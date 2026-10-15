@@ -1290,10 +1290,15 @@ class CheckpointPlatformTests(RefusalAssertions, unittest.TestCase):
 
 
 class CheckpointRecordTests(RefusalAssertions, TempCase):
-    """T14 / CKPT-02: the real scripts/record-run.py around a synthetic leaf command in a real proof layout; the evidence
-    index derives every expectation from that layout (registry, plan, request, source and parent manifests)."""
+    """T14 / CKPT-02 / CKPT2-01 / CKPT2-03: the real scripts/record-run.py around a synthetic leaf command in a real proof
+    layout; the evidence index derives every expectation from that layout (registry, plan, request, source and parent
+    manifests) and reads the raw evidence the segment describes: the raw product records (plan, state, journal, results,
+    command records, logs) written as the product writes them, the sealed checkpoint's manifest and a fork's admission.
+    A consumer (parent request, T16 comparison) re-checks every bound byte."""
 
     UNIT = "release-tools-checkpoints-proof-prefix-seed"
+    GOOD_VERDICT = {"status": "DEPLOYED", "release_images": {"api": image("6")}, "health": {"ok": True}, "migrations_after": True,
+                    "smoke_member_absent": True, "ordinary_entry_side": "release", "ordinary_entry_images": True, "frame_sha256": "f" * 64}
     COMMAND = textwrap.dedent("""\
         import hashlib, json, sys
         from pathlib import Path
@@ -1302,6 +1307,8 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
         print("EXACT_TESTS " + json.dumps(spec["tests"] if mode != "selection" else ["other.Case.test_x"]))
         if mode == "change-input":
             Path("tests/ops_release_checkpoints.py").write_text("# changed during the run\\n")
+        if spec.get("verdict"):
+            print(json.dumps({"forward_verdict": spec["verdict"]}))
         segment = dict(spec["segment"], run_json=str(run_dir / "run.json"))
         segment.update(spec.get("changes") or {})
         path = Path(spec["segment_path"])
@@ -1313,67 +1320,151 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
         sys.exit(1 if mode == "exit" else 0)
         """)
 
-    def layout(self):
-        """A proof root as `commands` lays it out: registry, plan, the leaf's source copy and manifest, a sealed parent
-        manifest in the shared store, the request; and a segment that satisfies the expectation."""
-        root = self.tempdir("kin-proof-")
+    def layout(self, unit=None, *, root=None, attempt=1, alter=None):
+        """A proof root as `commands` lays it out for one attempt of one leaf: registry, plan, the leaf's source copy and
+        manifest, a sealed parent manifest in the shared store, the request; the raw records the product run leaves in
+        the attempt's evidence root (per stack: plan.json, state.json with the history rows, journal.jsonl, one result,
+        command record and step log per phase of the fixed leaf contract), the sealed checkpoint and a fork's admission;
+        and the segment that describes exactly those bytes. `alter(kind, value, stack)` changes one generated value
+        before it is written and described ("result", "state", "plan", "files", "current", "manifest", "admission"), so
+        the segment stays consistent with the altered raw bytes and only the raw contract can refuse them."""
+        unit = unit or self.UNIT
+        alter = alter or (lambda kind, value, stack=None: value)
+        root = root or self.tempdir("kin-proof-")
         leaves = [dict(leaf) for leaf in cp.DEFAULT_PROOF_LEAVES]
-        (root / "registry.json").write_bytes(cp.canonical(leaves) + b"\n")
-        leaf = cp.registry_leaf(leaves, self.UNIT)
-        (root / ("plan-" + self.UNIT + ".json")).write_bytes(cp.canonical(cp.leaf_plan(leaves, self.UNIT)) + b"\n")
+        if not (root / "registry.json").exists():
+            (root / "registry.json").write_bytes(cp.canonical(leaves) + b"\n")
+        leaf = cp.registry_leaf(leaves, unit)
+        (root / ("plan-" + unit + ".json")).write_bytes(cp.canonical(cp.leaf_plan(leaves, unit)) + b"\n")
         copy_root = root / leaf["source"]
         for name in cp.LEAF_INPUT_FILES + ("scripts/tool.py",):
             (copy_root / name).parent.mkdir(parents=True, exist_ok=True)
-            (copy_root / name).write_bytes(("# " + name + "\n").encode())
+            if not (copy_root / name).exists():
+                (copy_root / name).write_bytes(("# " + name + "\n").encode())
         inputs = {"tool": "1" * 64, "source": "2" * 64, "harness": "3" * 64, "tool_files": {}}
         source = {"schema": 1, "kind": "release-tools-source", "root": str(copy_root), "tool": {"sha256": "1" * 64},
                   "source": {"sha256": "2" * 64}, "harness": {"sha256": "3" * 64}, "tool_files": {}}
         source_path = root / (leaf["source"] + ".source-manifest.json")
         source_path.write_bytes(cp.canonical(source) + b"\n")
-        parent_raw = b'{"checkpoint":"source-b0","kind":"release-tools-checkpoint","lineage":"source"}\n'
-        parent_sha = hashlib.sha256(parent_raw).hexdigest()
-        parent_path = root / "out" / "bundles" / parent_sha / "manifest.json"
-        parent_path.parent.mkdir(parents=True)
-        parent_path.write_bytes(parent_raw)
-        request = {"schema": 1, "unit": self.UNIT, "case": leaf["case"], "scenario": leaf["scenario"], "stage": leaf["stage"],
-                   "execution_kind": leaf["execution_kind"], "parent_manifest": {"path": str(parent_path), "sha256": parent_sha},
-                   "source_manifest": {"path": str(source_path), "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest()},
-                   "output_root": str(root / "out"), "evidence_root": str(cp.attempt_paths(root, self.UNIT)["evidence"])}
-        request_raw = cp.canonical(request) + b"\n"
-        cp.attempt_paths(root, self.UNIT)["request"].write_bytes(request_raw)
-        expectation = cp.leaf_expectation(leaves, self.UNIT, root)
+        parent_sha = None
+        if leaf["parent"]:
+            consumes = cp.STAGES[leaf["stage"]]["consumes"]
+            parent_raw = cp.canonical({"checkpoint": consumes, "kind": "release-tools-checkpoint",
+                                       "lineage": cp.CHECKPOINTS[consumes]["lineage"]}) + b"\n"
+            parent_sha = hashlib.sha256(parent_raw).hexdigest()
+            parent_path = root / "out" / "bundles" / parent_sha / "manifest.json"
+            parent_path.parent.mkdir(parents=True, exist_ok=True)
+            parent_path.write_bytes(parent_raw)
+        paths = cp.attempt_paths(root, unit, attempt)
+        evidence = paths["evidence"]
+        if leaf["stage"] is not None:
+            request = {"schema": 1, "unit": unit, "case": leaf["case"], "scenario": leaf["scenario"], "stage": leaf["stage"],
+                       "execution_kind": leaf["execution_kind"],
+                       "parent_manifest": {"path": str(parent_path), "sha256": parent_sha} if parent_sha else None,
+                       "source_manifest": {"path": str(source_path), "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest()},
+                       "output_root": str(root / "out"), "evidence_root": str(evidence)}
+            paths["request"].write_bytes(cp.canonical(request) + b"\n")
+        expectation = cp.leaf_expectation(leaves, unit, root, attempt)
+        expect = expectation["expect"]
+        plans, executing = {}, None
+        for stack in sorted({row["stack"] for row in expect["results"]}):
+            records = evidence / ("records-" + stack)
+            (records / "logs").mkdir(parents=True)
+            plan = plan_fixture(root=root / stack)
+            plans[stack] = intro.plan_identity(plan)
+            history, journal = [], []
+            for index, row in enumerate(item for item in expect["results"] if item["stack"] == stack):
+                request_sha = hashlib.sha256(("%s-%s-%d" % (stack, row["phase"], index)).encode()).hexdigest()
+                commands = "commands-" + row["phase"] + "-" + request_sha[:16] + ".jsonl"
+                log_raw = ("synthetic log of " + stack + " " + row["phase"] + "\n").encode()
+                log = {"file": "logs/" + row["phase"] + "-" + request_sha[:8] + ".out", "sha256": hashlib.sha256(log_raw).hexdigest(),
+                       "bytes": len(log_raw)}
+                (records / log["file"]).write_bytes(log_raw)
+                failure_raw = b"synthetic stderr\n"
+                failure = {"file": "logs/failed-" + request_sha[:8] + ".err", "sha256": hashlib.sha256(failure_raw).hexdigest()}
+                (records / failure["file"]).write_bytes(failure_raw)
+                (records / commands).write_bytes(intro.canonical({"seq": 1, "step": row["steps"][0][0], "exit": 0, "failure_log": failure}) + b"\n")
+                steps = [{"step": sid, "outcome": outcome, "seconds": 0.5,
+                          "commands": {"file": commands, "first": 1 if position == 0 else 2, "last": 1},
+                          **({"detail": {"log": log}} if position == 0 else {})} for position, (sid, outcome) in enumerate(row["steps"])]
+                result = alter("result", {"steps": steps, "status": row["status"], "phase": row["phase"], "request_sha256": request_sha,
+                                          "plan_sha256": plans[stack], "commands_file": commands}, stack)
+                result_raw = intro.canonical(result) + b"\n"
+                (records / ("result-" + row["phase"] + "-" + request_sha[:16] + ".json")).write_bytes(result_raw)
+                history.append({"phase": result["phase"], "status": "PASS" if result["status"] == intro.DONE.get(result["phase"])
+                                and all(step["outcome"] == "PASS" for step in result["steps"]) else result["status"],
+                                "request_sha256": request_sha, "seconds": 1.0, "result_sha256": hashlib.sha256(result_raw).hexdigest(),
+                                "steps": [[step["step"], step["outcome"]] for step in result["steps"]]})
+                journal.append({"event": "phase-end", "phase": row["phase"], "status": result["status"]})
+            state = alter("state", {"plan_sha256": plans[stack], "status": history[-1]["status"], "history": history}, stack)
+            (records / "state.json").write_bytes(intro.canonical(state) + b"\n")
+            (records / "journal.jsonl").write_bytes(b"".join(intro.canonical(entry) + b"\n" for entry in journal))
+            plan_raw = alter("plan", intro.canonical(plan) + b"\n", stack)
+            if plan_raw is not None:
+                (records / "plan.json").write_bytes(plan_raw)
+            alter("files", records, stack)
+            executing = executing or plans[stack]
+        raw_rows = sorted([path.relative_to(evidence).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]
+                          for path in sorted(evidence.glob("records-*/**/*")) if path.is_file())
+        phase_rows = cp.phase_results({stack: evidence / ("records-" + stack) for stack in plans})
+        results, admission = {}, None
+        if expect["produces"]:
+            manifest = alter("manifest", {"checkpoint": expect["produces"], "execution_kind": leaf["execution_kind"],
+                                          "parent": {"manifest_sha256": parent_sha} if parent_sha else None,
+                                          "identity": {"plan_sha256": executing}})
+            manifest_raw = cp.canonical(manifest) + b"\n"
+            folder = root / "out" / "bundles" / hashlib.sha256(manifest_raw).hexdigest()
+            folder.mkdir(parents=True)
+            (folder / "manifest.json").write_bytes(manifest_raw)
+            results["checkpoint"] = {"path": str(folder), "manifest_sha256": folder.name}
+        if expect["admission"]:
+            admission = alter("admission", {"schema": 1, "kind": "checkpoint-admission", "checkpoint": expect["consumes"],
+                                            "execution_kind": "diagnostic-fork", "fresh_e2e": False, "release_gate_eligible": False,
+                                            "changed_bodies": ["HostOps.fenced_smoke"], "earliest_phase": "verify",
+                                            "suffix_phases": ["verify", "reopen"], "parent_manifest_sha256": parent_sha})
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / "admission.json").write_bytes(cp.canonical(admission) + b"\n")
         now = datetime.now(timezone.utc).isoformat()
-        marker = {"unit": self.UNIT, "module": leaf["file"], "plan_sha256": expectation["expect"]["marker_plan_sha256"], "attempt": 1,
-                  "pid": 4242, "started_at": now}
-        current = cp.current_identity(inputs, execution_kind=leaf["execution_kind"], plan_sha256="6" * 64, root=copy_root, resumed_utc=now)
-        identity = {"parent": identity_fixture(phase_reached="source-b0"), "current": current,
-                    "parent_reference": {"manifest_sha256": parent_sha, "payload_manifest_sha256": "0" * 64, "checkpoint": "source-b0",
-                                         "lineage": "source"}}
+        marker = {"unit": unit, "module": leaf["file"], "plan_sha256": expect["marker_plan_sha256"], "attempt": attempt, "pid": 4242,
+                  "started_at": now}
+        kind = leaf["execution_kind"]
+        current = alter("current", cp.current_identity(
+            inputs, execution_kind=kind, plan_sha256=executing if leaf["stage"] is not None else None, root=copy_root,
+            resumed_utc=None if kind == "fresh" else now,
+            admission_sha256=hashlib.sha256(cp.canonical(admission)).hexdigest() if admission else None))
+        identity = {"parent": identity_fixture(phase_reached=expect["consumes"]) if parent_sha else None, "current": current,
+                    "parent_reference": {"manifest_sha256": parent_sha, "payload_manifest_sha256": "0" * 64, "checkpoint": expect["consumes"],
+                                         "lineage": cp.CHECKPOINTS[expect["consumes"]]["lineage"]} if parent_sha else None}
         segment = cp.segment_record(
-            request={key: leaf[key] for key in ("unit", "case", "stage", "scenario", "execution_kind")},
-            request_sha256=hashlib.sha256(request_raw).hexdigest(), marker=marker, identity=identity, executed_phases=["seed"],
-            inherited_phases=["capture"], results={"checkpoint": {"path": str(root / "out" / "bundles" / ("e" * 64)), "manifest_sha256": "e" * 64}},
-            cleanup={"complete": True, "removed": ["x"], "remaining": [], "errors": []}, run_json="(the command sets it)", started_utc=now,
-            ended_utc=now, selected_tests=[leaf["case"]],
-            phase_results=[{"stack": "clone", "file": "result-seed-1.json", "sha256": "a" * 64, "phase": "seed", "status": "SEEDED",
-                            "steps": [["S-01", "PASS"]]}],
-            raw_records=[["records-clone/state.json", "b" * 64]], inputs_before=inputs, inputs_after=inputs,
-            parent_chain=[{"manifest_sha256": parent_sha, "checkpoint": "source-b0", "execution_kind": "fresh", "payload_manifest_sha256": "0" * 64}])
-        segment.update(observed={"outcome": "PASS"}, expected={"outcome": "PASS"}, passed=True)
+            request={key: leaf[key] for key in ("unit", "case", "stage", "scenario", "execution_kind")}, request_sha256=expect["request_sha256"],
+            marker=marker, identity=identity, executed_phases=expect["executed"], inherited_phases=expect["inherited"], results=results,
+            admission=admission, cleanup={"complete": True, "removed": ["x"], "remaining": [], "errors": []}, run_json="(the command sets it)",
+            started_utc=now, ended_utc=now, selected_tests=[leaf["case"]], phase_results=phase_rows, raw_records=raw_rows, inputs_before=inputs,
+            inputs_after=inputs,
+            parent_chain=[{"manifest_sha256": parent_sha, "checkpoint": expect["consumes"], "execution_kind": "fresh",
+                           "payload_manifest_sha256": "0" * 64}] if parent_sha else [])
+        segment.update(observed=expect["outcome"], expected=expect["outcome"], passed=True)
         command = root / "command.py"
         command.write_text(self.COMMAND, encoding="utf-8")
-        return SimpleNamespace(root=root, leaves=leaves, expectation=expectation, segment=segment, copy_root=copy_root, command=command)
+        return SimpleNamespace(root=root, leaves=leaves, expectation=expectation, segment=segment, copy_root=copy_root, command=command,
+                               unit=unit, attempt=attempt, evidence=evidence, plans=plans, results=results)
 
-    def record(self, proof, mode="ok", *, changes=None, files=None, run="1"):
-        spec = proof.root / ("spec-" + run + ".json")
+    def record(self, proof, mode="ok", *, changes=None, files=None, verdict=None):
+        spec = proof.root / ("spec-" + proof.unit + "-" + str(proof.attempt) + ".json")
+        forward = proof.expectation["expect"]["forward_verdict"]
         spec.write_text(json.dumps({"mode": mode, "tests": proof.expectation["expected_tests"], "segment": proof.segment,
-                                    "segment_path": str(proof.expectation["segment_path"]), "changes": changes}), encoding="utf-8")
-        run_dir = proof.root / "runs" / (self.UNIT + "-" + run)
+                                    "segment_path": str(proof.expectation["segment_path"]), "changes": changes,
+                                    "verdict": (verdict or self.GOOD_VERDICT) if forward else None}), encoding="utf-8")
+        run_dir = proof.expectation["run_dir"]
         declared = proof.expectation["required_files"] if files is None else files
         completed = subprocess.run([sys.executable, "-B", str(RECORDER), "--run-dir", str(run_dir), "--cwd", str(proof.copy_root),
                                     *[item for name in declared for item in ("--file", name)], "--tree", "scripts", "--",
                                     sys.executable, "-B", str(proof.command), str(spec), str(run_dir)], capture_output=True, timeout=120)
         return run_dir, completed
+
+    def verdict(self, proof, **kwargs):
+        run_dir, _ = self.record(proof, **kwargs)
+        return cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir, proof.attempt)
 
     def test_existing_record_run_binds_exact_inputs_outputs_and_exit(self):
         """T14 (RQC-03/05/06/11, CKPT-02): the real recorder; AND of run.json, every recorded input before/after, the
@@ -1417,9 +1508,7 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
         }
         for name, kwargs in cases.items():
             with self.subTest(refused=name):
-                proof = self.layout()
-                run_dir, completed = self.record(proof, **kwargs)
-                verdict = cp.leaf_index(proof.leaves, self.UNIT, proof.root, run_dir)
+                verdict = self.verdict(self.layout(), **kwargs)
                 self.assertEqual(verdict["verdict"], "UNVERIFIED", name)
                 self.assertTrue(verdict["reasons"])
         with self.subTest(refused="the segment edited after the run announced it"):
@@ -1448,6 +1537,185 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
             (proof.root / ("plan-" + self.UNIT + ".json")).write_bytes(
                 cp.canonical(cp.leaf_plan(proof.leaves, self.UNIT, timeout_seconds=600)) + b"\n")
             self.assertRefused("INDEX_INPUT", cp.leaf_expectation, proof.leaves, self.UNIT, proof.root)
+
+    def test_raw_evidence_is_bound_not_only_the_segment_claims(self):
+        """CKPT2-01 (consult round3_acceptance): the index reads the raw records, results, plans, command records, logs,
+        the sealed checkpoint and a fork's admission themselves. The normal controls of a stage leaf, a fork, the expected
+        late STOP, the fresh control (source and clone plans apart) and the refusal proof (no phase, no plan) are BOUND;
+        a missing, changed or unlisted raw file, a failure hidden behind passed=true, a missing executed plan, a result
+        under another plan, a missing referenced log or command record, and a missing or foreign checkpoint or admission
+        are UNVERIFIED."""
+        late = "release-tools-checkpoints-proof-late-fault"
+        fork = "release-tools-checkpoints-proof-late-resume"
+        fresh = "release-tools-checkpoints-proof-fresh-control"
+        refusal = "release-tools-checkpoints-proof-early-refusal"
+        for unit in (self.UNIT, late, fork, fresh, refusal):
+            with self.subTest(bound=unit):
+                proof = self.layout(unit)
+                verdict = self.verdict(proof)
+                self.assertEqual(verdict["verdict"], "BOUND", verdict["reasons"])
+                self.assertEqual(sorted(verdict["raw"]["plans"]), sorted({row["stack"] for row in proof.expectation["expect"]["results"]}))
+                self.assertEqual({rel for rel, _ in verdict["raw"]["files"]},
+                                 {path.relative_to(proof.evidence).as_posix() for path in proof.evidence.glob("records-*/**/*") if path.is_file()})
+        proof = self.layout(fresh)
+        self.assertEqual(sorted(proof.plans), ["clone", "source"])
+        self.assertNotEqual(proof.plans["source"], proof.plans["clone"], "the fresh control binds the source and clone plans apart")
+        self.assertEqual([row["stack"] for row in cp.expected_results(cp.registry_leaf(proof.leaves, fresh))],
+                         ["source", "clone", "clone", "clone", "clone", "clone"])
+        self.assertEqual([(row["phase"], row["status"], row["steps"]) for row in cp.expected_results(cp.registry_leaf(proof.leaves, late))],
+                         [("reopen", "VERIFIED", [["L-11a", "STOP"]])])
+
+        def after_run(change):
+            """Changed after the run (the segment still names the old bytes)."""
+            def apply(proof):
+                change(proof)
+                return proof
+            return apply
+
+        def failed(kind, value, stack=None):
+            if kind == "result":
+                value.update(status="FAILED", steps=[{**value["steps"][0], "outcome": "STOP"}])
+            return value
+
+        def other_plan(kind, value, stack=None):
+            if kind == "result":
+                value["plan_sha256"] = "e" * 64
+            return value
+
+        def status_only(kind, value, stack=None):
+            if kind == "state":
+                value["history"][-1]["status"] = "PASS"
+                value["history"][-1]["steps"] = [[sid, "PASS"] for sid, _, _, _ in intro.STEPS[value["history"][-1]["phase"]]]
+            return value
+
+        def no_plan(kind, value, stack=None):
+            return None if kind == "plan" else value
+
+        def no_executed_plan(kind, value, stack=None):
+            return {**value, "plan_sha256": None} if kind == "current" else value
+
+        def without(name):
+            def change(kind, value, stack=None):
+                if kind == "files":
+                    for path in sorted(value.rglob(name)):
+                        path.unlink()
+                return value
+            return change
+
+        def foreign_manifest(kind, value, stack=None):
+            return {**value, "checkpoint": "held"} if kind == "manifest" else value
+
+        def no_bodies(kind, value, stack=None):
+            return {**value, "changed_bodies": []} if kind == "admission" else value
+
+        def deployed(kind, value, stack=None):
+            if kind == "result":
+                value.update(status="DEPLOYED", steps=[{**value["steps"][0], "step": sid, "outcome": "PASS"} for sid, _, _, _ in intro.STEPS["reopen"]])
+            return value
+
+        cases = {
+            "a raw record deleted after the run": (self.UNIT, None, after_run(lambda proof: next(proof.evidence.rglob("journal.jsonl")).unlink())),
+            "a raw record changed after the run": (self.UNIT, None, after_run(
+                lambda proof: next(proof.evidence.rglob("state.json")).write_bytes(b'{"status":"SEEDED"}\n'))),
+            "the raw journal changed after the run": (self.UNIT, None, after_run(
+                lambda proof: next(proof.evidence.rglob("journal.jsonl")).write_bytes(b'{"event":"edited"}\n'))),
+            "a raw record not listed in the segment": (self.UNIT, None, after_run(
+                lambda proof: (proof.evidence / "records-clone" / "extra.json").write_bytes(b"{}\n"))),
+            "a failed phase (S-01 STOP, FAILED) behind passed=true": (self.UNIT, failed, None),
+            "a FAILED result whose history row claims PASS": (self.UNIT, lambda kind, value, stack=None: status_only(kind, failed(kind, value)), None),
+            "a result under another plan": (self.UNIT, other_plan, None),
+            "no plan.json": (self.UNIT, no_plan, None),
+            "no executed plan in the current identity": (self.UNIT, no_executed_plan, None),
+            "no executed plan (a leaf that seals nothing)": (late, no_executed_plan, None),
+            "a referenced step log missing": (self.UNIT, without("*.out"), None),
+            "a log referenced by the command record missing": (self.UNIT, without("failed-*.err"), None),
+            "the referenced command record missing": (self.UNIT, without("commands-*.jsonl"), None),
+            "the sealed checkpoint's manifest deleted after the run": (self.UNIT, None, after_run(
+                lambda proof: (Path(proof.results["checkpoint"]["path"]) / "manifest.json").unlink())),
+            "a sealed checkpoint of another kind": (self.UNIT, foreign_manifest, None),
+            "a fork without its admission.json": (fork, None, after_run(lambda proof: (proof.evidence / "admission.json").unlink())),
+            "a fork admission that admits no body": (fork, no_bodies, None),
+            "the late fault reported as a deployed reopen": (late, deployed, None),
+            "a fresh clone result under another plan than the clone's own": (fresh, lambda kind, value, stack=None: other_plan(kind, value) if stack == "clone" else value, None),
+            "a fresh method that names one plan for its stacks": (fresh, lambda kind, value, stack=None:
+                                                                  {**value, "plan_sha256": "e" * 64} if kind == "current" else value, None),
+        }
+        for name, (unit, alter, after) in cases.items():
+            with self.subTest(refused=name):
+                proof = self.layout(unit, alter=alter)
+                run_dir, completed = self.record(proof)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                if after:
+                    after(proof)
+                verdict = cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir)
+                self.assertEqual(verdict["verdict"], "UNVERIFIED", name)
+                self.assertTrue(verdict["reasons"])
+        with self.subTest(refused="a refusal proof that names a plan"):
+            proof = self.layout(refusal, alter=lambda kind, value, stack=None: {**value, "plan_sha256": "e" * 64} if kind == "current" else value)
+            self.assertEqual(self.verdict(proof)["verdict"], "UNVERIFIED")
+
+    def bound_pair(self):
+        """The late-resume fork and the fresh control under one proof root, each recorded and BOUND by `index`."""
+        root = self.tempdir("kin-proof-")
+        units = ("release-tools-checkpoints-proof-late-resume", "release-tools-checkpoints-proof-fresh-control")
+        proofs = []
+        for unit in units:
+            proof = self.layout(unit, root=root)
+            run_dir, _ = self.record(proof)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cp.main(["index", "--registry", str(root / "registry.json"), "--unit", unit, "--proof-root", str(root),
+                                          "--run-dir", str(run_dir)]), 0)
+            proofs.append(proof)
+        return root, proofs
+
+    def test_bound_index_is_rechecked_when_consumed(self):
+        """CKPT2-03 (consult round3_acceptance): parent and compare re-read run.json, stdout/stderr, the segment and every
+        bound raw record and admission and compare them with the index; a changed stdout forward_verdict, a deleted raw
+        record or a read error is UNVERIFIED/PARENT_UNBOUND, never a pass and never a traceback taken as success."""
+        root, (fork, fresh) = self.bound_pair()
+        leaves = fork.leaves
+        self.assertTrue(cp.t16_comparison(leaves, root)["t16_pass"], cp.t16_comparison(leaves, root))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cp.main(["compare", "--registry", str(root / "registry.json"), "--proof-root", str(root)]), 0)
+        stdout = fresh.expectation["run_dir"] / "stdout.log"
+        original = stdout.read_bytes()
+        stdout.write_bytes(original.replace(b'"status": "DEPLOYED"', b'"status": "DEPLOYED", "edited": true'))
+        self.assertNotEqual(stdout.read_bytes(), original)
+        compared = cp.t16_comparison(leaves, root)
+        self.assertFalse(compared["t16_pass"], "a forward_verdict edited after its index is never compared")
+        self.assertTrue(any("stdout.log changed after its index" in reason for reason in compared["reasons"]), compared["reasons"])
+        stdout.write_bytes(original)
+        self.assertTrue(cp.t16_comparison(leaves, root)["t16_pass"])
+        consumed = {
+            "a raw record deleted after the index": lambda proof: next(proof.evidence.rglob("journal.jsonl")).unlink(),
+            "the admission changed after the index": lambda proof: (proof.evidence / "admission.json").write_bytes(b"{}\n"),
+            "run.json changed after the index": lambda proof: (proof.expectation["run_dir"] / "run.json").write_bytes(b"{}\n"),
+            "stderr.log changed after the index": lambda proof: (proof.expectation["run_dir"] / "stderr.log").write_bytes(b"x\n"),
+            "the segment replaced by a folder (a read error)": lambda proof: (proof.expectation["segment_path"].unlink(),
+                                                                               proof.expectation["segment_path"].mkdir()),
+        }
+        for name, change in consumed.items():
+            with self.subTest(refused=name):
+                other, (changed, _) = self.bound_pair()
+                change(changed)
+                self.assertRefused("PARENT_UNBOUND", cp.bound_index, other, changed.unit)
+                compared = cp.t16_comparison(leaves, other)
+                self.assertFalse(compared["t16_pass"], name)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cp.main(["compare", "--registry", str(other / "registry.json"), "--proof-root", str(other)]), 1)
+        # A parent request through a BOUND index whose raw record went missing: PARENT_UNBOUND before any request exists.
+        root = self.tempdir("kin-proof-")
+        introduce = "release-tools-checkpoints-proof-prefix-introduce"
+        parent = self.layout(introduce, root=root)
+        run_dir, _ = self.record(parent)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cp.main(["index", "--registry", str(root / "registry.json"), "--unit", introduce, "--proof-root", str(root),
+                                      "--run-dir", str(run_dir)]), 0)
+        (root / "b.source-manifest.json").write_bytes(cp.canonical({"root": str(root / "b")}) + b"\n")
+        self.assertEqual(self.admitted(cp.resolve_parent, parent.leaves, "release-tools-checkpoints-proof-late-resume", root)["sha256"],
+                         Path(parent.results["checkpoint"]["path"]).name)
+        next(parent.evidence.rglob("state.json")).write_bytes(b'{"history":[]}\n')
+        self.assertRefused("PARENT_UNBOUND", cp.leaf_request, parent.leaves, "release-tools-checkpoints-proof-late-resume", root)
 
 
 STAGE_IMAGES = {"previous": {"api": image("1"), "proxy": image("2"), "db": image("3"), "keycloak": image("4"), "orthanc": image("5")},
@@ -2236,13 +2504,22 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
 
     def bind(self, root, unit, bundle, *, verdict="BOUND"):
         """A parent leaf's index as `index` writes it, over a segment that names the bundle it sealed."""
-        segment = root / "evidence" / unit / "segment.json"
+        segment = root / "evidence" / unit / "attempt-1" / "segment.json"
         segment.parent.mkdir(parents=True)
         segment.write_bytes(cp.canonical({"results": {"checkpoint": {"path": str(bundle), "manifest_sha256": bundle.name}}}) + b"\n")
+        run_dir = root / "runs" / (unit + "-1")
+        run_dir.mkdir(parents=True)
+        logs = {}
+        for name in ("run.json", "stdout.log", "stderr.log"):
+            (run_dir / name).write_bytes(("synthetic " + name + "\n").encode())
+            logs[name] = hashlib.sha256((run_dir / name).read_bytes()).hexdigest()
+        manifest = bundle / "manifest.json"
         (root / "index").mkdir(exist_ok=True)
-        (root / "index" / (unit + ".json")).write_bytes(cp.canonical({"verdict": verdict, "unit": unit, "segment": str(segment),
-                                                                       "segment_sha256": hashlib.sha256(segment.read_bytes()).hexdigest(),
-                                                                       "run_dir": str(root / "runs" / (unit + "-1"))}) + b"\n")
+        (root / "index" / (unit + ".json")).write_bytes(cp.canonical({
+            "verdict": verdict, "unit": unit, "segment": str(segment), "segment_sha256": hashlib.sha256(segment.read_bytes()).hexdigest(),
+            "run_dir": str(run_dir), "run_json_sha256": logs.pop("run.json"), "logs": logs,
+            "raw": {"evidence": str(segment.parent), "files": [], "plans": {}, "admission": None,
+                    "checkpoint": {"path": str(manifest), "sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}}}) + b"\n")
         return segment
 
     def test_parent_map_requests_and_commands_are_fixed_before_restore(self):
@@ -2298,7 +2575,7 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
         with self.subTest(refused="a parent index whose leaf sealed another checkpoint"):
             self.assertRefused("PARENT_UNBOUND", cp.leaf_request, leaves, unit("late-fault"), root)
         with self.subTest(refused="a parent segment changed after its index"):
-            segment = root / "evidence" / unit("prefix-introduce") / "segment.json"
+            segment = root / "evidence" / unit("prefix-introduce") / "attempt-1" / "segment.json"
             segment.write_bytes(segment.read_bytes().replace(b"}\n", b" }\n"))
             self.assertRefused("PARENT_UNBOUND", cp.leaf_request, leaves, unit("late-resume"), root)
         with self.subTest(refused="an UNVERIFIED parent index"):
@@ -2668,6 +2945,21 @@ MUTANTS = (
     ("M35", "CheckpointLineageTests.test_retry_attempts_keep_unit_plan_parent_and_earlier_raw_bytes",   # CKPT2-06: fresh evidence reused
      '        checkpoints.require(not evidence or not Path(evidence).exists(), "EVIDENCE_EXISTS", str(evidence))',
      '        checkpoints.require(True, "EVIDENCE_EXISTS", str(evidence))', "rehearsal"),
+    ("M36", "CheckpointRecordTests.test_raw_evidence_is_bound_not_only_the_segment_claims",   # CKPT2-01: raw hashes unchecked
+     '        if sha256(data) != digest:\n            reasons.append("raw record changed: " + rel)\n            continue\n',
+     '        if False:\n            reasons.append("raw record changed: " + rel)\n            continue\n', "checkpoints"),
+    ("M37", "CheckpointRecordTests.test_raw_evidence_is_bound_not_only_the_segment_claims",   # CKPT2-01: raw result unread
+     '            if (result.get("phase") != item["phase"] or result.get("status") != item["status"] or steps != item["steps"]',
+     '            if False and (result.get("phase") != item["phase"] or result.get("status") != item["status"] or steps != item["steps"]',
+     "checkpoints"),
+    ("M38", "CheckpointRecordTests.test_raw_evidence_is_bound_not_only_the_segment_claims",   # CKPT2-01: executed plan optional
+     '    elif current.get("plan_sha256") is None or current.get("plan_sha256") != plans.get(expected[0]["stack"]):',
+     '    elif False:', "checkpoints"),
+    ("M39", "CheckpointRecordTests.test_bound_index_is_rechecked_when_consumed",   # CKPT2-03: raw records not re-read
+     '            current(evidence / rel, digest, "raw record " + rel)', '            pass', "checkpoints"),
+    ("M40", "CheckpointRecordTests.test_bound_index_is_rechecked_when_consumed",   # CKPT2-03: stdout trusted after the index
+     '        stdout = current(run_dir / "stdout.log", logs["stdout.log"], "stdout.log")',
+     '        stdout = (run_dir / "stdout.log").read_bytes()', "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest

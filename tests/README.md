@@ -1786,7 +1786,16 @@ Docker/Compose commands for a checkpoint) and the opt-in leaves of `tests/ops_re
   the parent chain, phase results, raw record hashes, inputs before/after and cleanup; it prints the segment's path and
   SHA once. `index` binds a recorded run only when every recorded input is unchanged, every required input of the leaf
   was declared, the logs, the exact selection, the runner's passed result, the announced segment SHA and the segment's
-  claims all agree (`BOUND`, else `UNVERIFIED` with reasons).
+  claims all agree, and the raw evidence itself does (CKPT2-01): every listed raw record exists with its SHA-256 and
+  none is unlisted; per stack plan.json, state.json and journal.jsonl are there, the state names the plan.json identity,
+  the leaf's own phases are the tail of the state history, each binds its raw result, and the result's phase, status,
+  steps, request and plan equal the fixed leaf contract (`expected_results`: the complete PASS sequence, or input A's
+  L-11a STOP at VERIFIED, or the forced L-09b rollback at RESTORED); the referenced command records and logs are there;
+  a leaf with phases names the plan its results ran under (the fresh method binds source and clone plans apart; only
+  T17 has no phase and no plan); a fork's admission.json and a sealed checkpoint's manifest are bound by their bytes
+  (`BOUND`, else `UNVERIFIED` with reasons). Every consumer of a BOUND index (`request`'s parent, `compare`) re-reads
+  run.json, stdout/stderr, the segment and every bound raw file, admission and checkpoint manifest and refuses a change,
+  a missing file or a read error (`PARENT_UNBOUND`; `compare` then has no `t16_pass`) (CKPT2-03).
 - Time: a bundle is reusable until min(created + 8 h, plan window end, TLS notAfter) and only if the declared suffix
   and teardown fit; a future creation time refuses; no window, approval, certificate or receipt time is rewritten; the
   next phase logs in again after the restore. Expiry refuses reuse and never deletes a bundle.
