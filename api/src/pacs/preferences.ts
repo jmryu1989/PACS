@@ -277,7 +277,21 @@ export class PacsPreferences {
 
   private validShortcutBindings(v: any) {
     const names = ['list','image','prior','report','context','note','tools','nativeTools','previous','next'];
-    return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === names.slice().sort().join(',') && new Set(Object.values(v)).size === names.length && Object.values(v).every((key: any) => typeof key === 'string' && /^(Digit[1-9]|Key[A-Z]|ArrowLeft|ArrowRight)$/.test(key) && !['KeyC','Digit8'].includes(key));
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+    const v2 = v.version === 2;
+    if (v2) names.push('finalize');
+    if (Object.keys(v).sort().join(',') !== [...names, ...(v2 ? ['version'] : [])].sort().join(',')) return false;
+    const used = new Set();
+    return names.every(id => {
+      const key = v[id];
+      if (v2 && key === null) return true;
+      if (typeof key !== 'string' || used.has(key)) return false;
+      const allowed = v2
+        ? key === 'Control+KeyS' || /^Control\+Alt\+(Digit[1-9]|Key[A-Z]|ArrowLeft|ArrowRight)$/.test(key) && !['Control+Alt+KeyC','Control+Alt+Digit8'].includes(key)
+        : /^(Digit[1-9]|Key[A-Z]|ArrowLeft|ArrowRight)$/.test(key) && !['KeyC','Digit8'].includes(key);
+      if (!allowed) return false;
+      used.add(key); return true;
+    });
   }
 
   private shortcutPreferencesResult(owner: { institution: string; subject: string }, row: any) {
@@ -303,6 +317,10 @@ export class PacsPreferences {
     const conflict = () => new ConflictException('계정 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
     try {
       const row = await this.prisma.$transaction(async tx => {
+        // Read in the same transaction; revision CAS still rejects a concurrent upgrade.
+        const stored = await tx.workspaceShortcuts.findUnique({ where: { institution_subject: owner } });
+        const storedVersion = (stored?.bindings as any)?.version ?? 1;
+        if (storedVersion > (body.bindings.version ?? 1)) throw conflict();
         if (body.revision === 0) return tx.workspaceShortcuts.create({ data: { ...owner, revision: 1, bindings: body.bindings } });
         const changed = await tx.workspaceShortcuts.updateMany({ where: { ...owner, revision: body.revision },
           data: { bindings: body.bindings, revision: { increment: 1 } } });
