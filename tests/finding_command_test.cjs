@@ -1,4 +1,3 @@
-const { readPageSource } = require('./page_source.cjs');
 const {install} = require('./module_session_harness.cjs');
 'use strict';
 /* TEST-S2B-PURE-TARGET / -RESULT / -LIST / -ADAPTER (REQ-S2B-LIST, REQ-S2B-COMMAND, REQ-S2B-BOUNDARY).
@@ -1612,60 +1611,15 @@ test('adapter: loading and switching the selected study sends only bound reads',
   assert.deepEqual(h.s.cited, []);
 });
 
-test('wiring: review stands the Image Findings drawer down once per dictation run, and the reading review pane gives way down to its own rows', () => {
-  // U4L attempt 1 (Astra B2/B3). Text pins only; what the rendered layout does is the hosted GEO proof.
-  const html = readPageSource(path.join(HP, 'main.html')), css = shipped('reading-workspace.css');
-  // B2: one named host function inside the dictation block (the region the host DOM harness slices).
-  const block = html.slice(html.indexOf('    // ══════════ 받아쓰기 (S3-ASR-U4) ══════════'),
-                           html.indexOf('    $("#t-mod").addEventListener("change", renderTemplates);'));
-  const at = block.indexOf('    function standDownFindingsForDictationReview() {');
-  assert.ok(at > 0, 'a named function inside the dictation block');
-  const fn = block.slice(at, block.indexOf('\n    }\n', at));
-  assert.match(fn, /if \(s\.state !== "review" \|\| s\.asrSeq === dictationDrawerSeq\) return;/, 'review only, once per run');
-  assert.match(fn, /dictationDrawerSeq = s\.asrSeq;\r?\n\s+readingFindings\?\.close\(\);/, 'remembers the run, then closes');
-  assert.ok(!/\.open\(|\.sync\(|show\(|\.end\(/.test(fn), 'it never reopens, re-syncs or ends the drawer');
-  assert.equal(html.split('dictation.subscribe(standDownFindingsForDictationReview);').length - 1, 1, 'subscribed exactly once');
-  assert.ok(block.includes('dictation.subscribe(standDownFindingsForDictationReview);'));
-  assert.equal(html.split('readingFindings?.close()').length - 1, 1, 'nothing else in the page closes the drawer');
-  assert.equal(html.split('dictationDrawerSeq').length - 1, 3, 'declared, compared and set - nowhere else');
-  // B3: the plain pane rule and the transcript's minimum and overflow are untouched...
-  const rule = (text, selector) => { const from = text.indexOf(selector + ' {'); return from < 0 ? '' : text.slice(from, text.indexOf('}', from) + 1); };
-  const plainPane = rule(html, '    #dictation-pane'), plainText = rule(html, '    #dictation-text');
-  assert.match(plainPane, /flex: none;/); assert.match(plainPane, /max-height: min\(30vh, 168px\);/); assert.match(plainPane, /overflow: auto;/);
-  assert.match(plainText, /flex: 0 1 auto; min-height: 1\.6em; overflow: auto;/);
-  // ...and the reading rules are scoped to the reading layout's review (the transcript shown), prefer the
-  // same cap expression rather than a number of their own, and hold one height of their own only: D2's one
-  // whole transcript line, in the transcript's content box at a stated pitch.
-  const reading = css.split(/\r?\n/).filter(line => line.startsWith('body.reading #dictation-'));
-  const review = 'body.reading #dictation-pane:has(> #dictation-text:not([hidden]))';
-  assert.deepEqual(reading, [
-    `${review} { flex: 0 1 min(30vh, 168px); overflow: visible; }`,
-    `${review} > #dictation-text { flex: 1 1 0; box-sizing: content-box; line-height: 1.5; min-height: 1lh; }`,
-    `${review} > .dictation-foot { display: flex; flex-wrap: wrap; align-items: center; gap: inherit; }`,
-    `${review} > .dictation-foot > #dictation-meta { flex: 1 1 auto; min-width: 0; }`,
-    `${review} > .dictation-foot > .dictation-actions { margin-left: auto; }`]);
-  const cap = /max-height: (min\([^)]*\))/.exec(plainPane)[1];
-  assert.equal(cap, /flex: 0 1 (min\([^)]*\))/.exec(reading[0])[1], 'the preferred size is the plain cap');
-  // B-2: the one matched cap expression is the plain rule's; with it set aside no rule carries a px literal,
-  // and the only height, floor or cap of their own is the transcript's `min-height: 1lh`.
-  const bodies = reading.map((line, i) => { const body = line.slice(line.indexOf('{')); return i === 0 ? body.replace(cap, '') : body; });
-  for (const body of bodies) assert.ok(!/\d(\.\d+)?px/.test(body), 'no px literal of its own: ' + body);
-  const heights = bodies.flatMap((body, i) => [...body.matchAll(/(?:^|[^-])((?:min-|max-)?height\s*:[^;}]*;?)/g)].map(m => [i, m[1].trim()]));
-  assert.deepEqual(heights, [[1, 'min-height: 1lh;']], 'one whole transcript line is the only height of its own');
-  assert.equal(reading.join('\n').split('#dictation-').length - 1, 12, 'twelve selector mentions in the five rules');
-  assert.equal(css.split('#dictation-').length - 1, reading.join('\n').split('#dictation-').length - 1 + 1,
-    'no other dictation rule in this sheet (the one extra mention is in its comment)');
-  // CE7: meta and the actions share one role-less wrapper, in their old order, and it is inert outside that
-  // review: one default rule, inside the report CSS the host DOM harness slices.
-  // W4: the read-only Recommendation notice now sits between the dictation pane and the report fields.
-  const pane = html.slice(html.indexOf('<div id="dictation-pane"'), html.indexOf('\n        <!-- W4 (설계 v4 §3)'));
-  assert.match(pane, /<div id="dictation-place"><\/div>\s*<div class="dictation-foot">\s*<div id="dictation-meta"><\/div>\s*<div class="dictation-actions">/);
-  assert.deepEqual([...pane.matchAll(/ id="([^"]+)"/g)].map(m => m[1]), ['dictation-pane', 'dictation-status', 'dictation-text',
-    'dictation-place', 'dictation-meta', 'dictation-stop', 'dictation-cancel', 'dictation-repin', 'dictation-insert', 'dictation-close']);
-  const reportCss = html.slice(html.indexOf('    /* Report */'), html.indexOf('    .citefield {'));
-  assert.equal(html.split('.dictation-foot {').length - 1, 1, 'one default rule');
-  assert.match(reportCss, /\r?\n    \.dictation-foot \{ display: contents; \}\r?\n/, 'inert by default, inside the sliced report CSS');
-});
+/* U4L wiring (Astra B2/B3, CE7/D2): checked as behaviour and geometry on the shipped page code in
+ * tests/report_dictation_host_dom_test.py - HD15 (review stands the Image Findings drawer down once per dictation run and
+ * never reopens it), HD16 (the meta/actions wrapper has no box and no role outside the reading review), HD17 (the region
+ * W4 re-bound: review pane, read-only Recommendation notice, report fields) and HD18 (in the reading layout the review pane
+ * prefers the plain cap, gives way down to its own rows, meta and the actions on one row). The text pins this file held on
+ * the same requirements - the dictation block's function text, CSS strings, selector counts, the pane's ID list and a
+ * slice ending at an HTML comment - failed on a comment-only edit while the page behaved the same, so they were replaced
+ * (D73, finding class C2; W4F-04). No historical byte proof is kept here: this file runs in a container without the
+ * repository's history, and the requirements are the page's behaviour, not those bytes. */
 /* ---------- S2-L saved locations and S2-C live facts in the worklist (TEST-S2L-WORKLIST) ----------
  * finding-command.js directly and the shipped panel in the worklist realm; the viewer's kinViewerJobLocation is a double of its own realm. */
 const WJ = 'dddddddd-0000-4000-8000-000000000001', WM = 'dddddddd-0000-4000-8000-000000000002', WV = 'dddddddd-0000-4000-8000-000000000003';

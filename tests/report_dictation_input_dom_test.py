@@ -186,7 +186,8 @@ EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")
 LITE = ROOT / "worklist-v0" / "hpacs-lite"
 DICTATION_JS = [(LITE / name).read_text(encoding="utf-8")
                 for name in ("dictation-session.js", "dictation-capture.js", "dictation.js")]
-DICTATION_PANE_HTML = (slice_between(MAIN, '<div id="dictation-pane"', '\n        <!-- W4 (')
+# The pane ends where the next element of the column starts (W4: the read-only Recommendation notice), not at a comment.
+DICTATION_PANE_HTML = (slice_between(MAIN, '<div id="dictation-pane"', '<details class="recnote" id="recnote"')
                        if '<div id="dictation-pane"' in MAIN else "")
 DICTATION_WIRING = (slice_between(MAIN, "    // ══════════ 받아쓰기 (S3-ASR-U4) ══════════",
                                   '    $("#t-mod").addEventListener("change", renderTemplates);')
