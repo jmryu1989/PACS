@@ -527,9 +527,10 @@ class SyntheticStack:
         values only) out of the temporary folder before it is removed."""
         target = os.environ.get("KIN_TEST_EMR_REHEARSAL_EVIDENCE")
         if target and self.records.directory.exists():
-            # The private values file (D04) is never evidence, whatever it holds.
+            # The private values file (D04) is never evidence, whatever it holds. Raw records are written once into a new
+            # folder (CKPT2-06): an existing copy is an error, never overwritten.
             shutil = __import__("shutil")
-            shutil.copytree(self.records.directory, Path(target) / ("records-" + self.label), dirs_exist_ok=True,
+            shutil.copytree(self.records.directory, Path(target) / ("records-" + self.label), dirs_exist_ok=False,
                             ignore=shutil.ignore_patterns(intro.COMPOSE_VALUES))
 
     @staticmethod
@@ -1139,9 +1140,12 @@ class RehearsalStages:
         """One fresh end-to-end rehearsal: every stage of the scenario in this process, under the live gate; a checkpoint
         request in the environment refuses it rather than shortening it."""
         checkpoints.fresh_guard()
+        evidence = os.environ.get("KIN_TEST_EMR_REHEARSAL_EVIDENCE")
+        # CKPT2-06: every attempt writes a new evidence folder; an existing one (an earlier attempt's raw records and
+        # segment) is refused before any stage, never overwritten.
+        checkpoints.require(not evidence or not Path(evidence).exists(), "EVIDENCE_EXISTS", str(evidence))
         live_test_gate.require_live_run()
         ops.require_local_docker()
-        evidence = os.environ.get("KIN_TEST_EMR_REHEARSAL_EVIDENCE")
         record = None
         if evidence:
             # CKPT-06: with an evidence folder (the T16 fresh control) the fresh method writes its own segment. Registered

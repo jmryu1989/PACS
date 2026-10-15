@@ -1835,10 +1835,26 @@ the parent leaf's BOUND index and must be the checkpoint this stage consumes), t
 from the leaf's copy with `--file` for the plan, registry, source manifest, request and parent manifest and the five
 harness files, `--tree scripts`, and `scripts/run-tests.py --plan` (checkpoint leaves with
 `KIN_TEST_EMR_CHECKPOINTS=1`, `KIN_TEST_EMR_CHECKPOINT_REQUEST`, `KIN_TEST_EMR_CHECKPOINT_REGISTRY`; the fresh control
-with `KIN_TEST_EMR_REHEARSAL=1`, `KIN_TEST_EMR_REHEARSAL_EVIDENCE=$P/evidence/<unit>` and no request), then `index`
-(`$P/index/<unit>.json` only when BOUND). It ends with `compare`, which exits 0 only for `t16_pass`: both forward
-verdicts DEPLOYED with every required fact true, equal, and both runs BOUND (equal failures are not a pass). A retry of
-a leaf uses the same unit with a new run folder (`-2`, `-3`); it never renames the unit.
+with `KIN_TEST_EMR_REHEARSAL=1`, `KIN_TEST_EMR_REHEARSAL_EVIDENCE=$P/evidence/<unit>/attempt-1` and no request), then
+`index --attempt 1` (`$P/index/<unit>.json` only when BOUND). It ends with `compare`, which exits 0 only for `t16_pass`:
+both forward verdicts DEPLOYED with every required fact true, equal, and both runs BOUND (equal failures are not a pass).
+
+Retry (CKPT2-06): after a failed leaf `U` and its real inspection (`release_after_inspection`), generate the rest of the
+sequence as attempt `N` (2 or 3) of the same unit and run it unchanged:
+
+```text
+python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B --from-unit U --attempt N > $P/proof-U-N.sh
+sudo -E bash $P/proof-U-N.sh
+```
+
+It makes no source copy and runs no earlier (BOUND) leaf again; `retry` first reads the gate ledger and refuses unless the
+marker was released, the failed leaf's kept fixture root `$P/out/fixture` was cleared by that inspection, and every
+earlier attempt of `U` is `failed` below the budget (an interrupted, running or passed
+attempt is final for `run-tests.py`, and an inspection alone never makes it retryable); `U` keeps its unit, its gate plan
+file `$P/plan-U.json`, its parent and the gate ledger, and only `$P/request-U-N.json`, `$P/runs/U-N` and
+`$P/evidence/U/attempt-N` are new (an existing one is refused before anything is written, so the earlier attempt's raw
+records and segment keep their bytes; the fresh control refuses an existing evidence folder before any stage); `index
+--attempt N` reads exactly that attempt; the later leaves follow as their attempt 1.
 
 T16 passes when prefix-source..prefix-verify are each BOUND with their sealed checkpoint, late-fault is BOUND with
 exactly L-11a STOP, status VERIFIED and no PONR, late-resume and the fresh control are BOUND and `compare` reports

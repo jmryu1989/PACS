@@ -1444,6 +1444,53 @@ REQUEST_KEYS = ("schema", "unit", "case", "scenario", "stage", "execution_kind",
                 "output_root", "evidence_root")
 
 
+def attempt_paths(proof_root, unit, attempt=1, *, flavour=Path):
+    """One attempt of one registered unit (CKPT2-06): only its request, run folder and evidence root are new per attempt.
+    The unit, its gate plan (<proof_root>/plan-<unit>.json), its parent, the source copies, the shared bundle store and the
+    gate's persistent ledger stay the same; an attempt never names a new unit or budget."""
+    require(type(attempt) is int and 1 <= attempt <= MAX_ATTEMPTS, "REGISTRY_INVALID", "attempt " + repr(attempt))
+    root = flavour(proof_root)
+    return {"request": root / ("request-" + unit + "-" + str(attempt) + ".json"), "run": root / "runs" / (unit + "-" + str(attempt)),
+            "evidence": root / "evidence" / unit / ("attempt-" + str(attempt))}
+
+
+def unused_attempt(paths):
+    """An attempt's request, run folder and evidence root are new: an existing one is refused before anything is written
+    (never overwritten, never reused)."""
+    for key in ("request", "run", "evidence"):
+        require(not Path(paths[key]).exists(), "EVIDENCE_EXISTS", key + " " + str(paths[key]) + " already exists")
+    return paths
+
+
+def retry_admission(state_dir, leaves, unit, attempt, proof_root):
+    """Whether attempt N (N >= 2) of a unit may run (CKPT2-06), read from the gate's persistent ledger and marker (never
+    written here): the previous attempt of this proof root exists, the unit is not BOUND, the failed run's marker was
+    released through a real inspection, the ledger's attempts are all `failed` and below the budget. An interrupted
+    (timeout/kill), running or passed attempt is final for scripts/run-tests.py: an inspection alone never makes it
+    retryable here either."""
+    registry_leaf(leaves, unit)
+    require(type(attempt) is int and attempt >= 2, "RETRY_REFUSED", "attempt 1 is the first run, not a retry")
+    paths = unused_attempt(attempt_paths(proof_root, unit, attempt))
+    require(attempt_paths(proof_root, unit, attempt - 1)["run"].is_dir(), "RETRY_REFUSED",
+            "attempt %d of %s has no run folder: attempts are consecutive" % (attempt - 1, unit))
+    require(not (Path(proof_root) / "index" / (unit + ".json")).exists(), "RETRY_REFUSED", unit + " is already BOUND")
+    # A failed leaf keeps its private fixture for the inspection; the retry restores into the same absolute root.
+    require(not (Path(proof_root) / "out" / "fixture").exists(), "RETRY_REFUSED", "the failed attempt's fixture root is not cleared yet")
+    state = Path(state_dir)
+    require(not (state / "live-needs-inspection.json").exists(), "RETRY_REFUSED",
+            "the failed run's marker is not released (gate.release_after_inspection with the real inspection first)")
+    try:
+        ledger = json.loads((state / (unit + ".json")).read_bytes())
+        statuses = [row["status"] for row in ledger["attempts"]]
+    except (OSError, ValueError, TypeError, KeyError):
+        raise Refused("RETRY_REFUSED", "no readable gate ledger for " + unit) from None
+    require(statuses, "RETRY_REFUSED", "the ledger records no attempt of " + unit)
+    require("interrupted" not in statuses, "RETRY_REFUSED", "an interrupted attempt is never retried on an inspection alone")
+    require("running" not in statuses and "passed" not in statuses, "RETRY_REFUSED", "a running or passed unit is never repeated")
+    require(statuses[-1] == "failed" and len(statuses) < MAX_ATTEMPTS, "RETRY_REFUSED", "attempt budget: " + ",".join(statuses))
+    return {"unit": unit, "attempt": attempt, "ledger": statuses, "paths": {key: str(value) for key, value in paths.items()}}
+
+
 def _reference(value, what, *, optional=False):
     if value is None and optional:
         return None
@@ -1474,6 +1521,8 @@ def load_request(path, leaves, *, case):
     for key in ("output_root", "evidence_root"):
         require(type(request[key]) is str and Path(request[key]).is_absolute(), "REQUEST_INVALID", key)
     require(not _nested(request["output_root"], request["evidence_root"]), "REQUEST_INVALID", "output and evidence roots overlap")
+    # CKPT2-06: an attempt's evidence root is new; an existing one is refused here, before anything is written into it.
+    require(not Path(request["evidence_root"]).exists(), "EVIDENCE_EXISTS", request["evidence_root"])
     if not fresh:
         parent_lineage(request, leaf)
     return request, sha256(raw)
@@ -1701,12 +1750,14 @@ def fresh_gate_verdict(index):
     return {"fresh_pass": not reasons, "reasons": reasons}
 
 
-def leaf_expectation(leaves, unit, proof_root):
+def leaf_expectation(leaves, unit, proof_root, attempt=1):
     """Everything a leaf's evidence must show, derived from the frozen proof layout (never from the run's own claims):
     the registry leaf, its plan (equal to leaf_plan), request, source manifest and parent manifest with their actual bytes,
-    the recorder inputs it must have declared, its exact selection, phases, outcome and checkpoint."""
+    the recorder inputs it must have declared, its exact selection, phases, outcome and checkpoint. The attempt selects
+    the request, run folder and evidence root (CKPT2-06): the request must name exactly that attempt's evidence."""
     leaf = registry_leaf(leaves, unit)
     root = Path(proof_root)
+    paths = attempt_paths(root, unit, attempt)
     plan_path, registry_path = root / ("plan-" + unit + ".json"), root / "registry.json"
     source_path = root / (leaf["source"] + ".source-manifest.json")
     try:
@@ -1716,23 +1767,33 @@ def leaf_expectation(leaves, unit, proof_root):
     require(json.loads(plan_raw) == leaf_plan(leaves, unit), "INDEX_INPUT", "the plan file is not this leaf's registered plan")
     source = json.loads(source_raw)
     files, request_sha, parent_sha = [plan_path, registry_path, source_path], None, None
+    output = None
     if leaf["stage"] is not None:
-        request_path = root / ("request-" + unit + ".json")
-        request_raw = request_path.read_bytes()
-        request = json.loads(request_raw)
+        request_path = paths["request"]
+        try:
+            request_raw = request_path.read_bytes()
+            request = json.loads(request_raw)
+        except (OSError, ValueError) as error:
+            raise Refused("INDEX_INPUT", "request of attempt %d unreadable: %s" % (attempt, type(error).__name__)) from None
         request_sha = sha256(request_raw)
         require(all(request.get(key) == leaf[key] for key in ("unit", "case", "scenario", "stage", "execution_kind")), "INDEX_INPUT",
                 "the request is not this leaf's")
         require(Path(request["source_manifest"]["path"]).resolve() == source_path.resolve()
                 and request["source_manifest"]["sha256"] == sha256(source_raw), "INDEX_INPUT", "the request names another source copy")
         evidence = Path(request["evidence_root"])
+        require(evidence.resolve() == paths["evidence"].resolve(), "INDEX_INPUT", "the request names another attempt's evidence root")
+        output = Path(request["output_root"])
         files.append(request_path)
         if request["parent_manifest"]:
             parent_path, parent_sha = Path(request["parent_manifest"]["path"]), request["parent_manifest"]["sha256"]
-            require(sha256(parent_path.read_bytes()) == parent_sha, "INDEX_INPUT", "the parent manifest bytes differ from the request")
+            try:
+                parent_raw = parent_path.read_bytes()
+            except OSError:
+                raise Refused("INDEX_INPUT", "the parent manifest is unreadable") from None
+            require(sha256(parent_raw) == parent_sha, "INDEX_INPUT", "the parent manifest bytes differ from the request")
             files.append(parent_path)
     else:
-        evidence = root / "evidence" / unit
+        evidence = paths["evidence"]
     executed, inherited = leaf_phases(leaf)
     outcome = leaf_outcome(leaf)
     expect = {"unit": unit, "case": leaf["case"], "stage": leaf["stage"], "scenario": leaf["scenario"],
@@ -1743,8 +1804,8 @@ def leaf_expectation(leaves, unit, proof_root):
               "admission": leaf["execution_kind"] == "diagnostic-fork" and outcome["outcome"] == "PASS",
               "inputs": {"tool": source["tool"]["sha256"], "source": source["source"]["sha256"], "harness": source["harness"]["sha256"]},
               "cwd": str(Path(source["root"]).resolve()), "forward_verdict": leaf["stage"] is None or leaf["case"] in PROOF_THEN}
-    return {"leaf": leaf, "expect": expect, "segment_path": evidence / "segment.json",
-            "expected_tests": [Path(leaf["file"]).stem + "." + leaf["case"]],
+    return {"leaf": leaf, "expect": expect, "segment_path": evidence / "segment.json", "attempt": attempt, "run_dir": paths["run"],
+            "expected_tests": [Path(leaf["file"]).stem + "." + leaf["case"]], "output_root": output,
             "required_files": [str(path) for path in files] + list(LEAF_INPUT_FILES), "required_trees": list(LEAF_INPUT_TREES)}
 
 
@@ -1897,8 +1958,12 @@ def evidence_index(run_dir, *, segment_path, expected_tests, expect, required_fi
             "selected_tests": list(expected_tests)}
 
 
-def leaf_index(leaves, unit, proof_root, run_dir):
-    expectation = leaf_expectation(leaves, unit, proof_root)
+def leaf_index(leaves, unit, proof_root, run_dir=None, attempt=1):
+    """The index of one attempt: its request, run folder and evidence root are the ones that attempt names (CKPT2-06)."""
+    expectation = leaf_expectation(leaves, unit, proof_root, attempt)
+    require(run_dir is None or Path(run_dir).resolve() == expectation["run_dir"].resolve(), "INDEX_INPUT",
+            "the run folder is not attempt %d's" % attempt)
+    run_dir = expectation["run_dir"]
     result = evidence_index(run_dir, segment_path=expectation["segment_path"], expected_tests=expectation["expected_tests"],
                             expect=expectation["expect"], required_files=expectation["required_files"],
                             required_trees=expectation["required_trees"])
@@ -1978,14 +2043,27 @@ def t16_comparison(leaves, proof_root):
     return compare_forward_verdicts(verdicts["resumed"], verdicts["fresh"], resumed_bound=bound["resumed"], fresh_bound=bound["fresh"])
 
 
-def proof_commands(leaves, *, proof_root, candidate, python="python3"):
+def proof_commands(leaves, *, proof_root, candidate, python="python3", from_unit=None, attempt=1):
     """The exact T16/T17 command sequence (bash) for the frozen registry at <proof_root>/registry.json: the source copies,
     then per leaf in registry order its plan, its request (parent resolved from the parent leaf's BOUND index), the
-    recorded run through the live gate with every input declared, and its index; then the T16 comparison. Attempt 1 of
-    each unit; a retry of the same unit uses a new run folder (-2, -3) and never a new unit name."""
+    recorded run through the live gate with every input declared, and its index; then the T16 comparison. Every leaf runs
+    as attempt 1 there.
+
+    A retry (CKPT2-06, `from_unit` with attempt 2 or 3) resumes the same sequence at that unit: no source copy is made
+    again and no earlier (BOUND) leaf runs again; `retry` first checks the gate ledger and the released marker
+    (retry_admission); the unit keeps its plan file, parent and ledger, and only its request, run folder and evidence root
+    are the attempt's own; the later leaves follow as their attempt 1."""
     leaves = registry_valid(leaves)
     root, candidate = str(PurePosixPath(proof_root)), str(PurePosixPath(candidate))
     require(root.startswith("/") and candidate.startswith("/"), "REGISTRY_INVALID", "absolute Linux paths required")
+    units = [leaf["unit"] for leaf in leaves]
+    if from_unit is None:
+        require(attempt == 1, "REGISTRY_INVALID", "a retry names its unit (--from-unit)")
+        start = 0
+    else:
+        require(from_unit in units, "REGISTRY_INVALID", "unregistered unit " + str(from_unit))
+        require(type(attempt) is int and 2 <= attempt <= MAX_ATTEMPTS, "REGISTRY_INVALID", "a retry is attempt 2 or 3")
+        start = units.index(from_unit)
     q = shlex.quote
     tool = python + " -B " + q(candidate + "/tests/ops_release_checkpoints.py")
     registry = q(root + "/registry.json")
@@ -1995,33 +2073,44 @@ def proof_commands(leaves, *, proof_root, candidate, python="python3"):
     lines += [': "${%s:?}"' % name for name in ("KIN_TEST_PREVIOUS_API_IMAGE", "KIN_TEST_PREVIOUS_PROXY_IMAGE", "KIN_TEST_API_IMAGE",
                                                 "KIN_TEST_PROXY_IMAGE", "PLAYWRIGHT_BROWSERS_PATH")]
     lines += ["export KIN_TEST_ISOLATED_INSTALL=1", "test -f " + registry, "mkdir -p -m 700 " + q(root + "/runs") + " " + q(root + "/index")]
-    for source in sorted({leaf["source"] for leaf in leaves}):
-        mutant = PROOF_SOURCES.get(source)
-        lines.append(tool + " source-copy --source " + q(candidate) + " --out " + q(root + "/" + source)
-                     + (" --mutant " + mutant if mutant else ""))
-    for leaf in leaves:
+    if from_unit is None:
+        for source in sorted({leaf["source"] for leaf in leaves}):
+            mutant = PROOF_SOURCES.get(source)
+            lines.append(tool + " source-copy --source " + q(candidate) + " --out " + q(root + "/" + source)
+                         + (" --mutant " + mutant if mutant else ""))
+    else:
+        lines.append("# Retry of " + from_unit + " as attempt " + str(attempt) + ": the source copies and the BOUND leaves before it stay.")
+        lines += ["test -f " + q(root + "/" + source + ".source-manifest.json") for source in sorted({leaf["source"] for leaf in leaves[start:]})]
+        lines.append(tool + " retry --registry " + registry + " --unit " + from_unit + " --attempt " + str(attempt) + " --proof-root " + q(root))
+    for leaf in leaves[start:]:
         unit, source = leaf["unit"], leaf["source"]
-        copy_root, run = root + "/" + source, root + "/runs/" + unit + "-1"
-        plan, request = root + "/plan-" + unit + ".json", root + "/request-" + unit + ".json"
-        lines += ["", "# " + unit + ": " + leaf["case"] + " from copy " + source
-                  + (" consuming " + STAGES[leaf["stage"]]["consumes"] + " of " + leaf["parent"] if leaf["parent"] else " (no parent)"),
-                  tool + " plan --registry " + registry + " --unit " + unit + " --out " + q(plan)]
+        number = attempt if unit == from_unit else 1
+        paths = attempt_paths(root, unit, number, flavour=PurePosixPath)
+        copy_root, run, request = root + "/" + source, str(paths["run"]), str(paths["request"])
+        plan = root + "/plan-" + unit + ".json"
+        lines += ["", "# " + unit + " (attempt " + str(number) + "): " + leaf["case"] + " from copy " + source
+                  + (" consuming " + STAGES[leaf["stage"]]["consumes"] + " of " + leaf["parent"] if leaf["parent"] else " (no parent)")]
+        # The gate plan is written once per unit (its ledger is keyed by it); a retry reuses the same file.
+        lines.append("test -f " + q(plan) if number > 1 else tool + " plan --registry " + registry + " --unit " + unit + " --out " + q(plan))
         files = ["--file " + q(plan), "--file " + registry, "--file " + q(root + "/" + source + ".source-manifest.json")]
         if leaf["stage"] is not None:
-            lines.append(tool + " request --registry " + registry + " --unit " + unit + " --proof-root " + q(root) + " --out " + q(request))
+            lines.append(tool + " request --registry " + registry + " --unit " + unit + " --attempt " + str(number) + " --proof-root " + q(root)
+                         + " --out " + q(request))
             files.append("--file " + q(request))
             if leaf["parent"]:
                 files.append('--file "$(' + tool + " parent-manifest --request " + q(request) + ')"')
-            environment = ["env", "-u", "KIN_TEST_EMR_REHEARSAL", "KIN_TEST_EMR_CHECKPOINTS=1", "KIN_TEST_EMR_CHECKPOINT_REQUEST=" + q(request),
-                           "KIN_TEST_EMR_CHECKPOINT_REGISTRY=" + registry, "KIN_TEST_EMR_CHECKPOINT_RUN_JSON=" + q(run + "/run.json")]
+            environment = ["env", "-u", "KIN_TEST_EMR_REHEARSAL", "-u", "KIN_TEST_EMR_REHEARSAL_EVIDENCE", "KIN_TEST_EMR_CHECKPOINTS=1",
+                           "KIN_TEST_EMR_CHECKPOINT_REQUEST=" + q(request), "KIN_TEST_EMR_CHECKPOINT_REGISTRY=" + registry,
+                           "KIN_TEST_EMR_CHECKPOINT_RUN_JSON=" + q(run + "/run.json")]
         else:
             environment = ["env", "-u", REQUEST_ENV, "-u", OPT_IN_ENV, "KIN_TEST_EMR_REHEARSAL=1",
-                           "KIN_TEST_EMR_REHEARSAL_EVIDENCE=" + q(root + "/evidence/" + unit),
+                           "KIN_TEST_EMR_REHEARSAL_EVIDENCE=" + q(str(paths["evidence"])),
                            "KIN_TEST_EMR_CHECKPOINT_RUN_JSON=" + q(run + "/run.json")]
         files += ["--file " + name for name in LEAF_INPUT_FILES] + ["--tree " + name for name in LEAF_INPUT_TREES]
         lines.append("(cd " + q(copy_root) + " && " + " ".join(environment) + " " + python + " -B scripts/record-run.py --run-dir " + q(run)
                      + " --cwd " + q(copy_root) + " " + " ".join(files) + " -- " + python + " -B scripts/run-tests.py --plan " + q(plan) + ")")
-        lines.append(tool + " index --registry " + registry + " --unit " + unit + " --proof-root " + q(root) + " --run-dir " + q(run))
+        lines.append(tool + " index --registry " + registry + " --unit " + unit + " --attempt " + str(number) + " --proof-root " + q(root)
+                     + " --run-dir " + q(run))
     lines += ["", tool + " compare --registry " + registry + " --proof-root " + q(root)]
     return "\n".join(lines) + "\n"
 
@@ -2086,18 +2175,20 @@ def source_copy(source, out, mutant=None):
     return target
 
 
-def leaf_request(leaves, unit, proof_root):
-    """The closed request of a registered stage leaf: its own source copy's manifest, the parent resolved from the
-    parent leaf's BOUND index (never given by hand), one shared output root (one bundle store, so every parent chain is
-    queryable) and the leaf's own evidence root under <proof_root>."""
+def leaf_request(leaves, unit, proof_root, attempt=1):
+    """The closed request of one attempt of a registered stage leaf: its own source copy's manifest, the parent resolved
+    from the parent leaf's BOUND index (never given by hand; the same for every attempt), one shared output root (one
+    bundle store, so every parent chain is queryable) and the attempt's own new evidence root under <proof_root>
+    (an existing request, run folder or evidence root of that attempt is refused: CKPT2-06)."""
     leaf = registry_leaf(leaves, unit)
     require(leaf["stage"] is not None, "REQUEST_INVALID", unit + " is a fresh method: it never takes a request")
     root = Path(proof_root)
+    paths = unused_attempt(attempt_paths(root, unit, attempt))
     source = root / (leaf["source"] + ".source-manifest.json")
     return {"schema": SCHEMA, "unit": leaf["unit"], "case": leaf["case"], "scenario": leaf["scenario"], "stage": leaf["stage"],
             "execution_kind": leaf["execution_kind"], "parent_manifest": resolve_parent(leaves, unit, proof_root),
             "source_manifest": {"path": str(source.resolve()), "sha256": sha256(source.read_bytes())},
-            "output_root": str((root / "out").resolve()), "evidence_root": str((root / "evidence" / unit).resolve())}
+            "output_root": str((root / "out").resolve()), "evidence_root": str(paths["evidence"].resolve())}
 
 
 def write_index(proof_root, result):
@@ -2126,7 +2217,13 @@ def main(argv=None):
     request.add_argument("--registry", required=True)
     request.add_argument("--unit", required=True)
     request.add_argument("--proof-root", required=True)
+    request.add_argument("--attempt", type=int, default=1)
     request.add_argument("--out", required=True)
+    retry = sub.add_parser("retry")
+    retry.add_argument("--registry", required=True)
+    retry.add_argument("--unit", required=True)
+    retry.add_argument("--attempt", type=int, required=True)
+    retry.add_argument("--proof-root", required=True)
     parent = sub.add_parser("parent-manifest")
     parent.add_argument("--request", required=True)
     copy_parser = sub.add_parser("source-copy")
@@ -2138,11 +2235,14 @@ def main(argv=None):
     commands.add_argument("--proof-root", required=True)
     commands.add_argument("--candidate", required=True)
     commands.add_argument("--python", default="python3")
+    commands.add_argument("--from-unit")
+    commands.add_argument("--attempt", type=int, default=1)
     index = sub.add_parser("index")
     index.add_argument("--registry", required=True)
     index.add_argument("--unit", required=True)
     index.add_argument("--proof-root", required=True)
-    index.add_argument("--run-dir", required=True)
+    index.add_argument("--attempt", type=int, default=1)
+    index.add_argument("--run-dir")
     compare = sub.add_parser("compare")
     compare.add_argument("--registry", required=True)
     compare.add_argument("--proof-root", required=True)
@@ -2162,7 +2262,13 @@ def main(argv=None):
         elif args.command == "plan":
             write_new(args.out, leaf_plan(leaves(), args.unit))
         elif args.command == "request":
-            write_new(args.out, leaf_request(leaves(), args.unit, args.proof_root))
+            require(Path(args.out).resolve() == attempt_paths(args.proof_root, args.unit, args.attempt)["request"].resolve(),
+                    "REQUEST_INVALID", "the request file of attempt %d is %s" % (args.attempt,
+                                                                               attempt_paths(args.proof_root, args.unit, args.attempt)["request"]))
+            write_new(args.out, leaf_request(leaves(), args.unit, args.proof_root, args.attempt))
+        elif args.command == "retry":
+            import live_test_gate
+            print(json.dumps(retry_admission(live_test_gate.STATE, leaves(), args.unit, args.attempt, args.proof_root)))
         elif args.command == "parent-manifest":
             value = json.loads(Path(args.request).read_bytes())["parent_manifest"]
             require(value is not None, "REQUEST_INVALID", "this request has no parent manifest")
@@ -2173,9 +2279,10 @@ def main(argv=None):
         elif args.command == "commands":
             require(Path(args.registry).resolve() == (Path(args.proof_root) / "registry.json").resolve(), "REGISTRY_INVALID",
                     "the frozen registry lives at <proof-root>/registry.json")
-            sys.stdout.write(proof_commands(leaves(), proof_root=args.proof_root, candidate=args.candidate, python=args.python))
+            sys.stdout.write(proof_commands(leaves(), proof_root=args.proof_root, candidate=args.candidate, python=args.python,
+                                            from_unit=args.from_unit, attempt=args.attempt))
         elif args.command == "index":
-            result = leaf_index(leaves(), args.unit, args.proof_root, args.run_dir)
+            result = leaf_index(leaves(), args.unit, args.proof_root, args.run_dir, args.attempt)
             write_index(args.proof_root, result)
             print(json.dumps(result, indent=2))
             return 0 if result["verdict"] == "BOUND" else 1

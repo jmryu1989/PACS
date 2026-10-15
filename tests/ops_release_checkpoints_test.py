@@ -1338,9 +1338,9 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
         request = {"schema": 1, "unit": self.UNIT, "case": leaf["case"], "scenario": leaf["scenario"], "stage": leaf["stage"],
                    "execution_kind": leaf["execution_kind"], "parent_manifest": {"path": str(parent_path), "sha256": parent_sha},
                    "source_manifest": {"path": str(source_path), "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest()},
-                   "output_root": str(root / "out"), "evidence_root": str(root / "evidence" / self.UNIT)}
+                   "output_root": str(root / "out"), "evidence_root": str(cp.attempt_paths(root, self.UNIT)["evidence"])}
         request_raw = cp.canonical(request) + b"\n"
-        (root / ("request-" + self.UNIT + ".json")).write_bytes(request_raw)
+        cp.attempt_paths(root, self.UNIT)["request"].write_bytes(request_raw)
         expectation = cp.leaf_expectation(leaves, self.UNIT, root)
         now = datetime.now(timezone.utc).isoformat()
         marker = {"unit": self.UNIT, "module": leaf["file"], "plan_sha256": expectation["expect"]["marker_plan_sha256"], "attempt": 1,
@@ -1439,7 +1439,10 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
             self.assertEqual(cp.leaf_index(proof.leaves, self.UNIT, proof.root, run_dir)["verdict"], "UNVERIFIED")
         with self.subTest(refused="no run.json"):
             proof = self.layout()
-            self.assertEqual(cp.leaf_index(proof.leaves, self.UNIT, proof.root, self.tempdir())["verdict"], "UNVERIFIED")
+            self.assertEqual(cp.leaf_index(proof.leaves, self.UNIT, proof.root)["verdict"], "UNVERIFIED")
+        with self.subTest(refused="another attempt's run folder"):
+            proof = self.layout()
+            self.assertRefused("INDEX_INPUT", cp.leaf_index, proof.leaves, self.UNIT, proof.root, self.tempdir())
         with self.subTest(refused="a plan that is not the leaf's registered plan"):
             proof = self.layout()
             (proof.root / ("plan-" + self.UNIT + ".json")).write_bytes(
@@ -2285,7 +2288,7 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
                                                               "sha256": sealed["introduced"].name})
                 self.assertEqual(Path(request["source_manifest"]["path"]).name, source + ".source-manifest.json")
                 self.assertEqual((request["output_root"], request["evidence_root"]),
-                                 (str((root / "out").resolve()), str((root / "evidence" / unit(name)).resolve())))
+                                 (str((root / "out").resolve()), str((root / "evidence" / unit(name) / "attempt-1").resolve())))
                 path = root / ("request-" + unit(name) + ".json")
                 path.write_bytes(cp.canonical(request) + b"\n")
                 loaded, _ = self.admitted(cp.load_request, str(path), leaves, case=request["case"])
@@ -2341,15 +2344,17 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
                 self.assertIn("--tree scripts -- python3 -B scripts/run-tests.py --plan /srv/proof/plan-" + leaf["unit"] + ".json)", line)
                 if leaf["stage"] is None:
                     self.assertIn("env -u KIN_TEST_EMR_CHECKPOINT_REQUEST -u KIN_TEST_EMR_CHECKPOINTS KIN_TEST_EMR_REHEARSAL=1 "
-                                  "KIN_TEST_EMR_REHEARSAL_EVIDENCE=/srv/proof/evidence/" + leaf["unit"] + " ", line)
+                                  "KIN_TEST_EMR_REHEARSAL_EVIDENCE=/srv/proof/evidence/" + leaf["unit"] + "/attempt-1 ", line)
                     self.assertNotIn("request-", line)
                 else:
-                    self.assertIn("KIN_TEST_EMR_CHECKPOINT_REQUEST=/srv/proof/request-" + leaf["unit"] + ".json ", line)
-                    self.assertIn("--file /srv/proof/request-" + leaf["unit"] + ".json ", line)
+                    self.assertIn("KIN_TEST_EMR_CHECKPOINT_REQUEST=/srv/proof/request-" + leaf["unit"] + "-1.json ", line)
+                    self.assertIn("--file /srv/proof/request-" + leaf["unit"] + "-1.json ", line)
                     self.assertEqual("parent-manifest --request" in line, leaf["parent"] is not None)
-                self.assertIn("index --registry /srv/proof/registry.json --unit " + leaf["unit"] + " --proof-root /srv/proof --run-dir "
+                    self.assertIn(" request --registry /srv/proof/registry.json --unit " + leaf["unit"] + " --attempt 1 --proof-root /srv/proof "
+                                  "--out /srv/proof/request-" + leaf["unit"] + "-1.json", script)
+                self.assertIn("index --registry /srv/proof/registry.json --unit " + leaf["unit"] + " --attempt 1 --proof-root /srv/proof --run-dir "
                               "/srv/proof/runs/" + leaf["unit"] + "-1", script)
-        order = [script.index("# " + leaf["unit"] + ":") for leaf in leaves]
+        order = [script.index("# " + leaf["unit"] + " (attempt 1):") for leaf in leaves]
         self.assertEqual(order, sorted(order))
         self.assertTrue(lines[-1].endswith("compare --registry /srv/proof/registry.json --proof-root /srv/proof"))
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -2360,7 +2365,161 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
         self.assertEqual((expectation["expect"]["fresh_e2e"], expectation["expect"]["forward_verdict"], expectation["expect"]["request_sha256"]),
                          (True, True, None))
         self.assertFalse([name for name in expectation["required_files"] if "request-" in name])
-        self.assertEqual(expectation["segment_path"], root / "evidence" / unit("fresh-control") / "segment.json")
+        self.assertEqual(expectation["segment_path"], root / "evidence" / unit("fresh-control") / "attempt-1" / "segment.json")
+
+    @staticmethod
+    def tree_hashes(root):
+        return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(Path(root).rglob("*"))
+                if path.is_file()}
+
+    def leaf_output(self, evidence, *, passed, attempt):
+        """What a leaf leaves in its evidence root (the close_leaf writers): its preserved raw records and one segment."""
+        records = self.tempdir("kin-records-") / "records"
+        (records / "logs").mkdir(parents=True)
+        (records / "state.json").write_bytes(b'{"attempt":%d}\n' % attempt)
+        (records / "logs" / "step.log").write_bytes(b"attempt %d\n" % attempt)
+        rows = cp.preserve_records({"clone": records}, evidence)
+        cp.finish_segment(None, passed=passed, segment={"attempt": attempt, "raw_records": rows}, evidence_root=evidence)
+
+    def test_retry_attempts_keep_unit_plan_parent_and_earlier_raw_bytes(self):
+        """CKPT2-06 (RQC-06/11): an allowed retry keeps the unit, its gate plan file, its parent and the gate ledger; only its
+        request, run folder and evidence root are new; commands, request and index select the same attempt; the source
+        copies and the BOUND prefix are not made or run again; the earlier attempt's raw bytes stay as they were, for a
+        checkpoint leaf and for the fresh control; reuse is refused before anything is overwritten; an interrupted attempt
+        is never retried on an inspection alone."""
+        name = "release-tools-checkpoints-proof-late-resume"
+        root, leaves, sealed = self.proof()
+        self.fresh_layout(root, leaves)
+        self.bind(root, "release-tools-checkpoints-proof-prefix-introduce", sealed["introduced"])
+        (root / ("plan-" + name + ".json")).write_bytes(cp.canonical(cp.leaf_plan(leaves, name)) + b"\n")
+        first, second = cp.attempt_paths(root, name, 1), cp.attempt_paths(root, name, 2)
+        request = self.admitted(cp.leaf_request, leaves, name, root)
+        self.assertEqual(Path(request["evidence_root"]), first["evidence"].resolve())
+        first["request"].write_bytes(cp.canonical(request) + b"\n")
+        loaded, _ = self.admitted(cp.load_request, str(first["request"]), leaves, case=request["case"])
+        # Attempt 1 runs and fails: its run folder, raw records and segment.
+        first["run"].mkdir(parents=True)
+        (first["run"] / "stdout.log").write_bytes(b"attempt 1\n")
+        self.leaf_output(first["evidence"], passed=False, attempt=1)
+        state = self.tempdir("kin-gate-state-")
+        (state / (name + ".json")).write_text(json.dumps({"attempts": [{"status": "failed", "attempt": 1}], "max_attempts": 3}))
+        (state / "live-needs-inspection.json").write_text("{}")
+        with self.subTest(refused="the failed run's marker is not released yet"):
+            self.assertRefused("RETRY_REFUSED", cp.retry_admission, state, leaves, name, 2, root)
+        (state / "live-needs-inspection.json").unlink()
+        with self.subTest(refused="the failed attempt's kept fixture root is not cleared yet"):
+            (root / "out" / "fixture").mkdir()
+            self.assertRefused("RETRY_REFUSED", cp.retry_admission, state, leaves, name, 2, root)
+            (root / "out" / "fixture").rmdir()
+        for label, ledger, code in (("an interrupted attempt (inspection alone never reopens it)", ["interrupted"], "RETRY_REFUSED"),
+                                    ("an earlier interrupted attempt", ["interrupted", "failed"], "RETRY_REFUSED"),
+                                    ("a passed unit", ["passed"], "RETRY_REFUSED"), ("a running attempt", ["running"], "RETRY_REFUSED"),
+                                    ("the budget", ["failed", "failed", "failed"], "RETRY_REFUSED")):
+            with self.subTest(refused=label):
+                other = self.tempdir("kin-gate-state-")
+                (other / (name + ".json")).write_text(json.dumps({"attempts": [{"status": status} for status in ledger], "max_attempts": 3}))
+                self.assertRefused(code, cp.retry_admission, other, leaves, name, 2, root)
+        with self.subTest(refused="attempt 3 before attempt 2"):
+            self.assertRefused("RETRY_REFUSED", cp.retry_admission, state, leaves, name, 3, root)
+        with self.subTest(refused="attempt 1 named again"):
+            self.assertRefused("EVIDENCE_EXISTS", cp.leaf_request, leaves, name, root)
+            self.assertRefused("EVIDENCE_EXISTS", cp.load_request, str(first["request"]), leaves, case=request["case"])
+        before = self.tree_hashes(root)
+        admitted = self.admitted(cp.retry_admission, state, leaves, name, 2, root)
+        self.assertEqual(admitted["ledger"], ["failed"])
+        retried = self.admitted(cp.leaf_request, leaves, name, root, 2)
+        self.assertEqual({key: retried[key] for key in ("unit", "case", "parent_manifest", "source_manifest", "output_root")},
+                         {key: loaded[key] for key in ("unit", "case", "parent_manifest", "source_manifest", "output_root")},
+                         "the same unit, parent, source copy and bundle store")
+        self.assertEqual(Path(retried["evidence_root"]), second["evidence"].resolve())
+        second["request"].write_bytes(cp.canonical(retried) + b"\n")
+        self.admitted(cp.load_request, str(second["request"]), leaves, case=request["case"])
+        second["run"].mkdir(parents=True)
+        self.leaf_output(second["evidence"], passed=True, attempt=2)
+        after = self.tree_hashes(root)
+        self.assertEqual({key: after.get(key) for key in before}, before, "every earlier byte (attempt 1, plan, registry, parent) is unchanged")
+        new = sorted(set(after) - set(before))
+        prefixes = [path.relative_to(root).as_posix() for path in (second["request"], second["run"], second["evidence"])]
+        self.assertTrue(new and all(any(item == prefix or item.startswith(prefix + "/") for prefix in prefixes) for item in new), new)
+        self.assertRefused("EVIDENCE_EXISTS", cp.retry_admission, state, leaves, name, 2, root)
+        # The index selects the attempt the request names, and the attempt's own run folder.
+        expectation = cp.leaf_expectation(leaves, name, root, 2)
+        self.assertEqual(expectation["segment_path"], second["evidence"] / "segment.json")
+        self.assertEqual(cp.leaf_expectation(leaves, name, root, 1)["segment_path"], first["evidence"] / "segment.json")
+        self.assertRefused("INDEX_INPUT", cp.leaf_index, leaves, name, root, first["run"], 2)
+        second["request"].write_bytes(cp.canonical({**retried, "evidence_root": request["evidence_root"]}) + b"\n")
+        self.assertRefused("INDEX_INPUT", cp.leaf_expectation, leaves, name, root, 2)
+        # The generated retry: no source copy, no earlier leaf, the same plan file, the attempt's request/run/evidence.
+        script = cp.proof_commands(leaves, proof_root="/srv/proof", candidate="/srv/candidate", from_unit=name, attempt=2)
+        self.assertNotIn(" source-copy ", script)
+        self.assertFalse([leaf["unit"] for leaf in leaves[:[item["unit"] for item in leaves].index(name)] if leaf["unit"] + " " in script])
+        retry = script.index(" retry --registry /srv/proof/registry.json --unit " + name + " --attempt 2 --proof-root /srv/proof")
+        self.assertLess(retry, script.index("# " + name + " (attempt 2)"))
+        self.assertIn("test -f /srv/proof/plan-" + name + ".json", script)
+        self.assertNotIn(" plan --registry /srv/proof/registry.json --unit " + name + " ", script)
+        self.assertIn(" request --registry /srv/proof/registry.json --unit " + name + " --attempt 2 --proof-root /srv/proof --out "
+                      "/srv/proof/request-" + name + "-2.json", script)
+        self.assertIn("KIN_TEST_EMR_CHECKPOINT_REQUEST=/srv/proof/request-" + name + "-2.json ", script)
+        self.assertIn("--run-dir /srv/proof/runs/" + name + "-2 ", script)
+        self.assertIn(" index --registry /srv/proof/registry.json --unit " + name + " --attempt 2 --proof-root /srv/proof --run-dir "
+                      "/srv/proof/runs/" + name + "-2", script)
+        for later in ("release-tools-checkpoints-proof-fresh-control", "release-tools-checkpoints-proof-early-refusal"):
+            self.assertIn(" plan --registry /srv/proof/registry.json --unit " + later + " --out", script)
+            self.assertIn("--run-dir /srv/proof/runs/" + later + "-1 ", script)
+        fresh = "release-tools-checkpoints-proof-fresh-control"
+        self.assertIn("KIN_TEST_EMR_REHEARSAL_EVIDENCE=/srv/proof/evidence/" + fresh + "/attempt-3 ",
+                      cp.proof_commands(leaves, proof_root="/srv/proof", candidate="/srv/candidate", from_unit=fresh, attempt=3))
+        for kwargs in ({"from_unit": name, "attempt": 1}, {"from_unit": name, "attempt": 4}, {"attempt": 2}, {"from_unit": "unregistered", "attempt": 2}):
+            with self.subTest(refused=str(kwargs)):
+                self.assertRefused("REGISTRY_INVALID", cp.proof_commands, leaves, proof_root="/srv/proof", candidate="/srv/candidate", **kwargs)
+        # The fresh control: an existing evidence folder is refused before any stage; a retry writes a new folder only.
+        import ops_deploy_host_container_test as rehearsal
+
+        class Probe(rehearsal.RehearsalStages, unittest.TestCase):
+            def runTest(self):
+                pass
+
+            def rehearsal_context(self, prefix, root=None):
+                raise AssertionError("no stage may start")
+        probe = Probe()
+        fresh_first, fresh_second = cp.attempt_paths(root, fresh, 1)["evidence"], cp.attempt_paths(root, fresh, 2)["evidence"]
+        records = self.tempdir("kin-fresh-records-") / "records"
+        (records / "logs").mkdir(parents=True)
+        (records / "state.json").write_bytes(b'{"fresh":1}\n')
+        (records / "result-capture-0001.json").write_bytes(b'{"phase":"capture"}\n')
+        stack = SimpleNamespace(records=SimpleNamespace(directory=records), label="clone")
+        gate_state = self.tempdir("kin-fresh-gate-")
+        inputs = {"tool": "1" * 64, "source": "2" * 64, "harness": "3" * 64, "tool_files": {}}
+        with patch.object(gate, "STATE", gate_state), patch.object(cp, "inputs_summary", lambda root: inputs), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for evidence in (fresh_first, fresh_second):
+                with patch.dict(os.environ, {"KIN_TEST_EMR_REHEARSAL_EVIDENCE": str(evidence)}):
+                    rehearsal.SyntheticStack.keep_records(stack)
+                    with self.assertRaises(FileExistsError, msg="raw records are copied once, never over an earlier copy"):
+                        rehearsal.SyntheticStack.keep_records(stack)
+                with self.assertRaises(RuntimeError):
+                    with gate.live_run(unit=fresh, module=cp.REHEARSAL_FILE, plan_sha256="a" * 64, attempt=1 if evidence == fresh_first else 2):
+                        with self.assertRaises(AssertionError):   # no owned stack was observed: the fresh segment fails
+                            probe.fresh_segment({"scenario": "forward", "evidence": evidence, "executed": [], "passed": False, "owned": [],
+                                                 "started": datetime.now(timezone.utc).isoformat(), "inputs_before": inputs})
+                        raise RuntimeError("the failed fresh attempt keeps its marker")
+                (gate_state / "live-needs-inspection.json").unlink()
+                if evidence == fresh_first:
+                    fresh_before = self.tree_hashes(fresh_first)
+        self.assertEqual(self.tree_hashes(fresh_first), fresh_before, "the first fresh attempt's raw records and segment are unchanged")
+        self.assertTrue((fresh_second / "segment.json").is_file() and (fresh_second / "records-clone" / "state.json").is_file())
+        for evidence in (fresh_first, fresh_second):
+            with self.subTest(refused="fresh evidence reused: " + evidence.name):
+                snapshot = self.tree_hashes(evidence)
+                with patch.dict(os.environ, {"KIN_TEST_EMR_REHEARSAL_EVIDENCE": str(evidence)}):
+                    os.environ.pop(cp.REQUEST_ENV, None)
+                    self.assertRefused("EVIDENCE_EXISTS", probe.run_fresh, "forward")
+                self.assertEqual(self.tree_hashes(evidence), snapshot)
+        with patch.dict(os.environ, {"KIN_TEST_EMR_REHEARSAL_EVIDENCE": str(cp.attempt_paths(root, fresh, 3)["evidence"])}):
+            os.environ.pop(cp.REQUEST_ENV, None)
+            with self.assertRaises(gate.Refused, msg="a new folder passes to the live permission, still before any stage"):
+                probe.run_fresh("forward")
+        self.assertFalse(cp.attempt_paths(root, fresh, 3)["evidence"].exists())
 
     def fresh_layout(self, root, leaves):
         name = "release-tools-checkpoints-proof-fresh-control"
@@ -2501,6 +2660,14 @@ MUTANTS = (
     ("M32", "CheckpointInputsTests.test_bundle_inputs_runtime_and_restored_facts_are_recomputed",   # CKPT2-04: lexical containment
      '    base, path = flavour(module.normpath(root)), flavour(module.normpath(value))', '    base, path = flavour(root), flavour(value)',
      "checkpoints"),
+    ("M33", "CheckpointLineageTests.test_retry_attempts_keep_unit_plan_parent_and_earlier_raw_bytes",   # CKPT2-06: one evidence root
+     '            "evidence": root / "evidence" / unit / ("attempt-" + str(attempt))}', '            "evidence": root / "evidence" / unit}',
+     "checkpoints"),
+    ("M34", "CheckpointLineageTests.test_retry_attempts_keep_unit_plan_parent_and_earlier_raw_bytes",   # CKPT2-06: interrupted retried
+     '    require("interrupted" not in statuses, "RETRY_REFUSED",', '    require(True, "RETRY_REFUSED",', "checkpoints"),
+    ("M35", "CheckpointLineageTests.test_retry_attempts_keep_unit_plan_parent_and_earlier_raw_bytes",   # CKPT2-06: fresh evidence reused
+     '        checkpoints.require(not evidence or not Path(evidence).exists(), "EVIDENCE_EXISTS", str(evidence))',
+     '        checkpoints.require(True, "EVIDENCE_EXISTS", str(evidence))', "rehearsal"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
