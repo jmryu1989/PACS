@@ -29,8 +29,10 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import ntpath
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
+import posixpath
 import re
 import shlex
 import shutil
@@ -859,12 +861,20 @@ def tree_member_bytes(archive_path, name):
 
 
 def _inside(value, root, what):
-    """The relative path of an absolute fixture path; anything outside the checkpoint's absolute root refuses."""
+    """The relative path of an absolute fixture path; anything outside the checkpoint's absolute root refuses. Both are
+    absolute and normalised first ('..' collapsed, in the root's own path flavour), then compared component by component:
+    a lexical prefix such as <root>/../elsewhere is outside (CKPT2-04). No link race defence (D557)."""
     require(type(value) is str and value, "PLAN_INPUT_OUTSIDE", what)
-    try:
-        return Path(value).relative_to(Path(root)).as_posix()
-    except ValueError:
-        raise Refused("PLAN_INPUT_OUTSIDE", what + " " + value + " lies outside the fixture root") from None
+    require(type(root) is str and root, "PLAN_INPUT_OUTSIDE", "fixture root")
+    windows = re.match(r"[A-Za-z]:[\\/]", root) is not None
+    module, flavour = (ntpath, PureWindowsPath) if windows else (posixpath, PurePosixPath)
+    require(flavour(root).is_absolute(), "PLAN_INPUT_OUTSIDE", "the fixture root " + root + " is not absolute")
+    require(flavour(value).is_absolute(), "PLAN_INPUT_OUTSIDE", what + " " + value + " is not absolute")
+    base, path = flavour(module.normpath(root)), flavour(module.normpath(value))
+    fold = (lambda parts: [part.lower() for part in parts]) if windows else list
+    require(fold(path.parts[:len(base.parts)]) == fold(base.parts), "PLAN_INPUT_OUTSIDE",
+            what + " " + value + " lies outside the fixture root")
+    return path.relative_to(base).as_posix()
 
 
 def bundle_inputs(manifest, bundle_dir):
@@ -928,8 +938,9 @@ def bundle_inputs(manifest, bundle_dir):
     _inside(target["repository"], root, "target repository")
     _inside(target["ca_file"], root, "target ca_file")
     for name in target["compose_files"]:
-        if Path(name).is_absolute() or PurePosixPath(name).is_absolute():
-            _inside(name, root, "compose file")
+        absolute = Path(name).is_absolute() or PurePosixPath(name).is_absolute()
+        # A relative compose file is read from the repository: it must stay inside it after normalisation as well.
+        _inside(name if absolute else target["repository"].rstrip("/\\") + "/" + name, root, "compose file")
     for overlay in target["declared_overlays"]:
         _inside(overlay["file"], root, "declared overlay")
         for bind in overlay.get("binds") or []:
@@ -1166,8 +1177,13 @@ def cleanup_owned(backend, owned):
                     errors.append(item["name"] + ": " + type(error).__name__)
     images_before = {image["id"] for image in inventory.get("images") or []}
     for image in inventory.get("images") or []:
-        for tag in sorted(set(image.get("tags") or []) & tags):
-            if len(set(image["tags"])) < 2:
+        names = set(image.get("tags") or [])
+        mine = sorted(names & tags)
+        # Decided per image before the first removal (CKPT2-05): with no foreign name left, one owned alias is kept as the
+        # image's last name, however many owned aliases it has; each removal is judged against that, never a stale count.
+        keep = None if names - tags else (mine[-1] if mine else None)
+        for tag in mine:
+            if tag == keep:
                 errors.append(tag + ": the last name of image " + image["id"] + " (kept; the shared image is never removed)")
                 continue
             try:

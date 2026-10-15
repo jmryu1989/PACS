@@ -1222,6 +1222,23 @@ class CheckpointCleanupTests(RefusalAssertions, TempCase):
             self.assertTrue(any("last name" in error for error in result["errors"]), result)
             self.assertEqual(backend.image_tags[image("2")], {proxy}, "the shared image and its only tag stay")
             self.assertNotIn(("remove", "tags", proxy), backend.calls)
+        with self.subTest(images="CKPT2-05: two owned aliases are the image's only names"):
+            alias = PROJECT + "-api:rehearsal"
+            both = {**owned, "tags": [api, alias]}
+            backend = FakeBackend(names, target["volumes"])
+            backend.image_tags = {image("1"): {api, alias}}
+            result = cp.cleanup_owned(backend, both)
+            self.assertIn(image("1"), backend.image_tags, "the image ID stays")
+            self.assertEqual(len(backend.image_tags[image("1")]), 1, "its last owned alias stays")
+            self.assertFalse(result["complete"], result)
+            self.assertEqual(result["remaining"], sorted(backend.image_tags[image("1")]), "the kept alias is reported as remaining")
+            self.assertTrue(any("last name" in error for error in result["errors"]), result)
+            self.assertFalse([error for error in result["errors"] if error.startswith("image removed")], result)
+            backend = FakeBackend(names, target["volumes"])
+            backend.image_tags = {image("1"): {api, alias, "kin-api:ci"}}
+            result = cp.cleanup_owned(backend, both)
+            self.assertTrue(result["complete"], result)
+            self.assertEqual(backend.image_tags, {image("1"): {"kin-api:ci"}}, "only the owned aliases go; the image and the foreign name stay")
         root = self.tempdir()
         (root / "fixture").mkdir()
         self.assertEqual(self.admitted(cp.remove_private_root, root / "fixture", owner_root=root)["removed"], str(root / "fixture"))
@@ -1987,6 +2004,68 @@ class CheckpointInputsTests(RefusalAssertions, TempCase):
                                    observe=lambda sid: None)
                 self.assertEqual(backend.calls, [], "nothing reached the daemon")
                 self.assertFalse(target_root.exists(), "no fixture root was created")
+        # CKPT2-04: every path a restore consumes, written as <root>/../elsewhere in an otherwise self-consistent bundle (plan,
+        # target, state and identity agree), is outside after normalisation: refused before any daemon call or fixture root.
+        # A '..' that stays inside is the normal control.
+
+        def moved(field, inside=False):
+            def change(parts):
+                descriptor = next(iter(parts["context"]["stacks"].values()))
+                root = str(Path(descriptor["root"]).parent)
+                away = root + "/" + Path(descriptor["root"]).name + "/../" + Path(descriptor["root"]).name + "/backups" if inside \
+                    else root + "/../outside-" + field.replace(" ", "-")
+                plan, target = descriptor["plan_document"], descriptor["target"]
+                if field == "plan backup_root":
+                    plan["backup_root"] = away
+                elif field == "plan seed b0_dir":
+                    plan["seed"]["b0_dir"] = away
+                elif field == "stack root":
+                    descriptor["root"] = away
+                elif field == "target repository":
+                    target["repository"] = away
+                elif field == "target ca_file":
+                    target["ca_file"] = away + "/clone-ca.pem"
+                elif field == "an absolute compose file":
+                    target["compose_files"][-1] = away + "/rehearsal-override.yml"
+                elif field == "a relative compose file":
+                    target["compose_files"][0] = "../../../outside/docker-compose.yml"
+                elif field == "a declared overlay":
+                    target["declared_overlays"] = [{"file": away + "/overlay.yml", "sha256": "1" * 64, "service": "proxy", "binds": []}]
+                elif field == "an overlay bind":
+                    target["declared_overlays"] = [{"file": root + "/clone/overlay.yml", "sha256": "1" * 64, "service": "proxy",
+                                                    "binds": [{"source": away, "target": "/etc/x", "read_only": True}]}]
+                elif field == "the source B0":
+                    parts["context"]["b0"]["dir"] = away
+                elif field == "the seed's B0 copy":
+                    parts["context"]["copy_dir"] = away
+                elif field == "the clone B0":
+                    parts["state"]["b0"]["dir"] = away
+                plan["target_manifest_sha256"] = hashlib.sha256(intro.canonical(target)).hexdigest()
+                descriptor["plan_sha256"] = intro.plan_identity(plan)
+                parts["state"]["plan_sha256"] = descriptor["plan_sha256"]
+            return change
+
+        def consistent(manifest, directory):
+            descriptor = json.loads(cp.tree_member_bytes(directory / "payload" / "fixture-tree.tar", cp.CONTEXT_FILE))["stacks"]["clone"]
+            return {**manifest, "identity": {**manifest["identity"], "plan_sha256": descriptor["plan_sha256"],
+                                             "target_manifest_sha256": descriptor["plan_document"]["target_manifest_sha256"]}}
+        manifest, directory = self.bundle("introduced", tamper=moved("plan backup_root", inside=True))
+        self.assertEqual(self.admitted(cp.bundle_inputs, consistent(manifest, directory), directory)["plan_sha256"],
+                         consistent(manifest, directory)["identity"]["plan_sha256"], "a '..' that stays inside is accepted")
+        for field in ("plan backup_root", "plan seed b0_dir", "stack root", "target repository", "target ca_file", "an absolute compose file",
+                      "a relative compose file", "a declared overlay", "an overlay bind", "the source B0", "the seed's B0 copy", "the clone B0"):
+            with self.subTest(escape=field):
+                manifest, directory = self.bundle("introduced", tamper=moved(field))
+                manifest = consistent(manifest, directory)
+                self.assertRefused("PLAN_INPUT_OUTSIDE", cp.bundle_inputs, manifest, directory)
+                backend = FakeBackend({role: PROJECT + "-" + role for role in intro.ROLES}, {}, running=set())
+                backend.containers.clear()
+                target_root = self.tempdir() / "restored"
+                self.assertRefused("PLAN_INPUT_OUTSIDE", cp.restore_checkpoint, manifest, directory, backend=backend, fixture_root=target_root,
+                                   names={role: PROJECT + "-" + role for role in intro.ROLES}, images_present=lambda image_id: True,
+                                   observe=lambda sid: None)
+                self.assertEqual(backend.calls, [], "no restore or create call reached the daemon")
+                self.assertFalse(target_root.exists(), "no fixture root was created")
         # Runtime and module origins (observed, never declared).
         facts = {"python": "3.12.7", "docker_server": "27.0.3", "compose": "2.29.1", "playwright": "1.48.2",
                  "chromium": "chromium-1140", "arch": "x86_64"}
@@ -2414,7 +2493,14 @@ MUTANTS = (
      '    reasons = [] if verdict.get("status") == "DEPLOYED" else ["status " + str(verdict.get("status"))]', '    reasons = []',
      "checkpoints"),
     ("M30", "CheckpointCleanupTests.test_only_owned_resources_are_removed_and_absence_is_observed",   # CKPT-09: last tag removed
-     '            if len(set(image["tags"])) < 2:', '            if False:', "checkpoints"),
+     '        keep = None if names - tags else (mine[-1] if mine else None)', '        keep = None', "checkpoints"),
+    # Round 3 (CKPT2-01..06, consult answer.json round3_acceptance).
+    ("M31", "CheckpointCleanupTests.test_only_owned_resources_are_removed_and_absence_is_observed",   # CKPT2-05: a stale tag count
+     '        keep = None if names - tags else (mine[-1] if mine else None)',
+     '        keep = None if names - tags or len(mine) > 1 else (mine[-1] if mine else None)', "checkpoints"),
+    ("M32", "CheckpointInputsTests.test_bundle_inputs_runtime_and_restored_facts_are_recomputed",   # CKPT2-04: lexical containment
+     '    base, path = flavour(module.normpath(root)), flavour(module.normpath(value))', '    base, path = flavour(root), flavour(value)',
+     "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -2478,7 +2564,7 @@ class CheckpointMutationContracts(TempCase):
                                  "mutant": "KILLED" if killed else "SURVIVED", "assertion": (second["failures"] or second["errors"] or [""])[0]})
                 print("MUTANT " + json.dumps(outcomes[-1]), flush=True)
                 self.assertTrue(killed, identifier + " survived or errored: " + json.dumps(second))
-        self.assertEqual(len(outcomes), 30)
+        self.assertEqual(len(outcomes), len(MUTANTS))
 
 
 if __name__ == "__main__":
