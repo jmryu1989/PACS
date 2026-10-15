@@ -32,6 +32,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -62,6 +63,26 @@ SCENARIOS = {"normal": ("source", "seed", "capture", "introduce", "verify", "nor
 PROOF_CASES = {"CheckpointSegments.test_original_late_fault": "forward-tail",
                "CheckpointSegments.test_late_change_resume": "verify",
                "CheckpointSegments.test_earlier_change_refused": "verify"}
+# What each proof case runs after its stage, and the outcome its segment must show (anything else is not the proof).
+PROOF_THEN = {"CheckpointSegments.test_late_change_resume": ("forward-tail",)}
+PROOF_OUTCOMES = {"CheckpointSegments.test_original_late_fault": {"outcome": "STOP", "step": "L-11a"},
+                  "CheckpointSegments.test_earlier_change_refused": {"outcome": "REFUSED", "code": "PREFIX_CHANGED"}}
+# The harness files every leaf reads besides its plan, request, registry, source manifest and parent manifest; with
+# `scripts` as a tree (the runner, the recorder and the product tool) they are the recorder inputs of every leaf.
+LEAF_INPUT_FILES = ("tests/ops_release_checkpoints.py", "tests/ops_release_checkpoints_live_test.py",
+                    "tests/ops_deploy_host_container_test.py", "tests/ops_deploy_host_test.py", "tests/live_test_gate.py")
+LEAF_INPUT_TREES = ("scripts",)
+CONTEXT_FILE = "checkpoint-context.json"
+SECRETS_INVENTORY = "checkpoint-secrets-inventory.json"
+CONTEXT_KEYS = {"previous_sha", "target_sha", "images", "legacy", "members", "b0", "copy_dir", "production_plan", "stacks"}
+# The fixture stack whose product state a checkpoint carries.
+LINEAGE_STACK = {"source-b0": "source", "seeded": "clone", "held": "clone", "introduced": "clone", "verified": "clone",
+                 "failure-held": "failure"}
+# Environment that selects another Docker endpoint or client configuration. Compose calls run without DOCKER_*/COMPOSE_*,
+# raw calls inherit them: a checkpoint stage refuses any of them so that every call reaches the one observed daemon.
+ENDPOINT_SELECTORS = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH")
+RUNTIME_KEYS = ("python", "docker_server", "compose", "playwright", "chromium", "arch")
+FORWARD_REQUIRED_TRUE = ("health", "migrations_after", "smoke_member_absent", "ordinary_entry_images")
 FRESH_CASES = {
     "normal": "EmrIntroductionRehearsal.test_emr_introduction_rehearsal_seed_capture_introduce_verify_rollback_receipt",
     "forced": "EmrIntroductionRehearsal.test_emr_introduction_rehearsal_forced_l09b_failure_rolls_back_with_kept_values_and_the_pinned_overlay",
@@ -128,26 +149,40 @@ RESUME_COMPARED = ("tool_tree_sha256_at_checkpoint", "source_tree_sha256", "harn
                    "host_key_sha256", "daemon_identity", "absolute_fixture_root", "runtime_identity")
 HARNESS_FILES = ("tests/ops_release_checkpoints.py", "tests/ops_release_checkpoints_live_test.py", "tests/ops_deploy_host_container_test.py",
                  "tests/ops_deploy_host_test.py", "tests/live_test_gate.py", "scripts/run-tests.py", "scripts/record-run.py")
+# The nine T16/T17 leaves, in execution order. `source` names the frozen source copy a leaf runs from (a: input A with
+# the deterministic L-11a STOP, b: the unmodified candidate B, c: input C with HostOps.prepare changed); `parent` names
+# the registered leaf whose sealed checkpoint this leaf consumes (its stage produces what this stage consumes). The
+# parent map is explicit: late-fault takes A's verified, late-resume and early-refusal take A's introduced (never "the
+# previous leaf"), and the fresh control has no parent.
 DEFAULT_PROOF_LEAVES = (
     {"unit": "release-tools-checkpoints-proof-prefix-source", "file": LIVE_FILE, "case": STAGES["source"]["case"],
-     "scenario": "forward", "stage": "source", "execution_kind": "fresh", "proof": "T16"},
+     "scenario": "forward", "stage": "source", "execution_kind": "fresh", "proof": "T16", "source": "a", "parent": None},
     {"unit": "release-tools-checkpoints-proof-prefix-seed", "file": LIVE_FILE, "case": STAGES["seed"]["case"],
-     "scenario": "forward", "stage": "seed", "execution_kind": "reseed-from-recorded-b0", "proof": "T16"},
+     "scenario": "forward", "stage": "seed", "execution_kind": "reseed-from-recorded-b0", "proof": "T16", "source": "a",
+     "parent": "release-tools-checkpoints-proof-prefix-source"},
     {"unit": "release-tools-checkpoints-proof-prefix-capture", "file": LIVE_FILE, "case": STAGES["capture"]["case"],
-     "scenario": "forward", "stage": "capture", "execution_kind": "checkpoint-resume", "proof": "T16"},
+     "scenario": "forward", "stage": "capture", "execution_kind": "checkpoint-resume", "proof": "T16", "source": "a",
+     "parent": "release-tools-checkpoints-proof-prefix-seed"},
     {"unit": "release-tools-checkpoints-proof-prefix-introduce", "file": LIVE_FILE, "case": STAGES["introduce"]["case"],
-     "scenario": "forward", "stage": "introduce", "execution_kind": "checkpoint-resume", "proof": "T16"},
+     "scenario": "forward", "stage": "introduce", "execution_kind": "checkpoint-resume", "proof": "T16", "source": "a",
+     "parent": "release-tools-checkpoints-proof-prefix-capture"},
     {"unit": "release-tools-checkpoints-proof-prefix-verify", "file": LIVE_FILE, "case": STAGES["verify"]["case"],
-     "scenario": "forward", "stage": "verify", "execution_kind": "checkpoint-resume", "proof": "T16"},
+     "scenario": "forward", "stage": "verify", "execution_kind": "checkpoint-resume", "proof": "T16", "source": "a",
+     "parent": "release-tools-checkpoints-proof-prefix-introduce"},
     {"unit": "release-tools-checkpoints-proof-late-fault", "file": LIVE_FILE, "case": "CheckpointSegments.test_original_late_fault",
-     "scenario": "forward", "stage": "forward-tail", "execution_kind": "checkpoint-resume", "proof": "T16"},
+     "scenario": "forward", "stage": "forward-tail", "execution_kind": "checkpoint-resume", "proof": "T16", "source": "a",
+     "parent": "release-tools-checkpoints-proof-prefix-verify"},
     {"unit": "release-tools-checkpoints-proof-late-resume", "file": LIVE_FILE, "case": "CheckpointSegments.test_late_change_resume",
-     "scenario": "forward", "stage": "verify", "execution_kind": "diagnostic-fork", "proof": "T16"},
+     "scenario": "forward", "stage": "verify", "execution_kind": "diagnostic-fork", "proof": "T16", "source": "b",
+     "parent": "release-tools-checkpoints-proof-prefix-introduce"},
     {"unit": "release-tools-checkpoints-proof-fresh-control", "file": REHEARSAL_FILE, "case": FRESH_CASES["forward"],
-     "scenario": "forward", "stage": None, "execution_kind": "fresh", "proof": "T16"},
+     "scenario": "forward", "stage": None, "execution_kind": "fresh", "proof": "T16", "source": "b", "parent": None},
     {"unit": "release-tools-checkpoints-proof-early-refusal", "file": LIVE_FILE, "case": "CheckpointSegments.test_earlier_change_refused",
-     "scenario": "forward", "stage": "verify", "execution_kind": "diagnostic-fork", "proof": "T17"},
+     "scenario": "forward", "stage": "verify", "execution_kind": "diagnostic-fork", "proof": "T17", "source": "c",
+     "parent": "release-tools-checkpoints-proof-prefix-introduce"},
 )
+# The frozen source copies of the proofs (tests/ops_release_checkpoints.py source-copy --mutant ...).
+PROOF_SOURCES = {"a": "backup-readiness-stop", "b": None, "c": "prepare-change"}
 
 
 class Refused(RuntimeError):
@@ -721,35 +756,49 @@ def load_bundle(directory):
         if member["name"].endswith(".tar"):
             category = member["category"].split(":", 1)[-1]
             archive_members(payload / member["name"], category=category)
+    # The bound fixture files are re-read from the fixture member itself, not trusted from the manifest's own claims.
+    check_bindings(payload / "fixture-tree.tar", manifest["bindings"], required=sorted(manifest["bindings"]))
     return manifest, directory
 
 
 def archive_members(path, *, category=None):
     """Validate a tar archive's members with the standard library before any extraction: no absolute or parent paths,
-    no device/FIFO/hardlink members, no undeclared link and nothing beneath a link. Returns the validated members."""
+    no device/FIFO/hardlink members, no undeclared link and nothing beneath a link. The whole archive is judged first
+    (normalised path set, link set), so a duplicate path, a path listed twice with two types, or a member listed before
+    the link it lies under refuses whatever the member order. Returns the validated members.
+    This guards the harness's own bundles against honest mistakes and damage; it does not claim to defend against a
+    deliberate same-account forgery (spec section 3)."""
     declared = DECLARED_LINKS.get(category)
-    links, out = set(), []
     try:
         with tarfile.open(path, "r:") as archive:
-            for member in archive.getmembers():
-                name = member.name[2:] if member.name.startswith("./") else member.name
-                if name in ("", "."):
-                    require(member.isdir(), "ARCHIVE_INVALID", "root entry")
-                    out.append(member)
-                    continue
-                pure = PurePosixPath(name)
-                require(not pure.is_absolute() and ".." not in pure.parts and "\\" not in name, "ARCHIVE_INVALID", "path " + name)
-                require(not any(str(parent) in links for parent in pure.parents), "ARCHIVE_INVALID", "member under a link " + name)
-                if member.issym():
-                    require(declared is not None and declared[0].fullmatch(name) is not None and member.linkname == declared[1],
-                            "ARCHIVE_INVALID", "undeclared link " + name)
-                    links.add(name)
-                else:
-                    require(member.isfile() or member.isdir(), "ARCHIVE_INVALID", "unsupported member " + name)
-                out.append(member)
+            members = archive.getmembers()
     except (tarfile.TarError, OSError) as error:
         raise Refused("ARCHIVE_INVALID", type(error).__name__) from None
-    return out
+    names, links, normalised = set(), set(), []
+    for member in members:
+        name = member.name[2:] if member.name.startswith("./") else member.name
+        if name.rstrip("/") in ("", "."):
+            require(member.isdir(), "ARCHIVE_INVALID", "root entry")
+            key = "."
+        else:
+            require("\\" not in name, "ARCHIVE_INVALID", "path " + name)
+            pure = PurePosixPath(name)
+            require(not pure.is_absolute() and ".." not in pure.parts, "ARCHIVE_INVALID", "path " + name)
+            key = pure.as_posix()
+        require(key not in names, "ARCHIVE_INVALID", "duplicate member " + key)
+        names.add(key)
+        if member.issym():
+            require(declared is not None and declared[0].fullmatch(key) is not None and member.linkname == declared[1],
+                    "ARCHIVE_INVALID", "undeclared link " + key)
+            links.add(key)
+        else:
+            require(member.isfile() or member.isdir(), "ARCHIVE_INVALID", "unsupported member " + key)
+        normalised.append((key, member))
+    for key, member in normalised:
+        if key != ".":
+            require(not any(parent.as_posix() in links for parent in PurePosixPath(key).parents), "ARCHIVE_INVALID",
+                    "member under a link " + key)
+    return [member for _, member in normalised]
 
 
 def write_tree_archive(root, destination, *, exclude=()):
@@ -797,6 +846,137 @@ def check_bindings(archive_path, bindings, *, required):
         binding = bindings.get(name)
         require(binding is not None, "BUNDLE_INVALID", "binding " + name + " missing")
         require(tree_member_sha256(archive_path, binding["path"]) == binding["sha256"], "BUNDLE_INVALID", "binding " + name + " differs")
+
+
+def tree_member_bytes(archive_path, name):
+    with tarfile.open(archive_path, "r:") as archive:
+        try:
+            member = archive.getmember(name)
+        except KeyError:
+            return None
+        handle = archive.extractfile(member)
+        return None if handle is None else handle.read()
+
+
+def _inside(value, root, what):
+    """The relative path of an absolute fixture path; anything outside the checkpoint's absolute root refuses."""
+    require(type(value) is str and value, "PLAN_INPUT_OUTSIDE", what)
+    try:
+        return Path(value).relative_to(Path(root)).as_posix()
+    except ValueError:
+        raise Refused("PLAN_INPUT_OUTSIDE", what + " " + value + " lies outside the fixture root") from None
+
+
+def bundle_inputs(manifest, bundle_dir):
+    """Before any restore: recompute the plan, target and both B0 identities from the actual bytes inside the fixture
+    member and compare them with the manifest identity, the stack descriptor and the bound state (never one claimed hash
+    against another). Every plan-dependent path must lie inside the absolute fixture root the bundle carries; another
+    input refuses (PLAN_INPUT_OUTSIDE). Returns the recomputed facts."""
+    identity, checkpoint = manifest["identity"], manifest["checkpoint"]
+    tree = Path(bundle_dir) / "payload" / "fixture-tree.tar"
+    root = identity["absolute_fixture_root"]
+
+    def member(rel, what):
+        raw = tree_member_bytes(tree, rel)
+        require(raw is not None, "BUNDLE_INPUT_MISMATCH", what + " missing from the fixture member: " + rel)
+        return raw
+
+    def document(rel, what):
+        try:
+            return json.loads(member(rel, what))
+        except ValueError:
+            raise Refused("BUNDLE_INPUT_MISMATCH", what + " is not JSON") from None
+
+    context = document(manifest["bindings"]["context"]["path"], "context")
+    require(type(context) is dict and set(context) == CONTEXT_KEYS, "BUNDLE_INPUT_MISMATCH", "context keys")
+    descriptor = (context["stacks"] or {}).get(LINEAGE_STACK[checkpoint])
+    require(type(descriptor) is dict and type(descriptor.get("plan_document")) is dict, "BUNDLE_INPUT_MISMATCH",
+            "no plan for the " + LINEAGE_STACK[checkpoint] + " stack")
+    plan, target = descriptor["plan_document"], descriptor["target"]
+    plan_sha = intro.plan_identity(plan)
+    state = document(manifest["bindings"]["state"]["path"], "state")
+    require(plan_sha == descriptor["plan_sha256"] == identity["plan_sha256"] == state.get("plan_sha256"), "BUNDLE_INPUT_MISMATCH",
+            "the plan bytes, the descriptor, the state and the identity name different plans")
+    target_sha = sha256(intro.canonical(target))
+    require(target_sha == plan["target_manifest_sha256"] == identity["target_manifest_sha256"], "BUNDLE_INPUT_MISMATCH",
+            "the target document differs from the plan and the identity")
+    require(plan["tool"] == identity["tool_files_actual_raw_sha256"], "BUNDLE_INPUT_MISMATCH", "the plan binds other tool files")
+    images = identity["image_ids"]
+    require(context["images"] == {"previous": images.get("previous"), "release": images.get("release")}
+            and plan["previous"]["images"] == images.get("previous") and plan["release"]["images"] == images.get("release"),
+            "BUNDLE_INPUT_MISMATCH", "image IDs differ between the context, the plan and the identity")
+    source_b0 = None
+    if identity["source_b0_manifest_sha256"] is not None or context["b0"] is not None:
+        b0 = context["b0"] or {}
+        source_b0 = sha256(member(_inside(b0.get("dir"), root, "source B0") + "/manifest.json", "source B0 manifest"))
+        require(source_b0 == b0.get("manifest_sha256") == identity["source_b0_manifest_sha256"], "BUNDLE_INPUT_MISMATCH",
+                "the source B0 manifest bytes differ")
+        if context["copy_dir"]:
+            copied = sha256(member(_inside(context["copy_dir"], root, "seed B0 copy") + "/manifest.json", "seed B0 copy manifest"))
+            require(copied == source_b0, "BUNDLE_INPUT_MISMATCH", "the seed's B0 copy differs from the source B0")
+    clone_b0 = None
+    state_b0 = state.get("b0") if LINEAGE_STACK[checkpoint] != "source" else None
+    if identity["clone_b0_manifest_sha256"] is not None or state_b0:
+        clone_b0 = sha256(member(_inside((state_b0 or {}).get("dir"), root, "clone B0") + "/manifest.json", "clone B0 manifest"))
+        require(clone_b0 == (state_b0 or {}).get("manifest_sha256") == identity["clone_b0_manifest_sha256"], "BUNDLE_INPUT_MISMATCH",
+                "the clone B0 manifest bytes differ")
+    # Plan-dependent inputs the next phase reads: all of them must come from this bundle's own fixture tree.
+    _inside(plan["backup_root"], root, "plan backup_root")
+    if plan.get("seed"):
+        _inside(plan["seed"]["b0_dir"], root, "plan seed b0_dir")
+    _inside(descriptor["root"], root, "stack root")
+    _inside(target["repository"], root, "target repository")
+    _inside(target["ca_file"], root, "target ca_file")
+    for name in target["compose_files"]:
+        if Path(name).is_absolute() or PurePosixPath(name).is_absolute():
+            _inside(name, root, "compose file")
+    for overlay in target["declared_overlays"]:
+        _inside(overlay["file"], root, "declared overlay")
+        for bind in overlay.get("binds") or []:
+            _inside(bind["source"], root, "overlay bind")
+    return {"plan_sha256": plan_sha, "target_manifest_sha256": target_sha, "source_b0_manifest_sha256": source_b0,
+            "clone_b0_manifest_sha256": clone_b0, "context_sha256": manifest["bindings"]["context"]["sha256"]}
+
+
+def runtime_identity(facts, *, modules, root):
+    """The executing runtime pinned from actual observation: interpreter, Docker server, Compose, Playwright and its
+    Chromium build, architecture, and the origin of every harness/product module (inside the frozen source, never a
+    bytecode cache; none may exist in the source's scripts/ or tests/). Origins are relative so A and B copies compare."""
+    out = {}
+    for key in RUNTIME_KEYS:
+        require(type(facts.get(key)) is str and facts[key].strip(), "RUNTIME_UNPINNED", key)
+        out[key] = facts[key].strip()
+    root = Path(root).resolve()
+    for folder in ("scripts", "tests"):
+        require(not any((root / folder).rglob("__pycache__")), "RUNTIME_UNPINNED", "a bytecode cache in the frozen " + folder)
+    origins = {}
+    for name, module in sorted(modules.items()):
+        origin = Path(getattr(module, "__file__", "") or "").resolve()
+        require(origin.suffix == ".py" and "__pycache__" not in origin.parts, "RUNTIME_UNPINNED", name + " origin")
+        try:
+            origins[name] = origin.relative_to(root).as_posix()
+        except ValueError:
+            raise Refused("RUNTIME_UNPINNED", name + " was imported from outside the frozen source") from None
+    out["modules"] = origins
+    return out
+
+
+def restored_mapping(recorded, observed):
+    """After a restore, the product facts observed at the checkpoint (data, rights, realm, frame, migrations, mounts,
+    networks, images, running roles) must be observed again; only container IDs may differ, and their old -> new
+    correspondence is returned for the record. Anything else refuses (RESTORE_MISMATCH)."""
+    require(type(recorded) is dict and type(observed) is dict and set(recorded) == set(observed), "RESTORE_MISMATCH",
+            "fact inventory")
+    differences, ids = [], {}
+    require(set(recorded["containers"]) == set(observed["containers"]), "RESTORE_MISMATCH", "container roles")
+    for role in sorted(recorded["containers"]):
+        old, new = recorded["containers"][role], observed["containers"][role]
+        if {k: v for k, v in old.items() if k != "id"} != {k: v for k, v in new.items() if k != "id"}:
+            differences.append("container " + role)
+        ids[role] = {"checkpoint": old.get("id"), "restored": new.get("id")}
+    differences += [key for key in sorted(recorded) if key != "containers" and recorded[key] != observed[key]]
+    require(not differences, "RESTORE_MISMATCH", ",".join(differences))
+    return {"container_ids": ids, "compared": sorted(recorded)}
 
 
 # ── capture and restore coordination (T08) through the backend adapter ──
@@ -911,9 +1091,10 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
 def restore_checkpoint(manifest, bundle_dir, *, backend, fixture_root, names, images_present, observe):
     """Spec section 3 steps 6-9 into new objects only: an existing volume or a non-empty root refuses; containers are
     recreated from the pinned ComposeEntry with the same image IDs, the database alone for HELD; no seed, provision or
-    migration runs; the product's boundary contract is observed at the end. Returns the action log."""
+    migration runs; the product's boundary contract is observed at the end. Returns the action log. The plan, target and
+    B0 bytes are recomputed from the bundle (bundle_inputs) before the first daemon call or file is created."""
     spec = CHECKPOINTS[manifest["checkpoint"]]
-    actions = []
+    actions = [("inputs", bundle_inputs(manifest, bundle_dir))]
     images = manifest["identity"]["image_ids"]
     for side, value in images.items():
         for image in (value.values() if type(value) is dict else [value]):
@@ -956,10 +1137,21 @@ def restore_checkpoint(manifest, bundle_dir, *, backend, fixture_root, names, im
 
 # ── cleanup (T12) ──
 
+def owned_remaining(inventory, owned):
+    """Owned resources still listed: containers, volumes and networks by exact label or ID, and the exact image tags this
+    run created (`owned["tags"]`); a foreign tag or a shared image ID is never counted as ours."""
+    tags = set(owned.get("tags") or ())
+    left = [item["name"] for kind in ("containers", "volumes", "networks") for item in inventory[kind] if owned_resource(item, owned)]
+    return left + sorted(tag for image in inventory.get("images") or [] for tag in image.get("tags") or [] if tag in tags)
+
+
 def cleanup_owned(backend, owned):
     """Remove exactly the owned resources (exact labels or recorded IDs), then observe their absence. A removal whose
-    re-query still lists the resource, or a failed query, makes the cleanup incomplete; foreign resources stay."""
+    re-query still lists the resource, or a failed query, makes the cleanup incomplete; foreign resources stay. An owned
+    image tag is only an alias: it is removed while another tag keeps the image, the image ID itself is never removed,
+    and a tag that is the image's last name is kept and reported (removing it would delete a shared image)."""
     removed, errors = [], []
+    tags = set(owned.get("tags") or ())
     try:
         inventory = backend.inventory()
     except Exception as error:  # an unobservable daemon is not a clean one
@@ -972,11 +1164,25 @@ def cleanup_owned(backend, owned):
                     removed.append(item["name"])
                 except Exception as error:
                     errors.append(item["name"] + ": " + type(error).__name__)
+    images_before = {image["id"] for image in inventory.get("images") or []}
+    for image in inventory.get("images") or []:
+        for tag in sorted(set(image.get("tags") or []) & tags):
+            if len(set(image["tags"])) < 2:
+                errors.append(tag + ": the last name of image " + image["id"] + " (kept; the shared image is never removed)")
+                continue
+            try:
+                backend.remove("tags", tag)
+                removed.append(tag)
+            except Exception as error:
+                errors.append(tag + ": " + type(error).__name__)
     try:
         after = backend.inventory()
-        remaining = [item["name"] for kind in ("containers", "volumes", "networks") for item in after[kind] if owned_resource(item, owned)]
+        remaining = owned_remaining(after, owned)
+        lost = sorted(images_before - {image["id"] for image in after.get("images") or []})
     except Exception as error:
         return {"complete": False, "removed": removed, "remaining": [], "errors": errors + ["re-query: " + type(error).__name__]}
+    errors += ["image removed: " + image for image in lost if any(set(i.get("tags") or []) & tags for i in inventory.get("images") or []
+                                                                  if i["id"] == image)]
     return {"complete": not remaining and not errors, "removed": removed, "remaining": remaining, "errors": errors}
 
 
@@ -1000,17 +1206,46 @@ def discard_bundle(store, digest, *, reason):
 
 # ── host admission (T13) and the live gate (T10) ──
 
+def daemon_environment(environ=None):
+    """The environment of every checkpoint Docker/Compose call: no DOCKER_* or COMPOSE_* selection at all, so raw and
+    Compose calls reach the same (default context) daemon the admission observed."""
+    environ = os.environ if environ is None else environ
+    return {key: value for key, value in environ.items() if not key.startswith(("DOCKER_", "COMPOSE_"))}
+
+
+def endpoint_selectors(environ=None):
+    environ = os.environ if environ is None else environ
+    return sorted(key for key in ENDPOINT_SELECTORS if environ.get(key))
+
+
+def foreign_containers(rows, *, owned_ids=()):
+    """D1034 over every container, running or stopped: a `kin-*` name, a `kin.ops.run` label or a `kin.emrb.live` label
+    (whatever the name) is foreign unless its exact ID is in this stage's own list. Names alone never grant ownership."""
+    found = []
+    for row in rows:
+        if row["id"] in owned_ids:
+            continue
+        if row["name"].startswith("kin-") or row.get("kin.ops.run") or row.get("kin.emrb.live"):
+            found.append(row["name"] + " (" + (row.get("state") or "unknown") + ")")
+    return sorted(found)
+
+
 def host_admission(facts, expected=None, *, gate=None):
     """Native Linux, the persistent live slot, D1034 (RAM, no foreign kin containers running or stopped, daemon
-    answering), and for a resume the same host, daemon, architecture and absolute root as the checkpoint."""
+    answering), one local daemon endpoint for every call, and for a resume the same host, daemon, architecture and
+    absolute root as the checkpoint."""
     if gate is not None:
         gate.require_live_run()
         gate_state = Path(gate.STATE)
         require(facts.get("gate_state") == str(gate_state) and gate_state.is_dir(), "HOST_REFUSED", "persistent live slot")
     require(facts.get("os") == "linux", "UNSUPPORTED_HOST", "v1 checkpoints run on native Linux only")
+    require(facts.get("endpoint_selectors") == [], "REMOTE_DAEMON",
+            "DOCKER_* endpoint selection in the environment: " + ",".join(facts.get("endpoint_selectors") or ["unobserved"]))
+    require(str(facts.get("docker_endpoint", "")).startswith("unix:///"), "REMOTE_DAEMON",
+            "the current Docker context is not a local socket: " + str(facts.get("docker_endpoint"))[:120])
+    require(facts.get("daemon_ok") is True and facts.get("daemon_identity"), "DAEMON_UNAVAILABLE", "daemon query failed")
     require("docker desktop" not in str(facts.get("docker_os", "")).lower() and facts.get("docker_os"), "UNSUPPORTED_HOST",
             "Docker Desktop is not a native Linux daemon")
-    require(facts.get("daemon_ok") is True and facts.get("daemon_identity"), "DAEMON_UNAVAILABLE", "daemon query failed")
     require(type(facts.get("available_ram_bytes")) is int and facts["available_ram_bytes"] >= MIN_HOST_RAM, "INSUFFICIENT_RAM",
             str(facts.get("available_ram_bytes")))
     require(type(facts.get("available_disk_bytes")) is int and facts["available_disk_bytes"] >= facts.get("required_disk_bytes", 0),
@@ -1032,20 +1267,29 @@ def stage_entry(gate, facts, expected=None):
     return host_admission(facts, expected, gate=gate)
 
 
-def bind_marker(gate, request):
-    """The current gate marker's identity, read from the gate, never from the request."""
+def marker_identity(gate):
+    """The current gate marker's identity (this process's live run), read from the gate itself."""
     raw = (Path(gate.STATE) / "live-needs-inspection.json").read_bytes()
     marker = json.loads(raw)
     gate.validate_identity(marker)
-    require(marker["unit"] == request["unit"] and marker["pid"] == os.getpid(), "REQUEST_INVALID", "marker unit/pid")
+    require(marker["pid"] == os.getpid(), "REQUEST_INVALID", "the marker belongs to another process")
     return {key: marker[key] for key in ("unit", "module", "attempt", "plan_sha256", "pid", "started_at")}
+
+
+def bind_marker(gate, request):
+    """The current gate marker's identity, read from the gate, never from the request."""
+    marker = marker_identity(gate)
+    require(marker["unit"] == request["unit"], "REQUEST_INVALID", "marker unit/pid")
+    return marker
 
 
 def finish_segment(gate, *, passed, segment, evidence_root):
     """Write the segment record. A failed or uncertain segment keeps the gate's marker for inspection: this harness never
     deletes or rewrites the marker or the unit ledger (release goes through gate.release_after_inspection only)."""
     path = Path(evidence_root) / "segment.json"
-    path.write_bytes(canonical({**segment, "passed": bool(passed)}) + b"\n")
+    Path(evidence_root).mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(path, "xb") as stream:  # a segment is written once; a second write is an error, never an overwrite
+        stream.write(canonical({**segment, "passed": bool(passed)}) + b"\n")
     return path
 
 
@@ -1099,10 +1343,13 @@ def login_after_restore(auth_time, restored_utc):
 def registry_valid(leaves):
     """The commander's frozen leaf registry: stable unit names fixed before the first run, one exact selection each."""
     require(type(leaves) in (list, tuple) and leaves, "REGISTRY_INVALID", "empty")
-    units, selections = set(), set()
+    units, selections, seen = set(), set(), {}
     for leaf in leaves:
-        require(type(leaf) is dict and set(leaf) == {"unit", "file", "case", "scenario", "stage", "execution_kind", "proof"},
+        require(type(leaf) is dict and set(leaf) == {"unit", "file", "case", "scenario", "stage", "execution_kind", "proof", "source",
+                                                     "parent"},
                 "REGISTRY_INVALID", "leaf keys")
+        require(type(leaf["source"]) is str and re.fullmatch(r"[a-z]", leaf["source"]) is not None, "REGISTRY_INVALID",
+                str(leaf.get("unit")) + " source copy")
         require(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", leaf["unit"]) is not None and leaf["unit"] not in units, "REGISTRY_INVALID",
                 "unit " + str(leaf["unit"]))
         units.add(leaf["unit"])
@@ -1120,17 +1367,58 @@ def registry_valid(leaves):
             allowed = ("fresh",) if consumes is None else ("reseed-from-recorded-b0",) if consumes == "source-b0" else \
                 ("checkpoint-resume", "diagnostic-fork") if CHECKPOINTS[consumes]["cross_tree"] else ("checkpoint-resume",)
             require(kind in allowed, "REGISTRY_INVALID", leaf["unit"] + ": execution kind " + kind)
+        # The parent map: an earlier registered leaf whose stage seals exactly the checkpoint this stage consumes; the
+        # same source copy resumes (checkpoint-resume / reseed), another source copy is a diagnostic fork.
+        consumes = STAGES[stage]["consumes"] if stage is not None else None
+        if consumes is None:
+            require(leaf["parent"] is None, "REGISTRY_INVALID", leaf["unit"] + ": a fresh leaf has no parent")
+        else:
+            parent = seen.get(leaf["parent"])
+            require(parent is not None and parent["stage"] is not None and STAGES[parent["stage"]]["produces"] == consumes
+                    and parent["case"] == STAGES[parent["stage"]]["case"], "REGISTRY_INVALID",
+                    leaf["unit"] + ": parent must be an earlier leaf sealing " + consumes)
+            require((kind == "diagnostic-fork") is (parent["source"] != leaf["source"]), "REGISTRY_INVALID",
+                    leaf["unit"] + ": a fork runs another source copy than its parent, a resume the same one")
         key = (leaf["file"], leaf["case"])
         require(key not in selections, "REGISTRY_INVALID", "duplicate selection " + leaf["case"])
         selections.add(key)
+        seen[leaf["unit"]] = leaf
     return list(leaves)
+
+
+def registry_leaf(leaves, unit):
+    leaf = next((item for item in registry_valid(leaves) if item["unit"] == unit), None)
+    require(leaf is not None, "REGISTRY_INVALID", "unregistered unit " + str(unit))
+    return leaf
+
+
+def leaf_phases(leaf):
+    """(executed, inherited) product phases of one registered leaf: what it must run itself, and what its parent lineage
+    already ran (never counted as executed here)."""
+    case, stage = leaf["case"], leaf["stage"]
+    if stage is None:
+        return [phase for name in SCENARIOS[leaf["scenario"]] for phase in STAGES[name]["phases"]], []
+    order = SCENARIOS[leaf["scenario"]]
+    inherited = [phase for name in order[:order.index(stage)] for phase in STAGES[name]["phases"]] if leaf["parent"] else []
+    if PROOF_OUTCOMES.get(case, {}).get("outcome") == "REFUSED":
+        return [], inherited
+    return [phase for name in (stage, *PROOF_THEN.get(case, ())) for phase in STAGES[name]["phases"]], inherited
+
+
+def leaf_outcome(leaf):
+    return dict(PROOF_OUTCOMES.get(leaf["case"], {"outcome": "PASS"}))
+
+
+def leaf_produces(leaf):
+    """The checkpoint a leaf seals: only a plain stage selection (a proof case consumes, it never seals)."""
+    stage = leaf["stage"]
+    return STAGES[stage]["produces"] if stage is not None and leaf["case"] == STAGES[stage]["case"] else None
 
 
 def leaf_plan(leaves, unit, *, timeout_seconds=MAX_ATTEMPT_SECONDS):
     """The run-tests plan of one registered leaf. The unit comes from the registry only: an output root, source SHA,
     attempt or evidence folder never names a new unit (no fresh failure budget)."""
-    leaf = next((item for item in registry_valid(leaves) if item["unit"] == unit), None)
-    require(leaf is not None, "REGISTRY_INVALID", "unregistered unit " + str(unit))
+    leaf = registry_leaf(leaves, unit)
     require(type(timeout_seconds) is int and 1 <= timeout_seconds <= MAX_ATTEMPT_SECONDS, "REGISTRY_INVALID", "timeout")
     return {"unit": leaf["unit"], "mode": "live", "tests": [{"file": leaf["file"], "case": leaf["case"]}],
             "max_attempts": MAX_ATTEMPTS, "timeout_seconds": timeout_seconds}
@@ -1170,7 +1458,30 @@ def load_request(path, leaves, *, case):
     for key in ("output_root", "evidence_root"):
         require(type(request[key]) is str and Path(request[key]).is_absolute(), "REQUEST_INVALID", key)
     require(not _nested(request["output_root"], request["evidence_root"]), "REQUEST_INVALID", "output and evidence roots overlap")
+    if not fresh:
+        parent_lineage(request, leaf)
     return request, sha256(raw)
+
+
+def parent_lineage(request, leaf):
+    """Before any restore: the parent manifest is a sealed checkpoint of exactly the kind this stage consumes, of this
+    scenario's lineage, never a derived (fork) bundle, and it lives in this request's own bundle store, so that its parent
+    chain stays queryable from there."""
+    path = Path(request["parent_manifest"]["path"])
+    try:
+        manifest = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        raise Refused("REQUEST_INVALID", "parent manifest unreadable") from None
+    consumes = STAGES[leaf["stage"]]["consumes"]
+    require(type(manifest) is dict and manifest.get("kind") == "release-tools-checkpoint", "REQUEST_INVALID", "not a checkpoint manifest")
+    require(manifest.get("checkpoint") == consumes, "REQUEST_INVALID",
+            "the parent checkpoint is " + str(manifest.get("checkpoint")) + ", this stage consumes " + str(consumes))
+    require(manifest.get("lineage") == CHECKPOINTS[consumes]["lineage"] and not manifest.get("derived"), "REQUEST_INVALID",
+            "the parent lineage is not this stage's or the parent is a derived bundle")
+    require(path.name == "manifest.json" and path.parent.name == request["parent_manifest"]["sha256"]
+            and path.parent.parent.resolve() == (Path(request["output_root"]) / "bundles").resolve(), "REQUEST_INVALID",
+            "the parent manifest is not a sealed bundle of this request's store")
+    return manifest
 
 
 def fresh_guard(environ=None):
@@ -1193,15 +1504,156 @@ def run_scenario(scenario, stages, context, *, environ=None):
 # ── segments, claims and evidence (T07/T14) ──
 
 def segment_record(*, request, request_sha256, marker, identity, executed_phases, inherited_phases, results, admission=None,
-                   cleanup, run_json, started_utc, ended_utc, selected_tests):
+                   cleanup, run_json, started_utc, ended_utc, selected_tests, phase_results=(), raw_records=(), inputs_before=None,
+                   inputs_after=None, parent_chain=()):
     kind = request["execution_kind"]
     return {"schema": SCHEMA, "kind": "release-tools-checkpoint-segment", "unit": request["unit"], "case": request["case"],
             "stage": request["stage"], "scenario": request["scenario"], "execution_kind": kind,
             "fresh_e2e": kind == "fresh" and request["stage"] is None,
             "release_gate_eligible": False, "request_sha256": request_sha256, "marker": marker, "identity": identity,
             "executed_phases": list(executed_phases), "inherited_phases": list(inherited_phases), "results": results,
+            "phase_results": list(phase_results), "raw_records": [list(row) for row in raw_records],
+            "inputs_before": inputs_before, "inputs_after": inputs_after,
+            "inputs_unchanged": inputs_before is not None and inputs_before == inputs_after, "parent_chain": list(parent_chain),
             "admission_sha256": sha256(canonical(admission)) if admission else None, "cleanup": cleanup,
             "run_json": str(run_json), "started_utc": started_utc, "ended_utc": ended_utc, "selected_tests": list(selected_tests)}
+
+
+def inputs_summary(root):
+    """The executing source's tool, source and harness trees and the eight TOOL_FILES, from the actual bytes now."""
+    actual = source_identity(root)
+    return {"tool": actual["tool"]["sha256"], "source": actual["source"]["sha256"], "harness": actual["harness"]["sha256"],
+            "tool_files": actual["tool_files"]}
+
+
+def parent_reference(manifest, bundle_dir):
+    """How a child bundle and a segment name their parent: the parent's manifest SHA (its bundle name, recomputed from the
+    manifest bytes here) and, as a separate field, its payload manifest SHA."""
+    bundle_dir = Path(bundle_dir)
+    raw = (bundle_dir / "manifest.json").read_bytes()
+    require(sha256(raw) == bundle_dir.name, "BUNDLE_INVALID", "manifest hash differs from the bundle name")
+    return {"manifest_sha256": sha256(raw), "payload_manifest_sha256": manifest["identity"]["payload_manifest_sha256"],
+            "checkpoint": manifest["checkpoint"], "lineage": manifest["lineage"]}
+
+
+def current_identity(inputs, *, execution_kind, plan_sha256, root, resumed_utc=None, admission_sha256=None):
+    """What this leaf itself executed with: its own source trees, the plan its phases ran under (the child plan of a fork)
+    and, for every consumption of a checkpoint, the resume time. The parent identity is recorded beside it, never as it."""
+    resumed = execution_kind != "fresh"
+    if resumed:
+        utc(resumed_utc)
+    return {"execution_kind": execution_kind, "source_root": str(root), "tool_tree_sha256": inputs["tool"],
+            "source_tree_sha256": inputs["source"], "harness_tree_sha256": inputs["harness"],
+            "tool_files_actual_raw_sha256": inputs["tool_files"], "tool_tree_sha256_at_resume": inputs["tool"] if resumed else None,
+            "resumed_utc": resumed_utc if resumed else None, "plan_sha256": plan_sha256, "admission_sha256": admission_sha256}
+
+
+def segment_identity(current, *, parent_manifest=None, parent_dir=None):
+    return {"parent": parent_manifest["identity"] if parent_manifest is not None else None,
+            "parent_reference": parent_reference(parent_manifest, parent_dir) if parent_manifest is not None else None,
+            "current": current}
+
+
+def parent_chain(store_root, digest, *, limit=16):
+    """The lineage of a bundle in one store, from `digest` up through each manifest's parent reference; every link's
+    manifest bytes must hash to its name (a missing or altered ancestor refuses: CHAIN_BROKEN)."""
+    chain, current = [], digest
+    while current is not None:
+        require(len(chain) < limit and type(current) is str and HASH.fullmatch(current) is not None, "CHAIN_BROKEN", str(current))
+        try:
+            raw = (Path(store_root) / current / "manifest.json").read_bytes()
+        except OSError:
+            raise Refused("CHAIN_BROKEN", "missing bundle " + current) from None
+        require(sha256(raw) == current, "CHAIN_BROKEN", "manifest hash " + current)
+        manifest = json.loads(raw)
+        chain.append({"manifest_sha256": current, "checkpoint": manifest["checkpoint"], "execution_kind": manifest["execution_kind"],
+                      "payload_manifest_sha256": manifest["identity"]["payload_manifest_sha256"]})
+        current = (manifest.get("parent") or {}).get("manifest_sha256")
+    return chain
+
+
+# The evidence secrets policy (spec section 3): the product keeps working secrets in the sibling `<records>.secrets`
+# directory; these names never leave the private fixture even when found inside a records directory.
+SECRET_RECORD_NAMES = frozenset({intro.COMPOSE_VALUES, ".env", "env.next"})
+SECRET_RECORD_PATTERN = re.compile(r"smoke-member-.*|browser-.*|.*\.secrets")
+
+
+def preserve_records(sources, evidence_dir):
+    """Copy each stack's raw product records (state, journal, phase results, command records, step and one-shot logs) into
+    the evidence, under the secrets policy, while the fixture still exists. A link or special file refuses; nothing is
+    overwritten. Returns [[evidence-relative path, sha256 of the bytes written]] sorted."""
+    evidence_dir = Path(evidence_dir)
+    rows = []
+    for label, directory in sorted(sources.items()):
+        require(re.fullmatch(r"[a-z]+", label) is not None, "RECORD_INVALID", "stack label " + str(label))
+        directory = Path(directory)
+        if not directory.is_dir():
+            continue
+        for current, folders, files in os.walk(directory):
+            base = Path(current)
+            for folder in folders:
+                require(not (base / folder).is_symlink(), "RECORD_INVALID", "linked folder " + folder)
+            folders[:] = sorted(folder for folder in folders if not SECRET_RECORD_PATTERN.fullmatch(folder))
+            for name in sorted(files):
+                if name in SECRET_RECORD_NAMES or SECRET_RECORD_PATTERN.fullmatch(name):
+                    continue
+                path = base / name
+                rel = path.relative_to(directory).as_posix()
+                require(stat.S_ISREG(path.lstat().st_mode), "RECORD_INVALID", "link or special file " + rel)
+                raw = path.read_bytes()
+                out = evidence_dir / ("records-" + label) / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with open(out, "xb") as stream:
+                    stream.write(raw)
+                rows.append(["records-" + label + "/" + rel, sha256(raw)])
+    return sorted(rows)
+
+
+def phase_results(sources, before=None):
+    """The phase result files the product wrote during this leaf (not in `before`, {label: set of names}): stack, file,
+    sha256, phase, status and the step outcomes."""
+    out = []
+    for label, directory in sorted(sources.items()):
+        known = (before or {}).get(label, set())
+        for path in sorted(Path(directory).glob("result-*.json")):
+            if path.name in known:
+                continue
+            raw = path.read_bytes()
+            result = json.loads(raw)
+            out.append({"stack": label, "file": path.name, "sha256": sha256(raw), "phase": result.get("phase"),
+                        "status": result.get("status"), "steps": [[step.get("step"), step.get("outcome")] for step in result.get("steps") or []]})
+    return out
+
+
+def result_names(sources):
+    return {label: {path.name for path in Path(directory).glob("result-*.json")} for label, directory in sources.items()}
+
+
+def close_leaf(gate, *, request, request_sha256, marker, identity, executed, inherited, phase_rows, results, admission, cleanup,
+               observed, expected, records, evidence, fixture_root, output_root, source_root, inputs_before, run_json, started_utc,
+               selected_tests, passed, chain=()):
+    """The end of one leaf, in this order: the raw product records are preserved into the evidence (secrets policy) while
+    the fixture still exists; the source inputs are hashed again; only a passed leaf with a complete cleanup and unchanged
+    inputs removes its private fixture root (a failed one keeps it for inspection); the segment binds all of it and its
+    path and hash are printed once for the recorder's stdout. Returns (segment, path)."""
+    raw = preserve_records(records, evidence) if records else []
+    try:
+        inputs_after = inputs_summary(source_root)
+    except Refused:
+        inputs_after = None
+    passed = bool(passed) and cleanup.get("complete") is True and inputs_before is not None and inputs_after == inputs_before
+    removed = None
+    if passed and Path(fixture_root).exists():
+        removed = remove_private_root(fixture_root, owner_root=output_root)["removed"]
+    record = segment_record(request=request, request_sha256=request_sha256, marker=marker, identity=identity, executed_phases=executed,
+                            inherited_phases=inherited, results=results, admission=admission, cleanup=cleanup, run_json=run_json,
+                            started_utc=started_utc, ended_utc=now_utc().isoformat(), selected_tests=selected_tests,
+                            phase_results=phase_rows, raw_records=raw, inputs_before=inputs_before, inputs_after=inputs_after,
+                            parent_chain=chain)
+    record.update(observed=observed, expected=expected, fixture_removed=removed, passed=passed)
+    path = finish_segment(gate, passed=passed, segment=record, evidence_root=evidence)
+    print(json.dumps({"segment": str(path), "sha256": sha256(path.read_bytes())}), flush=True)
+    return record, path
 
 
 def segment_outcome(segment):
@@ -1233,10 +1685,129 @@ def fresh_gate_verdict(index):
     return {"fresh_pass": not reasons, "reasons": reasons}
 
 
-def evidence_index(run_dir, *, segment_path, expected_tests, declared_inputs):
-    """AND-binding of an existing record-run directory: completed run, exit 0, declared inputs unchanged and present,
-    logs matching their recorded hashes, the exact test selection, and a segment naming this run.json (hashes of
-    run.json and segment.json live only here, so nothing hashes itself)."""
+def leaf_expectation(leaves, unit, proof_root):
+    """Everything a leaf's evidence must show, derived from the frozen proof layout (never from the run's own claims):
+    the registry leaf, its plan (equal to leaf_plan), request, source manifest and parent manifest with their actual bytes,
+    the recorder inputs it must have declared, its exact selection, phases, outcome and checkpoint."""
+    leaf = registry_leaf(leaves, unit)
+    root = Path(proof_root)
+    plan_path, registry_path = root / ("plan-" + unit + ".json"), root / "registry.json"
+    source_path = root / (leaf["source"] + ".source-manifest.json")
+    try:
+        plan_raw, source_raw = plan_path.read_bytes(), source_path.read_bytes()
+    except OSError as error:
+        raise Refused("INDEX_INPUT", "proof input unreadable: " + str(error)) from None
+    require(json.loads(plan_raw) == leaf_plan(leaves, unit), "INDEX_INPUT", "the plan file is not this leaf's registered plan")
+    source = json.loads(source_raw)
+    files, request_sha, parent_sha = [plan_path, registry_path, source_path], None, None
+    if leaf["stage"] is not None:
+        request_path = root / ("request-" + unit + ".json")
+        request_raw = request_path.read_bytes()
+        request = json.loads(request_raw)
+        request_sha = sha256(request_raw)
+        require(all(request.get(key) == leaf[key] for key in ("unit", "case", "scenario", "stage", "execution_kind")), "INDEX_INPUT",
+                "the request is not this leaf's")
+        require(Path(request["source_manifest"]["path"]).resolve() == source_path.resolve()
+                and request["source_manifest"]["sha256"] == sha256(source_raw), "INDEX_INPUT", "the request names another source copy")
+        evidence = Path(request["evidence_root"])
+        files.append(request_path)
+        if request["parent_manifest"]:
+            parent_path, parent_sha = Path(request["parent_manifest"]["path"]), request["parent_manifest"]["sha256"]
+            require(sha256(parent_path.read_bytes()) == parent_sha, "INDEX_INPUT", "the parent manifest bytes differ from the request")
+            files.append(parent_path)
+    else:
+        evidence = root / "evidence" / unit
+    executed, inherited = leaf_phases(leaf)
+    outcome = leaf_outcome(leaf)
+    expect = {"unit": unit, "case": leaf["case"], "stage": leaf["stage"], "scenario": leaf["scenario"],
+              "execution_kind": leaf["execution_kind"], "request_sha256": request_sha,
+              "fresh_e2e": leaf["stage"] is None and leaf["execution_kind"] == "fresh", "module": leaf["file"],
+              "marker_plan_sha256": sha256(json.dumps(json.loads(plan_raw)).encode("utf-8")), "outcome": outcome,
+              "executed": executed, "inherited": inherited, "parent_manifest_sha256": parent_sha, "produces": leaf_produces(leaf),
+              "admission": leaf["execution_kind"] == "diagnostic-fork" and outcome["outcome"] == "PASS",
+              "inputs": {"tool": source["tool"]["sha256"], "source": source["source"]["sha256"], "harness": source["harness"]["sha256"]},
+              "cwd": str(Path(source["root"]).resolve()), "forward_verdict": leaf["stage"] is None or leaf["case"] in PROOF_THEN}
+    return {"leaf": leaf, "expect": expect, "segment_path": evidence / "segment.json",
+            "expected_tests": [Path(leaf["file"]).stem + "." + leaf["case"]],
+            "required_files": [str(path) for path in files] + list(LEAF_INPUT_FILES), "required_trees": list(LEAF_INPUT_TREES)}
+
+
+def segment_contract(segment, expect):
+    """The segment's own claims, AND-ed against the expectation: selection, marker, request, kind, outcome, phases and
+    their raw results, identities (parent and current apart), unchanged inputs, checkpoint and cleanup."""
+    reasons = []
+    for key in ("unit", "case", "stage", "scenario", "execution_kind", "request_sha256", "fresh_e2e"):
+        if segment.get(key) != expect[key]:
+            reasons.append("segment " + key)
+    if segment.get("release_gate_eligible") is not False:
+        reasons.append("segment release_gate_eligible")
+    marker = segment.get("marker") or {}
+    if (marker.get("unit") != expect["unit"] or marker.get("module") != expect["module"]
+            or marker.get("plan_sha256") != expect["marker_plan_sha256"] or type(marker.get("attempt")) is not int
+            or type(marker.get("pid")) is not int):
+        reasons.append("segment marker")
+    if segment.get("selected_tests") != [expect["case"]]:
+        reasons.append("segment selection")
+    if segment.get("passed") is not True:
+        reasons.append("segment not passed")
+    if segment.get("observed") != expect["outcome"]:
+        reasons.append("segment outcome")
+    if segment.get("executed_phases") != expect["executed"] or segment.get("inherited_phases") != expect["inherited"]:
+        reasons.append("segment phases")
+    rows = segment.get("phase_results")
+    if (type(rows) is not list or sorted(str(row.get("phase")) for row in rows) != sorted(expect["executed"])
+            or any(HASH.fullmatch(str(row.get("sha256"))) is None or not row.get("status") or not row.get("steps") for row in rows)):
+        reasons.append("segment phase results")
+    raw = segment.get("raw_records")
+    if (type(raw) is not list or bool(raw) != bool(expect["executed"])
+            or any(type(row) is not list or len(row) != 2 or HASH.fullmatch(str(row[1])) is None for row in raw)):
+        reasons.append("segment raw records")
+    identity = segment.get("identity") or {}
+    current = identity.get("current") or {}
+    if any(current.get(field) != expect["inputs"][key] for field, key in (("tool_tree_sha256", "tool"), ("source_tree_sha256", "source"),
+                                                                           ("harness_tree_sha256", "harness"))):
+        reasons.append("segment current identity")
+    if expect["execution_kind"] == "fresh":
+        if identity.get("parent") is not None or identity.get("parent_reference") is not None or current.get("resumed_utc") is not None:
+            reasons.append("segment fresh identity")
+    else:
+        reference = identity.get("parent_reference") or {}
+        if type(identity.get("parent")) is not dict or reference.get("manifest_sha256") != expect["parent_manifest_sha256"]:
+            reasons.append("segment parent identity")
+        if not current.get("resumed_utc") or current.get("tool_tree_sha256_at_resume") != expect["inputs"]["tool"]:
+            reasons.append("segment resume identity")
+        chain = segment.get("parent_chain") or []
+        if not chain or chain[0].get("manifest_sha256") != expect["parent_manifest_sha256"]:
+            reasons.append("segment parent chain")
+    before = segment.get("inputs_before") or {}
+    if segment.get("inputs_unchanged") is not True or before != segment.get("inputs_after") or before.get("tool") != expect["inputs"]["tool"]:
+        reasons.append("segment inputs")
+    checkpoint = (segment.get("results") or {}).get("checkpoint")
+    if expect["produces"]:
+        if (type(checkpoint) is not dict or HASH.fullmatch(str(checkpoint.get("manifest_sha256"))) is None
+                or Path(str(checkpoint.get("path"))).name != checkpoint.get("manifest_sha256")):
+            reasons.append("segment checkpoint")
+    elif checkpoint is not None:
+        reasons.append("segment checkpoint from a leaf that seals none")
+    if expect["admission"] and HASH.fullmatch(str(segment.get("admission_sha256"))) is None:
+        reasons.append("segment admission")
+    cleanup = segment.get("cleanup") or {}
+    if cleanup.get("complete") is not True or cleanup.get("remaining") or cleanup.get("errors") or segment.get("skipped"):
+        reasons.append("segment cleanup or skip")
+    return reasons
+
+
+def _resolved(cwd, name):
+    path = Path(name)
+    return str((path if path.is_absolute() else Path(cwd) / path).resolve())
+
+
+def evidence_index(run_dir, *, segment_path, expected_tests, expect, required_files=(), required_trees=()):
+    """AND-binding of an existing record-run directory: a completed run with exit 0; every recorded input present and
+    unchanged before/after, and the leaf's complete required inputs among the declared ones (a shrunk --file list is not
+    a binding); logs matching their recorded hashes; the exact test selection and the runner's passed result; the one
+    segment the run announced on stdout, unchanged since (path and SHA); and the segment's claims (segment_contract).
+    The hashes of run.json and segment.json live only here, so nothing hashes itself."""
     run_dir, reasons = Path(run_dir), []
     try:
         run_raw = (run_dir / "run.json").read_bytes()
@@ -1245,14 +1816,27 @@ def evidence_index(run_dir, *, segment_path, expected_tests, declared_inputs):
         return {"verdict": "UNVERIFIED", "reasons": ["run.json missing or unreadable"]}
     if run.get("status") != "completed" or run.get("exit_code") != 0 or run.get("recorder_exit_code") != 0:
         reasons.append("command or recorder exit")
-    before = {item["requested"]: item for item in run.get("files_before") or []}
-    after = {item["requested"]: item for item in run.get("files_after") or []}
-    for name in declared_inputs:
-        first, last = before.get(name), after.get(name)
-        if not first or not last or first.get("status") != "present" or last.get("status") != "present":
-            reasons.append("declared input missing: " + name)
+    cwd = run.get("cwd") or "."
+    if expect.get("cwd") is not None and str(Path(cwd).resolve()) != expect["cwd"]:
+        reasons.append("the run's working tree is not the leaf's source copy")
+    declared = run.get("declared_inputs") or {}
+    declared_files = {_resolved(cwd, name) for name in declared.get("files") or []}
+    declared_trees = set(declared.get("trees") or [])
+    before = {item["path"]: item for item in run.get("files_before") or []}
+    after = {item["path"]: item for item in run.get("files_after") or []}
+    for path, first in sorted(before.items()):
+        last = after.get(path)
+        required = path in declared_files or first.get("tree") in declared_trees
+        if last is None:
+            reasons.append("input not hashed after the run: " + first["requested"])
+        elif first.get("status") != "present" or last.get("status") != "present":
+            if required or first.get("status") != last.get("status"):
+                reasons.append("input missing: " + first["requested"])
         elif first["sha256"] != last["sha256"]:
-            reasons.append("declared input changed during the run: " + name)
+            reasons.append("input changed during the run: " + first["requested"])
+    reasons += ["input appeared during the run: " + after[path]["requested"] for path in sorted(set(after) - set(before))]
+    reasons += ["required input not declared: " + name for name in required_files if _resolved(cwd, name) not in declared_files]
+    reasons += ["required tree not declared: " + name for name in required_trees if name not in declared_trees]
     logs = {}
     for item in run.get("log_files") or []:
         try:
@@ -1264,32 +1848,95 @@ def evidence_index(run_dir, *, segment_path, expected_tests, declared_inputs):
             reasons.append("log changed or missing: " + item["requested"])
     if set(logs) != {"stdout.log", "stderr.log"}:
         reasons.append("log inventory")
-    stdout = (run_dir / "stdout.log").read_bytes().decode("utf-8", errors="replace") if (run_dir / "stdout.log").exists() else ""
-    selections = [json.loads(line[len("EXACT_TESTS "):]) for line in stdout.splitlines() if line.startswith("EXACT_TESTS ")]
+    stdout = (run_dir / "stdout.log").read_bytes().decode("utf-8", errors="replace").splitlines() if (run_dir / "stdout.log").exists() else []
+    selections = [json.loads(line[len("EXACT_TESTS "):]) for line in stdout if line.startswith("EXACT_TESTS ")]
     if selections != [list(expected_tests)]:
         reasons.append("selected tests differ")
-    segment_raw = None
+    outcomes = [json.loads(line[len("PLAN_RESULT "):]) for line in stdout if line.startswith("PLAN_RESULT ")]
+    if len(outcomes) != 1 or outcomes[0].get("status") != "passed" or outcomes[0].get("exit_code") != 0:
+        reasons.append("the runner did not record this unit as passed")
+    announced = [json.loads(line) for line in stdout if line.startswith('{"segment"')]
+    segment_raw = segment = None
     try:
         segment_raw = Path(segment_path).read_bytes()
         segment = json.loads(segment_raw)
-        if Path(segment.get("run_json", "")).resolve() != (run_dir / "run.json").resolve():
-            reasons.append("segment names another run")
-        if not (segment.get("cleanup") or {}).get("complete") or segment.get("skipped"):
-            reasons.append("segment cleanup or skip")
     except (OSError, ValueError):
         reasons.append("segment missing")
-    return {"verdict": "UNVERIFIED" if reasons else "BOUND", "reasons": reasons, "run_json_sha256": sha256(run_raw),
-            "segment_sha256": sha256(segment_raw) if segment_raw is not None else None,
-            "logs": logs, "selected_tests": list(expected_tests)}
+    if len(announced) != 1:
+        reasons.append("the run announced %d segments" % len(announced))
+    elif segment_raw is not None and (Path(str(announced[0].get("segment"))).resolve() != Path(segment_path).resolve()
+                                      or announced[0].get("sha256") != sha256(segment_raw)):
+        reasons.append("the segment differs from the one the run announced")
+    if segment is not None:
+        if Path(str(segment.get("run_json", ""))).resolve() != (run_dir / "run.json").resolve():
+            reasons.append("segment names another run")
+        reasons += segment_contract(segment, expect)
+    if expect.get("forward_verdict"):
+        rows = [line for line in stdout if line.startswith('{"forward_verdict"')]
+        if len(rows) != 1:
+            reasons.append("expected exactly one forward_verdict line")
+    return {"verdict": "UNVERIFIED" if reasons else "BOUND", "reasons": reasons, "run_dir": str(run_dir.resolve()),
+            "run_json_sha256": sha256(run_raw), "segment": str(Path(segment_path).resolve()),
+            "segment_sha256": sha256(segment_raw) if segment_raw is not None else None, "logs": logs,
+            "selected_tests": list(expected_tests)}
 
 
-def compare_forward_verdicts(resumed, fresh):
+def leaf_index(leaves, unit, proof_root, run_dir):
+    expectation = leaf_expectation(leaves, unit, proof_root)
+    result = evidence_index(run_dir, segment_path=expectation["segment_path"], expected_tests=expectation["expected_tests"],
+                            expect=expectation["expect"], required_files=expectation["required_files"],
+                            required_trees=expectation["required_trees"])
+    return {**result, "unit": unit, "case": expectation["leaf"]["case"]}
+
+
+def bound_index(proof_root, unit):
+    """A leaf's BOUND index, re-checked: its segment bytes still hash to what the index bound."""
+    try:
+        index = json.loads((Path(proof_root) / "index" / (unit + ".json")).read_bytes())
+    except (OSError, ValueError):
+        raise Refused("PARENT_UNBOUND", unit + " has no BOUND index") from None
+    require(index.get("verdict") == "BOUND" and index.get("unit") == unit, "PARENT_UNBOUND", unit + " is not BOUND")
+    raw = Path(index["segment"]).read_bytes()
+    require(sha256(raw) == index["segment_sha256"], "PARENT_UNBOUND", unit + ": the segment changed after its index")
+    return index, json.loads(raw)
+
+
+def resolve_parent(leaves, unit, proof_root):
+    """The parent manifest of a registered leaf: from its parent leaf's BOUND index and segment, the sealed checkpoint
+    that leaf produced, of exactly the kind this leaf's stage consumes. No parent is taken from 'the previous leaf'."""
+    leaf = registry_leaf(leaves, unit)
+    if leaf["parent"] is None:
+        return None
+    _, segment = bound_index(proof_root, leaf["parent"])
+    checkpoint = (segment.get("results") or {}).get("checkpoint") or {}
+    path = Path(str(checkpoint.get("path"))) / "manifest.json"
+    raw = path.read_bytes()
+    require(sha256(raw) == checkpoint.get("manifest_sha256") == path.parent.name, "PARENT_UNBOUND", "the parent bundle changed")
+    manifest = json.loads(raw)
+    require(manifest["checkpoint"] == STAGES[leaf["stage"]]["consumes"], "PARENT_UNBOUND", "the parent sealed " + manifest["checkpoint"])
+    return {"path": str(path.resolve()), "sha256": sha256(raw)}
+
+
+def forward_verdict_reasons(verdict):
+    reasons = [] if verdict.get("status") == "DEPLOYED" else ["status " + str(verdict.get("status"))]
+    reasons += [key + " not true" for key in FORWARD_REQUIRED_TRUE if not verdict.get(key)]
+    if verdict.get("ordinary_entry_side") != "release":
+        reasons.append("ordinary entry side " + str(verdict.get("ordinary_entry_side")))
+    return reasons
+
+
+def compare_forward_verdicts(resumed, fresh, *, resumed_bound=False, fresh_bound=False):
     """T16: the resumed A->B suffix and B's fresh forward control reach the same product verdict. IDs, times and the new
-    B1 hash are bound to each run's own artifacts and are not compared byte for byte."""
+    B1 hash are bound to each run's own artifacts and are not compared byte for byte. Equality alone is not the proof:
+    t16_pass also needs both verdicts to be a successful forward (DEPLOYED, every required fact true, the release side)
+    and both runs BOUND by their evidence index."""
     keys = ("status", "release_images", "health", "migrations_after", "smoke_member_absent", "ordinary_entry_side",
             "ordinary_entry_images", "frame_sha256")
     differences = [key for key in keys if key not in resumed or resumed.get(key) != fresh.get(key)]
-    return {"equal": not differences, "differences": differences}
+    reasons = (["resumed: " + reason for reason in forward_verdict_reasons(resumed)]
+               + ["fresh: " + reason for reason in forward_verdict_reasons(fresh)]
+               + ([] if resumed_bound else ["the resumed run is not BOUND"]) + ([] if fresh_bound else ["the fresh control is not BOUND"]))
+    return {"equal": not differences, "differences": differences, "t16_pass": not differences and not reasons, "reasons": reasons}
 
 
 def verdict_from_log(path):
@@ -1298,6 +1945,69 @@ def verdict_from_log(path):
             if line.startswith('{"forward_verdict"')]
     require(len(rows) == 1, "UNVERIFIED", "expected exactly one forward_verdict line in " + str(path))
     return rows[0]
+
+
+def t16_comparison(leaves, proof_root):
+    """The late-resume leaf and the fresh control, each from its BOUND index and its own recorded stdout."""
+    resumed_unit = next(leaf["unit"] for leaf in registry_valid(leaves) if leaf["case"] == "CheckpointSegments.test_late_change_resume")
+    fresh_unit = next(leaf["unit"] for leaf in leaves if leaf["stage"] is None and leaf["scenario"] == "forward")
+    verdicts, bound = {}, {}
+    for side, unit in (("resumed", resumed_unit), ("fresh", fresh_unit)):
+        try:
+            index, _ = bound_index(proof_root, unit)
+            bound[side] = True
+            verdicts[side] = verdict_from_log(Path(index["run_dir"]) / "stdout.log")
+        except Refused:
+            bound[side], verdicts[side] = False, {}
+    return compare_forward_verdicts(verdicts["resumed"], verdicts["fresh"], resumed_bound=bound["resumed"], fresh_bound=bound["fresh"])
+
+
+def proof_commands(leaves, *, proof_root, candidate, python="python3"):
+    """The exact T16/T17 command sequence (bash) for the frozen registry at <proof_root>/registry.json: the source copies,
+    then per leaf in registry order its plan, its request (parent resolved from the parent leaf's BOUND index), the
+    recorded run through the live gate with every input declared, and its index; then the T16 comparison. Attempt 1 of
+    each unit; a retry of the same unit uses a new run folder (-2, -3) and never a new unit name."""
+    leaves = registry_valid(leaves)
+    root, candidate = str(PurePosixPath(proof_root)), str(PurePosixPath(candidate))
+    require(root.startswith("/") and candidate.startswith("/"), "REGISTRY_INVALID", "absolute Linux paths required")
+    q = shlex.quote
+    tool = python + " -B " + q(candidate + "/tests/ops_release_checkpoints.py")
+    registry = q(root + "/registry.json")
+    lines = ["#!/usr/bin/env bash", "# RELEASE-TOOLS-CHECKPOINTS T16/T17 (generated by tests/ops_release_checkpoints.py commands).",
+             "# Run as the persistent live-gate account (root) on the native Linux synthetic host, one leaf at a time.",
+             "set -euo pipefail"]
+    lines += [': "${%s:?}"' % name for name in ("KIN_TEST_PREVIOUS_API_IMAGE", "KIN_TEST_PREVIOUS_PROXY_IMAGE", "KIN_TEST_API_IMAGE",
+                                                "KIN_TEST_PROXY_IMAGE", "PLAYWRIGHT_BROWSERS_PATH")]
+    lines += ["export KIN_TEST_ISOLATED_INSTALL=1", "test -f " + registry, "mkdir -p -m 700 " + q(root + "/runs") + " " + q(root + "/index")]
+    for source in sorted({leaf["source"] for leaf in leaves}):
+        mutant = PROOF_SOURCES.get(source)
+        lines.append(tool + " source-copy --source " + q(candidate) + " --out " + q(root + "/" + source)
+                     + (" --mutant " + mutant if mutant else ""))
+    for leaf in leaves:
+        unit, source = leaf["unit"], leaf["source"]
+        copy_root, run = root + "/" + source, root + "/runs/" + unit + "-1"
+        plan, request = root + "/plan-" + unit + ".json", root + "/request-" + unit + ".json"
+        lines += ["", "# " + unit + ": " + leaf["case"] + " from copy " + source
+                  + (" consuming " + STAGES[leaf["stage"]]["consumes"] + " of " + leaf["parent"] if leaf["parent"] else " (no parent)"),
+                  tool + " plan --registry " + registry + " --unit " + unit + " --out " + q(plan)]
+        files = ["--file " + q(plan), "--file " + registry, "--file " + q(root + "/" + source + ".source-manifest.json")]
+        if leaf["stage"] is not None:
+            lines.append(tool + " request --registry " + registry + " --unit " + unit + " --proof-root " + q(root) + " --out " + q(request))
+            files.append("--file " + q(request))
+            if leaf["parent"]:
+                files.append('--file "$(' + tool + " parent-manifest --request " + q(request) + ')"')
+            environment = ["env", "-u", "KIN_TEST_EMR_REHEARSAL", "KIN_TEST_EMR_CHECKPOINTS=1", "KIN_TEST_EMR_CHECKPOINT_REQUEST=" + q(request),
+                           "KIN_TEST_EMR_CHECKPOINT_REGISTRY=" + registry, "KIN_TEST_EMR_CHECKPOINT_RUN_JSON=" + q(run + "/run.json")]
+        else:
+            environment = ["env", "-u", REQUEST_ENV, "-u", OPT_IN_ENV, "KIN_TEST_EMR_REHEARSAL=1",
+                           "KIN_TEST_EMR_REHEARSAL_EVIDENCE=" + q(root + "/evidence/" + unit),
+                           "KIN_TEST_EMR_CHECKPOINT_RUN_JSON=" + q(run + "/run.json")]
+        files += ["--file " + name for name in LEAF_INPUT_FILES] + ["--tree " + name for name in LEAF_INPUT_TREES]
+        lines.append("(cd " + q(copy_root) + " && " + " ".join(environment) + " " + python + " -B scripts/record-run.py --run-dir " + q(run)
+                     + " --cwd " + q(copy_root) + " " + " ".join(files) + " -- " + python + " -B scripts/run-tests.py --plan " + q(plan) + ")")
+        lines.append(tool + " index --registry " + registry + " --unit " + unit + " --proof-root " + q(root) + " --run-dir " + q(run))
+    lines += ["", tool + " compare --registry " + registry + " --proof-root " + q(root)]
+    return "\n".join(lines) + "\n"
 
 
 # ── source copies for the Linux proofs ──
@@ -1360,6 +2070,33 @@ def source_copy(source, out, mutant=None):
     return target
 
 
+def leaf_request(leaves, unit, proof_root):
+    """The closed request of a registered stage leaf: its own source copy's manifest, the parent resolved from the
+    parent leaf's BOUND index (never given by hand), one shared output root (one bundle store, so every parent chain is
+    queryable) and the leaf's own evidence root under <proof_root>."""
+    leaf = registry_leaf(leaves, unit)
+    require(leaf["stage"] is not None, "REQUEST_INVALID", unit + " is a fresh method: it never takes a request")
+    root = Path(proof_root)
+    source = root / (leaf["source"] + ".source-manifest.json")
+    return {"schema": SCHEMA, "unit": leaf["unit"], "case": leaf["case"], "scenario": leaf["scenario"], "stage": leaf["stage"],
+            "execution_kind": leaf["execution_kind"], "parent_manifest": resolve_parent(leaves, unit, proof_root),
+            "source_manifest": {"path": str(source.resolve()), "sha256": sha256(source.read_bytes())},
+            "output_root": str((root / "out").resolve()), "evidence_root": str((root / "evidence" / unit).resolve())}
+
+
+def write_index(proof_root, result):
+    """<proof_root>/index/<unit>.<run>.attempt.json for every attempt; <unit>.json only for the one BOUND attempt (a passed unit
+    never passes twice, so an existing BOUND index is never replaced)."""
+    folder = Path(proof_root) / "index"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    raw = canonical(result) + b"\n"
+    with open(folder / (result["unit"] + "." + Path(result["run_dir"]).name + ".attempt.json"), "xb") as stream:
+        stream.write(raw)
+    if result["verdict"] == "BOUND":
+        with open(folder / (result["unit"] + ".json"), "xb") as stream:
+            stream.write(raw)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="RELEASE-TOOLS-CHECKPOINTS helper (no Docker)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1372,23 +2109,27 @@ def main(argv=None):
     request = sub.add_parser("request")
     request.add_argument("--registry", required=True)
     request.add_argument("--unit", required=True)
-    request.add_argument("--parent-manifest")
-    request.add_argument("--source-manifest", required=True)
-    request.add_argument("--output-root", required=True)
-    request.add_argument("--evidence-root", required=True)
+    request.add_argument("--proof-root", required=True)
     request.add_argument("--out", required=True)
+    parent = sub.add_parser("parent-manifest")
+    parent.add_argument("--request", required=True)
     copy_parser = sub.add_parser("source-copy")
     copy_parser.add_argument("--source", required=True)
     copy_parser.add_argument("--out", required=True)
     copy_parser.add_argument("--mutant", choices=sorted(MUTANT_SOURCES))
+    commands = sub.add_parser("commands")
+    commands.add_argument("--registry", required=True)
+    commands.add_argument("--proof-root", required=True)
+    commands.add_argument("--candidate", required=True)
+    commands.add_argument("--python", default="python3")
     index = sub.add_parser("index")
+    index.add_argument("--registry", required=True)
+    index.add_argument("--unit", required=True)
+    index.add_argument("--proof-root", required=True)
     index.add_argument("--run-dir", required=True)
-    index.add_argument("--segment", required=True)
-    index.add_argument("--expected-test", action="append", required=True)
-    index.add_argument("--declared", action="append", default=[])
     compare = sub.add_parser("compare")
-    compare.add_argument("--resumed", required=True)
-    compare.add_argument("--fresh", required=True)
+    compare.add_argument("--registry", required=True)
+    compare.add_argument("--proof-root", required=True)
     args = parser.parse_args(argv)
 
     def write_new(path, value):
@@ -1396,32 +2137,39 @@ def main(argv=None):
             out.write(canonical(value) + b"\n")
         print(json.dumps({"written": str(path), "sha256": sha256(Path(path).read_bytes())}))
 
-    if args.command == "registry":
-        write_new(args.out, registry_valid(list(DEFAULT_PROOF_LEAVES)))
-    elif args.command == "plan":
-        write_new(args.out, leaf_plan(json.loads(Path(args.registry).read_bytes()), args.unit))
-    elif args.command == "request":
-        leaves = registry_valid(json.loads(Path(args.registry).read_bytes()))
-        leaf = next(item for item in leaves if item["unit"] == args.unit)
+    def leaves():
+        return registry_valid(json.loads(Path(args.registry).read_bytes()))
 
-        def reference(path):
-            return None if path in (None, "none") else {"path": str(Path(path).resolve()), "sha256": sha256(Path(path).read_bytes())}
-        write_new(args.out, {"schema": SCHEMA, "unit": leaf["unit"], "case": leaf["case"], "scenario": leaf["scenario"],
-                             "stage": leaf["stage"], "execution_kind": leaf["execution_kind"],
-                             "parent_manifest": reference(args.parent_manifest), "source_manifest": reference(args.source_manifest),
-                             "output_root": str(Path(args.output_root).resolve()), "evidence_root": str(Path(args.evidence_root).resolve())})
-    elif args.command == "source-copy":
-        path = source_copy(Path(args.source).resolve(), Path(args.out).resolve(), args.mutant)
-        print(json.dumps({"source_manifest": str(path), "sha256": sha256(path.read_bytes())}))
-    elif args.command == "index":
-        result = evidence_index(args.run_dir, segment_path=args.segment, expected_tests=args.expected_test,
-                                declared_inputs=args.declared)
-        print(json.dumps(result, indent=2))
-        return 0 if result["verdict"] == "BOUND" else 1
-    elif args.command == "compare":
-        result = compare_forward_verdicts(verdict_from_log(args.resumed), verdict_from_log(args.fresh))
-        print(json.dumps(result, indent=2))
-        return 0 if result["equal"] else 1
+    try:
+        if args.command == "registry":
+            write_new(args.out, registry_valid(list(DEFAULT_PROOF_LEAVES)))
+        elif args.command == "plan":
+            write_new(args.out, leaf_plan(leaves(), args.unit))
+        elif args.command == "request":
+            write_new(args.out, leaf_request(leaves(), args.unit, args.proof_root))
+        elif args.command == "parent-manifest":
+            value = json.loads(Path(args.request).read_bytes())["parent_manifest"]
+            require(value is not None, "REQUEST_INVALID", "this request has no parent manifest")
+            print(value["path"])
+        elif args.command == "source-copy":
+            path = source_copy(Path(args.source).resolve(), Path(args.out).resolve(), args.mutant)
+            print(json.dumps({"source_manifest": str(path), "sha256": sha256(path.read_bytes())}))
+        elif args.command == "commands":
+            require(Path(args.registry).resolve() == (Path(args.proof_root) / "registry.json").resolve(), "REGISTRY_INVALID",
+                    "the frozen registry lives at <proof-root>/registry.json")
+            sys.stdout.write(proof_commands(leaves(), proof_root=args.proof_root, candidate=args.candidate, python=args.python))
+        elif args.command == "index":
+            result = leaf_index(leaves(), args.unit, args.proof_root, args.run_dir)
+            write_index(args.proof_root, result)
+            print(json.dumps(result, indent=2))
+            return 0 if result["verdict"] == "BOUND" else 1
+        elif args.command == "compare":
+            result = t16_comparison(leaves(), args.proof_root)
+            print(json.dumps(result, indent=2))
+            return 0 if result["t16_pass"] else 1
+    except (Refused, FileExistsError) as error:
+        print("CHECKPOINT_REFUSED " + str(error), file=sys.stderr)
+        return 2
     return 0
 
 
