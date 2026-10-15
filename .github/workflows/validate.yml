@@ -1310,11 +1310,12 @@ jobs:
         run: python3 -B tests/ops_deploy_runner_test.py
       - name: Protected deployment host files, UID boundary and synthetic HTTPS
         run: sudo python3 -B tests/ops_deploy_host_test.py
-      # RELEASE-TOOLS-CHECKPOINTS (D1338, hardening 1 D1354): pure checkpoint contracts T01-T15 (the real rehearsal stage
-      # methods over a synthetic product), host adapter, bundle inputs, raw records, lineage and comparison, and mutants
-      # M01-M30; no Docker. The child runs as root because the ComposeEntry fork contract needs root-owned protected
-      # folders, as the product entry does.
-      - name: RELEASE-TOOLS-CHECKPOINTS boundary, bundle, identity, fork admission, budget, gate, time, cleanup, record, stage and lineage contracts with 30 mutants
+      # RELEASE-TOOLS-CHECKPOINTS (D1338, hardening 1 D1354, round 3 D1366): pure checkpoint contracts T01-T15 (the real
+      # rehearsal stage methods over a synthetic product), host adapter, bundle inputs, raw records, the raw-evidence
+      # index, lineage, retries, the supervised browser child against a frozen copy, comparison, and mutants M01-M42; no
+      # Docker. The child runs as root because the ComposeEntry fork contract needs root-owned protected folders, as the
+      # product entry does.
+      - name: RELEASE-TOOLS-CHECKPOINTS boundary, bundle, identity, fork admission, budget, gate, time, cleanup, record, stage and lineage contracts with 42 mutants
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/release-tools-checkpoints --cwd . --file tests/ops_release_checkpoints.py --file tests/ops_release_checkpoints_test.py --file tests/ops_release_checkpoints_live_test.py --file tests/ops_deploy_host_container_test.py --file tests/ops_deploy_host_test.py --file tests/live_test_gate.py --tree scripts -- sudo python3 -B tests/ops_release_checkpoints_test.py
       - name: Offline export inventory and image integrity
         run: python3 tests/ops_export_inventory_test.py

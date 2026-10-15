@@ -8,11 +8,17 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M30 to temporary copies of tests/ops_release_checkpoints.py and (M15-M17)
-tests/ops_deploy_host_container_test.py only, runs the named contract against the unmodified copies (control) and the
-mutant in fresh processes, and counts a kill only when the control passes and the mutant fails an assertion (an import,
-launch or fixture error is not a kill). M01-M14 are the spec's contracts; M15-M30 were added by hardening round 1 for
-CKPT-01..09 (one or more per finding).
+CheckpointMutationContracts (T18) applies M01-M42 to temporary copies of tests/ops_release_checkpoints.py and (M15-M17,
+M35) tests/ops_deploy_host_container_test.py only, runs the named contract against the unmodified copies (control) and
+the mutant in fresh processes, and counts a kill only when the control passes and the mutant fails an assertion (an
+import, launch or fixture error is not a kill). M01-M14 are the spec's contracts; M15-M30 were added by hardening round 1
+for CKPT-01..09 (one or more per finding); M31-M42 by round 3 for CKPT2-01..06 (M30 retargeted to the new alias keep).
+
+Round 3 (consult answer.json round3_acceptance): the index reads the raw evidence (CheckpointRecordTests, CKPT2-01) and
+every consumer re-checks a BOUND index (CKPT2-03); the product's supervised browser command leaves the frozen source
+admissible (CheckpointBytecodeTests, CKPT2-02, with P3's own test_120); fixture containment is normalised
+(CheckpointInputsTests, CKPT2-04); one owned alias is kept per image (CheckpointCleanupTests, CKPT2-05); retries use
+per-attempt request/run/evidence paths (CheckpointLineageTests, CKPT2-06).
 
 Hardening round 1 (Astra review of 460b4a9): T15 runs the real RehearsalStages methods of the three scenarios over a
 synthetic product (FakeProduct: realm, data, frame, overlay, ordinary entry, receipt) and requires every wrong outcome to
@@ -31,6 +37,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -2384,6 +2391,123 @@ class CheckpointInputsTests(RefusalAssertions, TempCase):
                 self.assertRefused("RESTORE_MISMATCH", cp.restored_mapping, recorded, changed)
 
 
+LAUNCHER = textwrap.dedent("""\
+    # Runs one supervised browser command exactly as built: on POSIX the real /usr/bin/env -i argv; on Windows (no
+    # /usr/bin/env) the same semantics - an environment of exactly the K=V assignments, plus SYSTEMROOT, without which a
+    # Windows interpreter cannot start. stdin is closed, as the supervisor's is: the entry reads an empty spec.
+    import json, os, re, subprocess, sys
+    spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
+    argv, env = spec["argv"], None
+    if os.name != "posix":
+        assert argv[:2] == ["/usr/bin/env", "-i"], argv
+        argv, env = argv[2:], {"SYSTEMROOT": os.environ["SYSTEMROOT"]}
+        while argv and re.fullmatch(r"[A-Z_][A-Z0-9_]*=.*", argv[0]):
+            key, _, value = argv.pop(0).partition("=")
+            env[key] = value
+    argv = [spec["interpreter"] if item == spec["alias"] else item for item in argv]
+    sys.exit(subprocess.run(argv, env=env, stdin=subprocess.DEVNULL).returncode)
+    """)
+
+
+class CheckpointBytecodeTests(RefusalAssertions, TempCase):
+    """CKPT2-02 (consult round3_acceptance): the product's supervised browser command (RELEASE-TOOLS-P3, RT-P3-PYCACHE:
+    SystemdBrowser.command adds -B and PYTHONDONTWRITEBYTECODE; its own test_120) run against a frozen source copy, under
+    the real recorder with the leaf's `--tree scripts`: the child imports the product and writes no bytecode into
+    scripts/ or tests/, the input trees stay byte-identical, and the next runtime_identity and the index's input binding
+    both pass. The policy's command without the product's -B (the control) writes a cache, which both refuse. The harness
+    adds no -B of its own and relaxes no product check; only the host admission of the command (root, systemd with cgroup
+    v2, protected paths) is given here, as test_120 gives it. The real browser and the following leaf stay T16 conditions."""
+
+    class HostOs:
+        """intro's `os` as a root systemd host shows it to SystemdBrowser.command; every other attribute is the real one."""
+        name = "posix"
+
+        @staticmethod
+        def geteuid():
+            return 0
+
+        def __getattr__(self, attribute):
+            return getattr(os, attribute)
+
+    def frozen_source(self):
+        root = self.tempdir("kin-frozen-")
+        (root / "scripts").mkdir()
+        (root / "tests").mkdir()
+        for path in sorted((ROOT / "scripts").glob("ops_*.py")):
+            shutil.copy2(path, root / "scripts" / path.name)
+        for name in cp.LEAF_INPUT_FILES:
+            shutil.copy2(ROOT / name, root / name)
+        return root
+
+    @staticmethod
+    def tree(root):
+        return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                for folder in ("scripts", "tests") for path in sorted((root / folder).rglob("*")) if path.is_file()}
+
+    def supervised(self, browsers):
+        """The command the product's supervisor runs for the policy's browser argv (built by SystemdBrowser.command)."""
+        alias = sys.executable if re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(sys.executable).name) else \
+            str(Path(sys.executable).with_name("python3"))
+        policy = ["/usr/bin/env", "PLAYWRIGHT_BROWSERS_PATH=" + browsers, alias, intro.__file__, "browser-smoke"]
+        import ops_deploy_host
+        host = {"/run/systemd/system", "/sys/fs/cgroup/cgroup.controllers"}
+        real_dir, real_file = Path.is_dir, Path.is_file
+        with patch.object(intro, "os", self.HostOs()), patch.object(ops_deploy_host, "protected"), \
+                patch.object(Path, "is_dir", lambda path: path.as_posix() in host or real_dir(path)), \
+                patch.object(Path, "is_file", lambda path: path.as_posix() in host or real_file(path)):
+            command = intro.SystemdBrowser.command(policy)
+        return command, policy, alias
+
+    def recorded(self, source, argv, alias):
+        """The child under the real recorder, from the frozen copy, with the leaf's input trees declared."""
+        tool = str(source / "scripts" / Path(intro.__file__).name)
+        spec = self.tempdir("kin-launch-") / "spec.json"
+        spec.write_text(json.dumps({"argv": [tool if item == intro.__file__ else item for item in argv], "alias": alias,
+                                    "interpreter": sys.executable}), encoding="utf-8")
+        launcher = spec.with_name("launch.py")
+        launcher.write_text(LAUNCHER, encoding="utf-8")
+        run_dir = self.tempdir("kin-run-") / "run"
+        completed = subprocess.run([sys.executable, "-B", str(RECORDER), "--run-dir", str(run_dir), "--cwd", str(source),
+                                    "--tree", "scripts", "--tree", "tests", "--", sys.executable, "-B", str(launcher), str(spec)],
+                                   capture_output=True, timeout=300)
+        run = json.loads((run_dir / "run.json").read_bytes())
+        stderr = (run_dir / "stderr.log").read_bytes()
+        self.assertEqual(run.get("exit_code"), 1, completed.stderr[-2000:])
+        self.assertIn(b'"valid": false', stderr, "the entry ran after its imports and refused the empty spec")
+        return run
+
+    def test_supervised_browser_child_keeps_the_frozen_source_admissible(self):
+        """CKPT2-02 (RQC-03/09/12): child import through the real SystemdBrowser.command; no bytecode in scripts/tests,
+        the same input trees, runtime_identity and the index's input binding pass; the control without -B is refused."""
+        browsers = str(self.tempdir("kin-browsers-"))
+        command, policy, alias = self.supervised(browsers)
+        self.assertEqual(command[:2], ["/usr/bin/env", "-i"])
+        self.assertIn("-B", command, "the product command itself carries -B (P3); the harness adds none")
+        self.assertEqual([item for item in command if item in (alias, intro.__file__, "browser-smoke")], [alias, intro.__file__, "browser-smoke"])
+        facts = {"python": "3.12.7", "docker_server": "27.0.3", "compose": "2.29.1", "playwright": "1.48.2", "chromium": "chromium-1140",
+                 "arch": "x86_64"}
+
+        def modules(source):
+            return {"ops_emr_introduction": SimpleNamespace(__file__=str(source / "scripts" / "ops_emr_introduction.py")),
+                    "ops_release_checkpoints": SimpleNamespace(__file__=str(source / "tests" / "ops_release_checkpoints.py"))}
+        source = self.frozen_source()
+        before = self.tree(source)
+        self.admitted(cp.runtime_identity, facts, modules=modules(source), root=source)
+        run = self.recorded(source, command, alias)
+        self.assertEqual([path for path in source.rglob("__pycache__")], [], "the supervised child wrote no bytecode")
+        self.assertEqual(self.tree(source), before, "the input trees are byte-identical after the child")
+        self.assertEqual(cp.recorded_inputs(run, required_trees=cp.LEAF_INPUT_TREES), [], "the index's input binding passes")
+        pinned = self.admitted(cp.runtime_identity, facts, modules=modules(source), root=source)
+        self.assertEqual(pinned["modules"]["ops_emr_introduction"], "scripts/ops_emr_introduction.py")
+        with self.subTest(control="the policy's command without the product's -B"):
+            control = self.frozen_source()
+            run = self.recorded(control, ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent", *policy[1:]], alias)
+            self.assertTrue(list((control / "scripts").rglob("__pycache__")), "the control writes bytecode beside the tool")
+            self.assertTrue([reason for reason in cp.recorded_inputs(run, required_trees=cp.LEAF_INPUT_TREES)
+                             if reason.startswith("input appeared during the run: scripts/__pycache__")])
+            self.assertRefused("RUNTIME_UNPINNED", cp.runtime_identity, facts, modules=modules(control), root=control)
+
+
 class CheckpointLeafTests(RefusalAssertions, TempCase):
     """CKPT-03: the end of a leaf without a bundle (late success / expected STOP): raw records preserved under the
     secrets policy before the fixture goes, parent and current identities apart, manifest vs payload SHA, parent chain."""
@@ -2960,6 +3084,12 @@ MUTANTS = (
     ("M40", "CheckpointRecordTests.test_bound_index_is_rechecked_when_consumed",   # CKPT2-03: stdout trusted after the index
      '        stdout = current(run_dir / "stdout.log", logs["stdout.log"], "stdout.log")',
      '        stdout = (run_dir / "stdout.log").read_bytes()', "checkpoints"),
+    ("M41", "CheckpointBytecodeTests.test_supervised_browser_child_keeps_the_frozen_source_admissible",   # CKPT2-02: cache admitted
+     '        require(not any((root / folder).rglob("__pycache__")), "RUNTIME_UNPINNED", "a bytecode cache in the frozen " + folder)',
+     '        require(True, "RUNTIME_UNPINNED", "a bytecode cache in the frozen " + folder)', "checkpoints"),
+    ("M42", "CheckpointBytecodeTests.test_supervised_browser_child_keeps_the_frozen_source_admissible",   # CKPT2-02: new files ignored
+     '    reasons += ["input appeared during the run: " + after[path]["requested"] for path in sorted(set(after) - set(before))]',
+     '    reasons += []', "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -3005,7 +3135,8 @@ class CheckpointMutationContracts(TempCase):
         return tests
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
-        """T18 (RQC-01..09, 11, CKPT-01..09): control PASS, then an assertion failure in the named contract for each mutant."""
+        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06): control PASS, then an assertion failure in the named contract for
+        each mutant (M01-M42)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:

@@ -1808,8 +1808,11 @@ Docker/Compose commands for a checkpoint) and the opt-in leaves of `tests/ops_re
 Pure contracts (CI `runtime`, any OS): `python -B tests/ops_release_checkpoints_test.py` — T01–T15 (T15 runs the real
 stage methods of the three scenarios over a synthetic product: each wrong data, rights, realm, frame, overlay,
 ordinary-entry, image or receipt outcome must fail in the stage that owns its assertion), the host adapter, bundle
-inputs, raw records and lineage contracts, and T18 (M01–M30, each killed only by an assertion after its control
-passed). Root on Linux for the ComposeEntry fork contract (CI uses sudo).
+inputs, raw records and lineage contracts, the raw-evidence index and its consumers, the supervised browser child
+against a frozen copy (CKPT2-02: the product's `SystemdBrowser.command` writes no bytecode into `scripts/`/`tests/`, so
+the next `runtime_identity` and the index's `--tree scripts` binding pass; the real browser stays a T16 condition), the
+per-attempt retry, and T18 (M01–M42, each killed only by an assertion after its control passed). Root on Linux for the
+ComposeEntry fork contract (CI uses sudo).
 
 Linux proofs T16/T17 (pending until run on a native Linux synthetic host with the persistent live slot, as the gate
 account (root); `P` is an absolute proof folder, `B` the candidate checkout; the four `KIN_TEST_*_IMAGE`,
