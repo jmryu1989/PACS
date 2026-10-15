@@ -37,6 +37,9 @@ jobs:
       - name: Landed split Git blobs for historical byte proofs
         if: ${{ !cancelled() }}
         run: git fetch --no-tags --depth=1 origin c8e4f1b485ec05ccbb97589c74a573b3f48b70ce
+      - name: W4 shortcut v2 server contract
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w4-shortcut-v2-server --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --tree worklist-v0/hpacs-lite --tree tests -- node --test tests/workspace_shortcuts_v2_service_test.cjs
       - name: W2 account shortcut CAS and unavailable-target retention
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/filter-shortcuts --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/filter_shortcuts_service_test.cjs -- node --test tests/filter_shortcuts_service_test.cjs
@@ -117,6 +120,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: W4 shortcut v2 module contract
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/w4-shortcut-v2-module --cwd . --tree worklist-v0/hpacs-lite --tree tests -- node --test tests/workspace_shortcuts_test.cjs
       - name: Worklist folder multi-selection and shortcut module contract
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/worklist-folder-tree --cwd . --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file worklist-v0/hpacs-lite/compound-filter.js --file tests/worklist_folder_tree_test.cjs --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/session-end.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_folder_tree_test.cjs
       - name: Synthetic runtime record-run evidence
