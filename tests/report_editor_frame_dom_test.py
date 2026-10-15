@@ -1792,11 +1792,29 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         for _ in range(30):
             self.page.keyboard.press('ArrowDown')
         self.page.keyboard.type('Z')
+        # W6R2-01: the caret's line box is measured as this browser lays out the field, never from an assumed font,
+        # line height or padding (the CI host's fonts differ from this one). A block with the field's computed text
+        # layout and content width, holding the text up to the caret plus one zero-width character, ends where the
+        # caret's line ends; the same block holding only that character is one line high.
         state = """() => { const host = document.querySelector('.redit'), el = document.querySelector('#findings'), box = host.getBoundingClientRect();
-          const line = parseFloat(getComputedStyle(el).lineHeight) || 16, at = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd;
-          const y = el.getBoundingClientRect().top + 7 + (el.value.slice(0, at).split('\\n').length - 1) * line;
+          const at = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd, css = getComputedStyle(el);
+          const block = document.createElement('div');
+          for (const p of ['font-family', 'font-size', 'font-weight', 'font-style', 'font-variant', 'font-stretch', 'font-kerning',
+            'font-feature-settings', 'line-height', 'letter-spacing', 'word-spacing', 'text-indent', 'text-transform', 'white-space',
+            'word-break', 'overflow-wrap', 'tab-size']) block.style.setProperty(p, css.getPropertyValue(p));
+          Object.assign(block.style, {position: 'absolute', left: '-10000px', top: '0', visibility: 'hidden', boxSizing: 'content-box',
+            padding: '0', border: '0', margin: '0', width: (el.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight)) + 'px'});
+          document.body.append(block);
+          block.textContent = '\\u200b';
+          const line = block.getBoundingClientRect().height;
+          block.textContent = el.value.slice(0, at) + '\\u200b';
+          const below = block.getBoundingClientRect().height;
+          block.remove();
+          const field = el.getBoundingClientRect(), top = box.top + host.clientTop, bottom = top + host.clientHeight;
+          const end = field.top + el.clientTop + parseFloat(css.paddingTop) + below - el.scrollTop, start = end - line;
           return {value: el.value, selection: [el.selectionStart, el.selectionEnd, el.selectionDirection], top: host.scrollTop,
-                  height: Math.round(box.height), caret: y >= box.top - 1 && y + line <= box.bottom + 1}; }"""
+                  height: Math.round(box.height), line, rect: [start, end], view: [top, bottom],
+                  caret: line > 0 && start >= top - 1 && end <= bottom + 1}; }"""
         frames = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
         before = self.page.evaluate(state)
         self.assertTrue(before['caret'], before)
