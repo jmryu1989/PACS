@@ -51,6 +51,112 @@ PANELS = [('.left', 'grow'), ('#worklist-folders-panel', 'grow'), ('#resize-main
           ('.rw', 'band'), ('#resize-top', 'below-band'), ('.workrow', 'below-band'), ('.related-p', 'below-band'),
           ('.related-list-pane', 'below-band'), ('.prior-report-pane', 'below-band'), ('.report-p', 'below-band'),
           ('.rbtns', 'below-band'), ('#findings', 'below-band'), ('#conclusion', 'below-band')]
+# W6-PAGE-22 (D1300): a decided difference from the pre-W6 baselines of the first-paint
+# (W2 9d6984b, below) and round-6 default (study_panel_size_dom_test.py) comparisons.
+# W6's shared report frame sizes Findings and Conclusion to their content (80/60 px
+# minimums, labels, Recommendation off screen) inside one scroller (.redit) that takes
+# the height its column has left. Excluded from those equalities, and nothing else: the
+# two field boxes, the scroller's pixels and the first-paint node delta (+ frame script
+# + measurement iframe - one heading). What lies below the scroller in its column (the
+# footer and every notice shown) is compared where the scroller leaves it, moved down by
+# the scroller's growth (w6_moved, w6_regions), and must stay reachable (W6R1-05:
+# assert_w6_reachable). W6's own page cases (report_editor_frame_dom_test.py --page,
+# incl. PAGE-22 on W3's layouts) carry the excluded region.
+W6_REPORT_FIELDS = ('#findings', '#conclusion')
+W6_FIRST_PAINT_NODES = 1
+SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
+# Below the scroller in its column: the footer and each notice (a notice section's first row is its bar; an opened
+# notice pane scrolls inside its own height cap).
+W6_BELOW = ('.rfoot2', '#question-p', '#image-request-p', '#cvr-sent-p', '#cvr-inbox-p')
+# For each of them shown: its box, then whether it can be brought into the window - by the window itself or by a
+# container the reader can wheel-scroll (overflow auto/scroll), never only by a programmatic scroll of a container that
+# hides its overflow, and never left cut off by one (vertical extent; every scroll position is restored afterwards).
+W6_REACH = '''(names) => {
+  const root = document.scrollingElement, wheel = e => /^(auto|scroll)$/.test(getComputedStyle(e).overflowY);
+  const facts = {root: [root.scrollHeight, root.clientHeight], below: {}};
+  for (const name of names) {
+    const node = document.querySelector(name);
+    if (!node || !node.getClientRects().length) continue;
+    const bar = node.matches('section') ? node.firstElementChild : node, box = bar.getBoundingClientRect();
+    const saved = [];
+    for (let e = bar.parentElement; e; e = e.parentElement) saved.push([e, e.scrollTop, e.scrollLeft]);
+    bar.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    const r = bar.getBoundingClientRect();
+    const scrolled = saved.filter(([e, top]) => e.scrollTop !== top)
+      .map(([e]) => [e.id || e.className || e.tagName, e !== root && e !== document.body && wheel(e)]);
+    let clipped = null;
+    for (let e = bar.parentElement; e && e !== document.documentElement && !clipped; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (s.overflowX === 'visible' && s.overflowY === 'visible') continue;
+      const top = e.getBoundingClientRect().top + e.clientTop;
+      if (r.top < top - 0.5 || r.bottom > top + e.clientHeight + 0.5) clipped = e.id || e.className || e.tagName;
+    }
+    facts.below[name] = {box: [box.x, box.y, box.width, box.height], window: r.top >= -0.5 && r.bottom <= innerHeight + 0.5,
+                         scrolled, clipped};
+    for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; }
+  }
+  return facts; }'''
+
+
+def w6_facts(page):
+    """The W6 scroller's box and the reach of what lies below it (W6-PAGE-22, D1300)."""
+    return {'scroller': page.evaluate(SCROLLER), 'reach': page.evaluate(W6_REACH, list(W6_BELOW))}
+
+
+def assert_w6_reachable(case, facts, where):
+    """W6R1-05: the page itself never scrolls, and the footer and every notice bar shown lie in the window or inside a
+    container the reader can wheel-scroll; nothing below the scroller is silently cut off."""
+    reach = facts['reach']
+    case.assertEqual(reach['root'][1], reach['root'][0], f'{where}: the page overflows the window {reach}')
+    case.assertIn('.rfoot2', reach['below'], where)
+    for name, fact in reach['below'].items():
+        case.assertTrue(fact['window'], f'{where}: {name} cannot be brought into the window {fact}')
+        case.assertIsNone(fact['clipped'], f'{where}: {name} is cut off {fact}')
+        case.assertTrue(all(wheel for _, wheel in fact['scrolled']), f'{where}: {name} needs a scroll the reader cannot make {fact}')
+
+
+def w6_moved(case, theirs, mine, offset, where):
+    """What lies below the scroller is the baseline's, moved down by `offset` (the work area's own move) plus the scroller's
+    growth: the scroller keeps its place and width and only grows, in whole pixels; the same rows are shown."""
+    (x, top, w, h), (x_mine, top_mine, w_mine, h_mine) = theirs['scroller'], mine['scroller']
+    for a, b in zip((x, top + offset, w), (x_mine, top_mine, w_mine)):
+        case.assertAlmostEqual(a, b, delta=0.01, msg=f'{where}: the W6 scroller keeps its place {theirs["scroller"]} {mine["scroller"]}')
+    shift = h_mine - h
+    case.assertGreaterEqual(shift, -0.01, where)
+    case.assertAlmostEqual(round(shift), shift, delta=0.01, msg=where)
+    below, below_mine = theirs['reach']['below'], mine['reach']['below']
+    case.assertEqual(sorted(below), sorted(below_mine), f'{where}: the rows below the scroller')
+    for name, fact in below.items():
+        expected = [fact['box'][0], fact['box'][1] + offset + shift, *fact['box'][2:]]
+        for a, b in zip(expected, below_mine[name]['box']):
+            case.assertAlmostEqual(a, b, delta=0.01, msg=f'{where}: {name} expected {expected}, got {below_mine[name]["box"]}')
+    return round(shift)
+
+
+def w6_regions(theirs, mine, width, height):
+    """W6-PAGE-22 (D1300): picture regions [x, width, y in the baseline, y in current, height]. Everything is compared
+    in place except W6's scroller (.redit), which is left out, and what lies below it in its column, which is compared
+    moved down by the scroller's growth (w6_moved checks its place). Where it moves, the scroller's fractional edge
+    columns (column and neighbour in one pixel) are not compared. What a move would push past the window's bottom is
+    not in the picture; assert_w6_reachable covers it."""
+    (x, top, w, h_theirs), (_, _, _, h_mine) = theirs, mine
+    shift = round(h_mine - h_theirs)
+    above, below = min(math.floor(top), height), math.ceil(top + h_theirs)
+    # The window clips a column that extends past its right edge (the 1024x768 report column).
+    left, right = min(math.floor(x), width), min(math.ceil(x + w), width)
+    inner_left, inner_right = min(math.ceil(x), width), min(math.floor(x + w), width)
+    regions = [[0, width, 0, 0, above], [0, left, above, above, height - above], [right, width - right, above, above, height - above],
+               [inner_left, inner_right - inner_left, below, below + shift, height - below - shift]]
+    if not shift:
+        regions += [[left, inner_left - left, below, below, height - below], [inner_right, right - inner_right, below, below, height - below]]
+    return [region for region in regions if region[1] > 0 and region[4] > 0]
+
+
+def without_w6_fields(facts):
+    """First-paint facts with W6's two report field boxes left out (W6-PAGE-22, D1300)."""
+    return {**facts, 'panels': [box for (name, _), box in zip(PANELS, facts['panels'], strict=True)
+                                if name not in W6_REPORT_FIELDS]}
+
 # The worklist list area: what a stacked list needs to show its header and one whole row.
 LIST = '''() => { const grid = document.querySelector('.left > .grid'), table = grid.querySelector('table');
   const box = grid.getBoundingClientRect(), row = table.tBodies[0].rows[0];
@@ -1099,7 +1205,9 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.assertEqual(saved, self.local())
 
     def first_paint(self, asset_root, version, width, height, rail=None, picture=None):
-        """Serve one tree at one size; return its first-paint facts, list area, Rail box and picture."""
+        """Serve one tree at one size; return its first-paint facts, list area, Rail box, picture and W6 facts (the
+        scroller's box and what lies below it). A picture covers the Rail box and the page's own W6 scroller (W6-PAGE-22,
+        D1300)."""
         auth.ROOT = asset_root
         site = WorkspaceSite()
         context = self.browser.new_context(viewport=dict(width=width, height=height))
@@ -1126,22 +1234,25 @@ class StudyPanelPageDOM(unittest.TestCase):
             area = page.evaluate(LIST)
             control = page.get_by_role('button', name='Rail', exact=True)
             box = control.bounding_box() if control.count() else None
+            w6 = w6_facts(page)
             pixels = None
             if picture:
-                cover(page, [rail])
+                cover(page, [rail, w6['scroller']])
                 pixels = first_paint_pixels(page, picture)
             self.assertEqual([], site.violations)
-            return facts, area, box and [box['x'], box['y'], box['width'], box['height']], pixels
+            return facts, area, box and [box['x'], box['y'], box['width'], box['height']], pixels, w6
         finally:
             context.close()
 
-    def assert_moved_work_area(self, w2, w2_area, mine, width, height, difference_of):
+    def assert_moved_work_area(self, w2, w2_area, mine, width, height, difference_of, w2_w6, mine_w6):
         """W3R-09 / W3R5-04: where W2's stacked list cannot show its header and one whole
         row, W3's list grows by that height in whole pixels (g) and the report window band
         may yield (y) so that D383's prior report line stays in view. Nothing else changes:
         every panel below is W2's panel moved down by g (the band and everything below it
         by g - y), and so are its pixels. Only the grown list (with the Folders rail that
-        spans it) and the band's yielded strip are not compared."""
+        spans it) and the band's yielded strip are not compared. W6's scroller moves with
+        the work area and keeps W2's height here, so what lies below it moves by g - y too
+        (W6-PAGE-22, D1300); each picture covers its own scroller."""
         index = {name: i for i, (name, _) in enumerate(PANELS)}
         grown = mine['panels'][index['.left']][3] - w2['panels'][index['.left']][3]
         missing = w2_area['head'] + w2_area['row'] + w2_area['scrollbar'] - (w2_area['grid'][1] - w2_area['grid'][0])
@@ -1156,10 +1267,13 @@ class StudyPanelPageDOM(unittest.TestCase):
             self.assertGreaterEqual(mine['related_line'], 8, 'the band yields only to keep the prior report line in view')
         g, y = round(grown), round(yielded)
         for (name, move), theirs, ours in zip(PANELS, w2['panels'], mine['panels']):
+            if name in W6_REPORT_FIELDS:
+                continue  # W6-PAGE-22 (D1300): a decided difference, see W6_REPORT_FIELDS
             dy, dh = {'grow': (0, g), 'below-list': (g, 0), 'work-area': (g, -g), 'band': (g, -y), 'below-band': (g - y, 0)}[move]
             expected = [theirs[0], theirs[1] + dy, theirs[2], theirs[3] + dh]
             for a, b in zip(expected, ours):
                 self.assertAlmostEqual(a, b, delta=0.01, msg=f'{name}: expected {expected}, got {ours}')
+        self.assertEqual(0, w6_moved(self, w2_w6, mine_w6, g - y, f'{width}x{height}'), 'the W6 scroller keeps W2 height')
         if difference_of is None:
             return
         rail = w2['panels'][index['#worklist-folders-panel']]
@@ -1183,7 +1297,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         # The baseline is the landed W2 (main 9d6984b: PR #164 W2-LAND + PR #168
         # W2-FU): D1041 6-② made W2 open Folders on every login, so W2's own first
         # paint changed by decision after the earlier W2 input 9d4ba0f, and W2-FU
-        # then changed how the footer wraps beside it. Two decided differences:
+        # then changed how the footer wraps beside it. Three decided differences:
         # - W3's Rail control shows in that open panel's title row; its measured
         #   box is masked in both pictures (the folder tree keeps W2's place).
         # - W3R-09: where W2's stacked list cannot show its header and one whole
@@ -1191,6 +1305,10 @@ class StudyPanelPageDOM(unittest.TestCase):
         #   focus, Folders and the list's place stay W2's; every panel below is W2's
         #   panel moved down (the report window band may yield for D383's prior
         #   report line), geometry and pixels alike (assert_moved_work_area).
+        # - W6-PAGE-22 (D1300, W6_REPORT_FIELDS above): the Findings/Conclusion boxes
+        #   are left out of the geometry and each picture covers its own W6 scroller;
+        #   what lies below the scroller in its column is compared where the scroller
+        #   leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable).
         # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
@@ -1202,31 +1320,35 @@ class StudyPanelPageDOM(unittest.TestCase):
             try:
                 for version in (None, 1, 2):
                     for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):
-                        mine, area, rail, _ = self.first_paint(current, version, width, height)
+                        mine, area, rail, _, mine_w6 = self.first_paint(current, version, width, height)
                         self.assertIsNotNone(rail)
                         name = f'v{version or 0}-{width}x{height}.png'
                         picture = (width, height) in ((1920,1080), (900,1200), (1080,1920), (768,1024))
-                        w2, w2_area, w2_rail, w2_pixels = self.first_paint(Path(temporary), version, width, height, rail,
+                        w2, w2_area, w2_rail, w2_pixels, w2_w6 = self.first_paint(Path(temporary), version, width, height, rail,
                             pictures / ('w2-' + name) if picture else None)
                         self.assertIsNone(w2_rail)
                         missing = w2_area['head'] + w2_area['row'] + w2_area['scrollbar'] - (w2_area['grid'][1] - w2_area['grid'][0])
                         pixels = None
                         if picture:
-                            again, _, _, pixels = self.first_paint(current, version, width, height, rail, pictures / ('current-' + name))
+                            again, _, _, pixels, _ = self.first_paint(current, version, width, height, rail, pictures / ('current-' + name))
                             self.assertEqual(mine, again)
                         difference_of = (lambda regions: picture_difference(self.browser, w2_pixels, pixels, regions)) if picture else None
                         with self.subTest(version=version, width=width, height=height):
+                            assert_w6_reachable(self, mine_w6, name)
                             if missing <= 0.5:
-                                self.assertEqual(w2, mine)
+                                self.assertEqual(without_w6_fields(w2), without_w6_fields(mine))
+                                w6_moved(self, w2_w6, mine_w6, 0, name)
                                 if picture:
-                                    self.assertEqual(0, difference_of(None)[0].get('over'), 'first-paint pixels differ outside the logo/native checkbox/Rail')
+                                    for result in difference_of(w6_regions(w2_w6['scroller'], mine_w6['scroller'], width, height)):
+                                        self.assertFalse(result.get('outside') or result.get('size'), result)
+                                        self.assertEqual(0, result['over'], f'first-paint pixels differ outside the logo/native checkbox/Rail/W6 scroller: {result}')
                                 continue
                             self.assertGreater(height, width, 'only a stacked list grows')
                             need = area['head'] + area['row'] + area['scrollbar']
                             self.assertAlmostEqual(need, area['grid'][1] - area['grid'][0], delta=1)
                             for key in ('focus', 'toolbar', 'folders', 'headings'):
                                 self.assertEqual(w2[key], mine[key], key)
-                            self.assert_moved_work_area(w2, w2_area, mine, width, height, difference_of)
+                            self.assert_moved_work_area(w2, w2_area, mine, width, height, difference_of, w2_w6, mine_w6)
             finally:
                 auth.ROOT = current
 

@@ -41,14 +41,17 @@
       // 붙여넣기는 편집기에 쓴다. 클립보드를 읽는 사이 검사가 바뀌었거나, 로그아웃 준비·세션 종료가 있었거나, 그 칸의 글이
       // 달라졌으면 쓰지 않는다 — 읽기 전에 본 글 위에 덮어쓰지 않는다. (붙여넣기 자체의 편집 안전은 편집기 단위의 몫이다.)
       const at = work.capture("editor");
+      const frame = mountReportFrame();
+      if (!frame) return;
+      const end = frame.read("findings").length;
+      const insertion = frame.capture("findings", { start: end, end });
       let text;
       try { text = await navigator.clipboard.readText(); } catch (e) { return; }
       work.commit(at, () => {
         if (reportWriteBlock()) return;
         // Findings 끝에 붙인다. 붙여 넣은 글은 타이핑한 글과 같은 이 문서의 편집이다 — 표시 없이 대입만 하면 자동 저장도
         // 로그아웃도 그 글을 모르고 다음 폴링이 서버 글로 덮는다(U5CLI-F09).
-        const end = $("#findings").value.length;
-        editReport([{ field: "findings", start: end, end, text }]);
+        editReport([{ field: "findings", at: insertion, text }]);
       });
     });
     const reportPreview = KinReportPreview({ api, actorName: displayActor, toast,

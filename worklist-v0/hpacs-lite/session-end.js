@@ -59,8 +59,11 @@
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       $('#chips')?.removeAttribute('data-render-signature');
       stopWorkspaceLayout();
-      // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
-      for (const k of RFIELDS) $("#" + k).value = "";
+      // The recovery snapshot above owns unsaved text. Ending cancels composition and purges native history.
+      document.activeElement?.blur();
+      reportFrame?.end({ uid: null, selectionSeq });
+      reportFrameEnded = true;
+      reportOpening = null;
       leftNotes.clear();
       for (const id of ["rows", "relrows", "user", "roles", "clinical", "thumbwrap", "ctx", "err", "leftnotes"]) $("#" + id)?.replaceChildren();
       document.querySelectorAll(".modal.show").forEach(modal => modal.classList.remove("show"));

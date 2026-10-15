@@ -8,7 +8,7 @@ the stored per-study revision and canonical envelopes, including reads after unc
 from pathlib import Path
 
 LITE = Path(__file__).resolve().parents[1] / "worklist-v0/hpacs-lite"
-ASSETS = ("work-context.js", "session-transport.js", "report-draft-client.js")
+ASSETS = ("work-context.js", "session-transport.js", "report-draft-client.js", "report-editor-frame.js")
 
 BOOT = r"""
 const work = KinWorkContext;

@@ -78,8 +78,8 @@ MUTANTS = [
         "title": "a field the person never put a caret in is read as position 0",
         "case": "test_d02_an_untouched_field_appends_exactly_as_before",
         "expect": "S3-U6 M2: a field nobody put a caret in still appends at the end",
-        "old": "      if (!caretFields.has(field)) return null;",
-        "new": "      if (false) return null;",
+        "old": "      return at?.visited ? { start: at.start, end: at.end } : null;",
+        "new": "      return { start: 0, end: 0 };",
     },
     {
         "id": "M3",
@@ -96,8 +96,8 @@ MUTANTS = [
         "title": "the screen goes back to appending at the end instead of writing what was sent",
         "case": "test_d11_the_body_the_screen_and_the_attestation_are_one_string",
         "expect": "S3-U6 M4: the string that was sent is the string on the screen",
-        "old": "        editReport([reportEditOf(field, shown.text, shown.end)]);",
-        "new": "        editReport([reportEditOf(field, el.value + (el.value ? \"\\n\" : \"\") + pane.block, shown.end)]);",
+        "old": "        const applied = editReport([reportEditOf(field, shown.text, shown.end)]);",
+        "new": "        const applied = editReport([reportEditOf(field, el.value + (el.value ? \"\\n\" : \"\") + pane.block, shown.end)]);",
     },
     {
         "id": "M5",
@@ -114,8 +114,8 @@ MUTANTS = [
         "title": "the caret is parked at the end of the field instead of on the inserted block",
         "case": "test_d01_caret_in_the_middle_of_the_field_places_whole_lines_and_the_caret",
         "expect": "S3-U6 M6: the caret must end on the inserted block, not at the end of the field",
-        "old": "        editReport([reportEditOf(field, shown.text, shown.end)]);",
-        "new": "        editReport([reportEditOf(field, shown.text, shown.text.length)]);",
+        "old": "        const applied = editReport([reportEditOf(field, shown.text, shown.end)]);",
+        "new": "        const applied = editReport([reportEditOf(field, shown.text, shown.text.length)]);",
     },
 ]
 

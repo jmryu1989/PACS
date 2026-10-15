@@ -28,14 +28,16 @@
       const a = appState[selectedUid] ?? {};
       return { blocked: !!reportEditorBlock(), uid: selectedUid, selectionSeq,
         baseVersion: reportBaseVersion(selectedUid, a.draft?.baseVersion ?? a.version ?? 0),
-        field: target, value: el.value, caret: caretAt(target) ?? { start: el.value.length, end: el.value.length } };
+        field: target, value: el.value, caret: caretAt(target) ?? { start: el.value.length, end: el.value.length },
+        // The placement caret above and this whole-field replacement ticket are one recording snapshot.
+        capture: reportFrame?.capture(target, { start: 0, end: el.value.length }) ?? null };
     }
     /**
      * Insert 한 번의 쓰기. 세션이 방금 확인한 그 화면인지 여기서 **동기로** 다시 본다 — 확정·다른 삽입이
      * 나가 있는지는 세션이 모르고, 그 사이에 넣은 글은 확정 응답의 다시 그리기가 지운다.
      */
     function dictationInsert(ins) {
-      if (commitInFlight || insertInFlight || dictationBlock()) return false;
+      if (!ins.capture || commitInFlight || insertInFlight || dictationBlock()) return false;
       const live = dictationContext(ins.field);
       if (!live || live.uid !== ins.uid || live.selectionSeq !== ins.selectionSeq ||
           live.baseVersion !== ins.baseVersion || live.value !== ins.expectedValue) return false;
@@ -44,7 +46,12 @@
       const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(ins.text), ins.caret,
                                                 citationGuards(ins.field));
       // 타이핑·상용구처럼 표시를 세우고 점유를 시작하며, 저장은 기존 자동 저장이 한 번 가져간다.
-      return editReport([reportEditOf(ins.field, plan.text, plan.end)]);
+      return editReport([{ field: ins.field, at: ins.capture, text: plan.text, caret: plan.end }]);
+    }
+    // The recording-time capture is also the pin's edit check: typing then Backspace or Undo leaves the same text
+    // but retires the capture. The session then refuses as for an edited field and keeps the transcript to re-pin.
+    function dictationCurrent(capture) {
+      return !!capture && !!reportFrame?.isCurrent(capture);
     }
     function dictationPlacement(pin, text) {
       const el = $("#" + pin.field);
@@ -55,7 +62,7 @@
     const dictation = KinDictation.createController({
       session: KinDictationSession, capture: KinDictationCapture, env: window, apiBase: API,
       readContext: dictationContext, block: dictationBlock, insert: dictationInsert, placement: dictationPlacement,
-      busy: () => commitInFlight || insertInFlight,
+      current: dictationCurrent, busy: () => commitInFlight || insertInFlight,
     });
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
@@ -69,14 +76,14 @@
       },
       closed: () => ($("#b-dictate").disabled ? $("#findings") : $("#b-dictate")).focus(),
     });
-    for (const k of ["findings", "conclusion", "recommendation"]) {
-      const el = $("#" + k);
-      el.addEventListener("focus", () => { dictationField = { field: k, seq: selectionSeq }; });
-      // 위치를 다시 고정하는 몸짓은 **칸 안을 누르는 것**이다. 다시 고정해도 넣지는 않는다.
-      el.addEventListener("mouseup", () => { dictation.fieldClicked(); });
-      // 사람이 고친 글은 새 편집 순번이다 — 그 전에 떠난 편집기 범위의 작업은 이 글 위에 쓰지 않는다.
-      el.addEventListener("input", () => { work.edited(); dictation.redraw(); });
-    }
+    // The target is the field the reader moved into. The editor's own focus for a template, citation or other write,
+    // and a field kept off screen, are not a choice of the reader.
+    onReportField("focus", event => {
+      if (reportFrame?.isWriting() || event.target.getAttribute("aria-hidden") === "true") return;
+      dictationField = { field: event.target.id, seq: selectionSeq };
+    });
+    onReportField("mouseup", () => dictation.fieldClicked());
+    onReportField("input", () => dictation.redraw());
     /**
      * 검토 단계에서 판독의가 읽고 눌러야 할 것(받아쓴 글, 위치를 다시 고를 판독문 칸, Insert)은 보고서 열
      * 폭이 약 420px일 때 모두 Image Findings 서랍 아래에 있다. 그래서 검토에 들어서는 순간 서랍을 한 번

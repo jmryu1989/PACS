@@ -17,7 +17,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { scripts, readPage, readPageSource } = require('./page_source.cjs');
 const { createHash } = require('node:crypto');
-const { baseline, chunks, statements, verify, currentHomes } = require('./main_move_contract.cjs');
+const { baseline, chunks, statements, verify, currentHomes, RETIRED_BY_REPORT_FRAME } = require('./main_move_contract.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const ts = require(require.resolve('typescript', { paths: [path.join(ROOT, 'api')] }));
@@ -245,6 +245,14 @@ function fixtureBlocks(page, ranges) {
   const { readPageSource } = require('./page_source.cjs');
   const base = readFixture().statements;
   const current = fixtureStatements(readPageSource(page));
+  // W6 owns cursor visits in the shipped frame. On a page that declares its adapter the three retired declarations
+  // must be gone; they leave the frozen runs, and the adapter's new declarations join the run they sit in like any
+  // other new statement. Historical pages still use the unchanged frozen map.
+  if (current.some(s => s.names.includes('reportFrame'))) {
+    const left = current.flatMap(s => s.names).filter(name => RETIRED_BY_REPORT_FRAME.includes(name));
+    if (left.length) throw new Error('Retired by the report frame, still declared: ' + left.join(', '));
+    for (const statement of base) statement.names = statement.names.filter(name => !RETIRED_BY_REPORT_FRAME.includes(name));
+  }
   const byName = new Map();
   base.forEach((s, i) => { for (const name of s.names) byName.set(name, i); });
   const home = frozenIndexes(current, base);

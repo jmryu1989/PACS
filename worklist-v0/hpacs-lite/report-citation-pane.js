@@ -107,9 +107,7 @@
       const at = work.capture("study");
       citationRefreshTimer = setTimeout(() => { citationRefreshTimer = null; work.commit(at, renderCitationBar); }, 400);
     }
-    for (const k of RFIELDS) $("#" + k).addEventListener("input", scheduleCitationRefresh);
-    // S3-U6: 커서 자리 자체는 그 칸이 들고 있다. 화면은 "이 칸을 짚은 적이 있다"만 표시해 둔다.
-    for (const k of RFIELDS) $("#" + k).addEventListener("focus", () => noteCaret(k));
+    onReportField("input", scheduleCitationRefresh);
     $("#b-cite-list").addEventListener("click", () => {
       citationListOpen = !citationListOpen;
       renderCitationBar();
@@ -413,7 +411,14 @@
         const el = $("#" + field);
         const shown = screenPlan(field, pane.block, before, plan2);
         // 커서는 넣은 글 끝에 선다. 가운데에 넣고 화면 끝으로 튀면 사람이 자기 글을 다시 찾아야 한다.
-        editReport([reportEditOf(field, shown.text, shown.end)]);
+        const applied = editReport([reportEditOf(field, shown.text, shown.end)]);
+        if (!applied && $("#" + field).value !== shown.text) {
+          markConverge(pane.uid);
+          invalidateCitations(pane.uid); invalidateStructure(pane.uid);
+          closeCitePreview(false);
+          toast("서버에 인용을 기록했지만 현재 입력 상태로 화면에 넣지 못했습니다. 입력은 그대로 보존했습니다. 서버 내용을 다시 확인하세요.", "err");
+          return;
+        }
         // 서버 행은 방금 우리가 보낸 세 칸이다. 초안 표시가 그 사실을 말하게 한다.
         // A confirmed insertion does not confirm later typing in any of the three fields.
         if (sameDraftText(appState[pane.uid]?.draft, { ...content, baseVersion })) reportConverge.delete(pane.uid);

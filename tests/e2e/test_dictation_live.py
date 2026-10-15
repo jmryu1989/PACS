@@ -453,8 +453,8 @@ def launch_verdict(text, fixture_path, capture_version, netlog_path):
         for flag in ('--headless', '--use-fake-device-for-media-stream', '--disable-audio-output'):
             if not capture['flags'].get(flag):
                 problems.append('the capture launch lacks %s' % flag)
-        if capture['chrome_headless_shell'] or not (capture['executable'] or '').endswith(FULL_CHROMIUM_SUFFIX):
-            problems.append('the capture launch is not the full pinned Chromium: %s' % capture['executable'])
+        # launch_problems already checks both processes against the shared Linux/Windows
+        # full-browser pin; a second Linux-only suffix check would reject the accepted Windows binary.
         for name, expected in netlog_args.items():
             if capture['netlog'][name] != expected:
                 problems.append('the capture launch NetLog switch %s is %r, not exactly %r'
@@ -891,7 +891,8 @@ def geo_problems(state, initial, measured):
     if not redit or (redit_min is not None and redit['h'] < redit_min):
         problems.append('G5 %s: .redit %s below its min-height %r' % (state, redit, redit_min))
     fields = measured.get('fields') or {}
-    for name in RFIELDS:
+    # W6 presents Findings/Conclusion in the shared scroller; Recommendation is retained by G7.
+    for name in ("findings", "conclusion"):
         value = fields.get(name) or {}
         field, field_min = value.get('box'), (value.get('min') or {}).get('px')
         if not field or (field_min is not None and field['h'] < field_min):
@@ -1019,7 +1020,7 @@ def oracle_self_check():
         if not result:
             problems.append('must reject: ' + label)
     # P0 launch lines, in the form Playwright's launchProcess writes them.
-    full = '/home/runner/.cache/ms-playwright/chromium-1223/chrome-linux64/chrome'
+    full = '/home/runner/.cache/ms-playwright' + FULL_CHROMIUM_SUFFIX
     shell = '/home/runner/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell'
     fixture = '/w/tests/e2e/artifacts/measurement-ci/dictation-live/fixture.wav'
     netlog = '/home/runner/work/_temp/u4l-netlog/0123abcd/netlog.json'
@@ -1034,6 +1035,16 @@ def oracle_self_check():
     good = launch_verdict(log(base, capture), fixture, BROWSER_VERSION, netlog)
     if good['problems'] or [r['capture'] for r in good['records']] != [False, True]:
         problems.append('the pinned two-launch log must pass P0: %r' % good['problems'])
+    windows = r'C:\pw\chromium-1223\chrome-win64\chrome.exe'
+    good_windows = launch_verdict(log(line(windows, '--enable-unsafe-swiftshader'),
+                                     line(windows, media + ' ' + switches)), fixture, BROWSER_VERSION, netlog)
+    if good_windows['problems']:
+        problems.append('the same pinned Windows full browser must pass P0: %r' % good_windows['problems'])
+    for wrong in (windows.replace('1223', '1222'), windows + '.bak',
+                  r'C:\pw\chromium_headless_shell-1223\chrome-headless-shell-win64\headless_shell.exe'):
+        expect_problem('unaccepted Windows capture '+wrong,
+                       launch_verdict(log(base, line(wrong, media + ' ' + switches)),
+                                      fixture, BROWSER_VERSION, netlog)['problems'])
     for label, text, version in (
             ('one launch line', log(capture), BROWSER_VERSION),
             ('three launch lines', log(base, capture, base), BROWSER_VERSION),

@@ -959,6 +959,8 @@ class LogoutDOMTest(unittest.TestCase):
         page = page or self.page
         page.locator("#rows tr", has_text=patient).first.click()
         expect(page.locator("#findings")).to_be_editable()
+        # Setup, not a user path (W6R2-02): the hidden Recommendation is filled directly to give the case three-field
+        # data. Since W6 no reader reaches that field by keyboard or pointer; template writes fill it.
         for name, value in fields.items():
             page.fill("#" + name, value)
         self.wait_until(lambda: self.site.holds, "the hold the typing starts", page=page)
@@ -2421,6 +2423,8 @@ class LogoutDOMTest(unittest.TestCase):
     def test_d07_am8_a_slow_save_past_its_deadline_is_not_a_failure_and_never_ends_the_session(self):
         self.page.clock.install()
         self.open_main()
+        # This case controls deadline ordering, so host time spent routing/filling must not advance it.
+        self.page.clock.pause_at(self.page.evaluate("Date.now()") + 100)
         self.select_and_type()
         self.site.put_answers = ["hold"]
         self.page.clock.run_for(21000)
