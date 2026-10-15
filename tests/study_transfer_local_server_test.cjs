@@ -171,9 +171,11 @@ function checkShape(row) {
     || (row.kind === 'sop-claim' && present(row.studyUid) && emptyArray(row.results) && row.manifestSha256 === null && row.download === null
       && present(row.claimKey) && /^sop:[0-9]+(\.[0-9]+)*$/.test(row.claimKey) && row.claimKey.length <= 68 && present(row.claim) && jsonObject(row.claim)));
   if (!owner || !kind) throw Object.assign(new Error('check_violation ImportOperation'), { code: 'P2010', meta: { code: '23514' } });
-}function store({ institutions } = {}) {
+}
+
+function store({ institutions } = {}) {
   const s = { ops: new Map(), states: new Map(), audits: [], clock: T0, migration: true, policies: new Map(), sessions: new Set(),
-    rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, expiredTokens: new Set(), idpEnded: new Set(),
+    rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, expiredTokens: new Set(), idpEnded: new Set(), reads: [],
     institutions: institutions ?? [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }] };
   for (const c of [TECH, TECH2, RAD, ADMIN, ADMIN2, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: c.roles });
   const advisory = new Map(), rows = new Map();
@@ -212,6 +214,7 @@ function checkShape(row) {
       findMany: async ({ where = {}, orderBy, take, select } = {}) => {
         let list = [...s.ops.values()].filter(r => seen(r) && fieldMatch(r, where)).sort((a, b) => (a.id < b.id ? -1 : 1));
         if (take) list = list.slice(0, take);
+        s.reads.push(where.kind ?? null);
         return list.map(r => { const o = out(r); return select ? Object.fromEntries(Object.keys(select).map(k => [k, o[k]])) : o; });
       },
       create: async ({ data }) => {
@@ -391,7 +394,8 @@ const apps = [];
 after(async () => { for (const a of apps) await a.close(); });
 
 async function harness(options = {}) {
-  const s = store(options);
+  // options.store: a second server over the same database (a restart), whose startup passes then run over its rows.
+  const s = options.store ?? store(options);
   const orthanc = fakeOrthanc();
   orthanc.db = s;
   await new Promise(resolve => orthanc.server.listen(0, '127.0.0.1', resolve));
@@ -401,11 +405,17 @@ async function harness(options = {}) {
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
     { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access }, { provide: AuthService, useValue: fakeAuth(s) },
     { provide: APP_GUARD, useClass: TestGuard }] })(TestModule);
+  const mark = s.reads.length;
   const app = await NestFactory.create(TestModule, { rawBody: true, logger: false });
   app.use(studyTransferLocalParser());
   app.setGlobalPrefix('api');
   await app.listen(0, '127.0.0.1');
-  await new Promise(resolve => setTimeout(resolve, 20));   // the startup reconciliation over the empty store
+  // The two startup passes (the gate's import pass, the download service's pass) run beside the server, not in front of
+  // it: wait until both have read their last page, so they never meet a test's own rows (a fixed delay raced with them on
+  // a loaded host). A test that wants them over its rows starts a second server over the same store (B50).
+  const started = () => ['study-claim', 'download'].every(kind => s.reads.slice(mark).includes(kind));
+  for (let i = 0; i < 500 && !started(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(started(), 'the startup passes ran');
   const port = app.getHttpServer().address().port;
   const gate = app.get(Gate.DicomImportGateService);
   const transfer = app.get(StudyTransferLocalService);
@@ -2636,4 +2646,41 @@ test('S9U4-B49 a restart over the restore fixture\'s phases: the expired prepare
   h.orthanc.calls.length = 0;
   const again = await h.send(dicom({ study: C, series: C + '.1', id: 'SYN-R' }));
   assert.deepEqual([again.status, again.body.outcome, h.orthanc.calls.filter(c => c.path === '/tools/find').length], [200, 'stored', 1]);
+});
+
+test('S9U4-B50 the startup passes run by themselves when a server starts (no direct call): over a database holding an expired prepared import attempt and an expired sending download, the new server fences the attempt (its initializing claim removed, one result row, no Orthanc write) and closes the download Unconfirmed with one result row', async () => {
+  const h = await harness();
+  const study = uid();
+  own(h.s, study, 'inst-a', 'local-import');
+  const stamp = new Date(T0 - 120000).toISOString(), expired = new Date(T0 - 60000).toISOString();
+  const attemptId = randomUUID(), opId = randomUUID();
+  const attempt = { attemptId, actor: TECH.actor, generation: 1, ownerInstance: randomUUID(), phase: 'prepared', leaseUntil: expired, startedAt: stamp,
+    finishedAt: null, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', transport: null, autoRecheckedAt: null, recovery: null };
+  const entry = { index: 0, sha256: 'a'.repeat(64), bytes: 1000, studyUid: study, seriesUid: study + '.1', sopUid: study + '.1.1', expectedStudyUid: null,
+    outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', identity: null, writeDisposition: null, at: stamp, attempts: [attempt] };
+  const create = data => h.s.prisma.importOperation.create({ data: { createdAt: new Date(stamp), updatedAt: new Date(stamp), ...data } });
+  await create({ id: opId, institutionId: 'inst-a', ownerIssuer: ISSUER, ownerSubject: TECH.sub, actor: TECH.actor, kind: 'import', studyUid: null,
+    status: 'open', results: [entry] });
+  await create({ id: randomUUID(), institutionId: 'inst-a', ownerIssuer: 'kin-internal', ownerSubject: 'dicom-import-gate', actor: 'dicom-import-gate',
+    status: 'reserved', results: [], kind: 'study-claim', studyUid: study, claimKey: 'study:' + study,
+    claim: { schemaVersion: 1, phase: 'initializing', institutionId: 'inst-a', studyUid: study, patientId: null, issuerInstitutionId: null, nameKey: null,
+      birthKey: null, sexKey: null, heldByAttemptId: attemptId, createdAt: stamp } });
+  const dl = await downloadStudy(h, 1), sending = randomUUID();
+  assert.equal((await prepare(h, dl, sending)).status, 200);
+  const row = h.s.ops.get(sending), supply = randomUUID();
+  row.download.attempts.push({ attemptId: supply, number: 1, ownerSubject: row.ownerSubject, actor: row.actor, manifestSha256: row.manifestSha256,
+    destination: 'browser-download', state: 'sending', startedAt: stamp, endedAt: null, ownerInstance: randomUUID(), leaseUntil: expired, objects: [],
+    archiveSha256: null, responseFinished: false });
+  row.status = 'sending';
+  const before = posts(h.orthanc);
+  // A second server over the same database: its own onModuleInit passes find both rows; nothing here calls them.
+  const h2 = await harness({ store: h.s });
+  for (let i = 0; i < 100 && !(h.s.file(opId, 0).outcome === 'retryable' && h.s.op(sending).status === 'unconfirmed'); i++) await sleep(20);
+  const file = h.s.file(opId, 0);
+  assert.deepEqual([file.outcome, file.code, file.attempts[0].transport], ['retryable', 'IMPORT_ATTEMPT_EXPIRED', 'certain-no-write'], 'the import startup pass fenced it');
+  assert.equal(h.s.claim('study:' + study), null, 'its initializing claim removed');
+  assert.equal(audits(h.s, 'dicom.import.result').filter(a => a.detail.attemptId === attemptId).length, 1);
+  assert.deepEqual([h.s.op(sending).status, h.s.op(sending).download.attempts.map(a => a.state)], ['unconfirmed', ['unconfirmed']], 'the download startup pass closed it');
+  assert.equal(resultRows(h, supply).length, 1);
+  assert.deepEqual([posts(h.orthanc), posts(h2.orthanc)], [before, 0], 'no Orthanc write');
 });
