@@ -604,6 +604,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    */
   private holdAttempt(operationId: string, attemptId: string, renew: boolean): Promise<boolean> {
     return this.gate.write(async tx => {
+      await this.gate.lockOperationKey(tx, operationId);
       const rows: any[] = await tx.$queryRaw`SELECT status, download->'attempts'->-1->>'attemptId' AS "attemptId",
         download->'attempts'->-1->>'state' AS "state", download->'attempts'->-1->>'leaseUntil' AS "leaseUntil"
         FROM "ImportOperation" WHERE id = ${operationId}::uuid AND kind = 'download' FOR UPDATE`;

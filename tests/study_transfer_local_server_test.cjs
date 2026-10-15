@@ -1733,6 +1733,32 @@ test('S9U4-B35 the chunk CAS judges by the database time read after its row lock
       'never Sent without the live lease; both checkpoints stay');
     assert.deepEqual(resultRows(h, a.attemptId).map(x => x.detail.state), ['unconfirmed']);
   }
+  // The chunk CAS takes the operation's advisory lock before its row, like every other transaction on the row: with a
+  // writer holding the advisory lock and then asking for the row, neither waits on the other in a cycle (no deadlock).
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    h.s.advance(15000);   // the next chunk check renews the lease, so it locks the row twice in one transaction
+    let release, locked;
+    const holding = new Promise(resolve => { release = resolve; });
+    const isLocked = new Promise(resolve => { locked = resolve; });
+    let rowTaken = false;
+    const writer = h.s.prisma.$transaction(async tx => {
+      await h.gate.lockOperationKey(tx, held.id);
+      locked();
+      await holding;
+      await tx.$queryRaw(['SELECT * FROM "ImportOperation" WHERE id = ', '::uuid FOR UPDATE'], held.id);
+      rowTaken = true;
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
+    await isLocked;
+    held.release();
+    await sleep(150);   // the archive reaches its next chunk check meanwhile
+    release();
+    await Promise.race([writer, sleep(3000)]);
+    assert.ok(rowTaken, 'the writer got the row: the chunk check did not hold it while waiting for the advisory lock');
+    const whole = await held.archive;
+    assert.equal(whole.bytes.length, Number(whole.headers['content-length']));
+  }
   // Less than 20 s of the lease left by DB time: the check before the next chunk renews it to DB now + 30 s.
   {
     const h = await harness();

@@ -1459,10 +1459,18 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
    * A member import row is checked against its persisted format.
    */
   async lockOperation(tx: Tx, id: string): Promise<any> {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${advisory('operation:' + id)}::bigint)`;
+    await this.lockOperationKey(tx, id);
     const found: any[] = await tx.$queryRaw`SELECT * FROM "ImportOperation" WHERE id = ${id}::uuid FOR UPDATE`;
     const row = found[0] ?? null;
     return row && row.kind === 'import' ? checkImportRow(row) : row;
+  }
+
+  /**
+   * The advisory lock of an operation id alone, for a statement that then locks the row itself (the download chunk CAS):
+   * every transaction takes it before the operation row, so the two locks are never taken in opposite orders.
+   */
+  async lockOperationKey(tx: Tx, id: string): Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${advisory('operation:' + id)}::bigint)`;
   }
 
   /**
