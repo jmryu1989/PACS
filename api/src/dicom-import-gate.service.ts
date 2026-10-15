@@ -1,0 +1,1364 @@
+/*
+ * The member import gate of the self-institution DICOM import (S9-U4b, contract S9-U4p 4.3-4.5, 4.8; B-U4b-WRITER-GATE).
+ *
+ * Every member import write passes here: the durable global Study/SOP reservations (ImportOperation claim rows) are
+ * committed with the attempt's intent before any Orthanc write; a Study UID that already has originals is first bound
+ * from the stored-file headers of every one of its instances; each SOP is looked up before and read back after the one
+ * POST /instances. Only member imports are serialised (D1203): Gateway, manual SR and the dev/test C-STORE seeding stay
+ * outside and their objects are treated as pre-existing originals (B-U4b-WRITER-RACE). Lock order is always the claim
+ * keys (sorted, advisory lock then row) and then the operation row; no database transaction is held across network IO.
+ *
+ * Orthanc is reached through this file's own bounded reads with the settings OrthancService uses (ORTHANC_URL/USER/PASS,
+ * redirect error, 5 s to body EOF, size caps, fatal UTF-8 then JSON). Upstream bodies and tag values never reach an
+ * error, a log line or an audit detail. Claim rows hold patient identity values; nothing here returns them to a caller.
+ */
+import { HttpException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
+import { PrismaService } from './prisma.service';
+import type { DicomReadResult } from './dicom-part10-reader';
+import { DICOM_READER_MESSAGES } from './dicom-part10-reader';
+import { birthKey, nameKey, sexKey } from './study-identity';
+
+export const IMPORT_MIGRATION = '20261015013945_import_operation';
+/** One object per request (contract 4): 24 MiB. */
+export const IMPORT_OBJECT_LIMIT = 25165824;
+/** Files of one import operation are indexed 0-99 (a screen selects at most 100). */
+export const IMPORT_FILE_SLOTS = 100;
+
+const LEASE_MS = 30000;
+const RENEW_MS = 10000;
+const READ_TIMEOUT_MS = 5000;
+const INIT_BUDGET_MS = 240000;
+const SMALL_LIMIT = 262144;
+const CONTEXT_LIMIT = 16777216;
+const POST_ANSWER_LIMIT = 4096;
+const ENUMERATION_SENTINEL = 4097;
+const UID = /^[0-9]+(\.[0-9]+)*$/;
+const ORTHANC_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
+const INTERNAL = Object.freeze({ ownerIssuer: 'kin-internal', ownerSubject: 'dicom-import-gate', actor: 'dicom-import-gate' });
+/** Node 22 fetch: a TypeError whose cause carries one of these ended before any request byte reached Orthanc (4.4). */
+const CONNECT_PHASE_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
+
+export type ImportOutcome = 'stored' | 'already-present' | 'rejected' | 'retryable' | 'unconfirmed';
+export type WriteDisposition = 'pre-write' | 'may-have-written';
+
+const IDENTITY_NOTICE = '환자 정보가 기존 검사와 다릅니다. 파일은 저장되지 않았습니다. 다른 환자의 영상이면 해당 검사로 따로 반입하고, '
+  + '기존 검사의 오더 연결이 잘못되었으면 Technician 화면의 Match/Unmatch로 바로잡으세요.';
+const MAY_HAVE_WRITTEN_NOTICE = '저장된 원본과 충돌하여 완료를 확인할 수 없습니다.';
+const AFTER_RECHECK_NOTICE = '저장 결과를 확인하지 못했습니다. 관리자에게 이 파일의 확인을 요청하세요.';
+
+/**
+ * Contract 4.8, the one table for every file result of POST/GET /api/dicom-import: code -> HTTP of the file POST,
+ * outcome token, final (the same operationId/index/sha256 replays it) and the Korean description. `stored` and
+ * `already-present` have no code (OUTCOME_ANSWERS). IMPORT_PERMISSION_REVOKED answers with the refusal's own 403/404.
+ */
+export const IMPORT_RESULT_CODES = Object.freeze({
+  IMPORT_UNCONFIRMED: { http: 202, outcome: 'unconfirmed', final: false, message: '저장 결과를 확인 중입니다. 같은 작업의 상태를 다시 확인하세요.' },
+  ORTHANC_UNAVAILABLE: { http: 503, outcome: 'retryable', final: false, message: 'Orthanc에 연결하거나 저장된 원본을 읽지 못했습니다. 이 파일은 저장되지 않았습니다. 잠시 뒤 같은 파일로 다시 시도하세요.' },
+  IMPORT_PERMISSION_REVOKED: { http: 403, outcome: 'retryable', final: false, message: '보내기 직전에 권한을 다시 확인하지 못해 이 파일은 저장되지 않았습니다. 권한을 확인한 뒤 같은 파일로 다시 시도하세요.' },
+  IMPORT_ATTEMPT_EXPIRED: { http: 200, outcome: 'retryable', final: false, message: '이전 시도가 보내기 전에 끝났습니다. 이 파일은 저장되지 않았습니다. 같은 파일로 다시 시도하세요.' },
+  STUDY_WRITE_PENDING: { http: 409, outcome: 'retryable', final: false, message: '같은 검사의 다른 파일 저장 결과가 아직 정해지지 않아 이 파일을 보내지 않았습니다. 잠시 뒤 다시 시도하세요.' },
+  SOP_WRITE_PENDING: { http: 409, outcome: 'retryable', final: false, message: '같은 영상(SOP)을 다른 작업이 저장하고 있어 이 파일을 보내지 않았습니다. 잠시 뒤 다시 시도하세요.' },
+  STUDY_OWNERSHIP_UNDETERMINED: { http: 409, outcome: 'retryable', final: false, message: '이 검사의 소유 기관이 아직 정해지지 않았습니다. 워크리스트에 검사가 나타난 뒤 다시 시도하세요. 이 파일은 저장되지 않았습니다.' },
+  RECOVERED_NO_OBJECT: { http: 200, outcome: 'retryable', final: false, message: '저장된 원본이 없음을 확인하고 근거를 기록했습니다. 같은 파일을 다시 보낼 수 있습니다.' },
+  DICOM_NOT_PART10: { http: 400, outcome: 'rejected', final: true, message: DICOM_READER_MESSAGES.DICOM_NOT_PART10 },
+  DICOM_FILE_META_MISSING: { http: 400, outcome: 'rejected', final: true, message: DICOM_READER_MESSAGES.DICOM_FILE_META_MISSING },
+  DICOM_TRANSFER_SYNTAX_UNSUPPORTED: { http: 400, outcome: 'rejected', final: true, message: DICOM_READER_MESSAGES.DICOM_TRANSFER_SYNTAX_UNSUPPORTED },
+  DICOM_MALFORMED: { http: 400, outcome: 'rejected', final: true, message: DICOM_READER_MESSAGES.DICOM_MALFORMED },
+  PATIENT_ID_UNREADABLE: { http: 400, outcome: 'rejected', final: true, message: DICOM_READER_MESSAGES.PATIENT_ID_UNREADABLE },
+  PATIENT_ID_MISSING: { http: 400, outcome: 'rejected', final: true, message: '환자 ID가 없는 파일입니다. 이 파일은 저장되지 않았습니다.' },
+  MODALITY_NOT_IMPORTABLE: { http: 400, outcome: 'rejected', final: true, message: '이 종류의 영상은 아직 직접 반입할 수 없습니다.' },
+  PATIENT_ISSUER_CONFLICT: { http: 409, outcome: 'rejected', final: true, message: '환자 ID 발급 기관이 이 기관 하나로 확인되지 않습니다. 파일은 저장되지 않았습니다.' },
+  PATIENT_ID_CONFLICT: { http: 409, outcome: 'rejected', final: true, message: IDENTITY_NOTICE },
+  PATIENT_IDENTITY_CONFLICT: { http: 409, outcome: 'rejected', final: true, message: IDENTITY_NOTICE },
+  STUDY_OWNERSHIP_CONFLICT: { http: 409, outcome: 'rejected', final: true, message: '다른 기관의 검사이거나 소유 기관이 배정되지 않은 검사라 반입할 수 없습니다. 파일은 저장되지 않았습니다.' },
+  STUDY_UID_MISMATCH: { http: 409, outcome: 'rejected', final: true, message: '선택한 검사와 파일의 검사가 다릅니다. 파일은 저장되지 않았습니다.' },
+  EXISTING_STUDY_IDENTITY_UNRESOLVED: { http: 409, outcome: 'rejected', final: true, message: '이 검사에 이미 저장된 영상들의 환자 정보가 서로 다르거나 확인할 수 없어 반입할 수 없습니다. 파일은 저장되지 않았습니다. 관리자에게 이 검사의 환자 정보 확인을 요청하세요.' },
+  SOP_UID_AMBIGUOUS: { http: 409, outcome: 'rejected', final: true, message: '같은 영상 식별자(SOP)가 저장소에 둘 이상 있어 반입할 수 없습니다. 파일은 저장되지 않았습니다.' },
+  SOP_CONTENT_CONFLICT: { http: 409, outcome: 'rejected', final: true, message: '같은 영상 식별자(SOP)의 다른 원본이 이미 있어 반입할 수 없습니다. 파일은 저장되지 않았습니다.' },
+} as const);
+export type ImportCode = keyof typeof IMPORT_RESULT_CODES;
+
+export const OUTCOME_ANSWERS = Object.freeze({
+  stored: { http: 200, final: true, message: '원본을 저장하고 다시 읽어 같음을 확인했습니다.' },
+  'already-present': { http: 200, final: true, message: '같은 원본이 이미 저장되어 있습니다.' },
+});
+
+/** 4.7 lean list (D1161; D1244 keeps it). The Korean texts are the contract's. */
+const MODALITY_NOTICES = Object.freeze({
+  usCine: '초음파 동영상은 아직 직접 반입할 수 없습니다.',
+  xaCine: '혈관조영 동영상은 아직 직접 반입할 수 없습니다.',
+  mammography: '유방촬영 영상은 아직 직접 반입할 수 없습니다.',
+  other: '이 종류의 영상은 아직 직접 반입할 수 없습니다.',
+});
+const SINGLE_FRAME_ALWAYS = new Set(['CT', 'MR', 'CR', 'DX', 'SR', 'KO', 'PR', 'SEG', 'DOC']);
+
+export const RECOVERY_NOTICES = Object.freeze({
+  stored: '원본이 저장되어 있음을 확인해 Stored로 정리했습니다. 점유를 해제했습니다.',
+  noObject: '저장된 원본이 없음을 확인하고 근거를 기록했습니다. 같은 파일을 다시 보낼 수 있습니다.',
+  mayHaveWritten: '원본 충돌로 반입 완료를 확인할 수 없습니다. 점유만 해제했습니다. Orthanc의 원본은 그대로 두었습니다.',
+  orthanc: 'Orthanc를 확인하지 못했습니다. 아무것도 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.',
+  notApplicable: '확인할 미확인 시도가 없거나 아직 진행 중입니다.',
+  evidence: '확인 근거와 확인 시각을 확인하세요. 확인 시각은 그 시도의 시작 뒤, 지금 이전이어야 합니다.',
+});
+export const RECOVERY_BASES = Object.freeze(['orthanc-restarted', 'orthanc-log-checked']);
+
+export const IMPORT_NOT_READY_MESSAGE = 'DICOM 반입 기능이 아직 준비되지 않았습니다. 파일은 저장되지 않았습니다. 관리자에게 알려 주세요.';
+export const IMPORT_STORAGE_MESSAGE = '반입 기록을 저장하지 못했습니다. 아무것도 저장하지 않았습니다. 잠시 뒤 같은 파일로 다시 시도하세요.';
+
+export interface ImportOwner { institutionId: string; ownerIssuer: string; ownerSubject: string; actor: string }
+export interface InstitutionRow { id: string; name: string; dicomNames: string | null }
+
+export interface ImportAttempt {
+  attemptId: string; actor: string; generation: number; ownerInstance: string;
+  phase: 'prepared' | 'dispatching' | 'finished' | 'unknown';
+  leaseUntil: string; startedAt: string; finishedAt: string | null;
+  outcome: ImportOutcome; code: ImportCode | null; transport: null | 'certain-no-write' | 'unknown';
+  autoRecheckedAt: string | null;
+  recovery: null | { basis: string; checkedAt: string; adminIssuer: string; adminSubject: string; adminActor: string; requestedAt: string; resolvedAt: string | null };
+}
+
+export interface ImportFileEntry {
+  index: number; sha256: string; bytes: number; studyUid: string | null; seriesUid: string | null; sopUid: string | null;
+  expectedStudyUid: string | null; outcome: ImportOutcome; code: ImportCode | null;
+  identity: null | 'new-study' | 'matched' | 'not_comparable'; writeDisposition: WriteDisposition | null; at: string;
+  attempts: ImportAttempt[];
+}
+
+/** The file facts of an accepted read: what the gate binds and compares. */
+export interface AcceptedFile {
+  ok: true; studyUid: string; seriesUid: string; sopUid: string; patientId: string; issuerInstitutionId: string;
+  nameKey: string | null; birthKey: string | null; sexKey: string | null;
+}
+export type FilePrecheck = AcceptedFile | { ok: false; code: ImportCode; message: string };
+
+export interface ImportRequest {
+  owner: ImportOwner; operationId: string; index: number; expectedStudyUid: string | null;
+  bytes: Buffer; sha256: string; precheck: FilePrecheck;
+  /** Contract 3: the current role, institution and StudyAccess immediately before the first Orthanc write; throws the refusal. */
+  recheck: () => Promise<void>;
+}
+
+export interface ImportAnswer { status: number; entry: ImportFileEntry; message: string; refusal?: HttpException }
+
+type ClaimRow = { id: string; kind: string; studyUid: string; claimKey: string; claim: any } | null;
+type Tx = any;
+
+class OrthancFailure extends Error {
+  constructor(readonly kind: 'config' | 'connect' | 'transport' | 'timeout' | 'status' | 'size' | 'decode' | 'parse') { super('orthanc ' + kind); }
+}
+
+/** The file-level reading of SOP state at Orthanc (4.5 steps 1 and 3). */
+type SopReading =
+  | { kind: 'absent' } | { kind: 'exact'; id: string } | { kind: 'conflict' } | { kind: 'ambiguous' } | { kind: 'failed' };
+
+type InitVerdict =
+  | { kind: 'bound'; patientId: string; nameKey: string | null; birthKey: string | null; sexKey: string | null }
+  | { kind: 'empty' } | { kind: 'unresolved' } | { kind: 'unavailable' } | { kind: 'lost' };
+
+type Step =
+  | { kind: 'answer'; answer: ImportAnswer }
+  | { kind: 'enumerate' }
+  | { kind: 'fence'; attemptId: string }
+  | { kind: 'initialize'; attempt: ImportAttempt }
+  | { kind: 'recheck'; attempt: ImportAttempt }
+  | { kind: 'send'; attempt: ImportAttempt };
+
+const studyKey = (uid: string) => 'study:' + uid;
+const sopKey = (uid: string) => 'sop:' + uid;
+const iso = (at: Date) => at.toISOString();
+const later = (at: Date, ms: number) => new Date(at.getTime() + ms).toISOString();
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+const FINAL_OUTCOMES = new Set(['stored', 'already-present', 'rejected']);
+/** The signed 64-bit advisory key of a claim text; a hash collision only serialises two keys, the exact text is re-read. */
+const advisory = (key: string) => createHash('sha256').update(key, 'utf8').digest().readBigInt64BE(0).toString();
+const lastAttempt = (entry: ImportFileEntry): ImportAttempt | null => entry.attempts.length ? entry.attempts[entry.attempts.length - 1] : null;
+const leaseLive = (attempt: ImportAttempt, now: Date) => Date.parse(attempt.leaseUntil) > now.getTime();
+const activeAttempt = (attempt: ImportAttempt, now: Date) =>
+  (attempt.phase === 'prepared' || attempt.phase === 'dispatching') && leaseLive(attempt, now);
+const expiredPrepared = (attempt: ImportAttempt, now: Date) => attempt.phase === 'prepared' && !leaseLive(attempt, now);
+const unknownResult = (attempt: ImportAttempt, now: Date) =>
+  attempt.phase === 'unknown' || (attempt.phase === 'dispatching' && !leaseLive(attempt, now));
+
+/** The answer of a stored file entry: HTTP, message, from the one table. */
+export function fileAnswer(entry: ImportFileEntry): ImportAnswer {
+  if (entry.code === null) {
+    const row = OUTCOME_ANSWERS[entry.outcome as 'stored' | 'already-present'];
+    return { status: row ? row.http : 500, entry, message: row ? row.message : '' };
+  }
+  const row = IMPORT_RESULT_CODES[entry.code];
+  let message: string = row.message;
+  if (entry.outcome === 'rejected' && entry.writeDisposition === 'may-have-written') message = MAY_HAVE_WRITTEN_NOTICE;
+  if (entry.outcome === 'unconfirmed' && lastAttempt(entry)?.autoRecheckedAt) message = AFTER_RECHECK_NOTICE;
+  return { status: row.http, entry, message };
+}
+
+/** 4.4 transport classes: certain-no-write only for a fetch TypeError ended in the connect phase, never for our own abort. */
+export function connectPhaseFailure(error: unknown, ownAbort: boolean): boolean {
+  if (ownAbort || !(error instanceof TypeError)) return false;
+  const cause: any = (error as any).cause;
+  if (!cause) return false;
+  if (typeof cause.code === 'string' && CONNECT_PHASE_CODES.has(cause.code)) return true;
+  return Array.isArray(cause.errors) && cause.errors.length > 0
+    && cause.errors.every((inner: any) => typeof inner?.code === 'string' && CONNECT_PHASE_CODES.has(inner.code));
+}
+
+/** 4.2 issuer rule: every institution whose id, name or alias equals the value after trim and lower-casing. */
+export function issuerInstitutions(value: string, institutions: readonly InstitutionRow[]): Set<string> {
+  const key = value.trim().toLowerCase();
+  const found = new Set<string>();
+  for (const row of institutions) {
+    const names = [row.id, row.name, ...String(row.dicomNames ?? '').split(',')].map(name => String(name).trim().toLowerCase()).filter(Boolean);
+    if (names.includes(key)) found.add(row.id);
+  }
+  return found;
+}
+
+/** 4.7: null when the modality is importable in Part 1, else the Korean notice. */
+export function modalityRefusal(modality: string | null, frames: number | null): string | null {
+  const value = (modality ?? '').trim().toUpperCase();
+  const multiFrame = (frames ?? 1) > 1;
+  if (SINGLE_FRAME_ALWAYS.has(value)) return null;
+  if (value === 'US') return multiFrame ? MODALITY_NOTICES.usCine : null;
+  if (value === 'XA') return multiFrame ? MODALITY_NOTICES.xaCine : null;
+  if (value === 'MG') return MODALITY_NOTICES.mammography;
+  return MODALITY_NOTICES.other;
+}
+
+/**
+ * 4.1-4.3 and 4.7 on the bytes alone (no reservation, no StudyState change): the reader's five codes, PatientID present,
+ * the modality, the expected study and the issuer set. A non-UI NUL is never stripped here to make a value valid (B-01).
+ */
+export function precheckFile(read: DicomReadResult, expectedStudyUid: string | null, institutionId: string,
+  institutions: readonly InstitutionRow[]): FilePrecheck {
+  if (read.ok === false) return { ok: false, code: read.code, message: IMPORT_RESULT_CODES[read.code].message };
+  const h = read.header;
+  if (h.patientId === null || h.patientId.trim() === '')
+    return { ok: false, code: 'PATIENT_ID_MISSING', message: IMPORT_RESULT_CODES.PATIENT_ID_MISSING.message };
+  const modality = modalityRefusal(h.modality, h.numberOfFrames);
+  if (modality) return { ok: false, code: 'MODALITY_NOT_IMPORTABLE', message: modality };
+  if (expectedStudyUid !== null && expectedStudyUid !== h.studyInstanceUid)
+    return { ok: false, code: 'STUDY_UID_MISMATCH', message: IMPORT_RESULT_CODES.STUDY_UID_MISMATCH.message };
+  if (h.issuerOfPatientId !== null && h.issuerOfPatientId.trim() !== '') {
+    const found = issuerInstitutions(h.issuerOfPatientId, institutions);
+    if (found.size !== 1 || !found.has(institutionId))
+      return { ok: false, code: 'PATIENT_ISSUER_CONFLICT', message: IMPORT_RESULT_CODES.PATIENT_ISSUER_CONFLICT.message };
+  }
+  const keyOrNull = (value: string) => value === '' ? null : value;
+  return { ok: true, studyUid: h.studyInstanceUid, seriesUid: h.seriesInstanceUid, sopUid: h.sopInstanceUid,
+    patientId: h.patientId.trim(), issuerInstitutionId: institutionId,
+    nameKey: h.patientNameComparable ? keyOrNull(nameKey(h.patientName)) : null,
+    birthKey: keyOrNull(birthKey(h.patientBirthDate)), sexKey: keyOrNull(sexKey(h.patientSex)) };
+}
+
+/** 4.4 claim initialisation, step 3: judged over every header read; never over an index or a partial read. */
+export function judgeExistingHeaders(headers: readonly any[], studyUid: string, institutionId: string,
+  institutions: readonly InstitutionRow[]): InitVerdict {
+  const sops = new Set<string>();
+  const ids = new Set<string>(), issuers = new Set<string>();
+  const demographics = { nameKey: new Set<string>(), birthKey: new Set<string>(), sexKey: new Set<string>() };
+  for (const h of headers) {
+    if (!h || typeof h !== 'object' || Array.isArray(h)) return { kind: 'unresolved' };
+    for (const key of ['IssuerOfPatientID', 'PatientName', 'PatientBirthDate', 'PatientSex'])
+      if (Object.prototype.hasOwnProperty.call(h, key) && typeof h[key] !== 'string') return { kind: 'unresolved' };
+    if (h.StudyInstanceUID !== studyUid) return { kind: 'unresolved' };
+    if (typeof h.SOPInstanceUID !== 'string' || h.SOPInstanceUID.length > 64 || !UID.test(h.SOPInstanceUID) || sops.has(h.SOPInstanceUID))
+      return { kind: 'unresolved' };
+    sops.add(h.SOPInstanceUID);
+    if (typeof h.PatientID !== 'string' || h.PatientID.trim() === '') return { kind: 'unresolved' };
+    ids.add(h.PatientID.trim());
+    issuers.add(typeof h.IssuerOfPatientID === 'string' ? h.IssuerOfPatientID.trim() : '');
+    const name = nameKey(h.PatientName ?? ''), birth = birthKey(h.PatientBirthDate ?? ''), sex = sexKey(h.PatientSex ?? '');
+    if (name) demographics.nameKey.add(name);
+    if (birth) demographics.birthKey.add(birth);
+    if (sex) demographics.sexKey.add(sex);
+  }
+  if (ids.size !== 1 || issuers.size !== 1) return { kind: 'unresolved' };
+  const [issuer] = [...issuers];
+  if (issuer !== '') {
+    const found = issuerInstitutions(issuer, institutions);
+    if (found.size !== 1 || !found.has(institutionId)) return { kind: 'unresolved' };
+  }
+  if (demographics.nameKey.size > 1 || demographics.birthKey.size > 1 || demographics.sexKey.size > 1) return { kind: 'unresolved' };
+  const one = (set: Set<string>) => set.size ? [...set][0] : null;
+  return { kind: 'bound', patientId: [...ids][0], nameKey: one(demographics.nameKey), birthKey: one(demographics.birthKey),
+    sexKey: one(demographics.sexKey) };
+}
+
+/** 4.2 on a bound Study claim: refusal code, identity relation, and the empty demographic fields this file fills. */
+export function compareWithStudyClaim(claim: any, file: AcceptedFile, institutionId: string):
+  { code: ImportCode | null; identity: 'matched' | 'not_comparable'; fill: Record<string, string> } {
+  if (claim.institutionId !== institutionId) return { code: 'STUDY_OWNERSHIP_CONFLICT', identity: 'matched', fill: {} };
+  if (claim.patientId !== file.patientId) return { code: 'PATIENT_ID_CONFLICT', identity: 'matched', fill: {} };
+  if (claim.issuerInstitutionId !== file.issuerInstitutionId) return { code: 'PATIENT_ISSUER_CONFLICT', identity: 'matched', fill: {} };
+  let comparable = true;
+  const fill: Record<string, string> = {};
+  for (const field of ['nameKey', 'birthKey', 'sexKey'] as const) {
+    const stored = claim[field], given = file[field];
+    if (stored && given && stored !== given) return { code: 'PATIENT_IDENTITY_CONFLICT', identity: 'matched', fill: {} };
+    if (!stored || !given) comparable = false;
+    if (!stored && given) fill[field] = given;
+  }
+  return { code: null, identity: comparable ? 'matched' : 'not_comparable', fill };
+}
+
+/** 4.4 SOP claim: the identity tuple, hash and length of a reserved SOP must all equal this file's. */
+export function sameSopContent(claim: any, file: AcceptedFile, sha256: string, bytes: number, institutionId: string): boolean {
+  return claim.institutionId === institutionId && claim.studyUid === file.studyUid && claim.seriesUid === file.seriesUid
+    && claim.sopUid === file.sopUid && claim.patientId === file.patientId && claim.issuerInstitutionId === file.issuerInstitutionId
+    && claim.sha256 === sha256 && claim.bytes === bytes;
+}
+
+@Injectable()
+export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger('DicomImportGate');
+  /** ownerInstance of this process's attempts; a restart never mistakes an old attempt for its own. */
+  readonly bootId = randomUUID();
+  private stopping = false;
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  onModuleInit() {
+    // Startup reconciliation runs beside the server, never in front of it: a slow Orthanc must not hold the API down.
+    const timer = setTimeout(() => {
+      if (!this.stopping) void this.reconcileOnStart().catch(() => this.logger.warn('import reconciliation stopped; the next start or request retries it'));
+    }, 0);
+    timer.unref?.();
+  }
+
+  onModuleDestroy() { this.stopping = true; }
+
+  // ── readiness (4.5): the migration applied and Orthanc answering, each checked per request, never cached ──
+
+  async migrationApplied(): Promise<boolean> {
+    try {
+      const rows: any[] = await this.prisma.$queryRaw`SELECT EXISTS (SELECT 1 FROM "_prisma_migrations" WHERE migration_name = ${IMPORT_MIGRATION}
+          AND finished_at IS NOT NULL AND rolled_back_at IS NULL) AS applied,
+        (pg_catalog.to_regclass('public."ImportOperation"') IS NOT NULL) AS present`;
+      return rows.length === 1 && rows[0].applied === true && rows[0].present === true;
+    } catch { return false; }
+  }
+
+  async orthancAnswering(): Promise<boolean> {
+    try {
+      const system = await this.orthancJson('GET', '/system', undefined, SMALL_LIMIT);
+      return !!system && typeof system === 'object' && !Array.isArray(system) && typeof system.Version === 'string';
+    } catch { return false; }
+  }
+
+  /** 503 IMPORT_NOT_READY on member import routes only; Gateway and manual SR never call this. */
+  async ready(orthanc: boolean): Promise<void> {
+    if (!await this.migrationApplied() || (orthanc && !await this.orthancAnswering()))
+      throw new ServiceUnavailableException({ code: 'IMPORT_NOT_READY', message: IMPORT_NOT_READY_MESSAGE });
+  }
+
+  async institutions(): Promise<InstitutionRow[]> {
+    return this.prisma.institution.findMany({ select: { id: true, name: true, dicomNames: true } });
+  }
+
+  // ── the import state machine (4.4 transition table) ──
+
+  async importFile(r: ImportRequest): Promise<ImportAnswer> {
+    let enumeration: { failed: boolean; count: number } | null = null;
+    for (let round = 0; round < 8; round++) {
+      const step = await this.storage(() => this.intake(r, enumeration));
+      if (step.kind === 'answer') return step.answer;
+      if (step.kind === 'enumerate' && r.precheck.ok) { enumeration = await this.enumerateNewStudy(r.precheck.studyUid); continue; }
+      if (step.kind === 'fence') { await this.storage(() => this.fenceExpired(step.attemptId)); continue; }
+      if (step.kind === 'recheck') return this.autoRecheck(r, step.attempt);
+      if (step.kind === 'initialize') {
+        const next = await this.initialize(r, step.attempt);
+        if (next.kind === 'answer') return next.answer;
+        return this.send(r, next.attempt);
+      }
+      if (step.kind === 'send') return this.send(r, step.attempt);
+    }
+    throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: IMPORT_STORAGE_MESSAGE });
+  }
+
+  /** The intake transaction: claims (sorted) then the operation row; the reservation and the intent commit together. */
+  private intake(r: ImportRequest, enumeration: { failed: boolean; count: number } | null): Promise<Step> {
+    const file = r.precheck;
+    return this.write(async (tx, now) => {
+      const claims = file.ok ? await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]) : new Map<string, ClaimRow>();
+      const op = await this.lockOperation(tx, r.operationId);
+      if (op && !this.sameOwner(op, r.owner, 'import')) throw this.requestConflict('OPERATION_CONFLICT');
+      const results: ImportFileEntry[] = op ? clone(op.results) : [];
+      let entry = results.find(e => e.index === r.index) ?? null;
+      if (entry && (entry.sha256 !== r.sha256 || entry.bytes !== r.bytes.length || entry.expectedStudyUid !== r.expectedStudyUid))
+        throw this.requestConflict('OPERATION_CONTENT_CONFLICT');
+      const save = () => this.saveImport(tx, op, r, results, now);
+      if (entry) {
+        if (FINAL_OUTCOMES.has(entry.outcome)) return { kind: 'answer', answer: fileAnswer(entry) };
+        if (entry.outcome === 'unconfirmed') {
+          const last = lastAttempt(entry);
+          if (last && activeAttempt(last, now)) return { kind: 'answer', answer: fileAnswer(entry) };
+          if (last && unknownResult(last, now)) {
+            if (last.phase === 'dispatching') {
+              this.markUnknown(entry, last, now);
+              await save();
+              await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, last, now);
+            }
+            if (!last.autoRecheckedAt) return { kind: 'recheck', attempt: last };
+            return { kind: 'answer', answer: fileAnswer(entry) };
+          }
+          if (last && expiredPrepared(last, now)) {
+            this.finishAttempt(entry, last, now, { outcome: 'retryable', code: 'IMPORT_ATTEMPT_EXPIRED', transport: 'certain-no-write' });
+            await this.releaseHolders(tx, claims, last.attemptId, now, true);
+            await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, last, now);
+          }
+        }
+      }
+      if (file.ok === false) {
+        // A new file, or a retryable one whose bytes are now refused before any reservation (e.g. an issuer that no
+        // longer resolves to this institution alone): a final result, no reservation, no StudyState change.
+        if (!entry) { entry = this.newEntry(r, null, now); results.push(entry); }
+        this.settle(entry, now, file.code, 'rejected', null);
+        await save();
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, null, now);
+        return { kind: 'answer', answer: { ...fileAnswer(entry), message: file.message } };
+      }
+      if (!entry) { entry = this.newEntry(r, file, now); results.push(entry); }
+      const refuse = async (code: ImportCode, disposition: WriteDisposition | null = null): Promise<Step> => {
+        this.settle(entry, now, code, IMPORT_RESULT_CODES[code].outcome as ImportOutcome, disposition);
+        await save();
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, null, now);
+        return { kind: 'answer', answer: fileAnswer(entry) };
+      };
+      const state = await tx.studyState.findUnique({ where: { uid: file.studyUid } });
+      if (state && state.institutionId !== r.owner.institutionId) return refuse('STUDY_OWNERSHIP_CONFLICT', 'pre-write');
+      const study = claims.get(studyKey(file.studyUid)), sop = claims.get(sopKey(file.sopUid));
+      // Decide everything before changing anything, so a refusal leaves every reservation as it was.
+      let identity: ImportFileEntry['identity'] = 'new-study';
+      let fill: Record<string, string> = {};
+      let initialize = false;
+      if (!study) {
+        if (!state) {
+          if (!enumeration) return { kind: 'enumerate' };
+          if (enumeration.failed) return refuse('ORTHANC_UNAVAILABLE');
+          if (enumeration.count > 0) return refuse('STUDY_OWNERSHIP_UNDETERMINED');
+        } else initialize = true;
+      } else {
+        const holder = study.claim.heldByAttemptId;
+        if (holder) {
+          const blocking = await this.holderBlocks(tx, holder, now);
+          if (blocking === 'expired') return { kind: 'fence', attemptId: holder };
+          if (blocking) return refuse('STUDY_WRITE_PENDING');
+        }
+        if (study.claim.phase === 'initializing') initialize = true;
+        else {
+          const compared = compareWithStudyClaim(study.claim, file, r.owner.institutionId);
+          if (compared.code) return refuse(compared.code, 'pre-write');
+          identity = compared.identity; fill = compared.fill;
+        }
+      }
+      if (!initialize && sop) {
+        if (!sameSopContent(sop.claim, file, r.sha256, r.bytes.length, r.owner.institutionId)) return refuse('SOP_CONTENT_CONFLICT', 'pre-write');
+        const holder = sop.claim.heldByAttemptId;
+        if (holder) {
+          const blocking = await this.holderBlocks(tx, holder, now);
+          if (blocking === 'expired') return { kind: 'fence', attemptId: holder };
+          if (blocking) return refuse('SOP_WRITE_PENDING');
+        }
+      }
+      // From here on: one new attempt holds the Study (and, unless the Study is still being initialised, the SOP).
+      const attempt = this.newAttempt(entry, r.owner.actor, now);
+      entry.attempts.push(attempt);
+      entry.outcome = 'unconfirmed'; entry.code = 'IMPORT_UNCONFIRMED'; entry.writeDisposition = null; entry.at = iso(now);
+      if (!study) {
+        if (initialize) {
+          await this.createClaim(tx, 'study-claim', file.studyUid, studyKey(file.studyUid), this.studyClaim(file, r.owner.institutionId, 'initializing', attempt.attemptId, now, false), now);
+        } else {
+          await tx.studyState.createMany({ data: [{ uid: file.studyUid, institutionId: r.owner.institutionId,
+            reqHosp: await this.institutionName(tx, r.owner.institutionId), ss: 'Unverified', origin: 'local-import' }], skipDuplicates: true });
+          const owned = await tx.studyState.findUnique({ where: { uid: file.studyUid } });
+          if (!owned || owned.institutionId !== r.owner.institutionId) {
+            entry.attempts.pop();
+            return refuse('STUDY_OWNERSHIP_CONFLICT', 'pre-write');
+          }
+          await this.createClaim(tx, 'study-claim', file.studyUid, studyKey(file.studyUid), this.studyClaim(file, r.owner.institutionId, 'bound', attempt.attemptId, now, true), now);
+        }
+      } else {
+        await this.updateClaim(tx, study, { ...study.claim, ...fill, heldByAttemptId: attempt.attemptId }, now);
+      }
+      if (!initialize) {
+        entry.identity = identity;
+        if (sop) await this.updateClaim(tx, sop, { ...sop.claim, heldByAttemptId: attempt.attemptId }, now);
+        else await this.createClaim(tx, 'sop-claim', file.studyUid, sopKey(file.sopUid), this.sopClaim(file, r, attempt.attemptId, now), now);
+      }
+      await save();
+      await this.auditIntent(tx, r, entry, attempt, now);
+      return initialize ? { kind: 'initialize', attempt } : { kind: 'send', attempt };
+    });
+  }
+
+  /** 4.4 claim initialisation for a Study UID whose StudyState exists and that has no bound claim. */
+  private async initialize(r: ImportRequest, attempt: ImportAttempt): Promise<{ kind: 'answer'; answer: ImportAnswer } | { kind: 'send'; attempt: ImportAttempt }> {
+    const file = r.precheck as AcceptedFile;
+    const lease = this.keepLease(r.operationId, r.index, attempt.attemptId, ['prepared']);
+    let verdict: InitVerdict;
+    try { verdict = await this.readExistingStudy(file.studyUid, r.owner.institutionId, lease.signal); }
+    finally { lease.stop(); }
+    return this.storage(() => this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
+      const op = await this.lockOperation(tx, r.operationId);
+      const results: ImportFileEntry[] = clone(op.results);
+      const entry = results.find(e => e.index === r.index);
+      const mine = entry?.attempts.find(a => a.attemptId === attempt.attemptId);
+      const study = claims.get(studyKey(file.studyUid)), sop = claims.get(sopKey(file.sopUid));
+      if (!entry || !mine || mine.phase !== 'prepared' || !study || study.claim.phase !== 'initializing' || study.claim.heldByAttemptId !== mine.attemptId)
+        return { kind: 'answer' as const, answer: fileAnswer(entry ?? this.newEntry(r, file, now)) };
+      const save = () => this.saveImport(tx, op, r, results, now);
+      const end = async (code: ImportCode, keepClaim: boolean, disposition: WriteDisposition | null = 'pre-write') => {
+        this.finishAttempt(entry, mine, now, { outcome: IMPORT_RESULT_CODES[code].outcome as ImportOutcome, code, transport: 'certain-no-write' }, disposition);
+        if (keepClaim) await this.releaseHolders(tx, claims, mine.attemptId, now, false);
+        else await tx.importOperation.delete({ where: { id: study.id } });
+        await save();
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+        return { kind: 'answer' as const, answer: fileAnswer(entry) };
+      };
+      if (verdict.kind === 'lost') return end('IMPORT_ATTEMPT_EXPIRED', false, null);
+      if (verdict.kind === 'unavailable') return end('ORTHANC_UNAVAILABLE', false, null);
+      if (verdict.kind === 'unresolved') return end('EXISTING_STUDY_IDENTITY_UNRESOLVED', false);
+      let values: { patientId: string; nameKey: string | null; birthKey: string | null; sexKey: string | null };
+      if (verdict.kind === 'empty') {
+        const state = await tx.studyState.findUnique({ where: { uid: file.studyUid } });
+        if (!state || (state.origin !== 'gateway' && state.origin !== 'local-import')) return end('EXISTING_STUDY_IDENTITY_UNRESOLVED', false);
+        values = { patientId: file.patientId, nameKey: file.nameKey, birthKey: file.birthKey, sexKey: file.sexKey };
+      } else values = verdict;
+      const bound = { ...study.claim, phase: 'bound', patientId: values.patientId, issuerInstitutionId: r.owner.institutionId,
+        nameKey: values.nameKey, birthKey: values.birthKey, sexKey: values.sexKey };
+      const compared = compareWithStudyClaim(bound, file, r.owner.institutionId);
+      if (compared.code) {
+        await this.updateClaim(tx, study, { ...bound, heldByAttemptId: null }, now);
+        this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: compared.code, transport: 'certain-no-write' }, 'pre-write');
+        await save();
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+        return { kind: 'answer' as const, answer: fileAnswer(entry) };
+      }
+      const blocked = async (code: ImportCode, disposition: WriteDisposition | null) => {
+        await this.updateClaim(tx, study, { ...bound, ...compared.fill, heldByAttemptId: null }, now);
+        this.finishAttempt(entry, mine, now, { outcome: IMPORT_RESULT_CODES[code].outcome as ImportOutcome, code, transport: 'certain-no-write' }, disposition);
+        await save();
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+        return { kind: 'answer' as const, answer: fileAnswer(entry) };
+      };
+      if (sop) {
+        if (!sameSopContent(sop.claim, file, r.sha256, r.bytes.length, r.owner.institutionId)) return blocked('SOP_CONTENT_CONFLICT', 'pre-write');
+        if (sop.claim.heldByAttemptId && sop.claim.heldByAttemptId !== mine.attemptId) return blocked('SOP_WRITE_PENDING', null);
+        await this.updateClaim(tx, sop, { ...sop.claim, heldByAttemptId: mine.attemptId }, now);
+      } else await this.createClaim(tx, 'sop-claim', file.studyUid, sopKey(file.sopUid), this.sopClaim(file, r, mine.attemptId, now), now);
+      await this.updateClaim(tx, study, { ...bound, ...compared.fill }, now);
+      entry.identity = compared.identity;
+      mine.leaseUntil = later(now, LEASE_MS);
+      await save();
+      return { kind: 'send' as const, attempt: mine };
+    }));
+  }
+
+  /** 4.5 steps 1-3 for one prepared attempt that holds its Study and SOP. */
+  private async send(r: ImportRequest, attempt: ImportAttempt): Promise<ImportAnswer> {
+    const file = r.precheck as AcceptedFile;
+    const lease = this.keepLease(r.operationId, r.index, attempt.attemptId, ['prepared', 'dispatching']);
+    try {
+      const before = await this.readSop(file, r.bytes.length, r.sha256, null);
+      if (before.kind !== 'absent') {
+        const ended: Record<string, [ImportOutcome, ImportCode | null, WriteDisposition | null]> = {
+          failed: ['retryable', 'ORTHANC_UNAVAILABLE', null], ambiguous: ['rejected', 'SOP_UID_AMBIGUOUS', 'pre-write'],
+          conflict: ['rejected', 'SOP_CONTENT_CONFLICT', 'pre-write'], exact: ['already-present', null, null] };
+        const [outcome, code, disposition] = ended[before.kind];
+        return this.finish(r, attempt, { outcome, code, transport: 'certain-no-write', disposition, release: true, from: ['prepared'] });
+      }
+      try { await r.recheck(); }
+      catch (refusal) {
+        if (!(refusal instanceof HttpException) || ![403, 404].includes(refusal.getStatus())) throw refusal;
+        const answer = await this.finish(r, attempt, { outcome: 'retryable', code: 'IMPORT_PERMISSION_REVOKED', transport: 'certain-no-write', disposition: null, release: true, from: ['prepared'] });
+        return { ...answer, status: refusal.getStatus(), refusal };
+      }
+      if (!await this.storage(() => this.markDispatching(r, attempt))) return this.current(r);
+      const posted = await this.postInstance(r.bytes);
+      if (posted.kind === 'certain-no-write')
+        return this.finish(r, attempt, { outcome: 'retryable', code: 'ORTHANC_UNAVAILABLE', transport: 'certain-no-write', disposition: null, release: true, from: ['dispatching'] });
+      if (posted.kind === 'unknown')
+        return this.finish(r, attempt, { outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', transport: 'unknown', disposition: null, release: false, from: ['dispatching'], phase: 'unknown' });
+      const after = await this.readSop(file, r.bytes.length, r.sha256, posted.id);
+      if (after.kind === 'exact')
+        return this.finish(r, attempt, { outcome: posted.status === 'AlreadyStored' ? 'already-present' : 'stored', code: null, transport: null, disposition: null, release: true, from: ['dispatching'] });
+      if (after.kind === 'conflict' || after.kind === 'ambiguous')
+        return this.finish(r, attempt, { outcome: 'rejected', code: after.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: null, disposition: 'may-have-written', release: false, from: ['dispatching'] });
+      return this.finish(r, attempt, { outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', transport: null, disposition: null, release: false, from: ['dispatching'], phase: 'unknown' });
+    } finally { lease.stop(); }
+  }
+
+  /** 4.4 automatic re-check, once per attempt: a read only, never a resend; absence leaves the file Unconfirmed. */
+  private async autoRecheck(r: ImportRequest, attempt: ImportAttempt): Promise<ImportAnswer> {
+    const file = r.precheck as AcceptedFile;
+    const reading = await this.readSop(file, r.bytes.length, r.sha256, null);
+    if (reading.kind === 'failed') return this.current(r);
+    return this.storage(() => this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
+      const op = await this.lockOperation(tx, r.operationId);
+      const results: ImportFileEntry[] = clone(op.results);
+      const entry = results.find(e => e.index === r.index);
+      const mine = entry && lastAttempt(entry);
+      if (!entry || !mine || mine.attemptId !== attempt.attemptId || mine.autoRecheckedAt || !unknownResult(mine, now)) return fileAnswer(entry);
+      mine.autoRecheckedAt = iso(now);
+      if (reading.kind === 'exact') {
+        this.finishAttempt(entry, mine, now, { outcome: 'stored', code: null, transport: mine.transport });
+        await this.releaseHolders(tx, claims, mine.attemptId, now, false);
+      } else if (reading.kind === 'conflict' || reading.kind === 'ambiguous') {
+        this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine.transport }, 'may-have-written');
+      }
+      await this.saveImport(tx, op, r, results, now);
+      if (reading.kind !== 'absent') await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+      return fileAnswer(entry);
+    }));
+  }
+
+  /** The attempt result, committed with its audit under the claim -> operation locks; a lost CAS writes nothing. */
+  private finish(r: ImportRequest, attempt: ImportAttempt, change: { outcome: ImportOutcome; code: ImportCode | null;
+    transport: ImportAttempt['transport']; disposition: WriteDisposition | null; release: boolean; from: string[]; phase?: 'unknown' }): Promise<ImportAnswer> {
+    const file = r.precheck as AcceptedFile;
+    return this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
+      const op = await this.lockOperation(tx, r.operationId);
+      const results: ImportFileEntry[] = clone(op.results);
+      const entry = results.find(e => e.index === r.index);
+      const mine = entry && lastAttempt(entry);
+      if (!entry || !mine || mine.attemptId !== attempt.attemptId || mine.generation !== attempt.generation || !change.from.includes(mine.phase))
+        return fileAnswer(entry);
+      this.finishAttempt(entry, mine, now, { outcome: change.outcome, code: change.code, transport: change.transport }, change.disposition, change.phase);
+      if (change.release) await this.releaseHolders(tx, claims, mine.attemptId, now, true);
+      await this.saveImport(tx, op, r, results, now);
+      await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+      return fileAnswer(entry);
+    }).catch(() => {
+      // After the POST a result that could not be committed with its audit leaves the file Unconfirmed with its holders
+      // (no rollback-delete, 4.4); before any write it is 503 with nothing changed (the prepared attempt expires and is fenced).
+      if (change.from.includes('dispatching')) return this.unconfirmedAnswer(r, attempt);
+      throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: IMPORT_STORAGE_MESSAGE });
+    });
+  }
+
+  private unconfirmedAnswer(r: ImportRequest, attempt: ImportAttempt): ImportAnswer {
+    const file = r.precheck as AcceptedFile;
+    const entry: ImportFileEntry = { index: r.index, sha256: r.sha256, bytes: r.bytes.length, studyUid: file.studyUid, seriesUid: file.seriesUid,
+      sopUid: file.sopUid, expectedStudyUid: r.expectedStudyUid, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', identity: null,
+      writeDisposition: null, at: attempt.startedAt, attempts: [attempt] };
+    return fileAnswer(entry);
+  }
+
+  private async current(r: ImportRequest): Promise<ImportAnswer> {
+    const op = await this.prisma.importOperation.findUnique({ where: { id: r.operationId } });
+    const entry = (op?.results as any[] ?? []).find((e: any) => e.index === r.index);
+    if (!entry) throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: IMPORT_STORAGE_MESSAGE });
+    return fileAnswer(entry);
+  }
+
+  /** prepared -> dispatching under the claim -> operation locks, only while this attempt still holds a live lease. */
+  private markDispatching(r: ImportRequest, attempt: ImportAttempt): Promise<boolean> {
+    const file = r.precheck as AcceptedFile;
+    return this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
+      const op = await this.lockOperation(tx, r.operationId);
+      const results: ImportFileEntry[] = clone(op.results);
+      const entry = results.find(e => e.index === r.index);
+      const mine = entry && lastAttempt(entry);
+      const holds = [...claims.values()].every(row => row && row.claim.heldByAttemptId === attempt.attemptId);
+      if (!mine || mine.attemptId !== attempt.attemptId || mine.phase !== 'prepared' || !leaseLive(mine, now) || !holds) return false;
+      mine.phase = 'dispatching';
+      mine.leaseUntil = later(now, LEASE_MS);
+      await this.saveImport(tx, op, r, results, now);
+      return true;
+    });
+  }
+
+  /** A Study/SOP holder blocks unless it is a prepared attempt whose lease ran out (that one is fenced first). */
+  private async holderBlocks(tx: Tx, attemptId: string, now: Date): Promise<boolean | 'expired'> {
+    const found = await this.findAttempt(tx, attemptId);
+    if (!found) return true;
+    return expiredPrepared(found.attempt, now) ? 'expired' : true;
+  }
+
+  private async findAttempt(db: Tx, attemptId: string): Promise<{ opId: string; entry: ImportFileEntry; attempt: ImportAttempt } | null> {
+    const probe = JSON.stringify([{ attempts: [{ attemptId }] }]);
+    const rows: any[] = await db.$queryRaw`SELECT id, results FROM "ImportOperation" WHERE kind = 'import' AND results @> ${probe}::jsonb`;
+    for (const row of rows) for (const entry of row.results as ImportFileEntry[]) {
+      const attempt = entry.attempts.find(a => a.attemptId === attemptId);
+      if (attempt) return { opId: row.id, entry, attempt };
+    }
+    return null;
+  }
+
+  /**
+   * Fence a prepared attempt whose lease ran out (it never sent anything): retryable IMPORT_ATTEMPT_EXPIRED, only its own
+   * holders released, an initializing Study claim it held deleted (no Orthanc write happened; the next import reads again).
+   */
+  private async fenceExpired(attemptId: string): Promise<void> {
+    const seen = await this.findAttempt(this.prisma, attemptId);
+    if (!seen) return;
+    const keys = [seen.entry.studyUid && studyKey(seen.entry.studyUid), seen.entry.sopUid && sopKey(seen.entry.sopUid)].filter(Boolean) as string[];
+    await this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, keys);
+      const op = await this.lockOperation(tx, seen.opId);
+      if (!op) return;
+      const results: ImportFileEntry[] = clone(op.results);
+      const entry = results.find(e => e.index === seen.entry.index);
+      const attempt = entry?.attempts.find(a => a.attemptId === attemptId);
+      if (!entry || !attempt || lastAttempt(entry) !== attempt || !expiredPrepared(attempt, now)) return;
+      this.finishAttempt(entry, attempt, now, { outcome: 'retryable', code: 'IMPORT_ATTEMPT_EXPIRED', transport: 'certain-no-write' });
+      await this.releaseHolders(tx, claims, attemptId, now, true);
+      await tx.importOperation.update({ where: { id: op.id }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
+      await this.auditResult(tx, op.institutionId, op.id, entry, attempt, now);
+    });
+  }
+
+  /** New Study UID without StudyState: one bounded enumeration before any reservation (4.4 "StudyState가 아직 없으면"). */
+  private async enumerateNewStudy(studyUid: string): Promise<{ failed: boolean; count: number }> {
+    try {
+      const ids = await this.orthancJson('POST', '/tools/find', JSON.stringify({ Level: 'Instance', Query: { StudyInstanceUID: studyUid },
+        Limit: ENUMERATION_SENTINEL, Expand: false }), CONTEXT_LIMIT);
+      // Any answer that is not a clean empty list means originals may exist: the ownership is undetermined.
+      return { failed: false, count: Array.isArray(ids) ? ids.length : 1 };
+    } catch (error) {
+      return error instanceof OrthancFailure && ['size', 'decode', 'parse'].includes(error.kind) ? { failed: false, count: 1 } : { failed: true, count: 0 };
+    }
+  }
+
+  /**
+   * 4.4 steps 1-4: one enumeration of the study's exact instance set, then the stored-file header of every instance, one
+   * at a time, each 5 s / 16 MiB, all within 240 s; at most 4,097 Orthanc requests. Only a failed first enumeration is
+   * "unavailable" (503); every later failure is "unresolved" (409); a partial read is never judged.
+   */
+  async readExistingStudy(studyUid: string, institutionId: string, lease?: AbortSignal): Promise<InitVerdict> {
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), INIT_BUDGET_MS);
+    const started = performance.now();
+    const stop = () => deadline.abort();
+    lease?.addEventListener('abort', stop, { once: true });
+    try {
+      let ids: any;
+      try {
+        ids = await this.orthancJson('POST', '/tools/find', JSON.stringify({ Level: 'Instance', Query: { StudyInstanceUID: studyUid },
+          Limit: ENUMERATION_SENTINEL, Expand: false }), CONTEXT_LIMIT, deadline.signal);
+      } catch (error) {
+        if (lease?.aborted) return { kind: 'lost' };
+        return error instanceof OrthancFailure && ['size', 'decode', 'parse'].includes(error.kind) ? { kind: 'unresolved' } : { kind: 'unavailable' };
+      }
+      if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !ORTHANC_ID.test(id)) || new Set(ids).size !== ids.length)
+        return { kind: 'unresolved' };
+      if (ids.length === 0) return { kind: 'empty' };
+      if (ids.length >= ENUMERATION_SENTINEL) return { kind: 'unresolved' };
+      const headers: any[] = [];
+      for (const id of ids) {
+        if (performance.now() - started >= INIT_BUDGET_MS) return { kind: 'unresolved' };
+        try {
+          const h = await this.orthancJson('GET', `/instances/${id}/tags?simplify`, undefined, CONTEXT_LIMIT, deadline.signal);
+          // Keep the seven values only; the rest of a (possibly large) header is released at once.
+          headers.push(h && typeof h === 'object' && !Array.isArray(h) ? pick(h) : h);
+        } catch {
+          if (lease?.aborted) return { kind: 'lost' };
+          return { kind: 'unresolved' };
+        }
+      }
+      if (performance.now() - started >= INIT_BUDGET_MS) return { kind: 'unresolved' };
+      return judgeExistingHeaders(headers, studyUid, institutionId, await this.institutions());
+    } finally {
+      clearTimeout(timer);
+      lease?.removeEventListener('abort', stop);
+    }
+  }
+
+  // ── GET status, startup reconciliation and the admin recovery ──
+
+  /** GET /api/dicom-import/:id: the owner's own import operation only; read-only reconciliation of unknown attempts. */
+  async importStatus(owner: ImportOwner, operationId: string, orthanc: boolean) {
+    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+    if (!op || !this.sameOwner(op, owner, 'import')) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
+    const now = await this.dbNow(this.prisma);
+    for (const entry of op.results as any as ImportFileEntry[]) {
+      const last = lastAttempt(entry);
+      if (entry.outcome === 'unconfirmed' && last && unknownResult(last, now)) await this.reconcileUnknown(op.id, entry.index, last.attemptId, orthanc);
+    }
+    const fresh = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+    return { operationId, status: fresh.status, files: (fresh.results as any as ImportFileEntry[]).map(entry => this.publicFile(entry)) };
+  }
+
+  publicFile(entry: ImportFileEntry) {
+    const answer = fileAnswer(entry);
+    const last = lastAttempt(entry);
+    return { index: entry.index, outcome: entry.outcome, code: entry.code, message: answer.message, identity: entry.identity,
+      writeDisposition: entry.writeDisposition, studyUid: entry.studyUid, seriesUid: entry.seriesUid, sopUid: entry.sopUid,
+      sha256: entry.sha256, bytes: entry.bytes, at: entry.at, generation: last ? last.generation : 0,
+      attempts: entry.attempts.map(a => ({ attemptId: a.attemptId, generation: a.generation, phase: a.phase, outcome: a.outcome, code: a.code,
+        transport: a.transport, startedAt: a.startedAt, finishedAt: a.finishedAt, autoRecheckedAt: a.autoRecheckedAt,
+        recovery: a.recovery ? { basis: a.recovery.basis, checkedAt: a.recovery.checkedAt, requestedAt: a.recovery.requestedAt, resolvedAt: a.recovery.resolvedAt } : null })) };
+  }
+
+  /**
+   * An expired dispatching or unknown attempt: Orthanc read only. Exact -> stored, confirmed different -> rejected
+   * (may-have-written, occupancy kept); otherwise the file stays Unconfirmed and a dispatching attempt becomes unknown with
+   * its unconfirmed result row. Never a resend, never a release on absence.
+   */
+  private async reconcileUnknown(operationId: string, index: number, attemptId: string, orthanc: boolean): Promise<void> {
+    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+    const seen = (op?.results as any as ImportFileEntry[] ?? []).find(e => e.index === index);
+    if (!seen || !seen.studyUid || !seen.sopUid) return;
+    const file = { studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid } as AcceptedFile;
+    let reading: SopReading = { kind: 'failed' };
+    if (orthanc) {
+      const sop = await this.prisma.importOperation.findUnique({ where: { claimKey: sopKey(seen.sopUid) } });
+      const claim: any = sop?.claim;
+      if (claim && claim.sha256 === seen.sha256) reading = await this.readSop({ ...file, patientId: claim.patientId } as AcceptedFile, seen.bytes, seen.sha256, null);
+    }
+    await this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, [studyKey(seen.studyUid), sopKey(seen.sopUid)]);
+      const locked = await this.lockOperation(tx, operationId);
+      const results: ImportFileEntry[] = clone(locked.results);
+      const entry = results.find(e => e.index === index);
+      const mine = entry && lastAttempt(entry);
+      if (!entry || !mine || mine.attemptId !== attemptId || entry.outcome !== 'unconfirmed' || !unknownResult(mine, now)) return;
+      if (reading.kind === 'exact') {
+        this.finishAttempt(entry, mine, now, { outcome: 'stored', code: null, transport: mine.transport });
+        await this.releaseHolders(tx, claims, attemptId, now, false);
+      } else if (reading.kind === 'conflict' || reading.kind === 'ambiguous') {
+        this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine.transport }, 'may-have-written');
+      } else if (mine.phase === 'dispatching') this.markUnknown(entry, mine, now);
+      else return;
+      await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
+      await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now);
+    }).catch(() => undefined);
+  }
+
+  /**
+   * Startup (4.4 "복원·maintenance"): 500-row cursor batches. Inactive prepared -> IMPORT_ATTEMPT_EXPIRED; dispatching/unknown ->
+   * read-only reconciliation; an initializing claim without a live holder is deleted (no write happened); an expired
+   * download sending attempt -> unconfirmed. Another instance's live lease is never taken.
+   */
+  async reconcileOnStart(): Promise<{ fenced: number; reconciled: number; claimsRemoved: number; downloads: number }> {
+    const counts = { fenced: 0, reconciled: 0, claimsRemoved: 0, downloads: 0 };
+    if (!await this.migrationApplied()) return counts;
+    const orthanc = await this.orthancAnswering();
+    let cursor: string | null = null;
+    for (;;) {
+      const page: any[] = await this.prisma.importOperation.findMany({ where: { kind: 'import', status: 'open', ...(cursor ? { id: { gt: cursor } } : {}) },
+        orderBy: { id: 'asc' }, take: 500 });
+      for (const op of page) {
+        const now = await this.dbNow(this.prisma);
+        for (const entry of op.results as ImportFileEntry[]) {
+          const last = lastAttempt(entry);
+          if (entry.outcome !== 'unconfirmed' || !last) continue;
+          if (expiredPrepared(last, now)) { await this.storage(() => this.fenceExpired(last.attemptId)).catch(() => undefined); counts.fenced++; }
+          else if (unknownResult(last, now)) { await this.reconcileUnknown(op.id, entry.index, last.attemptId, orthanc); counts.reconciled++; }
+        }
+      }
+      if (page.length < 500 || this.stopping) break;
+      cursor = page[page.length - 1].id;
+    }
+    cursor = null;
+    for (;;) {
+      const page: any[] = await this.prisma.importOperation.findMany({ where: { kind: 'study-claim', ...(cursor ? { id: { gt: cursor } } : {}) },
+        orderBy: { id: 'asc' }, take: 500 });
+      for (const row of page) {
+        if (row.claim?.phase !== 'initializing') continue;
+        const holder = row.claim.heldByAttemptId ? await this.findAttempt(this.prisma, row.claim.heldByAttemptId) : null;
+        if (holder) continue;   // its attempt was fenced above, or is live elsewhere
+        await this.write(async tx => {
+          const claims = await this.lockClaims(tx, [row.claimKey]);
+          const locked = claims.get(row.claimKey);
+          if (locked && locked.claim.phase === 'initializing' && !(locked.claim.heldByAttemptId && await this.findAttempt(tx, locked.claim.heldByAttemptId))) {
+            await tx.importOperation.delete({ where: { id: locked.id } });
+            counts.claimsRemoved++;
+          }
+        }).catch(() => undefined);
+      }
+      if (page.length < 500 || this.stopping) break;
+      cursor = page[page.length - 1].id;
+    }
+    counts.downloads = await this.expireDownloads();
+    if (counts.fenced || counts.reconciled || counts.claimsRemoved || counts.downloads)
+      this.logger.log(`import reconciliation: fenced ${counts.fenced}, reconciled ${counts.reconciled}, claims removed ${counts.claimsRemoved}, downloads ${counts.downloads}`);
+    return counts;
+  }
+
+  /** Download attempts whose sending lease ran out become unconfirmed; their checkpoints stay as they were. */
+  async expireDownloads(operationId?: string): Promise<number> {
+    let changed = 0, cursor: string | null = null;
+    for (;;) {
+      const where: any = operationId ? { id: operationId } : { kind: 'download', status: 'sending', ...(cursor ? { id: { gt: cursor } } : {}) };
+      const page: any[] = await this.prisma.importOperation.findMany({ where, orderBy: { id: 'asc' }, take: 500 });
+      for (const row of page) {
+        if (row.kind !== 'download') continue;
+        await this.write(async (tx, now) => {
+          const op = await this.lockOperation(tx, row.id);
+          const download = clone(op.download);
+          let touched = false;
+          for (const attempt of download.attempts) if (attempt.state === 'sending' && Date.parse(attempt.leaseUntil) <= now.getTime()) {
+            attempt.state = 'unconfirmed'; attempt.endedAt = iso(now); touched = true;
+          }
+          if (!touched) return;
+          await tx.importOperation.update({ where: { id: op.id }, data: { download, status: downloadStatus(download), updatedAt: now } });
+          changed++;
+        }).catch(() => undefined);
+      }
+      if (operationId || page.length < 500 || this.stopping) break;
+      cursor = page[page.length - 1].id;
+    }
+    return changed;
+  }
+
+  /**
+   * POST /api/admin/dicom-import/:operationId/files/:index/recovery (4.4 "관리자 확인"): request record and audit first,
+   * then the Orthanc re-read, then the result with its audits. The admin route never writes to or deletes from Orthanc.
+   */
+  async recover(admin: ImportOwner, operationId: string, index: number, body: unknown) {
+    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+    const seen = op && op.kind === 'import' && op.institutionId === admin.institutionId
+      ? (op.results as any as ImportFileEntry[]).find(e => e.index === index) : null;
+    if (!seen) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
+    const evidence = parseRecoveryBody(body);
+    if (!evidence) throw new HttpException({ code: 'RECOVERY_EVIDENCE_INVALID', message: RECOVERY_NOTICES.evidence }, 400);
+    const keys = [seen.studyUid && studyKey(seen.studyUid), seen.sopUid && sopKey(seen.sopUid)].filter(Boolean) as string[];
+    const requested = await this.storage(() => this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, keys);
+      const locked = await this.lockOperation(tx, operationId);
+      const results: ImportFileEntry[] = clone(locked.results);
+      const entry = results.find(e => e.index === index);
+      const mine = entry && lastAttempt(entry);
+      const holds = !!mine && [...claims.values()].some(row => row?.claim?.heldByAttemptId === mine.attemptId);
+      const unknown = !!mine && entry.outcome === 'unconfirmed' && unknownResult(mine, now);
+      const occupied = !!mine && entry.outcome === 'rejected' && entry.writeDisposition === 'may-have-written' && holds;
+      if (!unknown && !occupied) throw new HttpException({ code: 'RECOVERY_NOT_APPLICABLE', message: RECOVERY_NOTICES.notApplicable }, 409);
+      const checkedAt = Date.parse(evidence.checkedAt);
+      if (checkedAt < Date.parse(mine.startedAt) || checkedAt > now.getTime())
+        throw new HttpException({ code: 'RECOVERY_EVIDENCE_INVALID', message: RECOVERY_NOTICES.evidence }, 400);
+      mine.recovery = { basis: evidence.basis, checkedAt: evidence.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject,
+        adminActor: admin.actor, requestedAt: iso(now), resolvedAt: null };
+      await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, updatedAt: now } });
+      await tx.auditLog.create({ data: { actor: admin.actor, action: 'dicom.import.recovery.request', target: entry.studyUid ?? operationId,
+        detail: JSON.stringify({ institutionId: locked.institutionId, operationId, index, attemptId: mine.attemptId, generation: mine.generation,
+          basis: evidence.basis, checkedAt: evidence.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject, at: iso(now) }) } });
+      return { attemptId: mine.attemptId, requestedAt: mine.recovery.requestedAt, unknown, sha256: entry.sha256, bytes: entry.bytes };
+    }));
+    let reading: SopReading = { kind: 'failed' };
+    if (requested.unknown) {
+      const sop = seen.sopUid ? await this.prisma.importOperation.findUnique({ where: { claimKey: sopKey(seen.sopUid) } }) : null;
+      const claim: any = sop?.claim;
+      if (claim) reading = await this.readSop({ studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid, patientId: claim.patientId } as AcceptedFile,
+        requested.bytes, requested.sha256, null);
+      if (reading.kind === 'failed') throw new ServiceUnavailableException({ code: 'ORTHANC_UNAVAILABLE', message: RECOVERY_NOTICES.orthanc });
+    }
+    return this.storage(() => this.write(async (tx, now) => {
+      const claims = await this.lockClaims(tx, keys);
+      const locked = await this.lockOperation(tx, operationId);
+      const results: ImportFileEntry[] = clone(locked.results);
+      const entry = results.find(e => e.index === index);
+      const mine = entry && lastAttempt(entry);
+      if (!mine || mine.attemptId !== requested.attemptId || mine.recovery?.requestedAt !== requested.requestedAt || mine.recovery.resolvedAt)
+        throw new HttpException({ code: 'RECOVERY_NOT_APPLICABLE', message: RECOVERY_NOTICES.notApplicable }, 409);
+      let notice: string;
+      if (!requested.unknown) notice = RECOVERY_NOTICES.mayHaveWritten;
+      else if (reading.kind === 'exact') {
+        this.finishAttempt(entry, mine, now, { outcome: 'stored', code: null, transport: mine.transport });
+        notice = RECOVERY_NOTICES.stored;
+      } else if (reading.kind === 'absent') {
+        this.finishAttempt(entry, mine, now, { outcome: 'retryable', code: 'RECOVERED_NO_OBJECT', transport: mine.transport });
+        notice = RECOVERY_NOTICES.noObject;
+      } else {
+        this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine.transport }, 'may-have-written');
+        notice = RECOVERY_NOTICES.mayHaveWritten;
+      }
+      mine.recovery.resolvedAt = iso(now);
+      await this.releaseHolders(tx, claims, mine.attemptId, now, false);
+      await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
+      await tx.auditLog.create({ data: { actor: admin.actor, action: 'dicom.import.recovery.result', target: entry.studyUid ?? operationId,
+        detail: JSON.stringify({ institutionId: locked.institutionId, operationId, index, attemptId: mine.attemptId, generation: mine.generation,
+          basis: mine.recovery.basis, checkedAt: mine.recovery.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject,
+          outcome: entry.outcome, code: entry.code, at: iso(now) }) } });
+      await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now, admin.actor);
+      return { operationId, index, outcome: entry.outcome, code: entry.code, writeDisposition: entry.writeDisposition, message: notice };
+    }));
+  }
+
+  /**
+   * H's disposal hook (4.4 claim lifetime, U4P3-07): inside H's retention lock, delete the Study claim and every SOP claim
+   * of the study, so no patient identity value of the disposed originals stays here. Refused CLAIM_OCCUPIED (nothing
+   * deleted) while any of them has a holder or a new reservation appears meanwhile; H then counts the set incomplete.
+   */
+  async disposeImportClaims(studyUid: string, tx?: Tx): Promise<{ disposed: number } | { refused: 'CLAIM_OCCUPIED' }> {
+    const work = async (db: Tx) => {
+      const listed = async () => (await db.importOperation.findMany({ where: { kind: 'sop-claim', studyUid }, select: { claimKey: true } }))
+        .map((row: any) => row.claimKey as string).sort();
+      const before = await listed();
+      const claims = await this.lockClaims(db, [studyKey(studyUid), ...before]);
+      const after = await listed();
+      if (JSON.stringify(after) !== JSON.stringify(before)) return { refused: 'CLAIM_OCCUPIED' as const };
+      const rows = [...claims.values()].filter(Boolean);
+      if (rows.some(row => row.claim?.heldByAttemptId)) return { refused: 'CLAIM_OCCUPIED' as const };
+      for (const row of rows) await db.importOperation.delete({ where: { id: row.id } });
+      return { disposed: rows.length };
+    };
+    return tx ? work(tx) : this.write(work);
+  }
+
+  // ── reservations, entries and audit rows ──
+
+  private studyClaim(file: AcceptedFile, institutionId: string, phase: 'initializing' | 'bound', holder: string, now: Date, values: boolean) {
+    return { schemaVersion: 1, phase, institutionId, studyUid: file.studyUid,
+      patientId: values ? file.patientId : null, issuerInstitutionId: values ? file.issuerInstitutionId : null,
+      nameKey: values ? file.nameKey : null, birthKey: values ? file.birthKey : null, sexKey: values ? file.sexKey : null,
+      heldByAttemptId: holder, createdAt: iso(now) };
+  }
+
+  private sopClaim(file: AcceptedFile, r: ImportRequest, holder: string, now: Date) {
+    return { schemaVersion: 1, institutionId: r.owner.institutionId, studyUid: file.studyUid, seriesUid: file.seriesUid, sopUid: file.sopUid,
+      patientId: file.patientId, issuerInstitutionId: file.issuerInstitutionId, sha256: r.sha256, bytes: r.bytes.length,
+      heldByAttemptId: holder, createdAt: iso(now) };
+  }
+
+  private async createClaim(tx: Tx, kind: 'study-claim' | 'sop-claim', studyUid: string, claimKey: string, claim: any, now: Date) {
+    await tx.importOperation.create({ data: { id: randomUUID(), institutionId: claim.institutionId, ...INTERNAL, kind, studyUid,
+      status: 'reserved', results: [], claimKey, claim, createdAt: now, updatedAt: now } });
+  }
+
+  private async updateClaim(tx: Tx, row: ClaimRow, claim: any, now: Date) {
+    await tx.importOperation.update({ where: { id: row.id }, data: { claim, updatedAt: now } });
+  }
+
+  /** Release only the holders this attempt holds; an initializing Study claim it held goes away when asked (no write). */
+  private async releaseHolders(tx: Tx, claims: Map<string, ClaimRow>, attemptId: string, now: Date, dropInitializing: boolean) {
+    for (const row of claims.values()) {
+      if (!row || row.claim?.heldByAttemptId !== attemptId) continue;
+      if (dropInitializing && row.kind === 'study-claim' && row.claim.phase === 'initializing')
+        await tx.importOperation.delete({ where: { id: row.id } });
+      else await this.updateClaim(tx, row, { ...row.claim, heldByAttemptId: null }, now);
+    }
+  }
+
+  private newEntry(r: ImportRequest, file: AcceptedFile | null, now: Date): ImportFileEntry {
+    return { index: r.index, sha256: r.sha256, bytes: r.bytes.length, studyUid: file?.studyUid ?? null, seriesUid: file?.seriesUid ?? null,
+      sopUid: file?.sopUid ?? null, expectedStudyUid: r.expectedStudyUid, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', identity: null,
+      writeDisposition: null, at: iso(now), attempts: [] };
+  }
+
+  private newAttempt(entry: ImportFileEntry, actor: string, now: Date): ImportAttempt {
+    const generation = entry.attempts.reduce((max, a) => Math.max(max, a.generation), 0) + 1;
+    return { attemptId: randomUUID(), actor, generation, ownerInstance: this.bootId, phase: 'prepared', leaseUntil: later(now, LEASE_MS),
+      startedAt: iso(now), finishedAt: null, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', transport: null, autoRecheckedAt: null, recovery: null };
+  }
+
+  private settle(entry: ImportFileEntry, now: Date, code: ImportCode, outcome: ImportOutcome, disposition: WriteDisposition | null) {
+    entry.outcome = outcome; entry.code = code; entry.writeDisposition = disposition; entry.at = iso(now);
+  }
+
+  private finishAttempt(entry: ImportFileEntry, attempt: ImportAttempt, now: Date,
+    result: { outcome: ImportOutcome; code: ImportCode | null; transport: ImportAttempt['transport'] }, disposition: WriteDisposition | null = null,
+    phase: 'finished' | 'unknown' = 'finished') {
+    attempt.phase = phase; attempt.finishedAt = iso(now);
+    attempt.outcome = result.outcome; attempt.code = result.code; attempt.transport = result.transport;
+    entry.outcome = result.outcome; entry.code = result.code; entry.writeDisposition = disposition; entry.at = iso(now);
+  }
+
+  /** A dispatching attempt whose result was never written (lease ran out, process ended): unknown, entry Unconfirmed. */
+  private markUnknown(entry: ImportFileEntry, attempt: ImportAttempt, now: Date) {
+    attempt.phase = 'unknown'; attempt.transport = attempt.transport ?? 'unknown'; attempt.finishedAt = iso(now);
+    attempt.outcome = 'unconfirmed'; attempt.code = 'IMPORT_UNCONFIRMED';
+    entry.outcome = 'unconfirmed'; entry.code = 'IMPORT_UNCONFIRMED'; entry.at = iso(now);
+  }
+
+  private settledStatus(results: ImportFileEntry[]) {
+    return results.every(entry => FINAL_OUTCOMES.has(entry.outcome)) ? 'settled' : 'open';
+  }
+
+  private async saveImport(tx: Tx, op: any, r: ImportRequest, results: ImportFileEntry[], now: Date) {
+    const status = this.settledStatus(results);
+    if (op) await tx.importOperation.update({ where: { id: op.id }, data: { results: results as any, status, updatedAt: now } });
+    else await tx.importOperation.create({ data: { id: r.operationId, ...r.owner, kind: 'import', studyUid: null, status,
+      results: results as any, createdAt: now, updatedAt: now } });
+  }
+
+  private sameOwner(op: any, owner: ImportOwner, kind: string) {
+    return op.kind === kind && op.ownerIssuer === owner.ownerIssuer && op.ownerSubject === owner.ownerSubject
+      && op.institutionId === owner.institutionId;
+  }
+
+  private requestConflict(code: 'OPERATION_CONFLICT' | 'OPERATION_CONTENT_CONFLICT') {
+    return new HttpException({ code, message: code === 'OPERATION_CONFLICT'
+      ? '다른 사용자나 다른 종류의 작업에 쓰인 작업 번호입니다. 새 작업으로 다시 시도하세요.'
+      : '이 작업의 같은 파일 번호에 다른 파일이나 다른 검사가 이미 기록되어 있습니다. 기존 결과는 그대로입니다.' }, 409);
+  }
+
+  private async institutionName(tx: Tx, id: string): Promise<string> {
+    const row = await tx.institution.findUnique({ where: { id } });
+    return row?.name ?? id;
+  }
+
+  private auditIntent(tx: Tx, r: ImportRequest, entry: ImportFileEntry, attempt: ImportAttempt, now: Date) {
+    return tx.auditLog.create({ data: { actor: attempt.actor, action: 'dicom.import.intent', target: entry.studyUid ?? r.operationId,
+      detail: JSON.stringify({ institutionId: r.owner.institutionId, operationId: r.operationId, index: entry.index, attemptId: attempt.attemptId,
+        generation: attempt.generation, kind: 'import', actor: attempt.actor, ownerIssuer: r.owner.ownerIssuer, ownerSubject: r.owner.ownerSubject,
+        studyUid: entry.studyUid, seriesUid: entry.seriesUid, sopUid: entry.sopUid, sha256: entry.sha256, bytes: entry.bytes, at: iso(now) }) } });
+  }
+
+  /** Every file result (final, retryable, unconfirmed; reconciliation, re-check, recovery) has this row; no patient value. */
+  private async auditResult(tx: Tx, institutionId: string, operationId: string, entry: ImportFileEntry, attempt: ImportAttempt | null,
+    now: Date, actor?: string) {
+    const op = await tx.importOperation.findUnique({ where: { id: operationId }, select: { ownerIssuer: true, ownerSubject: true, actor: true } });
+    const who = actor ?? attempt?.actor ?? op?.actor ?? 'unknown';
+    await tx.auditLog.create({ data: { actor: who, action: 'dicom.import.result', target: entry.studyUid ?? operationId,
+      detail: JSON.stringify({ institutionId, operationId, index: entry.index, attemptId: attempt?.attemptId ?? null,
+        generation: attempt?.generation ?? 0, kind: 'import', actor: who, ownerIssuer: op?.ownerIssuer ?? null, ownerSubject: op?.ownerSubject ?? null,
+        studyUid: entry.studyUid, seriesUid: entry.seriesUid, sopUid: entry.sopUid, sha256: entry.sha256, bytes: entry.bytes,
+        outcome: entry.outcome, code: entry.code, writeDisposition: entry.writeDisposition, transport: attempt?.transport ?? null, at: iso(now) }) } });
+  }
+
+  // ── locks and transactions ──
+
+  private async lockClaims(tx: Tx, keys: string[]): Promise<Map<string, ClaimRow>> {
+    const rows = new Map<string, ClaimRow>();
+    for (const key of [...new Set(keys)].sort()) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${advisory(key)}::bigint)`;
+      const found: any[] = await tx.$queryRaw`SELECT * FROM "ImportOperation" WHERE "claimKey" = ${key} FOR UPDATE`;
+      rows.set(key, found[0] ?? null);
+    }
+    return rows;
+  }
+
+  private async lockOperation(tx: Tx, id: string): Promise<any> {
+    const found: any[] = await tx.$queryRaw`SELECT * FROM "ImportOperation" WHERE id = ${id}::uuid FOR UPDATE`;
+    return found[0] ?? null;
+  }
+
+  async dbNow(db: Tx): Promise<Date> {
+    const rows: any[] = await db.$queryRaw`SELECT CURRENT_TIMESTAMP AS now`;
+    return new Date(rows[0].now);
+  }
+
+  /** One short transaction: lock timeout 3 s, the database's own clock, no network inside. */
+  write<T>(work: (tx: Tx, now: Date) => Promise<T>): Promise<T> {
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      return work(tx, await this.dbNow(tx));
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
+  }
+
+  /** Database failures before any Orthanc write are 503 IMPORT_STORAGE_UNAVAILABLE with nothing changed (4.8). */
+  private async storage<T>(work: () => Promise<T>): Promise<T> {
+    try { return await work(); }
+    catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: IMPORT_STORAGE_MESSAGE });
+    }
+  }
+
+  /** Renew the attempt's lease every 10 s while its work runs; losing it aborts the work's signal. */
+  private keepLease(operationId: string, index: number, attemptId: string, phases: string[]) {
+    const lost = new AbortController();
+    const timer = setInterval(() => {
+      void this.write(async (tx, now) => {
+        const op = await this.lockOperation(tx, operationId);
+        const results: ImportFileEntry[] = clone(op.results);
+        const entry = results.find(e => e.index === index);
+        const mine = entry && lastAttempt(entry);
+        if (!mine || mine.attemptId !== attemptId || !phases.includes(mine.phase) || !leaseLive(mine, now)) return false;
+        mine.leaseUntil = later(now, LEASE_MS);
+        await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, updatedAt: now } });
+        return true;
+      }).then(kept => { if (!kept) lost.abort(); }, () => lost.abort());
+    }, RENEW_MS);
+    timer.unref?.();
+    return { signal: lost.signal, stop: () => clearInterval(timer) };
+  }
+
+  // ── Orthanc: this file's own bounded client (OrthancService settings, no access to its private members) ──
+
+  private orthancConfig(): { base: string; auth: string } {
+    const user = process.env.ORTHANC_USER, pass = process.env.ORTHANC_PASS;
+    if (!user || !pass) throw new OrthancFailure('config');
+    return { base: (process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, ''), auth: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64') };
+  }
+
+  /**
+   * One request with a 5 s deadline to body EOF and a byte cap; the body is returned only for a 200. A transport failure
+   * carries whether it ended in the connect phase (4.4); upstream text never leaves this function.
+   */
+  private async orthancCall(method: 'GET' | 'POST', path: string, body: string | Uint8Array | undefined, limit: number,
+    signal?: AbortSignal, contentType = 'text/plain', onChunk?: (chunk: Uint8Array) => boolean): Promise<{ status: number; bytes: Buffer }> {
+    const { base, auth } = this.orthancConfig();
+    const controller = new AbortController();
+    let timedOut = false, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const abort = () => { controller.abort(); void reader?.cancel().catch(() => undefined); };
+    const timer = setTimeout(() => { timedOut = true; abort(); }, READ_TIMEOUT_MS);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      let response: Response;
+      try {
+        response = await fetch(base + path, { method, redirect: 'error', signal: controller.signal,
+          headers: { Authorization: auth, ...(body === undefined ? {} : { 'Content-Type': contentType }) }, body: body as any });
+      } catch (error) {
+        throw Object.assign(new OrthancFailure(timedOut ? 'timeout' : 'transport'), { connect: connectPhaseFailure(error, controller.signal.aborted) });
+      }
+      if (response.status !== 200 || !response.body) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new OrthancFailure('status');
+      }
+      reader = response.body.getReader();
+      const chunks: Buffer[] = [];
+      let total = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (onChunk) { if (!onChunk(value)) break; continue; }
+          if (total > limit) throw new OrthancFailure('size');
+          chunks.push(Buffer.from(value));
+        }
+      } catch (error) {
+        if (error instanceof OrthancFailure) throw error;
+        throw new OrthancFailure(timedOut ? 'timeout' : 'transport');
+      }
+      return { status: response.status, bytes: Buffer.concat(chunks) };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      await reader?.cancel().catch(() => undefined);
+    }
+  }
+
+  private async orthancJson(method: 'GET' | 'POST', path: string, body: string | undefined, limit: number, signal?: AbortSignal): Promise<any> {
+    // /tools/find takes a JSON body, /tools/lookup a bare UID (the OrthancService precedents).
+    const contentType = body !== undefined && body.startsWith('{') ? 'application/json' : 'text/plain';
+    const { bytes } = await this.orthancCall(method, path, body, limit, signal, contentType);
+    let text: string;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw new OrthancFailure('decode'); }
+    try { return JSON.parse(text); } catch { throw new OrthancFailure('parse'); }
+  }
+
+  /**
+   * 4.5 steps 1/3: lookup (Type Instance only, 256 KiB), then the stored file streamed through SHA-256 and stopped at
+   * length + 1, then /simplified-tags (16 MiB) for PatientID and the three UIDs. Exact match only is "exact".
+   */
+  async readSop(file: AcceptedFile, length: number, sha256: string, expectedId: string | null): Promise<SopReading> {
+    try {
+      const found = await this.orthancJson('POST', '/tools/lookup', file.sopUid, SMALL_LIMIT);
+      if (!Array.isArray(found)) return { kind: 'failed' };
+      const instances = found.filter((item: any) => item?.Type === 'Instance');
+      if (instances.some((item: any) => typeof item.ID !== 'string' || !ORTHANC_ID.test(item.ID))) return { kind: 'failed' };
+      if (instances.length === 0) return { kind: 'absent' };
+      if (instances.length > 1) return { kind: 'ambiguous' };
+      const id: string = instances[0].ID;
+      if (expectedId !== null && id !== expectedId) return { kind: 'conflict' };
+      const hash = createHash('sha256');
+      let read = 0;
+      await this.orthancCall('GET', `/instances/${id}/file`, undefined, length + 1, undefined, 'text/plain', chunk => {
+        const room = length + 1 - read;
+        const part = chunk.byteLength > room ? chunk.subarray(0, room) : chunk;
+        hash.update(part); read += part.byteLength;
+        return read <= length;
+      });
+      const tags = await this.orthancJson('GET', `/instances/${id}/simplified-tags`, undefined, CONTEXT_LIMIT);
+      if (!tags || typeof tags !== 'object' || Array.isArray(tags)) return { kind: 'failed' };
+      for (const key of ['PatientID', 'StudyInstanceUID', 'SeriesInstanceUID', 'SOPInstanceUID'])
+        if (typeof tags[key] !== 'string') return { kind: 'failed' };
+      const same = read === length && hash.digest('hex') === sha256 && tags.PatientID.trim() === file.patientId
+        && tags.StudyInstanceUID === file.studyUid && tags.SeriesInstanceUID === file.seriesUid && tags.SOPInstanceUID === file.sopUid;
+      return same ? { kind: 'exact', id } : { kind: 'conflict' };
+    } catch { return { kind: 'failed' }; }
+  }
+
+  /** 4.5 step 2: one POST /instances of the original bytes; only a connect-phase failure is a certain no-write. */
+  private async postInstance(bytes: Buffer): Promise<{ kind: 'ok'; id: string; status: string } | { kind: 'certain-no-write' } | { kind: 'unknown' }> {
+    let answer: { status: number; bytes: Buffer };
+    try { answer = await this.orthancCall('POST', '/instances', new Uint8Array(bytes), POST_ANSWER_LIMIT, undefined, 'application/dicom'); }
+    catch (error: any) { return error instanceof OrthancFailure && (error as any).connect ? { kind: 'certain-no-write' } : { kind: 'unknown' }; }
+    try {
+      const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(answer.bytes));
+      if (parsed && (parsed.Status === 'Success' || parsed.Status === 'AlreadyStored') && typeof parsed.ID === 'string' && ORTHANC_ID.test(parsed.ID))
+        return { kind: 'ok', id: parsed.ID, status: parsed.Status };
+    } catch { /* an answer that is not the documented shape proves nothing */ }
+    return { kind: 'unknown' };
+  }
+
+  // ── reads the original download composes (contract 5.2) ──
+
+  /** The study's instance ids (Expand false, one bounded read); null when Orthanc could not be read. */
+  async studyInstanceIds(studyUid: string, limit: number): Promise<string[] | null> {
+    try {
+      const ids = await this.orthancJson('POST', '/tools/find', JSON.stringify({ Level: 'Instance', Query: { StudyInstanceUID: studyUid },
+        Limit: limit, Expand: false }), CONTEXT_LIMIT);
+      if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !ORTHANC_ID.test(id)) || new Set(ids).size !== ids.length) return null;
+      return ids;
+    } catch { return null; }
+  }
+
+  async instanceUids(id: string): Promise<{ studyUid: string; seriesUid: string; sopUid: string } | null> {
+    try {
+      const tags = await this.orthancJson('GET', `/instances/${id}/simplified-tags`, undefined, CONTEXT_LIMIT);
+      if (!tags || typeof tags !== 'object' || [tags.StudyInstanceUID, tags.SeriesInstanceUID, tags.SOPInstanceUID].some(v => typeof v !== 'string')) return null;
+      return { studyUid: tags.StudyInstanceUID, seriesUid: tags.SeriesInstanceUID, sopUid: tags.SOPInstanceUID };
+    } catch { return null; }
+  }
+
+  async attachmentInfo(id: string): Promise<{ bytes: number; md5: string } | null> {
+    try {
+      const info = await this.orthancJson('GET', `/instances/${id}/attachments/dicom/info`, undefined, SMALL_LIMIT);
+      const bytes = Number(info?.UncompressedSize);
+      if (!Number.isSafeInteger(bytes) || bytes < 0 || typeof info?.UncompressedMD5 !== 'string' || !/^[0-9a-f]{32}$/i.test(info.UncompressedMD5)) return null;
+      return { bytes, md5: info.UncompressedMD5.toLowerCase() };
+    } catch { return null; }
+  }
+
+  /**
+   * The archive source of one object (B-03): the stream is handed to adopt synchronously in the same turn the response
+   * arrives; the wait for the response is bounded by the signal and its own 30 s, and a late answer is released.
+   */
+  openOriginal(orthancId: string, signal: AbortSignal, adopt: (readable: Readable) => void): Promise<void> {
+    const { base, auth } = this.orthancConfig();
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const timer = setTimeout(abort, LEASE_MS);
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    return fetch(`${base}/instances/${orthancId}/file`, { redirect: 'error', signal: controller.signal, headers: { Authorization: auth } })
+      .then(response => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+        if (response.status !== 200 || !response.body) {
+          void response.body?.cancel().catch(() => undefined);
+          throw new Error('original unavailable');
+        }
+        adopt(Readable.fromWeb(response.body as any));
+      }, () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+        throw new Error('original unavailable');
+      });
+  }
+}
+
+/** The seven header values the judgement uses (4.4 step 2); nothing else of a header is kept. */
+function pick(h: any) {
+  const kept: any = {};
+  for (const key of ['PatientID', 'IssuerOfPatientID', 'PatientName', 'PatientBirthDate', 'PatientSex', 'StudyInstanceUID', 'SOPInstanceUID'])
+    if (Object.prototype.hasOwnProperty.call(h, key)) kept[key] = h[key];
+  return kept;
+}
+
+/** The closed recovery body {basis, checkedAt}: one of the two bases and a UTC ISO-8601 instant. */
+export function parseRecoveryBody(body: unknown): { basis: string; checkedAt: string } | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.getPrototypeOf(body) !== Object.prototype) return null;
+  const value = body as any;
+  if (Object.keys(value).sort().join() !== 'basis,checkedAt') return null;
+  if (!RECOVERY_BASES.includes(value.basis) || typeof value.checkedAt !== 'string') return null;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value.checkedAt) || Number.isNaN(Date.parse(value.checkedAt))) return null;
+  return { basis: value.basis, checkedAt: value.checkedAt };
+}
+
+/** Contract 5.3: the operation state is the state of its newest attempt, or prepared before any. */
+export function downloadStatus(download: any): string {
+  const attempts = Array.isArray(download?.attempts) ? download.attempts : [];
+  return attempts.length ? attempts[attempts.length - 1].state : 'prepared';
+}
