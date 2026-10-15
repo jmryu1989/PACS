@@ -18,6 +18,11 @@ project, previous images; RESTORED) -> rollback_reopen (refused with the pre-res
 after the restore) -> an ordinary compose recreate (still the recovery volumes and previous images) -> receipt; the
 receipt is then checked as production's introduce would check it (and refused a second time). Every resource is named
 kin-rehearsal-*, labelled and removed.
+
+RELEASE-TOOLS-CHECKPOINTS (Astra spec D1336): the three rehearsal methods are written as an explicit stage table
+(STAGE_METHODS, run by tests/ops_release_checkpoints.run_scenario) and still run whole, in one process, under the live
+gate (scripts/run-tests.py); a checkpoint request in their environment refuses them. SyntheticStack.descriptor/restored
+and CheckpointDocker serve tests/ops_release_checkpoints_live_test.CheckpointSegments only (opt-in, native Linux).
 """
 import json
 import os
@@ -240,6 +245,8 @@ from types import SimpleNamespace  # noqa: E402
 
 import ops_emr_introduction as intro  # noqa: E402
 import ops_audit_integrity as audit  # noqa: E402
+import live_test_gate  # noqa: E402
+import ops_release_checkpoints as checkpoints  # noqa: E402
 
 REHEARSAL_IMAGES = ("KIN_TEST_PREVIOUS_API_IMAGE", "KIN_TEST_PREVIOUS_PROXY_IMAGE", "KIN_TEST_API_IMAGE", "KIN_TEST_PROXY_IMAGE")
 SYNTHETIC_STUDY = "1.2.826.0.1.3680043.10.543.7001"
@@ -800,18 +807,212 @@ class SyntheticStack:
         for network in ids("network", "kin.ops.run=" + self.token):
             subprocess.run(["docker", "network", "rm", network], capture_output=True)
 
+    # ── RELEASE-TOOLS-CHECKPOINTS: an explicit descriptor, so a later stage process can rebuild this object ──
 
-@unittest.skipUnless(os.environ.get("KIN_TEST_EMR_REHEARSAL") == "1" and all(os.environ.get(name) for name in REHEARSAL_IMAGES),
-                     "opt-in synthetic EMR-introduction rehearsal (KIN_TEST_EMR_REHEARSAL=1 and the four images)")
-class EmrIntroductionRehearsal(unittest.TestCase):
+    def descriptor(self):
+        """Everything a later stage needs to rebuild this stack object over its restored fixture tree (no clone, network
+        or file is created again). It holds the synthetic secrets: it lives only inside the private fixture tree."""
+        out = {"label": self.label, "token": self.token, "project": self.project, "root": str(self.root), "public": self.public,
+               "maintenance": self.maintenance, "origin": self.origin, "target": self.target, "env": self.env,
+               "previous_sha": self.previous_sha, "target_sha": self.target_sha, "halo_network": self.halo_network,
+               "fail_first_login": bool(getattr(self, "fail_first_login", False)),
+               "plan_document": getattr(self, "plan_document", None), "plan_sha256": getattr(self, "plan_sha256", None)}
+        if hasattr(self, "monitor_dir"):
+            out["monitor_dir"] = str(self.monitor_dir)
+        if self.halo_network:
+            out.update(halo_conf=str(self.halo_conf), halo_bind=dict(self.halo_bind))
+        return out
+
+    @classmethod
+    def restored(cls, test, descriptor):
+        """The stack object over a restored fixture tree at the same absolute root; the same cleanups as __init__."""
+        stack = cls.__new__(cls)
+        stack.test, stack.label, stack.token, stack.project = test, descriptor["label"], descriptor["token"], descriptor["project"]
+        stack.root = Path(descriptor["root"])
+        stack.repo = stack.root / "repo"
+        stack.public, stack.maintenance, stack.origin = descriptor["public"], descriptor["maintenance"], descriptor["origin"]
+        stack.ca, stack.override_path = stack.root / "clone-ca.pem", stack.root / "rehearsal-override.yml"
+        stack.halo_network = descriptor["halo_network"]
+        if "monitor_dir" in descriptor:
+            stack.monitor_dir = Path(descriptor["monitor_dir"])
+        if stack.halo_network:
+            stack.halo_conf, stack.halo_bind = Path(descriptor["halo_conf"]), dict(descriptor["halo_bind"])
+        stack.target, stack.env = descriptor["target"], descriptor["env"]
+        stack.env_next, stack.token_file = stack.root / "env.next", stack.root / "smoke-token.json"
+        stack.records, stack.backups = intro.Records(stack.root / "records"), stack.root / "backups"
+        stack.previous_sha, stack.target_sha = descriptor["previous_sha"], descriptor["target_sha"]
+        if descriptor["plan_document"] is not None:
+            stack.plan_document, stack.plan_sha256 = descriptor["plan_document"], descriptor["plan_sha256"]
+        if descriptor["fail_first_login"]:
+            stack.fail_first_login = True
+        test.addCleanup(stack.remove)
+        test.addCleanup(stack.keep_records)
+        return stack
+
+
+class CheckpointDocker:
+    """RELEASE-TOOLS-CHECKPOINTS backend: the one place that builds Docker/Compose commands for a checkpoint of one
+    synthetic stack. tests/ops_release_checkpoints.py decides ownership, order and admission; this adapter only runs
+    exact commands against this stack's names, its pinned ComposeEntry and one fixed helper image ID."""
+
+    STOP_SECONDS = 120
+
+    def __init__(self, stack, helper_image):
+        self.stack, self.helper = stack, helper_image
+
+    def run(self, args, *, timeout=300, check=True, **kwargs):
+        result = subprocess.run(args, capture_output="stdout" not in kwargs, timeout=timeout, **kwargs)
+        if check and result.returncode:
+            raise RuntimeError("checkpoint command failed: " + " ".join(args[:3]) + " exit " + str(result.returncode))
+        return result
+
+    def inspect_all(self, kind, listing):
+        ids = self.run(listing).stdout.decode().split()
+        return json.loads(self.run(["docker", *kind, "inspect", *ids]).stdout) if ids else []
+
+    def inventory(self):
+        containers = [{"id": item["Id"], "name": item["Name"].lstrip("/"), "labels": item["Config"].get("Labels") or {},
+                       "running": item["State"]["Running"], "image": item["Image"]}
+                      for item in self.inspect_all([], ["docker", "ps", "-a", "-q", "--no-trunc"])]
+        volumes = [{"id": item["Name"], "name": item["Name"], "labels": item.get("Labels") or {}}
+                   for item in self.inspect_all(["volume"], ["docker", "volume", "ls", "-q"])]
+        networks = [{"id": item["Id"], "name": item["Name"], "labels": item.get("Labels") or {}}
+                    for item in self.inspect_all(["network"], ["docker", "network", "ls", "-q", "--no-trunc"])]
+        return {"containers": containers, "volumes": volumes, "networks": networks}
+
+    def stop(self, name):
+        stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), name], timeout=self.STOP_SECONDS + 60, check=False)
+        state = json.loads(self.run(["docker", "inspect", name]).stdout)[0]["State"]
+        return {"exit_code": state.get("ExitCode"), "forced": stopped.returncode != 0 or state.get("ExitCode") == 137,
+                "oom_killed": state.get("OOMKilled"), "running": state.get("Running")}
+
+    def writable_changes(self, name):
+        return [line for line in self.run(["docker", "diff", name]).stdout.decode().splitlines() if line.strip()]
+
+    def export_volume(self, name, destination):
+        with open(destination, "xb") as out:
+            self.run(["docker", "run", "--rm", "--network", "none", "--label", "kin.ops.run=" + self.stack.token,
+                      "--mount", "type=volume,source=" + name + ",target=/volume,readonly", "--entrypoint", "tar", self.helper,
+                      "-C", "/volume", "-cf", "-", "."], stdout=out, stderr=subprocess.PIPE, timeout=3600)
+
+    def volume_exists(self, name):
+        if self.run(["docker", "volume", "inspect", name], check=False).returncode == 0:
+            return True
+        self.run(["docker", "info", "--format", "{{.ServerVersion}}"])
+        return False
+
+    def image_present(self, image_id):
+        return self.run(["docker", "image", "inspect", image_id], check=False).returncode == 0
+
+    def create_volume(self, name, labels):
+        self.run(["docker", "volume", "create", *[item for key, value in sorted(labels.items()) for item in ("--label", key + "=" + value)],
+                  name])
+
+    def load_volume(self, name, archive, category):
+        checkpoints.archive_members(archive, category=category)
+        with open(archive, "rb") as stream:
+            self.run(["docker", "run", "--rm", "-i", "--network", "none", "--label", "kin.ops.run=" + self.stack.token,
+                      "--mount", "type=volume,source=" + name + ",target=/volume", "--entrypoint", "tar", self.helper,
+                      "-C", "/volume", "-xpf", "-"], stdin=stream, timeout=3600)
+
+    def create_network(self, name, labels):
+        self.run(["docker", "network", "create", *[item for key, value in sorted(labels.items()) for item in ("--label", key + "=" + value)],
+                  name])
+
+    def compose(self, args):
+        """The stack's pinned ComposeEntry (immutable image IDs), never a build, pull or tag resolution."""
+        argv, environment = intro.ComposeEntry(self.stack.root / "compose-entries").argv(args)
+        inherited = {key: value for key, value in os.environ.items() if not key.startswith(("COMPOSE_", "DOCKER_"))}
+        self.run(argv, cwd=self.stack.repo, env={**inherited, **environment}, timeout=900)
+
+    def compose_create(self, roles):
+        self.compose(["create", "--no-build", "--pull", "never", *roles])
+
+    def compose_start(self, role):
+        self.compose(["start", role])
+
+    def wait_db_ready(self, seconds=180):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self.run(["docker", "exec", self.stack.target["containers"]["db"], "pg_isready", "-h", "127.0.0.1", "-U", "kin"],
+                        check=False, timeout=20).returncode == 0:
+                return
+            time.sleep(1)
+        raise RuntimeError("restored database did not become ready within %d s" % seconds)
+
+    def remove(self, kind, ident):
+        command = {"containers": ["docker", "rm", "-f", "-v", ident], "volumes": ["docker", "volume", "rm", ident],
+                   "networks": ["docker", "network", "rm", ident]}[kind]
+        self.run(command, check=False)
+
+    def observe(self, checkpoint_id):
+        """The product's own observation (HostOps.snapshot) of the restored stack, judged by its boundary contract."""
+        stack = self.stack
+        runner, host_ops = stack.ops()
+        machine = intro.Introduction(plan=stack.plan_document, plan_sha256=stack.plan_sha256, target=stack.target,
+                                     production=copy.deepcopy(intro.EXAMPLE_POLICY["production"]) | {"host_key_sha256": "a" * 64},
+                                     ops=host_ops, records=stack.records, repository=stack.repo,
+                                     host_key=stack.target["host_key_sha256"], tool=intro.tool_hashes())
+        machine.state, machine.phase = stack.records.state(), "checkpoint-observe"
+        with intro.bound_ops(stack.repo, runner):
+            snapshot = host_ops.snapshot(machine)
+        checkpoints.boundary_contract(checkpoint_id, snapshot, state=machine.state, plan=stack.plan_document, target=stack.target)
+        return snapshot
+
+    @staticmethod
+    def self_contained_git(fixture_root):
+        """Each disposable clone keeps its own object closure (its --shared alternate is the source worktree)."""
+        for git_dir in sorted(Path(fixture_root).glob("*/repo/.git")):
+            subprocess.run(["git", "-C", str(git_dir.parent), "repack", "-a", "-d", "-q"], check=True, capture_output=True, timeout=600)
+            (git_dir / "objects" / "info" / "alternates").unlink(missing_ok=True)
+            subprocess.run(["git", "-C", str(git_dir.parent), "fsck", "--connectivity-only", "-q"], check=True, capture_output=True,
+                           timeout=600)
+
+    @staticmethod
+    def host_facts(fixture_root):
+        """D1034 and the host identity, observed now (never reused from an older gate observation)."""
+        info = json.loads(subprocess.run(["docker", "info", "--format", "{{json .}}"], capture_output=True, timeout=60).stdout or b"{}")
+        listed = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}} {{.State}} {{.Label \"kin.ops.run\"}}"],
+                                capture_output=True, text=True, timeout=60)
+        foreign = [line for line in listed.stdout.splitlines() if line.split(" ")[0].startswith("kin-")]
+        memory = 0
+        if os.name == "posix" and Path("/proc/meminfo").is_file():
+            fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
+            memory = int(fields.get("MemAvailable", "0 kB").split()[0]) * 1024
+        root = Path(fixture_root)
+        usage = shutil_disk_usage(root.parent if not root.exists() else root)
+        return {"os": "linux" if sys.platform.startswith("linux") else os.name, "docker_os": info.get("OperatingSystem", ""),
+                "daemon_ok": listed.returncode == 0 and bool(info.get("ID")), "daemon_identity": info.get("ID", ""),
+                "architecture": info.get("Architecture", ""), "available_ram_bytes": memory, "available_disk_bytes": usage,
+                "required_disk_bytes": 20 * 1024 ** 3, "foreign_containers": foreign, "absolute_fixture_root": str(root),
+                "host_key_sha256": intro.local_host_key() if os.name == "posix" else None, "gate_state": str(live_test_gate.STATE),
+                "runtime": {"python": sys.version.split()[0], "docker": info.get("ServerVersion", "")}}
+
+
+def shutil_disk_usage(path):
+    return __import__("shutil").disk_usage(str(path)).free
+
+
+# The explicit stage table of the three fresh rehearsals (RELEASE-TOOLS-CHECKPOINTS spec section 2): the fresh methods run
+# every stage of their scenario in one process; CheckpointSegments (tests/ops_release_checkpoints_live_test.py) runs one
+# stage after a cold restore. No stage is skipped by an environment variable.
+STAGE_METHODS = {"source": "stage_source", "seed": "stage_seed", "capture": "stage_capture", "introduce": "stage_introduce",
+                 "verify": "stage_verify", "normal-tail": "stage_normal_tail", "forward-tail": "stage_forward_tail",
+                 "forced-capture": "stage_forced_capture", "forced-tail": "stage_forced_tail"}
+REALM_SMOKE_SQL = "SELECT count(*) FROM user_entity u JOIN realm r ON r.id=u.realm_id WHERE r.name='kin' AND u.username LIKE 'kin-smoke-%';"
+
+
+class RehearsalStages:
+    """The rehearsal's stages over one context (ctx); every assertion of the former monolithic methods is kept."""
+
     def image_id(self, reference):
         return json.loads(subprocess.run(["docker", "image", "inspect", reference], check=True, capture_output=True).stdout)[0]["Id"]
 
-    def test_emr_introduction_rehearsal_seed_capture_introduce_verify_rollback_receipt(self):
-        ops.require_local_docker()
-        folder = tempfile.TemporaryDirectory(prefix="kin-emr-rehearsal-")
-        self.addCleanup(folder.cleanup)
-        root = Path(folder.name)
+    def rehearsal_context(self, prefix, root=None):
+        if root is None:
+            folder = tempfile.TemporaryDirectory(prefix=prefix)
+            self.addCleanup(folder.cleanup)
+            root = Path(folder.name)
         previous_sha = os.environ.get("KIN_TEST_PREVIOUS_SHA", "b9690cc9790d5360829cee861462aac14f5ab0c7")
         source_repo = Path(__file__).resolve().parents[1]
         target_sha = os.environ.get("KIN_TEST_TARGET_SHA") or subprocess.run(["git", "-C", str(source_repo), "rev-parse", "HEAD"],
@@ -821,9 +1022,31 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         images = {"previous": {"api": self.image_id(os.environ["KIN_TEST_PREVIOUS_API_IMAGE"]),
                                "proxy": self.image_id(os.environ["KIN_TEST_PREVIOUS_PROXY_IMAGE"]), **shared},
                   "release": {"api": self.image_id(os.environ["KIN_TEST_API_IMAGE"]), "proxy": self.image_id(os.environ["KIN_TEST_PROXY_IMAGE"]), **shared}}
+        return SimpleNamespace(root=root, previous_sha=previous_sha, target_sha=target_sha, images=images)
 
+    def stage_table(self):
+        return {stage: getattr(self, method) for stage, method in STAGE_METHODS.items()}
+
+    def run_fresh(self, scenario):
+        """One fresh end-to-end rehearsal: every stage of the scenario in this process, under the live gate; a checkpoint
+        request in the environment refuses it rather than shortening it."""
+        checkpoints.fresh_guard()
+        live_test_gate.require_live_run()
+        ops.require_local_docker()
+        context = self.rehearsal_context("kin-emr-failure-" if scenario == "forced" else "kin-emr-rehearsal-")
+        checkpoints.run_scenario(scenario, self.stage_table(), context)
+
+    def halo_wired(self, stack, stage):
+        """IRT-11: every proxy (re)creation used the declared file set: the overlay's bind and network are there."""
+        item = json.loads(subprocess.run(["docker", "inspect", stack.target["containers"]["proxy"]], check=True, capture_output=True).stdout)[0]
+        binds = [(m.get("Destination"), m.get("RW")) for m in item["Mounts"] if m.get("Type") == "bind"]
+        self.assertIn((stack.halo_bind["target"], False), binds, stage)
+        self.assertIn(stack.halo_network, item["NetworkSettings"]["Networks"], stage)
+
+    def stage_source(self, ctx):
+        root, images = ctx.root, ctx.images
         # S: the stand-in for the running Stage-5 host, with synthetic data only.
-        source = SyntheticStack(self, root, "source", previous_sha, target_sha)
+        source = SyntheticStack(self, root, "source", ctx.previous_sha, ctx.target_sha)
         source.plan(images)
         source.certificates(images["previous"]["proxy"])
         source.compose_up(images["previous"], ("db", "keycloak", "orthanc", "api", "proxy"))
@@ -846,10 +1069,13 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         source.phase("capture", "HELD")
         b0 = json.loads((source.records.directory / "state.json").read_text())["b0"]
         source.remove()
+        ctx.source, ctx.legacy, ctx.members, ctx.b0 = source, legacy, members, b0
 
+    def stage_seed(self, ctx):
+        root, images, members, b0, source = ctx.root, ctx.images, ctx.members, ctx.b0, ctx.source
         # C: the disposable clone, seeded from S's B0 copy (no S resource is reachable any more). The production plan the
         # rehearsal rehearses exists first; the clone's plan names its identity.
-        clone = SyntheticStack(self, root, "clone", previous_sha, target_sha)
+        clone = SyntheticStack(self, root, "clone", ctx.previous_sha, ctx.target_sha)
         copy_dir = root / "b0-copy" / Path(b0["dir"]).name
         shutil_copy = __import__("shutil").copytree
         shutil_copy(b0["dir"], copy_dir)
@@ -886,7 +1112,11 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         print(json.dumps({"certificate_volume_check": "absent and empty refused, filled accepted"}), flush=True)
         clone.phase("seed", "SEEDED")
         self.assertEqual(clone.psql(f"SELECT \"preDoc\" FROM \"StudyState\" WHERE uid='{SYNTHETIC_STUDY}';"), "doctor@kin.kr")
-        self.assertEqual(json.loads(clone.psql(LEGACY_FACTS_SQL)), legacy, "the seed keeps the further roles, owners and grants")
+        self.assertEqual(json.loads(clone.psql(LEGACY_FACTS_SQL)), ctx.legacy, "the seed keeps the further roles, owners and grants")
+        ctx.clone, ctx.copy_dir, ctx.production_plan = clone, copy_dir, production_plan
+
+    def stage_capture(self, ctx):
+        clone = ctx.clone
         # D07: the clone's browser command fails the release smoke's first login once (forced); every other call is real.
         clone.fail_first_login = True
         clone.phase("capture", "HELD")
@@ -895,6 +1125,9 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         # D01/D02: the browser itself and the smoke member's roles and group were proved before the fence.
         self.assertTrue(baseline["smoke_browser"]["browser"].startswith("chromium "), baseline["smoke_browser"])
         self.assertEqual(baseline["smoke_member_realm"], {"roles": ["radiologist"], "group": "hallym"})
+
+    def stage_introduce(self, ctx):
+        clone = ctx.clone
         clone.phase("introduce", "INTRODUCED")
         realm = "(SELECT id FROM realm WHERE name='kin')"
         self.assertEqual(clone.psql(f"SELECT enabled FROM user_entity WHERE username='tech' AND realm_id={realm};", "keycloak"), "t")
@@ -905,6 +1138,9 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         rights = clone.psql("SELECT json_build_object('suspended', suspended, 'approved', approved, 'roles', roles, 'institution', institution) "
                             f"FROM \"MemberRights\" WHERE username='{smoke['username']}';")
         self.assertEqual(json.loads(rights), {"suspended": False, "approved": True, "roles": ["radiologist"], "institution": "hallym"})
+
+    def stage_verify(self, ctx):
+        clone = ctx.clone
         # auth_time and newAuthAfter have whole-second resolution: the browser logs in in a later second than the import.
         time.sleep(1.1)
         verified = clone.phase("verify", "VERIFIED")
@@ -917,25 +1153,21 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         record = json.loads((clone.records.directory / "operator-smoke.json").read_text())
         self.assertEqual((record["by"], record["passed"], sorted(record["checks"])), ("Opus executor (D1062)", True, sorted(intro.OPERATOR_SMOKE_CHECKS)))
         self.assertTrue(all(record["checks"].values()))
-        realm_smoke = "SELECT count(*) FROM user_entity u JOIN realm r ON r.id=u.realm_id WHERE r.name='kin' AND u.username LIKE 'kin-smoke-%';"
-        self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0", "the smoke member is gone before any reopen")
+        self.assertEqual(clone.psql(REALM_SMOKE_SQL, "keycloak"), "0", "the smoke member is gone before any reopen")
         self.assertEqual(list(clone.records.secrets.glob("smoke-member-*.json")), [], "its password is gone with it")
+        self.halo_wired(clone, "release proxy after verify")
 
-        def halo_wired(stage):
-            """IRT-11: every proxy (re)creation used the declared file set: the overlay's bind and network are there."""
-            item = json.loads(subprocess.run(["docker", "inspect", clone.target["containers"]["proxy"]], check=True, capture_output=True).stdout)[0]
-            binds = [(m.get("Destination"), m.get("RW")) for m in item["Mounts"] if m.get("Type") == "bind"]
-            self.assertIn((clone.halo_bind["target"], False), binds, stage)
-            self.assertIn(clone.halo_network, item["NetworkSettings"]["Networks"], stage)
-        halo_wired("release proxy after verify")
+    def stage_normal_tail(self, ctx):
+        clone, images, legacy, b0, production_plan = ctx.clone, ctx.images, ctx.legacy, ctx.b0, ctx.production_plan
+        realm = "(SELECT id FROM realm WHERE name='kin')"
         clone.phase("rollback", "RESTORED")
         state = json.loads((clone.records.directory / "state.json").read_text())
         recovery = state["recovery"]
         # RESTORED: nothing reopened; rollback_reopen makes a smoke member in the restored realm (a login necessarily
         # after the restore), proves the previous version, deletes the member, and only then opens.
         reopened = clone.phase("rollback_reopen", "ROLLED_BACK")
-        halo_wired("previous proxy after the rollback")
-        self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0")
+        self.halo_wired(clone, "previous proxy after the rollback")
+        self.assertEqual(clone.psql(REALM_SMOKE_SQL, "keycloak"), "0")
         self.assertEqual(list(clone.records.secrets.glob("smoke-member-*.json")), [])
         self.assertTrue(json.loads((clone.records.directory / "operator-smoke-previous.json").read_text())["passed"])
         self.assertEqual([step["outcome"] for step in reopened["steps"]], ["PASS"] * 5)
@@ -959,7 +1191,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
             self.assertEqual(subprocess.run(["docker", "volume", "inspect", name], capture_output=True).returncode, 0, "failed volume kept: " + name)
         # C-COMPOSE: the supported ordinary entry, in a new process after transient/source inputs are gone.
         clone.ordinary_recreate(images, side="previous")
-        halo_wired("previous proxy after an ordinary recreate")
+        self.halo_wired(clone, "previous proxy after an ordinary recreate")
         mounts = lambda role, path: {m["Destination"]: m.get("Name") for m in inspect(clone.target["containers"][role])["Mounts"]}.get(path)
         self.assertEqual((mounts("db", "/var/lib/postgresql/data"), mounts("orthanc", "/var/lib/orthanc/db")), (recovery["pg"], recovery["orthanc"]))
         for role in ("db", "orthanc", "api"):
@@ -992,27 +1224,36 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                           "migrations": [len(clone.plan_document["migrations"]["before"]), len(clone.plan_document["migrations"]["after"])]}),
               flush=True)
 
-    def test_emr_introduction_rehearsal_forced_l09b_failure_rolls_back_with_kept_values_and_the_pinned_overlay(self):
+    def stage_forward_tail(self, ctx):
+        """A separate forward branch: reopen reaches PONR, then ordinary operation keeps release image IDs."""
+        stack = ctx.clone
+        reopened = stack.phase("reopen", "DEPLOYED")
+        images = {side: stack.plan_document[side]["images"] for side in ("previous", "release")}
+        stack.ordinary_recreate(images, side="release")
+        health = intro.health_check(stack.origin, ca_file=str(stack.ca), member_rights=True)
+        self.assertTrue(health)
+        self.forward_verdict(stack, reopened, health)
+
+    def forward_verdict(self, stack, reopened, health):
+        """The product verdict a resumed forward suffix and the fresh forward control must share (T16); IDs and times are
+        bound to each run's own records and are not part of it."""
+        inspect = lambda name: json.loads(subprocess.run(["docker", "inspect", name], check=True, capture_output=True).stdout)[0]
+        running = {role: inspect(stack.target["containers"][role])["Image"] for role in intro.ROLES}
+        rows = json.loads(stack.psql("SELECT json_agg(json_build_array(migration_name, checksum) ORDER BY migration_name COLLATE \"C\") "
+                                     "FROM \"_prisma_migrations\" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL;"))
+        verdict = {"status": reopened["status"], "release_images": stack.plan_document["release"]["images"], "health": health,
+                   "migrations_after": rows == stack.plan_document["migrations"]["after"],
+                   "smoke_member_absent": stack.psql(REALM_SMOKE_SQL, "keycloak") == "0", "ordinary_entry_side": "release",
+                   "ordinary_entry_images": running == stack.plan_document["release"]["images"],
+                   "frame_sha256": stack.plan_document["smoke"]["frame"]["sha256"]}
+        print(json.dumps({"forward_verdict": verdict}), flush=True)
+        return verdict
+
+    def stage_forced_capture(self, ctx):
         """Round 3 (D04/D05): a production-shaped stack whose monitor file binds ${KIN_MONITOR_PUBLIC_DIR} (absent from its
-        .env, given by the operator's shell at start) and whose declared overlay joins the Halo network. capture -> introduce,
-        where L-09b fails as a failed proxy recreate leaves it: the proxy container is gone, and meanwhile the overlay file
-        was edited by hand. The automatic rollback resolves the variable from the kept value and recreates the services
-        from the overlay bytes pinned at the capture (warning recorded): RESTORED; rollback_reopen (a new process, overlay
-        still edited) proves the previous version and reopens: ROLLED_BACK."""
-        ops.require_local_docker()
-        folder = tempfile.TemporaryDirectory(prefix="kin-emr-failure-")
-        self.addCleanup(folder.cleanup)
-        root = Path(folder.name)
-        previous_sha = os.environ.get("KIN_TEST_PREVIOUS_SHA", "b9690cc9790d5360829cee861462aac14f5ab0c7")
-        source_repo = Path(__file__).resolve().parents[1]
-        target_sha = os.environ.get("KIN_TEST_TARGET_SHA") or subprocess.run(["git", "-C", str(source_repo), "rev-parse", "HEAD"],
-                                                                             check=True, capture_output=True, text=True).stdout.strip()
-        shared = {"db": self.image_id("postgres:16-alpine"), "keycloak": self.image_id("quay.io/keycloak/keycloak:26.7.3"),
-                  "orthanc": self.image_id("orthancteam/orthanc:24.12.0")}
-        images = {"previous": {"api": self.image_id(os.environ["KIN_TEST_PREVIOUS_API_IMAGE"]),
-                               "proxy": self.image_id(os.environ["KIN_TEST_PREVIOUS_PROXY_IMAGE"]), **shared},
-                  "release": {"api": self.image_id(os.environ["KIN_TEST_API_IMAGE"]), "proxy": self.image_id(os.environ["KIN_TEST_PROXY_IMAGE"]), **shared}}
-        stack = SyntheticStack(self, root, "failure", previous_sha, target_sha)
+        .env, given by the operator's shell at start) and whose declared overlay joins the Halo network; then capture."""
+        root, images = ctx.root, ctx.images
+        stack = SyntheticStack(self, root, "failure", ctx.previous_sha, ctx.target_sha)
         stack.plan(images)
         stack.certificates(images["previous"]["proxy"])
         stack.compose_up(images["previous"], ("db", "keycloak", "orthanc", "api", "proxy"))
@@ -1031,6 +1272,14 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         state = json.loads((stack.records.directory / "state.json").read_text())
         self.assertEqual(state["compose_env"]["KIN_MONITOR_PUBLIC_DIR"]["from"], ["mount:proxy"])
         self.assertTrue((stack.records.secrets / intro.COMPOSE_VALUES).is_file())
+        ctx.failure, ctx.legacy = stack, legacy
+
+    def stage_forced_tail(self, ctx):
+        """introduce, where L-09b fails as a failed proxy recreate leaves it: the proxy container is gone, and meanwhile the
+        overlay file was edited by hand. The automatic rollback resolves the variable from the kept value and recreates the
+        services from the overlay bytes pinned at the capture (warning recorded): RESTORED; rollback_reopen (a new process,
+        overlay still edited) proves the previous version and reopens: ROLLED_BACK."""
+        stack, images, legacy = ctx.failure, ctx.images, ctx.legacy
         overlay = Path(stack.target["declared_overlays"][0]["file"])
         declared = overlay.read_bytes()
 
@@ -1063,24 +1312,27 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         print(json.dumps({"forced_l09b_failure": "RESTORED then ROLLED_BACK", "warnings": introduced["warnings"],
                           "kept_value_used": True, "legacy_roles": legacy}), flush=True)
 
+
+@unittest.skipUnless(os.environ.get("KIN_TEST_EMR_REHEARSAL") == "1" and all(os.environ.get(name) for name in REHEARSAL_IMAGES),
+                     "opt-in synthetic EMR-introduction rehearsal (KIN_TEST_EMR_REHEARSAL=1 and the four images)")
+class EmrIntroductionRehearsal(RehearsalStages, unittest.TestCase):
+    def test_emr_introduction_rehearsal_seed_capture_introduce_verify_rollback_receipt(self):
+        """source -> seed -> capture -> introduce -> verify -> rollback -> rollback_reopen -> ordinary recreate -> receipt."""
+        self.run_fresh("normal")
+
+    def test_emr_introduction_rehearsal_forced_l09b_failure_rolls_back_with_kept_values_and_the_pinned_overlay(self):
+        """Round 3 (D04/D05): a production-shaped stack whose monitor file binds ${KIN_MONITOR_PUBLIC_DIR} (absent from its
+        .env, given by the operator's shell at start) and whose declared overlay joins the Halo network. capture -> introduce,
+        where L-09b fails as a failed proxy recreate leaves it: the proxy container is gone, and meanwhile the overlay file
+        was edited by hand. The automatic rollback resolves the variable from the kept value and recreates the services
+        from the overlay bytes pinned at the capture (warning recorded): RESTORED; rollback_reopen (a new process, overlay
+        still edited) proves the previous version and reopens: ROLLED_BACK."""
+        self.run_fresh("forced")
+
     def test_emr_introduction_rehearsal_forward_entry_after_reopen(self):
-        """A separate forward branch: reopen reaches PONR, then ordinary operation keeps release image IDs."""
-        from unittest.mock import patch
-        original = SyntheticStack.phase
-        test = self
-        class ForwardComplete(Exception):
-            pass
-        def phase(stack, operation, expected, ops_class=None):
-            result = original(stack, operation, expected, ops_class)
-            if operation == "verify" and stack.label == "clone":
-                original(stack, "reopen", "DEPLOYED")
-                images = {side: stack.plan_document[side]["images"] for side in ("previous", "release")}
-                stack.ordinary_recreate(images, side="release")
-                test.assertTrue(intro.health_check(stack.origin, ca_file=str(stack.ca), member_rights=True))
-                raise ForwardComplete()
-            return result
-        with patch.object(SyntheticStack, "phase", phase), self.assertRaises(ForwardComplete):
-            self.test_emr_introduction_rehearsal_seed_capture_introduce_verify_rollback_receipt()
+        """A separate forward branch: reopen reaches PONR, then ordinary operation keeps release image IDs. The common
+        prefix runs with every assertion of the normal path up to verify (no monkeypatched early exit)."""
+        self.run_fresh("forward")
 
 
 if __name__ == "__main__":
