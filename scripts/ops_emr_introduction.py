@@ -2921,8 +2921,11 @@ class SystemdBrowser:
         require(Path(args[1]).resolve() == Path(__file__).resolve(), "browser 모듈이 보호 설치 도구와 다릅니다")
         require(browsers is not None and Path(browsers).is_absolute(), "Chromium 설치 경로를 명시해야 합니다")
         protected_host.protected(Path(browsers), directory=True)
-        return ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent",
-                "PLAYWRIGHT_BROWSERS_PATH=" + browsers, *args]
+        # RT-P3-PYCACHE: the interpreter runs the protected install's own files; it must not write bytecode beside them
+        # (the first smoke created lib/__pycache__ in /opt/kin-deploy). -B for this interpreter, the variable for any
+        # Python it starts.
+        return ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent", "PYTHONDONTWRITEBYTECODE=1",
+                "PLAYWRIGHT_BROWSERS_PATH=" + browsers, args[0], "-B", *args[1:]]
 
     def supervisor_timeout(self, cap):
         """A supervisor command's own bound: its cap, within the attempt's cleanup end. The browser's work deadline is

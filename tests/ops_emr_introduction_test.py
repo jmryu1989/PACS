@@ -3461,6 +3461,48 @@ class HelperTests(unittest.TestCase):
         for source in ("/run/desktop/mnt/host/c/Users/x", "/home/ubuntu/.kin-monitor-public"):
             self.assertEqual(intro.host_bind_source(source, "/srv/kin/repository"), source)
 
+    @unittest.skipUnless(os.name == "posix" and Path("/usr/bin/env").is_file(), "the supervised browser command is a POSIX host's")
+    def test_120_the_supervised_browser_smoke_writes_no_bytecode_into_the_tools_folder(self):
+        """RT-P3-PYCACHE (prep3 readiness3 §3-2, prep5 readiness5 note 2): the supervised smoke and the L-01 probe run the
+        protected install's own ops_emr_introduction.py; the first one wrote /opt/kin-deploy/lib/__pycache__ into that
+        install. The command the supervisor runs, executed as built against a copy of the tool folder, leaves no
+        __pycache__ there, while the policy's command run as it is does (the control: the entry imports cacheable
+        modules from its folder). The host admission of the command (root, systemd with cgroup v2, protected paths) is
+        given here; the policy's interpreter, tool path and subcommand are kept."""
+        import ops_deploy_host
+        scripts = Path(intro.__file__).resolve().parent
+        browsers = tempfile.TemporaryDirectory(prefix="kin-browsers-")
+        self.addCleanup(browsers.cleanup)
+        policy = ["/usr/bin/env", "PLAYWRIGHT_BROWSERS_PATH=" + browsers.name, sys.executable, intro.__file__, "browser-smoke"]
+        host = {"/run/systemd/system", "/sys/fs/cgroup/cgroup.controllers"}
+        real_dir, real_file = Path.is_dir, Path.is_file
+        with patch.object(intro.os, "geteuid", return_value=0), patch.object(ops_deploy_host, "protected"), \
+                patch.object(Path, "is_dir", lambda path: str(path) in host or real_dir(path)), \
+                patch.object(Path, "is_file", lambda path: str(path) in host or real_file(path)):
+            command = intro.SystemdBrowser.command(policy)
+        self.assertEqual(command[:2], ["/usr/bin/env", "-i"])
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=" + browsers.name, command)
+        self.assertEqual([item for item in command if item in (sys.executable, intro.__file__, "browser-smoke")],
+                         [sys.executable, intro.__file__, "browser-smoke"])
+
+        def run(argv):
+            folder = Path(tempfile.mkdtemp(prefix="kin-lib-"))
+            self.addCleanup(shutil.rmtree, folder, True)
+            for path in scripts.glob("ops_*.py"):
+                shutil.copy2(path, folder / path.name)
+            tool = str(folder / Path(intro.__file__).name)
+            result = subprocess.run([tool if item == intro.__file__ else item for item in argv], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+            # an empty spec is refused by the entry itself (after its imports), with its record-safe error line
+            self.assertEqual(result.returncode, 1, result.stderr[-2000:])
+            self.assertIn(b'"valid": false', result.stderr)
+            return folder
+
+        control = run(["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent", *policy[2:]])
+        self.assertTrue((control / "__pycache__").is_dir(), "the control writes bytecode beside the tool")
+        supervised = run(command)
+        self.assertFalse((supervised / "__pycache__").exists(), sorted(p.name for p in supervised.rglob("*")))
+
     def test_44_env_parsing_compose_digest_and_override(self):
         values = intro.parse_env(b"# comment\nA=1\nB='two words'\n export=x\nC=\"q\"\nbad line\n")
         self.assertEqual(values, {"A": "1", "B": "two words", "C": "q", "export": "x"})
