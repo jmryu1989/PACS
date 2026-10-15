@@ -1256,12 +1256,12 @@ test('S9U4-B32 the 10 s timers: a live attempt renews its lease; an archive stop
 
 // ════════════════════════════════════════ admin recovery ════════════════════════════════════════
 
-async function unknownAttempt(h, { study = uid(), stored = false } = {}) {
+async function unknownAttempt(h, { study = uid(), stored = false, as = TECH } = {}) {
   const bytes = dicom({ study });
   if (stored) h.orthanc.fault = call => (call.path === '/instances' ? { lose: true } : null);
   const restore = stored ? () => {} : failPost(fetchError('ECONNRESET'));
   let r;
-  try { r = await h.send(bytes); } finally { restore(); h.orthanc.fault = null; }
+  try { r = await h.send(bytes, { as }); } finally { restore(); h.orthanc.fault = null; }
   assert.equal(r.status, 202);
   return { id: r.id, bytes, study, attempt: h.s.file(r.id, 0).attempts[0] };
 }
@@ -3029,3 +3029,150 @@ test('S9U4-B53 the same gate for every write (U4BB2-01): a fence before object 2
     assert.deepEqual([a.state, a.archiveSha256, a.responseFinished], ['unconfirmed', null, false]);
   }
 });
+
+// ════════════════════════════════ round 3: the admin recovery within the target study's current reach (U4BB2-02) ════════════════════════════════
+
+/** A may-have-written occupancy (contract 4.4): index 1 of an operation of `as`, its SOP stored meanwhile by another writer. */
+async function mayHaveWritten(h, { as = TECH } = {}) {
+  const study = uid(), sop = uid(), id = randomUUID();
+  assert.equal((await h.send(dicom({ study, series: study + '.1', id: 'SYN-K' }), { id, index: 0, as })).status, 200);
+  h.orthanc.onPost = (stored, o) => { if (stored.body?.Status === 'Success') o.store(dicom({ study, series: study + '.1', sop, id: 'SYN-OUTSIDE' })); o.onPost = null; };
+  const k = await h.send(dicom({ study, series: study + '.1', sop, id: 'SYN-K' }), { id, index: 1, as });
+  assert.deepEqual([k.status, k.body.code, k.body.writeDisposition], [409, 'SOP_UID_AMBIGUOUS', 'may-have-written']);
+  return { id, study, index: 1 };
+}
+/** The two recoverable kinds: an expired unknown attempt and a may-have-written occupancy, each of operation owner `as`. */
+const RECOVERABLE = {
+  unknown: async (h, as = TECH) => { const a = await unknownAttempt(h, { as }); h.s.advance(31000); return { id: a.id, study: a.study, index: 0 }; },
+  'may-have-written': (h, as = TECH) => mayHaveWritten(h, { as }),
+};
+const evidenceFor = (h, t) => ({ basis: 'orthanc-log-checked', checkedAt: h.s.file(t.id, t.index).attempts.at(-1).startedAt });
+const scopeView = (h, t) => {
+  const file = h.s.file(t.id, t.index);
+  return { file, study: h.s.claim('study:' + t.study), sop: h.s.claim('sop:' + file.sopUid),
+    rows: audits(h.s, 'dicom.import.recovery.request').length + audits(h.s, 'dicom.import.recovery.result').length + audits(h.s, 'dicom.import.result').length };
+};
+const OUT_OF_REACH = {
+  restricted: (h, t) => { h.s.policies.set(ADMIN.sub, deniedPolicy); return () => h.s.policies.delete(ADMIN.sub); },
+  moved: (h, t) => { const s = h.s.states.get(t.study), was = s.institutionId; s.institutionId = 'inst-b'; return () => { s.institutionId = was; }; },
+  unassigned: (h, t) => { const s = h.s.states.get(t.study), was = s.institutionId; s.institutionId = null; return () => { s.institutionId = was; }; },
+  'tele-received only': (h, t) => { const s = h.s.states.get(t.study); s.institutionId = 'inst-b'; s.teleInstitutionId = 'inst-a'; return () => { s.institutionId = 'inst-a'; s.teleInstitutionId = null; }; },
+  deleted: (h, t) => { const s = h.s.states.get(t.study); h.s.states.delete(t.study); return () => h.s.states.set(t.study, s); },
+};
+
+test('S9U4-B54 the admin recovery binds to the target study\'s current reach (U4BB2-02): out of reach first - restricted, moved, unassigned, tele-received only, deleted - is the same 404 as no operation with no Orthanc read and no row; lost during the re-read it is 404 with nothing of the result written (the request row and the reading right stay); restored rights recover; another owner\'s operation of the same institution is recovered with its owner kept; a store that cannot answer is 503; a refused file without a study is 409 - for an unknown attempt and a may-have-written occupancy alike', async () => {
+  for (const [kind, make] of Object.entries(RECOVERABLE)) {
+    // Out of reach before anything: the 404 of an absent operation, byte for byte; nothing read at Orthanc, nothing written.
+    for (const [mode, leave] of Object.entries(OUT_OF_REACH)) {
+      const h = await harness();
+      const t = await make(h);
+      const missing = await recovery(h, randomUUID(), evidenceFor(h, t));
+      const before = scopeView(h, t);
+      const restore = leave(h, t);
+      h.orthanc.calls.length = 0;
+      const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      assert.deepEqual([r.status, r.body], [404, missing.body], `${kind} / ${mode}: the same 404 as no operation`);
+      assert.deepEqual(h.orthanc.calls.map(c => c.path), ['/system'], `${kind} / ${mode}: only the readiness fact, no SOP or file read`);
+      assert.deepEqual(scopeView(h, t), before, `${kind} / ${mode}: no recovery row, no result, holders unchanged`);
+      // An evidence error does not show through either: still the 404.
+      assert.equal((await recovery(h, t.id, { basis: 'admin-says-so', checkedAt: evidenceFor(h, t).checkedAt }, ADMIN, t.index)).status, 404, `${kind} / ${mode}: scope before evidence`);
+      // Rights restored: the same admin recovers it.
+      restore();
+      const ok = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      assert.equal(ok.status, 200, `${kind} / ${mode}: restored rights recover (${JSON.stringify(ok.body)})`);
+      assert.equal(h.s.claim('study:' + t.study).claim.heldByAttemptId, null);
+    }
+    // Lost during the Orthanc re-read: 404; the request row (and an unknown attempt's reading right) stay, nothing of the
+    // result is written; once the study is back and the right has run out, the recovery goes through.
+    for (const mode of ['moved', 'restricted']) {
+      const h = await harness();
+      const t = await make(h);
+      const before = scopeView(h, t);
+      let restore = null;
+      h.orthanc.fault = call => { if (call.path === '/tools/lookup' && !restore) restore = OUT_OF_REACH[mode](h, t); return null; };
+      const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      h.orthanc.fault = null;
+      assert.deepEqual([r.status, r.body.message], [404, '반입 작업을 찾을 수 없습니다'], `${kind} / ${mode} meanwhile`);
+      const after = scopeView(h, t);
+      assert.deepEqual([audits(h.s, 'dicom.import.recovery.request').length, audits(h.s, 'dicom.import.recovery.result').length], [1, 0], 'the request row stays; no result row');
+      assert.deepEqual([after.file.outcome, after.file.code, after.file.writeDisposition], [before.file.outcome, before.file.code, before.file.writeDisposition], 'the result unchanged');
+      assert.deepEqual([after.study.claim.heldByAttemptId, after.sop.claim.heldByAttemptId], [before.study.claim.heldByAttemptId, before.sop.claim.heldByAttemptId], 'holders unchanged');
+      const last = after.file.attempts.at(-1);
+      assert.ok(last.recovery && last.recovery.resolvedAt === null, 'the request is on record, unresolved');
+      if (kind === 'unknown') assert.ok(Date.parse(last.leaseUntil) > h.s.clock, 'the reading right taken while in reach stays and runs out');
+      restore();
+      if (kind === 'unknown') {
+        assert.equal((await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index)).body.code, 'RECOVERY_NOT_APPLICABLE', 'its reading right still lives');
+        h.s.advance(31000);
+      }
+      const again = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      assert.equal(again.status, 200, `${kind} / ${mode}: recovered once back in reach`);
+    }
+    // Lost between the first check and the request transaction: the request transaction checks it again - 404, not
+    // even the request row, nothing read at Orthanc.
+    {
+      const h = await harness();
+      const t = await make(h);
+      const before = scopeView(h, t);
+      let restore = null;
+      h.s.onQuery = async (sql, _values, tx) => { if (!restore && tx && sql.includes('WHERE "claimKey" = ? FOR UPDATE')) restore = OUT_OF_REACH.moved(h, t); };
+      h.orthanc.calls.length = 0;
+      const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      h.s.onQuery = null;
+      assert.ok(restore, 'moved while the request transaction took its locks');
+      assert.deepEqual([r.status, h.orthanc.calls.map(c => c.path), scopeView(h, t)], [404, ['/system'], before], `${kind}: no request row, no Orthanc read`);
+      restore();
+    }
+    // Lost during a re-read that itself failed: still that 404 (not the Orthanc answer); an unknown attempt's reading right stays.
+    {
+      const h = await harness();
+      const t = await make(h);
+      let restore = null;
+      h.orthanc.fault = call => {
+        if (call.path !== '/tools/lookup') return null;
+        restore = restore ?? OUT_OF_REACH.moved(h, t);
+        return { status: 500 };
+      };
+      const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      h.orthanc.fault = null;
+      assert.deepEqual([r.status, r.body.message], [404, '반입 작업을 찾을 수 없습니다'], `${kind}: out of reach after a failed re-read`);
+      if (kind === 'unknown') assert.ok(Date.parse(h.s.file(t.id, t.index).attempts.at(-1).leaseUntil) > h.s.clock, 'the reading right is not given back');
+      restore();
+    }
+    // Another owner's operation of the admin's institution: recovered; the owner and the attempt's actor stay, the admin is
+    // recorded as the recovery's.
+    {
+      const h = await harness();
+      const t = await make(h, TECH2);
+      const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      assert.equal(r.status, 200, `${kind}: another owner's operation`);
+      const op = h.s.op(t.id), last = h.s.file(t.id, t.index).attempts.at(-1);
+      assert.deepEqual([op.ownerSubject, op.actor, last.actor], [TECH2.sub, TECH2.actor, TECH2.actor]);
+      assert.deepEqual([last.recovery.adminSubject, last.recovery.adminActor], [ADMIN.sub, ADMIN.actor]);
+      const [row] = audits(h.s, 'dicom.import.recovery.result');
+      assert.deepEqual([row.actor, row.detail.adminSubject], [ADMIN.actor, ADMIN.sub]);
+      assert.ok(audits(h.s, 'dicom.import.result').filter(a => a.detail.operationId === t.id).every(a => a.detail.ownerSubject === TECH2.sub));
+    }
+    // A store that cannot answer the scope: 503, never a 404; nothing read, nothing written.
+    for (const [what, fail] of [['StudyAccess policy', h => { h.s.onQuery = async sql => { if (policyRead(sql)) throw new Error('synthetic policy store down'); }; }],
+      ['StudyState', h => { h.s.prisma.studyState.findUnique = async () => { throw new Error('synthetic StudyState store down'); }; }]]) {
+      const h = await harness();
+      const t = await make(h);
+      const before = scopeView(h, t);
+      fail(h);
+      h.orthanc.calls.length = 0;
+      const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      h.s.onQuery = null;
+      assert.deepEqual([r.status, r.body.code], [503, 'IMPORT_STORAGE_UNAVAILABLE'], `${kind}: ${what} unreadable`);
+      assert.ok(!JSON.stringify(r.body).includes('synthetic'), 'no store text');
+      assert.deepEqual([h.orthanc.calls.map(c => c.path), scopeView(h, t)], [['/system'], before]);
+    }
+  }
+  // A file the reader refused has no study: not a recovery target (409), never the out-of-reach 404.
+  const h = await harness();
+  const refused = await h.send(Buffer.from('not a dicom file at all'));
+  assert.equal(refused.body.code, 'DICOM_NOT_PART10');
+  const r = await recovery(h, refused.id, { basis: 'orthanc-log-checked', checkedAt: new Date(T0).toISOString() });
+  assert.deepEqual([r.status, r.body.code], [409, 'RECOVERY_NOT_APPLICABLE']);
+});
+

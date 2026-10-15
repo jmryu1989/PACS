@@ -339,8 +339,31 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     const admin = this.owner(c, 'recovery');
     await this.gate.ready(true);
     if (!OPERATION_ID.test(operationId ?? '') || !FILE_INDEX.test(indexText ?? '') || Number(indexText) >= IMPORT_FILE_SLOTS)
-      throw new NotFoundException('반입 작업을 찾을 수 없습니다');
-    return this.gate.recover(admin, operationId.toLowerCase(), Number(indexText), body);
+      throw new NotFoundException(IMPORT_NOT_FOUND);
+    return this.gate.recover(admin, operationId.toLowerCase(), Number(indexText), body, {
+      before: uid => this.recoveryScope(null, uid, c),
+      locked: (tx, uid) => this.recoveryScope(tx, uid, c),
+    });
+  }
+
+  /**
+   * Contract 3 / 4.4 for the admin recovery (U4BB2-02): the operation's institution and the admin role are not enough.
+   * The target index's study must now be the admin's own institution's (its current StudyState; held FOR SHARE inside a
+   * recovery transaction) and inside the admin's current StudyAccess; inside a transaction the admin's member rights are
+   * read again too. Out of reach - absent, unassigned, moved, tele-received only, restricted - is the same 404 as an
+   * absent operation or index; a store that cannot answer is 503 IMPORT_STORAGE_UNAVAILABLE, never a 404.
+   */
+  private async recoveryScope(tx: any | null, uid: string, c: Caller) {
+    try {
+      await this.storageRead(async () => {
+        if (!tx) { await this.ownStudy(uid, c); return; }
+        if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'recovery');
+        await this.ownStudyLocked(tx, uid, c);
+      }, importStorage);
+    } catch (failure) {
+      if (failure instanceof NotFoundException) throw new NotFoundException(IMPORT_NOT_FOUND);
+      throw failure;
+    }
   }
 
   // ── the persisted download row (5.2) ──
