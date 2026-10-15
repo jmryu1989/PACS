@@ -653,6 +653,8 @@ class SyntheticStack:
         for role in ("api", "proxy"):
             subprocess.run(["docker", "tag", images["previous" if side == "release" else "release"][role],
                             manifest["project"] + "-" + role + ":latest"], check=True, capture_output=True)
+            # RELEASE-TOOLS-CHECKPOINTS (CKPT-09): the exact aliases this fixture created, so cleanup removes only them.
+            self.created_tags = sorted(set(getattr(self, "created_tags", ())) | {manifest["project"] + "-" + role + ":latest"})
         if os.name == "posix":
             self.test.assertEqual(os.environ.get("KIN_TEST_ISOLATED_INSTALL"), "1")
             library = Path("/opt/kin-deploy/lib")
@@ -806,6 +808,12 @@ class SyntheticStack:
             subprocess.run(["docker", "network", "rm", network], capture_output=True)
         for network in ids("network", "kin.ops.run=" + self.token):
             subprocess.run(["docker", "network", "rm", network], capture_output=True)
+        # The aliases ordinary_recreate tagged (CKPT-09): only while another tag still names the shared image, so the
+        # image ID itself is never removed with them.
+        for tag in getattr(self, "created_tags", ()):
+            listed = subprocess.run(["docker", "image", "inspect", "--format", "{{json .RepoTags}}", tag], capture_output=True, text=True)
+            if listed.returncode == 0 and len(json.loads(listed.stdout or "[]")) > 1:
+                subprocess.run(["docker", "image", "rm", tag], capture_output=True)
 
     # ── RELEASE-TOOLS-CHECKPOINTS: an explicit descriptor, so a later stage process can rebuild this object ──
 
@@ -853,7 +861,9 @@ class SyntheticStack:
 class CheckpointDocker:
     """RELEASE-TOOLS-CHECKPOINTS backend: the one place that builds Docker/Compose commands for a checkpoint of one
     synthetic stack. tests/ops_release_checkpoints.py decides ownership, order and admission; this adapter only runs
-    exact commands against this stack's names, its pinned ComposeEntry and one fixed helper image ID."""
+    exact commands against this stack's names, its pinned ComposeEntry and one fixed helper image ID. Every call runs
+    without DOCKER_*/COMPOSE_* (checkpoints.daemon_environment), as the Compose calls do, so raw and Compose calls reach
+    the one daemon the host admission observed (CKPT-01)."""
 
     STOP_SECONDS = 120
 
@@ -861,6 +871,7 @@ class CheckpointDocker:
         self.stack, self.helper = stack, helper_image
 
     def run(self, args, *, timeout=300, check=True, **kwargs):
+        kwargs.setdefault("env", checkpoints.daemon_environment())
         result = subprocess.run(args, capture_output="stdout" not in kwargs, timeout=timeout, **kwargs)
         if check and result.returncode:
             raise RuntimeError("checkpoint command failed: " + " ".join(args[:3]) + " exit " + str(result.returncode))
@@ -880,7 +891,14 @@ class CheckpointDocker:
                    for item in self.inspect_all(["volume"], ["docker", "volume", "ls", "-q"])]
         networks = [{"id": item["Id"], "name": item["Name"], "labels": item.get("Labels") or {}}
                     for item in self.inspect_all(["network"], ["docker", "network", "ls", "-q", "--no-trunc"])]
-        return {"containers": containers, "volumes": volumes, "networks": networks}
+        tags = {}
+        for line in self.run(["docker", "image", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}"]).stdout.decode().splitlines():
+            ident, _, tag = line.partition("\t")
+            tags.setdefault(ident, set())
+            if tag and "<none>" not in tag:
+                tags[ident].add(tag)
+        images = [{"id": ident, "tags": sorted(names)} for ident, names in sorted(tags.items())]
+        return {"containers": containers, "volumes": volumes, "networks": networks, "images": images}
 
     def stop(self, name):
         stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), name], timeout=self.STOP_SECONDS + 60, check=False)
@@ -943,8 +961,10 @@ class CheckpointDocker:
         raise RuntimeError("restored database did not become ready within %d s" % seconds)
 
     def remove(self, kind, ident):
+        """containers/volumes/networks by exact ID; `tags` removes one exact alias (cleanup_owned only asks while another
+        tag keeps the image)."""
         command = {"containers": ["docker", "rm", "-f", "-v", ident], "volumes": ["docker", "volume", "rm", ident],
-                   "networks": ["docker", "network", "rm", ident]}[kind]
+                   "networks": ["docker", "network", "rm", ident], "tags": ["docker", "image", "rm", ident]}[kind]
         self.run(command, check=False)
 
     def observe(self, checkpoint_id):
@@ -961,6 +981,36 @@ class CheckpointDocker:
         checkpoints.boundary_contract(checkpoint_id, snapshot, state=machine.state, plan=stack.plan_document, target=stack.target)
         return snapshot
 
+    def boundary_facts(self):
+        """The product facts a restore must reproduce (CKPT-04), observed through the stack's own containers: per role its
+        container ID (history only), image, running state, Compose project, mounts and networks; with the database up the
+        applied migrations, the legacy roles/owners/grants, the realm's members, the study rows and the EMR roles; with
+        Orthanc up the synthetic frame's bytes. Compared by checkpoints.restored_mapping after the restore."""
+        stack, containers, running = self.stack, {}, set()
+        for role in intro.ROLES:
+            found = self.run(["docker", "inspect", stack.target["containers"][role]], check=False)
+            if found.returncode:
+                continue
+            item = json.loads(found.stdout)[0]
+            containers[role] = {"id": item["Id"], "image": item["Image"], "running": item["State"]["Running"],
+                                "project": (item["Config"].get("Labels") or {}).get("com.docker.compose.project"),
+                                "mounts": sorted([m.get("Destination"), m.get("Name") or m.get("Source"), bool(m.get("RW"))]
+                                                 for m in item.get("Mounts") or []),
+                                "networks": sorted(item["NetworkSettings"]["Networks"])}
+            if item["State"]["Running"]:
+                running.add(role)
+        facts = {"containers": containers}
+        if "db" in running:
+            facts["migrations"] = json.loads(stack.psql(MIGRATION_FACTS_SQL) or "null")
+            facts["legacy"] = json.loads(stack.psql(LEGACY_FACTS_SQL))
+            facts["realm"] = json.loads(stack.psql(intro.REALM_MEMBERS_SQL, "keycloak"))
+            facts["data"] = json.loads(stack.psql(DATA_FACTS_SQL))
+        if "orthanc" in running:
+            frame = self.run(["docker", "exec", stack.target["containers"]["orthanc"], "python3", "-c", FRAME_SCRIPT, SYNTHETIC_SOP],
+                             timeout=120)
+            facts["frame"] = json.loads(frame.stdout)
+        return facts
+
     @staticmethod
     def self_contained_git(fixture_root):
         """Each disposable clone keeps its own object closure (its --shared alternate is the source worktree)."""
@@ -971,12 +1021,29 @@ class CheckpointDocker:
                            timeout=600)
 
     @staticmethod
-    def host_facts(fixture_root):
-        """D1034 and the host identity, observed now (never reused from an older gate observation)."""
-        info = json.loads(subprocess.run(["docker", "info", "--format", "{{json .}}"], capture_output=True, timeout=60).stdout or b"{}")
-        listed = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}} {{.State}} {{.Label \"kin.ops.run\"}}"],
-                                capture_output=True, text=True, timeout=60)
-        foreign = [line for line in listed.stdout.splitlines() if line.split(" ")[0].startswith("kin-")]
+    def host_facts(fixture_root, owned_ids=()):
+        """D1034 and the host identity, observed now (never reused from an older gate observation): every container,
+        running or stopped, with its kin.ops.run and kin.emrb.live labels (a labelled container is foreign whatever its
+        name); the current context's endpoint and any DOCKER_* endpoint selection in this environment; a query that fails
+        or prints an unexpected row is an unobservable daemon (daemon_ok false), never a clean one."""
+        environment = checkpoints.daemon_environment()
+        info_run = subprocess.run(["docker", "info", "--format", "{{json .}}"], capture_output=True, timeout=60, env=environment)
+        try:
+            info = json.loads(info_run.stdout or b"{}") if info_run.returncode == 0 else {}
+        except ValueError:
+            info = {}
+        endpoint = subprocess.run(["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], capture_output=True,
+                                  text=True, timeout=60, env=environment)
+        listed = subprocess.run(["docker", "ps", "-a", "--no-trunc", "--format",
+                                 '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Label "kin.ops.run"}}\t{{.Label "kin.emrb.live"}}'],
+                                capture_output=True, text=True, timeout=60, env=environment)
+        rows = []
+        for line in listed.stdout.splitlines() if listed.returncode == 0 else []:
+            parts = line.split("\t")
+            if len(parts) != 5 or not parts[0] or not parts[1]:
+                rows = None
+                break
+            rows.append({"id": parts[0], "name": parts[1], "state": parts[2], "kin.ops.run": parts[3], "kin.emrb.live": parts[4]})
         memory = 0
         if os.name == "posix" and Path("/proc/meminfo").is_file():
             fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
@@ -984,11 +1051,34 @@ class CheckpointDocker:
         root = Path(fixture_root)
         usage = shutil_disk_usage(root.parent if not root.exists() else root)
         return {"os": "linux" if sys.platform.startswith("linux") else os.name, "docker_os": info.get("OperatingSystem", ""),
-                "daemon_ok": listed.returncode == 0 and bool(info.get("ID")), "daemon_identity": info.get("ID", ""),
-                "architecture": info.get("Architecture", ""), "available_ram_bytes": memory, "available_disk_bytes": usage,
-                "required_disk_bytes": 20 * 1024 ** 3, "foreign_containers": foreign, "absolute_fixture_root": str(root),
+                "daemon_ok": listed.returncode == 0 and rows is not None and info_run.returncode == 0 and bool(info.get("ID")),
+                "daemon_identity": info.get("ID", ""), "architecture": info.get("Architecture", ""), "available_ram_bytes": memory,
+                "available_disk_bytes": usage, "required_disk_bytes": 20 * 1024 ** 3,
+                "foreign_containers": checkpoints.foreign_containers(rows or [], owned_ids=owned_ids),
+                "docker_endpoint": endpoint.stdout.strip() if endpoint.returncode == 0 else "",
+                "endpoint_selectors": checkpoints.endpoint_selectors(), "absolute_fixture_root": str(root),
                 "host_key_sha256": intro.local_host_key() if os.name == "posix" else None, "gate_state": str(live_test_gate.STATE),
                 "runtime": {"python": sys.version.split()[0], "docker": info.get("ServerVersion", "")}}
+
+    @staticmethod
+    def runtime_facts():
+        """The executing runtime (CKPT-04): interpreter, Docker server, Compose, the Playwright package the smoke browser
+        imports from this interpreter and the Chromium builds of PLAYWRIGHT_BROWSERS_PATH, architecture."""
+        environment = checkpoints.daemon_environment()
+
+        def text(args):
+            result = subprocess.run(args, capture_output=True, text=True, timeout=60, env=environment)
+            return result.stdout.strip() if result.returncode == 0 else ""
+        import importlib.metadata
+        try:
+            playwright = importlib.metadata.version("playwright")
+        except importlib.metadata.PackageNotFoundError:
+            playwright = ""
+        browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "/nonexistent")
+        chromium = ",".join(sorted(path.name for path in browsers.glob("chromium*"))) if browsers.is_dir() else ""
+        return {"python": sys.version.split()[0], "docker_server": text(["docker", "version", "--format", "{{.Server.Version}}"]),
+                "compose": text(["docker", "compose", "version", "--short"]), "playwright": playwright, "chromium": chromium,
+                "arch": text(["docker", "info", "--format", "{{.Architecture}}"])}
 
 
 def shutil_disk_usage(path):
@@ -1002,6 +1092,22 @@ STAGE_METHODS = {"source": "stage_source", "seed": "stage_seed", "capture": "sta
                  "verify": "stage_verify", "normal-tail": "stage_normal_tail", "forward-tail": "stage_forward_tail",
                  "forced-capture": "stage_forced_capture", "forced-tail": "stage_forced_tail"}
 REALM_SMOKE_SQL = "SELECT count(*) FROM user_entity u JOIN realm r ON r.id=u.realm_id WHERE r.name='kin' AND u.username LIKE 'kin-smoke-%';"
+# RELEASE-TOOLS-CHECKPOINTS (CKPT-04): the restored boundary's data and rights, read as the checkpoint saw them.
+MIGRATION_FACTS_SQL = ("SELECT json_agg(json_build_array(migration_name, checksum, finished_at IS NOT NULL, rolled_back_at IS NOT NULL) "
+                       "ORDER BY migration_name COLLATE \"C\") FROM \"_prisma_migrations\";")
+DATA_FACTS_SQL = ("SELECT json_build_object('study', (SELECT json_agg(to_jsonb(s) ORDER BY s.uid) FROM \"StudyState\" s), "
+                  "'emr_roles', (SELECT json_agg(rolname ORDER BY rolname) FROM pg_roles WHERE rolname LIKE 'kin_emr_%' OR rolname='kin_runtime'));")
+FRAME_SCRIPT = r"""
+import base64, hashlib, json, os, sys, urllib.request
+password = json.loads(os.environ['ORTHANC__REGISTERED_USERS'])['admin']
+headers = {'Authorization': 'Basic ' + base64.b64encode(('admin:' + password).encode()).decode()}
+def call(path, data=None):
+    request = urllib.request.Request('http://127.0.0.1:8042' + path, data=data, headers=headers, method='POST' if data else 'GET')
+    return urllib.request.urlopen(request, timeout=30).read()
+found = [item['ID'] for item in json.loads(call('/tools/lookup', sys.argv[1].encode())) if item.get('Type') == 'Instance']
+frame = hashlib.sha256(call('/instances/' + found[0] + '/frames/0/raw')).hexdigest() if len(found) == 1 else None
+print(json.dumps({'instances': len(found), 'frame_sha256': frame}))
+"""
 
 
 class RehearsalStages:
@@ -1035,8 +1141,78 @@ class RehearsalStages:
         checkpoints.fresh_guard()
         live_test_gate.require_live_run()
         ops.require_local_docker()
+        evidence = os.environ.get("KIN_TEST_EMR_REHEARSAL_EVIDENCE")
+        record = None
+        if evidence:
+            # CKPT-06: with an evidence folder (the T16 fresh control) the fresh method writes its own segment. Registered
+            # first, it runs last: after every stack's keep_records and removal, so it observes the real cleanup.
+            record = {"scenario": scenario, "evidence": Path(evidence), "executed": [], "passed": False, "owned": [],
+                      "started": checkpoints.now_utc().isoformat(), "inputs_before": checkpoints.inputs_summary(Path(__file__).resolve().parents[1])}
+            self.addCleanup(self.fresh_segment, record)
         context = self.rehearsal_context("kin-emr-failure-" if scenario == "forced" else "kin-emr-rehearsal-")
-        checkpoints.run_scenario(scenario, self.stage_table(), context)
+        table = self.stage_table()
+        if record is not None:
+            def traced(stage, method):
+                def run(ctx):
+                    record["executed"].append(stage)
+                    try:
+                        method(ctx)
+                    finally:
+                        # What each stack owns, read while its records exist (the temporary folder is gone at the end).
+                        record["owned"] = [self.owned_by(getattr(ctx, name)) for name in ("source", "clone", "failure") if hasattr(ctx, name)]
+                return run
+            table = {stage: traced(stage, method) for stage, method in table.items()}
+        checkpoints.run_scenario(scenario, table, context)
+        if record is not None:
+            record["passed"] = True
+
+    @staticmethod
+    def owned_by(stack):
+        """One stack's exact ownership: its token label, its Compose project and recovery project, its recovery volume
+        label and the image aliases it created (never a name prefix)."""
+        state = stack.records.state() or {}
+        recovery = (state.get("recovery") or {}).get("project")
+        return {"token": stack.token, "projects": sorted({stack.project} | ({recovery} if recovery else set())),
+                "recovery": [stack.plan_sha256[:16]] if getattr(stack, "plan_sha256", None) else [],
+                "tags": list(getattr(stack, "created_tags", ()))}
+
+    def fresh_segment(self, record):
+        """The fresh method's segment (CKPT-06): the live marker, its exact case, the raw records keep_records preserved,
+        the phase results, the observed absence of every owned resource of its stacks, the unchanged inputs; written once
+        and announced on stdout for the evidence index. A cleanup that is not observed complete fails the test."""
+        case = checkpoints.FRESH_CASES[record["scenario"]]
+        marker = checkpoints.marker_identity(live_test_gate)
+        evidence = record["evidence"]
+        evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+        results = []
+        for owned in record["owned"]:
+            try:
+                remaining = checkpoints.owned_remaining(CheckpointDocker(None, None).inventory(), owned)
+                results.append({"complete": not remaining, "removed": [], "remaining": remaining, "errors": []})
+            except Exception as error:  # an unobservable daemon is not a clean one
+                results.append({"complete": False, "removed": [], "remaining": [], "errors": [type(error).__name__]})
+        cleanup = {"complete": bool(results) and all(item["complete"] for item in results),
+                   "removed": [], "remaining": [name for item in results for name in item["remaining"]],
+                   "errors": [error for item in results for error in item["errors"]]}
+        sources = {path.name[len("records-"):]: path for path in sorted(evidence.glob("records-*")) if path.is_dir()}
+        raw = sorted([path.relative_to(evidence).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]
+                     for folder in sources.values() for path in sorted(folder.rglob("*")) if path.is_file())
+        inputs_after = checkpoints.inputs_summary(Path(__file__).resolve().parents[1])
+        request = {"unit": marker["unit"], "case": case, "stage": None, "scenario": record["scenario"], "execution_kind": "fresh"}
+        current = checkpoints.current_identity(record["inputs_before"], execution_kind="fresh", root=Path(__file__).resolve().parents[1],
+                                               plan_sha256=None)
+        passed = record["passed"] and cleanup["complete"] and inputs_after == record["inputs_before"]
+        segment = checkpoints.segment_record(
+            request=request, request_sha256=None, marker=marker, identity=checkpoints.segment_identity(current),
+            executed_phases=[phase for stage in record["executed"] for phase in checkpoints.STAGES[stage]["phases"]],
+            inherited_phases=[], results={}, cleanup=cleanup, run_json=os.environ.get("KIN_TEST_EMR_CHECKPOINT_RUN_JSON", ""),
+            started_utc=record["started"], ended_utc=checkpoints.now_utc().isoformat(), selected_tests=[case],
+            phase_results=checkpoints.phase_results(sources), raw_records=[], inputs_before=record["inputs_before"],
+            inputs_after=inputs_after)
+        segment.update(raw_records=raw, observed={"outcome": "PASS"} if record["passed"] else {"outcome": "FAIL"}, expected={"outcome": "PASS"})
+        path = checkpoints.finish_segment(live_test_gate, passed=passed, segment=segment, evidence_root=evidence)
+        print(json.dumps({"segment": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}), flush=True)
+        self.assertTrue(cleanup["complete"], json.dumps(cleanup))
 
     def halo_wired(self, stack, stage):
         """IRT-11: every proxy (re)creation used the declared file set: the overlay's bind and network are there."""
@@ -1249,6 +1425,8 @@ class RehearsalStages:
                    "ordinary_entry_images": running == stack.plan_document["release"]["images"],
                    "frame_sha256": stack.plan_document["smoke"]["frame"]["sha256"]}
         print(json.dumps({"forward_verdict": verdict}), flush=True)
+        # CKPT-08: the verdict is the forward's own contract, not only material for a comparison.
+        self.assertEqual(checkpoints.forward_verdict_reasons(verdict), [], "forward verdict")
         return verdict
 
     def stage_forced_capture(self, ctx):
