@@ -538,7 +538,8 @@ test('A-HOOKS: a failed checkpoint, a lost lease or an abort stops the archive b
 
   let calls = 0;
   let afterFence = 0;
-  const fenced = await writeWith(() => null, { hooks: { beforeWrite: () => (calls += 1) < 5 } });
+  // A gate that settles without supplying the fifth chunk: the archive stops before it.
+  const fenced = await writeWith(() => null, { hooks: { supplyGate: supply => { if ((calls += 1) < 5) supply(); } } });
   assertIncomplete(fenced, 'fenced');
   afterFence = fenced.zip.length;
   assert.equal(afterFence, fenced.result.bytesWritten);
@@ -565,6 +566,77 @@ test('A-HOOKS: a failed checkpoint, a lost lease or an abort stops the archive b
   assert.ok(receiverStall.zip.length > 600 && receiverStall.zip.length < 1000, 'it was waiting on the stalled receiver');
 });
 
+test('A-SUPPLY-GATE: every sink write is made inside the gate, at most once per chunk; a gate that gives up stops the archive, a supplied chunk is never supplied again, and a drain that came while the gate was settling is not waited for again', async () => {
+  const plain = await writeWith(() => null);
+  // Every write of a whole archive (local headers, payload pieces, descriptors, manifest.json, central directory, end
+  // record) is one supply inside one gate call: no byte reaches the sink outside a supply.
+  {
+    const { data, plan } = sampleStudy();
+    const out = collector();
+    const original = out.sink.write.bind(out.sink);
+    let supplying = false;
+    let gates = 0;
+    const outside = [];
+    out.sink.write = (chunk, ...rest) => {
+      if (!supplying) outside.push(chunk.length);
+      return original(chunk, ...rest);
+    };
+    const result = await withTimeout(writeArchive({ plan, sink: out.sink,
+      source: (object, index, adopt) => adopt(Readable.from(chunked(data.get(object.orthancId), 64))),
+      supplyGate: async supply => {
+        gates += 1;
+        await new Promise(resolve => setImmediate(resolve));
+        supplying = true;
+        try { supply(); } finally { supplying = false; }
+      } }), 5000, 'writeArchive');
+    assert.equal(result.state, 'finished');
+    assert.ok(out.bytes().equals(plain.zip), 'the same archive as without a gate');
+    assert.deepEqual(outside, [], 'no byte reaches the sink outside a supply');
+    const pieces = plan.objects.reduce((n, o) => n + 2 + Math.ceil(o.bytes / 64), 0) + 5;
+    assert.equal(gates, pieces, 'one gate per write: per object header, pieces, descriptor; then manifest header, body, descriptor, central, end');
+  }
+  // Two calls of supply: the second supplies nothing.
+  const twice = await writeWith(() => null, { hooks: { supplyGate: supply => { assert.equal(supply(), true); assert.equal(supply(), false); } } });
+  assert.equal(twice.result.state, 'finished');
+  assert.ok(twice.zip.equals(plain.zip), 'each chunk exactly once');
+  // A gate that rejects after it supplied (its commit answer lost): that chunk stays supplied once, no further gate.
+  let calls = 0;
+  let supplied = 0;
+  const lost = await writeWith(() => null, { hooks: { supplyGate: async supply => {
+    calls += 1;
+    if (supply()) supplied += 1;
+    if (calls === 4) throw new Error('commit answer lost');
+  } } });
+  assertIncomplete(lost, 'fenced');
+  assert.deepEqual([calls, supplied], [4, 4], 'the fourth chunk supplied once, nothing after it');
+  assert.equal(lost.result.bytesWritten, 30 + Buffer.byteLength(lost.plan.entries[0].name, 'utf8') + 3 * 64, 'the local header and three pieces, each counted once');
+  // A gate that settles with 'aborted' or 'fenced' without supplying: the archive stops with that reason before the chunk.
+  for (const verdict of ['aborted', 'fenced']) {
+    let n = 0;
+    const stopped = await writeWith(() => null, { hooks: { supplyGate: supply => ((n += 1) < 3 ? (supply(), undefined) : verdict) } });
+    assertIncomplete(stopped, verdict);
+    assert.equal(n, 3, verdict + ': no gate after the one that stopped');
+  }
+  // A gate that supplies after the archive was aborted: nothing reaches the sink.
+  const controller = new AbortController();
+  const late = await writeWith(() => null, { hooks: { signal: controller.signal, supplyGate: async supply => {
+    controller.abort();
+    assert.equal(supply(), false, 'no supply after the archive stopped');
+  } } });
+  assertIncomplete(late, 'aborted');
+  assert.equal(late.result.bytesWritten, 0);
+  // Backpressure whose 'drain' arrives before the gate has settled: the writer goes on to the end (no second wait).
+  const { data, plan } = sampleStudy();
+  let drains = 0;
+  const sink = new Writable({ highWaterMark: 1, write(chunk, _encoding, done) { setImmediate(done); } });
+  sink.on('drain', () => { drains += 1; });
+  const drained = await withTimeout(writeArchive({ plan, sink,
+    source: (object, index, adopt) => adopt(Readable.from(chunked(data.get(object.orthancId), 64))),
+    supplyGate: supply => new Promise(resolve => { supply(); setTimeout(resolve, 2); }) }), 5000, 'writeArchive after early drains');
+  assert.equal(drained.state, 'finished');
+  assert.ok(drains > 0, 'the sink did ask for a drain');
+});
+
 /** One small object whose source the test controls; returns the pieces a lifecycle test needs. */
 function singleObject() {
   const data = Buffer.from('synthetic original object bytes');
@@ -572,7 +644,7 @@ function singleObject() {
   return { data, plan: planArchive(prepared.manifest).plan };
 }
 
-test('A-SOURCE-EARLY-ERROR: a source that fails while the first beforeWrite is pending ends the archive as source-error', async () => {
+test('A-SOURCE-EARLY-ERROR: a source that fails while the first supply approval is pending ends the archive as source-error', async () => {
   const { plan } = singleObject();
   const out = collector();
   let source;
@@ -584,7 +656,7 @@ test('A-SOURCE-EARLY-ERROR: a source that fails while the first beforeWrite is p
       adopt(source);
     },
     sink: out.sink,
-    beforeWrite: () => new Promise(resolve => setTimeout(() => resolve(true), 40)),
+    supplyGate: supply => new Promise(resolve => setTimeout(() => { supply(); resolve(); }, 40)),
   }), 5000, 'writeArchive');
   assert.equal(result.state, 'incomplete');
   assert.equal(result.reason, 'source-error');
@@ -598,7 +670,7 @@ test('A-SOURCE-EARLY-ERROR: a source that fails while the first beforeWrite is p
 
 /**
  * Plain child processes with no process-level handlers: an unowned 'error' event would end the child with a non-zero
- * status before the promise settles. Modes: 'timer' (the source fails 5 ms in, while the first beforeWrite is pending),
+ * status before the promise settles. Modes: 'timer' (the source fails 5 ms in, while the first supply approval is pending),
  * 'sync-nexttick' (the producer adopts synchronously and the stream fails in the next tick), 'promise-settlement'
  * (the producer adopts and resolves inside setImmediate and the stream fails in the next tick). The last two are the
  * reviewer's U4BA2-01 probes written for the adopt hand-over.
@@ -633,7 +705,7 @@ const source = (object, index, adopt) => {
 };
 writeArchive({
   plan: planArchive(prepared.manifest).plan, source, sink,
-  beforeWrite: mode === 'timer' ? () => new Promise(resolve => setTimeout(() => resolve(true), 40)) : undefined,
+  supplyGate: mode === 'timer' ? supply => new Promise(resolve => setTimeout(() => { supply(); resolve(); }, 40)) : undefined,
 }).then(result => console.log(JSON.stringify({ settled: 'resolved', result, sinkFinished: sink.writableFinished,
   sinkDestroyed: sink.destroyed, sourceDestroyed: stream.destroyed })),
 error => console.log(JSON.stringify({ settled: 'rejected', error: String(error) })));

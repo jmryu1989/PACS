@@ -280,14 +280,25 @@ function store({ institutions } = {}) {
         // clock_timestamp(): the database's time when the statement runs, i.e. after the locks taken before it.
         if (sql.includes('clock_timestamp() AS now')) return [{ now: new Date(s.clock) }];
         if (sql.includes("download->'attempts'->-1")) {
-          // The attempt CAS of a download chunk: the row lock (if the row exists), then the last attempt's three fields.
+          // The attempt CAS of a download chunk: the row lock (if the row exists), then the last attempt's fields as
+          // PostgreSQL's ->> gives them (text: the number too).
           if (!tx) throw new Error('row lock outside a transaction');
           tx.operationLocked = true;
+          tx.casOperation = values[0];
           const row = s.ops.get(values[0]);
           if (!seen(row) || row.kind !== 'download') return [];
           await lock(rows, row.id, tx.held);
           const now = s.ops.get(row.id), last = now.download.attempts[now.download.attempts.length - 1];
-          return [{ status: now.status, attemptId: last?.attemptId ?? null, state: last?.state ?? null, leaseUntil: last?.leaseUntil ?? null }];
+          return [{ status: now.status, attemptId: last?.attemptId ?? null, number: last ? String(last.number) : null, state: last?.state ?? null,
+            leaseUntil: last?.leaseUntil ?? null }];
+        }
+        if (sql.includes('FROM "StudyState" WHERE uid = ? FOR SHARE')) {
+          // A shared row lock on the study (modelled as the row's lock: nothing in this file takes it exclusively).
+          if (!tx) throw new Error('row lock outside a transaction');
+          const row = s.states.get(values[0]);
+          if (!seen(row)) return [];
+          await lock(rows, 'state:' + values[0], tx.held);
+          return s.states.has(values[0]) ? [{ institutionId: s.states.get(values[0]).institutionId }] : [];
         }
         if (sql.includes('_prisma_migrations')) {
           if (s.migration === 'error') throw new Error('permission denied for table _prisma_migrations');
@@ -339,14 +350,19 @@ function store({ institutions } = {}) {
     let ended;
     running.set(tx.id, new Promise(resolve => { ended = resolve; }));
     const db = api(tx);
+    let value;
     try {
-      const value = await fn(db);
+      value = await fn(db);
+      // A test may fail the COMMIT itself (the work is rolled back; the caller sees an error).
+      if (s.onCommit) await s.onCommit(tx);
       // Commit: what this transaction created becomes visible to every other one, then its locks go.
       for (const [kind, key] of tx.created) { const row = kind === 'op' ? s.ops.get(key) : s.states.get(key); if (row) delete row._tx; }
-      return value;
     }
     catch (error) { for (const fn of tx.undo.reverse()) fn(); throw error; }
     finally { tx.held.list.forEach(release => release()); running.delete(tx.id); ended(); s.openTransactions--; }
+    // A test may delay the commit's answer to the caller after the commit and its lock release (a slow network back).
+    if (s.onCommitted) await s.onCommitted(tx);
+    return value;
   };
   s.op = id => (s.ops.has(id) ? copy({ ...s.ops.get(id), _tx: undefined }) : null);
   s.claim = key => { const row = [...s.ops.values()].find(r => r.claimKey === key); return row ? copy({ ...row, _tx: undefined }) : null; };
@@ -2721,4 +2737,295 @@ test('S9U4-B51 the owner resends while its own prepared attempt (holding bound S
   assert.deepEqual([old.outcome, old.code, old.transport, next.generation, next.outcome], ['retryable', 'IMPORT_ATTEMPT_EXPIRED', 'certain-no-write', 2, 'stored']);
   await pending;   // the stalled first request fails its own CAS later and writes nothing
   assert.deepEqual([h.s.file(id, 0).attempts.map(a => a.outcome), posts(h.orthanc)], [['retryable', 'stored'], 1], 'stored once; the late worker changed nothing');
+});
+
+// ════════════════════════════════ round 3: a chunk is supplied only under its approval (U4BB2-01) ════════════════════════════════
+
+/**
+ * What the server submits to each archive response as it submits it - every write (its bytes, what write returned) and
+ * whether the response was ended - read off the http.ServerResponse itself, not from the client, whose receipt lags.
+ * The oracles below count these submissions and their byte offsets; they never count the product's own checks.
+ */
+const submissions = [];
+{
+  const { write, end } = http.ServerResponse.prototype;
+  const record = res => {
+    if (!/\/original-downloads\/[^/]+\/archive$/.test(res.req?.url ?? '')) return null;
+    let r = submissions.find(x => x.res === res);
+    if (!r) { r = { res, url: res.req.url, calls: 0, bytes: 0, chunks: [], ended: false, lastReturn: true, onWrite: null }; submissions.push(r); }
+    return r;
+  };
+  http.ServerResponse.prototype.write = function (chunk, ...rest) {
+    const r = record(this);
+    const answer = write.call(this, chunk, ...rest);
+    if (r && chunk && chunk.length) {
+      r.calls += 1; r.bytes += chunk.length; r.chunks.push(Buffer.from(chunk)); r.lastReturn = answer;
+      if (r.onWrite) r.onWrite(r);
+    }
+    return answer;
+  };
+  http.ServerResponse.prototype.end = function (...args) {
+    const r = record(this);
+    if (r) r.ended = true;
+    return end.apply(this, args);
+  };
+}
+/** The first response the server opened for this archive path (the old worker's when a retry follows it). */
+const submitted = (study, id) => submissions.find(r => r.url === archivePath(study, id));
+/** Byte offsets of each object's entry, by the contract's formula (5.2: L_i = 30 + f_i + s_i + 16) over the stored manifest. */
+function layout(h, id) {
+  let at = 0;
+  return JSON.parse(h.s.op(id).download.manifestCanonical).objects.map(o => {
+    const payload = at + 30 + Buffer.byteLength(o.path, 'utf8');
+    const entry = { header: at, payload, descriptor: payload + o.bytes, end: payload + o.bytes + 16 };
+    at = entry.end;
+    return entry;
+  });
+}
+const CENTRAL_SIG = Buffer.from([0x50, 0x4b, 0x01, 0x02]), END_SIG = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+const statusPath = (study, id) => `/api/studies/${study}/original-downloads/${id}`;
+const policyRead = sql => sql.includes('"StudyAccessPolicy"');
+/** A barrier released in finally: hold() parks a statement until open(); held resolves when one is parked. */
+function barrier() {
+  let open, parked;
+  const gate = new Promise(resolve => { open = resolve; });
+  const held = new Promise(resolve => { parked = resolve; });
+  return { gate, held, open: () => open(), park: async () => { parked(); await gate; } };
+}
+const within = (promise, ms) => Promise.race([promise.then(() => true), sleep(ms).then(() => false)]);
+
+/** The old worker after its fence: no submission since W0/B0, no finish, its checkpoint as it was, Unconfirmed, one result row. */
+async function assertNothingAfterFence(h, held, sub, mark, checkpoint, at, payloadStart) {
+  const answer = await held.archive;
+  await sleep(80);
+  assert.deepEqual([sub.calls - mark.W0, sub.bytes - mark.B0], [0, 0], 'no sink write call and no byte after the fence committed');
+  const bytes = Buffer.concat(sub.chunks);
+  assert.equal(bytes.length, sub.bytes);
+  if (payloadStart !== undefined) assert.equal(Math.max(0, sub.bytes - payloadStart), 0, 'not one payload byte of object 2');
+  assert.ok(!bytes.subarray(at[0].end).includes(Buffer.from([0x50, 0x4b, 0x07, 0x08])), 'no descriptor of object 2');
+  assert.ok(!bytes.includes(CENTRAL_SIG) && !bytes.includes(END_SIG), 'no manifest entry, central directory or end record');
+  assert.deepEqual([sub.ended, answer.complete], [false, false], 'no finish of the old response');
+  const [a] = h.s.op(held.id).download.attempts;
+  assert.deepEqual(a.objects, checkpoint, 'the checkpoint committed before the fence is unchanged');
+  assert.deepEqual([a.state, a.archiveSha256, a.responseFinished], ['unconfirmed', null, false]);
+  assert.equal(resultRows(h, a.attemptId).length, 1, 'exactly one result row for the old attempt');
+  return a;
+}
+
+test('S9U4-B52 a chunk is supplied only under its approval (U4BB2-01): the rights read of object 2\'s first payload held while the DB clock passes the lease and a GET commits the old attempt\'s Unconfirmed, then released as valid - no further write or byte; a read held inside the approval\'s lock - the fence waits, the lease check refuses after the release, then the fence commits; the commit answer delayed after the lock release - nothing after the fence; a retry sends the whole archive', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });   // only the approvals before each chunk act, never the 10 s timer
+  // (a) The read before the lock: a fence can commit while it waits. Its answer (valid rights) supplies nothing after it.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    assert.ok(sub && sub.bytes === at[0].end, 'object 1 complete and checkpointed; object 2 held at its source');
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    const b = barrier();
+    let armed = false;
+    sub.onWrite = r => { if (r.bytes === at[1].payload) armed = true; };
+    h.s.onQuery = async (sql, _values, tx) => { if (armed && !tx && policyRead(sql)) { armed = false; await b.park(); } };
+    const mark = {};
+    try {
+      held.release();
+      assert.ok(await within(b.held, 3000), 'the rights read of object 2\'s first payload is held');
+      assert.equal(sub.bytes, at[1].payload, 'object 2\'s local header supplied, not one payload byte');
+      h.s.advance(31000);
+      const fence = await h.request('GET', statusPath(held.study, held.id), { as: RAD });
+      assert.deepEqual([fence.status, fence.body.attempts[0].state], [200, 'unconfirmed'], 'the normal expiry path committed the fence');
+      Object.assign(mark, { W0: sub.calls, B0: sub.bytes });
+    } finally { b.open(); h.s.onQuery = null; }
+    await assertNothingAfterFence(h, held, sub, mark, checkpoint, at, at[1].payload);
+    // A new attempt after the fence: the whole archive, Sent.
+    const retry = await h.request('GET', archivePath(held.study, held.id), { as: RAD });
+    assert.equal(retry.bytes.length, Number(retry.headers['content-length']));
+    await sleep(50);
+    assert.deepEqual(h.s.op(held.id).download.attempts.map(a => a.state), ['unconfirmed', 'sent']);
+  }
+  // (b) The rights read that follows the approval's own read of the attempt (the lease read): held. It is inside the
+  // approval's lock, so the fence waits for that lock. DB clock +31 s -> read released -> the approval's lease check
+  // refuses (nothing written) -> its lock goes -> the fence commits. The read is released whatever the fence does.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    const b = barrier();
+    let armed = false, leaseRead = false;
+    sub.onWrite = r => { if (r.bytes === at[1].payload) armed = true; };
+    h.s.onQuery = async (sql, _values, tx) => {
+      if (armed && casSql(sql)) leaseRead = true;
+      else if (armed && leaseRead && policyRead(sql)) { armed = false; await b.park(); }
+    };
+    const order = [], mark = {};
+    let fence;
+    try {
+      held.release();
+      assert.ok(await within(b.held, 3000), 'the rights read after the lease read is held');
+      Object.assign(mark, { W0: sub.calls, B0: sub.bytes });
+      h.s.advance(31000);
+      order.push('db-time+31s');
+      fence = h.request('GET', statusPath(held.study, held.id), { as: RAD }).then(r => { order.push('fence-committed'); return r; });
+      await sleep(150);
+      assert.deepEqual([order.includes('fence-committed'), h.s.op(held.id).download.attempts[0].state], [false, 'sending'], 'the fence waits for the approval\'s row lock');
+    } finally { order.push('read-released'); b.open(); h.s.onQuery = null; }
+    const answer = await fence;
+    assert.deepEqual([answer.status, answer.body.attempts[0].state], [200, 'unconfirmed']);
+    assert.deepEqual(order, ['db-time+31s', 'read-released', 'fence-committed']);
+    await assertNothingAfterFence(h, held, sub, mark, checkpoint, at, at[1].payload);
+  }
+  // (c) Regression control: the approval's commit answer delayed after its lock was released, and a fence committed in
+  // that gap. The chunk it approved was supplied before the commit (under the lock); nothing is supplied after the fence.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    let armed = true, delayed = false;
+    const mark = {};
+    // Nothing is in flight now (object 2 waits at its source): the next approval to start is object 2's local header.
+    h.s.onQuery = async (sql, _values, tx) => { if (armed && tx && casSql(sql)) { armed = false; tx.watched = true; } };
+    h.s.onCommitted = async tx => {
+      if (!tx.watched || delayed) return;
+      delayed = true;
+      h.s.advance(31000);
+      const fence = await h.request('GET', statusPath(held.study, held.id), { as: RAD });
+      assert.equal(fence.body.attempts[0].state, 'unconfirmed');
+      Object.assign(mark, { W0: sub.calls, B0: sub.bytes });
+    };
+    try {
+      held.release();
+      for (let i = 0; i < 100 && !mark.W0; i++) await sleep(20);
+    } finally { h.s.onQuery = null; }
+    h.s.onCommitted = null;
+    await assertNothingAfterFence(h, held, sub, mark, checkpoint, at, at[1].payload);
+    assert.equal(mark.B0, at[1].payload, 'the approved local header was handed to the response before its transaction committed');
+  }
+});
+
+test('S9U4-B53 the same gate for every write (U4BB2-01): a fence before object 2\'s local header, before its descriptor or while the writer waits for a blocked receiver\'s drain leaves no further write; a commit answer lost after a supply stops the archive Unconfirmed without supplying that chunk again; an approval that ran past its bound while the event loop was stalled supplies nothing', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  // Before the local header: the fence commits while object 2 is still held at its source.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    h.s.advance(31000);
+    assert.equal((await h.request('GET', statusPath(held.study, held.id), { as: RAD })).body.attempts[0].state, 'unconfirmed');
+    const mark = { W0: sub.calls, B0: sub.bytes };
+    held.release();
+    await assertNothingAfterFence(h, held, sub, mark, checkpoint, at, at[1].header);
+    assert.equal(sub.bytes, at[0].end, 'no local header of object 2');
+  }
+  // Before the descriptor: the rights read of object 2's descriptor is held after its last payload byte.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    const b = barrier();
+    let armed = false;
+    sub.onWrite = r => { if (r.bytes === at[1].descriptor) armed = true; };
+    h.s.onQuery = async (sql, _values, tx) => { if (armed && !tx && policyRead(sql)) { armed = false; await b.park(); } };
+    const mark = {};
+    try {
+      held.release();
+      assert.ok(await within(b.held, 3000), 'the descriptor\'s rights read is held');
+      h.s.advance(31000);
+      assert.equal((await h.request('GET', statusPath(held.study, held.id), { as: RAD })).body.attempts[0].state, 'unconfirmed');
+      Object.assign(mark, { W0: sub.calls, B0: sub.bytes });
+    } finally { b.open(); h.s.onQuery = null; }
+    await assertNothingAfterFence(h, held, sub, mark, checkpoint, at);
+    assert.equal(sub.bytes, at[1].descriptor, 'object 2\'s payload went out under its approvals; its descriptor did not');
+  }
+  // After a blocked drain: the receiver stops reading, the writer waits for 'drain' (holding no lock), a fence commits,
+  // the receiver reads again - the next chunk is not supplied.
+  {
+    const h = await harness();
+    const study = uid();
+    own(h.s, study, 'inst-a', 'gateway');
+    h.orthanc.store(dicom({ study, series: study + '.1', id: 'SYN-D', pixel: 8 * 1024 * 1024 }));
+    h.orthanc.store(dicom({ study, series: study + '.2', id: 'SYN-D', pixel: 70 }));
+    const id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200);
+    let response, closed;
+    const ended = new Promise(resolve => { closed = resolve; });
+    const req = http.request({ host: '127.0.0.1', port: h.port, path: archivePath(study, id), headers: { 'x-test-caller': JSON.stringify(RAD) } },
+      res => { response = res; res.on('error', () => {}); res.on('close', closed); });
+    req.on('error', () => closed());
+    req.end();
+    let sub;
+    try {
+      // Wait until the server's last write answered false and nothing more is written: it waits for the drain.
+      let still = 0, seen = -1;
+      for (let i = 0; i < 300 && still < 15; i++) {
+        await sleep(20);
+        sub = submitted(study, id);
+        if (sub && sub.lastReturn === false && sub.calls === seen) still++; else still = 0;
+        seen = sub ? sub.calls : -1;
+      }
+      assert.ok(sub && still >= 15 && sub.lastReturn === false, 'the writer waits for the receiver\'s drain');
+      assert.equal(h.s.openTransactions, 0, 'no transaction is held while it waits');
+      h.s.advance(31000);
+      assert.equal((await h.request('GET', statusPath(study, id), { as: RAD })).body.attempts[0].state, 'unconfirmed');
+    } finally { response?.resume(); }
+    const mark = { W0: sub.calls, B0: sub.bytes };
+    await ended;
+    await sleep(80);
+    assert.deepEqual([sub.calls - mark.W0, sub.bytes - mark.B0], [0, 0], 'no write after the drain resumed');
+    assert.equal(sub.ended, false);
+    const [a] = h.s.op(id).download.attempts;
+    assert.deepEqual([a.state, a.objects.length, a.archiveSha256, a.responseFinished], ['unconfirmed', 0, null, false]);
+    assert.equal(resultRows(h, a.attemptId).length, 1);
+  }
+  // A commit answer lost after a supply: that chunk went out once; the archive stops Unconfirmed and never sends it again.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    let armed = false, lose = false;
+    const mark = {};
+    sub.onWrite = r => { if (r.bytes === at[1].payload && !armed) { armed = true; lose = true; Object.assign(mark, { W0: r.calls, B0: r.bytes }); } };
+    h.s.onCommit = async tx => { if (lose && tx.casOperation === held.id) { lose = false; throw Object.assign(new Error('synthetic commit lost'), { code: 'P1017' }); } };
+    try { held.release(); await held.archive; } finally { h.s.onCommit = null; }
+    await sleep(80);
+    assert.deepEqual([sub.calls - mark.W0, sub.bytes - mark.B0], [0, 0], 'nothing after the chunk whose commit answer was lost');
+    const bytes = Buffer.concat(sub.chunks);
+    assert.equal(bytes.length, at[1].payload, 'object 2\'s local header once, then nothing');
+    const [a] = h.s.op(held.id).download.attempts;
+    assert.deepEqual(a.objects, checkpoint);
+    assert.deepEqual([a.state, a.archiveSha256, a.responseFinished], ['unconfirmed', null, false], 'an unknown commit after a supply is Unconfirmed');
+    assert.equal(resultRows(h, a.attemptId).length, 1);
+  }
+  // An approval past its bound while the event loop is stalled (its timer has not run yet): the monotonic deadline read
+  // right before the supply refuses it - nothing supplied, the transaction rolled back, the archive Unconfirmed.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    let armed = false;
+    const mark = {};
+    sub.onWrite = r => { if (r.bytes === at[1].payload) { armed = true; Object.assign(mark, { W0: r.calls, B0: r.bytes }); } };
+    const leaseBefore = () => h.s.op(held.id).download.attempts[0].leaseUntil;
+    let lease = null;
+    h.s.onQuery = async (sql, _values, tx) => {
+      if (armed && tx && tx.casOperation === held.id && sql.includes('clock_timestamp() AS now')) {
+        armed = false;
+        lease = leaseBefore();
+        const until = performance.now() + 5200;
+        while (performance.now() < until) { /* the event loop stalls: no timer callback runs */ }
+        h.s.advance(15000);   // a renewal in this late approval would show as a new lease
+      }
+    };
+    try { held.release(); await held.archive; } finally { h.s.onQuery = null; }
+    await sleep(80);
+    assert.deepEqual([sub.calls - mark.W0, sub.bytes - mark.B0], [0, 0], 'the late approval supplied nothing');
+    const [a] = h.s.op(held.id).download.attempts;
+    assert.ok(lease !== null && a.leaseUntil === lease, 'its renewal rolled back with it');
+    assert.deepEqual(a.objects, checkpoint);
+    assert.deepEqual([a.state, a.archiveSha256, a.responseFinished], ['unconfirmed', null, false]);
+  }
 });

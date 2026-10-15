@@ -29,12 +29,15 @@ const LEASE_MS = 30000;
 const RENEW_MS = 10000;
 const NO_PROGRESS_MS = 30000;
 /**
- * The check before a chunk renews the lease (to DB now + 30 s) when less than this is left of it by the database's own
- * time; otherwise it only confirms it. After any passing check the lease outlives the check by at least this much, so a
- * fence by another request (only ever of an expired lease) cannot fall between the check and the chunk it admits.
+ * When a chunk's approval also renews the lease (to DB now + 30 s): with less than this left of it by the database's
+ * time. Only a choice of when to renew; no safety argument rests on it (the approval holds the row lock through the
+ * chunk's supply, see approve).
  */
 const RENEW_BELOW_MS = 20000;
-/** Upper bound of one check before a chunk; a check that does not answer in time stops the archive. */
+/**
+ * Upper bound of each of an approval's two stages (the credential outside the lock; the locked transaction with the
+ * supply), each as a whole: a stage that does not answer in time stops the archive, and a late answer supplies nothing.
+ */
 const CHECK_BOUND_MS = 5000;
 const DOWNLOAD_ROLES = ['radiologist', 'technician'];
 const DOWNLOAD_STATES = ['prepared', 'sending', 'sent', 'incomplete', 'unconfirmed'];
@@ -179,12 +182,29 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   async currentRights(c: Caller, role: 'import' | 'download', studyUid: string | null, req: any | null): Promise<void> {
     if (process.env.AUTH_REQUIRED !== 'false') {
       if (req) await this.liveCredential(req, c);
-      const row = await this.prisma.memberRights.findUnique({ where: { sub: c.sub } });
-      const allowed = rightsAllow(row);
-      this.role(allowed ? row.roles : [], role);
-      inst({ ...c, institution: allowed && row.institution === c.institution ? c.institution : null });
+      await this.memberRightsNow(this.prisma, c, role);
     }
     if (studyUid !== null) await this.ownStudy(studyUid, c);
+  }
+
+  /** The durable member rights the guard reads, read again on `db` (a transaction's own client when called in one). */
+  private async memberRightsNow(db: any, c: Caller, role: 'import' | 'download' | 'recovery') {
+    const row = await db.memberRights.findUnique({ where: { sub: c.sub } });
+    const allowed = rightsAllow(row);
+    this.role(allowed ? row.roles : [], role);
+    inst({ ...c, institution: allowed && row.institution === c.institution ? c.institution : null });
+  }
+
+  /**
+   * A study's own institution and the caller's StudyAccess, read in the caller's transaction under its locks: the
+   * StudyState row held (FOR SHARE) so no move commits meanwhile, and StudyAccess through its shared policy lock on the
+   * same transaction (its metadata, if a restricted policy needs any, prepared before the lock). Absent, foreign,
+   * unassigned, tele-received and outside StudyAccess are one NotFoundException.
+   */
+  private async ownStudyLocked(tx: any, uid: string, c: Caller) {
+    const rows: any[] = await tx.$queryRaw`SELECT "institutionId" FROM "StudyState" WHERE uid = ${uid} FOR SHARE`;
+    if (!rows.length || rows[0].institutionId !== c.institution) throw new NotFoundException(TRANSFER_MESSAGES.notFound);
+    await this.studyAccess.require(c, [uid], tx);
   }
 
   /**
@@ -487,36 +507,18 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     res.setHeader('Content-Length', String(plan.plan.totalSize));
     res.setHeader('Cache-Control', 'no-store');
     const stop = new AbortController();
-    let fenced = false, lastWritten = 0;
+    const target: SupplyTarget = { operationId: op.id, attemptId: attempt.attemptId, number: attempt.number, uid, c, req,
+      fenced: false, late: false };
+    let lastWritten = 0;
     const lost = () => { if (!res.writableFinished) stop.abort(); };
     res.once('close', lost);
     let idle = setTimeout(() => stop.abort(), NO_PROGRESS_MS);
-    // Between chunks (a slow source or receiver) the lease is kept and the rights are re-read every 10 s; a loss stops it.
+    // Between chunks (a slow source or receiver) the same approval without a chunk every 10 s: it keeps the lease and
+    // stops the archive on a lost right or a lost lease.
     const renew = setInterval(() => {
-      void this.holdAttempt(op.id, attempt.attemptId, true)
-        .then(kept => {
-          if (!kept) { fenced = true; stop.abort(); return; }
-          return this.currentRights(c, 'download', uid, req);
-        })
-        .catch(() => stop.abort());
+      void this.approve(target, null).then(verdict => { if (verdict) stop.abort(); });
     }, RENEW_MS);
     renew.unref?.();
-    /*
-     * 5.2 step 5 / step 6 / 5.3, immediately before every chunk (B-03): the attempt's CAS in the database - this attempt
-     * is still the operation's last, still sending, and its lease is live by the database's time read after the row lock -
-     * and the rights now (credential, member rights, own study, StudyAccess). No time window, no cached answer: each chunk
-     * waits for both, each wait bounded by CHECK_BOUND_MS. A lost or unanswered CAS fences the attempt (Unconfirmed); lost
-     * or unconfirmable rights cancel it, so the writer stops on its own signal before the chunk (Incomplete).
-     */
-    const confirm = async (): Promise<boolean> => {
-      if (fenced) return false;
-      if (stop.signal.aborted) return true;
-      const kept = await bounded(this.holdAttempt(op.id, attempt.attemptId, false)).catch(() => false);
-      if (!kept) { fenced = true; stop.abort(); return false; }
-      const allowed = await bounded(this.currentRights(c, 'download', uid, req)).then(() => true, () => false);
-      if (!allowed) stop.abort();
-      return !fenced;
-    };
     let result;
     try {
       result = await writeArchive({ plan: plan.plan, sink: res, signal: stop.signal,
@@ -530,13 +532,96 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
             idle = setTimeout(() => stop.abort(), NO_PROGRESS_MS);
           }
         },
-        beforeWrite: confirm });
+        supplyGate: supply => this.approve(target, supply) });
     } finally {
       clearTimeout(idle);
       clearInterval(renew);
       res.removeListener('close', lost);
     }
-    await this.closeAttempt(op.id, owner, attempt.attemptId, result).catch(() => undefined);
+    await this.closeAttempt(op.id, owner, attempt.attemptId, result, target.fenced).catch(() => undefined);
+  }
+
+  /**
+   * 5.2 steps 5-6 / 5.3, contract 3 (U4BB2-01): the approval of one archive chunk, and that chunk's supply under it.
+   *   1. Outside any lock, within CHECK_BOUND_MS: the request's own credential (AuthService), and the StudyAccess
+   *      metadata a restricted policy needs.
+   *   2. One short transaction, within CHECK_BOUND_MS as a whole, in the order every writer of the row uses: the
+   *      operation's advisory lock, then its row; the member rights, the study's own institution (its StudyState held)
+   *      and StudyAccess read in it; then the database's time and this attempt's place - still the last attempt (its id
+   *      and number), sending, its lease live.
+   *   3. While that row lock is still held, with no await after the last database answer: the cancellation latch and the
+   *      monotonic deadline are read, and `supply` runs once - the chunk's accounting and its sink.write.
+   *   4. The transaction ends; the writer waits for the receiver's drain outside it. Source reads, Orthanc and the drain
+   *      never hold the lock.
+   * A fence (an expiry by GET or startup, a retry's new attempt) needs the same row lock: it commits either before step 2
+   * reads the row - then nothing is supplied - or after the chunk was handed to the response. The order is the one in
+   * which the server submits bytes to the response; bytes already submitted are not called back. Every chunk is approved
+   * afresh: no time window, no answer kept from an earlier chunk.
+   * Verdicts: undefined - supplied (or, without a chunk, kept and renewed); 'fenced' - the attempt is no longer this
+   * one's, its lease is gone, or the approval itself timed out or failed (Unconfirmed; it wins over a lost right);
+   * 'aborted' - the rights alone are refused or could not be confirmed (Incomplete). A stage that timed out sets a
+   * permanent latch: the archive stops, and its late answer supplies nothing.
+   */
+  private async approve(t: SupplyTarget, supply: (() => boolean) | null): Promise<'fenced' | 'aborted' | undefined> {
+    if (t.fenced || t.late) return 'fenced';
+    const prepared = await bounded(this.rightsBeforeLock(t.c, t.uid, t.req)).then(() => true, () => false);
+    if (t.fenced || t.late) return 'fenced';
+    if (!prepared) return 'aborted';
+    const deadline = performance.now() + CHECK_BOUND_MS;
+    try {
+      const verdict = await bounded(this.supplyUnderLock(t, supply, deadline), () => { t.late = true; });
+      if (verdict === 'fenced') t.fenced = true;
+      return verdict;
+    } catch {
+      t.fenced = true;
+      return 'fenced';
+    }
+  }
+
+  /** Approval step 1: the credential the guard admitted, still live; the StudyAccess metadata prepared before any lock. */
+  private async rightsBeforeLock(c: Caller, uid: string, req: any) {
+    if (process.env.AUTH_REQUIRED !== 'false' && req) await this.liveCredential(req, c);
+    await this.studyAccess.prepare(c, [uid]);
+  }
+
+  /** Approval steps 2-3 (see approve); a late approval throws, so the transaction - and any renewal in it - rolls back. */
+  private supplyUnderLock(t: SupplyTarget, supply: (() => boolean) | null, deadline: number): Promise<'fenced' | 'aborted' | undefined> {
+    return this.gate.write(async tx => {
+      await this.gate.lockOperationKey(tx, t.operationId);
+      const rows: any[] = await tx.$queryRaw`SELECT status, download->'attempts'->-1->>'attemptId' AS "attemptId",
+        download->'attempts'->-1->>'number' AS "number", download->'attempts'->-1->>'state' AS "state",
+        download->'attempts'->-1->>'leaseUntil' AS "leaseUntil"
+        FROM "ImportOperation" WHERE id = ${t.operationId}::uuid AND kind = 'download' FOR UPDATE`;
+      let refused = false;
+      try {
+        if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, t.c, 'download');
+        await this.ownStudyLocked(tx, t.uid, t.c);
+      } catch (failure) {
+        // A refusal (403/404, StudyAccess unable to confirm a changed scope) is the rights' answer; anything else leaves
+        // this approval's database answer unknown.
+        if (!(failure instanceof HttpException) || failure.getStatus() >= 500) throw failure;
+        refused = true;
+      }
+      const now = await this.gate.clock(tx);
+      const last = rows[0];
+      const left = last ? Date.parse(last.leaseUntil) - now.getTime() : NaN;
+      if (!last || last.status !== 'sending' || last.attemptId !== t.attemptId || last.number !== String(t.number)
+          || last.state !== 'sending' || !(left > 0)) return 'fenced';
+      if (refused) return 'aborted';
+      if (!supply || left < RENEW_BELOW_MS) {
+        if (t.late) throw new LateApproval();
+        const { op, stored } = await this.lockDownload(tx, t.operationId);
+        const download = JSON.parse(JSON.stringify(stored!.download));
+        download.attempts[download.attempts.length - 1].leaseUntil = new Date(now.getTime() + LEASE_MS).toISOString();
+        await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
+      }
+      if (!supply) return undefined;
+      // From the last database answer to the response: synchronous, under the row lock. A stage past its bound - its
+      // timer already run (the latch) or not yet (the monotonic deadline) - supplies nothing.
+      if (t.late || performance.now() >= deadline) throw new LateApproval();
+      supply();
+      return undefined;
+    });
   }
 
   /** The download row locked for a change, read after its lock with the database's time, in its persisted format. */
@@ -597,31 +682,6 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         at: now.toISOString() }) } });
   }
 
-  /**
-   * The attempt's CAS, in one short transaction: the row locked, then the database's time, then this attempt must still
-   * be the last one, sending, with a live lease. The lease is renewed (DB now + 30 s) when asked or when less than
-   * RENEW_BELOW_MS of it is left; otherwise nothing is written.
-   */
-  private holdAttempt(operationId: string, attemptId: string, renew: boolean): Promise<boolean> {
-    return this.gate.write(async tx => {
-      await this.gate.lockOperationKey(tx, operationId);
-      const rows: any[] = await tx.$queryRaw`SELECT status, download->'attempts'->-1->>'attemptId' AS "attemptId",
-        download->'attempts'->-1->>'state' AS "state", download->'attempts'->-1->>'leaseUntil' AS "leaseUntil"
-        FROM "ImportOperation" WHERE id = ${operationId}::uuid AND kind = 'download' FOR UPDATE`;
-      const now = await this.gate.clock(tx);
-      const last = rows[0];
-      if (!last || last.status !== 'sending' || last.attemptId !== attemptId || last.state !== 'sending') return false;
-      const left = Date.parse(last.leaseUntil) - now.getTime();
-      if (!(left > 0)) return false;
-      if (!renew && left >= RENEW_BELOW_MS) return true;
-      const { op, stored } = await this.lockDownload(tx, operationId);
-      const download = JSON.parse(JSON.stringify(stored!.download));
-      download.attempts[download.attempts.length - 1].leaseUntil = new Date(now.getTime() + LEASE_MS).toISOString();
-      await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
-      return true;
-    });
-  }
-
   /** 5.2 step 4: each completed object's result is committed (same CAS) before the next object starts; a loss stops it. */
   private async checkpoint(operationId: string, attemptId: string, done: ArchiveObjectResult): Promise<void> {
     const kept = await this.gate.write(async tx => {
@@ -642,10 +702,11 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * 5.2 step 7 / B-04, under the same CAS as every chunk: Sent, responseFinished, the archive hash and the result row only
    * after the writer's own finish and while this attempt still holds a live lease. A lease that ran out by now closes it
    * Unconfirmed with its checkpoints as they were; a stop on its source, a length/MD5 mismatch, the receiver or a
-   * cancellation is Incomplete with the writer's exact counters; a lost CAS or any other stop is Unconfirmed. An attempt
-   * already closed by someone else (it was fenced) is left as it is: that close wrote its result row.
+   * cancellation is Incomplete with the writer's exact counters; a lost or unknown approval (`fenced`, whatever stop the
+   * writer reported after it) or any other stop is Unconfirmed. An attempt already closed by someone else (it was fenced)
+   * is left as it is: that close wrote its result row.
    */
-  private async closeAttempt(operationId: string, owner: ImportOwner, attemptId: string, result: any) {
+  private async closeAttempt(operationId: string, owner: ImportOwner, attemptId: string, result: any, fenced: boolean) {
     await this.gate.write(async tx => {
       const { op, now, stored } = await this.lockDownload(tx, operationId);
       const download = JSON.parse(JSON.stringify(stored!.download));
@@ -654,7 +715,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
       if (Date.parse(mine.leaseUntil) <= now.getTime()) {
         await this.expireSending(tx, op, mine, now);
       } else {
-        const state = result?.state === 'finished' ? 'sent' : INCOMPLETE_REASONS.includes(result?.reason) ? 'incomplete' : 'unconfirmed';
+        const state = result?.state === 'finished' ? 'sent' : !fenced && INCOMPLETE_REASONS.includes(result?.reason) ? 'incomplete' : 'unconfirmed';
         mine.state = state;
         mine.endedAt = now.toISOString();
         if (state !== 'unconfirmed' && Array.isArray(result?.objects)) mine.objects = result.objects;
@@ -699,11 +760,28 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   }
 }
 
-/** A check before a chunk that does not answer within CHECK_BOUND_MS rejects; a late answer is ignored by the caller. */
-function bounded<T>(work: Promise<T>): Promise<T> {
+/** The archive and the chunk an approval is for, with its two latches (set once, never cleared). */
+interface SupplyTarget {
+  operationId: string; attemptId: string; number: number; uid: string; c: Caller; req: any;
+  /** The attempt's lease or approval was lost or is unknown: no further chunk, and the close is Unconfirmed. */
+  fenced: boolean;
+  /** An approval stage ran past its bound: its late answer must supply nothing (read synchronously before a supply). */
+  late: boolean;
+}
+
+/** An approval whose time ran out by the time it could supply: thrown inside its transaction, so nothing of it commits. */
+class LateApproval extends Error {
+  constructor() { super('approval past its bound'); }
+}
+
+/**
+ * A stage that does not answer within CHECK_BOUND_MS rejects; `expired` runs first (it sets the permanent latch the late
+ * work reads before it could supply). A late answer is never taken as one.
+ */
+function bounded<T>(work: Promise<T>, expired?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error('check deadline')), CHECK_BOUND_MS);
+    timer = setTimeout(() => { expired?.(); reject(new Error('check deadline')); }, CHECK_BOUND_MS);
   });
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }

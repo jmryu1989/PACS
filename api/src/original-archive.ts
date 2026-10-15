@@ -5,7 +5,8 @@
  * SHA-256 binds an operation), the exact ZIP32 pre-computation that refuses an oversize archive before byte 1, and a
  * streaming STORE writer that hashes every object while it passes and never closes a short or mismatching archive as
  * a successful ZIP. No Orthanc client, no timers and no database here: the caller supplies one Readable per object,
- * the response as the sink, and hooks for its no-progress timer, lease fencing and per-object checkpoints.
+ * the response as the sink, a gate that approves and makes every sink write, and hooks for its no-progress timer and
+ * per-object checkpoints.
  */
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -135,8 +136,17 @@ export interface WriteArchiveOptions {
   onObjectDone?: (result: ArchiveObjectResult, index: number) => void | Promise<void>;
   /** Called after every payload chunk reaches the sink; the caller's no-progress timer hangs off this. */
   onProgress?: (progress: ArchiveProgress) => void;
-  /** Consulted immediately before every sink write; false or a rejection stops the archive (lease fencing). */
-  beforeWrite?: () => boolean | Promise<boolean>;
+  /**
+   * Approves and makes every sink write: each local header, payload piece and data descriptor, manifest.json, the central
+   * directory and the end record. It is called with `supply`, which accounts for that one chunk (archive hash, offsets,
+   * the object's supplied bytes) and hands it to the sink, synchronously; `supply` returns false and supplies nothing
+   * once the archive has already stopped (an abort, a sink or source failure). The gate calls `supply` at most once and
+   * synchronously at the moment its approval holds - a check that answered and was then given up leaves a gap a
+   * revocation can fall into - and settles after it. Settling without the call, with 'fenced' or 'aborted', or by a
+   * rejection stops the archive ('fenced' unless it says 'aborted'); a chunk already supplied stays supplied and is never
+   * supplied again. The wait for the receiver's 'drain' comes after the gate has settled.
+   */
+  supplyGate?: (supply: () => boolean) => void | 'fenced' | 'aborted' | Promise<void | 'fenced' | 'aborted'>;
   /** Aborting stops the archive before its next write (cancellation, revoked rights, the caller's timer). */
   signal?: AbortSignal;
 }
@@ -464,10 +474,12 @@ function watchSink(sink: Writable, onFailure: () => void) {
       if (!failure) failure = reason;
       notify();
     },
-    drain: () => {
+    /** A write the sink answered false: from then on a 'drain' is owed before the next write (set at the write itself). */
+    owe: () => {
       drained = false;
-      return until(() => drained);
     },
+    /** Waits for an owed 'drain' - at once when it already came - and rejects when the sink failed meanwhile. */
+    drain: () => until(() => drained),
     /** The writer's own end after the last planned byte; resolves on that end's 'finish'. */
     end: () => {
       writerEnding = true;
@@ -490,7 +502,7 @@ function watchSink(sink: Writable, onFailure: () => void) {
  * that errors, closes, or finishes before the writer ended it after the last planned byte releases the source.
  */
 export async function writeArchive(options: WriteArchiveOptions): Promise<ArchiveWriteResult> {
-  const { plan, source, sink, onObjectDone, onProgress, beforeWrite, signal } = options;
+  const { plan, source, sink, onObjectDone, onProgress, supplyGate, signal } = options;
   const archiveHash = createHash('sha256');
   const objects: ArchiveObjectResult[] = [];
   const crcs: number[] = [];
@@ -514,23 +526,43 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
   };
   const copy = (r: ArchiveObjectResult): ArchiveObjectResult => ({ ...r });
 
-  const put = async (chunk: Uint8Array) => {
-    if (beforeWrite) {
-      let allowed: boolean;
-      try {
-        allowed = await beforeWrite();
-      } catch {
-        throw new Stop('fenced');
-      }
-      if (allowed === false) throw new Stop('fenced');
-    }
+  /**
+   * One chunk to the sink, made by `supply` inside the caller's gate (or at once without one). `account` adds the chunk to
+   * a counter of the caller's (an object's supplied bytes) in the same synchronous step as its sink.write.
+   */
+  const put = async (chunk: Uint8Array, account?: () => void) => {
     if (signal?.aborted) throw new Stop('aborted');
-    const failure = watch.failure();
-    if (failure) throw new Stop(failure);
-    if (sink.destroyed || sink.writableEnded) throw new Stop('sink-closed');
-    archiveHash.update(chunk);
-    written += chunk.length;
-    if (!sink.write(chunk)) await watch.drain();
+    const before = watch.failure();
+    if (before) throw new Stop(before);
+    let supplied = false;
+    let refused: ArchiveStopReason | null = null;
+    let owed = false;
+    const supply = (): boolean => {
+      if (supplied || refused) return false;
+      refused = signal?.aborted ? 'aborted' : watch.failure() ?? (sink.destroyed || sink.writableEnded ? 'sink-closed' : null);
+      if (refused) return false;
+      supplied = true;
+      archiveHash.update(chunk);
+      written += chunk.length;
+      account?.();
+      if (!sink.write(chunk)) {
+        owed = true;
+        watch.owe();
+      }
+      return true;
+    };
+    let verdict: unknown;
+    if (!supplyGate) supply();
+    else {
+      try {
+        verdict = await supplyGate(supply);
+      } catch {
+        verdict = 'fenced';
+      }
+    }
+    if (verdict === 'fenced' || verdict === 'aborted') throw new Stop(verdict);
+    if (!supplied) throw new Stop(refused ?? 'fenced');
+    if (owed) await watch.drain();
   };
 
   // An abort must also end a wait on a stalled source or a stalled receiver, not only the next write.
@@ -602,8 +634,9 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
           md5.update(piece);
           sha256.update(piece);
           crc = crc32(piece, crc);
-          await put(piece);
-          result.bytesSupplied += piece.length;
+          await put(piece, () => {
+            result.bytesSupplied += piece.length;
+          });
           if (onProgress) {
             try {
               onProgress({ index, orthancId: object.orthancId, sopUid: object.sopUid, bytesRead: result.bytesRead,
