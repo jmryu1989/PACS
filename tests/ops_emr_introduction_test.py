@@ -4047,6 +4047,70 @@ class ProtectedHostTests(unittest.TestCase):
         with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
             self.assertEqual(intro.IntroductionHost(self.policy_path).execute(request("rollback"))["status"], "REJECTED")
 
+    def test_123_a_rollback_on_an_operating_accounts_0700_checkout_with_a_0755_git_leaves_the_operator_command_admitted(self):
+        """P3R1-02 (Astra review of 7adea16): the deployed shape of RT-P3-GIT-MODE - an operating-account checkout at 0700
+        whose .git is 0755 - met by a recovery. The rollback records the opened mode as its warning, makes .git 0700
+        after approval, the lease and a durable host_changed record (non-recursive), and the operator command's .git rule
+        then admits the checkout; before, the rollback ran without the correction and that rule refused afterwards. An
+        ownership change is still refused."""
+        owner = {"uid": 1000, "gid": 1000}
+        policy = json.loads(self.policy_path.read_bytes())
+        policy["repository_owner"] = owner
+        self.write(self.policy_path, policy)
+        git = self.repo / ".git"
+        (git / "objects").mkdir(mode=0o755, exist_ok=True)
+        (git / "objects").chmod(0o755)
+        for path in (self.repo, git):
+            os.chown(path, 1000, 1000)
+        self.repo.chmod(0o700)
+        git.chmod(0o755)
+        operator_rule = lambda: intro.owned_private(git, owner, private=True, directory=True)   # compose_operation's .git rule
+        with self.assertRaisesRegex(intro.Stop, "not private"):
+            operator_rule()
+        target = self.operational_target()
+        target["fix_checkout_mode"] = True
+        plan = plan_fixture(target)
+        now = datetime.now(timezone.utc)
+        plan.update(window={"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=2)).isoformat()},
+                    tool=intro.tool_hashes())
+        self.document("emr-targets", target)
+        plan_sha = self.document("emr-plans", plan)
+        runs = self.state / "emr-runs" / plan_sha
+        runs.mkdir(mode=0o700)
+        token = intro.acquire_lock(self.repo)
+        state = intro.new_state(plan_sha, plan)
+        state.update(status="INTRODUCED", lock_token=token, db_changed=True, checkout="target",
+                     b0={"dir": "/b0", "manifest_sha256": "8" * 64}, fenced={"running_before": []})
+        self.write(runs / "state.json", state)
+        shared = FakeOps()
+        shared.cron_state, shared.ingress_state = "fenced", "maintenance"
+
+        def rollback():
+            raw = json.dumps({"version": 1, "mode": intro.MODE, "phase": "rollback", "plan_sha256": plan_sha,
+                              "nonce": os.urandom(16).hex()}).encode()
+            self.approve(raw)
+            with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
+                return intro.IntroductionHost(self.policy_path).execute(raw)
+        result = rollback()
+        self.assertEqual(result["status"], "RESTORED", result)
+        (warning,) = result["warnings"]
+        self.assertEqual((warning["kind"], warning["modes"], warning["restored"]),
+                         ("checkout-mode", {"checkout": "0o700", ".git": "0o755"}, {"checkout": "0o700", ".git": "0o700"}))
+        self.assertTrue(json.loads((runs / "state.json").read_text())["host_changed"])
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), (git.stat().st_mode & 0o777), ((git / "objects").stat().st_mode & 0o777),
+                          git.stat().st_uid), (0o700, 0o700, 0o755, 1000))
+        operator_rule()
+        # Owner is still the rule for a recovery: another account's .git is refused (by the entry, before any request
+        # runs), its mode untouched.
+        state = json.loads((runs / "state.json").read_text())
+        state.update(status="INTRODUCED", rollback_attempted=False)
+        self.write(runs / "state.json", state)
+        git.chmod(0o755)
+        os.chown(git, 1001, 1001)
+        with self.assertRaises(intro.Stop):
+            rollback()
+        self.assertEqual((git.stat().st_mode & 0o777), 0o755)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -6339,6 +6339,15 @@ class IntroductionHost:
                 owned_private(self.repository, self.owner, private=True, directory=True)
                 owned_private(self.repository / ".git", self.owner, directory=True)
 
+        def recovered_check():
+            """P3R1-02: what a recovery leaves must also pass the operator command after it (compose_operation), whose
+            rule for an operating account's checkout requires its .git private; checkout 0700 with .git 0755 passes
+            repository_check, and a rollback that skipped the correction left every later `compose config`/`recreate`
+            refused. Root's checkout keeps repository_check's rule, which is compose_operation's rule for it."""
+            repository_check()
+            if self.owner is not None:
+                owned_private(self.repository / ".git", self.owner, private=True, directory=True)
+
         def ownership_check():
             """Everything repository_check requires except the mode bits of the checkout and of its .git: owner, no link,
             the ancestors' owners and modes."""
@@ -6358,7 +6367,7 @@ class IntroductionHost:
             # when only the checkout's mode was reopened since the capture (owner, links and ancestors still checked),
             # and records it as a warning; introduce, verify and reopen keep refusing.
             try:
-                repository_check()
+                (recovered_check if request["phase"] in RECOVERY_PHASES else repository_check)()
             except RuntimeError as error:
                 if request["phase"] not in RECOVERY_PHASES:
                     raise
@@ -6381,7 +6390,7 @@ class IntroductionHost:
                     os.chmod(git, 0o700)
                     warning["restored"] = {name: oct(path.lstat().st_mode & 0o7777)
                                            for name, path in (("checkout", self.repository), (".git", git))}
-                    repository_check()
+                    recovered_check()
         approval = approval_valid(decode(host.read_secure(self.state / "emr-approvals" / (digest + ".json"))), digest,
                                   request["phase"], int(time.time()), plan["target_kind"], unattended=browser_cmd is not None)
         evidence = {kind: self.document("emr-evidence", value) for kind, value in approval["evidence"].items()}
