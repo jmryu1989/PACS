@@ -297,7 +297,74 @@ function checkEntry(e: unknown, seen: { indexes: Set<number>; attempts: Set<stri
   const last = e.attempts.length ? e.attempts[e.attempts.length - 1] : null;
   // A file is Unconfirmed exactly while its last attempt has no result of its own.
   return (e.outcome === 'unconfirmed') === (!!last && last.phase !== 'finished')
-    && (e.outcome !== 'unconfirmed' || last!.outcome === 'unconfirmed');
+    && (e.outcome !== 'unconfirmed' || last!.outcome === 'unconfirmed')
+    && resultBound(e as ImportFileEntry);
+}
+
+/** Codes an attempt ends retryable with, having written nothing (4.5 lookup/POST connect failure, 3, a fence, 4.4 SOP held). */
+const ATTEMPT_RETRY_CODES = new Set(['ORTHANC_UNAVAILABLE', 'IMPORT_PERMISSION_REVOKED', 'IMPORT_ATTEMPT_EXPIRED', 'SOP_WRITE_PENDING']);
+/** Codes a file is answered retryable with before any attempt of this request (enumeration, ownership, a held Study/SOP). */
+const BEFORE_ATTEMPT_RETRY_CODES = new Set(['ORTHANC_UNAVAILABLE', 'STUDY_OWNERSHIP_UNDETERMINED', 'STUDY_WRITE_PENDING', 'SOP_WRITE_PENDING']);
+/** The reader's and the precheck's refusals of the bytes (4.1, 4.2, 4.7): decided before any reservation, never by an attempt. */
+const BYTES_REFUSAL_CODES = new Set(['DICOM_NOT_PART10', 'DICOM_FILE_META_MISSING', 'DICOM_TRANSFER_SYNTAX_UNSUPPORTED', 'DICOM_MALFORMED',
+  'PATIENT_ID_UNREADABLE', 'PATIENT_ID_MISSING', 'MODALITY_NOT_IMPORTABLE', 'STUDY_UID_MISMATCH', 'PATIENT_ISSUER_CONFLICT']);
+/** Pre-write refusals at the claims, before an attempt (4.4 ownership, identity, SOP content). */
+const CLAIM_REFUSAL_CODES = new Set(['STUDY_OWNERSHIP_CONFLICT', 'PATIENT_ID_CONFLICT', 'PATIENT_ISSUER_CONFLICT', 'PATIENT_IDENTITY_CONFLICT',
+  'SOP_CONTENT_CONFLICT']);
+/** Pre-write refusals an attempt ends with (claim initialisation, the pre-write lookup). */
+const ATTEMPT_REFUSAL_CODES = new Set(['STUDY_OWNERSHIP_CONFLICT', 'PATIENT_ID_CONFLICT', 'PATIENT_ISSUER_CONFLICT', 'PATIENT_IDENTITY_CONFLICT',
+  'EXISTING_STUDY_IDENTITY_UNRESOLVED', 'SOP_UID_AMBIGUOUS', 'SOP_CONTENT_CONFLICT']);
+/** Refusals after a write that may have happened (the read-back, a re-check or a reconciliation of an unknown attempt). */
+const MAY_HAVE_WRITTEN_CODES = new Set(['SOP_UID_AMBIGUOUS', 'SOP_CONTENT_CONFLICT']);
+
+/**
+ * An attempt that ended retryable as only the gate ends one: with a code of its own end and certain-no-write, or with
+ * RECOVERED_NO_OBJECT after a resolved admin recovery, keeping the transport its dispatch left (null or unknown). Every
+ * attempt before the last is one of these (no attempt follows a final result).
+ */
+function retryEnded(a: ImportAttempt): boolean {
+  if (a.phase !== 'finished' || a.outcome !== 'retryable') return false;
+  if (a.code === 'RECOVERED_NO_OBJECT') return a.transport !== 'certain-no-write' && !!a.recovery?.resolvedAt;
+  return ATTEMPT_RETRY_CODES.has(a.code as string) && a.transport === 'certain-no-write';
+}
+
+/**
+ * Contract 4.4 / 4.6, the stored result bound to the attempt it rests on (U4BB2-03 transition table). A row that
+ * matches none of these is not the persisted format (503 IMPORT_STORAGE_UNAVAILABLE, kept as it is, never rebuilt from an
+ * older attempt):
+ *    1 stored                         the last attempt finished stored; transport null (POST, read-back) or unknown (re-check)
+ *    2 already-present                the last attempt finished already-present; certain-no-write (lookup) or null (POST)
+ *    3/4 retryable, the attempt's own the last attempt finished retryable with the file's code (retryEnded)
+ *    5 retryable before an attempt    no attempt, or the last one ended retryable (its code may differ)
+ *    6 rejected by its bytes          no attempt
+ *    7 PATIENT_ISSUER_CONFLICT        after a retryable attempt: the issuer's institutions changed, the same bytes refused
+ *    8 pre-write at the claims        no attempt, or the last one ended retryable
+ *    9 pre-write at an attempt's end  the last attempt finished rejected with the file's code, certain-no-write
+ *   10 may-have-written               the last attempt finished rejected with the file's code, transport null or unknown
+ *   11 unconfirmed                    the last attempt still without a result: prepared/dispatching (transport null) or
+ *                                     unknown (null or unknown)
+ */
+function resultBound(e: ImportFileEntry): boolean {
+  const last = lastAttempt(e);
+  if (!e.attempts.slice(0, -1).every(retryEnded)) return false;
+  const lastEnded = (outcome: ImportOutcome, code: string | null) => !!last && last.phase === 'finished' && last.outcome === outcome && last.code === code;
+  const noneOrRetry = !last || retryEnded(last);
+  const code = e.code as string;
+  if (e.outcome === 'stored')
+    return e.writeDisposition === null && lastEnded('stored', null) && (last!.transport === null || last!.transport === 'unknown');
+  if (e.outcome === 'already-present')
+    return e.writeDisposition === null && lastEnded('already-present', null) && (last!.transport === 'certain-no-write' || last!.transport === null);
+  if (e.outcome === 'retryable')
+    return e.writeDisposition === null && ((lastEnded('retryable', code) && retryEnded(last!)) || (BEFORE_ATTEMPT_RETRY_CODES.has(code) && noneOrRetry));
+  if (e.outcome === 'rejected' && e.writeDisposition === null)
+    return (BYTES_REFUSAL_CODES.has(code) && !last) || (code === 'PATIENT_ISSUER_CONFLICT' && !!last && retryEnded(last));
+  if (e.outcome === 'rejected' && e.writeDisposition === 'pre-write')
+    return (CLAIM_REFUSAL_CODES.has(code) && noneOrRetry)
+      || (ATTEMPT_REFUSAL_CODES.has(code) && lastEnded('rejected', code) && last!.transport === 'certain-no-write');
+  if (e.outcome === 'rejected')
+    return MAY_HAVE_WRITTEN_CODES.has(code) && lastEnded('rejected', code) && last!.transport !== 'certain-no-write';
+  return e.outcome === 'unconfirmed' && !!last && last.phase !== 'finished' && last.outcome === 'unconfirmed' && last.code === 'IMPORT_UNCONFIRMED'
+    && (last.phase === 'unknown' ? last.transport !== 'certain-no-write' : last.transport === null);
 }
 
 /** A member import row (4.4 table): owner, closed columns, every file entry and attempt; status follows the entries. */

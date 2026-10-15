@@ -3176,3 +3176,118 @@ test('S9U4-B54 the admin recovery binds to the target study\'s current reach (U4
   assert.deepEqual([r.status, r.body.code], [409, 'RECOVERY_NOT_APPLICABLE']);
 });
 
+// ════════════════════════════════ round 3: a stored result bound to the attempt it rests on (U4BB2-03) ════════════════════════════════
+
+test('S9U4-B55 a stored file result must rest on its last attempt by the transition table (U4BB2-03): Stored without attempts, with a last retryable or certain-no-write attempt, Stored/AlreadyStored swapped, a success after another final attempt and every combination the table does not allow are 503 IMPORT_STORAGE_UNAVAILABLE on GET and on the same file\'s POST, with the rows kept and nothing written; the legitimate transitions answer 200 - the retryable ones, RECOVERED_NO_OBJECT, a pre-attempt refusal after an older retryable attempt, AlreadyStored by lookup, Stored after an unknown transport, and PATIENT_ISSUER_CONFLICT after a retryable attempt when the issuer\'s institutions changed (no new attempt)', async () => {
+  const STORAGE = [503, 'IMPORT_STORAGE_UNAVAILABLE'];
+  const finished = (a, outcome, code, transport, extra = {}) => ({ ...a, phase: 'finished', finishedAt: a.startedAt, outcome, code, transport, ...extra });
+  const second = a => ({ ...a, attemptId: randomUUID(), generation: 2 });
+  const corruptions = [
+    ['Stored with no attempt (ASTRA2-04)', e => { e.attempts = []; }],
+    ['Stored after a last retryable certain-no-write attempt (ASTRA2-04)', e => { e.attempts = [finished(e.attempts[0], 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write')]; }],
+    ['Stored on an attempt that ended AlreadyStored by lookup', e => { e.attempts = [finished(e.attempts[0], 'already-present', null, 'certain-no-write')]; }],
+    ['Stored on an attempt that ended AlreadyStored by its POST (transport null)', e => { e.attempts = [finished(e.attempts[0], 'already-present', null, null)]; }],
+    ['AlreadyStored on an attempt that ended Stored', e => { e.outcome = 'already-present'; }],
+    ['Stored on a certain-no-write transport', e => { e.attempts[0].transport = 'certain-no-write'; }],
+    ['Stored on an attempt that ended rejected', e => { e.attempts = [finished(e.attempts[0], 'rejected', 'SOP_CONTENT_CONFLICT', 'certain-no-write')]; }],
+    ['Stored after an earlier Stored attempt', e => { e.attempts = [e.attempts[0], second(e.attempts[0])]; }],
+    ['retryable IMPORT_ATTEMPT_EXPIRED with no attempt', e => { Object.assign(e, { outcome: 'retryable', code: 'IMPORT_ATTEMPT_EXPIRED' }); e.attempts = []; }],
+    ['retryable ORTHANC_UNAVAILABLE on an attempt with a null transport', e => { Object.assign(e, { outcome: 'retryable', code: 'ORTHANC_UNAVAILABLE' }); e.attempts = [finished(e.attempts[0], 'retryable', 'ORTHANC_UNAVAILABLE', null)]; }],
+    ['RECOVERED_NO_OBJECT without a resolved recovery', e => { Object.assign(e, { outcome: 'retryable', code: 'RECOVERED_NO_OBJECT' }); e.attempts = [finished(e.attempts[0], 'retryable', 'RECOVERED_NO_OBJECT', 'unknown')]; }],
+    ['EXISTING_STUDY_IDENTITY_UNRESOLVED with no attempt', e => { Object.assign(e, { outcome: 'rejected', code: 'EXISTING_STUDY_IDENTITY_UNRESOLVED', writeDisposition: 'pre-write' }); e.attempts = []; }],
+    ['may-have-written on a last retryable attempt', e => { Object.assign(e, { outcome: 'rejected', code: 'SOP_CONTENT_CONFLICT', writeDisposition: 'may-have-written' }); e.attempts = [finished(e.attempts[0], 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write')]; }],
+    ['a refusal of the bytes after an attempt (only the issuer may change)', e => { Object.assign(e, { outcome: 'rejected', code: 'MODALITY_NOT_IMPORTABLE' }); e.attempts = [finished(e.attempts[0], 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write')]; }],
+    ['unconfirmed on a dispatching attempt with an unknown transport', e => { Object.assign(e, { outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED' }); e.attempts = [{ ...e.attempts[0], phase: 'dispatching', finishedAt: null, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', transport: 'unknown' }]; }],
+  ];
+  for (const [name, corrupt] of corruptions) {
+    const h = await harness();
+    const bytes = dicom({ study: uid() });
+    const first = await h.send(bytes);
+    assert.deepEqual([first.status, first.body.outcome], [200, 'stored']);
+    corrupt(h.s.ops.get(first.id).results[0]);
+    const row = h.s.op(first.id), writes = h.s.writes, audited = h.s.audits.length, before = posts(h.orthanc);
+    const status = await h.request('GET', '/api/dicom-import/' + first.id);
+    assert.deepEqual([status.status, status.body.code], STORAGE, name + ': GET');
+    const again = await h.send(bytes, { id: first.id });
+    assert.deepEqual([again.status, again.body.code], STORAGE, name + ': the same file\'s POST');
+    assert.deepEqual([h.s.op(first.id), h.s.writes, h.s.audits.length, posts(h.orthanc)], [row, writes, audited, before], name + ': kept as it is, nothing written');
+  }
+  const ok = async (h, id) => {
+    const r = await h.request('GET', '/api/dicom-import/' + id);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    return r.body.files;
+  };
+  // Row 3: retryable with the attempt's own code (the lookup failed before the write).
+  {
+    const h = await harness();
+    h.orthanc.fault = call => (call.path === '/tools/lookup' ? { status: 500 } : null);
+    const r = await h.send(dicom({ study: uid() }));
+    h.orthanc.fault = null;
+    assert.deepEqual([r.status, r.body.code, r.body.attempts[0].transport], [503, 'ORTHANC_UNAVAILABLE', 'certain-no-write']);
+    assert.equal((await ok(h, r.id))[0].code, 'ORTHANC_UNAVAILABLE');
+  }
+  // Row 4: RECOVERED_NO_OBJECT after a resolved admin recovery; row 1 with an unknown transport after the re-check.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h);
+    h.s.advance(31000);
+    assert.equal((await recovery(h, a.id, { basis: 'orthanc-restarted', checkedAt: a.attempt.startedAt })).body.code, 'RECOVERED_NO_OBJECT');
+    assert.equal((await ok(h, a.id))[0].code, 'RECOVERED_NO_OBJECT');
+    const b = await unknownAttempt(h, { stored: true });
+    h.s.advance(31000);
+    const [file] = await ok(h, b.id);
+    assert.deepEqual([file.outcome, file.attempts[0].transport], ['stored', 'unknown'], 'reconciled by the GET, read again as Stored');
+  }
+  // Row 2: AlreadyStored by the pre-write lookup (certain-no-write).
+  {
+    const h = await harness();
+    const study = uid(), bytes = dicom({ study });
+    h.orthanc.store(bytes);
+    own(h.s, study);
+    const r = await h.send(bytes);
+    assert.deepEqual([r.status, r.body.outcome, r.body.attempts[0].transport], [200, 'already-present', 'certain-no-write']);
+    assert.equal((await ok(h, r.id))[0].outcome, 'already-present');
+  }
+  // Row 5: a pre-attempt refusal (STUDY_WRITE_PENDING) after an older retryable attempt of another code.
+  {
+    const h = await harness();
+    const study = uid(), bytes = dicom({ study, series: study + '.1' });
+    h.orthanc.fault = call => (call.path === '/tools/lookup' ? { status: 500 } : null);
+    const first = await h.send(bytes);
+    assert.equal(first.body.code, 'ORTHANC_UNAVAILABLE');
+    h.orthanc.fault = call => (call.path === '/tools/lookup' ? { hang: true } : null);
+    const holding = h.send(dicom({ study, series: study + '.1' }));
+    await sleep(150);
+    const pending = await h.send(bytes, { id: first.id });
+    assert.deepEqual([pending.status, pending.body.code, pending.body.attempts.length], [409, 'STUDY_WRITE_PENDING', 1]);
+    const [file] = await ok(h, first.id);
+    assert.deepEqual([file.code, file.attempts[0].code], ['STUDY_WRITE_PENDING', 'ORTHANC_UNAVAILABLE']);
+    h.orthanc.fault = null;
+    void holding;
+  }
+  // Row 7, through the real path: attempt 1 ends retryable (lookup failed); then another institution gets the same issuer
+  // alias, so the same bytes are refused by the precheck - no new attempt, the old one kept; GET 200, POST 409 (final,
+  // also after the alias is reverted).
+  {
+    const institutions = [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }];
+    const h = await harness({ institutions });
+    const bytes = dicom({ study: uid(), issuer: 'SYN A' });
+    h.orthanc.fault = call => (call.path === '/tools/lookup' ? { status: 500 } : null);
+    const first = await h.send(bytes);
+    h.orthanc.fault = null;
+    assert.deepEqual([first.status, first.body.code, first.body.attempts.length], [503, 'ORTHANC_UNAVAILABLE', 1]);
+    const [attempt] = h.s.file(first.id, 0).attempts;
+    h.s.institutions[1].dicomNames = 'SYN B,SYN A';
+    const intents = audits(h.s, 'dicom.import.intent').length;
+    const refused = await h.send(bytes, { id: first.id });
+    assert.deepEqual([refused.status, refused.body.outcome, refused.body.code, refused.body.attempts.length], [409, 'rejected', 'PATIENT_ISSUER_CONFLICT', 1]);
+    assert.deepEqual(h.s.file(first.id, 0).attempts, [attempt], 'the retryable attempt kept as it was, no new one');
+    const [file] = await ok(h, first.id);
+    assert.deepEqual([file.outcome, file.code, file.attempts.map(a => [a.outcome, a.code, a.transport])], ['rejected', 'PATIENT_ISSUER_CONFLICT', [['retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write']]]);
+    assert.deepEqual((await h.send(bytes, { id: first.id })).status, 409, 'replayed');
+    h.s.institutions[1].dicomNames = 'SYN B';
+    const reverted = await h.send(bytes, { id: first.id });
+    assert.deepEqual([reverted.status, reverted.body.code], [409, 'PATIENT_ISSUER_CONFLICT'], 'a final result stays final');
+    assert.deepEqual([audits(h.s, 'dicom.import.intent').length, posts(h.orthanc)], [intents, 0], 'no new intent, no Orthanc write');
+  }
+});
