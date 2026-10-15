@@ -340,10 +340,9 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     await this.gate.ready(true);
     if (!OPERATION_ID.test(operationId ?? '') || !FILE_INDEX.test(indexText ?? '') || Number(indexText) >= IMPORT_FILE_SLOTS)
       throw new NotFoundException(IMPORT_NOT_FOUND);
-    return this.gate.recover(admin, operationId.toLowerCase(), Number(indexText), body, {
-      before: uid => this.recoveryScope(null, uid, c),
-      locked: (tx, uid) => this.recoveryScope(tx, uid, c),
-    });
+    const inReach: (studyUid: string) => Promise<void> = studyUid => this.recoveryScope(null, studyUid, c);
+    const inReachLocked: (tx: any, studyUid: string) => Promise<void> = (tx, studyUid) => this.recoveryScope(tx, studyUid, c);
+    return this.gate.recover(admin, operationId.toLowerCase(), Number(indexText), body, inReach, inReachLocked);
   }
 
   /**

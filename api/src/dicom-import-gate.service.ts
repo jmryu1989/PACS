@@ -145,17 +145,6 @@ export interface ImportRequest {
 
 export interface ImportAnswer { status: number; entry: ImportFileEntry; message: string; refusal?: HttpException }
 
-/**
- * Contract 3 for the admin recovery: the target index's study within the admin's reach now. Each throws the route's
- * refusal (the same 404 as an absent operation when out of reach).
- */
-export interface RecoveryScope {
-  /** Before the evidence is judged and before any Orthanc read or recovery row (the StudyAccess metadata prepared here). */
-  before: (studyUid: string) => Promise<void>;
-  /** Inside each recovery transaction, after its claim and operation locks and before its DB time. */
-  locked: (tx: Tx, studyUid: string) => Promise<void>;
-}
-
 type ClaimRow = { id: string; kind: string; studyUid: string; claimKey: string; claim: any } | null;
 type Tx = any;
 
@@ -1284,21 +1273,24 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
    *   3./4. the result, the release and both result rows in one transaction, only while everything read in step 1 is
    *      still exactly as it was (recoverySnapshot): a reconciliation or another admin request that won meanwhile makes
    *      this one 409 RECOVERY_NOT_APPLICABLE with nothing written.
-   * The target index's study is checked against the admin's reach now (`scope`, contract 3) before anything else is
-   * judged or read, and again inside both transactions: out of reach first is the same 404 as no operation, with no SOP
-   * read and no row; lost during the Orthanc re-read it is that 404 with nothing of the result written (the request row
-   * and the reading right recorded while it was in reach stay). Another owner's operation of the admin's institution is
-   * recovered under the same rule; its owner and attempts stay, the admin is recorded beside them.
+   * The target index's study is checked against the admin's reach now (contract 3): `inReach` before the evidence is
+   * judged and before any Orthanc read or recovery row (the StudyAccess metadata prepared there), `inReachLocked` inside
+   * both transactions after their claim and operation locks and before their DB time; each throws the route's refusal.
+   * Out of reach first is the same 404 as no operation, with no SOP read and no row; lost during the Orthanc re-read it
+   * is that 404 with nothing of the result written (the request row and the reading right recorded while it was in reach
+   * stay). Another owner's operation of the admin's institution is recovered under the same rule; its owner and attempts
+   * stay, the admin is recorded beside them.
    * The admin route never writes to or deletes from Orthanc.
    */
-  async recover(admin: ImportOwner, operationId: string, index: number, body: unknown, scope: RecoveryScope) {
+  async recover(admin: ImportOwner, operationId: string, index: number, body: unknown,
+    inReach: (studyUid: string) => Promise<void>, inReachLocked: (tx: Tx, studyUid: string) => Promise<void>) {
     const op = await this.storage(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }));
     const mineToSee = !!op && op.kind === 'import' && op.institutionId === admin.institutionId;
     if (mineToSee) await this.storage(async () => checkImportRow(op));
     const seen = mineToSee ? (op.results as any as ImportFileEntry[]).find(e => e.index === index) : null;
     if (!seen) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
     // A file refused before any study has none: not a recovery target (409 below), never a question of scope.
-    if (seen.studyUid) await scope.before(seen.studyUid);
+    if (seen.studyUid) await inReach(seen.studyUid);
     const evidence = parseRecoveryBody(body);
     if (!evidence) throw new HttpException({ code: 'RECOVERY_EVIDENCE_INVALID', message: RECOVERY_NOTICES.evidence }, 400);
     const notApplicable = () => new HttpException({ code: 'RECOVERY_NOT_APPLICABLE', message: RECOVERY_NOTICES.notApplicable }, 409);
@@ -1309,7 +1301,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       const locked = await this.lockOperation(tx, operationId);
       const results: ImportFileEntry[] = clone(locked.results);
       const entry = results.find(e => e.index === index)!;
-      await scope.locked(tx, entry.studyUid!);
+      await inReachLocked(tx, entry.studyUid!);
       const now = await this.clock(tx);
       const mine = lastAttempt(entry);
       const holds = !!mine && [...claims.values()].some(row => row?.claim?.heldByAttemptId === mine.attemptId);
@@ -1341,7 +1333,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         const locked = await this.lockOperation(tx, operationId);
         const results: ImportFileEntry[] = clone(locked.results);
         const entry = results.find(e => e.index === index)!;
-        await scope.locked(tx, entry.studyUid!);
+        await inReachLocked(tx, entry.studyUid!);
         const now = await this.clock(tx);
         const mine = lastAttempt(entry);
         if (!mine || this.recoverySnapshot(entry, mine, claims) !== requested.snapshot || (requested.unknown && !leaseLive(mine, now))) throw notApplicable();
