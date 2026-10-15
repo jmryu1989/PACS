@@ -90,6 +90,25 @@ class ContainerTests(unittest.TestCase):
         return self.command(["docker", "exec", self.db, "psql", "-X", "-U", "postgres", "-d", "kin",
                              "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql])
 
+    def database_ready(self, seconds):
+        """Synchronisation only: the image's first boot runs initdb, then a temporary server on the Unix socket alone
+        (listen_addresses=''), creates POSTGRES_DB, stops it and starts the final server, the only one on TCP. pg_isready
+        over the socket already answers the temporary server before kin exists (runtime jobs 116188557336/116220212621:
+        'database "kin" does not exist'), so wait for the final server over TCP and for the database row, as the
+        product's db_ready and the other harnesses do."""
+        deadline, last = time.monotonic() + seconds, ""
+        while time.monotonic() < deadline:
+            try:
+                self.command(["docker", "exec", self.db, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], timeout=10)
+                if self.command(["docker", "exec", self.db, "psql", "-X", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres",
+                                 "-Atc", "SELECT 1 FROM pg_database WHERE datname='kin'"], timeout=10) == "1":
+                    return
+                last = "database kin is not listed yet"
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                last = str(error)[-500:]
+            time.sleep(1)
+        raise RuntimeError("Disposable database did not reach its final server with database kin within %d s: %s" % (seconds, last))
+
     def readiness(self):
         script = """Promise.all([fetch('http://127.0.0.1:3000/api/health'),fetch('http://127.0.0.1:3000/api/me')])
 .then(async([r,m])=>{const h=await r.json();if(r.status!==200||!h.ok||!h.auth||m.status!==401)process.exit(1)})
@@ -159,14 +178,7 @@ class ContainerTests(unittest.TestCase):
                       "--network", self.network, "--tmpfs", "/var/lib/postgresql/data",
                       "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700", "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
                       "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            result = subprocess.run(["docker", "exec", self.db, "pg_isready", "-U", "postgres"], capture_output=True, timeout=10)
-            if result.returncode == 0:
-                break
-            time.sleep(0.5)
-        else:
-            self.fail("Disposable database readiness timed out")
+        self.database_ready(120)
         self.addCleanup(self.remove_volume, state_volume)
         self.command(["docker", "exec", "-u", "postgres", self.db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
         self.command(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex, self.db, "psql", "-X", "-U", "postgres",
