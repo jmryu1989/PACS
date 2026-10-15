@@ -931,6 +931,68 @@ class ReportEditorFrameDOM(unittest.TestCase):
         self.assert_text("", "conclusion")
         self.assertEqual(self.page.evaluate("document.activeElement.id"), "conclusion")
 
+    def active(self):
+        return self.page.evaluate("document.activeElement.id || document.activeElement.tagName")
+
+    def test_write_returns_focus_and_a_hidden_field_never_keeps_it(self):
+        """W6R1-02: a write focuses its fields only for the native edit and gives focus back where it was; where that
+        cannot take focus (the page itself), no field keeps it. A field hidden from the person (aria-hidden) never keeps
+        focus outside the frame's own writes, although the document-wide native Undo/Redo steps through its edits."""
+        self.page.evaluate("document.getElementById('recommendation').setAttribute('aria-hidden', 'true')")
+        self.type("A")
+        self.page.evaluate("document.activeElement.blur()")
+        many = "editor.insertMany(['findings','conclusion','recommendation'].map(k => ({at: editor.capture(k), text: 'T-' + k})))"
+        self.assertEqual(self.page.evaluate(many), {"status": "applied"})
+        self.assertEqual(self.active(), "BODY")
+        self.capture("conclusion")
+        self.assertEqual(self.insert("X"), {"status": "applied"})
+        self.assertEqual(self.active(), "BODY")
+        self.page.focus("#before")
+        self.capture("recommendation")
+        self.assertEqual(self.insert("Y"), {"status": "applied"})
+        self.assertEqual(self.active(), "before")
+        self.focus("findings")
+        hidden = set()
+        for key in ["Control+z"] * 4 + ["Control+y"] * 4 + ["Control+Shift+z", "Control+z", "Control+Shift+z"]:
+            self.key(key)
+            hidden.add(self.read()["recommendation"])
+            self.assertNotEqual(self.active(), "recommendation", key)
+        self.assertEqual(hidden, {"", "T-recommendation", "T-recommendationY"})
+        self.page.evaluate("document.getElementById('recommendation').focus()")
+        self.assertNotEqual(self.active(), "recommendation", "programmatic focus")
+
+    def test_is_current_follows_the_opening_and_edits_not_the_moment(self):
+        """W6R1-04: a request is current while its opening stands and its field has had no edit since it was taken
+        (an edit later undone included); composition and edit permission are moments of a write, not of the request."""
+        self.type("ab")
+        self.capture()
+        current = lambda: self.page.evaluate("editor.isCurrent(at)")
+        self.assertTrue(current())
+        self.page.evaluate("allowed = false")
+        self.assertTrue(current())
+        self.page.evaluate("allowed = true")
+        self.focus("conclusion")
+        cdp = self.compose()
+        self.assertTrue(current(), "a composition in another field")
+        cdp.send("Input.insertText", {"text": "한"})
+        cdp.detach()
+        self.assertTrue(current(), "an edit of another field")
+        self.focus("findings")
+        self.key("End")
+        self.key("x")
+        self.key("Backspace")
+        self.assert_text("ab")
+        self.assertFalse(current())
+        self.capture()
+        self.type("y")
+        self.key("Control+z")
+        self.assertFalse(current())
+        self.capture()
+        self.assertTrue(current())
+        self.open("B")
+        self.assertFalse(current())
+        self.assertFalse(self.page.evaluate("editor.isCurrent(null)"))
+
 
 # Each mutation changes one product line; unchanged context can disambiguate an anchor.
 # Assertions never require these source spellings.
@@ -1023,7 +1085,9 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.page.wait_for_function('() => !!appState[selectedUid]?.holder')
 
     def record_dictation(self):
-        """Shipped controller/session + page adapter; synthetic microphone bytes and HTTP transcript."""
+        """Shipped controller/session + page adapter; synthetic microphone bytes and HTTP transcript. The page's own
+        adapter functions are passed as the page passes them, and a click in a report field reaches this controller
+        through the page's field delegation as it reaches the page's own (the click re-pin gesture)."""
         self.context.route('**/dictation', lambda route: route.fulfill(json={
             'text':'SYN delayed', 'seconds':1, 'languagePin':'ko', 'enginePin':'synthetic', 'modelPin':'synthetic'}))
         self.page.evaluate("""async () => {
@@ -1031,9 +1095,10 @@ class ReportEditorFramePageDOM(unittest.TestCase):
             session:KinDictationSession,
             capture:{available:()=>true,createCapture:()=>({start:async()=>{},stop:async()=>new Uint8Array(48),cancel:()=>{}})},
             env:{isSecureContext:true,navigator:{mediaDevices:{getUserMedia(){}}}}, apiBase:API,
-            readContext:dictationContext, block:dictationBlock, insert:dictationInsert,
+            readContext:dictationContext, block:dictationBlock, insert:dictationInsert, current:dictationCurrent,
             busy:()=>commitInFlight||insertInFlight
           });
+          onReportField('mouseup', () => recorded.fieldClicked());
           recorded.setServerCapability({available:true,maxBytes:1048576,timeoutMs:120000,
             languagePin:'ko',enginePin:'synthetic',modelPin:'synthetic'});
           await recorded.start();
@@ -1044,7 +1109,23 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.page.evaluate('recorded.stop()')
         self.page.wait_for_function("recorded.snapshot().state === 'review'")
 
+    def assert_dictation_kept_for_a_repin(self, result, before):
+        """HD05's edited-field contract: Insert refuses without touching the report, and the review keeps the
+        transcript, asks for a re-pin and shows the field-changed notice."""
+        self.assertFalse(result['inserted'])
+        self.assertEqual(result['reason'], 'field-changed')
+        self.assertEqual(self.texts(), before)
+        snapshot = self.page.evaluate('recorded.snapshot()')
+        self.assertEqual((snapshot['state'], snapshot['needsRepin'], snapshot['text']), ('review', True, 'SYN delayed'))
+        self.assertEqual(self.page.evaluate("recorded.view().status"), self.page.evaluate("KinDictation.NOTICES['field-changed']"))
+
+    def placed(self, field, text, caret):
+        return self.page.evaluate("([field, text, caret]) => KinReportCitation.placeBlock(document.getElementById(field).value, "
+                                  "text, caret, citationGuards(field)).text", [field, text, caret])
+
     def test_page_record_type_undo_refuses_late_dictation(self):
+        # W6R1-04: typing then Undo leaves the same text but retires the recording's capture. The late Insert refuses
+        # as for an edited field (HD05), keeps the transcript and Redo; Pin Caret re-pins and a fresh Insert inserts there.
         self.page.locator('#findings').fill('KEEP')
         self.page.locator('#findings').focus()
         self.record_dictation()
@@ -1053,14 +1134,38 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.assertEqual(self.texts()['findings'], 'KEEP')
         self.review_dictation()
         before = self.texts()
-        result = self.page.evaluate('recorded.insert()')
-        self.assertFalse(result['inserted'])
-        self.assertEqual(result['reason'], 'insert-refused')
-        self.assertIn('판독문이 그 사이 바뀌어 받아쓴 글을 넣지 않았습니다', self.page.evaluate('recorded.view().status'))
-        self.assertEqual(self.texts(), before)
+        self.assert_dictation_kept_for_a_repin(self.page.evaluate('recorded.insert()'), before)
         self.page.locator('#findings').focus()
         self.page.keyboard.press('Control+y')
         self.assertEqual(self.texts()['findings'], 'KEEPX')
+        self.page.keyboard.press('Control+z')
+        self.assertEqual(self.texts()['findings'], 'KEEP')
+        self.page.locator('#findings').evaluate('e => e.setSelectionRange(0, 0)')
+        self.assertTrue(self.page.evaluate('recorded.repin().then(r => r.ok)'))
+        self.assertEqual(self.page.evaluate('recorded.snapshot().pin.caret'), {'start': 0, 'end': 0})
+        expected = self.placed('findings', 'SYN delayed', {'start': 0, 'end': 0})
+        self.assertTrue(self.page.evaluate('recorded.insert().then(r => r.inserted)'))
+        self.assertEqual(self.texts(), {**before, 'findings': expected})
+
+    def test_page_record_type_backspace_keeps_dictation_for_a_click_repin(self):
+        # W6R1-04: the same with Backspace, and the re-pin gesture is a click in the field.
+        self.page.locator('#findings').fill('KEEP')
+        self.page.locator('#findings').focus()
+        self.record_dictation()
+        self.page.keyboard.type('X')
+        self.page.keyboard.press('Backspace')
+        self.review_dictation()
+        before = self.texts()
+        self.assert_dictation_kept_for_a_repin(self.page.evaluate('recorded.insert()'), before)
+        self.page.locator('#findings').click(position={'x': 12, 'y': 8})
+        self.page.wait_for_function('() => recorded.snapshot().needsRepin === false')
+        pin = self.page.evaluate('recorded.snapshot().pin')
+        self.assertEqual(pin['field'], 'findings')
+        self.assertEqual([pin['caret']['start'], pin['caret']['end']],
+                         self.page.locator('#findings').evaluate('e => [e.selectionStart, e.selectionEnd]'))
+        expected = self.placed('findings', 'SYN delayed', pin['caret'])
+        self.assertTrue(self.page.evaluate('recorded.insert().then(r => r.inserted)'))
+        self.assertEqual(self.texts(), {**before, 'findings': expected})
 
     def test_page_record_unchanged_accepts_original_caret(self):
         self.page.locator('#conclusion').fill('first\nlast')
@@ -1445,15 +1550,113 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.page.keyboard.type('CONTEXT')
         self.assertEqual(self.texts()['findings'], 'CONTEXT')
 
+    def active(self):
+        return self.page.evaluate('document.activeElement.id || document.activeElement.tagName')
+
+    def use_template(self, **fields):
+        self.page.evaluate("t => { templates = [t]; renderTemplates(); }", {'title': 'SYN TEMPLATE', **fields})
+
     def test_page_template_native_focus_does_not_retarget_dictation(self):
         self.page.locator('#findings').focus()
         self.page.keyboard.type('typed')
         self.page.locator('#b-copy').focus()
+        focused = self.active()
         self.assertTrue(self.page.evaluate("insertTemplate({findings:'F',conclusion:'C',recommendation:'R'})"))
         self.assertEqual(self.page.evaluate('dictationContext().field'), 'findings')
+        self.assertEqual(self.active(), focused)
         self.assertTrue(self.page.evaluate("() => { const x=dictationContext(); return dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'}); }"))
         self.assertIn('SYN dictated', self.texts()['findings'])
         self.assertEqual(self.texts()['recommendation'], 'R')
+        # W6R1-03, the template list as the reader uses it: the double-click on a row leaves the page itself focused.
+        # A two-field template then leaves the dictation target and keyboard focus where they were before W6: the
+        # field the reader last chose (Findings) and the page, not the last field the template filled.
+        self.use_template(findings='SYN T2', conclusion='SYN C2')
+        expected = self.placed('conclusion', 'SYN C2', None)
+        self.page.locator('#tplrows tr[data-i]').first.dblclick()
+        self.assertEqual(self.texts()['conclusion'], expected)
+        self.assertEqual(self.active(), 'BODY')
+        self.assertEqual(self.page.evaluate('dictationContext().field'), 'findings')
+        self.assertTrue(self.page.evaluate("() => { const x=dictationContext(); return dictationInsert({...x,expectedValue:x.value,text:'SYN second'}); }"))
+        self.assertTrue(self.texts()['findings'].endswith('SYN second'))
+        self.assertNotIn('SYN second', self.texts()['conclusion'])
+
+    def assert_off_hidden_recommendation(self, label):
+        """W6R1-02: keyboard focus and the dictation target are never the hidden Recommendation, and the next keystroke
+        does not change it."""
+        self.assertNotEqual(self.active(), 'recommendation', label)
+        self.assertNotEqual(self.page.evaluate('dictationContext().field'), 'recommendation', label)
+        hidden = self.texts()['recommendation']
+        self.page.keyboard.type('k')
+        self.assertEqual(self.texts()['recommendation'], hidden, label)
+
+    def test_page_template_double_click_and_native_undo_never_focus_hidden_recommendation(self):
+        # W6R1-02 on the template list as the reader uses it (the row's double-click leaves the page focused), with a
+        # two-field and a three-field template, then every Undo/Redo shortcut stepping through the hidden field's edits.
+        self.keep_hold_claim()
+        self.page.locator('#findings').click()
+        self.page.keyboard.type('A')
+        for fields in ({'findings': 'SYN T2', 'conclusion': 'SYN C2'},
+                       {'findings': 'SYN T3', 'conclusion': 'SYN C3', 'recommendation': 'SYN R3'}):
+            self.use_template(**fields)
+            self.page.locator('#tplrows tr[data-i]').first.dblclick()
+            self.assertTrue(all(text in self.texts()[k] for k, text in fields.items()), fields)
+            self.assertEqual(self.active(), 'BODY', 'focus stays on the page, as before W6')
+            self.assert_off_hidden_recommendation('template %s' % sorted(fields))
+        self.assertEqual(self.texts()['recommendation'], 'SYN R3')
+        self.page.locator('#findings').click()
+        values = set()
+        for key in ['Control+z'] * 3 + ['Control+y'] * 3 + ['Control+Shift+z', 'Control+z', 'Control+Shift+z']:
+            self.page.keyboard.press(key)
+            values.add(self.texts()['recommendation'])
+            self.assertNotEqual(self.active(), 'recommendation', key)
+            self.assertNotEqual(self.page.evaluate('dictationContext().field'), 'recommendation', key)
+        self.assertEqual(values, {'', 'SYN R3'}, 'the shortcuts did step through the hidden field')
+        self.assert_off_hidden_recommendation('after Undo/Redo')
+        # The hidden field stays part of the saved report.
+        self.answer_hold_claim()
+        self.page.clock.run_for(21000)
+        self.page.wait_for_function("() => !document.querySelector('#b-report-template').disabled")
+        self.assertEqual({k: self.site.puts[-1][k] for k in FIELDS}, self.texts())
+
+    def test_page_other_writes_never_leave_focus_in_hidden_recommendation(self):
+        # W6R1-02 on the other application writes: the template preview's Insert (the list's keyboard path), Clear, a
+        # citation, a structured line and a dictation Insert.
+        self.use_template(findings='SYN T', conclusion='SYN C', recommendation='SYN R')
+        self.page.locator('#tplrows [data-tpl-preview]').first.focus()
+        self.page.keyboard.press('Enter')
+        self.page.wait_for_function("() => document.querySelector('#tpl-preview').classList.contains('show')")
+        self.page.locator('#tpl-preview-insert').focus()
+        self.page.keyboard.press('Enter')
+        self.page.wait_for_function("() => !document.querySelector('#tpl-preview').classList.contains('show')")
+        self.assertEqual(self.texts()['recommendation'], 'SYN R')
+        self.assert_off_hidden_recommendation('template preview Insert')
+        self.page.locator('#report-more > summary').click()
+        self.page.locator('#b-clear').click()
+        self.assertEqual(self.texts(), dict.fromkeys(FIELDS, ''))
+        self.assert_off_hidden_recommendation('Clear')
+        self.page.locator('#findings').fill('LOCAL')
+        self.assertTrue(self.page.evaluate("request=>openCitePreview(request)", {
+            'uid':self.h.UID,'findingId':'SYN-FINDING','findingRevision':1,'sourceIndex':0,
+            'sourceLabel':'SYN source','linkState':'current','headRevision':None,'block':'SYN cited finding'}))
+        self.page.locator('#cite-preview-insert').click()
+        self.page.wait_for_function("() => !document.querySelector('#cite-preview').classList.contains('show')")
+        self.assertIn('SYN cited finding', self.texts()['findings'])
+        self.assert_off_hidden_recommendation('citation')
+        if not self.page.locator('#b-structured').is_visible():
+            self.page.locator('#report-more > summary').click()
+        self.page.locator('#b-structured').click()
+        self.page.locator('#struct-item').select_option('GEN-1\x00CONCLUSION')
+        self.page.locator('#struct-value-text').fill('SYN result')
+        self.page.locator('#struct-apply').click()
+        self.page.wait_for_function("() => !document.querySelector('#structmodal').classList.contains('on')")
+        self.assertIn('SYN result', self.texts()['conclusion'])
+        self.assert_off_hidden_recommendation('structured line')
+        self.page.locator('#conclusion').focus()
+        self.record_dictation()
+        self.review_dictation()
+        self.assertTrue(self.page.evaluate('recorded.insert().then(r => r.inserted)'))
+        self.assertIn('SYN delayed', self.texts()['conclusion'])
+        self.assert_off_hidden_recommendation('dictation Insert')
 
     def test_page_dictation_targets_the_field_focused_after_replacement(self):
         self.switch(self.h.PATIENT_B)
@@ -1464,7 +1667,8 @@ class ReportEditorFramePageDOM(unittest.TestCase):
 
     def test_page_w3_drawer_close_after_replacement_returns_to_a_current_field(self):
         # W6-PAGE-18 on the W3 layout: an opening replaces the three fields while focus is in the Study Panel,
-        # so the drawer's remembered opener is a removed node. Closing returns focus to the current field.
+        # so the drawer's remembered opener is a removed node. Closing returns focus to the current field of the
+        # section the drawer was opened from (W6R1-07: Conclusion here, not the first field).
         uid_b = self.page.locator('#rows tr', has_text=self.h.PATIENT_B).first.get_attribute('data-uid')
         replacements = {
             'other study': ("uid => select(uid)", uid_b),
@@ -1481,40 +1685,54 @@ class ReportEditorFramePageDOM(unittest.TestCase):
                 self.assertTrue(self.page.evaluate("() => document.querySelector('#study-panel-host').contains(document.activeElement)"))
                 self.page.keyboard.press('Escape')
                 self.page.wait_for_function("() => !document.querySelector('#study-panel-host .study-panel:not([hidden])')")
-                active = self.page.evaluate("() => { const a = document.activeElement; return [a.id, a.isConnected, a.id === 'findings' && a === reportFrame.element('findings')]; }")
-                self.assertEqual(active, ['findings', True, True])
+                active = self.page.evaluate("() => { const a = document.activeElement; return [a.id, a.isConnected, a.id === 'conclusion' && a === reportFrame.element('conclusion')]; }")
+                self.assertEqual(active, ['conclusion', True, True])
                 before = self.texts()
                 self.page.keyboard.type('W3')
-                self.assertEqual(self.texts(), {**before, 'findings': before['findings'] + 'W3'})
+                self.assertEqual(self.texts(), {**before, 'conclusion': before['conclusion'] + 'W3'})
         self.assertEqual(self.page.evaluate('selectedUid'), uid_b)
 
     def test_page_frame_minimum_on_w3_layouts_with_notices_and_panel(self):
-        # W6-PAGE-22 re-validated on W3's placements (portrait bands, narrow sheet, short windows): with the
-        # unavailable-service notices shown below it and the Study Panel closed or open, the shared scroller
-        # keeps its 200 px minimum, the panel never covers it, and each section focused is in the window.
+        # W6-PAGE-22 on W3's placements (portrait bands, narrow sheet, short windows) and 1366x768, with the three
+        # unavailable-service notices shown below the report fields and the Study Panel closed or open (W6R1-01). The
+        # shared scroller has no fixed minimum: it gives up its height before anything below it leaves the column (it
+        # is down to its own padding whenever the column's content overflows), the page itself never scrolls, and the
+        # footer and every notice bar stay in the window or inside a container the reader can wheel-scroll. The panel
+        # never covers the scroller and each section focused shows in it. The last window is shorter than the column's
+        # own rows: there the column itself scrolls.
+        from study_panel_page_dom_test import assert_w6_reachable, w6_facts
         from study_panel_size_dom_test import BOUND_SIZES
-        measure = """() => { const host = document.querySelector('.redit'), box = host.getBoundingClientRect();
+        measure = """() => { const host = document.querySelector('.redit'), box = host.getBoundingClientRect(), css = getComputedStyle(host);
           const panel = document.querySelector('#study-panel-host .study-panel:not([hidden])')?.getBoundingClientRect();
           const seen = id => { const r = document.getElementById(id).getBoundingClientRect();
             return Math.min(box.bottom, r.bottom, innerHeight) - Math.max(box.top, r.top, 0); };
-          return {height: box.height, covered: !!panel && box.left < panel.right && box.right > panel.left
+          const column = host.parentElement;
+          return {height: box.height, least: ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth'].reduce((n, k) => n + parseFloat(css[k]), 0),
+                  overflow: column.scrollHeight - column.clientHeight,
+                  covered: !!panel && box.left < panel.right && box.right > panel.left
                     && Math.max(box.top, 0) < panel.bottom && Math.min(box.bottom, innerHeight) > panel.top,
                   findings: seen('findings'), conclusion: seen('conclusion')}; }"""
         notices = self.page.evaluate("() => ['#question-p', '#image-request-p', '#cvr-sent-p'].filter(s => document.querySelector(s).getClientRects().length).length")
-        self.assertGreater(notices, 0)
-        for width, height in BOUND_SIZES:
+        self.assertEqual(notices, 3)
+        for width, height in dict.fromkeys([tuple(size) for size in BOUND_SIZES] + [(1366, 768), (1280, 540)]):
             self.page.set_viewport_size({'width': width, 'height': height})
             for opened in (False, True):
                 with self.subTest(width=width, height=height, panel=opened):
                     if opened:
                         self.assertTrue(self.page.evaluate("() => openStudyPanel('info')"))
+                    self.page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                    where = '%dx%d panel=%s' % (width, height, opened)
+                    fact = self.page.evaluate(measure)
+                    if fact['overflow'] > 0.5:
+                        self.assertLessEqual(fact['height'], fact['least'] + 0.5, '%s: the scroller did not yield %s' % (where, fact))
+                    assert_w6_reachable(self, w6_facts(self.page), where)
                     for field in ('findings', 'conclusion'):
                         self.page.locator('#' + field).evaluate('e => e.focus()')
                         self.page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
                         fact = self.page.evaluate(measure)
-                        self.assertGreaterEqual(fact['height'], 199.5, fact)
                         self.assertFalse(fact['covered'], fact)
                         self.assertGreater(fact[field], 0, fact)
+                        assert_w6_reachable(self, w6_facts(self.page), where + ' ' + field)
                     if opened:
                         self.page.evaluate("() => studyPanel.close()")
 
@@ -1537,6 +1755,71 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.page.wait_for_url(self.h.INDEX_URL)
         self.assertEqual(self.site.stored(), {'findings':'F','conclusion':'C','recommendation':'R'})
         self.assertEqual(len(self.site.logouts), 1)
+
+    def test_page_logout_during_composition_saves_the_composed_text_once(self):
+        # W6R1-06 (W6-PAGE-19): Log Out pressed while a Korean IME composition is open in Findings, focus left there.
+        # The composition is finished first, while the page is still at work - before the logout preparation freezes
+        # the save snapshot and before its panel opens - so the saved draft holds the composed syllable as the
+        # reader left it; the page saves it once and logs out once.
+        ended = []
+        self.page.expose_function('compositionEnded', lambda fact: ended.append(fact))
+        self.page.locator('#findings').click()
+        self.page.keyboard.type('ab')
+        cdp = self.context.new_cdp_session(self.page)
+        cdp.send('Input.imeSetComposition', {'text': '한', 'selectionStart': 1, 'selectionEnd': 1})
+        self.assertTrue(self.page.evaluate('reportFrame.isComposing()'))
+        self.page.evaluate("""() => document.addEventListener('compositionend', event => compositionEnded({field: event.target.id,
+            value: event.target.value, work: work.state(), panel: !!document.querySelector('dialog.kin-logout[open]')}), true)""")
+        self.page.evaluate("document.querySelector('#logout').click()")
+        self.page.wait_for_url(self.h.INDEX_URL)
+        self.assertEqual(ended[:1], [{'field': 'findings', 'value': 'ab한', 'work': 'active', 'panel': False}])
+        self.assertEqual(self.site.stored(), {'findings': 'ab한', 'conclusion': '', 'recommendation': ''})
+        self.assertEqual(sum(put.get('findings') == 'ab한' for put in self.site.puts), 1)
+        self.assertEqual(len(self.site.logouts), 1)
+
+    def test_page_related_panel_round_trip_and_resize_keep_the_editor(self):
+        # W6R1-10 (design v5 §9): in the Reading Workspace, Hide Related Panel and Show again, with a window resize in
+        # between (both change the shared scroller's size), keep the text, the selection, the caret in view (or the
+        # reader's own scroll) and the native history: one Ctrl+Z still removes exactly the last typing.
+        self.keep_hold_claim()
+        self.page.get_by_role('button', name='Reading Workspace', exact=True).click()
+        toggle = self.page.locator('#reading-related-toggle')
+        self.page.wait_for_function("() => document.body.classList.contains('reading')")
+        text = '\n'.join('line %d' % i for i in range(60))
+        self.page.locator('#findings').focus()
+        self.page.keyboard.insert_text(text)
+        self.page.keyboard.press('Control+Home')
+        for _ in range(30):
+            self.page.keyboard.press('ArrowDown')
+        self.page.keyboard.type('Z')
+        state = """() => { const host = document.querySelector('.redit'), el = document.querySelector('#findings'), box = host.getBoundingClientRect();
+          const line = parseFloat(getComputedStyle(el).lineHeight) || 16, at = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd;
+          const y = el.getBoundingClientRect().top + 7 + (el.value.slice(0, at).split('\\n').length - 1) * line;
+          return {value: el.value, selection: [el.selectionStart, el.selectionEnd, el.selectionDirection], top: host.scrollTop,
+                  height: Math.round(box.height), caret: y >= box.top - 1 && y + line <= box.bottom + 1}; }"""
+        frames = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+        before = self.page.evaluate(state)
+        self.assertTrue(before['caret'], before)
+        heights = [before['height']]
+        size = self.page.viewport_size
+        toggle.click()
+        self.page.evaluate(frames)
+        heights.append(self.page.evaluate(state)['height'])
+        self.page.set_viewport_size({'width': size['width'], 'height': size['height'] + 300})
+        self.page.evaluate(frames)
+        heights.append(self.page.evaluate(state)['height'])
+        toggle.click()
+        self.page.evaluate(frames)
+        self.assertEqual(toggle.text_content(), 'Hide Related Panel')
+        after = self.page.evaluate(state)
+        heights.append(after['height'])
+        self.assertGreater(len(set(heights)), 1, 'the round trip and the resize changed the scroller: %s' % heights)
+        self.assertEqual((after['value'], after['selection']), (before['value'], before['selection']))
+        self.assertTrue(after['caret'] or after['top'] == before['top'], after)
+        self.page.locator('#findings').focus()
+        self.page.keyboard.press('Control+z')
+        self.assertEqual(self.texts()['findings'], text)
+        self.answer_hold_claim()
 
     def test_page_citation_and_structure_apply_screen_matches_payload(self):
         self.page.locator('#findings').fill('LOCAL')
@@ -1659,6 +1942,13 @@ MUTANTS = [
         "test_same_study_caret_carry_is_lf_only"]),
     ("M39-equality-nbsp-fold-F13", "read(k) === lf(texts[k])", "read(k).replace(/\\u00a0/g, ' ') === lf(texts[k]).replace(/\\u00a0/g, ' ')", [
         "test_authoritative_equality_is_lf_only", "test_same_opening_equality_is_lf_only"]),
+    # Round 2 (W6R1-02/04): the module contracts of the page fixes.
+    ("M40-write-keeps-focus-W6R1-02", "if (now !== target && Object.values(states).some(s => s.el === now)) now.blur();",
+     "// Leave focus in the last field written.", ["test_write_returns_focus_and_a_hidden_field_never_keeps_it"]),
+    ("M41-hidden-field-keeps-focus-W6R1-02", "if (writing || !hidden(s.el)) return;", "return;",
+     ["test_write_returns_focus_and_a_hidden_field_never_keeps_it"]),
+    ("M42-current-ignores-edits-W6R1-04", "return !['ended', 'stale', 'changed'].includes(blocked(at));",
+     "return !['ended', 'stale'].includes(blocked(at));", ["test_is_current_follows_the_opening_and_edits_not_the_moment"]),
 ]
 
 
@@ -1705,8 +1995,12 @@ PAGE_MUTANTS = [
     ('W6-PAGE-15', 'current-study.js', 'if (reportFrame?.isComposing()) return;', '// Allow a switch during composition.',
      'test_page_composition_refuses_a_queued_study_activation'),
     # Post-W3: the drawer's fallback reads the field when the drawer closes; a kept reference is a removed node after an opening.
-    ('W6-PAGE-18-drawer-fallback', 'feature-mounts.js', "fallbackFocus: () => [$('#findings'), $('#quick'), $('#study-panel-open')]",
-     "fallbackFocus: () => [openStudyPanel.field ??= $('#findings'), $('#quick'), $('#study-panel-open')]",
+    ('W6-PAGE-18-drawer-fallback', 'feature-mounts.js',
+     "fallbackFocus: () => [studyPanelField && $('#' + studyPanelField), $('#findings'),",
+     "fallbackFocus: () => [openStudyPanel.field ??= studyPanelField && $('#' + studyPanelField), $('#findings'),",
+     'test_page_w3_drawer_close_after_replacement_returns_to_a_current_field'),
+    ('W6R1-07-section-return', 'feature-mounts.js',
+     "fallbackFocus: () => [studyPanelField && $('#' + studyPanelField), $('#findings'),", "fallbackFocus: () => [$('#findings'),",
      'test_page_w3_drawer_close_after_replacement_returns_to_a_current_field'),
     ('W6-PAGE-19', 'work-exit.js', 'Object.assign(prep, captureReport());', '// Forget the report snapshot.',
      'test_page_logout_saves_template_and_hidden_recommendation_once'),
@@ -1719,6 +2013,29 @@ PAGE_MUTANTS = [
     ('W6-PAGE-22-caret-follow', 'report-editor-frame.js',
      "if (follow && doc.activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);",
      "if (false) revealCaret(follow);", 'test_page_single_scroll_tab_shortcut_and_thousand_lines'),
+    # Round 2 (Opus binding review of 9277ccd): each finding's fault put back.
+    ('W6R1-01-hard-minimum', 'main.html', '.redit { flex: 1; overflow: auto;', '.redit { flex: 1; min-height: 200px; overflow: auto;',
+     'test_page_frame_minimum_on_w3_layouts_with_notices_and_panel'),
+    ('W6R1-01-column-scroll', 'main.html', '.report-p { overflow-y: auto; min-width: min-content; }', '.report-p { min-width: min-content; }',
+     'test_page_frame_minimum_on_w3_layouts_with_notices_and_panel'),
+    ('W6R1-02-hidden-focus-guard', 'report-editor-frame.js', 'if (writing || !hidden(s.el)) return;', 'return;',
+     'test_page_template_double_click_and_native_undo_never_focus_hidden_recommendation'),
+    # Round 1's focus return: back to whatever was focused, a hidden field included, and nothing when that fails.
+    ('W6R1-02-write-focus-return', 'report-editor-frame.js',
+     "if (target?.isConnected && doc.activeElement !== target && !hidden(target)) target.focus({ preventScroll: true });\n"
+     "      const now = doc.activeElement;\n"
+     "      if (now !== target && Object.values(states).some(s => s.el === now)) now.blur();",
+     "if (target?.isConnected && doc.activeElement !== target) target.focus({ preventScroll: true });",
+     'test_page_template_double_click_and_native_undo_never_focus_hidden_recommendation'),
+    ('W6R1-03-dictation-target', 'report-dictation.js',
+     'if (reportFrame?.isWriting() || event.target.getAttribute("aria-hidden") === "true") return;',
+     'if (event.target.getAttribute("aria-hidden") === "true") return;', 'test_page_template_native_focus_does_not_retarget_dictation'),
+    ('W6R1-04-consuming-refusal', 'dictation-session.js', 'if (!pinned || live.value !== start.value', 'if (live.value !== start.value',
+     'test_page_record_type_undo_refuses_late_dictation'),
+    ('W6R1-06-skip-composition', 'work-exit.js', 'if (reportFrame?.isComposing()) {', 'if (false) {',
+     'test_page_logout_during_composition_saves_the_composed_text_once'),
+    ('W6R1-10-resize-scroll', 'report-editor-frame.js', 'host.scrollTop = top; host.scrollLeft = left;', '// Let a resize move the scroller.',
+     'test_page_related_panel_round_trip_and_resize_keep_the_editor'),
 ]
 
 
@@ -1743,6 +2060,7 @@ def run_page_mutants():
         case.bundle_source = ''.join(changed if item['file'] == file else originals[item['file']] for item in order)
         # Standalone session scripts are served separately from the generated bundle.
         case.session_source = changed if file == 'dictation-session.js' else None
+        case.html_source = changed if file == 'main.html' else None
         output = io.StringIO()
         result = unittest.TextTestRunner(stream=output, verbosity=2).run(unittest.TestSuite([case(name)]))
         caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
@@ -1753,6 +2071,7 @@ def run_page_mutants():
     case.bundle_source = None
     case.dictation_source = None
     case.session_source = None
+    case.html_source = None
     print('PAGE mutants killed: %s/%s' % (killed, len(PAGE_MUTANTS)))
     return 0 if killed == len(PAGE_MUTANTS) else 1
 

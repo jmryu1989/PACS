@@ -21,7 +21,6 @@ the largest report column, and Default during a drag. They drive real mouse, key
 """
 import io
 import json
-import math
 import subprocess
 import tempfile
 import unittest
@@ -30,7 +29,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
-from study_panel_page_dom_test import SCROLLER, W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS
+from study_panel_page_dom_test import W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -71,27 +70,6 @@ def within_panel(facts):
     place = lambda box: [box[0] - x, box[1] - y, box[2], box[3]]
     return {**facts, 'drawer': facts['drawer'][2:], 'close': place(facts['close']), 'tablist': place(facts['tablist']),
             'tabs': [place(tab) for tab in facts['tabs']], 'shown': place(facts['shown'])}
-
-
-def w6_regions(theirs, mine, width, height):
-    """W6-PAGE-22 (D1300): picture regions [x, width, y in round 6, y in current, height] for the open-panel
-    picture. Everything is compared in place except W6's scroller (.redit), which is left out, and what lies below it
-    in its column, which W6's 200 px minimum moves down by the scroller's height difference and is compared moved.
-    Where it moves, the scroller's fractional edge columns (column and neighbour in one pixel) are not compared."""
-    (x, top, w, h_theirs), (x_mine, top_mine, w_mine, h_mine) = theirs, mine
-    assert (x, top, w) == (x_mine, top_mine, w_mine), ('the W6 scroller keeps its place and width', theirs, mine)
-    shift = h_mine - h_theirs
-    assert shift >= 0 and shift == round(shift), ('the scroller only grows, in whole pixels', theirs, mine)
-    shift = round(shift)
-    above, below = min(math.floor(top), height), math.ceil(top + h_theirs)
-    # The window clips a column that extends past its right edge (the 1024x768 report column).
-    left, right = min(math.floor(x), width), min(math.ceil(x + w), width)
-    inner_left, inner_right = min(math.ceil(x), width), min(math.floor(x + w), width)
-    regions = [[0, width, 0, 0, above], [0, left, above, above, height - above], [right, width - right, above, above, height - above],
-               [inner_left, inner_right - inner_left, below, below + shift, height - below - shift]]
-    if not shift:
-        regions += [[left, inner_left - left, below, below, height - below], [inner_right, right - inner_right, below, below, height - below]]
-    return [region for region in regions if region[1] > 0 and region[4] > 0]
 
 
 class StudyPanelSizeDOM(unittest.TestCase):
@@ -216,7 +194,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             settle(page)
             facts['nodes'] = page.evaluate("() => document.querySelectorAll('*').length")
             facts['panel'], facts['page'] = self.panel(page), page.evaluate(PAGE)
-            facts['w6_scroller'] = page.evaluate(SCROLLER)
+            facts['w6'] = w6_facts(page)
             del facts['panel']['edge']
             drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
             controls = [c.bounding_box() for c in (drawer.get_by_role('combobox', name='Text Size'),
@@ -255,12 +233,16 @@ class StudyPanelSizeDOM(unittest.TestCase):
                     with self.subTest(width=width, height=height):
                         # W6-PAGE-22 (D1300, W6_REPORT_FIELDS in study_panel_page_dom_test.py): a decided difference.
                         # W6's report section adds W6_FIRST_PAINT_NODES nodes, its two field boxes are left out of the
-                        # page facts and its scroller's pixels are not compared (what its 200 px minimum moves down is,
-                        # moved: w6_regions); everything else stays round 6's.
+                        # page facts and its scroller's pixels are not compared; what lies below the scroller is compared
+                        # where the scroller leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable);
+                        # everything else stays round 6's.
                         self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES, mine['first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
                         page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
                         self.assertEqual(page_facts(theirs), page_facts(mine), 'page')
+                        where = f'{width}x{height}'
+                        assert_w6_reachable(self, mine['w6'], where)
+                        w6_moved(self, theirs['w6'], mine['w6'], 0, where)
                         # Round 6's tab click rewrote the toolbar status line, which wraps at 900x1200 and 768x1024 and
                         # pushed its panel down (W3R7-04, fixed this round). So each tab's content is round 6's within
                         # the panel, and the panel itself stays where it opened, which is round 6's place (above).
@@ -285,7 +267,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # controls' row and the edge (stated in the round-7 report).
                         self.assertEqual(7 + W6_FIRST_PAINT_NODES, mine['nodes'] - theirs['nodes'])
                         if picture:
-                            regions = w6_regions(theirs['w6_scroller'], mine['w6_scroller'], width, height)
+                            regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
                                 self.assertFalse(difference.get('outside') or difference.get('size'), difference)
                                 self.assertEqual(0, difference['over'], f'open panel pixels differ outside the new controls/W6 scroller: {difference}')
