@@ -53,6 +53,91 @@ def orthanc_archive():
     return stream.getvalue()
 
 
+def pg_role(name, *, superuser=False, login=False, inherit=True, connlimit=-1):
+    return {"rolname": name, "rolsuper": superuser, "rolcreaterole": superuser, "rolcreatedb": superuser, "rolcanlogin": login,
+            "rolreplication": superuser, "rolbypassrls": superuser, "rolinherit": inherit, "rolconnlimit": connlimit,
+            "rolvaliduntil": None, "rolconfig": None}
+
+
+def daily_role_catalog():
+    """The role catalog of a post-EMR production cluster (bootstrap superuser kin) as a daily backup reads it (D23): the
+    EMR roles and a further NOLOGIN role with a membership that pg_dumpall records as GRANTED BY kin."""
+    roles = [pg_role("kin", superuser=True, login=True), pg_role("kin_emr_owner"), pg_role("kin_emr_reader"),
+                      pg_role("kin_emr_retention"), pg_role("kin_legacy_group", inherit=False), pg_role("kin_legacy_reader", connlimit=3),
+                      pg_role("kin_runtime", login=True)]
+    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": sorted(row["rolname"] for row in roles if row["rolcanlogin"]), "builtin_roles": [], "settings": [],
+            "setting_names": ["search_path", "statement_timeout", "work_mem"],
+            "role_comments": [[row["rolname"], None] for row in roles], "roles": roles,
+            "memberships": [{"granted": "kin_legacy_group", "member": "kin_legacy_reader", "grantor": "kin", "admin_option": False, "inherit_option": True,
+                             "set_option": True}],
+            "databases": [{"name": "keycloak", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"], "attributes": {"datistemplate": False, "datallowconn": True}},
+                          {"name": "kin", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin", "kin_legacy_reader=c/kin"], "attributes": {"datistemplate": False, "datallowconn": True}},
+                          *[{"name": name, "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"], "attributes": {"datistemplate": False, "datallowconn": True}} for name in ("postgres", "template0", "template1")]],
+            "tablespaces": [{"name": "kin_emr_access", "owner": "kin_emr_owner", "location": ops.EMR_TABLESPACE},
+                            {"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""}],
+            "schemas": ["emr_access", "public"]}
+
+
+class DailyCluster:
+    """The fresh networkless rehearsal cluster of a daily EMR set restored by the catalog replay (D23): bootstrap superuser
+    kin; it applies the CREATE ROLE / GRANT statements sent on stdin, the EMR tablespace and pg_restore --create; its
+    databases, tablespaces and schemas are then the snapshot's (or `restored`, a restore that came out differently)."""
+
+    def __init__(self, source, restored=None):
+        self.source, self.restored = source, restored
+        self.roles = {"kin": next(role for role in source["roles"] if role["rolname"] == "kin")}
+        self.memberships, self.tablespace, self.restored_databases, self.statements = [], False, set(), []
+        self.verifiers = set()
+
+    def catalog(self):
+        base = self.restored or self.source
+        whole = self.restored_databases >= {"kin", "keycloak"}
+        # A fresh cluster holds the image's postgres and templates and what pg_restore --create brought back: a source
+        # database the set does not hold (and a setting scoped to it) never exists there. `restored` is echoed as given.
+        present = {"postgres", "template0", "template1", *self.restored_databases}
+        databases = base["databases"] if self.restored else [item for item in base["databases"] if item["name"] in present]
+        settings = base["settings"] if self.restored else [entry for entry in base["settings"] if entry["database"] in (None, *present)]
+        return {**{key: base[key] for key in ("server_major", "unsupported_verifiers", "login_verifiers", "builtin_roles", "setting_names")},
+                "settings": settings,
+                "login_verifiers": sorted(self.verifiers), "role_comments": [[name, None] for name in sorted(self.roles)], "roles": [self.roles[name] for name in sorted(self.roles)],
+                "memberships": sorted(self.memberships, key=lambda item: (item["granted"], item["member"])),
+                "databases": databases if whole else [{"name": "kin", "owner": "kin", "acl": []}, {"name": "postgres", "owner": "kin", "acl": []}],
+                "tablespaces": base["tablespaces"] if self.tablespace else [item for item in base["tablespaces"] if item["name"].startswith("pg_")],
+                "schemas": base["schemas"] if whole else ["public"]}
+
+    def text(self, args, **kwargs):
+        joined = " ".join(args)
+        if ops.ROLE_CATALOG_SQL in args:
+            return json.dumps(self.catalog())
+        if "datname='keycloak'" in joined:
+            return "%d:%d" % ("keycloak" in self.restored_databases, "kin" not in self.restored_databases)
+        if "n.nspname='public'" in joined:
+            return "0"
+        raise AssertionError("unexpected rehearsal query " + joined[:80])
+
+    def observe(self, args, input_file):
+        import re as pattern
+        joined = " ".join(args)
+        if "psql" in args and input_file is not None:
+            sql = input_file.read().decode("utf-8", errors="replace")
+            self.statements.append(sql)
+            self.verifiers.update(pattern.findall(r'ALTER ROLE "([^"]+)" PASSWORD ', sql))
+            for name, flags in pattern.findall(r'CREATE ROLE "([^"]+)" WITH ([^;]+);', sql):
+                words = flags.split()
+                self.roles[name] = {**pg_role(name), "rolsuper": "SUPERUSER" in words, "rolcreaterole": "CREATEROLE" in words,
+                                    "rolcreatedb": "CREATEDB" in words, "rolcanlogin": "LOGIN" in words, "rolreplication": "REPLICATION" in words,
+                                    "rolbypassrls": "BYPASSRLS" in words, "rolinherit": "INHERIT" in words,
+                                    "rolconnlimit": int(words[words.index("LIMIT") + 1])}
+            for granted, member, admin, inherit, setting in pattern.findall(
+                    r'GRANT "([^"]+)" TO "([^"]+)" WITH ADMIN (TRUE|FALSE), INHERIT (TRUE|FALSE), SET (TRUE|FALSE);', sql):
+                self.memberships.append({"granted": granted, "member": member, "grantor": "kin", "admin_option": admin == "TRUE",
+                                         "inherit_option": inherit == "TRUE", "set_option": setting == "TRUE"})
+        elif "CREATE TABLESPACE kin_emr_access" in joined:
+            self.tablespace = True
+        elif "pg_restore" in args and input_file is not None:
+            self.restored_databases.add(Path(input_file.name).name.split(".")[0])
+
+
 class Host:
     """The fake host of test_14 (all writers running) with a private backup parent beside the repository, recording
     every command and the order of pause, resume, readiness and seal."""
@@ -62,6 +147,7 @@ class Host:
         self.repo.mkdir()
         for filename in ops.FILES[3:]:
             (self.repo / filename).write_text("TEST_ONLY=placeholder")
+        (self.repo / ".env").write_text("POSTGRES_PASSWORD=synthetic-fixture\nKIN_EMR_RUNTIME_PASSWORD=synthetic-runtime\n")
         self.parent = Path(temporary) / "backups"
         self.parent.mkdir(mode=0o700)
         self.info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a" * 64,
@@ -74,6 +160,10 @@ class Host:
         self.catalog = {"synthetic": "catalog"}
         self.restored_catalog = None
         self.restore_answer = "EMR_RESTORE_VERIFIED"
+        # D23: the cluster's role catalog the backup records, and (when set) what a rehearsal's restore comes out with.
+        self.role_catalog = daily_role_catalog()
+        self.restored_role_catalog = None
+        self.cluster = None
         # Backups a minute apart within the monitor's 30-hour window: the monitor orders manifests by whole seconds.
         self.clock = datetime.now(timezone.utc) - timedelta(hours=1)
 
@@ -95,6 +185,8 @@ class Host:
             return "4096"
         if "pg_stat_activity" in " ".join(args):
             return "0"
+        if ops.ROLE_CATALOG_SQL in args:
+            return json.dumps(self.role_catalog)
         return "" if "status" in args else "a" * 40
 
     def fake_run(self, args, **kwargs):
@@ -148,7 +240,14 @@ class Host:
         error = None
         cleanup = Mock()
         earlier = set(folder.glob("rehearsal-*.json"))
-        with patch.object(ops, "run", side_effect=self.fake_run), \
+        recorded = json.loads((folder / "manifest.json").read_text(encoding="utf-8")).get("role_catalog")
+        self.cluster = DailyCluster(recorded or self.role_catalog, self.restored_role_catalog)
+
+        def rehearsal_run(args, **kwargs):
+            self.events.append(("command", list(args)))
+            self.cluster.observe(args, kwargs.get("input_file"))
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        with patch.object(ops, "run", side_effect=rehearsal_run), patch.object(ops, "text", side_effect=self.cluster.text), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
                 patch.object(ops, "emr_catalog", return_value=self.restored_catalog or self.catalog), \
                 patch.object(ops, "counts", return_value={"public.Report": 5}), \
@@ -196,6 +295,8 @@ class BackupSafetyTests(unittest.TestCase):
                     return '[{"RepoDigests": []}]'
                 if "pg_stat_activity" in " ".join(args):
                     return "0"
+                if ops.ROLE_CATALOG_SQL in args:
+                    return json.dumps(daily_role_catalog())
                 return "" if "status" in args else "a" * 40
 
             def fake_run(args, **kwargs):
@@ -361,6 +462,8 @@ class BackupSafetyTests(unittest.TestCase):
                     return "4096"
                 if "pg_stat_activity" in " ".join(args):
                     return "0"
+                if ops.ROLE_CATALOG_SQL in args:
+                    return json.dumps(daily_role_catalog())
                 return "" if "status" in args else "a"*40
 
             def fake_run(args, **kwargs):
@@ -714,11 +817,23 @@ class BackupSafetyTests(unittest.TestCase):
             def rehearse():
                 with patch.object(sys, "argv", ["ops_backup.py", "rehearse", str(sealed)]):
                     ops.main()
+            clusters = []
+
             def rehearsal_run(args, **kwargs):
-                # This boundary test simulates provisioning only; the real verifier/exporter still hits FakeDocker
-                # and its watchdog. B L07/L19 exercise these provisioning statements on PostgreSQL itself.
-                if args[:2] == ["docker", "exec"] and ("mkdir" in args or "psql" in args):
-                    return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+                # This boundary test simulates provisioning and the catalog replay of the fresh cluster (D23) only; the
+                # real verifier/exporter still hits FakeDocker and its watchdog. B L07/L19 exercise these statements on
+                # PostgreSQL itself.
+                if args[:3] == ["docker", "run", "-d"]:
+                    clusters.append(DailyCluster(json.loads((sealed / "manifest.json").read_text(encoding="utf-8"))["role_catalog"]))
+                if args[:2] == ["docker", "exec"] and "pg_restore" in args:
+                    clusters[-1].observe(args, kwargs.get("input_file"))
+                elif args[:2] == ["docker", "exec"] and ("mkdir" in args or "psql" in args):
+                    clusters[-1].observe(args, kwargs.get("input_file"))
+                    try:
+                        answer = clusters[-1].text(args)
+                    except AssertionError:
+                        answer = ""
+                    return SimpleNamespace(returncode=0, stdout=answer.encode(), stderr=b"")
                 return real_run(args, **kwargs)
             for label, plan, success in (("sound", dict(answer=verifier_answer(rows)), True),
                                          ("the restored copy's export stalls", dict(exporter="stall"), False)):
@@ -744,7 +859,8 @@ class BackupSafetyTests(unittest.TestCase):
                         proof = result["audit"]["cleanup"]
                         self.assertTrue(proof["confirmed"], proof)
                         self.assertTrue(proof["steps"]["remote"]["confirmed"], "the restored copy's export was ended")
-                        self.assertEqual((proof["target"]["database"], proof["target"]["role"]), ("kin", "postgres"))
+                        # D23: the restored copy is a cluster whose bootstrap superuser is kin (the catalog replay).
+                        self.assertEqual((proof["target"]["database"], proof["target"]["role"]), ("kin", "kin"))
                     self.assertEqual(result["cleanup_failures"], [])
                     self.assertFalse((host.repo / ".kin-ops.lock").exists(), "the operations lock is released")
                     self.assertEqual(fake.running(), [])
@@ -888,6 +1004,89 @@ class EmrRestoreVerification(unittest.TestCase):
         self.assertFalse(any('pg_dump' in command or 'pg_dumpall' in command for command in commands))
         resumed = [name for command in commands if command[:2] == ['docker', 'start'] for name in command[2:]]
         self.assertCountEqual(resumed, ops.CONTAINERS[:-1])
+
+    def test_d23_a_daily_set_is_rehearsed_by_the_catalog_replay_and_refuses_a_differing_restore(self):
+        """D23: a daily EMR set records the cluster's role catalog inside the writer pause; its rehearsal starts a cluster
+        whose bootstrap superuser is kin, replays the roles and memberships from that catalog (never pg_dumpall's
+        GRANTED BY statements as postgres), compares the restored role catalog and verifies the seal as kin. A restore
+        whose catalog differs is refused."""
+        self.assertEqual(self.manifest["role_catalog"], daily_role_catalog())
+        kinds = [" ".join(event[1][:2]) if event[0] == "command" else event[0] for event in self.host.events]
+        read = next(index for index, event in enumerate(self.host.events) if event[0] == "command" and ops.ROLE_CATALOG_SQL in event[1])
+        self.assertLess(kinds.index("docker stop"), read)
+        self.assertLess(read, kinds.index("docker start"), "the role catalog is read inside the writer pause")
+        result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
+        self.assertIsNone(error, error)
+        self.assertTrue(result["success"] and result["audit"]["verified"])
+        self.assertEqual((result["roles"], result["catalog"]["catalog"]), ("catalog replay", "equal"))
+        commands = [event[1] for event in self.host.events if event[0] == "command"]
+        started = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
+        self.assertIn("POSTGRES_USER=kin", started)
+        self.assertFalse(any("-U" in command and command[command.index("-U") + 1] == "postgres" for command in commands),
+                         "nothing runs as postgres in the rehearsal cluster")
+        self.assertEqual(self.host.cluster.memberships, daily_role_catalog()["memberships"])
+        self.assertFalse(any("GRANTED BY" in sql for sql in self.host.cluster.statements))
+        changed = daily_role_catalog()
+        changed["databases"][1]["acl"] = ["=Tc/kin", "kin=CTc/kin"]
+        self.host.restored_role_catalog = changed
+        result, error, _, _ = self.host.rehearse(self.folder, self.answer)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn("Restored catalog differs from the snapshot: databases", str(error))
+        self.assertFalse(result["success"])
+
+    def test_d23_an_older_daily_set_without_a_role_catalog_keeps_its_previous_rehearsal(self):
+        """D23: a set made before the role catalog was recorded is rehearsed as before (pg_dumpall roles as postgres)."""
+        manifest = dict(self.manifest)
+        manifest.pop("role_catalog")
+        ops.write_json(self.folder / "manifest.json", manifest)
+        result, error, _, _ = self.host.rehearse(self.folder, self.answer)
+        self.assertIsNone(error, error)
+        self.assertTrue(result["success"])
+        commands = [event[1] for event in self.host.events if event[0] == "command"]
+        started = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
+        self.assertNotIn("POSTGRES_USER=kin", started)
+        self.assertTrue(any(command[:3] == ["docker", "exec", "-i"] and "psql" in command and command[command.index("-U") + 1] == "postgres"
+                            for command in commands))
+
+    def test_r5_02_a_database_outside_the_daily_set_is_named_and_the_set_still_compared(self):
+        """R5-02 (PR #175 CI emr-b, live L19): a daily set dumps kin and keycloak only, so a further database of the
+        source cluster (L19's cluster still holds L06's l06_tampered) and a setting scoped to it are outside the set: the
+        rehearsal names it instead of refusing a complete set, and replays and compares everything the set holds. A
+        restore that yields a database the set does not hold, or whose kin ACL differs, is still refused; a held
+        (whole-cluster) capture still refuses the further database."""
+        def outside_database(name):
+            return {"name": name, "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"], "attributes": {"datistemplate": False, "datallowconn": True}}
+        captured = daily_role_catalog()
+        captured["databases"] = sorted([*captured["databases"], outside_database("l06_tampered")], key=lambda item: item["name"])
+        captured["settings"] = [{"database": "kin", "role": None, "config": ["work_mem=8MB"]},
+                                {"database": "l06_tampered", "role": None, "config": ["work_mem=4MB"]}]
+        self.host.role_catalog = captured
+        folder, manifest, error = self.host.backup(self.answer)
+        self.assertIsNone(error, error)
+        self.assertEqual(manifest["role_catalog"], captured, "the manifest keeps the cluster as captured")
+        result, error, _, _ = self.host.rehearse(folder, self.answer)
+        self.assertIsNone(error, error)
+        self.assertTrue(result["success"] and result["audit"]["verified"])
+        self.assertEqual((result["databases_outside_set"], result["catalog"]["catalog"]), (["l06_tampered"], "equal"))
+        replayed = "".join(self.host.cluster.statements)
+        self.assertIn('ALTER ROLE ALL IN DATABASE "kin" SET "work_mem" TO', replayed)
+        self.assertNotIn("l06_tampered", replayed)
+        in_set = copy.deepcopy(captured)
+        in_set["databases"] = [item for item in in_set["databases"] if item["name"] != "l06_tampered"]
+        in_set["settings"] = in_set["settings"][:1]
+        extra_restored = copy.deepcopy(in_set)
+        extra_restored["databases"] = sorted([*extra_restored["databases"], outside_database("kin_scratch")], key=lambda item: item["name"])
+        acl_changed = copy.deepcopy(in_set)
+        next(item for item in acl_changed["databases"] if item["name"] == "kin")["acl"] = ["=Tc/kin", "kin=CTc/kin"]
+        for label, restored in (("a database the set does not hold", extra_restored), ("kin's ACL", acl_changed)):
+            with self.subTest(restored=label):
+                self.host.restored_role_catalog = restored
+                result, error, _, _ = self.host.rehearse(folder, self.answer)
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIn("Restored catalog differs from the snapshot: databases", str(error))
+                self.assertFalse(result["success"])
+        with self.assertRaisesRegex(ops.RestoreAdmissionError, "the databases are not exactly kin and keycloak"):
+            ops.supported_catalog(captured, shape="post")
 
     def test_unsafe_emr_archive_refused_despite_matching_checksum(self):
         archive_path = self.folder / 'emr-state.tgz'
