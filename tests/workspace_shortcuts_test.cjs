@@ -36,8 +36,10 @@ test('v1 migration preserves every valid user key and isolates corrupt actions',
     data.set('kin-workspace-shortcuts:v1:'+owner,raw);
     assert.ok(Object.entries(s.readV2(storage,owner)).every(([id,key])=>id==='version'||key===null));
   }
-  assert.equal(s.readV2({getItem(){throw Error('denied');}},owner).report,null);
-  assert.equal(s.readV2(undefined,owner).report,null);
+  for(const unavailable of [undefined,{getItem(){throw Error('denied');}},{getItem(){return null;}}]){
+    assert.deepEqual(s.readV2(unavailable,owner),s.defaultsV2);
+    assert.deepEqual(s.read(unavailable,owner),s.defaults);
+  }
 });
 test('v2 exact shape, nullable actions and reserved browser/editing keys',()=>{
   assert.equal(s.valid(s.defaultsV2),true);
@@ -79,7 +81,7 @@ test('v2 takes precedence over legacy storage; existing window snapshots keep th
 
 // Minimal DOM adapter exercises the shipped dialog callbacks. Browser layout and
 // keyboard focus rendering are covered by the isolated-browser consumer checks.
-function dialogFixture(saved=null){
+function dialogFixture(saved=null,storageDenied=false){
   const vm=require('node:vm'),fs=require('node:fs');
   const nodes=[];let focused=null;
   const document={createElement(tag){const n={tag,children:[],dataset:{},style:{},attrs:{},textContent:'',value:'',hidden:false,open:false,
@@ -88,7 +90,7 @@ function dialogFixture(saved=null){
   document.body=document.createElement('body');const host=document.createElement('div');
   let owner=JSON.stringify(['hospital','reader']),state='active',changed=null,response={owner:['hospital','reader'],revision:0,bindings:null,invalid:false};
   const requests=[],data=new Map();if(saved!==null)data.set('kin-workspace-shortcuts:v1:'+owner,JSON.stringify(saved));
-  const root={document,localStorage:{getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v)},
+  const root={document,localStorage:{getItem:k=>{if(storageDenied)throw Error('denied');return data.get(k)??null;},setItem:(k,v)=>data.set(k,v)},
     KinWorkContext:{state:()=>state,capture:()=>({}),commit:(_,run)=>run(),onInvalidate(){}},
     KinSessionTransport:{page:()=>({async request(url,options){requests.push({url,options});return {ok:true,body:structuredClone(response)};}})}};
   vm.runInNewContext(fs.readFileSync(require.resolve('../worklist-v0/hpacs-lite/workspace-shortcuts.js'),'utf8'),{window:root,AbortController,setTimeout,clearTimeout,setInterval:()=>1,clearInterval(){}});
@@ -139,5 +141,40 @@ test('account load migrates v1 key-for-key and saves v2 with the observed owner/
   assert.deepEqual(body.expectedOwner,['hospital','reader']);assert.equal(body.revision,8);
   assert.equal(body.bindings.version,2);assert.equal(body.bindings.report,'Control+Alt+KeyR');
   assert.equal(body.bindings.finalize,'Control+KeyS');assert.equal(s.valid(body.bindings),true);
+  f.instance.end();
+});
+
+// W4SC-R1-04/05: absence is different from an observed unreadable preference.
+test('unreadable shapes and unsupported versions consistently unassign all actions with one notice',()=>{
+  for(const value of ['bad',[],42,false,{version:3},{...s.defaultsV2,version:'2'},{version:null}]){
+    const result=s.migrate(value);
+    assert.ok(Object.entries(result.map).every(([id,key])=>id==='version'||key===null));
+    assert.equal(result.notices.length,1);
+    assert.match(result.notices[0],/미배정.*Shortcuts/);
+  }
+  assert.deepEqual(s.migrate(null),{map:s.defaultsV2,notices:[]});
+});
+test('dialog preserves defaults without observable storage, and names only bad actions when observed',async()=>{
+  const absent=dialogFixture(null,true);
+  assert.equal(absent.instance.read().report,'Control+Alt+Digit4');
+  assert.equal(absent.node('workspace-shortcuts-status').textContent,'');
+  absent.instance.end();
+  const bad=dialogFixture({...s.defaults,image:'KeyC',report:'KeyR'});
+  assert.equal(bad.instance.read().image,null);
+  assert.equal(bad.instance.read().report,'Control+Alt+KeyR');
+  assert.match(bad.node('workspace-shortcuts-status').textContent,/Image.*미배정/);
+  bad.node('workspace-shortcuts-edit').onclick();await bad.flush();
+  bad.node('workspace-shortcuts-tab-viewer').onclick();
+  assert.equal(bad.node('workspace-shortcut-image').value,'Unassigned');
+  bad.instance.end();
+});
+test('duplicate notice identifies conflicting actions and tabs even when one is hidden',async()=>{
+  const f=dialogFixture();f.node('workspace-shortcuts-edit').onclick();await f.flush();
+  f.node('workspace-shortcuts-tab-viewer').onclick();f.press('image',{altKey:true,code:'KeyR'});
+  f.node('workspace-shortcuts-tab-worklist').onclick();f.press('report',{altKey:true,code:'KeyR'});
+  f.node('workspace-shortcuts-apply').onclick();
+  const message=f.node('workspace-shortcuts-message').textContent;
+  assert.match(message,/Image \(Viewer\)/);assert.match(message,/Report Editor \(Worklist\)/);
+  assert.equal(f.node('workspace-shortcuts-dialog').open,true);assert.equal(f.data.size,0);
   f.instance.end();
 });

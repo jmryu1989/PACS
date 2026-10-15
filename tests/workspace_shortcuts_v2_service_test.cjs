@@ -39,8 +39,7 @@ test('current revision v1 over stored v2 is 409 and preserves every key (downgra
   const f=fixture();f.seed(v2());const before=f.snapshot();
   await assert.rejects(f.service.saveWorkspaceShortcuts(request(v1(),7),caller),status(409));
   assert.deepEqual(f.snapshot(),before);assert.deepEqual((await f.service.workspaceShortcuts(caller)).bindings,v2());
-  f.seed({...v2(),version:3});const future=f.snapshot();
-  await assert.rejects(f.service.saveWorkspaceShortcuts(request(v2(),7),caller),status(409));assert.deepEqual(f.snapshot(),future);
+
 });
 test('unknown fields, missing actions, malformed versions, reserved chords and duplicates are 400 without mutation',async()=>{
   const bad=[null,[],{},false,{...v2(),version:1},{...v2(),version:3},{...v2(),version:'2'},{...v1(),version:1},{...v2(),extra:null},{...v1(),extra:'KeyZ'}];
@@ -68,4 +67,16 @@ test('read isolation, role denial and corrupt stored shape do not repair or leak
   await assert.rejects(f.service.saveWorkspaceShortcuts(request(null),denied),status(403));
   f.seed({...v2(),finalize:'Enter'});const before=f.snapshot();
   assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:7,bindings:null,invalid:true});assert.deepEqual(f.snapshot(),before);
+});
+
+test('invalid stored versions and shapes can be repaired only at the current revision',async()=>{
+  for(const bindings of [{...v2(),version:3},{...v2(),version:'3'},{...v2(),version:2.5},{...v2(),finalize:'Enter'},{}]){
+    const f=fixture();f.seed(bindings);const before=f.snapshot();
+    assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:7,bindings:null,invalid:true});
+    await assert.rejects(f.service.saveWorkspaceShortcuts(request(v2(),6),caller),status(409));
+    assert.deepEqual(f.snapshot(),before);
+    const repaired=await f.service.saveWorkspaceShortcuts(request(v2(),7),caller);
+    assert.deepEqual(repaired,{owner:owner(caller),revision:8,bindings:v2(),invalid:false});
+    assert.deepEqual(await f.service.workspaceShortcuts(caller),repaired);
+  }
 });
