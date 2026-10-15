@@ -614,6 +614,98 @@ class ReportFlowPage(unittest.TestCase):
     def approve_next(self):
         self.page.locator("#b-approve-next").click()
 
+    def refresh(self):
+        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+
+    def sort_by_name_descending(self):
+        self.page.locator("#heads th[data-key=name]").click()
+        self.page.locator("#heads th[data-key=name]").click()   # CHARLIE, BRAVO, ALPHA
+
+    def drop_from_the_list(self, uid, patient):
+        """The server stops listing the study (another reader, a filter on the server) and the reader presses Refresh."""
+        self.site.hidden.add(uid)
+        self.refresh()
+        self.wait(lambda: patient not in self.page.locator("#rows").inner_text(), patient + " left the list")
+
+    def test_approve_and_next_keeps_the_press_time_successor_when_the_list_is_sorted_during_the_answer(self):
+        """ANCHOR_REORDER (W4F-02): the anchor taken at the press (B, its place, C after it) decides; a sort while the
+        approval's answer is out does not pick the row that now follows B."""
+        self.open()
+        self.open_study(h.PATIENT_B)
+        self.type("SYN B anchor")
+        self.site.commit_answers = ["hold"]
+        self.approve_next()
+        self.wait(lambda: self.site.held_flow_commits, "the commit")
+        self.sort_by_name_descending()
+        self.site.finish_flow_commit()
+        self.wait(lambda: self.selected() != h.PATIENT_B, "the move after the accepted approval")
+        self.assertEqual((PATIENT_C, PATIENT_C), (self.selected(), self.editor_of()))
+
+    def test_next_revalidates_its_target_after_the_save_wait(self):
+        """NEXT_REMOVED (W4F-02): Next's target left the list while A's draft write was out. The move goes to the next
+        candidate of the press-time queue that is still listed, never into the row that is gone."""
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN pending navigation")
+        self.site.put_answers = ["hold"]
+        self.page.locator("#b-next").click()
+        self.wait(lambda: self.site.held_flow_puts, "A's draft write")
+        self.drop_from_the_list(h.UID_B, h.PATIENT_B)
+        self.site.finish_flow_put()
+        self.wait(lambda: self.selected() != h.PATIENT, "the move after the confirmed write")
+        self.assertEqual((PATIENT_C, PATIENT_C), (self.selected(), self.editor_of()))
+        self.assertEqual("SYN pending navigation", self.stored(h.UID)["findings"])
+
+    def test_next_keeps_its_press_time_target_when_the_list_is_sorted_during_the_save_wait(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN A sorted")
+        self.site.put_answers = ["hold"]
+        self.page.locator("#b-next").click()   # BRAVO follows ALPHA in the order the reader sees
+        self.wait(lambda: self.site.held_flow_puts, "A's draft write")
+        self.sort_by_name_descending()          # ALPHA is now the last row
+        self.site.finish_flow_put()
+        self.wait(lambda: self.selected() != h.PATIENT, "the move after the confirmed write")
+        self.assertEqual(h.PATIENT_B, self.selected())
+
+    def test_next_stays_when_its_target_and_every_later_candidate_left_during_the_save_wait(self):
+        self.open()
+        self.open_study(h.PATIENT_B)
+        self.type("SYN B before the last row")
+        self.site.put_answers = ["hold"]
+        self.page.locator("#b-next").click()   # CHARLIE, the last row
+        self.wait(lambda: self.site.held_flow_puts, "B's draft write")
+        self.drop_from_the_list(UID_C, PATIENT_C)
+        self.site.finish_flow_put()
+        self.settle(400)
+        self.assertEqual(h.PATIENT_B, self.selected(), "no later candidate: it stays, never the first row")
+        self.assertEqual("SYN B before the last row", self.stored(h.UID_B)["findings"])
+
+    def test_prev_follows_the_same_anchor_rule_across_the_save_wait(self):
+        self.open()
+        self.open_study(PATIENT_C)
+        self.type("SYN C typed")
+        self.site.put_answers = ["hold"]
+        self.page.locator("#b-prev").click()   # BRAVO
+        self.wait(lambda: self.site.held_flow_puts, "C's draft write")
+        self.drop_from_the_list(h.UID_B, h.PATIENT_B)
+        self.site.finish_flow_put()
+        self.wait(lambda: self.selected() != PATIENT_C, "the move after the confirmed write")
+        self.assertEqual(h.PATIENT, self.selected())
+
+    def test_retry_after_the_target_left_goes_to_the_next_candidate(self):
+        # The anchor travels with the Notice: Retry moves by the press-time queue, re-checked when it moves.
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN A refused first")
+        self.site.put_answers = [(403, {"code": "REPORT_FORBIDDEN", "message": "SYN refused write"})]
+        self.page.locator("#b-next").click()
+        expect(self.notice()).to_contain_text("Save Failed")
+        self.drop_from_the_list(h.UID_B, h.PATIENT_B)
+        self.page.locator("#report-notice-retry").click()
+        self.wait(lambda: self.selected() != h.PATIENT, "Retry saves and moves")
+        self.assertEqual(PATIENT_C, self.selected())
+
     def test_approve_and_next_under_a_w_filter_goes_to_the_following_row_not_the_first(self):
         self.open()
         self.filter_waiting()
@@ -922,10 +1014,18 @@ MUTANTS = [
      'if (reportFrame?.isComposing()) {\n          showReportNotice({ status: "composing", uid: leave.from.uid',
      'if (false) {\n          showReportNotice({ status: "composing", uid: leave.from.uid',
      "test_composition_started_while_the_save_is_out_keeps_the_study"),
-    ("anchor-from-current-list", "report-toolbar.js", "if (at === -1) return", "if (true) return",
-     "test_plain_approve_stays_and_next_continues_from_the_anchor"),
-    ("approve-next-first-row", "report-toolbar.js", "if (at === -1) return", "if (true) return",
+    # Next after a plain Approve that took the study out of the filter: without the last-seen order it starts at the top.
+    ("anchor-from-current-list", "report-toolbar.js", "if (index === -1 && uid && queueSeen?.uid === uid) {",
+     "if (false) {", "test_plain_approve_stays_and_next_continues_from_the_anchor"),
+    ("approve-next-first-row", "report-commit.js", "const next = queueTarget(anchor);",
+     "const next = orderedStudies()[0]?.uid;",
      "test_approve_and_next_under_a_w_filter_goes_to_the_following_row_not_the_first"),
+    # W4F-02: the destination comes from the press-time anchor, re-checked after the wait - not from the list at the answer.
+    ("anchor-from-the-answer-time-list", "report-commit.js", "const next = queueTarget(anchor);",
+     "const next = queueTarget(queueAnchor(1));",
+     "test_approve_and_next_keeps_the_press_time_successor_when_the_list_is_sorted_during_the_answer"),
+    ("no-revalidation-after-the-wait", "current-study.js", "const to = moveDestination(target);", "const to = target.uid;",
+     "test_next_revalidates_its_target_after_the_save_wait"),
     # The acceptance rule as a whole: accepted, nothing typed after the press, the same selection, the approval on screen.
     ("move-on-any-answer", "report-commit.js",
      "if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;",

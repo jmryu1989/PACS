@@ -365,19 +365,22 @@
      * Approve & Next(W4-PAGE-04/08 — 설계 v5 §3의 Finalize & Next; 이름은 D1358 ①로 Approve를 지킨다). Approve는 그
      * 검사에 머물고, 이 단추는 승인이 **서버에 받아들여지고 그 승인본이 편집기에 그려진 뒤에만** 다음 검사로 옮긴다. 결과를
      * 모르는 확정·거절·점유·낡은 판, 누른 뒤에 친 글이 남은 확정, 글자 조합 때문에 그리지 못한 승인본이면 머문다 — 무엇이 됐는지
-     * 사람이 보지 못한 채 다음 환자로 넘어가지 않는다. 다음 검사는 누른 순간의 줄(queue anchor)로 정한다: 승인으로 이 검사가
-     * 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫 행이 아니다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
+     * 사람이 보지 못한 채 다음 환자로 넘어가지 않는다. 다음 검사는 누른 순간의 줄(queue anchor: 이 검사와 그 자리, 그 다음 검사와
+     * 그 뒤의 후보들)이 정하고, 승인이 받아들여져 그려진 **뒤에** 그 줄로 다시 확인한다(`queueAnchor`/`queueTarget`): 그 사이
+     * 목록이 다시 정렬됐어도 다른 행으로 가지 않고, 승인으로 이 검사가 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫
+     * 행이 아니며, 그 다음 검사가 빠졌으면 그 줄의 다음 후보로, 후보가 없으면 머문다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
      */
     async function approveAndNext() {
       const why = reportCommandBlocked("finalize-next");
       if (why) { toast(why, "err"); return; }
-      const anchor = { uid: selectedUid, order: orderedStudies().map(s => s.uid) }, asked = studyRequests;
+      const anchor = queueAnchor(1), asked = studyRequests;
       const done = await commitReport("approve");
       if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;
       // 답을 기다리는 사이 사람이 다른 검사를 골랐다(옮겨졌든 저장을 기다리며 머물렀든): 늦게 온 답이 그 뜻을 덮지 않는다.
       if (studyRequests !== asked) return;
-      const next = nextStudyFrom(anchor, 1);
+      const next = queueTarget(anchor);
       if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return; }
+      // 여기서는 확인되지 않은 글이 없다(위의 조건) — 관문은 같은 자리에서 옮기므로, 방금 다시 확인한 그 검사로 간다.
       select(next, { openSelected: true });
     }
     /** 편집기가 그 검사의 서버 판독문을 그리고 있는가: 미뤄 둔 다시 그리기도, 확인되지 않은 글도 없는 그 선택의 opening. */

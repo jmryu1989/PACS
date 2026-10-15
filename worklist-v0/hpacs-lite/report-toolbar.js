@@ -70,24 +70,32 @@
      * 목록 밖이면 방향에 맞게 끝에서 시작한다: Next는 첫 번째, Prev는 마지막.
      *
      * 단, 선택이 목록에서 **빠진 것**은 목록 밖이 아니다(W4-PAGE-05, 설계 v5 §3 "첫 행 회귀 없음"). Approve로 그 검사가 W 필터에서
-     * 빠지면 Next는 "처음"이 아니라 그 검사가 서 있던 자리의 다음이어야 한다. 그래서 다음을 줄(queue anchor)로 정한다:
-     * 그 검사가 지금 목록에 있으면 지금 목록에서, 없으면 그 검사가 마지막으로 보였던 순서에서 그 뒤(Prev는 그 앞) 검사 가운데
-     * 지금 목록에 있는 첫 검사다. 그 검사를 본 순서가 아예 없을 때만(목록 밖에서 연 검사) 예전처럼 끝에서 시작한다.
+     * 빠지면 Next는 "처음"이 아니라 그 검사가 서 있던 자리의 다음이어야 한다.
+     *
+     * 그래서 목적지는 **누른 순간의 줄(queue anchor)**이 정한다: 지금 검사(UID)와 그 자리(index), 그 다음(Prev는 그 앞) 검사와
+     * 그 뒤의 후보들을 누른 순간의 목록 순서 그대로 잡아 둔다. 지금 검사가 목록에서 빠져 있으면 그 검사가 마지막으로 보였던
+     * 순서에서 잡고, 그 검사를 본 순서가 아예 없을 때만(목록 밖에서 연 검사) 예전처럼 끝에서 시작한다. 쓰던 글의 저장을 기다리거나
+     * (Next·Prev) 승인이 받아들여져 그려질 때까지 기다린 뒤에는(Approve & Next) 그 줄로 목적지를 **다시 확인한다**: 그 사이 목록이
+     * 다시 정렬됐어도 다른 행으로 가지 않고, 그 다음 검사가 필터·새로 고침으로 목록에서 빠졌으면 그 줄에서 그 뒤의 첫 검사(지금
+     * 목록에 있는 것)로 가며, 남은 후보가 없으면 머문다 — 목록의 첫 행으로 튀지 않는다.
      */
-    function nextStudyFrom(anchor, step) {
-      const list = orderedStudies();
-      if (!list.length) return null;
-      const here = list.findIndex(s => s.uid === anchor.uid);
-      if (here !== -1) return list[here + step]?.uid ?? null;
-      const order = anchor.order ?? [], at = order.indexOf(anchor.uid);
-      if (at === -1) return (step > 0 ? list[0] : list[list.length - 1]).uid;
-      const shown = new Set(list.map(s => s.uid));
-      for (let i = at + step; i >= 0 && i < order.length; i += step) if (shown.has(order[i])) return order[i];
-      return null;
+    function queueAnchor(step) {
+      const list = orderedStudies().map(s => s.uid), uid = selectedUid;
+      let order = list, index = list.indexOf(uid);
+      if (index === -1 && uid && queueSeen?.uid === uid) { order = queueSeen.order; index = order.indexOf(uid); }
+      const ahead = index === -1 ? (step > 0 ? list : [...list].reverse())
+        : step > 0 ? order.slice(index + 1) : order.slice(0, index).reverse();
+      const shown = new Set(list), from = ahead.findIndex(id => id !== uid && shown.has(id));
+      return { uid, index, step, next: from === -1 ? null : ahead[from], candidates: from === -1 ? [] : ahead.slice(from) };
+    }
+    /** 누른 순간의 줄에서 지금 갈 곳: 그때의 다음 검사가 아직 목록에 있으면 그 검사, 빠졌으면 그 줄에서 그 뒤의 첫 검사, 없으면 null. */
+    function queueTarget(anchor) {
+      const shown = new Set(orderedStudies().map(s => s.uid));
+      return anchor.candidates.find(id => id !== anchor.uid && shown.has(id)) ?? null;
     }
     function move(step) {
-      const next = nextStudyFrom({ uid: selectedUid, order: queueSeen?.uid === selectedUid ? queueSeen.order : null }, step);
-      if (next) select(next, { openSelected: true });
+      const anchor = queueAnchor(step);
+      if (anchor.next) select(anchor.next, { openSelected: true, revalidate: () => queueTarget(anchor) });
     }
     $("#b-prev").addEventListener("click", () => move(-1));
     $("#b-next").addEventListener("click", () => move(1));

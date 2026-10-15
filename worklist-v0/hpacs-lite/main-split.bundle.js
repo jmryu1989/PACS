@@ -2107,10 +2107,15 @@
      *
      * 돌려주는 것: 바로 정해지면 결과 `{status, uid}`, 저장의 답을 기다리면 그 결과의 Promise. status는 same(이미 그 검사)·
      * clear(바로 옮겼다)·saved(저장 확인 뒤 옮겼다)·composing·refused·unknown·conflict·owner(옮기지 않았다)·stale(기다리는
-     * 사이 선택이나 문맥이 바뀌어 옮기지 않았다)·stayed(기다리는 사이 사람이 지금 검사를 다시 골랐다). 결과에 따라 무엇을 할
-     * 부른 쪽은 `whenSelected`를 쓴다 — 옮겨진 뒤에만, 그 검사일 때만 한다.
+     * 사이 선택이나 문맥이 바뀌어 옮기지 않았다)·stayed(기다리는 사이 사람이 지금 검사를 다시 골랐다)·gone(줄로 정한 목적지가
+     * 기다리는 사이 목록에서 빠졌고 그 뒤의 후보도 없다). 결과에 따라 무엇을 할 부른 쪽은 `whenSelected`를 쓴다 — 옮겨진
+     * 뒤에만, 그 검사일 때만 한다.
+     *
+     * `revalidate`는 줄(queue anchor)로 정한 이동(Next·Prev·Approve & Next)이 주는 다시 확인이다: 옮기기 직전에 불러 그때의
+     * 목적지를 받는다(누른 순간의 줄 기준, 없으면 null). 같은 이벤트에서 옮기면 누를 때 정한 그 검사이고, 저장을 기다린 뒤나
+     * Notice의 Retry·Check로 나중에 옮길 때는 그 사이 바뀐 목록에 맞춘 답이다. 사람이 고른 행(클릭·메뉴·키보드 진입)은 그 행 그대로다.
      */
-    function select(uid, { deferViewer = false, openSelected = false } = {}) {
+    function select(uid, { deferViewer = false, openSelected = false, revalidate = null } = {}) {
       const options = { deferViewer, openSelected };
       if (uid !== selectedUid) studyRequests += 1;
       /**
@@ -2128,14 +2133,16 @@
         return { status: "same", uid };
       }
       // 기다리는 이동이 있으면 마지막으로 고른 검사가 그 이동의 목적지다(저장은 한 번만 기다린다).
-      if (pendingLeave) { pendingLeave.target = { uid, options }; return pendingLeave.done; }
+      if (pendingLeave) { pendingLeave.target = { uid, options, revalidate }; return pendingLeave.done; }
       const pass = leaveStudyGate("select");
       if (!(pass instanceof Promise)) {
         if (pass.status !== "clear") return { ...pass, uid };
-        enterStudy(uid, options);
-        return { status: "clear", uid };
+        const to = moveDestination({ uid, revalidate });
+        if (!to) return { status: "gone", uid };
+        enterStudy(to, options);
+        return { status: "clear", uid: to };
       }
-      const leave = pendingLeave = { target: { uid, options }, from: { uid: selectedUid, seq: selectionSeq } };
+      const leave = pendingLeave = { target: { uid, options, revalidate }, from: { uid: selectedUid, seq: selectionSeq } };
       leave.done = pass.then(result => {
         if (pendingLeave === leave) pendingLeave = null;
         const target = leave.target;
@@ -2153,10 +2160,19 @@
           return { status: "composing", uid: target.uid };
         }
         if (reportConverge.has(leave.from.uid)) return { status: "stayed", uid: leave.from.uid };
-        enterStudy(target.uid, target.options);
-        return { status: "saved", uid: target.uid };
+        // 기다리는 사이 목록이 다시 정렬되거나 새로 고쳐졌을 수 있다: 줄로 정한 목적지는 누른 순간의 줄로 다시 확인한다.
+        const to = moveDestination(target);
+        if (!to) return { status: "gone", uid: target.uid };
+        enterStudy(to, target.options);
+        return { status: "saved", uid: to };
       });
       return leave.done;
+    }
+    /** 옮겨 갈 검사: 사람이 고른 행이면 그 행, 줄로 정한 이동이면 지금 다시 확인한 목적지. 줄에 남은 검사가 없으면 그렇다고 말한다. */
+    function moveDestination(target) {
+      const to = target.revalidate ? target.revalidate() : target.uid;
+      if (!to) toast("가려던 다음 검사가 목록에서 빠졌고 그 뒤에 남은 검사도 없어 이 검사에 머뭅니다", "info");
+      return to;
     }
     // 저장을 기다리는 이동(하나)과, 이 문서에서 다른 검사를 고른 횟수(늦게 온 Approve & Next의 답이 그 뒤의 선택을 덮지 않게).
     let pendingLeave = null, studyRequests = 0;
@@ -4456,7 +4472,7 @@
       const n = reportNotice;
       if (!n?.target || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
       clearReportNotice();
-      select(n.target.uid, n.target.options);
+      select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
     }
     /** 서버가 읽어 준 초안의 작성자가 이 페이지의 계정인가(기관·사용자 ID·작성자 셋 다 같아야 한다). */
     function sameDraftOwner(owner, mine) {
@@ -4511,7 +4527,7 @@
           renderDraftBar();
         }
         clearReportNotice();
-        select(n.target.uid, n.target.options);
+        select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
       });
       // 확인하는 사이 글을 더 쳤거나 선택·작업 문맥이 바뀌었다: 이 읽기로는 정하지 않는다(보낸 것도 없다).
       if (!decided) work.commit(work.capture("document"), () => {
@@ -6541,19 +6557,22 @@
      * Approve & Next(W4-PAGE-04/08 — 설계 v5 §3의 Finalize & Next; 이름은 D1358 ①로 Approve를 지킨다). Approve는 그
      * 검사에 머물고, 이 단추는 승인이 **서버에 받아들여지고 그 승인본이 편집기에 그려진 뒤에만** 다음 검사로 옮긴다. 결과를
      * 모르는 확정·거절·점유·낡은 판, 누른 뒤에 친 글이 남은 확정, 글자 조합 때문에 그리지 못한 승인본이면 머문다 — 무엇이 됐는지
-     * 사람이 보지 못한 채 다음 환자로 넘어가지 않는다. 다음 검사는 누른 순간의 줄(queue anchor)로 정한다: 승인으로 이 검사가
-     * 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫 행이 아니다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
+     * 사람이 보지 못한 채 다음 환자로 넘어가지 않는다. 다음 검사는 누른 순간의 줄(queue anchor: 이 검사와 그 자리, 그 다음 검사와
+     * 그 뒤의 후보들)이 정하고, 승인이 받아들여져 그려진 **뒤에** 그 줄로 다시 확인한다(`queueAnchor`/`queueTarget`): 그 사이
+     * 목록이 다시 정렬됐어도 다른 행으로 가지 않고, 승인으로 이 검사가 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫
+     * 행이 아니며, 그 다음 검사가 빠졌으면 그 줄의 다음 후보로, 후보가 없으면 머문다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
      */
     async function approveAndNext() {
       const why = reportCommandBlocked("finalize-next");
       if (why) { toast(why, "err"); return; }
-      const anchor = { uid: selectedUid, order: orderedStudies().map(s => s.uid) }, asked = studyRequests;
+      const anchor = queueAnchor(1), asked = studyRequests;
       const done = await commitReport("approve");
       if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;
       // 답을 기다리는 사이 사람이 다른 검사를 골랐다(옮겨졌든 저장을 기다리며 머물렀든): 늦게 온 답이 그 뜻을 덮지 않는다.
       if (studyRequests !== asked) return;
-      const next = nextStudyFrom(anchor, 1);
+      const next = queueTarget(anchor);
       if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return; }
+      // 여기서는 확인되지 않은 글이 없다(위의 조건) — 관문은 같은 자리에서 옮기므로, 방금 다시 확인한 그 검사로 간다.
       select(next, { openSelected: true });
     }
     /** 편집기가 그 검사의 서버 판독문을 그리고 있는가: 미뤄 둔 다시 그리기도, 확인되지 않은 글도 없는 그 선택의 opening. */
@@ -7853,24 +7872,32 @@
      * 목록 밖이면 방향에 맞게 끝에서 시작한다: Next는 첫 번째, Prev는 마지막.
      *
      * 단, 선택이 목록에서 **빠진 것**은 목록 밖이 아니다(W4-PAGE-05, 설계 v5 §3 "첫 행 회귀 없음"). Approve로 그 검사가 W 필터에서
-     * 빠지면 Next는 "처음"이 아니라 그 검사가 서 있던 자리의 다음이어야 한다. 그래서 다음을 줄(queue anchor)로 정한다:
-     * 그 검사가 지금 목록에 있으면 지금 목록에서, 없으면 그 검사가 마지막으로 보였던 순서에서 그 뒤(Prev는 그 앞) 검사 가운데
-     * 지금 목록에 있는 첫 검사다. 그 검사를 본 순서가 아예 없을 때만(목록 밖에서 연 검사) 예전처럼 끝에서 시작한다.
+     * 빠지면 Next는 "처음"이 아니라 그 검사가 서 있던 자리의 다음이어야 한다.
+     *
+     * 그래서 목적지는 **누른 순간의 줄(queue anchor)**이 정한다: 지금 검사(UID)와 그 자리(index), 그 다음(Prev는 그 앞) 검사와
+     * 그 뒤의 후보들을 누른 순간의 목록 순서 그대로 잡아 둔다. 지금 검사가 목록에서 빠져 있으면 그 검사가 마지막으로 보였던
+     * 순서에서 잡고, 그 검사를 본 순서가 아예 없을 때만(목록 밖에서 연 검사) 예전처럼 끝에서 시작한다. 쓰던 글의 저장을 기다리거나
+     * (Next·Prev) 승인이 받아들여져 그려질 때까지 기다린 뒤에는(Approve & Next) 그 줄로 목적지를 **다시 확인한다**: 그 사이 목록이
+     * 다시 정렬됐어도 다른 행으로 가지 않고, 그 다음 검사가 필터·새로 고침으로 목록에서 빠졌으면 그 줄에서 그 뒤의 첫 검사(지금
+     * 목록에 있는 것)로 가며, 남은 후보가 없으면 머문다 — 목록의 첫 행으로 튀지 않는다.
      */
-    function nextStudyFrom(anchor, step) {
-      const list = orderedStudies();
-      if (!list.length) return null;
-      const here = list.findIndex(s => s.uid === anchor.uid);
-      if (here !== -1) return list[here + step]?.uid ?? null;
-      const order = anchor.order ?? [], at = order.indexOf(anchor.uid);
-      if (at === -1) return (step > 0 ? list[0] : list[list.length - 1]).uid;
-      const shown = new Set(list.map(s => s.uid));
-      for (let i = at + step; i >= 0 && i < order.length; i += step) if (shown.has(order[i])) return order[i];
-      return null;
+    function queueAnchor(step) {
+      const list = orderedStudies().map(s => s.uid), uid = selectedUid;
+      let order = list, index = list.indexOf(uid);
+      if (index === -1 && uid && queueSeen?.uid === uid) { order = queueSeen.order; index = order.indexOf(uid); }
+      const ahead = index === -1 ? (step > 0 ? list : [...list].reverse())
+        : step > 0 ? order.slice(index + 1) : order.slice(0, index).reverse();
+      const shown = new Set(list), from = ahead.findIndex(id => id !== uid && shown.has(id));
+      return { uid, index, step, next: from === -1 ? null : ahead[from], candidates: from === -1 ? [] : ahead.slice(from) };
+    }
+    /** 누른 순간의 줄에서 지금 갈 곳: 그때의 다음 검사가 아직 목록에 있으면 그 검사, 빠졌으면 그 줄에서 그 뒤의 첫 검사, 없으면 null. */
+    function queueTarget(anchor) {
+      const shown = new Set(orderedStudies().map(s => s.uid));
+      return anchor.candidates.find(id => id !== anchor.uid && shown.has(id)) ?? null;
     }
     function move(step) {
-      const next = nextStudyFrom({ uid: selectedUid, order: queueSeen?.uid === selectedUid ? queueSeen.order : null }, step);
-      if (next) select(next, { openSelected: true });
+      const anchor = queueAnchor(step);
+      if (anchor.next) select(anchor.next, { openSelected: true, revalidate: () => queueTarget(anchor) });
     }
     $("#b-prev").addEventListener("click", () => move(-1));
     $("#b-next").addEventListener("click", () => move(1));

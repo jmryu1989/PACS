@@ -371,7 +371,7 @@
       const n = reportNotice;
       if (!n?.target || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
       clearReportNotice();
-      select(n.target.uid, n.target.options);
+      select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
     }
     /** 서버가 읽어 준 초안의 작성자가 이 페이지의 계정인가(기관·사용자 ID·작성자 셋 다 같아야 한다). */
     function sameDraftOwner(owner, mine) {
@@ -426,7 +426,7 @@
           renderDraftBar();
         }
         clearReportNotice();
-        select(n.target.uid, n.target.options);
+        select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
       });
       // 확인하는 사이 글을 더 쳤거나 선택·작업 문맥이 바뀌었다: 이 읽기로는 정하지 않는다(보낸 것도 없다).
       if (!decided) work.commit(work.capture("document"), () => {

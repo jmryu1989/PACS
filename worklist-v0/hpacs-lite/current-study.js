@@ -78,10 +78,15 @@
      *
      * 돌려주는 것: 바로 정해지면 결과 `{status, uid}`, 저장의 답을 기다리면 그 결과의 Promise. status는 same(이미 그 검사)·
      * clear(바로 옮겼다)·saved(저장 확인 뒤 옮겼다)·composing·refused·unknown·conflict·owner(옮기지 않았다)·stale(기다리는
-     * 사이 선택이나 문맥이 바뀌어 옮기지 않았다)·stayed(기다리는 사이 사람이 지금 검사를 다시 골랐다). 결과에 따라 무엇을 할
-     * 부른 쪽은 `whenSelected`를 쓴다 — 옮겨진 뒤에만, 그 검사일 때만 한다.
+     * 사이 선택이나 문맥이 바뀌어 옮기지 않았다)·stayed(기다리는 사이 사람이 지금 검사를 다시 골랐다)·gone(줄로 정한 목적지가
+     * 기다리는 사이 목록에서 빠졌고 그 뒤의 후보도 없다). 결과에 따라 무엇을 할 부른 쪽은 `whenSelected`를 쓴다 — 옮겨진
+     * 뒤에만, 그 검사일 때만 한다.
+     *
+     * `revalidate`는 줄(queue anchor)로 정한 이동(Next·Prev·Approve & Next)이 주는 다시 확인이다: 옮기기 직전에 불러 그때의
+     * 목적지를 받는다(누른 순간의 줄 기준, 없으면 null). 같은 이벤트에서 옮기면 누를 때 정한 그 검사이고, 저장을 기다린 뒤나
+     * Notice의 Retry·Check로 나중에 옮길 때는 그 사이 바뀐 목록에 맞춘 답이다. 사람이 고른 행(클릭·메뉴·키보드 진입)은 그 행 그대로다.
      */
-    function select(uid, { deferViewer = false, openSelected = false } = {}) {
+    function select(uid, { deferViewer = false, openSelected = false, revalidate = null } = {}) {
       const options = { deferViewer, openSelected };
       if (uid !== selectedUid) studyRequests += 1;
       /**
@@ -99,14 +104,16 @@
         return { status: "same", uid };
       }
       // 기다리는 이동이 있으면 마지막으로 고른 검사가 그 이동의 목적지다(저장은 한 번만 기다린다).
-      if (pendingLeave) { pendingLeave.target = { uid, options }; return pendingLeave.done; }
+      if (pendingLeave) { pendingLeave.target = { uid, options, revalidate }; return pendingLeave.done; }
       const pass = leaveStudyGate("select");
       if (!(pass instanceof Promise)) {
         if (pass.status !== "clear") return { ...pass, uid };
-        enterStudy(uid, options);
-        return { status: "clear", uid };
+        const to = moveDestination({ uid, revalidate });
+        if (!to) return { status: "gone", uid };
+        enterStudy(to, options);
+        return { status: "clear", uid: to };
       }
-      const leave = pendingLeave = { target: { uid, options }, from: { uid: selectedUid, seq: selectionSeq } };
+      const leave = pendingLeave = { target: { uid, options, revalidate }, from: { uid: selectedUid, seq: selectionSeq } };
       leave.done = pass.then(result => {
         if (pendingLeave === leave) pendingLeave = null;
         const target = leave.target;
@@ -124,10 +131,19 @@
           return { status: "composing", uid: target.uid };
         }
         if (reportConverge.has(leave.from.uid)) return { status: "stayed", uid: leave.from.uid };
-        enterStudy(target.uid, target.options);
-        return { status: "saved", uid: target.uid };
+        // 기다리는 사이 목록이 다시 정렬되거나 새로 고쳐졌을 수 있다: 줄로 정한 목적지는 누른 순간의 줄로 다시 확인한다.
+        const to = moveDestination(target);
+        if (!to) return { status: "gone", uid: target.uid };
+        enterStudy(to, target.options);
+        return { status: "saved", uid: to };
       });
       return leave.done;
+    }
+    /** 옮겨 갈 검사: 사람이 고른 행이면 그 행, 줄로 정한 이동이면 지금 다시 확인한 목적지. 줄에 남은 검사가 없으면 그렇다고 말한다. */
+    function moveDestination(target) {
+      const to = target.revalidate ? target.revalidate() : target.uid;
+      if (!to) toast("가려던 다음 검사가 목록에서 빠졌고 그 뒤에 남은 검사도 없어 이 검사에 머뭅니다", "info");
+      return to;
     }
     // 저장을 기다리는 이동(하나)과, 이 문서에서 다른 검사를 고른 횟수(늦게 온 Approve & Next의 답이 그 뒤의 선택을 덮지 않게).
     let pendingLeave = null, studyRequests = 0;
