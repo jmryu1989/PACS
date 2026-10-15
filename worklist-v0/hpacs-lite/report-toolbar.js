@@ -68,14 +68,26 @@
      * Next가 "다음"이 아니라 "처음"이 되는 것이다. Prev는 `list[-2]`라 아무 일도 안 났다 —
      * 두 버튼이 서로 다르게 틀렸다.
      * 목록 밖이면 방향에 맞게 끝에서 시작한다: Next는 첫 번째, Prev는 마지막.
+     *
+     * 단, 선택이 목록에서 **빠진 것**은 목록 밖이 아니다(W4-PAGE-05, 설계 v5 §3 "첫 행 회귀 없음"). Approve로 그 검사가 W 필터에서
+     * 빠지면 Next는 "처음"이 아니라 그 검사가 서 있던 자리의 다음이어야 한다. 그래서 다음을 줄(queue anchor)로 정한다:
+     * 그 검사가 지금 목록에 있으면 지금 목록에서, 없으면 그 검사가 마지막으로 보였던 순서에서 그 뒤(Prev는 그 앞) 검사 가운데
+     * 지금 목록에 있는 첫 검사다. 그 검사를 본 순서가 아예 없을 때만(목록 밖에서 연 검사) 예전처럼 끝에서 시작한다.
      */
-    function move(step) {
+    function nextStudyFrom(anchor, step) {
       const list = orderedStudies();
-      if (!list.length) return;
-      const i = list.findIndex(s => s.uid === selectedUid);
-      if (i === -1) { select(step > 0 ? list[0].uid : list[list.length - 1].uid, { openSelected: true }); return; }
-      const next = list[i + step];
-      if (next) select(next.uid, { openSelected: true });
+      if (!list.length) return null;
+      const here = list.findIndex(s => s.uid === anchor.uid);
+      if (here !== -1) return list[here + step]?.uid ?? null;
+      const order = anchor.order ?? [], at = order.indexOf(anchor.uid);
+      if (at === -1) return (step > 0 ? list[0] : list[list.length - 1]).uid;
+      const shown = new Set(list.map(s => s.uid));
+      for (let i = at + step; i >= 0 && i < order.length; i += step) if (shown.has(order[i])) return order[i];
+      return null;
+    }
+    function move(step) {
+      const next = nextStudyFrom({ uid: selectedUid, order: queueSeen?.uid === selectedUid ? queueSeen.order : null }, step);
+      if (next) select(next, { openSelected: true });
     }
     $("#b-prev").addEventListener("click", () => move(-1));
     $("#b-next").addEventListener("click", () => move(1));

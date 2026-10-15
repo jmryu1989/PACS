@@ -31,9 +31,10 @@
       if (!tr?.dataset.uid) return;
       const uid = tr.dataset.uid;
       if (e.target.closest('[data-tech-note]')) { techNote.open(studies.find(s => s.uid === uid)); return; }
-      select(uid, { openSelected: true });
-      // select()의 render가 클릭한 행을 새 DOM으로 바꾸므로, 새 행에 초점을 다시 남긴다.
-      $("#rows").querySelector(`tr[data-uid="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true });
+      // select()의 render가 클릭한 행을 새 DOM으로 바꾸므로, 새 행에 초점을 다시 남긴다 — 옮겨졌을 때만(W4-PAGE-06): 옮기지
+      // 않았으면(저장 대기·거절·글자 조합) 초점은 쓰던 칸에 그대로 둔다.
+      whenSelected(select(uid, { openSelected: true }), uid,
+        () => $("#rows").querySelector(`tr[data-uid="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true }));
     });
     $("#rows").addEventListener("keydown", e => {
       if (e.target.closest('[data-tech-note]')) return;

@@ -198,7 +198,7 @@
         toast("서버 연결이 끊겨 저장할 수 없습니다. 쓰던 내용을 복사해 두고 연결을 기다리세요.", "err");
         return;
       }
-      const uid = selectedUid;
+      const uid = selectedUid, pressedSeq = selectionSeq;
       const content = {
         findings: $("#findings").value,
         conclusion: $("#conclusion").value,
@@ -211,7 +211,7 @@
         commitInFlight = true;
         // 요청이 나가 있는 동안 버튼을 회색으로. 플래그만으로도 두 번째 호출은 막히지만,
         // 눌리는데 아무 일도 안 일어나는 버튼은 "먹통"으로 읽혀 또 누르게 만든다.
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
+        for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
           if ($(id)) $(id).disabled = true;
         // 내 글을 확정하는 중이라면(초안이 있거나 편집기가 dirty) 기준은 **화면에 그려진 판**이다.
         // `appState.version`은 본문을 다시 그리지 않고도 올라가므로, 그대로 보내면
@@ -357,6 +357,51 @@
       }
       render(); renderRelated(); updateReportButtons();
       announceCommit(uid, action, reason, lateText);
+      // 받아들여진 확정이다. 누른 그 검사·그 선택과, 그 확정이 싣지 않은 글이 남았는지를 부른 쪽(Approve & Next)에 알린다.
+      return { accepted: true, uid, seq: pressedSeq, lateText };
+    }
+
+    /**
+     * Approve & Next(W4-PAGE-04/08 — 설계 v5 §3의 Finalize & Next; 이름은 D1358 ①로 Approve를 지킨다). Approve는 그
+     * 검사에 머물고, 이 단추는 승인이 **서버에 받아들여지고 그 승인본이 편집기에 그려진 뒤에만** 다음 검사로 옮긴다. 결과를
+     * 모르는 확정·거절·점유·낡은 판, 누른 뒤에 친 글이 남은 확정, 글자 조합 때문에 그리지 못한 승인본이면 머문다 — 무엇이 됐는지
+     * 사람이 보지 못한 채 다음 환자로 넘어가지 않는다. 다음 검사는 누른 순간의 줄(queue anchor)로 정한다: 승인으로 이 검사가
+     * 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫 행이 아니다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
+     */
+    async function approveAndNext() {
+      const why = reportCommandBlocked("finalize-next");
+      if (why) { toast(why, "err"); return; }
+      const anchor = { uid: selectedUid, order: orderedStudies().map(s => s.uid) }, asked = studyRequests;
+      const done = await commitReport("approve");
+      if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;
+      // 답을 기다리는 사이 사람이 다른 검사를 골랐다(옮겨졌든 저장을 기다리며 머물렀든): 늦게 온 답이 그 뜻을 덮지 않는다.
+      if (studyRequests !== asked) return;
+      const next = nextStudyFrom(anchor, 1);
+      if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return; }
+      select(next, { openSelected: true });
+    }
+    /** 편집기가 그 검사의 서버 판독문을 그리고 있는가: 미뤄 둔 다시 그리기도, 확인되지 않은 글도 없는 그 선택의 opening. */
+    function reportShowsAccepted(uid) {
+      return reportRefreshPendingFor !== uid && !reportConverge.has(uid)
+        && reportOpening?.uid === uid && reportOpening.selectionSeq === selectionSeq;
+    }
+    /**
+     * 판독 명령(Approve & Next·Ctrl+S의 Finalize)을 지금 할 수 없는 까닭, 할 수 있으면 null. W5 Related Report mode가 자기
+     * 까닭을 더하는 자리다(설계 v5 §1.6). 단추가 잠겨 있으면 그 단추가 말하는 까닭이 그대로 까닭이다 — 같은 판단을 두 번 하지 않는다.
+     */
+    function reportCommandBlocked(command) {
+      if (!["finalize", "finalize-next"].includes(command)) return null;
+      if (!selectedUid) return "검사를 선택하세요";
+      if (pendingLeave) return "쓰던 글의 저장을 기다려 검사를 옮기는 중입니다";
+      const button = $("#b-approve");
+      if (button.disabled) return button.title || "지금은 승인할 수 없습니다";
+      return null;
+    }
+    /** 단축키 목록의 "Finalize (Approve)"(Ctrl+S). 명령을 실행했으면 true — 그때만 브라우저의 페이지 저장을 막는다. */
+    function finalizeCommand() {
+      if (mode !== "Radiology" || reportCommandBlocked("finalize")) return false;
+      commitReport("approve");
+      return true;
     }
 
     /** 검사를 사람에게 가리키는 표기: 환자 이름 · 접수번호 · 검사일. 목록에서 사라진 검사는 남은 이름(UID)으로 부른다. */
@@ -409,6 +454,7 @@
     $("#b-save").addEventListener("click", () => commitReport("save"));
     $("#b-transcribe").addEventListener("click", () => commitReport("save"));
     $("#b-approve").addEventListener("click", () => commitReport("approve"));
+    $("#b-approve-next").addEventListener("click", approveAndNext);
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
     function askReason({ title, choices }) {

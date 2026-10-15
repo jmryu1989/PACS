@@ -51,12 +51,20 @@
     });
     document.addEventListener("click", () => ctx.style.display = "none");
 
+    /**
+     * 행의 메뉴는 **그 행의 검사가 지금 선택일 때만** 연다(W4-PAGE-10 MENU-TARGET). 메뉴의 항목(판독문 작성으로, Unmatch…)은
+     * 지금 선택을 대상으로 하므로, 선택이 그 행으로 옮겨지지 않았는데(글자 조합 중, 쓰던 글의 저장 대기·거절) 그 행의 메뉴를
+     * 띄우면 항목이 **앞 검사**에 닿는다. 저장을 기다려 옮겨지면 그때 같은 자리에 연다. 항목은 행의 UID에 묶여 있어, 그 사이
+     * 선택이 바뀌었으면 아무것도 하지 않는다.
+     */
     $("#rows").addEventListener("contextmenu", e => {
       const tr = e.target.closest("tr");
       if (!tr?.dataset.uid) return;
       e.preventDefault();
       const uid = tr.dataset.uid;
-      select(uid);
+      whenSelected(select(uid), uid, () => showRowMenu(e, uid));
+    });
+    function showRowMenu(e, uid) {
       const s = studies.find(x => x.uid === uid);
       const forceReleaseItems = KinAuth.has("admin") && s?.holder ? [{
         label: "점유 강제 해제 (관리자)", dis: s.holder === user, act: async () => {
@@ -81,7 +89,7 @@
         const mine = !s?.tele;
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
-          { label: "판독문 작성으로", act: () => $("#findings").focus() },
+          { label: "판독문 작성으로", act: () => { if (selectedUid === uid) $("#findings").focus(); } },
           { sep: 1 },
           { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
@@ -113,7 +121,7 @@
           ...forceReleaseItems,
         ]);
       }
-    });
+    }
 
     $("#orderrows").addEventListener("contextmenu", e => {
       const tr = e.target.closest("tr[data-oid]"); if (!tr) return;
@@ -128,7 +136,9 @@
         { label: "Unmatch", dis: o.matched !== "M", act: async () => {
             const s2 = studies.find(x => x.uid === o.studyUid);
             if (!s2) { toast("이 오더에 매칭된 검사를 목록에서 찾을 수 없습니다", "err"); return; }
+            // 그 검사로 옮겨졌을 때만 한다 — 옮겨지지 않았으면(글자 조합·쓰던 글의 저장) Unmatch가 지금 선택에 닿는다.
             await select(s2.uid);
+            if (selectedUid !== s2.uid) return;
             doUnmatch();
           } },
         { sep: 1 },

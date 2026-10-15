@@ -12,7 +12,7 @@
         button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
       });
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
-      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
+      ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
         const el = $(s); if (!el) return;
         el.disabled = !rad;
@@ -331,7 +331,7 @@
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
-        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>{select(uid);if(mode==='Radiology')$('#findings').focus();}});
+        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')$('#findings').focus();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
         current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
@@ -457,6 +457,11 @@
       const owner = workspaceOwner?.slice(KinWorkspaceLayout.PREFIX.length);
       const bindings = KinWorkspaceShortcuts.read(workspaceStorage, owner);
       const command = KinWorkspaceShortcuts.action(bindings, event);
+      // Finalize (Approve), Ctrl+S by default (W4-SC model): the browser's Save Page is prevented only when the command runs.
+      if (command === 'finalize') {
+        if (finalizeCommand()) { event.preventDefault(); event.stopImmediatePropagation(); }
+        return;
+      }
       const templates = !command && KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event) === 'context';
       if (command !== 'context' && !templates) return;
       if (openStudyPanel(templates ? 'templates' : undefined)) { event.preventDefault(); event.stopImmediatePropagation(); }

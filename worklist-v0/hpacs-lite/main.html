@@ -284,7 +284,7 @@
     .rbtns { display: flex; gap: 4px; padding: 4px 8px; background: var(--kin-panel); flex: none; flex-wrap: wrap; }
     .rbtns button, .rfoot2 button { background: var(--kin-panel2); border: 1px solid var(--kin-line2); color: var(--kin-muted); padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .rbtns button:disabled { opacity: .35; cursor: default; }
-    .rbtns .approve { background: var(--kin-btn); color: var(--kin-text); border-color: var(--kin-accent); }
+    .rbtns .approve, .rfoot2 .approve { background: var(--kin-btn); color: var(--kin-text); border-color: var(--kin-accent); }
     .rbtns .save { background: var(--kin-panel2); color: var(--kin-text); border-color: var(--kin-line2); }
     /* One scroller for both sections takes the height the column has left. It has no fixed minimum: a minimum
        pushed the footer and the notices below it out of a short window, where nothing could scroll them back.
@@ -329,6 +329,10 @@
     .draftbar button { background: #232936; border: 1px solid #5c5124; color: #d8b24a;
                        padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .draftbar b { color: #f0c95a; }
+    /* W4 숨긴 Recommendation의 읽기 전용 띠 — 안내줄과 같은 등급, 펼쳐도 판독문 칸을 밀어내지 않게 글은 짧게 스크롤한다. */
+    .recnote { flex: none; padding: 3px 10px; background: #1f2530; border-top: 1px solid #3a4356; color: #c3cad6; font-size: 11px; }
+    .recnote summary { cursor: pointer; }
+    #recnote-text { margin: 3px 0 1px; max-height: 5.5em; overflow: auto; white-space: pre-wrap; color: #dfe5ee; }
     /* 인용 목록 — 안내줄과 같은 등급이며 판독문 편집 영역의 크기를 바꾸지 않는다. */
     #citelist { flex: none; max-height: 30vh; overflow: auto; padding: 4px 10px 6px;
                 background: #20242e; border-top: 1px solid #3a4356; color: #c3cad6; font-size: 11px; }
@@ -1499,6 +1503,14 @@
             </div>
           </details>
         </div>
+        <!-- W4: 검사를 옮기지 않았을 때만 보인다(쓰던 글의 저장 거절·결과 모름·충돌·글자 조합). 무엇을 누르면 되는지 함께 말한다. -->
+        <div class="draftbar" id="report-notice" role="status" aria-live="polite" style="display:none">
+          <span id="report-notice-msg"></span>
+          <span class="spacer"></span>
+          <button id="report-notice-retry" type="button" style="display:none" title="쓰던 글을 다시 저장하고, 저장되면 고른 검사로 이동합니다">Retry</button>
+          <button id="report-notice-check" type="button" style="display:none" title="서버의 저장 상태를 다시 확인하고, 저장이 확인되면 고른 검사로 이동합니다">Check</button>
+          <button id="report-notice-stay" type="button" title="이 검사에 머뭅니다 (안내만 닫습니다)">Stay</button>
+        </div>
         <!-- 쓰다 만 초안이 있을 때만 보인다. 확정본과 다른 것을 보고 있다는 사실을
              화면이 말해주지 않으면, 사용자는 저장된 것을 보고 있다고 믿는다. -->
         <div class="draftbar" id="draftbar" style="display:none">
@@ -1542,6 +1554,11 @@
             </div>
           </div>
         </div>
+        <!-- W4 (설계 v4 §3): 숨긴 Recommendation에 값이 있을 때만 보이는 읽기 전용 띠. 편집기가 아니다 — 숨긴 칸은 그대로다. -->
+        <details class="recnote" id="recnote" hidden>
+          <summary title="이 판독문에는 화면에 입력칸이 없는 Recommendation 값이 있습니다. 저장·승인에 그대로 포함됩니다. 펼쳐서 읽을 수 있습니다">Recommendation (existing value · read only)</summary>
+          <div id="recnote-text"></div>
+        </details>
         <div class="redit">
           <label for="findings">Findings</label>
           <textarea id="findings" placeholder="Please enter findings"></textarea>
@@ -1561,6 +1578,7 @@
           <div id="question-pane" role="region" aria-label="Question Threads" hidden></div>
         </section>
         <div class="rfoot2">
+          <button class="approve" id="b-approve-next" title="승인한 뒤 목록의 다음 검사로 갑니다 — 승인이 확인되고 화면에 그려진 뒤에만 이동하고, 결과를 모르거나 거절되면 이 검사에 머뭅니다">Approve &amp; Next</button>
           <button id="b-prev">◀ Prev</button>
           <button id="b-next">Next ▶</button>
         </div>

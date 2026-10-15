@@ -1323,10 +1323,13 @@
       return consultationFilter ? tagged.filter(s => consultationFilter.uids.has(s.uid)) : tagged;
     }
     // Navigation and its position indicator must use the same order the reader sees.
+    // 고른 검사가 보인 마지막 순서도 기억한다: 그 검사가 Approve로 필터에서 빠진 뒤의 Next/Prev는 그 자리에서 이어 간다(W4-PAGE-05).
+    let queueSeen = null;
     function orderedStudies() {
       const list = filtered();
       if (sortDir !== 0 && sortKey)
         list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+      if (selectedUid && list.some(s => s.uid === selectedUid)) queueSeen = { uid: selectedUid, order: list.map(s => s.uid) };
       return list;
     }
     let resultPage = 0, resultQuery = '', resultPageSize = 100;
@@ -1470,7 +1473,7 @@
       const locked = !!appState[selectedUid]?.prelimHidden;
       // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
       // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
-      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
+      for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
         const el = $(id);
         if (!el) continue;
         el.disabled = !rad || locked || filming || !!held;
@@ -1489,7 +1492,7 @@
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
         // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save(Transcribe도 save다)는 사유 없이 승인을 풀고
         // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
-        for (const id of ["#b-save", "#b-transcribe", "#b-approve"]) {
+        for (const id of ["#b-save", "#b-transcribe", "#b-approve", "#b-approve-next"]) {
           $(id).disabled = true;
           $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
         }
@@ -1513,7 +1516,7 @@
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
       }
-      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
+      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-approve-next','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
       // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
@@ -2086,7 +2089,23 @@
     });
     window.addEventListener('pagehide', endPatientCopy);
 
+    /**
+     * 검사 이동의 단일 관문(W4-PAGE-06/05/10). 행 클릭·키보드 진입·Next/Prev·Approve & Next·우클릭 메뉴·질문·자문·즐겨찾기·
+     * 통합 판독 화면 — 검사를 바꾸는 길은 모두 여기를 지난다.
+     *
+     * 이 검사에 서버가 아직 확인하지 않은 글(`reportConverge`)이 없으면 지금처럼 그 자리에서 옮긴다(판독의의 평소 길: 클릭 수도
+     * 지연도 그대로다). 있으면 그 글의 초안 저장을 기다려 **저장이 확인될 때만** 옮긴다. 저장이 거절됐거나 결과를 모르거나
+     * 충돌했으면 옮기지 않고 그 사실을 Notice로 말한다(Retry/Check/Stay) — 글은 어느 쪽이든 화면에 그대로다. "그래도 떠나기"는
+     * 없다: 떠난 뒤의 글은 사람이 다시 볼 자리가 없다. 글자 조합(IME) 중에는 옮기지 않고 그렇다고 말한다.
+     *
+     * 돌려주는 것: 바로 정해지면 결과 `{status, uid}`, 저장의 답을 기다리면 그 결과의 Promise. status는 same(이미 그 검사)·
+     * clear(바로 옮겼다)·saved(저장 확인 뒤 옮겼다)·composing·refused·unknown·conflict·owner(옮기지 않았다)·stale(기다리는
+     * 사이 선택이나 문맥이 바뀌어 옮기지 않았다)·stayed(기다리는 사이 사람이 지금 검사를 다시 골랐다). 결과에 따라 무엇을 할
+     * 부른 쪽은 `whenSelected`를 쓴다 — 옮겨진 뒤에만, 그 검사일 때만 한다.
+     */
     function select(uid, { deferViewer = false, openSelected = false } = {}) {
+      const options = { deferViewer, openSelected };
+      if (uid !== selectedUid) studyRequests += 1;
       /**
        * **같은 검사를 다시 고르는 것은 이동이 아니다.**
        *
@@ -2096,8 +2115,113 @@
        * 클릭할 때마다 다시 떴다.** 남발된 경고는 아무도 안 본다(교훈 §2).
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
       */
-      if (uid === selectedUid) return;
-      if (reportFrame?.isComposing()) return;
+      if (uid === selectedUid) {
+        // 저장을 기다리는 사이 지금 검사를 다시 골랐다: 그 이동은 하지 않는다.
+        if (pendingLeave) pendingLeave.target = null;
+        return { status: "same", uid };
+      }
+      // 기다리는 이동이 있으면 마지막으로 고른 검사가 그 이동의 목적지다(저장은 한 번만 기다린다).
+      if (pendingLeave) { pendingLeave.target = { uid, options }; return pendingLeave.done; }
+      const pass = leaveStudyGate("select");
+      if (!(pass instanceof Promise)) {
+        if (pass.status !== "clear") return { ...pass, uid };
+        enterStudy(uid, options);
+        return { status: "clear", uid };
+      }
+      const leave = pendingLeave = { target: { uid, options }, from: { uid: selectedUid, seq: selectionSeq } };
+      leave.done = pass.then(result => {
+        if (pendingLeave === leave) pendingLeave = null;
+        const target = leave.target;
+        if (!target) return { status: "stayed", uid: leave.from.uid };
+        if (result.status !== "saved") {
+          showReportNotice({ ...result, uid: leave.from.uid, seq: leave.from.seq, target });
+          return { ...result, uid: target.uid };
+        }
+        // 기다리는 사이 선택이 바뀌었거나 이 문서의 작업이 끝났으면(로그아웃 준비·세션 종료) 그 이동은 지금의 것이 아니다.
+        if (selectedUid !== leave.from.uid || selectionSeq !== leave.from.seq || work.state() !== "active")
+          return { status: "stale", uid: target.uid };
+        // 기다리는 사이 글자 조합을 시작했거나 글을 더 쳤다: 그 글은 이 저장이 확인한 글이 아니다 — 옮기지 않는다.
+        if (reportFrame?.isComposing()) {
+          showReportNotice({ status: "composing", uid: leave.from.uid, seq: leave.from.seq, target });
+          return { status: "composing", uid: target.uid };
+        }
+        if (reportConverge.has(leave.from.uid)) return { status: "stayed", uid: leave.from.uid };
+        enterStudy(target.uid, target.options);
+        return { status: "saved", uid: target.uid };
+      });
+      return leave.done;
+    }
+    // 저장을 기다리는 이동(하나)과, 이 문서에서 다른 검사를 고른 횟수(늦게 온 Approve & Next의 답이 그 뒤의 선택을 덮지 않게).
+    let pendingLeave = null, studyRequests = 0;
+    /** 옮겨진 뒤에만, 그 검사일 때만 `then`을 한다(우클릭 메뉴·키보드 진입의 Findings focus·Unmatch). */
+    function whenSelected(result, uid, then) {
+      const run = () => { if (selectedUid === uid) then(); };
+      if (result instanceof Promise) result.then(run); else run();
+    }
+
+    /**
+     * 지금 검사를 떠나도 되는가(W5 인터페이스 `leaveStudyGate`). 바로 정해지면 결과를, 저장의 답을 기다려야 하면 Promise를
+     * 돌려준다 — 결과는 `{status, uid, selectionSeq}`. 판정은 초안 명령 경로의 결과와 수렴 표시를 그대로 읽는다: 새 큐·순번·
+     * 재시도 규칙을 만들지 않는다. 기다림의 상한은 LEAVE_WAIT_MS다 — 넘으면 결과를 모르는 것으로 멈춘다(Notice).
+     */
+    const LEAVE_WAIT_MS = 3000;
+    function leaveStudyGate(reason) {
+      const uid = selectedUid, seq = selectionSeq;
+      if (reportFrame?.isComposing()) {
+        showReportNotice({ status: "composing", uid, seq, reason });
+        return { status: "composing", uid, selectionSeq: seq };
+      }
+      if (!uid || !reportConverge.has(uid)) return { status: "clear", uid, selectionSeq: seq };
+      return settleStudyText(uid, seq).then(result => ({ ...result, uid, selectionSeq: seq }));
+    }
+    const LEAVE_TIMEOUT = Symbol("timeout");
+    function leaveWithin(promise, ms) {
+      let timer;
+      return Promise.race([promise, new Promise(resolve => { timer = setTimeout(() => resolve(LEAVE_TIMEOUT), Math.max(0, ms)); })])
+        .finally(() => clearTimeout(timer));
+    }
+    /** 이 검사의 확인되지 않은 글을 기존 초안 저장으로 보내고 그 결과를 읽는다. 표시가 내려가면 저장이 확인된 것이다. */
+    async function settleStudyText(uid, seq) {
+      const deadline = Date.now() + LEAVE_WAIT_MS;
+      while (reportConverge.has(uid)) {
+        if (selectedUid !== uid || selectionSeq !== seq) return { status: "stale" };
+        const left = deadline - Date.now();
+        if (left <= 0) return { status: "unknown" };
+        // 나가 있는 확정·삽입·버리기의 답이 먼저다 — 그 답이 이 글의 운명(판독문이 됐는가)을 정한다.
+        if (workBusy()) {
+          if (await leaveWithin(workIdle(), left) === LEAVE_TIMEOUT) return { status: "unknown" };
+          continue;
+        }
+        const why = leaveSaveBlock(uid);
+        if (why) return { status: why.status, reason: why.reason };
+        const written = await leaveWithin(stashReport(), left);
+        if (written === LEAVE_TIMEOUT) return { status: "unknown" };
+        if (!reportConverge.has(uid)) break;
+        // 이 문서의 작업이 끝났거나(로그아웃 준비·세션 종료) 요청이 떠나지 않았다 — 이동할 문맥이 아니다.
+        if (written === undefined || ["unsent", "auth"].includes(written)) return { status: "stale" };
+        if (written === "conflict" || (serverMode && draftClient.conflict(uid))) return { status: "conflict" };
+        if (written === "unknown") return { status: "unknown" };
+        if (written === "owner") return { status: "owner", reason: "이 화면의 계정으로 쓴 초안이 아니라고 서버가 답했습니다" };
+        if (written !== "saved" && written !== "merged" && written !== "withdrawn")
+          return { status: "refused", reason: leaveSaveBlock(uid)?.reason ?? reportSaveOutcome.get(uid)?.reason ?? "서버가 저장을 받지 않았습니다" };
+        // 저장은 됐지만 그 사이 더 친 글이 있다: 그 글도 같은 길로 한 번 더 보낸다(상한 안에서).
+      }
+      return { status: "saved" };
+    }
+    /** 이 검사의 글을 지금 보낼 수 없는 사정(보내 봐야 같은 답이다). 없으면 null. */
+    function leaveSaveBlock(uid) {
+      if (serverMode && draftClient.conflict(uid)) return { status: "conflict" };
+      if (offline) return { status: "refused", reason: "서버 연결이 끊겨 저장할 수 없습니다" };
+      if (!KinAuth.has("radiologist")) return { status: "refused", reason: "판독의 권한이 없어 저장할 수 없습니다" };
+      const a = appState[uid] ?? {};
+      if (a.prelimHidden) return { status: "refused", reason: "다른 판독의의 예비 판독(RS: P)입니다" };
+      const held = heldByOther(studies.find(s => s.uid === uid));
+      if (held) return { status: "refused", reason: `${displayActor(held)} 님이 판독 중입니다` };
+      return null;
+    }
+
+    function enterStudy(uid, { deferViewer = false, openSelected = false } = {}) {
+      clearReportNotice();
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);
       // A→B→A로 돌아와도 이전 검사에서 읽던 미리보기의 삽입 버튼은 재사용하지 않는다.
@@ -4165,6 +4289,9 @@
       // 인용 줄은 초안과 별개다 — 초안이 없어도 승인본에 이월된 인용은 남아 있다.
       // 아래 분기들이 일찍 빠져나가므로 여기서 먼저 그린다.
       renderCitationBar();
+      // 숨긴 Recommendation의 안내와 이동하지 않은 까닭의 Notice도 초안과 별개로 그 검사의 지금 상태를 따른다.
+      renderRecommendationNotice();
+      if (reportNotice || reportNoticeShown) renderReportNotice();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -4223,17 +4350,109 @@
       const deferred = !!selectedUid && reportConverge.has(selectedUid);
       // 서버가 이 검사에 쓸 수 없다고 답해 자동 저장을 멈춘 글이다. 한 번 알린 뒤에는 이 줄이 그 사실을 말한다.
       const stopped = deferred && reportSaveFailures.get(selectedUid) === "stop";
+      // 지나갈 수 있는 실패(5xx·결과 모름) 뒤의 글. 결과를 모르는 것과 거절된 것은 다른 말로 한다(W4-PAGE-01).
+      const failure = deferred && !stopped ? reportSaveFailures.get(selectedUid) : undefined;
+      const note = stopped || failure ? reportSaveOutcome.get(selectedUid) : null;
+      const lead = apart ? "" : "● ";
       // 누가 확정했는지는 여기서 알 수 없다 — 내가 누른 Approve가 떠난 뒤의 쓰기도 이 자리에 온다. 아는 사실만 말한다.
+      // 상태 이름은 영어(Draft Saved·Save Failed·Result Unknown·Unsaved Draft), 설명은 한국어다(AGENTS §4).
       $("#draftmsg").innerHTML =
-        (apart ? `<b>● 승인된 판독문에 포함되지 않은 글이 있습니다</b> — 이 화면의 글은 승인본(v${esc(r.version)})과 다릅니다 · `
-               : `<b>● 저장 안 된 초안</b> — `) +
-        (stopped ? `이 화면에 담아 두었습니다 · 서버가 저장을 받지 않아 자동 저장을 멈췄습니다 — 글을 고치면 다시 시도합니다`
-         : deferred ? `이 화면에 담아 두었습니다 · 서버 저장은 아직 확인되지 않았습니다`
-                  : `${esc(at)}에 ${apart ? "초안으로 " : ""}자동 저장됨`) +
+        (apart ? `<b>● 승인된 판독문에 포함되지 않은 글이 있습니다</b> — 이 화면의 글은 승인본(v${esc(r.version)})과 다릅니다 · ` : ``) +
+        (stopped ? `<b>${lead}Save Failed — ${esc(note?.reason ?? "서버가 저장을 받지 않았습니다")}</b> — 이 화면에 담아 두었습니다 · ` +
+                   `서버가 저장을 받지 않아 자동 저장을 멈췄습니다 — 글을 고치면 다시 시도합니다`
+         : failure && note?.outcome === "unknown" ? `<b>${lead}Result Unknown</b> — 저장 결과를 확인하지 못했습니다 · ` +
+                   `입력한 내용은 이 화면에 그대로 있고, 다음 저장이 서버 상태부터 확인합니다`
+         : failure ? `<b>${lead}Save Failed — ${esc(note?.reason ?? "서버가 저장을 받지 않았습니다")}</b> — 이 화면에 담아 두었습니다 · ` +
+                   `다음 자동 저장이 다시 시도합니다`
+         : deferred ? `<b>${lead}Unsaved Draft</b> — 이 화면에 담아 두었습니다 · 서버 저장은 아직 확인되지 않았습니다`
+                  : `<b>${lead}Draft Saved${at ? " " + esc(draftTime(d.at)) : ""}</b> — ${apart ? "초안으로 " : "개인 초안으로 "}자동 저장됨 (확정 전)`) +
         (behind ? ` · <b>주의</b> 이 초안을 쓰기 시작한 뒤 v${esc(r.version)}이 확정됐습니다`
                 : `<span id="drafthint"></span>`);
       renderDraftHint();
     }
+    /** 초안이 확인된 시각(이 화면의 시계로 hh:mm). 모르면 빈 글이다. */
+    function draftTime(at) {
+      const date = at ? new Date(at) : null;
+      return date && !Number.isNaN(date.getTime())
+        ? `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}` : "";
+    }
+
+    /**
+     * 자동 초안 쓰기가 실패한 마지막 까닭(검사마다): `{outcome, reason}`. 저장 실패 기록(`reportSaveFailures`)이 있을 때만
+     * 읽는다 — 그 기록이 지워지면 이 까닭도 더는 말할 것이 아니다. 판정은 초안 명령 경로의 결과를 그대로 옮긴 것이다.
+     */
+    const reportSaveOutcome = new Map();
+
+    /**
+     * 검사를 옮기지 않은 까닭을 말하는 한 줄(W4-PAGE-01/06, W5가 다시 쓰는 Notice). 쓰던 글의 저장이 거절됐거나(Retry),
+     * 결과를 모르거나(Check), 충돌했거나, 글자 조합 중이어서 옮기지 않았다는 사실과 무엇을 누르면 되는지를 말한다. 글은 어느
+     * 쪽이든 화면에 그대로다 — "그래도 떠나기"는 없다(Stay는 이 줄을 닫을 뿐이다). 그 검사·그 선택일 때만 보이고, 기다리던
+     * 저장이 뒤늦게 확인되면 같은 줄이 그 사실을 말한다(Check가 그 이동을 이어 간다).
+     */
+    let reportNotice = null, reportNoticeShown = false;
+    function showReportNotice(notice) {
+      if (!["composing", "refused", "unknown", "conflict", "owner"].includes(notice.status)) return;
+      reportNotice = notice;
+      renderReportNotice();
+    }
+    function clearReportNotice() {
+      if (!reportNotice && !reportNoticeShown) return;
+      reportNotice = null;
+      renderReportNotice();
+    }
+    function renderReportNotice() {
+      if (reportNotice && (reportNotice.uid !== selectedUid || reportNotice.seq !== selectionSeq)) reportNotice = null;
+      const n = reportNotice;
+      reportNoticeShown = !!n;
+      $("#report-notice").style.display = n ? "flex" : "none";
+      if (!n) return;
+      const saved = n.status !== "composing" && !reportConverge.has(n.uid);
+      // 확인된 글이 초안이면 그 시각을, 확정이 그 글을 판독문으로 받았으면(초안이 없다) 저장됐다는 사실만 말한다.
+      const draftAt = draftTime(appState[n.uid]?.draft?.at);
+      const label = saved ? (appState[n.uid]?.draft ? `Draft Saved${draftAt ? " " + draftAt : ""}` : "Saved")
+        : n.status === "composing" ? "Not Moved"
+        : n.status === "unknown" ? "Result Unknown"
+        : n.status === "conflict" ? "Save Failed — 서버의 초안이 이 화면과 다릅니다"
+        : `Save Failed — ${n.reason ?? "서버가 저장을 받지 않았습니다"}`;
+      const toward = n.target ? ` (${studyLabel(n.target.uid)}(으)로 가려던 이동)` : "";
+      const text = saved ? `쓰던 글의 저장이 확인됐습니다. 이동하려면 Check를 누르세요${toward}.`
+        : n.status === "composing" ? "글자 조합(한글 입력)이 끝나지 않아 검사를 옮기지 않았습니다 — 입력을 마친 뒤 다시 누르세요."
+        : n.status === "unknown" ? `쓰던 글의 저장을 확인하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+          "Check를 누르면 서버의 저장 상태를 다시 확인하고, 확인되면 이동합니다."
+        : n.status === "conflict" ? `검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+          "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고른 뒤 다시 누르세요."
+        : `쓰던 글을 저장하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. 원인을 해결한 뒤 Retry를 누르세요.`;
+      const strong = document.createElement("b");
+      strong.textContent = "● " + label;
+      $("#report-notice-msg").replaceChildren(strong, " — " + text);
+      $("#report-notice-retry").style.display = !saved && ["refused", "owner"].includes(n.status) && n.target ? "" : "none";
+      $("#report-notice-check").style.display = (saved || n.status === "unknown") && n.target ? "" : "none";
+    }
+    /** Retry·Check: 같은 이동을 같은 관문으로 다시 한다(저장 확인이 먼저다). */
+    function retryReportNotice() {
+      const n = reportNotice;
+      if (!n?.target || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
+      clearReportNotice();
+      select(n.target.uid, n.target.options);
+    }
+    $("#report-notice-retry").addEventListener("click", retryReportNotice);
+    $("#report-notice-check").addEventListener("click", retryReportNotice);
+    $("#report-notice-stay").addEventListener("click", clearReportNotice);
+
+    /**
+     * 숨긴 Recommendation의 안내(W4-PAGE-12, 설계 v4 §3). 편집기에는 Recommendation 입력칸이 없지만 값은 문서의 일부로 모든
+     * 저장·확정에 실린다(상용구·구조화 서식이 그 칸에 글을 넣는다). 값이 있는데 화면이 말하지 않으면 판독의는 보이지 않는
+     * 문장이 든 판독문에 서명한다. 그래서 값이 있으면 읽기 전용 띠로 그 존재를 알리고, 펼치면 글을 읽을 수 있다. 띠는 편집기가
+     * 아니다 — 숨긴 칸은 그대로 숨어 있고(aria-hidden, tabindex -1) 띠에서 그 칸으로 가는 길도 없다. 검사가 바뀌면 접힌다.
+     */
+    let recommendationNoticeUid = null;
+    function renderRecommendationNotice() {
+      const box = $("#recnote"), value = $("#recommendation").value;
+      if (recommendationNoticeUid !== selectedUid) { box.open = false; recommendationNoticeUid = selectedUid; }
+      box.hidden = !value;
+      $("#recnote-text").textContent = value;
+    }
+    onReportField("input", event => { if (event.target.id === "recommendation") renderRecommendationNotice(); });
 
     /**
      * 승인된 판독문과 내 초안이 갈라져 있는가. 기록된 사실만 본다: 그 검사가 승인 상태(RS A)이고, 내 초안이 있고, 그 초안의
@@ -5656,9 +5875,10 @@
      *
      * `keepalive`는 탭이 닫히는 중에도 요청이 끝까지 가게 한다(beforeunload용). 그 답은 볼 수 없다.
      *
-     * 결과: 서버가 이 쓰기를 받았음을 답으로 확인했으면(비서버 모드는 로컬 저장) "saved"로 끝난다. 값 없이 끝나면 저장을
-     * 확인한 것이 없다 — 보낼 것이 없었거나, 남의 점유·권한·오프라인·삽입 중 미룸으로 보내지 않았거나, 서버가 거절했거나,
-     * 충돌했거나, 결과를 모른다. 확인되지 않은 글은 수렴 표시로 남아 다음 저장이 다시 가져간다.
+     * 결과: 서버가 이 쓰기를 받았음을 답으로 확인했으면(비서버 모드는 로컬 저장) "saved"로 끝난다. 보낸 쓰기가 저장되지
+     * 않았으면 그 결과의 이름(refused·unknown·conflict·owner…)으로 끝나고, 값 없이 끝나면 보낸 것이 없다 — 보낼 것이
+     * 없었거나, 남의 점유·권한·오프라인·삽입 중 미룸으로 보내지 않았다. 확인되지 않은 글은 수렴 표시로 남아 다음 저장이 다시
+     * 가져간다.
      */
     async function stashReport({ keepalive = false } = {}) {
       if (!selectedUid) return;
@@ -5764,9 +5984,12 @@
         draftNotSaved(uid, at, result, { quiet: moot || (failed && reportSaveFailures.has(uid)), converge: false });
         if (failed && !moot) work.commit(at, () => {
           reportSaveFailures.set(uid, standing ? "stop" : "retry");
+          // 무엇이 실패했는지(거절·결과 모름과 그 까닭)를 표시줄과 이동 관문이 같은 말로 전한다(W4-PAGE-01).
+          reportSaveOutcome.set(uid, { outcome: result.outcome, reason: draftFailureText(result) });
           if (uid === selectedUid) renderDraftBar();
         });
-        return;
+        // 저장되지 않았다: 부른 쪽(검사 이동의 관문)이 그 결과로 정하도록 결과의 이름을 돌려준다.
+        return result.outcome;
       }
       return work.commit(at, () => {
         const now = appState[uid] ?? {};
@@ -6068,7 +6291,7 @@
         toast("서버 연결이 끊겨 저장할 수 없습니다. 쓰던 내용을 복사해 두고 연결을 기다리세요.", "err");
         return;
       }
-      const uid = selectedUid;
+      const uid = selectedUid, pressedSeq = selectionSeq;
       const content = {
         findings: $("#findings").value,
         conclusion: $("#conclusion").value,
@@ -6081,7 +6304,7 @@
         commitInFlight = true;
         // 요청이 나가 있는 동안 버튼을 회색으로. 플래그만으로도 두 번째 호출은 막히지만,
         // 눌리는데 아무 일도 안 일어나는 버튼은 "먹통"으로 읽혀 또 누르게 만든다.
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
+        for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
           if ($(id)) $(id).disabled = true;
         // 내 글을 확정하는 중이라면(초안이 있거나 편집기가 dirty) 기준은 **화면에 그려진 판**이다.
         // `appState.version`은 본문을 다시 그리지 않고도 올라가므로, 그대로 보내면
@@ -6227,6 +6450,51 @@
       }
       render(); renderRelated(); updateReportButtons();
       announceCommit(uid, action, reason, lateText);
+      // 받아들여진 확정이다. 누른 그 검사·그 선택과, 그 확정이 싣지 않은 글이 남았는지를 부른 쪽(Approve & Next)에 알린다.
+      return { accepted: true, uid, seq: pressedSeq, lateText };
+    }
+
+    /**
+     * Approve & Next(W4-PAGE-04/08 — 설계 v5 §3의 Finalize & Next; 이름은 D1358 ①로 Approve를 지킨다). Approve는 그
+     * 검사에 머물고, 이 단추는 승인이 **서버에 받아들여지고 그 승인본이 편집기에 그려진 뒤에만** 다음 검사로 옮긴다. 결과를
+     * 모르는 확정·거절·점유·낡은 판, 누른 뒤에 친 글이 남은 확정, 글자 조합 때문에 그리지 못한 승인본이면 머문다 — 무엇이 됐는지
+     * 사람이 보지 못한 채 다음 환자로 넘어가지 않는다. 다음 검사는 누른 순간의 줄(queue anchor)로 정한다: 승인으로 이 검사가
+     * 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫 행이 아니다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
+     */
+    async function approveAndNext() {
+      const why = reportCommandBlocked("finalize-next");
+      if (why) { toast(why, "err"); return; }
+      const anchor = { uid: selectedUid, order: orderedStudies().map(s => s.uid) }, asked = studyRequests;
+      const done = await commitReport("approve");
+      if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;
+      // 답을 기다리는 사이 사람이 다른 검사를 골랐다(옮겨졌든 저장을 기다리며 머물렀든): 늦게 온 답이 그 뜻을 덮지 않는다.
+      if (studyRequests !== asked) return;
+      const next = nextStudyFrom(anchor, 1);
+      if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return; }
+      select(next, { openSelected: true });
+    }
+    /** 편집기가 그 검사의 서버 판독문을 그리고 있는가: 미뤄 둔 다시 그리기도, 확인되지 않은 글도 없는 그 선택의 opening. */
+    function reportShowsAccepted(uid) {
+      return reportRefreshPendingFor !== uid && !reportConverge.has(uid)
+        && reportOpening?.uid === uid && reportOpening.selectionSeq === selectionSeq;
+    }
+    /**
+     * 판독 명령(Approve & Next·Ctrl+S의 Finalize)을 지금 할 수 없는 까닭, 할 수 있으면 null. W5 Related Report mode가 자기
+     * 까닭을 더하는 자리다(설계 v5 §1.6). 단추가 잠겨 있으면 그 단추가 말하는 까닭이 그대로 까닭이다 — 같은 판단을 두 번 하지 않는다.
+     */
+    function reportCommandBlocked(command) {
+      if (!["finalize", "finalize-next"].includes(command)) return null;
+      if (!selectedUid) return "검사를 선택하세요";
+      if (pendingLeave) return "쓰던 글의 저장을 기다려 검사를 옮기는 중입니다";
+      const button = $("#b-approve");
+      if (button.disabled) return button.title || "지금은 승인할 수 없습니다";
+      return null;
+    }
+    /** 단축키 목록의 "Finalize (Approve)"(Ctrl+S). 명령을 실행했으면 true — 그때만 브라우저의 페이지 저장을 막는다. */
+    function finalizeCommand() {
+      if (mode !== "Radiology" || reportCommandBlocked("finalize")) return false;
+      commitReport("approve");
+      return true;
     }
 
     /** 검사를 사람에게 가리키는 표기: 환자 이름 · 접수번호 · 검사일. 목록에서 사라진 검사는 남은 이름(UID)으로 부른다. */
@@ -6279,6 +6547,7 @@
     $("#b-save").addEventListener("click", () => commitReport("save"));
     $("#b-transcribe").addEventListener("click", () => commitReport("save"));
     $("#b-approve").addEventListener("click", () => commitReport("approve"));
+    $("#b-approve-next").addEventListener("click", approveAndNext);
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
     function askReason({ title, choices }) {
@@ -7467,14 +7736,26 @@
      * Next가 "다음"이 아니라 "처음"이 되는 것이다. Prev는 `list[-2]`라 아무 일도 안 났다 —
      * 두 버튼이 서로 다르게 틀렸다.
      * 목록 밖이면 방향에 맞게 끝에서 시작한다: Next는 첫 번째, Prev는 마지막.
+     *
+     * 단, 선택이 목록에서 **빠진 것**은 목록 밖이 아니다(W4-PAGE-05, 설계 v5 §3 "첫 행 회귀 없음"). Approve로 그 검사가 W 필터에서
+     * 빠지면 Next는 "처음"이 아니라 그 검사가 서 있던 자리의 다음이어야 한다. 그래서 다음을 줄(queue anchor)로 정한다:
+     * 그 검사가 지금 목록에 있으면 지금 목록에서, 없으면 그 검사가 마지막으로 보였던 순서에서 그 뒤(Prev는 그 앞) 검사 가운데
+     * 지금 목록에 있는 첫 검사다. 그 검사를 본 순서가 아예 없을 때만(목록 밖에서 연 검사) 예전처럼 끝에서 시작한다.
      */
-    function move(step) {
+    function nextStudyFrom(anchor, step) {
       const list = orderedStudies();
-      if (!list.length) return;
-      const i = list.findIndex(s => s.uid === selectedUid);
-      if (i === -1) { select(step > 0 ? list[0].uid : list[list.length - 1].uid, { openSelected: true }); return; }
-      const next = list[i + step];
-      if (next) select(next.uid, { openSelected: true });
+      if (!list.length) return null;
+      const here = list.findIndex(s => s.uid === anchor.uid);
+      if (here !== -1) return list[here + step]?.uid ?? null;
+      const order = anchor.order ?? [], at = order.indexOf(anchor.uid);
+      if (at === -1) return (step > 0 ? list[0] : list[list.length - 1]).uid;
+      const shown = new Set(list.map(s => s.uid));
+      for (let i = at + step; i >= 0 && i < order.length; i += step) if (shown.has(order[i])) return order[i];
+      return null;
+    }
+    function move(step) {
+      const next = nextStudyFrom({ uid: selectedUid, order: queueSeen?.uid === selectedUid ? queueSeen.order : null }, step);
+      if (next) select(next, { openSelected: true });
     }
     $("#b-prev").addEventListener("click", () => move(-1));
     $("#b-next").addEventListener("click", () => move(1));
@@ -8158,7 +8439,8 @@
       identity: () => { const s=KinAuth.session(); return s?.state==='approved' ? [s.institution,s.sub] : null; },
       current: () => selectedUid, study: uid => studies.find(s => s.uid===uid), select,
       applyFolder: (value,id) => favoriteList.apply(value,id), changed: value => favoriteList.adopt(value), ended: () => favoriteList.end(),
-      openSavedView: (uid,job) => { select(uid,{deferViewer:true});readingWorkspace.openJob(uid,job); },
+      // The saved view opens on its study only once the selection has moved there (W4 navigation gate).
+      openSavedView: (uid,job) => whenSelected(select(uid,{deferViewer:true}),uid,()=>readingWorkspace.openJob(uid,job)),
       notice: message => toast(message,'err'),
     });
     $('#favorite-open').onclick = () => favorites.open();
@@ -10514,9 +10796,10 @@
       if (!tr?.dataset.uid) return;
       const uid = tr.dataset.uid;
       if (e.target.closest('[data-tech-note]')) { techNote.open(studies.find(s => s.uid === uid)); return; }
-      select(uid, { openSelected: true });
-      // select()의 render가 클릭한 행을 새 DOM으로 바꾸므로, 새 행에 초점을 다시 남긴다.
-      $("#rows").querySelector(`tr[data-uid="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true });
+      // select()의 render가 클릭한 행을 새 DOM으로 바꾸므로, 새 행에 초점을 다시 남긴다 — 옮겨졌을 때만(W4-PAGE-06): 옮기지
+      // 않았으면(저장 대기·거절·글자 조합) 초점은 쓰던 칸에 그대로 둔다.
+      whenSelected(select(uid, { openSelected: true }), uid,
+        () => $("#rows").querySelector(`tr[data-uid="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true }));
     });
     $("#rows").addEventListener("keydown", e => {
       if (e.target.closest('[data-tech-note]')) return;
@@ -10638,12 +10921,20 @@
     });
     document.addEventListener("click", () => ctx.style.display = "none");
 
+    /**
+     * 행의 메뉴는 **그 행의 검사가 지금 선택일 때만** 연다(W4-PAGE-10 MENU-TARGET). 메뉴의 항목(판독문 작성으로, Unmatch…)은
+     * 지금 선택을 대상으로 하므로, 선택이 그 행으로 옮겨지지 않았는데(글자 조합 중, 쓰던 글의 저장 대기·거절) 그 행의 메뉴를
+     * 띄우면 항목이 **앞 검사**에 닿는다. 저장을 기다려 옮겨지면 그때 같은 자리에 연다. 항목은 행의 UID에 묶여 있어, 그 사이
+     * 선택이 바뀌었으면 아무것도 하지 않는다.
+     */
     $("#rows").addEventListener("contextmenu", e => {
       const tr = e.target.closest("tr");
       if (!tr?.dataset.uid) return;
       e.preventDefault();
       const uid = tr.dataset.uid;
-      select(uid);
+      whenSelected(select(uid), uid, () => showRowMenu(e, uid));
+    });
+    function showRowMenu(e, uid) {
       const s = studies.find(x => x.uid === uid);
       const forceReleaseItems = KinAuth.has("admin") && s?.holder ? [{
         label: "점유 강제 해제 (관리자)", dis: s.holder === user, act: async () => {
@@ -10668,7 +10959,7 @@
         const mine = !s?.tele;
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
-          { label: "판독문 작성으로", act: () => $("#findings").focus() },
+          { label: "판독문 작성으로", act: () => { if (selectedUid === uid) $("#findings").focus(); } },
           { sep: 1 },
           { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
@@ -10700,7 +10991,7 @@
           ...forceReleaseItems,
         ]);
       }
-    });
+    }
 
     $("#orderrows").addEventListener("contextmenu", e => {
       const tr = e.target.closest("tr[data-oid]"); if (!tr) return;
@@ -10715,7 +11006,9 @@
         { label: "Unmatch", dis: o.matched !== "M", act: async () => {
             const s2 = studies.find(x => x.uid === o.studyUid);
             if (!s2) { toast("이 오더에 매칭된 검사를 목록에서 찾을 수 없습니다", "err"); return; }
+            // 그 검사로 옮겨졌을 때만 한다 — 옮겨지지 않았으면(글자 조합·쓰던 글의 저장) Unmatch가 지금 선택에 닿는다.
             await select(s2.uid);
+            if (selectedUid !== s2.uid) return;
             doUnmatch();
           } },
         { sep: 1 },
@@ -10862,7 +11155,7 @@
         button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
       });
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
-      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
+      ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
         const el = $(s); if (!el) return;
         el.disabled = !rad;
@@ -11181,7 +11474,7 @@
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
-        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>{select(uid);if(mode==='Radiology')$('#findings').focus();}});
+        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')$('#findings').focus();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
         current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
@@ -11307,6 +11600,11 @@
       const owner = workspaceOwner?.slice(KinWorkspaceLayout.PREFIX.length);
       const bindings = KinWorkspaceShortcuts.read(workspaceStorage, owner);
       const command = KinWorkspaceShortcuts.action(bindings, event);
+      // Finalize (Approve), Ctrl+S by default (W4-SC model): the browser's Save Page is prevented only when the command runs.
+      if (command === 'finalize') {
+        if (finalizeCommand()) { event.preventDefault(); event.stopImmediatePropagation(); }
+        return;
+      }
       const templates = !command && KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event) === 'context';
       if (command !== 'context' && !templates) return;
       if (openStudyPanel(templates ? 'templates' : undefined)) { event.preventDefault(); event.stopImmediatePropagation(); }
