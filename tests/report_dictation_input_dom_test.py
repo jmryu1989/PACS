@@ -544,6 +544,7 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.page.keyboard.type(COMPOSED)
         self.place("conclusion", 0)
         self.compose("#conclusion", STEPS, COMPOSED)
+        # Setup for the byte comparison, not a user path (W6R2-02): the hidden Recommendation is focused directly.
         self.place("recommendation", 0)
         self.page.keyboard.insert_text(COMPOSED)
         value = self.snap()

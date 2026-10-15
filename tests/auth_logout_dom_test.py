@@ -959,6 +959,8 @@ class LogoutDOMTest(unittest.TestCase):
         page = page or self.page
         page.locator("#rows tr", has_text=patient).first.click()
         expect(page.locator("#findings")).to_be_editable()
+        # Setup, not a user path (W6R2-02): the hidden Recommendation is filled directly to give the case three-field
+        # data. Since W6 no reader reaches that field by keyboard or pointer; template writes fill it.
         for name, value in fields.items():
             page.fill("#" + name, value)
         self.wait_until(lambda: self.site.holds, "the hold the typing starts", page=page)

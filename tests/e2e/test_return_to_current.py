@@ -121,6 +121,7 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         expect(page.locator("#prior-findings")).to_have_text(related.secret)
         values = dict(findings="D03C newly typed findings", conclusion="D03C newly typed conclusion",
                       recommendation="D03C newly typed recommendation")
+        # Setup, not a user path (W6R2-02): dirty three-field data, the hidden Recommendation filled directly.
         for name,value in values.items():page.locator("#" + name).fill(value)
         self.wait_state(page, current, lambda s: s.get("holder") == self.stack.actor("doctor"))
         rows = {f.uid: self.report_rows(f) for f in (current, related)}

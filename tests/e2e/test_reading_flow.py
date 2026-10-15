@@ -158,8 +158,7 @@ class W6DoctorPathE2E(TemplatePreservationE2E):
    page.locator('#tplrows').get_by_text(template['title'],exact=True).dblclick()
    expect(page.locator('#findings')).to_have_value('SYN W6 TYPED\nSYN W6 TEMPLATE')
    checkpoint('template')
-   # A multi-field template ends in Conclusion; choose the intended dictation field.
-   page.locator('#findings').click()
+   # W6R1-03: the template's write leaves the dictation target in Findings, where the reader typed; no re-choice click.
    page.locator('#b-dictate').click();expect(page.locator('#dictation-stop')).to_be_visible()
    page.wait_for_timeout(500)
    page.locator('#dictation-stop').click();expect(page.locator('#dictation-insert')).to_be_enabled()
