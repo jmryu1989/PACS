@@ -417,8 +417,15 @@
       };
     }
     /**
-     * 판독 명령(Approve & Next·Ctrl+S의 Finalize)을 지금 할 수 없는 까닭, 할 수 있으면 null. W5 Related Report mode가 자기
-     * 까닭을 더하는 자리다(설계 v5 §1.6). 단추가 잠겨 있으면 그 단추가 말하는 까닭이 그대로 까닭이다 — 같은 판단을 두 번 하지 않는다.
+     * 판독 명령을 지금 할 수 없는 까닭, 할 수 있으면 null — 명령의 공통 차단점이다(W5 인터페이스 ③, impact §10). command는
+     * "approve"(Approve 단추)·"finalize-next"(Approve & Next)·"next"·"prev"(Next/Prev 단추와 통합 판독 화면의 이전/다음)·
+     * "finalize"(Ctrl+S와 뷰어 창이 넘기는 Finalize)이고, 이 명령들은 모두 실행 직전에 이것을 지난다: 까닭이 있으면 검사를
+     * 옮기지도 확정하지도 않고 그 까닭을 말한다. 까닭이 없으면 지금까지의 같은 길이다(같은 이벤트·같은 클릭 수). W5 Related
+     * Report mode가 자기 까닭을 여기에 더한다(설계 v5 §1.6).
+     *
+     * W4가 정하는 까닭은 단추가 아닌 길(키·다른 문서)로 오는 확정과 Approve & Next의 것뿐이다: 승인 단추가 잠겨 있으면 그 단추가
+     * 말하는 까닭이 그대로 까닭이다(같은 판단을 두 번 하지 않는다). Approve 단추·Next·Prev는 눌릴 때 이미 자기 상태(잠김·목록 끝·
+     * 이동 관문)를 지니므로 W4가 까닭을 더하지 않는다.
      */
     function reportCommandBlocked(command) {
       if (!["finalize", "finalize-next"].includes(command)) return null;
@@ -488,7 +495,11 @@
     $("#b-prelim")?.addEventListener("click", doPreliminary);
     $("#b-save").addEventListener("click", () => commitReport("save"));
     $("#b-transcribe").addEventListener("click", () => commitReport("save"));
-    $("#b-approve").addEventListener("click", () => commitReport("approve"));
+    $("#b-approve").addEventListener("click", () => {
+      const why = reportCommandBlocked("approve");
+      if (why) { toast(why, "err"); return; }
+      commitReport("approve");
+    });
     $("#b-approve-next").addEventListener("click", approveAndNext);
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;

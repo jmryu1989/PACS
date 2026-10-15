@@ -94,6 +94,9 @@
       return anchor.candidates.find(id => id !== anchor.uid && shown.has(id)) ?? null;
     }
     function move(step) {
+      // 판독 명령의 공통 차단점(W5 인터페이스): 까닭이 있으면 옮기지 않는다.
+      const why = reportCommandBlocked(step > 0 ? "next" : "prev");
+      if (why) { toast(why, "err"); return; }
       const anchor = queueAnchor(step);
       if (anchor.next) select(anchor.next, { openSelected: true, revalidate: () => queueTarget(anchor) });
     }

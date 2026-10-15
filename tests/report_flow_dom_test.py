@@ -8,7 +8,9 @@ driven through the page's own controls.
 
 Setup-only, documented where used: FINALIZE_STAND_IN gives the delivered shortcut model the fixed W4-SC interface (D1358,
 D1371: readV2 with `finalize`) while the W4-SC model is not on this branch, and installs nothing once it is; the hook case
-marks an insertion as out (`insertInFlight`), which the citation and structure suites drive for real.
+marks an insertion as out (`insertInFlight`), which the citation and structure suites drive for real; W5_REASON stands in
+for a future W5 Related Report mode contributing a reason at the common command block (impact section 10, item 3) - the
+page's own reportCommandBlocked is put back right after.
 """
 import io
 import json
@@ -249,6 +251,12 @@ FINALIZE_STAND_IN = """(() => {
   };
   return 'stand-in';
 })()"""
+# Setup-only stand-in for W5 (not on any branch yet): the common command block gains a reason, as W5's Related Report mode
+# will add one (design v5 section 1.6). Everything that consults the block is shipped code.
+W5_REASON = "SYN related report mode: back to the current draft first"
+W5_BLOCK_ON = """reason => { window.__w4CommandBlocked = reportCommandBlocked;
+  reportCommandBlocked = command => reason; }"""
+W5_BLOCK_OFF = "() => { reportCommandBlocked = window.__w4CommandBlocked; }"
 # One Ctrl+S keydown in Findings, as the keyboard sends it; returns whether a listener prevented the browser default
 # (the page's dispatcher stops the event at the window, so nothing after it could observe the flag).
 CTRL_S = """() => { const e = new KeyboardEvent('keydown', { key: 's', code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true });
@@ -1062,6 +1070,67 @@ class ReportFlowPage(unittest.TestCase):
         self.assertEqual([h.UID], [uid for uid, _ in self.site.flow_commits], "one approval, by the first call")
         self.assertEqual(h.PATIENT_B, self.selected())
 
+    # ── W5 interface: the common command block and the read-only draft snapshot (W4F-05) ──
+    def test_a_command_block_reason_stops_every_report_command_and_none_keeps_the_same_path(self):
+        """W5_COMMAND_BLOCK (W4F-05): Approve, Approve & Next, Next, Prev and Ctrl+S all consume the common block. With a
+        reason nothing moves, commits or writes, and the reason is said; without one each is the same one-click path."""
+        self.open()
+        self.page.evaluate(FINALIZE_STAND_IN)
+        self.open_study(h.PATIENT_B)
+        self.type("SYN B blocked")
+        self.page.evaluate(W5_BLOCK_ON, W5_REASON)
+        writes = len(self.site.flow_puts)
+        for button in ("#b-next", "#b-prev", "#b-approve", "#b-approve-next"):
+            self.page.locator(button).click()
+            expect(self.page.locator("#toast")).to_have_text(W5_REASON)
+            self.page.evaluate("() => { $('#toast').textContent = ''; }")
+        self.page.locator("#findings").focus()
+        self.assertFalse(self.page.evaluate(CTRL_S), "Ctrl+S ran nothing: the browser default is left alone")
+        self.settle(300)
+        self.assertEqual((h.PATIENT_B, [], writes), (self.selected(), self.site.flow_commits, len(self.site.flow_puts)))
+        # No reason: the paths are the ones before - Approve is one click, one commit; Next with nothing unconfirmed
+        # switches in the same event.
+        self.page.evaluate(W5_BLOCK_OFF)
+        self.page.locator("#b-approve").click()
+        self.wait(lambda: self.site.flow_commits, "the approval")
+        self.assertEqual(["approve"], [body["action"] for _, body in self.site.flow_commits])
+        self.wait(lambda: self.site.store[h.UID_B]["report"]["rs"] == "A", "B approved")
+        self.settle()
+        moved = self.page.evaluate("() => { document.querySelector('#b-next').click(); return selectedUid; }")
+        self.assertEqual(UID_C, moved)
+
+    def test_draft_snapshot_is_a_read_only_copy_of_the_document_draft(self):
+        """W4F-05 / impact section 10 item 4: {uid, author, selectionSeq, revision, baseVersion, texts} (+ lists and
+        unconfirmed) read in one go; copies only; reading it sends nothing and changes nothing."""
+        self.open()
+        self.open_study(h.PATIENT)
+        self.wait(lambda: self.page.evaluate("draftClient.lists(selectedUid) !== null"), "the editor's draft baseline")
+        snap = self.page.evaluate("reportDraftSnapshot()")
+        seq = self.page.evaluate("selectionSeq")
+        self.assertEqual({"uid": h.UID, "author": h.owner_of(h.RAD), "selectionSeq": seq,
+                          "revision": self.site.revision_of(h.UID), "baseVersion": 0, "texts": None,
+                          "lists": {"citations": [], "structured": []}, "unconfirmed": False}, snap)
+        self.type("SYN A snapshot")
+        self.wait(lambda: self.site.holds, "the hold the typing takes")
+        self.settle(300)
+        calls = list(self.site.calls)
+        changed = self.page.evaluate("""() => { const s = reportDraftSnapshot();
+          s.texts.findings = 'SYN changed by the caller'; s.lists.citations.push('SYN-CID'); s.author.sub = 'SYN-OTHER';
+          return [s, reportDraftSnapshot(), $('#findings').value, draftClient.lists(selectedUid)]; }""")
+        self.settle(300)
+        self.assertEqual(calls, self.site.calls, "reading the snapshot sends nothing")
+        self.assertEqual({"findings": "SYN A snapshot", "conclusion": "", "recommendation": ""}, changed[1]["texts"])
+        self.assertEqual((True, [], h.owner_of(h.RAD)["sub"]),
+                         (changed[1]["unconfirmed"], changed[1]["lists"]["citations"], changed[1]["author"]["sub"]))
+        self.assertEqual(("SYN A snapshot", {"citations": [], "structured": []}), (changed[2], changed[3]))
+        # A study left behind: its kept copy, no selection sequence, the revision its confirmed write moved to.
+        self.pick(h.PATIENT_B)
+        self.wait(lambda: self.selected() == h.PATIENT_B, "B after A's write")
+        left = self.page.evaluate("uid => reportDraftSnapshot(uid)", h.UID)
+        self.assertEqual((None, {"findings": "SYN A snapshot", "conclusion": "", "recommendation": ""}, False,
+                          self.site.revision_of(h.UID)),
+                         (left["selectionSeq"], left["texts"], left["unconfirmed"], left["revision"]))
+
     def test_study_info_and_templates_keys_on_the_v2_map(self):
         """The dispatcher reads the v2 map (D1371): Ctrl+Alt+5 still opens Study Info & Templates and Ctrl+Alt+T its
         Templates tab, as with the v1 map."""
@@ -1152,6 +1221,11 @@ MUTANTS = [
      "KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event)", "test_study_info_and_templates_keys_on_the_v2_map"),
     ("finalize-hook-always-true", "page-boot.js", "finalize: () => finalizeCommand()", "finalize: () => (finalizeCommand(), true)",
      "test_report_commands_finalize_answers_true_only_when_the_command_ran"),
+    # W4F-05: every report command consumes the common block (W5 interface).
+    ("approve-bypasses-the-common-block", "report-commit.js", 'const why = reportCommandBlocked("approve");',
+     "const why = null;", "test_a_command_block_reason_stops_every_report_command_and_none_keeps_the_same_path"),
+    ("next-prev-bypass-the-common-block", "report-toolbar.js", 'const why = reportCommandBlocked(step > 0 ? "next" : "prev");',
+     "const why = null;", "test_a_command_block_reason_stops_every_report_command_and_none_keeps_the_same_path"),
     ("finalize-hook-ran-during-insertion", "report-commit.js",
      'if (mode !== "Radiology" || commitInFlight || insertInFlight || reportCommandBlocked("finalize")) return false;',
      'if (mode !== "Radiology" || reportCommandBlocked("finalize")) return false;',
