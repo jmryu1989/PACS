@@ -43,6 +43,7 @@ const TECH = caller('tech-a-sub', ['technician']);
 const TECH2 = caller('tech-a2-sub', ['technician']);
 const RAD = caller('rad-a-sub', ['radiologist']);
 const ADMIN = caller('admin-a-sub', ['admin']);
+const ADMIN2 = caller('admin-a2-sub', ['admin']);
 const TECH_B = caller('tech-b-sub', ['technician'], 'inst-b');
 const ADMIN_B = caller('admin-b-sub', ['admin'], 'inst-b');
 const GATEWAY = { ...caller('gw-sub', ['gateway']), kind: 'gateway' };
@@ -62,9 +63,9 @@ const uid = () => `2.25.${T0 / 1000}${process.pid}${++counter}`;
 /** One synthetic file; any named value set to null is omitted. */
 function dicom(o = {}) {
   const v = { sopClass: '1.2.840.10008.5.1.4.1.1.2', sop: uid(), modality: 'CT', name: 'SYNTHETIC^PATIENT', id: 'SYN-0001', issuer: null,
-    birth: '19700101', sex: 'F', study: '2.25.1', series: '2.25.11', frames: null, syntax: '1.2.840.10008.1.2.1', pixel: 16, ...o };
+    birth: '19700101', sex: 'F', study: '2.25.1', series: '2.25.11', frames: null, syntax: '1.2.840.10008.1.2.1', pixel: 16, institution: null, ...o };
   const meta = Buffer.concat([el(2, 1, 'OB', Buffer.from([0, 1])), el(2, 2, 'UI', v.sopClass), el(2, 3, 'UI', v.sop), el(2, 0x10, 'UI', v.syntax), el(2, 0x12, 'UI', '2.25.77')]);
-  const named = [[8, 0x16, 'UI', v.sopClass], [8, 0x18, 'UI', v.sop], [8, 0x60, 'CS', v.modality], [0x10, 0x10, 'PN', v.name], [0x10, 0x20, 'LO', v.id],
+  const named = [[8, 0x16, 'UI', v.sopClass], [8, 0x18, 'UI', v.sop], [8, 0x60, 'CS', v.modality], [8, 0x80, 'LO', v.institution], [0x10, 0x10, 'PN', v.name], [0x10, 0x20, 'LO', v.id],
     [0x10, 0x21, 'LO', v.issuer], [0x10, 0x30, 'DA', v.birth], [0x10, 0x40, 'CS', v.sex], [0x20, 0x0d, 'UI', v.study], [0x20, 0x0e, 'UI', v.series],
     [0x28, 0x08, 'IS', v.frames]].filter(row => row[3] !== null && row[3] !== undefined);
   const body = Buffer.concat([...named.map(([g, e, vr, value]) => el(g, e, vr, value)), el(0x7fe0, 0x10, 'OW', Buffer.alloc(v.pixel, 0x5a))]);
@@ -161,7 +162,7 @@ function store({ institutions } = {}) {
   const s = { ops: new Map(), states: new Map(), audits: [], clock: T0, migration: true, policies: new Map(), sessions: new Set(),
     rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, expiredTokens: new Set(), idpEnded: new Set(),
     institutions: institutions ?? [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }] };
-  for (const c of [TECH, TECH2, RAD, ADMIN, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: c.roles });
+  for (const c of [TECH, TECH2, RAD, ADMIN, ADMIN2, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: c.roles });
   const advisory = new Map(), rows = new Map();
   const lock = async (map, key, held) => {
     if (held.keys.has(map === advisory ? 'a:' + key : 'r:' + key)) return;
@@ -169,29 +170,45 @@ function store({ institutions } = {}) {
     map.set(key, prev.then(() => mine)); await prev; held.list.push(release); held.keys.add(map === advisory ? 'a:' + key : 'r:' + key);
   };
   const copy = v => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
-  const out = row => (row ? { ...copy({ ...row, createdAt: undefined, updatedAt: undefined }), createdAt: new Date(row.createdAt), updatedAt: new Date(row.updatedAt) } : null);
+  const out = row => (row ? { ...copy({ ...row, _tx: undefined, createdAt: undefined, updatedAt: undefined }), createdAt: new Date(row.createdAt), updatedAt: new Date(row.updatedAt) } : null);
+  // PostgreSQL visibility of a created row: until its transaction commits, only that transaction sees it (READ COMMITTED
+  // reads never see another transaction's uncommitted insert, and FOR UPDATE finds nothing to lock). A second insert of the
+  // same key waits for the first transaction to end, then fails with a unique violation if that one committed.
+  const running = new Map();
+  let transactionSeq = 0;
   const fieldMatch = (row, where) => Object.entries(where).every(([k, v]) => (v && typeof v === 'object' && 'gt' in v ? row[k] > v.gt : row[k] === v));
   function api(tx) {
     const undo = fn => tx && tx.undo.push(fn);
+    const seen = row => !!row && (!row._tx || (!!tx && row._tx === tx.id));
+    const created = (kind, key) => { if (tx) tx.created.push([kind, key]); };
+    const settle = async clash => {
+      for (;;) {
+        const row = clash();
+        if (!row || !row._tx || (tx && row._tx === tx.id) || !running.has(row._tx)) return;
+        await running.get(row._tx);
+      }
+    };
     const fail = () => { if (s.failNextWrite && s.failNextWrite()) throw Object.assign(new Error('synthetic storage failure'), { code: 'P1001' }); };
     const ImportOperation = {
       findUnique: async ({ where, select }) => {
-        const row = where.id ? s.ops.get(where.id) : [...s.ops.values()].find(r => r.claimKey === where.claimKey);
-        if (!row) return null;
+        const row = where.id ? s.ops.get(where.id) : [...s.ops.values()].find(r => r.claimKey === where.claimKey && seen(r));
+        if (!seen(row)) return null;
         const o = out(row);
         return select ? Object.fromEntries(Object.keys(select).map(k => [k, o[k]])) : o;
       },
       findMany: async ({ where = {}, orderBy, take, select } = {}) => {
-        let list = [...s.ops.values()].filter(r => fieldMatch(r, where)).sort((a, b) => (a.id < b.id ? -1 : 1));
+        let list = [...s.ops.values()].filter(r => seen(r) && fieldMatch(r, where)).sort((a, b) => (a.id < b.id ? -1 : 1));
         if (take) list = list.slice(0, take);
         return list.map(r => { const o = out(r); return select ? Object.fromEntries(Object.keys(select).map(k => [k, o[k]])) : o; });
       },
       create: async ({ data }) => {
         fail();
         const row = { studyUid: null, results: [], manifestSha256: null, download: null, claimKey: null, claim: null, ...copy(data), createdAt: (data.createdAt ?? new Date(s.clock)).toISOString(), updatedAt: (data.updatedAt ?? new Date(s.clock)).toISOString() };
+        await settle(() => s.ops.get(row.id));
+        if (row.claimKey !== null) await settle(() => [...s.ops.values()].find(r => r.claimKey === row.claimKey));
         if (s.ops.has(row.id)) throw Object.assign(new Error('Unique constraint failed (id)'), { code: 'P2002' });
         if (row.claimKey !== null && [...s.ops.values()].some(r => r.claimKey === row.claimKey)) throw Object.assign(new Error('Unique constraint failed (claimKey)'), { code: 'P2002' });
-        checkShape(row); s.ops.set(row.id, row); s.writes++; undo(() => s.ops.delete(row.id)); return out(row);
+        checkShape(row); if (tx) row._tx = tx.id; s.ops.set(row.id, row); created('op', row.id); s.writes++; undo(() => s.ops.delete(row.id)); return out(row);
       },
       update: async ({ where, data }) => {
         fail();
@@ -208,13 +225,14 @@ function store({ institutions } = {}) {
     const db = {
       importOperation: ImportOperation,
       studyState: {
-        findUnique: async ({ where }) => copy(s.states.get(where.uid)) ?? null,
+        findUnique: async ({ where }) => (seen(s.states.get(where.uid)) ? copy({ ...s.states.get(where.uid), _tx: undefined }) : null),
         createMany: async ({ data, skipDuplicates }) => {
           fail();
           let count = 0;
           for (const row of data) {
+            await settle(() => s.states.get(row.uid));
             if (s.states.has(row.uid)) { if (!skipDuplicates) throw Object.assign(new Error('Unique'), { code: 'P2002' }); continue; }
-            s.states.set(row.uid, { teleInstitutionId: null, rs: 'W', ...row }); count++; s.writes++; undo(() => s.states.delete(row.uid));
+            s.states.set(row.uid, { teleInstitutionId: null, rs: 'W', ...row, ...(tx ? { _tx: tx.id } : {}) }); created('state', row.uid); count++; s.writes++; undo(() => s.states.delete(row.uid));
           }
           return { count };
         },
@@ -249,7 +267,7 @@ function store({ institutions } = {}) {
           // The attempt CAS of a download chunk: the row lock (if the row exists), then the last attempt's three fields.
           if (!tx) throw new Error('row lock outside a transaction');
           const row = s.ops.get(values[0]);
-          if (!row || row.kind !== 'download') return [];
+          if (!seen(row) || row.kind !== 'download') return [];
           await lock(rows, row.id, tx.held);
           const now = s.ops.get(row.id), last = now.download.attempts[now.download.attempts.length - 1];
           return [{ status: now.status, attemptId: last?.attemptId ?? null, state: last?.state ?? null, leaseUntil: last?.leaseUntil ?? null }];
@@ -261,18 +279,21 @@ function store({ institutions } = {}) {
         }
         if (sql.includes('WHERE "claimKey" = ? FOR UPDATE')) {
           if (!tx) throw new Error('row lock outside a transaction');
-          const row = [...s.ops.values()].find(r => r.claimKey === values[0]);
+          const row = [...s.ops.values()].find(r => r.claimKey === values[0] && seen(r));
           if (row) await lock(rows, row.id, tx.held);
           return row ? [out(s.ops.get(row.id))] : [];
         }
         if (sql.includes('WHERE id = ?::uuid FOR UPDATE')) {
+          // PostgreSQL READ COMMITTED: FOR UPDATE locks the rows it finds and nothing else - an absent id takes no lock
+          // (no gap lock); only an advisory lock taken before it serialises the creation of a new id.
           if (!tx) throw new Error('row lock outside a transaction');
+          if (!seen(s.ops.get(values[0]))) return [];
           await lock(rows, values[0], tx.held);
           return s.ops.has(values[0]) ? [out(s.ops.get(values[0]))] : [];
         }
         if (sql.includes('results @> ?::jsonb')) {
           const [{ attempts: [{ attemptId }] }] = JSON.parse(values[0]);
-          return [...s.ops.values()].filter(r => r.kind === 'import' && r.results.some(e => e.attempts.some(a => a.attemptId === attemptId))).map(out);
+          return [...s.ops.values()].filter(r => seen(r) && r.kind === 'import' && r.results.some(e => e.attempts.some(a => a.attemptId === attemptId))).map(out);
         }
         if (sql.includes('"StudyAccessPolicy"')) {
           const p = s.policies.get(values[0]);
@@ -289,14 +310,21 @@ function store({ institutions } = {}) {
   s.prisma.$transaction = async (fn, options) => {
     s.transactions++;
     assert.deepEqual(options, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
-    const tx = { undo: [], held: { list: [], keys: new Set() } };
+    const tx = { id: ++transactionSeq, undo: [], created: [], held: { list: [], keys: new Set() } };
+    let ended;
+    running.set(tx.id, new Promise(resolve => { ended = resolve; }));
     const db = api(tx);
-    try { return await fn(db); }
+    try {
+      const value = await fn(db);
+      // Commit: what this transaction created becomes visible to every other one, then its locks go.
+      for (const [kind, key] of tx.created) { const row = kind === 'op' ? s.ops.get(key) : s.states.get(key); if (row) delete row._tx; }
+      return value;
+    }
     catch (error) { for (const fn of tx.undo.reverse()) fn(); throw error; }
-    finally { tx.held.list.forEach(release => release()); }
+    finally { tx.held.list.forEach(release => release()); running.delete(tx.id); ended(); }
   };
-  s.op = id => (s.ops.has(id) ? copy(s.ops.get(id)) : null);
-  s.claim = key => copy([...s.ops.values()].find(r => r.claimKey === key)) ?? null;
+  s.op = id => (s.ops.has(id) ? copy({ ...s.ops.get(id), _tx: undefined }) : null);
+  s.claim = key => { const row = [...s.ops.values()].find(r => r.claimKey === key); return row ? copy({ ...row, _tx: undefined }) : null; };
   s.file = (id, index) => s.op(id)?.results.find(e => e.index === index);
   s.actions = () => s.audits.map(a => a.action);
   s.advance = ms => { s.clock += ms; };
@@ -810,6 +838,11 @@ test('S9U4-B14 the response lost after the write: 202 unconfirmed; GET reconcile
   assert.deepEqual([r.status, r.body.outcome, r.body.code], [202, 'unconfirmed', 'IMPORT_UNCONFIRMED']);
   assert.equal(h.orthanc.count(), 1);
   h.orthanc.fault = null;
+  // While the unknown attempt's lease lives nobody reconciles it (4.4): GET answers Unconfirmed and reads nothing.
+  const mark = h.orthanc.calls.length;
+  const early = await h.request('GET', '/api/dicom-import/' + r.id);
+  assert.deepEqual([early.body.files[0].outcome, h.orthanc.calls.slice(mark).filter(c => c.path !== '/system').length], ['unconfirmed', 0]);
+  h.s.advance(31000);
   const status = await h.request('GET', '/api/dicom-import/' + r.id);
   assert.deepEqual([status.status, status.body.files[0].outcome], [200, 'stored']);
   assert.equal(posts(h.orthanc), 1);
@@ -848,6 +881,11 @@ test('S9U4-B16 the automatic re-check runs once per unknown attempt: exact -> st
   try { r = await h.send(bytes); } finally { restore(); }
   assert.equal(r.status, 202);
   h.orthanc.calls.length = 0;
+  // Before the lease ran out by DB time the same POST re-checks nothing (4.4: unknown is not touched while its lease lives).
+  h.s.advance(29999);
+  const early = await h.send(bytes, { id: r.id });
+  assert.deepEqual([early.status, h.orthanc.calls.filter(c => c.path !== '/system').length], [202, 0], 'one millisecond before the end');
+  h.s.advance(1);
   const first = await h.send(bytes, { id: r.id });
   assert.deepEqual([first.status, first.body.outcome], [202, 'unconfirmed']);
   assert.equal(first.body.message, '저장 결과를 확인하지 못했습니다. 관리자에게 이 파일의 확인을 요청하세요.');
@@ -863,6 +901,7 @@ test('S9U4-B16 the automatic re-check runs once per unknown attempt: exact -> st
   h2.orthanc.fault = call => (call.path === '/instances' ? { lose: true } : null);
   const lostAnswer = await h2.send(bytes2);
   h2.orthanc.fault = null;
+  h2.s.advance(31000);
   const recheck = await h2.send(bytes2, { id: lostAnswer.id });
   assert.deepEqual([recheck.status, recheck.body.outcome, posts(h2.orthanc)], [200, 'stored', 1]);
   // A re-check whose read fails leaves autoRecheckedAt empty, so the next POST checks once more.
@@ -872,8 +911,15 @@ test('S9U4-B16 the automatic re-check runs once per unknown attempt: exact -> st
   let r3;
   try { r3 = await h3.send(bytes3); } finally { restore3(); }
   h3.orthanc.fault = call => (call.path === '/tools/lookup' ? { status: 500 } : null);
+  h3.s.advance(31000);
   assert.equal((await h3.send(bytes3, { id: r3.id })).status, 202);
   assert.equal(h3.s.file(r3.id, 0).attempts[0].autoRecheckedAt, null);
+  // The failed read gave its reading right back at once: the next POST checks once more, now with an answer.
+  h3.orthanc.fault = null;
+  h3.orthanc.calls.length = 0;
+  assert.equal((await h3.send(bytes3, { id: r3.id })).status, 202);
+  assert.ok(h3.s.file(r3.id, 0).attempts[0].autoRecheckedAt);
+  assert.equal(h3.orthanc.calls.filter(c => c.path === '/tools/lookup').length, 1);
 });
 
 test('S9U4-B17 IMPORT_PERMISSION_REVOKED: rights lost while prepared answer the existing refusal (403/404, no code), retryable, zero writes; restored rights re-execute', async () => {
@@ -903,7 +949,7 @@ test('S9U4-B17 IMPORT_PERMISSION_REVOKED: rights lost while prepared answer the 
   assert.equal(h2.s.file(r2.id, 0).code, 'IMPORT_PERMISSION_REVOKED');
 });
 
-test('S9U4-B18 an expired prepared attempt: GET writes nothing, the same POST fences it (IMPORT_ATTEMPT_EXPIRED, its holder only) and re-executes; startup fences it too', async () => {
+test('S9U4-B18 an expired prepared attempt: GET fences it by CAS (200, retryable IMPORT_ATTEMPT_EXPIRED, certain-no-write, its own holders only, its one result row, zero Orthanc writes; one millisecond earlier nothing), the same POST then re-executes; startup fences it too', async () => {
   const h = await harness();
   const study = uid(), bytes = dicom({ study });
   // The process "ends" right after the intent: the lookup never answers, the client gives up.
@@ -912,17 +958,24 @@ test('S9U4-B18 an expired prepared attempt: GET writes nothing, the same POST fe
   await new Promise(resolve => setTimeout(resolve, 150));
   const id = [...h.s.ops.values()].find(o => o.kind === 'import').id;
   h.orthanc.fault = null;
-  h.s.advance(31000);
+  const [held] = h.s.file(id, 0).attempts;
+  h.s.advance(Date.parse(held.leaseUntil) - h.s.clock - 1);
   const writes = h.s.writes;
-  const status = await h.request('GET', '/api/dicom-import/' + id);
-  assert.deepEqual([status.status, status.body.files[0].outcome, h.s.writes], [200, 'unconfirmed', writes], 'GET never fences a prepared attempt');
-  const again = await h.send(bytes, { id });
-  assert.deepEqual([again.status, again.body.outcome, again.body.generation], [200, 'stored', 2]);
+  const live = await h.request('GET', '/api/dicom-import/' + id);
+  assert.deepEqual([live.status, live.body.files[0].outcome, h.s.writes], [200, 'unconfirmed', writes], 'one millisecond before the lease ends: nothing');
+  h.s.advance(1);
+  const fenced = await h.request('GET', '/api/dicom-import/' + id);
+  assert.deepEqual([fenced.status, fenced.body.files[0].outcome, fenced.body.files[0].code], [200, 'retryable', 'IMPORT_ATTEMPT_EXPIRED'], 'contract 4.4 table: GET cancels the right to send by CAS');
   const [old] = h.s.file(id, 0).attempts;
   assert.deepEqual([old.phase, old.outcome, old.code, old.transport], ['finished', 'retryable', 'IMPORT_ATTEMPT_EXPIRED', 'certain-no-write']);
+  assert.deepEqual([h.s.claim('study:' + study).claim.heldByAttemptId, h.s.claim('sop:' + h.s.file(id, 0).sopUid).claim.heldByAttemptId], [null, null], 'its own holders released');
+  assert.equal(posts(h.orthanc), 0, 'GET never writes to Orthanc');
+  const again = await h.send(bytes, { id });
+  assert.deepEqual([again.status, again.body.outcome, again.body.generation], [200, 'stored', 2]);
   assert.deepEqual(audits(h.s, 'dicom.import.result').filter(a => a.detail.attemptId === old.attemptId).map(a => a.detail.code), ['IMPORT_ATTEMPT_EXPIRED'],
     'the fenced attempt has exactly one result row');
   await pending;   // the stalled first request fails its own CAS later and writes nothing
+  assert.deepEqual([h.s.file(id, 0).attempts.map(a => a.outcome), posts(h.orthanc)], [['retryable', 'stored'], 1], 'the late worker changed nothing');
   // Startup reconciliation: a prepared attempt whose lease ran out is fenced; GET then shows the code with 200.
   const h2 = await harness();
   h2.orthanc.fault = call => (call.path === '/tools/lookup' ? { hang: true } : null);
@@ -1168,7 +1221,11 @@ test('S9U4-B23 admin recovery of an unknown attempt with no object: request audi
   const h = await harness();
   const { id, bytes, study, attempt } = await unknownAttempt(h);
   const body = { basis: 'orthanc-restarted', checkedAt: new Date(T0 + 1000).toISOString() };
+  // Not while the unknown attempt's lease lives (4.4): 409, nothing recorded.
   h.s.advance(2000);
+  const early = await recovery(h, id, body);
+  assert.deepEqual([early.status, early.body.code, audits(h.s, 'dicom.import.recovery.request').length], [409, 'RECOVERY_NOT_APPLICABLE', 0]);
+  h.s.advance(29000);
   let requested = null;
   h.orthanc.fault = call => { if (call.path === '/tools/lookup') requested = h.s.actions().slice(); return null; };
   const r = await recovery(h, id, body);
@@ -1225,7 +1282,7 @@ test('S9U4-B24 admin recovery outcomes: exact object -> stored; a different obje
   const h2 = await harness();
   const b = await unknownAttempt(h2);
   h2.orthanc.store(dicom({ study: b.study, sop: h2.s.file(b.id, 0).sopUid, id: 'SYN-OTHER', series: h2.s.file(b.id, 0).seriesUid }));
-  h2.s.advance(2000);
+  h2.s.advance(31000);
   const conflict = await recovery(h2, b.id, body);
   assert.deepEqual([conflict.status, conflict.body.outcome, conflict.body.writeDisposition, conflict.body.message],
     [200, 'rejected', 'may-have-written', '원본 충돌로 반입 완료를 확인할 수 없습니다. 점유만 해제했습니다. Orthanc의 원본은 그대로 두었습니다.']);
@@ -1915,4 +1972,497 @@ test('S9U4-B39 an expired sending attempt is closed Unconfirmed with exactly one
   h.s.auditFailure = null;
   assert.equal(await h.transfer.expireDownloads(), 1);
   assert.equal(h.s.op(id).status, 'unconfirmed');
+});
+// ── the gate findings of round 2: status access (U4BB-01), the credential before the write (U4BB-02), one transition table
+// by DB time (U4BB-04), one automatic re-check (U4BB-05), the recovery CAS (U4BB-06), the known context of a result
+// (U4BB-11), the creation race of an operation id (U4BB-12) and storage failures before any intent (U4BB-16) ──
+
+const allowPolicy = study => ({ institution: 'inst-a', policy: { version: 1, restricted: true, startsAt: null, endsAt: null,
+  rules: [{ patientId: null, modalities: [], dateFrom: null, dateTo: null, studyUids: [study] }] } });
+/** A gate that holds the first statement matching `when` until open() (the others pass). */
+function holdOnce(h, when) {
+  let open, reached;
+  const gate = new Promise(resolve => { open = resolve; });
+  const seen = new Promise(resolve => { reached = resolve; });
+  let used = false;
+  h.s.onQuery = async (sql, values, tx) => { if (!used && when(sql, values, tx)) { used = true; reached(); await gate; } };
+  return { open: () => { h.s.onQuery = null; open(); }, reached: seen };
+}
+
+test('S9U4-B40 status GETs check the role, the institution, the study ownership and StudyAccess now (ASTRA-01): a policy restricted before the import, a study moved or tele-received, a multi-study operation with one study out of reach - one 404 with nothing of it; a renamed actor and restored rights see the result again', async () => {
+  const h = await harness();
+  const study = uid(), other = uid();
+  // A restricted account whose policy (set before the import) covers the study: import and status both answer.
+  h.s.policies.set(TECH.sub, allowPolicy(study));
+  own(h.s, study, 'inst-a', 'gateway');
+  const first = await h.send(dicom({ study }));
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const ok = await h.request('GET', '/api/dicom-import/' + first.id);
+  assert.deepEqual([ok.status, ok.body.files[0].outcome], [200, 'stored']);
+  // The policy narrowed to another study: the same 404 as an unknown operation, nothing of the file in it.
+  h.s.policies.set(TECH.sub, deniedPolicy);
+  const narrowed = await h.request('GET', '/api/dicom-import/' + first.id);
+  assert.deepEqual([narrowed.status, narrowed.body.message], [404, '반입 작업을 찾을 수 없습니다']);
+  noPatientValue(narrowed.body, study, first.body.sopUid, first.body.sha256);
+  assert.deepEqual((await h.request('GET', '/api/dicom-import/' + randomUUID())).body, narrowed.body, 'identical to an absent operation');
+  // Restored rights: the same result again; a renamed actor of the same subject too.
+  h.s.policies.delete(TECH.sub);
+  assert.equal((await h.request('GET', '/api/dicom-import/' + first.id)).status, 200);
+  assert.equal((await h.request('GET', '/api/dicom-import/' + first.id, { as: { ...TECH, actor: 'renamed@synthetic.test' } })).status, 200, 'same sub, renamed actor');
+  // The study moved to another institution, then tele-received from it: 404 both times; moved back: 200.
+  h.s.states.get(study).institutionId = 'inst-b';
+  assert.equal((await h.request('GET', '/api/dicom-import/' + first.id)).status, 404, 'moved');
+  h.s.states.get(study).teleInstitutionId = 'inst-a';
+  assert.equal((await h.request('GET', '/api/dicom-import/' + first.id)).status, 404, 'tele-received');
+  Object.assign(h.s.states.get(study), { institutionId: 'inst-a', teleInstitutionId: null });
+  assert.equal((await h.request('GET', '/api/dicom-import/' + first.id)).status, 200, 'back');
+  // A multi-study operation: one study out of reach hides the whole operation (no partial answer).
+  const multi = randomUUID();
+  assert.equal((await h.send(dicom({ study }), { id: multi, index: 0 })).status, 200);
+  assert.equal((await h.send(dicom({ study: other }), { id: multi, index: 1 })).status, 200);
+  h.s.policies.set(TECH.sub, allowPolicy(study));
+  const partial = await h.request('GET', '/api/dicom-import/' + multi);
+  assert.equal(partial.status, 404);
+  noPatientValue(partial.body, study, other);
+  h.s.policies.delete(TECH.sub);
+  assert.equal((await h.request('GET', '/api/dicom-import/' + multi)).body.files.length, 2);
+  // Results decided from the caller's own file alone (a foreign study's refusal, a modality refusal) need no study check.
+  const foreign = uid();
+  h.s.states.set(foreign, { uid: foreign, institutionId: 'inst-b', teleInstitutionId: 'inst-a', origin: 'gateway' });
+  const refusals = randomUUID();
+  assert.equal((await h.send(dicom({ study: foreign }), { id: refusals, index: 0 })).body.code, 'STUDY_OWNERSHIP_CONFLICT');
+  assert.equal((await h.send(dicom({ study: foreign, modality: 'MG' }), { id: refusals, index: 1 })).body.code, 'MODALITY_NOT_IMPORTABLE');
+  const own404 = await h.request('GET', '/api/dicom-import/' + refusals);
+  assert.deepEqual([own404.status, own404.body.files.map(f => f.code)], [200, ['STUDY_OWNERSHIP_CONFLICT', 'MODALITY_NOT_IMPORTABLE']]);
+  // The download status: StudyAccess and the institution now, else the same 404 as no operation (ASTRA-01).
+  const dl = await downloadStudy(h, 1), id = randomUUID();
+  assert.equal((await prepare(h, dl, id)).status, 200);
+  const status = () => h.request('GET', `/api/studies/${dl}/original-downloads/${id}`, { as: RAD });
+  h.s.policies.set(RAD.sub, deniedPolicy);
+  assert.deepEqual([(await status()).status, (await status()).body.message], [404, '다운로드 작업을 찾을 수 없습니다']);
+  h.s.policies.delete(RAD.sub);
+  h.s.states.get(dl).institutionId = 'inst-b';
+  assert.equal((await status()).status, 404, 'moved');
+  h.s.states.get(dl).institutionId = 'inst-a';
+  assert.equal((await status()).status, 200, 'restored');
+});
+
+test('S9U4-B41 the credential of the request is checked again right before the write (ASTRA-02): a logout, an ended provider session or an expired token - also during a long legacy initialisation - is 403 without a code, no POST /instances, IMPORT_PERMISSION_REVOKED certain-no-write with its own holders released; a credential check that fails for another reason is 503 and writes nothing', async () => {
+  const cases = [
+    ['logout of the cookie session', { ...TECH, session: 'sid-tech-a' }, h => h.s.sessions.delete('sid-tech-a')],
+    ['provider session ended', TECH, h => h.s.idpEnded.add('idp:' + TECH.sub)],
+    ['access token expired', TECH, h => h.s.expiredTokens.add('tok:' + TECH.sub)],
+  ];
+  for (const [name, as, end] of cases) {
+    const h = await harness();
+    h.s.sessions.add('sid-tech-a');
+    const study = uid();
+    h.orthanc.fault = call => { if (call.path === '/tools/lookup') end(h); return null; };
+    const r = await h.send(dicom({ study }), { as });
+    assert.deepEqual([r.status, r.body.code, r.body.message], [403, undefined, '인증 세션이 없습니다'], name);
+    const entry = h.s.file(r.id, 0);
+    assert.deepEqual([entry.outcome, entry.code, entry.attempts[0].phase, entry.attempts[0].transport], ['retryable', 'IMPORT_PERMISSION_REVOKED', 'finished', 'certain-no-write'], name);
+    assert.deepEqual([posts(h.orthanc), h.s.claim('study:' + study).claim.heldByAttemptId, h.s.claim('sop:' + entry.sopUid).claim.heldByAttemptId], [0, null, null], name);
+  }
+  // A logout while a long legacy initialisation reads its headers: refused at the check before the write.
+  {
+    const h = await harness();
+    h.s.sessions.add('sid-tech-a');
+    const study = uid();
+    h.orthanc.store(dicom({ study, series: study + '.1', id: 'SYN-L' }));
+    own(h.s, study);
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    h.orthanc.fault = async call => (call.path.endsWith('?simplify') ? (await held, null) : null);
+    const pending = h.send(dicom({ study, series: study + '.2', id: 'SYN-L' }), { as: { ...TECH, session: 'sid-tech-a' } });
+    await sleep(150);
+    h.s.sessions.delete('sid-tech-a');
+    release();
+    const r = await pending;
+    assert.deepEqual([r.status, h.s.file(r.id, 0).code, posts(h.orthanc)], [403, 'IMPORT_PERMISSION_REVOKED', 0]);
+    assert.deepEqual([h.s.claim('study:' + study).claim.phase, h.s.claim('study:' + study).claim.heldByAttemptId], ['bound', null], 'the binding stays, the holder goes');
+  }
+  // Positive control: the session alive -> stored.
+  {
+    const h = await harness();
+    h.s.sessions.add('sid-tech-a');
+    assert.equal((await h.send(dicom({ study: uid() }), { as: { ...TECH, session: 'sid-tech-a' } })).status, 200);
+  }
+  // A credential check that cannot answer (storage, provider): 503 IMPORT_STORAGE_UNAVAILABLE, no write, never a session end.
+  {
+    const h = await harness();
+    h.orthanc.fault = call => { if (call.path === '/tools/lookup') h.s.authFailure = () => new common.ServiceUnavailableException({ code: 'AUTH_IDP_UNAVAILABLE' }); return null; };
+    const r = await h.send(dicom({ study: uid() }));
+    h.s.authFailure = null;
+    assert.deepEqual([r.status, r.body.code, posts(h.orthanc)], [503, 'IMPORT_STORAGE_UNAVAILABLE', 0]);
+    assert.equal(h.s.file(r.id, 0).attempts[0].phase, 'prepared', 'nothing decided: the attempt runs out and is fenced like any other');
+  }
+});
+
+test('S9U4-B42 one transition table by DB time: an initialising worker whose lease ran out never binds or writes (ASTRA-04); a dispatched worker whose lease ran out writes no result (ASTRA-05); a renewal waits for the claim lock and never revives an expired lease; unknown is untouched until its lease ends (ASTRA-08)', async t => {
+  // ASTRA-04: the DB clock passes the lease while the initialisation reads headers: no bind, no POST, IMPORT_ATTEMPT_EXPIRED.
+  {
+    const h = await harness();
+    const study = uid(); own(h.s, study);
+    h.orthanc.store(dicom({ study }));
+    let moved = false;
+    h.orthanc.fault = call => { if (!moved && call.path.endsWith('/tags?simplify')) { moved = true; h.s.advance(31000); } return null; };
+    const r = await h.send(dicom({ study }));
+    assert.deepEqual([r.status, r.body.outcome, r.body.code, posts(h.orthanc)], [200, 'retryable', 'IMPORT_ATTEMPT_EXPIRED', 0]);
+    assert.equal(h.s.claim('study:' + study), null, 'the initializing claim goes; the next import reads again');
+    const [a] = h.s.file(r.id, 0).attempts;
+    assert.deepEqual(audits(h.s, 'dicom.import.result').filter(x => x.detail.attemptId === a.attemptId).map(x => x.detail.code), ['IMPORT_ATTEMPT_EXPIRED']);
+  }
+  // ASTRA-05: the DB clock passes the lease after the POST: the late worker writes no result and keeps the holders; once
+  // the lease ended a GET reconciles it read-only (one object, no second write).
+  {
+    const h = await harness();
+    const study = uid();
+    h.orthanc.onPost = () => { h.s.advance(31000); h.orthanc.onPost = null; };
+    const r = await h.send(dicom({ study }));
+    assert.deepEqual([r.status, r.body.outcome], [202, 'unconfirmed']);
+    const [a] = h.s.file(r.id, 0).attempts;
+    assert.deepEqual([a.phase, h.s.claim('study:' + study).claim.heldByAttemptId], ['dispatching', a.attemptId], 'no result written, holders kept');
+    const status = await h.request('GET', '/api/dicom-import/' + r.id);
+    assert.deepEqual([status.body.files[0].outcome, posts(h.orthanc), h.s.claim('study:' + study).claim.heldByAttemptId], ['stored', 1, null]);
+  }
+  // A renewal in claim -> operation order with the time after its locks: it waits for a claim lock another transaction
+  // holds while the DB clock passes the lease, and then refuses to revive it (the lookup the worker waits on is held).
+  {
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const h = await harness();
+    const study = uid(), bytes = dicom({ study });
+    h.orthanc.fault = call => (call.path === '/tools/lookup' ? { hang: true } : null);
+    const pending = h.send(bytes);
+    await sleep(150);
+    const id = [...h.s.ops.values()].find(o => o.kind === 'import').id;
+    const before = h.s.file(id, 0).attempts[0].leaseUntil;
+    let unlock, locked;
+    const holding = new Promise(resolve => { unlock = resolve; });
+    const isLocked = new Promise(resolve => { locked = resolve; });
+    const other = h.s.prisma.$transaction(async tx => {
+      await tx.$executeRaw(['SELECT pg_advisory_xact_lock(', '::bigint)'], 'study-claim-held-by-test');
+      await tx.$queryRaw(['SELECT * FROM "ImportOperation" WHERE "claimKey" = ', ' FOR UPDATE'], 'study:' + study);
+      locked();
+      await holding;
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
+    await isLocked;
+    t.mock.timers.tick(10000);
+    await sleep(50);
+    h.s.advance(31000);
+    unlock();
+    await other;
+    await sleep(100);
+    assert.equal(h.s.file(id, 0).attempts[0].leaseUntil, before, 'an expired lease is never revived');
+    h.orthanc.fault = null;
+    void pending;
+  }
+  // ASTRA-08: an unknown attempt with 28 s of lease left: the same POST, a GET and the admin recovery all leave it alone.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h);
+    h.s.advance(2000);
+    h.orthanc.calls.length = 0;
+    assert.equal((await h.send(a.bytes, { id: a.id })).status, 202);
+    assert.equal((await h.request('GET', '/api/dicom-import/' + a.id)).body.files[0].outcome, 'unconfirmed');
+    assert.equal((await recovery(h, a.id, { basis: 'orthanc-restarted', checkedAt: new Date(T0 + 1000).toISOString() })).body.code, 'RECOVERY_NOT_APPLICABLE');
+    assert.deepEqual([h.orthanc.calls.filter(c => c.path === '/tools/lookup').length, h.s.file(a.id, 0).attempts[0].autoRecheckedAt], [0, null]);
+  }
+});
+
+test('S9U4-B43 the automatic re-check runs once per attempt even for overlapping same-key POSTs (ASTRA-07): its reading right is taken with the row before the lookup; an absence is recorded once; a stopped reader keeps the holders and its right runs out', async () => {
+  const h = await harness();
+  const a = await unknownAttempt(h);
+  h.s.advance(31000);
+  h.orthanc.calls.length = 0;
+  h.orthanc.fault = async call => { if (call.path === '/tools/lookup') await sleep(150); return null; };
+  const answers = await Promise.all([h.send(a.bytes, { id: a.id }), h.send(a.bytes, { id: a.id })]);
+  assert.deepEqual(answers.map(r => r.status), [202, 202]);
+  assert.equal(h.orthanc.calls.filter(c => c.path === '/tools/lookup').length, 1, 'one bounded lookup for two overlapping POSTs');
+  const [attempt] = h.s.file(a.id, 0).attempts;
+  assert.ok(attempt.autoRecheckedAt);
+  assert.deepEqual(audits(h.s, 'dicom.import.result').filter(x => x.detail.attemptId === attempt.attemptId).map(x => x.detail.outcome), ['unconfirmed', 'unconfirmed'],
+    'the unknown result row, then the re-check absence once');
+  h.orthanc.fault = null;
+  h.orthanc.calls.length = 0;
+  assert.equal((await h.send(a.bytes, { id: a.id })).status, 202);
+  assert.deepEqual([h.orthanc.calls.filter(c => c.path !== '/system').length, posts(h.orthanc)], [0, 0], 'no second read, no resend');
+  // A reader that stops after taking its right (the lookup never answers): the holders stay; the right runs out and the
+  // next POST re-checks once.
+  const h2 = await harness();
+  const b = await unknownAttempt(h2);
+  h2.s.advance(31000);
+  h2.orthanc.fault = call => (call.path === '/tools/lookup' ? { hang: true } : null);
+  const stalled = h2.send(b.bytes, { id: b.id });
+  await sleep(150);
+  assert.equal(h2.s.claim('study:' + b.study).claim.heldByAttemptId, b.attempt.attemptId);
+  assert.equal((await h2.send(b.bytes, { id: b.id })).status, 202, 'the reading right is held: nothing read');
+  h2.orthanc.fault = null;
+  await stalled;
+  h2.s.advance(31000);
+  assert.equal((await h2.send(b.bytes, { id: b.id })).status, 202);
+  assert.ok(h2.s.file(b.id, 0).attempts[0].autoRecheckedAt);
+  assert.equal(h2.s.claim('study:' + b.study).claim.heldByAttemptId, b.attempt.attemptId, 'absence never releases the occupancy');
+});
+
+test('S9U4-B44 the admin recovery re-reads Orthanc for both kinds and commits only on the state it read (ASTRA-06, ASTRA-13): a failed read is 503 with nothing changed; a reconciliation or another admin that won meanwhile makes it 409; two admins in one DB millisecond never mix; a failing result row rolls everything back', async () => {
+  const body = (checkedAt = new Date(T0 + 1000).toISOString()) => ({ basis: 'orthanc-log-checked', checkedAt });
+  async function mayHaveWritten(h) {
+    const study = uid(), sop = uid();
+    h.orthanc.onPost = (stored, o) => { o.store(dicom({ study, series: study + '.1', sop, id: 'SYN-OUTSIDE' })); o.onPost = null; };
+    const r = await h.send(dicom({ study, series: study + '.1', sop }));
+    assert.equal(r.body.writeDisposition, 'may-have-written');
+    h.s.advance(5000);
+    return { id: r.id, study };
+  }
+  // ASTRA-06: a may-have-written occupancy and a failing lookup: 503 ORTHANC_UNAVAILABLE, the lookup was asked, nothing released.
+  {
+    const h = await harness();
+    const m = await mayHaveWritten(h);
+    const before = h.s.file(m.id, 0);
+    h.orthanc.calls.length = 0;
+    h.orthanc.fault = call => (call.path === '/tools/lookup' ? { status: 500 } : null);
+    const r = await recovery(h, m.id, body());
+    assert.deepEqual([r.status, r.body.code], [503, 'ORTHANC_UNAVAILABLE']);
+    assert.ok(h.orthanc.calls.some(c => c.path === '/tools/lookup'), 'the bounded re-read ran');
+    assert.deepEqual([h.s.file(m.id, 0).outcome, h.s.file(m.id, 0).code, h.s.claim('study:' + m.study).claim.heldByAttemptId], [before.outcome, before.code, before.attempts[0].attemptId]);
+    h.orthanc.fault = null;
+    const done = await recovery(h, m.id, body());
+    assert.deepEqual([done.status, done.body.outcome, h.s.claim('study:' + m.study).claim.heldByAttemptId], [200, 'rejected', null], 'with Orthanc answering: occupancy released, result unchanged');
+  }
+  // ASTRA-13: the recovery's read is slow and the object lands meanwhile; a GET in between finds the reading right held
+  // and reconciles nothing, so no stale answer overwrites a settled file; the resend then finds the object (one object).
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h);
+    h.s.advance(31000);
+    let release, reached;
+    const held = new Promise(resolve => { release = resolve; });
+    const seen = new Promise(resolve => { reached = resolve; });
+    let first = true;
+    h.orthanc.fault = async call => { if (call.path === '/tools/lookup' && first) { first = false; reached(); await held; return { raw: '[]' }; } return null; };
+    const pending = recovery(h, a.id, body());
+    await seen;
+    h.orthanc.store(a.bytes);
+    const status = await h.request('GET', '/api/dicom-import/' + a.id);
+    assert.equal(status.body.files[0].outcome, 'unconfirmed', 'the GET does not read while the recovery holds the reading right');
+    release();
+    const recovered = await pending;
+    assert.deepEqual([recovered.status, recovered.body.code], [200, 'RECOVERED_NO_OBJECT']);
+    const resent = await h.send(a.bytes, { id: a.id });
+    assert.deepEqual([resent.status, resent.body.outcome, h.orthanc.count()], [200, 'already-present', 1]);
+  }
+  // A reconciliation that holds the right first: the recovery is 409 while it runs and 409 once the file is settled.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h, { stored: true });
+    h.s.advance(31000);
+    let release, reached;
+    const held = new Promise(resolve => { release = resolve; });
+    const seen = new Promise(resolve => { reached = resolve; });
+    h.orthanc.fault = async call => { if (call.path === '/tools/lookup') { reached(); await held; } return null; };
+    const get = h.request('GET', '/api/dicom-import/' + a.id);
+    await seen;
+    assert.equal((await recovery(h, a.id, body())).body.code, 'RECOVERY_NOT_APPLICABLE', 'in progress');
+    h.orthanc.fault = null;
+    release();
+    assert.equal((await get).body.files[0].outcome, 'stored');
+    assert.equal((await recovery(h, a.id, body())).body.code, 'RECOVERY_NOT_APPLICABLE', 'settled');
+    assert.equal(audits(h.s, 'dicom.import.recovery.result').length, 0);
+  }
+  // Two admins within one DB millisecond on one may-have-written occupancy: the later request record wins; the earlier
+  // request is 409 with nothing of it in the result; each request row keeps its own admin.
+  {
+    const h = await harness();
+    const m = await mayHaveWritten(h);
+    let release, arrived = 0, both;
+    const held = new Promise(resolve => { release = resolve; });
+    const two = new Promise(resolve => { both = resolve; });
+    h.orthanc.fault = async call => { if (call.path === '/tools/lookup') { if (++arrived === 2) both(); await held; } return null; };
+    const first = recovery(h, m.id, body(new Date(T0 + 1000).toISOString()), ADMIN);
+    await sleep(100);
+    const second = recovery(h, m.id, { basis: 'orthanc-restarted', checkedAt: new Date(T0 + 2000).toISOString() }, ADMIN2);
+    await two;
+    release();
+    const answers = [await first, await second];
+    assert.deepEqual(answers.map(r => [r.status, r.status === 200 ? r.body.outcome : r.body.code]), [[409, 'RECOVERY_NOT_APPLICABLE'], [200, 'rejected']]);
+    assert.deepEqual(audits(h.s, 'dicom.import.recovery.request').map(x => [x.actor, x.detail.basis]), [[ADMIN.actor, 'orthanc-log-checked'], [ADMIN2.actor, 'orthanc-restarted']]);
+    assert.deepEqual(audits(h.s, 'dicom.import.recovery.result').map(x => [x.actor, x.detail.basis, x.detail.adminSubject]), [[ADMIN2.actor, 'orthanc-restarted', ADMIN2.sub]]);
+    assert.deepEqual([h.s.file(m.id, 0).attempts[0].recovery.adminSubject, h.s.file(m.id, 0).attempts[0].recovery.basis], [ADMIN2.sub, 'orthanc-restarted']);
+  }
+  // An automatic re-check holding the reading right: the recovery is 409 meanwhile; afterwards (absence recorded, right
+  // given back) it records its own basis.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h);
+    h.s.advance(31000);
+    let release, reached;
+    const held = new Promise(resolve => { release = resolve; });
+    const seen = new Promise(resolve => { reached = resolve; });
+    h.orthanc.fault = async call => { if (call.path === '/tools/lookup') { reached(); await held; } return null; };
+    const recheck = h.send(a.bytes, { id: a.id });
+    await seen;
+    assert.equal((await recovery(h, a.id, body())).body.code, 'RECOVERY_NOT_APPLICABLE', 'the re-check reads');
+    h.orthanc.fault = null;
+    release();
+    assert.equal((await recheck).status, 202);
+    assert.deepEqual((await recovery(h, a.id, body())).body.code, 'RECOVERED_NO_OBJECT');
+  }
+  // Two objects under the SOP UID at the recovery read: rejected SOP_UID_AMBIGUOUS may-have-written, occupancy released.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h, { stored: true });
+    const entry = h.s.file(a.id, 0);
+    h.orthanc.store(dicom({ study: a.study, series: entry.seriesUid, sop: entry.sopUid, id: 'SYN-SECOND' }));
+    h.s.advance(31000);
+    const r = await recovery(h, a.id, body());
+    assert.deepEqual([r.status, r.body.outcome, r.body.code, r.body.writeDisposition], [200, 'rejected', 'SOP_UID_AMBIGUOUS', 'may-have-written']);
+    assert.equal(h.s.claim('study:' + a.study).claim.heldByAttemptId, null);
+  }
+  // A result row that cannot be written: the whole result rolls back (503, outcome and holders unchanged, no result row);
+  // once the reading right ran out the same request succeeds.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h);
+    h.s.advance(31000);
+    h.s.auditFailure = data => data.action === 'dicom.import.recovery.result';
+    const failed = await recovery(h, a.id, body());
+    assert.deepEqual([failed.status, failed.body.code], [503, 'IMPORT_STORAGE_UNAVAILABLE']);
+    assert.deepEqual([h.s.file(a.id, 0).outcome, h.s.claim('study:' + a.study).claim.heldByAttemptId, audits(h.s, 'dicom.import.recovery.result').length],
+      ['unconfirmed', a.attempt.attemptId, 0]);
+    h.s.auditFailure = null;
+    h.s.advance(31000);
+    assert.deepEqual((await recovery(h, a.id, body())).body.code, 'RECOVERED_NO_OBJECT');
+  }
+});
+
+test('S9U4-B45 a file result keeps what is already known (ASTRA-12, ASTRA-14): the three UIDs of a parsed file refused for its modality or identity, the Study UID as the audit target, the request actor of a new refusal, and only an InstitutionName mismatch flag (no tag text); the replay keeps the file-specific description', async () => {
+  const h = await harness();
+  const study = uid(), series = study + '.1';
+  const first = await h.send(dicom({ study, series }));
+  // ASTRA-12: an MG file of a known study - its UIDs stay with the refusal and its audit row.
+  const mg = dicom({ study, series, modality: 'MG' });
+  const refused = await h.send(mg, { id: first.id, index: 1, as: { ...TECH, actor: 'renamed@synthetic.test' } });
+  assert.deepEqual([refused.body.code, refused.body.studyUid, refused.body.seriesUid, !!refused.body.sopUid], ['MODALITY_NOT_IMPORTABLE', study, series, true]);
+  const entry = h.s.file(first.id, 1);
+  assert.deepEqual([entry.studyUid, entry.seriesUid, entry.sopUid], [study, series, refused.body.sopUid]);
+  const row = audits(h.s, 'dicom.import.result').find(a => a.detail.operationId === first.id && a.detail.index === 1);
+  // ASTRA-14: the actor of the request that refused it; the operation keeps its first actor and its owner.
+  assert.deepEqual([row.target, row.actor, row.detail.actor], [study, 'renamed@synthetic.test', 'renamed@synthetic.test']);
+  assert.deepEqual([h.s.op(first.id).actor, h.s.op(first.id).ownerSubject], [TECH.actor, TECH.sub]);
+  // U4BB-18: the same bytes again replay the mammography sentence; GET gives the table's general description.
+  const replay = await h.send(mg, { id: first.id, index: 1 });
+  assert.equal(replay.body.message, refused.body.message);
+  assert.equal(replay.body.message, '유방촬영 영상은 아직 직접 반입할 수 없습니다.');
+  const status = await h.request('GET', '/api/dicom-import/' + first.id);
+  assert.equal(status.body.files[1].message, '이 종류의 영상은 아직 직접 반입할 수 없습니다.');
+  // A file the reader refused has no UIDs and its row targets the operation.
+  const unread = await h.send(Buffer.from('not dicom'), { id: first.id, index: 2 });
+  assert.deepEqual([unread.body.studyUid, audits(h.s, 'dicom.import.result').find(a => a.detail.index === 2 && a.detail.operationId === first.id).target], [null, first.id]);
+  // InstitutionName: the own name or an alias (trim/case) -> false; another hospital's name -> true; no tag -> null.
+  for (const [name, flag] of [['  synthetic a ', false], ['SYN A', false], ['inst-a', false], ['SYNTHETIC OTHER HOSPITAL', true], [null, null]]) {
+    const r = await h.send(dicom({ study: uid(), institution: name }));
+    assert.equal(r.status, 200, String(name));
+    const rows = h.s.audits.filter(a => JSON.parse(a.detail).operationId === r.id).map(a => JSON.parse(a.detail));
+    assert.deepEqual(rows.map(d => d.institutionNameMismatch), [flag, flag], String(name) + ': intent and result');
+    noPatientValue(h.s.audits, 'SYNTHETIC OTHER HOSPITAL');
+    noPatientValue(h.s.op(r.id), 'SYNTHETIC OTHER HOSPITAL', 'institutionNameMismatch');
+  }
+  const flagged = await h.send(dicom({ study: uid(), institution: 'SYNTHETIC OTHER HOSPITAL', modality: 'NM' }));
+  assert.equal(JSON.parse(h.s.audits.at(-1).detail).institutionNameMismatch, true, 'a refusal row carries the flag too');
+  assert.ok([...h.s.states.values()].every(state => state.institutionId === 'inst-a' && state.origin === 'local-import'), 'the flag never changes ownership');
+  void flagged;
+});
+
+test('S9U4-B46 two requests creating one new operation id are serialised by its advisory lock, never by a lock on an absent row (ASTRA-PG-ABSENCE): same index and other bytes 409 OPERATION_CONTENT_CONFLICT, other indexes both kept, another owner 409 OPERATION_CONFLICT, an import and a download preparation of one id 409', async () => {
+  // The first request is held after its lock on the (still absent) operation row and before it creates the row: only a
+  // lock that does not depend on the row existing keeps the second one out of that window.
+  const afterOpSelect = id => { let inTx = null; return (sql, values, tx) => {
+    if (!inTx && sql.includes('WHERE id = ?::uuid FOR UPDATE') && values[0] === id) { inTx = tx; return false; }
+    return !!inTx && tx === inTx && sql.includes('clock_timestamp()');
+  }; };
+  const ownStudy = h => { const study = uid(); own(h.s, study, 'inst-a', 'gateway'); return study; };
+  async function race(h, id, first, second) {
+    const hold = holdOnce(h, afterOpSelect(id));
+    const a = first();
+    await hold.reached;
+    const b = second();
+    await sleep(150);
+    assert.equal(h.s.ops.has(id), false, 'the second request waits; nothing committed yet');
+    hold.open();
+    return [await a, await b];
+  }
+  {
+    const h = await harness();
+    const id = randomUUID();
+    const [a, b] = await race(h, id, () => h.send(dicom({ study: ownStudy(h) }), { id }), () => h.send(dicom({ study: ownStudy(h) }), { id }));
+    assert.deepEqual([a.status, b.status, b.body.code], [200, 409, 'OPERATION_CONTENT_CONFLICT'], JSON.stringify([a.body, b.body]));
+    assert.deepEqual([h.s.op(id).results.length, h.s.file(id, 0).sha256], [1, a.body.sha256], 'the winner\'s entry stays');
+  }
+  {
+    const h = await harness();
+    const id = randomUUID();
+    const [a, b] = await race(h, id, () => h.send(dicom({ study: ownStudy(h) }), { id, index: 0 }), () => h.send(dicom({ study: ownStudy(h) }), { id, index: 1 }));
+    assert.deepEqual([a.status, b.status, h.s.op(id).results.map(e => e.outcome)], [200, 200, ['stored', 'stored']], 'no result lost');
+  }
+  {
+    const h = await harness();
+    const id = randomUUID();
+    const [a, b] = await race(h, id, () => h.send(dicom({ study: ownStudy(h) }), { id }), () => h.send(dicom({ study: ownStudy(h) }), { id, as: TECH2 }));
+    assert.deepEqual([a.status, b.status, b.body.code], [200, 409, 'OPERATION_CONFLICT']);
+  }
+  {
+    const h = await harness();
+    const id = randomUUID(), study = await downloadStudy(h, 1);
+    const [a, b] = await race(h, id, () => h.send(dicom({ study: ownStudy(h) }), { id }), () => prepare(h, study, id, TECH));
+    assert.deepEqual([a.status, b.status, b.body.code, h.s.op(id).kind], [200, 409, 'OPERATION_CONFLICT', 'import']);
+  }
+});
+
+test('S9U4-B47 a database read or commit that fails before any intent is 503 IMPORT_STORAGE_UNAVAILABLE with nothing written (ASTRA-EXTRA-01) on import, preparation, status and archive; refusals and readiness keep their own answers; no database text leaves', async () => {
+  const unavailable = () => { throw new Error('synthetic database read unavailable: relation "secret" password=x'); };
+  const checks = [
+    ['the institution list', h => { h.s.prisma.institution.findMany = unavailable; }],
+    ['the StudyState read', h => { h.s.prisma.studyState.findUnique = unavailable; }],
+    ['the StudyAccess policy read', h => { const q = h.s.prisma.$queryRaw; h.s.prisma.$queryRaw = (strings, ...values) => (strings.join('?').includes('StudyAccessPolicy') ? unavailable() : q(strings, ...values)); }],
+    ['the operation lock', h => { h.s.onQuery = sql => { if (sql.includes('WHERE id = ?::uuid FOR UPDATE')) unavailable(); }; }],
+  ];
+  for (const [name, fail] of checks) {
+    const h = await harness();
+    const study = uid(); own(h.s, study);
+    h.orthanc.store(dicom({ study }));
+    fail(h);
+    const r = await h.send(dicom({ study, series: study + '.9' }));
+    assert.deepEqual([r.status, r.body.code], [503, 'IMPORT_STORAGE_UNAVAILABLE'], name);
+    assert.ok(!JSON.stringify(r.body).includes('secret'), name + ': no database text');
+    assert.deepEqual([posts(h.orthanc), [...h.s.ops.values()].filter(o => o.kind === 'import').length], [0, 0], name);
+  }
+  // Preparation, status and archive reads.
+  {
+    const h = await harness();
+    const study = await downloadStudy(h, 1), id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200);
+    const read = h.s.prisma.studyState.findUnique;
+    h.s.prisma.studyState.findUnique = unavailable;
+    for (const [what, call] of [['prepare', () => prepare(h, study, randomUUID())], ['status', () => h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: RAD })],
+      ['archive', () => h.request('GET', archivePath(study, id), { as: RAD })]]) {
+      const r = await call();
+      assert.deepEqual([r.status, r.body?.code], [503, 'IMPORT_STORAGE_UNAVAILABLE'], what);
+    }
+    h.s.prisma.studyState.findUnique = read;
+    const importOp = (await h.send(dicom({ study: uid() }))).id;
+    h.s.prisma.importOperation.findUnique = unavailable;
+    assert.deepEqual((await h.request('GET', '/api/dicom-import/' + importOp)).body.code, 'IMPORT_STORAGE_UNAVAILABLE', 'import status');
+    assert.equal(h.s.op(id).download.attempts.length, 0, 'no attempt, no byte');
+  }
+  // Refusals keep their own answers under the same mapping.
+  {
+    const h = await harness();
+    assert.equal((await h.send(dicom({ study: uid() }), { as: RAD })).status, 403);
+    const existing = uid(); own(h.s, existing);
+    h.s.policies.set(TECH.sub, deniedPolicy);
+    assert.deepEqual([(await h.send(dicom({ study: existing }))).status], [404]);
+    h.s.migration = false;
+    assert.deepEqual((await h.send(dicom({ study: uid() }))).body.code, 'IMPORT_NOT_READY');
+  }
 });

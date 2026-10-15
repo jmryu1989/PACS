@@ -105,7 +105,7 @@ export const RECOVERY_NOTICES = Object.freeze({
 export const RECOVERY_BASES = Object.freeze(['orthanc-restarted', 'orthanc-log-checked']);
 
 export const IMPORT_NOT_READY_MESSAGE = 'DICOM 반입 기능이 아직 준비되지 않았습니다. 파일은 저장되지 않았습니다. 관리자에게 알려 주세요.';
-export const IMPORT_STORAGE_MESSAGE = '반입 기록을 저장하지 못했습니다. 아무것도 저장하지 않았습니다. 잠시 뒤 같은 파일로 다시 시도하세요.';
+export const IMPORT_STORAGE_MESSAGE = '반입 기록을 읽거나 저장하지 못했습니다. 아무것도 저장하지 않았습니다. 잠시 뒤 같은 파일로 다시 시도하세요.';
 
 export interface ImportOwner { institutionId: string; ownerIssuer: string; ownerSubject: string; actor: string }
 export interface InstitutionRow { id: string; name: string; dicomNames: string | null }
@@ -129,9 +129,12 @@ export interface ImportFileEntry {
 /** The file facts of an accepted read: what the gate binds and compares. */
 export interface AcceptedFile {
   ok: true; studyUid: string; seriesUid: string; sopUid: string; patientId: string; issuerInstitutionId: string;
-  nameKey: string | null; birthKey: string | null; sexKey: string | null;
+  nameKey: string | null; birthKey: string | null; sexKey: string | null; institutionNameMismatch: boolean | null;
 }
-export type FilePrecheck = AcceptedFile | { ok: false; code: ImportCode; message: string };
+/** A refused file: its code and message, and - when the reader accepted the bytes - the three UIDs it already verified. */
+export type RefusedFile = { ok: false; code: ImportCode; message: string;
+  uids: { studyUid: string; seriesUid: string; sopUid: string } | null; institutionNameMismatch: boolean | null };
+export type FilePrecheck = AcceptedFile | RefusedFile;
 
 export interface ImportRequest {
   owner: ImportOwner; operationId: string; index: number; expectedStudyUid: string | null;
@@ -162,7 +165,7 @@ type Step =
   | { kind: 'enumerate' }
   | { kind: 'fence'; attemptId: string }
   | { kind: 'initialize'; attempt: ImportAttempt }
-  | { kind: 'recheck'; attempt: ImportAttempt }
+  | { kind: 'recheck'; attempt: ImportAttempt; token: string }
   | { kind: 'send'; attempt: ImportAttempt };
 
 const studyKey = (uid: string) => 'study:' + uid;
@@ -326,11 +329,37 @@ export function checkClaimRow(row: any): any {
 const advisory = (key: string) => createHash('sha256').update(key, 'utf8').digest().readBigInt64BE(0).toString();
 const lastAttempt = (entry: ImportFileEntry): ImportAttempt | null => entry.attempts.length ? entry.attempts[entry.attempts.length - 1] : null;
 const leaseLive = (attempt: ImportAttempt, now: Date) => Date.parse(attempt.leaseUntil) > now.getTime();
-const activeAttempt = (attempt: ImportAttempt, now: Date) =>
-  (attempt.phase === 'prepared' || attempt.phase === 'dispatching') && leaseLive(attempt, now);
-const expiredPrepared = (attempt: ImportAttempt, now: Date) => attempt.phase === 'prepared' && !leaseLive(attempt, now);
-const unknownResult = (attempt: ImportAttempt, now: Date) =>
-  attempt.phase === 'unknown' || (attempt.phase === 'dispatching' && !leaseLive(attempt, now));
+
+/**
+ * Contract 4.4 transition table: the one reading of a file, by the database's time read after the row locks, that every
+ * path decides from (the owner's POST, GET, startup, the automatic re-check, the admin recovery, a needed holder).
+ *   final            stored / already-present / rejected: replayed, nothing else (a may-have-written occupancy is the
+ *                    admin recovery's alone)
+ *   retryable        the same POST runs a new generation
+ *   live             the last attempt holds a live lease - a worker preparing, initialising or dispatching, or a reader
+ *                    re-reading an unknown result: nobody else reconciles, fences, re-checks or recovers it
+ *   expired-prepared the last attempt never dispatched and its lease ran out: anyone fences it (IMPORT_ATTEMPT_EXPIRED,
+ *                    certain-no-write, only its own holders released), never a write to Orthanc
+ *   expired-unknown  the last attempt dispatched (or its read-back failed) and its lease ran out: read-only reconciliation,
+ *                    the automatic re-check once, the admin recovery
+ */
+export type FileState = 'final' | 'retryable' | 'live' | 'expired-prepared' | 'expired-unknown';
+export function fileState(entry: ImportFileEntry, now: Date): FileState {
+  if (FINAL_OUTCOMES.has(entry.outcome)) return 'final';
+  if (entry.outcome === 'retryable') return 'retryable';
+  const last = lastAttempt(entry)!;   // an Unconfirmed file always ends with an attempt that has no result (checked format)
+  if (leaseLive(last, now)) return 'live';
+  return last.phase === 'prepared' ? 'expired-prepared' : 'expired-unknown';
+}
+
+/**
+ * A worker's own CAS before it writes anything for its attempt (initialisation result, dispatch, result, renewal): its
+ * attempt is still the file's last, the same generation, in one of these phases, and its lease is live by DB time.
+ */
+function holdsAttempt(entry: ImportFileEntry | undefined, attempt: ImportAttempt, now: Date, phases: readonly string[]): boolean {
+  const last = entry ? lastAttempt(entry) : null;
+  return !!last && last.attemptId === attempt.attemptId && last.generation === attempt.generation && phases.includes(last.phase) && leaseLive(last, now);
+}
 
 /** The answer of a stored file entry: HTTP, message, from the one table. */
 export function fileAnswer(entry: ImportFileEntry): ImportAnswer {
@@ -383,24 +412,35 @@ export function modalityRefusal(modality: string | null, frames: number | null):
  */
 export function precheckFile(read: DicomReadResult, expectedStudyUid: string | null, institutionId: string,
   institutions: readonly InstitutionRow[]): FilePrecheck {
-  if (read.ok === false) return { ok: false, code: read.code, message: IMPORT_RESULT_CODES[read.code].message };
+  if (read.ok === false)
+    return { ok: false, code: read.code, message: IMPORT_RESULT_CODES[read.code].message, uids: null, institutionNameMismatch: null };
   const h = read.header;
-  if (h.patientId === null || h.patientId.trim() === '')
-    return { ok: false, code: 'PATIENT_ID_MISSING', message: IMPORT_RESULT_CODES.PATIENT_ID_MISSING.message };
+  // Once the reader accepted the bytes their three UIDs are known and kept with any business refusal (4.6, 4.9 target).
+  const uids = { studyUid: h.studyInstanceUid, seriesUid: h.seriesInstanceUid, sopUid: h.sopInstanceUid };
+  const institutionNameMismatch = institutionNameSignal(h.institutionName, institutionId, institutions);
+  const refused = (code: ImportCode, message: string): FilePrecheck => ({ ok: false, code, message, uids, institutionNameMismatch });
+  if (h.patientId === null || h.patientId.trim() === '') return refused('PATIENT_ID_MISSING', IMPORT_RESULT_CODES.PATIENT_ID_MISSING.message);
   const modality = modalityRefusal(h.modality, h.numberOfFrames);
-  if (modality) return { ok: false, code: 'MODALITY_NOT_IMPORTABLE', message: modality };
-  if (expectedStudyUid !== null && expectedStudyUid !== h.studyInstanceUid)
-    return { ok: false, code: 'STUDY_UID_MISMATCH', message: IMPORT_RESULT_CODES.STUDY_UID_MISMATCH.message };
+  if (modality) return refused('MODALITY_NOT_IMPORTABLE', modality);
+  if (expectedStudyUid !== null && expectedStudyUid !== h.studyInstanceUid) return refused('STUDY_UID_MISMATCH', IMPORT_RESULT_CODES.STUDY_UID_MISMATCH.message);
   if (h.issuerOfPatientId !== null && h.issuerOfPatientId.trim() !== '') {
     const found = issuerInstitutions(h.issuerOfPatientId, institutions);
-    if (found.size !== 1 || !found.has(institutionId))
-      return { ok: false, code: 'PATIENT_ISSUER_CONFLICT', message: IMPORT_RESULT_CODES.PATIENT_ISSUER_CONFLICT.message };
+    if (found.size !== 1 || !found.has(institutionId)) return refused('PATIENT_ISSUER_CONFLICT', IMPORT_RESULT_CODES.PATIENT_ISSUER_CONFLICT.message);
   }
   const keyOrNull = (value: string) => value === '' ? null : value;
-  return { ok: true, studyUid: h.studyInstanceUid, seriesUid: h.seriesInstanceUid, sopUid: h.sopInstanceUid,
-    patientId: h.patientId.trim(), issuerInstitutionId: institutionId,
+  return { ok: true, ...uids, patientId: h.patientId.trim(), issuerInstitutionId: institutionId,
     nameKey: h.patientNameComparable ? keyOrNull(nameKey(h.patientName)) : null,
-    birthKey: keyOrNull(birthKey(h.patientBirthDate)), sexKey: keyOrNull(sexKey(h.patientSex)) };
+    birthKey: keyOrNull(birthKey(h.patientBirthDate)), sexKey: keyOrNull(sexKey(h.patientSex)), institutionNameMismatch };
+}
+
+/**
+ * 4.3: InstitutionName is a mismatch signal only, never an ownership fact. null when the tag is absent or empty; false when
+ * it names the importing institution by its id, name or an alias (the 4.2 trim/lower-case normalisation); true otherwise.
+ * Only this boolean reaches an audit detail; the tag text never does.
+ */
+export function institutionNameSignal(name: string | null, institutionId: string, institutions: readonly InstitutionRow[]): boolean | null {
+  if (name === null || name.trim() === '') return null;
+  return !issuerInstitutions(name, institutions).has(institutionId);
 }
 
 /** 4.4 claim initialisation, step 3: judged over every header read; never over an index or a partial read. */
@@ -508,7 +548,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     return this.prisma.institution.findMany({ select: { id: true, name: true, dicomNames: true } });
   }
 
-  // ── the import state machine (4.4 transition table) ──
+  // ── the import state machine (4.4 transition table: fileState) ──
 
   async importFile(r: ImportRequest): Promise<ImportAnswer> {
     let enumeration: { failed: boolean; count: number } | null = null;
@@ -517,9 +557,9 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       if (step.kind === 'answer') return step.answer;
       if (step.kind === 'enumerate' && r.precheck.ok) { enumeration = await this.enumerateNewStudy(r.precheck.studyUid); continue; }
       if (step.kind === 'fence') { await this.storage(() => this.fenceExpired(step.attemptId)); continue; }
-      if (step.kind === 'recheck') return this.autoRecheck(r, step.attempt);
+      if (step.kind === 'recheck') return this.autoRecheck(r, step.attempt, step.token);
       if (step.kind === 'initialize') {
-        const next = await this.initialize(r, step.attempt);
+        const next = await this.storage(() => this.initialize(r, step.attempt));
         if (next.kind === 'answer') return next.answer;
         return this.send(r, next.attempt);
       }
@@ -528,9 +568,13 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: IMPORT_STORAGE_MESSAGE });
   }
 
-  /** The intake transaction: claims (sorted) then the operation row; the reservation and the intent commit together. */
+  /**
+   * The intake transaction: claims (sorted) then the operation row (whose advisory lock also serialises the creation of a
+   * new operation id), then the database's time; the reservation and the intent commit together.
+   */
   private intake(r: ImportRequest, enumeration: { failed: boolean; count: number } | null): Promise<Step> {
     const file = r.precheck;
+    const said = { institutionNameMismatch: file.institutionNameMismatch };
     return this.write(async tx => {
       const claims = file.ok ? await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]) : new Map<string, ClaimRow>();
       const op = await this.lockOperation(tx, r.operationId);
@@ -542,40 +586,42 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         throw this.requestConflict('OPERATION_CONTENT_CONFLICT');
       const save = () => this.saveImport(tx, op, r, results, now);
       if (entry) {
-        if (FINAL_OUTCOMES.has(entry.outcome)) return { kind: 'answer', answer: fileAnswer(entry) };
-        if (entry.outcome === 'unconfirmed') {
-          const last = lastAttempt(entry);
-          if (last && activeAttempt(last, now)) return { kind: 'answer', answer: fileAnswer(entry) };
-          if (last && unknownResult(last, now)) {
-            if (last.phase === 'dispatching') {
-              this.markUnknown(entry, last, now);
-              await save();
-              await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, last, now);
-            }
-            if (!last.autoRecheckedAt) return { kind: 'recheck', attempt: last };
-            return { kind: 'answer', answer: fileAnswer(entry) };
-          }
-          if (last && expiredPrepared(last, now)) {
-            this.finishAttempt(entry, last, now, { outcome: 'retryable', code: 'IMPORT_ATTEMPT_EXPIRED', transport: 'certain-no-write' });
-            await this.releaseHolders(tx, claims, last.attemptId, now, true);
-            await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, last, now);
-          }
+        const state = fileState(entry, now);
+        if (state === 'final') return { kind: 'answer', answer: this.replay(entry, file) };
+        if (state === 'live') return { kind: 'answer', answer: fileAnswer(entry) };
+        const last = lastAttempt(entry)!;
+        if (state === 'expired-unknown') {
+          if (last.autoRecheckedAt || !file.ok) return { kind: 'answer', answer: fileAnswer(entry) };
+          // The one automatic re-check (4.4): its reading right is taken here, with the row, before any Orthanc read, so
+          // a second same-key POST meanwhile finds the attempt live and reads nothing.
+          const wasDispatching = this.takeReading(entry, last, now);
+          await save();
+          if (wasDispatching) await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, last, now, said);
+          return { kind: 'recheck', attempt: last, token: last.leaseUntil };
+        }
+        if (state === 'expired-prepared') {
+          this.finishAttempt(entry, last, now, { outcome: 'retryable', code: 'IMPORT_ATTEMPT_EXPIRED', transport: 'certain-no-write' });
+          await this.releaseHolders(tx, claims, last.attemptId, now, true);
+          await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, last, now, said);
         }
       }
+      // A refusal written by this request is this request's: its actor, not the operation's first one (4.9).
+      const refusedBy = { actor: r.owner.actor, ...said };
       if (file.ok === false) {
         // A new file, or a retryable one whose bytes are now refused before any reservation (e.g. an issuer that no
-        // longer resolves to this institution alone): a final result, no reservation, no StudyState change.
-        if (!entry) { entry = this.newEntry(r, null, now); results.push(entry); }
+        // longer resolves to this institution alone): a final result, no reservation, no StudyState change. The three
+        // UIDs the reader already verified stay with it; only a file the reader refused has none.
+        if (!entry) { entry = this.newEntry(r, file.uids, now); results.push(entry); }
         this.settle(entry, now, file.code, 'rejected', null);
         await save();
-        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, null, now);
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, null, now, refusedBy);
         return { kind: 'answer', answer: { ...fileAnswer(entry), message: file.message } };
       }
       if (!entry) { entry = this.newEntry(r, file, now); results.push(entry); }
       const refuse = async (code: ImportCode, disposition: WriteDisposition | null = null): Promise<Step> => {
         this.settle(entry, now, code, IMPORT_RESULT_CODES[code].outcome as ImportOutcome, disposition);
         await save();
-        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, null, now);
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, null, now, refusedBy);
         return { kind: 'answer', answer: fileAnswer(entry) };
       };
       const state = await tx.studyState.findUnique({ where: { uid: file.studyUid } });
@@ -645,75 +691,85 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * A final result replayed (4.8). A refusal of these very bytes is answered with the description it was refused with
+   * (e.g. the mammography sentence of 4.7, read again from the same bytes); GET, which has no bytes, gives the code's
+   * general description of the one table.
+   */
+  private replay(entry: ImportFileEntry, file: FilePrecheck): ImportAnswer {
+    const answer = fileAnswer(entry);
+    if (file.ok === false && entry.outcome === 'rejected' && entry.writeDisposition === null && file.code === entry.code) return { ...answer, message: file.message };
+    return answer;
+  }
+
   /** 4.4 claim initialisation for a Study UID whose StudyState exists and that has no bound claim. */
   private async initialize(r: ImportRequest, attempt: ImportAttempt): Promise<{ kind: 'answer'; answer: ImportAnswer } | { kind: 'send'; attempt: ImportAttempt }> {
     const file = r.precheck as AcceptedFile;
-    const lease = this.keepLease(r.operationId, r.index, attempt.attemptId, ['prepared']);
+    const said = { institutionNameMismatch: file.institutionNameMismatch };
+    const lease = this.keepLease(r, attempt, ['prepared']);
     let verdict: InitVerdict;
     try { verdict = await this.readExistingStudy(file.studyUid, r.owner.institutionId, lease.signal); }
     finally { lease.stop(); }
-    return this.storage(() => this.write(async tx => {
+    return this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
       const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
-      const entry = results.find(e => e.index === r.index);
-      const mine = entry?.attempts.find(a => a.attemptId === attempt.attemptId);
+      const entry = results.find(e => e.index === r.index)!;
+      const mine = lastAttempt(entry);
       const study = claims.get(studyKey(file.studyUid)), sop = claims.get(sopKey(file.sopUid));
-      if (!entry || !mine || mine.phase !== 'prepared' || !study || study.claim.phase !== 'initializing' || study.claim.heldByAttemptId !== mine.attemptId)
-        return { kind: 'answer' as const, answer: fileAnswer(entry ?? this.newEntry(r, file, now)) };
       const save = () => this.saveImport(tx, op, r, results, now);
-      const end = async (code: ImportCode, keepClaim: boolean, disposition: WriteDisposition | null = 'pre-write') => {
-        this.finishAttempt(entry, mine, now, { outcome: IMPORT_RESULT_CODES[code].outcome as ImportOutcome, code, transport: 'certain-no-write' }, disposition);
-        if (keepClaim) await this.releaseHolders(tx, claims, mine.attemptId, now, false);
-        else await tx.importOperation.delete({ where: { id: study.id } });
+      const end = async (code: ImportCode, disposition: WriteDisposition | null = 'pre-write') => {
+        this.finishAttempt(entry, mine!, now, { outcome: IMPORT_RESULT_CODES[code].outcome as ImportOutcome, code, transport: 'certain-no-write' }, disposition);
+        // No Orthanc write happened: the initializing claim this attempt holds goes away and the next import reads again.
+        await this.releaseHolders(tx, claims, mine!.attemptId, now, true);
         await save();
-        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now, said);
         return { kind: 'answer' as const, answer: fileAnswer(entry) };
       };
-      if (verdict.kind === 'lost') return end('IMPORT_ATTEMPT_EXPIRED', false, null);
-      if (verdict.kind === 'unavailable') return end('ORTHANC_UNAVAILABLE', false, null);
-      if (verdict.kind === 'unresolved') return end('EXISTING_STUDY_IDENTITY_UNRESOLVED', false);
+      // The worker's CAS: still its file's last attempt, prepared, holding the initializing claim, its lease live by DB time.
+      // Its own expired prepared attempt is fenced here exactly as anyone would fence it; anything else is someone else's.
+      if (!holdsAttempt(entry, attempt, now, ['prepared']) || !study || study.claim.phase !== 'initializing' || study.claim.heldByAttemptId !== attempt.attemptId) {
+        if (mine?.attemptId === attempt.attemptId && fileState(entry, now) === 'expired-prepared') return end('IMPORT_ATTEMPT_EXPIRED', null);
+        return { kind: 'answer' as const, answer: fileAnswer(entry) };
+      }
+      if (verdict.kind === 'lost') return end('IMPORT_ATTEMPT_EXPIRED', null);
+      if (verdict.kind === 'unavailable') return end('ORTHANC_UNAVAILABLE', null);
+      if (verdict.kind === 'unresolved') return end('EXISTING_STUDY_IDENTITY_UNRESOLVED');
       let values: { patientId: string; nameKey: string | null; birthKey: string | null; sexKey: string | null };
       if (verdict.kind === 'empty') {
         const state = await tx.studyState.findUnique({ where: { uid: file.studyUid } });
-        if (!state || (state.origin !== 'gateway' && state.origin !== 'local-import')) return end('EXISTING_STUDY_IDENTITY_UNRESOLVED', false);
+        if (!state || (state.origin !== 'gateway' && state.origin !== 'local-import')) return end('EXISTING_STUDY_IDENTITY_UNRESOLVED');
         values = { patientId: file.patientId, nameKey: file.nameKey, birthKey: file.birthKey, sexKey: file.sexKey };
       } else values = verdict;
       const bound = { ...study.claim, phase: 'bound', patientId: values.patientId, issuerInstitutionId: r.owner.institutionId,
         nameKey: values.nameKey, birthKey: values.birthKey, sexKey: values.sexKey };
       const compared = compareWithStudyClaim(bound, file, r.owner.institutionId);
-      if (compared.code) {
-        await this.updateClaim(tx, study, { ...bound, heldByAttemptId: null }, now);
-        this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: compared.code, transport: 'certain-no-write' }, 'pre-write');
+      const blocked = async (code: ImportCode, disposition: WriteDisposition | null, fill: Record<string, string>) => {
+        await this.updateClaim(tx, study, { ...bound, ...fill, heldByAttemptId: null }, now);
+        this.finishAttempt(entry, mine!, now, { outcome: IMPORT_RESULT_CODES[code].outcome as ImportOutcome, code, transport: 'certain-no-write' }, disposition);
         await save();
-        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
-        return { kind: 'answer' as const, answer: fileAnswer(entry) };
-      }
-      const blocked = async (code: ImportCode, disposition: WriteDisposition | null) => {
-        await this.updateClaim(tx, study, { ...bound, ...compared.fill, heldByAttemptId: null }, now);
-        this.finishAttempt(entry, mine, now, { outcome: IMPORT_RESULT_CODES[code].outcome as ImportOutcome, code, transport: 'certain-no-write' }, disposition);
-        await save();
-        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now, said);
         return { kind: 'answer' as const, answer: fileAnswer(entry) };
       };
+      if (compared.code) return blocked(compared.code, 'pre-write', {});
       if (sop) {
-        if (!sameSopContent(sop.claim, file, r.sha256, r.bytes.length, r.owner.institutionId)) return blocked('SOP_CONTENT_CONFLICT', 'pre-write');
-        if (sop.claim.heldByAttemptId && sop.claim.heldByAttemptId !== mine.attemptId) return blocked('SOP_WRITE_PENDING', null);
-        await this.updateClaim(tx, sop, { ...sop.claim, heldByAttemptId: mine.attemptId }, now);
-      } else await this.createClaim(tx, 'sop-claim', file.studyUid, sopKey(file.sopUid), this.sopClaim(file, r, mine.attemptId, now), now);
+        if (!sameSopContent(sop.claim, file, r.sha256, r.bytes.length, r.owner.institutionId)) return blocked('SOP_CONTENT_CONFLICT', 'pre-write', compared.fill);
+        if (sop.claim.heldByAttemptId && sop.claim.heldByAttemptId !== attempt.attemptId) return blocked('SOP_WRITE_PENDING', null, compared.fill);
+        await this.updateClaim(tx, sop, { ...sop.claim, heldByAttemptId: attempt.attemptId }, now);
+      } else await this.createClaim(tx, 'sop-claim', file.studyUid, sopKey(file.sopUid), this.sopClaim(file, r, attempt.attemptId, now), now);
       await this.updateClaim(tx, study, { ...bound, ...compared.fill }, now);
       entry.identity = compared.identity;
-      mine.leaseUntil = later(now, LEASE_MS);
+      mine!.leaseUntil = later(now, LEASE_MS);
       await save();
-      return { kind: 'send' as const, attempt: mine };
-    }));
+      return { kind: 'send' as const, attempt: mine! };
+    });
   }
 
   /** 4.5 steps 1-3 for one prepared attempt that holds its Study and SOP. */
   private async send(r: ImportRequest, attempt: ImportAttempt): Promise<ImportAnswer> {
     const file = r.precheck as AcceptedFile;
-    const lease = this.keepLease(r.operationId, r.index, attempt.attemptId, ['prepared', 'dispatching']);
+    const lease = this.keepLease(r, attempt, ['prepared', 'dispatching']);
     try {
       const before = await this.readSop(file, r.bytes.length, r.sha256, null);
       if (before.kind !== 'absent') {
@@ -723,11 +779,16 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         const [outcome, code, disposition] = ended[before.kind];
         return this.finish(r, attempt, { outcome, code, transport: 'certain-no-write', disposition, release: true, from: ['prepared'] });
       }
+      // Contract 3: the rights and the request's own credential now, immediately before the first Orthanc write.
       try { await r.recheck(); }
       catch (refusal) {
-        if (!(refusal instanceof HttpException) || ![403, 404].includes(refusal.getStatus())) throw refusal;
-        const answer = await this.finish(r, attempt, { outcome: 'retryable', code: 'IMPORT_PERMISSION_REVOKED', transport: 'certain-no-write', disposition: null, release: true, from: ['prepared'] });
-        return { ...answer, status: refusal.getStatus(), refusal };
+        if (refusal instanceof HttpException && [403, 404].includes(refusal.getStatus())) {
+          const answer = await this.finish(r, attempt, { outcome: 'retryable', code: 'IMPORT_PERMISSION_REVOKED', transport: 'certain-no-write', disposition: null, release: true, from: ['prepared'] });
+          return answer.entry.code === 'IMPORT_PERMISSION_REVOKED' ? { ...answer, status: refusal.getStatus(), refusal } : answer;
+        }
+        // Not a refusal (the database, the identity provider): nothing was written and nothing is decided; the prepared
+        // attempt keeps its holders until its lease runs out and is fenced like any other (IMPORT_ATTEMPT_EXPIRED).
+        throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: IMPORT_STORAGE_MESSAGE });
       }
       if (!await this.storage(() => this.markDispatching(r, attempt))) return this.current(r);
       const posted = await this.postInstance(r.bytes);
@@ -744,49 +805,87 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     } finally { lease.stop(); }
   }
 
-  /** 4.4 automatic re-check, once per attempt: a read only, never a resend; absence leaves the file Unconfirmed. */
-  private async autoRecheck(r: ImportRequest, attempt: ImportAttempt): Promise<ImportAnswer> {
+  /**
+   * 4.4 automatic re-check, once per attempt: one bounded read under the reading right the intake took (the attempt's
+   * lease, `token`), never a resend. A completed read is recorded once (autoRecheckedAt and its result row, absence
+   * included); a read that itself failed records nothing, so the next POST may check once more. The reading right is
+   * given back either way; a crash keeps the holders, and the right simply runs out.
+   */
+  private async autoRecheck(r: ImportRequest, attempt: ImportAttempt, token: string): Promise<ImportAnswer> {
     const file = r.precheck as AcceptedFile;
     const reading = await this.readSop(file, r.bytes.length, r.sha256, null);
-    if (reading.kind === 'failed') return this.current(r);
     return this.storage(() => this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
       const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
-      const entry = results.find(e => e.index === r.index);
-      const mine = entry && lastAttempt(entry);
-      if (!entry || !mine || mine.attemptId !== attempt.attemptId || mine.autoRecheckedAt || !unknownResult(mine, now)) return fileAnswer(entry);
-      mine.autoRecheckedAt = iso(now);
-      if (reading.kind === 'exact') {
-        this.finishAttempt(entry, mine, now, { outcome: 'stored', code: null, transport: mine.transport });
-        await this.releaseHolders(tx, claims, mine.attemptId, now, false);
-      } else if (reading.kind === 'conflict' || reading.kind === 'ambiguous') {
-        this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine.transport }, 'may-have-written');
+      const entry = results.find(e => e.index === r.index)!;
+      const mine = lastAttempt(entry);
+      if (!this.readingHeld(entry, attempt, token, now) || mine!.autoRecheckedAt) return fileAnswer(entry);
+      mine!.leaseUntil = iso(now);
+      if (reading.kind !== 'failed') {
+        mine!.autoRecheckedAt = iso(now);
+        if (reading.kind === 'exact') {
+          this.finishAttempt(entry, mine!, now, { outcome: 'stored', code: null, transport: mine!.transport });
+          await this.releaseHolders(tx, claims, mine!.attemptId, now, false);
+        } else if (reading.kind === 'conflict' || reading.kind === 'ambiguous') {
+          this.finishAttempt(entry, mine!, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine!.transport }, 'may-have-written');
+        }
       }
       await this.saveImport(tx, op, r, results, now);
-      if (reading.kind !== 'absent') await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+      if (reading.kind !== 'failed')
+        await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now, { institutionNameMismatch: file.institutionNameMismatch });
       return fileAnswer(entry);
     }));
   }
 
-  /** The attempt result, committed with its audit under the claim -> operation locks; a lost CAS writes nothing. */
+  /** A reader's own right on an unknown attempt: still the file's last attempt, unknown, with the very lease it set, live. */
+  private readingHeld(entry: ImportFileEntry | undefined, attempt: ImportAttempt, token: string, now: Date): boolean {
+    const last = entry ? lastAttempt(entry) : null;
+    return !!last && last.attemptId === attempt.attemptId && last.phase === 'unknown' && last.leaseUntil === token && leaseLive(last, now);
+  }
+
+  /**
+   * Take the reading right of an expired unknown attempt (GET, startup, the automatic re-check, the admin recovery): a
+   * fresh lease for this reader, so no other reader acts on it meanwhile. A dispatching attempt whose lease ran out first
+   * becomes unknown (its result was never written); the caller writes that generation's unconfirmed result row.
+   */
+  private takeReading(entry: ImportFileEntry, attempt: ImportAttempt, now: Date): boolean {
+    const wasDispatching = attempt.phase === 'dispatching';
+    if (wasDispatching) this.markUnknown(entry, attempt, now);
+    attempt.leaseUntil = later(now, LEASE_MS);
+    return wasDispatching;
+  }
+
+  /**
+   * The attempt's result, committed with its audit under the claim -> operation locks and the worker's CAS. A lost CAS
+   * writes no result: a prepared attempt whose own lease ran out is fenced by its worker as anyone would (certain-no-write,
+   * IMPORT_ATTEMPT_EXPIRED); a dispatched one leaves its result unknown for the reconciliation (4.4).
+   */
   private finish(r: ImportRequest, attempt: ImportAttempt, change: { outcome: ImportOutcome; code: ImportCode | null;
     transport: ImportAttempt['transport']; disposition: WriteDisposition | null; release: boolean; from: string[]; phase?: 'unknown' }): Promise<ImportAnswer> {
     const file = r.precheck as AcceptedFile;
+    const said = { institutionNameMismatch: file.institutionNameMismatch };
     return this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
       const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
-      const entry = results.find(e => e.index === r.index);
-      const mine = entry && lastAttempt(entry);
-      if (!entry || !mine || mine.attemptId !== attempt.attemptId || mine.generation !== attempt.generation || !change.from.includes(mine.phase))
+      const entry = results.find(e => e.index === r.index)!;
+      const mine = lastAttempt(entry);
+      if (!holdsAttempt(entry, attempt, now, change.from)) {
+        if (change.from.includes('prepared') && mine?.attemptId === attempt.attemptId && fileState(entry, now) === 'expired-prepared') {
+          this.finishAttempt(entry, mine, now, { outcome: 'retryable', code: 'IMPORT_ATTEMPT_EXPIRED', transport: 'certain-no-write' });
+          await this.releaseHolders(tx, claims, mine.attemptId, now, true);
+          await this.saveImport(tx, op, r, results, now);
+          await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now, said);
+        }
         return fileAnswer(entry);
-      this.finishAttempt(entry, mine, now, { outcome: change.outcome, code: change.code, transport: change.transport }, change.disposition, change.phase);
-      if (change.release) await this.releaseHolders(tx, claims, mine.attemptId, now, true);
+      }
+      this.finishAttempt(entry, mine!, now, { outcome: change.outcome, code: change.code, transport: change.transport }, change.disposition, change.phase);
+      if (change.release) await this.releaseHolders(tx, claims, mine!.attemptId, now, true);
       await this.saveImport(tx, op, r, results, now);
-      await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now);
+      await this.auditResult(tx, r.owner.institutionId, r.operationId, entry, mine, now, said);
       return fileAnswer(entry);
     }).catch(() => {
       // After the POST a result that could not be committed with its audit leaves the file Unconfirmed with its holders
@@ -814,7 +913,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     return fileAnswer(entry);
   }
 
-  /** prepared -> dispatching under the claim -> operation locks, only while this attempt still holds a live lease. */
+  /** prepared -> dispatching under the claim -> operation locks, only under the worker's CAS and while it holds both claims. */
   private markDispatching(r: ImportRequest, attempt: ImportAttempt): Promise<boolean> {
     const file = r.precheck as AcceptedFile;
     return this.write(async tx => {
@@ -823,9 +922,9 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
       const entry = results.find(e => e.index === r.index);
-      const mine = entry && lastAttempt(entry);
       const holds = [...claims.values()].every(row => row && row.claim.heldByAttemptId === attempt.attemptId);
-      if (!mine || mine.attemptId !== attempt.attemptId || mine.phase !== 'prepared' || !leaseLive(mine, now) || !holds) return false;
+      if (!holdsAttempt(entry, attempt, now, ['prepared']) || !holds) return false;
+      const mine = lastAttempt(entry!)!;
       mine.phase = 'dispatching';
       mine.leaseUntil = later(now, LEASE_MS);
       await this.saveImport(tx, op, r, results, now);
@@ -847,7 +946,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     }
     if (found.entry.studyUid !== row.studyUid || (row.kind === 'sop-claim' && found.entry.sopUid !== row.claim.sopUid))
       throw new StoredFormatError('claim holder of ' + row.claimKey);
-    return expiredPrepared(found.attempt, now) ? 'expired' : true;
+    return lastAttempt(found.entry)?.attemptId === found.attempt.attemptId && fileState(found.entry, now) === 'expired-prepared' ? 'expired' : true;
   }
 
   private async findAttempt(db: Tx, attemptId: string): Promise<{ opId: string; entry: ImportFileEntry; attempt: ImportAttempt } | null> {
@@ -875,8 +974,8 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       if (!op) return;
       const results: ImportFileEntry[] = clone(op.results);
       const entry = results.find(e => e.index === seen.entry.index);
-      const attempt = entry?.attempts.find(a => a.attemptId === attemptId);
-      if (!entry || !attempt || lastAttempt(entry) !== attempt || !expiredPrepared(attempt, now)) return;
+      const attempt = entry && lastAttempt(entry);
+      if (!entry || !attempt || attempt.attemptId !== attemptId || fileState(entry, now) !== 'expired-prepared') return;
       this.finishAttempt(entry, attempt, now, { outcome: 'retryable', code: 'IMPORT_ATTEMPT_EXPIRED', transport: 'certain-no-write' });
       await this.releaseHolders(tx, claims, attemptId, now, true);
       await tx.importOperation.update({ where: { id: op.id }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
@@ -942,20 +1041,33 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
 
   // ── GET status, startup reconciliation and the admin recovery ──
 
-  /** GET /api/dicom-import/:id: the owner's own import operation only; read-only reconciliation of unknown attempts. */
-  async importStatus(owner: ImportOwner, operationId: string, orthanc: boolean) {
+  /** The owner's own member import row in its persisted format; null for another owner, another kind or no row (one 404). */
+  async ownImport(owner: ImportOwner, operationId: string): Promise<any | null> {
     const op = await this.storage(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }));
-    if (!op || !this.sameOwner(op, owner, 'import')) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
-    await this.storage(async () => checkImportRow(op));
-    const now = await this.storage(() => this.dbNow());
-    for (const entry of op.results as any as ImportFileEntry[]) {
-      const last = lastAttempt(entry);
-      if (entry.outcome === 'unconfirmed' && last && unknownResult(last, now)) await this.reconcileUnknown(op.id, entry.index, last.attemptId, orthanc);
-    }
-    const fresh = await this.storage(async () => checkImportRow(await this.prisma.importOperation.findUnique({ where: { id: operationId } })));
-    return { operationId, status: fresh.status, files: (fresh.results as any as ImportFileEntry[]).map(entry => this.publicFile(entry)) };
+    if (!op || !this.sameOwner(op, owner, 'import')) return null;
+    return this.storage(async () => checkImportRow(op));
   }
 
+  /**
+   * GET /api/dicom-import/:id after the route's own access checks: the 4.4 table applied by DB time - an expired prepared
+   * attempt is fenced (IMPORT_ATTEMPT_EXPIRED, its own holders released, its result row; no Orthanc write) and an expired
+   * unknown one is reconciled read-only when Orthanc answers. A live attempt is never touched.
+   */
+  async importStatus(owner: ImportOwner, operationId: string, orthanc: boolean) {
+    const op = await this.ownImport(owner, operationId);
+    if (!op) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
+    const now = await this.storage(() => this.dbNow());
+    for (const entry of op.results as ImportFileEntry[]) {
+      const state = fileState(entry, now);
+      if (state === 'expired-prepared') await this.fenceExpired(lastAttempt(entry)!.attemptId).catch(() => undefined);
+      else if (state === 'expired-unknown') await this.reconcileUnknown(op.id, entry.index, lastAttempt(entry)!.attemptId, orthanc);
+    }
+    const fresh = await this.ownImport(owner, operationId);
+    if (!fresh) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
+    return { operationId, status: fresh.status, files: (fresh.results as ImportFileEntry[]).map(entry => this.publicFile(entry)) };
+  }
+
+  /** A file as the routes answer it. Its message is the one table's description of its code (no bytes here to read again). */
   publicFile(entry: ImportFileEntry) {
     const answer = fileAnswer(entry);
     const last = lastAttempt(entry);
@@ -968,47 +1080,66 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * An expired dispatching or unknown attempt: Orthanc read only. Exact -> stored, confirmed different -> rejected
-   * (may-have-written, occupancy kept); otherwise the file stays Unconfirmed and a dispatching attempt becomes unknown with
-   * its unconfirmed result row. Never a resend, never a release on absence.
+   * An expired dispatching or unknown attempt, read only (GET and startup). Under the row locks a dispatching attempt
+   * becomes unknown with its generation's unconfirmed result row, and the reading right is taken; then one bounded SOP
+   * read; then, under the same locks and only while that right is still this reader's: exact -> stored (holders
+   * released), confirmed different -> rejected may-have-written (occupancy kept), otherwise Unconfirmed as it was. Never a
+   * resend, never a release on absence; the right is given back at the end.
    */
   private async reconcileUnknown(operationId: string, index: number, attemptId: string, orthanc: boolean): Promise<void> {
-    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } }).catch(() => null);
-    if (!op) return;
-    try { checkImportRow(op); } catch { return; }
-    const seen = (op.results as any as ImportFileEntry[]).find(e => e.index === index);
-    if (!seen || !seen.studyUid || !seen.sopUid) return;
-    const file = { studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid } as AcceptedFile;
-    let reading: SopReading = { kind: 'failed' };
-    if (orthanc) {
-      const sop = await this.prisma.importOperation.findUnique({ where: { claimKey: sopKey(seen.sopUid) } });
-      const claim: any = sop?.claim;
-      if (claim && claim.sha256 === seen.sha256) reading = await this.readSop({ ...file, patientId: claim.patientId } as AcceptedFile, seen.bytes, seen.sha256, null);
-    }
-    await this.write(async tx => {
-      const claims = await this.lockClaims(tx, [studyKey(seen.studyUid), sopKey(seen.sopUid)]);
-      const locked = await this.lockOperation(tx, operationId);
-      const now = await this.clock(tx);
-      const results: ImportFileEntry[] = clone(locked.results);
-      const entry = results.find(e => e.index === index);
-      const mine = entry && lastAttempt(entry);
-      if (!entry || !mine || mine.attemptId !== attemptId || entry.outcome !== 'unconfirmed' || !unknownResult(mine, now)) return;
-      if (reading.kind === 'exact') {
-        this.finishAttempt(entry, mine, now, { outcome: 'stored', code: null, transport: mine.transport });
-        await this.releaseHolders(tx, claims, attemptId, now, false);
-      } else if (reading.kind === 'conflict' || reading.kind === 'ambiguous') {
-        this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine.transport }, 'may-have-written');
-      } else if (mine.phase === 'dispatching') this.markUnknown(entry, mine, now);
-      else return;
-      await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
-      await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now);
-    }).catch(() => undefined);
+    try {
+      const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+      if (!op) return;
+      const seen = (checkImportRow(op).results as ImportFileEntry[]).find(e => e.index === index);
+      if (!seen?.studyUid || !seen.sopUid) return;
+      const keys = [studyKey(seen.studyUid), sopKey(seen.sopUid)];
+      const taken = await this.write(async tx => {
+        const claims = await this.lockClaims(tx, keys);
+        const locked = await this.lockOperation(tx, operationId);
+        const now = await this.clock(tx);
+        const results: ImportFileEntry[] = clone(locked.results);
+        const entry = results.find(e => e.index === index);
+        const mine = entry && lastAttempt(entry);
+        if (!entry || !mine || mine.attemptId !== attemptId || fileState(entry, now) !== 'expired-unknown') return null;
+        const claim = claims.get(sopKey(seen.sopUid))?.claim;
+        const readable = orthanc && !!claim && claim.sha256 === entry.sha256;
+        const wasDispatching = readable ? this.takeReading(entry, mine, now) : mine.phase === 'dispatching';
+        if (!readable && wasDispatching) this.markUnknown(entry, mine, now);
+        if (!readable && !wasDispatching) return null;
+        await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, updatedAt: now } });
+        if (wasDispatching) await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now);
+        return readable ? { token: mine.leaseUntil, attempt: mine, patientId: claim.patientId as string } : null;
+      });
+      if (!taken) return;
+      const reading = await this.readSop({ studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid, patientId: taken.patientId } as AcceptedFile,
+        seen.bytes, seen.sha256, null);
+      await this.write(async tx => {
+        const claims = await this.lockClaims(tx, keys);
+        const locked = await this.lockOperation(tx, operationId);
+        const now = await this.clock(tx);
+        const results: ImportFileEntry[] = clone(locked.results);
+        const entry = results.find(e => e.index === index)!;
+        if (!this.readingHeld(entry, taken.attempt, taken.token, now)) return;
+        const mine = lastAttempt(entry)!;
+        mine.leaseUntil = iso(now);
+        const settled = reading.kind === 'exact' || reading.kind === 'conflict' || reading.kind === 'ambiguous';
+        if (reading.kind === 'exact') {
+          this.finishAttempt(entry, mine, now, { outcome: 'stored', code: null, transport: mine.transport });
+          await this.releaseHolders(tx, claims, attemptId, now, false);
+        } else if (settled) {
+          this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine.transport }, 'may-have-written');
+        }
+        await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
+        if (settled) await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now);
+      });
+    } catch { /* GET and the startup pass answer what is stored; the next reader reads again */ }
   }
 
   /**
-   * Startup (4.4 "복원·maintenance"): 500-row cursor batches. Inactive prepared -> IMPORT_ATTEMPT_EXPIRED; dispatching/unknown ->
-   * read-only reconciliation; an initializing claim without a live holder is deleted (no write happened). Another
-   * instance's live lease is never taken. (Expired download attempts are the download service's own startup pass.)
+   * Startup (4.4 "복원·maintenance"): 500-row cursor batches, the same table as every request. An expired prepared attempt
+   * is fenced; an expired dispatching/unknown one is reconciled read-only; an initializing claim whose attempt is gone is
+   * deleted (no write happened). A live lease - another instance's included - is never taken. (Expired download attempts
+   * are the download service's own startup pass.)
    */
   async reconcileOnStart(): Promise<{ fenced: number; reconciled: number; claimsRemoved: number }> {
     const counts = { fenced: 0, reconciled: 0, claimsRemoved: 0 };
@@ -1023,10 +1154,9 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         try { checkImportRow(op); } catch { this.logger.warn('import reconciliation: a stored row is not in its format; left as it is'); continue; }
         const now = await this.dbNow();
         for (const entry of op.results as ImportFileEntry[]) {
-          const last = lastAttempt(entry);
-          if (entry.outcome !== 'unconfirmed' || !last) continue;
-          if (expiredPrepared(last, now)) { await this.storage(() => this.fenceExpired(last.attemptId)).catch(() => undefined); counts.fenced++; }
-          else if (unknownResult(last, now)) { await this.reconcileUnknown(op.id, entry.index, last.attemptId, orthanc); counts.reconciled++; }
+          const state = fileState(entry, now);
+          if (state === 'expired-prepared') { await this.fenceExpired(lastAttempt(entry)!.attemptId).catch(() => undefined); counts.fenced++; }
+          else if (state === 'expired-unknown') { await this.reconcileUnknown(op.id, entry.index, lastAttempt(entry)!.attemptId, orthanc); counts.reconciled++; }
         }
       }
       if (page.length < 500 || this.stopping) break;
@@ -1038,8 +1168,8 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         orderBy: { id: 'asc' }, take: 500 });
       for (const row of page) {
         if (row.claim?.phase !== 'initializing') continue;
-        const holder = row.claim.heldByAttemptId ? await this.findAttempt(this.prisma, row.claim.heldByAttemptId) : null;
-        if (holder) continue;   // its attempt was fenced above, or is live elsewhere
+        const holder = row.claim.heldByAttemptId ? await this.findAttempt(this.prisma, row.claim.heldByAttemptId).catch(() => 'unknown') : null;
+        if (holder) continue;   // its attempt was fenced above, or is live elsewhere (or could not be read: left as it is)
         await this.write(async tx => {
           const claims = await this.lockClaims(tx, [row.claimKey]);
           const locked = claims.get(row.claimKey);
@@ -1058,8 +1188,25 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * POST /api/admin/dicom-import/:operationId/files/:index/recovery (4.4 "관리자 확인"): request record and audit first,
-   * then the Orthanc re-read, then the result with its audits. The admin route never writes to or deletes from Orthanc.
+   * What the admin recovery read, as one comparable value: the attempt (id, generation, phase, lease), the file's result,
+   * both claims' holders and the recovery record itself (whose admin, basis and time tell two requests apart even within
+   * one database millisecond). The result is committed only if this is still exactly what it was.
+   */
+  private recoverySnapshot(entry: ImportFileEntry, mine: ImportAttempt, claims: Map<string, ClaimRow>): string {
+    return JSON.stringify([mine.attemptId, mine.generation, mine.phase, mine.leaseUntil, entry.outcome, entry.code, entry.writeDisposition,
+      mine.recovery, [...claims.entries()].map(([key, row]) => [key, row ? row.claim.heldByAttemptId : null])]);
+  }
+
+  /**
+   * POST /api/admin/dicom-import/:operationId/files/:index/recovery (4.4 "관리자 확인"):
+   *   1. the request record and its audit row in one transaction (an expired unknown attempt's reading right taken with
+   *      them, so no GET, re-check or other recovery reads it meanwhile);
+   *   2. the same bounded SOP re-read for both kinds - an unknown attempt and a may-have-written occupancy (a failed read
+   *      is 503 ORTHANC_UNAVAILABLE: result and occupancy unchanged, only the reading right given back);
+   *   3./4. the result, the release and both result rows in one transaction, only while everything read in step 1 is
+   *      still exactly as it was (recoverySnapshot): a reconciliation or another admin request that won meanwhile makes
+   *      this one 409 RECOVERY_NOT_APPLICABLE with nothing written.
+   * The admin route never writes to or deletes from Orthanc.
    */
   async recover(admin: ImportOwner, operationId: string, index: number, body: unknown) {
     const op = await this.storage(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }));
@@ -1069,46 +1216,56 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     if (!seen) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
     const evidence = parseRecoveryBody(body);
     if (!evidence) throw new HttpException({ code: 'RECOVERY_EVIDENCE_INVALID', message: RECOVERY_NOTICES.evidence }, 400);
-    const keys = [seen.studyUid && studyKey(seen.studyUid), seen.sopUid && sopKey(seen.sopUid)].filter(Boolean) as string[];
+    const notApplicable = () => new HttpException({ code: 'RECOVERY_NOT_APPLICABLE', message: RECOVERY_NOTICES.notApplicable }, 409);
+    if (!seen.studyUid || !seen.sopUid) throw notApplicable();
+    const keys = [studyKey(seen.studyUid), sopKey(seen.sopUid)];
     const requested = await this.storage(() => this.write(async tx => {
       const claims = await this.lockClaims(tx, keys);
       const locked = await this.lockOperation(tx, operationId);
       const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(locked.results);
-      const entry = results.find(e => e.index === index);
-      const mine = entry && lastAttempt(entry);
+      const entry = results.find(e => e.index === index)!;
+      const mine = lastAttempt(entry);
       const holds = !!mine && [...claims.values()].some(row => row?.claim?.heldByAttemptId === mine.attemptId);
-      const unknown = !!mine && entry.outcome === 'unconfirmed' && unknownResult(mine, now);
+      const unknown = !!mine && fileState(entry, now) === 'expired-unknown';
       const occupied = !!mine && entry.outcome === 'rejected' && entry.writeDisposition === 'may-have-written' && holds;
-      if (!unknown && !occupied) throw new HttpException({ code: 'RECOVERY_NOT_APPLICABLE', message: RECOVERY_NOTICES.notApplicable }, 409);
+      if (!unknown && !occupied) throw notApplicable();
       const checkedAt = utcInstant(evidence.checkedAt)!;
-      if (checkedAt < Date.parse(mine.startedAt) || checkedAt > now.getTime())
+      if (checkedAt < Date.parse(mine!.startedAt) || checkedAt > now.getTime())
         throw new HttpException({ code: 'RECOVERY_EVIDENCE_INVALID', message: RECOVERY_NOTICES.evidence }, 400);
-      mine.recovery = { basis: evidence.basis, checkedAt: evidence.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject,
+      const sop = claims.get(sopKey(seen.sopUid!));
+      if (!sop) throw new StoredFormatError('the SOP claim of a dispatched attempt');
+      const wasDispatching = unknown ? this.takeReading(entry, mine!, now) : false;
+      mine!.recovery = { basis: evidence.basis, checkedAt: evidence.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject,
         adminActor: admin.actor, requestedAt: iso(now), resolvedAt: null };
       await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, updatedAt: now } });
+      if (wasDispatching) await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now);
       await tx.auditLog.create({ data: { actor: admin.actor, action: 'dicom.import.recovery.request', target: entry.studyUid ?? operationId,
-        detail: JSON.stringify({ institutionId: locked.institutionId, operationId, index, attemptId: mine.attemptId, generation: mine.generation,
+        detail: JSON.stringify({ institutionId: locked.institutionId, operationId, index, attemptId: mine!.attemptId, generation: mine!.generation,
           basis: evidence.basis, checkedAt: evidence.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject, at: iso(now) }) } });
-      return { attemptId: mine.attemptId, requestedAt: mine.recovery.requestedAt, unknown, sha256: entry.sha256, bytes: entry.bytes };
+      return { snapshot: this.recoverySnapshot(entry, mine!, claims), unknown, patientId: sop.claim.patientId as string,
+        sha256: entry.sha256, bytes: entry.bytes };
     }));
-    let reading: SopReading = { kind: 'failed' };
-    if (requested.unknown) {
-      const sop = seen.sopUid ? await this.prisma.importOperation.findUnique({ where: { claimKey: sopKey(seen.sopUid) } }) : null;
-      const claim: any = sop?.claim;
-      if (claim) reading = await this.readSop({ studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid, patientId: claim.patientId } as AcceptedFile,
-        requested.bytes, requested.sha256, null);
-      if (reading.kind === 'failed') throw new ServiceUnavailableException({ code: 'ORTHANC_UNAVAILABLE', message: RECOVERY_NOTICES.orthanc });
+    const reading = await this.readSop({ studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid, patientId: requested.patientId } as AcceptedFile,
+      requested.bytes, requested.sha256, null);
+    const underSnapshot = <T>(work: (tx: Tx, entry: ImportFileEntry, mine: ImportAttempt, claims: Map<string, ClaimRow>, locked: any, now: Date) => Promise<T>) =>
+      this.write(async tx => {
+        const claims = await this.lockClaims(tx, keys);
+        const locked = await this.lockOperation(tx, operationId);
+        const now = await this.clock(tx);
+        const results: ImportFileEntry[] = clone(locked.results);
+        const entry = results.find(e => e.index === index)!;
+        const mine = lastAttempt(entry);
+        if (!mine || this.recoverySnapshot(entry, mine, claims) !== requested.snapshot || (requested.unknown && !leaseLive(mine, now))) throw notApplicable();
+        const answer = await work(tx, entry, mine, claims, locked, now);
+        await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
+        return answer;
+      });
+    if (reading.kind === 'failed') {
+      if (requested.unknown) await underSnapshot(async (_tx, _entry, mine, _claims, _locked, now) => { mine.leaseUntil = iso(now); }).catch(() => undefined);
+      throw new ServiceUnavailableException({ code: 'ORTHANC_UNAVAILABLE', message: RECOVERY_NOTICES.orthanc });
     }
-    return this.storage(() => this.write(async tx => {
-      const claims = await this.lockClaims(tx, keys);
-      const locked = await this.lockOperation(tx, operationId);
-      const now = await this.clock(tx);
-      const results: ImportFileEntry[] = clone(locked.results);
-      const entry = results.find(e => e.index === index);
-      const mine = entry && lastAttempt(entry);
-      if (!mine || mine.attemptId !== requested.attemptId || mine.recovery?.requestedAt !== requested.requestedAt || mine.recovery.resolvedAt)
-        throw new HttpException({ code: 'RECOVERY_NOT_APPLICABLE', message: RECOVERY_NOTICES.notApplicable }, 409);
+    return this.storage(() => underSnapshot(async (tx, entry, mine, claims, locked, now) => {
       let notice: string;
       if (!requested.unknown) notice = RECOVERY_NOTICES.mayHaveWritten;
       else if (reading.kind === 'exact') {
@@ -1121,14 +1278,13 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         this.finishAttempt(entry, mine, now, { outcome: 'rejected', code: reading.kind === 'ambiguous' ? 'SOP_UID_AMBIGUOUS' : 'SOP_CONTENT_CONFLICT', transport: mine.transport }, 'may-have-written');
         notice = RECOVERY_NOTICES.mayHaveWritten;
       }
-      mine.recovery.resolvedAt = iso(now);
+      mine.recovery!.resolvedAt = iso(now);
       await this.releaseHolders(tx, claims, mine.attemptId, now, false);
-      await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
       await tx.auditLog.create({ data: { actor: admin.actor, action: 'dicom.import.recovery.result', target: entry.studyUid ?? operationId,
         detail: JSON.stringify({ institutionId: locked.institutionId, operationId, index, attemptId: mine.attemptId, generation: mine.generation,
-          basis: mine.recovery.basis, checkedAt: mine.recovery.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject,
+          basis: mine.recovery!.basis, checkedAt: mine.recovery!.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject,
           outcome: entry.outcome, code: entry.code, at: iso(now) }) } });
-      await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now, admin.actor);
+      await this.auditResult(tx, locked.institutionId, operationId, entry, mine, now, { actor: admin.actor });
       return { operationId, index, outcome: entry.outcome, code: entry.code, writeDisposition: entry.writeDisposition, message: notice };
     }));
   }
@@ -1196,7 +1352,8 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private newEntry(r: ImportRequest, file: AcceptedFile | null, now: Date): ImportFileEntry {
+  /** A new file entry; its three UIDs when the reader accepted the bytes (even if the file is then refused), else null. */
+  private newEntry(r: ImportRequest, file: { studyUid: string; seriesUid: string; sopUid: string } | null, now: Date): ImportFileEntry {
     return { index: r.index, sha256: r.sha256, bytes: r.bytes.length, studyUid: file?.studyUid ?? null, seriesUid: file?.seriesUid ?? null,
       sopUid: file?.sopUid ?? null, expectedStudyUid: r.expectedStudyUid, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', identity: null,
       writeDisposition: null, at: iso(now), attempts: [] };
@@ -1258,19 +1415,28 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     return tx.auditLog.create({ data: { actor: attempt.actor, action: 'dicom.import.intent', target: entry.studyUid ?? r.operationId,
       detail: JSON.stringify({ institutionId: r.owner.institutionId, operationId: r.operationId, index: entry.index, attemptId: attempt.attemptId,
         generation: attempt.generation, kind: 'import', actor: attempt.actor, ownerIssuer: r.owner.ownerIssuer, ownerSubject: r.owner.ownerSubject,
-        studyUid: entry.studyUid, seriesUid: entry.seriesUid, sopUid: entry.sopUid, sha256: entry.sha256, bytes: entry.bytes, at: iso(now) }) } });
+        studyUid: entry.studyUid, seriesUid: entry.seriesUid, sopUid: entry.sopUid, sha256: entry.sha256, bytes: entry.bytes,
+        institutionNameMismatch: r.precheck.institutionNameMismatch, at: iso(now) }) } });
   }
 
-  /** Every file result (final, retryable, unconfirmed; reconciliation, re-check, recovery) has this row; no patient value. */
+  /**
+   * Every file result (final, retryable, unconfirmed; reconciliation, re-check, recovery) has this row; no patient value.
+   * The actor is the one who caused this result: the request that refused a file (its own req.actor), the attempt's actor
+   * for the attempt's result, the admin for a recovery; never the operation's first actor for someone else's refusal (4.9).
+   * Rows written while the request's bytes are at hand carry the InstitutionName mismatch signal (4.3): a boolean or null
+   * (no tag), never the tag text.
+   */
   private async auditResult(tx: Tx, institutionId: string, operationId: string, entry: ImportFileEntry, attempt: ImportAttempt | null,
-    now: Date, actor?: string) {
+    now: Date, by: { actor?: string; institutionNameMismatch?: boolean | null } = {}) {
     const op = await tx.importOperation.findUnique({ where: { id: operationId }, select: { ownerIssuer: true, ownerSubject: true, actor: true } });
-    const who = actor ?? attempt?.actor ?? op?.actor ?? 'unknown';
+    const who = by.actor ?? attempt?.actor ?? op?.actor ?? 'unknown';
+    const signal = by.institutionNameMismatch === undefined ? {} : { institutionNameMismatch: by.institutionNameMismatch };
     await tx.auditLog.create({ data: { actor: who, action: 'dicom.import.result', target: entry.studyUid ?? operationId,
       detail: JSON.stringify({ institutionId, operationId, index: entry.index, attemptId: attempt?.attemptId ?? null,
         generation: attempt?.generation ?? 0, kind: 'import', actor: who, ownerIssuer: op?.ownerIssuer ?? null, ownerSubject: op?.ownerSubject ?? null,
         studyUid: entry.studyUid, seriesUid: entry.seriesUid, sopUid: entry.sopUid, sha256: entry.sha256, bytes: entry.bytes,
-        outcome: entry.outcome, code: entry.code, writeDisposition: entry.writeDisposition, transport: attempt?.transport ?? null, at: iso(now) }) } });
+        outcome: entry.outcome, code: entry.code, writeDisposition: entry.writeDisposition, transport: attempt?.transport ?? null, ...signal,
+        at: iso(now) }) } });
   }
 
   // ── locks and transactions ──
@@ -1286,8 +1452,14 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     return rows;
   }
 
-  /** The operation row, locked after any claim rows; a member import row is checked against its persisted format. */
+  /**
+   * The operation row, locked after any claim rows. Its advisory lock comes first and holds whether or not the row exists:
+   * PostgreSQL's SELECT ... FOR UPDATE locks no absent row, so two requests creating the same new operation id (or an
+   * import and a download preparation of one id) are serialised here and the second sees the first's committed row.
+   * A member import row is checked against its persisted format.
+   */
   async lockOperation(tx: Tx, id: string): Promise<any> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${advisory('operation:' + id)}::bigint)`;
     const found: any[] = await tx.$queryRaw`SELECT * FROM "ImportOperation" WHERE id = ${id}::uuid FOR UPDATE`;
     const row = found[0] ?? null;
     return row && row.kind === 'import' ? checkImportRow(row) : row;
@@ -1321,19 +1493,24 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Renew the attempt's lease every 10 s while its work runs; losing it aborts the work's signal. */
-  private keepLease(operationId: string, index: number, attemptId: string, phases: string[]) {
+  /**
+   * Renew the attempt's lease every 10 s while its work runs, in the same lock order as every other write of the file
+   * (its claims, then the operation row, then the DB time) and under the worker's CAS: a lease that already ran out is
+   * never revived. Losing it aborts the work's signal.
+   */
+  private keepLease(r: ImportRequest, attempt: ImportAttempt, phases: string[]) {
+    const file = r.precheck as AcceptedFile;
     const lost = new AbortController();
     const timer = setInterval(() => {
       void this.write(async tx => {
-        const op = await this.lockOperation(tx, operationId);
+        await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
+        const op = await this.lockOperation(tx, r.operationId);
         const now = await this.clock(tx);
         const results: ImportFileEntry[] = clone(op.results);
-        const entry = results.find(e => e.index === index);
-        const mine = entry && lastAttempt(entry);
-        if (!mine || mine.attemptId !== attemptId || !phases.includes(mine.phase) || !leaseLive(mine, now)) return false;
-        mine.leaseUntil = later(now, LEASE_MS);
-        await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, updatedAt: now } });
+        const entry = results.find(e => e.index === r.index);
+        if (!holdsAttempt(entry, attempt, now, phases)) return false;
+        lastAttempt(entry!)!.leaseUntil = later(now, LEASE_MS);
+        await tx.importOperation.update({ where: { id: r.operationId }, data: { results: results as any, updatedAt: now } });
         return true;
       }).then(kept => { if (!kept) lost.abort(); }, () => lost.abort());
     }, RENEW_MS);

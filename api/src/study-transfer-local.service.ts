@@ -17,7 +17,7 @@ import { rightsAllow } from './member-rights';
 import { readDicomPart10 } from './dicom-part10-reader';
 import { canonicalManifest, parseCanonicalManifest, planArchive, writeArchive, ORIGINAL_ARCHIVE_LIMITS, ORIGINAL_ARCHIVE_MESSAGES } from './original-archive';
 import type { ArchiveObjectResult, ManifestObjectInput, OriginalManifest } from './original-archive';
-import { DicomImportGateService, IMPORT_OBJECT_LIMIT, IMPORT_FILE_SLOTS, StoredFormatError, exactKeys, precheckFile, storedTime } from './dicom-import-gate.service';
+import { DicomImportGateService, IMPORT_OBJECT_LIMIT, IMPORT_FILE_SLOTS, IMPORT_STORAGE_MESSAGE, StoredFormatError, exactKeys, precheckFile, storedTime } from './dicom-import-gate.service';
 import type { ImportOwner } from './dicom-import-gate.service';
 
 const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -68,6 +68,18 @@ export const TRANSFER_MESSAGES = Object.freeze({
 });
 
 const error = (status: number, code: string, message: string) => new HttpException({ code, message }, status);
+const IMPORT_NOT_FOUND = '반입 작업을 찾을 수 없습니다';
+const importStorage = () => error(503, 'IMPORT_STORAGE_UNAVAILABLE', IMPORT_STORAGE_MESSAGE);
+/** The routes' own 5xx answers, which pass through a storage mapping as they are (contract 4.8). */
+const OWN_5XX = new Set(['IMPORT_NOT_READY', 'IMPORT_STORAGE_UNAVAILABLE', 'IMPORT_ISSUER_UNCONFIGURED', 'ORTHANC_UNAVAILABLE', 'MANIFEST_STORE_INVALID']);
+/**
+ * File results decided from the uploaded bytes or the study's ownership alone, before any reservation of a study the
+ * caller owned: their UIDs are the caller's own file's, so a status GET shows them without a study check. Every other
+ * result (anything with an attempt, a claim comparison, a pending holder) belongs to an own study and needs it now.
+ */
+const BEFORE_STUDY_CODES = new Set(['DICOM_NOT_PART10', 'DICOM_FILE_META_MISSING', 'DICOM_TRANSFER_SYNTAX_UNSUPPORTED', 'DICOM_MALFORMED',
+  'PATIENT_ID_UNREADABLE', 'PATIENT_ID_MISSING', 'MODALITY_NOT_IMPORTABLE', 'STUDY_UID_MISMATCH', 'PATIENT_ISSUER_CONFLICT',
+  'STUDY_OWNERSHIP_CONFLICT', 'STUDY_OWNERSHIP_UNDETERMINED', 'ORTHANC_UNAVAILABLE']);
 const storeInvalid = () => error(503, 'MANIFEST_STORE_INVALID', ORIGINAL_ARCHIVE_MESSAGES.MANIFEST_STORE_INVALID);
 const downloadStorage = () => error(503, 'IMPORT_STORAGE_UNAVAILABLE', TRANSFER_MESSAGES.storage);
 const text = (value: unknown, max = 1024): value is string => typeof value === 'string' && value.length > 0 && value.length <= max;
@@ -224,20 +236,23 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     const bytes: Buffer = req.body;
     if (bytes.length > IMPORT_OBJECT_LIMIT) throw error(413, 'DICOM_IMPORT_TOO_LARGE', TRANSFER_MESSAGES.tooLarge);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
-    const institutions = await this.gate.institutions();
+    // Every read before the intent maps a storage failure to 503 IMPORT_STORAGE_UNAVAILABLE (4.8); refusals keep their own.
+    const institutions = await this.storageRead(() => this.gate.institutions(), importStorage);
     const precheck = precheckFile(readDicomPart10(bytes), typeof expected === 'string' ? expected : null, owner.institutionId, institutions);
-    if (precheck.ok) {
+    if (precheck.ok) await this.storageRead(async () => {
       // Request-level StudyAccess (contract 3): an existing own study must be inside the caller's scope (404); a
       // restricted account cannot open a new study (403). A foreign or unassigned study is the file's own 409 below.
       const state = await this.prisma.studyState.findUnique({ where: { uid: precheck.studyUid } });
       if (state && state.institutionId === owner.institutionId) await this.studyAccess.require(c, [precheck.studyUid]);
       else if (!state && (await this.studyAccess.snapshot(c)).policy.restricted)
         throw error(403, 'STUDY_ACCESS_RESTRICTED_IMPORT', TRANSFER_MESSAGES.restricted);
-    }
+    }, importStorage);
     const answer = await this.gate.importFile({ owner, operationId: operationId.toLowerCase(), index: Number(indexText),
       expectedStudyUid: typeof expected === 'string' ? expected : null, bytes, sha256, precheck,
       recheck: async () => {
-        await this.currentRights(c, 'import', null, null);
+        // The request's own credential too: a logout, an ended provider session or an expired token before the dispatch
+        // is a refusal here (403, IMPORT_PERMISSION_REVOKED, no POST /instances), never a write under a session that ended.
+        await this.currentRights(c, 'import', null, req);
         if (precheck.ok) await this.importStudyScope(precheck.studyUid, c);
       } });
     if (answer.refusal) throw answer.refusal;
@@ -256,8 +271,46 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   async importStatus(operationId: string, c: Caller) {
     const owner = this.owner(c, 'import');
     await this.gate.ready(false);
-    if (!OPERATION_ID.test(operationId ?? '')) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
-    return this.gate.importStatus(owner, operationId.toLowerCase(), await this.gate.orthancAnswering());
+    if (!OPERATION_ID.test(operationId ?? '')) throw new NotFoundException(IMPORT_NOT_FOUND);
+    const id = operationId.toLowerCase();
+    const op = await this.gate.ownImport(owner, id);
+    if (!op) throw new NotFoundException(IMPORT_NOT_FOUND);
+    await this.importVisible(op, c);
+    return this.gate.importStatus(owner, id, await this.gate.orthancAnswering());
+  }
+
+  /**
+   * The status policy of contract 3 / 4.4, before any answer or reconciliation: the owner key alone is not enough. Every
+   * study a file result depends on must now be the caller's institution's own (a study moved to another institution, a
+   * tele-received one or a disposed one is not) and inside the caller's StudyAccess. If any is not, the whole operation
+   * is the same 404 as an absent one, so no UID, hash or result of a study the caller cannot see leaves the server
+   * (BEFORE_STUDY_CODES results carry only the caller's own file's values). Restored rights show the same result again.
+   */
+  private async importVisible(op: any, c: Caller) {
+    const uids = [...new Set<string>((op.results as any[])
+      .filter(e => e.studyUid && (e.attempts.length > 0 || !BEFORE_STUDY_CODES.has(e.code))).map(e => e.studyUid))];
+    if (!uids.length) return;
+    await this.storageRead(async () => {
+      for (const uid of uids) {
+        const state = await this.prisma.studyState.findUnique({ where: { uid } });
+        if (!state || state.institutionId !== c.institution) throw new NotFoundException(IMPORT_NOT_FOUND);
+      }
+      const allowed = await this.studyAccess.allowed(c, uids);
+      if (uids.some(uid => !allowed.has(uid))) throw new NotFoundException(IMPORT_NOT_FOUND);
+    }, importStorage);
+  }
+
+  /**
+   * A read before any intent or byte: a refusal (4xx) or one of the routes' own coded 5xx answers passes as it is; any other
+   * failure - the database, the identity provider, StudyAccess unable to read its policy - becomes the route's storage
+   * answer (503 IMPORT_STORAGE_UNAVAILABLE), never an uncoded 500 and never an upstream text.
+   */
+  private async storageRead<T>(work: () => Promise<T>, failure: () => HttpException): Promise<T> {
+    try { return await work(); }
+    catch (e) {
+      if (e instanceof HttpException && (e.getStatus() < 500 || OWN_5XX.has((e.getResponse() as any)?.code))) throw e;
+      throw failure();
+    }
   }
 
   // ── POST /api/admin/dicom-import/:operationId/files/:index/recovery ──
@@ -276,6 +329,15 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   private storedDownload(op: any): StoredDownload {
     try { return checkDownloadRow(op); }
     catch (failure) { if (failure instanceof StoredFormatError) throw storeInvalid(); throw failure; }
+  }
+
+  /**
+   * An existing download operation's study now: its own StudyState and StudyAccess. A study the caller can no longer see
+   * answers exactly as an absent operation does, so the answer never tells that the operation exists.
+   */
+  private async downloadStudyNow(uid: string, c: Caller) {
+    try { await this.storageRead(() => this.ownStudy(uid, c), downloadStorage); }
+    catch (failure) { if (failure instanceof NotFoundException) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound); throw failure; }
   }
 
   private ownsDownload(op: any, owner: ImportOwner) {
@@ -301,8 +363,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         || typeof (body as any).operationId !== 'string' || !OPERATION_ID.test((body as any).operationId))
       throw error(400, 'IMPORT_REQUEST_INVALID', TRANSFER_MESSAGES.request);
     const operationId = (body as any).operationId.toLowerCase();
-    await this.ownStudy(uid, c);
-    const existing = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+    await this.storageRead(() => this.ownStudy(uid, c), downloadStorage);
+    const existing = await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }), downloadStorage);
     if (existing) return this.replayPrepared(existing, owner, uid);
     const built = await this.preparedManifest(uid);
     if (built.ok === false) throw error(409, built.code, built.message);
@@ -393,11 +455,13 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   async downloadStatus(uid: string, operationId: string, c: Caller) {
     const owner = this.owner(c, 'download');
     await this.gate.ready(false);
-    const op = OPERATION_ID.test(operationId ?? '') ? await this.prisma.importOperation.findUnique({ where: { id: operationId.toLowerCase() } }) : null;
+    const op = OPERATION_ID.test(operationId ?? '') ? await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId.toLowerCase() } }), downloadStorage) : null;
     if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
+    // The study now (contract 3): still the institution's own and inside StudyAccess, else the same 404 as no operation.
+    await this.downloadStudyNow(uid, c);
     this.storedDownload(op);
     await this.expireDownloads(op.id);
-    const fresh = await this.prisma.importOperation.findUnique({ where: { id: op.id } });
+    const fresh = await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: op.id } }), downloadStorage);
     return this.downloadView(fresh, this.storedDownload(fresh));
   }
 
@@ -406,15 +470,15 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   async archive(uid: string, operationId: string, req: any, res: any, c: Caller): Promise<void> {
     const owner = this.owner(c, 'download');
     await this.gate.ready(true);
-    const op = OPERATION_ID.test(operationId ?? '') ? await this.prisma.importOperation.findUnique({ where: { id: operationId.toLowerCase() } }) : null;
+    const op = OPERATION_ID.test(operationId ?? '') ? await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId.toLowerCase() } }), downloadStorage) : null;
     if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
-    await this.ownStudy(uid, c);
+    await this.downloadStudyNow(uid, c);
     const stored = this.storedDownload(op);
     const plan = planArchive(stored.manifest);
     if (plan.ok === false) throw error(409, plan.code, plan.message);
     if (op.status === 'sent') throw error(409, 'DOWNLOAD_ALREADY_SENT', TRANSFER_MESSAGES.alreadySent);
     await this.unchangedOriginals(uid, stored);
-    await this.currentRights(c, 'download', uid, req);
+    await this.storageRead(() => this.currentRights(c, 'download', uid, req), downloadStorage);
     const attempt = await this.openAttempt(op.id, owner, stored);
     // Everything is decided: headers, then bytes. From here no error becomes an HTTP status (5.2 step 6).
     res.status(200);
