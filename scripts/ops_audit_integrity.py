@@ -17,6 +17,7 @@ An exit 2 that ended an export or a verification carries the termination proof o
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -419,6 +420,37 @@ def replace_json(path, body):
             os.unlink(name)
 
 
+LEDGER_LOCK = ".kin-audit-ledger.lock"
+
+
+@contextmanager
+def ledger_lock(root):
+    """One writer of a backup root's ledger at a time (init, plan, seal), held where the ledger lives (RT-P3-LEDGER-LOCK).
+    The operations lock sits beside the tool (ops_backup.ROOT): a protected install (/opt/kin-deploy, root 0755) run as
+    the operating account that owns the backup root could not take it, and an installed copy and a checkout would hold
+    two different ones. Same form as that lock: an exclusive new 0600 file with this holder's token, refused while it
+    exists (a writer that died leaves it; it is never broken or skipped), removed only by its own holder."""
+    path = Path(root) / LEDGER_LOCK
+    token = uuid.uuid4().hex
+    try:
+        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        raise Refused("The audit ledger is held by another writer (" + LEDGER_LOCK + " exists)") from None
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(token)
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_directory(path.parent)
+    info = path.stat()
+    lease = ops.LockLease(path=path, token=token, identity=(info.st_dev, info.st_ino))
+    try:
+        yield lease
+    finally:
+        lease.verify()
+        path.unlink()
+        fsync_directory(path.parent)
+
+
 def read_json(path):
     path = Path(path)
     if path.is_symlink() or not path.is_file():
@@ -478,7 +510,7 @@ def ledger_years(entries):
 
 
 def append_ledger(root, ledger, new_entries):
-    """Append under the caller's operations lock. The whole file is re-read first and must equal what the caller read:
+    """Append under the caller's ledger lock. The whole file is re-read first and must equal what the caller read:
     entries are never removed or rewritten, and a ledger that changed meanwhile is not written."""
     if read_ledger(root) != ledger:
         raise LedgerChanged("The audit ledger changed while it was being extended")
@@ -1054,7 +1086,8 @@ def alarm_of(checkpoint):
 
 def seal(directory, root, manifest):
     """Seal a complete backup's AuditLog (stage 'seal audit' of ops_backup.backup, which holds the operations lock and
-    calls this after the writers resumed). The digests come from the snapshot's kin.dump in the isolated verifier; the
+    calls this after the writers resumed); the seal itself holds the root's ledger lock, so it never runs beside an init
+    or a plan. The digests come from the snapshot's kin.dump in the isolated verifier; the
     live database is never contacted. Commit order: checkpoint file -> manifest declaration (with backup_error
     'audit integrity' when a finding is recorded) -> ledger seal. Returns the alarm type or None; failures raise and the
     caller records them as backup_error 'seal audit'."""
@@ -1062,6 +1095,11 @@ def seal(directory, root, manifest):
     target = directory / CHECKPOINT
     if directory.is_symlink() or target.exists() or target.is_symlink():
         raise Refused("The backup already holds a checkpoint")
+    with ledger_lock(root):
+        return _seal(directory, root, manifest, target)
+
+
+def _seal(directory, root, manifest, target):
     ledger = read_ledger(root)
     years = ledger_years(ledger["entries"])
     seals = [entry for entry in ledger["entries"] if entry["kind"] == "seal"]
@@ -1193,7 +1231,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action in ("init", "plan"):
-            with ops.lock():
+            with ledger_lock(checked_root(args.root)):
                 if args.action == "init":
                     body = init(args.root, args.years, args.after_loss, args.reason)
                     result = {"exit": 0, "ledger": body["entries"][0]["kind"], "years": args.years}
@@ -1215,7 +1253,7 @@ def main(argv=None):
             as_of = parse_utc(args.as_of) if args.as_of else None
             code, result = retention(args.root, as_of, args.max_age)
     except (InputError, Refused, LedgerMissing, LedgerInvalid, LedgerChanged, OSError, RuntimeError, ValueError) as error:
-        # Refusals, a held operations lock and a remote Docker context are not judgements: exit 2, no paths echoed.
+        # Refusals, a held ledger lock and a remote Docker context are not judgements: exit 2, no paths echoed.
         code, result = 2, {"exit": 2, "error": type(error).__name__,
                            "detail": str(error) if isinstance(error, (InputError, Refused, LedgerMissing,
                                                                         LedgerInvalid, LedgerChanged)) else None}

@@ -718,6 +718,10 @@ python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pa
 - 봉인: `backup`은 writer 정지 구간에 뜬 `kin.dump`가 완성되고 writer 재개·준비 확인이 끝난 뒤(실패해도) 그 덤프의 AuditLog 행을
   격리 검증 DB에서 digest로 만들어 백업 폴더의 `audit-checkpoint.json`(0600)에 쓰고, manifest의 `sha256`·`bytes`에 선언한 뒤(형식 1 그대로)
   백업 부모의 `audit-ledger.json`에 덧붙인다(K → manifest → 장부 순서). 정지 시간은 늘지 않고 봉인은 `kin-db`에 명령을 보내지 않는다.
+- 장부를 쓰는 `init`·`plan`·봉인은 백업 부모 안의 장부 잠금(`.kin-audit-ledger.lock`, 0600, 소유자만 해제)으로 한 번에 하나만
+  돈다. 도구 폴더에는 쓰지 않으므로 보호 설치(`/opt/kin-deploy`, root 0755)를 백업 부모 소유 계정으로 실행해도 된다. 다른
+  쓰기가 진행 중이면 거절(종료코드 2)하고 아무것도 쓰지 않는다. 죽은 실행이 남긴 잠금은 지우거나 건너뛰지 않고 계속 거절한다
+  (RT-P3-LEDGER-LOCK, `ops_audit_integrity_test.py` PV-11).
 - 장부가 없으면 봉인하지 않는다(자동으로 처음부터 시작하지 않음): manifest `backup_error = {"stage": "seal audit", "type": "LedgerMissing"}`,
   종료코드 1. 선언된 체크포인트가 있는 부모의 `init`은 거절되고 `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
 - 이전 봉인과 행이 다르거나(과거 사건: `previous_verification` failed/unverifiable), 이번 덤프의 가드가 무력하거나 표 모양이 다르면(현재 결함)

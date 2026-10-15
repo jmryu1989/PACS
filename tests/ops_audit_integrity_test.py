@@ -6,6 +6,7 @@ PV-01..PV-07: only the isolated verifier boundary (evaluate: the one place that 
 returns the digest stream of an export) is replaced by a synthetic stream; its real behaviour on PostgreSQL is
 tests/audit_store_db_test.py. Backup roots, folders and the ledger are made with the public commands (init, plan), the
 public seal function and files; times enter only through a snapshot manifest's created_utc and retention --as-of.
+PV-11 runs init/plan with the tool's folder unwritable and starts a second ledger writer while one is writing.
 PV-08 runs the real evaluate with its existing timeout argument against FakeDocker below: a test-side docker CLI whose
 exporter and verifier are real processes that stall, refuse to read or fail as a case asks. Assertions are on exit
 codes, the documented report, file contents (ids, digests, states), elapsed time and whether processes and containers
@@ -806,6 +807,88 @@ class AuditIntegrityPure(unittest.TestCase):
         code, report = ws.cli("retention", ws.root, "--as-of", "2026-10-02T06:00:00Z")
         self.assertEqual((code, report["uncommitted"]), (1, []))
         self.assertIsNotNone(report["discontinuity"])
+
+    # PV-11 (RT-P3-LEDGER-LOCK, prep5 readiness5 §3 B3): the ledger's writers take turns where the ledger lives.
+    def test_pv11_ledger_writers_need_no_write_beside_the_tool_and_still_take_turns(self):
+        """Production installs the tool where the operating account cannot write (/opt/kin-deploy, root 0755) and runs
+        init as that account, which owns the backup root; init exited 2 (PermissionError) and wrote nothing. init and
+        plan succeed while the tool's folder cannot be written, and the ledger still has one writer at a time: an init,
+        a plan or a seal that starts while another writer of the same root is under way is refused and writes nothing;
+        an existing ledger is still never replaced, and nothing of the turn-taking stays behind in the root."""
+        def unwritable(ws):
+            installed = Path(ws.temp.name) / "installed"
+            if os.name == "posix" and os.geteuid() != 0:
+                installed.mkdir()
+                installed.chmod(0o555)          # as /opt/kin-deploy is to the operating account
+                self.addCleanup(installed.chmod, 0o755)
+            else:
+                installed.write_text("a regular file: nothing can be created below it\n")
+                installed = installed / "kin-deploy"
+            ws.repo = installed
+
+        unwritable(self.ws)
+        code, report = self.ws.cli("init", self.ws.root, "--years", 5)
+        self.assertEqual((code, report), (0, {"exit": 0, "ledger": "init", "years": 5}))
+        code, report = self.ws.cli("plan", self.ws.root, "--years", 6)
+        self.assertEqual((code, report), (0, {"exit": 0, "plan": 6}))
+        self.assertEqual(self.ws.cli("init", self.ws.root, "--years", 7)[0], 2, "an existing ledger is never replaced")
+        self.assertEqual([entry.get("years") for entry in self.ws.ledger()["entries"]], [5, 6])
+
+        def while_writing(ws, action):
+            """Run action while a writer of ws's root is writing the ledger; returns what it saw and what it did."""
+            real, seen = audit.replace_json, {}
+
+            def write(path, body):
+                if Path(path).name == audit.LEDGER and "result" not in seen:
+                    seen["before"] = ws.tree()
+                    try:
+                        seen["result"] = action()
+                    except Exception as error:   # a refused seal raises; its type is the outcome
+                        seen["result"] = type(error).__name__
+                    seen["after"] = ws.tree()
+                return real(path, body)
+            return patch.object(audit, "replace_json", side_effect=write), seen
+
+        # two inits of one root: the second starts while the first writes; it is refused and the first one's ledger stays
+        fresh = Workspace()
+        self.addCleanup(fresh.close)
+        unwritable(fresh)
+        writing, seen = while_writing(fresh, lambda: fresh.cli("init", fresh.root, "--years", 4))
+        with writing:
+            self.assertEqual(fresh.cli("init", fresh.root, "--years", 3)[0], 0)
+        self.assertEqual(seen["result"][0], 2, seen["result"])
+        self.assertEqual(seen["before"], seen["after"])
+        self.assertEqual([entry["years"] for entry in fresh.ledger()["entries"]], [3])
+
+        # a seal that starts while a plan writes is refused before it writes anything; afterwards it seals
+        folder = self.ws.backup("2026-10-01T01:00:00Z")
+        writing, seen = while_writing(self.ws, lambda: self.ws.seal(folder, stream({1: "a"})))
+        with writing:
+            self.assertEqual(self.ws.cli("plan", self.ws.root, "--years", 8)[0], 0)
+        self.assertEqual(seen["result"], "Refused")
+        self.assertEqual(seen["before"], seen["after"])
+        self.assertNotIn(audit.CHECKPOINT, [path.name for path in folder.iterdir()])
+        self.ws.seal(folder, stream({1: "a"}))
+        self.assertEqual([entry["kind"] for entry in self.ws.ledger()["entries"]], ["init", "plan", "plan", "seal"])
+
+        # a plan or an init that starts while a seal is under way is refused and writes nothing
+        later = self.ws.backup("2026-10-02T01:00:00Z")
+        during = {}
+
+        def evaluation(*_):
+            during["before"] = self.ws.tree()
+            during["plan"] = self.ws.cli("plan", self.ws.root, "--years", 9)
+            during["init"] = self.ws.cli("init", self.ws.root, "--after-loss", "--reason", "a concurrent init")
+            during["after"] = self.ws.tree()
+            return stream({1: "a", 2: "b"})
+        with patch.object(audit, "evaluate", side_effect=evaluation):
+            audit.seal(later, self.ws.root, self.ws.manifest(later))
+        self.assertEqual((during["plan"][0], during["init"][0]), (2, 2), during)
+        self.assertEqual(during["before"], during["after"])
+        self.assertEqual([entry["kind"] for entry in self.ws.ledger()["entries"]], ["init", "plan", "plan", "seal", "seal"])
+        # nothing of the turn-taking stays behind: the root holds the ledger and the backup folders only
+        for ws in (self.ws, fresh):
+            self.assertEqual(sorted(path.name for path in ws.root.iterdir() if not path.is_dir()), [audit.LEDGER])
 
 
 TARGET = "kin-syn-target"   # the named database's container in PV-08
