@@ -851,11 +851,36 @@ class CheckpointRestoreTests(RefusalAssertions, TempCase):
             "unknown writable-layer state": ("WRITABLE_LAYER", lambda b: b.diffs.update({names["orthanc"]: ["A /etc/orthanc/extra.json"]})),
             "a non-owned volume": ("NOT_OWNED", lambda b: b.volumes[PROJECT + "_pg-db"].update(labels={"com.docker.compose.project": "other"})),
             "a non-owned container with our name": ("NOT_OWNED", lambda b: b.containers[names["api"]].update(labels={})),
+            "an anonymous volume": ("UNDECLARED_STATE", lambda b: (
+                b.volumes.update({"a" * 64: {"id": "a" * 64, "name": "a" * 64, "labels": {"com.docker.compose.project": PROJECT}}}),
+                b.containers[names["orthanc"]].update(mounts=[{"type": "volume", "name": "a" * 64}]))),
+            "a foreign volume": ("UNDECLARED_STATE", lambda b: (
+                b.volumes.update({"shared-data": {"id": "shared-data", "name": "shared-data", "labels": {}}}),
+                b.containers[names["api"]].update(mounts=[{"type": "volume", "name": "shared-data"}]))),
+            "a bind outside the fixture tree": ("UNDECLARED_STATE", lambda b: b.containers[names["proxy"]].update(
+                mounts=[{"type": "bind", "source": str(outside)}])),
         }.items():
             with self.subTest(refused=name):
+                outside = self.tempdir()
                 backend = FakeBackend(names, volumes)
                 prepare(backend)
                 self.assertRefused(code, self.captured, "introduced", backend)
+                self.assertFalse([call for call in backend.calls if call[0] == "export"], "nothing exported before the refusal")
+        with self.subTest(captured="another volume of the project"):
+            backend = FakeBackend(names, volumes)
+            extra = PROJECT + "_rehearsal-workflow"
+            backend.volumes[extra] = {"id": extra, "name": extra, "labels": {"com.docker.compose.project": PROJECT,
+                                                                               "com.docker.compose.volume": "rehearsal-workflow"}}
+            backend.containers[names["proxy"]]["mounts"] = [{"type": "volume", "name": extra},
+                                                           {"type": "volume", "name": PROJECT + "_proxy-certs"}]
+            final, backend, names, fixture = self.captured("introduced", backend)
+            manifest, directory = cp.load_bundle(final)
+            self.assertEqual(manifest["owned"]["volumes"]["extra:" + extra]["name"], extra)
+            fresh = FakeBackend(names, {}, running=set())
+            fresh.containers.clear()
+            cp.restore_checkpoint(manifest, directory, backend=fresh, fixture_root=self.tempdir() / "restored", names=names,
+                                  images_present=lambda image_id: True, observe=lambda sid: None)
+            self.assertIn(extra, fresh.loaded)
 
 
 class CheckpointBudgetTests(RefusalAssertions, TempCase):

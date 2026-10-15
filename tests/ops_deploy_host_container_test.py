@@ -872,7 +872,9 @@ class CheckpointDocker:
 
     def inventory(self):
         containers = [{"id": item["Id"], "name": item["Name"].lstrip("/"), "labels": item["Config"].get("Labels") or {},
-                       "running": item["State"]["Running"], "image": item["Image"]}
+                       "running": item["State"]["Running"], "image": item["Image"],
+                       "mounts": [{"type": m.get("Type"), "name": m.get("Name"), "source": m.get("Source"),
+                                   "destination": m.get("Destination")} for m in item.get("Mounts") or []]}
                       for item in self.inspect_all([], ["docker", "ps", "-a", "-q", "--no-trunc"])]
         volumes = [{"id": item["Name"], "name": item["Name"], "labels": item.get("Labels") or {}}
                    for item in self.inspect_all(["volume"], ["docker", "volume", "ls", "-q"])]

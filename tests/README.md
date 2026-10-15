@@ -1718,8 +1718,9 @@ adapter, the only place that builds Docker/Compose commands for a checkpoint) an
   point of no return, and the product's boundary contract (`checkpoint_valid`; for `seeded` with the released lock).
   Never inside L-09b/L-10c/L-11a, never NEEDS_ATTENTION/CAPTURE_FAILED/a failed HELD, never `docker commit`.
 - A bundle is private (0700/0600) under `<output_root>/bundles`, outside the fixture and evidence roots: the declared
-  volumes (stopped proxy → api → keycloak → orthanc, the database last; a forced kill, an unconfirmed stop or unknown
-  writable-layer state refuses), the fixture tree (each clone's own Git objects, records and sibling secrets, the
+  volumes (stopped proxy → api → keycloak → orthanc, the database last; a forced kill, an unconfirmed stop, unknown
+  writable-layer state, an anonymous or foreign volume or a bind outside the fixture tree refuses; another named volume
+  of the project is captured as an extra member), the fixture tree (each clone's own Git objects, records and sibling secrets, the
   operations lock, the ComposeEntry generations, the backup root with its audit ledger, the CA, overlays, the stage
   context), the tool tree bytes, and an identity of the actual bytes (tool/source/harness trees, the eight TOOL_FILES,
   source and clone B0 separately, image IDs, plan and target, host key, daemon, absolute root, runtime). manifest.json

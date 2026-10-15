@@ -828,6 +828,32 @@ def owned_resource(item, owned):
             or labels.get("com.docker.compose.project") in owned["projects"])
 
 
+def mount_inventory(inventory, names, volumes, fixture_root, owned):
+    """Persistent state outside the declared volumes and the fixture tree refuses (v1): every volume a stack container
+    mounts is an owned named volume (the declared ones, or another of this Compose project that is captured as an extra
+    member), never an anonymous one; every bind source lies inside the fixture root. Returns the extra volume names."""
+    declared, extra = {name for name in volumes.values() if name}, []
+    root = Path(fixture_root).resolve()
+    listed = {item["name"]: item for item in inventory["volumes"]}
+    for container in inventory["containers"]:
+        if container["name"] not in names.values():
+            continue
+        for mount in container.get("mounts") or []:
+            if mount.get("type") == "volume":
+                name = mount.get("name") or ""
+                require(name in listed and owned_resource(listed[name], owned) and not re.fullmatch(r"[0-9a-f]{64}", name),
+                        "UNDECLARED_STATE", container["name"] + " mounts " + (name or "an anonymous volume"))
+                if name not in declared and name not in extra:
+                    extra.append(name)
+            elif mount.get("type") == "bind":
+                source = Path(str(mount.get("source")))
+                require(source.is_absolute() and (source.resolve() == root or root in source.resolve().parents), "UNDECLARED_STATE",
+                        container["name"] + " binds " + str(source) + " outside the fixture tree")
+            else:
+                require(mount.get("type") == "tmpfs", "UNDECLARED_STATE", container["name"] + " mount " + str(mount.get("type")))
+    return sorted(extra)
+
+
 def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volumes, fixture_root, bindings, identity, owned,
                        execution_kind, parent=None, derived=False, running=None, extra_members=()):
     """Spec section 3 steps 1-5. `volumes` maps a category to its declared volume name; `bindings` names the fixture
@@ -846,21 +872,25 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
             if any(c["name"] == names[role] for c in inventory["containers"]):
                 unknown = [change for change in backend.writable_changes(names[role]) if not writable_layer_allowed(change)]
                 require(not unknown, "WRITABLE_LAYER", role + ": " + ",".join(unknown[:5]))
+    extra = mount_inventory(inventory, names, volumes, fixture_root, owned)
     pending = store.begin(checkpoint_id)
     for name, category, path in extra_members:
         pending.add(name, category, Path(path))
+    members = {}
     if spec["volumes"]:
         listed = {item["name"]: item for item in inventory["volumes"]}
-        for category in VOLUME_CATEGORIES:
-            name = volumes.get(category)
+        exports = [(category, volumes.get(category), "volume-" + category + ".tar") for category in VOLUME_CATEGORIES]
+        exports += [("extra:" + name, name, "volume-extra-%02d.tar" % index) for index, name in enumerate(extra)]
+        for category, name, member in exports:
             if name is None or name not in listed:
                 pending.declare_absent(category)
                 continue
             require(owned_resource(listed[name], owned), "NOT_OWNED", name)
-            archive = pending.directory / ("export-" + category + ".tar")
+            archive = pending.directory / ("export-" + member)
             backend.export_volume(name, archive)
             archive_members(archive, category=category)
-            pending.add("volume-" + category + ".tar", "volume:" + category, archive)
+            pending.add(member, "volume:" + category, archive)
+            members[category] = member
             archive.unlink()
     tree = pending.directory / "export-fixture.tar"
     write_tree_archive(fixture_root, tree)
@@ -869,9 +899,10 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
     pending.add("fixture-tree.tar", "fixture-tree", tree)
     tree.unlink()
     labels = {item["name"]: item.get("labels") or {} for item in inventory["volumes"]}
+    named = {**{category: volumes.get(category) for category in VOLUME_CATEGORIES}, **{"extra:" + name: name for name in extra}}
     owned_record = {"token": owned["token"], "projects": sorted(owned["projects"]),
-                    "volumes": {category: {"name": volumes[category], "labels": labels.get(volumes[category], {})}
-                                for category in VOLUME_CATEGORIES if volumes.get(category) in labels},
+                    "volumes": {category: {"name": named[category], "labels": labels.get(named[category], {}), "member": member}
+                                for category, member in sorted(members.items())},
                     "networks": owned.get("networks", []), "stack": owned.get("stack")}
     return pending.seal(identity=identity, boundary=boundary, bindings={k: bindings[k] for k in required}, owned=owned_record,
                         execution_kind=execution_kind, parent=parent, derived=derived)
@@ -904,12 +935,9 @@ def restore_checkpoint(manifest, bundle_dir, *, backend, fixture_root, names, im
         actions.append(("network", network["name"]))
     if not spec["volumes"]:
         return actions
-    for category in VOLUME_CATEGORIES:
-        if category in manifest["absent"]:
-            continue
-        volume = manifest["owned"]["volumes"][category]
+    for category, volume in sorted(manifest["owned"]["volumes"].items()):
         backend.create_volume(volume["name"], volume["labels"])
-        backend.load_volume(volume["name"], payload / ("volume-" + category + ".tar"), category)
+        backend.load_volume(volume["name"], payload / volume["member"], category)
         actions.append(("volume", volume["name"]))
     backend.compose_create(list(intro.ROLES))
     actions.append(("create", tuple(intro.ROLES)))
