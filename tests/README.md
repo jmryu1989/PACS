@@ -1700,19 +1700,24 @@ host could not be observed before it does not run; after a change it ends UNKNOW
 
 ## RELEASE-TOOLS-CHECKPOINTS — resumable rehearsal checkpoints (test harness only)
 
-Astra spec `spec-release-tools-checkpoints-20261015` (D1336, order D1338): REQ RQC-01..12 → RISK RSK-01..12 → TEST
-T01..T18. `scripts/**`, `tests/live_test_gate.py` and the runner/recorder are unchanged; the checkpoints live in
-`tests/ops_release_checkpoints.py` (identity, admission, bundles, cleanup, time, claims), the stage table of
-`tests/ops_deploy_host_container_test.py` (`STAGE_METHODS`, `SyntheticStack.descriptor/restored`, the `CheckpointDocker`
-adapter, the only place that builds Docker/Compose commands for a checkpoint) and the opt-in leaves of
-`tests/ops_release_checkpoints_live_test.py` (`CheckpointSegments`).
+Astra spec `spec-release-tools-checkpoints-20261015` (D1336, order D1338; hardening 1 D1354): REQ RQC-01..12 → RISK
+RSK-01..12 → TEST T01..T18. `scripts/**`, `tests/live_test_gate.py` and the runner/recorder are unchanged; the
+checkpoints live in `tests/ops_release_checkpoints.py` (identity, admission, bundles, cleanup, time, claims, evidence
+index, parent map and the generated proof commands), the stage table of `tests/ops_deploy_host_container_test.py`
+(`STAGE_METHODS`, `SyntheticStack.descriptor/restored`, the `CheckpointDocker` adapter, the only place that builds
+Docker/Compose commands for a checkpoint) and the opt-in leaves of `tests/ops_release_checkpoints_live_test.py`
+(`CheckpointSegments`).
 
 - Fresh stays fresh. The three `EmrIntroductionRehearsal` methods run every stage of their scenario in one process
   (`normal`: source, seed, capture, introduce, verify, normal-tail; `forward`: the same prefix with every verify
-  assertion, then forward-tail; `forced`: forced-capture, forced-tail), now under `require_live_run()` (run them through
-  `scripts/run-tests.py`), and refuse a set `KIN_TEST_EMR_CHECKPOINT_REQUEST`. Only such a run is a fresh end-to-end
-  pass; every checkpoint consumption records `fresh_e2e=false`, `release_gate_eligible=false`, and its inherited phases
-  apart from its executed ones. A derived (fork) run never makes a receipt and never counts as a final-candidate pass.
+  assertion, then forward-tail, whose verdict must itself be DEPLOYED with every required fact true; `forced`:
+  forced-capture, forced-tail), under `require_live_run()` (run them through `scripts/run-tests.py`), and refuse a set
+  `KIN_TEST_EMR_CHECKPOINT_REQUEST`. With `KIN_TEST_EMR_REHEARSAL_EVIDENCE` a fresh method also writes its own
+  `segment.json` there after its stacks are removed (the live marker, the raw records `keep_records` preserved, phase
+  results, the observed absence of every owned resource and alias, unchanged inputs); an unobserved cleanup fails it.
+  Only such a run is a fresh end-to-end pass; every checkpoint consumption records `fresh_e2e=false`,
+  `release_gate_eligible=false`, and its inherited phases apart from its executed ones. A derived (fork) run never makes
+  a receipt and never counts as a final-candidate pass.
 - Boundaries: `source-b0` (source B0 input cache), `seeded`, `held`, `introduced`, `verified`, and the separate forced
   lineage's `failure-held`, only after the phase's own PASS result, its history row, quiet workers, no UNKNOWN hold, no
   point of no return, and the product's boundary contract (`checkpoint_valid`; for `seeded` with the released lock).
@@ -1720,66 +1725,105 @@ adapter, the only place that builds Docker/Compose commands for a checkpoint) an
 - A bundle is private (0700/0600) under `<output_root>/bundles`, outside the fixture and evidence roots: the declared
   volumes (stopped proxy → api → keycloak → orthanc, the database last; a forced kill, an unconfirmed stop, unknown
   writable-layer state, an anonymous or foreign volume or a bind outside the fixture tree refuses; another named volume
-  of the project is captured as an extra member), the fixture tree (each clone's own Git objects, records and sibling secrets, the
-  operations lock, the ComposeEntry generations, the backup root with its audit ledger, the CA, overlays, the stage
-  context), the tool tree bytes, and an identity of the actual bytes (tool/source/harness trees, the eight TOOL_FILES,
-  source and clone B0 separately, image IDs, plan and target, host key, daemon, absolute root, runtime). manifest.json
-  is written last and names the bundle by its sha256; a `.partial-*` is never consumed; nothing is rewritten.
-- Resume: same host, daemon, architecture and absolute root; new volume objects only; containers from the pinned
-  ComposeEntry with the same image IDs (HELD: all created, the database alone started); no seed, provision or migration;
-  the product's observation is judged again. Same tool tree → `checkpoint-resume` (original plan and state bytes).
-  Changed tool tree → `diagnostic-fork` only when the exact difference lies inside `HostOps.proxy_ui` (from `held` or
-  `failure-held`), `HostOps.fenced_smoke`/`probe` or `HostOps.final_allowlist`/`backup_readiness` (from `introduced`, or
-  the earlier `held`), and the suffix re-runs the first affected phase; `verified` with a changed tool is refused as
-  `VERIFIED_PLAN_BINDING` (its smoke binds the parent plan); `HostOps.prepare`, any shared helper, the phase machine, an
-  import, constant, default, decorator or other file is `PREFIX_CHANGED`/`UNCLASSIFIED_CHANGE` before any restore. One
-  transition A→B only; a derived checkpoint is never a donor.
+  of the project is captured as an extra member), the fixture tree (each clone's own Git objects, records and sibling
+  secrets, the operations lock, the ComposeEntry generations, the backup root with its audit ledger, the CA, overlays,
+  the stage context), the tool tree bytes, the product facts observed at the boundary (containers, mounts, networks,
+  images, migrations, legacy roles/grants, realm members, study rows, EMR roles, the synthetic frame), and an identity of
+  the actual bytes (tool/source/harness trees, the eight TOOL_FILES, source and clone B0 separately, image IDs, plan and
+  target, host key, daemon, absolute root, runtime: Python, Docker, Compose, Playwright, Chromium, architecture and the
+  module origins). manifest.json is written last and names the bundle by its sha256; a child names its parent by that
+  manifest SHA and, separately, by its payload SHA; a `.partial-*` is never consumed; nothing is rewritten; a tar with a
+  duplicate path or a member under a link (in any order) refuses.
+- Resume: same host, daemon, architecture and absolute root; plan, target and both B0 recomputed from the bundle's own
+  bytes before anything is created (every plan-dependent path must lie inside the fixture root); new volume objects only;
+  containers from the pinned ComposeEntry with the same image IDs (HELD: all created, the database alone started); no
+  seed, provision or migration; the product's observation is judged again, and the boundary's product facts must be
+  observed again (only container IDs may differ; the old → new correspondence is recorded). Same tool tree →
+  `checkpoint-resume` (original plan and state bytes). Changed tool tree → `diagnostic-fork` only when the exact
+  difference lies inside `HostOps.proxy_ui` (from `held` or `failure-held`), `HostOps.fenced_smoke`/`probe` or
+  `HostOps.final_allowlist`/`backup_readiness` (from `introduced`, or the earlier `held`), and the suffix re-runs the
+  first affected phase; `verified` with a changed tool is refused as `VERIFIED_PLAN_BINDING` (its smoke binds the parent
+  plan); `HostOps.prepare`, any shared helper, the phase machine, an import, constant, default, decorator or other file
+  is `PREFIX_CHANGED`/`UNCLASSIFIED_CHANGE` before any restore. One transition A→B only; a derived checkpoint is never a
+  donor. A request whose parent manifest is not the checkpoint this stage consumes, of its lineage, sealed in the
+  request's own bundle store and not derived, is refused before the bundle is read.
+- Host: every Docker/Compose call of a checkpoint stage runs without `DOCKER_*`/`COMPOSE_*`; any `DOCKER_HOST`,
+  `DOCKER_CONTEXT`, `DOCKER_CONFIG` or TLS selection, or a current context that is not a local `unix://` socket, is
+  `REMOTE_DAEMON`. D1034 (≥ 10 GiB available RAM, a daemon that answers, and no foreign container running or stopped:
+  a `kin-*` name, a `kin.ops.run` or a `kin.emrb.live` label, whatever the name) is measured inside each leaf before its
+  first query and again directly before the restore; a failed or malformed listing is `DAEMON_UNAVAILABLE`.
 - Budgets: one stable unit per leaf, fixed before the first run in the commander's registry
-  (`KIN_TEST_EMR_CHECKPOINT_REGISTRY`, default the nine proof leaves of `DEFAULT_PROOF_LEAVES`); at most 3 attempts of at
-  most 3600 s each (restore, phases, export and cleanup included); a passed, running or interrupted unit is never
-  repeated; a new output folder, source SHA or evidence folder never names a new unit. A failed leaf keeps the gate's
-  marker until `release_after_inspection` with the real inspection (`inspection_record`).
+  (`KIN_TEST_EMR_CHECKPOINT_REGISTRY`, default the nine proof leaves of `DEFAULT_PROOF_LEAVES`, each with its source
+  copy and its parent leaf); at most 3 attempts of at most 3600 s each (restore, phases, export and cleanup included); a
+  passed, running or interrupted unit is never repeated; a new output folder, source SHA or evidence folder never names
+  a new unit. A failed leaf keeps the gate's marker until `release_after_inspection` with the real inspection
+  (`inspection_record`).
+- Evidence: each leaf preserves its raw product records (state, journal, phase results, command records, logs; never
+  `<records>.secrets`, the Compose values file, env files, smoke-member passwords or browser profiles) into its evidence
+  root before its private fixture is removed (a failed leaf keeps the fixture for inspection), and writes one
+  `segment.json` with its parent identity and its own current identity (source trees, executed plan, resume time) apart,
+  the parent chain, phase results, raw record hashes, inputs before/after and cleanup; it prints the segment's path and
+  SHA once. `index` binds a recorded run only when every recorded input is unchanged, every required input of the leaf
+  was declared, the logs, the exact selection, the runner's passed result, the announced segment SHA and the segment's
+  claims all agree (`BOUND`, else `UNVERIFIED` with reasons).
 - Time: a bundle is reusable until min(created + 8 h, plan window end, TLS notAfter) and only if the declared suffix
   and teardown fit; a future creation time refuses; no window, approval, certificate or receipt time is rewritten; the
   next phase logs in again after the restore. Expiry refuses reuse and never deletes a bundle.
+- Cleanup: exact labels and recorded IDs only; the image aliases a fixture tagged (`<project>-api:latest`,
+  `<project>-proxy:latest`) are removed only while another tag keeps the shared image (its last name is kept and
+  reported); the image ID is never removed; absence is observed by a new query.
 - Platform: Windows and Docker Desktop are `UNSUPPORTED_HOST` (pure tests only there); the leaves skip elsewhere with
-  their reason. D1034 (≥ 10 GiB available RAM, no foreign `kin-*` container running or stopped, a daemon that answers)
-  is measured inside each leaf before its first mutation.
+  their reason.
 
-Pure contracts (CI `runtime`, any OS): `python -B tests/ops_release_checkpoints_test.py` — T01–T15 and T18 (M01–M14, each
-killed only by an assertion after its control passed). Root on Linux for the ComposeEntry fork contract (CI uses sudo).
+Pure contracts (CI `runtime`, any OS): `python -B tests/ops_release_checkpoints_test.py` — T01–T15 (T15 runs the real
+stage methods of the three scenarios over a synthetic product: each wrong data, rights, realm, frame, overlay,
+ordinary-entry, image or receipt outcome must fail in the stage that owns its assertion), the host adapter, bundle
+inputs, raw records and lineage contracts, and T18 (M01–M30, each killed only by an assertion after its control
+passed). Root on Linux for the ComposeEntry fork contract (CI uses sudo).
 
-Linux proofs (pending until run on a native Linux synthetic host with the persistent live slot; one leaf per command, in
-this order; `P` is an absolute proof folder, `B` the candidate checkout, the four `KIN_TEST_*_IMAGE`, `KIN_TEST_ISOLATED_INSTALL=1`
-and `PLAYWRIGHT_BROWSERS_PATH` as for the fresh rehearsal):
+Linux proofs T16/T17 (pending until run on a native Linux synthetic host with the persistent live slot, as the gate
+account (root); `P` is an absolute proof folder, `B` the candidate checkout; the four `KIN_TEST_*_IMAGE`,
+`PLAYWRIGHT_BROWSERS_PATH` and the installed Playwright as for the fresh rehearsal; the script exports
+`KIN_TEST_ISOLATED_INSTALL=1`). The parent map is fixed in the registry, not taken from "the previous leaf":
+
+| Leaf (unit `release-tools-checkpoints-proof-…`) | Copy | Case | Parent leaf → checkpoint | Kind |
+|---|---|---|---|---|
+| prefix-source | a | `CheckpointSegments.test_source_checkpoint` | — | fresh (seals source-b0) |
+| prefix-seed | a | `CheckpointSegments.test_seed_checkpoint` | prefix-source → source-b0 | reseed-from-recorded-b0 (seals seeded) |
+| prefix-capture | a | `CheckpointSegments.test_capture_checkpoint` | prefix-seed → seeded | checkpoint-resume (seals held) |
+| prefix-introduce | a | `CheckpointSegments.test_introduce_checkpoint` | prefix-capture → held | checkpoint-resume (seals introduced) |
+| prefix-verify | a | `CheckpointSegments.test_verify_checkpoint` | prefix-introduce → introduced | checkpoint-resume (seals verified) |
+| late-fault | a | `CheckpointSegments.test_original_late_fault` | prefix-verify → verified | checkpoint-resume, expects L-11a STOP |
+| late-resume | b | `CheckpointSegments.test_late_change_resume` | prefix-introduce → introduced | diagnostic-fork, verify + forward-tail |
+| fresh-control | b | `EmrIntroductionRehearsal.test_emr_introduction_rehearsal_forward_entry_after_reopen` | — (no request) | fresh |
+| early-refusal | c | `CheckpointSegments.test_earlier_change_refused` | prefix-introduce → introduced | diagnostic-fork, expects PREFIX_CHANGED |
+
+Copy `a` is input A (`HostOps.backup_readiness` raises the deterministic L-11a STOP), `b` the unmodified candidate B,
+`c` input C (`HostOps.prepare` changed). The exact command sequence is generated from the frozen registry and run
+unchanged:
 
 ```text
-python3 -B $B/tests/ops_release_checkpoints.py registry --out $P/registry.json
-python3 -B $B/tests/ops_release_checkpoints.py source-copy --source $B --out $P/a --mutant backup-readiness-stop   # input A
-python3 -B $B/tests/ops_release_checkpoints.py source-copy --source $B --out $P/b                                  # input B
-python3 -B $B/tests/ops_release_checkpoints.py source-copy --source $B --out $P/c --mutant prepare-change         # input C
-# per leaf U (S = a for prefix-*/late-fault, b for late-resume/fresh-control, c for early-refusal; PARENT = the
-# previous leaf's segment.json results.checkpoint path + /manifest.json, "none" for prefix-source):
-python3 -B $B/tests/ops_release_checkpoints.py plan --registry $P/registry.json --unit $U --out $P/plan-$U.json
-python3 -B $B/tests/ops_release_checkpoints.py request --registry $P/registry.json --unit $U --parent-manifest $PARENT \
-  --source-manifest $P/$S.source-manifest.json --output-root $P/out --evidence-root $P/evidence/$U --out $P/request-$U.json
-cd $P/$S && sudo -E env KIN_TEST_EMR_CHECKPOINTS=1 KIN_TEST_EMR_CHECKPOINT_REQUEST=$P/request-$U.json \
-  KIN_TEST_EMR_CHECKPOINT_RUN_JSON=$P/runs/$U-1/run.json python3 -B scripts/record-run.py --run-dir $P/runs/$U-1 \
-  --cwd $P/$S --file $P/plan-$U.json --file $P/request-$U.json --file $P/$S.source-manifest.json \
-  --file tests/ops_release_checkpoints.py --file tests/ops_release_checkpoints_live_test.py \
-  --file tests/ops_deploy_host_container_test.py --tree scripts -- python3 -B scripts/run-tests.py --plan $P/plan-$U.json
-# fresh control (unit release-tools-checkpoints-proof-fresh-control, S = b): KIN_TEST_EMR_REHEARSAL=1 and no request.
-python3 -B $B/tests/ops_release_checkpoints.py compare --resumed $P/runs/release-tools-checkpoints-proof-late-resume-1/stdout.log \
-  --fresh $P/runs/release-tools-checkpoints-proof-fresh-control-1/stdout.log
-python3 -B $B/tests/ops_release_checkpoints.py index --run-dir $P/runs/$U-1 --segment $P/evidence/$U/segment.json \
-  --expected-test ops_release_checkpoints_live_test.$CASE --declared $P/plan-$U.json --declared $P/request-$U.json
+python3 -B $B/tests/ops_release_checkpoints.py registry --out $P/registry.json      # or the commander's frozen registry
+python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B > $P/proof.sh
+sudo -E bash $P/proof.sh
 ```
 
-T16 passes when prefix-source..prefix-verify each seal their checkpoint, late-fault shows exactly L-11a STOP with status
-VERIFIED and no PONR, late-resume (B forked from A's `introduced`) and the fresh control both reach DEPLOYED with
-`compare` equal, every index is BOUND and no owned resource remains. T17 passes when early-refusal reports
-`PREFIX_CHANGED` for C and for C with a late body too, before any restore, with the bundle bytes, the daemon inventory
-and the fixture root unchanged. A fresh control that exceeds 3600 s stays a real timeout.
+`proof.sh` makes the three source copies (`source-copy`, each with its source manifest), then for every leaf in registry
+order: `plan` (the registered exact selection), `request` (checkpoint leaves only; the parent manifest is resolved from
+the parent leaf's BOUND index and must be the checkpoint this stage consumes), the run through `scripts/record-run.py`
+from the leaf's copy with `--file` for the plan, registry, source manifest, request and parent manifest and the five
+harness files, `--tree scripts`, and `scripts/run-tests.py --plan` (checkpoint leaves with
+`KIN_TEST_EMR_CHECKPOINTS=1`, `KIN_TEST_EMR_CHECKPOINT_REQUEST`, `KIN_TEST_EMR_CHECKPOINT_REGISTRY`; the fresh control
+with `KIN_TEST_EMR_REHEARSAL=1`, `KIN_TEST_EMR_REHEARSAL_EVIDENCE=$P/evidence/<unit>` and no request), then `index`
+(`$P/index/<unit>.json` only when BOUND). It ends with `compare`, which exits 0 only for `t16_pass`: both forward
+verdicts DEPLOYED with every required fact true, equal, and both runs BOUND (equal failures are not a pass). A retry of
+a leaf uses the same unit with a new run folder (`-2`, `-3`); it never renames the unit.
+
+T16 passes when prefix-source..prefix-verify are each BOUND with their sealed checkpoint, late-fault is BOUND with
+exactly L-11a STOP, status VERIFIED and no PONR, late-resume and the fresh control are BOUND and `compare` reports
+`t16_pass`, and no owned resource or alias remains. T17 passes when early-refusal is BOUND with `PREFIX_CHANGED` for C
+and for C with a late body too, before any restore, with the bundle bytes, the daemon inventory and the fixture root
+unchanged. A fresh control that exceeds 3600 s stays a real timeout.
 
 # 뷰어 반전 정밀도
 
