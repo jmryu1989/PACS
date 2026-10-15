@@ -718,6 +718,21 @@ python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pa
 - 봉인: `backup`은 writer 정지 구간에 뜬 `kin.dump`가 완성되고 writer 재개·준비 확인이 끝난 뒤(실패해도) 그 덤프의 AuditLog 행을
   격리 검증 DB에서 digest로 만들어 백업 폴더의 `audit-checkpoint.json`(0600)에 쓰고, manifest의 `sha256`·`bytes`에 선언한 뒤(형식 1 그대로)
   백업 부모의 `audit-ledger.json`에 덧붙인다(K → manifest → 장부 순서). 정지 시간은 늘지 않고 봉인은 `kin-db`에 명령을 보내지 않는다.
+- 장부를 쓰는 `init`·`plan`·봉인과 `rotate`의 삭제 구간은 백업 부모 안의 장부 잠금(`.kin-audit-ledger.lock`, 0600, 소유자만 해제)으로
+  한 번에 하나만 돈다. 도구 폴더에는 쓰지 않으므로 보호 설치(`/opt/kin-deploy`, root 0755)를 백업 부모 소유 계정으로 실행해도 된다.
+  봉인(`backup` 안)과 rotation은 운영 잠금 → 장부 잠금 순서로만 잡고 `init`·`plan`은 장부 잠금만 잡는다. 어느 쪽도 기다리지 않고,
+  죽은 실행이 남긴 잠금은 지우거나 건너뛰지 않고 계속 거절한다(RT-P3-LEDGER-LOCK·P3R1-01, `ops_audit_integrity_test.py` PV-11·PV-12).
+  경합했을 때의 결과는 진입점마다 다르다:
+  - `init`·`plan` CLI: 종료코드 2(`{"error": "Refused"}`), 장부·백업 부모는 그대로다.
+  - 봉인(`ops_audit_integrity.seal`): `Refused`를 올리고 체크포인트·manifest 선언·장부를 쓰지 않는다. `backup` CLI는 이를 실패로 남긴다:
+    완성된 백업 폴더는 지우지 않고 그 manifest에 `backup_error = {"stage": "seal audit", "type": "Refused"}`를 기록하며 종료코드 1이다
+    (봉인되지 않은 그 세트는 rotation에서 `audit-undeclared`가 아니라 일반 세대로 판단된다; 다음 백업 전에 원인을 확인한다).
+  - `rotate`(단독 또는 `backup` 뒤): 아무것도 삭제·이름변경하지 않고 실패(종료코드 1)한다. 보존기간 변경(`plan`)은 rotation의 마지막
+    보존 판정→이름변경→삭제 사이에 끼어들 수 없으므로, 성공한 `plan`의 새 기간 안의 세트를 그 rotation이 지우지 않는다.
+- 읽기 전용 `verify`·`retention`은 잠금을 잡지도 깨지도 않는다. 단 `retention`은 진행 중인 봉인 전체의 일관된 snapshot이 아니다:
+  봉인이 manifest 선언을 쓴 뒤 장부에 덧붙이기 전 사이에 조회하면 그 세트를 `uncommitted`로 보고(종료코드 1)하고, 봉인이 끝난 뒤 같은
+  조회는 종료코드 0이다(P3R1-04, P3 이전부터의 관측 한계). 백업 실행 시각과 겹친 `retention`의 `uncommitted`는 백업이 끝난 뒤 다시
+  조회해 판정하고, 다시 조회해도 남을 때만 중단된 봉인으로 다룬다. `verify`는 고정된 체크포인트와 내보내기를 읽으므로 해당하지 않는다.
 - 장부가 없으면 봉인하지 않는다(자동으로 처음부터 시작하지 않음): manifest `backup_error = {"stage": "seal audit", "type": "LedgerMissing"}`,
   종료코드 1. 선언된 체크포인트가 있는 부모의 `init`은 거절되고 `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
 - 이전 봉인과 행이 다르거나(과거 사건: `previous_verification` failed/unverifiable), 이번 덤프의 가드가 무력하거나 표 모양이 다르면(현재 결함)
@@ -1615,9 +1630,15 @@ overlay bytes and all effective interpolation values into the persistent immutab
 ordinary recreate read that bundle after the original inputs or proxy vanish. Any bundle corruption is a refusal;
 there is no checkout fallback. Temporary working copies remain private and may be removed after the plan ends;
 the active entry's inputs remain. Before a seed nothing runs to resolve from: the required VM monitor file needs
-`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`, inside its checkout. Omitting monitor is not an alternative.
-With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
-(recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`. Omitting monitor is not an alternative. A rehearsal binds no host path
+outside its checkout except its declared overlay binds and that one monitor bind (the proxy's read-only
+`/var/run/kin-monitor-public` with `docker-compose.monitor.yml` listed), so the clone may keep the folder where
+production does, outside the checkout (RT-P3-MONITOR-BIND). The supervised browser runs its interpreter with `-B` and
+`PYTHONDONTWRITEBYTECODE=1`, so no smoke or probe writes `__pycache__` into the protected install (RT-P3-PYCACHE).
+With `fix_checkout_mode` the capture first makes the checkout and its `.git` 0700, as the operator command after the
+release requires (RT-P3-GIT-MODE; recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+A rollback judges the checkout by that operator command's rule too, so an operating account's 0700 checkout whose
+`.git` alone is 0755 is restored to 0700 after approval, the lease and a durable `host_changed` record (P3R1-02).
 L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and
 bind mounts, networks, published ports; IRT2-02) and accepts as backup root this tool's own private folder or the
 operating account's 0700 folder (policy `repository_owner`; B0/B1/Bfail are then handed to that account, whose daily
