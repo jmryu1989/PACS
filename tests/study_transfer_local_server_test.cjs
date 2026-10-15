@@ -868,6 +868,8 @@ test('S9U4-B18 an expired prepared attempt: GET writes nothing, the same POST fe
   assert.deepEqual([again.status, again.body.outcome, again.body.generation], [200, 'stored', 2]);
   const [old] = h.s.file(id, 0).attempts;
   assert.deepEqual([old.phase, old.outcome, old.code, old.transport], ['finished', 'retryable', 'IMPORT_ATTEMPT_EXPIRED', 'certain-no-write']);
+  assert.deepEqual(audits(h.s, 'dicom.import.result').filter(a => a.detail.attemptId === old.attemptId).map(a => a.detail.code), ['IMPORT_ATTEMPT_EXPIRED'],
+    'the fenced attempt has exactly one result row');
   await pending;   // the stalled first request fails its own CAS later and writes nothing
   // Startup reconciliation: a prepared attempt whose lease ran out is fenced; GET then shows the code with 200.
   const h2 = await harness();
@@ -1035,6 +1037,29 @@ test('S9U4-B31 an initialisation interrupted mid-read: the same study is STUDY_W
   assert.deepEqual([late.body.outcome, late.body.code], ['retryable', 'IMPORT_ATTEMPT_EXPIRED'], 'the interrupted request loses its CAS and writes nothing');
   assert.equal(h.s.claim('study:' + study).claim.phase, 'bound');
   assert.equal(audits(h.s, 'dicom.import.result').filter(a => a.detail.attemptId === fenced.attemptId).length, 1, 'one result row for the fenced attempt');
+});
+
+test('S9U4-B33 the owner resends after its own initialisation was interrupted: the same POST fences its prepared attempt, drops the initializing claim and reads again', async () => {
+  const h = await harness();
+  const study = uid();
+  h.orthanc.store(dicom({ study, series: study + '.1', id: 'SYN-J' }));
+  own(h.s, study);
+  let stall = true;
+  h.orthanc.fault = call => (stall && call.path.endsWith('?simplify') ? { hang: true } : null);
+  const bytes = dicom({ study, series: study + '.2', id: 'SYN-J' });
+  const id = randomUUID();
+  const first = h.send(bytes, { id });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const [held] = h.s.file(id, 0).attempts;
+  assert.equal(h.s.claim('study:' + study).claim.heldByAttemptId, held.attemptId);
+  stall = false;
+  h.s.advance(31000);
+  const again = await h.send(bytes, { id });
+  assert.deepEqual([again.status, again.body.outcome, again.body.generation], [200, 'stored', 2], JSON.stringify(again.body));
+  assert.deepEqual(audits(h.s, 'dicom.import.result').filter(a => a.detail.attemptId === held.attemptId).map(a => a.detail.code), ['IMPORT_ATTEMPT_EXPIRED'],
+    'one result row for the fenced attempt');
+  assert.equal(h.s.claim('study:' + study).claim.phase, 'bound');
+  await first;
 });
 
 test('S9U4-B32 the 10 s timers: a live attempt renews its lease; an archive stops supplying bytes once the rights are gone', async t => {

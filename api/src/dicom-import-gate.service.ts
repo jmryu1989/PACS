@@ -1026,13 +1026,21 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     await tx.importOperation.update({ where: { id: row.id }, data: { claim, updatedAt: now } });
   }
 
-  /** Release only the holders this attempt holds; an initializing Study claim it held goes away when asked (no write). */
+  /**
+   * Release only the holders this attempt holds; an initializing Study claim it held goes away when asked (no write). The
+   * locked rows of this transaction are updated in place, so the decisions after a release read what was committed.
+   */
   private async releaseHolders(tx: Tx, claims: Map<string, ClaimRow>, attemptId: string, now: Date, dropInitializing: boolean) {
-    for (const row of claims.values()) {
+    for (const [key, row] of claims) {
       if (!row || row.claim?.heldByAttemptId !== attemptId) continue;
-      if (dropInitializing && row.kind === 'study-claim' && row.claim.phase === 'initializing')
+      if (dropInitializing && row.kind === 'study-claim' && row.claim.phase === 'initializing') {
         await tx.importOperation.delete({ where: { id: row.id } });
-      else await this.updateClaim(tx, row, { ...row.claim, heldByAttemptId: null }, now);
+        claims.set(key, null);
+      } else {
+        const claim = { ...row.claim, heldByAttemptId: null };
+        await this.updateClaim(tx, row, claim, now);
+        claims.set(key, { ...row, claim });
+      }
     }
   }
 
@@ -1316,6 +1324,8 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
    * arrives; the wait for the response is bounded by the signal and its own 30 s, and a late answer is released.
    */
   openOriginal(orthancId: string, signal: AbortSignal, adopt: (readable: Readable) => void): Promise<void> {
+    // The id comes from a stored manifest: only Orthanc's own id shape ever reaches the request path.
+    if (!ORTHANC_ID.test(orthancId)) return Promise.reject(new Error('original unavailable'));
     const { base, auth } = this.orthancConfig();
     const controller = new AbortController();
     const abort = () => controller.abort();
