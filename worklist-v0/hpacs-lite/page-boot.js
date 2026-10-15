@@ -446,6 +446,10 @@
     let studyPanelComposing = false;
     document.addEventListener('compositionstart', () => { studyPanelComposing = true; }, true);
     document.addEventListener('compositionend', () => { studyPanelComposing = false; }, true);
+    // Finalize (Approve) as a command another document can run (D1371): a bound viewer frame's keydown never reaches this
+    // window, so the frame forwards its Finalize key here, and the dispatcher below uses the same hook. It answers true only
+    // when the command ran; only then may the caller keep the browser's own Ctrl+S (Save Page) from happening.
+    window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand() });
     window.addEventListener('keydown', event => {
       if (!workspaceEditable() || event.defaultPrevented || event.isComposing || studyPanelComposing || event.keyCode === 229
           || document.querySelector('dialog[open], .modal.show, [popover]:popover-open')) return;
@@ -455,14 +459,18 @@
         studyPanel.close(); event.preventDefault(); event.stopImmediatePropagation(); return;
       }
       const owner = workspaceOwner?.slice(KinWorkspaceLayout.PREFIX.length);
-      const bindings = KinWorkspaceShortcuts.read(workspaceStorage, owner);
+      // The v2 map (D1371) is the one with Finalize; read() stays the v1 view for v1 consumers. A model without readV2 (the
+      // W4-SC model not yet on this page) answers through read(): no Finalize key, every other key as before.
+      const bindings = (KinWorkspaceShortcuts.readV2 ?? KinWorkspaceShortcuts.read)(workspaceStorage, owner);
       const command = KinWorkspaceShortcuts.action(bindings, event);
-      // Finalize (Approve), Ctrl+S by default (W4-SC model): the browser's Save Page is prevented only when the command runs.
+      // Finalize (Approve), Ctrl+S by default: the browser's Save Page is prevented only when the command ran.
       if (command === 'finalize') {
-        if (finalizeCommand()) { event.preventDefault(); event.stopImmediatePropagation(); }
+        if (KinReportCommands.finalize() === true) { event.preventDefault(); event.stopImmediatePropagation(); }
         return;
       }
-      const templates = !command && KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event) === 'context';
+      // Ctrl+Alt+T, unless the reader gave that chord to another action. A one-action map in the v1 form names the same
+      // chord to either model version (a v2 map holds whole chords, so 'KeyT' merged into it would never match).
+      const templates = !command && KinWorkspaceShortcuts.action({ context: 'KeyT' }, event) === 'context';
       if (command !== 'context' && !templates) return;
       if (openStudyPanel(templates ? 'templates' : undefined)) { event.preventDefault(); event.stopImmediatePropagation(); }
     }, true);

@@ -397,9 +397,13 @@
       if (button.disabled) return button.title || "지금은 승인할 수 없습니다";
       return null;
     }
-    /** 단축키 목록의 "Finalize (Approve)"(Ctrl+S). 명령을 실행했으면 true — 그때만 브라우저의 페이지 저장을 막는다. */
+    /**
+     * 단축키 목록의 "Finalize (Approve)"(Ctrl+S). 명령을 실행했으면 true — 그때만 브라우저의 페이지 저장을 막는다.
+     * 확정·삽입이 나가 있으면 commitReport는 아무것도 하지 않고 돌아온다(삽입 중에는 Approve 단추도 잠기지 않는다) —
+     * 그때 "실행했다"고 답하면 Ctrl+S가 아무 일도 하지 않은 채 사라진다.
+     */
     function finalizeCommand() {
-      if (mode !== "Radiology" || reportCommandBlocked("finalize")) return false;
+      if (mode !== "Radiology" || commitInFlight || insertInFlight || reportCommandBlocked("finalize")) return false;
       commitReport("approve");
       return true;
     }
