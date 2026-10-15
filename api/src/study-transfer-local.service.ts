@@ -25,6 +25,12 @@ const FILE_INDEX = /^(?:0|[1-9][0-9]?)$/;
 const LEASE_MS = 30000;
 const RENEW_MS = 10000;
 const NO_PROGRESS_MS = 30000;
+/** Before a chunk: the lease is asked of the database once less than this is left of the window it is known to hold. */
+const LEASE_MARGIN_MS = 1000;
+/** Before a chunk: the current rights are re-read once their last confirmation is older than this. */
+const RIGHTS_FRESH_MS = 1000;
+/** Upper bound of one check before a chunk; a check that does not answer in time stops the archive. */
+const CHECK_BOUND_MS = 5000;
 const DOWNLOAD_ROLES = ['radiologist', 'technician'];
 
 export const TRANSFER_MESSAGES = Object.freeze({
@@ -278,7 +284,10 @@ export class StudyTransferLocalService {
       current.code === 'ARCHIVE_TOO_LARGE' ? TRANSFER_MESSAGES.changed : current.message);
     if (current.manifestCanonical !== stored.manifestCanonical) throw error(409, 'MANIFEST_CHANGED', TRANSFER_MESSAGES.changed);
     const session = req?.authMethod === 'session' && typeof req.sid === 'string' ? req.sid : null;
+    // Monotonic times taken before each confirmation is asked: the rights read and the lease the commit below sets.
+    let rightsFrom = performance.now();
     await this.currentRights(c, 'download', uid, session);
+    let leaseFrom = performance.now();
     const attempt = await this.openAttempt(op.id, owner, stored.manifestSha256);
     // Everything is decided: headers, then bytes. From here no error becomes an HTTP status (5.2 step 6).
     res.status(200);
@@ -292,11 +301,43 @@ export class StudyTransferLocalService {
     res.once('close', lost);
     let idle = setTimeout(() => stop.abort(), NO_PROGRESS_MS);
     const renew = setInterval(() => {
+      const leaseAsked = performance.now();
       void this.renewAttempt(op.id, attempt.attemptId)
-        .then(kept => { if (!kept) { fenced = true; stop.abort(); } return this.currentRights(c, 'download', uid, session); })
+        .then(kept => {
+          if (!kept) { fenced = true; stop.abort(); return; }
+          leaseFrom = Math.max(leaseFrom, leaseAsked);
+          const rightsAsked = performance.now();
+          return this.currentRights(c, 'download', uid, session).then(() => { rightsFrom = Math.max(rightsFrom, rightsAsked); });
+        })
         .catch(() => stop.abort());
     }, RENEW_MS);
     renew.unref?.();
+    /*
+     * 5.2 step 5 / B-03, immediately before every chunk. The database set leaseUntil = its commit time + 30 s, the commit
+     * came after leaseFrom, and only an expired lease is ever fenced (by another archive request or the startup
+     * reconciliation), so while less than LEASE_MS - LEASE_MARGIN_MS has passed since leaseFrom the attempt's CAS cannot
+     * have been lost; once that window could have lapsed the CAS is asked of the database before the chunk. The rights are
+     * re-read once their last confirmation is older than RIGHTS_FRESH_MS. Each wait is bounded by CHECK_BOUND_MS. A lost or
+     * unanswered CAS fences the attempt (Unconfirmed); lost rights cancel it, and the writer's own signal check then stops
+     * it as 'aborted' (Incomplete), the same as the 10 s timer finding them gone.
+     */
+    const confirm = async (): Promise<boolean> => {
+      if (fenced) return false;
+      if (stop.signal.aborted) return true;
+      if (performance.now() - leaseFrom >= LEASE_MS - LEASE_MARGIN_MS) {
+        const asked = performance.now();
+        const kept = await bounded(this.renewAttempt(op.id, attempt.attemptId)).catch(() => false);
+        if (!kept) { fenced = true; stop.abort(); return false; }
+        leaseFrom = Math.max(leaseFrom, asked);
+      }
+      if (performance.now() - rightsFrom >= RIGHTS_FRESH_MS) {
+        const asked = performance.now();
+        const allowed = await bounded(this.currentRights(c, 'download', uid, session)).then(() => true, () => false);
+        if (!allowed) { stop.abort(); return !fenced; }
+        rightsFrom = Math.max(rightsFrom, asked);
+      }
+      return !fenced;
+    };
     let result;
     try {
       result = await writeArchive({ plan: plan.plan, sink: res, signal: stop.signal,
@@ -310,7 +351,7 @@ export class StudyTransferLocalService {
             idle = setTimeout(() => stop.abort(), NO_PROGRESS_MS);
           }
         },
-        beforeWrite: () => !fenced && !stop.signal.aborted });
+        beforeWrite: confirm });
     } finally {
       clearTimeout(idle);
       clearInterval(renew);
@@ -403,6 +444,15 @@ export class StudyTransferLocalService {
           at: now.toISOString() }) } });
     });
   }
+}
+
+/** A check before a chunk that does not answer within CHECK_BOUND_MS rejects; a late answer is ignored by the caller. */
+function bounded<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('check deadline')), CHECK_BOUND_MS);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
 function totalBytes(manifest: OriginalManifest) {

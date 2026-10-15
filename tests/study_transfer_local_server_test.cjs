@@ -1421,3 +1421,59 @@ test('S9U4-B30 download streams that stop: an MD5 change of a stored original is
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.deepEqual(h.s.op(id).download.attempts.map(a => a.state), ['incomplete', 'incomplete', 'unconfirmed', 'sent'], 'retries add attempts; earlier supply facts stay');
 });
+
+test('S9U4-B34 before every chunk, without the 10 s timer: rights older than 1 s are re-read; a lapsed lease window is asked of the database (lost -> Unconfirmed, held -> continues)', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] }); // the 10 s timer never fires in this test
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  async function heldArchive() {
+    const h = await harness();
+    const study = await downloadStudy(h, 2), id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200);
+    let served = 0, release;
+    const held = new Promise(resolve => { release = resolve; });
+    h.orthanc.fault = async call => (call.path.endsWith('/file') && ++served === 2 ? (await held, null) : null);
+    const archive = h.request('GET', `/api/studies/${study}/original-downloads/${id}/archive`, { as: RAD });
+    await sleep(200);
+    return { h, id, archive, release };
+  }
+  // Rights lost while the second original is held back: the next chunk, over 1 s later, re-reads them and stops (Incomplete).
+  const lost = await heldArchive();
+  lost.h.s.rights.set(RAD.sub, { ...lost.h.s.rights.get(RAD.sub), roles: ['clinician'] });
+  await sleep(1100);
+  lost.release();
+  const cut = await lost.archive;
+  assert.ok(cut.bytes.length < Number(cut.headers['content-length']), 'no complete archive after the rights were lost');
+  await sleep(100);
+  const [stopped] = lost.h.s.op(lost.id).download.attempts;
+  assert.deepEqual([stopped.state, stopped.responseFinished], ['incomplete', false]);
+  assert.deepEqual(stopped.objects.map(o => [o.complete, o.complete ? 'supplied' : o.bytesSupplied]), [[true, 'supplied'], [false, 0]], 'no byte of the held original');
+  // A worker whose own lease window has lapsed asks the database before the next chunk: the lease expired there -> fenced.
+  const realNow = performance.now.bind(performance);
+  const late = await heldArchive();
+  late.h.s.advance(31000);
+  let fenced;
+  performance.now = () => realNow() + 31000;
+  try {
+    late.release();
+    fenced = await late.archive;
+  } finally { performance.now = realNow; }
+  assert.ok(fenced.bytes.length < Number(fenced.headers['content-length']));
+  await sleep(100);
+  const [lateAttempt] = late.h.s.op(late.id).download.attempts;
+  assert.deepEqual([lateAttempt.state, lateAttempt.responseFinished, lateAttempt.objects.filter(o => o.complete).length], ['unconfirmed', false, 1]);
+  // The same lapse with the database lease still held: the CAS renews it and the archive completes.
+  const kept = await heldArchive();
+  const leaseBefore = kept.h.s.op(kept.id).download.attempts[0].leaseUntil;
+  kept.h.s.advance(5000);
+  let whole;
+  performance.now = () => realNow() + 31000;
+  try {
+    kept.release();
+    whole = await kept.archive;
+  } finally { performance.now = realNow; }
+  assert.equal(whole.bytes.length, Number(whole.headers['content-length']));
+  await sleep(100);
+  const [sent] = kept.h.s.op(kept.id).download.attempts;
+  assert.deepEqual([sent.state, sent.responseFinished], ['sent', true]);
+  assert.ok(Date.parse(sent.leaseUntil) > Date.parse(leaseBefore), 'the lease was renewed by the check before the chunk');
+});
