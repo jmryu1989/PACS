@@ -1145,7 +1145,9 @@ def retention(root, as_of=None, max_age_hours=BACKUP_AGE // 3600):
     """Report, never write or delete. Exit 1 when a sealed backup still inside its retention window is missing or no
     longer matches the ledger, when the latest seal is older than max_age_hours, when a declared checkpoint is not in the
     ledger (however many seals followed it), or when a re-initialisation after loss is still inside its window; exit 2
-    without a readable ledger."""
+    without a readable ledger. It takes no lock (it never waits for, holds or breaks a writer's), so it is not a snapshot
+    of a seal under way: between that seal's manifest declaration and its ledger append the set reads as uncommitted
+    (P3R1-04); an uncommitted set seen while a backup runs is judged by observing again after it ended."""
     as_of = as_of or utc_now()
     root = Path(root)
     try:
