@@ -1615,7 +1615,10 @@ overlay bytes and all effective interpolation values into the persistent immutab
 ordinary recreate read that bundle after the original inputs or proxy vanish. Any bundle corruption is a refusal;
 there is no checkout fallback. Temporary working copies remain private and may be removed after the plan ends;
 the active entry's inputs remain. Before a seed nothing runs to resolve from: the required VM monitor file needs
-`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`, inside its checkout. Omitting monitor is not an alternative.
+`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`. Omitting monitor is not an alternative. A rehearsal binds no host path
+outside its checkout except its declared overlay binds and that one monitor bind (the proxy's read-only
+`/var/run/kin-monitor-public` with `docker-compose.monitor.yml` listed), so the clone may keep the folder where
+production does, outside the checkout (RT-P3-MONITOR-BIND).
 With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
 (recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
 L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and

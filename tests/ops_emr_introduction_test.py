@@ -2333,6 +2333,57 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         self.overlay.write_bytes(self.overlay.read_bytes() + b"# changed\n")
         refuses(self, ops_host.declared_overlay_facts, message="differs from the manifest")
 
+    def test_119_a_rehearsal_binds_the_monitor_public_folder_where_production_keeps_it_and_nothing_else_outside(self):
+        """RT-P3-MONITOR-BIND (prep3 readiness3 §3-1, D1311): an operational rehearsal lists docker-compose.monitor.yml
+        last, and that file binds ${KIN_MONITOR_PUBLIC_DIR} read-only into the proxy. Production keeps the folder outside
+        its checkout (/home/ubuntu/.kin-monitor-public); a clone with production's shape binds it outside its checkout
+        too, and that one bind - the proxy's read-only monitor folder with the monitor file listed - is accepted. Every
+        other host path outside the checkout is still refused, and so is the monitor bind in any other shape."""
+        self.production_host()
+        rehearsal = target_fixture("rehearsal", str(self.repo))
+        # The operational check names the overlay file by its POSIX name (the VM's paths); written that way here too.
+        overlays = [dict(entry, file=Path(entry["file"]).as_posix()) for entry in copy.deepcopy(self.target["declared_overlays"])]
+        rehearsal.update(compose_files=["docker-compose.yml", "docker-compose.prod.yml", self.override.as_posix(), self.overlay.as_posix(),
+                                        "docker-compose.monitor.yml"],
+                         external_networks=copy.deepcopy(self.target["external_networks"]), declared_overlays=overlays)
+        intro.target_valid(rehearsal, operational=True)
+        monitor_target = "/var/run/kin-monitor-public"
+        # Beside the checkout, as production's /home/ubuntu/.kin-monitor-public is beside /home/ubuntu/pacs-starter-kit.
+        outside = {"type": "bind", "source": str(self.root / ".kin-monitor-public"), "target": monitor_target, "read_only": True}
+        for maintenance in (False, True):
+            model = resolved_model(rehearsal, target_checkout=False, maintenance=maintenance)
+            model["mounts"]["proxy"].append(dict(outside))
+            check = lambda model, target=rehearsal, maintenance=maintenance: intro.check_resolved(
+                model, target, target_checkout=False, maintenance=maintenance)
+            with self.subTest(maintenance=maintenance):
+                check(model)
+            inside = copy.deepcopy(model)
+            inside["mounts"]["proxy"][-1]["source"] = str(self.repo / ".kin-monitor-public")   # the D1311 data workaround
+            check(inside)
+            elsewhere = {"type": "bind", "source": str(self.root / "elsewhere"), "target": "/etc/nginx/conf.d/x.conf", "read_only": True}
+            for name, change in {
+                    "the monitor bind writable": lambda m: m["mounts"]["proxy"][-1].__setitem__("read_only", False),
+                    "the monitor folder at another target": lambda m: m["mounts"]["proxy"][-1].__setitem__("target", monitor_target + "-x"),
+                    "the monitor folder on another service": lambda m: m["mounts"]["api"].append(m["mounts"]["proxy"].pop()),
+                    "a second outside folder at the monitor target": lambda m: m["mounts"]["proxy"].append(
+                        dict(outside, source=str(self.root / "second-monitor"))),
+                    "another outside bind beside the monitor bind": lambda m: m["mounts"]["proxy"].append(dict(elsewhere)),
+                    "another outside bind on another service": lambda m: m["mounts"]["orthanc"].append(dict(elsewhere))}.items():
+                bad = copy.deepcopy(model)
+                change(bad)
+                with self.subTest(case=name, maintenance=maintenance):
+                    refuses(self, check, bad, message="outside its checkout")
+            unlisted = copy.deepcopy(rehearsal)
+            unlisted["compose_files"].remove("docker-compose.monitor.yml")
+            with self.subTest(case="the monitor file not listed", maintenance=maintenance):
+                refuses(self, check, model, unlisted, message="outside its checkout")
+        # Production is as production runs it: no rehearsal rule, its monitor folder outside its checkout.
+        images = plan_fixture(self.target)["previous"]["images"]
+        production = resolved_model(self.target, target_checkout=False, maintenance=False, images=images)
+        production["mounts"]["proxy"].append(dict(outside, source="/home/ubuntu/.kin-monitor-public"))
+        intro.target_valid(self.target, operational=False)
+        intro.check_resolved(production, self.target, target_checkout=False, maintenance=False, images=images)
+
     @unittest.skipUnless(shutil.which("docker"), "needs the docker CLI (`docker compose config` only: no container, no daemon change)")
     def test_86_compose_itself_drops_an_overlay_merged_before_the_rehearsal_override(self):
         """IRT-11 (D1066): the product's compose files, the generated rehearsal override (`volumes: !override` on the

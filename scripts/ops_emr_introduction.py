@@ -99,6 +99,9 @@ COMPOSE_NAME = re.compile(r"docker-compose(?:\.[a-z0-9-]+)?\.yml")
 PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 TAG = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 FENCED = "#kin-emr-introduction-fenced# "
+# The tracked monitor file and the one bind it brings (the proxy's read-only public folder, ${KIN_MONITOR_PUBLIC_DIR}).
+MONITOR_FILE = "docker-compose.monitor.yml"
+MONITOR_PUBLIC_TARGET = "/var/run/kin-monitor-public"
 TOOL_FILES = ("ops_emr_introduction.py", "ops_emr_probe.py", "ops_backup.py", "ops_deploy_preflight.py", "ops_deploy_host.py",
               "ops_audit_integrity.py", "ops_deploy_entry.py", "ops_deploy_runner.py")
 OPERATOR_SMOKE_CHECKS = ("login_pkce", "logout_old_session_refused", "worklist_uid", "ohif_frame", "w2_folders",
@@ -602,8 +605,9 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
     """The resolved Compose model (selected, secret-free fields) is exactly the manifest's target before anything uses it:
     project, container names, every named volume (and which service mounts which at which path), networks, published
     ports (proxy only on the planned ingress, any other service on loopback only), origin settings and, when the caller
-    pins them, images. A rehearsal binds nothing outside its own checkout. recovery: after a rollback the project and
-    the pg/Orthanc volumes are the recovery ones."""
+    pins them, images. A rehearsal binds nothing outside its own checkout but its declared overlay binds and the monitor
+    file's public folder (RT-P3-MONITOR-BIND). recovery: after a rollback the project and the pg/Orthanc volumes are the
+    recovery ones."""
     project = recovery["project"] if recovery else target["project"]
     require(model["project"] == project, "Resolved compose project differs")
     expected = {role: target["containers"][role] for role in ROLES}
@@ -652,8 +656,14 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
         require(all(bind in binds for bind in declared_binds.get(role, [])), "A declared overlay bind is missing from the resolved model: " + role)
         if target["kind"] == "rehearsal":
             repository = path_of(target["repository"])
+            # RT-P3-MONITOR-BIND: the tracked monitor file binds ${KIN_MONITOR_PUBLIC_DIR}, which production keeps outside
+            # its checkout; a clone of that shape may bind it there too, but only as that file declares it (the proxy's
+            # one read-only bind at the monitor target, with the file listed). Any other outside path stays refused.
+            monitor = [bind for bind in binds if bind[1] == MONITOR_PUBLIC_TARGET] \
+                if role == "proxy" and MONITOR_FILE in target["compose_files"] else []
             for bind in binds:
-                require(bind[0] == repository or repository in bind[0].parents or bind in declared_binds.get(role, []),
+                require(bind[0] == repository or repository in bind[0].parents or bind in declared_binds.get(role, [])
+                        or (monitor == [bind] and bind[2] is True),
                         "A rehearsal binds a host path outside its checkout: " + role)
     for role, ports in model["ports"].items():
         if role == "proxy":
