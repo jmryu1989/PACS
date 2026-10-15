@@ -2222,12 +2222,20 @@ test('S9U4-B42 one transition table by DB time: an initialising worker whose lea
       await holding;
     }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
     await isLocked;
-    t.mock.timers.tick(10000);
-    await sleep(50);
-    h.s.advance(31000);
-    unlock();
+    // The DB clock moves 5 s first, so a renewal that did not wait for the claim lock would visibly move the lease (to
+    // DB now + 30 s); the one that waits reads the time only after its locks, when the lease has already ended.
+    try {
+      h.s.advance(5000);
+      t.mock.timers.tick(10000);
+      await sleep(50);
+      assert.equal(h.s.file(id, 0).attempts[0].leaseUntil, before, 'the renewal waits behind the claim lock');
+      h.s.advance(26000);
+    } finally {
+      unlock();   // the test's own transaction ends whatever happened, so a failure never holds the file open
+    }
     await other;
     await sleep(100);
+    assert.ok(Date.parse(before) < h.s.clock, 'the lease has ended by DB time');
     assert.equal(h.s.file(id, 0).attempts[0].leaseUntil, before, 'an expired lease is never revived');
     h.orthanc.fault = null;
     void pending;
