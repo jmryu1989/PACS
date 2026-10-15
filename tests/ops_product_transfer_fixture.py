@@ -102,8 +102,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
               'api/prisma/migrations/20261008120000_emr_b/migration.sql', 'api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql',
               'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql',
-              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql']
-TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
+              'api/prisma/migrations/20261015013945_import_operation/migration.sql']
+# S9-U4b (52 tables, 47 migrations): ImportOperation, its seven synthetic rows (an import with every attempt phase, a prepared
+# and an attempted download, a bound and an initializing Study reservation, a held and a free SOP reservation), one primary
+# key, two checks and three indexes. Not measured on a stack when written: estimated at about 12 KB of catalog and rows,
+# well inside the cap below.
+TABLES = sorted(['ImportOperation', 'AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -461,7 +466,86 @@ def expected_rows(uid):
         basisId=basis_id,agreementId=agreement_id,status='OPEN',sourcePatientKey='SYNTHETIC-hospital|SYNTHETIC-patient',
         requestedBy='SYNTHETIC-tech',requestedAt=STAMP,expiresAt='2026-10-06T00:00:00.123',decidedBy=None,decidedAt=None,
         decisionReason=None,localPatientId=None,importRequestedAt=None,importRequestedBy=None,importedAt=None)]
+    rows['ImportOperation'] = import_operation_rows(uid)
     return rows
+
+
+def import_operation_rows(uid):
+    """S9-U4b (contract S9-U4p 7, REQ-S9-U4-13): every field a restore must keep, with real values. The member import holds
+    one stored file (an attempt finished), one unconfirmed file whose attempt was dispatching when the copy was taken (the
+    restored API reconciles it read-only), and one whose first attempt ended certain-no-write and whose second ended unknown
+    with its automatic re-check and an admin recovery request on record. The downloads are one prepared only and one with an
+    incomplete attempt (one object complete with its hashes, one partial with its counters) and an unconfirmed retry. The gate's
+    reservations are a bound and an initializing Study claim and a held and a free SOP claim (the held one is the unresolved
+    occupancy of the unknown attempt). Owner fields are the verified issuer and subject, never derived from the actor."""
+    issuer, sub, actor, hospital = 'https://synthetic.test/auth/realms/kin', 'SYNTHETIC-tech-sub', 'SYNTHETIC-tech', 'SYNTHETIC-hospital'
+    # Series, SOP and the second study take fixed synthetic UIDs: derived from the study UID they could pass 64 characters.
+    series, other_study = '2.25.4242.1', '2.25.4242.9'
+    boot = '00000000-0000-4000-8000-000000001b01'
+    stamp = '2026-09-06T00:00:00.123Z'
+    attempt_ids = ['00000000-0000-4000-8000-0000000011a' + n for n in '1234']
+    def attempt(attempt_id, generation, phase, outcome, code, transport, finished, **extra):
+        return dict(dict(attemptId=attempt_id, actor=actor, generation=generation, ownerInstance=boot, phase=phase,
+            leaseUntil='2026-09-06T00:00:30.123Z', startedAt=stamp, finishedAt=stamp if finished else None, outcome=outcome,
+            code=code, transport=transport, autoRecheckedAt=None, recovery=None), **extra)
+    def entry(index, outcome, code, attempts, writeDisposition=None, identity='matched'):
+        return dict(index=index, sha256=str(index + 1) * 64, bytes=1000 + index, studyUid=uid, seriesUid=series,
+            sopUid=series + '.' + str(index + 1), expectedStudyUid=uid if index == 0 else None, outcome=outcome, code=code,
+            identity=identity, writeDisposition=writeDisposition, at=stamp, attempts=attempts)
+    recovery = dict(basis='orthanc-restarted', checkedAt='2026-09-06T00:00:10.000Z', adminIssuer=issuer, adminSubject='SYNTHETIC-admin-sub',
+        adminActor='SYNTHETIC-admin', requestedAt='2026-09-06T00:00:11.000Z', resolvedAt=None)
+    results = [
+        entry(0, 'stored', None, [attempt(attempt_ids[0], 1, 'finished', 'stored', None, None, True)]),
+        entry(1, 'unconfirmed', 'IMPORT_UNCONFIRMED', [attempt(attempt_ids[1], 1, 'dispatching', 'unconfirmed', 'IMPORT_UNCONFIRMED', None, False)],
+            identity='not_comparable'),
+        entry(2, 'unconfirmed', 'IMPORT_UNCONFIRMED', [
+            attempt(attempt_ids[2], 1, 'finished', 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write', True),
+            attempt(attempt_ids[3], 2, 'unknown', 'unconfirmed', 'IMPORT_UNCONFIRMED', 'unknown', True,
+                autoRecheckedAt='2026-09-06T00:00:05.000Z', recovery=recovery)])]
+    objects = [dict(orthancId=('%08x' % n) + '-00000000-00000000-00000000-00000000', seriesUid=series, sopUid=series + '.' + str(n),
+        bytes=1000 + n, md5=str(n) * 32) for n in (1, 2)]
+    for ordinal, item in enumerate(objects, 1):
+        item['path'] = '001/' + str(ordinal).zfill(5) + '.dcm'
+    canonical_manifest = json.dumps(dict(schemaVersion=1, studyUid=uid, objects=objects), separators=(',', ':'))
+    manifest_sha = hashlib.sha256(canonical_manifest.encode()).hexdigest()
+    def download(attempts):
+        return dict(schemaVersion=1, targetStudyUid=uid, destination='browser-download', preparedAt=stamp,
+            manifestCanonical=canonical_manifest, attempts=attempts)
+    def supply(number, state, objects_supplied, ended, lease):
+        return dict(attemptId='00000000-0000-4000-8000-0000000012a' + str(number), number=number, ownerSubject=sub, actor=actor,
+            manifestSha256=manifest_sha, destination='browser-download', state=state, startedAt=stamp, endedAt=stamp if ended else None,
+            ownerInstance=boot, leaseUntil=lease, objects=objects_supplied, archiveSha256=None, responseFinished=False)
+    first = [dict(orthancId=objects[0]['orthancId'], sopUid=objects[0]['sopUid'], bytesRead=1001, bytesSupplied=1001, sha256='a' * 64,
+                  md5=objects[0]['md5'], complete=True),
+             dict(orthancId=objects[1]['orthancId'], sopUid=objects[1]['sopUid'], bytesRead=512, bytesSupplied=480, sha256=None, md5=None,
+                  complete=False)]
+    member = dict(institutionId=hospital, ownerIssuer=issuer, ownerSubject=sub, actor=actor, createdAt=STAMP, updatedAt=STAMP)
+    gate = dict(institutionId=hospital, ownerIssuer='kin-internal', ownerSubject='dicom-import-gate', actor='dicom-import-gate',
+        results=[], manifestSha256=None, download=None, createdAt=STAMP, updatedAt=STAMP)
+    study_claim = lambda study, phase, holder, values: dict(schemaVersion=1, phase=phase, institutionId=hospital, studyUid=study,
+        **values, heldByAttemptId=holder, createdAt=stamp)
+    identity = dict(patientId='SYNTHETIC-patient', issuerInstitutionId=hospital, nameKey='SYNTHETIC PATIENT', birthKey='19700101', sexKey=None)
+    blank = dict(patientId=None, issuerInstitutionId=None, nameKey=None, birthKey=None, sexKey=None)
+    sop_claim = lambda index, holder: dict(schemaVersion=1, institutionId=hospital, studyUid=uid, seriesUid=series,
+        sopUid=series + '.' + str(index + 1), patientId='SYNTHETIC-patient', issuerInstitutionId=hospital, sha256=str(index + 1) * 64,
+        bytes=1000 + index, heldByAttemptId=holder, createdAt=stamp)
+    return [
+        dict(id='00000000-0000-4000-8000-000000001101', **member, kind='import', studyUid=None, status='open', results=results,
+             manifestSha256=None, download=None, claimKey=None, claim=None),
+        dict(id='00000000-0000-4000-8000-000000001201', **member, kind='download', studyUid=uid, status='prepared', results=[],
+             manifestSha256=manifest_sha, download=download([]), claimKey=None, claim=None),
+        dict(id='00000000-0000-4000-8000-000000001202', **member, kind='download', studyUid=uid, status='unconfirmed', results=[],
+             manifestSha256=manifest_sha, download=download([supply(1, 'incomplete', first, True, '2026-09-06T00:00:30.123Z'),
+                 supply(2, 'unconfirmed', first[:1], False, '2026-09-06T00:01:00.123Z')]), claimKey=None, claim=None),
+        dict(id='00000000-0000-4000-8000-000000001301', **gate, kind='study-claim', studyUid=uid, status='reserved',
+             claimKey='study:' + uid, claim=study_claim(uid, 'bound', None, identity)),
+        dict(id='00000000-0000-4000-8000-000000001302', **gate, kind='study-claim', studyUid=other_study, status='reserved',
+             claimKey='study:' + other_study, claim=study_claim(other_study, 'initializing', attempt_ids[1], blank)),
+        dict(id='00000000-0000-4000-8000-000000001303', **gate, kind='sop-claim', studyUid=uid, status='reserved',
+             claimKey='sop:' + series + '.1', claim=sop_claim(0, None)),
+        dict(id='00000000-0000-4000-8000-000000001304', **gate, kind='sop-claim', studyUid=uid, status='reserved',
+             claimKey='sop:' + series + '.3', claim=sop_claim(2, attempt_ids[3])),
+    ]
 
 
 def expected_sequences():
@@ -589,7 +673,7 @@ def create_product(name, db, uid):
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
                   'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
-                  'GatewayReceipt', 'GatewayRetryRequest'):
+                  'ImportOperation', 'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -677,7 +761,9 @@ def catalog_contract(value):
     require(value['tables'] == TABLES)
     # The additive appearance table takes the product above 256 columns. Keep
     # byte/output budgets and exact catalog comparison; bound other lists as before.
-    require(all(type(value[key]) is list and 0 < len(value[key]) <= (512 if key == 'columns' else 256) for key in value))
+    # S9-U4b: ImportOperation's 15 columns take the product past 512 (506 before it, counted from schema.prisma), so the
+    # column list gets the next power of two; the receipt byte cap and the exact comparison are unchanged.
+    require(all(type(value[key]) is list and 0 < len(value[key]) <= (1024 if key == 'columns' else 256) for key in value))
     require(sorted(item['sequencename'] for item in value['sequence_settings']) == SEQUENCES)
 
 
@@ -983,6 +1069,24 @@ def constraint_probes(name, product):
       BEGIN INSERT INTO "ReaderAssignment" SELECT * FROM json_populate_record(NULL::"ReaderAssignment",
         (SELECT (to_jsonb(t)||jsonb_build_object('institutionId','SYNTHETIC-third'))::json FROM "ReaderAssignment" t WHERE "closedAt" IS NULL));
         RAISE EXCEPTION 'reader assignment pair key accepted'; EXCEPTION WHEN raise_exception THEN NULL; END;
+      -- S9-U4b: ImportOperation keeps one row per exact reservation key, any number of member rows without one (the raise
+      -- afterwards undoes that insert), its closed kinds and per-kind shapes, and the internal owner for reservations only.
+      BEGIN INSERT INTO "ImportOperation" SELECT * FROM json_populate_record(NULL::"ImportOperation",
+        (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000001f99'))::json FROM "ImportOperation" t WHERE kind='sop-claim' LIMIT 1));
+        RAISE EXCEPTION 'missing import reservation unique'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN INSERT INTO "ImportOperation" SELECT * FROM json_populate_record(NULL::"ImportOperation",
+        (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000001f98'))::json FROM "ImportOperation" t WHERE kind='import' LIMIT 1));
+        RAISE EXCEPTION 'import rows without a reservation key accepted'; EXCEPTION WHEN raise_exception THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET kind='gateway-import' WHERE kind='import';
+        RAISE EXCEPTION 'missing import kind check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "claimKey"='sop:2.25.4242.7' WHERE kind='import';
+        RAISE EXCEPTION 'missing import reservation-null check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "manifestSha256"=NULL WHERE kind='download';
+        RAISE EXCEPTION 'missing download manifest check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "ownerIssuer"='kin-internal',"ownerSubject"='dicom-import-gate',actor='dicom-import-gate' WHERE kind='download';
+        RAISE EXCEPTION 'missing internal owner check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "claimKey"='study:2.25.4242.8' WHERE kind='study-claim' AND claim->>'phase'='bound';
+        RAISE EXCEPTION 'missing study reservation key check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));
