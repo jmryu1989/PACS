@@ -2214,6 +2214,97 @@ def s9u4_proxy_post(proxy: str, path: str, token: str, length: int) -> tuple[int
     return (int(match.group(1)) if match else None), head
 
 
+S9U4_SYNTHETIC_UID = re.compile(r"2\.25\.[0-9]+(?:\.[0-9]+)*")
+
+
+def s9u4_cleanup(orthanc_request: Callable[..., HttpResult], run_psql: Callable[[str], Any],
+                 studies: list[str], operations: list[str]) -> list[str]:
+    """The S9-U4 cases' own synthetic data (contract 2 execution ledger, 6 owned data): exactly this scope's study UIDs and
+    operation ids. Each owned study is looked up, every Orthanc study found for it must carry exactly that
+    StudyInstanceUID before it is deleted, and a second lookup must find nothing left. A lookup that is not a 200 list, a
+    study that is not the scope's, a DELETE that is not 200 or an object still found is a failure; with any failure no
+    database row of the scope is removed (the rows that identify and trace the originals stay with them for inspection)
+    and the failures are returned for the caller to raise, so run-tests keeps its inspection marker and raw evidence."""
+    failures: list[str] = []
+    owned = [uid for uid in dict.fromkeys(studies) if S9U4_SYNTHETIC_UID.fullmatch(uid)]
+    failures += [f"{uid}: not a synthetic UID of this scope" for uid in dict.fromkeys(studies) if uid not in owned]
+    ops = [op for op in dict.fromkeys(operations) if re.fullmatch(UUID_RE, op)]
+    failures += [f"{op}: not an operation id" for op in dict.fromkeys(operations) if op not in ops]
+    for uid in owned:
+        lookup = orthanc_request("POST", "/tools/lookup", uid.encode("ascii"))
+        if lookup.status != 200 or not isinstance(lookup.body, list):
+            failures.append(f"{uid}: lookup answered {lookup.status}")
+            continue
+        for item in lookup.body:
+            if not isinstance(item, dict) or item.get("Type") != "Study":
+                continue
+            study_id = str(item.get("ID", ""))
+            found = orthanc_request("GET", f"/studies/{quote(study_id)}")
+            tags = found.body.get("MainDicomTags", {}) if found.status == 200 and isinstance(found.body, dict) else {}
+            if tags.get("StudyInstanceUID") != uid:
+                failures.append(f"{uid}: Orthanc study {study_id} is not this scope's ({found.status})")
+                continue
+            deleted = orthanc_request("DELETE", f"/studies/{quote(study_id)}")
+            if deleted.status != 200:
+                failures.append(f"{uid}: DELETE of {study_id} answered {deleted.status}")
+        after = orthanc_request("POST", "/tools/lookup", uid.encode("ascii"))
+        if after.status != 200 or not isinstance(after.body, list):
+            failures.append(f"{uid}: lookup after the delete answered {after.status}")
+        elif any(isinstance(item, dict) and item.get("Type") in ("Study", "Series", "Instance") for item in after.body):
+            failures.append(f"{uid}: originals remain after the delete")
+    if failures:
+        return failures
+    uids = ", ".join(f"'{uid}'" for uid in owned) or "''"
+    op_ids = ", ".join(f"'{op}'" for op in ops) or "'00000000-0000-4000-8000-000000000000'"
+    run_psql(f"DELETE FROM \"ImportOperation\" WHERE \"studyUid\" IN ({uids}) OR id IN ({op_ids});")
+    run_psql(f"DELETE FROM \"StudyState\" WHERE uid IN ({uids});")
+    run_psql(past_audit_guard(f"DELETE FROM \"AuditLog\" WHERE target IN ({uids}, {op_ids})"))
+    return failures
+
+
+class S9U4CleanupTests(unittest.TestCase):
+    """U4BB-15 pure fault controls of s9u4_cleanup over a scripted Orthanc and a recording psql (no LiveStack): a lookup
+    500, a DELETE failure, an object left after the delete and a study that is not the scope's each keep every database
+    row and report the failure; a clean removal deletes the originals first and only then the scope's rows."""
+
+    def test_s9u4_cleanup_faults_keep_every_row_and_report(self) -> None:
+        uid, op = "2.25.4242424242", "00000000-0000-4000-8000-0000000000f1"
+        def run(script: Callable[[str, str, int], HttpResult]) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+            calls: list[tuple[str, str]] = []
+            sql: list[str] = []
+            def orthanc(method: str, path: str, body: bytes | None = None) -> HttpResult:
+                calls.append((method, path))
+                return script(method, path, sum(1 for c in calls if c == (method, path)))
+            return s9u4_cleanup(orthanc, sql.append, [uid], [op]), calls, sql
+        study = HttpResult(200, [{"Type": "Study", "ID": "s-1"}], "")
+        mine = HttpResult(200, {"MainDicomTags": {"StudyInstanceUID": uid}}, "")
+        def normal(method: str, path: str, nth: int, *, lookup: HttpResult = study, again: HttpResult = HttpResult(200, [], ""),
+                   delete: HttpResult = HttpResult(200, {}, ""), tags: HttpResult = mine) -> HttpResult:
+            if path == "/tools/lookup":
+                return lookup if nth == 1 else again
+            return tags if method == "GET" else delete
+        cases = [
+            ("lookup 500", lambda m, p, n: normal(m, p, n, lookup=HttpResult(500, None, "")), "lookup answered 500"),
+            ("delete fails", lambda m, p, n: normal(m, p, n, delete=HttpResult(500, None, "")), "DELETE of s-1 answered 500"),
+            ("object left", lambda m, p, n: normal(m, p, n, again=HttpResult(200, [{"Type": "Instance", "ID": "i-1"}], "")), "originals remain"),
+            ("another study", lambda m, p, n: normal(m, p, n, tags=HttpResult(200, {"MainDicomTags": {"StudyInstanceUID": "2.25.1"}}, "")), "is not this scope's"),
+        ]
+        for name, script, reason in cases:
+            with self.subTest(fault=name):
+                failures, calls, sql = run(script)
+                self.assertTrue(failures and any(reason in failure for failure in failures), failures)
+                self.assertEqual(sql, [], "every database row stays with the original for inspection")
+                if name == "another study":
+                    self.assertNotIn(("DELETE", "/studies/s-1"), calls, "never deletes what is not the scope's")
+        failures, calls, sql = run(normal)
+        self.assertEqual(failures, [])
+        self.assertEqual(calls, [("POST", "/tools/lookup"), ("GET", "/studies/s-1"), ("DELETE", "/studies/s-1"), ("POST", "/tools/lookup")])
+        self.assertEqual(len(sql), 3)
+        self.assertTrue(all(uid in statement for statement in sql[:2]) and op in sql[0] and "AuditLog" in sql[2])
+        refused = s9u4_cleanup(lambda *a: HttpResult(200, [], ""), sql.append, ["1.2.3"], ["not-an-id"])
+        self.assertEqual((len(refused), len(sql)), (2, 3), "only the scope's synthetic UIDs and ids are touched; nothing deleted")
+
+
 class LiveInvariantTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -4953,9 +5044,10 @@ class LiveInvariantTests(unittest.TestCase):
             ])
 
     # ── S9-U4b self-institution DICOM import / original download (contract S9-U4p; REQ-S9-U4-02/03/05/06/12) ──
-    # Outside-gate originals are seeded through Orthanc's own REST upload (the operator writer of contract 4.5's writer
-    # table; C-STORE and Gateway objects are the same kind of pre-existing original to the gate). Every object, study row,
-    # ImportOperation row and audit row a case makes is synthetic and removed by its own scope.
+    # Outside-gate originals are seeded through the existing synthetic C-STORE writer (or the Gateway, KIN_TEST_INGEST) for
+    # the claim initialisation and the pre-write collision (s9u4_cstore), and through Orthanc's own REST upload (the
+    # operator writer of contract 4.5's writer table) where a value the C-STORE writer cannot set is needed. Every object,
+    # study row, ImportOperation row and audit row a case makes is synthetic and removed by its own scope, originals first.
 
     def s9u4_import(self, user: str, data: bytes, *, op: str | None = None, index: int = 0, expect: str | None = None,
                     headers: dict[str, str] | None = None) -> tuple[str, HttpResult]:
@@ -5029,22 +5121,41 @@ class LiveInvariantTests(unittest.TestCase):
         try:
             yield scope
         finally:
-            failures = []
-            for uid in scope["studies"]:
-                try:
-                    lookup = self.stack._orthanc_request("POST", "/tools/lookup", uid.encode("ascii"))
-                    for item in (lookup.body if lookup.status == 200 else []):
-                        if item.get("Type") == "Study":
-                            self.stack._orthanc_request("DELETE", f"/studies/{quote(item['ID'])}")
-                except Exception as error:   # the database cleanup below runs regardless
-                    failures.append(str(error))
-            uids = ", ".join(f"'{uid}'" for uid in scope["studies"] if re.fullmatch(r"[0-9.]+", uid)) or "''"
-            ops = ", ".join(f"'{op}'" for op in scope["operations"] if re.fullmatch(UUID_RE, op)) or "'00000000-0000-4000-8000-000000000000'"
-            psql(f"DELETE FROM \"ImportOperation\" WHERE \"studyUid\" IN ({uids}) OR id IN ({ops});")
-            psql(f"DELETE FROM \"StudyState\" WHERE uid IN ({uids});")
-            psql(past_audit_guard(f"DELETE FROM \"AuditLog\" WHERE target IN ({uids}, {ops})"))
+            # Originals first, confirmed gone, and only then the rows that identify and trace them (s9u4_cleanup); any
+            # failure keeps everything and fails the case, so run-tests leaves its inspection marker with the evidence.
+            failures = s9u4_cleanup(self.stack._orthanc_request, psql, scope["studies"], scope["operations"])
             if failures:
-                raise RuntimeError("S9-U4 cleanup: " + "; ".join(failures))
+                raise RuntimeError("S9-U4 cleanup (originals and their rows kept for inspection): " + "; ".join(failures))
+
+    def s9u4_cstore(self, scope: dict[str, list[str]], study: str, patient_id: str, *, name: str, birth: str = "19800101",
+                    sex: str = "O") -> dict[str, str]:
+        """An outside-gate original through the existing synthetic C-STORE writer (scripts/send_cstore.py via
+        LiveStack.fixture_command, unchanged; KIN_TEST_INGEST=gateway sends it through the Gateway instead) into a chosen
+        Study UID; returns the stored instance's UIDs as Orthanc's file header has them."""
+        if study not in scope["studies"]:
+            scope["studies"].append(study)
+        before = set(self.s9u4_study_instances(study))
+        command = self.stack.fixture_command("한림병원", name, patient_id) + [
+            "--study-uid", study, "--birth", birth, "--sex", sex, "--desc", "S9-U4 outside-gate seed"]
+        done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and not set(self.s9u4_study_instances(study)) - before:
+            time.sleep(0.5)
+        [new] = sorted(set(self.s9u4_study_instances(study)) - before)
+        tags = self.stack._orthanc_request("GET", f"/instances/{new}/simplified-tags").body
+        return {"orthancId": new, "studyUid": tags["StudyInstanceUID"], "seriesUid": tags["SeriesInstanceUID"],
+                "sopUid": tags["SOPInstanceUID"], "patientId": tags["PatientID"]}
+
+    def s9u4_study_instances(self, study: str) -> list[str]:
+        found = self.stack._orthanc_request("POST", "/tools/find", json.dumps({"Level": "Instance", "Query": {"StudyInstanceUID": study}}).encode())
+        self.assertEqual(found.status, 200, found.text)
+        return list(found.body)
+
+    def s9u4_db_now(self) -> str:
+        """The database's own UTC time now, in the recovery evidence form (startedAt <= checkedAt <= DB now)."""
+        [now] = psql("SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"');")
+        return now
 
     def s9u4_new_study(self, scope: dict[str, list[str]]) -> str:
         uid = s9u4_uid()
@@ -5097,8 +5208,32 @@ class LiveInvariantTests(unittest.TestCase):
             scope["operations"].append(op)
             self.assertEqual((bound.status, bound.body["outcome"], bound.body["identity"]), (200, "stored", "matched"), bound.text)
             self.assertEqual(self.s9u4_claim("study:" + legacy)["phase"], "bound")
+            # The existing outside-gate writer (C-STORE, or the Gateway under KIN_TEST_INGEST=gateway) seeds two originals of
+            # one patient: the first member import binds from both stored-file headers and stores (REQ-02, 4.5 writer table).
+            cstored = self.s9u4_new_study(scope)
+            first_seed = self.s9u4_cstore(scope, cstored, "S9U4-CS1", name="S9U4^CSTORE")
+            self.s9u4_cstore(scope, cstored, "S9U4-CS1", name="S9U4^CSTORE")
+            self.s9u4_register(cstored)
+            op, consumed = self.s9u4_import("tech", s9u4_dicom(study=cstored, series=cstored + ".9", sop=s9u4_uid(), patient_id="S9U4-CS1",
+                                                               name="S9U4^CSTORE", birth="19800101", sex=None))
+            scope["operations"].append(op)
+            self.assertEqual((consumed.status, consumed.body.get("outcome")), (200, "stored"), consumed.text)
+            self.assertEqual((self.s9u4_claim("study:" + cstored)["phase"], self.s9u4_claim("study:" + cstored)["patientId"]), ("bound", "S9U4-CS1"))
+            self.assertEqual(first_seed["patientId"], "S9U4-CS1")
+            # Two C-STORE originals of different patients under one Study UID, in both store orders: refused before any write.
+            for order in (("S9U4-CS2", "S9U4-CS3"), ("S9U4-CS3", "S9U4-CS2")):
+                mixed = self.s9u4_new_study(scope)
+                for patient in order:
+                    self.s9u4_cstore(scope, mixed, patient, name="S9U4^" + patient.replace("-", ""))
+                self.s9u4_register(mixed)
+                count = len(self.s9u4_study_instances(mixed))
+                op, r = self.s9u4_import("tech", s9u4_dicom(study=mixed, series=mixed + ".9", sop=s9u4_uid(), patient_id=order[0], name=None))
+                scope["operations"].append(op)
+                self.assertEqual((r.status, r.body.get("code")), (409, "EXISTING_STUDY_IDENTITY_UNRESOLVED"), (order, r.text))
+                self.assertEqual((len(self.s9u4_study_instances(mixed)), self.s9u4_claim("study:" + mixed)), (count, None), "zero writes, no claim")
             # U4P5-01 positive controls: one SOP with another institution's issuer, the owner's id beside its alias, one SOP
             # with another name under the same PatientID (one index value), and two patient branches - in both store orders.
+            # (IssuerOfPatientID cannot be set through the C-STORE writer; these seeds use Orthanc's own REST upload.)
             controls = [
                 [dict(patient_id="S9U4-X"), dict(patient_id="S9U4-X", issuer="KINLAB")],
                 [dict(patient_id="S9U4-X", issuer="hallym"), dict(patient_id="S9U4-X", issuer="HALLYM")],
@@ -5170,6 +5305,17 @@ class LiveInvariantTests(unittest.TestCase):
             scope["operations"].append(op)
             self.assertEqual((refused.status, refused.body["code"], refused.body["writeDisposition"]), (409, "SOP_CONTENT_CONFLICT", "pre-write"), refused.text)
             self.assertEqual((self.s9u4_sop_objects(legacy_sop), self.s9u4_sha(seeded)), ([seeded], seeded_sha))
+            # The same through the existing C-STORE writer (or the Gateway): a member file with the seeded SOP UID and other
+            # bytes is refused before any write; the seeded original stays the only object, byte for byte.
+            cstored = self.s9u4_new_study(scope)
+            seed = self.s9u4_cstore(scope, cstored, "S9U4-CSH", name="S9U4^CSTORE")
+            seed_sha = self.s9u4_sha(seed["orthancId"])
+            self.s9u4_register(cstored)
+            op, refused = self.s9u4_import("tech", s9u4_dicom(study=cstored, series=seed["seriesUid"], sop=seed["sopUid"],
+                                                              patient_id="S9U4-CSH", name=None, birth=None, sex=None))
+            scope["operations"].append(op)
+            self.assertEqual((refused.status, refused.body.get("code"), refused.body.get("writeDisposition")), (409, "SOP_CONTENT_CONFLICT", "pre-write"), refused.text)
+            self.assertEqual((self.s9u4_sop_objects(seed["sopUid"]), self.s9u4_sha(seed["orthancId"])), ([seed["orthancId"]], seed_sha))
             # Member/member races, both arrival orders: same SOP with another Series, Patient or Study; another SOP of the
             # same new Study with another patient. Exactly one matching identity reaches Orthanc; the loser is pre-write 409.
             def race(make_a: Callable[[str, str], bytes], make_b: Callable[[str, str], bytes], swap: bool) -> None:
@@ -5238,30 +5384,46 @@ class LiveInvariantTests(unittest.TestCase):
             retry_op, retryable = self.s9u4_import("tech", s9u4_dicom(study=unregistered, series=unregistered + ".2", sop=s9u4_uid(), patient_id="S9U4-U"))
             scope["operations"].append(retry_op)
             self.assertEqual((retryable.status, retryable.body["outcome"], retryable.body["code"]), (409, "retryable", "STUDY_OWNERSHIP_UNDETERMINED"))
-            # An unknown attempt whose object exists (the answer was lost): the owner's same POST re-checks once -> stored, no write.
+            # An unknown attempt whose object exists (the answer was lost) and whose lease ended by DB time: the owner's same
+            # POST re-checks once -> stored, no write. (While its lease lives nobody touches an unknown attempt, 4.4.)
+            past = "2000-01-01T00:00:00.000Z"
             known = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O")
             known_op, done = self.s9u4_import("tech", known)
             scope["operations"].append(known_op)
-            entry = self.s9u4_set_attempt(known_op, 0, phase="unknown", transport="unknown", outcome="unconfirmed", code="IMPORT_UNCONFIRMED")
+            entry = self.s9u4_set_attempt(known_op, 0, phase="unknown", transport="unknown", outcome="unconfirmed", code="IMPORT_UNCONFIRMED",
+                                          leaseUntil=past)
             self.s9u4_hold(entry)
             objects = self.s9u4_sop_objects(entry["sopUid"])
             rechecked = self.s9u4_import("tech", known, op=known_op)[1]
             self.assertEqual((rechecked.status, rechecked.body["outcome"], self.s9u4_sop_objects(entry["sopUid"])), (200, "stored", objects))
             self.assertIsNotNone(self.s9u4_operation(known_op)["results"][0]["attempts"][-1]["autoRecheckedAt"])
-            # An unknown attempt with no object: 202 after the one re-check, never a resend; the admin records the basis.
+            # An unknown attempt with no object, its lease ended: two overlapping same-key POSTs make one re-check (one
+            # recorded absence), never a resend; the admin then records the basis.
             lost = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O")
             lost_op, _ = self.s9u4_import("tech", lost)
             scope["operations"].append(lost_op)
-            entry = self.s9u4_set_attempt(lost_op, 0, phase="unknown", transport="unknown", outcome="unconfirmed", code="IMPORT_UNCONFIRMED")
+            entry = self.s9u4_set_attempt(lost_op, 0, phase="unknown", transport="unknown", outcome="unconfirmed", code="IMPORT_UNCONFIRMED",
+                                          leaseUntil=past)
             self.s9u4_hold(entry)
             for orthanc_id in self.s9u4_sop_objects(entry["sopUid"]):
-                self.stack._orthanc_request("DELETE", f"/instances/{orthanc_id}")
+                self.assertEqual(self.stack._orthanc_request("DELETE", f"/instances/{orthanc_id}").status, 200)
+            attempt_id = entry["attempts"][-1]["attemptId"]
+            unconfirmed_rows = lambda: int(psql("SELECT count(*) FROM \"AuditLog\" WHERE action='dicom.import.result' "
+                                                f"AND detail::jsonb->>'attemptId'='{attempt_id}' AND detail::jsonb->>'outcome'='unconfirmed';")[0])
+            before_rows = unconfirmed_rows()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pair = list(pool.map(lambda _: self.s9u4_import("tech", lost, op=lost_op)[1], range(2)))
+            self.assertEqual(sorted(r.status for r in pair), [202, 202], [r.text for r in pair])
+            self.assertEqual(unconfirmed_rows() - before_rows, 1, "one re-check for the overlapping pair")
+            self.assertIsNotNone(self.s9u4_operation(lost_op)["results"][0]["attempts"][-1]["autoRecheckedAt"])
             waiting = self.s9u4_import("tech", lost, op=lost_op)[1]
             self.assertEqual((waiting.status, waiting.body["outcome"], waiting.body["message"]),
                              (202, "unconfirmed", "저장 결과를 확인하지 못했습니다. 관리자에게 이 파일의 확인을 요청하세요."))
             self.assertEqual(self.s9u4_sop_objects(entry["sopUid"]), [], "absence alone never resends")
-            self.assertEqual(self.s9u4_import("tech", lost, op=lost_op)[1].status, 202)
-            checked = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            self.assertEqual(unconfirmed_rows() - before_rows, 1, "no further read for that attempt")
+            # The evidence time is a real UTC instant between the attempt's start and the database's own now.
+            checked = self.s9u4_db_now()
+            self.assertLessEqual(entry["attempts"][-1]["startedAt"], checked)
             recovery = self.stack.request("POST", f"/admin/dicom-import/{lost_op}/files/0/recovery", "jmryu",
                                           {"basis": "orthanc-restarted", "checkedAt": checked})
             self.assertEqual((recovery.status, recovery.body.get("code"), recovery.body.get("outcome")), (200, "RECOVERED_NO_OBJECT", "retryable"), recovery.text)
@@ -5270,7 +5432,27 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual(len(self.s9u4_sop_objects(entry["sopUid"])), 1)
             actions = psql(f"SELECT action FROM \"AuditLog\" WHERE target='{study}' AND detail::jsonb->>'operationId'='{lost_op}' ORDER BY id;")
             self.assertEqual(actions[-5:], ["dicom.import.recovery.request", "dicom.import.recovery.result", "dicom.import.result",
-                                            "dicom.import.intent", "dicom.import.result"])
+                                            "dicom.import.intent", "dicom.import.result"])            # One new operation id from two requests at once, on PostgreSQL (U4BB-12): the same index with other bytes is one
+            # stored file and one 409 OPERATION_CONTENT_CONFLICT; two indexes are both kept; another owner is 409
+            # OPERATION_CONFLICT; a download preparation of an import's id is 409 OPERATION_CONFLICT.
+            def together(payloads: list[tuple[str, bytes, str, int]]) -> list[HttpResult]:
+                with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+                    return list(pool.map(lambda item: self.s9u4_import(item[0], item[1], op=item[2], index=item[3])[1], payloads))
+            def fresh(patient: str) -> bytes:
+                uid = self.s9u4_new_study(scope)
+                return s9u4_dicom(study=uid, series=uid + ".1", sop=s9u4_uid(), patient_id=patient)
+            same = str(uuid.uuid4()); scope["operations"].append(same)
+            answers = together([("tech", fresh("S9U4-RACE"), same, 0), ("tech", fresh("S9U4-RACE"), same, 0)])
+            self.assertEqual(sorted((r.status, r.body.get("code")) for r in answers), [(200, None), (409, "OPERATION_CONTENT_CONFLICT")], [r.text for r in answers])
+            self.assertEqual(len(self.s9u4_operation(same)["results"]), 1)
+            both = str(uuid.uuid4()); scope["operations"].append(both)
+            answers = together([("tech", fresh("S9U4-RACE"), both, 0), ("tech", fresh("S9U4-RACE"), both, 1)])
+            self.assertEqual(([r.status for r in answers], sorted(e["index"] for e in self.s9u4_operation(both)["results"])), ([200, 200], [0, 1]))
+            owners = str(uuid.uuid4()); scope["operations"].append(owners)
+            answers = together([("tech", fresh("S9U4-RACE"), owners, 0), ("jmryu", fresh("S9U4-RACE"), owners, 0)])
+            self.assertEqual(sorted((r.status, r.body.get("code")) for r in answers), [(200, None), (409, "OPERATION_CONFLICT")], [r.text for r in answers])
+            kinds = self.stack.request("POST", f"/studies/{study}/original-downloads", "doctor", {"operationId": same})
+            self.assertEqual((kinds.status, kinds.body.get("code")), (409, "OPERATION_CONFLICT"), kinds.text)
 
     def test_s9_u4_restart_recovery_and_unchanged_writers(self) -> None:
         """REQ-S9-U4-06: readiness without an env flag (Orthanc stopped -> 503 IMPORT_NOT_READY on the member routes only,
@@ -5297,19 +5479,54 @@ class LiveInvariantTests(unittest.TestCase):
                 deadline = time.monotonic() + 120
                 while time.monotonic() < deadline and self.stack._orthanc_request("GET", "/system").status != 200:
                     time.sleep(1)
-            # Before a restart: one inactive prepared attempt and one unknown attempt whose object exists.
-            prepared_bytes = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-S")
-            prepared_op, _ = self.s9u4_import("tech", prepared_bytes)
-            scope["operations"].append(prepared_op)
-            past = "2000-01-01T00:00:00.000Z"
-            prepared_entry = self.s9u4_set_attempt(prepared_op, 0, phase="prepared", leaseUntil=past, finishedAt=None,
-                                                   outcome="unconfirmed", code="IMPORT_UNCONFIRMED")
-            self.s9u4_hold(prepared_entry)
-            unknown_op, _ = self.s9u4_import("tech", s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-S"))
-            scope["operations"].append(unknown_op)
-            unknown_entry = self.s9u4_set_attempt(unknown_op, 0, phase="dispatching", leaseUntil=past, transport=None,
-                                                  outcome="unconfirmed", code="IMPORT_UNCONFIRMED")
+            # Before a restart, each on a study of its own (one holder per Study): a prepared attempt whose original never
+            # reached Orthanc (the object is removed, as for a send that never happened) and one whose identical object is
+            # already there; an expired dispatching attempt whose object exists; another instance's live dispatching attempt;
+            # an initializing claim whose attempt is gone; and a download attempt that was sending when the API stopped.
+            past, future = "2000-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z"
+            def stored_file(patient: str) -> tuple[str, bytes, str]:
+                uid = self.s9u4_new_study(scope)
+                data = s9u4_dicom(study=uid, series=uid + ".1", sop=s9u4_uid(), patient_id=patient)
+                op, answer = self.s9u4_import("tech", data)
+                scope["operations"].append(op)
+                self.assertEqual(answer.status, 200, answer.text)
+                return op, data, uid
+            running = dict(finishedAt=None, transport=None, outcome="unconfirmed", code="IMPORT_UNCONFIRMED")
+            absent_op, absent_bytes, absent_study = stored_file("S9U4-SA")
+            absent_entry = self.s9u4_set_attempt(absent_op, 0, phase="prepared", leaseUntil=past, **running)
+            for orthanc_id in self.s9u4_sop_objects(absent_entry["sopUid"]):
+                self.assertEqual(self.stack._orthanc_request("DELETE", f"/instances/{orthanc_id}").status, 200)
+            self.assertEqual(self.s9u4_sop_objects(absent_entry["sopUid"]), [], "the prepared attempt's original is really absent")
+            self.s9u4_hold(absent_entry)
+            present_op, present_bytes, present_study = stored_file("S9U4-SP")
+            present_entry = self.s9u4_set_attempt(present_op, 0, phase="prepared", leaseUntil=past, **running)
+            [present_object] = self.s9u4_sop_objects(present_entry["sopUid"])
+            present_sha = self.s9u4_sha(present_object)
+            self.s9u4_hold(present_entry)
+            unknown_op, _, unknown_study = stored_file("S9U4-SU")
+            unknown_entry = self.s9u4_set_attempt(unknown_op, 0, phase="dispatching", leaseUntil=past, **running)
             self.s9u4_hold(unknown_entry)
+            live_op, _, live_study = stored_file("S9U4-SL")
+            live_entry = self.s9u4_set_attempt(live_op, 0, phase="dispatching", leaseUntil=future, ownerInstance=str(uuid.uuid4()), **running)
+            self.s9u4_hold(live_entry)
+            live_before = self.s9u4_operation(live_op)["results"]
+            orphan = self.s9u4_new_study(scope)
+            claim = {"schemaVersion": 1, "phase": "initializing", "institutionId": "hallym", "studyUid": orphan, "patientId": None,
+                     "issuerInstitutionId": None, "nameKey": None, "birthKey": None, "sexKey": None, "heldByAttemptId": str(uuid.uuid4()),
+                     "createdAt": "2026-10-15T00:00:00.000Z"}
+            psql("INSERT INTO \"ImportOperation\" (id,\"institutionId\",\"ownerIssuer\",\"ownerSubject\",actor,kind,\"studyUid\",status,\"claimKey\",claim) "
+                 f"VALUES ('{uuid.uuid4()}','hallym','kin-internal','dicom-import-gate','dicom-import-gate','study-claim','{orphan}','reserved',"
+                 f"'study:{orphan}','{json.dumps(claim)}'::jsonb);")
+            download = str(uuid.uuid4()); scope["operations"].append(download)
+            self.assertEqual(self.stack.request("POST", f"/studies/{study}/original-downloads", "doctor", {"operationId": download}).status, 200)
+            row = self.s9u4_operation(download)
+            sending_id = str(uuid.uuid4())
+            row["download"]["attempts"].append({"attemptId": sending_id, "number": 1, "ownerSubject": row["ownerSubject"], "actor": row["actor"],
+                "manifestSha256": row["manifestSha256"], "destination": "browser-download", "state": "sending", "startedAt": "2026-10-15T00:00:00.000Z",
+                "endedAt": None, "ownerInstance": str(uuid.uuid4()), "leaseUntil": past, "objects": [], "archiveSha256": None, "responseFinished": False})
+            psql(f"UPDATE \"ImportOperation\" SET download = '{json.dumps(row['download']).replace(chr(39), chr(39) * 2)}'::jsonb, status = 'sending' "
+                 f"WHERE id = '{download}';")
+            bound_before = self.s9u4_claim("study:" + study)
             subprocess.run(["docker", "compose", "restart", "api"], cwd=ROOT, check=True, capture_output=True, timeout=300)
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
@@ -5321,17 +5538,32 @@ class LiveInvariantTests(unittest.TestCase):
                 time.sleep(1)
             # The startup reconciliation runs beside the started server; wait for it, bounded.
             deadline = time.monotonic() + 60
-            while time.monotonic() < deadline and any(self.s9u4_operation(o)["results"][0]["outcome"] == "unconfirmed"
-                                                      for o in (prepared_op, unknown_op)):
+            while time.monotonic() < deadline and (any(self.s9u4_operation(o)["results"][0]["outcome"] == "unconfirmed"
+                                                       for o in (absent_op, present_op, unknown_op))
+                                                   or self.s9u4_operation(download)["status"] == "sending"):
                 time.sleep(1)
-            fenced = self.s9u4_operation(prepared_op)["results"][0]
-            self.assertEqual((fenced["outcome"], fenced["code"], fenced["attempts"][-1]["transport"]),
-                             ("retryable", "IMPORT_ATTEMPT_EXPIRED", "certain-no-write"))
+            for op in (absent_op, present_op):
+                fenced = self.s9u4_operation(op)["results"][0]
+                self.assertEqual((fenced["outcome"], fenced["code"], fenced["attempts"][-1]["transport"]),
+                                 ("retryable", "IMPORT_ATTEMPT_EXPIRED", "certain-no-write"), op)
             self.assertEqual(self.s9u4_operation(unknown_op)["results"][0]["outcome"], "stored", "reconciled read-only from Orthanc")
-            self.assertIsNone(self.s9u4_claim("study:" + study)["heldByAttemptId"])
-            again = self.s9u4_import("tech", prepared_bytes, op=prepared_op)[1]
-            self.assertEqual((again.status, again.body["outcome"], again.body["generation"]), (200, "stored", 2))
-
+            for uid in (absent_study, present_study, unknown_study):
+                self.assertIsNone(self.s9u4_claim("study:" + uid)["heldByAttemptId"], uid)
+            self.assertEqual(self.s9u4_operation(live_op)["results"], live_before, "another instance's live attempt is never taken")
+            self.assertEqual(self.s9u4_claim("study:" + live_study)["heldByAttemptId"], live_entry["attempts"][-1]["attemptId"])
+            self.assertIsNone(self.s9u4_claim("study:" + orphan), "an initializing claim whose attempt is gone is removed")
+            self.assertEqual(self.s9u4_claim("study:" + study), bound_before, "a bound claim stays the baseline")
+            closed = self.s9u4_operation(download)["download"]["attempts"][-1]
+            self.assertEqual((closed["attemptId"], closed["state"], closed["objects"]), (sending_id, "unconfirmed", []))
+            self.assertEqual(psql(f"SELECT count(*) FROM \"AuditLog\" WHERE action='original.download.result' AND detail::jsonb->>'attemptId'='{sending_id}';"), ["1"])
+            # The prepared attempt with no object: the same POST sends once (generation 2) and stores. With the object already
+            # there: the same POST finds it before any write (already-present), the object and its bytes unchanged.
+            again = self.s9u4_import("tech", absent_bytes, op=absent_op)[1]
+            self.assertEqual((again.status, again.body["outcome"], again.body["generation"], len(self.s9u4_sop_objects(absent_entry["sopUid"]))),
+                             (200, "stored", 2, 1))
+            present = self.s9u4_import("tech", present_bytes, op=present_op)[1]
+            self.assertEqual((present.status, present.body["outcome"], present.body["generation"]), (200, "already-present", 2))
+            self.assertEqual((self.s9u4_sop_objects(present_entry["sopUid"]), self.s9u4_sha(present_object)), ([present_object], present_sha))
     def test_s9_u4_route_inventory_and_bypass(self) -> None:
         """REQ-S9-U4-12: the six routes are declared and classified, Gateway credentials are refused on all six, the exact
         32m location takes a body above 2 MiB while case/slash aliases stay on /api/'s 2m at nginx, and an archive writes
@@ -5366,6 +5598,42 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual([action for action, _ in rows], ["original.download.prepare", "original.download.intent", "original.download.result"])
             self.assertTrue(all(json.loads(detail)["institutionId"] == "hallym" for _, detail in rows))
             self.assertEqual(json.loads(rows[-1][1])["state"], "sent")
+            # The reader's role revoked while the archive streams (contract 5.3, U4BB-03): the check before the next chunk
+            # stops the supply - never the whole archive - and the attempt closes Incomplete with its result row.
+            big = self.s9u4_new_study(scope)
+            for _ in range(12):
+                op, stored_big = self.s9u4_import("tech", s9u4_dicom(study=big, series=big + ".1", sop=s9u4_uid(), patient_id="S9U4-BIG",
+                                                                     pixel=2 * 1024 * 1024))
+                scope["operations"].append(op)
+                self.assertEqual(stored_big.status, 200, stored_big.text)
+            stream_id = str(uuid.uuid4())
+            scope["operations"].append(stream_id)
+            self.assertEqual(self.stack.request("POST", f"/studies/{big}/original-downloads", "doctor", {"operationId": stream_id}).status, 200)
+            token = self.stack.token("doctor")
+            subject = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))["sub"]
+            self.assertRegex(subject, UUID_RE)
+            [roles] = psql(f"SELECT array_to_json(roles)::text FROM \"MemberRights\" WHERE sub = '{subject}';")
+            received, total = 0, None
+            try:
+                request = Request(self.stack.api + f"/studies/{big}/original-downloads/{stream_id}/archive", headers={"Authorization": "Bearer " + token})
+                with self.stack._open(request) as response:
+                    total = int(response.headers["Content-Length"])
+                    received += len(response.read(1024 * 1024))
+                    psql(f"UPDATE \"MemberRights\" SET roles = ARRAY['clinician'] WHERE sub = '{subject}';")
+                    try:
+                        while chunk := response.read(256 * 1024):
+                            received += len(chunk)
+                    except Exception as cut:   # the server ends the stream short: Content-Length is never met
+                        received += len(getattr(cut, "partial", b""))
+            finally:
+                psql(f"UPDATE \"MemberRights\" SET roles = ARRAY(SELECT json_array_elements_text('{roles}'::json)) WHERE sub = '{subject}';")
+            self.assertLess(received, total, "no whole archive after the role was revoked")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and self.s9u4_operation(stream_id)["status"] == "sending":
+                time.sleep(0.5)
+            cut_attempt = self.s9u4_operation(stream_id)["download"]["attempts"][-1]
+            self.assertEqual((cut_attempt["state"], cut_attempt["responseFinished"], cut_attempt["archiveSha256"]), ("incomplete", False, None))
+            self.assertLess(sum(o["bytesSupplied"] for o in cut_attempt["objects"]), 12 * 2 * 1024 * 1024)
 
     def test_zzz_known_failure_concurrent_commit_must_not_return_500(self) -> None:
         """다음 배치의 빨간 테스트. @expectedFailure로 숨기지 않는다."""

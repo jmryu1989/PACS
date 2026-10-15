@@ -105,7 +105,8 @@ function fakeOrthanc() {
     req.on('end', async () => {
       const body = Buffer.concat(chunks);
       const url = new URL(req.url, 'http://x');
-      const call = { method: req.method, path: url.pathname + url.search, body };
+      // Network IO is never held inside a database transaction (4.4): each call records how many were open.
+      const call = { method: req.method, path: url.pathname + url.search, body, openTransactions: o.db?.openTransactions ?? 0 };
       o.calls.push(call);
       if (req.headers.authorization !== 'Basic ' + Buffer.from('synthetic-orthanc:synthetic-orthanc-pass').toString('base64')) { res.writeHead(401); return res.end(); }
       const action = o.fault && await o.fault(call, o);
@@ -278,6 +279,7 @@ function checkShape(row) {
         if (sql.includes("download->'attempts'->-1")) {
           // The attempt CAS of a download chunk: the row lock (if the row exists), then the last attempt's three fields.
           if (!tx) throw new Error('row lock outside a transaction');
+          tx.operationLocked = true;
           const row = s.ops.get(values[0]);
           if (!seen(row) || row.kind !== 'download') return [];
           await lock(rows, row.id, tx.held);
@@ -291,6 +293,8 @@ function checkShape(row) {
         }
         if (sql.includes('WHERE "claimKey" = ? FOR UPDATE')) {
           if (!tx) throw new Error('row lock outside a transaction');
+          // Contract 4.4 lock order: claim rows (sorted) first, then the operation row - never a claim after it.
+          if (tx.operationLocked) throw new Error('lock order: a claim row after the operation row');
           const row = [...s.ops.values()].find(r => r.claimKey === values[0] && seen(r));
           if (row) await lock(rows, row.id, tx.held);
           return row ? [out(s.ops.get(row.id))] : [];
@@ -299,6 +303,7 @@ function checkShape(row) {
           // PostgreSQL READ COMMITTED: FOR UPDATE locks the rows it finds and nothing else - an absent id takes no lock
           // (no gap lock); only an advisory lock taken before it serialises the creation of a new id.
           if (!tx) throw new Error('row lock outside a transaction');
+          tx.operationLocked = true;
           if (!seen(s.ops.get(values[0]))) return [];
           await lock(rows, values[0], tx.held);
           return s.ops.has(values[0]) ? [out(s.ops.get(values[0]))] : [];
@@ -319,10 +324,15 @@ function checkShape(row) {
   }
   s.prisma = api(null);
   s.transactions = 0;
+  s.openTransactions = 0;
   s.prisma.$transaction = async (fn, options) => {
     s.transactions++;
-    assert.deepEqual(options, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
-    const tx = { id: ++transactionSeq, undo: [], created: [], held: { list: [], keys: new Set() } };
+    // What the gate relies on, not the numbers it picked (D73): READ COMMITTED (each statement sees what committed before
+    // it, so a row read after its lock is current) and a bounded wait and duration.
+    assert.equal(options?.isolationLevel, 'ReadCommitted');
+    assert.ok([options?.maxWait, options?.timeout].every(v => Number.isFinite(v) && v > 0), 'a bounded transaction');
+    const tx = { id: ++transactionSeq, undo: [], created: [], held: { list: [], keys: new Set() }, operationLocked: false };
+    s.openTransactions++;
     let ended;
     running.set(tx.id, new Promise(resolve => { ended = resolve; }));
     const db = api(tx);
@@ -333,7 +343,7 @@ function checkShape(row) {
       return value;
     }
     catch (error) { for (const fn of tx.undo.reverse()) fn(); throw error; }
-    finally { tx.held.list.forEach(release => release()); running.delete(tx.id); ended(); }
+    finally { tx.held.list.forEach(release => release()); running.delete(tx.id); ended(); s.openTransactions--; }
   };
   s.op = id => (s.ops.has(id) ? copy({ ...s.ops.get(id), _tx: undefined }) : null);
   s.claim = key => { const row = [...s.ops.values()].find(r => r.claimKey === key); return row ? copy({ ...row, _tx: undefined }) : null; };
@@ -383,6 +393,7 @@ after(async () => { for (const a of apps) await a.close(); });
 async function harness(options = {}) {
   const s = store(options);
   const orthanc = fakeOrthanc();
+  orthanc.db = s;
   await new Promise(resolve => orthanc.server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = 'http://127.0.0.1:' + orthanc.server.address().port;
   const access = new StudyAccessService(s.prisma, {}, {});
@@ -471,6 +482,7 @@ test('S9U4-B01 new study: stored with read-back, StudyState Unverified/local-imp
   assert.equal(posts(h.orthanc), 1, 'no second POST /instances');
   const status = await h.request('GET', '/api/dicom-import/' + first.id);
   assert.deepEqual([status.status, status.body.status, status.body.files[0].outcome], [200, 'settled', 'stored']);
+  assert.ok(h.orthanc.calls.every(c => c.openTransactions === 0), 'no Orthanc call while a transaction is open');
 });
 
 test('S9U4-B02 the reader codes and the per-file checks before any reservation: 400/409 final, replayed, nothing reserved', async () => {
@@ -1442,7 +1454,16 @@ test('S9U4-B28 download: prepare -> one fixed manifest (replayed for the same id
   assert.deepEqual(audits(h.s, 'original.download.result')[0].detail.objects.map(o => o.sha256).sort(), manifest.objects.map(o => o.sha256).sort());
   const status = await h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: RAD });
   assert.deepEqual([status.body.state, status.body.note], ['sent', '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.']);
-  assert.deepEqual((await h.request('GET', `/api/studies/${study}/original-downloads/${id}/archive`, { as: RAD })).body.code, 'DOWNLOAD_ALREADY_SENT');
+  // Sent is final for its operation (5.3): 409 DOWNLOAD_ALREADY_SENT, byte 0, nothing changed; a new id prepares again.
+  const before = h.s.op(id), audited = h.s.audits.length;
+  const again = await h.request('GET', `/api/studies/${study}/original-downloads/${id}/archive`, { as: RAD });
+  assert.deepEqual([again.status, again.body.code, again.headers['content-type'].startsWith('application/json')], [409, 'DOWNLOAD_ALREADY_SENT', true]);
+  assert.deepEqual([h.s.op(id), h.s.audits.length], [before, audited], 'state and audit unchanged');
+  const next = randomUUID();
+  assert.equal((await prepare(h, study, next)).status, 200);
+  const second = await h.request('GET', `/api/studies/${study}/original-downloads/${next}/archive`, { as: RAD });
+  assert.equal(second.bytes.length, Number(second.headers['content-length']));
+  assert.ok(h.orthanc.calls.every(c => c.openTransactions === 0), 'no Orthanc read while a transaction is open');
 });
 
 test('S9U4-B29 download refusals before byte 1: roles, foreign/tele study 404, MANIFEST_INCOMPLETE, ARCHIVE_TOO_LARGE, MANIFEST_CHANGED, DOWNLOAD_IN_PROGRESS, MANIFEST_STORE_INVALID', async () => {
