@@ -5,6 +5,10 @@ The delivered split page (main.html, its bundle and every shipped asset) against
 product file is modified. FlowSite extends the logout suite's wire boundary (auth_logout_dom_test.Site) from one study
 to several, each with its own stored draft row, revision and report, so the queue, a filter and A -> B -> A can be
 driven through the page's own controls.
+
+Setup-only, documented where used: FINALIZE_STAND_IN gives the delivered shortcut model the fixed W4-SC interface (D1358,
+D1371: readV2 with `finalize`) while the W4-SC model is not on this branch, and installs nothing once it is; the hook case
+marks an insertion as out (`insertInFlight`), which the citation and structure suites drive for real.
 """
 import io
 import json
@@ -213,14 +217,26 @@ class FlowSite(h.Site):
         return answer[0]
 
 
-# Setup-only stand-in for the W4-SC shortcut model (fixed interface D1358): until fable/w4-sc lands on this branch the
-# v1 model has no `finalize` action, so the delivered page's KinWorkspaceShortcuts.action answers 'finalize' for
-# Control+KeyS (no Alt/Shift/Meta) here, exactly as the v2 default binding will. Everything after that answer - the page
-# dispatcher, its preventDefault rule and the Finalize (Approve) command - is the shipped code.
+# Setup-only stand-in for the W4-SC shortcut model (fixed interface D1358 + D1371). Until fable/w4-sc lands on this branch
+# the delivered model has no readV2, the v2 map that holds `finalize`. The stand-in then gives it one - a fixture map: the
+# v1 defaults as whole chords plus finalize = Control+KeyS, as the v2 defaults are - and answers a v2 map's chords the way the
+# interface fixes them (a v2 value is the whole chord); a v1-shaped map still goes to the delivered model. Once the W4-SC
+# model is on the page it has readV2 and nothing is installed: the same cases then run on the shipped model. Everything
+# after the model's answer - the page dispatcher, KinReportCommands and the Finalize (Approve) command - is shipped code.
 FINALIZE_STAND_IN = """(() => {
-  const real = KinWorkspaceShortcuts.action;
-  KinWorkspaceShortcuts.action = (map, e) =>
-    e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.code === 'KeyS' && !e.repeat && !e.isComposing ? 'finalize' : real(map, e);
+  const model = KinWorkspaceShortcuts;
+  if (model.readV2) return 'shipped model';
+  const fixture = { version: 2, finalize: 'Control+KeyS',
+    ...Object.fromEntries(Object.entries(model.defaults).map(([id, key]) => [id, 'Control+Alt+' + key])) };
+  const v1 = model.action;
+  model.readV2 = () => ({ ...fixture });
+  model.action = (map, e) => {
+    if (map?.version !== 2) return v1(map, e);
+    if (e.defaultPrevented || e.repeat || e.isComposing || !e.ctrlKey || e.shiftKey || e.metaKey) return null;
+    const chord = 'Control+' + (e.altKey ? 'Alt+' : '') + e.code;
+    return Object.keys(map).find(id => id !== 'version' && map[id] === chord) ?? null;
+  };
+  return 'stand-in';
 })()"""
 # One Ctrl+S keydown in Findings, as the keyboard sends it; returns whether a listener prevented the browser default
 # (the page's dispatcher stops the event at the window, so nothing after it could observe the flag).
@@ -713,6 +729,47 @@ class ReportFlowPage(unittest.TestCase):
         self.settle()
         self.assertEqual(1, len(self.site.flow_commits))
 
+    def test_report_commands_finalize_answers_true_only_when_the_command_ran(self):
+        """D1371: the hook a bound viewer frame forwards its Finalize key to (the frame keeps the browser's Ctrl+S
+        unless it answers true)."""
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN A by the hook")
+        self.site.commit_answers = ["hold"]
+        self.assertIs(True, self.page.evaluate("KinReportCommands.finalize()"))
+        self.wait(lambda: self.site.held_flow_commits, "the approval by the hook")
+        self.assertEqual("SYN A by the hook", self.site.flow_commits[-1][1]["findings"])
+        # While that approval is out the command does not run again.
+        self.assertIs(False, self.page.evaluate("KinReportCommands.finalize()"))
+        self.site.finish_flow_commit()
+        self.wait(lambda: self.site.store[h.UID]["report"]["rs"] == "A", "the approval")
+        expect(self.page.locator("#b-approve")).to_be_disabled()
+        self.assertIs(False, self.page.evaluate("KinReportCommands.finalize()"), "approved (A): Approve is refused")
+        # Another study with an insertion out (setup only, see the module header): Approve's button stays as it is, but
+        # the commit would return without doing anything, so the hook does not say it ran.
+        self.open_study(h.PATIENT_B)
+        expect(self.page.locator("#b-approve")).to_be_enabled()
+        self.page.evaluate("insertInFlight = true")
+        self.assertIs(False, self.page.evaluate("KinReportCommands.finalize()"))
+        self.page.evaluate("insertInFlight = false")
+        self.settle()
+        self.assertEqual([h.UID], [uid for uid, _ in self.site.flow_commits], "one approval, by the first call")
+        self.assertEqual(h.PATIENT_B, self.selected())
+
+    def test_study_info_and_templates_keys_on_the_v2_map(self):
+        """The dispatcher reads the v2 map (D1371): Ctrl+Alt+5 still opens Study Info & Templates and Ctrl+Alt+T its
+        Templates tab, as with the v1 map."""
+        self.open()
+        self.page.evaluate(FINALIZE_STAND_IN)
+        self.open_study(h.PATIENT)
+        drawer = self.page.get_by_role("complementary", name="Study Panel", exact=True)
+        self.page.keyboard.press("Control+Alt+5")
+        expect(drawer).to_be_visible()
+        self.page.keyboard.press("Escape")
+        expect(drawer).to_have_count(0)
+        self.page.keyboard.press("Control+Alt+t")
+        expect(drawer.get_by_role("tab", name="Templates", exact=True)).to_have_attribute("aria-selected", "true")
+
 
 # Each mutant is a one-off copy of one bundle source (or main.html) served to the page; the product tree is never written.
 MUTANTS = [
@@ -753,9 +810,20 @@ MUTANTS = [
     ("menu-item-unbound", "context-menu.js", "act: () => { if (selectedUid === uid) $(\"#findings\").focus(); } },",
      "act: () => $(\"#findings\").focus() },", "test_menu_item_bound_to_its_row_does_nothing_after_the_selection_moved"),
     ("ctrl-s-prevents-when-not-run", "page-boot.js",
-     "if (finalizeCommand()) { event.preventDefault(); event.stopImmediatePropagation(); }",
-     "finalizeCommand(); event.preventDefault(); event.stopImmediatePropagation();",
+     "if (KinReportCommands.finalize() === true) { event.preventDefault(); event.stopImmediatePropagation(); }",
+     "KinReportCommands.finalize(); event.preventDefault(); event.stopImmediatePropagation();",
      "test_ctrl_s_runs_finalize_and_prevents_save_page_only_when_it_runs"),
+    # D1371: the dispatcher reads the v2 map; the v1 view has no Finalize key.
+    ("dispatcher-reads-v1-map", "page-boot.js", "(KinWorkspaceShortcuts.readV2 ?? KinWorkspaceShortcuts.read)(workspaceStorage, owner)",
+     "KinWorkspaceShortcuts.read(workspaceStorage, owner)", "test_ctrl_s_runs_finalize_and_prevents_save_page_only_when_it_runs"),
+    ("templates-chord-merged-into-v2-map", "page-boot.js", "KinWorkspaceShortcuts.action({ context: 'KeyT' }, event)",
+     "KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event)", "test_study_info_and_templates_keys_on_the_v2_map"),
+    ("finalize-hook-always-true", "page-boot.js", "finalize: () => finalizeCommand()", "finalize: () => (finalizeCommand(), true)",
+     "test_report_commands_finalize_answers_true_only_when_the_command_ran"),
+    ("finalize-hook-ran-during-insertion", "report-commit.js",
+     'if (mode !== "Radiology" || commitInFlight || insertInFlight || reportCommandBlocked("finalize")) return false;',
+     'if (mode !== "Radiology" || reportCommandBlocked("finalize")) return false;',
+     "test_report_commands_finalize_answers_true_only_when_the_command_ran"),
 ]
 
 
