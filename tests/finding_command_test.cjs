@@ -1657,7 +1657,8 @@ test('wiring: review stands the Image Findings drawer down once per dictation ru
     'no other dictation rule in this sheet (the one extra mention is in its comment)');
   // CE7: meta and the actions share one role-less wrapper, in their old order, and it is inert outside that
   // review: one default rule, inside the report CSS the host DOM harness slices.
-  const pane = html.slice(html.indexOf('<div id="dictation-pane"'), html.indexOf('\n        <div class="redit">'));
+  // W4: the read-only Recommendation notice now sits between the dictation pane and the report fields.
+  const pane = html.slice(html.indexOf('<div id="dictation-pane"'), html.indexOf('\n        <!-- W4 (설계 v4 §3)'));
   assert.match(pane, /<div id="dictation-place"><\/div>\s*<div class="dictation-foot">\s*<div id="dictation-meta"><\/div>\s*<div class="dictation-actions">/);
   assert.deepEqual([...pane.matchAll(/ id="([^"]+)"/g)].map(m => m[1]), ['dictation-pane', 'dictation-status', 'dictation-text',
     'dictation-place', 'dictation-meta', 'dictation-stop', 'dictation-cancel', 'dictation-repin', 'dictation-insert', 'dictation-close']);

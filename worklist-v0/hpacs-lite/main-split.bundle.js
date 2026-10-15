@@ -1473,7 +1473,7 @@
       const locked = !!appState[selectedUid]?.prelimHidden;
       // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
       // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
-      for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
+      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
         const el = $(id);
         if (!el) continue;
         el.disabled = !rad || locked || filming || !!held;
@@ -1492,7 +1492,7 @@
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
         // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save(Transcribe도 save다)는 사유 없이 승인을 풀고
         // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
-        for (const id of ["#b-save", "#b-transcribe", "#b-approve", "#b-approve-next"]) {
+        for (const id of ["#b-save", "#b-transcribe", "#b-approve"]) {
           $(id).disabled = true;
           $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
         }
@@ -1516,8 +1516,15 @@
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
       }
-      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-approve-next','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
+      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
+      }
+      // Approve & Next는 Approve와 같은 확정이다(W4-PAGE-04): 같은 때, 같은 까닭으로 잠긴다 — 같은 판단을 따로 하지 않는다.
+      const approveNext = $("#b-approve-next");
+      if (approveNext) {
+        approveNext.disabled = $("#b-approve").disabled;
+        approveNext.title = $("#b-approve").title
+          || "승인한 뒤 목록의 다음 검사로 갑니다 — 승인이 확인되고 화면에 그려진 뒤에만 이동하고, 결과를 모르거나 거절되면 이 검사에 머뭅니다";
       }
       // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
       renderDraftHint();

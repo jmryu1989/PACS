@@ -64,6 +64,14 @@ PANELS = [('.left', 'grow'), ('#worklist-folders-panel', 'grow'), ('#resize-main
 # incl. PAGE-22 on W3's layouts) carry the excluded region.
 W6_REPORT_FIELDS = ('#findings', '#conclusion')
 W6_FIRST_PAINT_NODES = 1
+# W4-LAND (pre-granted decided difference, same rule as W6R1-05): the report column gains Approve & Next in its footer row,
+# in front of Prev/Next, which keep their place (the row is right-aligned and stays one line), and two rows hidden at first
+# paint - the Notice of a study move that did not happen (6 nodes) and the read-only Recommendation notice (3 nodes).
+# First paint: + W4_REPORT_NODES nodes. In a picture the new button is made invisible where it stands (HIDE_W4, layout
+# kept), so every other pixel and box is still compared with the baseline; its own place and reach are the W4 cases'
+# (report_actions_dom_test.py, report_flow_dom_test.py).
+W4_REPORT_NODES = 10
+HIDE_W4 = "() => document.querySelector('#b-approve-next')?.style.setProperty('visibility', 'hidden')"
 SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
 # Below the scroller in its column: the footer and each notice (a notice section's first row is its bar; an opened
 # notice pane scrolls inside its own height cap).
@@ -1237,6 +1245,7 @@ class StudyPanelPageDOM(unittest.TestCase):
             w6 = w6_facts(page)
             pixels = None
             if picture:
+                page.evaluate(HIDE_W4)   # W4-LAND decided difference, see W4_REPORT_NODES
                 cover(page, [rail, w6['scroller']])
                 pixels = first_paint_pixels(page, picture)
             self.assertEqual([], site.violations)

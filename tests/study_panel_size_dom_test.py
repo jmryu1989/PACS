@@ -30,6 +30,7 @@ from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
 from study_panel_page_dom_test import W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
+from study_panel_page_dom_test import HIDE_W4, W4_REPORT_NODES
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -203,6 +204,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 left, top = min(c['x'] for c in controls), min(c['y'] for c in controls)
                 mask = [left, top, max(c['x'] + c['width'] for c in controls) - left, max(c['y'] + c['height'] for c in controls) - top]
             if picture:
+                page.evaluate(HIDE_W4)   # W4-LAND decided difference (study_panel_page_dom_test.py W4_REPORT_NODES)
                 cover(page, [mask])
                 settle(page)
                 facts['pixels'] = page.screenshot(animations='disabled', caret='hide',
@@ -236,7 +238,9 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # page facts and its scroller's pixels are not compared; what lies below the scroller is compared
                         # where the scroller leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable);
                         # everything else stays round 6's.
-                        self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES, mine['first_paint_nodes'], 'first paint')
+                        # W4-LAND: + W4_REPORT_NODES (Approve & Next and the two report rows hidden at first paint).
+                        self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES,
+                                         mine['first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
                         page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
                         self.assertEqual(page_facts(theirs), page_facts(mine), 'page')
@@ -265,7 +269,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                             self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
                         # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
                         # controls' row and the edge (stated in the round-7 report).
-                        self.assertEqual(7 + W6_FIRST_PAINT_NODES, mine['nodes'] - theirs['nodes'])
+                        self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES, mine['nodes'] - theirs['nodes'])
                         if picture:
                             regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
