@@ -4093,6 +4093,8 @@ class ProtectedHostTests(unittest.TestCase):
                 return intro.IntroductionHost(self.policy_path).execute(raw)
         result = rollback()
         self.assertEqual(result["status"], "RESTORED", result)
+        self.assertEqual([warning["kind"] for warning in result.get("warnings", [])], ["checkout-mode"],
+                         "the rollback met the opened .git and recorded it")
         (warning,) = result["warnings"]
         self.assertEqual((warning["kind"], warning["modes"], warning["restored"]),
                          ("checkout-mode", {"checkout": "0o700", ".git": "0o755"}, {"checkout": "0o700", ".git": "0o700"}))
