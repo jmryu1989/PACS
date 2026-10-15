@@ -178,3 +178,60 @@ test('duplicate notice identifies conflicting actions and tabs even when one is 
   assert.equal(f.node('workspace-shortcuts-dialog').open,true);assert.equal(f.data.size,0);
   f.instance.end();
 });
+
+// W4SC-A-01/02: REQ-WS7 -> RISK-WS7 -> actionable notices without preference loss.
+test('account save names hidden-tab conflicts, preserves every input and sends no PUT',async()=>{
+  const f=dialogFixture();f.node('workspace-shortcuts-edit').onclick();await f.flush();
+  assert.equal(f.node('workspace-shortcuts-account-save').disabled,false);
+  f.node('workspace-shortcuts-tab-viewer').onclick();f.press('image',{altKey:true,code:'KeyR'});
+  f.node('workspace-shortcuts-tab-worklist').onclick();f.press('report',{altKey:true,code:'KeyR'});
+  assert.equal(f.node('workspace-shortcuts-tab-viewer-panel').hidden,true);
+  const inputs=()=>Object.keys(s.defaultsV2).filter(id=>id!=='version').map(id=>{
+    const field=f.node('workspace-shortcut-'+id);return [id,field.value,field.dataset.code];
+  });
+  const before=inputs();
+  f.node('workspace-shortcuts-account-save').onclick();await f.flush();
+  const notice=f.node('workspace-shortcuts-account-status').textContent;
+  assert.match(notice,/Image \(Viewer\)/);assert.match(notice,/Report Editor \(Worklist\)/);
+  assert.match(notice,/중복.*서로 다른 키/);
+  assert.deepEqual(inputs(),before);
+  assert.equal(f.requests.filter(x=>x.options.method==='PUT').length,0);
+  assert.equal(f.node('workspace-shortcuts-dialog').open,true);assert.equal(f.data.size,0);
+  f.instance.end();
+});
+test('observed v1 null unassigns only that action with a notice; explicit v2 null is silent',()=>{
+  const legacy={...s.defaults,image:'KeyI',report:null,note:'KeyN'};
+  const expected={version:2,...Object.fromEntries(Object.entries(legacy).map(([id,key])=>[id,key===null?null:'Control+Alt+'+key])),finalize:'Control+KeyS'};
+  const owner='reader',data=new Map([['kin-workspace-shortcuts:v1:'+owner,JSON.stringify(legacy)]]);
+  const storage={getItem:key=>data.get(key)??null};
+  assert.equal(s.valid(legacy),false);
+  assert.deepEqual(s.readV2(storage,owner),expected);assert.deepEqual(s.read(storage,owner),legacy);
+  const migrated=s.migrate(legacy);
+  assert.deepEqual(migrated.map,expected);assert.equal(migrated.notices.length,1);
+  assert.match(migrated.notices[0],/Report Editor.*미배정.*Shortcuts/);
+  data.set('kin-workspace-shortcuts:v2:'+owner,JSON.stringify(expected));
+  assert.equal(s.valid(expected),true);assert.deepEqual(s.readV2(storage,owner),expected);
+  assert.deepEqual(s.migrate(expected),{map:expected,notices:[]});
+});
+test('dialog reading v1 null shows its notice and preserves other keys; v2 unassignment stays silent',async()=>{
+  const legacy={...s.defaults,image:'KeyI',report:null,note:'KeyN'};
+  for(const version of [1,2]){
+    const f=dialogFixture(version===1?legacy:null);
+    const expected={version:2,...Object.fromEntries(Object.entries(legacy).map(([id,key])=>[id,key===null?null:'Control+Alt+'+key])),finalize:'Control+KeyS'};
+    if(version===2)f.data.set('kin-workspace-shortcuts:v2:'+f.owner(),JSON.stringify(expected));
+    else assert.match(f.node('workspace-shortcuts-status').textContent,/Report Editor.*미배정/);
+    const stored=[...f.data];
+    f.node('workspace-shortcuts-edit').onclick();await f.flush();
+    assert.deepEqual({...f.instance.read()},expected);
+    for(const [id,key] of Object.entries(expected))if(id!=='version'){
+      assert.equal(f.node('workspace-shortcut-'+id).dataset.code,key??'');
+      assert.equal(f.node('workspace-shortcut-'+id).value,s.display(key));
+    }
+    const notice=f.node('workspace-shortcuts-message').textContent;
+    if(version===1)assert.match(notice,/Report Editor.*미배정.*Shortcuts/);
+    else assert.equal(notice,'각 항목에서 사용할 조합을 누르세요.');
+    assert.deepEqual([...f.data],stored);assert.equal(f.requests.filter(x=>x.options.method==='PUT').length,0);
+    assert.equal(f.node('workspace-shortcuts-dialog').open,true);
+    f.instance.end();
+  }
+});

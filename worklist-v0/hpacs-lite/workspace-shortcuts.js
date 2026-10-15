@@ -32,7 +32,7 @@
       const key=source.version===2?raw:typeof raw==='string'?'Control+Alt+'+raw:null;
       map[id]=chord(key)&&!used.has(key)?key:null;
       if(map[id])used.set(key,id);
-      else if(raw!==null)notices.push(labels[id]+': 알 수 없거나 중복된 키를 미배정으로 두었습니다. Shortcuts에서 지정하세요.');
+      else if(raw!==null||source.version!==2)notices.push(labels[id]+': 알 수 없거나 중복된 키를 미배정으로 두었습니다. Shortcuts에서 지정하세요.');
     }
     if(!Object.hasOwn(map,'finalize')){
       const key=defaultsV2.finalize;
@@ -101,7 +101,10 @@
       if(work.state()!=='active')return;const at=work.capture('document');
       if(ended||accountBusy||!dialog.open||!allowed()||!draftOwner||owner()!==draftOwner||action==='save'&&accountRevision===null)return;
       const snapshot=draft(), bound=draftOwner, ticket=++accountEpoch;
-      if(action==='save'&&!valid(snapshot)){accountStatus.textContent='중복 또는 예약 단축키를 수정하세요.';return;}
+      if(action==='save'&&!valid(snapshot)){
+        const conflicts=ids.filter(id=>snapshot[id]&&ids.some(other=>other!==id&&snapshot[other]===snapshot[id]));
+        accountStatus.textContent='중복 단축키: '+conflicts.map(id=>labels[id]+' ('+scope(id)+')').join(', ')+'. 서로 다른 키로 지정하세요.';return;
+      }
       const live=()=>!ended&&ticket===accountEpoch&&dialog.open&&allowed()&&owner()===bound&&draftOwner===bound;
       const controller=new AbortController();accountRequest=controller;accountBusy=true;interruptedAction=action;refreshAccount();
       const timeout=setTimeout(()=>controller.abort(),10000);accountStatus.textContent='계정 단축키를 확인하는 중…';
