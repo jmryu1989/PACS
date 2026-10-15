@@ -1914,6 +1914,12 @@ test('S9U4-B37 stored import results and reservations outside their persisted fo
     assert.deepEqual([h.s.op(a.id), h.s.audits.length], [before, audited], 'nothing changed');
     const valid = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: '2026-02-28T00:00:00Z' });
     assert.equal(valid.status, 200, 'a real date in the same form is taken');
+    // The body is judged before the file's state: on a file no recovery applies to any more, a real date is 409 and the
+    // impossible one is still 400 (an invalid request never reaches the state decision).
+    const settled = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: '2026-02-28T00:00:00Z' });
+    assert.deepEqual([settled.status, settled.body.code], [409, 'RECOVERY_NOT_APPLICABLE']);
+    const impossible = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: '2026-02-30T00:00:00.000Z' });
+    assert.deepEqual([impossible.status, impossible.body.code], [400, 'RECOVERY_EVIDENCE_INVALID']);
   }
 });
 
@@ -2683,4 +2689,28 @@ test('S9U4-B50 the startup passes run by themselves when a server starts (no dir
   assert.deepEqual([h.s.op(sending).status, h.s.op(sending).download.attempts.map(a => a.state)], ['unconfirmed', ['unconfirmed']], 'the download startup pass closed it');
   assert.equal(resultRows(h, supply).length, 1);
   assert.deepEqual([posts(h.orthanc), posts(h2.orthanc)], [before, 0], 'no Orthanc write');
+});
+
+test('S9U4-B51 the owner resends while its own prepared attempt (holding bound Study and SOP claims) has expired, with no GET before: the same intake transaction fences it with exactly one result row, the holders it released are taken by generation 2 there and then, and the file is stored once', async () => {
+  const h = await harness();
+  const study = uid(), bytes = dicom({ study });
+  // The first request reserves both claims and then stalls at the pre-write lookup (its process "ends" there).
+  h.orthanc.fault = call => (call.path === '/tools/lookup' ? { hang: true } : null);
+  const pending = h.send(bytes);
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const id = [...h.s.ops.values()].find(o => o.kind === 'import').id;
+  h.orthanc.fault = null;
+  const [held] = h.s.file(id, 0).attempts;
+  const sopUid = h.s.file(id, 0).sopUid;
+  assert.deepEqual([held.phase, h.s.claim('study:' + study).claim.phase, h.s.claim('study:' + study).claim.heldByAttemptId,
+    h.s.claim('sop:' + sopUid).claim.heldByAttemptId], ['prepared', 'bound', held.attemptId, held.attemptId]);
+  h.s.advance(Date.parse(held.leaseUntil) - h.s.clock);
+  const again = await h.send(bytes, { id });
+  assert.deepEqual([again.status, again.body.outcome, again.body.generation], [200, 'stored', 2]);
+  assert.deepEqual(audits(h.s, 'dicom.import.result').filter(a => a.detail.attemptId === held.attemptId).map(a => a.detail.code), ['IMPORT_ATTEMPT_EXPIRED'],
+    'the fenced attempt has exactly one result row');
+  const [old, next] = h.s.file(id, 0).attempts;
+  assert.deepEqual([old.outcome, old.code, old.transport, next.generation, next.outcome], ['retryable', 'IMPORT_ATTEMPT_EXPIRED', 'certain-no-write', 2, 'stored']);
+  await pending;   // the stalled first request fails its own CAS later and writes nothing
+  assert.deepEqual([h.s.file(id, 0).attempts.map(a => a.outcome), posts(h.orthanc)], [['retryable', 'stored'], 1], 'stored once; the late worker changed nothing');
 });
