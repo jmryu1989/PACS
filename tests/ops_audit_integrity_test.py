@@ -954,7 +954,7 @@ class AuditIntegrityPure(unittest.TestCase):
                 self.assertIn("plan", seen, "the plan ran inside the rotation's deletion")
                 self.assertFalse(seen["plan"][0] == 0 and gone(kept_by_six),
                                  "a plan succeeded and the rotation then deleted a set its period keeps")
-                self.assertEqual((seen["plan"][0], seen["plan"][1]["error"]), (2, "Refused"), seen["plan"])
+                self.assertEqual((seen["plan"][0], seen["plan"][1].get("error")), (2, "Refused"), seen["plan"])
                 self.assertEqual(seen["before"], seen["after"])
                 self.assertEqual((result["deleted"], audit.ledger_years(ws.ledger()["entries"])), ([kept_by_six.name], 2))
                 # the turn was only the rotation's: the plan goes through afterwards and nothing is left in the root
