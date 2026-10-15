@@ -605,7 +605,8 @@ class MigrationPins(unittest.TestCase):
         provider_change = "20261007120000_provider_change"
         attempt_ids = "20261006000000_tech_note_attempt_id"
         self.assertEqual(names[names.index(U3_MIGRATION):], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
-                                       audit_guard, draft_boundary, session_end, isolation, attempt_ids, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects', '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts'],
+                                       audit_guard, draft_boundary, session_end, isolation, attempt_ids, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects', '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
+                                       '20261015013945_import_operation'],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
                          "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
                          "S7-AUDIT-STORE's audit_log_append_only, S7-U5's draft_revision_session_entry and its "
@@ -642,9 +643,10 @@ class MigrationPins(unittest.TestCase):
         rows = restore_fixture.expected_rows("2.25.1")
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())])
         self.assertIn("api/prisma/migrations/20261008120000_emr_b/migration.sql", restore_fixture.MIGRATIONS)
-        self.assertEqual(len(restore_fixture.TABLES), 51)
+        # S9-U4b: 47 migrations, 52 tables (ImportOperation), rows + one import, two downloads and four reservations, 97.
+        self.assertEqual(len(restore_fixture.TABLES), 52)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 90)   # S7-U5: + the emptied draft row (tombstone); + 2 end marks; + 2 isolation facts; + 2 change records
+        self.assertEqual(sum(len(value) for value in rows.values()), 97)   # S7-U5: + the emptied draft row (tombstone); + 2 end marks; + 2 isolation facts; + 2 change records; S9-U4b: + 7
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})
