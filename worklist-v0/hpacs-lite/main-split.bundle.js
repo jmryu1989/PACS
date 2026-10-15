@@ -11016,9 +11016,12 @@
     const ctx = $("#ctx");
     let ctxItems = [];
     let ctxOpener = null;
-    function showCtx(e, items, keyboard = null) {
+    // 행·오더 메뉴를 연 그 선택({uid, seq, oid}: 검사 UID·선택 순번·고른 오더). 다른 메뉴(상용구·저장 검색)는 선택에 묶이지 않는다(null).
+    let ctxTarget = null;
+    function showCtx(e, items, keyboard = null, target = null) {
       ctxOpener = document.activeElement;
       ctxItems = items;
+      ctxTarget = target;
       ctx.setAttribute('role', 'menu');
       ctx.innerHTML = items.map((it, i) =>
         it.sep ? '<hr role="separator">' : `<div data-i="${i}" role="menuitem" tabindex="-1" aria-disabled="${!!it.dis}" class="${it.dis ? "dis" : ""}">${esc(it.label)}</div>`).join("");
@@ -11049,6 +11052,17 @@
       ctx.style.display = 'none';
       ctxOpener?.focus();
       /**
+       * 행·오더 메뉴의 항목은 **메뉴를 연 그 선택**에 대한 것이다(W4-PAGE-10 MENU-TARGET). 여럿이 실행할 때의 지금 선택에 닿는다 —
+       * Match·Unmatch·Modify Exam은 `cur()`·`curOrder()`를, 판독문 작성으로는 지금 편집기를 쓴다. 메뉴가 열린 채 키보드로 다른 행을
+       * 골랐거나 오더 선택이 바뀌었으면 그 항목은 **다른 검사**에 요청을 보낸다. 그래서 실행 직전에 메뉴를 연 검사·선택 순번·오더가
+       * 지금과 같은지 보고, 다르면 아무것도 보내지 않고 그렇다고 말한다 — 그 행에서 메뉴를 다시 열면 된다(A→B→A도 같은 선택이 아니다).
+       */
+      const target = ctxTarget;
+      if (target && (target.uid !== selectedUid || target.seq !== selectionSeq || target.oid !== selectedOid)) {
+        toast("메뉴를 연 뒤 선택한 검사가 바뀌어 실행하지 않았습니다 — 그 행에서 메뉴를 다시 여세요", "err");
+        return;
+      }
+      /**
        * **`act()`를 await하고 catch한다.**
        *
        * 메뉴 항목의 절반이 async다(원격판독 의뢰, Match/Unmatch, 삭제…).
@@ -11066,8 +11080,8 @@
     /**
      * 행의 메뉴는 **그 행의 검사가 지금 선택일 때만** 연다(W4-PAGE-10 MENU-TARGET). 메뉴의 항목(판독문 작성으로, Unmatch…)은
      * 지금 선택을 대상으로 하므로, 선택이 그 행으로 옮겨지지 않았는데(글자 조합 중, 쓰던 글의 저장 대기·거절) 그 행의 메뉴를
-     * 띄우면 항목이 **앞 검사**에 닿는다. 저장을 기다려 옮겨지면 그때 같은 자리에 연다. 항목은 행의 UID에 묶여 있어, 그 사이
-     * 선택이 바뀌었으면 아무것도 하지 않는다.
+     * 띄우면 항목이 **앞 검사**에 닿는다. 저장을 기다려 옮겨지면 그때 같은 자리에 연다. 메뉴는 연 그 선택에 묶여, 그 사이
+     * 선택이 바뀌었으면 어느 항목도 실행하지 않는다(위 클릭 처리).
      */
     $("#rows").addEventListener("contextmenu", e => {
       const tr = e.target.closest("tr");
@@ -11078,6 +11092,8 @@
     });
     function showRowMenu(e, uid) {
       const s = studies.find(x => x.uid === uid);
+      // 이 메뉴가 열린 선택. 항목은 이 선택이 그대로일 때만 실행된다(위 클릭 처리).
+      const opened = { uid, seq: selectionSeq, oid: selectedOid };
       const forceReleaseItems = KinAuth.has("admin") && s?.holder ? [{
         label: "점유 강제 해제 (관리자)", dis: s.holder === user, act: async () => {
           if (!confirm(`${displayActor(s.holder)} 님의 점유를 강제로 해제합니다. 그쪽 화면은 다음 저장에서 거절됩니다. 계속할까요?`)) return;
@@ -11101,14 +11117,14 @@
         const mine = !s?.tele;
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
-          { label: "판독문 작성으로", act: () => { if (selectedUid === uid) $("#findings").focus(); } },
+          { label: "판독문 작성으로", act: () => $("#findings").focus() },
           { sep: 1 },
           { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
           { sep: 1 },
           { label: "판독 시작 (수신 기관)", dis: mine || ts !== "sent", act: () => setTs(uid, "inReading") },
           ...forceReleaseItems,
-        ]);
+        ], null, opened);
       } else {
         const o = curOrder();
         showCtx(e, [
@@ -11131,7 +11147,7 @@
           { sep: 1 },
           { label: "Delete", dis: s.rs !== "W", act: () => doDelete(uid) },
           ...forceReleaseItems,
-        ]);
+        ], null, opened);
       }
     }
 
@@ -11155,7 +11171,7 @@
           } },
         { sep: 1 },
         { label: "New Exam (SC 생성)", dis: 1, act: () => {} },
-      ]);
+      ], null, { uid: selectedUid, seq: selectionSeq, oid: selectedOid });
     });
 
     $('#related-include-current').addEventListener('change',e=>{if(cur()){relatedIncludeCurrent=e.target.checked;renderRelated();}});

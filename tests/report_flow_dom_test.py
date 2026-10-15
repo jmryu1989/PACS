@@ -50,6 +50,7 @@ class FlowSite(h.Site):
         self.flow_draft_reads = []      # uid of every full draft read (GET draft) that reached the server
         self.held_draft_reads = []      # (route, uid, account)
         self.templates = []
+        self.orders = []                # the Order List (bootstrap), for the Technician tab
         self.hidden = set()
 
     # ── one study's stored state ──
@@ -141,7 +142,7 @@ class FlowSite(h.Site):
                 "actor": account["actor"], "roles": account["roles"], "institution": h.INSTITUTION,
                 "institutionName": "SYN Hospital A"}, "filters": [], "templates": self.templates,
                 "institutions": [{"id": h.INSTITUTION, "name": "SYN Hospital A", "type": "hospital"}],
-                "states": states, "orders": [], "serverTime": "2026-10-03T00:00:00.000Z"})
+                "states": states, "orders": self.orders, "serverTime": "2026-10-03T00:00:00.000Z"})
         found = re.fullmatch(r"/api/studies/([^/]+)/(hold|release|report|draft|report/commit|report/versions)", path)
         if not found or found.group(1) not in self.store:
             return super().api(route, request, method, path, query)
@@ -924,6 +925,96 @@ class ReportFlowPage(unittest.TestCase):
         self.page.locator("#ctx [data-i]", has_text="판독문 작성으로").dispatch_event("click")
         self.assertNotEqual("findings", self.page.evaluate("document.activeElement?.id"))
 
+    # ── MENU-TARGET in the Technician tab: items that act on the current selection (W4F-03) ──
+    def technician(self, matched):
+        """A technician-capable account on the Technician tab, one unmatched order, and `matched` (uid -> M) as the
+        studies' match state. The match/unmatch writes are recorded and refused (nothing changes on the server)."""
+        self.site.account = {**h.RAD, "roles": ["admin", "radiologist", "technician"]}
+        state_of = self.site.state_of
+        self.site.state_of = lambda uid, account: {**state_of(uid, account), "matched": matched.get(uid, "U")}
+        self.site.orders = [{"oid": "SYN-O-1", "id": "SYN-P-009", "name": "SYN ORDER NINE", "sex": "M", "birth": "1980-01-01",
+                             "sched": "2026-10-03 09:00", "modality": "CT", "desc": "SYN CT CHEST", "ward": "", "reqDoc": "",
+                             "matched": "U", "studyUid": None}]
+        self.writes_to = {"match": [], "unmatch": []}
+
+        def refuse(route, kind):
+            self.writes_to[kind].append(route.request.post_data_json)
+            route.fulfill(status=403, json={"code": "SYN_REFUSED", "message": "SYN keeps the data"})
+        for kind in ("match", "unmatch"):
+            self.context.route("**/api/" + kind, lambda route, request, kind=kind: refuse(route, kind))
+        self.open()
+        self.page.locator("[data-tab=Technician]").click()
+        expect(self.page.locator("#orderrows tr[data-oid]")).to_have_count(1)
+
+    def menu_item(self, label):
+        return self.page.locator("#ctx [data-i]").filter(has_text=re.compile("^" + re.escape(label) + "$"))
+
+    def menu_then_keyboard(self, patient, key="ArrowDown"):
+        """The row menu of `patient` (selected first), then - menu still open - the keyboard selects the next row."""
+        self.open_study_row(patient)
+        self.right_click(patient)
+        self.wait(self.menu_shown, "the menu of " + patient)
+        self.row(patient).focus()
+        self.page.keyboard.press(key)
+        self.page.keyboard.press("Enter")
+
+    def open_study_row(self, patient):
+        self.pick(patient)
+        self.wait(lambda: self.selected() == patient, patient)
+
+    MENU_CANCELLED = "메뉴를 연 뒤 선택한 검사가 바뀌어 실행하지 않았습니다"
+
+    def test_technician_unmatch_and_modify_send_nothing_once_the_keyboard_selected_another_study(self):
+        """MENU_UNMATCH (W4F-03): with B's row menu open the keyboard selects C (both matched, both RS W). Unmatch and
+        Modify Exam act on the current selection when they run; they must send nothing for C - nor for B, whose selection
+        the menu no longer is - open nothing, and say why."""
+        self.technician({h.UID_B: "M", UID_C: "M"})
+        self.menu_then_keyboard(h.PATIENT_B)
+        self.assertEqual(PATIENT_C, self.selected())
+        self.menu_item("Unmatch").click()
+        expect(self.page.locator("#toast")).to_contain_text(self.MENU_CANCELLED)
+        self.menu_then_keyboard(h.PATIENT_B)
+        self.assertEqual(PATIENT_C, self.selected())
+        self.menu_item("Modify Exam").click()
+        self.settle(300)
+        self.assertEqual(0, self.page.locator("#modal.show").count(), "no Modify Exam form for C")
+        self.assertEqual({"match": [], "unmatch": []}, self.writes_to)
+        self.assertEqual([], self.dialogs)
+
+    def test_technician_match_sends_nothing_once_the_keyboard_selected_another_study(self):
+        """W4F-03: Match pairs the current selection with the selected order when it runs. From A's row menu, and from
+        the Order List's own menu, after the keyboard selected B (unmatched too), nothing is asked or sent."""
+        self.technician({})
+        self.page.locator("#orderrows tr[data-oid]").click()
+        self.menu_then_keyboard(h.PATIENT)
+        self.assertEqual(h.PATIENT_B, self.selected())
+        self.menu_item("Match").click()
+        expect(self.page.locator("#toast")).to_contain_text(self.MENU_CANCELLED)
+        # The Order List's menu, opened while C is selected; the keyboard then selects B.
+        self.open_study_row(PATIENT_C)
+        order = self.page.locator("#orderrows tr[data-oid]")
+        box = order.evaluate("tr => { const r = tr.getBoundingClientRect(); return { x: r.x, y: r.y }; }")
+        order.dispatch_event("contextmenu", {"clientX": box["x"] + 5, "clientY": box["y"] + 5, "button": 2})
+        self.wait(self.menu_shown, "the Order List menu")
+        self.row(PATIENT_C).focus()
+        self.page.keyboard.press("ArrowUp")
+        self.page.keyboard.press("Enter")
+        self.assertEqual(h.PATIENT_B, self.selected())
+        self.menu_item("Match").click()
+        self.settle(300)
+        self.assertEqual({"match": [], "unmatch": []}, self.writes_to)
+        self.assertEqual([], self.dialogs, "nothing was asked either (Match asks before it sends)")
+
+    def test_technician_menu_item_acts_on_the_row_it_was_opened_on(self):
+        # The doctor's and technician's normal path: the menu of the selected row acts on that row, with one click.
+        self.technician({h.UID_B: "M"})
+        self.open_study_row(h.PATIENT_B)
+        self.right_click(h.PATIENT_B)
+        self.wait(self.menu_shown, "the menu of B")
+        self.menu_item("Unmatch").click()
+        self.wait(lambda: self.writes_to["unmatch"], "the Unmatch request")
+        self.assertEqual([{"uid": h.UID_B}], self.writes_to["unmatch"])
+
     # ── Ctrl+S dispatch to Finalize (Approve) ──
     def test_ctrl_s_runs_finalize_and_prevents_save_page_only_when_it_runs(self):
         self.open()
@@ -1038,8 +1129,18 @@ MUTANTS = [
      "select(uid); showRowMenu(e, uid);", "test_menu_during_composition_does_not_open_for_another_row"),
     ("menu-waits-not", "context-menu.js", "whenSelected(select(uid), uid, () => showRowMenu(e, uid));",
      "select(uid); showRowMenu(e, uid);", "test_menu_on_a_non_selected_row_opens_after_the_move_and_acts_on_that_row"),
-    ("menu-item-unbound", "context-menu.js", "act: () => { if (selectedUid === uid) $(\"#findings\").focus(); } },",
-     "act: () => $(\"#findings\").focus() },", "test_menu_item_bound_to_its_row_does_nothing_after_the_selection_moved"),
+    # A row/order menu item runs only on the selection the menu was opened on (W4F-03).
+    ("menu-item-unbound", "context-menu.js",
+     "if (target && (target.uid !== selectedUid || target.seq !== selectionSeq || target.oid !== selectedOid)) {",
+     "if (false) {", "test_menu_item_bound_to_its_row_does_nothing_after_the_selection_moved"),
+    ("item-uses-cur", "context-menu.js",
+     "if (target && (target.uid !== selectedUid || target.seq !== selectionSeq || target.oid !== selectedOid)) {",
+     "if (target && target.oid !== selectedOid) {",
+     "test_technician_unmatch_and_modify_send_nothing_once_the_keyboard_selected_another_study"),
+    ("match-uses-cur", "context-menu.js",
+     "if (target && (target.uid !== selectedUid || target.seq !== selectionSeq || target.oid !== selectedOid)) {",
+     "if (target && target.oid !== selectedOid) {",
+     "test_technician_match_sends_nothing_once_the_keyboard_selected_another_study"),
     ("ctrl-s-prevents-when-not-run", "page-boot.js",
      "if (KinReportCommands.finalize() === true) { event.preventDefault(); event.stopImmediatePropagation(); }",
      "KinReportCommands.finalize(); event.preventDefault(); event.stopImmediatePropagation();",
