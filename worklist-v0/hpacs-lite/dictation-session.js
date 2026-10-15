@@ -179,8 +179,11 @@
       if (!current(token)) return reply(false, 'stale');
       const live = checkScope(token, pin.field);
       if (!live) return reply(false, 'editor-changed');
-      // UTF-8 replaces lone UTF-16 surrogates; keep exact string identity as well as the hash.
-      if (live.value !== start.value || start.value !== pinnedValue || h !== pin.fieldValueHash) {
+      // UTF-8 replaces lone UTF-16 surrogates; keep exact string identity as well as the hash. The host may also
+      // know of an edit that left the same text (typing then Undo): the same refusal, before anything is spent.
+      let pinned = false;
+      try { pinned = !options.pinned || options.pinned() === true; } catch (_) { /* unknown is not pinned */ }
+      if (!pinned || live.value !== start.value || start.value !== pinnedValue || h !== pin.fieldValueHash) {
         needsRepin = true; error = 'field-changed'; return reply(false, 'field-changed');
       }
       if (!insertionAllowed()) return reply(false, 'insertion-blocked');

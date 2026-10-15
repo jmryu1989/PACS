@@ -36,8 +36,12 @@
       for (const s of Object.values(states)) {
         const el = s.el;
         if (el.getAttribute('aria-hidden') === 'true') continue;
-        el.style.height = '0px';
-        el.style.height = (el.scrollHeight + el.offsetHeight - el.clientHeight) + 'px';
+        // The text's own height, measured with no page height in the way. It becomes the field's minimum where it
+        // exceeds the page's own: the page's sizes may yield to a short scroller, the text never shrinks into itself.
+        el.style.height = '0px'; el.style.minHeight = '0px';
+        const text = el.scrollHeight + el.offsetHeight - el.clientHeight;
+        el.style.height = ''; el.style.minHeight = '';
+        if (text > (parseFloat(doc.defaultView.getComputedStyle(el).minHeight) || 0)) el.style.minHeight = text + 'px';
         el.scrollTop = 0;
       }
       host.scrollTop = top; host.scrollLeft = left;
@@ -75,16 +79,34 @@
       // 숫자 위치는 브라우저가 소유하고 여기서는 사람이 이 칸을 사용했는지만 기억한다. 같은 검사의
       // 경계에서 글이 같은 칸은 이 표시가 선택과 함께 옮겨 가고, 다른 검사나 바뀐 글에서는 지워진다.
       const caret = () => { if (!writing) s.caret = true; };
+      // A field hidden from the person never keeps keyboard focus outside this frame's own writes. Native
+      // Undo/Redo of its step moves focus into it, and the next keystrokes would change text no one sees.
+      const away = event => {
+        if (writing || !hidden(s.el)) return;
+        const from = event.relatedTarget;
+        if (from?.isConnected && !hidden(from)) from.focus({ preventScroll: true });
+        if (doc.activeElement === s.el) s.el.blur();
+      };
       s.el.addEventListener('compositionstart', start);
       s.el.addEventListener('compositionend', end);
       s.el.addEventListener('input', input);
+      s.el.addEventListener('focus', away);
       for (const event of ['focus', 'pointerdown', 'keydown', 'input']) s.el.addEventListener(event, caret);
       s.unbind = () => {
         s.el.removeEventListener('compositionstart', start);
         s.el.removeEventListener('compositionend', end);
         s.el.removeEventListener('input', input);
+        s.el.removeEventListener('focus', away);
         for (const event of ['focus', 'pointerdown', 'keydown', 'input']) s.el.removeEventListener(event, caret);
       };
+    }
+    function hidden(el) { return el.getAttribute?.('aria-hidden') === 'true'; }
+    // A write focuses its field only for the native edit. Focus then goes back where the person had it; where
+    // that cannot take focus (the page itself, after a click outside any control), no field keeps it either.
+    function giveBack(target) {
+      if (target?.isConnected && doc.activeElement !== target && !hidden(target)) target.focus({ preventScroll: true });
+      const now = doc.activeElement;
+      if (now !== target && Object.values(states).some(s => s.el === now)) now.blur();
     }
     Object.values(states).forEach(bind);
     // The host can move between workspaces or resize without replacing text or undo history.
@@ -205,6 +227,12 @@
       return null;
     }
 
+    // Whether a request still addresses the text it was taken from: this opening, and no edit to its field since
+    // (an edit later undone included). Composition and edit permission are moments of the write, not of the request.
+    function isCurrent(at) {
+      return !['ended', 'stale', 'changed'].includes(blocked(at));
+    }
+
     function replace(at, text, start, end) {
       if (typeof text !== 'string') throw new TypeError('Report text must be a string');
       if (writing) return refused('busy');
@@ -234,7 +262,7 @@
         return { status: 'applied' };
       } finally {
         if (!applied) el.setSelectionRange(saved.start, saved.end, saved.direction);
-        if (active !== el && active?.isConnected) active.focus({ preventScroll: true });
+        if (active !== el) giveBack(active);
         restoreScroll(positions);
         writing = false;
       }
@@ -291,8 +319,7 @@
         return { status: completed.length ? 'applied' : 'unchanged' };
       } finally {
         writing = true;
-        const target = activeField ? state(activeField).el : active;
-        if (target?.isConnected && doc.activeElement !== target) target.focus({ preventScroll: true });
+        giveBack(activeField ? state(activeField).el : active);
         restoreScroll(positions);
         writing = false;
       }
@@ -319,6 +346,9 @@
     }
 
     return Object.freeze({ switchStudy, replaceAuthoritative, capture, insert, insertMany, applyServer, read, isComposing, end,
+      isCurrent,
+      // True while this frame itself moves focus for a write: such focus is not the person choosing a field.
+      isWriting: () => writing,
       element: name => state(name).el });
   }
 

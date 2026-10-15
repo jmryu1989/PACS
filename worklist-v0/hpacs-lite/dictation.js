@@ -187,6 +187,9 @@
       },
       validateTranscript: text => typeof text === 'string' && text.length <= TEXT_CAP,
       insert: insertion => o.insert({ ...insertion, capture: editorCapture }),
+      // An edit since the pin can leave the same text (typing then Undo). The host's check of the same capture
+      // tells the session so before it spends the transcript: it then asks for a re-pin and a fresh Insert.
+      pinned: () => !o.current || o.current(editorCapture) === true,
       canInsert: () => !gate() && !(o.busy && o.busy()),
       cleanup: () => { editorCapture = null; release(); },
       hashText: o.hashText,

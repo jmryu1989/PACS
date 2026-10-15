@@ -275,18 +275,27 @@
 
     /* Report */
     .report-p { flex: 1; }
+    /* Side by side, nothing around the report column scrolls (the page itself does not). When its rows below the
+       fields (footer, notices, an opened list) need more than the column has, the column scrolls instead of
+       running them off the window. It keeps the width its content needs, as before it scrolled. Stacked and
+       reading layouts already scroll the area that holds the column. */
+    body:not(.portrait):not(.reading) .report-p { overflow-y: auto; min-width: min-content; }
     .order-p { flex: 1; }
     .rbtns { display: flex; gap: 4px; padding: 4px 8px; background: var(--kin-panel); flex: none; flex-wrap: wrap; }
     .rbtns button, .rfoot2 button { background: var(--kin-panel2); border: 1px solid var(--kin-line2); color: var(--kin-muted); padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .rbtns button:disabled { opacity: .35; cursor: default; }
     .rbtns .approve { background: var(--kin-btn); color: var(--kin-text); border-color: var(--kin-accent); }
     .rbtns .save { background: var(--kin-panel2); color: var(--kin-text); border-color: var(--kin-line2); }
-    /* Keep both empty sections usable when notices below fill the report column. */
-    .redit { flex: 1; min-height: 200px; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
+    /* One scroller for both sections takes the height the column has left. It has no fixed minimum: a minimum
+       pushed the footer and the notices below it out of a short window, where nothing could scroll them back.
+       Each section prefers its empty height (80/60) and gives it up, in proportion, down to the floor the
+       sections had before (50/34) when the scroller is short; it never gets shorter than its own text
+       (report-editor-frame.js sets that minimum), which the scroller then scrolls. */
+    .redit { flex: 1; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
     .redit label { margin: 2px 0; font-size: 11px; color: #8892a4; }
-    .redit textarea { flex: none; width: 100%; box-sizing: border-box; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; overflow: hidden; }
-    #findings { min-height: 80px; }
-    #conclusion { min-height: 60px; }
+    .redit textarea { flex: 0 1 auto; width: 100%; box-sizing: border-box; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; overflow: hidden; }
+    #findings { height: 80px; min-height: 50px; }
+    #conclusion { height: 60px; min-height: 34px; }
     /* Recommendation remains part of the document and native edit history, outside the two-section view. */
     .redit #recommendation { position: absolute; left: -10000px; width: 1px; height: 1px; min-height: 0; }
     .rfoot2 { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; justify-content: flex-end; }

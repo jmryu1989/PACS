@@ -431,6 +431,11 @@
       // 타이핑·상용구처럼 표시를 세우고 점유를 시작하며, 저장은 기존 자동 저장이 한 번 가져간다.
       return editReport([{ field: ins.field, at: ins.capture, text: plan.text, caret: plan.end }]);
     }
+    // The recording-time capture is also the pin's edit check: typing then Backspace or Undo leaves the same text
+    // but retires the capture. The session then refuses as for an edited field and keeps the transcript to re-pin.
+    function dictationCurrent(capture) {
+      return !!capture && !!reportFrame?.isCurrent(capture);
+    }
     function dictationPlacement(pin, text) {
       const el = $("#" + pin.field);
       if (!el) return "";
@@ -440,7 +445,7 @@
     const dictation = KinDictation.createController({
       session: KinDictationSession, capture: KinDictationCapture, env: window, apiBase: API,
       readContext: dictationContext, block: dictationBlock, insert: dictationInsert, placement: dictationPlacement,
-      busy: () => commitInFlight || insertInFlight,
+      current: dictationCurrent, busy: () => commitInFlight || insertInFlight,
     });
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
@@ -454,7 +459,12 @@
       },
       closed: () => ($("#b-dictate").disabled ? $("#findings") : $("#b-dictate")).focus(),
     });
-    onReportField("focus", event => { dictationField = { field: event.target.id, seq: selectionSeq }; });
+    // The target is the field the reader moved into. The editor's own focus for a template, citation or other write,
+    // and a field kept off screen, are not a choice of the reader.
+    onReportField("focus", event => {
+      if (reportFrame?.isWriting() || event.target.getAttribute("aria-hidden") === "true") return;
+      dictationField = { field: event.target.id, seq: selectionSeq };
+    });
     onReportField("mouseup", () => dictation.fieldClicked());
     onReportField("input", () => dictation.redraw());
     /**
@@ -8240,16 +8250,28 @@
     // A size under a drag is shown but stored only when the drag ends; the edge being resized now.
     let studyPanelPreview = null, studyPanelEdge = null;
     const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
+    // The report section the drawer's focus came from. A study opening replaces the report fields, so the drawer's
+    // remembered node can be a removed one; the section it named is still the reader's (W6-PAGE-18).
+    let studyPanelField = null;
+    function noteStudyPanelOpener(el) {
+      // The drawer keeps the last outside element focus came from; the page and its own controls do not replace it.
+      if (!el || el === document.body || el === document.documentElement || $('#study-panel-host').contains(el)) return;
+      studyPanelField = RFIELDS.includes(el.id) && el === $('#' + el.id) ? el.id : null;
+    }
+    $('#study-panel-host').addEventListener('focusin', event => noteStudyPanelOpener(event.relatedTarget));
     function openStudyPanel(tab) {
       if (workspaceEnded || work.state() !== 'active') return false;
       if (tab && !studyPanelAvailable().includes(tab)) return false;
+      // A new drawer starts from the focus it is opened from.
+      if (!studyPanel) studyPanelField = null;
+      noteStudyPanelOpener(document.activeElement);
       workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       if (!studyPanel) {
         // Mount on the explicit open: legacy layouts keep their first paint.
         // destroy() returns these same nodes, with their listeners, to the row.
         studyPanel = KinStudyPanel({ host: $('#study-panel-host'), opener: document.activeElement,
           content: { images: $('.s-thumb'), info: $('.s-clinical'), templates: $('.s-template') },
-          available: studyPanelAvailable(), fallbackFocus: () => [$('#findings'), $('#quick'), $('#study-panel-open')]
+          available: studyPanelAvailable(), fallbackFocus: () => [studyPanelField && $('#' + studyPanelField), $('#findings'), $('#quick'), $('#study-panel-open')]
             .find(node => node?.isConnected && !node.disabled && !node.closest('[hidden], [inert]')
               && node.getClientRects().length && getComputedStyle(node).visibility === 'visible'),
           escapeClaimed: () => !!document.querySelector('dialog[open], .modal.show, [popover]:popover-open'),

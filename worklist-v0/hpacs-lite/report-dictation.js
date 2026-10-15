@@ -48,6 +48,11 @@
       // 타이핑·상용구처럼 표시를 세우고 점유를 시작하며, 저장은 기존 자동 저장이 한 번 가져간다.
       return editReport([{ field: ins.field, at: ins.capture, text: plan.text, caret: plan.end }]);
     }
+    // The recording-time capture is also the pin's edit check: typing then Backspace or Undo leaves the same text
+    // but retires the capture. The session then refuses as for an edited field and keeps the transcript to re-pin.
+    function dictationCurrent(capture) {
+      return !!capture && !!reportFrame?.isCurrent(capture);
+    }
     function dictationPlacement(pin, text) {
       const el = $("#" + pin.field);
       if (!el) return "";
@@ -57,7 +62,7 @@
     const dictation = KinDictation.createController({
       session: KinDictationSession, capture: KinDictationCapture, env: window, apiBase: API,
       readContext: dictationContext, block: dictationBlock, insert: dictationInsert, placement: dictationPlacement,
-      busy: () => commitInFlight || insertInFlight,
+      current: dictationCurrent, busy: () => commitInFlight || insertInFlight,
     });
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
@@ -71,7 +76,12 @@
       },
       closed: () => ($("#b-dictate").disabled ? $("#findings") : $("#b-dictate")).focus(),
     });
-    onReportField("focus", event => { dictationField = { field: event.target.id, seq: selectionSeq }; });
+    // The target is the field the reader moved into. The editor's own focus for a template, citation or other write,
+    // and a field kept off screen, are not a choice of the reader.
+    onReportField("focus", event => {
+      if (reportFrame?.isWriting() || event.target.getAttribute("aria-hidden") === "true") return;
+      dictationField = { field: event.target.id, seq: selectionSeq };
+    });
     onReportField("mouseup", () => dictation.fieldClicked());
     onReportField("input", () => dictation.redraw());
     /**
