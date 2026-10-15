@@ -146,7 +146,8 @@ def extract_function(source, name):
 MARKERS = {
     "MODAL_CSS": (".modal { display: none;", "/* ══ 클릭 피드백"),
     "RBTNS_HTML": ('<div class="rbtns">', "\n        </div>"),
-    "BARS_HTML": ('<div class="draftbar" id="draftbar"', '<div id="citelist"'),
+    # W4: the Notice row that says why a study move did not happen sits right above the draft bar.
+    "BARS_HTML": ('<div class="draftbar" id="report-notice"', '<div id="citelist"'),
     "REDIT_HTML": ('<div class="redit">', "\n        </div>"),
     # Not asserted here, but `commitReport` addresses #b-unread/#b-defer by id: a missing element
     # would throw at runtime instead of at load, which is the harder failure to read.
@@ -162,7 +163,9 @@ MODAL_CSS = slice_between(MAIN, *MARKERS["MODAL_CSS"])
 RBTNS_HTML = slice_between(MAIN, *MARKERS["RBTNS_HTML"]) + "\n        </div>"
 BARS_HTML = (slice_between(MAIN, *MARKERS["BARS_HTML"])
              + '<div id="citelist" hidden aria-label="Report Citations"></div>')
-REDIT_HTML = slice_between(MAIN, *MARKERS["REDIT_HTML"]) + "\n        </div>"
+# W4: the read-only Recommendation notice right above the report fields belongs to the fields' region.
+REDIT_HTML = (slice_between(MAIN, '<details class="recnote" id="recnote"', '<div class="redit">')
+              + slice_between(MAIN, *MARKERS["REDIT_HTML"]) + "\n        </div>")
 RFOOT_HTML = slice_between(MAIN, *MARKERS["RFOOT_HTML"]) + "\n        </div>"
 PANE_HTML = slice_between(MAIN, *MARKERS["PANE_HTML"]) + "\n  </div>"
 CITE_HTML = slice_between(MAIN, *MARKERS["CITE_HTML"]) + "\n  </div>"
@@ -183,7 +186,7 @@ EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")
 LITE = ROOT / "worklist-v0" / "hpacs-lite"
 DICTATION_JS = [(LITE / name).read_text(encoding="utf-8")
                 for name in ("dictation-session.js", "dictation-capture.js", "dictation.js")]
-DICTATION_PANE_HTML = (slice_between(MAIN, '<div id="dictation-pane"', '\n        <div class="redit">')
+DICTATION_PANE_HTML = (slice_between(MAIN, '<div id="dictation-pane"', '\n        <!-- W4 (')
                        if '<div id="dictation-pane"' in MAIN else "")
 DICTATION_WIRING = (slice_between(MAIN, "    // ══════════ 받아쓰기 (S3-ASR-U4) ══════════",
                                   '    $("#t-mod").addEventListener("change", renderTemplates);')
