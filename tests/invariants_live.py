@@ -2215,42 +2215,70 @@ def s9u4_proxy_post(proxy: str, path: str, token: str, length: int) -> tuple[int
 
 
 S9U4_SYNTHETIC_UID = re.compile(r"2\.25\.[0-9]+(?:\.[0-9]+)*")
+S9U4_ORTHANC_ID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{8}){4}")
+S9U4_LOOKUP_TYPES = ("Patient", "Study", "Series", "Instance")
+
+
+def s9u4_lookup_rows(answer: HttpResult | None) -> list[dict[str, Any]] | None:
+    """A /tools/lookup answer only as Orthanc gives it: HTTP 200, a list, and every row a dict whose Type is exactly one
+    of Patient/Study/Series/Instance and whose ID is a string in Orthanc's own form (five groups of eight lower-case hex
+    digits, never coerced with str()); unused keys such as Path are allowed. Anything else proves nothing about what is
+    stored - not even absence - and is None."""
+    if answer is None or answer.status != 200 or not isinstance(answer.body, list):
+        return None
+    for row in answer.body:
+        if not isinstance(row, dict) or not isinstance(row.get("Type"), str) or row["Type"] not in S9U4_LOOKUP_TYPES:
+            return None
+        if not isinstance(row.get("ID"), str) or not S9U4_ORTHANC_ID.fullmatch(row["ID"]):
+            return None
+    return answer.body
 
 
 def s9u4_cleanup(orthanc_request: Callable[..., HttpResult], run_psql: Callable[[str], Any],
-                 studies: list[str], operations: list[str]) -> list[str]:
+                 studies: list[str], operations: list[str], deleted: list[str] | None = None) -> list[str]:
     """The S9-U4 cases' own synthetic data (contract 2 execution ledger, 6 owned data): exactly this scope's study UIDs and
-    operation ids. Each owned study is looked up, every Orthanc study found for it must carry exactly that
-    StudyInstanceUID before it is deleted, and a second lookup must find nothing left. A lookup that is not a 200 list, a
-    study that is not the scope's, a DELETE that is not 200 or an object still found is a failure; with any failure no
-    database row of the scope is removed (the rows that identify and trace the originals stay with them for inspection)
-    and the failures are returned for the caller to raise, so run-tests keeps its inspection marker and raw evidence."""
+    operation ids. Each owned study is looked up and every row of the answer checked (s9u4_lookup_rows) before anything of
+    it is deleted; only a Study whose GET carries exactly that StudyInstanceUID is deleted (a Patient row is recognised and
+    left, a Series or Instance is never deleted by itself), and a second lookup, checked the same way, must show no Study,
+    Series or Instance. A malformed lookup or row, an HTTP, transport or parse failure, a study that is not the scope's, a
+    DELETE that is not 200 or anything left is a failure; with any failure anywhere in the scope no database row of the
+    scope is removed (the rows that identify and trace the originals stay for inspection) and the failures are returned
+    for the caller to raise, so run-tests keeps its inspection marker and raw evidence. Studies already deleted before a
+    failure are appended to `deleted` (when given), so the report says what went and what stayed."""
     failures: list[str] = []
+    removed: list[str] = [] if deleted is None else deleted
     owned = [uid for uid in dict.fromkeys(studies) if S9U4_SYNTHETIC_UID.fullmatch(uid)]
     failures += [f"{uid}: not a synthetic UID of this scope" for uid in dict.fromkeys(studies) if uid not in owned]
     ops = [op for op in dict.fromkeys(operations) if re.fullmatch(UUID_RE, op)]
     failures += [f"{op}: not an operation id" for op in dict.fromkeys(operations) if op not in ops]
+
+    def ask(method: str, path: str, body: bytes | None = None) -> HttpResult | None:
+        try:
+            return orthanc_request(method, path, body)
+        except Exception as error:  # a transport, timeout or decode failure proves nothing either; the rows stay
+            failures.append(f"{method} {path}: {type(error).__name__}")
+            return None
+
     for uid in owned:
-        lookup = orthanc_request("POST", "/tools/lookup", uid.encode("ascii"))
-        if lookup.status != 200 or not isinstance(lookup.body, list):
-            failures.append(f"{uid}: lookup answered {lookup.status}")
+        before = s9u4_lookup_rows(ask("POST", "/tools/lookup", uid.encode("ascii")))
+        if before is None:
+            failures.append(f"{uid}: the lookup before the delete is not a 200 list of Orthanc rows; nothing of it deleted")
             continue
-        for item in lookup.body:
-            if not isinstance(item, dict) or item.get("Type") != "Study":
+        for study_id in dict.fromkeys(row["ID"] for row in before if row["Type"] == "Study"):
+            found = ask("GET", f"/studies/{quote(study_id)}")
+            tags = found.body.get("MainDicomTags") if found is not None and found.status == 200 and isinstance(found.body, dict) else None
+            if not isinstance(tags, dict) or not isinstance(tags.get("StudyInstanceUID"), str) or tags["StudyInstanceUID"] != uid:
+                failures.append(f"{uid}: Orthanc study {study_id} is not this scope's ({found.status if found else 'no answer'})")
                 continue
-            study_id = str(item.get("ID", ""))
-            found = orthanc_request("GET", f"/studies/{quote(study_id)}")
-            tags = found.body.get("MainDicomTags", {}) if found.status == 200 and isinstance(found.body, dict) else {}
-            if tags.get("StudyInstanceUID") != uid:
-                failures.append(f"{uid}: Orthanc study {study_id} is not this scope's ({found.status})")
+            gone = ask("DELETE", f"/studies/{quote(study_id)}")
+            if gone is None or gone.status != 200:
+                failures.append(f"{uid}: DELETE of {study_id} answered {gone.status if gone else 'nothing'}")
                 continue
-            deleted = orthanc_request("DELETE", f"/studies/{quote(study_id)}")
-            if deleted.status != 200:
-                failures.append(f"{uid}: DELETE of {study_id} answered {deleted.status}")
-        after = orthanc_request("POST", "/tools/lookup", uid.encode("ascii"))
-        if after.status != 200 or not isinstance(after.body, list):
-            failures.append(f"{uid}: lookup after the delete answered {after.status}")
-        elif any(isinstance(item, dict) and item.get("Type") in ("Study", "Series", "Instance") for item in after.body):
+            removed.append(f"{uid} ({study_id})")
+        after = s9u4_lookup_rows(ask("POST", "/tools/lookup", uid.encode("ascii")))
+        if after is None:
+            failures.append(f"{uid}: the lookup after the delete is not a 200 list of Orthanc rows")
+        elif any(row["Type"] != "Patient" for row in after):
             failures.append(f"{uid}: originals remain after the delete")
     if failures:
         return failures
@@ -2263,47 +2291,144 @@ def s9u4_cleanup(orthanc_request: Callable[..., HttpResult], run_psql: Callable[
 
 
 class S9U4CleanupTests(unittest.TestCase):
-    """U4BB-15 pure fault controls of s9u4_cleanup over a scripted Orthanc and a recording psql (no LiveStack): a lookup
-    500, a DELETE failure, an object left after the delete and a study that is not the scope's each keep every database
-    row and report the failure; a clean removal deletes the originals first and only then the scope's rows."""
+    """U4BB-15 / U4BB2-04 pure fault controls of s9u4_cleanup over a scripted Orthanc and a recording psql (no LiveStack).
+    Every lookup row, before and after the delete, must be a dict with a known Type and a string ID in Orthanc's own form:
+    [null], a non-object, a missing or unknown Type, an ID that is missing, null, a number, a bool, blank or of another
+    form, good rows mixed with a bad one, a malformed answer after the delete, an HTTP, transport or parse failure, another
+    study, a DELETE failure or a Study/Series/Instance left - in any UID of the scope - keeps every database row (zero psql
+    calls) and is reported with what was deleted before it, and the scope raises it. A clean removal deletes only the
+    scope's own Study (a Patient row is recognised and left) and only then the scope's rows. The Orthanc IDs are synthetic
+    values in Orthanc's form, not real ones."""
 
     def test_s9u4_cleanup_faults_keep_every_row_and_report(self) -> None:
-        uid, op = "2.25.4242424242", "00000000-0000-4000-8000-0000000000f1"
-        def run(script: Callable[[str, str, int], HttpResult]) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+        uid, other, op = "2.25.4242424242", "2.25.4242424243", "00000000-0000-4000-8000-0000000000f1"
+        sid = {uid: "5e1a0001-0000aaaa-0000bbbb-0000cccc-00000001", other: "5e1a0002-0000aaaa-0000bbbb-0000cccc-00000002"}
+        patient, instance = "9a7e0001-0000aaaa-0000bbbb-0000cccc-00000003", "1a5e0001-0000aaaa-0000bbbb-0000cccc-00000004"
+        empty = HttpResult(200, [], "")
+
+        def study_row(u: str) -> dict[str, Any]:
+            return {"Type": "Study", "ID": sid[u], "Path": "/studies/" + sid[u]}
+
+        def run(*, pre: dict[str, HttpResult] | None = None, post: dict[str, HttpResult] | None = None,
+                tags: dict[str, HttpResult] | None = None, delete: dict[str, HttpResult] | None = None,
+                fail: Callable[[str, str], bool] | None = None, studies: tuple[str, ...] = (uid,)
+                ) -> tuple[list[str], list[tuple[str, str]], list[str], list[str]]:
+            """pre/post: the lookup answer per UID before/after the delete (default: its own Study, then nothing); tags/delete:
+            the GET/DELETE answer per Orthanc study id; fail: a (method, path) whose request raises (a transport failure)."""
             calls: list[tuple[str, str]] = []
             sql: list[str] = []
+            deleted: list[str] = []
+            lookups: dict[str, int] = {}
+
             def orthanc(method: str, path: str, body: bytes | None = None) -> HttpResult:
                 calls.append((method, path))
-                return script(method, path, sum(1 for c in calls if c == (method, path)))
-            return s9u4_cleanup(orthanc, sql.append, [uid], [op]), calls, sql
-        study = HttpResult(200, [{"Type": "Study", "ID": "s-1"}], "")
-        mine = HttpResult(200, {"MainDicomTags": {"StudyInstanceUID": uid}}, "")
-        def normal(method: str, path: str, nth: int, *, lookup: HttpResult = study, again: HttpResult = HttpResult(200, [], ""),
-                   delete: HttpResult = HttpResult(200, {}, ""), tags: HttpResult = mine) -> HttpResult:
-            if path == "/tools/lookup":
-                return lookup if nth == 1 else again
-            return tags if method == "GET" else delete
-        cases = [
-            ("lookup 500", lambda m, p, n: normal(m, p, n, lookup=HttpResult(500, None, "")), "lookup answered 500"),
-            ("delete fails", lambda m, p, n: normal(m, p, n, delete=HttpResult(500, None, "")), "DELETE of s-1 answered 500"),
-            ("object left", lambda m, p, n: normal(m, p, n, again=HttpResult(200, [{"Type": "Instance", "ID": "i-1"}], "")), "originals remain"),
-            ("another study", lambda m, p, n: normal(m, p, n, tags=HttpResult(200, {"MainDicomTags": {"StudyInstanceUID": "2.25.1"}}, "")), "is not this scope's"),
-        ]
-        for name, script, reason in cases:
-            with self.subTest(fault=name):
-                failures, calls, sql = run(script)
-                self.assertTrue(failures and any(reason in failure for failure in failures), failures)
-                self.assertEqual(sql, [], "every database row stays with the original for inspection")
-                if name == "another study":
-                    self.assertNotIn(("DELETE", "/studies/s-1"), calls, "never deletes what is not the scope's")
-        failures, calls, sql = run(normal)
-        self.assertEqual(failures, [])
-        self.assertEqual(calls, [("POST", "/tools/lookup"), ("GET", "/studies/s-1"), ("DELETE", "/studies/s-1"), ("POST", "/tools/lookup")])
-        self.assertEqual(len(sql), 3)
-        self.assertTrue(all(uid in statement for statement in sql[:2]) and op in sql[0] and "AuditLog" in sql[2])
-        refused = s9u4_cleanup(lambda *a: HttpResult(200, [], ""), sql.append, ["1.2.3"], ["not-an-id"])
-        self.assertEqual((len(refused), len(sql)), (2, 3), "only the scope's synthetic UIDs and ids are touched; nothing deleted")
+                if fail and fail(method, path):
+                    raise ConnectionResetError("synthetic connection reset")
+                if path == "/tools/lookup":
+                    key = (body or b"").decode("ascii")
+                    lookups[key] = lookups.get(key, 0) + 1
+                    if lookups[key] == 1:
+                        return (pre or {}).get(key, HttpResult(200, [study_row(key)], ""))
+                    return (post or {}).get(key, empty)
+                study = path.rsplit("/", 1)[1]
+                owner = next((u for u, i in sid.items() if i == study), "2.25.1")
+                if method == "GET":
+                    return (tags or {}).get(study, HttpResult(200, {"MainDicomTags": {"StudyInstanceUID": owner}}, ""))
+                return (delete or {}).get(study, HttpResult(200, {}, ""))
 
+            return s9u4_cleanup(orthanc, sql.append, list(studies), [op], deleted), calls, sql, deleted
+
+        def kept(name: str, reason: str, outcome: tuple[list[str], list[tuple[str, str]], list[str], list[str]]) -> None:
+            failures, _calls, sql, _deleted = outcome
+            self.assertTrue(failures and any(reason in failure for failure in failures), f"{name}: {failures}")
+            self.assertEqual(sql, [], f"{name}: every database row stays for inspection")
+
+        rows = lambda *items: HttpResult(200, list(items), "")  # noqa: E731
+        good = {"Type": "Study", "ID": sid[uid]}
+        malformed = [
+            ("[null]", rows(None)), ("a string row", rows("Study")), ("a list row", rows(["Study", sid[uid]])), ("a number row", rows(42)),
+            ("missing Type", rows({"ID": sid[uid]})), ("unknown Type", rows({"Type": "Folder", "ID": sid[uid]})),
+            ("a non-string Type", rows({"Type": 1, "ID": sid[uid]})), ("missing ID", rows({"Type": "Study"})),
+            ("null ID", rows({"Type": "Study", "ID": None})), ("number ID", rows({"Type": "Study", "ID": 42})),
+            ("bool ID", rows({"Type": "Study", "ID": True})), ("blank ID", rows({"Type": "Study", "ID": ""})),
+            ("an ID of another form", rows({"Type": "Study", "ID": "s-1"})), ("an upper-case ID", rows({"Type": "Study", "ID": sid[uid].upper()})),
+            ("an ID with four groups", rows({"Type": "Study", "ID": sid[uid][:35]})), ("an unexpected key only", rows({"Unexpected": 1})),
+            ("good rows then a bad one", rows(good, {"Type": "Patient", "ID": patient}, None)),
+            ("not a list", HttpResult(200, {"Type": "Study", "ID": sid[uid]}, "")), ("not JSON", HttpResult(200, "<html>", "<html>")),
+        ]
+        for name, answer in malformed:
+            with self.subTest(before=name):
+                outcome = run(pre={uid: answer})
+                kept("before: " + name, "the lookup before the delete", outcome)
+                self.assertNotIn(("DELETE", f"/studies/{sid[uid]}"), outcome[1], "nothing of it is deleted")
+                self.assertEqual(outcome[3], [])
+            with self.subTest(after=name):
+                outcome = run(post={uid: answer})
+                kept("after: " + name, "the lookup after the delete", outcome)
+                self.assertEqual(outcome[3], [f"{uid} ({sid[uid]})"], "what was deleted is reported as deleted")
+        faults = [
+            ("lookup 500", dict(pre={uid: HttpResult(500, None, "")}), "the lookup before the delete"),
+            ("lookup after the delete 500", dict(post={uid: HttpResult(500, None, "")}), "the lookup after the delete"),
+            ("delete fails", dict(delete={sid[uid]: HttpResult(500, None, "")}), f"DELETE of {sid[uid]} answered 500"),
+            ("a Study left", dict(post={uid: rows(good)}), "originals remain"),
+            ("a Series left", dict(post={uid: rows({"Type": "Series", "ID": instance})}), "originals remain"),
+            ("an Instance left", dict(post={uid: rows({"Type": "Instance", "ID": instance})}), "originals remain"),
+            ("another study", dict(tags={sid[uid]: HttpResult(200, {"MainDicomTags": {"StudyInstanceUID": "2.25.1"}}, "")}), "is not this scope's"),
+            ("tags not an object", dict(tags={sid[uid]: HttpResult(200, {"MainDicomTags": "2.25.4242424242"}, "")}), "is not this scope's"),
+            ("a non-string StudyInstanceUID", dict(tags={sid[uid]: HttpResult(200, {"MainDicomTags": {"StudyInstanceUID": [uid]}}, "")}), "is not this scope's"),
+            ("the study's GET 404", dict(tags={sid[uid]: HttpResult(404, None, "")}), "is not this scope's"),
+            ("the lookup's connection reset", dict(fail=lambda m, p: p == "/tools/lookup"), "POST /tools/lookup: ConnectionResetError"),
+            ("the GET's connection reset", dict(fail=lambda m, p: m == "GET"), "GET /studies/"),
+            ("the DELETE's connection reset", dict(fail=lambda m, p: m == "DELETE"), "DELETE /studies/"),
+        ]
+        for name, script, reason in faults:
+            with self.subTest(fault=name):
+                outcome = run(**script)
+                kept(name, reason, outcome)
+                if name in ("another study", "tags not an object", "a non-string StudyInstanceUID", "the study's GET 404"):
+                    self.assertNotIn(("DELETE", f"/studies/{sid[uid]}"), outcome[1], "never deletes what is not the scope's")
+        # One UID of several failing keeps every row of the whole scope; the other's original was deleted and says so.
+        with self.subTest(scope="one of two UIDs malformed"):
+            failures, calls, sql, deleted = run(studies=(uid, other), pre={other: rows(None)})
+            kept("one of two", f"{other}: the lookup before the delete", (failures, calls, sql, deleted))
+            self.assertEqual(deleted, [f"{uid} ({sid[uid]})"])
+            self.assertNotIn(("DELETE", f"/studies/{sid[other]}"), calls)
+        # Success: the own Study only (looked up, its UID confirmed, deleted, gone), then the three row deletes.
+        failures, calls, sql, deleted = run()
+        self.assertEqual(failures, [])
+        self.assertEqual(calls, [("POST", "/tools/lookup"), ("GET", f"/studies/{sid[uid]}"), ("DELETE", f"/studies/{sid[uid]}"), ("POST", "/tools/lookup")])
+        self.assertEqual((len(sql), deleted), (3, [f"{uid} ({sid[uid]})"]))
+        self.assertTrue(all(uid in statement for statement in sql[:2]) and op in sql[0] and "AuditLog" in sql[2])
+        # A Patient row beside the own Study, before and after: recognised and left; the Study removed; success.
+        failures, calls, sql, deleted = run(pre={uid: rows({"Type": "Patient", "ID": patient, "Path": "/patients/" + patient}, study_row(uid))},
+                                            post={uid: rows({"Type": "Patient", "ID": patient})})
+        self.assertEqual((failures, len(sql)), ([], 3))
+        self.assertFalse(any(patient in path for _method, path in calls), "a Patient is never read or deleted")
+        self.assertEqual([path for method, path in calls if method == "DELETE"], [f"/studies/{sid[uid]}"])
+        # Only the scope's synthetic UIDs and operation ids are touched.
+        sql = []
+        refused = s9u4_cleanup(lambda *a: HttpResult(200, [], ""), sql.append, ["1.2.3"], ["not-an-id"])
+        self.assertTrue(any("not a synthetic UID" in f for f in refused) and any("not an operation id" in f for f in refused))
+        self.assertEqual(sql, [], "nothing deleted")
+        # The scope raises the failures (run-tests keeps its inspection marker and the raw evidence) and runs no psql.
+        def broken(method: str, path: str, body: bytes | None = None) -> HttpResult:
+            return HttpResult(200, [None], "") if path == "/tools/lookup" else HttpResult(200, {}, "")
+
+        class Stack:
+            _orthanc_request = staticmethod(broken)
+
+        class Case:
+            stack = Stack()
+
+        statements: list[str] = []
+        with patch.dict(globals(), {"psql": statements.append}):
+            with self.assertRaises(RuntimeError) as raised:
+                with LiveInvariantTests.s9u4_scope(Case()) as scope:
+                    scope["studies"].append(uid)
+                    scope["operations"].append(op)
+        self.assertEqual(statements, [])
+        self.assertIn("every database row of the scope is kept for inspection", str(raised.exception))
+        self.assertIn("deleted before the failure: none", str(raised.exception))
 
 class LiveInvariantTests(unittest.TestCase):
     @classmethod
@@ -5122,10 +5247,12 @@ class LiveInvariantTests(unittest.TestCase):
             yield scope
         finally:
             # Originals first, confirmed gone, and only then the rows that identify and trace them (s9u4_cleanup); any
-            # failure keeps everything and fails the case, so run-tests leaves its inspection marker with the evidence.
-            failures = s9u4_cleanup(self.stack._orthanc_request, psql, scope["studies"], scope["operations"])
+            # failure keeps every row and fails the case, so run-tests leaves its inspection marker with the evidence.
+            deleted: list[str] = []
+            failures = s9u4_cleanup(self.stack._orthanc_request, psql, scope["studies"], scope["operations"], deleted)
             if failures:
-                raise RuntimeError("S9-U4 cleanup (originals and their rows kept for inspection): " + "; ".join(failures))
+                raise RuntimeError("S9-U4 cleanup failed; every database row of the scope is kept for inspection; Orthanc studies "
+                                   f"deleted before the failure: {', '.join(deleted) or 'none'}; failures: " + "; ".join(failures))
 
     def s9u4_cstore(self, scope: dict[str, list[str]], study: str, patient_id: str, *, name: str, birth: str = "19800101",
                     sex: str = "O") -> dict[str, str]:

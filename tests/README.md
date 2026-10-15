@@ -2557,6 +2557,6 @@ Related의 RL06/08 동등성도 C6에 따라 고정 pre-UX landed 입력(c8e4f1b
 
 - 저장: migration `20261015013945_import_operation` — `ImportOperation`(import·download·study-claim·sop-claim, kind별 필수·null CHECK, `claimKey` nullable UNIQUE). 실행 역할 `kin_runtime`에는 준비 상태 사실이 읽는 `_prisma_migrations` 세 열만 SELECT를 준다.
 - 실행: `node --test tests/study_transfer_local_server_test.cjs`(kin-api:ci의 `/app/dist`, 없으면 `tests/service_test_loader.cjs`가 `api/src`를 컴파일), validate.yml runtime의 S9-U4b 세 단계.
-- 실환경: `python scripts/run-tests.py --plan <plan>` — 단위 `s9-u4b-b-identity`·`-collision`·`-outcomes`·`-restart`·`-routes`, 각 계획은 위 사례 하나다. Orthanc를 멈추고 API를 재기동하는 `-restart`는 다른 실환경 시험과 함께 돌리지 않는다. 각 사례의 정리는 자기 합성 원본을 먼저 지우고 사라졌음을 확인한 뒤에만 식별·추적 행을 지운다(실패면 모두 남기고 실패한다, 순수 대조 `S9U4CleanupTests`).
+- 실환경: `python scripts/run-tests.py --plan <plan>` — 단위 `s9-u4b-b-identity`·`-collision`·`-outcomes`·`-restart`·`-routes`, 각 계획은 위 사례 하나다. Orthanc를 멈추고 API를 재기동하는 `-restart`는 다른 실환경 시험과 함께 돌리지 않는다. 각 사례의 정리는 자기 합성 원본을 먼저 지우고 사라졌음을 확인한 뒤에만 식별·추적 행을 지운다(실패면 모두 남기고 실패한다, 순수 대조 `S9U4CleanupTests`). 삭제 전·후 lookup의 모든 행은 알려진 Type(Patient/Study/Series/Instance)과 Orthanc ID 형식의 문자열이어야 하며, 아니면 부재로 읽지 않고 scope 전체의 DB 행을 남긴 채 이미 지운 원본을 보고한다.
 - 다운로드 코드: 이미 `sent`인 작업의 archive는 409 `DOWNLOAD_ALREADY_SENT`(byte 0, 상태 불변, 다시 받으려면 새 operationId로 준비; S9U4-B28). §4.8 단일 표 행은 지휘자가 계약 개정으로 결속한다.
 - 설명 문구: 같은 파일의 재POST는 그 bytes로 처음과 같은 §4.7 설명을 재생하고, bytes가 없는 GET 상태는 코드표의 일반 설명을 쓴다(S9U4-B45).
