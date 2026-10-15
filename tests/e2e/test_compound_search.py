@@ -151,7 +151,8 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         fixtures = [synthetic_ct(self.stack, prefix + suffix, suffix, date, slices=1)
                     for suffix, date in (('A', '20260201'), ('B', '20260228'),
                                          ('C', '20260301'), ('M', ''))]
-        for fixture, description in zip(fixtures, ('Chest', 'Chest followup', 'Abdomen', None)):
+        # The overlay contract carries text only; '' blanks the source description, which is the missing value.
+        for fixture, description in zip(fixtures, ('Chest', 'Chest followup', 'Abdomen', '')):
             self.patch(fixture, ov={'desc': description})
         page = self.login(); page.locator('#quick').fill(prefix)
         self.rows_are(page, fixtures)
