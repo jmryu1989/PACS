@@ -26,6 +26,7 @@ const { studyTransferLocalParser } = require('/app/dist/study-transfer-local-par
 const Gate = require('/app/dist/dicom-import-gate.service');
 const { PrismaService } = require('/app/dist/prisma.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
+const { AuthService } = require('/app/dist/auth.service');
 const { readDicomPart10 } = require('/app/dist/dicom-part10-reader');
 
 process.env.KC_ISSUER = 'https://synthetic.test/auth/realms/kin';
@@ -158,7 +159,7 @@ function checkShape(row) {
 }
 function store({ institutions } = {}) {
   const s = { ops: new Map(), states: new Map(), audits: [], clock: T0, migration: true, policies: new Map(), sessions: new Set(),
-    rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0,
+    rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, expiredTokens: new Set(), idpEnded: new Set(),
     institutions: institutions ?? [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }] };
   for (const c of [TECH, TECH2, RAD, ADMIN, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: c.roles });
   const advisory = new Map(), rows = new Map();
@@ -240,7 +241,19 @@ function store({ institutions } = {}) {
       },
       $queryRaw: async (strings, ...values) => {
         const sql = strings.join('?').replace(/\s+/g, ' ');
-        if (sql.includes('CURRENT_TIMESTAMP AS now')) return [{ now: new Date(s.clock) }];
+        // A test may hold or slow one statement (a DB delay, a lock wait elsewhere) before it runs.
+        if (s.onQuery) await s.onQuery(sql, values, tx);
+        // clock_timestamp(): the database's time when the statement runs, i.e. after the locks taken before it.
+        if (sql.includes('clock_timestamp() AS now')) return [{ now: new Date(s.clock) }];
+        if (sql.includes("download->'attempts'->-1")) {
+          // The attempt CAS of a download chunk: the row lock (if the row exists), then the last attempt's three fields.
+          if (!tx) throw new Error('row lock outside a transaction');
+          const row = s.ops.get(values[0]);
+          if (!row || row.kind !== 'download') return [];
+          await lock(rows, row.id, tx.held);
+          const now = s.ops.get(row.id), last = now.download.attempts[now.download.attempts.length - 1];
+          return [{ status: now.status, attemptId: last?.attemptId ?? null, state: last?.state ?? null, leaseUntil: last?.leaseUntil ?? null }];
+        }
         if (sql.includes('_prisma_migrations')) {
           if (s.migration === 'error') throw new Error('permission denied for table _prisma_migrations');
           assert.equal(values[0], Gate.IMPORT_MIGRATION);
@@ -259,8 +272,7 @@ function store({ institutions } = {}) {
         }
         if (sql.includes('results @> ?::jsonb')) {
           const [{ attempts: [{ attemptId }] }] = JSON.parse(values[0]);
-          return [...s.ops.values()].filter(r => r.kind === 'import' && r.results.some(e => e.attempts.some(a => a.attemptId === attemptId)))
-            .map(r => ({ id: r.id, results: copy(r.results) }));
+          return [...s.ops.values()].filter(r => r.kind === 'import' && r.results.some(e => e.attempts.some(a => a.attemptId === attemptId))).map(out);
         }
         if (sql.includes('"StudyAccessPolicy"')) {
           const p = s.policies.get(values[0]);
@@ -298,10 +310,32 @@ class TestGuard {
     const c = JSON.parse(req.headers['x-test-caller'] || 'null');
     if (!c) throw new common.UnauthorizedException();
     Object.assign(req, c, c.session ? { authMethod: 'session', sid: c.session } : { authMethod: 'bearer' });
+    // The credential the real guard verified: a bearer caller carries its synthetic access token on the same request.
+    if (!c.session) req.headers.authorization = 'Bearer ' + (c.token ?? 'tok:' + c.sub);
     return true;
   }
 }
 common.Injectable()(TestGuard);
+
+/**
+ * AuthService's public checks over the store: a cookie session lives while its row does; a synthetic bearer token
+ * 'tok:<sub>' verifies until it is marked expired, and its provider session 'idp:<sub>' until it is marked ended. The
+ * real verification and marks are AuthService's own suites; this file asserts what the routes do with their answers.
+ */
+function fakeAuth(s) {
+  return {
+    hasSession: async req => { if (s.authFailure) throw s.authFailure(); return s.sessions.has(req.sid); },
+    verifyAccessToken: async raw => {
+      if (s.authFailure) throw s.authFailure();
+      if (!raw.startsWith('tok:') || s.expiredTokens.has(raw)) throw new common.UnauthorizedException('토큰 검증 실패: synthetic');
+      return { sub: raw.slice(4), sid: 'idp:' + raw.slice(4) };
+    },
+    bearerRights: async payload => {
+      if (s.idpEnded.has(payload.sid)) throw new common.UnauthorizedException({ code: 'AUTH_SESSION_ENDED', message: '인증 세션이 없습니다' });
+      return s.rights.get(payload.sub) ?? null;
+    },
+  };
+}
 
 const apps = [];
 after(async () => { for (const a of apps) await a.close(); });
@@ -314,7 +348,8 @@ async function harness(options = {}) {
   const access = new StudyAccessService(s.prisma, {}, {});
   class TestModule {}
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
-    { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access }, { provide: APP_GUARD, useClass: TestGuard }] })(TestModule);
+    { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access }, { provide: AuthService, useValue: fakeAuth(s) },
+    { provide: APP_GUARD, useClass: TestGuard }] })(TestModule);
   const app = await NestFactory.create(TestModule, { rawBody: true, logger: false });
   app.use(studyTransferLocalParser());
   app.setGlobalPrefix('api');
@@ -322,6 +357,7 @@ async function harness(options = {}) {
   await new Promise(resolve => setTimeout(resolve, 20));   // the startup reconciliation over the empty store
   const port = app.getHttpServer().address().port;
   const gate = app.get(Gate.DicomImportGateService);
+  const transfer = app.get(StudyTransferLocalService);
   const close = async () => { await app.close(); await new Promise(resolve => orthanc.server.close(resolve)); };
   apps.push({ close });
   function request(method, path, { as = TECH, headers = {}, body, raw } = {}) {
@@ -341,14 +377,16 @@ async function harness(options = {}) {
         // A body the server cut short ends in 'close' without 'end' (resolve is idempotent).
         res.on('close', () => resolve({ status: res.statusCode, body: null, bytes: Buffer.concat(chunks), headers: res.headers, complete: res.complete, aborted: !res.complete }));
       });
-      req.on('error', reject);
+      // An archive stopped before its first byte destroys the response before its headers left: the client sees the
+      // connection end with no answer and no byte (resolved as such; any other request error still fails the test).
+      req.on('error', failure => (failure.code === 'ECONNRESET' ? resolve({ status: null, body: null, bytes: Buffer.alloc(0), headers: {}, complete: false, aborted: true, reset: true }) : reject(failure)));
       if (payload) req.end(payload); else req.end();
     });
   }
   const send = (bytes, { id = randomUUID(), index = 0, as = TECH, expect, headers = {} } = {}) =>
     request('POST', '/api/dicom-import', { as, raw: bytes, headers: { 'content-type': 'application/dicom', 'x-kin-operation-id': id,
       'x-kin-file-index': String(index), ...(expect ? { 'x-kin-expect-study': expect } : {}), ...headers } }).then(r => ({ ...r, id }));
-  return { s, orthanc, gate, request, send, close, port };
+  return { s, orthanc, gate, transfer, request, send, close, port };
 }
 
 const posts = o => o.calls.filter(c => c.method === 'POST' && c.path === '/instances').length;
@@ -683,10 +721,16 @@ test('S9U4-B11 member/member: a SOP reserved with other bytes is refused at the 
   assert.equal((await slow).status, 200);
   const later = await h.send(second, { as: TECH2, id: pending.id });
   assert.deepEqual([later.status, later.body.outcome], [200, 'stored'], 'the retryable code re-executes, it is never a replayed final');
-  // A SOP held by an attempt while its Study is not (a restored state): SOP_WRITE_PENDING.
+  // A SOP held by a live attempt of another operation while its Study is not (a restored state): SOP_WRITE_PENDING.
   const sopHeld = uid();
   const bytes = dicom({ study, series, sop: sopHeld, id: 'SYN-M' });
-  const holder = randomUUID();
+  const holder = randomUUID(), at = new Date(h.s.clock).toISOString();
+  await h.s.prisma.importOperation.create({ data: { id: randomUUID(), institutionId: 'inst-a', ownerIssuer: ISSUER, ownerSubject: TECH2.sub, actor: TECH2.actor,
+    kind: 'import', studyUid: null, status: 'open', results: [{ index: 0, sha256: sha(bytes), bytes: bytes.length, studyUid: study, seriesUid: series,
+      sopUid: sopHeld, expectedStudyUid: null, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', identity: 'matched', writeDisposition: null, at,
+      attempts: [{ attemptId: holder, actor: TECH2.actor, generation: 1, ownerInstance: randomUUID(), phase: 'dispatching',
+        leaseUntil: new Date(h.s.clock + 20000).toISOString(), startedAt: at, finishedAt: null, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED',
+        transport: null, autoRecheckedAt: null, recovery: null }] }] } });
   await h.s.prisma.importOperation.create({ data: { id: randomUUID(), institutionId: 'inst-a', ownerIssuer: 'kin-internal', ownerSubject: 'dicom-import-gate',
     actor: 'dicom-import-gate', kind: 'sop-claim', studyUid: study, status: 'reserved', results: [], claimKey: 'sop:' + sopHeld,
     claim: { schemaVersion: 1, institutionId: 'inst-a', studyUid: study, seriesUid: series, sopUid: sopHeld, patientId: 'SYN-M', issuerInstitutionId: 'inst-a',
@@ -1086,7 +1130,8 @@ test('S9U4-B32 the 10 s timers: a live attempt renews its lease; an archive stop
   assert.equal(Date.parse(lease()) - Date.parse(before), 10000, 'renewed to DB now + 30 s');
   void stalled;
   h.orthanc.fault = null;
-  // An archive whose reader loses the radiologist role while the second original is still on its way.
+  // An archive stalled on a slow source reaches no chunk check: the 10 s timer's rights re-read finds the radiologist role
+  // gone and stops it while the second original is still held back (the source wait itself is cancelled).
   const dl = await downloadStudy(h, 2), opId = randomUUID();
   assert.equal((await prepare(h, dl, opId)).status, 200);
   let served = 0, release;
@@ -1096,9 +1141,9 @@ test('S9U4-B32 the 10 s timers: a live attempt renews its lease; an archive stop
   await new Promise(resolve => setTimeout(resolve, 200));
   h.s.rights.set(RAD.sub, { ...h.s.rights.get(RAD.sub), roles: ['clinician'] });
   t.mock.timers.tick(10000);
-  await new Promise(resolve => setTimeout(resolve, 200));
+  const answer = await Promise.race([archive, new Promise(resolve => setTimeout(() => resolve('still held'), 3000))]);
+  assert.notEqual(answer, 'still held', 'the timer ended the archive before its source answered');
   release();
-  const answer = await archive;
   assert.ok(answer.bytes.length < Number(answer.headers['content-length']), 'no complete archive after the rights were lost');
   await new Promise(resolve => setTimeout(resolve, 100));
   const [attempt] = h.s.op(opId).download.attempts;
@@ -1217,7 +1262,7 @@ test('S9U4-B26 startup reconciliation: expired dispatching/unknown read-only (ex
   const a = await unknownAttempt(h, { stored: true });
   const b = await unknownAttempt(h);
   // b's attempt is turned back into a dispatching one whose lease ran out (the API died during the POST).
-  const op = h.s.ops.get(b.id); op.results[0].attempts[0].phase = 'dispatching'; op.results[0].attempts[0].transport = null;
+  const op = h.s.ops.get(b.id); Object.assign(op.results[0].attempts[0], { phase: 'dispatching', transport: null, finishedAt: null });
   // An initializing claim whose holder no attempt names (an interrupted initialisation of an older copy).
   const orphan = uid();
   await h.s.prisma.importOperation.create({ data: { id: randomUUID(), institutionId: 'inst-a', ownerIssuer: 'kin-internal', ownerSubject: 'dicom-import-gate',
@@ -1225,7 +1270,7 @@ test('S9U4-B26 startup reconciliation: expired dispatching/unknown read-only (ex
     claim: { schemaVersion: 1, phase: 'initializing', institutionId: 'inst-a', studyUid: orphan, patientId: null, issuerInstitutionId: null, nameKey: null, birthKey: null, sexKey: null, heldByAttemptId: randomUUID(), createdAt: new Date(T0).toISOString() } } });
   // A live lease of another instance stays as it is.
   const c = await unknownAttempt(h);
-  const live = h.s.ops.get(c.id); live.results[0].attempts[0].phase = 'dispatching'; live.results[0].attempts[0].ownerInstance = randomUUID();
+  const live = h.s.ops.get(c.id); Object.assign(live.results[0].attempts[0], { phase: 'dispatching', transport: null, finishedAt: null, ownerInstance: randomUUID() });
   h.s.advance(31000);
   live.results[0].attempts[0].leaseUntil = new Date(h.s.clock + 20000).toISOString();
   const before = h.s.op(c.id);
@@ -1408,72 +1453,466 @@ test('S9U4-B30 download streams that stop: an MD5 change of a stored original is
   await new Promise(resolve => setTimeout(resolve, 200));
   assert.equal(h.s.op(id).download.attempts[1].state, 'incomplete');
   h.orthanc.fault = null;
-  // An expired sending attempt (the API died mid-stream) is closed Unconfirmed by the startup reconciliation; checkpoints stay.
+  // An expired sending attempt (the API died mid-stream after its first checkpoint) is closed Unconfirmed by the download
+  // startup pass with its own result row; its checkpoint stays as it was.
   const row = h.s.ops.get(id);
-  row.download.attempts.push({ ...row.download.attempts[0], attemptId: randomUUID(), number: 3, state: 'sending', endedAt: null, leaseUntil: new Date(h.s.clock + 1000).toISOString() });
+  const checkpointed = row.download.attempts[0].objects.filter(o => o.complete);
+  const stoppedId = randomUUID();
+  row.download.attempts.push({ ...row.download.attempts[0], attemptId: stoppedId, number: 3, state: 'sending', endedAt: null, objects: checkpointed,
+    archiveSha256: null, responseFinished: false, leaseUntil: new Date(h.s.clock + 1000).toISOString() });
   row.status = 'sending';
   h.s.advance(5000);
   await h.gate.reconcileOnStart();
+  assert.equal(h.s.op(id).download.attempts[2].state, 'sending', 'the import pass leaves download attempts to the download pass');
+  assert.equal(await h.transfer.expireDownloads(), 1);
   const last = h.s.op(id).download.attempts[2];
-  assert.deepEqual([last.state, last.objects.length], ['unconfirmed', 2]);
+  assert.deepEqual([last.state, last.objects.length, last.objects[0].sha256], ['unconfirmed', 1, checkpointed[0].sha256]);
+  assert.deepEqual(audits(h.s, 'original.download.result').filter(a => a.detail.attemptId === stoppedId).map(a => [a.detail.state, a.detail.reason]),
+    [['unconfirmed', 'lease-expired']], 'the closed attempt has exactly one result row');
   const retried = await h.request('GET', `/api/studies/${study}/original-downloads/${id}/archive`, { as: RAD });
   assert.equal(retried.status, 200);
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.deepEqual(h.s.op(id).download.attempts.map(a => a.state), ['incomplete', 'incomplete', 'unconfirmed', 'sent'], 'retries add attempts; earlier supply facts stay');
 });
 
-test('S9U4-B34 before every chunk, without the 10 s timer: rights older than 1 s are re-read; a lapsed lease window is asked of the database (lost -> Unconfirmed, held -> continues)', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] }); // the 10 s timer never fires in this test
-  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-  async function heldArchive() {
+// ── the archive's check before every chunk (U4BB-03), the persisted formats (U4BB-08), the manifest readings (U4BB-09) and
+// the close of an expired attempt (U4BB-10) ──
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const archivePath = (study, id) => `/api/studies/${study}/original-downloads/${id}/archive`;
+const deniedPolicy = { institution: 'inst-a', policy: { version: 1, restricted: true, startsAt: null, endsAt: null,
+  rules: [{ patientId: null, modalities: [], dateFrom: null, dateTo: null, studyUids: ['2.25.424242'] }] } };
+const resultRows = (h, attemptId) => audits(h.s, 'original.download.result').filter(a => a.detail.attemptId === attemptId);
+const casSql = sql => sql.includes("download->'attempts'->-1");
+
+/** An archive of a two-object study whose second original is held back until release(); the first is supplied and checkpointed. */
+async function heldArchive(h, as = RAD) {
+  const study = await downloadStudy(h, 2), id = randomUUID();
+  assert.equal((await prepare(h, study, id, as)).status, 200);
+  let served = 0, release;
+  const held = new Promise(resolve => { release = resolve; });
+  h.orthanc.fault = async call => (call.path.endsWith('/file') && ++served === 2 ? (await held, null) : null);
+  const archive = h.request('GET', archivePath(study, id), { as });
+  await sleep(200);
+  const manifest = JSON.parse(h.s.op(id).download.manifestCanonical);
+  return { study, id, archive, release, second: h.orthanc.instances.get(manifest.objects[1].orthancId).bytes };
+}
+
+test('S9U4-B34 before every chunk: the attempt CAS in the database and the rights now, with no window or cache; a revocation, an ended cookie or provider session, an expired token, lost StudyAccess or a moved study stop the stream before its next byte; a lease past by DB time fences it', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });   // the 10 s timer never fires: only the check before each chunk acts
+  // ASTRA-03: the role is revoked as the first original starts to answer, a few milliseconds before its first chunk.
+  {
+    const h = await harness();
+    const study = await downloadStudy(h, 1), id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200);
+    h.orthanc.fault = call => { if (call.path.endsWith('/file')) h.s.rights.set(RAD.sub, { ...h.s.rights.get(RAD.sub), roles: ['clinician'] }); return null; };
+    const r = await h.request('GET', archivePath(study, id), { as: RAD });
+    assert.ok(r.bytes.length === 0 && (r.reset || (r.status === 200 && !r.complete)), 'not one archive byte after the revocation');
+    await sleep(50);
+    const [a] = h.s.op(id).download.attempts;
+    assert.deepEqual([a.state, a.responseFinished, a.objects.map(o => o.bytesSupplied)], ['incomplete', false, [0]]);
+    assert.deepEqual(resultRows(h, a.attemptId).map(x => x.detail.state), ['incomplete']);
+  }
+  // ASTRA-15: the database's clock passes the lease as the first original starts: the CAS fails, not one byte, Unconfirmed.
+  {
+    const h = await harness();
+    const study = await downloadStudy(h, 1), id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200);
+    let moved = false;
+    h.orthanc.fault = call => { if (!moved && call.path.endsWith('/file')) { moved = true; h.s.advance(31000); } return null; };
+    const r = await h.request('GET', archivePath(study, id), { as: RAD });
+    assert.ok(r.bytes.length === 0 && (r.reset || (r.status === 200 && !r.complete)), 'not one byte after the lease expired by DB time');
+    await sleep(50);
+    const [a] = h.s.op(id).download.attempts;
+    assert.deepEqual([a.state, a.responseFinished, a.objects.length], ['unconfirmed', false, 0]);
+    assert.deepEqual(resultRows(h, a.attemptId).map(x => [x.detail.state, x.detail.reason]), [['unconfirmed', 'lease-expired']]);
+  }
+  // Between chunks (the second original held back): each loss stops the stream before the held original's first byte.
+  const losses = [
+    ['role revoked', RAD, h => h.s.rights.set(RAD.sub, { ...h.s.rights.get(RAD.sub), roles: ['clinician'] })],
+    ['cookie session logged out', { ...RAD, session: 'sid-rad-a' }, h => h.s.sessions.delete('sid-rad-a')],
+    ['provider session ended', RAD, h => h.s.idpEnded.add('idp:' + RAD.sub)],
+    ['access token expired', RAD, h => h.s.expiredTokens.add('tok:' + RAD.sub)],
+    ['StudyAccess restricted', RAD, h => h.s.policies.set(RAD.sub, deniedPolicy)],
+    ['study moved to another institution', RAD, (h, held) => { h.s.states.get(held.study).institutionId = 'inst-b'; }],
+  ];
+  for (const [name, as, lose] of losses) {
+    const h = await harness();
+    h.s.sessions.add('sid-rad-a');
+    const held = await heldArchive(h, as);
+    lose(h, held);
+    held.release();
+    const r = await held.archive;
+    assert.ok(r.bytes.length < Number(r.headers['content-length']) && !r.bytes.includes(held.second), name + ': no byte of the held original');
+    await sleep(50);
+    const [a] = h.s.op(held.id).download.attempts;
+    assert.deepEqual([a.state, a.objects.map(o => [o.complete, o.bytesSupplied > 0])], ['incomplete', [[true, true], [false, false]]], name);
+  }
+  // Positive control: the cookie session alive and the rights unchanged -> the whole archive, Sent.
+  const h = await harness();
+  h.s.sessions.add('sid-rad-a');
+  const kept = await heldArchive(h, { ...RAD, session: 'sid-rad-a' });
+  kept.release();
+  const whole = await kept.archive;
+  assert.equal(whole.bytes.length, Number(whole.headers['content-length']));
+  await sleep(50);
+  assert.equal(h.s.op(kept.id).download.attempts[0].state, 'sent');
+});
+
+test('S9U4-B35 the chunk CAS judges by the database time read after its row lock; a CAS that does not answer in time is lost; a stalled worker loses to the retry that fenced it; the final close needs the live lease; a lease near its end is renewed by the chunk check', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  // A database that does not answer the CAS within its bound: fenced, Unconfirmed, the first object's checkpoint kept.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    h.s.onQuery = async sql => { if (casSql(sql)) await sleep(6000); };
+    held.release();
+    const r = await held.archive;
+    assert.ok(!r.bytes.includes(held.second), 'a slow CAS admits no byte');
+    await sleep(1500);
+    h.s.onQuery = null;
+    const [a] = h.s.op(held.id).download.attempts;
+    assert.deepEqual([a.state, a.objects.length, a.objects[0].complete], ['unconfirmed', 1, true], 'the completed checkpoint stays');
+    assert.deepEqual(resultRows(h, a.attemptId).map(x => x.detail.state), ['unconfirmed']);
+  }
+  // A lock wait: the CAS queues behind another transaction's row lock while the database's clock passes the lease. The
+  // time it judges by is read after the lock, so the chunk is refused (a time read at the transaction start would pass).
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    let unlock, locked, waiting;
+    const holding = new Promise(resolve => { unlock = resolve; });
+    const isLocked = new Promise(resolve => { locked = resolve; });
+    const casWaiting = new Promise(resolve => { waiting = resolve; });
+    const other = h.s.prisma.$transaction(async tx => {
+      await tx.$queryRaw(['SELECT * FROM "ImportOperation" WHERE id = ', '::uuid FOR UPDATE'], held.id);
+      locked();
+      await holding;
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
+    await isLocked;
+    h.s.onQuery = async sql => { if (casSql(sql)) waiting(); };
+    held.release();
+    await casWaiting;
+    await sleep(50);
+    h.s.advance(31000);
+    unlock();
+    await other;
+    const r = await held.archive;
+    h.s.onQuery = null;
+    assert.ok(!r.bytes.includes(held.second));
+    await sleep(50);
+    const [a] = h.s.op(held.id).download.attempts;
+    assert.deepEqual([a.state, a.objects.length], ['unconfirmed', 1]);
+    assert.deepEqual(resultRows(h, a.attemptId).map(x => [x.detail.state, x.detail.reason]), [['unconfirmed', 'lease-expired']]);
+  }
+  // A stalled worker and a retry: the first archive stalls past its lease; the retry fences it (Unconfirmed, its one
+  // result row) and sends the whole archive; the stalled worker then supplies no further byte and changes nothing.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const [first] = h.s.op(held.id).download.attempts;
+    h.s.advance(31000);
+    const retry = await h.request('GET', archivePath(held.study, held.id), { as: RAD });
+    assert.equal(retry.bytes.length, Number(retry.headers['content-length']));
+    held.release();
+    const stalled = await held.archive;
+    assert.ok(!stalled.bytes.includes(held.second), 'the fenced worker supplies no byte of the held original');
+    await sleep(50);
+    const attempts = h.s.op(held.id).download.attempts;
+    assert.deepEqual(attempts.map(a => a.state), ['unconfirmed', 'sent']);
+    assert.equal(attempts[0].objects.length, 1, 'its checkpoint stays');
+    assert.deepEqual(resultRows(h, first.attemptId).map(x => [x.detail.state, x.detail.reason]), [['unconfirmed', 'lease-expired']]);
+    assert.deepEqual(resultRows(h, attempts[1].attemptId).map(x => x.detail.state), ['sent']);
+  }
+  // The final close needs the live lease: every byte went out, but the DB clock passed the lease before the close.
+  {
     const h = await harness();
     const study = await downloadStudy(h, 2), id = randomUUID();
     assert.equal((await prepare(h, study, id)).status, 200);
-    let served = 0, release;
-    const held = new Promise(resolve => { release = resolve; });
-    h.orthanc.fault = async call => (call.path.endsWith('/file') && ++served === 2 ? (await held, null) : null);
-    const archive = h.request('GET', `/api/studies/${study}/original-downloads/${id}/archive`, { as: RAD });
-    await sleep(200);
-    return { h, id, archive, release };
+    let moved = false;
+    h.s.onQuery = async (sql, values) => {
+      const row = h.s.ops.get(values[0]);
+      if (!moved && sql.includes('WHERE id = ?::uuid FOR UPDATE') && row?.download?.attempts?.at(-1)?.objects?.length === 2) { moved = true; h.s.advance(31000); }
+    };
+    const r = await h.request('GET', archivePath(study, id), { as: RAD });
+    h.s.onQuery = null;
+    assert.equal(r.bytes.length, Number(r.headers['content-length']), 'every byte was supplied');
+    await sleep(50);
+    const [a] = h.s.op(id).download.attempts;
+    assert.deepEqual([a.state, a.responseFinished, a.archiveSha256, a.objects.filter(o => o.complete).length], ['unconfirmed', false, null, 2],
+      'never Sent without the live lease; both checkpoints stay');
+    assert.deepEqual(resultRows(h, a.attemptId).map(x => x.detail.state), ['unconfirmed']);
   }
-  // Rights lost while the second original is held back: the next chunk, over 1 s later, re-reads them and stops (Incomplete).
-  const lost = await heldArchive();
-  lost.h.s.rights.set(RAD.sub, { ...lost.h.s.rights.get(RAD.sub), roles: ['clinician'] });
-  await sleep(1100);
-  lost.release();
-  const cut = await lost.archive;
-  assert.ok(cut.bytes.length < Number(cut.headers['content-length']), 'no complete archive after the rights were lost');
-  await sleep(100);
-  const [stopped] = lost.h.s.op(lost.id).download.attempts;
-  assert.deepEqual([stopped.state, stopped.responseFinished], ['incomplete', false]);
-  assert.deepEqual(stopped.objects.map(o => [o.complete, o.complete ? 'supplied' : o.bytesSupplied]), [[true, 'supplied'], [false, 0]], 'no byte of the held original');
-  // A worker whose own lease window has lapsed asks the database before the next chunk: the lease expired there -> fenced.
-  const realNow = performance.now.bind(performance);
-  const late = await heldArchive();
-  late.h.s.advance(31000);
-  let fenced;
-  performance.now = () => realNow() + 31000;
-  try {
-    late.release();
-    fenced = await late.archive;
-  } finally { performance.now = realNow; }
-  assert.ok(fenced.bytes.length < Number(fenced.headers['content-length']));
-  await sleep(100);
-  const [lateAttempt] = late.h.s.op(late.id).download.attempts;
-  assert.deepEqual([lateAttempt.state, lateAttempt.responseFinished, lateAttempt.objects.filter(o => o.complete).length], ['unconfirmed', false, 1]);
-  // The same lapse with the database lease still held: the CAS renews it and the archive completes.
-  const kept = await heldArchive();
-  const leaseBefore = kept.h.s.op(kept.id).download.attempts[0].leaseUntil;
-  kept.h.s.advance(5000);
-  let whole;
-  performance.now = () => realNow() + 31000;
-  try {
-    kept.release();
-    whole = await kept.archive;
-  } finally { performance.now = realNow; }
-  assert.equal(whole.bytes.length, Number(whole.headers['content-length']));
-  await sleep(100);
-  const [sent] = kept.h.s.op(kept.id).download.attempts;
-  assert.deepEqual([sent.state, sent.responseFinished], ['sent', true]);
-  assert.ok(Date.parse(sent.leaseUntil) > Date.parse(leaseBefore), 'the lease was renewed by the check before the chunk');
+  // Less than 20 s of the lease left by DB time: the check before the next chunk renews it to DB now + 30 s.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    h.s.advance(15000);
+    // The lease as the second object's checkpoint locks the row (the last full-row lock while one object is checkpointed).
+    let leaseAtCheckpoint = null;
+    h.s.onQuery = async (sql, values) => {
+      const last = h.s.ops.get(values[0])?.download?.attempts?.at(-1);
+      if (sql.includes('WHERE id = ?::uuid FOR UPDATE') && last?.objects?.length === 1) leaseAtCheckpoint = last.leaseUntil;
+    };
+    held.release();
+    const whole = await held.archive;
+    h.s.onQuery = null;
+    assert.equal(whole.bytes.length, Number(whole.headers['content-length']));
+    await sleep(50);
+    assert.equal(h.s.op(held.id).download.attempts[0].state, 'sent');
+    assert.equal(leaseAtCheckpoint, new Date(h.s.clock + 30000).toISOString(), 'renewed by a chunk check before the second checkpoint');
+  }
+});
+
+test('S9U4-B36 a stored download row outside its persisted format is 503 MANIFEST_STORE_INVALID with byte 0, on prepare replay, status and archive, and is never rebuilt', async () => {
+  const h = await harness();
+  const study = await downloadStudy(h, 2);
+  const template = randomUUID();
+  assert.equal((await prepare(h, study, template)).status, 200);
+  assert.equal((await h.request('GET', archivePath(study, template), { as: RAD })).status, 200);
+  await sleep(50);
+  const sent = h.s.op(template).download.attempts[0];
+  assert.equal(sent.state, 'sent');
+  const incomplete = { ...sent, state: 'incomplete', archiveSha256: null, responseFinished: false, objects: sent.objects.slice(0, 1) };
+  const corruptions = [
+    ['an extra key (ASTRA-11)', d => { d.unlisted = 'not-in-the-closed-schema'; }],
+    ['another destination (ASTRA-11)', d => { d.destination = 'external-destination'; }],
+    ['a missing key', d => { delete d.preparedAt; }],
+    ['a JSON null target', d => { d.targetStudyUid = null; }],
+    ['another target study', d => { d.targetStudyUid = '2.25.999'; }],
+    ['another schema version', d => { d.schemaVersion = 2; }],
+    ['a date that does not exist', d => { d.preparedAt = '2026-02-30T00:00:00.000Z'; }],
+    ['manifest text that is not its hash', d => { d.manifestCanonical += ' '; }],
+    ['a manifest of another study', d => { d.manifestCanonical = d.manifestCanonical.split(study).join('2.25.999'); }],
+    ['an attempt with an extra key', d => { d.attempts = [{ ...incomplete, unlisted: 1 }]; }],
+    ['an attempt id of JSON null', d => { d.attempts = [{ ...incomplete, attemptId: null }]; }],
+    ['duplicate attempt numbers', d => { d.attempts = [incomplete, { ...incomplete, attemptId: randomUUID() }]; }],
+    ['one attempt id twice', d => { d.attempts = [incomplete, { ...incomplete, number: 2 }]; }],
+    ['another owner subject', d => { d.attempts = [{ ...incomplete, ownerSubject: TECH.sub }]; }],
+    ['Sent without the archive hash', d => { d.attempts = [{ ...sent, archiveSha256: null }]; }],
+    ['a partial object with a full hash', d => { d.attempts = [{ ...incomplete, objects: [sent.objects[0], { ...sent.objects[1], complete: false }] }]; }],
+    ['a checkpoint of another object', d => { d.attempts = [{ ...incomplete, objects: [{ ...sent.objects[1] }] }]; }],
+    ['an end time that does not exist', d => { d.attempts = [{ ...incomplete, endedAt: '2026-02-30T00:00:00.000Z' }]; }],
+    ['a status other than the last attempt', (d, row) => { d.attempts = [incomplete]; row.status = 'prepared'; }],
+  ];
+  for (const [name, corrupt] of corruptions) {
+    const id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200, name);
+    const row = h.s.ops.get(id);
+    corrupt(row.download, row);
+    if (name !== 'a status other than the last attempt') row.status = row.download.attempts?.at(-1)?.state ?? 'prepared';
+    const before = h.s.op(id), audited = h.s.audits.length;
+    for (const [what, call] of [['archive', () => h.request('GET', archivePath(study, id), { as: RAD })],
+      ['status', () => h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: RAD })], ['replay', () => prepare(h, study, id)]]) {
+      const r = await call();
+      assert.deepEqual([r.status, r.body?.code, r.bytes.length > 0 && r.headers['content-type'] === 'application/zip'], [503, 'MANIFEST_STORE_INVALID', false], `${name}: ${what}`);
+    }
+    assert.deepEqual([h.s.op(id), h.s.audits.length], [before, audited], name + ': the row is left exactly as it is, no attempt, no audit');
+  }
+});
+
+test('S9U4-B37 stored import results and reservations outside their persisted format are a safe 503 IMPORT_STORAGE_UNAVAILABLE with no Orthanc write and no rebuild; a holder that names no attempt of its study is one; a recovery date that does not exist is 400 with nothing changed', async () => {
+  const study = uid(), series = study + '.1';
+  const corruptEntries = [
+    ['an extra key', e => { e.unlisted = 1; }],
+    ['a missing key', e => { delete e.identity; }],
+    ['a JSON null hash', e => { e.sha256 = null; }],
+    ['a date that does not exist', e => { e.at = '2026-02-30T00:00:00.000Z'; }],
+    ['a generation out of order', e => { e.attempts[0].generation = 2; }],
+    ['an attempt id that is not a UUID', e => { e.attempts[0].attemptId = 'attempt-1'; }],
+    ['a code of another outcome', e => { e.code = 'IMPORT_UNCONFIRMED'; }],
+    ['an attempt still running under a final result', e => { e.attempts[0].phase = 'dispatching'; e.attempts[0].finishedAt = null; }],
+  ];
+  for (const [name, corrupt] of corruptEntries) {
+    const h = await harness();
+    const bytes = dicom({ study, series, id: 'SYN-F' });
+    const first = await h.send(bytes);
+    assert.equal(first.status, 200, name);
+    corrupt(h.s.ops.get(first.id).results[0]);
+    const before = h.s.op(first.id), calls = h.orthanc.calls.length;
+    const replay = await h.send(bytes, { id: first.id });
+    assert.deepEqual([replay.status, replay.body.code], [503, 'IMPORT_STORAGE_UNAVAILABLE'], name + ': POST');
+    const status = await h.request('GET', '/api/dicom-import/' + first.id);
+    assert.deepEqual([status.status, status.body.code], [503, 'IMPORT_STORAGE_UNAVAILABLE'], name + ': GET');
+    assert.deepEqual(h.s.op(first.id), before, name + ': left as it is');
+    assert.deepEqual(h.orthanc.calls.slice(calls).filter(c => c.path !== '/system').length, 0, name + ': no Orthanc call beyond readiness');
+  }
+  // Two entries with one index.
+  {
+    const h = await harness();
+    const id = randomUUID();
+    assert.equal((await h.send(dicom({ study, series, id: 'SYN-F' }), { id, index: 0 })).status, 200);
+    assert.equal((await h.send(dicom({ study, series, id: 'SYN-F' }), { id, index: 1 })).status, 200);
+    h.s.ops.get(id).results[1].index = 0;
+    assert.deepEqual((await h.send(dicom({ study, series, id: 'SYN-F' }), { id, index: 2 })).body.code, 'IMPORT_STORAGE_UNAVAILABLE', 'duplicate index');
+  }
+  const corruptClaims = [
+    ['an extra key', c => { c.claim.unlisted = 1; }],
+    ['a JSON null PatientID in a bound claim', c => { c.claim.patientId = null; }],
+    ['a holder that is not a UUID', c => { c.claim.heldByAttemptId = 'attempt-1'; }],
+    ['the claim of another study under this key', c => { c.claim.studyUid = '2.25.999'; }],
+    ['a creation date that does not exist', c => { c.claim.createdAt = '2026-02-30T00:00:00.000Z'; }],
+    ['a holder that names no attempt', c => { c.claim.heldByAttemptId = randomUUID(); }],
+  ];
+  for (const [name, corrupt] of corruptClaims) {
+    const h = await harness();
+    assert.equal((await h.send(dicom({ study, series, id: 'SYN-F' }))).status, 200, name);
+    const row = [...h.s.ops.values()].find(r => r.claimKey === 'study:' + study);
+    corrupt(row);
+    const before = h.s.claim('study:' + study), posts0 = posts(h.orthanc), calls = h.orthanc.calls.length;
+    const next = await h.send(dicom({ study, series, id: 'SYN-F' }));
+    assert.deepEqual([next.status, next.body.code], [503, 'IMPORT_STORAGE_UNAVAILABLE'], name);
+    assert.deepEqual([h.s.claim('study:' + study), posts(h.orthanc)], [before, posts0], name + ': the claim is left as it is; no write');
+    assert.equal(h.orthanc.calls.slice(calls).filter(c => c.path !== '/system').length, 0, name + ': refused before any Orthanc read');
+  }
+  // A holder that is an attempt of another study.
+  {
+    const h = await harness();
+    const other = uid();
+    const elsewhere = await unknownAttempt(h, { study: other });
+    assert.equal((await h.send(dicom({ study, series, id: 'SYN-F' }))).status, 200);
+    [...h.s.ops.values()].find(r => r.claimKey === 'study:' + study).claim.heldByAttemptId = elsewhere.attempt.attemptId;
+    assert.deepEqual((await h.send(dicom({ study, series, id: 'SYN-F' }))).body.code, 'IMPORT_STORAGE_UNAVAILABLE', 'a holder of another study');
+  }
+  // ASTRA-EXTRA-04: a recovery date that does not exist (30 February) is 400 RECOVERY_EVIDENCE_INVALID and changes nothing.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h);
+    h.s.advance(31000);
+    h.s.ops.get(a.id).results[0].attempts[0].startedAt = '2026-02-01T00:00:00.000Z';
+    const before = h.s.op(a.id), audited = h.s.audits.length;
+    for (const checkedAt of ['2026-02-30T00:00:00.000Z', '2026-04-31T00:00:00Z', '2026-13-01T00:00:00.000Z', '2026-02-28T24:00:00.000Z']) {
+      const r = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt });
+      assert.deepEqual([r.status, r.body.code], [400, 'RECOVERY_EVIDENCE_INVALID'], checkedAt);
+    }
+    assert.deepEqual([h.s.op(a.id), h.s.audits.length], [before, audited], 'nothing changed');
+    const valid = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: '2026-02-28T00:00:00Z' });
+    assert.equal(valid.status, 200, 'a real date in the same form is taken');
+  }
+});
+
+test('S9U4-B38 preparation reads the originals twice and compares every value; a change between the readings or a size that is not a number is MANIFEST_INCOMPLETE; at the archive any change of the prepared set, an emptied study included, is MANIFEST_CHANGED with no attempt and byte 0', async () => {
+  const noRow = (h, id, name) => assert.deepEqual([h.s.op(id), audits(h.s, 'original.download.prepare').filter(a => a.detail.operationId === id).length], [null, 0], name);
+  // ASTRA-09: an original's bytes (and so its MD5) change between the two readings.
+  {
+    const h = await harness();
+    const study = await downloadStudy(h, 1), id = randomUUID();
+    const instance = [...h.orthanc.instances.values()][0];
+    let enumerations = 0;
+    h.orthanc.fault = call => { if (call.path === '/tools/find' && ++enumerations === 2) instance.bytes = Buffer.from(instance.bytes).fill(0x42, instance.bytes.length - 2); return null; };
+    const r = await prepare(h, study, id);
+    assert.deepEqual([r.status, r.body.code], [409, 'MANIFEST_INCOMPLETE'], 'bytes/MD5 changed between the readings');
+    noRow(h, id, 'ASTRA-09');
+  }
+  // A UID, a size or an instance that changes between the readings.
+  for (const [name, fault] of [
+    ['a series UID', (count, call) => (call.path.endsWith('/simplified-tags') && count.tags++ === 1 ? 'series' : null)],
+    ['a size', (count, call) => (call.path.endsWith('/attachments/dicom/info') && count.info++ === 1 ? 'size' : null)],
+    ['an added instance', (count, call) => (call.path === '/tools/find' && count.find++ === 1 ? 'added' : null)],
+  ]) {
+    const h = await harness();
+    const study = await downloadStudy(h, 1), id = randomUUID();
+    const [instance] = [...h.orthanc.instances.values()];
+    const count = { tags: 0, info: 0, find: 0 };
+    h.orthanc.fault = call => {
+      const what = fault(count, call);
+      if (what === 'series') return { raw: JSON.stringify({ PatientID: 'SYN-D', StudyInstanceUID: study, SeriesInstanceUID: study + '.9', SOPInstanceUID: instance.h.sopInstanceUid }) };
+      if (what === 'size') return { raw: JSON.stringify({ UncompressedSize: instance.bytes.length + 1, UncompressedMD5: md5(instance.bytes) }) };
+      if (what === 'added') return { raw: JSON.stringify([instance.id, '00000000-00000000-00000000-00000000-00000001']) };
+      return null;
+    };
+    const r = await prepare(h, study, id);
+    assert.deepEqual([r.status, r.body.code], [409, 'MANIFEST_INCOMPLETE'], name);
+    noRow(h, id, name);
+  }
+  // Sizes outside Orthanc's own forms are refused, never coerced (ASTRA-EXTRA-03 null); a number and its digits are taken.
+  for (const [size, accepted] of [[null, false], [true, false], ['', false], ['-1', false], ['1.5', false], ['007', false], [{}, false], [-1, false], [1.5, false], ['number', true], ['digits', true]]) {
+    const h = await harness();
+    const study = await downloadStudy(h, 1), id = randomUUID();
+    const [instance] = [...h.orthanc.instances.values()];
+    const value = size === 'number' ? instance.bytes.length : size === 'digits' ? String(instance.bytes.length) : size;
+    h.orthanc.fault = call => (call.path.endsWith('/attachments/dicom/info') ? { raw: JSON.stringify({ UncompressedSize: value, UncompressedMD5: md5(instance.bytes) }) } : null);
+    const r = await prepare(h, study, id);
+    if (accepted) assert.deepEqual([r.status, r.body.state], [200, 'prepared'], JSON.stringify(size));
+    else { assert.deepEqual([r.status, r.body.code], [409, 'MANIFEST_INCOMPLETE'], JSON.stringify(size)); noRow(h, id, JSON.stringify(size)); }
+  }
+  // Order alone may differ between the readings and at the archive.
+  {
+    const h = await harness();
+    const study = await downloadStudy(h, 3), id = randomUUID();
+    let finds = 0;
+    h.orthanc.fault = call => {
+      if (call.path !== '/tools/find' || ++finds === 1) return null;
+      return { raw: JSON.stringify([...h.orthanc.instances.values()].filter(i => i.h.studyInstanceUid === study).map(i => i.id).reverse()) };
+    };
+    assert.deepEqual((await prepare(h, study, id)).body.state, 'prepared', 'reversed second reading');
+    const zip = await h.request('GET', archivePath(study, id), { as: RAD });
+    assert.equal(zip.bytes.length, Number(zip.headers['content-length']), 'reversed enumeration at the archive');
+  }
+  // At the archive: an emptied study (ASTRA-EXTRA-02), a changed MD5 or an added instance is MANIFEST_CHANGED; a read
+  // failure is MANIFEST_INCOMPLETE; never an attempt, an intent row or a byte.
+  for (const [name, change, code] of [
+    ['emptied', h => h.orthanc.instances.clear(), 'MANIFEST_CHANGED'],
+    ['MD5 changed', h => { h.orthanc.fault = call => (call.path.endsWith('/attachments/dicom/info') ? { raw: JSON.stringify({ UncompressedSize: 1, UncompressedMD5: '0'.repeat(32) }) } : null); }, 'MANIFEST_CHANGED'],
+    ['an instance added', (h, study) => h.orthanc.store(dicom({ study, series: study + '.1', id: 'SYN-D', pixel: 200 })), 'MANIFEST_CHANGED'],
+    ['an enumeration failure', h => { h.orthanc.fault = call => (call.path === '/tools/find' ? { status: 500 } : null); }, 'MANIFEST_INCOMPLETE'],
+    ['a tags failure', h => { h.orthanc.fault = call => (call.path.endsWith('/simplified-tags') ? { status: 500 } : null); }, 'MANIFEST_INCOMPLETE'],
+  ]) {
+    const h = await harness();
+    const study = await downloadStudy(h, 2), id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200);
+    change(h, study);
+    const r = await h.request('GET', archivePath(study, id), { as: RAD });
+    assert.deepEqual([r.status, r.body?.code], [409, code], name);
+    assert.deepEqual([h.s.op(id).download.attempts.length, audits(h.s, 'original.download.intent').length], [0, 0], name + ': no attempt');
+  }
+});
+
+test('S9U4-B39 an expired sending attempt is closed Unconfirmed with exactly one result row by whichever path comes first (GET, startup, the next archive); a result row that cannot be written leaves it open and starts nothing', async () => {
+  const expiredAttempt = (h, id) => {
+    const row = h.s.ops.get(id);
+    const attempt = { attemptId: randomUUID(), number: 1, ownerSubject: RAD.sub, actor: 'earlier@synthetic.test', manifestSha256: row.manifestSha256,
+      destination: 'browser-download', state: 'sending', startedAt: new Date(T0 - 60000).toISOString(), endedAt: null, ownerInstance: randomUUID(),
+      leaseUntil: new Date(T0 - 1000).toISOString(), objects: [], archiveSha256: null, responseFinished: false };
+    row.download.attempts.push(attempt);
+    row.status = 'sending';
+    return attempt;
+  };
+  for (const first of ['GET', 'startup', 'archive']) {
+    const h = await harness();
+    const study = await downloadStudy(h, 1), id = randomUUID();
+    assert.equal((await prepare(h, study, id)).status, 200);
+    const attempt = expiredAttempt(h, id);
+    const paths = { GET: () => h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: RAD }),
+      startup: () => h.transfer.expireDownloads(), archive: () => h.request('GET', archivePath(study, id), { as: RAD }) };
+    await paths[first]();
+    for (const other of Object.keys(paths).filter(p => p !== first && p !== 'archive')) await paths[other]();
+    await sleep(50);
+    const [closed] = h.s.op(id).download.attempts;
+    assert.deepEqual([closed.state, closed.endedAt !== null, closed.objects], ['unconfirmed', true, []], first);
+    const rows = resultRows(h, attempt.attemptId);
+    assert.deepEqual(rows.map(x => [x.actor, x.detail.state, x.detail.reason, x.detail.institutionId, x.detail.responseFinished]),
+      [['earlier@synthetic.test', 'unconfirmed', 'lease-expired', 'inst-a', false]], first + ': exactly one result row for that attempt');
+    if (first === 'archive') {
+      const attempts = h.s.op(id).download.attempts;
+      assert.deepEqual(attempts.map(a => a.state), ['unconfirmed', 'sent']);
+      assert.deepEqual(audits(h.s, 'original.download.intent').map(a => a.detail.attemptId), [attempts[1].attemptId], 'the new attempt has its own intent');
+      assert.deepEqual(resultRows(h, attempts[1].attemptId).map(x => x.detail.state), ['sent'], 'and its own result');
+    }
+  }
+  // The result row cannot be written: the attempt stays as committed (sending), no path reports it closed, no new attempt.
+  const h = await harness();
+  const study = await downloadStudy(h, 1), id = randomUUID();
+  assert.equal((await prepare(h, study, id)).status, 200);
+  expiredAttempt(h, id);
+  h.s.auditFailure = data => data.action === 'original.download.result';
+  const status = await h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: RAD });
+  assert.deepEqual([status.status, status.body.state], [200, 'sending'], 'never shown closed without its result row');
+  assert.equal(await h.transfer.expireDownloads(), 0);
+  const archive = await h.request('GET', archivePath(study, id), { as: RAD });
+  assert.deepEqual([archive.status, archive.body.code], [503, 'IMPORT_STORAGE_UNAVAILABLE']);
+  assert.deepEqual([h.s.op(id).download.attempts.map(a => a.state), audits(h.s, 'original.download.intent').length], [['sending'], 0]);
+  h.s.auditFailure = null;
+  assert.equal(await h.transfer.expireDownloads(), 1);
+  assert.equal(h.s.op(id).status, 'unconfirmed');
 });

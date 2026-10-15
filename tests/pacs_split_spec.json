@@ -8247,7 +8247,8 @@
         "params": [
           "PrismaService",
           "DicomImportGateService",
-          "StudyAccessService"
+          "StudyAccessService",
+          "AuthService"
         ],
         "scope": null,
         "declared": [],

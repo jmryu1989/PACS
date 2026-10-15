@@ -171,6 +171,157 @@ const iso = (at: Date) => at.toISOString();
 const later = (at: Date, ms: number) => new Date(at.getTime() + ms).toISOString();
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 const FINAL_OUTCOMES = new Set(['stored', 'already-present', 'rejected']);
+
+// ── the persisted formats (contract 4.4, 5.2): every stored row and JSON value is checked before its first use ──
+
+/**
+ * A stored ImportOperation row or JSON value that is not exactly the persisted format. It is never used and never rebuilt
+ * or overwritten: an import or a reservation answers 503 IMPORT_STORAGE_UNAVAILABLE with no Orthanc write, a download
+ * 503 MANIFEST_STORE_INVALID with no byte.
+ */
+export class StoredFormatError extends Error {
+  constructor(readonly what: string) { super('stored ImportOperation format: ' + what); }
+}
+
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
+const HEX32 = /^[0-9a-f]{32}$/;
+const UTC_TEXT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+
+/**
+ * The instant of a UTC ISO-8601 text whose calendar fields exist as written (2026-02-30 is refused, never rolled over to
+ * March the way Date.parse does); null otherwise.
+ */
+export function utcInstant(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const m = UTC_TEXT.exec(value);
+  if (!m) return null;
+  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  const at = Date.UTC(year, month - 1, day, hour, minute, second, m[7] ? Number(m[7].padEnd(3, '0')) : 0);
+  const back = new Date(at);
+  return back.getUTCFullYear() === year && back.getUTCMonth() === month - 1 && back.getUTCDate() === day ? at : null;
+}
+
+/** A time the server itself stored (Date.toISOString): a real UTC instant in exactly that form. */
+export const storedTime = (value: unknown): value is string => {
+  const at = utcInstant(value);
+  return at !== null && new Date(at).toISOString() === value;
+};
+
+export const plainRecord = (value: unknown): value is Record<string, any> =>
+  !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+
+/** Exactly these keys: a missing key, an extra key or a non-plain value is a format violation. */
+export function exactKeys(value: unknown, keys: readonly string[]): value is Record<string, any> {
+  if (!plainRecord(value)) return false;
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+const text = (value: unknown, max = 1024): value is string => typeof value === 'string' && value.length > 0 && value.length <= max;
+const uidText = (value: unknown): value is string => typeof value === 'string' && value.length <= 64 && UID.test(value);
+const count = (value: unknown, max: number): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= max;
+const oneOf = <T extends string>(value: unknown, allowed: readonly T[]): value is T => typeof value === 'string' && (allowed as readonly string[]).includes(value);
+const OUTCOMES = ['stored', 'already-present', 'rejected', 'retryable', 'unconfirmed'] as const;
+const PHASES = ['prepared', 'dispatching', 'finished', 'unknown'] as const;
+const ENTRY_KEYS = ['index', 'sha256', 'bytes', 'studyUid', 'seriesUid', 'sopUid', 'expectedStudyUid', 'outcome', 'code', 'identity',
+  'writeDisposition', 'at', 'attempts'];
+const ATTEMPT_KEYS = ['attemptId', 'actor', 'generation', 'ownerInstance', 'phase', 'leaseUntil', 'startedAt', 'finishedAt', 'outcome', 'code',
+  'transport', 'autoRecheckedAt', 'recovery'];
+const RECOVERY_KEYS = ['basis', 'checkedAt', 'adminIssuer', 'adminSubject', 'adminActor', 'requestedAt', 'resolvedAt'];
+const STUDY_CLAIM_KEYS = ['schemaVersion', 'phase', 'institutionId', 'studyUid', 'patientId', 'issuerInstitutionId', 'nameKey', 'birthKey',
+  'sexKey', 'heldByAttemptId', 'createdAt'];
+const SOP_CLAIM_KEYS = ['schemaVersion', 'institutionId', 'studyUid', 'seriesUid', 'sopUid', 'patientId', 'issuerInstitutionId', 'sha256',
+  'bytes', 'heldByAttemptId', 'createdAt'];
+
+/** An outcome with its code: no code exactly for stored/already-present, otherwise a table code of that outcome (4.8). */
+function outcomeWithCode(outcome: unknown, code: unknown): boolean {
+  if (!oneOf(outcome, OUTCOMES)) return false;
+  if (outcome === 'stored' || outcome === 'already-present') return code === null;
+  return typeof code === 'string' && Object.prototype.hasOwnProperty.call(IMPORT_RESULT_CODES, code)
+    && IMPORT_RESULT_CODES[code as ImportCode].outcome === outcome;
+}
+
+function checkAttempt(a: unknown, generation: number, last: boolean): a is ImportAttempt {
+  if (!exactKeys(a, ATTEMPT_KEYS)) return false;
+  if (!(typeof a.attemptId === 'string' && UUID_TEXT.test(a.attemptId)) || !text(a.actor, 256) || a.generation !== generation
+      || !(typeof a.ownerInstance === 'string' && UUID_TEXT.test(a.ownerInstance)) || !oneOf(a.phase, PHASES)
+      || !storedTime(a.leaseUntil) || !storedTime(a.startedAt) || !(a.finishedAt === null || storedTime(a.finishedAt))
+      || !outcomeWithCode(a.outcome, a.code) || !(a.transport === null || oneOf(a.transport, ['certain-no-write', 'unknown']))
+      || !(a.autoRecheckedAt === null || storedTime(a.autoRecheckedAt))) return false;
+  // prepared/dispatching are still running (no end); finished and unknown ended; only the last attempt may still run.
+  if ((a.phase === 'prepared' || a.phase === 'dispatching') !== (a.finishedAt === null)) return false;
+  if (!last && a.phase !== 'finished') return false;
+  if ((a.phase === 'finished') === (a.outcome === 'unconfirmed')) return false;
+  if (a.recovery !== null) {
+    const r = a.recovery;
+    if (!exactKeys(r, RECOVERY_KEYS) || !oneOf(r.basis, RECOVERY_BASES) || utcInstant(r.checkedAt) === null || !text(r.adminIssuer)
+        || !text(r.adminSubject, 256) || !text(r.adminActor, 256) || !storedTime(r.requestedAt) || !(r.resolvedAt === null || storedTime(r.resolvedAt)))
+      return false;
+  }
+  return true;
+}
+
+function checkEntry(e: unknown, seen: { indexes: Set<number>; attempts: Set<string> }): e is ImportFileEntry {
+  if (!exactKeys(e, ENTRY_KEYS)) return false;
+  if (!count(e.index, IMPORT_FILE_SLOTS - 1) || seen.indexes.has(e.index) || !(typeof e.sha256 === 'string' && HEX64.test(e.sha256))
+      || !count(e.bytes, IMPORT_OBJECT_LIMIT) || !(e.expectedStudyUid === null || uidText(e.expectedStudyUid))
+      || !outcomeWithCode(e.outcome, e.code) || !(e.identity === null || oneOf(e.identity, ['new-study', 'matched', 'not_comparable']))
+      || !(e.writeDisposition === null || oneOf(e.writeDisposition, ['pre-write', 'may-have-written']))
+      || (e.writeDisposition === 'may-have-written' && e.outcome !== 'rejected') || !storedTime(e.at) || !Array.isArray(e.attempts))
+    return false;
+  seen.indexes.add(e.index);
+  // The three UIDs are known together (a file the reader accepted) or not at all (a file it refused).
+  const uids = [e.studyUid, e.seriesUid, e.sopUid];
+  if (!(uids.every(uid => uid === null) || uids.every(uidText))) return false;
+  if (e.studyUid === null && e.attempts.length) return false;
+  for (const [i, a] of e.attempts.entries()) {
+    if (!checkAttempt(a, i + 1, i === e.attempts.length - 1) || seen.attempts.has(a.attemptId)) return false;
+    seen.attempts.add(a.attemptId);
+  }
+  const last = e.attempts.length ? e.attempts[e.attempts.length - 1] : null;
+  // A file is Unconfirmed exactly while its last attempt has no result of its own.
+  return (e.outcome === 'unconfirmed') === (!!last && last.phase !== 'finished')
+    && (e.outcome !== 'unconfirmed' || last!.outcome === 'unconfirmed');
+}
+
+/** A member import row (4.4 table): owner, closed columns, every file entry and attempt; status follows the entries. */
+export function checkImportRow(row: any): any {
+  const seen = { indexes: new Set<number>(), attempts: new Set<string>() };
+  const ok = !!row && row.kind === 'import' && text(row.institutionId, 256) && text(row.ownerIssuer) && text(row.ownerSubject, 256)
+    && text(row.actor, 256) && row.studyUid === null && oneOf(row.status, ['open', 'settled']) && Array.isArray(row.results)
+    && row.results.length <= IMPORT_FILE_SLOTS && row.manifestSha256 === null && row.download === null && row.claimKey === null && row.claim === null
+    && row.results.every((e: unknown) => checkEntry(e, seen))
+    && row.status === (row.results.every((e: ImportFileEntry) => FINAL_OUTCOMES.has(e.outcome)) ? 'settled' : 'open');
+  if (!ok) throw new StoredFormatError('import ' + (row?.id ?? '?'));
+  return row;
+}
+
+/** A gate reservation row (4.4 claim JSON): the internal owner, the exact key of its UID and the closed claim object. */
+export function checkClaimRow(row: any): any {
+  const claim = row?.claim;
+  const owner = !!row && row.ownerIssuer === INTERNAL.ownerIssuer && row.ownerSubject === INTERNAL.ownerSubject && row.actor === INTERNAL.actor
+    && text(row.institutionId, 256) && row.status === 'reserved' && Array.isArray(row.results) && row.results.length === 0
+    && row.manifestSha256 === null && row.download === null && uidText(row.studyUid);
+  let ok = false;
+  if (owner && row.kind === 'study-claim' && exactKeys(claim, STUDY_CLAIM_KEYS)) {
+    const values = [claim.patientId, claim.issuerInstitutionId, claim.nameKey, claim.birthKey, claim.sexKey];
+    ok = claim.schemaVersion === 1 && row.claimKey === studyKey(row.studyUid) && claim.studyUid === row.studyUid
+      && claim.institutionId === row.institutionId && storedTime(claim.createdAt)
+      && (claim.heldByAttemptId === null || (typeof claim.heldByAttemptId === 'string' && UUID_TEXT.test(claim.heldByAttemptId)))
+      && (claim.phase === 'initializing' ? values.every(v => v === null)
+        : claim.phase === 'bound' && text(claim.patientId, 256) && text(claim.issuerInstitutionId, 256)
+          && [claim.nameKey, claim.birthKey, claim.sexKey].every(v => v === null || text(v, 1024)));
+  } else if (owner && row.kind === 'sop-claim' && exactKeys(claim, SOP_CLAIM_KEYS)) {
+    ok = claim.schemaVersion === 1 && uidText(claim.sopUid) && row.claimKey === sopKey(claim.sopUid) && claim.studyUid === row.studyUid
+      && uidText(claim.seriesUid) && claim.institutionId === row.institutionId && text(claim.patientId, 256) && text(claim.issuerInstitutionId, 256)
+      && typeof claim.sha256 === 'string' && HEX64.test(claim.sha256) && count(claim.bytes, IMPORT_OBJECT_LIMIT) && storedTime(claim.createdAt)
+      && (claim.heldByAttemptId === null || (typeof claim.heldByAttemptId === 'string' && UUID_TEXT.test(claim.heldByAttemptId)));
+  }
+  if (!ok) throw new StoredFormatError('claim ' + (row?.claimKey ?? row?.id ?? '?'));
+  return row;
+}
 /** The signed 64-bit advisory key of a claim text; a hash collision only serialises two keys, the exact text is re-read. */
 const advisory = (key: string) => createHash('sha256').update(key, 'utf8').digest().readBigInt64BE(0).toString();
 const lastAttempt = (entry: ImportFileEntry): ImportAttempt | null => entry.attempts.length ? entry.attempts[entry.attempts.length - 1] : null;
@@ -380,9 +531,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   /** The intake transaction: claims (sorted) then the operation row; the reservation and the intent commit together. */
   private intake(r: ImportRequest, enumeration: { failed: boolean; count: number } | null): Promise<Step> {
     const file = r.precheck;
-    return this.write(async (tx, now) => {
+    return this.write(async tx => {
       const claims = file.ok ? await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]) : new Map<string, ClaimRow>();
       const op = await this.lockOperation(tx, r.operationId);
+      const now = await this.clock(tx);
       if (op && !this.sameOwner(op, r.owner, 'import')) throw this.requestConflict('OPERATION_CONFLICT');
       const results: ImportFileEntry[] = op ? clone(op.results) : [];
       let entry = results.find(e => e.index === r.index) ?? null;
@@ -442,7 +594,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       } else {
         const holder = study.claim.heldByAttemptId;
         if (holder) {
-          const blocking = await this.holderBlocks(tx, holder, now);
+          const blocking = await this.holderBlocks(tx, study, now);
           if (blocking === 'expired') return { kind: 'fence', attemptId: holder };
           if (blocking) return refuse('STUDY_WRITE_PENDING');
         }
@@ -457,7 +609,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         if (!sameSopContent(sop.claim, file, r.sha256, r.bytes.length, r.owner.institutionId)) return refuse('SOP_CONTENT_CONFLICT', 'pre-write');
         const holder = sop.claim.heldByAttemptId;
         if (holder) {
-          const blocking = await this.holderBlocks(tx, holder, now);
+          const blocking = await this.holderBlocks(tx, sop, now);
           if (blocking === 'expired') return { kind: 'fence', attemptId: holder };
           if (blocking) return refuse('SOP_WRITE_PENDING');
         }
@@ -500,9 +652,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     let verdict: InitVerdict;
     try { verdict = await this.readExistingStudy(file.studyUid, r.owner.institutionId, lease.signal); }
     finally { lease.stop(); }
-    return this.storage(() => this.write(async (tx, now) => {
+    return this.storage(() => this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
+      const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
       const entry = results.find(e => e.index === r.index);
       const mine = entry?.attempts.find(a => a.attemptId === attempt.attemptId);
@@ -596,9 +749,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     const file = r.precheck as AcceptedFile;
     const reading = await this.readSop(file, r.bytes.length, r.sha256, null);
     if (reading.kind === 'failed') return this.current(r);
-    return this.storage(() => this.write(async (tx, now) => {
+    return this.storage(() => this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
+      const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
       const entry = results.find(e => e.index === r.index);
       const mine = entry && lastAttempt(entry);
@@ -620,9 +774,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   private finish(r: ImportRequest, attempt: ImportAttempt, change: { outcome: ImportOutcome; code: ImportCode | null;
     transport: ImportAttempt['transport']; disposition: WriteDisposition | null; release: boolean; from: string[]; phase?: 'unknown' }): Promise<ImportAnswer> {
     const file = r.precheck as AcceptedFile;
-    return this.write(async (tx, now) => {
+    return this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
+      const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
       const entry = results.find(e => e.index === r.index);
       const mine = entry && lastAttempt(entry);
@@ -650,7 +805,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async current(r: ImportRequest): Promise<ImportAnswer> {
-    const op = await this.prisma.importOperation.findUnique({ where: { id: r.operationId } });
+    const op = await this.storage(async () => {
+      const row = await this.prisma.importOperation.findUnique({ where: { id: r.operationId } });
+      return row ? checkImportRow(row) : null;
+    });
     const entry = (op?.results as any[] ?? []).find((e: any) => e.index === r.index);
     if (!entry) throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: IMPORT_STORAGE_MESSAGE });
     return fileAnswer(entry);
@@ -659,9 +817,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   /** prepared -> dispatching under the claim -> operation locks, only while this attempt still holds a live lease. */
   private markDispatching(r: ImportRequest, attempt: ImportAttempt): Promise<boolean> {
     const file = r.precheck as AcceptedFile;
-    return this.write(async (tx, now) => {
+    return this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
+      const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(op.results);
       const entry = results.find(e => e.index === r.index);
       const mine = entry && lastAttempt(entry);
@@ -674,17 +833,27 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  /** A Study/SOP holder blocks unless it is a prepared attempt whose lease ran out (that one is fenced first). */
-  private async holderBlocks(tx: Tx, attemptId: string, now: Date): Promise<boolean | 'expired'> {
-    const found = await this.findAttempt(tx, attemptId);
-    if (!found) return true;
+  /**
+   * A Study/SOP holder blocks unless it is a prepared attempt whose lease ran out (that one is fenced first). The holder
+   * must be an attempt of a file of this very claim (its Study, and for a SOP claim its SOP): anything else is a stored
+   * relation that the gate did not write and never repairs. An initializing Study claim whose attempt is gone is the
+   * startup pass's to remove (nothing was written for it); until then it blocks like any other holder.
+   */
+  private async holderBlocks(tx: Tx, row: NonNullable<ClaimRow>, now: Date): Promise<boolean | 'expired'> {
+    const found = await this.findAttempt(tx, row.claim.heldByAttemptId);
+    if (!found) {
+      if (row.kind === 'study-claim' && row.claim.phase === 'initializing') return true;
+      throw new StoredFormatError('claim holder of ' + row.claimKey);
+    }
+    if (found.entry.studyUid !== row.studyUid || (row.kind === 'sop-claim' && found.entry.sopUid !== row.claim.sopUid))
+      throw new StoredFormatError('claim holder of ' + row.claimKey);
     return expiredPrepared(found.attempt, now) ? 'expired' : true;
   }
 
   private async findAttempt(db: Tx, attemptId: string): Promise<{ opId: string; entry: ImportFileEntry; attempt: ImportAttempt } | null> {
     const probe = JSON.stringify([{ attempts: [{ attemptId }] }]);
-    const rows: any[] = await db.$queryRaw`SELECT id, results FROM "ImportOperation" WHERE kind = 'import' AND results @> ${probe}::jsonb`;
-    for (const row of rows) for (const entry of row.results as ImportFileEntry[]) {
+    const rows: any[] = await db.$queryRaw`SELECT * FROM "ImportOperation" WHERE kind = 'import' AND results @> ${probe}::jsonb`;
+    for (const row of rows) for (const entry of checkImportRow(row).results as ImportFileEntry[]) {
       const attempt = entry.attempts.find(a => a.attemptId === attemptId);
       if (attempt) return { opId: row.id, entry, attempt };
     }
@@ -699,9 +868,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     const seen = await this.findAttempt(this.prisma, attemptId);
     if (!seen) return;
     const keys = [seen.entry.studyUid && studyKey(seen.entry.studyUid), seen.entry.sopUid && sopKey(seen.entry.sopUid)].filter(Boolean) as string[];
-    await this.write(async (tx, now) => {
+    await this.write(async tx => {
       const claims = await this.lockClaims(tx, keys);
       const op = await this.lockOperation(tx, seen.opId);
+      const now = await this.clock(tx);
       if (!op) return;
       const results: ImportFileEntry[] = clone(op.results);
       const entry = results.find(e => e.index === seen.entry.index);
@@ -774,14 +944,15 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
 
   /** GET /api/dicom-import/:id: the owner's own import operation only; read-only reconciliation of unknown attempts. */
   async importStatus(owner: ImportOwner, operationId: string, orthanc: boolean) {
-    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+    const op = await this.storage(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }));
     if (!op || !this.sameOwner(op, owner, 'import')) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
-    const now = await this.dbNow(this.prisma);
+    await this.storage(async () => checkImportRow(op));
+    const now = await this.storage(() => this.dbNow());
     for (const entry of op.results as any as ImportFileEntry[]) {
       const last = lastAttempt(entry);
       if (entry.outcome === 'unconfirmed' && last && unknownResult(last, now)) await this.reconcileUnknown(op.id, entry.index, last.attemptId, orthanc);
     }
-    const fresh = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
+    const fresh = await this.storage(async () => checkImportRow(await this.prisma.importOperation.findUnique({ where: { id: operationId } })));
     return { operationId, status: fresh.status, files: (fresh.results as any as ImportFileEntry[]).map(entry => this.publicFile(entry)) };
   }
 
@@ -802,8 +973,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
    * its unconfirmed result row. Never a resend, never a release on absence.
    */
   private async reconcileUnknown(operationId: string, index: number, attemptId: string, orthanc: boolean): Promise<void> {
-    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
-    const seen = (op?.results as any as ImportFileEntry[] ?? []).find(e => e.index === index);
+    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } }).catch(() => null);
+    if (!op) return;
+    try { checkImportRow(op); } catch { return; }
+    const seen = (op.results as any as ImportFileEntry[]).find(e => e.index === index);
     if (!seen || !seen.studyUid || !seen.sopUid) return;
     const file = { studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid } as AcceptedFile;
     let reading: SopReading = { kind: 'failed' };
@@ -812,9 +985,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       const claim: any = sop?.claim;
       if (claim && claim.sha256 === seen.sha256) reading = await this.readSop({ ...file, patientId: claim.patientId } as AcceptedFile, seen.bytes, seen.sha256, null);
     }
-    await this.write(async (tx, now) => {
+    await this.write(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(seen.studyUid), sopKey(seen.sopUid)]);
       const locked = await this.lockOperation(tx, operationId);
+      const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(locked.results);
       const entry = results.find(e => e.index === index);
       const mine = entry && lastAttempt(entry);
@@ -833,11 +1007,11 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Startup (4.4 "복원·maintenance"): 500-row cursor batches. Inactive prepared -> IMPORT_ATTEMPT_EXPIRED; dispatching/unknown ->
-   * read-only reconciliation; an initializing claim without a live holder is deleted (no write happened); an expired
-   * download sending attempt -> unconfirmed. Another instance's live lease is never taken.
+   * read-only reconciliation; an initializing claim without a live holder is deleted (no write happened). Another
+   * instance's live lease is never taken. (Expired download attempts are the download service's own startup pass.)
    */
-  async reconcileOnStart(): Promise<{ fenced: number; reconciled: number; claimsRemoved: number; downloads: number }> {
-    const counts = { fenced: 0, reconciled: 0, claimsRemoved: 0, downloads: 0 };
+  async reconcileOnStart(): Promise<{ fenced: number; reconciled: number; claimsRemoved: number }> {
+    const counts = { fenced: 0, reconciled: 0, claimsRemoved: 0 };
     if (!await this.migrationApplied()) return counts;
     const orthanc = await this.orthancAnswering();
     let cursor: string | null = null;
@@ -845,7 +1019,9 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       const page: any[] = await this.prisma.importOperation.findMany({ where: { kind: 'import', status: 'open', ...(cursor ? { id: { gt: cursor } } : {}) },
         orderBy: { id: 'asc' }, take: 500 });
       for (const op of page) {
-        const now = await this.dbNow(this.prisma);
+        // A row that is not its persisted format is left exactly as it is (never rebuilt); a request on it answers 503.
+        try { checkImportRow(op); } catch { this.logger.warn('import reconciliation: a stored row is not in its format; left as it is'); continue; }
+        const now = await this.dbNow();
         for (const entry of op.results as ImportFileEntry[]) {
           const last = lastAttempt(entry);
           if (entry.outcome !== 'unconfirmed' || !last) continue;
@@ -876,36 +1052,9 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       if (page.length < 500 || this.stopping) break;
       cursor = page[page.length - 1].id;
     }
-    counts.downloads = await this.expireDownloads();
-    if (counts.fenced || counts.reconciled || counts.claimsRemoved || counts.downloads)
-      this.logger.log(`import reconciliation: fenced ${counts.fenced}, reconciled ${counts.reconciled}, claims removed ${counts.claimsRemoved}, downloads ${counts.downloads}`);
+    if (counts.fenced || counts.reconciled || counts.claimsRemoved)
+      this.logger.log(`import reconciliation: fenced ${counts.fenced}, reconciled ${counts.reconciled}, claims removed ${counts.claimsRemoved}`);
     return counts;
-  }
-
-  /** Download attempts whose sending lease ran out become unconfirmed; their checkpoints stay as they were. */
-  async expireDownloads(operationId?: string): Promise<number> {
-    let changed = 0, cursor: string | null = null;
-    for (;;) {
-      const where: any = operationId ? { id: operationId } : { kind: 'download', status: 'sending', ...(cursor ? { id: { gt: cursor } } : {}) };
-      const page: any[] = await this.prisma.importOperation.findMany({ where, orderBy: { id: 'asc' }, take: 500 });
-      for (const row of page) {
-        if (row.kind !== 'download') continue;
-        await this.write(async (tx, now) => {
-          const op = await this.lockOperation(tx, row.id);
-          const download = clone(op.download);
-          let touched = false;
-          for (const attempt of download.attempts) if (attempt.state === 'sending' && Date.parse(attempt.leaseUntil) <= now.getTime()) {
-            attempt.state = 'unconfirmed'; attempt.endedAt = iso(now); touched = true;
-          }
-          if (!touched) return;
-          await tx.importOperation.update({ where: { id: op.id }, data: { download, status: downloadStatus(download), updatedAt: now } });
-          changed++;
-        }).catch(() => undefined);
-      }
-      if (operationId || page.length < 500 || this.stopping) break;
-      cursor = page[page.length - 1].id;
-    }
-    return changed;
   }
 
   /**
@@ -913,16 +1062,18 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
    * then the Orthanc re-read, then the result with its audits. The admin route never writes to or deletes from Orthanc.
    */
   async recover(admin: ImportOwner, operationId: string, index: number, body: unknown) {
-    const op = await this.prisma.importOperation.findUnique({ where: { id: operationId } });
-    const seen = op && op.kind === 'import' && op.institutionId === admin.institutionId
-      ? (op.results as any as ImportFileEntry[]).find(e => e.index === index) : null;
+    const op = await this.storage(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }));
+    const mineToSee = !!op && op.kind === 'import' && op.institutionId === admin.institutionId;
+    if (mineToSee) await this.storage(async () => checkImportRow(op));
+    const seen = mineToSee ? (op.results as any as ImportFileEntry[]).find(e => e.index === index) : null;
     if (!seen) throw new NotFoundException('반입 작업을 찾을 수 없습니다');
     const evidence = parseRecoveryBody(body);
     if (!evidence) throw new HttpException({ code: 'RECOVERY_EVIDENCE_INVALID', message: RECOVERY_NOTICES.evidence }, 400);
     const keys = [seen.studyUid && studyKey(seen.studyUid), seen.sopUid && sopKey(seen.sopUid)].filter(Boolean) as string[];
-    const requested = await this.storage(() => this.write(async (tx, now) => {
+    const requested = await this.storage(() => this.write(async tx => {
       const claims = await this.lockClaims(tx, keys);
       const locked = await this.lockOperation(tx, operationId);
+      const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(locked.results);
       const entry = results.find(e => e.index === index);
       const mine = entry && lastAttempt(entry);
@@ -930,7 +1081,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       const unknown = !!mine && entry.outcome === 'unconfirmed' && unknownResult(mine, now);
       const occupied = !!mine && entry.outcome === 'rejected' && entry.writeDisposition === 'may-have-written' && holds;
       if (!unknown && !occupied) throw new HttpException({ code: 'RECOVERY_NOT_APPLICABLE', message: RECOVERY_NOTICES.notApplicable }, 409);
-      const checkedAt = Date.parse(evidence.checkedAt);
+      const checkedAt = utcInstant(evidence.checkedAt)!;
       if (checkedAt < Date.parse(mine.startedAt) || checkedAt > now.getTime())
         throw new HttpException({ code: 'RECOVERY_EVIDENCE_INVALID', message: RECOVERY_NOTICES.evidence }, 400);
       mine.recovery = { basis: evidence.basis, checkedAt: evidence.checkedAt, adminIssuer: admin.ownerIssuer, adminSubject: admin.ownerSubject,
@@ -949,9 +1100,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         requested.bytes, requested.sha256, null);
       if (reading.kind === 'failed') throw new ServiceUnavailableException({ code: 'ORTHANC_UNAVAILABLE', message: RECOVERY_NOTICES.orthanc });
     }
-    return this.storage(() => this.write(async (tx, now) => {
+    return this.storage(() => this.write(async tx => {
       const claims = await this.lockClaims(tx, keys);
       const locked = await this.lockOperation(tx, operationId);
+      const now = await this.clock(tx);
       const results: ImportFileEntry[] = clone(locked.results);
       const entry = results.find(e => e.index === index);
       const mine = entry && lastAttempt(entry);
@@ -1123,31 +1275,40 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
 
   // ── locks and transactions ──
 
+  /** The claim rows of these keys (sorted; advisory lock, then the row), each checked against its persisted format. */
   private async lockClaims(tx: Tx, keys: string[]): Promise<Map<string, ClaimRow>> {
     const rows = new Map<string, ClaimRow>();
     for (const key of [...new Set(keys)].sort()) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${advisory(key)}::bigint)`;
       const found: any[] = await tx.$queryRaw`SELECT * FROM "ImportOperation" WHERE "claimKey" = ${key} FOR UPDATE`;
-      rows.set(key, found[0] ?? null);
+      rows.set(key, found[0] ? checkClaimRow(found[0]) : null);
     }
     return rows;
   }
 
-  private async lockOperation(tx: Tx, id: string): Promise<any> {
+  /** The operation row, locked after any claim rows; a member import row is checked against its persisted format. */
+  async lockOperation(tx: Tx, id: string): Promise<any> {
     const found: any[] = await tx.$queryRaw`SELECT * FROM "ImportOperation" WHERE id = ${id}::uuid FOR UPDATE`;
-    return found[0] ?? null;
+    const row = found[0] ?? null;
+    return row && row.kind === 'import' ? checkImportRow(row) : row;
   }
 
-  async dbNow(db: Tx): Promise<Date> {
-    const rows: any[] = await db.$queryRaw`SELECT CURRENT_TIMESTAMP AS now`;
+  /**
+   * The database's time now. Read after a transaction's locks are held, so a decision on a lease is made at the moment
+   * the row is ours, never at a transaction start that may lie before a lock wait (contract 4.4: "잠금 취득 후 유효 DB 시각").
+   */
+  async clock(db: Tx): Promise<Date> {
+    const rows: any[] = await db.$queryRaw`SELECT clock_timestamp() AS now`;
     return new Date(rows[0].now);
   }
 
-  /** One short transaction: lock timeout 3 s, the database's own clock, no network inside. */
-  write<T>(work: (tx: Tx, now: Date) => Promise<T>): Promise<T> {
+  dbNow(): Promise<Date> { return this.clock(this.prisma); }
+
+  /** One short transaction: lock timeout 3 s, no network inside; the work reads the clock after taking its locks. */
+  write<T>(work: (tx: Tx) => Promise<T>): Promise<T> {
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-      return work(tx, await this.dbNow(tx));
+      return work(tx);
     }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
   }
 
@@ -1164,8 +1325,9 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   private keepLease(operationId: string, index: number, attemptId: string, phases: string[]) {
     const lost = new AbortController();
     const timer = setInterval(() => {
-      void this.write(async (tx, now) => {
+      void this.write(async tx => {
         const op = await this.lockOperation(tx, operationId);
+        const now = await this.clock(tx);
         const results: ImportFileEntry[] = clone(op.results);
         const entry = results.find(e => e.index === index);
         const mine = entry && lastAttempt(entry);
@@ -1310,11 +1472,18 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     } catch { return null; }
   }
 
+  /**
+   * The stored size and MD5 of one original (5.2 step 2). The size is taken only as Orthanc writes it: a JSON integer (the
+   * 64-bit value of the fixed image) or, should a build print it as text the way /statistics does, the same digits as a
+   * string. Nothing else is coerced: null, a boolean, an empty or signed or fractional value is a malformed answer.
+   */
   async attachmentInfo(id: string): Promise<{ bytes: number; md5: string } | null> {
     try {
       const info = await this.orthancJson('GET', `/instances/${id}/attachments/dicom/info`, undefined, SMALL_LIMIT);
-      const bytes = Number(info?.UncompressedSize);
-      if (!Number.isSafeInteger(bytes) || bytes < 0 || typeof info?.UncompressedMD5 !== 'string' || !/^[0-9a-f]{32}$/i.test(info.UncompressedMD5)) return null;
+      if (!plainRecord(info)) return null;
+      const size = info.UncompressedSize;
+      const bytes = typeof size === 'number' ? size : typeof size === 'string' && /^(?:0|[1-9][0-9]{0,15})$/.test(size) ? Number(size) : NaN;
+      if (!Number.isSafeInteger(bytes) || bytes < 0 || typeof info.UncompressedMD5 !== 'string' || !/^[0-9a-f]{32}$/i.test(info.UncompressedMD5)) return null;
       return { bytes, md5: info.UncompressedMD5.toLowerCase() };
     } catch { return null; }
   }
@@ -1357,18 +1526,12 @@ function pick(h: any) {
   return kept;
 }
 
-/** The closed recovery body {basis, checkedAt}: one of the two bases and a UTC ISO-8601 instant. */
+/**
+ * The closed recovery body {basis, checkedAt}: one of the two bases and a UTC ISO-8601 instant whose calendar date exists
+ * as written (2026-02-30 is refused, never read as 2 March).
+ */
 export function parseRecoveryBody(body: unknown): { basis: string; checkedAt: string } | null {
-  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.getPrototypeOf(body) !== Object.prototype) return null;
-  const value = body as any;
-  if (Object.keys(value).sort().join() !== 'basis,checkedAt') return null;
-  if (!RECOVERY_BASES.includes(value.basis) || typeof value.checkedAt !== 'string') return null;
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value.checkedAt) || Number.isNaN(Date.parse(value.checkedAt))) return null;
-  return { basis: value.basis, checkedAt: value.checkedAt };
-}
-
-/** Contract 5.3: the operation state is the state of its newest attempt, or prepared before any. */
-export function downloadStatus(download: any): string {
-  const attempts = Array.isArray(download?.attempts) ? download.attempts : [];
-  return attempts.length ? attempts[attempts.length - 1].state : 'prepared';
+  if (!exactKeys(body, ['basis', 'checkedAt'])) return null;
+  if (!RECOVERY_BASES.includes(body.basis) || utcInstant(body.checkedAt) === null) return null;
+  return { basis: body.basis, checkedAt: body.checkedAt };
 }
