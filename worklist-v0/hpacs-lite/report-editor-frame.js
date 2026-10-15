@@ -79,24 +79,27 @@
       // 숫자 위치는 브라우저가 소유하고 여기서는 사람이 이 칸을 사용했는지만 기억한다. 같은 검사의
       // 경계에서 글이 같은 칸은 이 표시가 선택과 함께 옮겨 가고, 다른 검사나 바뀐 글에서는 지워진다.
       const caret = () => { if (!writing) s.caret = true; };
-      // A field hidden from the person never keeps keyboard focus outside this frame's own writes. Native
-      // Undo/Redo of its step moves focus into it, and the next keystrokes would change text no one sees.
+      // A field hidden from the person has no way in for the keyboard (no tab stop, off screen), but the document-wide
+      // native Undo/Redo moves focus into it when it undoes or redoes a step of that field. Focus then goes back where
+      // it came from (or nowhere): the next keystrokes must never change text no one sees.
+      let from = null;
       const away = event => {
-        if (writing || !hidden(s.el)) return;
-        const from = event.relatedTarget;
+        if (writing) return;
+        if (event.type === 'focus') { from = event.relatedTarget; return; }
+        if (!hidden(s.el) || doc.activeElement !== s.el || !event.inputType?.startsWith('history')) return;
         if (from?.isConnected && !hidden(from)) from.focus({ preventScroll: true });
         if (doc.activeElement === s.el) s.el.blur();
       };
       s.el.addEventListener('compositionstart', start);
       s.el.addEventListener('compositionend', end);
       s.el.addEventListener('input', input);
-      s.el.addEventListener('focus', away);
+      for (const event of ['focus', 'input']) s.el.addEventListener(event, away);
       for (const event of ['focus', 'pointerdown', 'keydown', 'input']) s.el.addEventListener(event, caret);
       s.unbind = () => {
         s.el.removeEventListener('compositionstart', start);
         s.el.removeEventListener('compositionend', end);
         s.el.removeEventListener('input', input);
-        s.el.removeEventListener('focus', away);
+        for (const event of ['focus', 'input']) s.el.removeEventListener(event, away);
         for (const event of ['focus', 'pointerdown', 'keydown', 'input']) s.el.removeEventListener(event, caret);
       };
     }

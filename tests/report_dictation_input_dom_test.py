@@ -537,32 +537,25 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         per-character `Input.insertText`: path 1 is 'typed without an IME', not 'key events'.
         `keyboard.insert_text` is the same CDP call in one chunk. So what this case really measures
         is the **composition** path against direct insertion - which is the comparison that matters:
-        a composition must end exactly where plain insertion ends.
-
-        W6 keeps Recommendation off screen and never lets it keep keyboard focus (W6R1-02), so no reader path
-        reaches it: the third path writes the visible Findings again, over the typed text, and the hidden field
-        stays empty."""
+        a composition must end exactly where plain insertion ends."""
         self.need_composition("DI-02")
         self.open(fields=("", "", ""))
         self.place("findings", 0)
         self.page.keyboard.type(COMPOSED)
-        typed = self.snap()["text"][0]
         self.place("conclusion", 0)
         self.compose("#conclusion", STEPS, COMPOSED)
-        self.page.focus("#recommendation")
-        self.assertNotEqual("recommendation", self.snap()["focused"], "the hidden field keeps no focus")
-        self.place("findings", 0)
-        self.page.keyboard.press("Control+a")
+        self.place("recommendation", 0)
         self.page.keyboard.insert_text(COMPOSED)
         value = self.snap()
-        self.assertEqual(COMPOSED, typed, "typed without an IME")
-        self.assertEqual([COMPOSED, COMPOSED, ""], value["text"], "all three paths must store the same bytes")
-        self.assertEqual([[len(COMPOSED)] * 2] * 2, [value["caret"][k] for k in ("findings", "conclusion")])
-        self.assertEqual([[len(COMPOSED)] * 2] * 2, [value["insertionRange"][k] for k in ("findings", "conclusion")])
+        self.assertEqual([COMPOSED] * 3, value["text"], "all three paths must store the same bytes")
+        self.assertEqual([[len(COMPOSED)] * 2] * 3, [value["caret"][k] for k in
+                                                     ("findings", "conclusion", "recommendation")])
+        self.assertEqual([[len(COMPOSED)] * 2] * 3, [value["insertionRange"][k] for k in
+                                      ("findings", "conclusion", "recommendation")])
         self.page.evaluate("stash()")
         self.page.wait_for_function("()=>calls.length>=1")
         body = self.puts()[-1]["body"]
-        self.assertEqual([COMPOSED, COMPOSED, ""], [body["findings"], body["conclusion"], body["recommendation"]],
+        self.assertEqual([COMPOSED] * 3, [body["findings"], body["conclusion"], body["recommendation"]],
                          "and the draft must carry the same bytes from every path")
 
     # ── DI-03 ──────────────────────────────────────────────────────────────────────────────

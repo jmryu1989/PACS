@@ -936,8 +936,8 @@ class ReportEditorFrameDOM(unittest.TestCase):
 
     def test_write_returns_focus_and_a_hidden_field_never_keeps_it(self):
         """W6R1-02: a write focuses its fields only for the native edit and gives focus back where it was; where that
-        cannot take focus (the page itself), no field keeps it. A field hidden from the person (aria-hidden) never keeps
-        focus outside the frame's own writes, although the document-wide native Undo/Redo steps through its edits."""
+        cannot take focus (the page itself), no field keeps it. The document-wide native Undo/Redo steps through a field
+        hidden from the person (aria-hidden) and would leave focus there; focus goes back where it came from."""
         self.page.evaluate("document.getElementById('recommendation').setAttribute('aria-hidden', 'true')")
         self.type("A")
         self.page.evaluate("document.activeElement.blur()")
@@ -958,8 +958,8 @@ class ReportEditorFrameDOM(unittest.TestCase):
             hidden.add(self.read()["recommendation"])
             self.assertNotEqual(self.active(), "recommendation", key)
         self.assertEqual(hidden, {"", "T-recommendation", "T-recommendationY"})
-        self.page.evaluate("document.getElementById('recommendation').focus()")
-        self.assertNotEqual(self.active(), "recommendation", "programmatic focus")
+        self.page.keyboard.type("Q")
+        self.assertNotIn("Q", self.read()["recommendation"])
 
     def test_is_current_follows_the_opening_and_edits_not_the_moment(self):
         """W6R1-04: a request is current while its opening stands and its field has had no edit since it was taken
@@ -1945,7 +1945,8 @@ MUTANTS = [
     # Round 2 (W6R1-02/04): the module contracts of the page fixes.
     ("M40-write-keeps-focus-W6R1-02", "if (now !== target && Object.values(states).some(s => s.el === now)) now.blur();",
      "// Leave focus in the last field written.", ["test_write_returns_focus_and_a_hidden_field_never_keeps_it"]),
-    ("M41-hidden-field-keeps-focus-W6R1-02", "if (writing || !hidden(s.el)) return;", "return;",
+    ("M41-hidden-field-keeps-focus-W6R1-02",
+     "if (!hidden(s.el) || doc.activeElement !== s.el || !event.inputType?.startsWith('history')) return;", "return;",
      ["test_write_returns_focus_and_a_hidden_field_never_keeps_it"]),
     ("M42-current-ignores-edits-W6R1-04", "return !['ended', 'stale', 'changed'].includes(blocked(at));",
      "return !['ended', 'stale'].includes(blocked(at));", ["test_is_current_follows_the_opening_and_edits_not_the_moment"]),
@@ -2018,7 +2019,8 @@ PAGE_MUTANTS = [
      'test_page_frame_minimum_on_w3_layouts_with_notices_and_panel'),
     ('W6R1-01-column-scroll', 'main.html', '.report-p { overflow-y: auto; min-width: min-content; }', '.report-p { min-width: min-content; }',
      'test_page_frame_minimum_on_w3_layouts_with_notices_and_panel'),
-    ('W6R1-02-hidden-focus-guard', 'report-editor-frame.js', 'if (writing || !hidden(s.el)) return;', 'return;',
+    ('W6R1-02-hidden-focus-guard', 'report-editor-frame.js',
+     "if (!hidden(s.el) || doc.activeElement !== s.el || !event.inputType?.startsWith('history')) return;", 'return;',
      'test_page_template_double_click_and_native_undo_never_focus_hidden_recommendation'),
     # Round 1's focus return: back to whatever was focused, a hidden field included, and nothing when that fails.
     ('W6R1-02-write-focus-return', 'report-editor-frame.js',
