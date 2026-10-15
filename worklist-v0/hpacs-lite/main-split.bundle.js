@@ -411,14 +411,16 @@
       const a = appState[selectedUid] ?? {};
       return { blocked: !!reportEditorBlock(), uid: selectedUid, selectionSeq,
         baseVersion: reportBaseVersion(selectedUid, a.draft?.baseVersion ?? a.version ?? 0),
-        field: target, value: el.value, caret: caretAt(target) ?? { start: el.value.length, end: el.value.length } };
+        field: target, value: el.value, caret: caretAt(target) ?? { start: el.value.length, end: el.value.length },
+        // The placement caret above and this whole-field replacement ticket are one recording snapshot.
+        capture: reportFrame?.capture(target, { start: 0, end: el.value.length }) ?? null };
     }
     /**
      * Insert 한 번의 쓰기. 세션이 방금 확인한 그 화면인지 여기서 **동기로** 다시 본다 — 확정·다른 삽입이
      * 나가 있는지는 세션이 모르고, 그 사이에 넣은 글은 확정 응답의 다시 그리기가 지운다.
      */
     function dictationInsert(ins) {
-      if (commitInFlight || insertInFlight || dictationBlock()) return false;
+      if (!ins.capture || commitInFlight || insertInFlight || dictationBlock()) return false;
       const live = dictationContext(ins.field);
       if (!live || live.uid !== ins.uid || live.selectionSeq !== ins.selectionSeq ||
           live.baseVersion !== ins.baseVersion || live.value !== ins.expectedValue) return false;
@@ -427,7 +429,12 @@
       const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(ins.text), ins.caret,
                                                 citationGuards(ins.field));
       // 타이핑·상용구처럼 표시를 세우고 점유를 시작하며, 저장은 기존 자동 저장이 한 번 가져간다.
-      return editReport([reportEditOf(ins.field, plan.text, plan.end)]);
+      return editReport([{ field: ins.field, at: ins.capture, text: plan.text, caret: plan.end }]);
+    }
+    // The recording-time capture is also the pin's edit check: typing then Backspace or Undo leaves the same text
+    // but retires the capture. The session then refuses as for an edited field and keeps the transcript to re-pin.
+    function dictationCurrent(capture) {
+      return !!capture && !!reportFrame?.isCurrent(capture);
     }
     function dictationPlacement(pin, text) {
       const el = $("#" + pin.field);
@@ -438,7 +445,7 @@
     const dictation = KinDictation.createController({
       session: KinDictationSession, capture: KinDictationCapture, env: window, apiBase: API,
       readContext: dictationContext, block: dictationBlock, insert: dictationInsert, placement: dictationPlacement,
-      busy: () => commitInFlight || insertInFlight,
+      current: dictationCurrent, busy: () => commitInFlight || insertInFlight,
     });
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
@@ -452,14 +459,14 @@
       },
       closed: () => ($("#b-dictate").disabled ? $("#findings") : $("#b-dictate")).focus(),
     });
-    for (const k of ["findings", "conclusion", "recommendation"]) {
-      const el = $("#" + k);
-      el.addEventListener("focus", () => { dictationField = { field: k, seq: selectionSeq }; });
-      // 위치를 다시 고정하는 몸짓은 **칸 안을 누르는 것**이다. 다시 고정해도 넣지는 않는다.
-      el.addEventListener("mouseup", () => { dictation.fieldClicked(); });
-      // 사람이 고친 글은 새 편집 순번이다 — 그 전에 떠난 편집기 범위의 작업은 이 글 위에 쓰지 않는다.
-      el.addEventListener("input", () => { work.edited(); dictation.redraw(); });
-    }
+    // The target is the field the reader moved into. The editor's own focus for a template, citation or other write,
+    // and a field kept off screen, are not a choice of the reader.
+    onReportField("focus", event => {
+      if (reportFrame?.isWriting() || event.target.getAttribute("aria-hidden") === "true") return;
+      dictationField = { field: event.target.id, seq: selectionSeq };
+    });
+    onReportField("mouseup", () => dictation.fieldClicked());
+    onReportField("input", () => dictation.redraw());
     /**
      * 검토 단계에서 판독의가 읽고 눌러야 할 것(받아쓴 글, 위치를 다시 고를 판독문 칸, Insert)은 보고서 열
      * 폭이 약 420px일 때 모두 Image Findings 서랍 아래에 있다. 그래서 검토에 들어서는 순간 서랍을 한 번
@@ -581,46 +588,40 @@
       return true;
     }
     // 단축어 Tab(아래 등록)이 부르는 편집기의 한 자리다. 분할된 script 사이의 Tab이 미정의를 만나지 않게 등록보다 앞에 둔다(S9-U0a-PRE).
-    /**
-     * 판독문 칸(`#findings`·`#conclusion`·`#recommendation`)의 글을 **이 문서의 코드가** 바꾸는 한 자리.
-     *
-     * 사람의 타건은 input 이벤트가 알리지만 스크립트의 `.value` 대입은 아무것도 알리지 않는다. 대입하는 자리마다 "이 글은
-     * 서버가 아직 모른다"는 표시를 각자 챙기게 두면, 한 자리가 빠지는 순간 그 글은 자동 저장·로그아웃 보존·떠나기 경고
-     * 어디에도 없고 다음 폴링이 서버 글로 덮는다(U5CLI-F09: Paste와 Clear가 그랬다). 그래서 값을 바꾸는 일과 그 기록을
-     * 이 함수 하나가 함께 한다 — 붙여넣기·비우기·상용구·받아쓰기·단축어·인용·구조화가 모두 여기를 지난다. 이 함수 밖에서
-     * 세 칸에 대입하는 곳은 둘뿐이다: 서버의 글을 그리는 `loadReport`와 화면을 닫는 `closeWork`(둘 다 이 문서의 편집이
-     * 아니다).
-     *
-     * `edits`는 `{ field, start, end, text[, caret] }`의 목록이다: 그 칸의 지금 글에서 [start, end)를 text로 바꾸고 커서를
-     * caret(없으면 넣은 글의 끝)에 둔다. 칸·범위·넣을 글로 받는 것은 편집기 경계 모듈(report-editor-frame.js의
-     * capture + insert / insertMany)이 같은 것을 받기 때문이다. 쓸 수 있는가(권한·잠금·그때 그 선택인가)는 부르는 쪽이
-     * 이미 확인했다. 여기서는 업무 중인 문서의 고른 검사일 때만 쓰고, 글이 실제로 바뀌었는지를 돌려준다 — 아무것도 바꾸지
-     * 않은 호출(빈 붙여넣기 등)은 편집이 아니므로 표시도 세우지 않는다.
-     */
+    // All application edits use the frame's native undo transaction. Its input event owns dirty/hold
+    // accounting; this adapter only retains the final multi-field snapshot. Delayed callers pass
+    // their captured request so later input or another opening cannot accept an old insertion.
     function editReport(edits) {
       if (work.state() !== "active" || !selectedUid) return false;
-      const changed = [];
-      for (const { field, start, end, text, caret } of edits) {
-        const el = $("#" + field), was = el.value;
-        if (was.slice(start, end) === text) continue;
-        el.value = was.slice(0, start) + text + was.slice(end);
-        const at = caret ?? start + text.length;
-        el.setSelectionRange(at, at);
-        changed.push(el);
+      const frame = mountReportFrame();
+      if (!frame) return false;
+      if (reportOpening?.uid !== selectedUid || reportOpening?.selectionSeq !== selectionSeq) return false;
+      const changes = edits.map(edit => ({ at: edit.at ?? frame.capture(edit.field, edit), text: edit.text }));
+      // A logout waiting for an accepted server command must let that command reach the editor
+      // before it freezes the save snapshot. Its modal otherwise makes native insertion inert.
+      const waiting = document.querySelector("dialog.kin-logout[open]");
+      const returnFocus = waiting?.contains(document.activeElement) ? document.activeElement : null;
+      if (waiting && !frame.isComposing()) waiting.close();
+      let result;
+      try {
+        result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);
+      } finally {
+        if (waiting?.isConnected && !waiting.open && work.state() === "active") {
+          waiting.showModal();
+          returnFocus?.focus({ preventScroll: true });
+        }
       }
-      if (!changed.length) return false;
-      // 편집기의 글이 바뀌었다 — 그 전에 떠난 편집기 범위의 작업(클립보드 읽기 등)은 이 글 위에 쓰지 않는다.
-      work.edited();
-      recordReportEdit();
-      // 글이 바뀐 뒤에 따라오는 일(점유 시작, 인용 다시 세기, 상용구 단추, 받아쓰기 자리)은 타이핑과 같은 input이 알린다.
-      for (const el of changed) el.dispatchEvent(new Event("input", { bubbles: true }));
+      if (result.status !== "applied") return false;
+      for (const edit of edits) if (edit.caret !== undefined)
+        frame.element(edit.field).setSelectionRange(edit.caret, edit.caret);
+      // Native input already records each edit once. Retain the final multi-field snapshot without another edit turn.
+      keepReportEditor();
       return true;
     }
-    ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
-      $(sel).addEventListener("keydown", e => {
-        if (e.key !== "Tab" || e.shiftKey || e.target.readOnly) return;
-        if (expandShortcut(e.target)) e.preventDefault();
-      }));
+    onReportField("keydown", e => {
+      if (e.key !== "Tab" || e.shiftKey || e.isComposing || e.target.readOnly || reportFrame?.isComposing()) return;
+      if (expandShortcut(e.target)) e.preventDefault();
+    });
 
     /**
      * 상용구 편집. 매뉴얼 7.3.5.1.1대로 목록에서 우클릭해 만든다.
@@ -2096,6 +2097,7 @@
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
       */
       if (uid === selectedUid) return;
+      if (reportFrame?.isComposing()) return;
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);
       // A→B→A로 돌아와도 이전 검사에서 읽던 미리보기의 삽입 버튼은 재사용하지 않는다.
@@ -3964,32 +3966,37 @@
      * 초안을 그렸다면 기준은 그 초안이 딛고 선 판이다. 화면에 있는 글자의 출처가
      * 확정본이 아니라 초안이기 때문이다.
      */
-    /**
-     * S3-U6: **사람이 커서를 둔 적이 있는 칸**의 이름들.
-     *
-     * 커서 자리 자체는 브라우저가 이미 들고 있다 — textarea는 초점을 잃어도 자기
-     * `selectionStart/selectionEnd`를 유지하므로 화면이 사본을 두면 그 사본만 낡는다.
-     * 화면이 기억할 것은 하나뿐이다: **그 칸을 짚은 적이 있는가.** 한 번도 초점을 받지 않은
-     * 칸도 `0`을 답하는데, 그 `0`은 "맨 앞을 가리킨다"가 아니라 "자리가 없다"이기 때문이다.
-     * 그 둘을 구별하지 못하면 커서를 둔 적 없는 칸의 **맨 위**에 문장이 들어간다.
-     *
-     * 잊는 자리는 둘뿐이다 — 검사 선택이 바뀔 때(아래)와 `loadReport`가 그 칸의 값을 실제로
-     * 갈아끼울 때. 그 밖에는 잊지 않는다: 같은 값 재대입은 캐럿을 옮기지 않는다.
-     */
-    const caretFields = new Set();
-    function noteCaret(field) { caretFields.add(field); }
-    function forgetCaret(field) { caretFields.delete(field); }
+    // An untouched field appends a block; an explicitly chosen end position follows line placement.
+    // The frame owns this distinction and retires it when a different study opens.
     function caretAt(field) {
-      if (!caretFields.has(field)) return null;
-      const el = $("#" + field);
-      return el ? { start: el.selectionStart, end: el.selectionEnd } : null;
+      const at = mountReportFrame()?.capture(field);
+      return at?.visited ? { start: at.start, end: at.end } : null;
     }
+    let reportFrame = null;
+    let reportOpening = null;
+    let reportFrameEnded = false;
+    function mountReportFrame() {
+      // Auth may finish after this document has already ended. Never revive its editor.
+      if (reportFrameEnded) return null;
+      if (!reportFrame) reportFrame = KinReportEditorFrame.create({
+        fields: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k)])),
+        host: document.querySelector(".redit"),
+        canEdit: () => work.state() === "active" && !!selectedUid && !reportEditorBlock(),
+      });
+      return reportFrame;
+    }
+    // Delegation follows replacement fields without retaining detached textareas.
+    function onReportField(type, listener) {
+      document.addEventListener(type, event => {
+        if (RFIELDS.includes(event.target?.id) && event.target === $("#" + event.target.id)) listener(event);
+      }, type === "focus");
+    }
+    mountReportFrame();
     function markSelectionChanged(uid) {
       selectedUid = uid;
       // 선택 순번은 이 문서의 관문이 센다 — 검사 범위의 작업 문맥이 같은 값을 본다(A→B→A도 같은 선택이 아니다).
       selectionSeq = work.select(uid);
-      // 커서 자리는 그 검사의 그 글에 대한 것이다. A→B→A도 같은 화면이 아니다.
-      caretFields.clear();
+      // The frame consumes this existing selection sequence at the next report render.
       // 그 검사를 열었다 — 떠나 있는 동안 남겨 둔 안내는 이제 그 검사의 초안 표시줄이 이어받는다.
       dropLeftNote(uid);
     }
@@ -4094,9 +4101,22 @@
       const locked = !!r.prelimHidden;
       if (locked) reportPreview.close();
       // 자동 저장된 내 초안은 DOM과 같아 dirty가 아니어도, 잠금 전환이 그 글을 지워서는 안 된다.
-      const preserveValue = !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
+      let preserveValue = !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
       reportRefreshPendingFor = preserveValue && (locked || reportDirty()) ? selectedUid : null;
       const src = locked ? {} : reportSource();
+      const frame = mountReportFrame();
+      if (!frame) return false;
+      const opening = { uid: selectedUid, selectionSeq };
+      const newOpening = !reportOpening || reportOpening.uid !== selectedUid || reportOpening.selectionSeq !== selectionSeq;
+      if (!preserveValue || newOpening) {
+        const texts = Object.fromEntries(RFIELDS.map(k => [k, locked ? "" : String(src[k] ?? "")]));
+        const result = newOpening ? frame.switchStudy(opening, texts) : frame.replaceAuthoritative(texts);
+        if (result.status === "refused") {
+          // A refused authoritative render cannot advance the text's origin or erase current typing.
+          preserveValue = true;
+          reportRefreshPendingFor = selectedUid;
+        } else reportOpening = opening;
+      }
       // 값을 실제로 넣는 이 호출만이 기준 판을 바꾼다. 입력을 보존하는 호출(폴링·잠금
       // 전환)은 화면의 글자를 그대로 두므로 그 글자가 딛고 선 판도 그대로다.
       if (!preserveValue) {
@@ -4115,16 +4135,6 @@
                                  ["#conclusion", "Please enter conclusion"],
                                  ["#recommendation", "Please enter recommendation"]]) {
         const el = $(sel);
-        // S3-U6: 값이 **실제로** 달라졌을 때만 그 칸의 커서 자리를 잊는다. 폴링이 같은 글을
-        // 다시 대입하는 것은 화면에서 아무 일도 아니고(명세상 캐럿도 그대로다), 그때까지
-        // 잊으면 사람이 짚어둔 자리가 30초마다 사라진다. 비교는 대입 전후의 API 값으로 한다 —
-        // 원문과 API 값이 줄 끝에서 다를 수 있으므로 문자열 예측이 아니라 결과를 본다.
-        if (!preserveValue) {
-          const was = el.value;
-          // 서버의 글을 그리는 대입이다(이 문서의 편집이 아니다) — `editReport` 밖의 두 대입 가운데 하나.
-          el.value = locked ? "" : (src[sel.slice(1)] ?? "");
-          if (el.value !== was) forgetCaret(sel.slice(1));
-        }
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
       }
@@ -4141,6 +4151,7 @@
         draftClient.prime(selectedUid, { owner: draftOwner, context: work.capture("study") });
       // 이 검사에 결과를 모르는 버리기가 남아 있으면 그 결과부터 안다(다시 그리는 글이 서버의 지금 초안이 되게).
       if (selectedUid && reportUnknownDiscards.has(selectedUid)) learnDiscardOutcome(selectedUid);
+      return !preserveValue;
     }
 
     /**
@@ -5109,7 +5120,15 @@
           toast("다른 검사로 옮기기 전에 누른 구조화 적용의 응답이 늦게 도착해 화면에 반영하지 않았습니다.", "err");
           return;
         }
-        editReport([reportEditOf(pane.field, fresh.text, fresh.end)]);
+        // The accepted operation is never sent again because the local frame refused it.
+        const shown = structurePlan(pane);
+        const applied = shown && shown.mode2 !== "refuse" && editReport([reportEditOf(pane.field, shown.text, shown.end)]);
+        if (!applied && (!shown || shown.mode2 === "refuse" || $("#" + pane.field).value !== shown.text)) {
+          markConverge(uid); invalidateStructure(uid);
+          if (structPane === pane) closeStructure();
+          toast("서버에 구조화 내용을 기록했지만 현재 입력 상태로 화면에 넣지 못했습니다. 입력은 그대로 보존했습니다. 서버 내용을 다시 확인하세요.", "err");
+          return;
+        }
         // The edit retained all current fields, including edits made while this command was out.
         if (sameDraftText(appState[uid]?.draft, { ...content, baseVersion })) reportConverge.delete(uid);
         // 새 `sid`를 지어내지 않는다 — 서버가 무엇을 기록했는지는 전용 읽기 하나가 말한다.
@@ -5255,9 +5274,7 @@
       const at = work.capture("study");
       citationRefreshTimer = setTimeout(() => { citationRefreshTimer = null; work.commit(at, renderCitationBar); }, 400);
     }
-    for (const k of RFIELDS) $("#" + k).addEventListener("input", scheduleCitationRefresh);
-    // S3-U6: 커서 자리 자체는 그 칸이 들고 있다. 화면은 "이 칸을 짚은 적이 있다"만 표시해 둔다.
-    for (const k of RFIELDS) $("#" + k).addEventListener("focus", () => noteCaret(k));
+    onReportField("input", scheduleCitationRefresh);
     $("#b-cite-list").addEventListener("click", () => {
       citationListOpen = !citationListOpen;
       renderCitationBar();
@@ -5561,7 +5578,14 @@
         const el = $("#" + field);
         const shown = screenPlan(field, pane.block, before, plan2);
         // 커서는 넣은 글 끝에 선다. 가운데에 넣고 화면 끝으로 튀면 사람이 자기 글을 다시 찾아야 한다.
-        editReport([reportEditOf(field, shown.text, shown.end)]);
+        const applied = editReport([reportEditOf(field, shown.text, shown.end)]);
+        if (!applied && $("#" + field).value !== shown.text) {
+          markConverge(pane.uid);
+          invalidateCitations(pane.uid); invalidateStructure(pane.uid);
+          closeCitePreview(false);
+          toast("서버에 인용을 기록했지만 현재 입력 상태로 화면에 넣지 못했습니다. 입력은 그대로 보존했습니다. 서버 내용을 다시 확인하세요.", "err");
+          return;
+        }
         // 서버 행은 방금 우리가 보낸 세 칸이다. 초안 표시가 그 사실을 말하게 한다.
         // A confirmed insertion does not confirm later typing in any of the three fields.
         if (sameDraftText(appState[pane.uid]?.draft, { ...content, baseVersion })) reportConverge.delete(pane.uid);
@@ -5822,7 +5846,7 @@
       reportSaveFailures.delete(selectedUid);
       keepReportEditor();
     }
-    for (const field of RFIELDS) $("#" + field).addEventListener("input", recordReportEdit);
+    onReportField("input", () => { work.edited(); recordReportEdit(); });
 
     /**
      * 계획이 낸 **칸 전체의 새 글**을, 지금 글에서 달라지는 한 구간의 편집으로 옮긴다(앞뒤의 같은 글자는 건드리지 않는다).
@@ -6420,13 +6444,12 @@
     }
 
     // 판독문에 두 글자 이상 쓰면 그때 점유가 시작된다
-    ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
-      $(sel).addEventListener("input", () => {
+    onReportField("input", () => {
         updateReportTemplateButton();
         if (!selectedUid) return;
         const total = $("#findings").value.length + $("#conclusion").value.length + $("#recommendation").value.length;
         if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);
-      }));
+      });
 
     // ══════════ 이탈 시 판독문 보존 (교훈 §1) ══════════
     /**
@@ -6551,6 +6574,13 @@
       const begin = () => {
         // 기다리는 사이 취소했거나 세션이 끝났으면(닫힌 화면이 이어받았다) 여기서 할 일이 없다.
         if (logoutPrep !== prep || prep.state !== "waiting" || work.state() !== "active") return;
+        if (reportFrame?.isComposing()) {
+          // Finish the native composition before freezing the recovery/save snapshot.
+          // A delayed compositionend resumes this same logout click, unless it was cancelled.
+          document.addEventListener("compositionend", () => queueMicrotask(begin), { once: true });
+          document.activeElement?.blur();
+          if (reportFrame.isComposing()) { showLogoutPanel(prep); return; }
+        }
         Object.assign(prep, captureReport());
         saveForLogout(prep);
       };
@@ -7410,14 +7440,17 @@
       // 붙여넣기는 편집기에 쓴다. 클립보드를 읽는 사이 검사가 바뀌었거나, 로그아웃 준비·세션 종료가 있었거나, 그 칸의 글이
       // 달라졌으면 쓰지 않는다 — 읽기 전에 본 글 위에 덮어쓰지 않는다. (붙여넣기 자체의 편집 안전은 편집기 단위의 몫이다.)
       const at = work.capture("editor");
+      const frame = mountReportFrame();
+      if (!frame) return;
+      const end = frame.read("findings").length;
+      const insertion = frame.capture("findings", { start: end, end });
       let text;
       try { text = await navigator.clipboard.readText(); } catch (e) { return; }
       work.commit(at, () => {
         if (reportWriteBlock()) return;
         // Findings 끝에 붙인다. 붙여 넣은 글은 타이핑한 글과 같은 이 문서의 편집이다 — 표시 없이 대입만 하면 자동 저장도
         // 로그아웃도 그 글을 모르고 다음 폴링이 서버 글로 덮는다(U5CLI-F09).
-        const end = $("#findings").value.length;
-        editReport([{ field: "findings", start: end, end, text }]);
+        editReport([{ field: "findings", at: insertion, text }]);
       });
     });
     const reportPreview = KinReportPreview({ api, actorName: displayActor, toast,
@@ -8217,16 +8250,28 @@
     // A size under a drag is shown but stored only when the drag ends; the edge being resized now.
     let studyPanelPreview = null, studyPanelEdge = null;
     const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
+    // The report section the drawer's focus came from. A study opening replaces the report fields, so the drawer's
+    // remembered node can be a removed one; the section it named is still the reader's (W6-PAGE-18).
+    let studyPanelField = null;
+    function noteStudyPanelOpener(el) {
+      // The drawer keeps the last outside element focus came from; the page and its own controls do not replace it.
+      if (!el || el === document.body || el === document.documentElement || $('#study-panel-host').contains(el)) return;
+      studyPanelField = RFIELDS.includes(el.id) && el === $('#' + el.id) ? el.id : null;
+    }
+    $('#study-panel-host').addEventListener('focusin', event => noteStudyPanelOpener(event.relatedTarget));
     function openStudyPanel(tab) {
       if (workspaceEnded || work.state() !== 'active') return false;
       if (tab && !studyPanelAvailable().includes(tab)) return false;
+      // A new drawer starts from the focus it is opened from.
+      if (!studyPanel) studyPanelField = null;
+      noteStudyPanelOpener(document.activeElement);
       workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       if (!studyPanel) {
         // Mount on the explicit open: legacy layouts keep their first paint.
         // destroy() returns these same nodes, with their listeners, to the row.
         studyPanel = KinStudyPanel({ host: $('#study-panel-host'), opener: document.activeElement,
           content: { images: $('.s-thumb'), info: $('.s-clinical'), templates: $('.s-template') },
-          available: studyPanelAvailable(), fallbackFocus: () => [$('#findings'), $('#quick'), $('#study-panel-open')]
+          available: studyPanelAvailable(), fallbackFocus: () => [studyPanelField && $('#' + studyPanelField), $('#findings'), $('#quick'), $('#study-panel-open')]
             .find(node => node?.isConnected && !node.disabled && !node.closest('[hidden], [inert]')
               && node.getClientRects().length && getComputedStyle(node).visibility === 'visible'),
           escapeClaimed: () => !!document.querySelector('dialog[open], .modal.show, [popover]:popover-open'),
@@ -10765,8 +10810,11 @@
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       $('#chips')?.removeAttribute('data-render-signature');
       stopWorkspaceLayout();
-      // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
-      for (const k of RFIELDS) $("#" + k).value = "";
+      // The recovery snapshot above owns unsaved text. Ending cancels composition and purges native history.
+      document.activeElement?.blur();
+      reportFrame?.end({ uid: null, selectionSeq });
+      reportFrameEnded = true;
+      reportOpening = null;
       leftNotes.clear();
       for (const id of ["rows", "relrows", "user", "roles", "clinical", "thumbwrap", "ctx", "err", "leftnotes"]) $("#" + id)?.replaceChildren();
       document.querySelectorAll(".modal.show").forEach(modal => modal.classList.remove("show"));
@@ -11099,6 +11147,7 @@
         showMembershipState(sess.state);
         return;
       }
+      if (!mountReportFrame()) return;
       user = sess.user ?? "";
       if (!sess.demo && typeof sess.sub === "string")
         draftOwner = Object.freeze({ institution: sess.institution ?? null, sub: sess.sub, author: sess.actor });

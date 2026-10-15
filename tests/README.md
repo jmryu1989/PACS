@@ -2791,6 +2791,21 @@ D1160 파일럿 답(크기 조절 옵션, 지금 화면이 기본): REQ-WS7-PANE
 - `tests/worklist_toolbar_dom_test.py`
 
 
+W6-LAND: REQ-WS5/WS6/WS7 → RISK-UID/HISTORY/DUPLICATE-INPUT →
+`report_editor_frame_dom_test.py` (TEST-REF-*; `--page` 실제 제공 HTML/bundle 연결, `--mutants` 모듈 반례, `--page-mutants` PAGE 연결 반례, `--integrated-module-mutants` 원래 M01..M34를 제공 페이지에서 검증).
+PAGE-05는 녹음 시점 문서·필드·커서·본문과 frame capture를 함께 보존한다. 녹음→입력→Backspace/Undo→늦은 Insert는 판독문을 바꾸지 않고 받아쓴 글을 남긴 채 재고정을 요구하며(HD05와 같은 계약, Redo 유지), 칸 클릭이나 Pin Caret 뒤 새 Insert는 새 위치에 넣는다. 무변경 수용, 검사 전환 취소도 실제 controller/session으로 검사한다.
+숨긴 Recommendation은 저장·재열람·일괄 거절에 그대로 들어가지만 키보드 초점과 받아쓰기 대상이 되지 않는다(상용구 더블클릭·미리보기 Insert·Clear·인용·구조화·받아쓰기 삽입·Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z).
+판독문 칸의 공유 스크롤 영역에는 고정 최소 높이가 없다. 열의 남은 높이를 차지하고, 그 아래 바닥줄과 알림 줄보다 먼저 줄어든다. 가로 배치에서 열 자체의 줄이 열보다 길면 문서가 아니라 열이 스크롤한다.
+W3 기준선 두 시험의 결정된 차이(D1300): `study_panel_page_dom_test.py`(W2 9d6984b 첫 화면)와 `study_panel_size_dom_test.py`(round 6 ea2a037 기본 패널)는 Findings/Conclusion 두 칸의 상자, 공유 스크롤 영역(.redit)의 픽셀, 첫 화면 node +1만 비교에서 뺀다. 스크롤 영역 아래(바닥줄·알림 줄)는 스크롤 영역이 남긴 자리에서 기하와 픽셀로 비교하고(`w6_moved`, `w6_regions`), 문서 루트가 넘치지 않으며 각 줄이 창 안이나 사용자가 휠로 스크롤할 수 있는 영역 안에 있음을 단언한다(`assert_w6_reachable`). 뺀 영역은 이 파일의 `--page` 사례(PAGE-22: W3 BOUND 크기·1366x768·짧은 창, 패널 닫힘/열림)가 맡는다.
+`report_dictation_host_dom_test.py` HD13(1366x768 460x420 frame에서 바닥줄이 frame 안)은 기준선 실패가 아니다. 519d6c5에서 통과하고 W6의 200 px 최소 높이가 깨뜨렸던 것을 r2에서 제품으로 고쳐 단언 변경 없이 통과한다.
+Related 왕복 사례의 커서 판정은 그 브라우저가 그린 줄 상자를 잰다(칸의 계산된 글꼴·줄 높이·안쪽 여백과 내용 폭을 가진 블록에 커서 앞 글을 넣어 높이를 잰다). 글꼴·줄 높이·여백 상수를 가정하지 않으므로 Linux CI(Arial 계열 12px, normal 14px)와 Windows에서 같은 기준으로 판정한다(W6R2-01).
+W6 frame 소비자(W6R2-03/04): 제공 페이지 밖에서 판독 영역 코드를 잘라 쓰는 하니스는 그 코드가 쓰는 report frame 모듈(`report-editor-frame.js`)을 실제 페이지처럼 함께 싣는다. 공용 계약(`report_page_contract.py` ASSETS)을 쓰는 citation/cursor/host/input/rebase/structure, 자체 모듈 목록을 쓰는 `report_dictation_capture_dom_test.py`(PAGE_SCRIPTS = 페이지의 script 태그 = NC-11 script-src 목록, CAP-00과 CAP-01이 일치를 단언), 추출한 Log out 처리기를 쓰는 `clinician_question_dom_test.py`(페이지의 frame 상태·mount·필드 위임을 그대로 잘라 main.html의 실제 판독문 칸 위에 올린다)가 이에 해당한다.
+숨긴 Recommendation에 글을 직접 넣는 하니스는 세 칸 자료를 만드는 준비 단계이며 사용자가 그 칸에 닿는다는 근거가 아니다(W6R2-02): `auth_logout_dom_test.py` select_and_type, `report_session_page_dom_test.py` type_report, `report_text_boundaries_dom_test.py`의 빈 칸 만들기, `report_dictation_input_dom_test.py` DI-02, `e2e/test_workspace_roaming.py` roam_01, `e2e/test_return_to_current.py` d03c_03. 상용구 단축어는 `e2e/test_template_preservation.py` d09a_03이 보이는 Findings/Conclusion에서 실제 키 입력과 Tab으로 검사하고, Recommendation은 상용구 삽입→초안 저장→새 세션 재열람과 작성자 경계로 검사한다.
+`worklist-ux.yml`의 measurements가 다섯 실행의 원문과 source tree/45-source order 입력을
+`tmp/workspace-ui-ci/report-editor-frame*`에 기록한다. 숨긴 Recommendation을 포함한 세 필드의
+저장 계약은 유지하며, 서버 CAS/migration/candidate 선택 ID는 변경하지 않는다.
+한글 OS IME와 의사 직접 확인, post-W3 통합 live 및 후보 CI/G3/교차 검수는 별도 관문이다.
+
 W3의 U0b 이력 계약(C6)은 `U0B-HISTORY`에서 승인된 U0b Git blob의 member/SQL 해시를 계속 검사한다. `U0B-STRUCT-NORMAL`과 R02는 현재 concern 소유권·facade forwarding·DI를 검사하고 v3 동작은 `workspace_layout_v3_service_test.cjs`가 검사한다. citation/structure migration의 `assert_behaviour`는 현재 소유권과 고정 이력을 모두 실행한다. 역사 기준 SHA·baseline은 바꾸지 않는다.
 
 Related의 RL06/08 동등성도 C6에 따라 고정 pre-UX landed 입력(c8e4f1b)에 결속한다. 원래 S7 기준 SHA·geometry 단언·허용 예외는 그대로이며, 현재 화면의 Related 동작과 W2 첫 화면은 별도 현재 소비자 시험으로 검증한다.

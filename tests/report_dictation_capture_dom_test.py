@@ -47,8 +47,11 @@ MAIN = read_page_source(LITE / "main.html")
 PAGE_PATH = "/worklist/hpacs-lite/u4b-capture.html"
 AFTER_EXIT_PATH = "/u4b/after-exit.html"
 ASSET_DIR = "/worklist/hpacs-lite/"
-PAGE_SCRIPTS = ("work-context.js", "session-transport.js", "report-draft-client.js", "report-citation.js", "report-structure.js", "dictation-session.js", "dictation-capture.js",
-                "dictation.js")
+# In main.html's order. W6: the report region the page script cuts in (REPORT_BLOCK) mounts the shipped report frame
+# over the report fields when it runs, so report-editor-frame.js is served and listed like the other page modules
+# (the NC-11 script-src lists exactly these; the assets-byte-exact check covers it).
+PAGE_SCRIPTS = ("work-context.js", "session-transport.js", "report-draft-client.js", "report-citation.js", "report-editor-frame.js",
+                "report-structure.js", "dictation-session.js", "dictation-capture.js", "dictation.js")
 WORKLET = "dictation-worklet.js"
 ASSETS = PAGE_SCRIPTS + (WORKLET,)
 BROWSER_VERSION = "148.0.7778.96"
@@ -172,6 +175,7 @@ STRUCTHTML
 <script src="session-transport.js"></script>
 <script src="report-draft-client.js"></script>
 <script src="report-citation.js"></script>
+<script src="report-editor-frame.js"></script>
 <script src="report-structure.js"></script>
 <script src="dictation-session.js"></script>
 <script src="dictation-capture.js"></script>
@@ -768,6 +772,11 @@ def static_report():
     Bytes are pinned only for the deterministic synthetic signal, whose spectrum is the oracle.
     """
     problems = harness_self_check() + observer_problems()
+    # W6R2-04: the page's module tags are the served list, in order, so the CSP allow-list (NC-11), the byte check and
+    # what the page loads cannot drift apart again (the frame module was missing from both after W6).
+    tags = tuple(re.findall(r'<script src="([^"]+)"></script>', TEMPLATE))
+    if tags != PAGE_SCRIPTS:
+        problems.append("the page's module tags %r are not PAGE_SCRIPTS %r" % (tags, PAGE_SCRIPTS))
     # 76677d8's shape: the exported observer itself wrapping fetch.
     if not observer_problems(OBSERVER_WITH_REQUESTS, OBSERVER_WITH_REQUESTS):
         problems.append("the observer guard must reject an observer that wraps fetch")
@@ -1504,6 +1513,10 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.check("launched-full-chromium", not problems["binary"], problems["binary"])
             case.check("launch-forbidden-flags-absent", not problems["forbidden"], problems["forbidden"])
             before = self.open(case, capability)
+            # W6R2-04: the page loaded exactly the listed modules, each once (arrival order is the browser's).
+            loaded = sorted(e["path"][len(ASSET_DIR):] for e in self.server.snapshot()
+                            if e["method"] == "GET" and e["path"].startswith(ASSET_DIR) and e["path"] != PAGE_PATH)
+            case.check("page-scripts-served-as-listed", loaded == sorted(PAGE_SCRIPTS), loaded)
             env = case.js("environment")
             permission = case.js("permission")
             case.observed.update(environment=env, permission=permission, browser=self.browser_info)

@@ -150,10 +150,15 @@ class TemplatePreservationE2E(base.WorklistE2E):
         self.assertEqual(self.report_rows(prior), prior_rows)
         self.assertEqual(commits, [])
 
-    def test_d09a_03_create_recommendation_shortcut_and_owner(self):
-        """SHORTCUT/MIX: new multiline Recommendation expands only at its own caret."""
-        fixture = self.fixture()
+    def test_d09a_03_create_template_shortcut_in_visible_fields_and_owner(self):
+        """SHORTCUT/MIX: a new template's shortcut, typed and expanded with Tab in the visible Findings and Conclusion,
+        becomes that field's own multiline text at the caret and nowhere else. Recommendation is hidden from the reader
+        since W6 (off screen, no tab stop), so no keystroke reaches it: the template's application write fills it, the
+        draft carries it when the reader moves on, and the study reopened in a new session shows it (W6R2-02). The
+        template and the draft stay their author's."""
+        fixture, other = self.fixture(), self.fixture()
         self.seed_report(fixture)
+        self.seed_report(other)
         anchor = self.template(ord=73)
         page = self.login()
         self.select(page, fixture)
@@ -161,8 +166,10 @@ class TemplatePreservationE2E(base.WorklistE2E):
         page.locator("#ctx").get_by_text("＋ 새 상용구", exact=True).click()
         title = "D09A <img src=x onerror=window.d09aBad=1> " + uuid.uuid4().hex[:8]
         shortcut = "new" + uuid.uuid4().hex[:8]
-        for selector, value in {"#tpl-t": title, "#tpl-s": shortcut, "#tpl-b": "CHEST", "#tpl-f": "new findings",
-                                "#tpl-c": "new conclusion", "#tpl-r": "First recommendation\nSecond line"}.items():
+        texts = {"findings": "First finding\nSecond finding line", "conclusion": "First conclusion\nSecond conclusion line",
+                 "recommendation": "First recommendation\nSecond line"}
+        for selector, value in {"#tpl-t": title, "#tpl-s": shortcut, "#tpl-b": "CHEST", "#tpl-f": texts["findings"],
+                                "#tpl-c": texts["conclusion"], "#tpl-r": texts["recommendation"]}.items():
             page.locator(selector).fill(value)
         saved = self.save(page)
         self.addCleanup(self.remove_template, saved["id"])
@@ -171,21 +178,50 @@ class TemplatePreservationE2E(base.WorklistE2E):
         self.assertIsNone(self.saved_template(saved["id"], "doctor2"))
         expect(page.locator("#tplrows img")).to_have_count(0)
         self.assertIsNone(page.evaluate("window.d09aBad"))
-        recommendation = page.locator("#recommendation")
-        recommendation.fill("before " + shortcut + " after")
-        recommendation.press("Home")
+        # Findings: the reader types a new line with the shortcut inside it, puts the caret right after the shortcut and
+        # presses Tab; only the shortcut becomes the template's Findings text, the words around it stay.
+        findings, conclusion = page.locator("#findings"), page.locator("#conclusion")
+        findings.click()
+        page.keyboard.press("Control+End")
+        page.keyboard.type("\nbefore " + shortcut + " after")
+        expect(findings).to_have_value(fixture.secret + "\nbefore " + shortcut + " after")
+        page.keyboard.press("Home")
         for _ in range(len("before " + shortcut)):
-            recommendation.press("ArrowRight")
-        recommendation.press("Tab")
-        expect(recommendation).to_have_value("before First recommendation\nSecond line after")
-        expect(page.locator("#findings")).to_have_value(fixture.secret)
-        expect(page.locator("#conclusion")).to_have_value("E2E conclusion")
+            page.keyboard.press("ArrowRight")
+        page.keyboard.press("Tab")
+        expect(findings).to_have_value(fixture.secret + "\nbefore " + texts["findings"] + " after")
+        expect(findings).to_be_focused()
+        # Conclusion: the same shortcut at the end of its line expands to the template's Conclusion text.
+        conclusion.click()
+        page.keyboard.press("Control+End")
+        page.keyboard.type(" " + shortcut)
+        page.keyboard.press("Tab")
+        expect(conclusion).to_have_value("E2E conclusion " + texts["conclusion"])
+        expect(findings).to_have_value(fixture.secret + "\nbefore " + texts["findings"] + " after")
+        expect(page.locator("#recommendation")).to_have_value("")
+        # Recommendation: the template's application write on another study (a double-click, as the reader inserts a
+        # template), saved with the draft when the reader moves on, then read back after reopening.
+        self.select(page, other)
+        with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(f"/studies/{other.uid}/hold")) as hold:
+            page.locator("#tplrows").get_by_text(title, exact=True).dblclick()
+        self.assertEqual(hold.value.status, 201)
+        applied = {"findings": other.secret + "\n" + texts["findings"], "conclusion": "E2E conclusion\n" + texts["conclusion"],
+                   "recommendation": texts["recommendation"]}
+        for key, value in applied.items():
+            expect(page.locator("#" + key)).to_have_value(value)
+        self.select(page, fixture)
+        draft = self.wait_state(page, other, lambda s: (s.get("draft") or {}).get("recommendation") == texts["recommendation"])["draft"]
+        self.assertEqual({key: draft[key] for key in applied}, applied)
         fresh = self.login()
+        self.select(fresh, other)
+        for key, value in applied.items():
+            expect(fresh.locator("#" + key)).to_have_value(value)
+        self.assertIsNone(self.state(other, "doctor2").get("draft"))
         self.edit(fresh, title)
         expect(fresh.locator("#tpl-r")).to_have_value(saved["recommendation"])
         fresh.locator("#tpl-cancel").click()
-        other = self.login("doctor2")
-        expect(other.locator("#tplrows").get_by_text(title, exact=True)).to_have_count(0)
+        second = self.login("doctor2")
+        expect(second.locator("#tplrows").get_by_text(title, exact=True)).to_have_count(0)
 
     def test_d09a_04_insertion_respects_filming_holder_and_hidden_prelim(self):
         """GUARD/LOCK: programmatic insertion cannot bypass readonly report fields."""

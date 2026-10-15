@@ -12,45 +12,15 @@ const vm = require('node:vm');
 const page = process.env.KIN_REBASE_MAIN || join(__dirname, '../worklist-v0/hpacs-lite/main.html');
 const html = readPageSource(page);
 
-/** The shipped function body, brace matched, so a test can never drift into a copy. */
+// Select the pure consumer declarations with the existing TypeScript AST projection.
+// The frame's DOM mount belongs to the browser suites, not the origin/sequence model.
 function extractFunction(source, name) {
-  const start = source.indexOf(`function ${name}(`);
-  assert.ok(start >= 0, `function ${name} is gone from main.html`);
-  // The body starts after the parameter list: a destructured parameter carries
-  // braces of its own, and matching those would return half a signature.
-  let depth = 0, quote = null, escaped = false, open = -1;
-  for (let i = source.indexOf('(', start); i < source.length; i++) {
-    const ch = source[i];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
-    else if (ch === '(') depth++;
-    else if (ch === ')' && --depth === 0) { open = source.indexOf('{', i); break; }
-  }
-  assert.ok(open > start, `unbalanced parameter list for ${name}`);
-  depth = 0; quote = null; escaped = false;
-  for (let i = open; i < source.length; i++) {
-    const ch = source[i];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
-    else if (ch === '{') depth++;
-    else if (ch === '}' && --depth === 0) return source.slice(start, i + 1);
-  }
-  throw new Error(`unbalanced ${name}`);
+  const statement = fixtureBlocks(page, { named: [name] }).named;
+  return statement.slice(statement.indexOf(`function ${name}(`));
 }
-
-// The base-version run (selectionSeq up to reportSource) by the TypeScript-AST fixture projection: S9-U0a-PRE moved
-// selectionSeq ahead of its first caller, so the run is no longer one stretch of text between two markers.
-const { BASE_BLOCK: baseBlock } = fixtureBlocks(page, { BASE_BLOCK: REPORT_FIXTURE.BASE_BLOCK });
+const names = ['selectionSeq', 'leftNotes', 'renderLeftNotes', 'dropLeftNote', 'markSelectionChanged',
+  'reportOrigin', 'recordReportOrigin', 'reportBaseVersion', 'renderedOrigin', 'commitFailureRoute', 'staleHeadOf'];
+const baseBlock = Object.values(fixtureBlocks(page, Object.fromEntries(names.map(name => [name, [name]])))).join('\n');
 // The selection sequence is counted by the page's work-context gate (S7-U5): the block runs against the shipped module.
 const sandbox = vm.createContext({ work: require(join(__dirname, '../worklist-v0/hpacs-lite/work-context.js')).create() });
 vm.runInContext(baseBlock, sandbox);

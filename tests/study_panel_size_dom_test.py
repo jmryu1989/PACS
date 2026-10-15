@@ -29,6 +29,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
+from study_panel_page_dom_test import W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -193,6 +194,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             settle(page)
             facts['nodes'] = page.evaluate("() => document.querySelectorAll('*').length")
             facts['panel'], facts['page'] = self.panel(page), page.evaluate(PAGE)
+            facts['w6'] = w6_facts(page)
             del facts['panel']['edge']
             drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
             controls = [c.bounding_box() for c in (drawer.get_by_role('combobox', name='Text Size'),
@@ -229,9 +231,18 @@ class StudyPanelSizeDOM(unittest.TestCase):
                     mine, mask = self.default_panel(current, width, height, picture=picture)
                     theirs, _ = self.default_panel(Path(temporary), width, height, mask=mask, picture=picture)
                     with self.subTest(width=width, height=height):
-                        self.assertEqual(theirs['first_paint_nodes'], mine['first_paint_nodes'], 'first paint')
-                        for key in ('panel', 'page'):
-                            self.assertEqual(theirs[key], mine[key], key)
+                        # W6-PAGE-22 (D1300, W6_REPORT_FIELDS in study_panel_page_dom_test.py): a decided difference.
+                        # W6's report section adds W6_FIRST_PAINT_NODES nodes, its two field boxes are left out of the
+                        # page facts and its scroller's pixels are not compared; what lies below the scroller is compared
+                        # where the scroller leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable);
+                        # everything else stays round 6's.
+                        self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES, mine['first_paint_nodes'], 'first paint')
+                        self.assertEqual(theirs['panel'], mine['panel'], 'panel')
+                        page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
+                        self.assertEqual(page_facts(theirs), page_facts(mine), 'page')
+                        where = f'{width}x{height}'
+                        assert_w6_reachable(self, mine['w6'], where)
+                        w6_moved(self, theirs['w6'], mine['w6'], 0, where)
                         # Round 6's tab click rewrote the toolbar status line, which wraps at 900x1200 and 768x1024 and
                         # pushed its panel down (W3R7-04, fixed this round). So each tab's content is round 6's within
                         # the panel, and the panel itself stays where it opened, which is round 6's place (above).
@@ -254,10 +265,12 @@ class StudyPanelSizeDOM(unittest.TestCase):
                             self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
                         # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
                         # controls' row and the edge (stated in the round-7 report).
-                        self.assertEqual(7, mine['nodes'] - theirs['nodes'])
+                        self.assertEqual(7 + W6_FIRST_PAINT_NODES, mine['nodes'] - theirs['nodes'])
                         if picture:
-                            difference = picture_difference(self.browser, theirs['pixels'], mine['pixels'])[0]
-                            self.assertEqual(0, difference.get('over'), f'open panel pixels differ outside the new controls: {difference}')
+                            regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
+                            for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
+                                self.assertFalse(difference.get('outside') or difference.get('size'), difference)
+                                self.assertEqual(0, difference['over'], f'open panel pixels differ outside the new controls/W6 scroller: {difference}')
             finally:
                 auth.ROOT = current
 

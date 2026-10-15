@@ -400,6 +400,27 @@ class ReportStructureDOMTest(unittest.TestCase):
                          "S3-STRUCT D3: a locked report must not be written")
         self.assertTrue(page.evaluate("() => ($('#struct-status').textContent || '').length > 0"))
 
+    def test_w6_accepted_replacement_does_not_choose_between_two_late_matching_lines(self):
+        head = entry(sid="s-head")
+        page = self.open(state(findings=CHOICE_LINE),
+                         struct_replies=[{"version": 4, "unknown": False, "head": [head], "draft": []}],
+                         replies=[{"status": 200, "body": {"applied": {"sid": "s-new", "field": "findings", "enteredAt": "now"}}}])
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.wait_for_function("() => structKnown()")
+        self.pick(page)
+        page.select_option("#struct-value-choice", "c2")
+        page.evaluate("() => { holdCount = 1; applyStruct(); }")
+        page.wait_for_function("() => calls.length === 1")
+        current = CHOICE_LINE + "\n" + CHOICE_LINE
+        page.locator("#findings").fill(current)
+        page.evaluate("() => release()")
+        page.wait_for_function("() => pane() === null")
+        self.assertEqual(page.locator("#findings").input_value(), current)
+        self.assertTrue(page.evaluate("() => toasts.some(t => JSON.stringify(t).includes('화면에 넣지 못했습니다'))"))
+        self.assertEqual(page.evaluate("() => calls.length"), 1)
+        self.assertEqual(errors, [])
+
     # D4 ───────────────────────────────────────────────────────────────────────────────────────
     def test_d04_a_head_value_is_replaced_in_place_after_a_save(self):
         head = entry(sid="s-head")

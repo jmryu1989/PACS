@@ -107,7 +107,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js", "report-editor-frame.js")}
 MAIN = read_page_source(HPACS / "main.html")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 INDEX_STAND_IN = ('<!doctype html><html><head><meta charset="utf-8"><title>SYN index stand-in</title></head>'
@@ -389,19 +389,29 @@ READER_SETUP = """(session) => { window.synSession = session; window.synStudies 
 # it go. OTHER_PANEL registers another panel's end() in the list, so a case sees the list itself called.
 API_FN = extract_function(MAIN, "api")
 LOG_OUT_HANDLER = slice_between(MAIN, "    let loggingOut = false;\n", "    // 다른 사람이 잡거나 놓은 걸 보려면")
+# W6 (W6R2-03): the page's report frame, cut out as shipped - its state, its mount over main.html's own report fields,
+# its field delegation and the mount call (report-editor.js) - on the shipped frame module open_reader loads. Log out
+# asks this frame whether an IME composition is open before it freezes the save snapshot (work-exit.js), so the cut
+# handler reads the composition state of the page's real fields; nothing here answers for it. The frame's edit
+# permission (canEdit -> reportEditorBlock, in the report region this file does not cut out) is asked only by a write
+# through the frame, which none of these cases makes.
+REPORT_FRAME = slice_between(MAIN, "    let reportFrame = null;\n", "    function markSelectionChanged(uid) {")
 # S7-U5 §8: stashReport() stands for the draft write of the logout's preparation and answers "saved" when the case lets it
 # go, as the shipped one answers a stored write; the preparation's other page reads are the empty case.
 EXIT_STAND_INS = """
 let insertInFlight = false, commitInFlight = false, appState = {}, selectionSeq = 0, user = 'syn-radiologist';
 const RFIELDS = ['findings', 'conclusion', 'recommendation'];
+""" + REPORT_FRAME + """
 const reportBaseVersion = (uid, fallback) => fallback;
 const heldByOther = () => null, reportNeedsWrite = () => true;
 let draftOwner = {sub:'SYN-RAD-SUB',institution:'SYN-INST-A',author:'syn-radiologist'}, poll = null;
 // The page saves at Log out only what it recorded as edited: an `input` on the editor marks the selected study and the
 // kept text of a marked study is the editor's (main.html recordReportEdit / unconfirmedReport, which sit in the report
 // region this file does not cut out). These stand-ins keep that rule; the rule itself is tests/report_text_boundaries_dom_test.py's.
+// The edit is heard the way the page hears it since W6: through its delegation (onReportField above), which follows a
+// field the frame replaced at a study opening; a listener on the first element would go deaf after one.
 const reportConverge = new Set();
-for (const field of RFIELDS) document.getElementById(field)?.addEventListener('input', () => { if (selectedUid) reportConverge.add(selectedUid); });
+onReportField('input', () => { if (selectedUid) reportConverge.add(selectedUid); });
 const unconfirmedReport = uid => uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, document.getElementById(k).value])) : null;
 const studyLabel = uid => uid;
 const KinReportDraftClient = {sameSnapshot: (a,b) => JSON.stringify(a) === JSON.stringify(b)};
@@ -1042,8 +1052,9 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.page.goto(ORIGIN + BASE + "main.html")
         self.page.evaluate(READER_SETUP.replace("SYN_STUDIES", json.dumps(studies or READER_STUDIES)),
                            {**session, "state": "approved"})
-        # The sliced consumer uses the same shipped authority and page defaults as the real document.
-        for name in ['auth.js', 'work-context.js', 'session-transport.js']:
+        # The sliced consumer uses the same shipped authority and page defaults as the real document, and the shipped
+        # report frame module that main.html loads before its page script (W6: the page's report fields are the frame's).
+        for name in ['auth.js', 'work-context.js', 'session-transport.js', 'report-editor-frame.js']:
             self.page.add_script_tag(content=SHIPPED[name])
         self.assertEqual("approved", self.page.evaluate("async () => (await KinAuth.init()).state"))
         self.page.evaluate("KinWorkContext.follow(KinAuth)")

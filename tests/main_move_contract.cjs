@@ -80,6 +80,12 @@ function historicalPage(dir) {
   }
   return path.join(dir, 'main.html');
 }
+// W6 retires the page's own cursor model: the shipped report frame (report-editor-frame.js) owns cursor visits.
+// A page that declares the frame's page adapter has none of these three, and the adapter's own declarations
+// have one owner like every other. Historical byte/statement proofs above stay fixed.
+const RETIRED_BY_REPORT_FRAME = ['caretFields', 'noteCaret', 'forgetCaret'];
+const REPORT_FRAME_DECLARATIONS = { reportFrame: 'report-editor.js', reportOpening: 'report-editor.js',
+  reportFrameEnded: 'report-editor.js', mountReportFrame: 'report-editor.js', onReportField: 'report-editor.js' };
 function currentHomes(page) {
   const actual = readPage(page);
   const order = require('../scripts/main-split-order.json').sources.map(s => s.file);
@@ -92,14 +98,24 @@ function currentHomes(page) {
     name: joined[index++].name, module, file,
   })));
   assert.equal(index, joined.length, 'No statements cross source boundaries');
+  const frame = homes.some(home => home.name === 'reportFrame');
   // Declaration ownership remains a live contract; anonymous effects may change
   // with the feature, and their execution order is checked on the current AST.
   for (const original of spec.modules) for (const name of original.statements) {
     if (/Statement after /.test(name)) continue;
     const matches = homes.filter(home => home.name === name);
+    if (frame && RETIRED_BY_REPORT_FRAME.includes(name)) {
+      assert.equal(matches.length, 0, `Retired by the report frame: ${name}`);
+      continue;
+    }
     assert.equal(matches.length, 1, `Current declaration occurs once: ${name}`);
     assert.equal(matches[0].file, original.file, `Current declaration owner: ${name}`);
   }
+  if (frame) for (const [name, file] of Object.entries(REPORT_FRAME_DECLARATIONS)) {
+    const matches = homes.filter(home => home.name === name);
+    assert.equal(matches.length, 1, `Current declaration occurs once: ${name}`);
+    assert.equal(matches[0].file, file, `Current declaration owner: ${name}`);
+  }
   return homes;
 }
-module.exports = { statements, chunks, verify, baseline, historicalPage, currentHomes, LANDED };
+module.exports = { statements, chunks, verify, baseline, historicalPage, currentHomes, LANDED, RETIRED_BY_REPORT_FRAME };

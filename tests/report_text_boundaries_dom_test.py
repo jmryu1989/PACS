@@ -556,6 +556,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
 
     def test_conflict_clear_keeps_the_empty_edit_on_study_change(self):
         self.prepare_conflict()
+        # Setup, not a user path (W6R2-02): every field emptied directly, the hidden Recommendation included.
         for field in h.FIELDS:
             self.page.fill("#" + field, "")
         self.switch(h.PATIENT_B)

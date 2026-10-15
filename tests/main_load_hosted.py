@@ -320,6 +320,7 @@ def assert_script_requests(baseline, candidate, *, landing=False):
     if landing:
         expected[("GET", "/worklist/hpacs-lite/worklist-folder-tree.js", "")] += 1
         expected[("GET", "/worklist/hpacs-lite/study-panel.js", "")] += 1
+        expected[("GET", "/worklist/hpacs-lite/report-editor-frame.js", "")] += 1
     actual = Counter(map(tuple, candidate))
     assert actual == expected, f"different script requests: expected={expected!r}, actual={actual!r}"
 
@@ -746,7 +747,7 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         static = [r for r in waterfall.rows.values() if "/worklist/" in r.get("url", "") and "status" in r]
         assert static and all(r["protocol"] == "h2" for r in static), "static protocol mismatch"
         scripts = [r for r in static if urlparse(r["url"]).path.endswith(".js")]
-        assert len(scripts) == (59 if stack.side == "candidate" else 56), "execution request count"
+        assert len(scripts) == (60 if stack.side == "candidate" else 56), "execution request count"
         assert all(urlparse(r["url"]).netloc == urlparse(stack.origin).netloc for r in scripts), "script-src 'self' compatibility"
         document = next(r for r in wire if r["name"] == "main.html")
         result["csp"] = {"header": document["headers"].get("content-security-policy"),

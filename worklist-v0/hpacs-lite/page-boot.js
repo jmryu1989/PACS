@@ -297,6 +297,7 @@
         showMembershipState(sess.state);
         return;
       }
+      if (!mountReportFrame()) return;
       user = sess.user ?? "";
       if (!sess.demo && typeof sess.sub === "string")
         draftOwner = Object.freeze({ institution: sess.institution ?? null, sub: sess.sub, author: sess.actor });
