@@ -49,13 +49,23 @@ test('v2 exact shape, nullable actions and reserved browser/editing keys',()=>{
   for(const value of [{...s.defaultsV2,version:3},{...s.defaultsV2,extra:null},{...s.defaultsV2,list:'Control+KeyS'}])assert.equal(s.valid(value),false);
   for(const id of Object.keys(s.defaultsV2)){const value={...s.defaultsV2};delete value[id];assert.equal(s.valid(value),false,id);}
 });
-test('new Finalize default never steals an existing user command (Ctrl+S collision mutant)',()=>{
+test('missing v2 Finalize never steals an existing user command',()=>{
   const source={...s.defaultsV2,list:'Control+KeyS'};delete source.finalize;
   const {map,notices}=s.migrate(source);
   assert.equal(map.list,'Control+KeyS');assert.equal(map.finalize,null);
-  assert.ok(notices.some(text=>text.includes('Worklist')&&text.includes('지정')));
+  assert.equal(notices.length,1);assert.match(notices[0],/Finalize \(Approve\).*미배정/);
   assert.equal(s.action(map,{ctrlKey:true,altKey:false,code:'KeyS'}),'list');
   assert.equal(s.migrate({...s.defaultsV2,finalize:null}).map.finalize,null);
+});
+// W4SC-O3-01: REQ-WS7 -> RISK-WS7 -> TEST-WS7-SHORTCUT-MIGRATION.
+test('missing Finalize is unassigned in v2; only v1 introduces the default silently',()=>{
+  const legacy={...s.defaults,image:'KeyI',report:'KeyR'};
+  const expected={version:2,...Object.fromEntries(Object.entries(legacy).map(([id,key])=>[id,'Control+Alt+'+key]))};
+  const migrated=s.migrate(expected);
+  assert.deepEqual(migrated.map,{...expected,finalize:null});
+  assert.equal(migrated.notices.length,1);
+  assert.match(migrated.notices[0],/Finalize \(Approve\).*미배정.*Shortcuts/);
+  assert.deepEqual(s.migrate(legacy),{map:{...expected,finalize:'Control+KeyS'},notices:[]});
 });
 test('Finalize resolves without Alt; resolution alone never prevents browser Save Page',()=>{
   let cancelled=0;const event={ctrlKey:true,altKey:false,code:'KeyS',preventDefault(){cancelled++}};
@@ -229,7 +239,7 @@ test('dialog reading v1 null shows its notice and preserves other keys; v2 unass
     }
     const notice=f.node('workspace-shortcuts-message').textContent;
     if(version===1)assert.match(notice,/Report Editor.*미배정.*Shortcuts/);
-    else assert.equal(notice,'각 항목에서 사용할 조합을 누르세요.');
+    else assert.doesNotMatch(notice,/Report Editor|미배정/);
     assert.deepEqual([...f.data],stored);assert.equal(f.requests.filter(x=>x.options.method==='PUT').length,0);
     assert.equal(f.node('workspace-shortcuts-dialog').open,true);
     f.instance.end();

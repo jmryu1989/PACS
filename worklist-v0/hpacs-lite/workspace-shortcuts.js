@@ -27,7 +27,7 @@
     if(!value||typeof value!=='object'||Array.isArray(value)||Object.hasOwn(value,'version')&&value.version!==2)return unassigned();
     const map={version:2},notices=[],used=new Map(),source=value;
     for(const id of ids){
-      if(id==='finalize'&&!Object.hasOwn(source,id))continue;
+      if(id==='finalize'&&!Object.hasOwn(source,'version')&&!Object.hasOwn(source,id))continue;
       const raw=source[id];
       const key=source.version===2?raw:typeof raw==='string'?'Control+Alt+'+raw:null;
       map[id]=chord(key)&&!used.has(key)?key:null;
