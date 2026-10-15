@@ -319,8 +319,10 @@ export class PacsPreferences {
       const row = await this.prisma.$transaction(async tx => {
         // Read in the same transaction; revision CAS still rejects a concurrent upgrade.
         const stored = await tx.workspaceShortcuts.findUnique({ where: { institution_subject: owner } });
-        const storedVersion = (stored?.bindings as any)?.version ?? 1;
-        if (storedVersion > (body.bindings.version ?? 1)) throw conflict();
+        const version = (stored?.bindings as any)?.version;
+        const storedVersion = Number.isInteger(version) ? version : 1;
+        // Invalid rows can be repaired at their current revision, as GET advertises.
+        if (this.validShortcutBindings(stored?.bindings) && storedVersion > (body.bindings.version ?? 1)) throw conflict();
         if (body.revision === 0) return tx.workspaceShortcuts.create({ data: { ...owner, revision: 1, bindings: body.bindings } });
         const changed = await tx.workspaceShortcuts.updateMany({ where: { ...owner, revision: body.revision },
           data: { bindings: body.bindings, revision: { increment: 1 } } });
