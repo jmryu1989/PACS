@@ -2540,3 +2540,21 @@ D1160 파일럿 답(크기 조절 옵션, 지금 화면이 기본): REQ-WS7-PANE
 W3의 U0b 이력 계약(C6)은 `U0B-HISTORY`에서 승인된 U0b Git blob의 member/SQL 해시를 계속 검사한다. `U0B-STRUCT-NORMAL`과 R02는 현재 concern 소유권·facade forwarding·DI를 검사하고 v3 동작은 `workspace_layout_v3_service_test.cjs`가 검사한다. citation/structure migration의 `assert_behaviour`는 현재 소유권과 고정 이력을 모두 실행한다. 역사 기준 SHA·baseline은 바꾸지 않는다.
 
 Related의 RL06/08 동등성도 C6에 따라 고정 pre-UX landed 입력(c8e4f1b)에 결속한다. 원래 S7 기준 SHA·geometry 단언·허용 예외는 그대로이며, 현재 화면의 Related 동작과 W2 첫 화면은 별도 현재 소비자 시험으로 검증한다.
+
+## S9-U4 자기 기관 DICOM 반입·원본 다운로드 (S9-U4b part (b), 계약 S9-U4p)
+
+서버 쪽(반입 관문·반입/다운로드 route·raw parser·`ImportOperation`)의 REQ → RISK → TEST다. 화면(Import DICOM·Download Originals·Resolve Unconfirmed)은 part (c) 몫이다. 순수·서버 시험은 CI에서 돌고, 실제 Orthanc 시험(REQ-02/03/05/06/12)은 `tests/invariants_live.py`의 다섯 사례이며 실환경 묶음에서 실행한다(작성 시점 미실행).
+
+| REQ | RISK | TEST |
+|---|---|---|
+| REQ-S9-U4-02 환자·검사·SOP·소유 기관 식별(PatientID 필수, 발급주체 = 기관 하나, 기존 검사는 모든 인스턴스 저장 파일 헤더로 claim 초기화) | RISK-S9-U4-02 다른 환자 합침·발급주체 혼동 | `study_transfer_local_server_test.cjs` S9U4-B02~B09·B31, `invariants_live.py` `LiveInvariantTests.test_s9_u4_import_identity_rule` |
+| REQ-S9-U4-03 원본 보존, 같은 SOP는 저장 bytes로 판정 | RISK-S9-U4-03 다른 bytes 덮어쓰기 | 서버 S9U4-B10·B11·B15, live `test_s9_u4_original_hash_and_collision` |
+| REQ-S9-U4-05 파일별 결과·작업 멱등(§4.8 코드표 하나가 HTTP·outcome·최종/재시도를 정함) | RISK-S9-U4-05 거짓 성공·이중 저장·결과 유실 | 서버 S9U4-B01·B12~B19·B22, live `test_s9_u4_member_import_outcomes_and_idempotency` |
+| REQ-S9-U4-06 재기동·결과 불명 확인·준비 상태(환경 변수 없음)·관문 밖 writer 불변 | RISK-S9-U4-06 재기동·준비 공백이 완료를 꾸미거나 검사를 영구 봉쇄 | 서버 S9U4-B18·B21·B23~B27·B32, live `test_s9_u4_restart_recovery_and_unchanged_writers` |
+| REQ-S9-U4-12 새 route 분류·권한 계약·우회 없음 | RISK-S9-U4-12 미분류 route·proxy 별칭·raw 우회 | 서버 S9U4-B20, `emr_contract_test.cjs`, `pacs_split_test.cjs`(U0B-DI 선언 차감), `clinician_policy_test.py`, `admin_audit_attribution_test.cjs`(벡터 42-50), live `test_s9_u4_route_inventory_and_bypass` |
+| REQ-S9-U4-08 고정 manifest 전체 원본 다운로드(서버 쪽) | RISK-S9-U4-08 부분·변경 검사를 전체로 제시 | 서버 S9U4-B28~B30, `original_archive_test.cjs` |
+| REQ-S9-U4-13 migration·복원·CI 선언 일치 | RISK-S9-U4-13 미등록 상태·복원 누락 | `ops_product_transfer_test.py`(47 migrations, 52 tables, ImportOperation 7행), `production_image_test.py`, `candidate_ci_test.py`(invariants 100) |
+
+- 저장: migration `20261015013945_import_operation` — `ImportOperation`(import·download·study-claim·sop-claim, kind별 필수·null CHECK, `claimKey` nullable UNIQUE). 실행 역할 `kin_runtime`에는 준비 상태 사실이 읽는 `_prisma_migrations` 세 열만 SELECT를 준다.
+- 실행: `node --test tests/study_transfer_local_server_test.cjs`(kin-api:ci의 `/app/dist`, 없으면 `tests/service_test_loader.cjs`가 `api/src`를 컴파일), validate.yml runtime의 S9-U4b 세 단계.
+- 실환경: `python scripts/run-tests.py --plan <plan>` — 단위 `s9-u4b-b-identity`·`-collision`·`-outcomes`·`-restart`·`-routes`, 각 계획은 위 사례 하나다. Orthanc를 멈추고 API를 재기동하는 `-restart`는 다른 실환경 시험과 함께 돌리지 않는다.

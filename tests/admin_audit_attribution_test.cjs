@@ -141,6 +141,28 @@ CONTRACT.synthetic_vectors.push(
   {"row":39,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":[],"withheld_sides":{},"note":"PENDING member (no group): no institution"},
   {"row":40,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":[],"withheld_sides":{},"note":"two groups (INVALID): no single institution"},
   {"row":41,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m3's session could not be stored: failure row with the verified A identity"});
+/* S9-U4b (contract S9-U4p 4.9, U4P4-02): the seven self-institution import / original download actions are attributed to
+ * the institution they recorded, detail.institutionId = the operation's ImportOperation.institutionId (the verified session
+ * institution of the member who opened it; for a recovery the operation's, which the admin's own must equal). Vectors
+ * 42-50 continue the numbering; the card block above stays verbatim. */
+const IMPORT_MEANING = "record-time institution of the operation (ImportOperation.institutionId)";
+Object.assign(CONTRACT.field_rules, {"dicom.import.intent":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "dicom.import.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "dicom.import.recovery.request":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "dicom.import.recovery.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "original.download.prepare":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "original.download.intent":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "original.download.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING}});
+CONTRACT.synthetic_vectors.push(
+  {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
+  {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},
+  {"row":44,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"B's file result, never A's"},
+  {"row":45,"action":"dicom.import.recovery.request","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A admin's recovery request"},
+  {"row":46,"action":"dicom.import.recovery.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A admin's recovery result"},
+  {"row":47,"action":"original.download.prepare","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's download preparation"},
+  {"row":48,"action":"original.download.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's archive intent"},
+  {"row":49,"action":"original.download.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"B member's archive result"},
+  {"row":50,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":[],"withheld_sides":{},"note":"no institutionId recorded although the actor is an A member: no_institution_recorded, nobody sees it"});
 
 const json = value => JSON.parse(JSON.stringify(value));
 const WITHHELD = { withheld: 'other_institution' };
@@ -222,6 +244,29 @@ for (const r of [
   row(40, 'auth.login', MX, authDetail(null, { outcome: 'success' }), 'syn-mx-login@synthetic.test'),
   row(41, 'auth.login', M3, authDetail('inst-a', { outcome: 'failure', cause: 'session_failed' }), 'syn-m3-login@synthetic.test'),
 ]) ROWS.set(r.id, r);
+// S9-U4b: dicom-import-gate.service.ts and study-transfer-local.service.ts write these details (UIDs, hashes, ids and
+// outcomes; never a patient value); target is the Study UID, actor the member (or the admin for a recovery).
+const OP_A = '00000000-0000-4000-8000-0000000004a1', OP_B = '00000000-0000-4000-8000-0000000004b1', ATT = '00000000-0000-4000-8000-0000000004c1';
+const importDetail = (institutionId, rest = {}) => ({ institutionId, operationId: institutionId === 'inst-b' ? OP_B : OP_A, index: 3, attemptId: ATT,
+  generation: 1, kind: 'import', actor: 'syn-tech-a@members.test', ownerIssuer: 'https://synthetic.test/realms/kin', ownerSubject: 'syn-tech-a-sub',
+  studyUid: S1, seriesUid: S1 + '.1', sopUid: S1 + '.1.1', sha256: 'a'.repeat(64), bytes: 2048, at: '2026-10-15T00:00:00.000Z', ...rest });
+const downloadDetail = (institutionId, rest = {}) => ({ institutionId, operationId: institutionId === 'inst-b' ? OP_B : OP_A, manifestSha256: 'b'.repeat(64),
+  ownerIssuer: 'https://synthetic.test/realms/kin', ownerSubject: 'syn-rad-sub', at: '2026-10-15T00:00:00.000Z', ...rest });
+for (const r of [
+  row(42, 'dicom.import.intent', S1, importDetail('inst-a'), 'syn-tech-a@members.test'),
+  row(43, 'dicom.import.result', S1, importDetail('inst-a', { outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', writeDisposition: null, transport: 'unknown' }), 'syn-tech-a@members.test'),
+  row(44, 'dicom.import.result', S2, importDetail('inst-b', { studyUid: S2, outcome: 'stored', code: null, writeDisposition: null, transport: null }), 'syn-tech-b@members.test'),
+  row(45, 'dicom.import.recovery.request', S1, { institutionId: 'inst-a', operationId: OP_A, index: 3, attemptId: ATT, generation: 1, basis: 'orthanc-restarted',
+    checkedAt: '2026-10-15T00:00:00.000Z', adminIssuer: 'https://synthetic.test/realms/kin', adminSubject: 'syn-admin-a-sub', at: '2026-10-15T00:01:00.000Z' }, 'syn-admin-a@members.test'),
+  row(46, 'dicom.import.recovery.result', S1, { institutionId: 'inst-a', operationId: OP_A, index: 3, attemptId: ATT, generation: 1, basis: 'orthanc-restarted',
+    checkedAt: '2026-10-15T00:00:00.000Z', adminIssuer: 'https://synthetic.test/realms/kin', adminSubject: 'syn-admin-a-sub', outcome: 'retryable',
+    code: 'RECOVERED_NO_OBJECT', at: '2026-10-15T00:01:01.000Z' }, 'syn-admin-a@members.test'),
+  row(47, 'original.download.prepare', S1, downloadDetail('inst-a', { studyUid: S1, objects: 3, bytes: 6144 }), 'syn-rad-a@members.test'),
+  row(48, 'original.download.intent', S1, downloadDetail('inst-a', { attemptId: ATT, number: 1 }), 'syn-rad-a@members.test'),
+  row(49, 'original.download.result', S2, downloadDetail('inst-b', { attemptId: ATT, state: 'sent', archiveSha256: 'c'.repeat(64), responseFinished: true,
+    reason: null, objects: [{ sopUid: S2 + '.1.1', sha256: 'd'.repeat(64), bytesSupplied: 2048, complete: true }] }), 'syn-rad-b@members.test'),
+  row(50, 'dicom.import.result', S1, (({ institutionId, ...rest }) => ({ ...rest, outcome: 'stored', code: null }))(importDetail('inst-a')), 'syn-tech-a@members.test'),
+]) ROWS.set(r.id, r);
 
 /** Sides of a member row the reader gets as {withheld:'other_institution'} (field rows withhold nothing). */
 function withheldSides(projection) {
@@ -275,8 +320,8 @@ test('the module table is the card contract; allowed and hidden never overlap; t
 
 test('the synthetic vectors (the card\'s 30 and study.question): record-time readers and withheld sides per row', () => {
   // 31 = the card's 30, unchanged, and the study.question row added with its contract row (Astra S5-U5b-D-F02); 32-41
-  // are the S7-U5 access-record rows (AT-02).
-  assert.equal(CONTRACT.synthetic_vectors.length, 41);
+  // are the S7-U5 access-record rows (AT-02); 42-50 the S9-U4b import/download rows (contract S9-U4p 4.9).
+  assert.equal(CONTRACT.synthetic_vectors.length, 50);
   assert.deepEqual(CONTRACT.synthetic_vectors.slice(0, 30).map(v => v.row), Array.from({ length: 30 }, (_, i) => i + 1));
   assert.deepEqual(CONTRACT.synthetic_vectors[30], { row: 31, action: 'study.question', rule: 'hidden:study_scoped_owner_only',
     record_time_visible_to: [], withheld_sides: {}, note: CONTRACT.synthetic_vectors[30].note });
@@ -300,6 +345,20 @@ test('the synthetic vectors (the card\'s 30 and study.question): record-time rea
       assert.equal(A.projectAuditRow(source, reader), null, `row ${vector.row} must not reach ${reader}`);
     assert.equal(result.hidden === null, vector.record_time_visible_to.length > 0, `row ${vector.row} hidden reason`);
   }
+});
+
+test('S9-U4b import/download rows: the admin finds operationId and index; a row without institutionId reaches nobody; seven more candidates', () => {
+  const unconfirmed = A.projectAuditRow(ROWS.get(43), 'inst-a');
+  assert.deepEqual([unconfirmed.detail.operationId, unconfirmed.detail.index, unconfirmed.detail.attemptId, unconfirmed.detail.outcome],
+    [OP_A, 3, ATT, 'unconfirmed']);
+  assert.equal(A.projectAuditRow(ROWS.get(43), 'inst-b'), null);
+  assert.equal(A.attributeAuditRow(ROWS.get(50)).hidden, 'no_institution_recorded');
+  const seven = ['dicom.import.intent', 'dicom.import.result', 'dicom.import.recovery.request', 'dicom.import.recovery.result',
+    'original.download.prepare', 'original.download.intent', 'original.download.result'];
+  for (const action of seven) assert.equal(A.auditRule(action), 'field:detail.institutionId', action);
+  assert.deepEqual(A.AUDIT_CANDIDATE_ACTIONS.filter(action => /^(dicom\.import|original\.download)\./.test(action)).sort(), [...seven].sort());
+  // Not one of them is widened by a hidden wildcard or a neighbouring name.
+  for (const near of ['dicom.import', 'dicom.import.recovery', 'original.download', 'dicom.import.result.extra']) assert.equal(A.auditRule(near), 'hidden:unknown_action', near);
 });
 
 test('member rows: each side sees its own snapshot, the other side is withheld unnamed; email is never projected', () => {
@@ -760,7 +819,8 @@ test('B-F02: the SQL prefilter is a literal substring: names with \\, ", % and _
 // completeness cases below) ──
 
 test('AT-03 negative control: the current-group rule hands exactly m\'s A-era access rows to B; the record-time rule keeps them in A', () => {
-  const vectors = CONTRACT.synthetic_vectors.filter(v => v.row >= 32);
+  // The S7-U5 access-record vectors are 32-41 (the S9-U4b rows 42-50 follow them and are no access records).
+  const vectors = CONTRACT.synthetic_vectors.filter(v => v.row >= 32 && v.row <= 41);
   assert.deepEqual(vectors.map(v => v.row), [32, 33, 34, 35, 36, 37, 38, 39, 40, 41]);
   const leaks = vectors.filter(v => JSON.stringify(currentRule(ROWS.get(v.row))) !== JSON.stringify(v.record_time_visible_to))
     .map(v => v.row);

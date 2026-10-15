@@ -34,7 +34,8 @@ server {
     # 상대 리다이렉트는 브라우저가 현재 보고 있는 출처를 그대로 보존한다.
     absolute_redirect off;
 
-    # 전역 기본. DICOM 쓰기(STOW)는 이미 limit_except로 막혀 있어 큰 본문을 받을 곳이 없다.
+    # 전역 기본. 큰 본문을 받는 곳은 Gateway 전용 지정형 STOW(아래 /dicom-web/studies/<uid>)와 member 반입의
+    # 정확 경로(location = /api/dicom-import) 둘뿐이다. 그 밖의 DICOM 쓰기는 limit_except로 막혀 있고 나머지 /api/는 2m이다.
     client_max_body_size 32m;
     proxy_read_timeout   300s;
     proxy_send_timeout   300s;
@@ -95,6 +96,12 @@ server {
     location = /api/auth/register {
         limit_req zone=kin_registration burst=5 nodelay;
         client_max_body_size 2m;
+        proxy_pass http://api:3000;
+    }
+
+    location = /api/dicom-import {
+        # 반입 객체 24 MiB(API가 정확히 강제)와 헤더 여유. 나머지 /api/는 2m 그대로.
+        client_max_body_size 32m;
         proxy_pass http://api:3000;
     }
 

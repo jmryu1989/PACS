@@ -8224,5 +8224,154 @@
       }
     ]
   },
+  "di_additions": {
+    "unit": "S9-U4b",
+    "note": "contract S9-U4p 6: the self-institution import/download feature controller and its providers; U0B-DI compares the snapshot minus exactly these with di",
+    "controllers": [
+      "StudyTransferLocalController"
+    ],
+    "providers": [
+      "StudyTransferLocalService",
+      "DicomImportGateService"
+    ],
+    "injectables": {
+      "StudyTransferLocalController": {
+        "params": [
+          "StudyTransferLocalService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyTransferLocalService": {
+        "params": [
+          "PrismaService",
+          "DicomImportGateService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "DicomImportGateService": {
+        "params": [
+          "PrismaService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "routes": [
+      {
+        "controller": "StudyTransferLocalController",
+        "handler": "archive",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/original-downloads/:operationId/archive"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "1:3@3:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"operationId\":0"
+        ]
+      },
+      {
+        "controller": "StudyTransferLocalController",
+        "handler": "downloadStatus",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/original-downloads/:operationId"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"operationId\":0"
+        ]
+      },
+      {
+        "controller": "StudyTransferLocalController",
+        "handler": "importFile",
+        "method": "POST",
+        "paths": [
+          "/|dicom-import"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "StudyTransferLocalController",
+        "handler": "importStatus",
+        "method": "GET",
+        "paths": [
+          "/|dicom-import/:operationId"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"operationId\":0"
+        ]
+      },
+      {
+        "controller": "StudyTransferLocalController",
+        "handler": "prepareDownload",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/original-downloads"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "StudyTransferLocalController",
+        "handler": "recover",
+        "method": "POST",
+        "paths": [
+          "/|admin/dicom-import/:operationId/files/:index/recovery"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:3@3:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"operationId\":0",
+          "5:1@1:\"index\":0"
+        ]
+      }
+    ]
+  },
   "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee"
 }

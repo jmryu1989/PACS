@@ -144,7 +144,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 138, "public": 7, "session": 2, "business": 21, "denied": 108},
+    "counts": {"routes": 144, "public": 7, "session": 2, "business": 21, "denied": 114},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -154,7 +154,8 @@
       "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
       "connect": "inter-institution Connect agreements, basis and transfers; a far later stage (AGENTS).",
       "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action.",
-      "critical_result": "the sender side of critical result delivery (S7-U1a, contract S7-U1p section 6.1/6.3): recipient candidates, create, cancel and supersede are the radiologist's, and the per-study list shows the reading workflow's own records. The clinician's three rows are the received list, one record and the explicit ACK."
+      "critical_result": "the sender side of critical result delivery (S7-U1a, contract S7-U1p section 6.1/6.3): recipient candidates, create, cancel and supersede are the radiologist's, and the per-study list shows the reading workflow's own records. The clinician's three rows are the received list, one record and the explicit ACK.",
+      "original_transfer": "self-institution DICOM import and whole-original download (S9-U4b, contract S9-U4p 3/6): import is technician/admin, download radiologist/technician/admin, both owning institution and StudyAccess only; a clinician-only member neither writes originals nor takes them out."
     },
     "denied": {
       "report": [
@@ -189,7 +190,7 @@
       "admin": [
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
         "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET unassigned",
-        "POST studies/:uid/assign", "GET admin/metrics", "GET admin/audit"
+        "POST studies/:uid/assign", "GET admin/metrics", "GET admin/audit", "POST admin/dicom-import/:operationId/files/:index/recovery"
       ],
       "consultation": [
         "GET consultation-candidates", "GET consultations", "GET consultations/:id", "POST consultations/:id",
@@ -206,6 +207,10 @@
       "critical_result": [
         "GET studies/:uid/critical-result-recipients", "POST studies/:uid/critical-results", "GET studies/:uid/critical-results",
         "POST critical-results/:id/cancel", "POST critical-results/:id/supersede"
+      ],
+      "original_transfer": [
+        "POST dicom-import", "GET dicom-import/:operationId", "POST studies/:uid/original-downloads",
+        "GET studies/:uid/original-downloads/:operationId", "GET studies/:uid/original-downloads/:operationId/archive"
       ]
     },
     "post_baseline": {
@@ -242,7 +247,13 @@
       "GET studies/:uid/draft": {"decision": "denied", "unit": "S7-U5", "commit": "aafc2d9", "basis": "the authoritative read of the caller's own report draft and its stored revision (the draft boundary of the reading workflow); a clinician reads final reports only"},
       "POST auth/entry": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "consumes the one-time entry proof of the login that just finished, for the cookie's own session; it answers the session id a document binds to, so it runs before any role or member check"},
       "POST auth/login": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a login from a document that names the session it replaces; that session is ended with its audit row first, and a binding that is not the cookie's session is refused"},
-      "POST auth/register": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a registration from a document that names the session it replaces, under the same binding rule as POST auth/login"}
+      "POST auth/register": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a registration from a document that names the session it replaces, under the same binding rule as POST auth/login"},
+      "POST dicom-import": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "member import of one DICOM original into the owning institution (need technician, admin passes; restricted StudyAccess refuses a new study); a clinician never writes originals"},
+      "GET dicom-import/:operationId": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the owner's own import operation status (same verified issuer, subject, institution and kind; another owner 404); an importer's read, not a clinician's"},
+      "POST studies/:uid/original-downloads": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "prepares the fixed manifest of a whole-original download (radiologist/technician/admin, owning institution and StudyAccess); a clinician takes no originals out"},
+      "GET studies/:uid/original-downloads/:operationId": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the owner's own download operation state and attempts (another owner, kind or study 404)"},
+      "GET studies/:uid/original-downloads/:operationId/archive": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the ZIP of the stored originals of a prepared download (audited intent before the first byte); a clinician takes no originals out"},
+      "POST admin/dicom-import/:operationId/files/:index/recovery": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "own-institution admin confirmation of an unknown import attempt (admin only, Gateway refused); never a clinician action"}
     }
   },
   "controller_decorators": {
