@@ -15,7 +15,7 @@ const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
-const { createHash, randomUUID } = require('node:crypto');
+const { createHash, randomBytes, randomUUID } = require('node:crypto');
 if (!fs.existsSync('/app/dist/app.module.js')) require('./service_test_loader.cjs');
 require('/app/node_modules/reflect-metadata');
 const { NestFactory, APP_GUARD } = require('/app/node_modules/@nestjs/core');
@@ -561,7 +561,8 @@ test('S9U4-B09 the enumeration and header-read bounds: 4,097 / malformed / dupli
     const r = await h.send(bytes);
     return { h, r, bytes };
   }
-  const id = () => randomUUID().replace(/-/g, '').slice(0, 40).match(/.{8}/g).join('-');
+  // Orthanc identifiers are five groups of eight hex digits: a list of 4,097 well-formed ids is refused by the count alone.
+  const id = () => randomBytes(20).toString('hex').match(/.{8}/g).join('-');
   const findOnly = raw => call => (call.path === '/tools/find' ? { raw } : null);
   const unresolved = [
     ['4,097 ids', findOnly(JSON.stringify(Array.from({ length: 4097 }, id)))],
@@ -660,6 +661,13 @@ test('S9U4-B11 member/member: a SOP reserved with other bytes is refused at the 
   const other = await h.send(dicom({ study, series, sop, id: 'SYN-M', pixel: 48 }), { as: TECH2 });
   assert.deepEqual([other.status, other.body.code, other.body.writeDisposition], [409, 'SOP_CONTENT_CONFLICT', 'pre-write']);
   assert.equal(h.orthanc.calls.filter(c => c.path !== '/system').length, 0, 'refused at the reservation, before any Orthanc call');
+  // Same length, other content (a non-identity value of equal size): the reserved hash alone refuses it, still before Orthanc.
+  const twinBytes = dicom({ study, series, sop, id: 'SYN-M', pixel: 32, modality: 'MR' });
+  assert.equal(twinBytes.length, dicom({ study, series, sop, id: 'SYN-M', pixel: 32 }).length);
+  h.orthanc.calls.length = 0;
+  const twin = await h.send(twinBytes, { as: TECH2 });
+  assert.deepEqual([twin.status, twin.body.code, twin.body.writeDisposition], [409, 'SOP_CONTENT_CONFLICT', 'pre-write'], 'same length, other hash');
+  assert.equal(h.orthanc.calls.filter(c => c.path !== '/system').length, 0, 'same length: refused at the reservation');
   // A Study whose holder is a live attempt: the second member is STUDY_WRITE_PENDING; the same request goes through later.
   const busy = uid(), busySop = uid();
   let release;
