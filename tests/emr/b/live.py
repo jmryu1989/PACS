@@ -961,6 +961,11 @@ class EmrBLedgerLive(unittest.TestCase):
             root = Path(temporary); repo = root / "repo"; repo.mkdir(); output = root / "backups"; output.mkdir(mode=0o700)
             for filename in backup.FILES[3:]:
                 (repo / filename).write_text("SYNTHETIC_ONLY=no_production_secret\n", encoding="utf-8")
+            # As a compose host's .env does, it holds the credentials of the LOGIN roles it provisioned (this stack's own
+            # generated values): a daily set's rehearsal rebuilds their verifiers from it (D1303).
+            (repo / ".env").write_text("SYNTHETIC_ONLY=no_production_secret\n" + "".join(
+                "%s=%s\n" % (name, self.secrets[name]) for name in ("POSTGRES_PASSWORD", "KIN_EMR_RUNTIME_PASSWORD",
+                                                                     "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD")), encoding="utf-8")
             sqlite = root / "index"
             with contextlib.closing(sqlite3.connect(sqlite)) as connection:
                 connection.execute("CREATE TABLE AttachedFiles(uuid TEXT, compressedSize INTEGER)")

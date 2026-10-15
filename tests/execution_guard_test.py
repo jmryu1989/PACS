@@ -47,6 +47,9 @@ TG01_EXCLUDED = {
     'tests/ops_deploy_host_container_test.py': 'creates its own kin-api/kin-proxy for the ops contract (Linux CI)',
     'tests/migration_rehearsal.py': 'operator tool bound to the ops_backup backup source',
     'tests/gateway_pipeline_live.py': 'container-object operations only on the proven-empty hosted gateway-e2e daemon',
+    'tests/ops_emr_introduction_test.py': 'kin-db is injected into a resolved-model fixture to assert check_resolved '
+                                          'refuses a production container; its real docker calls name only its own '
+                                          'token-labelled volumes and networkless check containers',
 }
 TG02_EXCLUDED = {
     'tests/audit_store_db_test.py': 'only its own labelled networkless containers, no Compose; its docker(*args) '
@@ -54,6 +57,17 @@ TG02_EXCLUDED = {
     'tests/ops_deploy_host_container_test.py': 'its own disposable project (--project-directory, -f)',
     'tests/gateway_pipeline_live.py': 'its own gateway project (-p, --env-file, -f) with a scrubbed environment',
     'tests/measurement_ci.py': 'its own hosted project (-p project, env=env) on a proven-empty daemon',
+    'tests/ops_deploy_round4_test.py': 'mock of the scripts/ops_emr_introduction.py Compose contract: argv filters '
+                                       'over the FakeDocker call recorder; its real Compose runs are only `config` '
+                                       'renders of its own temporary ComposeEntry via the tool Runner, no container',
+    'tests/ops_deploy_smoke_test.py': 'mock of the scripts/ops_emr_introduction.py Compose contract: fake-runner argv, '
+                                      'a TimeoutExpired argv and a Runner whose process tree is a patched Python '
+                                      'child; no Compose process is started',
+    'tests/ops_emr_introduction_test.py': 'mock of the scripts/ops_emr_introduction.py Compose contract (FakeDocker '
+                                          'recorder and its filters, HostOps.cmd on fake runners), plus real runs on '
+                                          'its own temporary checkout only: `config` renders (--project-directory, -f) '
+                                          'and a docker(*args) wrapper for its own labelled volumes and networkless '
+                                          'containers, no Compose',
 }
 Violation = namedtuple('Violation', 'rule file line detail')
 OPAQUE = object()

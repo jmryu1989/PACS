@@ -1444,6 +1444,260 @@ checks ownership labels and removes only the fixture's containers/network/tag.
 The isolated `ops_deploy_entry.py` requires a separately provisioned root-owned
 policy/library/repository and request-bound operator evidence. Running scripts
 from a developer checkout does not grant deployment authority.
+
+## EMR-introduction release mode (INTERIM-RELEASE-TOOLS)
+
+Round 4 수용 계약: 이 절은 배포 가능 판정이 아니다. 같은 최종 bytes의 Windows/Linux-root 행렬,
+기존 재현 시험과 mutant, 정상·강제 L-09b 합성 리허설, 독립 검수까지 완료해야 한다.
+관측은 `OK(value)`·성공한 조회의 `ABSENT`·`ERROR(reason)`을 구분한다. 변경 또는 미결 작업 뒤
+관측 실패는 durable UNKNOWN이며 새 phase 요청으로 해제하지 않는다. 모든 보조 작업의 서버 쪽 종료를
+확인한 뒤 정리·재시도·복원한다. 최초 cron 재개 전 L-11b, 복구 cron 재개 전 RB-04c에 표지를 보존한다.
+DB 무변경 release도 RL-01의 첫 해제 전에 PONR을 기록한다.
+
+Part B의 Linux browser는 root systemd/cgroup v2와 보호 설치 Python/Playwright/Chromium 경로가 필요하다.
+`Type=exec`, `ExitType=cgroup`, `KillMode=control-group`, `Restart=no`의 transient service를 생성하며
+입력과 출력은 run의 private 작업 저장소에 둔다. unit 신원·main exit·cgroup 전체 종료·잔존 zombie 부재를
+대조한 뒤에만 profile을 지운다. 조회 실패는 UNKNOWN으로 보존하고 재진입의 관측만으로 hold를 풀지 않는다.
+Windows는 suspended-create → Job 할당 → resume 및 전체 Job 종료를 검사한다. Windows 성공으로 Linux
+검증을 대신하지 않는다. Linux 설치 환경이 준비되지 않으면 L-01에서 거절한다.
+
+첫 smoke 시도는 phase에 제한된 300초, 재시도는 총 120초이며 각 마지막 20초는 정리 시간이다. 모든
+helper·HTTP·pagination·browser 작업에 같은 monotonic deadline의 남은 시간을 전달한다. 작업 deadline 뒤
+새 작업을 시작하지 않고 정리도 최종 deadline을 넘겨 연장하지 않는다. 끝내지 못한 정리는 UNKNOWN이다.
+인증·소유권·allowlist의 영구 거절은 재시도하지 않는다. 임시 member/client 삭제는 소유 marker와 기록한
+불변 ID를 함께 확인한다. 원래 쿠키의 logout replay와 기존 업무 화면 8개 검사는 유지한다.
+`tests/ops_deploy_smoke_test.py`는 실제 subprocess/Windows Job/느린 HTTP·pagination의 시간 제한과
+systemd 관측 계약을 검사한다. 실제 Linux Chromium의 crash/hang/setsid/double-fork 및 entry crash는
+별도 systemd 실행 환경의 필수 증거이며 순수 관측 fixture로 통과 처리하지 않는다.
+Windows의 고정 명령 실행도 같은 Job 경계로 CLI와 plugin을 묶는다. Compose plugin이 출력 파이프를
+물고 있어도 공통 smoke deadline 안에 회수해야 하며, stdin/stdout 파일·바이너리 입력·cwd/env 보존을 함께 검사한다.
+
+Part C의 `kin-pg16-logical-v1`은 PostgreSQL 16 카탈로그 목록과 객체별 속성 목록을 닫힌 집합으로 검사한다.
+schema·table/view/sequence/index·column ACL·enum/domain·routine·constraint·trigger·RLS policy·default ACL·
+dependency·comment를 구조화된 `(database, schema, kind, name, qualifier)` 키로 비교한다. OID·물리 tuple 배치·
+WAL/transaction horizon·planner 통계는 논리 복원 값이 아니다. large object·publication·event trigger·FDW·
+partition·추가 extension·외부 verifier 등 v1 미지원 항목은 checkout 보정 전 admission과 fenced capture에서 거절한다.
+마지막 큰 열을 삭제한 뒤 남는 기본 TOAST 저장소도 물리 배치로 본다. 저장소가 없는 복원본의 기본 정책과
+대조하되 TOAST 옵션·소유자·ACL·tablespace 및 index 옵션의 차이는 계속 검출한다.
+PostgreSQL이 중복 저장한 동일 의존성은 한 관계로 비교하며 대상·열·종류가 다른 의존성은 구분한다.
+`NOLOGIN` 역할도 저장 verifier를 조사하며 미보존 verifier가 있으면 거절한다. 설정은
+v1의 명시 목록(`ops_backup.py`의 `RESTORE_SETTINGS`)과 실제 PostgreSQL 설정 목록에 함께 속해야 하며
+role·database·role-in-DB 범위를 재현한다. 표시·인코딩·timeout·transaction 기본값·memory·search_path·row_security
+설정을 포함하고 preload library·역할 전환·temp_tablespaces·그 밖의 설정 및 postgres/template 설정 변경은 거절한다.
+스칼라 설정은 보조 연결에 활성화하지 않고 저장한다. 유일한 인용 목록 설정인 search_path만 PostgreSQL이 파싱하여
+재현하므로 짧은 timeout이나 읽기 전용 transaction 설정이 복원 연결의 쓰기를 막지 않는다.
+두 DB의 모든 사용자 schema/table/column 값을 NULL·중복 행·원래 JSON text까지
+비교한다. 한 table당 100,000행·1,000,000셀·64 MiB를 넘으면 materialize 전에 거절한다.
+보존된 `standard_conforming_strings`·`client_encoding` 설정과 관계없이 도구의 SQL 리터럴은 명시적 escape를,
+private 입출력과 daily/held/Bfail dump는 UTF-8을 사용한다. 실제 PG16 시험은 역슬래시·따옴표·한글 값과
+설정의 동시 복원을 검사하며 held capture가 실행한 실제 export를 복원한다.
+공용 조회는 `pg_catalog,public` 순서로 이름을 해석해 카탈로그 충돌을 막고 기존 seed의 public 테이블 조회를 유지한다.
+격리된 복원 대상의 작업 연결에만 쓰기 가능 상태와 자체 timeout을
+적용한다. 보존할 역할·DB 기본 설정은 변경하지 않으며 복원 뒤에도 원래 값과 대조한다.
+
+`postgres`, `template0`, `template1` 및 시스템 객체는 같은 image digest의 `initdb` 결과와 대조한다.
+원본 `template0`의 연결 설정은 바꾸지 않는다. 소유 helper의 private 물리 복사본에서만 연결을 열며
+원본 volume을 helper에 mount하지 않는다. `pg_basebackup`의 checkpoint/WAL 활동은 발생한다.
+현재 경계 조사는 합계 DB 크기 1 GiB 이내, helper memory 3 GiB/tmpfs 2 GiB의 v1 범위다.
+이 범위를 넘거나 기본 경계가 다른 cluster는 변경 전에 거절하며 generic PostgreSQL 복원을 보장하지 않는다.
+
+clone 변환은 실제 Keycloak 26.7.3 이미지에서만 실행한다. kin realm의 정확한 기존 행에서 secret·해당 origin
+URL·SMTP·IdP enabled 필드만 바꾸고 양 DB의 나머지 값을 다시 비교한다. 새 master administrator도
+새 immutable ID·credential·temporary marker·정확한 역할 행을 검증한 뒤 나머지 전체 값을 대조한다.
+테이블 이름으로 비교를 면제하지 않는다. 지원 버전·행·필드 계약이 맞지 않으면 거절한다.
+계약 근거는 [PostgreSQL 16 catalog](https://www.postgresql.org/docs/16/catalogs.html) 및
+[고정 Keycloak bootstrap 구현](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/services/managers/ApplianceBootstrap.java)이다.
+순수 계약 시험은 `tests/ops_backup_restore_test.py`, 실제 SQL/복원 검증은 `tests/ops_backup_held_test.py`의
+격리 PG16 fixture에서 수행한다. 순수 시험은 실제 PostgreSQL 쿼리의 성공 증거가 아니다.
+
+`tests/ops_deploy_round5_test.py`는 등록 exec의 개별 Engine ID, 관측 전용 작업과 호스트 변경의 구분,
+소유 복원 서버의 생성·준비·정리, 실제 held manifest를 받는 RB-02와 clone 변환 본문을 확인한다.
+감독 명령의 오류는 browser 자체의 확정 timeout과 구분하며, UNKNOWN이면 profile·비밀 입력과 hold를 유지한다.
+capture가 변경 전에 거절되면 이전 운영 entry와 daily backup lock을 복구한다. realm의 기본 required action,
+조건부 OTP와 비밀번호 정책은 fence 전에 읽기 전용으로 검사한다.
+
+PG16 시험에는 비밀번호가 있는 bootstrap kin의 verifier 재현, 누락·추가 verifier 거절, 과거 이름을 가진
+Keycloak index 컬럼과 중첩 CHECK의 dump/restore 동등성이 포함된다. 지원하지 않는 trigger·policy·rule comment,
+builtin membership 변경, 추가 template 속성은 capture admission에서 거절하고, 비어 있는 임시 namespace는 허용한다.
+Windows Job·Linux systemd·Docker exec의 실제 종료, healthcheck와 겹치는 300회 exec, 단명 프로세스와 겹치는
+200회 browser unit 및 정상·강제 복구·forward 리허설은 격리 실행 기록으로 별도 확인한다.
+
+지원 운영 명령은 root 보호 설치본의 `/opt/kin-deploy/entry.py compose config` 및
+`/opt/kin-deploy/entry.py compose recreate [db|api|keycloak|orthanc|proxy ...]`다. checkout 밖의
+`<state_dir>/compose-entries/<generation>/`에 논리 파일·고정 bytes·환경·runtime override의 해시를
+보존하고 완전한 세대만 active pointer로 활성화한다. 기본 tag가 오래되어도 고정 image ID를 사용한다.
+원시 env/config는 증거 export에 넣지 않는다. bare Compose와 기존 explicit `-f` 운영 절차는 폐기한다.
+interim policy가 설치되어 있으면 보호 entry의 기존 API 배포 lane은 거절한다. runner/host bytes는 유지한다.
+임의 root 명령까지 차단한다고 주장하지 않는다. 미이관 cron/helper가 하나라도 실행 가능하면 배포 불가다.
+
+Compose 소비자 inventory와 현재 연결:
+
+| 소비자 | 입력 수명·연결 또는 차단 | 필요한 실행 증거 |
+|---|---|---|
+| HostOps의 capture/introduce/verify/reopen 및 re-entry | `compose()` → active immutable entry; 직접 초기 config는 변경 전 입력 고정에만 사용 | phase별 관측 행렬·실제 config |
+| I-RV, rollback, rollback_reopen | 같은 entry, 이전 이미지 ID와 fresh recovery project/volume 세대 | 복원 뒤 새 프로세스 recreate |
+| one-shot provision/migrate/Keycloak/helper | 같은 entry와 등록된 worker; 비밀은 private 입력, 명령 기록은 해시 | CLI 실패 뒤 서버 종료·UNKNOWN 보존 |
+| backup/restore의 docker run/exec | Compose 호출 없음; HostOps의 등록·이미지·자원 경계로 실행 | daemon worker 종료·보존 |
+| 보호 설치 확인·운영자 recreate | `entry.py compose config/recreate`; 종료 상태·동일 plan/tool/host/entry, 실제 allowlist를 변경 전에 확인 | 원본 overlay/env/proxy가 없어도 새 명령 실행 |
+| 기존 API-only entry | interim policy 존재 시 실행 거절; runner/host 원본 유지 | 보호 설치의 거절 시험 |
+| `ops_deploy_preflight.py`의 COMPOSE 목록 | API-only 읽기 검증의 선언; 실행 caller가 아니며 interim entry에 목록을 제공하지 않음 | consumer 소스 대조 |
+| `emr-compose.py` | 선언 검사·SQL 출력만 수행; Docker/DB 실행 없음 | consumer 소스 대조 |
+| monitor/notify | 직접 Compose 실행 없음 | 설치된 실제 cron/timer/스크립트의 해시·명령 목록 대조 |
+| cron/helper 및 기존 runbook | 공통 entry 이관 또는 실행 불가를 설치 담당자가 입증; `.env`만 바꾼 이관은 불인정 | G04/G05/G06/G13/W4의 대상별 실행 증거, 미이관 0 |
+
+생산 논리 순서는 `docker-compose.yml`, `docker-compose.prod.yml`,
+`/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, `docker-compose.monitor.yml`이다.
+VM은 prod 다음, Halo 앞에 rehearsal override를 삽입한다. 마지막 생성 runtime override는 이미지·포트·복구
+project/volume만 담는다. v1에서 service `env_file` 의존성은 bundle admission 거절 대상이다.
+격리 합성 rehearsal은 보호 plan에 선언한 Halo overlay·bind source·external network 신원을 사용한다.
+파일 순서와 proxy의 읽기 전용 bind 목적지는 동일하게 검사하며, 생산 target의 고정 신원 검사는 유지한다.
+
+최종 stage-exit의 실환경 선행 관문:
+
+| 관문 | 배포 전에 보존할 관측·실행 근거 |
+|---|---|
+| R3-01/05/09 | 보호 설치 Python과 browser pin으로 Linux root `env -i` Chromium 실행, 실제 Keycloak 버전·필드, Docker 29 inspect 대조 |
+| R3-03/10 | 실제 B0의 소요·최대 메모리·disk/inode·WAL 여유 측정, backup root 소유권과 audit ledger 확인 |
+| R3-11/15 | 최종 plan·bundle digest, 동일 최종 change SHA의 CI·G3·독립 판정·두 합성 리허설 |
+| R3-07 | 고정 host key의 인증 SSH로 root 보호 저장소에 원자 전송, host/plan/B0/tool/run 및 1회 사용 receipt 결속 |
+| R3-13 | D1034 여유 RAM 10 GiB·다른 kin.emrb.live/kin.ops.run 부재를 기록하고 한 자기 stack만 실행; 이전 위반 기록 보존 |
+| R3-17 | 실제 realm OTP 흐름·network 소비자 목록·TLS/AppArmor·audit·bind 대조 및 미이관 자동 소비자 0 |
+
+수용된 제한의 고정 문구:
+
+- R3-04: ordinary daily는 기존 counts/catalog/EMR 검증 범위 유지. held B0/B1 exact 검증과 구별하며 daily exact-value 통과라고 보고하지 않음
+- R3-06: 이번 고정 release DOM locator 사용 가능. 제품 DOM/문구를 시험 때문에 바꾸지 않음. Stage9 최종 release에서 다시 검증
+- R3-07: 별도 producer 서명은 추가하지 않음. 승인 executor·host-key 고정 SSH·root 보호 저장·hash manifest·원자 설치·one-use로 신뢰 경계를 닫음. 임의 전달 bundle은 거절
+- R3-12: r2 비밀번호 6개 덮어쓰기 사실 보존; 해당 파일을 원시 증거로 인용하지 않음. r4 원시 기록은 수정 없이 별도 보존
+- R3-14: native 오류/exit 의미를 그대로 기록. signature 적응은 허용하되 원 acceptance와 positive control을 유지. “오류가 났으니 취약성 소멸” 판정 금지
+- R3-16: PurePosixPath/Desktop 정규화는 유지. 임의 플랫폼 확대 불필요. 실제 VM manifest 경로의 config/inspect 일치는 별도 필수
+- 범용 PG 기능 미지원은 실제 inventory 조사 후 admission 거절
+
+UNKNOWN/호스트 상실은 자동 rollback 보장 밖의 **보존 정지**로 명시하고, 담당자의 수동 진단·복구 경로와
+연락 책임을 실행 계획에 둔다. 야간 응답자가 없으면 다음 담당자 확인까지 maintenance/lock을 유지하는 장애
+시간을 수용해야 한다. 사람 부재를 이유로 강제 재개하지 않는다. 외부 backup OFF·retention/reader NOLOGIN·
+서비스 감사 이력 유지도 바꾸지 않는다.
+
+The API-only runner keeps refusing a release that brings the EMR-B storage; `scripts/ops_emr_introduction.py` is
+that release's own mode (requests with `"mode": "emr-introduction"` are routed there by `ops_deploy_entry.py`, with
+its own disabled-by-default policy `/etc/kin-deploy/emr-introduction.json`; `python scripts/ops_emr_introduction.py
+example policy|target` prints placeholders). Phases follow one another only: capture (observe-before, write fence,
+pre-EMR B0 with the writers held, isolated B0 restore check) → introduce (provisioning, installer migration, Keycloak
+cache option, member-rights import, API as node/kin_runtime, UI/proxy, ingress still fenced) → verify (fenced HTTPS
+smoke with a login made after the member import, the worklist UID and the frame bytes, the one-shot EMR probe
+`scripts/ops_emr_probe.py`, B1 and its same-point restore) → reopen; release (before any database change) and rollback
+are the exits. A rollback restores B0 into fresh volumes of a recovery Compose project pinned in the immutable common
+entry with the previous image IDs. The supported recreate command retains those recovery volumes; the restore ends
+RESTORED behind the maintenance ingress, and only `rollback_reopen` (the previous version's own login
+made after the restore, worklist UID and frame bytes) opens anything. One phase of a plan runs at a time (an OS lease
+the kernel frees with a dead process); a phase that never recorded its end is classified NEEDS_ATTENTION, never re-run.
+Every step records the host before and after it and every command it ran (`commands-<phase>-<request>.jsonl`: redacted
+argv, environment names, input hash, exit/timeout, output hashes). Production's introduce requires, once, the v2
+local-restore receipt that a rehearsal of exactly that production plan and B0 produced on the plan's rehearsal host
+(per-phase steps and result hashes, B0/B1/Bfail/recovery/previous-version smoke cross-checked, at most seven days old;
+`verify-receipt --bundle` re-checks the run directory); external backup stays OFF and no offsite receipt is claimed.
+Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (the
+introduced release's daily backup seals into it).
+
+The target manifest names the host's own wiring instead of tolerating drift: `declared_overlays` (a compose file
+outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds)
+with `external_networks` per service. In `compose_files` a production target lists the overlay immediately after
+`docker-compose.prod.yml` (where Compose renders the host's modified file byte-identically); a rehearsal lists
+`docker-compose.prod.yml`, its one rehearsal override (which replaces the proxy's volumes), then the overlay (D09).
+`tracked_overlay_reconcile` (only `docker-compose.prod.yml`) puts the modified tracked file back to the commit only
+after Compose renders the current files, the commit plus the overlay, and the declared list byte-identically. With
+declared overlays L-00b retains the legacy `COMPOSE_FILE=<the declared list>` line for the plan's compose digest
+(`prepare-env --target` and `compose-digest --target` produce it). That line does not authorize bare Compose or
+override explicit `-f` callers. Re-entry loads the immutable generation; first admission checks the overlay file
+(hash) and every folder above it (root or the allowed
+owner, not writable by others, no link; IRT2-19) and its bind sources. The first admission captures the verified
+overlay bytes and all effective interpolation values into the persistent immutable bundle. Subsequent calls and
+ordinary recreate read that bundle after the original inputs or proxy vanish. Any bundle corruption is a refusal;
+there is no checkout fallback. Temporary working copies remain private and may be removed after the plan ends;
+the active entry's inputs remain. Before a seed nothing runs to resolve from: the required VM monitor file needs
+`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`, inside its checkout. Omitting monitor is not an alternative.
+With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
+(recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and
+bind mounts, networks, published ports; IRT2-02) and accepts as backup root this tool's own private folder or the
+operating account's 0700 folder (policy `repository_owner`; B0/B1/Bfail are then handed to that account, whose daily
+backups and ledger live there; IRT2-03). A clone's seed refuses a proxy certificate volume that is absent, empty, or
+whose key is not the certificate's own or whose chain does not verify against `ca_file` (D30), and compares the
+restored rows with the seed's `values.json` before and after its own recorded Keycloak changes (only their tables may
+differ; IRT2-24). Unattended (policy `smoke.browser_cmd`, D1062): L-01 proves the browser command (an executable file;
+a blank page within 60 s; `PLAYWRIGHT_BROWSERS_PATH` resolves) and the planned member's realm roles and top-level group
+(D01/D02). A temporary member `kin-smoke-<run>` (marked as this run's; a same-named account or client is never changed
+or deleted, IRT2-23) with a generated password in the secrets folder (never among the records; discarded with the
+member, IRT2-15) signs in through headless Chromium - the product's own sign-in; the worklist row and its Modality
+cell, the folders, the Reading Workspace with OHIF, the shortcuts dialog and the standalone viewer's image (IRT2-11);
+the logout, after which the ended session's original cookie is sent again from outside the browser and must be
+refused (IRT2-12) - then a temporary public client's Authorization Code + PKCE login for the token the API checks (the
+chain is verified first and the browser trusts only that leaf's SPKI pin; the origin's host:port maps to the
+maintenance port; the code is read from an unresolvable `.invalid` redirect; the profile lives in the secrets folder
+and is removed). The browser runs in its own process group (Windows: job object) and a timeout ends the whole tree
+(D17). A settled smoke failure gets one retry within 120 s with its own client and profile, the first attempt's record
+kept beside (D07); the eight checks become the executor's record, and the member is disabled and deleted before any
+reopen. The browser command carries its browsers' path itself (`/usr/bin/env
+PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers ...`). Production's receipt is admitted only together with its
+producer's run bundle: the rehearsal run directory's `result-*.json` and `journal.jsonl`, copied to
+`state/emr-bundles/<receipt sha256>/` (protected like the state) before the introduce request (IRT2-01). A step whose
+host could not be observed before it does not run; after a change it ends UNKNOWN (IRT2-22).
+
+- `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
+  allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state
+  machine (order, retained lock, budget/window, revert before the first database change, automatic rollback only when
+  no one-shot worker can be alive, none after an unknown end or past the point of no return). Its root-only class
+  needs an isolated Linux root fixture.
+- `python -B tests/ops_backup_held_test.py`: `ops_backup.capture_held()` never starts or stops a container, refuses
+  running writers before writing, refuses any EMR trace (EMR role, `emr_*` schema, tablespace) and any pre-EMR catalog
+  a rollback could not rebuild exactly (a further LOGIN role, role settings, another database or tablespace) in the
+  pre-EMR shape, and its result validates as a held capture; `ops_backup.restore_pre_snapshot()` replays the further
+  NOLOGIN roles and memberships, restores kin and keycloak with `--create` (owners and privileges kept) and compares
+  the whole catalog, also in the isolated B0 restore check. The catalog covers column, type, large-object and
+  foreign-server privileges, publications, event triggers, user mappings, function/view/trigger definitions and
+  sequence states; a membership another role than kin granted, and a kin whose attributes differ from a fresh
+  cluster's bootstrap kin, are refused at capture (IRT2-16/17); `values.json` (row count and SHA-256 per table of
+  every schema of both databases) is compared after every held restore (IRT2-24). Daily EMR sets record their role
+  catalog in the manifest and `rehearse` replays it in a kin-bootstrapped cluster (D23; older sets keep the
+  `pg_dumpall` path, which PostgreSQL 16 refuses for a `GRANTED BY kin` membership); a source database outside the
+  daily set (it dumps kin and keycloak) and its settings are named in the rehearsal result, not compared, while a
+  held capture still refuses it (R5-02, `ops_backup_test.py`). Its real-cluster class needs the
+  local image `postgres:16-alpine`.
+  `python -B tests/ops_backup_rotation_test.py`: after a complete, error-free `backup` (default `--rotate-keep 7`,
+  D1047; `--no-rotate` leaves the sets) and in `ops_backup.py rotate [--dry-run]` (the dry run lists exactly the plan
+  the run executes), rotation keeps N physically whole daily sets (every manifest component with its size and
+  SHA-256), never counts or deletes an incomplete set, never deletes release/held/protected/latest-verified sets,
+  re-judges an interrupted deletion (`.rotating-<name>`) by its original name and folder and leaves it in place when
+  anything protects it, and only thins a set that the audit ledger alone still retains (`validate_backup` then refuses it).
+  C-ROTATE는 계획·rename 직후·중단 삭제 재개·archive 삭제 직전에 같은 작업 잠금 소유권, 루트/세트 신원,
+  현재 manifest와 모든 component 해시, hold/protect/latest/audit 및 현재 complete 세대의 keep 조건을 다시 검사한다.
+  변화·조회 실패·불완전 세트는 `preserved-stop`과 CLI 실패로 남기며 남은 파일을 보존한다. orphan도 삭제하지 않는다.
+  `thinned.json`은 원 세트와 manifest/archive hash·크기에 결속한 v1 `THIN_PLANNED` → `THINNED_COMPLETE` 기록이다.
+  잘림·링크·불일치 marker는 삭제 근거가 아니다. 계획 marker와 archive가 모두 유효한 중단 thin만 재개할 수 있으며,
+  archive 삭제 뒤 완료 기록 전 중단된 세트는 자동 완료로 추정하지 않는다. 완료 marker가 있어도 남은 모든 component를
+  검증하며, archive가 아직 있으면 그 bytes도 검사한다. dry-run은 잠금 파일을 포함해 쓰지 않는다.
+  검사와 삭제 사이에는 보호 루트와 같은 잠금을 사용하는 소비자 계약을 적용한다. 악성 root 동시 변조를 보장하지 않는다.
+- The provision-first rule (Astra DR2-09): the mode refuses a database that already carries an EMR role, an `emr_*`
+  schema, the tablespace or a migration beyond the previous history before provisioning, instead of repairing it;
+  after the migration every relation of every `emr_*` schema, with its TOAST table and TOAST index, must be in
+  `kin_emr_access`.
+- `python -B tests/ops_emr_probe_test.py`: the probe verdict; with `KIN_TEST_API_IMAGE` set it runs the probe script
+  in that production image against a disposable provisioned and migrated PostgreSQL.
+- `tests/ops_deploy_host_container_test.py EmrIntroductionRehearsal` (opt-in `KIN_TEST_EMR_REHEARSAL=1` plus
+  `KIN_TEST_PREVIOUS_API_IMAGE`, `KIN_TEST_PREVIOUS_PROXY_IMAGE` built from the previous commit and
+  `KIN_TEST_API_IMAGE`, `KIN_TEST_PROXY_IMAGE` from the target): the fully synthetic rehearsal with the product's own
+  compose files on a local daemon - a source stack's B0 (with a synthetic DICOM frame and further NOLOGIN roles, a
+  membership, an owned schema and grants) seeds a clone with other names and secrets, which runs every phase through
+  rollback, rollback_reopen and an ordinary compose recreate, and produces the receipt (checked for its production
+  plan once, refused the second time). The clone carries a declared overlay (an external network and a host-file bind
+  outside its checkout, after the rehearsal override) that every proxy recreation keeps, and its certificate volume
+  check is shown refusing an absent and an empty volume first. The smoke runs unattended with the mode's reference
+  browser (`ops_emr_introduction.py browser-smoke`, Playwright Chromium): real Authorization Code + PKCE logins through
+  the clone's loopback maintenance ingress (a direct grant carries no `auth_time`, which the product refuses after the
+  member import). `KIN_TEST_EMR_REHEARSAL_EVIDENCE=<dir>` keeps each stack's run records. It is not a
+  rehearsal of a production backup copy, a real realm, production TLS or data volume; that is the separate rehearsal
+  on a disposable host.
+
 # 뷰어 반전 정밀도
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,
