@@ -643,10 +643,10 @@ class MigrationPins(unittest.TestCase):
         rows = restore_fixture.expected_rows("2.25.1")
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())])
         self.assertIn("api/prisma/migrations/20261008120000_emr_b/migration.sql", restore_fixture.MIGRATIONS)
-        # S9-U4b: 47 migrations, 52 tables (ImportOperation), rows + one import, two downloads and four reservations, 97.
+        # S9-U4b: 47 migrations, 52 tables (ImportOperation), rows + one import, three downloads and eight reservations, 102.
         self.assertEqual(len(restore_fixture.TABLES), 52)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 97)   # S7-U5: + the emptied draft row (tombstone); + 2 end marks; + 2 isolation facts; + 2 change records; S9-U4b: + 7
+        self.assertEqual(sum(len(value) for value in rows.values()), 102)   # S7-U5: + the emptied draft row (tombstone); + 2 end marks; + 2 isolation facts; + 2 change records; S9-U4b: + 12
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

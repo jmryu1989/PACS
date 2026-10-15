@@ -104,10 +104,10 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql']
-# S9-U4b (52 tables, 47 migrations): ImportOperation, its seven synthetic rows (an import with every attempt phase, a prepared
-# and an attempted download, a bound and an initializing Study reservation, a held and a free SOP reservation), one primary
-# key, two checks and three indexes. Not measured on a stack when written: estimated at about 12 KB of catalog and rows,
-# well inside the cap below.
+# S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
+# studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
+# primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
+# rows, well inside the cap below.
 TABLES = sorted(['ImportOperation', 'AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -471,38 +471,50 @@ def expected_rows(uid):
 
 
 def import_operation_rows(uid):
-    """S9-U4b (contract S9-U4p 7, REQ-S9-U4-13): every field a restore must keep, with real values. The member import holds
-    one stored file (an attempt finished), one unconfirmed file whose attempt was dispatching when the copy was taken (the
-    restored API reconciles it read-only), and one whose first attempt ended certain-no-write and whose second ended unknown
-    with its automatic re-check and an admin recovery request on record. The downloads are one prepared only and one with an
-    incomplete attempt (one object complete with its hashes, one partial with its counters) and an unconfirmed retry. The gate's
-    reservations are a bound and an initializing Study claim and a held and a free SOP claim (the held one is the unresolved
-    occupancy of the unknown attempt). Owner fields are the verified issuer and subject, never derived from the actor."""
+    """S9-U4b (contract S9-U4p 4.4 restore/maintenance, 7, REQ-S9-U4-13): every phase a restore must keep, with real values
+    and valid reservation relations (each holder is an attempt of a file of that very Study/SOP; one holder per Study).
+      import  one member operation over four studies: a stored file and its free SOP claim; an unknown second generation
+              (lease ended, automatic re-check and an admin recovery request on record) that holds Study A and its SOP; a
+              file refused for its modality (UIDs kept, no reservation); an expired dispatching attempt holding Study B and
+              its SOP (the restarted API reconciles it read-only); an expired prepared attempt holding the initializing
+              claim of Study C (the restart fences it and removes that claim: no Orthanc write happened); and another
+              instance's live dispatching attempt holding Study D and its SOP (never taken by the restart).
+      download one prepared only; one Sent after an incomplete attempt (partial checkpoint with counters and no hash, then
+              both objects with their full hashes, the archive hash and responseFinished); one whose last attempt was still
+              sending with an expired lease after an unconfirmed one (the restart closes it unconfirmed).
+    Owner fields are the verified issuer and subject, never derived from the actor."""
     issuer, sub, actor, hospital = 'https://synthetic.test/auth/realms/kin', 'SYNTHETIC-tech-sub', 'SYNTHETIC-tech', 'SYNTHETIC-hospital'
-    # Series, SOP and the second study take fixed synthetic UIDs: derived from the study UID they could pass 64 characters.
-    series, other_study = '2.25.4242.1', '2.25.4242.9'
-    boot = '00000000-0000-4000-8000-000000001b01'
-    stamp = '2026-09-06T00:00:00.123Z'
-    attempt_ids = ['00000000-0000-4000-8000-0000000011a' + n for n in '1234']
-    def attempt(attempt_id, generation, phase, outcome, code, transport, finished, **extra):
-        return dict(dict(attemptId=attempt_id, actor=actor, generation=generation, ownerInstance=boot, phase=phase,
-            leaseUntil='2026-09-06T00:00:30.123Z', startedAt=stamp, finishedAt=stamp if finished else None, outcome=outcome,
-            code=code, transport=transport, autoRecheckedAt=None, recovery=None), **extra)
-    def entry(index, outcome, code, attempts, writeDisposition=None, identity='matched'):
-        return dict(index=index, sha256=str(index + 1) * 64, bytes=1000 + index, studyUid=uid, seriesUid=series,
-            sopUid=series + '.' + str(index + 1), expectedStudyUid=uid if index == 0 else None, outcome=outcome, code=code,
-            identity=identity, writeDisposition=writeDisposition, at=stamp, attempts=attempts)
+    # Series, SOP and the other studies take fixed synthetic UIDs: derived from the study UID they could pass 64 characters.
+    study_b, study_c, study_d = '2.25.4242.2', '2.25.4242.3', '2.25.4242.4'
+    series = {uid: '2.25.4242.1', study_b: study_b + '.1', study_c: study_c + '.1', study_d: study_d + '.1'}
+    boot, other_boot = '00000000-0000-4000-8000-000000001b01', '00000000-0000-4000-8000-000000001b02'
+    stamp, expired, live = '2026-09-06T00:00:00.123Z', '2026-09-06T00:00:30.123Z', '2099-01-01T00:00:00.000Z'
+    ids = {name: '00000000-0000-4000-8000-0000000011' + code for name, code in
+           (('stored', 'a1'), ('first', 'a2'), ('unknown', 'a3'), ('dispatching', 'a4'), ('prepared', 'a5'), ('live', 'a6'))}
+    def attempt(name, generation, phase, outcome, code, transport, **extra):
+        running = phase in ('prepared', 'dispatching')
+        return dict(dict(attemptId=ids[name], actor=actor, generation=generation, ownerInstance=boot, phase=phase, leaseUntil=expired,
+            startedAt=stamp, finishedAt=None if running else stamp, outcome=outcome, code=code, transport=transport, autoRecheckedAt=None,
+            recovery=None), **extra)
+    def entry(index, study, sop, outcome, code, attempts, identity='matched', writeDisposition=None):
+        return dict(index=index, sha256=format(index + 1, 'x') * 64, bytes=1000 + index, studyUid=study, seriesUid=series[study],
+            sopUid=sop, expectedStudyUid=study if index == 0 else None, outcome=outcome, code=code, identity=identity,
+            writeDisposition=writeDisposition, at=stamp, attempts=attempts)
+    unconfirmed = ('unconfirmed', 'IMPORT_UNCONFIRMED')
     recovery = dict(basis='orthanc-restarted', checkedAt='2026-09-06T00:00:10.000Z', adminIssuer=issuer, adminSubject='SYNTHETIC-admin-sub',
         adminActor='SYNTHETIC-admin', requestedAt='2026-09-06T00:00:11.000Z', resolvedAt=None)
+    sop_a1, sop_a2, sop_a6 = series[uid] + '.1', series[uid] + '.2', series[uid] + '.6'
+    sop_b, sop_c, sop_d = series[study_b] + '.1', series[study_c] + '.1', series[study_d] + '.1'
     results = [
-        entry(0, 'stored', None, [attempt(attempt_ids[0], 1, 'finished', 'stored', None, None, True)]),
-        entry(1, 'unconfirmed', 'IMPORT_UNCONFIRMED', [attempt(attempt_ids[1], 1, 'dispatching', 'unconfirmed', 'IMPORT_UNCONFIRMED', None, False)],
-            identity='not_comparable'),
-        entry(2, 'unconfirmed', 'IMPORT_UNCONFIRMED', [
-            attempt(attempt_ids[2], 1, 'finished', 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write', True),
-            attempt(attempt_ids[3], 2, 'unknown', 'unconfirmed', 'IMPORT_UNCONFIRMED', 'unknown', True,
-                autoRecheckedAt='2026-09-06T00:00:05.000Z', recovery=recovery)])]
-    objects = [dict(orthancId=('%08x' % n) + '-00000000-00000000-00000000-00000000', seriesUid=series, sopUid=series + '.' + str(n),
+        entry(0, uid, sop_a1, 'stored', None, [attempt('stored', 1, 'finished', 'stored', None, None)], identity='new-study'),
+        entry(1, uid, sop_a2, *unconfirmed, [
+            attempt('first', 1, 'finished', 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write'),
+            attempt('unknown', 2, 'unknown', *unconfirmed, 'unknown', autoRecheckedAt='2026-09-06T00:00:05.000Z', recovery=recovery)]),
+        entry(2, study_b, sop_b, *unconfirmed, [attempt('dispatching', 1, 'dispatching', *unconfirmed, None)], identity='not_comparable'),
+        entry(3, study_c, sop_c, *unconfirmed, [attempt('prepared', 1, 'prepared', *unconfirmed, None)], identity=None),
+        entry(4, study_d, sop_d, *unconfirmed, [attempt('live', 1, 'dispatching', *unconfirmed, None, ownerInstance=other_boot, leaseUntil=live)]),
+        entry(5, uid, sop_a6, 'rejected', 'MODALITY_NOT_IMPORTABLE', [], identity=None)]
+    objects = [dict(orthancId=('%08x' % n) + '-00000000-00000000-00000000-00000000', seriesUid=series[uid], sopUid=series[uid] + '.' + str(n),
         bytes=1000 + n, md5=str(n) * 32) for n in (1, 2)]
     for ordinal, item in enumerate(objects, 1):
         item['path'] = '001/' + str(ordinal).zfill(5) + '.dcm'
@@ -511,42 +523,52 @@ def import_operation_rows(uid):
     def download(attempts):
         return dict(schemaVersion=1, targetStudyUid=uid, destination='browser-download', preparedAt=stamp,
             manifestCanonical=canonical_manifest, attempts=attempts)
-    def supply(number, state, objects_supplied, ended, lease):
-        return dict(attemptId='00000000-0000-4000-8000-0000000012a' + str(number), number=number, ownerSubject=sub, actor=actor,
-            manifestSha256=manifest_sha, destination='browser-download', state=state, startedAt=stamp, endedAt=stamp if ended else None,
-            ownerInstance=boot, leaseUntil=lease, objects=objects_supplied, archiveSha256=None, responseFinished=False)
-    first = [dict(orthancId=objects[0]['orthancId'], sopUid=objects[0]['sopUid'], bytesRead=1001, bytesSupplied=1001, sha256='a' * 64,
-                  md5=objects[0]['md5'], complete=True),
-             dict(orthancId=objects[1]['orthancId'], sopUid=objects[1]['sopUid'], bytesRead=512, bytesSupplied=480, sha256=None, md5=None,
-                  complete=False)]
+    def supply(row, number, state, objects_supplied, lease=expired, archive=None):
+        return dict(attemptId='00000000-0000-4000-8000-00000000%04x' % (0x1200 + row * 16 + number), number=number, ownerSubject=sub,
+            actor=actor, manifestSha256=manifest_sha, destination='browser-download', state=state, startedAt=stamp,
+            endedAt=None if state == 'sending' else stamp, ownerInstance=boot, leaseUntil=lease, objects=objects_supplied,
+            archiveSha256=archive, responseFinished=archive is not None)
+    def done(n, digest):
+        item = objects[n]
+        return dict(orthancId=item['orthancId'], sopUid=item['sopUid'], bytesRead=item['bytes'], bytesSupplied=item['bytes'],
+            sha256=digest * 64, md5=item['md5'], complete=True)
+    partial = dict(orthancId=objects[1]['orthancId'], sopUid=objects[1]['sopUid'], bytesRead=512, bytesSupplied=480, sha256=None, md5=None,
+        complete=False)
     member = dict(institutionId=hospital, ownerIssuer=issuer, ownerSubject=sub, actor=actor, createdAt=STAMP, updatedAt=STAMP)
     gate = dict(institutionId=hospital, ownerIssuer='kin-internal', ownerSubject='dicom-import-gate', actor='dicom-import-gate',
         results=[], manifestSha256=None, download=None, createdAt=STAMP, updatedAt=STAMP)
-    study_claim = lambda study, phase, holder, values: dict(schemaVersion=1, phase=phase, institutionId=hospital, studyUid=study,
-        **values, heldByAttemptId=holder, createdAt=stamp)
     identity = dict(patientId='SYNTHETIC-patient', issuerInstitutionId=hospital, nameKey='SYNTHETIC PATIENT', birthKey='19700101', sexKey=None)
     blank = dict(patientId=None, issuerInstitutionId=None, nameKey=None, birthKey=None, sexKey=None)
-    sop_claim = lambda index, holder: dict(schemaVersion=1, institutionId=hospital, studyUid=uid, seriesUid=series,
-        sopUid=series + '.' + str(index + 1), patientId='SYNTHETIC-patient', issuerInstitutionId=hospital, sha256=str(index + 1) * 64,
-        bytes=1000 + index, heldByAttemptId=holder, createdAt=stamp)
+    def study_claim(row, study, phase, holder):
+        return dict(id='00000000-0000-4000-8000-00000000130' + row, **gate, kind='study-claim', studyUid=study, status='reserved',
+            claimKey='study:' + study, claim=dict(schemaVersion=1, phase=phase, institutionId=hospital, studyUid=study,
+            **(identity if phase == 'bound' else blank), heldByAttemptId=holder, createdAt=stamp))
+    def sop_claim(row, index, holder):
+        file = results[index]
+        return dict(id='00000000-0000-4000-8000-00000000140' + row, **gate, kind='sop-claim', studyUid=file['studyUid'], status='reserved',
+            claimKey='sop:' + file['sopUid'], claim=dict(schemaVersion=1, institutionId=hospital, studyUid=file['studyUid'],
+            seriesUid=file['seriesUid'], sopUid=file['sopUid'], patientId='SYNTHETIC-patient', issuerInstitutionId=hospital,
+            sha256=file['sha256'], bytes=file['bytes'], heldByAttemptId=holder, createdAt=stamp))
     return [
         dict(id='00000000-0000-4000-8000-000000001101', **member, kind='import', studyUid=None, status='open', results=results,
              manifestSha256=None, download=None, claimKey=None, claim=None),
         dict(id='00000000-0000-4000-8000-000000001201', **member, kind='download', studyUid=uid, status='prepared', results=[],
              manifestSha256=manifest_sha, download=download([]), claimKey=None, claim=None),
-        dict(id='00000000-0000-4000-8000-000000001202', **member, kind='download', studyUid=uid, status='unconfirmed', results=[],
-             manifestSha256=manifest_sha, download=download([supply(1, 'incomplete', first, True, '2026-09-06T00:00:30.123Z'),
-                 supply(2, 'unconfirmed', first[:1], False, '2026-09-06T00:01:00.123Z')]), claimKey=None, claim=None),
-        dict(id='00000000-0000-4000-8000-000000001301', **gate, kind='study-claim', studyUid=uid, status='reserved',
-             claimKey='study:' + uid, claim=study_claim(uid, 'bound', None, identity)),
-        dict(id='00000000-0000-4000-8000-000000001302', **gate, kind='study-claim', studyUid=other_study, status='reserved',
-             claimKey='study:' + other_study, claim=study_claim(other_study, 'initializing', attempt_ids[1], blank)),
-        dict(id='00000000-0000-4000-8000-000000001303', **gate, kind='sop-claim', studyUid=uid, status='reserved',
-             claimKey='sop:' + series + '.1', claim=sop_claim(0, None)),
-        dict(id='00000000-0000-4000-8000-000000001304', **gate, kind='sop-claim', studyUid=uid, status='reserved',
-             claimKey='sop:' + series + '.3', claim=sop_claim(2, attempt_ids[3])),
+        dict(id='00000000-0000-4000-8000-000000001202', **member, kind='download', studyUid=uid, status='sent', results=[],
+             manifestSha256=manifest_sha, download=download([supply(2, 1, 'incomplete', [done(0, 'a'), partial]),
+                 supply(2, 2, 'sent', [done(0, 'a'), done(1, 'b')], archive='c' * 64)]), claimKey=None, claim=None),
+        dict(id='00000000-0000-4000-8000-000000001203', **member, kind='download', studyUid=uid, status='sending', results=[],
+             manifestSha256=manifest_sha, download=download([supply(3, 1, 'unconfirmed', [done(0, 'a')]),
+                 supply(3, 2, 'sending', [done(0, 'a')])]), claimKey=None, claim=None),
+        study_claim('1', uid, 'bound', ids['unknown']),
+        study_claim('2', study_b, 'bound', ids['dispatching']),
+        study_claim('3', study_c, 'initializing', ids['prepared']),
+        study_claim('4', study_d, 'bound', ids['live']),
+        sop_claim('1', 0, None),
+        sop_claim('2', 1, ids['unknown']),
+        sop_claim('3', 2, ids['dispatching']),
+        sop_claim('4', 4, ids['live']),
     ]
-
 
 def expected_sequences():
     return {name: dict(last_value=2 if name in ('ReportVersion_id_seq', 'ProviderChange_id_seq') else 1,
@@ -1087,6 +1109,35 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing internal owner check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "ImportOperation" SET "claimKey"='study:2.25.4242.8' WHERE kind='study-claim' AND claim->>'phase'='bound';
         RAISE EXCEPTION 'missing study reservation key check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      -- U4BB-07: each required column of each kind on its own - SQL NULL, a malformed value, or JSON null where an object is
+      -- required - is a check violation (a CHECK whose expression is NULL would pass), and JSON null in a column that must be
+      -- SQL NULL is one too.
+      BEGIN UPDATE "ImportOperation" SET download=NULL WHERE kind='download';
+        RAISE EXCEPTION 'missing download object check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET download='null'::jsonb WHERE kind='download';
+        RAISE EXCEPTION 'JSON null download accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "manifestSha256"='not-a-sha256' WHERE kind='download';
+        RAISE EXCEPTION 'malformed download manifest hash accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "studyUid"=NULL WHERE kind='download';
+        RAISE EXCEPTION 'download without its study accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET status='reserved' WHERE kind='download';
+        RAISE EXCEPTION 'download status outside its states accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "claimKey"=NULL WHERE kind='study-claim';
+        RAISE EXCEPTION 'study reservation without its key accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET claim=NULL WHERE kind='study-claim';
+        RAISE EXCEPTION 'study reservation without its claim accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET claim='null'::jsonb WHERE kind='study-claim';
+        RAISE EXCEPTION 'JSON null study claim accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "claimKey"=NULL WHERE kind='sop-claim';
+        RAISE EXCEPTION 'SOP reservation without its key accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET claim=NULL WHERE kind='sop-claim';
+        RAISE EXCEPTION 'SOP reservation without its claim accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "claimKey"='sop:not-a-uid' WHERE kind='sop-claim';
+        RAISE EXCEPTION 'malformed SOP reservation key accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET download='null'::jsonb WHERE kind='import';
+        RAISE EXCEPTION 'JSON null in a member import NULL column accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET results='{}'::jsonb WHERE kind='import';
+        RAISE EXCEPTION 'member import results that are not an array accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));

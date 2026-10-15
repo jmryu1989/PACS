@@ -33,20 +33,28 @@ CREATE TABLE "ImportOperation" (
              = ("ownerIssuer" = 'kin-internal' AND "ownerSubject" = 'dicom-import-gate' AND "actor" = 'dicom-import-gate'))
         AND ("studyUid" IS NULL OR ("studyUid" ~ '^[0-9]+(\.[0-9]+)*$' AND length("studyUid") <= 64))),
     -- One closed shape per kind (contract 4.4 table): status values, which columns are required and which stay NULL.
-    CONSTRAINT "ImportOperation_kind_check" CHECK (
+    -- A CHECK passes when its expression is NULL, so every required column is tested IS NOT NULL before its value (a NULL
+    -- manifest, download, claim key or claim makes its branch false, never unknown), and the whole expression is COALESCEd
+    -- to false as well. SQL NULL and JSON null stay distinct: a required-NULL column holding JSON null is not NULL, and a
+    -- JSON null where an object is required is not an object.
+    CONSTRAINT "ImportOperation_kind_check" CHECK (COALESCE(
         ("kind" = 'import' AND "status" IN ('open', 'settled') AND "studyUid" IS NULL
             AND CASE WHEN jsonb_typeof("results") = 'array' THEN jsonb_array_length("results") <= 100 ELSE false END
             AND "manifestSha256" IS NULL AND "download" IS NULL AND "claimKey" IS NULL AND "claim" IS NULL)
         OR ("kind" = 'download' AND "status" IN ('prepared', 'sending', 'sent', 'incomplete', 'unconfirmed')
             AND "studyUid" IS NOT NULL AND "results" = '[]'::jsonb
-            AND "manifestSha256" ~ '^[0-9a-f]{64}$' AND jsonb_typeof("download") = 'object'
+            AND "manifestSha256" IS NOT NULL AND "manifestSha256" ~ '^[0-9a-f]{64}$'
+            AND "download" IS NOT NULL AND jsonb_typeof("download") = 'object'
             AND "claimKey" IS NULL AND "claim" IS NULL)
         OR ("kind" = 'study-claim' AND "status" = 'reserved' AND "studyUid" IS NOT NULL AND "results" = '[]'::jsonb
             AND "manifestSha256" IS NULL AND "download" IS NULL
-            AND "claimKey" = ('study:' || "studyUid") AND jsonb_typeof("claim") = 'object')
+            AND "claimKey" IS NOT NULL AND "claimKey" = ('study:' || "studyUid")
+            AND "claim" IS NOT NULL AND jsonb_typeof("claim") = 'object')
         OR ("kind" = 'sop-claim' AND "status" = 'reserved' AND "studyUid" IS NOT NULL AND "results" = '[]'::jsonb
             AND "manifestSha256" IS NULL AND "download" IS NULL
-            AND "claimKey" ~ '^sop:[0-9]+(\.[0-9]+)*$' AND length("claimKey") <= 68 AND jsonb_typeof("claim") = 'object'))
+            AND "claimKey" IS NOT NULL AND "claimKey" ~ '^sop:[0-9]+(\.[0-9]+)*$' AND length("claimKey") <= 68
+            AND "claim" IS NOT NULL AND jsonb_typeof("claim") = 'object'),
+        false))
 );
 
 -- NULL for every member operation (any number of them); one row per exact reservation text, refused by the database.

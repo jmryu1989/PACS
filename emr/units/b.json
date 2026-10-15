@@ -493,7 +493,7 @@
     "migrations": 47,
     "public_tables": 52,
     "emr_tables": 10,
-    "fixture_public_rows": 97,
+    "fixture_public_rows": 102,
     "fixture_emr_rows": 11,
     "note": "declared before running; never generated from a run's own result"
   },

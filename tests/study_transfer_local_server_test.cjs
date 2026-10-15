@@ -146,19 +146,31 @@ function fakeOrthanc() {
 }
 
 // ── a recording store: ImportOperation (CHECK shapes, PK/UNIQUE), StudyState, AuditLog, rights, locks, rollback ──
+// The two CHECKs of migration 20261015013945_import_operation, clause by clause. SQL three-valued logic is kept the way the
+// migration closes it: every required column is tested IS NOT NULL before its value, so a NULL makes its branch false.
+// (JSON null is not representable here - a JS null is SQL NULL; the JSON-null probes run on PostgreSQL in restore-product.)
 const CHECK_STATUS = { import: ['open', 'settled'], download: ['prepared', 'sending', 'sent', 'incomplete', 'unconfirmed'], 'study-claim': ['reserved'], 'sop-claim': ['reserved'] };
+const present = v => v !== null && v !== undefined;
+const jsonObject = v => present(v) && typeof v === 'object' && !Array.isArray(v);
+const emptyArray = v => Array.isArray(v) && v.length === 0;
 function checkShape(row) {
   const internal = row.ownerIssuer === 'kin-internal' && row.ownerSubject === 'dicom-import-gate' && row.actor === 'dicom-import-gate';
-  const claimKind = row.kind === 'study-claim' || row.kind === 'sop-claim';
-  const ok = CHECK_STATUS[row.kind]?.includes(row.status) && internal === claimKind
-    && (row.studyUid === null || /^[0-9]+(\.[0-9]+)*$/.test(row.studyUid))
-    && (row.kind === 'import' ? row.studyUid === null && Array.isArray(row.results) && row.results.length <= 100 && row.manifestSha256 === null && row.download === null && row.claimKey === null && row.claim === null
-      : row.kind === 'download' ? row.studyUid !== null && JSON.stringify(row.results) === '[]' && /^[0-9a-f]{64}$/.test(row.manifestSha256 ?? '') && row.download && typeof row.download === 'object' && row.claimKey === null && row.claim === null
-      : row.studyUid !== null && JSON.stringify(row.results) === '[]' && row.manifestSha256 === null && row.download === null && row.claim && typeof row.claim === 'object'
-        && (row.kind === 'study-claim' ? row.claimKey === 'study:' + row.studyUid : /^sop:[0-9]+(\.[0-9]+)*$/.test(row.claimKey)));
-  if (!ok) throw Object.assign(new Error('check_violation ImportOperation'), { code: 'P2010', meta: { code: '23514' } });
-}
-function store({ institutions } = {}) {
+  const owner = [row.institutionId, row.ownerIssuer, row.ownerSubject, row.actor].every(v => typeof v === 'string' && v.length > 0)
+    && (row.kind === 'study-claim' || row.kind === 'sop-claim') === internal
+    && (row.studyUid === null || (/^[0-9]+(\.[0-9]+)*$/.test(row.studyUid) && row.studyUid.length <= 64));
+  const status = CHECK_STATUS[row.kind]?.includes(row.status);
+  const kind = status && (
+    (row.kind === 'import' && row.studyUid === null && Array.isArray(row.results) && row.results.length <= 100
+      && row.manifestSha256 === null && row.download === null && row.claimKey === null && row.claim === null)
+    || (row.kind === 'download' && present(row.studyUid) && emptyArray(row.results)
+      && present(row.manifestSha256) && /^[0-9a-f]{64}$/.test(row.manifestSha256) && present(row.download) && jsonObject(row.download)
+      && row.claimKey === null && row.claim === null)
+    || (row.kind === 'study-claim' && present(row.studyUid) && emptyArray(row.results) && row.manifestSha256 === null && row.download === null
+      && present(row.claimKey) && row.claimKey === 'study:' + row.studyUid && present(row.claim) && jsonObject(row.claim))
+    || (row.kind === 'sop-claim' && present(row.studyUid) && emptyArray(row.results) && row.manifestSha256 === null && row.download === null
+      && present(row.claimKey) && /^sop:[0-9]+(\.[0-9]+)*$/.test(row.claimKey) && row.claimKey.length <= 68 && present(row.claim) && jsonObject(row.claim)));
+  if (!owner || !kind) throw Object.assign(new Error('check_violation ImportOperation'), { code: 'P2010', meta: { code: '23514' } });
+}function store({ institutions } = {}) {
   const s = { ops: new Map(), states: new Map(), audits: [], clock: T0, migration: true, policies: new Map(), sessions: new Set(),
     rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, expiredTokens: new Set(), idpEnded: new Set(),
     institutions: institutions ?? [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }] };
@@ -2465,4 +2477,116 @@ test('S9U4-B47 a database read or commit that fails before any intent is 503 IMP
     h.s.migration = false;
     assert.deepEqual((await h.send(dicom({ study: uid() }))).body.code, 'IMPORT_NOT_READY');
   }
+});
+// ── the migration's checks and the restore fixture's phases (U4BB-07, U4BB-13) ──
+
+test('S9U4-B48 the store keeps the migration\'s checks with SQL NULL closed: each required column of each kind set NULL or malformed is a check violation; any number of member rows without a reservation key, one row per exact key', async () => {
+  const h = await harness();
+  const study = uid();
+  const imported = await h.send(dicom({ study }));
+  const dl = await downloadStudy(h, 1), downloadId = randomUUID();
+  assert.equal((await prepare(h, dl, downloadId)).status, 200);
+  const row = kind => [...h.s.ops.values()].find(r => r.kind === kind).id;
+  const violations = [
+    ['download manifestSha256 NULL', row('download') && downloadId, { manifestSha256: null }],
+    ['download object NULL', downloadId, { download: null }],
+    ['download manifestSha256 malformed', downloadId, { manifestSha256: 'not-a-sha256' }],
+    ['download studyUid NULL', downloadId, { studyUid: null }],
+    ['download status outside its states', downloadId, { status: 'reserved' }],
+    ['study claim key NULL', row('study-claim'), { claimKey: null }],
+    ['study claim NULL', row('study-claim'), { claim: null }],
+    ['study claim key of another study', row('study-claim'), { claimKey: 'study:2.25.4242.8' }],
+    ['SOP claim key NULL', row('sop-claim'), { claimKey: null }],
+    ['SOP claim NULL', row('sop-claim'), { claim: null }],
+    ['SOP claim key malformed', row('sop-claim'), { claimKey: 'sop:not-a-uid' }],
+    ['member import with a reservation key', imported.id, { claimKey: 'sop:2.25.4242.7' }],
+    ['member import results not an array', imported.id, { results: {} }],
+    ['another kind', imported.id, { kind: 'gateway-import' }],
+    ['the internal owner on a member row', downloadId, { ownerIssuer: 'kin-internal', ownerSubject: 'dicom-import-gate', actor: 'dicom-import-gate' }],
+  ];
+  for (const [name, id, data] of violations) {
+    const before = h.s.op(id);
+    await assert.rejects(h.s.prisma.$transaction(tx => tx.importOperation.update({ where: { id }, data }), { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }),
+      error => error.meta?.code === '23514', name);
+    assert.deepEqual(h.s.op(id), before, name + ': rolled back');
+  }
+  // Any number of member rows without a key; a second row with an existing reservation key is a unique violation.
+  const copyOf = (id, extra) => ({ ...h.s.op(id), id: randomUUID(), createdAt: new Date(T0), updatedAt: new Date(T0), ...extra });
+  await h.s.prisma.importOperation.create({ data: copyOf(imported.id) });
+  await h.s.prisma.importOperation.create({ data: copyOf(imported.id) });
+  await assert.rejects(h.s.prisma.importOperation.create({ data: copyOf(row('sop-claim')) }), error => error.code === 'P2002');
+});
+
+test('S9U4-B49 a restart over the restore fixture\'s phases: the expired prepared attempt is fenced and its initializing claim removed (the next import initialises again), expired dispatching/unknown attempts are reconciled read-only with their holders kept, another instance\'s live attempt and every bound claim stay as they were, the expired sending download closes Unconfirmed with its row, Sent and prepared rows are untouched', async () => {
+  const h = await harness();
+  // The twelve rows of tests/ops_product_transfer_fixture.py import_operation_rows (REQ-S9-U4-13), with times relative to
+  // the store's clock (leases expired a minute ago; the other instance's lease far ahead).
+  const A = uid(), B = uid(), C = uid(), D = uid();
+  for (const study of [A, B, C, D]) own(h.s, study, 'inst-a', 'local-import');
+  const stamp = new Date(T0 - 120000).toISOString(), expired = new Date(T0 - 60000).toISOString(), live = '2099-01-01T00:00:00.000Z';
+  const boot = randomUUID(), otherBoot = randomUUID();
+  const ids = Object.fromEntries(['stored', 'first', 'unknown', 'dispatching', 'prepared', 'live'].map(n => [n, randomUUID()]));
+  const attempt = (name, generation, phase, outcome, code, transport, extra = {}) => ({ attemptId: ids[name], actor: TECH.actor, generation,
+    ownerInstance: boot, phase, leaseUntil: expired, startedAt: stamp, finishedAt: ['prepared', 'dispatching'].includes(phase) ? null : stamp,
+    outcome, code, transport, autoRecheckedAt: null, recovery: null, ...extra });
+  const entry = (index, study, outcome, code, attempts, identity = 'matched') => ({ index, sha256: (index + 1).toString(16).repeat(64),
+    bytes: 1000 + index, studyUid: study, seriesUid: study + '.1', sopUid: study + '.1.' + (index + 1), expectedStudyUid: null, outcome, code,
+    identity, writeDisposition: null, at: stamp, attempts });
+  const U = ['unconfirmed', 'IMPORT_UNCONFIRMED'];
+  const results = [
+    entry(0, A, 'stored', null, [attempt('stored', 1, 'finished', 'stored', null, null)], 'new-study'),
+    entry(1, A, ...U, [attempt('first', 1, 'finished', 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write'),
+      attempt('unknown', 2, 'unknown', ...U, 'unknown', { autoRecheckedAt: stamp })]),
+    entry(2, B, ...U, [attempt('dispatching', 1, 'dispatching', ...U, null)], 'not_comparable'),
+    entry(3, C, ...U, [attempt('prepared', 1, 'prepared', ...U, null)], null),
+    entry(4, D, ...U, [attempt('live', 1, 'dispatching', ...U, null, { ownerInstance: otherBoot, leaseUntil: live })]),
+    { ...entry(5, A, 'rejected', 'MODALITY_NOT_IMPORTABLE', []), identity: null }];
+  const member = { institutionId: 'inst-a', ownerIssuer: ISSUER, ownerSubject: TECH.sub, actor: TECH.actor };
+  const gate = { institutionId: 'inst-a', ownerIssuer: 'kin-internal', ownerSubject: 'dicom-import-gate', actor: 'dicom-import-gate', status: 'reserved', results: [] };
+  const create = data => h.s.prisma.importOperation.create({ data: { createdAt: new Date(stamp), updatedAt: new Date(stamp), ...data } });
+  const opId = randomUUID();
+  await create({ id: opId, ...member, kind: 'import', studyUid: null, status: 'open', results });
+  const identity = { patientId: 'SYN-R', issuerInstitutionId: 'inst-a', nameKey: null, birthKey: null, sexKey: null };
+  const blank = { patientId: null, issuerInstitutionId: null, nameKey: null, birthKey: null, sexKey: null };
+  const studyClaim = (study, phase, holder) => create({ id: randomUUID(), ...gate, kind: 'study-claim', studyUid: study, claimKey: 'study:' + study,
+    claim: { schemaVersion: 1, phase, institutionId: 'inst-a', studyUid: study, ...(phase === 'bound' ? identity : blank), heldByAttemptId: holder, createdAt: stamp } });
+  const sopClaim = (index, holder) => { const e = results[index]; return create({ id: randomUUID(), ...gate, kind: 'sop-claim', studyUid: e.studyUid,
+    claimKey: 'sop:' + e.sopUid, claim: { schemaVersion: 1, institutionId: 'inst-a', studyUid: e.studyUid, seriesUid: e.seriesUid, sopUid: e.sopUid,
+      patientId: 'SYN-R', issuerInstitutionId: 'inst-a', sha256: e.sha256, bytes: e.bytes, heldByAttemptId: holder, createdAt: stamp } }); };
+  await studyClaim(A, 'bound', ids.unknown); await studyClaim(B, 'bound', ids.dispatching); await studyClaim(C, 'initializing', ids.prepared);
+  await studyClaim(D, 'bound', ids.live);
+  await sopClaim(0, null); await sopClaim(1, ids.unknown); await sopClaim(2, ids.dispatching); await sopClaim(4, ids.live);
+  // The downloads: prepared; Sent after an incomplete attempt; an expired sending attempt after an unconfirmed one.
+  const dl = await downloadStudy(h, 2);
+  const [prepared, sent, sending] = [randomUUID(), randomUUID(), randomUUID()];
+  for (const id of [prepared, sent, sending]) assert.equal((await prepare(h, dl, id)).status, 200);
+  assert.equal((await h.request('GET', archivePath(dl, sent), { as: RAD })).status, 200);
+  await sleep(50);
+  const sentAttempt = h.s.op(sent).download.attempts[0];
+  const row = h.s.ops.get(sending);
+  row.download.attempts.push({ ...sentAttempt, attemptId: randomUUID(), state: 'unconfirmed', archiveSha256: null, responseFinished: false, objects: sentAttempt.objects.slice(0, 1) },
+    { ...sentAttempt, attemptId: randomUUID(), number: 2, state: 'sending', endedAt: null, leaseUntil: expired, archiveSha256: null, responseFinished: false, objects: sentAttempt.objects.slice(0, 1) });
+  row.status = 'sending';
+  const claimsBefore = Object.fromEntries([A, B, D].map(s => ['study:' + s, h.s.claim('study:' + s)]));
+  const untouched = [h.s.op(prepared), h.s.op(sent)];
+  const postsBefore = posts(h.orthanc);
+  const counts = await h.gate.reconcileOnStart();
+  const downloads = await h.transfer.expireDownloads();
+  const files = h.s.op(opId).results;
+  assert.deepEqual([files[3].outcome, files[3].code, files[3].attempts[0].transport], ['retryable', 'IMPORT_ATTEMPT_EXPIRED', 'certain-no-write'], 'prepared fenced');
+  assert.equal(h.s.claim('study:' + C), null, 'its initializing claim removed');
+  assert.deepEqual([files[2].outcome, files[2].attempts[0].phase, files[2].attempts[0].transport], ['unconfirmed', 'unknown', 'unknown'], 'dispatching -> unknown, read-only');
+  assert.deepEqual([files[1].outcome, files[1].attempts[1].phase], ['unconfirmed', 'unknown'], 'unknown, nothing found: stays');
+  assert.deepEqual(files[4], results[4], 'another instance\'s live attempt untouched');
+  assert.deepEqual([files[0], files[5]], [results[0], results[5]]);
+  for (const [key, before] of Object.entries(claimsBefore)) assert.deepEqual(h.s.claim(key), before, key + ': bound claims and their holders stay');
+  assert.deepEqual([counts.fenced, counts.claimsRemoved, posts(h.orthanc)], [1, 0, postsBefore], 'no Orthanc write; the claim went with its fence');
+  assert.equal(downloads, 1);
+  assert.deepEqual(h.s.op(sending).download.attempts.map(a => a.state), ['unconfirmed', 'unconfirmed']);
+  assert.equal(resultRows(h, row.download.attempts[1].attemptId).length, 1);
+  assert.deepEqual([h.s.op(prepared), h.s.op(sent)], untouched);
+  // The next import of Study C initialises it again from Orthanc (the removed claim left no baseline behind).
+  h.orthanc.calls.length = 0;
+  const again = await h.send(dicom({ study: C, series: C + '.1', id: 'SYN-R' }));
+  assert.deepEqual([again.status, again.body.outcome, h.orthanc.calls.filter(c => c.path === '/tools/find').length], [200, 'stored', 1]);
 });
