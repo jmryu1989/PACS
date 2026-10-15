@@ -2806,6 +2806,14 @@ W6 frame 소비자(W6R2-03/04): 제공 페이지 밖에서 판독 영역 코드�
 저장 계약은 유지하며, 서버 CAS/migration/candidate 선택 ID는 변경하지 않는다.
 한글 OS IME와 의사 직접 확인, post-W3 통합 live 및 후보 CI/G3/교차 검수는 별도 관문이다.
 
+W4-FLOW(W4-LAND): W4-PAGE-01/04/05/06/08/10/12 → RISK-LOST-TEXT/WRONG-STUDY/FIRST-ROW-JUMP/HIDDEN-RECOMMENDATION →
+`report_flow_dom_test.py`(제공 split 페이지 + 합성 HTTP, 여러 검사의 초안 행·revision·판독문을 각각 가진 `FlowSite`; `--mutants` 반례 14개).
+SAVE-OUTCOME: 서버가 확인하지 않은 글이 있는 검사를 떠나는 모든 길(행 클릭·Enter·Next/Prev·우클릭 메뉴·질문/자문/즐겨찾기 열기·Approve & Next)은 한 관문을 지나 그 글의 초안 저장이 확인된 뒤에만 옮긴다. 거절(Retry)·결과 모름(Check, 3초 상한)·충돌·글자 조합 중이면 머물고 Notice로 말한다(Leave anyway 없음). 확인되지 않은 글이 없으면 지금처럼 같은 이벤트 안에서 옮긴다(의사 마찰 0, 동기 전환을 단언). 초안 표시줄 어휘는 Draft Saved hh:mm / Save Failed — 사유 / Result Unknown / Unsaved Draft다.
+QUEUE-ANCHOR: Approve & Next(바닥줄, Prev 앞; 이름은 D1358 ①로 Approve 유지)는 승인이 받아들여지고 그 승인본이 편집기에 그려진 뒤에만 누른 순간의 줄에서 다음 검사로 간다. 승인으로 W 필터에서 빠져도 첫 행으로 가지 않고, 일반 Next/Prev도 같은 규칙이다(정렬·새로 고침 포함). 결과 모름·거절·늦은 답(그 사이 다른 검사를 고름, A→B→A)은 옮기지 않는다.
+RECOMMENDATION-ROUNDTRIP: 상용구가 숨긴 Recommendation에 값을 넣으면 읽기 전용 띠 "Recommendation (existing value · read only)"가 그 글을 보이고, 자동 저장·재열람·새 문서·승인 payload에 그대로 실린다(숨긴 칸 직접 입력 없음). MENU-TARGET: 행 메뉴는 그 행이 지금 선택일 때만 열리고 항목은 행 UID에 묶인다. Ctrl+S Finalize(Approve)는 W4-SC 모델의 `finalize` 응답을 준비용 대역(FINALIZE_STAND_IN)으로 세워 페이지 dispatcher가 명령을 실행할 때만 기본 동작을 막는지 검사한다.
+결정된 차이(소비자 재결속): `report_actions_dom_test.py`(바닥줄에 Approve & Next, 보이는 control 8), `report_session_page_dom_test.py`(거절된 쓰기 뒤 B로 옮기지 않고 A에서 목록 갱신을 받음), `report_editor_frame_dom_test.py`(`switch`는 선택이 바뀔 때까지 기다림, W6-PAGE-15 반례 위치가 관문으로 이동하고 조합 거절의 Notice를 함께 봄), `report_page_contract.py`·`report_dictation_host/input_dom_test.py`(잘라 쓰는 판독 영역이 등록하는 Notice·Approve & Next·Recommendation 띠 markup을 main.html에서 그대로 실음).
+후보 FLOW `e2e/test_report_flow.py` W4ReportFlowE2E.test_w4_01(선택 123 → 124)과 W6DoctorPathE2E 등 live 단위는 지휘자 실행 몫이다.
+
 W3의 U0b 이력 계약(C6)은 `U0B-HISTORY`에서 승인된 U0b Git blob의 member/SQL 해시를 계속 검사한다. `U0B-STRUCT-NORMAL`과 R02는 현재 concern 소유권·facade forwarding·DI를 검사하고 v3 동작은 `workspace_layout_v3_service_test.cjs`가 검사한다. citation/structure migration의 `assert_behaviour`는 현재 소유권과 고정 이력을 모두 실행한다. 역사 기준 SHA·baseline은 바꾸지 않는다.
 
 Related의 RL06/08 동등성도 C6에 따라 고정 pre-UX landed 입력(c8e4f1b)에 결속한다. 원래 S7 기준 SHA·geometry 단언·허용 예외는 그대로이며, 현재 화면의 Related 동작과 W2 첫 화면은 별도 현재 소비자 시험으로 검증한다.
