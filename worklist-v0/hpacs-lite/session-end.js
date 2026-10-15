@@ -58,6 +58,7 @@
       $('#worklist-folders-panel').open = false;
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       $('#chips')?.removeAttribute('data-render-signature');
+      stopWorkspaceLayout();
       // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
       leftNotes.clear();

@@ -70,6 +70,28 @@ def incomplete_requests(result):
     return [row for row in result.get("waterfall", []) if "end" not in row and "failed" not in row]
 
 
+def account_exchange_exclusion(result):
+    """W3S-04: issued account requests need an observed terminal exchange.
+
+    status plus loadingFinished proves a response completed. loadingFailed with
+    an errorText is the documented CDP terminal alternative; it does not excuse
+    console, fixture or product assertions. Timing is never an admission input.
+    """
+    pending = [row for row in result.get("waterfall", [])
+               if urlparse(row.get("url", "")).path.startswith('/api/')
+               and not (row.get("status") is not None and "end" in row)
+               and not row.get("failed", {}).get("errorText")]
+    if pending:
+        return {"reason": "incomplete account startup exchange", "requests": copy.deepcopy(pending)}
+    return None
+
+
+def sample_exclusion(result):
+    if network_changed(result):
+        return {"reason": "network change"}
+    return account_exchange_exclusion(result)
+
+
 def sampling_policy():
     return {"warmup_attempts": WARMUP_ATTEMPTS,
             "settle_window_s": NETWORK_SETTLE_WINDOW_S,
@@ -77,7 +99,7 @@ def sampling_policy():
             "collection_deadline_s": STARTUP_COLLECTION_TIMEOUT_S,
             "max_replaced_pairs_per_phase": MAX_REPLACED_PAIRS_PER_PHASE,
             "required_valid_pairs": 5,
-            "invalidity": "status None plus CDP ERR_NETWORK_CHANGED, or console ERR_NETWORK_CHANGED plus a row without status/end; dependent warm invalid after invalid cold",
+            "invalidity": "network change or issued /api/ request without response status plus loadingFinished or loadingFailed.errorText; dependent warm invalid after invalid cold; excluded pairs retain reason and raw requests",
             "warmup_retry": "wait failure or network change; otherwise successful visits with pending (not completed/failed) requests; never retry unrelated assertions",
             "replacement": "after five planned pairs, at most two additional rounds; accept only deficient phases chosen before each round; timing never selects pairs; alternate order by physical round without rebalancing accepted pairs",
             "overall_bound": "existing run-tests.py 600s deadline still applies to all phases and attempts",
@@ -201,14 +223,18 @@ def collect_pairs(stack, browser, clock_start, patient, result, visit_fn=None):
                             pairs[mode][side] = sample
                 finally:
                     context.close()
-            cold_invalid = any(network_changed(sample) for sample in pairs["cold"].values())
+            exclusions = {mode: {side: sample_exclusion(sample) for side, sample in pair.items()
+                                  if sample_exclusion(sample)} for mode, pair in pairs.items()}
+            cold_invalid = bool(exclusions["cold"])
             for mode in phases:
                 pair = pairs[mode]
-                invalid = any(network_changed(sample) for sample in pair.values()) or (mode == "warm" and cold_invalid)
+                invalid = bool(exclusions[mode]) or (mode == "warm" and cold_invalid)
                 if invalid:
-                    attempt.setdefault("invalid", {})[mode] = "network change" if mode == "cold" or not cold_invalid else "network change in preceding cold visit"
+                    attempt.setdefault("invalid", {})[mode] = {
+                        "reason": "pair excluded", "samples": exclusions[mode],
+                        "preceding_cold": exclusions["cold"] if mode == "warm" and cold_invalid else {}}
                     continue
-                assert all(sample["valid"] for sample in pair.values()), "invalid visit without network-change evidence"
+                assert all(sample["valid"] for sample in pair.values()), "invalid visit without declared exclusion evidence"
                 result[mode].append(pair)
                 result["valid_pairs"][mode] += 1
                 attempt["accepted"].append(mode)
@@ -288,11 +314,12 @@ def save(path, value):
 
 
 def assert_script_requests(baseline, candidate, *, landing=False):
-    """Only the approved bundle request may differ; retain names and occurrences."""
+    """Allow exactly the bundle and landed dependencies; retain names and occurrences."""
     expected = Counter(map(tuple, baseline))
     expected[("GET", "/worklist/hpacs-lite/main-split.bundle.js", "")] += 1
     if landing:
         expected[("GET", "/worklist/hpacs-lite/worklist-folder-tree.js", "")] += 1
+        expected[("GET", "/worklist/hpacs-lite/study-panel.js", "")] += 1
     actual = Counter(map(tuple, candidate))
     assert actual == expected, f"different script requests: expected={expected!r}, actual={actual!r}"
 
@@ -314,6 +341,7 @@ class HostedStack:
         self.candidate_dir = Path(candidate_dir)
         self.project = "kin-load-" + uuid.uuid4().hex[:12]
         self.commands, self.requests, self.violations = [], [], []
+        self.ledger = threading.Lock()  # handler threads update request entries
         self.me_received, self.me_release = threading.Event(), threading.Event()
         self.server = self.thread = None
         self.started = False
@@ -475,6 +503,10 @@ class HostedStack:
                     self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(body)
+                entry = getattr(self, "ledger_entry", None)
+                if entry is not None:
+                    with stack.ledger:
+                        entry.update(status=status, answered=time.perf_counter())
 
             def do_GET(self):
                 site, requests = stack.site, stack.requests
@@ -487,7 +519,9 @@ class HostedStack:
 
                 stamp = time.perf_counter()
                 url = urlparse(self.path)
-                requests.append({"method": "GET", "path": url.path, "query": url.query, "received": stamp})
+                self.ledger_entry = {"method": "GET", "path": url.path, "query": url.query, "received": stamp}
+                with stack.ledger:
+                    requests.append(self.ledger_entry)
                 if url.path == "/api/health":
                     return self.fulfill(json={"ok": True, "synthetic": True})
                 if url.path == DISCOVERY_PATH:
@@ -629,6 +663,13 @@ def collect_startup_requests(page, waterfall, result, record_path):
          on_timeout=diagnostic)
 
 
+def server_ledger(stack):
+    """A copy of the synthetic server's requests: path, received and, once the
+    response was written, status and answered (host perf_counter seconds)."""
+    with stack.ledger:
+        return copy.deepcopy(stack.requests)
+
+
 def visit(stack, browser_context, clock_start, patient, metadata):
     stack.reset()
     page = browser_context.new_page()  # a new Document; never reload/history/BFCache
@@ -694,7 +735,7 @@ def visit(stack, browser_context, clock_start, patient, metadata):
                 "note": "native responseEnd differs from retained host auth-release observation; diagnostic only"},
             resources=performance["resources"], navigation=performance["navigation"],
             non_script_requests=[(r["method"], r["path"], r["query"]) for r in stack.requests],
-            server_requests=list(stack.requests), inputs=stack.versions[stack.side])
+            inputs=stack.versions[stack.side])
         result["script_requests"] = [(r["method"], urlparse(r["url"]).path, urlparse(r["url"]).query)
                                      for r in waterfall.rows.values() if r.get("type") == "Script"]
         assert not errors, errors
@@ -705,7 +746,7 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         static = [r for r in waterfall.rows.values() if "/worklist/" in r.get("url", "") and "status" in r]
         assert static and all(r["protocol"] == "h2" for r in static), "static protocol mismatch"
         scripts = [r for r in static if urlparse(r["url"]).path.endswith(".js")]
-        assert len(scripts) == (58 if stack.side == "candidate" else 56), "execution request count"
+        assert len(scripts) == (59 if stack.side == "candidate" else 56), "execution request count"
         assert all(urlparse(r["url"]).netloc == urlparse(stack.origin).netloc for r in scripts), "script-src 'self' compatibility"
         document = next(r for r in wire if r["name"] == "main.html")
         result["csp"] = {"header": document["headers"].get("content-security-policy"),
@@ -728,11 +769,16 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         result["console_errors"] = list(console_errors)
         result["page_errors"] = list(errors)
         result["fixture_violations"] = list(stack.visit_violations)
+        # W3R-06: the synthetic server's own ledger, taken before the release
+        # below, for failed visits too. An entry without "answered" is a request
+        # the fixture received and still held (e.g. a second /api/me).
+        result["server_requests"] = server_ledger(stack)
         # A failed navigation/auth wait may leave a synthetic handler held.
         # Release this visit's event before its page closes and reset replaces it.
         stack.me_release.set()
         result["network_changed"] = network_changed(result)
-        if result["network_changed"]:
+        result["sample_exclusion"] = sample_exclusion(result)
+        if result["sample_exclusion"]:
             result["valid"] = False
         save(record_path, result)
         waterfall.close()

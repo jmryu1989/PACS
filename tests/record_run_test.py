@@ -18,6 +18,49 @@ RECORDER = Path(__file__).resolve().parents[1] / "scripts" / "record-run.py"
 
 
 class RecordRunTest(unittest.TestCase):
+    def test_served_page_records_local_assets_before_and_after_child(self):
+        # REQ-W3-LAND-CI -> RISK-UNRECORDED-ASSET: workflow relocation must
+        # retain dependencies even when a page adds another script or stylesheet.
+        for name in ('worklist-v0/hpacs-lite/main.html', 'worklist-v0/hpacs-lite/drawer.css',
+                     'scripts/record-run.py'):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('fixture\n', encoding='utf-8')
+        child = "from pathlib import Path; Path('worklist-v0/hpacs-lite/added.js').write_text('added')"
+        result = self.run_command([sys.executable, '-c', child], files=['worklist-v0/hpacs-lite/main.html'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        for field in ('files_before', 'files_after'):
+            rows = {row['requested']: row for row in record[field]}
+            self.assertEqual(rows['worklist-v0/hpacs-lite/drawer.css']['status'], 'present')
+            self.assertTrue(rows['worklist-v0/hpacs-lite/drawer.css']['sha256'])
+        self.assertNotIn('worklist-v0/hpacs-lite/added.js', {r['requested'] for r in record['files_before']})
+        self.assertIn('worklist-v0/hpacs-lite/added.js', {r['requested'] for r in record['files_after']})
+        self.assertEqual(record['served_page_inputs']['trees'], ['worklist-v0/hpacs-lite'])
+
+    def test_page_source_helper_records_the_served_page_assets(self):
+        # W3R5-06: a step that serves main.html through a page-serving test records
+        # tests/page_source.py, not main.html; its page and assets are still recorded.
+        for name in ('worklist-v0/hpacs-lite/main.html', 'worklist-v0/hpacs-lite/drawer.js',
+                     'tests/page_source.py', 'tests/other_test.py', 'scripts/record-run.py'):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('fixture\n', encoding='utf-8')
+        served = self.run_command([sys.executable, '-c', 'pass'], files=['tests/other_test.py', 'tests/page_source.py'])
+        self.assertEqual(served.returncode, 0, served.stderr)
+        record = self.record()
+        self.assertEqual(record['served_page_inputs']['trees'], ['worklist-v0/hpacs-lite'])
+        for field in ('files_before', 'files_after'):
+            rows = {row['requested']: row for row in record[field]}
+            for name in ('worklist-v0/hpacs-lite/main.html', 'worklist-v0/hpacs-lite/drawer.js'):
+                self.assertEqual(rows[name]['status'], 'present')
+                self.assertTrue(rows[name]['sha256'])
+        # A step that serves no page records no page directory.
+        self.run_dir = self.root / 'evidence' / 'second'
+        quiet = self.run_command([sys.executable, '-c', 'pass'], files=['tests/other_test.py'])
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertEqual(self.record()['served_page_inputs'], {'files': [], 'trees': []})
+
     def put(self, name, raw=b'synthetic\n'):
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)

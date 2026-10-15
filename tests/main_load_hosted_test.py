@@ -116,9 +116,10 @@ class FirstAuthDiagnostic(unittest.TestCase):
                 event = threading.Event()
                 if not browser_request:
                     event.set()
+                held = {"method": "GET", "path": "/api/me", "query": "", "received": 0}
                 stack = SimpleNamespace(root=root / "stack", side="baseline", origin="https://fixture",
                     url="https://fixture/worklist/hpacs-lite/main.html", me_received=event,
-                    me_release=threading.Event(), visit_violations=[],
+                    me_release=threading.Event(), visit_violations=[], requests=[held], ledger=threading.Lock(),
                     reset=Mock(), versions={"baseline": {"main.html": "sha"}})
                 handlers = {}
                 page = Mock(url=stack.url)
@@ -156,6 +157,10 @@ class FirstAuthDiagnostic(unittest.TestCase):
                 self.assertTrue(all(c["error"] == "HTTP 502" for c in diagnostic["stack_health"].values()))
                 self.assertTrue(captured[0]["wait_failed"])
                 self.assertTrue(stack.me_release.is_set())
+                # W3R-06: the failed record keeps the fixture's own ledger as it
+                # was before the release: the held /api/me has no answer yet.
+                self.assertEqual([held], captured[0]["server_requests"])
+                self.assertNotIn("answered", captured[0]["server_requests"][0])
 
 
 def sample(metadata, side="baseline", network=False):
@@ -388,6 +393,74 @@ class MeasuredPairs(unittest.TestCase):
         self.assertEqual({"cold": 0, "warm": 0}, result["replacements"])
         self.assertEqual([200000] * 5, [p["candidate"]["auth_to_usable_ms"] for p in result["warm"]])
 
+    def test_incomplete_account_exchange_excludes_pair_with_raw_reason(self):
+        # W3S-04: a served-list mismatch caused by an issued but unfinished
+        # account GET is not a product request-list difference.
+        for pending in ({}, {"status": 200}, {"end": 3}):
+            with self.subTest(pending=pending):
+                request = {"id": "account", "method": "GET", "url": "https://fixture/api/study-access",
+                           "start": 1, **pending}
+                def alter(result):
+                    if result['visit'] == 6:
+                        result['waterfall'] = [request]
+                result = self.collect(alter)
+                self.assertEqual({'cold': 5, 'warm': 5}, result['valid_pairs'])
+                self.assertEqual([1, 3, 4, 5, 6], [p['baseline']['pair'] for p in result['warm']])
+                self.assertEqual({'cold': 0, 'warm': 1}, result['replacements'])
+                exclusion = result['pair_attempts'][1]['invalid']['warm']
+                self.assertEqual('pair excluded', exclusion['reason'])
+                self.assertEqual([request], exclusion['samples']['candidate']['requests'])
+                self.assertEqual('incomplete account startup exchange', exclusion['samples']['candidate']['reason'])
+
+    def test_incomplete_cold_exchange_also_excludes_dependent_warm(self):
+        def alter(result):
+            if result['visit'] == 1:
+                result['waterfall'] = [{'url': 'https://fixture/api/study-access'}]
+        result = self.collect(alter)
+        self.assertEqual({'cold': 1, 'warm': 1}, result['replacements'])
+        self.assertTrue(result['pair_attempts'][0]['invalid']['warm']['preceding_cold'])
+
+    def test_complete_response_or_documented_terminal_failure_is_not_pending(self):
+        for terminal in ({'status': 200, 'end': 3}, {'failed': {'errorText': 'net::ERR_ABORTED'}}):
+            with self.subTest(terminal=terminal):
+                def alter(result):
+                    result['waterfall'] = [{'url': 'https://fixture/api/study-access', **terminal}]
+                result = self.collect(alter)
+                self.assertEqual({'cold': 0, 'warm': 0}, result['replacements'])
+                self.assertEqual({'cold': 5, 'warm': 5}, result['valid_pairs'])
+
+    def test_incomplete_account_replacement_budget_retains_shortfall(self):
+        result = self.collect(lambda r: r.update(waterfall=[{'url': 'https://fixture/api/study-access'}]))
+        self.assertEqual({'cold': 0, 'warm': 0}, result['valid_pairs'])
+        self.assertEqual(5 + hosted.MAX_REPLACED_PAIRS_PER_PHASE, len(result['pair_attempts']))
+
+    def test_complete_but_different_account_request_list_still_fails(self):
+        def alter(result):
+            paths = ['/api/me', '/api/study-access']
+            if result['side'] == 'candidate':
+                paths.append('/api/extra-account-request')
+            result['waterfall'] = [{'url': 'https://fixture' + p, 'method': 'GET', 'status': 200, 'end': 3} for p in paths]
+            result['non_script_requests'] = [('GET', p, '') for p in paths]
+        result = self.collect(alter)
+        self.assertEqual({'cold': 5, 'warm': 5}, result['valid_pairs'])
+        self.assertEqual({'cold': 0, 'warm': 0}, result['replacements'])
+        pair = result['warm'][0]
+        with self.assertRaisesRegex(AssertionError, 'different account startup requests'):
+            hosted.assert_account_requests(pair['baseline']['non_script_requests'], pair['candidate']['non_script_requests'])
+
+    def test_incomplete_account_does_not_hide_an_unrelated_assertion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack = SimpleNamespace(root=Path(directory)/'stack', side=None)
+            stack.activate = lambda side: setattr(stack, 'side', side)
+            result = {'cold': [], 'warm': [], 'visits': [], 'valid_pairs': {'cold': 0, 'warm': 0}}
+            def visit(stack, context, clock, patient, metadata):
+                row = sample(metadata, stack.side)
+                row.update(valid=False, waterfall=[{'url': 'https://fixture/api/study-access'}])
+                raise hosted.VisitFailure(AssertionError('body hash differs'), row)
+            with self.assertRaisesRegex(hosted.VisitFailure, 'body hash differs'):
+                hosted.collect_pairs(stack, Mock(), None, 'patient', result, visit)
+            self.assertEqual(1, len(result['visits']))
+
     def test_network_replacement_budget_exhaustion_retains_shortfall(self):
         result = self.collect(lambda r: r.update(sample(r, r["side"], network=True)))
         self.assertEqual({"cold": 0, "warm": 0}, result["valid_pairs"])
@@ -507,6 +580,36 @@ class VisitLifecycle(unittest.TestCase):
             self.assertEqual(["BrokenPipeError('closed page')"], old_violations)
             self.assertEqual(old_violations, stack.violations)
             self.assertEqual([], stack.visit_violations)
+
+    def test_server_ledger_marks_answered_and_held_requests(self):
+        """W3R-06: each fixture request records status and answer time once its
+        response is written; a request still held has neither."""
+        with tempfile.TemporaryDirectory() as directory:
+            stack = hosted.HostedStack(Path(directory) / "stack", lambda: Mock(), "sha", Path(directory))
+            with patch.object(hosted, "ThreadingHTTPServer") as server, patch.object(hosted.threading, "Thread"):
+                stack.start_api()
+            handler_type = server.call_args.args[1]
+
+            def handler(path):
+                h = object.__new__(handler_type)
+                h.path, h.headers, h.wfile = path, {}, io.BytesIO()
+                h.send_response = h.send_header = h.end_headers = lambda *args: None
+                return h
+
+            handler("/api/health").do_GET()
+            during = []
+            release = Mock()
+            release.wait.side_effect = lambda timeout: (during.append(hosted.server_ledger(stack)), False)[1]
+            stack.me_release = release
+            handler("/api/me").do_GET()
+            ledger = hosted.server_ledger(stack)
+            self.assertEqual(["/api/health", "/api/me"], [r["path"] for r in ledger])
+            self.assertEqual([200, 504], [r["status"] for r in ledger])
+            self.assertTrue(all(r["answered"] >= r["received"] for r in ledger))
+            held = during[0][1]
+            self.assertEqual("/api/me", held["path"])
+            self.assertNotIn("answered", held)
+            self.assertNotIn("status", held)
 
 
 if __name__ == "__main__":

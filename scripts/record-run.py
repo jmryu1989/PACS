@@ -128,6 +128,32 @@ def workflow_contract_inputs(files, trees, cwd):
     return extra_files, extra_trees
 
 
+def served_page_inputs(files, trees, cwd):
+    """Retain the asset directory consumed by an explicitly recorded main page.
+
+    A split workflow keeps its original command, while the page may gain local
+    scripts/styles. Recording the bounded served directory also captures assets
+    added by the child, without inferring dependencies from product source text.
+    """
+    directory = 'worklist-v0/hpacs-lite'
+    # A run serves the main page when it records the page, its bundle, or the
+    # page-source helper with which page-serving tests list main.html's moved
+    # files (tests/page_source.py reads main.html for every served allowlist).
+    triggers = {directory + '/main.html', directory + '/main-split.bundle.js', 'tests/page_source.py', 'tests/page_source.cjs'}
+    requested = {(cwd / name).resolve() for name in files}
+    if not requested.intersection((cwd / name).resolve() for name in triggers):
+        return [], []
+    covered = any((cwd / directory).resolve().is_relative_to((cwd / name).resolve()) for name in trees)
+    recorder = 'scripts/record-run.py'
+    extras = [] if (cwd / recorder).resolve() in requested else [recorder]
+    # Related's historical oracle imports the approved split pin after W3.
+    if (cwd / 'tests/related_layout_dom_test.py').resolve() in requested:
+        history = 'tests/main_split_historical.py'
+        if (cwd / history).resolve() not in requested:
+            extras.append(history)
+    return extras, [] if covered else [directory]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
         "Arguments and output are recorded verbatim. Do not supply secrets or "
@@ -150,6 +176,10 @@ def main(argv=None):
     run_dir = Path(args.run_dir).resolve()
     cwd = Path(args.cwd).resolve()
     extra_files, extra_trees = workflow_contract_inputs(args.file, args.tree, cwd)
+    page_files, page_trees = served_page_inputs(args.file + extra_files, args.tree + extra_trees, cwd)
+    workflow_files, workflow_trees = extra_files[:], extra_trees[:]
+    extra_files += page_files
+    extra_trees += page_trees
     try:
         # Exclusive mkdir claims this run before any command or evidence is written.
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -169,7 +199,8 @@ def main(argv=None):
         "git_head_before": git_head(cwd), "git_head_after": None,
         "files_before": declared_before + automatic_before, "files_after": None,
         "stdout": "stdout.log", "stderr": "stderr.log", "log_files": None,
-        "workflow_contract_inputs": {"files": extra_files, "trees": extra_trees},
+        "workflow_contract_inputs": {"files": workflow_files, "trees": workflow_trees},
+        "served_page_inputs": {"files": page_files, "trees": page_trees},
         "declared_inputs": {"files": args.file, "trees": args.tree},
     }
     metadata = run_dir / "run.json"

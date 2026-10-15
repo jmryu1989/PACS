@@ -67,9 +67,14 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        commit; it is recorded once at the candidate.
 
 Measurements are printed as `RL-MEASURE {json}` lines next to the assertions; they are observations, not pass evidence.
+W3/C6: RL06/08 is now the historical S7 preservation proof against the fixed
+pre-UX landed tree. Its original baseline and every geometry assertion remain.
+Current layout changes are checked by RelatedLayoutDOMTest; W2 first paint is
+checked separately by study_panel_page_dom_test.py, not by the older S7 baseline.
 KIN_MULTI_INSTITUTION_MAIN (the harness override) points the page at a copy for the local mutant runs. Synthetic data only
 (SYN-* names); no server, no network, no credentials.
 """
+import io
 import json
 import os
 import re
@@ -77,6 +82,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
@@ -737,6 +743,48 @@ class RelatedLayoutDOMTest(Base):
                     w.assert_panel_stacked(tag)
                     w.screen.finish()
 
+    def test_s7_rl_notice_portrait_row_hit_area_and_first_line(self):
+        """S7-RL-NOTICE-PORTRAIT: both portrait sizes and D403 narrow landscapes.
+
+        With a viewed MR outside a CT filter, the CT row focused for the next
+        selection must remain wholly clickable; its centre click clears the notice.
+        The existing geometry oracle samples 15 points as well as the viewport ratio.
+        """
+        many = [harness.row(f"2.25.88{i:02d}", PID, date=f"2025{1+i%12:02d}{1+i%28:02d}",
+                            rs="W", modality="CT", desc=f"SYN W3 MANY {i:02d}") for i in range(60)]
+        stored = {"version": 1, "mode": "auto", "portrait": {"related": 286, "prior": 150}, "landscape": {}}
+        for size in [*PORTRAIT_MIN, (800, 768), (840, 768), (860, 768)]:
+            for notice in (False, True):
+                # One visible related row: MR without a filter, or CT while the
+                # viewed MR is outside the CT filter and keeps the notice present.
+                one = [rows()[0], rows()[1]] + ([rows()[3]] if notice else [])
+                cases = [('one row', {'row_set': one}), ('many rows', {'row_set': rows(many)}),
+                         ('stored', {'storage': {LAYOUT_KEY: json.dumps(stored)}})]
+                for label, options in cases:
+                    with self.subTest(size=size, notice=notice, case=label):
+                        w = self.open_state('shown', size=size, notice=notice, **options)
+                        target = w.related_row(CT_DESC if notice else REPORT_DESC)
+                        w.scroll_into_view(target)
+                        w.assert_row_whole_on_top('S7-RL-NOTICE-PORTRAIT', target)
+                        w.assert_t8('S7-RL-NOTICE-PORTRAIT', STATES['none'] if notice else STATES['shown'])
+                        w.screen.finish()
+                    self.doCleanups()
+                for state in STATES:
+                    if notice and state == 'unselected':
+                        continue  # no viewed study can be outside the filter before selection
+                    for label, options in cases:
+                        with self.subTest(size=size, notice=notice, state=state, case=label):
+                            state_options = options
+                            if label == 'one row' and state == 'none':
+                                state_options = {'row_set': [rows()[0], rows()[2]] + ([rows()[3]] if notice else [])}
+                            w = self.open_state(state, size=size, notice=notice, **state_options)
+                            w.assert_t8('S7-RL-NOTICE-PORTRAIT', STATES[state])
+                            w.screen.finish()
+                        # Each matrix cell owns its page and held HTTP answers.
+                        # Release them after every assertion, rather than retaining
+                        # all portrait cases until the unittest method ends.
+                        self.doCleanups()
+
     # ── RL-11 (S7-U5 fix-up D; triage M, stop-rule counterexample 4) ─────────────────────────────────────────────────
     # The Reading Workspace sizes the Related list itself (reading-workspace.js); its table kept only 40px under the fixed
     # rows, less than its sticky header and one row, so the header covered the row a click aimed at (six live modules).
@@ -998,7 +1046,14 @@ class RelatedLayoutEquivalence(unittest.TestCase):
             base_page = Path(folder) / "main.html"
             base_page.write_text(base_text, encoding="utf-8", newline="\n")
             base = run_snapshot(base_page, BASE_SHA)
-        cand = run_snapshot(None)
+        # Reuse the approved split history pin, and page_source in the existing
+        # harness, rather than comparing an intentional W3 redesign to S7 bytes.
+        from main_split_historical import LANDED
+        with tempfile.TemporaryDirectory() as folder:
+            archive = subprocess.check_output(['git', 'archive', '--format=zip', LANDED,
+                'worklist-v0/hpacs-lite', 'scripts/main-split-order.json'], cwd=TESTS.parent)
+            zipfile.ZipFile(io.BytesIO(archive)).extractall(folder)
+            cand = run_snapshot(Path(folder) / REL_MAIN, LANDED)
         differences, excepted = [], []
         for key, landmarks_b in base["sizes"].items():
             size = key.split()[0]

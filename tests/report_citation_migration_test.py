@@ -183,7 +183,7 @@ class LeakBoundaryTests(SourceCase):
         # Reading the draft's citations unlocked and emptying the row later loses a same-author
         # insertion that lands in between - the user's own confirmed work.
         # S7-U5: the lock is `ownDraft`, the one read of the caller's row every draft mutation takes.
-        assert_behaviour('pacs_split_test.cjs', '^U0B-STRUCT-NORMAL')
+        assert_behaviour('pacs_split_test.cjs', '^(U0B-STRUCT-NORMAL|U0B-HISTORY)')
 
     def test_the_forced_release_retry_is_inside_the_same_mapping(self) -> None:
         # S3-structured-report renamed this wrapper to `reportLimitChecked` because it now maps two

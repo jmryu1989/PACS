@@ -497,7 +497,12 @@
       $("#tpl-preview-insert").disabled = true;
       delete $("#tpl-preview-target").dataset.uid;
       for (const id of ["title", "meta", "target", "status", ...RFIELDS]) $("#tpl-preview-" + id).textContent = "";
-      if (returnFocus) (templatePreviewReturn?.isConnected ? templatePreviewReturn : $("#tpl-search")).focus();
+      if (returnFocus) {
+        const target = [templatePreviewReturn, $('#tpl-search'), $('#findings'), $('#quick')].find(el =>
+          el?.isConnected && !el.disabled && !el.closest('[hidden], [inert]') && el.getClientRects().length
+          && getComputedStyle(el).visibility === 'visible');
+        target?.focus({ preventScroll: true });
+      }
       templatePreviewReturn = null;
     }
     function updateTemplatePreview() {
@@ -670,7 +675,12 @@
       delete $("#tpl-source").dataset.uid;
       $("#tpl-save").disabled = true; $("#tpl-save").textContent = "저장";
       $("#tpl-cancel").disabled = false;
-      if (returnFocus && session.returnFocus?.isConnected) session.returnFocus.focus();
+      if (returnFocus) {
+        const target = [session.returnFocus, $('#tpl-search'), $('#findings'), $('#quick')].find(el =>
+          el?.isConnected && !el.disabled && !el.closest('[hidden], [inert]') && el.getClientRects().length
+          && getComputedStyle(el).visibility === 'visible');
+        target?.focus({ preventScroll: true });
+      }
     }
     function editTemplate(t, source = null, seed = t) {
       if (!KinAuth.has("radiologist")) { toast("판독의만 상용구를 편집할 수 있습니다", "err"); return; }
@@ -8203,11 +8213,63 @@
     // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
     let layoutMode = "auto";
     let workspaceState = KinWorkspaceLayout.defaults();
+    let workspaceEnded = false, studyPanel = null, studyPanelRestoring = false, workspaceWasNarrow = false;
+    // A size under a drag is shown but stored only when the drag ends; the edge being resized now.
+    let studyPanelPreview = null, studyPanelEdge = null;
+    const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
+    function openStudyPanel(tab) {
+      if (workspaceEnded || work.state() !== 'active') return false;
+      if (tab && !studyPanelAvailable().includes(tab)) return false;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
+      if (!studyPanel) {
+        // Mount on the explicit open: legacy layouts keep their first paint.
+        // destroy() returns these same nodes, with their listeners, to the row.
+        studyPanel = KinStudyPanel({ host: $('#study-panel-host'), opener: document.activeElement,
+          content: { images: $('.s-thumb'), info: $('.s-clinical'), templates: $('.s-template') },
+          available: studyPanelAvailable(), fallbackFocus: () => [$('#findings'), $('#quick'), $('#study-panel-open')]
+            .find(node => node?.isConnected && !node.disabled && !node.closest('[hidden], [inert]')
+              && node.getClientRects().length && getComputedStyle(node).visibility === 'visible'),
+          escapeClaimed: () => !!document.querySelector('dialog[open], .modal.show, [popover]:popover-open'),
+          onChange: state => {
+            $('#study-panel-open').setAttribute('aria-expanded', String(state.open));
+            document.querySelector('#reading-bar [aria-controls="study-panel-host"]')?.setAttribute('aria-expanded', String(state.open));
+            if (!studyPanelRestoring && workspaceState.workspace.studyPanelTab !== state.tab) {
+              workspaceState.workspace.studyPanelTab = state.tab; saveWorkspace(true);
+            }
+            $('#study-panel-status').textContent = state.open ? 'Study Panel을 열었습니다.' : 'Study Panel을 닫았습니다.';
+            if (!state.open && !studyPanelRestoring) {
+              const panel = studyPanel; studyPanel = null; panel?.destroy();
+              studyPanelPreview = null;
+              document.body.classList.remove('study-panel-open');
+            }
+          },
+          onResize: resizeStudyPanel,
+          onText: text => changeStudyPanel({ text }),
+          // The drawer has already ended a drag in progress; its preview never outlives Default (W3R7-06).
+          onReset: () => { studyPanelPreview = null; changeStudyPanel(null); },
+        });
+        studyPanelRestoring = true;
+        studyPanel.restore({ open: false, tab: workspaceState.workspace.studyPanelTab });
+        studyPanelRestoring = false;
+      }
+      document.body.classList.add('study-panel-open');
+      const opened = studyPanel.open(tab);
+      applyLayout();
+      return opened;
+    }
     const portraitLayout = () => document.body.classList.contains("portrait");
     const workspaceAxis = () => portraitLayout() ? "portrait" : "landscape";
     function applyLayout() {
-      const portrait = layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
+      if (workspaceEnded) return;
+      // A selected study needs a usable row hit area even in a narrow landscape
+      // window. The stacked panels scroll vertically without changing saved sizes.
+      const narrow = innerWidth < 900 && innerHeight <= innerWidth && !!selectedUid;
+      const portrait = narrow || layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
       document.body.classList.toggle("portrait", portrait);
+      document.body.classList.toggle('workspace-narrow', narrow);
+      // A strip consumes height only in stacked layouts. Short side-by-side
+      // windows retain their existing prior-report line; View opens the drawer.
+      document.body.classList.toggle('workspace-strip', portrait && innerWidth <= 1100 && !!selectedUid);
       $("#layout-toggle").textContent = {
         auto: "Layout: Auto", portrait: "Layout: Portrait", landscape: "Layout: Landscape",
       }[layoutMode];
@@ -8222,8 +8284,14 @@
         $(".related-p").style.height = "";
       }
       // A temporary small window must not overwrite the user's preferred size.
-      // Reapply stored pixels within today's bounds, separately for each orientation.
-      const sizes = workspaceState[workspaceAxis()];
+      // Reapply stored pixels within today's bounds, separately for each orientation:
+      // a landscape width is never a portrait height (W3R-07).
+      const sizes = workspaceState[workspaceAxis()], geometry = workspaceState.workspace;
+      if (geometry) {
+        document.body.classList.toggle('workspace-rail-collapsed', geometry.railCollapsed);
+        document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
+        $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
+      }
       const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
       left.style[portrait ? "height" : "width"] = "";
       related.style[portrait ? "height" : "width"] = "";
@@ -8233,6 +8301,47 @@
       const split = $(".split").getBoundingClientRect();
       if (sizes.main != null) left.style[portrait ? "height" : "width"] = clampPanel(sizes.main,
         portrait ? 180 : 500, portrait ? split.height - 420 : split.width - 426) + "px";
+      // Every worklist keeps its column header and one whole row in view, as in the
+      // approved portrait picture (W3R-09; the Related list follows the same rule,
+      // D383). Wrapped list controls take their own height, not the rows'. A stacked
+      // list grows into the work area below it. A side-by-side list column, and the
+      // narrow sheet's band (which also shows the next row where it has room, so the
+      // next study is one click away), keep that floor and scroll vertically instead:
+      // past the minimums the page scrolls, nothing is clipped (design v4 §1, v5 §2).
+      left.style.minHeight = "";
+      const listGrid = left.querySelector(":scope > .grid"), listTable = listGrid?.querySelector("table");
+      // Each pass measures the list without its floor; a re-measure (rendered rows,
+      // a resize) keeps where the reader had scrolled the column and the list.
+      const listScroll = [left.scrollTop, listGrid?.scrollTop || 0];
+      if (listGrid) listGrid.style.minHeight = "";
+      document.body.classList.remove("workspace-list-scroll");
+      let listNeed = 0, listFloor = 0;
+      const becameNarrow = narrow && !workspaceWasNarrow;
+      const keepListFloor = () => {
+        const scrolling = document.body.classList.contains("workspace-list-scroll");
+        if (listFloor - listGrid.getBoundingClientRect().height > 0.5) {
+          listGrid.style.minHeight = Math.ceil(listFloor) + "px";
+          document.body.classList.add("workspace-list-scroll");
+        }
+        if (!document.body.classList.contains("workspace-list-scroll")) return;
+        left.style.setProperty("--workspace-list-height", left.clientHeight + "px");
+        if (!scrolling && !becameNarrow) [left.scrollTop, listGrid.scrollTop] = listScroll;
+      };
+      if (!document.body.classList.contains("reading") && listTable?.tHead && listGrid.getClientRects().length) {
+        const grid = listGrid, table = listTable, rows = table.tBodies[0]?.rows || [];
+        const rowHeight = index => rows[index]?.getBoundingClientRect().height || 41;
+        const need = listNeed = table.tHead.getBoundingClientRect().height + rowHeight(0) + grid.offsetHeight - grid.clientHeight;
+        const short = need - grid.getBoundingClientRect().height;
+        if (portrait && !narrow) {
+          // Grow by whole pixels: the work area below moves down unchanged, keeping
+          // the sub-pixel position each of its lines and borders had at first paint.
+          if (short > 0) left.style.minHeight = left.getBoundingClientRect().height + Math.ceil(short) + "px";
+        } else {
+          listFloor = need + (narrow && rows.length > 1 ? rowHeight(1) : 0);
+          keepListFloor();
+        }
+      }
+      workspaceWasNarrow = narrow;
       if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
@@ -8241,7 +8350,172 @@
         prior.style.flex = "none";
         prior.style.height = clampPanel(sizes.prior, 150, related.getBoundingClientRect().height - 136) + "px";
       }
+      if (selectedUid && !document.body.classList.contains('reading') && (portrait || innerWidth < 900)) {
+        // Wrapped controls and the hidden-filter notice belong above the table,
+        // not on top of its selected row. Keep a full header + row hit area.
+        const grid = prior.querySelector('.grid2'), table = grid.querySelector('table');
+        const fixed = [...prior.children].filter(child => child !== grid && !child.matches('[popover]'))
+          .reduce((sum, child) => sum + child.getBoundingClientRect().height, 0);
+        const floor = Math.ceil(fixed + (table.tHead?.getBoundingClientRect().height || 24)
+          + (table.tBodies[0]?.rows[0]?.getBoundingClientRect().height || 41) + 2);
+        if (portrait) {
+          prior.style.maxHeight = ''; prior.style.overflowY = '';
+          related.querySelector('.prior-report-pane').style.minHeight = '';
+          prior.style.minHeight = floor + 'px';
+          related.style.minHeight = (floor + 6 + 116) + 'px';
+        } else {
+          prior.style.maxHeight = 'calc(100% - 49px)'; prior.style.overflowY = 'auto';
+          related.querySelector('.prior-report-pane').style.minHeight = '43px';
+        }
+      } else {
+        prior.style.minHeight = ''; prior.style.maxHeight = ''; prior.style.overflowY = '';
+        related.style.minHeight = ''; related.querySelector('.prior-report-pane').style.minHeight = '';
+      }
+      // The worklist floor must not push the prior report's first line out of a
+      // stacked work area (D383). The report window band yields first, only as much
+      // as needed and never below its 140 px drag minimum; a stored size wins.
+      if (portrait && !narrow && sizes.top == null && !document.body.classList.contains("reading")) {
+        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
+        const over = line - area.getBoundingClientRect().bottom;
+        if (over > 0) top.style.height = Math.max(140, Math.floor(top.getBoundingClientRect().height - over)) + "px";
+      }
+      // In the narrow sheet the list band yields to that line the same way, only as
+      // much as needed and never below the list's header and one whole row; the
+      // next row is then a wheel turn away inside the band.
+      if (narrow && listNeed) {
+        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
+        const over = line - area.getBoundingClientRect().bottom;
+        if (over > 0) {
+          const band = Math.max(Math.ceil(listNeed), Math.floor(left.getBoundingClientRect().height - over));
+          left.style.setProperty("height", band + "px", "important");
+          left.style.minHeight = band + "px";
+          // The list then fills the shorter band and scrolls inside it.
+          listFloor = Math.max(listNeed, Math.min(listFloor, band));
+          listGrid.style.minHeight = "";
+          keepListFloor();
+        }
+      }
+      // Becoming the narrow sheet at selection reflows the list: bring the band's
+      // top and the selected row back into view, scrolling inside the band only.
+      if (becameNarrow && listNeed) {
+        left.scrollTop = 0;
+        const selected = selectedUid && listTable.tBodies[0]?.querySelector(`tr[data-uid="${CSS.escape(selectedUid)}"]`);
+        if (selected) {
+          const area = listGrid.getBoundingClientRect(), box = selected.getBoundingClientRect();
+          const top = area.top + listTable.tHead.getBoundingClientRect().height;
+          const bottom = Math.min(area.bottom - (listGrid.offsetHeight - listGrid.clientHeight), left.getBoundingClientRect().top + left.clientHeight);
+          if (box.top < top) listGrid.scrollTop -= top - box.top;
+          else if (box.bottom > bottom) listGrid.scrollTop += box.bottom - bottom;
+        }
+      }
+      if (studyPanel) placeStudyPanel();
     }
+    // The open Study Panel never covers the report section (W3R5-03 ②). Wide
+    // landscape: the 360 px column left of the report, from the work area's top.
+    // Stacked layouts and small windows: across the window from the work area's top,
+    // the approved 55 % of the window high at most and ending 12 px above the report
+    // section; it follows the report as the work area scrolls, so Approve/Save/Prelim
+    // and the fields stay where the reader sees them, and the work area below the
+    // panel stays in view to scroll to the report.
+    //
+    // The reader may move the panel's free edge (pilot D1160): its width where it is a column, its height where
+    // it spans the window, stored per orientation with the Text Size step. With nothing stored and Normal text
+    // every form is exactly the placement above. A chosen size stays between a minimum and the room this rule
+    // gives: never under the report section or its column (W3R5-03 ②). The minimum keeps the panel usable,
+    // larger with the text: a column fits its header row and three tabs in one row (320 px), a band holds 240 px
+    // (the room below which this rule already puts the panel beside the report instead).
+    function placeStudyPanel() {
+      const host = $('#study-panel-host');
+      host.style.width = '';
+      const axis = workspaceAxis();
+      const chosen = workspaceState.workspace?.studyPanel?.[axis] || {}, text = chosen.text || 0;
+      const scale = KinStudyPanel.TEXT_SCALES[text], minWidth = Math.ceil(320 * scale), minHeight = Math.ceil(240 * scale);
+      // A preview belongs to the edge (orientation and dimension) its drag started on (W3R7-02).
+      const wanted = name => studyPanelPreview?.key === axis + ':' + name ? studyPanelPreview.size : chosen[name];
+      // The default when nothing was chosen; otherwise the choice (or the default) within [minimum, room].
+      const size = (name, initial, minimum, room) => wanted(name) == null && !text ? initial
+        : Math.min(room, Math.max(minimum, wanted(name) ?? initial));
+      const edge = (name, value, minimum, room) => {
+        const key = axis + ':' + name;
+        // The window turned or the panel changed form under a drag: that drag ends here without a result, and
+        // the drawer stops it too (setSize names the new edge), so its release changes neither record.
+        if (studyPanelPreview && studyPanelPreview.key !== key) studyPanelPreview = null;
+        studyPanelEdge = { key, name, value, min: Math.min(minimum, room), max: room };
+        studyPanel.setSize({ axis: name === 'width' ? 'x' : 'y', key, value, min: studyPanelEdge.min, max: room });
+      };
+      studyPanel.setText(text);
+      const report = $('.report-p').getBoundingClientRect();
+      if (portraitLayout() || innerWidth <= 1100) {
+        const area = $('.split').getBoundingClientRect();
+        const top = Math.max(0, area.top), bottom = Math.min(report.top, area.bottom, innerHeight) - 12;
+        host.style.top = top + 'px';
+        // Too little room above a report column beside the work area (Reading
+        // Workspace, short side-by-side windows): the column left of it instead.
+        if (bottom - top < 240 && report.left - 24 >= 240) {
+          const room = report.left - 24, width = size('width', room, minWidth, room);
+          host.style.width = width + 'px';
+          host.style.height = Math.max(120, Math.min(area.bottom, innerHeight) - 12 - top) + 'px';
+          edge('width', width, minWidth, room);
+          return;
+        }
+        const room = Math.max(120, bottom - top);
+        const height = Math.max(120, size('height', Math.min(innerHeight * 0.55, bottom - top), minHeight, room));
+        host.style.height = height + 'px';
+        edge('height', height, Math.max(120, minHeight), room);
+        return;
+      }
+      const top = Math.max(0, $('.right').getBoundingClientRect().top);
+      host.style.top = top + 'px';
+      host.style.height = Math.max(120, innerHeight - top - 12) + 'px';
+      // The 360 px column (D1041 3-①) is the stylesheet's; any width, the default included, ends 12 px before the
+      // report column, so neither the panel nor its edge reaches a report column widened to its largest
+      // (Reading Workspace, Image and Report Size at End: W3R7-05). Where there is room it is the 360 px column.
+      const room = Math.max(120, Math.min(innerWidth, report.width ? report.left : innerWidth) - 24);
+      const width = size('width', Math.min(360, room), minWidth, room);
+      if (wanted('width') != null || text || width !== 360) host.style.width = width + 'px';
+      edge('width', width, minWidth, room);
+    }
+    // The drawer reports the reader's drag/keys; the page clamps, shows and (when the drag ends) stores.
+    function resizeStudyPanel(value, phase) {
+      if (!studyPanel || !studyPanelEdge) return;
+      // A cancelled drag, or one the workspace stopped accepting (a session ending), leaves the stored size shown.
+      if (phase === 'cancel' || !workspaceEditable()) {
+        if (studyPanelPreview) { studyPanelPreview = null; placeStudyPanel(); }
+        return;
+      }
+      const size = Math.round(Math.min(studyPanelEdge.max, Math.max(studyPanelEdge.min, value)));
+      const preview = studyPanelPreview?.key === studyPanelEdge.key ? studyPanelPreview : null;
+      if (phase === 'move') {
+        // The drag's first move that changes the shown size is the reader's newer local choice: an account Load
+        // still on its way then gives way to it (W3R7-03). A press without movement, a move held at a bound and
+        // Default at the default are no change; the choice itself is stored once, when the drag ends.
+        const changed = !!preview?.changed || size !== Math.round(studyPanelEdge.value);
+        if (changed && !preview?.changed) workspaceGeneration++;
+        studyPanelPreview = { key: studyPanelEdge.key, name: studyPanelEdge.name, size, changed };
+        placeStudyPanel(); return;
+      }
+      studyPanelPreview = null;
+      // A drag that never changed the shown size ends as it began: nothing is chosen or stored.
+      if (preview && !preview.changed && size === Math.round(studyPanelEdge.value)) { placeStudyPanel(); return; }
+      changeStudyPanel({ [studyPanelEdge.name]: size });
+    }
+    // A change of this orientation's size or Text Size step, or (null) the default for this orientation.
+    function changeStudyPanel(change) {
+      if (!workspaceEditable()) return;
+      const next = KinWorkspaceLayout.withStudyPanel(workspaceState, workspaceAxis(), change);
+      if (!next) return;
+      // The same choice again (Default at the default, End at the largest size) writes nothing: a write would also
+      // make an account Load that is still on its way give way to a change that did not happen.
+      const same = JSON.stringify(next.workspace.studyPanel || {}) === JSON.stringify(workspaceState.workspace?.studyPanel || {});
+      workspaceState = next;
+      if (studyPanel) placeStudyPanel();
+      if (!same) saveWorkspace(true);
+    }
+    document.addEventListener('scroll', event => {
+      if (studyPanel && !workspaceEnded && event.target instanceof Element && event.target.matches('.split, .right')) placeStudyPanel();
+    }, { capture: true, passive: true });
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
@@ -9524,10 +9798,28 @@
     } catch (_) { toast('임상의 질문 줄을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
     // ── 패널 크기 조절 ──
+    let workspaceDragCancel = null;
+    function workspaceEditable() {
+      return !workspaceEnded && work.state() === 'active' && workspaceOwner === KinWorkspaceLayout.key(KinAuth.session());
+    }
     function bindPanelResize(selector, axis, resize) {
       const handle = $(selector);
+      handle.tabIndex = 0;
+      handle.addEventListener('keydown', e => {
+        if (!workspaceEditable() || e.isComposing || e.keyCode === 229) return;
+        const direction = typeof axis === 'function' ? axis() : axis;
+        const keys = direction === 'x' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+        if (![...keys, 'Home', 'End'].includes(e.key)) return;
+        e.preventDefault();
+        const box = handle.getBoundingClientRect(), step = e.shiftKey ? 40 : 10;
+        const delta = e.key === 'Home' ? -16384 : e.key === 'End' ? 16384 : e.key === keys[0] ? -step : step;
+        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction);
+        rememberPanelSize(selector);
+      });
       handle.addEventListener("pointerdown", e => {
-        if (e.button !== 0) return;
+        if (e.button !== 0 || !workspaceEditable()) return;
+        workspaceDragCancel?.();
+        const at = work.capture('document');
         workspaceGeneration++;
         e.preventDefault();
         const dragAxis = typeof axis === "function" ? axis() : axis;
@@ -9536,7 +9828,7 @@
         document.body.classList.add("resizing", dragAxis === "x" ? "resizing-x" : "resizing-y");
 
         const move = event => {
-          if (event.pointerId === e.pointerId) resize(event, dragAxis);
+          if (event.pointerId === e.pointerId) work.commit(at, () => resize(event, dragAxis));
         };
         const end = event => {
           if (event.pointerId !== e.pointerId) return;
@@ -9546,9 +9838,13 @@
           handle.classList.remove("dragging");
           document.body.classList.remove("resizing", "resizing-x", "resizing-y");
           if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
-          if (event.type === "pointerup") rememberPanelSize(selector);
-          else applyLayout();
+          workspaceDragCancel = null;
+          work.commit(at, () => {
+            if (event.type === "pointerup") rememberPanelSize(selector);
+            else applyLayout();
+          });
         };
+        workspaceDragCancel = () => end({ pointerId: e.pointerId, type: 'pointercancel' });
         handle.addEventListener("pointermove", move);
         handle.addEventListener("pointerup", end);
         handle.addEventListener("pointercancel", end);
@@ -9559,15 +9855,40 @@
     // 이 브라우저에 배치를 남겼는가(마지막 쓰기·읽기의 결과). 계정 배치를 확인하지 못했을 때 "이 브라우저에서 계속 쓴다"고
     // 말해도 되는지를 이것이 정한다 — 남기지 못했으면 새로고침하면 사라진다고 말한다(workspace-roaming.js).
     let workspaceLocalKept = true;
-    function saveWorkspace() {
+    // The v3 tab belongs to this login. A layout saved by an earlier login may
+    // restore sizes, but must not replace the pilot's initial Info tab.
+    const studyPanelSessionKey = () => workspaceOwner ? 'kin-study-panel-session:' + workspaceOwner : null;
+    function rememberStudyPanelSession() {
+      try {
+        const key = studyPanelSessionKey();
+        if (key && work.session()) workspaceStorage?.setItem(key, work.session());
+      } catch (_) { /* Unavailable storage keeps the current document's tab. */ }
+    }
+    // fromStudyPanel: a choice made in the open Study Panel (its tab, size, Text Size, Default; W3R7-04). The toolbar
+    // status line is not rewritten for it: in narrower windows that line wraps when its text grows, and the list,
+    // Related and report below would move under the reader's hand. A success is quiet; a failed save, and the first
+    // success after one, is said in the panel itself, which lies over the page. Other layout saves keep the toolbar
+    // line (the Rail/Layout wrap is a separate toolbar matter).
+    function saveWorkspace(fromStudyPanel = false) {
+      if (!workspaceEditable()) return;
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
-      workspaceState = KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels());
+      workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()));
       const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
+      if (saved) rememberStudyPanelSession();
+      const kept = workspaceLocalKept;
       workspaceLocalKept = !!saved;
-      $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+      const said = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+      if (!fromStudyPanel) $("#layout-status").textContent = said;
+      else if (!saved || !kept) studyPanel?.setNotice(said);
     }
     function rememberPanelSize(selector) {
+      if (!workspaceEditable()) return;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
+      if (selector === '#resize-rail') {
+        workspaceState.workspace.rail = Math.round($('#worklist-folders-panel').getBoundingClientRect().width);
+        saveWorkspace(); return;
+      }
       const targets = { "#resize-main": ["main", ".left"], "#resize-top": ["top", ".rw"],
         "#resize-related": ["related", ".related-p"], "#resize-prior": ["prior", ".related-list-pane"] };
       const [name, panel] = targets[selector];
@@ -9579,7 +9900,14 @@
       workspaceOwner = KinWorkspaceLayout.key(sess);
       try { workspaceStorage = localStorage; } catch (_) { workspaceStorage = null; }
       const result = KinWorkspaceLayout.read(workspaceStorage, workspaceOwner);
+      // Restore legacy display state as it was saved. Adopt v3 only on an
+      // explicit edit/open/save, so new geometry cannot affect the first paint.
       workspaceState = result.state;
+      if (workspaceState.workspace) {
+        let sameSession = false;
+        try { sameSession = !!work.session() && workspaceStorage?.getItem(studyPanelSessionKey()) === work.session(); } catch (_) {}
+        if (!sameSession) workspaceState.workspace.studyPanelTab = 'info';
+      }
       workspaceLocalKept = !["disabled", "unavailable"].includes(result.status);
       layoutMode = workspaceState.mode;
       readingWorkspace.applyPanels(workspaceState.reading || KinReadingPanelLayout.defaults());
@@ -9588,15 +9916,17 @@
       applyLayout();
     }
     $("#layout-toggle").addEventListener("click", () => {
+      if (!workspaceEditable()) return;
       layoutMode = layoutMode === "auto" ? "portrait" : layoutMode === "portrait" ? "landscape" : "auto";
       applyLayout();
       saveWorkspace();
     });
     $("#layout-reset").addEventListener("click", () => {
+      if (!workspaceEditable()) return;
       workspaceGeneration++;
       const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
       workspaceLocalKept = !!removed;
-      workspaceState = KinWorkspaceLayout.defaults(); layoutMode = "auto";
+      workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.defaults()); layoutMode = "auto";
       readingWorkspace.applyPanels(KinReadingPanelLayout.defaults());
       applyLayout();
       $("#layout-status").textContent = removed ? "기본 배치 · 이 브라우저" : "초기화 저장 안 됨 · 이 창에서만 유지";
@@ -9613,16 +9943,63 @@
      */
     const workArea = $(".split");
     let splitFrame = 0, splitSize = "";
-    new ResizeObserver(() => {
-      if (!workArea.isConnected) return;
-      const box = workArea.getBoundingClientRect(), size = Math.round(box.width) + "x" + Math.round(box.height);
-      if (size === splitSize || splitFrame) { splitSize = size; return; }
-      splitSize = size;
+    const workspaceObservedSizes = new WeakMap();
+    const workspaceObserver = new ResizeObserver(entries => {
+      if (workspaceEnded || !workArea.isConnected) return;
+      const at = work.capture('document');
+      let changed = false;
+      for (const entry of entries) {
+        const box = entry.target.getBoundingClientRect(), size = box.width + 'x' + box.height;
+        if (entry.target === workArea) {
+          if (splitSize !== size) changed = true;
+          splitSize = size;
+        } else {
+          if (workspaceObservedSizes.get(entry.target) !== size) changed = true;
+          workspaceObservedSizes.set(entry.target, size);
+        }
+      }
+      if (changed) scheduleWorkspaceLayout(at);
+    });
+    // One layout pass before the next paint, coalesced with any pending one.
+    function scheduleWorkspaceLayout(at = work.capture('document')) {
+      if (workspaceEnded || splitFrame) return;
       splitFrame = requestAnimationFrame(() => {
         splitFrame = 0;
-        if (workArea.isConnected && !document.body.classList.contains("resizing")) applyLayout();
+        work.commit(at, () => {
+          if (!workspaceEnded && workArea.isConnected && !document.body.classList.contains("resizing")) applyLayout();
+        });
       });
-    }).observe(workArea);
+    }
+    workspaceObserver.observe(workArea);
+    // A notice, wrapped filter or list control changes a row floor even in a
+    // fixed window, and so do the first rendered rows.
+    for (const node of [...$('.related-list-pane').children, $('#relrows'), $('.left > .grid thead'), $('#rows'),
+      ...[...$('.left').children].filter(child => !child.matches('.grid, #worklist-folders-panel'))]) workspaceObserver.observe(node);
+    function stopWorkspaceLayout() {
+      workspaceEnded = true; workspaceGeneration++;
+      workspaceDragCancel?.(); workspaceObserver.disconnect(); cancelAnimationFrame(splitFrame); splitFrame = 0;
+      window.removeEventListener('resize', applyLayout);
+      studyPanel?.destroy(); studyPanel = null;
+      document.body.classList.remove('study-panel-open');
+    }
+    window.addEventListener('pagehide', stopWorkspaceLayout, { once: true });
+    work.onInvalidate(event => {
+      if (event.reason === 'prepare') workspaceDragCancel?.();
+      // The tab strip, the narrow stacking and the row floors follow the selected
+      // study: settle them before the selection's first paint, so opening the
+      // drawer later moves nothing (W3R-03).
+      if (event.reason === 'select') scheduleWorkspaceLayout();
+    });
+    $('#rail-collapse').addEventListener('click', () => {
+      if (!workspaceEditable()) return;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
+      workspaceState.workspace.railCollapsed = !workspaceState.workspace.railCollapsed;
+      applyLayout(); saveWorkspace();
+    });
+    bindPanelResize('#resize-rail', 'x', e => {
+      const left = $('.left').getBoundingClientRect();
+      document.body.style.setProperty('--workspace-rail-width', clampPanel(e.clientX - left.left, 160, innerWidth / 3) + 'px');
+    });
     applyLayout();
 
     bindPanelResize("#resize-main", () => portraitLayout() ? "y" : "x", (e, axis) => {
@@ -10387,6 +10764,7 @@
       $('#worklist-folders-panel').open = false;
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       $('#chips')?.removeAttribute('data-render-signature');
+      stopWorkspaceLayout();
       // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
       leftNotes.clear();
@@ -10431,6 +10809,10 @@
     // 처음부터 회색인 편이 낫다. (서버 검사가 진짜 방어선이고 이건 안내다)
     function applyRoleUi() {
       const rad = KinAuth.has("radiologist"), tec = KinAuth.has("technician");
+      studyPanel?.setAvailable(studyPanelAvailable());
+      document.querySelectorAll('[data-study-panel-tab]').forEach(button => {
+        button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
+      });
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
       ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
@@ -10776,16 +11158,23 @@
         owner: workspaceOwner ? [sess.institution, sess.sub] : null,
         // A reset or legacy local record still comes from a client that can
         // preserve reading panels; never serialize it as an older v1 writer.
-        read: () => KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()),
+        read: () => KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels())),
         generation: () => workspaceGeneration,
         model: KinWorkspaceLayout, endpoint: API + '/workspace-layout', sessionEndpoint: API + '/me',
         localKept: () => workspaceLocalKept,
         apply: state => {
-          state = KinWorkspaceLayout.mergeLoaded(workspaceState, state);
+          if (!workspaceEditable()) return false;
+          state = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.mergeLoaded(workspaceState, state));
           if (!state) return false;
           workspaceGeneration++; workspaceState = state; layoutMode = state.mode; applyLayout();
           if (state.reading) readingWorkspace.applyPanels(state.reading);
+          if (studyPanel) {
+            studyPanelRestoring = true;
+            studyPanel.restore({ open: studyPanel.snapshot().open, tab: state.workspace.studyPanelTab });
+            studyPanelRestoring = false;
+          }
           const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, state);
+          if (saved) rememberStudyPanelSession();
           workspaceLocalKept = !!saved;
           $("#layout-status").textContent = saved ? "배치 복원됨 · 이 브라우저" : "배치 · 이 창에서만 유지";
           return saved;
@@ -10840,5 +11229,38 @@
       }
       await load();
     }
+    $('#study-panel-open').addEventListener('click', () => studyPanel ? studyPanel.close() : openStudyPanel());
+    document.querySelectorAll('[data-study-panel-tab]').forEach(button => {
+      button.addEventListener('click', () => openStudyPanel(button.dataset.studyPanelTab));
+    });
+    const studyContextOpener = document.querySelector('#reading-bar [aria-controls="reading-context"]');
+    if (studyContextOpener) {
+      studyContextOpener.setAttribute('aria-controls', 'study-panel-host');
+      studyContextOpener.addEventListener('click', event => {
+        if (!workspaceEditable()) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (studyPanel) studyPanel.close(); else openStudyPanel();
+      }, true);
+    }
+    // Use the existing account-scoped shortcut model. A remapped command wins
+    // over the Templates convenience chord; native input/IME and overlays win.
+    let studyPanelComposing = false;
+    document.addEventListener('compositionstart', () => { studyPanelComposing = true; }, true);
+    document.addEventListener('compositionend', () => { studyPanelComposing = false; }, true);
+    window.addEventListener('keydown', event => {
+      if (!workspaceEditable() || event.defaultPrevented || event.isComposing || studyPanelComposing || event.keyCode === 229
+          || document.querySelector('dialog[open], .modal.show, [popover]:popover-open')) return;
+      // The drawer has priority over the integrated workspace's list Escape.
+      if (event.key === 'Escape' && studyPanel?.element.contains(document.activeElement)
+          && !event.target.closest('select, [aria-expanded="true"]')) {
+        studyPanel.close(); event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
+      const owner = workspaceOwner?.slice(KinWorkspaceLayout.PREFIX.length);
+      const bindings = KinWorkspaceShortcuts.read(workspaceStorage, owner);
+      const command = KinWorkspaceShortcuts.action(bindings, event);
+      const templates = !command && KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event) === 'context';
+      if (command !== 'context' && !templates) return;
+      if (openStudyPanel(templates ? 'templates' : undefined)) { event.preventDefault(); event.stopImmediatePropagation(); }
+    }, true);
     boot();
   

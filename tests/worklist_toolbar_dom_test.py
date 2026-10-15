@@ -106,6 +106,9 @@ DATE_FILTERS = [('Today', 0), ('3 Days', 3), ('Week', 7), ('1 Month', 30), ('2 M
 DATE_FILTER_AT_OPEN = 'All'
 # The original regrouping containers plus the explicitly requested W2 folder entry.
 FOLDER_ENTRY_IDS = ['worklist-folders-toggle']
+# W3 adds a drawer opener and change-only status inside View. The historical
+# regrouping byte proof below stays pinned; current IDs still must be unique.
+STUDY_PANEL_ENTRY_IDS = ['study-panel-open', 'study-panel-status']
 GROUP_IDS = ['toolbar-search', 'toolbar-filters', 'toolbar-refresh', 'toolbar-refresh-menu', 'toolbar-view',
              'toolbar-more', 'toolbar-status']
 # Where every base toolbar id now lives. Primary groups are always in view; menus are <details>.
@@ -421,8 +424,8 @@ class WorklistToolbarStructureTest(unittest.TestCase):
                 self.assertEqual(1, self.text.count(f'id="{key}"'), key)
         toolbar = ids_in(self.parts['toolbar'])
         self.assertEqual(len(toolbar), len(set(toolbar)))
-        self.assertEqual(set(BASE_TOOLBAR_IDS) | set(GIVEN_IDS) | set(GROUP_IDS) | set(FOLDER_ENTRY_IDS), set(toolbar))
-        for key in list(GIVEN_IDS) + GROUP_IDS + FOLDER_ENTRY_IDS:
+        self.assertEqual(set(BASE_TOOLBAR_IDS) | set(GIVEN_IDS) | set(GROUP_IDS) | set(FOLDER_ENTRY_IDS) | set(STUDY_PANEL_ENTRY_IDS), set(toolbar))
+        for key in list(GIVEN_IDS) + GROUP_IDS + FOLDER_ENTRY_IDS + STUDY_PANEL_ENTRY_IDS:
             self.assertEqual(1, self.text.count(f'id="{key}"'), key)
         # The declared groups account for every base id exactly once.
         declared = [i for ids in list(PRIMARY.values()) + list(MENUS.values()) for i in ids]
