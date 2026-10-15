@@ -101,16 +101,28 @@
     // A size under a drag is shown but stored only when the drag ends; the edge being resized now.
     let studyPanelPreview = null, studyPanelEdge = null;
     const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
+    // The report section the drawer's focus came from. A study opening replaces the report fields, so the drawer's
+    // remembered node can be a removed one; the section it named is still the reader's (W6-PAGE-18).
+    let studyPanelField = null;
+    function noteStudyPanelOpener(el) {
+      // The drawer keeps the last outside element focus came from; the page and its own controls do not replace it.
+      if (!el || el === document.body || el === document.documentElement || $('#study-panel-host').contains(el)) return;
+      studyPanelField = RFIELDS.includes(el.id) && el === $('#' + el.id) ? el.id : null;
+    }
+    $('#study-panel-host').addEventListener('focusin', event => noteStudyPanelOpener(event.relatedTarget));
     function openStudyPanel(tab) {
       if (workspaceEnded || work.state() !== 'active') return false;
       if (tab && !studyPanelAvailable().includes(tab)) return false;
+      // A new drawer starts from the focus it is opened from.
+      if (!studyPanel) studyPanelField = null;
+      noteStudyPanelOpener(document.activeElement);
       workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       if (!studyPanel) {
         // Mount on the explicit open: legacy layouts keep their first paint.
         // destroy() returns these same nodes, with their listeners, to the row.
         studyPanel = KinStudyPanel({ host: $('#study-panel-host'), opener: document.activeElement,
           content: { images: $('.s-thumb'), info: $('.s-clinical'), templates: $('.s-template') },
-          available: studyPanelAvailable(), fallbackFocus: () => [$('#findings'), $('#quick'), $('#study-panel-open')]
+          available: studyPanelAvailable(), fallbackFocus: () => [studyPanelField && $('#' + studyPanelField), $('#findings'), $('#quick'), $('#study-panel-open')]
             .find(node => node?.isConnected && !node.disabled && !node.closest('[hidden], [inert]')
               && node.getClientRects().length && getComputedStyle(node).visibility === 'visible'),
           escapeClaimed: () => !!document.querySelector('dialog[open], .modal.show, [popover]:popover-open'),

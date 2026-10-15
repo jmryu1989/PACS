@@ -106,6 +106,7 @@ class ReportSessionPageTest(unittest.TestCase):
 
     def type_report(self, fields=auth.FIELDS):
         self.page.locator("#rows tr", has_text=auth.PATIENT).first.click()
+        # Setup, not a user path (W6R2-02): three-field data, the hidden Recommendation filled directly.
         for key, value in fields.items():
             self.page.locator("#" + key).fill(value)
 

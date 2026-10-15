@@ -102,46 +102,40 @@
       return true;
     }
     // 단축어 Tab(아래 등록)이 부르는 편집기의 한 자리다. 분할된 script 사이의 Tab이 미정의를 만나지 않게 등록보다 앞에 둔다(S9-U0a-PRE).
-    /**
-     * 판독문 칸(`#findings`·`#conclusion`·`#recommendation`)의 글을 **이 문서의 코드가** 바꾸는 한 자리.
-     *
-     * 사람의 타건은 input 이벤트가 알리지만 스크립트의 `.value` 대입은 아무것도 알리지 않는다. 대입하는 자리마다 "이 글은
-     * 서버가 아직 모른다"는 표시를 각자 챙기게 두면, 한 자리가 빠지는 순간 그 글은 자동 저장·로그아웃 보존·떠나기 경고
-     * 어디에도 없고 다음 폴링이 서버 글로 덮는다(U5CLI-F09: Paste와 Clear가 그랬다). 그래서 값을 바꾸는 일과 그 기록을
-     * 이 함수 하나가 함께 한다 — 붙여넣기·비우기·상용구·받아쓰기·단축어·인용·구조화가 모두 여기를 지난다. 이 함수 밖에서
-     * 세 칸에 대입하는 곳은 둘뿐이다: 서버의 글을 그리는 `loadReport`와 화면을 닫는 `closeWork`(둘 다 이 문서의 편집이
-     * 아니다).
-     *
-     * `edits`는 `{ field, start, end, text[, caret] }`의 목록이다: 그 칸의 지금 글에서 [start, end)를 text로 바꾸고 커서를
-     * caret(없으면 넣은 글의 끝)에 둔다. 칸·범위·넣을 글로 받는 것은 편집기 경계 모듈(report-editor-frame.js의
-     * capture + insert / insertMany)이 같은 것을 받기 때문이다. 쓸 수 있는가(권한·잠금·그때 그 선택인가)는 부르는 쪽이
-     * 이미 확인했다. 여기서는 업무 중인 문서의 고른 검사일 때만 쓰고, 글이 실제로 바뀌었는지를 돌려준다 — 아무것도 바꾸지
-     * 않은 호출(빈 붙여넣기 등)은 편집이 아니므로 표시도 세우지 않는다.
-     */
+    // All application edits use the frame's native undo transaction. Its input event owns dirty/hold
+    // accounting; this adapter only retains the final multi-field snapshot. Delayed callers pass
+    // their captured request so later input or another opening cannot accept an old insertion.
     function editReport(edits) {
       if (work.state() !== "active" || !selectedUid) return false;
-      const changed = [];
-      for (const { field, start, end, text, caret } of edits) {
-        const el = $("#" + field), was = el.value;
-        if (was.slice(start, end) === text) continue;
-        el.value = was.slice(0, start) + text + was.slice(end);
-        const at = caret ?? start + text.length;
-        el.setSelectionRange(at, at);
-        changed.push(el);
+      const frame = mountReportFrame();
+      if (!frame) return false;
+      if (reportOpening?.uid !== selectedUid || reportOpening?.selectionSeq !== selectionSeq) return false;
+      const changes = edits.map(edit => ({ at: edit.at ?? frame.capture(edit.field, edit), text: edit.text }));
+      // A logout waiting for an accepted server command must let that command reach the editor
+      // before it freezes the save snapshot. Its modal otherwise makes native insertion inert.
+      const waiting = document.querySelector("dialog.kin-logout[open]");
+      const returnFocus = waiting?.contains(document.activeElement) ? document.activeElement : null;
+      if (waiting && !frame.isComposing()) waiting.close();
+      let result;
+      try {
+        result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);
+      } finally {
+        if (waiting?.isConnected && !waiting.open && work.state() === "active") {
+          waiting.showModal();
+          returnFocus?.focus({ preventScroll: true });
+        }
       }
-      if (!changed.length) return false;
-      // 편집기의 글이 바뀌었다 — 그 전에 떠난 편집기 범위의 작업(클립보드 읽기 등)은 이 글 위에 쓰지 않는다.
-      work.edited();
-      recordReportEdit();
-      // 글이 바뀐 뒤에 따라오는 일(점유 시작, 인용 다시 세기, 상용구 단추, 받아쓰기 자리)은 타이핑과 같은 input이 알린다.
-      for (const el of changed) el.dispatchEvent(new Event("input", { bubbles: true }));
+      if (result.status !== "applied") return false;
+      for (const edit of edits) if (edit.caret !== undefined)
+        frame.element(edit.field).setSelectionRange(edit.caret, edit.caret);
+      // Native input already records each edit once. Retain the final multi-field snapshot without another edit turn.
+      keepReportEditor();
       return true;
     }
-    ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
-      $(sel).addEventListener("keydown", e => {
-        if (e.key !== "Tab" || e.shiftKey || e.target.readOnly) return;
-        if (expandShortcut(e.target)) e.preventDefault();
-      }));
+    onReportField("keydown", e => {
+      if (e.key !== "Tab" || e.shiftKey || e.isComposing || e.target.readOnly || reportFrame?.isComposing()) return;
+      if (expandShortcut(e.target)) e.preventDefault();
+    });
 
     /**
      * 상용구 편집. 매뉴얼 7.3.5.1.1대로 목록에서 우클릭해 만든다.

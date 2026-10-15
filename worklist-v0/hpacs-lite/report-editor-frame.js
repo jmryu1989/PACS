@@ -1,0 +1,359 @@
+// Own report text history boundaries, composition guards and synchronous text edits.
+(function (root) {
+  'use strict';
+
+  function create({ fields, canEdit, host = null }) {
+    const names = Object.keys(fields);
+    const doc = fields[names[0]]?.ownerDocument;
+    if (!names.length || typeof canEdit !== 'function' || names.some(name =>
+      fields[name].tagName !== 'TEXTAREA' || fields[name].ownerDocument !== doc || !fields[name].isConnected)
+      || new Set(Object.values(fields)).size !== names.length) throw new TypeError('Invalid report fields');
+    const states = Object.fromEntries(names.map(name => [name, { el: fields[name], revision: 0, composing: false, caret: false }]));
+    // Measurement in a separate document cannot split the report's native undo typing group.
+    const measure = host ? doc.createElement('iframe') : null;
+    let mirror = null;
+    if (measure) {
+      measure.tabIndex = -1; measure.setAttribute('aria-hidden', 'true');
+      measure.setAttribute('sandbox', 'allow-same-origin');
+      Object.assign(measure.style, { position: 'fixed', visibility: 'hidden', pointerEvents: 'none',
+        left: '-10000px', top: '0', width: '1px', height: '1px', border: '0' });
+      doc.body.append(measure);
+      mirror = measure.contentDocument.createElement('textarea');
+      mirror.readOnly = true; mirror.tabIndex = -1;
+      Object.assign(mirror.style, { height: '0', minHeight: '0', overflow: 'hidden' });
+      measure.contentDocument.body.append(mirror);
+    }
+    const requests = new WeakSet();
+    let opening = null;
+    let writing = false;
+    let ended = false;
+    const refused = reason => ({ status: 'refused', reason });
+    const lf = text => text.replace(/\r\n?/g, '\n');
+
+    function fit(follow = null) {
+      if (!host) return;
+      const top = host.scrollTop, left = host.scrollLeft;
+      for (const s of Object.values(states)) {
+        const el = s.el;
+        if (el.getAttribute('aria-hidden') === 'true') continue;
+        // The text's own height, measured with no page height in the way. It becomes the field's minimum where it
+        // exceeds the page's own: the page's sizes may yield to a short scroller, the text never shrinks into itself.
+        el.style.height = '0px'; el.style.minHeight = '0px';
+        const text = el.scrollHeight + el.offsetHeight - el.clientHeight;
+        el.style.height = ''; el.style.minHeight = '';
+        if (text > (parseFloat(doc.defaultView.getComputedStyle(el).minHeight) || 0)) el.style.minHeight = text + 'px';
+        el.scrollTop = 0;
+      }
+      host.scrollTop = top; host.scrollLeft = left;
+      if (follow && doc.activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);
+    }
+
+    function revealCaret(el) {
+      // Resizing removes the field's own scroll range. A textarea with the same wrap/font
+      // measures the caret line without changing the active field's focus, selection or undo group.
+      const css = doc.defaultView.getComputedStyle(el);
+      for (const property of ['box-sizing', 'border-width', 'border-style', 'padding', 'font', 'line-height',
+        'letter-spacing', 'word-spacing', 'text-indent', 'white-space', 'word-break', 'overflow-wrap', 'tab-size'])
+        mirror.style.setProperty(property, css.getPropertyValue(property));
+      mirror.style.width = el.getBoundingClientRect().width + 'px';
+      const paddingTop = parseFloat(css.paddingTop) || 0, paddingBottom = parseFloat(css.paddingBottom) || 0;
+      mirror.value = '\u200b';
+      const lineHeight = mirror.scrollHeight - paddingTop - paddingBottom;
+      mirror.value = el.value.slice(0, el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd) + '\u200b';
+      const field = el.getBoundingClientRect(), viewport = host.getBoundingClientRect();
+      const caretBottom = field.top + (parseFloat(css.borderTopWidth) || 0) + mirror.scrollHeight - paddingBottom;
+      const caretTop = caretBottom - lineHeight, edge = viewport.top + host.clientTop;
+      if (caretBottom > edge + host.clientHeight) host.scrollTop += caretBottom - edge - host.clientHeight;
+      else if (caretTop < edge) host.scrollTop += caretTop - edge;
+    }
+
+    function state(name) {
+      if (!Object.hasOwn(states, name)) throw new TypeError('Unknown report field');
+      return states[name];
+    }
+
+    function bind(s) {
+      const start = () => { s.composing = true; };
+      const end = () => { s.composing = false; };
+      const input = () => { s.revision++; fit(writing ? null : s.el); };
+      // 숫자 위치는 브라우저가 소유하고 여기서는 사람이 이 칸을 사용했는지만 기억한다. 같은 검사의
+      // 경계에서 글이 같은 칸은 이 표시가 선택과 함께 옮겨 가고, 다른 검사나 바뀐 글에서는 지워진다.
+      const caret = () => { if (!writing) s.caret = true; };
+      // A field hidden from the person has no way in for the keyboard (no tab stop, off screen), but the document-wide
+      // native Undo/Redo moves focus into it when it undoes or redoes a step of that field. Focus then goes back where
+      // it came from (or nowhere): the next keystrokes must never change text no one sees.
+      let from = null;
+      const away = event => {
+        if (writing) return;
+        if (event.type === 'focus') { from = event.relatedTarget; return; }
+        if (!hidden(s.el) || doc.activeElement !== s.el || !event.inputType?.startsWith('history')) return;
+        if (from?.isConnected && !hidden(from)) from.focus({ preventScroll: true });
+        if (doc.activeElement === s.el) s.el.blur();
+      };
+      s.el.addEventListener('compositionstart', start);
+      s.el.addEventListener('compositionend', end);
+      s.el.addEventListener('input', input);
+      for (const event of ['focus', 'input']) s.el.addEventListener(event, away);
+      for (const event of ['focus', 'pointerdown', 'keydown', 'input']) s.el.addEventListener(event, caret);
+      s.unbind = () => {
+        s.el.removeEventListener('compositionstart', start);
+        s.el.removeEventListener('compositionend', end);
+        s.el.removeEventListener('input', input);
+        for (const event of ['focus', 'input']) s.el.removeEventListener(event, away);
+        for (const event of ['focus', 'pointerdown', 'keydown', 'input']) s.el.removeEventListener(event, caret);
+      };
+    }
+    function hidden(el) { return el.getAttribute?.('aria-hidden') === 'true'; }
+    // A write focuses its field only for the native edit. Focus then goes back where the person had it; where
+    // that cannot take focus (the page itself, after a click outside any control), no field keeps it either.
+    function giveBack(target) {
+      if (target?.isConnected && doc.activeElement !== target && !hidden(target)) target.focus({ preventScroll: true });
+      const now = doc.activeElement;
+      if (now !== target && Object.values(states).some(s => s.el === now)) now.blur();
+    }
+    Object.values(states).forEach(bind);
+    // The host can move between workspaces or resize without replacing text or undo history.
+    const resize = host && typeof ResizeObserver === 'function' ? new ResizeObserver(() => fit(!writing && Object.values(states).some(s => s.el === doc.activeElement && s.caret) ? doc.activeElement : null)) : null;
+    if (resize) resize.observe(host);
+
+    function isComposing(name) {
+      return name === undefined ? Object.values(states).some(s => s.composing) : state(name).composing;
+    }
+
+    function read(name) {
+      return name === undefined ? Object.fromEntries(names.map(k => [k, state(k).el.value])) : state(name).el.value;
+    }
+
+    function view(el) {
+      return { start: el.selectionStart, end: el.selectionEnd, direction: el.selectionDirection,
+        top: el.scrollTop, left: el.scrollLeft };
+    }
+
+    function scrolls() {
+      const elements = new Set();
+      for (const s of Object.values(states)) {
+        for (let el = s.el; el; el = el.parentElement) elements.add(el);
+      }
+      return [...elements].map(el => [el, el.scrollTop, el.scrollLeft]);
+    }
+
+    function restoreScroll(positions) {
+      for (const [el, top, left] of positions) { el.scrollTop = top; el.scrollLeft = left; }
+    }
+
+    function unchanged(texts) {
+      return names.every(k => read(k) === lf(texts[k])) ? { status: 'unchanged' } : null;
+    }
+
+    function switchStudy(context, texts) {
+      if (!context || !(context.uid === null || typeof context.uid === 'string') ||
+          !Number.isSafeInteger(context.selectionSeq) || names.some(k => typeof texts?.[k] !== 'string'))
+        throw new TypeError('A study opening and all report texts are required');
+      if (ended) return refused('ended');
+      if (writing) return refused('busy');
+      // A render of the current opening must not reset history, selection or an IME session.
+      if (opening && opening.uid === context.uid && opening.selectionSeq === context.selectionSeq)
+        return unchanged(texts) || refused('same-opening');
+      return open(context, texts);
+    }
+
+    // 세 칸 모두 같은 글인 저장/재조회는 Undo와 커서를 그대로 둔다. 한 칸이라도 다르면 새 경계라서
+    // Undo는 세 칸 모두 끊기고, 글이 같은 칸만 커서와 사용 표시를 유지한다.
+    function replaceAuthoritative(texts) {
+      if (!opening || names.some(k => typeof texts?.[k] !== 'string'))
+        throw new TypeError('An open study and all report texts are required');
+      if (ended) return refused('ended');
+      if (writing) return refused('busy');
+      return unchanged(texts) || open(opening, texts);
+    }
+
+    function open(context, texts) {
+      if (isComposing()) return refused('composing');
+      writing = true;
+      try {
+        const active = doc.activeElement;
+        const positions = scrolls();
+        // 커서 자리는 그 검사의 그 글의 것이다. 다른 검사의 글이 byte까지 같아도 A의 자리를 B로 옮기지 않는다.
+        const sameStudy = opening !== null && opening.uid === context.uid;
+        const replacements = names.map(name => {
+          const s = state(name), old = s.el, next = old.cloneNode(true), saved = view(old);
+          // Detached initialization creates no undo command. Old commands cannot target a new node.
+          next.value = lf(texts[name]);
+          next.defaultValue = next.value;
+          return { s, old, next, saved, same: sameStudy && old.value === next.value };
+        });
+        opening = Object.freeze({ uid: context.uid, selectionSeq: context.selectionSeq });
+        if (mirror) mirror.value = "";
+        for (const { s, old, next, saved, same } of replacements) {
+          s.unbind();
+          s.el = next; s.revision = 0;
+          bind(s);
+          old.replaceWith(next);
+          if (same) next.setSelectionRange(saved.start, saved.end, saved.direction);
+          // 같은 값을 다시 넣으면 브라우저가 커서를 옮기지 않으므로, 기본 삽입 위치인 끝을 화면에도 둔다.
+          else { s.caret = false; next.setSelectionRange(next.value.length, next.value.length); }
+        }
+        const focused = replacements.find(item => item.old === active);
+        if (focused) focused.next.focus();
+        restoreScroll(positions);
+        for (const { next, saved, same } of replacements) {
+          if (same) { next.scrollTop = saved.top; next.scrollLeft = saved.left; }
+        }
+        fit();
+        if (!sameStudy && host) { host.scrollTop = 0; host.scrollLeft = 0; }
+        return { status: 'switched' };
+      } finally { writing = false; }
+    }
+
+    // Capture before an await or before a toolbar takes focus. A later caret move is not an edit.
+    function capture(name, range) {
+      const s = state(name), el = s.el;
+      const start = range?.start ?? (s.caret ? el.selectionStart : el.value.length);
+      const end = range?.end ?? (s.caret ? el.selectionEnd : el.value.length);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > el.value.length)
+        throw new TypeError('Invalid report selection');
+      // Block insertion distinguishes an untouched field's append rule from a chosen line boundary.
+      const at = Object.freeze({ field: name, text: el.value, start, end, visited: s.caret, opening, revision: s.revision });
+      requests.add(at);
+      return at;
+    }
+
+    function blocked(at) {
+      if (ended) return 'ended';
+      if (!at || !requests.has(at) || !opening || at.opening !== opening) return 'stale';
+      const s = state(at.field);
+      // Even an edit followed by Undo retires a pending request.
+      if (s.revision !== at.revision || s.el.value !== at.text) return 'changed';
+      // Focusing a different field would commit its composition as a side effect.
+      if (isComposing()) return 'composing';
+      if (s.el.readOnly || s.el.disabled || !canEdit(at.field)) return 'readonly';
+      return null;
+    }
+
+    // Whether a request still addresses the text it was taken from: this opening, and no edit to its field since
+    // (an edit later undone included). Composition and edit permission are moments of the write, not of the request.
+    function isCurrent(at) {
+      return !['ended', 'stale', 'changed'].includes(blocked(at));
+    }
+
+    function replace(at, text, start, end) {
+      if (typeof text !== 'string') throw new TypeError('Report text must be a string');
+      if (writing) return refused('busy');
+      let why = blocked(at);
+      if (why) return refused(why);
+      text = lf(text);
+      const s = state(at.field), el = s.el;
+      const expected = at.text.slice(0, start) + text + at.text.slice(end);
+      if (expected === el.value) return { status: 'unchanged' };
+      if (el.maxLength >= 0 && expected.length > el.maxLength) return refused('length');
+      const active = doc.activeElement, saved = view(el), positions = scrolls();
+      writing = true;
+      let applied = false;
+      try {
+        el.focus({ preventScroll: true });
+        // Focus listeners can change edit permission. Check again immediately before the native edit.
+        why = blocked(at);
+        if (why) return refused(why);
+        // Hidden or inert controls cannot take focus; execCommand would edit the previous field.
+        if (doc.activeElement !== el) return refused('unavailable');
+        el.setSelectionRange(start, end);
+        const accepted = doc.execCommand('insertText', false, text);
+        applied = el.value === expected;
+        if (!accepted || !applied) return refused('native-edit');
+        // Chromium ends a typing group on an explicit selection, including an unchanged selection.
+        el.setSelectionRange(start + text.length, start + text.length);
+        return { status: 'applied' };
+      } finally {
+        if (!applied) el.setSelectionRange(saved.start, saved.end, saved.direction);
+        if (active !== el) giveBack(active);
+        restoreScroll(positions);
+        writing = false;
+      }
+    }
+
+    function insert(at, text) { return replace(at, text, at?.start, at?.end); }
+
+    function insertMany(edits) {
+      if (!Array.isArray(edits) || !edits.length || new Set(edits.map(e => e.at?.field)).size !== edits.length)
+        throw new TypeError('One edit per field is required');
+      if (writing) return refused('busy');
+      const active = doc.activeElement, positions = scrolls();
+      const activeField = names.find(k => state(k).el === active);
+      const before = read();
+      const completed = [];
+      // 포커스가 필요한 native 편집이므로 숨김/모달/권한도 첫 쓰기 전에 전부 검사한다.
+      function check() {
+        for (const { at, text } of edits) {
+          if (typeof text !== 'string') throw new TypeError('Report text must be a string');
+          const why = blocked(at);
+          if (why) return why;
+          const el = state(at.field).el;
+          const length = at.text.length - (at.end - at.start) + lf(text).length;
+          if (el.maxLength >= 0 && length > el.maxLength) return 'length';
+        }
+        return null;
+      }
+      try {
+        writing = true;
+        let why = check();
+        if (why) return refused(why);
+        for (const { at } of edits) {
+          const el = state(at.field).el;
+          el.focus({ preventScroll: true });
+          if (doc.activeElement !== el) return refused('unavailable');
+        }
+        why = check();
+        if (why) return refused(why);
+        writing = false;
+        for (const { at, text } of edits) {
+          const result = insert(at, text);
+          if (result.status === 'refused') {
+            writing = true;
+            // Undo로 되돌리면 Redo가 실패한 작업의 반쪽을 살린다. 부분 native 실패는
+            // 원문으로 새 경계를 열어 양쪽 이력을 끊고, 이력 초기화를 결과에 명시한다.
+            if (completed.length || names.some(k => read(k) !== before[k])) {
+              open(opening, before);
+              return { ...result, historyReset: true };
+            }
+            return result;
+          }
+          if (result.status === 'applied') completed.push(at.field);
+        }
+        return { status: completed.length ? 'applied' : 'unchanged' };
+      } finally {
+        writing = true;
+        giveBack(activeField ? state(activeField).el : active);
+        restoreScroll(positions);
+        writing = false;
+      }
+    }
+
+    function applyServer(at, { sent, text }) {
+      // A save sends the captured text; a structured insertion sends its proposed replacement.
+      if (typeof sent !== 'string' || (sent !== at?.text && sent !== text)) return refused('sent-mismatch');
+      return replace(at, text, 0, at?.text.length);
+    }
+
+    function end(context) {
+      if (ended) return { status: 'unchanged' };
+      // This is terminal cancellation, after the page retained its recovery snapshot.
+      // No composition event is fabricated and no old undo command may reach the empty fields.
+      doc.activeElement?.blur();
+      for (const s of Object.values(states)) s.composing = false;
+      const result = open(context, Object.fromEntries(names.map(k => [k, ''])));
+      ended = true;
+      resize?.disconnect();
+      measure?.remove();
+      for (const s of Object.values(states)) { s.el.readOnly = true; s.unbind(); }
+      return result;
+    }
+
+    return Object.freeze({ switchStudy, replaceAuthoritative, capture, insert, insertMany, applyServer, read, isComposing, end,
+      isCurrent,
+      // True while this frame itself moves focus for a write: such focus is not the person choosing a field.
+      isWriting: () => writing,
+      element: name => state(name).el });
+  }
+
+  root.KinReportEditorFrame = Object.freeze({ create });
+})(typeof window === 'object' ? window : globalThis);

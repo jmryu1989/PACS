@@ -176,12 +176,22 @@
       if (failed) throw new Error('cleanup-failed');
     }
 
+    // Only begin/explicit re-pin reads without a field. Keep that capture across later
+    // hash/scope reads: typing then Undo must not turn an old recording into a new edit.
+    let editorCapture = null;
     const session = o.session.create({
-      readContext: o.readContext,
+      readContext: field => {
+        const live = o.readContext(field);
+        if (field === undefined) editorCapture = live?.capture ?? null;
+        return live;
+      },
       validateTranscript: text => typeof text === 'string' && text.length <= TEXT_CAP,
-      insert: o.insert,
+      insert: insertion => o.insert({ ...insertion, capture: editorCapture }),
+      // An edit since the pin can leave the same text (typing then Undo). The host's check of the same capture
+      // tells the session so before it spends the transcript: it then asks for a re-pin and a fresh Insert.
+      pinned: () => !o.current || o.current(editorCapture) === true,
       canInsert: () => !gate() && !(o.busy && o.busy()),
-      cleanup: release,
+      cleanup: () => { editorCapture = null; release(); },
       hashText: o.hashText,
     });
 

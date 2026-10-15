@@ -12,32 +12,37 @@
      * 초안을 그렸다면 기준은 그 초안이 딛고 선 판이다. 화면에 있는 글자의 출처가
      * 확정본이 아니라 초안이기 때문이다.
      */
-    /**
-     * S3-U6: **사람이 커서를 둔 적이 있는 칸**의 이름들.
-     *
-     * 커서 자리 자체는 브라우저가 이미 들고 있다 — textarea는 초점을 잃어도 자기
-     * `selectionStart/selectionEnd`를 유지하므로 화면이 사본을 두면 그 사본만 낡는다.
-     * 화면이 기억할 것은 하나뿐이다: **그 칸을 짚은 적이 있는가.** 한 번도 초점을 받지 않은
-     * 칸도 `0`을 답하는데, 그 `0`은 "맨 앞을 가리킨다"가 아니라 "자리가 없다"이기 때문이다.
-     * 그 둘을 구별하지 못하면 커서를 둔 적 없는 칸의 **맨 위**에 문장이 들어간다.
-     *
-     * 잊는 자리는 둘뿐이다 — 검사 선택이 바뀔 때(아래)와 `loadReport`가 그 칸의 값을 실제로
-     * 갈아끼울 때. 그 밖에는 잊지 않는다: 같은 값 재대입은 캐럿을 옮기지 않는다.
-     */
-    const caretFields = new Set();
-    function noteCaret(field) { caretFields.add(field); }
-    function forgetCaret(field) { caretFields.delete(field); }
+    // An untouched field appends a block; an explicitly chosen end position follows line placement.
+    // The frame owns this distinction and retires it when a different study opens.
     function caretAt(field) {
-      if (!caretFields.has(field)) return null;
-      const el = $("#" + field);
-      return el ? { start: el.selectionStart, end: el.selectionEnd } : null;
+      const at = mountReportFrame()?.capture(field);
+      return at?.visited ? { start: at.start, end: at.end } : null;
     }
+    let reportFrame = null;
+    let reportOpening = null;
+    let reportFrameEnded = false;
+    function mountReportFrame() {
+      // Auth may finish after this document has already ended. Never revive its editor.
+      if (reportFrameEnded) return null;
+      if (!reportFrame) reportFrame = KinReportEditorFrame.create({
+        fields: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k)])),
+        host: document.querySelector(".redit"),
+        canEdit: () => work.state() === "active" && !!selectedUid && !reportEditorBlock(),
+      });
+      return reportFrame;
+    }
+    // Delegation follows replacement fields without retaining detached textareas.
+    function onReportField(type, listener) {
+      document.addEventListener(type, event => {
+        if (RFIELDS.includes(event.target?.id) && event.target === $("#" + event.target.id)) listener(event);
+      }, type === "focus");
+    }
+    mountReportFrame();
     function markSelectionChanged(uid) {
       selectedUid = uid;
       // 선택 순번은 이 문서의 관문이 센다 — 검사 범위의 작업 문맥이 같은 값을 본다(A→B→A도 같은 선택이 아니다).
       selectionSeq = work.select(uid);
-      // 커서 자리는 그 검사의 그 글에 대한 것이다. A→B→A도 같은 화면이 아니다.
-      caretFields.clear();
+      // The frame consumes this existing selection sequence at the next report render.
       // 그 검사를 열었다 — 떠나 있는 동안 남겨 둔 안내는 이제 그 검사의 초안 표시줄이 이어받는다.
       dropLeftNote(uid);
     }
@@ -142,9 +147,22 @@
       const locked = !!r.prelimHidden;
       if (locked) reportPreview.close();
       // 자동 저장된 내 초안은 DOM과 같아 dirty가 아니어도, 잠금 전환이 그 글을 지워서는 안 된다.
-      const preserveValue = !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
+      let preserveValue = !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
       reportRefreshPendingFor = preserveValue && (locked || reportDirty()) ? selectedUid : null;
       const src = locked ? {} : reportSource();
+      const frame = mountReportFrame();
+      if (!frame) return false;
+      const opening = { uid: selectedUid, selectionSeq };
+      const newOpening = !reportOpening || reportOpening.uid !== selectedUid || reportOpening.selectionSeq !== selectionSeq;
+      if (!preserveValue || newOpening) {
+        const texts = Object.fromEntries(RFIELDS.map(k => [k, locked ? "" : String(src[k] ?? "")]));
+        const result = newOpening ? frame.switchStudy(opening, texts) : frame.replaceAuthoritative(texts);
+        if (result.status === "refused") {
+          // A refused authoritative render cannot advance the text's origin or erase current typing.
+          preserveValue = true;
+          reportRefreshPendingFor = selectedUid;
+        } else reportOpening = opening;
+      }
       // 값을 실제로 넣는 이 호출만이 기준 판을 바꾼다. 입력을 보존하는 호출(폴링·잠금
       // 전환)은 화면의 글자를 그대로 두므로 그 글자가 딛고 선 판도 그대로다.
       if (!preserveValue) {
@@ -163,16 +181,6 @@
                                  ["#conclusion", "Please enter conclusion"],
                                  ["#recommendation", "Please enter recommendation"]]) {
         const el = $(sel);
-        // S3-U6: 값이 **실제로** 달라졌을 때만 그 칸의 커서 자리를 잊는다. 폴링이 같은 글을
-        // 다시 대입하는 것은 화면에서 아무 일도 아니고(명세상 캐럿도 그대로다), 그때까지
-        // 잊으면 사람이 짚어둔 자리가 30초마다 사라진다. 비교는 대입 전후의 API 값으로 한다 —
-        // 원문과 API 값이 줄 끝에서 다를 수 있으므로 문자열 예측이 아니라 결과를 본다.
-        if (!preserveValue) {
-          const was = el.value;
-          // 서버의 글을 그리는 대입이다(이 문서의 편집이 아니다) — `editReport` 밖의 두 대입 가운데 하나.
-          el.value = locked ? "" : (src[sel.slice(1)] ?? "");
-          if (el.value !== was) forgetCaret(sel.slice(1));
-        }
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
       }
@@ -189,6 +197,7 @@
         draftClient.prime(selectedUid, { owner: draftOwner, context: work.capture("study") });
       // 이 검사에 결과를 모르는 버리기가 남아 있으면 그 결과부터 안다(다시 그리는 글이 서버의 지금 초안이 되게).
       if (selectedUid && reportUnknownDiscards.has(selectedUid)) learnDiscardOutcome(selectedUid);
+      return !preserveValue;
     }
 
     /**

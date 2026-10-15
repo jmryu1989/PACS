@@ -718,6 +718,21 @@ python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pa
 - 봉인: `backup`은 writer 정지 구간에 뜬 `kin.dump`가 완성되고 writer 재개·준비 확인이 끝난 뒤(실패해도) 그 덤프의 AuditLog 행을
   격리 검증 DB에서 digest로 만들어 백업 폴더의 `audit-checkpoint.json`(0600)에 쓰고, manifest의 `sha256`·`bytes`에 선언한 뒤(형식 1 그대로)
   백업 부모의 `audit-ledger.json`에 덧붙인다(K → manifest → 장부 순서). 정지 시간은 늘지 않고 봉인은 `kin-db`에 명령을 보내지 않는다.
+- 장부를 쓰는 `init`·`plan`·봉인과 `rotate`의 삭제 구간은 백업 부모 안의 장부 잠금(`.kin-audit-ledger.lock`, 0600, 소유자만 해제)으로
+  한 번에 하나만 돈다. 도구 폴더에는 쓰지 않으므로 보호 설치(`/opt/kin-deploy`, root 0755)를 백업 부모 소유 계정으로 실행해도 된다.
+  봉인(`backup` 안)과 rotation은 운영 잠금 → 장부 잠금 순서로만 잡고 `init`·`plan`은 장부 잠금만 잡는다. 어느 쪽도 기다리지 않고,
+  죽은 실행이 남긴 잠금은 지우거나 건너뛰지 않고 계속 거절한다(RT-P3-LEDGER-LOCK·P3R1-01, `ops_audit_integrity_test.py` PV-11·PV-12).
+  경합했을 때의 결과는 진입점마다 다르다:
+  - `init`·`plan` CLI: 종료코드 2(`{"error": "Refused"}`), 장부·백업 부모는 그대로다.
+  - 봉인(`ops_audit_integrity.seal`): `Refused`를 올리고 체크포인트·manifest 선언·장부를 쓰지 않는다. `backup` CLI는 이를 실패로 남긴다:
+    완성된 백업 폴더는 지우지 않고 그 manifest에 `backup_error = {"stage": "seal audit", "type": "Refused"}`를 기록하며 종료코드 1이다
+    (봉인되지 않은 그 세트는 rotation에서 `audit-undeclared`가 아니라 일반 세대로 판단된다; 다음 백업 전에 원인을 확인한다).
+  - `rotate`(단독 또는 `backup` 뒤): 아무것도 삭제·이름변경하지 않고 실패(종료코드 1)한다. 보존기간 변경(`plan`)은 rotation의 마지막
+    보존 판정→이름변경→삭제 사이에 끼어들 수 없으므로, 성공한 `plan`의 새 기간 안의 세트를 그 rotation이 지우지 않는다.
+- 읽기 전용 `verify`·`retention`은 잠금을 잡지도 깨지도 않는다. 단 `retention`은 진행 중인 봉인 전체의 일관된 snapshot이 아니다:
+  봉인이 manifest 선언을 쓴 뒤 장부에 덧붙이기 전 사이에 조회하면 그 세트를 `uncommitted`로 보고(종료코드 1)하고, 봉인이 끝난 뒤 같은
+  조회는 종료코드 0이다(P3R1-04, P3 이전부터의 관측 한계). 백업 실행 시각과 겹친 `retention`의 `uncommitted`는 백업이 끝난 뒤 다시
+  조회해 판정하고, 다시 조회해도 남을 때만 중단된 봉인으로 다룬다. `verify`는 고정된 체크포인트와 내보내기를 읽으므로 해당하지 않는다.
 - 장부가 없으면 봉인하지 않는다(자동으로 처음부터 시작하지 않음): manifest `backup_error = {"stage": "seal audit", "type": "LedgerMissing"}`,
   종료코드 1. 선언된 체크포인트가 있는 부모의 `init`은 거절되고 `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
 - 이전 봉인과 행이 다르거나(과거 사건: `previous_verification` failed/unverifiable), 이번 덤프의 가드가 무력하거나 표 모양이 다르면(현재 결함)
@@ -1615,9 +1630,15 @@ overlay bytes and all effective interpolation values into the persistent immutab
 ordinary recreate read that bundle after the original inputs or proxy vanish. Any bundle corruption is a refusal;
 there is no checkout fallback. Temporary working copies remain private and may be removed after the plan ends;
 the active entry's inputs remain. Before a seed nothing runs to resolve from: the required VM monitor file needs
-`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`, inside its checkout. Omitting monitor is not an alternative.
-With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
-(recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`. Omitting monitor is not an alternative. A rehearsal binds no host path
+outside its checkout except its declared overlay binds and that one monitor bind (the proxy's read-only
+`/var/run/kin-monitor-public` with `docker-compose.monitor.yml` listed), so the clone may keep the folder where
+production does, outside the checkout (RT-P3-MONITOR-BIND). The supervised browser runs its interpreter with `-B` and
+`PYTHONDONTWRITEBYTECODE=1`, so no smoke or probe writes `__pycache__` into the protected install (RT-P3-PYCACHE).
+With `fix_checkout_mode` the capture first makes the checkout and its `.git` 0700, as the operator command after the
+release requires (RT-P3-GIT-MODE; recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+A rollback judges the checkout by that operator command's rule too, so an operating account's 0700 checkout whose
+`.git` alone is 0755 is restored to 0700 after approval, the lease and a durable `host_changed` record (P3R1-02).
 L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and
 bind mounts, networks, published ports; IRT2-02) and accepts as backup root this tool's own private folder or the
 operating account's 0700 folder (policy `repository_owner`; B0/B1/Bfail are then handed to that account, whose daily
@@ -2917,6 +2938,21 @@ D1160 파일럿 답(크기 조절 옵션, 지금 화면이 기본): REQ-WS7-PANE
 - `tests/worklist_image_thumbnails_dom_test.py`
 - `tests/worklist_toolbar_dom_test.py`
 
+
+W6-LAND: REQ-WS5/WS6/WS7 → RISK-UID/HISTORY/DUPLICATE-INPUT →
+`report_editor_frame_dom_test.py` (TEST-REF-*; `--page` 실제 제공 HTML/bundle 연결, `--mutants` 모듈 반례, `--page-mutants` PAGE 연결 반례, `--integrated-module-mutants` 원래 M01..M34를 제공 페이지에서 검증).
+PAGE-05는 녹음 시점 문서·필드·커서·본문과 frame capture를 함께 보존한다. 녹음→입력→Backspace/Undo→늦은 Insert는 판독문을 바꾸지 않고 받아쓴 글을 남긴 채 재고정을 요구하며(HD05와 같은 계약, Redo 유지), 칸 클릭이나 Pin Caret 뒤 새 Insert는 새 위치에 넣는다. 무변경 수용, 검사 전환 취소도 실제 controller/session으로 검사한다.
+숨긴 Recommendation은 저장·재열람·일괄 거절에 그대로 들어가지만 키보드 초점과 받아쓰기 대상이 되지 않는다(상용구 더블클릭·미리보기 Insert·Clear·인용·구조화·받아쓰기 삽입·Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z).
+판독문 칸의 공유 스크롤 영역에는 고정 최소 높이가 없다. 열의 남은 높이를 차지하고, 그 아래 바닥줄과 알림 줄보다 먼저 줄어든다. 가로 배치에서 열 자체의 줄이 열보다 길면 문서가 아니라 열이 스크롤한다.
+W3 기준선 두 시험의 결정된 차이(D1300): `study_panel_page_dom_test.py`(W2 9d6984b 첫 화면)와 `study_panel_size_dom_test.py`(round 6 ea2a037 기본 패널)는 Findings/Conclusion 두 칸의 상자, 공유 스크롤 영역(.redit)의 픽셀, 첫 화면 node +1만 비교에서 뺀다. 스크롤 영역 아래(바닥줄·알림 줄)는 스크롤 영역이 남긴 자리에서 기하와 픽셀로 비교하고(`w6_moved`, `w6_regions`), 문서 루트가 넘치지 않으며 각 줄이 창 안이나 사용자가 휠로 스크롤할 수 있는 영역 안에 있음을 단언한다(`assert_w6_reachable`). 뺀 영역은 이 파일의 `--page` 사례(PAGE-22: W3 BOUND 크기·1366x768·짧은 창, 패널 닫힘/열림)가 맡는다.
+`report_dictation_host_dom_test.py` HD13(1366x768 460x420 frame에서 바닥줄이 frame 안)은 기준선 실패가 아니다. 519d6c5에서 통과하고 W6의 200 px 최소 높이가 깨뜨렸던 것을 r2에서 제품으로 고쳐 단언 변경 없이 통과한다.
+Related 왕복 사례의 커서 판정은 그 브라우저가 그린 줄 상자를 잰다(칸의 계산된 글꼴·줄 높이·안쪽 여백과 내용 폭을 가진 블록에 커서 앞 글을 넣어 높이를 잰다). 글꼴·줄 높이·여백 상수를 가정하지 않으므로 Linux CI(Arial 계열 12px, normal 14px)와 Windows에서 같은 기준으로 판정한다(W6R2-01).
+W6 frame 소비자(W6R2-03/04): 제공 페이지 밖에서 판독 영역 코드를 잘라 쓰는 하니스는 그 코드가 쓰는 report frame 모듈(`report-editor-frame.js`)을 실제 페이지처럼 함께 싣는다. 공용 계약(`report_page_contract.py` ASSETS)을 쓰는 citation/cursor/host/input/rebase/structure, 자체 모듈 목록을 쓰는 `report_dictation_capture_dom_test.py`(PAGE_SCRIPTS = 페이지의 script 태그 = NC-11 script-src 목록, CAP-00과 CAP-01이 일치를 단언), 추출한 Log out 처리기를 쓰는 `clinician_question_dom_test.py`(페이지의 frame 상태·mount·필드 위임을 그대로 잘라 main.html의 실제 판독문 칸 위에 올린다)가 이에 해당한다.
+숨긴 Recommendation에 글을 직접 넣는 하니스는 세 칸 자료를 만드는 준비 단계이며 사용자가 그 칸에 닿는다는 근거가 아니다(W6R2-02): `auth_logout_dom_test.py` select_and_type, `report_session_page_dom_test.py` type_report, `report_text_boundaries_dom_test.py`의 빈 칸 만들기, `report_dictation_input_dom_test.py` DI-02, `e2e/test_workspace_roaming.py` roam_01, `e2e/test_return_to_current.py` d03c_03. 상용구 단축어는 `e2e/test_template_preservation.py` d09a_03이 보이는 Findings/Conclusion에서 실제 키 입력과 Tab으로 검사하고, Recommendation은 상용구 삽입→초안 저장→새 세션 재열람과 작성자 경계로 검사한다.
+`worklist-ux.yml`의 measurements가 다섯 실행의 원문과 source tree/45-source order 입력을
+`tmp/workspace-ui-ci/report-editor-frame*`에 기록한다. 숨긴 Recommendation을 포함한 세 필드의
+저장 계약은 유지하며, 서버 CAS/migration/candidate 선택 ID는 변경하지 않는다.
+한글 OS IME와 의사 직접 확인, post-W3 통합 live 및 후보 CI/G3/교차 검수는 별도 관문이다.
 
 W3의 U0b 이력 계약(C6)은 `U0B-HISTORY`에서 승인된 U0b Git blob의 member/SQL 해시를 계속 검사한다. `U0B-STRUCT-NORMAL`과 R02는 현재 concern 소유권·facade forwarding·DI를 검사하고 v3 동작은 `workspace_layout_v3_service_test.cjs`가 검사한다. citation/structure migration의 `assert_behaviour`는 현재 소유권과 고정 이력을 모두 실행한다. 역사 기준 SHA·baseline은 바꾸지 않는다.
 
