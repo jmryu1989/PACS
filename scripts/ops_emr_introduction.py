@@ -4526,16 +4526,19 @@ class HostOps:
 
     # ── IRT-13 / IRT-11: recorded pre-fence corrections of the checkout ──
     def checkout_mode(self, intro):
-        """With the manifest's fix_checkout_mode: the checkout becomes 0700 and its .git loses group/other write (never
-        recursively), modes recorded before and after; then the checkout is checked as private like any other run."""
+        """With the manifest's fix_checkout_mode: the checkout and its .git become 0700 (never recursively), modes
+        recorded before and after; then the checkout is checked as private like any other run. RT-P3-GIT-MODE: .git
+        becomes 0700, not only free of group/other write, because the operator command after the release
+        (compose_operation) requires an operating account's .git to be private; a 0755 .git left here made every later
+        `compose config`/`recreate` refuse on a deployed host."""
         git = self.repo / ".git"
         before = {"checkout": oct(self.repo.stat().st_mode & 0o7777), ".git": oct(git.stat().st_mode & 0o7777)}
         if self.t["fix_checkout_mode"]:
-            if before["checkout"] != "0o700" or git.stat().st_mode & 0o022:
+            if before["checkout"] != "0o700" or before[".git"] != "0o700":
                 intro.state["host_changed"] = True
                 intro.save()
             os.chmod(self.repo, 0o700)
-            os.chmod(git, git.stat().st_mode & 0o7777 & ~0o022)
+            os.chmod(git, 0o700)
         after = {"checkout": oct(self.repo.stat().st_mode & 0o7777), ".git": oct(git.stat().st_mode & 0o7777)}
         self.repository_check()
         return {"fixed": self.t["fix_checkout_mode"], "before": before, "after": after}
@@ -6360,7 +6363,7 @@ class IntroductionHost:
                 if request["phase"] not in RECOVERY_PHASES:
                     raise
                 # IRT2-07: owner, links and ancestors still hold; only the mode of the checkout and its .git was opened
-                # again. The capture's own correction is made again (checkout 0700, .git without group/other write, never
+                # again. The capture's own correction is made again (checkout and .git 0700, RT-P3-GIT-MODE; never
                 # recursive), recorded, and the full check must then pass; the rollback's steps check the content (a clean
                 # tracked tree, the planned compose files and .env) before they use it.
                 ownership_check()
@@ -6375,7 +6378,7 @@ class IntroductionHost:
                     machine.state["host_changed"] = True
                     machine.save()
                     os.chmod(self.repository, 0o700)
-                    os.chmod(git, git.lstat().st_mode & 0o7777 & ~0o022)
+                    os.chmod(git, 0o700)
                     warning["restored"] = {name: oct(path.lstat().st_mode & 0o7777)
                                            for name, path in (("checkout", self.repository), (".git", git))}
                     repository_check()

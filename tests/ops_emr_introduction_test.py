@@ -2623,6 +2623,29 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         with self.assertRaises(intro.Stop):
             intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records).prepare(context)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX mode bits")
+    def test_122_the_declared_checkout_correction_leaves_git_private(self):
+        """RT-P3-GIT-MODE: with fix_checkout_mode, L-00a leaves the checkout and its .git at 0700 whatever their modes were
+        (an open checkout; production after its window: checkout 0700, .git 0755), records both before and after and
+        marks the host changed; contents below .git are not touched. An already private checkout is recorded unchanged."""
+        git = self.repo / ".git"
+        (git / "objects").mkdir(parents=True, exist_ok=True)
+        (git / "objects").chmod(0o755)
+        self.target["fix_checkout_mode"] = True
+        for name, (checkout, git_mode, changed) in {"open checkout and .git": (0o775, 0o775, True),
+                                                    "production after its window": (0o700, 0o755, True),
+                                                    "already private": (0o700, 0o700, False)}.items():
+            self.repo.chmod(checkout)
+            git.chmod(git_mode)
+            ops_host, _, context = self.host(prepare=False)
+            with self.subTest(case=name):
+                detail = ops_host.checkout_mode(context)
+                self.assertEqual(detail, {"fixed": True, "before": {"checkout": oct(checkout), ".git": oct(git_mode)},
+                                          "after": {"checkout": "0o700", ".git": "0o700"}})
+                self.assertEqual(((self.repo.stat().st_mode & 0o7777), (git.stat().st_mode & 0o7777)), (0o700, 0o700))
+                self.assertEqual((git / "objects").stat().st_mode & 0o777, 0o755, "never recursive")
+                self.assertEqual(bool(context.state.get("host_changed")), changed)
+
     def test_91_the_seed_names_each_compose_variable_the_clone_env_lacks(self):
         """D28: before the seed no clone stack runs, so a VM target whose compose files require KIN_MONITOR_PUBLIC_DIR
         needs it in the clone's .env; the seed refuses with the variable and the file named, before any command."""
@@ -3858,7 +3881,7 @@ class ProtectedHostTests(unittest.TestCase):
 
     def test_83_a_declared_checkout_mode_correction_is_applied_recorded_and_then_checked(self):
         """IRT-13: an open checkout (0775, .git 0775) passes only with fix_checkout_mode: the capture's L-00a makes it 0700
-        and its .git 0755 (no recursion), records both modes, and the privacy check then runs as usual."""
+        and its .git 0700 (RT-P3-GIT-MODE; no recursion), records both modes, and the privacy check then runs as usual."""
         (self.repo / "inner").mkdir(mode=0o775)
         self.repo.chmod(0o775)
         (self.repo / ".git").chmod(0o775)
@@ -3867,9 +3890,36 @@ class ProtectedHostTests(unittest.TestCase):
         first = json.loads(next(runs.glob("result-capture-*.json")).read_text())["steps"][0]
         self.assertEqual((first["step"], first["outcome"]), ("L-00a", "PASS"))
         self.assertEqual(first["detail"], {"fixed": True, "before": {"checkout": "0o775", ".git": "0o775"},
-                                           "after": {"checkout": "0o700", ".git": "0o755"}})
+                                           "after": {"checkout": "0o700", ".git": "0o700"}})
         self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / "inner").stat().st_mode & 0o777)), (0o700, 0o775))
         self.assertEqual(result["status"], "CAPTURE_FAILED", "the run went on past L-00a (to the fence made to fail)")
+
+    def test_121_a_deployed_hosts_0755_git_is_made_private_by_the_next_capture_and_the_operator_command_then_admits_it(self):
+        """RT-P3-GIT-MODE (prep7-window report-window.md, 차단; D1355): production after its window - an operating-account
+        checkout at 0700 whose .git L-00a had left at 0755 - refused every `entry.py compose config`/`recreate`, whose
+        rule requires that .git private. The next capture's L-00a (fix_checkout_mode) makes .git 0700 and records it, and
+        the operator command's checkout rule then admits the checkout; with .git as it was, that rule refuses."""
+        owner = {"uid": 1000, "gid": 1000}
+        policy = json.loads(self.policy_path.read_bytes())
+        policy["repository_owner"] = owner
+        self.write(self.policy_path, policy)
+        git = self.repo / ".git"
+        for path in (self.repo, git):
+            os.chown(path, 1000, 1000)
+        self.repo.chmod(0o700)
+        git.chmod(0o755)
+        operator_rule = lambda: intro.owned_private(git, owner, private=True, directory=True)   # compose_operation's .git rule
+        with self.assertRaisesRegex(intro.Stop, "not private"):
+            operator_rule()
+        result, runs, docker = self.installed_run(target_changes={"fix_checkout_mode": True},
+                                                  prepare=lambda runs: os.chown(self.repo / ".env", 1000, 1000))
+        first = json.loads(next(runs.glob("result-capture-*.json")).read_text())["steps"][0]
+        self.assertEqual((first["step"], first["outcome"]), ("L-00a", "PASS"), result)
+        self.assertEqual(first["detail"], {"fixed": True, "before": {"checkout": "0o700", ".git": "0o755"},
+                                           "after": {"checkout": "0o700", ".git": "0o700"}})
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), (git.stat().st_mode & 0o777), git.stat().st_uid), (0o700, 0o700, 1000))
+        operator_rule()
+        self.assertEqual(intro.IntroductionHost(self.policy_path).owner, owner)
 
     def test_84_an_open_checkout_without_the_declaration_is_refused_before_any_step(self):
         self.repo.chmod(0o775)
@@ -3982,8 +4032,8 @@ class ProtectedHostTests(unittest.TestCase):
         self.assertEqual(result["status"], "RESTORED", result)
         (warning,) = result["warnings"]
         self.assertEqual((warning["kind"], warning["modes"], warning["restored"]),
-                         ("checkout-mode", {"checkout": "0o775", ".git": "0o775"}, {"checkout": "0o700", ".git": "0o755"}))
-        self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / ".git").stat().st_mode & 0o777)), (0o700, 0o755))
+                         ("checkout-mode", {"checkout": "0o775", ".git": "0o775"}, {"checkout": "0o700", ".git": "0o700"}))
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / ".git").stat().st_mode & 0o777)), (0o700, 0o700))
         (written,) = runs.glob("result-rollback-*.json")
         self.assertEqual(json.loads(written.read_text())["warnings"], result["warnings"])
         journal = [json.loads(line) for line in (runs / "journal.jsonl").read_text().splitlines()]

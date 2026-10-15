@@ -1624,8 +1624,8 @@ outside its checkout except its declared overlay binds and that one monitor bind
 `/var/run/kin-monitor-public` with `docker-compose.monitor.yml` listed), so the clone may keep the folder where
 production does, outside the checkout (RT-P3-MONITOR-BIND). The supervised browser runs its interpreter with `-B` and
 `PYTHONDONTWRITEBYTECODE=1`, so no smoke or probe writes `__pycache__` into the protected install (RT-P3-PYCACHE).
-With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
-(recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+With `fix_checkout_mode` the capture first makes the checkout and its `.git` 0700, as the operator command after the
+release requires (RT-P3-GIT-MODE; recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
 L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and
 bind mounts, networks, published ports; IRT2-02) and accepts as backup root this tool's own private folder or the
 operating account's 0700 folder (policy `repository_owner`; B0/B1/Bfail are then handed to that account, whose daily
