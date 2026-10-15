@@ -20,14 +20,15 @@
       used.add(key); return true;
     });
   }
+  const unassigned = () => ({map:{version:2,...Object.fromEntries(ids.map(id=>[id,null]))},notices:['저장된 단축키를 확인할 수 없어 미배정으로 두었습니다. Shortcuts에서 확인하세요.']});
+  const scope = id => ['image','note','tools','nativeTools'].includes(id)?'Viewer':'Worklist';
   function migrate(value) {
     if(value===null)return {map:{...defaultsV2},notices:[]};
-    const map={version:2},notices=[],used=new Map();
-    const source=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
-    const supported=source.version===undefined||source.version===2;
+    if(!value||typeof value!=='object'||Array.isArray(value)||Object.hasOwn(value,'version')&&value.version!==2)return unassigned();
+    const map={version:2},notices=[],used=new Map(),source=value;
     for(const id of ids){
-      if(id==='finalize'&&!Object.hasOwn(source,id)&&supported)continue;
-      const raw=supported?source[id]:null;
+      if(id==='finalize'&&!Object.hasOwn(source,id))continue;
+      const raw=source[id];
       const key=source.version===2?raw:typeof raw==='string'?'Control+Alt+'+raw:null;
       map[id]=chord(key)&&!used.has(key)?key:null;
       if(map[id])used.set(key,id);
@@ -72,7 +73,7 @@
     showTab('Worklist');
     const fields = {};
     for (const id of ids) {
-      const row=el('label',labels[id],panels[['image','note','tools','nativeTools'].includes(id)?'Viewer':'Worklist']); row.style.cssText='display:grid;grid-template-columns:minmax(100px,1fr) minmax(130px,1fr);align-items:center;gap:12px;margin:8px 0';
+      const row=el('label',labels[id],panels[scope(id)]); row.style.cssText='display:grid;grid-template-columns:minmax(100px,1fr) minmax(130px,1fr);align-items:center;gap:12px;margin:8px 0';
       const field=el('input','',row);field.readOnly=true;field.id='workspace-shortcut-'+id;field.setAttribute('aria-label',labels[id]+' 단축키');field.style.cssText='box-sizing:border-box;width:100%;padding:6px;background:#0b1320;color:inherit;border:1px solid #718eaa;border-radius:4px';fields[id]=field;
       field.onkeydown=e=>{
         if (e.key==='Tab'||e.key==='Escape') return;
@@ -127,7 +128,10 @@
     button('Apply & Save','workspace-shortcuts-apply',()=>{
       if(ended||!allowed()||!draftOwner||owner()!==draftOwner){message.textContent='계정이 바뀌었습니다. 창을 닫고 다시 확인하세요.';return;}
       const next=draft();
-      if(!valid(next)){message.textContent='중복 단축키가 있습니다. 서로 다른 키로 지정하세요.';return;}
+      if(!valid(next)){
+        const conflicts=ids.filter(id=>next[id]&&ids.some(other=>other!==id&&next[other]===next[id]));
+        message.textContent='중복 단축키: '+conflicts.map(id=>labels[id]+' ('+scope(id)+')').join(', ')+'. 서로 다른 키로 지정하세요.';return;
+      }
       try {
         if(localBaseline(storage(),draftOwner)!==baseline){message.textContent='다른 창에서 설정이 바뀌었습니다. 취소 후 다시 열어 확인하세요.';return;}
         storage().setItem(prefix+draftOwner,JSON.stringify(next));
@@ -167,13 +171,15 @@
   function localBaseline(storage,owner){return JSON.stringify([storage.getItem(prefix+owner),storage.getItem(legacyPrefix+owner)]);}
   function readLocal(storage,owner){
     if(!owner)return migrate(null);
+    let raw;
+    // Storage denial observes no preference; only an observed bad value is unassigned.
+    try{raw=storage.getItem(prefix+owner)??storage.getItem(legacyPrefix+owner);}catch(_){return migrate(null);}
+    if(raw==null)return migrate(null);
     try{
-      const raw=storage.getItem(prefix+owner)??storage.getItem(legacyPrefix+owner);
-      if(raw===null)return migrate(null);
       if(raw.length>4096)throw Error();
       const value=JSON.parse(raw);if(value===null)throw Error();
       return migrate(value);
-    }catch(_){return {map:{version:2,...Object.fromEntries(ids.map(id=>[id,null]))},notices:['저장된 단축키를 확인할 수 없어 미배정으로 두었습니다. Shortcuts에서 확인하세요.']};}
+    }catch(_){return unassigned();}
   }
   function readV2(storage,owner){return readLocal(storage,owner).map;}
   function read(storage, owner) {

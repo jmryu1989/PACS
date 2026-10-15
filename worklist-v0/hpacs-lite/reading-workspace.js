@@ -338,8 +338,11 @@ window.KinReadingWorkspace = function (app) {
       e.preventDefault(); closeContext(); context.focus(); return;
     }
     const command = shortcuts.action(e);
-    // Finalize belongs to the page command gate, including while reading is active.
-    if(command==='finalize')return;
+    // Frame keydown cannot reach the page dispatcher; both use the same command gate.
+    if(command==='finalize'){
+      if(doc!==document&&window.KinReportCommands?.finalize?.()===true)e.preventDefault();
+      return;
+    }
     if (!active) {
       // List/report navigation is also useful before opening the integrated
       // viewer. Only focus a visible local pane; do not open or retarget images.
