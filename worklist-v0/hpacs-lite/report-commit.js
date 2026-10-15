@@ -386,6 +386,34 @@
         && reportOpening?.uid === uid && reportOpening.selectionSeq === selectionSeq;
     }
     /**
+     * 이 문서가 그 검사에 대해 가진 초안의 사진(W5 인터페이스 ④, impact §10). 읽기만 한다 — 요청도, 표시·기준·화면의 변경도 없다.
+     * 한 동기 구간에서 함께 읽은 값이고 모두 사본이다(부른 쪽이 고쳐도 이 문서의 상태는 그대로다). Notice의 Check가 서버의 전체 읽기를
+     * 이것과 견주고, W5의 Check가 같은 자리를 쓴다.
+     *   uid · author(이 페이지의 계정: 기관·사용자 ID·작성자) · selectionSeq(그 검사가 지금 선택일 때만, 아니면 null)
+     *   revision(초안 명령 경로가 딛고 선 초안 revision, 모르면 null) · baseVersion(이 글이 딛고 선 판)
+     *   texts(이 문서의 초안 글 세 칸: 고른 검사는 편집기의 글, 떠난 검사는 담아 둔 사본. 초안도 확인되지 않은 글도 없으면 null —
+     *     편집기는 저장된 판독문을 보이고 있다) · lists(그 revision에서 서버가 가진 인용·구조화 id, 초안 쓰기가 함께 싣는 목록; 모르면
+     *     null) · unconfirmed(서버가 아직 확인하지 않은 글이 있는가)
+     */
+    function reportDraftSnapshot(uid = selectedUid) {
+      if (!uid) return null;
+      const a = appState[uid] ?? {}, draft = a.prelimHidden ? null : a.draft ?? null;
+      const unconfirmed = reportConverge.has(uid);
+      const texts = !unconfirmed && !draft ? null
+        : Object.fromEntries(RFIELDS.map(k => [k, uid === selectedUid ? $("#" + k).value : String(draft?.[k] ?? "")]));
+      const lists = draftClient.lists(uid);
+      return {
+        uid,
+        author: draftOwner ? { institution: draftOwner.institution ?? null, sub: draftOwner.sub, author: draftOwner.author } : null,
+        selectionSeq: uid === selectedUid ? selectionSeq : null,
+        revision: draftClient.revision(uid),
+        baseVersion: reportBaseVersion(uid, draft?.baseVersion ?? a.version ?? 0),
+        texts,
+        lists: lists ? { citations: [...lists.citations], structured: [...lists.structured] } : null,
+        unconfirmed,
+      };
+    }
+    /**
      * 판독 명령(Approve & Next·Ctrl+S의 Finalize)을 지금 할 수 없는 까닭, 할 수 있으면 null. W5 Related Report mode가 자기
      * 까닭을 더하는 자리다(설계 v5 §1.6). 단추가 잠겨 있으면 그 단추가 말하는 까닭이 그대로 까닭이다 — 같은 판단을 두 번 하지 않는다.
      */

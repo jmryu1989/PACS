@@ -47,6 +47,8 @@ class FlowSite(h.Site):
         self.flow_commits = []          # (uid, body) of every commit
         self.held_flow_puts = []        # (route, uid, body, account)
         self.held_flow_commits = []     # (route, uid, body, account)
+        self.flow_draft_reads = []      # uid of every full draft read (GET draft) that reached the server
+        self.held_draft_reads = []      # (route, uid, account)
         self.templates = []
         self.hidden = set()
 
@@ -157,8 +159,11 @@ class FlowSite(h.Site):
             return route.fulfill(json=[])
         if method == "GET" and what == "draft":
             self.draft_reads.append(request.headers.get("x-kin-session"))
+            self.flow_draft_reads.append(uid)
             if self.draft_read_answers:
                 reply = self.draft_read_answers.pop(0)
+                if reply == "hold":
+                    return self.held_draft_reads.append((route, uid, account))
                 return route.abort("connectionreset") if reply == "abort" else self.answer(route, *reply)
             return route.fulfill(json=self.envelope_of(uid, account))
         if method == "PUT" and what == "report":
@@ -206,6 +211,11 @@ class FlowSite(h.Site):
         answer = self.write_of(uid, body, account) if status == 200 else (status, {"code": "SYN_FAILED", "message": "SYN"})
         self.answer(route, *answer)
         return answer[0]
+
+    def finish_draft_read(self, index=0):
+        """Answer a held full draft read with the server's state now."""
+        route, uid, account = self.held_draft_reads.pop(index)
+        route.fulfill(json=self.envelope_of(uid, account))
 
     def finish_flow_commit(self, index=0, lost=False):
         route, uid, body, account = self.held_flow_commits.pop(index)
@@ -337,6 +347,28 @@ class ReportFlowPage(unittest.TestCase):
     def stored(self, uid):
         return self.site.stored_of(uid)
 
+    def reads_of(self, uid):
+        return self.site.flow_draft_reads.count(uid)
+
+    def another_window_writes(self, uid, findings, base_version=0):
+        """Another document of the same account stores its own draft of the study (a real write on the server's rules)."""
+        status, _ = self.site.write_of(uid, {"findings": findings, "conclusion": "", "recommendation": "",
+                                             "baseVersion": base_version, "citationIds": [], "structureIds": [],
+                                             "expectedOwner": h.owner_of(h.RAD),
+                                             "expectedRevision": self.site.revision_of(uid)}, h.RAD)
+        self.assertEqual(200, status)
+
+    def unknown_on_the_way_to_b(self, text, put):
+        """A's text, then a row click on B whose draft write ends with its result unknown (the confirming read fails too)."""
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type(text)
+        self.site.put_answers = [put]
+        self.site.draft_read_answers = ["abort"]
+        self.pick(h.PATIENT_B)
+        expect(self.notice()).to_contain_text("Result Unknown")
+        self.assertEqual(h.PATIENT, self.selected())
+
     # ── SAVE-OUTCOME (W4-PAGE-01/03/06) ──
     def test_save_outcome_applied_moves_only_after_the_write_is_confirmed(self):
         self.open()
@@ -377,24 +409,113 @@ class ReportFlowPage(unittest.TestCase):
         expect(self.notice()).to_be_hidden()
 
     def test_save_outcome_unknown_stays_and_check_confirms_from_the_server_then_moves(self):
-        self.open()
-        self.open_study(h.PATIENT)
-        self.type("SYN A unknown")
-        # The connection drops before the server has the write, and the confirming read fails too.
-        self.site.put_answers = ["abort"]
-        self.site.draft_read_answers = ["abort"]
-        self.pick(h.PATIENT_B)
-        expect(self.notice()).to_contain_text("Result Unknown")
+        # The server stores the write but its answer is lost, and the confirming read fails too: the result is unknown.
+        self.unknown_on_the_way_to_b("SYN A unknown", "lost")
         expect(self.page.locator("#report-notice-check")).to_be_visible()
         expect(self.page.locator("#report-notice-retry")).to_be_hidden()
-        self.assertEqual(h.PATIENT, self.selected())
         self.assertEqual("SYN A unknown", self.page.locator("#findings").input_value())
         expect(self.page.locator("#draftmsg")).to_contain_text("Result Unknown")
+        writes, reads = len(self.site.flow_puts), self.reads_of(h.UID)
+        # Check reads the server's draft once and compares the whole snapshot; it sends nothing.
+        self.page.locator("#report-notice-check").click()
+        self.wait(lambda: self.selected() == h.PATIENT_B, "Check confirms the save from the server and continues the move")
+        self.assertEqual(writes, len(self.site.flow_puts), "Check never writes")
+        self.assertEqual(reads + 1, self.reads_of(h.UID), "one explicit read of A's draft")
+        self.assertEqual({"findings": "SYN A unknown", "conclusion": "", "recommendation": ""}, self.stored(h.UID))
+        expect(self.notice()).to_be_hidden()
+
+    def test_check_reads_and_stays_without_writing_when_the_server_lacks_the_text(self):
+        """CHECK_MISMATCH (W4F-01): the write never reached the server. Check reads that, keeps the text and stays - it
+        does not resend. Retry is the write path: it saves the text and then continues the move."""
+        self.unknown_on_the_way_to_b("SYN unknown Check contract", "abort")
+        writes, reads = len(self.site.flow_puts), self.reads_of(h.UID)
+        self.page.locator("#report-notice-check").click()
+        expect(self.notice()).to_contain_text("서버의 초안에 이 화면의 글이 없어")
+        self.settle(300)
+        self.assertEqual(writes, len(self.site.flow_puts), "Check only reads")
+        self.assertEqual(reads + 1, self.reads_of(h.UID))
+        self.assertEqual((h.PATIENT, "SYN unknown Check contract"),
+                         (self.selected(), self.page.locator("#findings").input_value()))
+        self.assertIsNone(self.stored(h.UID))
+        expect(self.page.locator("#report-notice-retry")).to_be_visible()
+        self.page.locator("#report-notice-retry").click()
+        self.wait(lambda: self.selected() == h.PATIENT_B, "Retry saves the text and moves")
+        self.assertEqual(writes + 1, len(self.site.flow_puts))
+        self.assertEqual({"findings": "SYN unknown Check contract", "conclusion": "", "recommendation": ""}, self.stored(h.UID))
+
+    def test_check_after_a_late_success_reads_again_and_stays_when_another_window_wrote(self):
+        """CHECK_LATE (W4F-01): the wait bound said Result Unknown, the write then succeeded late, and another window of
+        the same account stored a different draft. Check reads again and does not move on the earlier success."""
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN slow original")
+        self.site.put_answers = ["hold"]
+        self.pick(h.PATIENT_B)
+        self.wait(lambda: self.site.held_flow_puts, "the draft write of A")
+        self.page.clock.run_for(3001)
+        expect(self.notice()).to_contain_text("Result Unknown")
+        self.site.finish_flow_put()
+        expect(self.notice()).to_contain_text("Draft Saved")
+        self.another_window_writes(h.UID, "SYN another tab")
+        writes, reads = len(self.site.flow_puts), self.reads_of(h.UID)
+        self.page.locator("#report-notice-check").click()
+        expect(self.notice()).to_contain_text("다른 창에서")
+        self.settle(300)
+        self.assertEqual(reads + 1, self.reads_of(h.UID), "Check reads even after the late success")
+        self.assertEqual(writes, len(self.site.flow_puts))
+        self.assertEqual((h.PATIENT, "SYN slow original"), (self.selected(), self.page.locator("#findings").input_value()))
+        self.assertEqual("SYN another tab", self.stored(h.UID)["findings"])
+
+    def test_check_compares_the_whole_snapshot_not_only_the_text(self):
+        # The same three fields on another base version (another window) are not this document's draft.
+        self.unknown_on_the_way_to_b("SYN A whole", "abort")
+        self.another_window_writes(h.UID, "SYN A whole", base_version=7)
         writes = len(self.site.flow_puts)
         self.page.locator("#report-notice-check").click()
-        self.wait(lambda: self.selected() == h.PATIENT_B, "Check confirms the save and continues the move")
-        self.assertGreater(len(self.site.flow_puts), writes)
-        self.assertEqual({"findings": "SYN A unknown", "conclusion": "", "recommendation": ""}, self.stored(h.UID))
+        expect(self.notice()).to_contain_text("서버의 초안에 이 화면의 글이 없어")
+        self.settle(300)
+        self.assertEqual((h.PATIENT, writes), (self.selected(), len(self.site.flow_puts)))
+
+    def test_check_read_failure_stays_without_writing(self):
+        self.unknown_on_the_way_to_b("SYN A unread", "abort")
+        self.site.draft_read_answers = ["abort"]
+        writes = len(self.site.flow_puts)
+        self.page.locator("#report-notice-check").click()
+        expect(self.notice()).to_contain_text("확인하지 못해")
+        self.settle(300)
+        expect(self.page.locator("#report-notice-check")).to_be_enabled()
+        expect(self.page.locator("#report-notice-retry")).to_be_hidden()
+        self.assertEqual((h.PATIENT, writes, "SYN A unread"),
+                         (self.selected(), len(self.site.flow_puts), self.page.locator("#findings").input_value()))
+
+    def test_check_after_more_typing_stays_without_writing(self):
+        # The lost write holds the earlier text; the reader typed more since. That text is not on the server.
+        self.unknown_on_the_way_to_b("SYN A first", "lost")
+        self.type("SYN A first and more")
+        writes = len(self.site.flow_puts)
+        self.page.locator("#report-notice-check").click()
+        expect(self.notice()).to_contain_text("서버의 초안에 이 화면의 글이 없어")
+        self.settle(300)
+        self.assertEqual((h.PATIENT, writes, "SYN A first and more"),
+                         (self.selected(), len(self.site.flow_puts), self.page.locator("#findings").input_value()))
+        self.assertEqual("SYN A first", self.stored(h.UID)["findings"])
+
+    def test_a_late_check_answer_after_a_b_a_does_not_move(self):
+        self.unknown_on_the_way_to_b("SYN A lost", "lost")
+        self.site.draft_read_answers = ["hold"]
+        self.page.locator("#report-notice-check").click()
+        self.wait(lambda: self.site.held_draft_reads, "the Check read")
+        # While that read is out the reader goes to B (the gate confirms A's text with its own read) and back to A.
+        self.pick(h.PATIENT_B)
+        self.wait(lambda: self.selected() == h.PATIENT_B, "B")
+        self.pick(h.PATIENT)
+        self.wait(lambda: self.selected() == h.PATIENT, "A again")
+        writes = len(self.site.flow_puts)
+        self.site.finish_draft_read()
+        self.settle(400)
+        self.assertEqual(h.PATIENT, self.selected(), "the late Check answer belongs to the earlier selection")
+        self.assertEqual(writes, len(self.site.flow_puts))
+        self.assertEqual("SYN A lost", self.stored(h.UID)["findings"])
 
     def test_wait_bound_stops_as_unknown_and_a_late_confirmation_is_shown_without_moving(self):
         self.open()
@@ -410,8 +531,10 @@ class ReportFlowPage(unittest.TestCase):
         expect(self.notice()).to_contain_text("Draft Saved")
         self.settle()
         self.assertEqual(h.PATIENT, self.selected(), "a late answer does not move by itself")
+        writes, reads = len(self.site.flow_puts), self.reads_of(h.UID)
         self.page.locator("#report-notice-check").click()
-        self.wait(lambda: self.selected() == h.PATIENT_B, "Check moves once the save is known")
+        self.wait(lambda: self.selected() == h.PATIENT_B, "Check moves once the server shows the saved text")
+        self.assertEqual((writes, reads + 1), (len(self.site.flow_puts), self.reads_of(h.UID)))
 
     def test_stay_closes_the_notice_and_keeps_the_text(self):
         self.open()
@@ -773,6 +896,14 @@ class ReportFlowPage(unittest.TestCase):
 
 # Each mutant is a one-off copy of one bundle source (or main.html) served to the page; the product tree is never written.
 MUTANTS = [
+    # W4F-01: Check is a read; resending through the move (Retry's write path) is the defect the review found.
+    ("check-re-sends", "report-editor.js", '$("#report-notice-check").addEventListener("click", checkReportNotice);',
+     '$("#report-notice-check").addEventListener("click", retryReportNotice);',
+     "test_check_reads_and_stays_without_writing_when_the_server_lacks_the_text"),
+    ("check-compares-text-only", "report-editor.js",
+     "KinReportDraftClient.sameSnapshot(read.present ? read.snapshot : null, expected);",
+     "RFIELDS.every(k => (read.snapshot?.[k] ?? \"\") === (expected?.[k] ?? \"\"));",
+     "test_check_compares_the_whole_snapshot_not_only_the_text"),
     ("gate-bypass-on-unknown", "current-study.js", 'if (result.status !== "saved") {',
      'if (result.status !== "saved" && result.status !== "unknown") {',
      "test_save_outcome_unknown_stays_and_check_confirms_from_the_server_then_moves"),
