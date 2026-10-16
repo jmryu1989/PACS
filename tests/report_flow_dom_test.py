@@ -6,9 +6,10 @@ product file is modified. FlowSite extends the logout suite's wire boundary (aut
 to several, each with its own stored draft row, revision and report, so the queue, a filter and A -> B -> A can be
 driven through the page's own controls.
 
-Setup-only, documented where used: FINALIZE_STAND_IN gives the delivered shortcut model the fixed W4-SC interface (D1358,
-D1371: readV2 with `finalize`) while the W4-SC model is not on this branch, and installs nothing once it is; the hook case
-marks an insertion as out (`insertInFlight`), which the citation and structure suites drive for real; W5_REASON stands in
+The Ctrl+S cases run on the shipped W4-SC shortcut model (D1358, D1371: readV2 with `finalize`); its setup-only stand-in
+was removed once the model was merged onto this branch (D1420), so a model without readV2 fails them.
+Setup-only, documented where used: the hook case marks an insertion as out (`insertInFlight`), which the citation and
+structure suites drive for real; W5_REASON stands in
 for a future W5 Related Report mode contributing a reason at the common command block (impact section 10, item 3) - the
 page's own reportCommandBlocked is put back right after.
 """
@@ -230,27 +231,6 @@ class FlowSite(h.Site):
         return answer[0]
 
 
-# Setup-only stand-in for the W4-SC shortcut model (fixed interface D1358 + D1371). Until fable/w4-sc lands on this branch
-# the delivered model has no readV2, the v2 map that holds `finalize`. The stand-in then gives it one - a fixture map: the
-# v1 defaults as whole chords plus finalize = Control+KeyS, as the v2 defaults are - and answers a v2 map's chords the way the
-# interface fixes them (a v2 value is the whole chord); a v1-shaped map still goes to the delivered model. Once the W4-SC
-# model is on the page it has readV2 and nothing is installed: the same cases then run on the shipped model. Everything
-# after the model's answer - the page dispatcher, KinReportCommands and the Finalize (Approve) command - is shipped code.
-FINALIZE_STAND_IN = """(() => {
-  const model = KinWorkspaceShortcuts;
-  if (model.readV2) return 'shipped model';
-  const fixture = { version: 2, finalize: 'Control+KeyS',
-    ...Object.fromEntries(Object.entries(model.defaults).map(([id, key]) => [id, 'Control+Alt+' + key])) };
-  const v1 = model.action;
-  model.readV2 = () => ({ ...fixture });
-  model.action = (map, e) => {
-    if (map?.version !== 2) return v1(map, e);
-    if (e.defaultPrevented || e.repeat || e.isComposing || !e.ctrlKey || e.shiftKey || e.metaKey) return null;
-    const chord = 'Control+' + (e.altKey ? 'Alt+' : '') + e.code;
-    return Object.keys(map).find(id => id !== 'version' && map[id] === chord) ?? null;
-  };
-  return 'stand-in';
-})()"""
 # Setup-only stand-in for W5 (not on any branch yet): the common command block gains a reason, as W5's Related Report mode
 # will add one (design v5 section 1.6). Everything that consults the block is shipped code.
 W5_REASON = "SYN related report mode: back to the current draft first"
@@ -1026,7 +1006,6 @@ class ReportFlowPage(unittest.TestCase):
     # ── Ctrl+S dispatch to Finalize (Approve) ──
     def test_ctrl_s_runs_finalize_and_prevents_save_page_only_when_it_runs(self):
         self.open()
-        self.page.evaluate(FINALIZE_STAND_IN)
         self.open_study(h.PATIENT)
         self.type("SYN A by keyboard")
         self.page.locator("#findings").focus()
@@ -1075,7 +1054,6 @@ class ReportFlowPage(unittest.TestCase):
         """W5_COMMAND_BLOCK (W4F-05): Approve, Approve & Next, Next, Prev and Ctrl+S all consume the common block. With a
         reason nothing moves, commits or writes, and the reason is said; without one each is the same one-click path."""
         self.open()
-        self.page.evaluate(FINALIZE_STAND_IN)
         self.open_study(h.PATIENT_B)
         self.type("SYN B blocked")
         self.page.evaluate(W5_BLOCK_ON, W5_REASON)
@@ -1135,7 +1113,6 @@ class ReportFlowPage(unittest.TestCase):
         """The dispatcher reads the v2 map (D1371): Ctrl+Alt+5 still opens Study Info & Templates and Ctrl+Alt+T its
         Templates tab, as with the v1 map."""
         self.open()
-        self.page.evaluate(FINALIZE_STAND_IN)
         self.open_study(h.PATIENT)
         drawer = self.page.get_by_role("complementary", name="Study Panel", exact=True)
         self.page.keyboard.press("Control+Alt+5")
