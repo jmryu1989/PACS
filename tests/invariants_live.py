@@ -5859,7 +5859,8 @@ class WorklistSplitUidInvariantTests(unittest.TestCase):
             for path in (f"/dicom-web/studies/{uid}/series", f"/dicom-web/studies?StudyInstanceUID={uid}"):
                 self.assertEqual(self.stack.dicom_request(path, "doctor").status, 403, path)
             self.assertEqual(self.stack.dicom_request(f"/dicom-web/studies/{single.uid}/series", "doctor").status, 200)
-            self.assertEqual(self.stack.request("POST", f"/studies/{quote(uid)}/release", "doctor").status, 200)
+            released = self.stack.request("POST", f"/studies/{quote(uid)}/release", "doctor")
+            self.assertEqual((released.status, released.body), (201, {"ok": True}), released.text)
             for table in ("ReportDraft", "Report", "ReportVersion"):
                 self.assertEqual(psql(f'SELECT count(*) FROM "{table}" WHERE uid={sql_text(uid)}'), ["0"], table)
             self.assertEqual((self.originals(uid), self.rows(uid)), (before, rows))
