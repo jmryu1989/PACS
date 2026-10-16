@@ -68,6 +68,8 @@ export const TRANSFER_MESSAGES = Object.freeze({
   inProgress: '이 작업의 내려받기가 진행 중입니다. 끝난 뒤 다시 시도하세요.',
   alreadySent: '이 작업의 원본은 이미 모두 보냈습니다. 다시 받으려면 새로 준비하세요.',
   storage: '원본 다운로드 기록을 읽거나 저장하지 못했습니다. 내려받기는 시작되지 않았습니다. 잠시 뒤 다시 시도하세요.',
+  /** The status read's own storage answer: it starts nothing, and says nothing of what earlier attempts supplied. */
+  statusStorage: '원본 다운로드 기록을 읽지 못했습니다. 이 작업의 상태를 잠시 뒤 다시 확인하세요.',
   sent: '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.',
 });
 
@@ -86,6 +88,7 @@ const BEFORE_STUDY_CODES = new Set(['DICOM_NOT_PART10', 'DICOM_FILE_META_MISSING
   'STUDY_OWNERSHIP_CONFLICT', 'STUDY_OWNERSHIP_UNDETERMINED', 'ORTHANC_UNAVAILABLE']);
 const storeInvalid = () => error(503, 'MANIFEST_STORE_INVALID', ORIGINAL_ARCHIVE_MESSAGES.MANIFEST_STORE_INVALID);
 const downloadStorage = () => error(503, 'IMPORT_STORAGE_UNAVAILABLE', TRANSFER_MESSAGES.storage);
+const statusStorage = () => error(503, 'IMPORT_STORAGE_UNAVAILABLE', TRANSFER_MESSAGES.statusStorage);
 const text = (value: unknown, max = 1024): value is string => typeof value === 'string' && value.length > 0 && value.length <= max;
 const count = (value: unknown, max: number): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= max;
 
@@ -357,13 +360,26 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     try {
       await this.storageRead(async () => {
         if (!tx) { await this.ownStudy(uid, c); return; }
-        if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'recovery');
+        if (process.env.AUTH_REQUIRED !== 'false') await this.recoveryRightsNow(tx, c);
         await this.ownStudyLocked(tx, uid, c);
       }, importStorage);
     } catch (failure) {
       if (failure instanceof NotFoundException) throw new NotFoundException(IMPORT_NOT_FOUND);
       throw failure;
     }
+  }
+
+  /**
+   * The admin's durable member rights read again inside a recovery transaction (U4BB3-03): a lost admin role or a
+   * disabled account is the existing 403; an admin whose current institution is now another one no longer reaches this
+   * institution's operation - the same 404 as an absent one, never the "no institution" refusal.
+   */
+  private async recoveryRightsNow(tx: any, c: Caller) {
+    const row = await tx.memberRights.findUnique({ where: { sub: c.sub } });
+    const allowed = rightsAllow(row);
+    this.role(allowed ? row.roles : [], 'recovery');
+    if (typeof row.institution === 'string' && row.institution && row.institution !== c.institution) throw new NotFoundException(IMPORT_NOT_FOUND);
+    inst({ ...c, institution: row.institution === c.institution ? c.institution : null });
   }
 
   // ── the persisted download row (5.2) ──
@@ -378,8 +394,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * An existing download operation's study now: its own StudyState and StudyAccess. A study the caller can no longer see
    * answers exactly as an absent operation does, so the answer never tells that the operation exists.
    */
-  private async downloadStudyNow(uid: string, c: Caller) {
-    try { await this.storageRead(() => this.ownStudy(uid, c), downloadStorage); }
+  private async downloadStudyNow(uid: string, c: Caller, failure: () => HttpException = downloadStorage) {
+    try { await this.storageRead(() => this.ownStudy(uid, c), failure); }
     catch (failure) { if (failure instanceof NotFoundException) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound); throw failure; }
   }
 
@@ -500,13 +516,15 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   async downloadStatus(uid: string, operationId: string, c: Caller) {
     const owner = this.owner(c, 'download');
     await this.gate.ready(false);
-    const op = OPERATION_ID.test(operationId ?? '') ? await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId.toLowerCase() } }), downloadStorage) : null;
+    const op = OPERATION_ID.test(operationId ?? '') ? await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId.toLowerCase() } }), statusStorage) : null;
     if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
     // The study now (contract 3): still the institution's own and inside StudyAccess, else the same 404 as no operation.
-    await this.downloadStudyNow(uid, c);
+    await this.downloadStudyNow(uid, c, statusStorage);
     this.storedDownload(op);
-    await this.expireDownloads(op.id);
-    const fresh = await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: op.id } }), downloadStorage);
+    // The expiry scan is a read before the answer too (U4BB3-04): a store that cannot answer is the status route's own
+    // storage answer, never an uncoded 500; what was committed (attempts, checkpoints) stays as it was.
+    await this.storageRead(() => this.expireDownloads(op.id), statusStorage);
+    const fresh = await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: op.id } }), statusStorage);
     return this.downloadView(fresh, this.storedDownload(fresh));
   }
 
@@ -618,27 +636,24 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   private async approve(t: SupplyTarget, supply: (() => boolean) | null): Promise<StopReason | undefined> {
     if (t.stop) return t.stop;
     const start = performance.now();
-    const credential: ApprovalStage = { deadline: start + CHECK_BOUND_MS, expired: false };
-    const credentialStopped = () => stageStopped(t, credential, 'aborted');
-    const prepared = await bounded(credential, credentialStopped, () => this.rightsBeforeLock(t.c, t.uid, t.req, credentialStopped))
-      .then(() => true, () => false);
+    const credential = new ApprovalStage(t, start + CHECK_BOUND_MS, 'aborted');
+    const prepared = await bounded(credential, () => this.rightsBeforeLock(t.c, t.uid, t.req, credential)).then(() => true, () => false);
     // Where stage 1's answer is consumed: past this check only stage 2's own deadline counts. A failure here is the
     // rights' (they could not be confirmed): stage 1 touches no row and supplies nothing.
-    const first = credentialStopped();
+    const first = credential.stopped();
     if (first) return first;
     if (!prepared) return stopAttempt(t, 'aborted');
-    const locked: ApprovalStage = { deadline: Math.min(performance.now() + CHECK_BOUND_MS, start + 2 * CHECK_BOUND_MS), expired: false };
-    const lockedStopped = () => stageStopped(t, locked, 'fenced');
+    const locked = new ApprovalStage(t, Math.min(performance.now() + CHECK_BOUND_MS, start + 2 * CHECK_BOUND_MS), 'fenced');
     let verdict: StopReason | undefined;
     let unknown = false;
     try {
-      verdict = await bounded(locked, lockedStopped, () => this.supplyUnderLock(t, supply, lockedStopped));
+      verdict = await bounded(locked, () => this.supplyUnderLock(t, supply, locked));
     } catch (failure) {
       unknown = !(failure instanceof ApprovalStopped);
     }
     // Where stage 2's answer - success, refusal or failure - is consumed: first its deadline (an expiry is 'fenced'),
     // then an unknown database answer joins the stop reason, and only then is the attempt's stop reason the verdict.
-    lockedStopped();
+    locked.stopped();
     if (unknown) stopAttempt(t, 'fenced');
     if (t.stop) return t.stop;
     return verdict ? stopAttempt(t, verdict) : undefined;
@@ -648,9 +663,9 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * Approval step 1: the credential the guard admitted, still live; the StudyAccess metadata prepared before any lock.
    * The stage is checked between the two: an answer that came past the deadline starts no metadata read.
    */
-  private async rightsBeforeLock(c: Caller, uid: string, req: any, stopped: () => StopReason | null) {
+  private async rightsBeforeLock(c: Caller, uid: string, req: any, stage: ApprovalStage) {
     if (process.env.AUTH_REQUIRED !== 'false' && req) await this.liveCredential(req, c);
-    if (stopped()) throw new ApprovalStopped();
+    if (stage.stopped()) throw new ApprovalStopped();
     await this.studyAccess.prepare(c, [uid]);
   }
 
@@ -659,8 +674,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * waits, before the next step or branch, the stage is checked: expired (or the attempt stopped by another approval)
    * throws, so the transaction - and any renewal in it - rolls back and nothing is supplied.
    */
-  private supplyUnderLock(t: SupplyTarget, supply: (() => boolean) | null, stopped: () => StopReason | null): Promise<StopReason | undefined> {
-    const live = () => { if (stopped()) throw new ApprovalStopped(); };
+  private supplyUnderLock(t: SupplyTarget, supply: (() => boolean) | null, stage: ApprovalStage): Promise<StopReason | undefined> {
+    const live = () => { if (stage.stopped()) throw new ApprovalStopped(); };
     return this.gate.write(async tx => {
       live();
       await this.gate.lockOperationKey(tx, t.operationId);
@@ -880,18 +895,27 @@ function stopAttempt(t: SupplyTarget, reason: StopReason): StopReason {
 }
 
 /**
- * One stage of an approval: its monotonic deadline, fixed before its work starts and never moved, and its expiry - set
- * once, by the stage's timer or by the first completion that finds now >= deadline - never cleared.
+ * One stage of an approval, owned by the attempt it approves for: its monotonic deadline, fixed before its work starts and
+ * never moved, and its expiry - set once, by the stage's timer or by the first completion that finds now >= deadline -
+ * never cleared. An expired stage stops its attempt for good with the stage's own reason (stage 1 'aborted', stage 2
+ * 'fenced'); the stage keeps that link, so no caller can judge it against another attempt or with another reason.
  */
-interface ApprovalStage { readonly deadline: number; expired: boolean }
+class ApprovalStage {
+  private expired = false;
 
-/**
- * The first check of every completion of a stage: its expiry, read now whether or not its timer could run, stops the
- * attempt with the stage's own reason (stage 1 'aborted', stage 2 'fenced'); otherwise the attempt's own stop reason.
- */
-function stageStopped(t: SupplyTarget, stage: ApprovalStage, reason: StopReason): StopReason | null {
-  if (!stage.expired && performance.now() >= stage.deadline) stage.expired = true;
-  return stage.expired ? stopAttempt(t, reason) : t.stop;
+  constructor(private readonly target: SupplyTarget, readonly deadline: number, private readonly expiryReason: StopReason) {}
+
+  /** The stage's timer ran out: the stage expires and stops its attempt. */
+  expire(): StopReason {
+    this.expired = true;
+    return stopAttempt(this.target, this.expiryReason);
+  }
+
+  /** The first check of every completion: its expiry, read now whether or not its timer could run; else the attempt's stop reason. */
+  stopped(): StopReason | null {
+    if (this.expired || performance.now() >= this.deadline) return this.expire();
+    return this.target.stop;
+  }
 }
 
 /** Thrown where an approval finds its stage expired or its attempt stopped: inside a transaction, nothing of it commits. */
@@ -902,19 +926,19 @@ class ApprovalStopped extends Error {
 /**
  * Runs a stage's work within the stage's deadline. The timer is set before the work starts (so its synchronous part
  * counts too) for the time left, and expires the stage when it runs. The work's own answer - a value or a failure - is
- * read through the stage's check (`stopped`) first, so an answer after the deadline is never taken as one, also when a
- * stalled event loop runs it before the timer. A late answer is not cancelled: it is still consumed here, and the work's
- * own checks keep it from supplying or renewing anything. A failure is passed on as it is, after the same check: the
- * caller tells an unknown database answer from a stop, so a stop found meanwhile never stands in for it (U4BB4-01).
+ * read through the stage's check first, so an answer after the deadline is never taken as one, also when a stalled event
+ * loop runs it before the timer. A late answer is not cancelled: it is still consumed here, and the work's own checks
+ * keep it from supplying or renewing anything. A failure is passed on as it is, after the same check: the caller tells
+ * an unknown database answer from a stop, so a stop found meanwhile never stands in for it (U4BB4-01).
  */
-function bounded<T>(stage: ApprovalStage, stopped: () => StopReason | null, work: () => Promise<T>): Promise<T> {
+function bounded<T>(stage: ApprovalStage, work: () => Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiry = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => { stage.expired = true; stopped(); reject(new ApprovalStopped()); }, Math.max(0, stage.deadline - performance.now()));
+    timer = setTimeout(() => { stage.expire(); reject(new ApprovalStopped()); }, Math.max(0, stage.deadline - performance.now()));
   });
   const answer = new Promise<T>(resolve => resolve(work())).then(
-    value => { if (stopped()) throw new ApprovalStopped(); return value; },
-    failure => { stopped(); throw failure; });
+    value => { if (stage.stopped()) throw new ApprovalStopped(); return value; },
+    failure => { stage.stopped(); throw failure; });
   return Promise.race([answer, expiry]).finally(() => clearTimeout(timer));
 }
 

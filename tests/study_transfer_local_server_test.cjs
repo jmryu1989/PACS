@@ -183,7 +183,16 @@ function checkShape(row) {
 const OP_COLUMNS = ['id', 'institutionId', 'ownerIssuer', 'ownerSubject', 'actor', 'kind', 'studyUid', 'status', 'results', 'manifestSha256',
   'download', 'claimKey', 'claim', 'createdAt', 'updatedAt'];
 const OP_REQUIRED = new Set(['id', 'institutionId', 'ownerIssuer', 'ownerSubject', 'actor', 'kind', 'status']);   // NOT NULL, no default
+const OP_STAMPS = new Set(['createdAt', 'updatedAt']);   // NOT NULL DEFAULT now(): an explicit null is a not-null violation
 const JSON_COLUMNS = new Set(['results', 'download', 'claim']);   // JSONB; results NOT NULL DEFAULT '[]', download/claim nullable
+/**
+ * What this store models of the ImportOperation table and what it does not (U4BL6-01): the migration's CHECKs (checkShape)
+ * on every create and update; NOT NULL of the required columns and of the two time stamps (an explicit null refused, on
+ * create and on update); the primary key on create and the claimKey UNIQUE on create and on update; JSONB's two nulls and
+ * its key order. It does not model an update of the primary key and refuses one outright (a product update never sets it;
+ * a store that let it through would answer for a database it is not), nor column types and lengths (uuid, varchar), nor
+ * isolation beyond the row visibility and lock waits below. It is no proof of every NOT NULL or UNIQUE rule.
+ */
 const nullType = (value, name) => value instanceof Prisma.NullTypes[name];
 const prismaError = (message, extra) => Object.assign(new Error(message), extra);
 /**
@@ -199,6 +208,7 @@ function opInput(column, value) {
   if (!JSON_COLUMNS.has(column)) {
     if (sentinel) throw prismaError(`Invalid value for argument \`${column}\``, { name: 'PrismaClientValidationError' });
     if (value === null && OP_REQUIRED.has(column)) throw prismaError(`Argument \`${column}\` must not be null`, { name: 'PrismaClientValidationError' });
+    if (value === null && OP_STAMPS.has(column)) throw prismaError(`null value in column "${column}" violates not-null constraint`, { code: 'P2011', meta: { code: '23502' } });
     return value instanceof Date ? value.toISOString() : value;
   }
   if (sentinel === 'AnyNull') throw prismaError(`Invalid value for argument \`${column}\``, { name: 'PrismaClientValidationError' });
@@ -298,8 +308,16 @@ function store({ institutions } = {}) {
       update: async ({ where, data }) => {
         fail();
         const before = s.ops.get(where.id); if (!before) throw Object.assign(new Error('not found'), { code: 'P2025' });
-        const after = { ...before, updatedAt: new Date(s.clock).toISOString(), ...written(data) };
-        checkShape(after); s.ops.set(where.id, after); s.writes++; undo(() => s.ops.set(where.id, before)); return out(after);
+        const changes = written(data);
+        if ('id' in changes && changes.id !== before.id) throw prismaError('this test store does not model an update of the primary key `id`', { name: 'UnmodelledStoreUpdate' });
+        const after = { ...before, updatedAt: new Date(s.clock).toISOString(), ...changes };
+        checkShape(after);
+        // The claimKey UNIQUE on update as on create (U4BL6-01): a key another row holds, committed or not, is refused.
+        if (after.claimKey !== null && after.claimKey !== before.claimKey) {
+          await settle(() => [...s.ops.values()].find(r => r !== before && r.claimKey === after.claimKey));
+          if ([...s.ops.values()].some(r => r !== before && r.claimKey === after.claimKey)) throw Object.assign(new Error('Unique constraint failed (claimKey)'), { code: 'P2002' });
+        }
+        s.ops.set(where.id, after); s.writes++; undo(() => s.ops.set(where.id, before)); return out(after);
       },
       delete: async ({ where }) => {
         fail();
@@ -491,7 +509,8 @@ async function harness(options = {}) {
   orthanc.db = s;
   await new Promise(resolve => orthanc.server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = 'http://127.0.0.1:' + orthanc.server.address().port;
-  const access = new StudyAccessService(s.prisma, {}, {});
+  // options.accessOrthanc: the source tags a restricted policy with metadata rules reads (StudyAccessService.prepare).
+  const access = new StudyAccessService(s.prisma, options.accessOrthanc ?? {}, {});
   class TestModule {}
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
     { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access }, { provide: AuthService, useValue: fakeAuth(s) },
@@ -1599,7 +1618,12 @@ test('S9U4-B29 download refusals before byte 1: roles, foreign/tele study 404, M
     state: 'sending', startedAt: new Date(h.s.clock).toISOString(), endedAt: null, ownerInstance: randomUUID(), leaseUntil: new Date(h.s.clock + 20000).toISOString(),
     objects: [], archiveSha256: null, responseFinished: false });
   row.status = 'sending';
-  assert.deepEqual((await h.request('GET', `/api/studies/${study2}/original-downloads/${id2}/archive`, { as: RAD })).body.code, 'DOWNLOAD_IN_PROGRESS');
+  // U4BB5-01: the refusal by its behaviour - the status, the code read null-safe (a stream answer has no JSON body), the
+  // attempt list and the state unchanged, no byte - so a missing refusal fails on these, never on a TypeError.
+  const live = await h.request('GET', `/api/studies/${study2}/original-downloads/${id2}/archive`, { as: RAD });
+  assert.deepEqual([live.status, live.body?.code ?? null], [409, 'DOWNLOAD_IN_PROGRESS'], 'a live sending lease refuses a second archive');
+  assert.notEqual(live.headers['content-type'], 'application/zip', 'no archive starts');
+  assert.deepEqual([h.s.op(id2).download.attempts.length, h.s.op(id2).status], [1, 'sending'], 'no new attempt, the state unchanged');
   h.s.advance(31000);
   const retried = await h.request('GET', `/api/studies/${study2}/original-downloads/${id2}/archive`, { as: RAD });
   assert.equal(retried.status, 200, 'an expired sending attempt is fenced to unconfirmed and a new attempt starts');
@@ -2559,11 +2583,18 @@ test('S9U4-B46 two requests creating one new operation id are serialised by its 
   async function race(h, id, first, second) {
     const hold = holdOnce(h, afterOpSelect(id));
     const a = first();
-    await hold.reached;
-    const b = second();
-    await sleep(150);
-    assert.equal(h.s.ops.has(id), false, 'the second request waits; nothing committed yet');
-    hold.open();
+    let b = null;
+    try {
+      await hold.reached;
+      b = second();
+      await sleep(150);
+      assert.equal(h.s.ops.has(id), false, 'the second request waits; nothing committed yet');
+    } finally {
+      // U4BB3-05: the held request is let go and both requests settle even when an assertion above failed, so a failure
+      // ends this case as itself (never as the file's timeout with a request still held).
+      hold.open();
+      await Promise.allSettled([a, b].filter(Boolean));
+    }
     return [await a, await b];
   }
   {
@@ -4466,4 +4497,124 @@ test('S9U4-B72 R6-N02 the admin recovery of a may-have-written occupancy over a 
     const again = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: a.attempt.startedAt });
     assert.deepEqual([again.status, again.body.code], [200, 'RECOVERED_NO_OBJECT'], JSON.stringify(again.body));
   }
+});
+
+// ════════════════════════════════ part (c): the carried P3 of parts (a)/(b) (U4BB3-03/04/06, U4BL6-01) ════════════════════════════════
+
+/** Source tags for a restricted policy with metadata rules: every study's PatientID is its own synthetic one. */
+const metadataSource = calls => ({ studyAccessMetadata: async uid => { calls.push(uid);
+  return { '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PID-' + uid.slice(-6)] }, '00080020': { Value: ['20261015'] }, '00080061': { Value: ['CT'] } }; } });
+/** A restricted policy whose one rule needs the source metadata and matches no study of these cases. */
+const metadataPolicy = { institution: 'inst-a', policy: { version: 1, restricted: true, startsAt: null, endsAt: null,
+  rules: [{ patientId: 'SYN-PID-NONE', modalities: [], dateFrom: null, dateTo: null, studyUids: [] }] } };
+
+test('S9U4-B73 U4BB3-03 the admin recovery\'s reach lost during the Orthanc re-read is one 404 also when the new policy needs source metadata (read outside the lock) or when the admin keeps the role but is now of another institution; a lost admin role stays 403; the request row stays, no result row, holders unchanged - for both recoverable kinds', async () => {
+  for (const [kind, make] of Object.entries(RECOVERABLE)) {
+    for (const [mode, leave, status] of [
+      ['a policy that needs metadata', h => { h.s.policies.set(ADMIN.sub, metadataPolicy); return () => h.s.policies.delete(ADMIN.sub); }, 404],
+      ['another current institution, the admin role kept', h => { const r = h.s.rights.get(ADMIN.sub), was = r.institution; r.institution = 'inst-b'; return () => { r.institution = was; }; }, 404],
+      ['the admin role lost', h => { const r = h.s.rights.get(ADMIN.sub), was = r.roles; r.roles = ['technician']; return () => { r.roles = was; }; }, 403],
+    ]) {
+      const calls = [];
+      const h = await harness({ accessOrthanc: metadataSource(calls) });
+      const t = await make(h);
+      const missing = await recovery(h, randomUUID(), evidenceFor(h, t));
+      const before = scopeView(h, t);
+      let restore = null;
+      h.orthanc.fault = call => { if (call.path === '/tools/lookup' && !restore) restore = leave(h); return null; };
+      const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      h.orthanc.fault = null;
+      const label = `${kind} / ${mode}`;
+      assert.equal(r.status, status, `${label}: ${JSON.stringify(r.body)}`);
+      if (status === 404) assert.deepEqual(r.body, missing.body, `${label}: the same 404 as an absent operation`);
+      else assert.equal(r.body.message, '반입 결과 확인은 admin 권한이 필요합니다', `${label}: the existing role refusal`);
+      if (mode === 'a policy that needs metadata') assert.ok(calls.includes(t.study), `${label}: the metadata of the new policy was read (outside the lock)`);
+      const after = scopeView(h, t);
+      assert.deepEqual([audits(h.s, 'dicom.import.recovery.request').length, audits(h.s, 'dicom.import.recovery.result').length], [1, 0], `${label}: the request row stays, no result row`);
+      assert.deepEqual([after.file.outcome, after.file.code, after.file.writeDisposition], [before.file.outcome, before.file.code, before.file.writeDisposition], `${label}: the result unchanged`);
+      assert.deepEqual([after.study.claim.heldByAttemptId, after.sop.claim.heldByAttemptId], [before.study.claim.heldByAttemptId, before.sop.claim.heldByAttemptId], `${label}: holders unchanged`);
+      restore();
+      if (kind === 'unknown') h.s.advance(31000);
+      const again = await recovery(h, t.id, evidenceFor(h, t), ADMIN, t.index);
+      assert.equal(again.status, 200, `${label}: recovered once back in reach (${JSON.stringify(again.body)})`);
+    }
+  }
+});
+
+test('S9U4-B74 U4BB3-04 a download status whose expiry scan cannot read the store is 503 IMPORT_STORAGE_UNAVAILABLE with a message that says nothing of earlier supply, no database text and the rows and checkpoints as they were; refusals, readiness and the stored-format code keep their own answers', async () => {
+  const h = await harness();
+  const study = await downloadStudy(h, 2), id = randomUUID();
+  assert.equal((await prepare(h, study, id)).status, 200);
+  const sent = await h.request('GET', archivePath(study, id), { as: RAD });
+  assert.equal(sent.status, 200);
+  await sleep(50);
+  const stored = JSON.stringify(h.s.op(id));
+  const scan = h.s.prisma.importOperation.findMany;
+  h.s.prisma.importOperation.findMany = async () => { throw new Error('synthetic scan failure: relation "secret" password=x'); };
+  const r = await h.request('GET', statusPath(study, id), { as: RAD });
+  assert.deepEqual([r.status, r.body?.code], [503, 'IMPORT_STORAGE_UNAVAILABLE'], JSON.stringify(r.body));
+  assert.ok(!JSON.stringify(r.body).includes('secret'), 'no database text');
+  for (const claim of ['시작되지 않았', '보내지 않았', '전송되지 않았']) assert.ok(!r.body.message.includes(claim), `the status answer never says the past supply did not happen (${claim})`);
+  assert.equal(JSON.stringify(h.s.op(id)), stored, 'the row, its attempts and checkpoints unchanged');
+  // The route's own answers stay what they are while the scan is down.
+  assert.equal((await h.request('GET', statusPath(study, id), { as: caller('clin-a-sub', ['clinician']) })).status, 403, 'a role refusal');
+  assert.equal((await h.request('GET', statusPath(study, randomUUID()), { as: RAD })).status, 404, 'an absent operation');
+  h.s.migration = false;
+  assert.equal((await h.request('GET', statusPath(study, id), { as: RAD })).body.code, 'IMPORT_NOT_READY', 'readiness');
+  h.s.migration = true;
+  h.s.ops.get(id).download.manifestCanonical += ' ';
+  assert.equal((await h.request('GET', statusPath(study, id), { as: RAD })).body.code, 'MANIFEST_STORE_INVALID', 'the stored-format code');
+  h.s.prisma.importOperation.findMany = scan;
+});
+
+test('S9U4-B75 U4BB3-06 the contract 4.8 addendum codes of the download routes present in part (c) round 1, by behaviour: 409 DOWNLOAD_ALREADY_SENT (byte 0, state unchanged, a new operation prepares) and 400 IMPORT_REQUEST_INVALID for a preparation body other than the closed {operationId} (nothing prepared, no audit row)', async () => {
+  const h = await harness();
+  const study = await downloadStudy(h, 1), id = randomUUID();
+  for (const body of [{ operationId: randomUUID(), extra: 1 }, {}, { operationId: 'not-a-uuid' }, [randomUUID()], { operationid: randomUUID() }]) {
+    const before = [h.s.ops.size, audits(h.s, 'original.download.prepare').length];
+    const r = await h.request('POST', `/api/studies/${study}/original-downloads`, { as: RAD, body });
+    assert.deepEqual([r.status, r.body?.code], [400, 'IMPORT_REQUEST_INVALID'], JSON.stringify(body));
+    assert.deepEqual([h.s.ops.size, audits(h.s, 'original.download.prepare').length], before, `${JSON.stringify(body)}: nothing prepared`);
+  }
+  assert.equal((await prepare(h, study, id)).status, 200);
+  assert.equal((await h.request('GET', archivePath(study, id), { as: RAD })).status, 200);
+  await sleep(50);
+  const state = JSON.stringify(h.s.op(id));
+  const again = await h.request('GET', archivePath(study, id), { as: RAD });
+  assert.deepEqual([again.status, again.body?.code, again.headers['content-type']?.startsWith('application/json')], [409, 'DOWNLOAD_ALREADY_SENT', true]);
+  assert.equal(JSON.stringify(h.s.op(id)), state, 'byte 0, the state unchanged');
+  assert.equal((await prepare(h, study, randomUUID())).status, 200, 'a new operation prepares');
+});
+
+test('S9U4-B76 U4BL6-01 the store\'s update keeps the claimKey UNIQUE (a duplicate is refused and rolls back) and refuses what it does not model (a primary key update); a null time stamp is a not-null violation on create and on update; a product update that changes neither still commits', async () => {
+  const h = await harness();
+  const study = uid();
+  const first = await h.send(dicom({ study }));
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const claims =[...h.s.ops.values()].filter(r => r.kind === 'sop-claim');
+  const second = await h.send(dicom({ study, series: study + '.2' }));
+  assert.equal(second.status, 200);
+  const sops = [...h.s.ops.values()].filter(r => r.kind === 'sop-claim');
+  assert.equal(sops.length, claims.length + 1, 'two SOP claims');
+  const [a, b] = sops;
+  const snapshot = () => JSON.stringify([...h.s.ops.values()]);
+  const before = snapshot();
+  const db = h.s.prisma;
+  await assert.rejects(db.importOperation.update({ where: { id: a.id }, data: { claimKey: b.claimKey } }), { code: 'P2002' }, 'a claimKey moved onto another row\'s');
+  await assert.rejects(db.importOperation.update({ where: { id: a.id }, data: { id: randomUUID() } }), { name: 'UnmodelledStoreUpdate' }, 'a primary key update');
+  await assert.rejects(db.importOperation.update({ where: { id: a.id }, data: { createdAt: null } }), { code: 'P2011' }, 'a null createdAt');
+  await assert.rejects(db.importOperation.update({ where: { id: a.id }, data: { updatedAt: null } }), { code: 'P2011' }, 'a null updatedAt');
+  assert.equal(snapshot(), before, 'nothing changed');
+  // Inside a transaction the refusal rolls the transaction's earlier write back.
+  await assert.rejects(db.$transaction(async tx => {
+    await tx.importOperation.update({ where: { id: a.id }, data: { status: 'reserved' } });
+    await tx.importOperation.update({ where: { id: b.id }, data: { claimKey: a.claimKey } });
+  }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }), { code: 'P2002' });
+  assert.equal(snapshot(), before, 'the transaction rolled back');
+  await assert.rejects(db.importOperation.create({ data: { id: randomUUID(), institutionId: 'inst-a', ownerIssuer: ISSUER, ownerSubject: TECH.sub, actor: TECH.actor,
+    kind: 'import', status: 'open', createdAt: null } }), { code: 'P2011' }, 'a null createdAt on create');
+  assert.equal(snapshot(), before, 'nothing created');
+  // The same identity values written again are no change of identity: the product's own updates keep committing.
+  const updated = await db.importOperation.update({ where: { id: a.id }, data: { id: a.id, claimKey: a.claimKey, updatedAt: new Date(h.s.clock) } });
+  assert.equal(updated.id, a.id);
 });

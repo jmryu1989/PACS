@@ -794,5 +794,53 @@
           "expect": { "pass": true } }
       ]
     }
-  ]
+  ],
+  "record_flow": {
+    "note": "CW21 (S9-U4b part (c), U4BB4-02; Astra consult u4bb4_02_shape): constructor-record-flow.ts read as a corpus of its own. `table` plays api/src/admin-audit.ts's part; `positive.pairs` are the lines the class form and the record form must give alike (places left out, `positive.names` mapping the record form's method names to the class form's), `positive.writers` every write site of the corpus; each variant's `edits` replace text occurring once in the file and `expect` names every verdict class it fails by (as in `cases`).",
+    "table": { "rows": ["synrecord.stage"] },
+    "positive": {
+      "pairs": [["class-read", "record-read"], ["class-audit", "record-audit"]],
+      "names": [["recordLocked", "classLocked"], ["recordForm", "classForm"]],
+      "writers": ["auditLog.create [synrecord.stage] []", "auditLog.create [synrecord.stage] []"]
+    },
+    "variants": [
+      { "name": "N0 an alias in the constructor writes the record it keeps",
+        "edits": [{ "find": "  constructor(private readonly target: SynTarget, readonly deadline: number, private readonly reason: SynReason) {}",
+          "replace": "  constructor(private readonly target: SynTarget, readonly deadline: number, private readonly reason: SynReason) {\n    const own = target;\n    own.uid = own.uid + '.1';\n  }" }],
+        "expect": { "unresolved": [{ "tag": "class-read", "reason": "binding `own` is written through" }] } },
+      { "name": "N1 an alias in a method of the class writes the kept record",
+        "edits": [{ "find": "  record(tx: Prisma.TransactionClient, actor: string) {",
+          "replace": "  rename() {\n    const kept = this.target;\n    kept.operationId = kept.operationId + '0';\n  }\n\n  record(tx: Prisma.TransactionClient, actor: string) {" }],
+        "expect": { "unresolved": [{ "tag": "class-read", "reason": "binding `kept` is written through" }] } },
+      { "name": "N2 the kept record handed to an opaque callback",
+        "edits": [{ "find": "  expire(): string {",
+          "replace": "  share(fn: (t: SynTarget) => void) {\n    fn(this.target);\n  }\n\n  expire(): string {" }],
+        "expect": { "unresolved": [{ "tag": "class-read", "reason": "binding `t` is handed to unproved consumer `fn`" }] } },
+      { "name": "N3 a type assertion hides the instance that keeps the record",
+        "edits": [{ "find": "    this.expired = true;\n    return synStop(this.target, this.reason);",
+          "replace": "    this.expired = true;\n    (this as any).target.uid = 'x';\n    return synStop(this.target, this.reason);" }],
+        "expect": { "unresolved": [{ "tag": "class-read", "reason": "is read through the assertion `this as any`" },
+          { "tag": "class-record-call", "reason": "a client value handed to `stage.record`, which this check does not follow" }] } },
+      { "name": "N4 a member read by a key the program does not fix",
+        "edits": [{ "find": "  stopped(): string | null {",
+          "replace": "  peek(key: string) {\n    return this[key as keyof SynStage];\n  }\n\n  stopped(): string | null {" }],
+        "expect": { "unresolved": [{ "tag": "class-read", "reason": "is read by a key the program does not fix" },
+          { "tag": "class-record-call", "reason": "a client value handed to `stage.record`, which this check does not follow" }] } },
+      { "name": "N5 a method of the instance replaced",
+        "edits": [{ "find": "    const stage = new SynStage(t, Date.now() + 5000, 'fenced'); // @cw:class-new",
+          "replace": "    const stage = new SynStage(t, Date.now() + 5000, 'fenced'); // @cw:class-new\n    stage.stopped = () => null;" }],
+        "expect": { "unresolved": [{ "tag": "class-read", "reason": "is handed on as `this` of `stage.stopped`" },
+          { "tag": "class-record-call", "reason": "a client value handed to `stage.record`, which this check does not follow" }] } },
+      { "name": "N7 the instance handed to a parameter not declared as its class",
+        "edits": [{ "find": "    return this.classLocked(t, stage, actor);",
+          "replace": "    synPark(stage);\n    return this.classLocked(t, stage, actor);" },
+          { "find": "export class SynSupply {", "replace": "function synPark(kept: unknown) { return kept; }\n\nexport class SynSupply {" }],
+        "expect": { "unresolved": [{ "tag": "class-read", "reason": "is not declared `SynStage`" },
+          { "tag": "class-record-call", "reason": "a client value handed to `stage.record`, which this check does not follow" }] } },
+      { "name": "N6 an audit write of the class with an action outside the table is counted as that action",
+        "edits": [{ "find": "action: 'synrecord.stage', target: this.target.uid } }); // @cw:class-audit",
+          "replace": "action: 'synrecord.other', target: this.target.uid } }); // @cw:class-audit" }],
+        "expect": { "unlisted": ["synrecord.other"] } }
+    ]
+  }
 }

@@ -1280,12 +1280,13 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
    *      still exactly as it was (recoverySnapshot): a reconciliation or another admin request that won meanwhile makes
    *      this one 409 RECOVERY_NOT_APPLICABLE with nothing written.
    * The target index's study is checked against the admin's reach now (contract 3): `inReach` before the evidence is
-   * judged and before any Orthanc read or recovery row (the StudyAccess metadata prepared there), `inReachLocked` inside
-   * both transactions after their claim and operation locks and before their DB time; each throws the route's refusal.
-   * Out of reach first is the same 404 as no operation, with no SOP read and no row; lost during the Orthanc re-read it
-   * is that 404 with nothing of the result written (the request row and the reading right recorded while it was in reach
-   * stay). Another owner's operation of the admin's institution is recovered under the same rule; its owner and attempts
-   * stay, the admin is recorded beside them.
+   * judged and again before the result's transaction - outside every lock, where the StudyAccess metadata of the policy
+   * now in force is prepared (a policy that changed during the Orthanc re-read is read again there, never inside a lock,
+   * U4BB3-03) - and `inReachLocked` inside both transactions after their claim and operation locks and before their DB
+   * time; each throws the route's refusal. Out of reach first is the same 404 as no operation, with no SOP read and no
+   * row; lost during the Orthanc re-read it is that 404 with nothing of the result written (the request row and the
+   * reading right recorded while it was in reach stay). Another owner's operation of the admin's institution is
+   * recovered under the same rule; its owner and attempts stay, the admin is recorded beside them.
    * The admin route never writes to or deletes from Orthanc.
    */
   async recover(admin: ImportOwner, operationId: string, index: number, body: unknown,
@@ -1332,9 +1333,11 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     }));
     const reading = await this.readSop({ studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid, patientId: requested.patientId } as AcceptedFile,
       requested.bytes, requested.sha256, null);
-    const underSnapshot = <T>(work: (tx: Tx, entry: ImportFileEntry, mine: ImportAttempt, claims: Map<string, ClaimRow>, locked: any, now: Date) => Promise<T>,
-      write = true) =>
-      this.write(async tx => {
+    const underSnapshot = async <T>(work: (tx: Tx, entry: ImportFileEntry, mine: ImportAttempt, claims: Map<string, ClaimRow>, locked: any, now: Date) => Promise<T>,
+      write = true) => {
+      // The Orthanc re-read took time: the reach is read again for the policy in force now, outside the lock (U4BB3-03).
+      await inReach(seen.studyUid!);
+      return this.write(async tx => {
         const claims = await this.lockClaims(tx, keys);
         const locked = await this.lockOperation(tx, operationId);
         const results: ImportFileEntry[] = clone(locked.results);
@@ -1347,6 +1350,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         if (write) await tx.importOperation.update({ where: { id: operationId }, data: { results: results as any, status: this.settledStatus(results), updatedAt: now } });
         return answer;
       });
+    };
     if (reading.kind === 'failed') {
       // The reading right goes back (unknown) only while the study is still in reach; out of reach (or the admin's rights
       // gone) answers that refusal, the right then simply runs out. Anything else: the Orthanc answer, nothing changed.

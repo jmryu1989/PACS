@@ -2464,7 +2464,30 @@ class S9U4RegisterTests(unittest.TestCase):
     only SELECTs are read. LiveInvariantTests.s9u4_register_row expects the writer's origin. The UIDs are synthetic."""
 
     def test_s9u4_registered_reads_the_product_row_never_the_list(self) -> None:
+        # U4BL6-02: the read is executed, not matched as text. Each round's StudyState is an in-memory SQLite table (the
+        # standard library's own SQL engine; the statement's identifiers, quotes, coalesce and || mean the same there),
+        # opened query-only, holding the round's rows of this UID beside decoys of other UIDs - a UID prefix among them.
+        # So any spelling of the one exact-UID SELECT passes, and a wrong UID, a read of the whole table or a write fails.
+        import sqlite3
+
         uid = "2.25.4242424244"
+        # Each decoy answers a value no case expects, so a read of another UID never looks like this UID's row.
+        decoys = [("2.25.42424242440", "decoy-prefix", "dicom"), ("2.25.1", "decoy-other", "dicom"), ("2.25.4242424245", "decoy-next", "gateway")]
+
+        def table(rows: list[tuple[str, str | None, str]]) -> sqlite3.Connection:
+            db = sqlite3.connect(":memory:")
+            # No key on uid here: the helper must itself refuse two rows of one UID, whatever a constraint would allow.
+            db.execute('CREATE TABLE "StudyState" (uid TEXT NOT NULL, "institutionId" TEXT, origin TEXT NOT NULL)')
+            db.executemany('INSERT INTO "StudyState" VALUES (?, ?, ?)', [*decoys, *rows])
+            db.commit()
+            db.execute("PRAGMA query_only = ON")
+            return db
+
+        def execute(db: sqlite3.Connection, statement: str) -> list[str]:
+            before = db.total_changes
+            found = [str(row[0]) for row in db.execute(statement).fetchall()]
+            self.assertEqual(db.total_changes, before, "the read writes nothing")
+            return found
 
         def run(rows_by_round: list[list[str]], lists: list[HttpResult], *, institution: str = "hallym", origin: str = "dicom"
                 ) -> tuple[list[HttpResult] | AssertionError, list[str], int]:
@@ -2478,7 +2501,12 @@ class S9U4RegisterTests(unittest.TestCase):
 
             def read(statement: str) -> list[str]:
                 sql.append(statement)
-                return rows_by_round[min(len(sql), len(rows_by_round)) - 1]
+                # The round's rows of this UID, given as "institution|origin" (an empty institution is NULL).
+                rows = []
+                for row in rows_by_round[min(len(sql), len(rows_by_round)) - 1]:
+                    institution_id, row_origin = row.split("|")
+                    rows.append((uid, institution_id or None, row_origin))
+                return execute(table(rows), statement)
 
             def pause(seconds: float) -> None:
                 now[0] += seconds
@@ -2499,7 +2527,18 @@ class S9U4RegisterTests(unittest.TestCase):
             answer, sql, calls = run([[], [], ["hallym|dicom"]], lists)
             self.assertIsInstance(answer, list, lists)
             self.assertEqual((len(answer), calls, len(sql)), (3, 3, 3), lists)
-            self.assertTrue(all(s.startswith("SELECT ") and f"uid='{uid}'" in s for s in sql), sql)
+        # The fixture itself tells the reads apart (negative controls of the oracle, not of the product): the exact-UID
+        # SELECT in another spelling gives the one row; a wrong UID none; the whole table every row; a write is refused.
+        db = table([(uid, "hallym", "dicom")])
+        for spelling in (f"SELECT coalesce(\"institutionId\", '') || '|' || origin FROM \"StudyState\" WHERE uid = '{uid}';",
+                         f'select coalesce("institutionId",\'\')||\'|\'||"origin" from "StudyState" where "uid"=\'{uid}\''):
+            self.assertEqual(execute(db, spelling), ["hallym|dicom"], spelling)
+        self.assertEqual(execute(db, f"SELECT coalesce(\"institutionId\", '') || '|' || origin FROM \"StudyState\" WHERE uid='{uid}9';"), [])
+        self.assertEqual(execute(db, f"SELECT coalesce(\"institutionId\", '') || '|' || origin FROM \"StudyState\" WHERE uid LIKE '{uid}%';"),
+                         ["decoy-prefix|dicom", "hallym|dicom"], "a prefix read finds the decoy too")
+        self.assertEqual(len(execute(db, "SELECT coalesce(\"institutionId\", '') || '|' || origin FROM \"StudyState\";")), 1 + len(decoys))
+        with self.assertRaises(sqlite3.OperationalError):
+            execute(db, f"UPDATE \"StudyState\" SET origin='dicom' WHERE uid='{uid}';")
         answer, _sql, _calls = run([["hallym|gateway"]], [changed], origin="gateway")
         self.assertIsInstance(answer, list, "the Gateway writer's origin")
         # No row, another institution, another origin, an unassigned row or two rows: a failure within the bound - also
