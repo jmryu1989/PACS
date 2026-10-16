@@ -146,12 +146,16 @@
      * 검사마다의 잠금은 그 검사의 상태 칸(`appState[uid].identityUnresolved`)에 둔다 — 편집기·단추·저장·영상 열기가 이미 읽는
      * 자리다. 검색·Related·비교 후보는 목록 행에서 오므로 이 UID가 없다. 서버가 같은 행위를 409·403으로 거절하므로 이 표시는
      * 경계가 아니다. 완성된 목록만 표시를 바꾸고, 그 목록이 이 칸을 말하지 않으면(모름) 그대로 둔다.
+     * 안내(건수)와 잠금은 따로 간다: 안내는 이번 완성 목록이 말한 그대로이고, 잠금은 그 UID가 이번 완성 목록의 정상 행(원본
+     * 하나)으로 돌아왔을 때만 풀린다. 안내에서 빠진 것만으로는(범위·원격판독·접근 조건이 바뀌어 보이지 않게 됨) 풀지 않는다.
      */
     let studyIdentityIssues = new Set();
-    function applyIdentityIssues(issues) {
+    function applyIdentityIssues(issues, rows) {
       if (!Array.isArray(issues)) return;
       const next = new Set(issues.map(issue => issue.uid));
-      for (const uid of studyIdentityIssues) if (!next.has(uid) && appState[uid]) delete appState[uid].identityUnresolved;
+      const single = new Set(Array.isArray(rows) ? rows.map(row => row?.uid) : []);
+      for (const uid of Object.keys(appState))
+        if (appState[uid]?.identityUnresolved && single.has(uid) && !next.has(uid)) delete appState[uid].identityUnresolved;
       for (const uid of next) {
         // Only a study this page already knew can be open, kept or launched; an unseen UID has nothing to lock.
         if (!appState[uid]) continue;
@@ -730,7 +734,7 @@
         // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
           studies = r.studies.map(fromApi);
           folderLoadState = 'complete';
-          applyIdentityIssues(r.identityIssues);
+          applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           studyPriority.observed(r.studies.map(s=>s.uid));
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));

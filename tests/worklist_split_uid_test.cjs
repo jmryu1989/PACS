@@ -406,6 +406,30 @@ test('TEST-WSU-06 single at enumeration but split at the page details is one con
   policy.hooks.find = async (arg, n) => { if (n === 3) policy.policy = { revision: 2, policy: restricted([rule({ studyUids: [NORMAL] })]) }; };
   await rejects(policy.pacs.listStudies(caller(), { limit: '10' }), 409, 'STUDY_ACCESS_CHANGED');
 });
+test('TEST-WSU-06 a source access tag that changes between the enumeration and the page details is STUDY_LIST_CHANGED, even when both values pass the policy', async () => {
+  // spec §3.2: the page's Orthanc details are held to the enumeration's tags. The stored rows and the UID set stay the
+  // same, and both values of every changed tag pass the caller's policy, so only the source comparison can see it.
+  const changes = { institution: 'OTHER', patientId: 'SYN-PID-M', date: '20261002', modalities: ['MR'] };
+  const both = restricted([rule({ patientId: 'SYN-PID-N' }), rule({ patientId: 'SYN-PID-M' })]);
+  for (const field of [null, ...Object.keys(changes)]) {
+    const w = await world({ resources: [resource(NORMAL, 'SYN-PID-N')], states: [stateRow(NORMAL, { institutionId: 'hallym' })],
+      policy: { revision: 1, policy: both } }).start();
+    // findMany #1 is the enumeration's rows, #2 the page's details: the source changes between the two reads.
+    w.hooks.find = async (arg, n) => { if (n === 2 && field) w.resources[0][field] = changes[field]; };
+    if (!field) {
+      const page = await w.pacs.listStudies(caller(), { limit: '10' });
+      assert.deepEqual(uidsOf(page), [NORMAL], 'the unchanged source answers its page');
+    } else await rejects(w.pacs.listStudies(caller(), { limit: '10' }), 409, 'STUDY_LIST_CHANGED');
+    assert.deepEqual(w.sourceWrites(), []);
+  }
+  // A caller without a source-tag policy is held to the institution tag the enumeration resolved the row by.
+  for (const change of [false, true]) {
+    const open = await world({ resources: [resource(NORMAL, 'SYN-PID-N')], states: [stateRow(NORMAL, { institutionId: 'hallym' })] }).start();
+    open.hooks.find = async (arg, n) => { if (n === 2 && change) open.resources[0].institution = 'OTHER'; };
+    if (change) await rejects(open.pacs.listStudies(caller(), { limit: '10' }), 409, 'STUDY_LIST_CHANGED');
+    else assert.deepEqual(uidsOf(await open.pacs.listStudies(caller(), { limit: '10' })), [NORMAL]);
+  }
+});
 
 // ── TEST-WSU-08 direct clinical entries (M-WSU-14, M-WSU-16) ──
 const owner = c => ({ institution: c.institution, sub: c.sub, author: c.actor });

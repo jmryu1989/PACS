@@ -14,7 +14,7 @@ import { ORDER_IDENTITY_SELECT, orderIdentity } from '../study-identity';
 import { projectGatewayReceipt } from '../gateway-receipt';
 // ASR capability is optional; no engine URL or credentials leave the server.
 import { asrConfiguration } from '../asr.service';
-import { groupSources, consensus, sameUidSet, identityIssueList } from '../study-source-groups';
+import { groupSources, consensus, sameUidSet, identityIssueList, sameAccessTags } from '../study-source-groups';
 import { dump, qidoCount, toClient } from './values';
 import { inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -170,7 +170,12 @@ export class PacsWorklist {
       // that became a second resource since is a real change (the next first page excludes it); a stable split was
       // never on this page.
       const detail = groupSources(await this.orthanc.studiesByUid(pageUids), st => OrthancService.tag(st, '0020000D'));
-      if (pageUids.some(uid => detail.byUid.get(uid)?.length !== 1 || !this.studyAccess.matches(access, uid, detail.byUid.get(uid)![0])))
+      // spec §3.2: each selected UID still has its one resource with the access tags the enumeration saw (the
+      // enumeration's row is the immutable reference); a changed source tag is a changed list even when both values
+      // would pass the policy and the stored rows are unchanged.
+      const withMetadata = this.studyAccess.needsMetadata(access);
+      if (pageUids.some(uid => detail.byUid.get(uid)?.length !== 1 || !this.studyAccess.matches(access, uid, detail.byUid.get(uid)![0])
+        || !sameAccessTags(sources.byUid.get(uid)?.[0], detail.byUid.get(uid)![0], withMetadata)))
         throw accessConflict();
       sourceRows = pageUids.map(uid => detail.byUid.get(uid)![0]);
     }

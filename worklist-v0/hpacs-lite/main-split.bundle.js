@@ -1188,12 +1188,16 @@
      * 검사마다의 잠금은 그 검사의 상태 칸(`appState[uid].identityUnresolved`)에 둔다 — 편집기·단추·저장·영상 열기가 이미 읽는
      * 자리다. 검색·Related·비교 후보는 목록 행에서 오므로 이 UID가 없다. 서버가 같은 행위를 409·403으로 거절하므로 이 표시는
      * 경계가 아니다. 완성된 목록만 표시를 바꾸고, 그 목록이 이 칸을 말하지 않으면(모름) 그대로 둔다.
+     * 안내(건수)와 잠금은 따로 간다: 안내는 이번 완성 목록이 말한 그대로이고, 잠금은 그 UID가 이번 완성 목록의 정상 행(원본
+     * 하나)으로 돌아왔을 때만 풀린다. 안내에서 빠진 것만으로는(범위·원격판독·접근 조건이 바뀌어 보이지 않게 됨) 풀지 않는다.
      */
     let studyIdentityIssues = new Set();
-    function applyIdentityIssues(issues) {
+    function applyIdentityIssues(issues, rows) {
       if (!Array.isArray(issues)) return;
       const next = new Set(issues.map(issue => issue.uid));
-      for (const uid of studyIdentityIssues) if (!next.has(uid) && appState[uid]) delete appState[uid].identityUnresolved;
+      const single = new Set(Array.isArray(rows) ? rows.map(row => row?.uid) : []);
+      for (const uid of Object.keys(appState))
+        if (appState[uid]?.identityUnresolved && single.has(uid) && !next.has(uid)) delete appState[uid].identityUnresolved;
       for (const uid of next) {
         // Only a study this page already knew can be open, kept or launched; an unseen UID has nothing to lock.
         if (!appState[uid]) continue;
@@ -1772,7 +1776,7 @@
         // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
           studies = r.studies.map(fromApi);
           folderLoadState = 'complete';
-          applyIdentityIssues(r.identityIssues);
+          applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           studyPriority.observed(r.studies.map(s=>s.uid));
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
@@ -2260,9 +2264,6 @@
         return { status: "composing", uid, selectionSeq: seq };
       }
       if (!uid || !reportConverge.has(uid)) return { status: "clear", uid, selectionSeq: seq };
-      // WORKLIST-SPLIT-UID: a study excluded as unresolved never sends its kept text (it stays on this page and its copy),
-      // so there is no save to wait for; leaving it is not blocked by a write that is refused by design.
-      if (appState[uid]?.identityUnresolved) return { status: "clear", uid, selectionSeq: seq };
       return settleStudyText(uid, seq).then(result => ({ ...result, uid, selectionSeq: seq }));
     }
     const LEAVE_TIMEOUT = Symbol("timeout");
@@ -2306,6 +2307,9 @@
       if (!KinAuth.has("radiologist")) return { status: "refused", reason: "판독의 권한이 없어 저장할 수 없습니다" };
       const a = appState[uid] ?? {};
       if (a.prelimHidden) return { status: "refused", reason: "다른 판독의의 예비 판독(RS: P)입니다" };
+      // WORKLIST-SPLIT-UID: an unresolved study's kept text is never sent. It is a refused save, answered like the others
+      // (Retry/Check/Stay, no target switch, nothing written); the text stays in the editor.
+      if (a.identityUnresolved) return { status: "refused", reason: "환자 식별 불일치로 이 검사의 글을 저장할 수 없습니다. 원본 확인이 필요합니다" };
       const held = heldByOther(studies.find(s => s.uid === uid));
       if (held) return { status: "refused", reason: `${displayActor(held)} 님이 판독 중입니다` };
       return null;
@@ -6978,8 +6982,11 @@
         else {
           keepReportEditor();
           const context = work.capture("document");
+          // WORKLIST-SPLIT-UID: an unresolved study's kept text is not sent on the way out either; it stays in the copy, and
+          // the browser's own warning below still asks before the text is lost.
           for (const report of pending)
-            draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
+            if (!appState[report.uid]?.identityUnresolved)
+              draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
         }
       }
       if (serverMode && heldUid) {
@@ -7151,6 +7158,9 @@
           });
           continue;
         }
+        // WORKLIST-SPLIT-UID: an unresolved study's text is not preserved to the server; the logout stops with it named
+        // (Retry, Back to Editing or an explicit discard) and the text stays on this page.
+        if (appState[report.uid]?.identityUnresolved) { report.reason = "identity"; continue; }
         /**
          * 이 검사에 결과를 모르는 확정이 남아 있으면, 잡아 둔 글을 초안으로 보존하기 전에 서버의 판독 상태부터 읽는다
          * (준비 문맥으로). 그 글이 이미 판독문으로 확정돼 있으면 보존할 것이 없다 — 초안으로 다시 쓰면 다음 로그인에서
@@ -7454,6 +7464,8 @@
         for (const report of prep.reports) {
           if (report.safe) continue;
           if (!work.commit(at, () => { prep.uid = report.uid; prep.texts = report.texts; report.reason = null; })) return;
+          // WORKLIST-SPLIT-UID: Recover Draft does not send an unresolved study's text either; it stays here with its reason.
+          if (appState[report.uid]?.identityUnresolved) { if (!work.commit(at, () => { report.reason = "identity"; })) return; continue; }
           // 결과를 모르는 확정이 남은 검사는 그 글을 초안으로 쓰기 전에 판독 상태부터 읽는다(보존 저장과 같다).
           if (reportUnknownCommits.has(report.uid)) {
             say("서버의 판독 상태를 확인하는 중입니다…");
@@ -7543,6 +7555,7 @@
       refused: "서버가 판독문 초안 저장을 받아들이지 않았습니다.",
       unknown: "판독문 초안 저장의 결과를 확인하지 못했습니다. 저장됐을 수도 있고 아닐 수도 있습니다.",
       conflict: "서버에 이 화면과 다른 초안이 있어 판독문 초안을 저장하지 않았습니다. Overwrite Server Draft를 누르면 이 화면의 내용으로 덮어씁니다.",
+      identity: "환자 식별 불일치로 이 검사의 판독문 초안을 저장하지 않았습니다. 원본 확인이 필요합니다.",
     };
 
     function logoutStatus(prep, text) {
@@ -7658,7 +7671,7 @@
           if (!live() || commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
-          applyIdentityIssues(r.identityIssues);
+          applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
           const arrivalNotice = arrivals?.ok && arrivals.changes.length

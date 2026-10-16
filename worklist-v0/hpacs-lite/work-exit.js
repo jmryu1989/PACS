@@ -36,8 +36,11 @@
         else {
           keepReportEditor();
           const context = work.capture("document");
+          // WORKLIST-SPLIT-UID: an unresolved study's kept text is not sent on the way out either; it stays in the copy, and
+          // the browser's own warning below still asks before the text is lost.
           for (const report of pending)
-            draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
+            if (!appState[report.uid]?.identityUnresolved)
+              draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
         }
       }
       if (serverMode && heldUid) {
@@ -209,6 +212,9 @@
           });
           continue;
         }
+        // WORKLIST-SPLIT-UID: an unresolved study's text is not preserved to the server; the logout stops with it named
+        // (Retry, Back to Editing or an explicit discard) and the text stays on this page.
+        if (appState[report.uid]?.identityUnresolved) { report.reason = "identity"; continue; }
         /**
          * 이 검사에 결과를 모르는 확정이 남아 있으면, 잡아 둔 글을 초안으로 보존하기 전에 서버의 판독 상태부터 읽는다
          * (준비 문맥으로). 그 글이 이미 판독문으로 확정돼 있으면 보존할 것이 없다 — 초안으로 다시 쓰면 다음 로그인에서
@@ -512,6 +518,8 @@
         for (const report of prep.reports) {
           if (report.safe) continue;
           if (!work.commit(at, () => { prep.uid = report.uid; prep.texts = report.texts; report.reason = null; })) return;
+          // WORKLIST-SPLIT-UID: Recover Draft does not send an unresolved study's text either; it stays here with its reason.
+          if (appState[report.uid]?.identityUnresolved) { if (!work.commit(at, () => { report.reason = "identity"; })) return; continue; }
           // 결과를 모르는 확정이 남은 검사는 그 글을 초안으로 쓰기 전에 판독 상태부터 읽는다(보존 저장과 같다).
           if (reportUnknownCommits.has(report.uid)) {
             say("서버의 판독 상태를 확인하는 중입니다…");
@@ -601,6 +609,7 @@
       refused: "서버가 판독문 초안 저장을 받아들이지 않았습니다.",
       unknown: "판독문 초안 저장의 결과를 확인하지 못했습니다. 저장됐을 수도 있고 아닐 수도 있습니다.",
       conflict: "서버에 이 화면과 다른 초안이 있어 판독문 초안을 저장하지 않았습니다. Overwrite Server Draft를 누르면 이 화면의 내용으로 덮어씁니다.",
+      identity: "환자 식별 불일치로 이 검사의 판독문 초안을 저장하지 않았습니다. 원본 확인이 필요합니다.",
     };
 
     function logoutStatus(prep, text) {

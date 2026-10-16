@@ -54,3 +54,21 @@ export function consensus<T>(values: readonly (T | null | undefined)[]): T | nul
 export function identityIssueList(uids: Iterable<string>): { uid: string; code: string }[] {
   return [...new Set(uids)].sort((a, b) => a < b ? -1 : a > b ? 1 : 0).map(uid => ({ uid, code: STUDY_IDENTITY_UNRESOLVED }));
 }
+
+/**
+ * WORKLIST-SPLIT-UID (spec §3.2): the access tags a page's detail read must still show for a UID, compared with the
+ * enumeration that chose the page (the immutable reference). InstitutionName always; PatientID, StudyDate and the
+ * modalities when the caller's policy reads them (the enumeration carries them only then). Values are compared as
+ * read (trimmed text; modalities as an upper-case set), so an unchanged source never differs from itself.
+ */
+export function sameAccessTags(enumerated: any, detail: any, withMetadata: boolean): boolean {
+  const text = (row: any, key: string) => { const v = row?.[key]?.Value?.[0]; return typeof v === 'string' ? v.trim() : ''; };
+  const modalities = (row: any) => {
+    const v = row?.['00080061']?.Value;
+    return Array.isArray(v) ? [...new Set(v.filter((x: unknown) => typeof x === 'string').map((x: string) => x.trim().toUpperCase()).filter(Boolean))].sort().join('\\') : '';
+  };
+  if (text(enumerated, '00080080') !== text(detail, '00080080')) return false;
+  if (!withMetadata) return true;
+  return text(enumerated, '00100020') === text(detail, '00100020') && text(enumerated, '00080020') === text(detail, '00080020')
+    && modalities(enumerated) === modalities(detail);
+}

@@ -171,9 +171,6 @@
         return { status: "composing", uid, selectionSeq: seq };
       }
       if (!uid || !reportConverge.has(uid)) return { status: "clear", uid, selectionSeq: seq };
-      // WORKLIST-SPLIT-UID: a study excluded as unresolved never sends its kept text (it stays on this page and its copy),
-      // so there is no save to wait for; leaving it is not blocked by a write that is refused by design.
-      if (appState[uid]?.identityUnresolved) return { status: "clear", uid, selectionSeq: seq };
       return settleStudyText(uid, seq).then(result => ({ ...result, uid, selectionSeq: seq }));
     }
     const LEAVE_TIMEOUT = Symbol("timeout");
@@ -217,6 +214,9 @@
       if (!KinAuth.has("radiologist")) return { status: "refused", reason: "판독의 권한이 없어 저장할 수 없습니다" };
       const a = appState[uid] ?? {};
       if (a.prelimHidden) return { status: "refused", reason: "다른 판독의의 예비 판독(RS: P)입니다" };
+      // WORKLIST-SPLIT-UID: an unresolved study's kept text is never sent. It is a refused save, answered like the others
+      // (Retry/Check/Stay, no target switch, nothing written); the text stays in the editor.
+      if (a.identityUnresolved) return { status: "refused", reason: "환자 식별 불일치로 이 검사의 글을 저장할 수 없습니다. 원본 확인이 필요합니다" };
       const held = heldByOther(studies.find(s => s.uid === uid));
       if (held) return { status: "refused", reason: `${displayActor(held)} 님이 판독 중입니다` };
       return null;

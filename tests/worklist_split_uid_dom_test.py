@@ -152,11 +152,81 @@ class WorklistSplitUidDOMTest(unittest.TestCase):
         self.assertEqual((puts, commits), (len(self.site.puts), len(self.site.commits)))
         self.assertEqual([], self.popups)
         self.assertEqual(auth.FIELDS, self.editor())
-        # Another normal study still opens, without discarding the kept text or choosing a study by itself.
+        # The kept text was never confirmed: choosing another study is a refused save (the existing leave contract) — the
+        # page stays on this study with its text visible, says why, and writes nothing.
+        self.page.locator("#rows tr", has_text=auth.PATIENT_B).first.click()
+        self.page.wait_for_timeout(300)
+        self.assertEqual(auth.UID, self.page.evaluate("() => selectedUid"))
+        self.assertEqual(auth.FIELDS, self.editor())
+        expect(self.page.locator("#report-notice")).to_contain_text("환자 식별 불일치")
+        self.assertEqual((puts, commits), (len(self.site.puts), len(self.site.commits)), "leaving the locked study writes nothing")
+
+    def test_wsu07_07_a_clean_unresolved_study_is_left_normally_and_never_reselected(self):
+        self.open_main()
+        self.type_report()
+        # The typed text is saved and confirmed before the source becomes unresolved: nothing is pending for this study.
+        self.page.clock.run_for(20001)
+        self.wait_until(lambda: self.site.puts and not self.page.evaluate("uid => reportConverge.has(uid)", auth.UID), "the confirmed save")
+        puts, commits = len(self.site.puts), len(self.site.commits)
+        self.site.split = {auth.UID}
+        self.refresh()
+        expect(self.page.locator("#identity-issues")).to_have_text(TITLE + " " + NOTICE)
+        self.assertTrue(self.page.locator("#findings").evaluate("e => e.readOnly"))
+        # Another normal study opens as usual.
         self.page.locator("#rows tr", has_text=auth.PATIENT_B).first.click()
         expect(self.page.locator("#findings")).to_be_editable()
         expect(self.page.locator("#findings")).to_have_value("")
-        self.assertEqual((puts, commits), (len(self.site.puts), len(self.site.commits)), "leaving the locked study writes nothing")
+        # The unresolved study is not selected again by a stale target.
+        self.page.evaluate("uid => select(uid)", auth.UID)
+        self.page.wait_for_timeout(100)
+        self.assertNotEqual(auth.UID, self.page.evaluate("() => selectedUid"))
+        self.assertEqual((puts, commits), (len(self.site.puts), len(self.site.commits)))
+
+    def test_wsu07_08_leaving_the_page_or_logging_out_sends_no_write_for_an_unresolved_study(self):
+        self.open_main()
+        self.type_report()
+        self.site.split = {auth.UID}
+        self.refresh()
+        expect(self.page.locator("#identity-issues")).to_be_visible()
+        puts = len(self.site.puts)
+        # The page's own unload handler (the document is not closed): the browser warning stays, nothing is sent.
+        prevented = self.page.evaluate("() => { const e = new Event('beforeunload', {cancelable: true}); window.dispatchEvent(e); return e.defaultPrevented; }")
+        self.page.wait_for_timeout(300)
+        self.assertTrue(prevented, "the native warning still asks before the kept text is lost")
+        self.assertEqual(puts, len(self.site.puts), "no draft write on unload for the unresolved study")
+        self.assertEqual(auth.FIELDS, self.editor())
+        # Log Out preserves drafts first: this one is not sent; the logout stops and names why, the text stays.
+        self.page.locator("#logout").click()
+        expect(self.page.locator("dialog.kin-logout")).to_contain_text("환자 식별 불일치로 이 검사의 판독문 초안을 저장하지 않았습니다")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(puts, len(self.site.puts), "no preserve write for the unresolved study")
+        self.assertEqual(auth.FIELDS, self.editor())
+
+    def test_wsu12_05_an_issue_that_only_disappears_does_not_unlock_the_kept_report(self):
+        self.open_main()
+        self.type_report()
+        self.site.split = {auth.UID}
+        self.refresh()
+        expect(self.page.locator("#identity-issues")).to_be_visible()
+        # A successful list that still leaves the study out but no longer names it (its scope changed): the notice says
+        # what this list says, the kept report stays locked.
+        original = self.site.list_body
+        def unnamed(account, rename=None):
+            body = original(account, rename)
+            body["identityIssues"] = []
+            return body
+        self.site.list_body = unnamed
+        self.refresh()
+        expect(self.page.locator("#identity-issues")).to_be_hidden()
+        self.assertTrue(self.page.locator("#findings").evaluate("e => e.readOnly"), "only a single-resource return unlocks")
+        expect(self.page.locator("#b-save")).to_be_disabled()
+        self.assertEqual(auth.FIELDS, self.editor())
+        # The study comes back as one resource in the completed normal list: now it unlocks.
+        self.site.list_body = original
+        self.site.split = set()
+        self.refresh()
+        expect(self.page.locator("#findings")).to_be_editable()
+        self.assertEqual(auth.FIELDS, self.editor())
 
     def test_wsu07_03_failed_cancelled_and_late_list_answers_never_overwrite_the_notice(self):
         self.site.split = {auth.UID_B}
