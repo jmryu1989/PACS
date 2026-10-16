@@ -102,9 +102,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
               'api/prisma/migrations/20261008120000_emr_b/migration.sql', 'api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql',
               'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql',
-              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql']
+              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
+              'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql']
+# W5-API (52 tables, 47 migrations): ReportDraftInsertReceipt, its three synthetic rows (refused, applied, discarded), one
+# primary key, two checks, one index and the terminal guard's two triggers. Not measured on a stack when written: estimated
+# at about 6 KB of catalog and rows, well inside the cap above.
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
-                 'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
+                 'ReportDraft', 'ReportDraftInsertReceipt', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
@@ -146,6 +150,25 @@ def migration_sources():
 
 def migration_records():
     return [dict(path=path, sha256=image_transfer.sha(raw)) for path, raw in zip(MIGRATIONS, migration_sources())]
+
+
+def insert_receipt_rows(uid):
+    """W5-API (O4 R1): one Related Report insert receipt in each state, every column with a value where its state has one.
+    The refused row has changed its reason once (receipt revision 2); the applied row wrote the draft revision after the one
+    it expected and has no reason; the discarded row is the tombstone of a cancelled insertion. They are bound to SYNTHETIC-reader1's
+    draft of this study and to the study's draft epoch; the Source study is another synthetic UID (receipts carry no FK).
+    No text: only the request and proposal SHA-256 values."""
+    owner = dict(targetUid=uid, ownerInstitution='SYNTHETIC-hospital', ownerSub='SYNTHETIC-reader1-sub', ownerAuthor='SYNTHETIC-reader1',
+                 expectedEpoch='00000000-0000-4000-8000-0000000000d1', sourceUid='2.25.4242.21', sourceVersion=2, targetBaseVersion=2,
+                 createdAt=STAMP, updatedAt=STAMP)
+    return [
+        dict(insertRequestId='00000000-0000-4000-8000-000000002101', **owner, requestHash='a1' * 32, proposalHash='b1' * 32,
+             expectedRevision=3, section='findings', state='refused', appliedRevision=None, reason='TARGET_HELD', receiptRevision=2),
+        dict(insertRequestId='00000000-0000-4000-8000-000000002102', **owner, requestHash='a2' * 32, proposalHash='b2' * 32,
+             expectedRevision=2, section='conclusion', state='applied', appliedRevision=3, reason=None, receiptRevision=1),
+        dict(insertRequestId='00000000-0000-4000-8000-000000002103', **owner, requestHash='a3' * 32, proposalHash='b3' * 32,
+             expectedRevision=3, section='findings', state='discarded', appliedRevision=None, reason='INSERT_DISCARDED', receiptRevision=2),
+    ]
 
 
 def expected_rows(uid):
@@ -216,6 +239,7 @@ def expected_rows(uid):
         revision=4 - number, present=True, updatedAt=STAMP) for number in (1, 2)]
     rows['ReportDraft'].append(dict(uid=uid, author='SYNTHETIC-reader3', findings='', conclusion='', recommendation='',
         baseVersion=0, citations=None, structured=None, revision=5, present=False, updatedAt=STAMP))
+    rows['ReportDraftInsertReceipt'] = insert_receipt_rows(uid)
     # S4-U2: the Order table had no synthetic row, so a dump that lost the new accession value would
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
@@ -587,7 +611,7 @@ def create_product(name, db, uid):
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
-                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
+                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt', 'ReportDraftInsertReceipt',
                   'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
@@ -677,7 +701,10 @@ def catalog_contract(value):
     require(value['tables'] == TABLES)
     # The additive appearance table takes the product above 256 columns. Keep
     # byte/output budgets and exact catalog comparison; bound other lists as before.
-    require(all(type(value[key]) is list and 0 < len(value[key]) <= (512 if key == 'columns' else 256) for key in value))
+    # W5-API: ReportDraftInsertReceipt's 19 columns take the product past 512 (508 scalar fields in schema.prisma before it, 527
+    # with it; the hosted catalog is the authority), so
+    # the column list gets the next power of two; the receipt byte cap and the exact comparison are unchanged.
+    require(all(type(value[key]) is list and 0 < len(value[key]) <= (1024 if key == 'columns' else 256) for key in value))
     require(sorted(item['sequencename'] for item in value['sequence_settings']) == SEQUENCES)
 
 
@@ -992,6 +1019,44 @@ def constraint_probes(name, product):
       BEGIN INSERT INTO "AuditLog" (id,actor,action,target) VALUES(-1,'SYNTHETIC','SYNTHETIC','SYNTHETIC');
         DELETE FROM "AuditLog" WHERE id=-1;
         RAISE EXCEPTION 'missing audit append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      -- W5-API: the insert receipts keep one row per ID, their closed values and states (a SQL NULL where a value is required
+      -- is refused, never passed as unknown), and their terminal guard (a trigger, which --no-privileges keeps): a terminal row
+      -- is never changed, no receipt is deleted or truncated, a refused row moves one receipt revision at a time with its binding
+      -- unchanged. Inserted copies take a new ID so that only the probed value differs; the raise after the one allowed
+      -- transition undoes it, and only that raise is caught.
+      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM "ReportDraftInsertReceipt" LIMIT 1;
+        RAISE EXCEPTION 'missing insert receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
+        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f1','section','recommendation'))::json
+         FROM "ReportDraftInsertReceipt" t WHERE state='refused'));
+        RAISE EXCEPTION 'missing insert receipt section check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
+        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f2','reason',NULL))::json
+         FROM "ReportDraftInsertReceipt" t WHERE state='refused'));
+        RAISE EXCEPTION 'missing insert receipt NULL reason check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
+        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f3','appliedRevision',NULL))::json
+         FROM "ReportDraftInsertReceipt" t WHERE state='applied'));
+        RAISE EXCEPTION 'missing insert receipt NULL applied revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
+        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f4','requestHash',upper(t."requestHash")))::json
+         FROM "ReportDraftInsertReceipt" t WHERE state='applied'));
+        RAISE EXCEPTION 'missing insert receipt hash check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ReportDraftInsertReceipt" SET "receiptRevision"="receiptRevision"+1 WHERE state='applied';
+        RAISE EXCEPTION 'missing insert receipt terminal guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN UPDATE "ReportDraftInsertReceipt" SET state='refused',"appliedRevision"=NULL,reason='TARGET_HELD',"receiptRevision"="receiptRevision"+1 WHERE state='discarded';
+        RAISE EXCEPTION 'missing insert receipt tombstone guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN UPDATE "ReportDraftInsertReceipt" SET "requestHash"=repeat('c',64),"receiptRevision"="receiptRevision"+1 WHERE state='refused';
+        RAISE EXCEPTION 'missing insert receipt binding guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN UPDATE "ReportDraftInsertReceipt" SET reason='SOURCE_CHANGED' WHERE state='refused';
+        RAISE EXCEPTION 'missing insert receipt revision guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN DELETE FROM "ReportDraftInsertReceipt";
+        RAISE EXCEPTION 'missing insert receipt delete guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN TRUNCATE "ReportDraftInsertReceipt";
+        RAISE EXCEPTION 'missing insert receipt truncate guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN UPDATE "ReportDraftInsertReceipt" SET state='applied',"appliedRevision"="expectedRevision"+1,reason=NULL,
+          "receiptRevision"="receiptRevision"+1 WHERE state='refused';
+        RAISE EXCEPTION 'insert receipt refused-to-applied accepted'; EXCEPTION WHEN raise_exception THEN NULL; END;
       -- EMR-B1 after the restore: the ledger stays placed, append-only for the owner path, closed to the runtime's direct
       -- writes and to its expiry call, and the retention role cannot remove an unexpired prefix.
       IF EXISTS (SELECT 1 FROM emr_access.storage_placement() WHERE tablespace <> 'kin_emr_access') THEN

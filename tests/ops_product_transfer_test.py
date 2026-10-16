@@ -53,7 +53,9 @@ def check(body, product_sha=None):
 class Pure(unittest.TestCase):
     def test_catalog_column_budget_supports_current_schema_and_stays_bounded(self):
         catalog=fixture()[0]['product']['catalog']
-        catalog['columns']=[dict(column_name='synthetic') for _ in range(260)]
+        # W5-API: the product has 527 columns with ReportDraftInsertReceipt (508 before it); 530 must pass and the doubled list
+        # (1,060) is still refused, so the bound grew with the schema and stays a bound.
+        catalog['columns']=[dict(column_name='synthetic') for _ in range(530)]
         transfer.catalog_contract(catalog)
         catalog['columns']*=2
         with self.assertRaises(ValueError):transfer.catalog_contract(catalog)
@@ -71,6 +73,46 @@ class Pure(unittest.TestCase):
             actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
             actual['rows'][table][0][field] = value
             with self.subTest(table=table, field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+
+    def assert_insert_receipt_rows(self, receipts, rows):
+        """W5-API (O4 R1): the receipts a restore must keep - one per state, bound to a real owner draft and the study epoch."""
+        self.assertEqual(sorted(r['state'] for r in receipts), ['applied', 'discarded', 'refused'])
+        self.assertEqual(len({r['insertRequestId'] for r in receipts}), 3)
+        by_state = {r['state']: r for r in receipts}
+        self.assertEqual((by_state['refused']['reason'], by_state['refused']['appliedRevision'], by_state['refused']['receiptRevision']),
+                         ('TARGET_HELD', None, 2))
+        applied = by_state['applied']
+        self.assertEqual((applied['reason'], applied['appliedRevision']), (None, applied['expectedRevision'] + 1))
+        self.assertEqual((by_state['discarded']['reason'], by_state['discarded']['appliedRevision']), ('INSERT_DISCARDED', None))
+        [epoch] = {r['draftEpoch'] for r in rows['StudyState']}
+        drafts = {d['author'] for d in rows['ReportDraft']}
+        for r in receipts:
+            self.assertEqual((r['targetUid'], r['expectedEpoch']), (UID, epoch))
+            self.assertIn(r['ownerAuthor'], drafts)
+            self.assertRegex(r['requestHash'], r'^[0-9a-f]{64}$'); self.assertRegex(r['proposalHash'], r'^[0-9a-f]{64}$')
+            self.assertIn(r['section'], ('findings', 'conclusion'))
+            self.assertNotIn(r['sourceUid'], {s['uid'] for s in rows['StudyState']}, 'the Source is another study (no FK)')
+        self.assertFalse({'findings', 'conclusion', 'recommendation', 'text', 'insertedText'} & {k for r in receipts for k in r},
+                         'a receipt carries no report or inserted text')
+
+    def test_insert_receipt_restore_keeps_state_revision_hashes_and_binding(self):
+        """W5-API (O4 R1): a restore that loses a receipt or changes its state, revision, hash or binding is a product mismatch."""
+        body, _, _, _ = fixture(); expected = body['product']
+        def find(rows, state): return next(r for r in rows if r['state'] == state)
+        changes = [
+            ('applied back to refused', lambda rows: find(rows, 'applied').update(state='refused', appliedRevision=None, reason='TARGET_HELD')),
+            ('tombstone lost', lambda rows: rows.remove(find(rows, 'discarded'))),
+            ('receipt revision', lambda rows: find(rows, 'refused').__setitem__('receiptRevision', 1)),
+            ('refusal reason', lambda rows: find(rows, 'refused').__setitem__('reason', 'DRAFT_CONFLICT')),
+            ('request hash', lambda rows: find(rows, 'applied').__setitem__('requestHash', 'f' * 64)),
+            ('owner', lambda rows: find(rows, 'applied').__setitem__('ownerSub', 'SYNTHETIC-reader2-sub')),
+            ('expected boundary', lambda rows: find(rows, 'applied').__setitem__('expectedEpoch', '00000000-0000-4000-8000-0000000000d2')),
+        ]
+        for name, change in changes:
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
+            change(actual['rows']['ReportDraftInsertReceipt'])
+            with self.subTest(change=name), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
 
     def test_current_git_migrations_are_covered(self):
@@ -283,8 +325,10 @@ class Pure(unittest.TestCase):
         # EMR-B1 added schema emr_access (46 migration files after the W2 union): still 51 public tables and the same public rows; its 8 tables are
         # observed schema-qualified beside them with 8 synthetic rows (two chained viewing entries, the heads of both streams, a placed and
         # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
-        self.assertEqual(len(transfer.MIGRATIONS), 46)
-        self.assertEqual(len(transfer.TABLES), 51)
+        # W5-API added ReportDraftInsertReceipt (47 migration files, 52 public tables) with three synthetic receipts: refused,
+        # applied and discarded.
+        self.assertEqual(len(transfer.MIGRATIONS), 47)
+        self.assertEqual(len(transfer.TABLES), 52)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
@@ -310,7 +354,9 @@ class Pure(unittest.TestCase):
                          + 2    # S7-U5 member isolation: the owed and the done isolation fact
                          + 2    # S7-U5 member rights/import
                          + 1    # S8-CTX: revision with save attempt id, beside the legacy revision
-                         + 2)   # S7-U5 D600: the unknown and the settled provider change record
+                         + 2    # S7-U5 D600: the unknown and the settled provider change record
+                         + 3)   # W5-API: the refused, the applied and the discarded insert receipt
+        self.assert_insert_receipt_rows(rows['ReportDraftInsertReceipt'], rows)
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
         self.assertEqual(sorted(rows['MemberIsolation'][0]), ['attempts', 'decidedAt', 'nextAttemptAt', 'providerDoneAt', 'sub'])
@@ -488,6 +534,11 @@ class Pure(unittest.TestCase):
             sql = execute.call_args.args[2]
             self.assertTrue(sql.startswith('BEGIN;')); self.assertTrue(sql.endswith('ROLLBACK'))
             self.assertIn('WHEN foreign_key_violation', sql); self.assertIn('VALUES(99,', sql)
+            # W5-API: every receipt guard branch is probed after the restore (terminal, tombstone, binding, revision, DELETE,
+            # TRUNCATE) beside the one allowed transition, and the NULL probes of the checks.
+            for probe in ('terminal guard', 'tombstone guard', 'binding guard', 'revision guard', 'delete guard', 'truncate guard',
+                          'NULL reason check', 'NULL applied revision check', 'refused-to-applied accepted'):
+                self.assertIn('insert receipt ' + probe, sql)
             verify.assert_called_once_with('owned', 'kin', body['product'])
 
     def test_10_receipt_caps_duplicate_json_and_separate_hash(self):
