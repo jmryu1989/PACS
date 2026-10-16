@@ -32,7 +32,9 @@ def include_moved_files(files, root):
     """Extend an existing served-input allowlist; keep every existing entry and its order."""
     root = Path(root).resolve()
     added = [p.relative_to(root).as_posix() for p in moved_files(root/'worklist-v0/hpacs-lite/main.html')]
-    frame = root / "worklist-v0/hpacs-lite/report-editor-frame.js"
-    if frame.is_file():
-        added.append(frame.relative_to(root).as_posix())
+    # Standalone page assets served beside the moved files (the W6 report frame; S9-U4b's transfer panel).
+    for name in ("report-editor-frame.js", "study-transfer-local.js"):
+        asset = root / "worklist-v0/hpacs-lite" / name
+        if asset.is_file():
+            added.append(asset.relative_to(root).as_posix())
     return tuple(dict.fromkeys([*files, *added]))

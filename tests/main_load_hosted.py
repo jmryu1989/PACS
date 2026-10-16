@@ -321,6 +321,8 @@ def assert_script_requests(baseline, candidate, *, landing=False):
         expected[("GET", "/worklist/hpacs-lite/worklist-folder-tree.js", "")] += 1
         expected[("GET", "/worklist/hpacs-lite/study-panel.js", "")] += 1
         expected[("GET", "/worklist/hpacs-lite/report-editor-frame.js", "")] += 1
+        # S9-U4b part (c): the transfer panel's standalone script (Import DICOM / Download Originals).
+        expected[("GET", "/worklist/hpacs-lite/study-transfer-local.js", "")] += 1
     actual = Counter(map(tuple, candidate))
     assert actual == expected, f"different script requests: expected={expected!r}, actual={actual!r}"
 
