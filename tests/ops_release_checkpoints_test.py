@@ -20,6 +20,10 @@ admissible (CheckpointBytecodeTests, CKPT2-02, with P3's own test_120); fixture 
 (CheckpointInputsTests, CKPT2-04); one owned alias is kept per image (CheckpointCleanupTests, CKPT2-05); retries use
 per-attempt request/run/evidence paths (CheckpointLineageTests, CKPT2-06).
 
+Round 4 (T16 run-d1428): the seal's Git calls run against the real git (CheckpointGitClosureTests), and `commands`
+refuses a host whose --python lacks Playwright or pydicom or whose proof root or candidate is not on a root-owned chain
+outside every user home (CheckpointHostPreconditionTests).
+
 Hardening round 1 (Astra review of 460b4a9): T15 runs the real RehearsalStages methods of the three scenarios over a
 synthetic product (FakeProduct: realm, data, frame, overlay, ordinary entry, receipt) and requires every wrong outcome to
 fail in the stage that owns its assertion (CKPT-05); the host adapter is exercised with a fake process table (CKPT-01);
@@ -36,9 +40,10 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -2928,6 +2933,220 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
         (root / "b.source-manifest.json").write_bytes(cp.canonical({"root": str(root / "b"), "tool": {"sha256": "1" * 64},
                                                                      "source": {"sha256": "2" * 64}, "harness": {"sha256": "3" * 64}}) + b"\n")
         return root
+
+
+def git(*args, cwd=None, check=True):
+    """The real git, with a fixed identity so a commit needs no account configuration."""
+    return subprocess.run(["git", "-c", "user.name=checkpoint-test", "-c", "user.email=checkpoint-test@invalid", "-c", "commit.gpgsign=false",
+                           *args], cwd=cwd, check=check, capture_output=True, text=True, timeout=120)
+
+
+def drop_object(repo, digest):
+    """Remove one loose object from a repository's own store (Git writes them read-only)."""
+    path = Path(repo) / ".git" / "objects" / digest[:2] / digest[2:]
+    path.chmod(0o600)
+    path.unlink()
+
+
+class CheckpointGitClosureTests(TempCase):
+    """Round 4 (T16 run-d1428): the seal step CheckpointDocker.self_contained_git ran `git fsck --connectivity-only -q`,
+    which git does not accept (exit 129), so no checkpoint could be sealed; the r3 suite never ran the seal's Git calls.
+    These run them against the real git on tiny temporary repositories, the way a checkpoint leaf meets them: each
+    fixture clone made with --shared (one of them from a shallow source, as the T16 candidate is) must end with its own
+    object closure, and a missing object must be the error path (CalledProcessError), never a silent success."""
+
+    def repository(self, base):
+        source = base / "src"
+        git("init", "-q", str(source))
+        for number in (1, 2):
+            (source / "a.txt").write_text("synthetic %d\n" % number, encoding="utf-8")
+            git("-C", str(source), "add", "a.txt")
+            git("-C", str(source), "commit", "-q", "-m", "synthetic %d" % number)
+        return source
+
+    def test_the_seal_keeps_each_shared_clone_self_contained(self):
+        import ops_deploy_host_container_test as rehearsal
+        base = self.tempdir("kin-git-")
+        source = self.repository(base)
+        shallow = base / "shallow"
+        git("clone", "-q", "--depth", "1", source.as_uri(), str(shallow))
+        self.assertTrue((shallow / ".git" / "shallow").is_file(), "the second source is shallow")
+        fixture = base / "fixture"
+        clones = {"source": source, "clone": shallow}
+        for name, origin in clones.items():
+            (fixture / name).mkdir(parents=True)
+            git("clone", "-q", "--shared", str(origin), str(fixture / name / "repo"))
+        # Git borrows the store of a complete source; from a shallow one it copies the objects and stays shallow (the
+        # T16 fixture repositories are of this kind: shallow, no alternate).
+        self.assertTrue((fixture / "source" / "repo" / ".git" / "objects" / "info" / "alternates").is_file())
+        self.assertTrue((fixture / "clone" / "repo" / ".git" / "shallow").is_file())
+        # A dangling object is reported by fsck but is not a broken closure.
+        subprocess.run(["git", "-C", str(fixture / "clone" / "repo"), "hash-object", "-w", "--stdin"], input="dangling\n", text=True,
+                       check=True, capture_output=True, timeout=60)
+        rehearsal.CheckpointDocker.self_contained_git(fixture)
+        heads = {}
+        for name in clones:
+            repo = fixture / name / "repo"
+            self.assertFalse((repo / ".git" / "objects" / "info" / "alternates").exists(), name + ": the alternate is gone")
+            heads[name] = git("-C", str(repo), "rev-parse", "HEAD").stdout.strip()
+        # Without the borrowed stores the clones still hold every object they reach.
+        source.rename(base / "src-moved")
+        shallow.rename(base / "shallow-moved")
+        for name in clones:
+            repo = fixture / name / "repo"
+            rehearsal.CheckpointDocker.git_connected(repo)
+            self.assertEqual(git("-C", str(repo), "cat-file", "-t", heads[name] + "^{tree}").stdout.strip(), "tree")
+            self.assertEqual(git("-C", str(repo), "show", heads[name] + ":a.txt").stdout, "synthetic 2\n")
+
+    def test_a_missing_object_is_the_error_path(self):
+        import ops_deploy_host_container_test as rehearsal
+        base = self.tempdir("kin-git-")
+        source = self.repository(base)
+        rehearsal.CheckpointDocker.git_connected(source)
+        blob = git("-C", str(source), "rev-parse", "HEAD:a.txt").stdout.strip()
+        drop_object(source, blob)
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            rehearsal.CheckpointDocker.git_connected(source)
+        self.assertIn("fsck", raised.exception.cmd)
+        self.assertNotIn(raised.exception.returncode, (0, 129), "git accepted the arguments and found the broken closure")
+        self.assertIn(blob, raised.exception.stdout.decode() + raised.exception.stderr.decode())
+        # Through the seal: a clone whose borrowed store lost an object is refused, whichever Git call meets it first.
+        other = self.tempdir("kin-git-")
+        origin = self.repository(other)
+        (other / "fixture" / "source").mkdir(parents=True)
+        git("clone", "-q", "--shared", str(origin), str(other / "fixture" / "source" / "repo"))
+        drop_object(origin, git("-C", str(origin), "rev-parse", "HEAD:a.txt").stdout.strip())
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            rehearsal.CheckpointDocker.self_contained_git(other / "fixture")
+        self.assertNotIn(raised.exception.returncode, (0, 129))
+
+
+def stub_package(site, name, version, modules):
+    """A minimal installed distribution: importable modules and the metadata importlib.metadata reads."""
+    package = Path(site) / name
+    package.mkdir(parents=True)
+    for module in modules:
+        (package / (module + ".py")).write_text("", encoding="utf-8")
+    info = Path(site) / ("%s-%s.dist-info" % (name, version))
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: %s\nVersion: %s\n" % (name, version), encoding="utf-8")
+
+
+def fake_lstat(entries):
+    """os.lstat over a declared tree {path: (uid, mode)}; anything undeclared does not exist."""
+    def lstat(path):
+        if path not in entries:
+            raise FileNotFoundError(2, "No such file or directory", path)
+        uid, mode = entries[path]
+        return SimpleNamespace(st_uid=uid, st_mode=mode)
+    return lstat
+
+
+class CheckpointHostPreconditionTests(RefusalAssertions, TempCase):
+    """Round 4 (T16 run-d1428 attempts 1 and 2 spent gate attempts on the host): `commands` refuses, before any byte of
+    proof.sh, a --python interpreter without Playwright or pydicom and a proof root or candidate that is not on a
+    root-owned chain outside every user home (the product refuses the declared overlay and the browser module there)."""
+
+    GOOD ={"/": (0, 0o040755), "/srv": (0, 0o040755), "/srv/kin-ckpt": (0, 0o040700), "/srv/kin-ckpt/proof": (0, 0o040700),
+            "/srv/kin-ckpt/candidate": (0, 0o040755)}
+
+    def venv(self):
+        """A real virtual environment without pip (no package of the host interpreter is visible in it)."""
+        folder = self.tempdir("kin-venv-") / "py"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(folder)], check=True, capture_output=True, timeout=300)
+        python = folder / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        site = subprocess.run([str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"], check=True,
+                              capture_output=True, text=True, timeout=60).stdout.strip()
+        return str(python), Path(site)
+
+    def test_the_proof_root_and_candidate_need_a_root_owned_chain_outside_user_homes(self):
+        homes = [PurePosixPath("/home/ubuntu")]
+        chain = self.admitted(cp.root_owned_chain, "/srv/kin-ckpt/proof", "--proof-root", homes=homes, lstat=fake_lstat(self.GOOD))
+        self.assertEqual([item["path"] for item in chain], ["/", "/srv", "/srv/kin-ckpt", "/srv/kin-ckpt/proof"])
+        under_home = {"/": (0, 0o040755), "/home": (0, 0o040755), "/home/ubuntu": (1000, 0o040750),
+                      "/home/ubuntu/kin-ckpt": (0, 0o040700), "/home/ubuntu/kin-ckpt/proof": (0, 0o040700)}
+        root_home = {path: (0, mode) for path, (_, mode) in under_home.items()}
+        cases = (("a proof root inside a user home (run-d1428 attempt 2)", "/home/ubuntu/kin-ckpt/proof", under_home, homes, "user home"),
+                 ("a folder owned by a user on the path", "/home/ubuntu/kin-ckpt/proof", under_home, [], "owned by uid 1000"),
+                 ("a root-owned folder inside a user home", "/home/ubuntu/kin-ckpt/proof", root_home, homes, "user home"),
+                 ("a group-writable folder on the path", "/srv/kin-ckpt/proof", {**self.GOOD, "/srv/kin-ckpt": (0, 0o040770)}, homes,
+                  "writable by group or others"),
+                 ("a sticky world-writable /tmp", "/tmp/proof", {"/": (0, 0o040755), "/tmp": (0, 0o041777), "/tmp/proof": (0, 0o040700)},
+                  homes, "writable by group or others"),
+                 ("a link on the path", "/srv/kin-ckpt/proof", {**self.GOOD, "/srv/kin-ckpt": (0, stat.S_IFLNK | 0o777)}, homes, "link"),
+                 ("a missing folder", "/srv/kin-ckpt/absent", self.GOOD, homes, "cannot be read"),
+                 ("a relative path", "srv/kin-ckpt/proof", self.GOOD, homes, "absolute"),
+                 ("a path with ..", "/srv/kin-ckpt/../kin-ckpt/proof", self.GOOD, homes, ".."))
+        for label, path, entries, user_homes, reason in cases:
+            with self.subTest(refused=label):
+                error = self.assertRefused("HOST_PRECONDITION", cp.root_owned_chain, path, "--proof-root", homes=user_homes,
+                                           lstat=fake_lstat(entries))
+                self.assertIn(reason, str(error))
+        answer = SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"python": "3.12.3", "executable": "/opt/kin-smoke/py/bin/python3",
+                                                                             "modules": {"playwright": {"version": "1.60.0"},
+                                                                                         "pydicom": {"version": "2.4.4"}}}) + "\n")
+        facts = self.admitted(cp.host_preconditions, "/opt/kin-smoke/py/bin/python3", "/srv/kin-ckpt/proof", "/srv/kin-ckpt/candidate",
+                              platform="posix", homes=["/home/ubuntu"], lstat=fake_lstat(self.GOOD), run=lambda *a, **k: answer)
+        self.assertEqual(sorted(facts["paths"]), ["--candidate", "--proof-root"])
+        self.assertEqual(facts["python"]["modules"], {"playwright": "1.60.0", "pydicom": "2.4.4"})
+        with self.subTest(refused="the candidate under a user home"):
+            self.assertRefused("HOST_PRECONDITION", cp.host_preconditions, "/opt/kin-smoke/py/bin/python3", "/srv/kin-ckpt/proof",
+                               "/home/ubuntu/kin-ckpt/proof", platform="posix", homes=["/home/ubuntu"], lstat=fake_lstat({**self.GOOD, **under_home}),
+                               run=lambda *a, **k: answer)
+        with self.subTest(refused="a host that is not POSIX"):
+            self.assertRefused("HOST_PRECONDITION", cp.host_preconditions, "python3", "/srv/kin-ckpt/proof", "/srv/kin-ckpt/candidate",
+                               platform="nt", homes=[], lstat=fake_lstat(self.GOOD), run=lambda *a, **k: answer)
+
+    def test_the_python_interpreter_must_import_playwright_and_pydicom(self):
+        python, site = self.venv()
+        error = self.assertRefused("HOST_PRECONDITION", cp.python_precondition, python)
+        self.assertIn("lacks playwright (", str(error))
+        self.assertIn("pydicom (", str(error))
+        stub_package(site, "playwright", "1.60.0", ["__init__", "sync_api"])
+        error = self.assertRefused("HOST_PRECONDITION", cp.python_precondition, python)
+        self.assertIn("lacks pydicom (ModuleNotFoundError", str(error), "run-d1428 attempt 1: Playwright only")
+        stub_package(site, "pydicom", "2.4.4", ["__init__"])
+        facts = self.admitted(cp.python_precondition, python)
+        self.assertEqual(facts["modules"], {"playwright": "1.60.0", "pydicom": "2.4.4"})
+        self.assertEqual(Path(facts["executable"]).parent.parent, Path(python).parent.parent, "the probe ran in that interpreter")
+        with self.subTest(refused="an interpreter that does not exist"):
+            error = self.assertRefused("HOST_PRECONDITION", cp.python_precondition, str(self.tempdir() / "no-python"))
+            self.assertIn("cannot run", str(error))
+        with self.subTest(refused="an interpreter that does not answer the probe"):
+            error = self.assertRefused("HOST_PRECONDITION", cp.python_precondition, python,
+                                       run=lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="Traceback: boom"))
+            self.assertIn("did not answer", str(error))
+        # `commands`: a refused host writes no byte of proof.sh and exits 2; an admitted one prints the versions.
+        empty, _ = self.venv()
+
+        def commands(root, candidate, interpreter):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cp.main(["commands", "--registry", str(root / "registry.json"), "--proof-root", str(root), "--candidate",
+                                str(candidate), "--python", interpreter])
+            return code, out.getvalue(), err.getvalue()
+        root, candidate = self.tempdir("kin-proof-"), self.tempdir("kin-candidate-")
+        (root / "registry.json").write_bytes(cp.canonical([dict(leaf) for leaf in cp.DEFAULT_PROOF_LEAVES]) + b"\n")
+        if os.name == "posix" and os.geteuid() == 0:
+            # Root (CI): the temporary folders are under /root, a root-owned chain.
+            code, out, err = commands(root, candidate, python)
+            self.assertEqual(code, 0, err)
+            self.assertTrue(out.startswith("#!/usr/bin/env bash\n"))
+            facts = json.loads(err.strip().splitlines()[-1])["host_preconditions"]
+            self.assertEqual(facts["python"]["modules"], {"playwright": "1.60.0", "pydicom": "2.4.4"})
+            refusals = [(candidate, empty, "lacks playwright")]
+            (candidate / "open").mkdir()
+            (candidate / "open").chmod(0o777)
+            refusals.append((candidate / "open", python, "writable by group or others"))
+        else:
+            # Elsewhere (Windows, or a non-root account under a sticky /tmp) the host itself is refused.
+            refusals = [(candidate, python, "HOST_PRECONDITION"), (candidate, empty, "HOST_PRECONDITION")]
+        for where, interpreter, reason in refusals:
+            with self.subTest(refused=reason):
+                code, out, err = commands(root, where, interpreter)
+                self.assertEqual((code, out), (2, ""), "refused before any byte of proof.sh")
+                self.assertIn("CHECKPOINT_REFUSED HOST_PRECONDITION", err)
+                self.assertIn(reason, err)
 
 
 class CheckpointCompareTests(RefusalAssertions, TempCase):

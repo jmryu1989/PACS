@@ -1811,8 +1811,11 @@ ordinary-entry, image or receipt outcome must fail in the stage that owns its as
 inputs, raw records and lineage contracts, the raw-evidence index and its consumers, the supervised browser child
 against a frozen copy (CKPT2-02: the product's `SystemdBrowser.command` writes no bytecode into `scripts/`/`tests/`, so
 the next `runtime_identity` and the index's `--tree scripts` binding pass; the real browser stays a T16 condition), the
-per-attempt retry, and T18 (M01–M42, each killed only by an assertion after its control passed). Root on Linux for the
-ComposeEntry fork contract (CI uses sudo).
+per-attempt retry, the seal's Git calls against the real git (`CheckpointGitClosureTests`: shared and shallow fixture
+clones keep their own object closure; a missing object raises), the `commands` host preconditions
+(`CheckpointHostPreconditionTests`: a real venv without Playwright or pydicom, non-root or user-home paths), and T18
+(M01–M42, each killed only by an assertion after its control passed). Root on Linux for the ComposeEntry fork contract
+and the root-owned `commands` path (CI uses sudo).
 
 Linux proofs T16/T17 (pending until run on a native Linux synthetic host with the persistent live slot, as the gate
 account (root); `P` is an absolute proof folder, `B` the candidate checkout; the four `KIN_TEST_*_IMAGE`,
@@ -1832,14 +1835,38 @@ account (root); `P` is an absolute proof folder, `B` the candidate checkout; the
 | early-refusal | c | `CheckpointSegments.test_earlier_change_refused` | prefix-introduce → introduced | diagnostic-fork, expects PREFIX_CHANGED |
 
 Copy `a` is input A (`HostOps.backup_readiness` raises the deterministic L-11a STOP), `b` the unmodified candidate B,
-`c` input C (`HostOps.prepare` changed). The exact command sequence is generated from the frozen registry and run
-unchanged:
+`c` input C (`HostOps.prepare` changed).
+
+Host preconditions (T16 run-d1428 spent two of the first leaf's three gate attempts on them; `commands` now checks them
+before it writes a byte of `proof.sh` and refuses with `CHECKPOINT_REFUSED HOST_PRECONDITION`, exit 2, so a host that
+cannot pass costs no attempt; on success it prints the observed facts as `{"host_preconditions": ...}` on stderr):
+
+- `--python` is the interpreter of every leaf (recorder, runner, tests). It must import Playwright (the smoke browser)
+  and pydicom (the synthetic study, `synthetic_dicom`); the versions are printed. Use the smoke venv by its absolute
+  path, e.g. `/opt/kin-smoke/py/bin/python3` with Playwright and `pydicom==2.4.4` (the version CI pins), owned by root.
+- `P` and `B` must each lie on a chain of folders owned by uid 0 that neither group nor others can write (no link on
+  the path, no sticky `/tmp` either), outside every user home (`/home/<user>` from the account database). The product
+  refuses the declared overlay (IRT2-19) and the browser module (`ops_deploy_host.protected`) anywhere else, and both
+  live in the copies under `P`. Use e.g. `/srv/kin-ckpt/proof-<stamp>` (made by root, mode 0700) and a root-owned
+  candidate checkout such as `/srv/kin-ckpt/candidate`.
+- Native Linux, as root (the gate account), with the leaves' Docker, RAM and image conditions above.
+
+The exact command sequence is generated from the frozen registry and run unchanged (as root):
 
 ```text
 python3 -B $B/tests/ops_release_checkpoints.py registry --out $P/registry.json      # or the commander's frozen registry
-python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B > $P/proof.sh
-sudo -E bash $P/proof.sh
+python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B --python /opt/kin-smoke/py/bin/python3 > $P/proof.sh && sudo -E bash $P/proof.sh
 ```
+
+Gate budget: every leaf is one stable unit with at most 3 attempts in the gate account's persistent ledger
+(`/root/.local/state/kin-pacs/test-gate/<unit>.json`); a leaf that fails, environment causes included, spends one; a
+`commands` refusal spends none. A spent budget is never reset for the same candidate SHA. A NEW candidate SHA (a fix)
+runs in a NEW proof root `P'` (never the old `P`), and its leaves start from an empty ledger only after the old SHA's
+ledger files of the nine `release-tools-checkpoints-proof-*` units (`<unit>.json`, `<unit>-attempt-<n>.json`) were moved
+out of `test-gate/` into the old SHA's evidence with its inspection, on the commander's recorded disposition naming the
+new SHA; nothing is deleted, `inspections.jsonl` and every other unit's ledger stay, and the marker must already be
+released. The old ledger stays the old SHA's result; a fresh ledger is never an acceptance of anything, and only the
+new SHA's own BOUND leaves and `compare` count.
 
 `proof.sh` makes the three source copies (`source-copy`, each with its source manifest), then for every leaf in registry
 order: `plan` (the registered exact selection), `request` (checkpoint leaves only; the parent manifest is resolved from
@@ -1855,8 +1882,7 @@ Retry (CKPT2-06): after a failed leaf `U` and its real inspection (`release_afte
 sequence as attempt `N` (2 or 3) of the same unit and run it unchanged:
 
 ```text
-python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B --from-unit U --attempt N > $P/proof-U-N.sh
-sudo -E bash $P/proof-U-N.sh
+python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B --python /opt/kin-smoke/py/bin/python3 --from-unit U --attempt N > $P/proof-U-N.sh && sudo -E bash $P/proof-U-N.sh
 ```
 
 It makes no source copy and runs no earlier (BOUND) leaf again; `retry` first reads the gate ledger and refuses unless the

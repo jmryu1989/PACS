@@ -1018,8 +1018,15 @@ class CheckpointDocker:
         for git_dir in sorted(Path(fixture_root).glob("*/repo/.git")):
             subprocess.run(["git", "-C", str(git_dir.parent), "repack", "-a", "-d", "-q"], check=True, capture_output=True, timeout=600)
             (git_dir / "objects" / "info" / "alternates").unlink(missing_ok=True)
-            subprocess.run(["git", "-C", str(git_dir.parent), "fsck", "--connectivity-only", "-q"], check=True, capture_output=True,
-                           timeout=600)
+            CheckpointDocker.git_connected(git_dir.parent)
+
+    @staticmethod
+    def git_connected(repo):
+        """Every object reachable from the clone's refs, reflogs and index is in its own object store (CalledProcessError
+        otherwise). git-fsck(1) has no -q/--quiet (git 2.43 and 2.55 exit 129 on it, T16 run-d1428); --no-progress keeps
+        stderr free of progress lines, and dangling objects are reported without failing."""
+        subprocess.run(["git", "-C", str(repo), "fsck", "--connectivity-only", "--no-progress"], check=True, capture_output=True,
+                       timeout=600)
 
     @staticmethod
     def host_facts(fixture_root, owned_ids=()):

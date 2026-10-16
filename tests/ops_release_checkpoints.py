@@ -2367,6 +2367,87 @@ def proof_commands(leaves, *, proof_root, candidate, python="python3", from_unit
     return "\n".join(lines) + "\n"
 
 
+# ── host preconditions of the generated proof (checked by `commands` before proof.sh exists) ──
+# A leaf that fails on one of these spends a gate attempt of its unit without proving anything (T16 run-d1428: attempt 1
+# lacked pydicom, attempt 2 ran under /home/ubuntu), so `commands` refuses them instead.
+
+# Every leaf runs `<python> -B` for the recorder, the runner and the tests: the smoke browser imports Playwright from it and
+# the synthetic study is written with pydicom (ops_deploy_host_container_test.synthetic_dicom).
+PROOF_PYTHON_MODULES = (("playwright", "playwright.sync_api"), ("pydicom", "pydicom"))
+PROOF_PYTHON_PROBE = """import importlib, importlib.metadata, json, sys
+found = {}
+for name, module in %r:
+    try:
+        importlib.import_module(module)
+        found[name] = {"version": importlib.metadata.version(name)}
+    except Exception as error:
+        found[name] = {"error": type(error).__name__ + ": " + str(error)}
+print(json.dumps({"python": sys.version.split()[0], "executable": sys.executable, "modules": found}))
+""" % (PROOF_PYTHON_MODULES,)
+
+
+def python_precondition(python, *, cwd=None, run=subprocess.run):
+    """The --python interpreter imports playwright and pydicom (their versions are returned); anything else refuses."""
+    try:
+        result = run([python, "-B", "-c", PROOF_PYTHON_PROBE], capture_output=True, text=True, timeout=120, cwd=cwd)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Refused("HOST_PRECONDITION", "--python %s cannot run: %s" % (python, error)) from None
+    try:
+        observed = json.loads(result.stdout.strip().splitlines()[-1]) if result.returncode == 0 else None
+        modules = observed["modules"]
+        require(set(modules) == {name for name, _ in PROOF_PYTHON_MODULES}, "HOST_PRECONDITION")
+    except (IndexError, ValueError, TypeError, KeyError, Refused):
+        raise Refused("HOST_PRECONDITION", "--python %s did not answer the module probe (exit %s): %s"
+                      % (python, result.returncode, (result.stderr or "").strip()[-400:])) from None
+    missing = ["%s (%s)" % (name, modules[name].get("error")) for name, _ in PROOF_PYTHON_MODULES if "version" not in modules[name]]
+    require(not missing, "HOST_PRECONDITION", "--python %s lacks %s; install it into that interpreter (a leaf would otherwise "
+            "spend a gate attempt on it)" % (python, ", ".join(missing)))
+    return {"python": python, "version": observed.get("python"), "executable": observed.get("executable"),
+            "modules": {name: modules[name]["version"] for name, _ in PROOF_PYTHON_MODULES}}
+
+
+def user_homes():
+    """The home folders of the host's user accounts (uid 1000 and above, apart from nobody), from the account database."""
+    import pwd
+    return sorted({PurePosixPath(entry.pw_dir) for entry in pwd.getpwall()
+                   if entry.pw_uid >= 1000 and entry.pw_uid != 65534 and entry.pw_dir.startswith("/") and entry.pw_dir != "/"})
+
+
+def root_owned_chain(path, what, *, homes, lstat=os.lstat):
+    """`path` and every folder above it: no link, owned by uid 0, writable by neither group nor others, and not inside a
+    user's home. The product refuses anything else for the declared overlay (IRT2-19) and for the browser module
+    (ops_deploy_host.protected), and both live under the proof root's copies; the copies borrow the candidate's objects."""
+    require(type(path) is str and path.startswith("/"), "HOST_PRECONDITION", what + " must be an absolute Linux path: " + repr(path))
+    pure = PurePosixPath(path)
+    require(".." not in pure.parts, "HOST_PRECONDITION", what + " must not contain '..': " + path)
+    for home in homes:
+        require(pure != home and home not in pure.parents, "HOST_PRECONDITION",
+                "%s %s lies inside the user home %s; use a root-owned folder such as /srv/kin-ckpt/..." % (what, pure, home))
+    chain = []
+    for item in reversed((pure, *pure.parents)):
+        try:
+            info = lstat(str(item))
+        except OSError as error:
+            raise Refused("HOST_PRECONDITION", "%s: %s cannot be read: %s" % (what, item, error)) from None
+        require(not stat.S_ISLNK(info.st_mode), "HOST_PRECONDITION", "%s has a link on its path: %s" % (what, item))
+        require(info.st_uid == 0, "HOST_PRECONDITION", "%s is not on a root-owned path: %s is owned by uid %d" % (what, item, info.st_uid))
+        require(not info.st_mode & 0o022, "HOST_PRECONDITION",
+                "%s is not on a protected path: %s is writable by group or others (mode %s)" % (what, item, oct(info.st_mode & 0o7777)))
+        chain.append({"path": str(item), "uid": info.st_uid, "mode": oct(info.st_mode & 0o7777)})
+    return chain
+
+
+def host_preconditions(python, proof_root, candidate, *, platform=None, homes=None, lstat=os.lstat, run=subprocess.run):
+    """What `commands` checks before it writes proof.sh: a POSIX host, the proof root and the candidate on root-owned
+    chains outside every user home, and the --python interpreter with Playwright and pydicom."""
+    platform = os.name if platform is None else platform
+    require(platform == "posix", "HOST_PRECONDITION", "T16/T17 run on a native Linux host (this host is %s)" % platform)
+    homes = user_homes() if homes is None else [PurePosixPath(home) for home in homes]
+    paths = {what: root_owned_chain(str(value), what, homes=homes, lstat=lstat)
+             for what, value in (("--proof-root", proof_root), ("--candidate", candidate))}
+    return {"paths": paths, "python": python_precondition(python, cwd=str(candidate), run=run)}
+
+
 # ── source copies for the Linux proofs ──
 
 def mutate_body(text, qualified, replacement):
@@ -2482,11 +2563,13 @@ def main(argv=None):
     copy_parser.add_argument("--source", required=True)
     copy_parser.add_argument("--out", required=True)
     copy_parser.add_argument("--mutant", choices=sorted(MUTANT_SOURCES))
-    commands = sub.add_parser("commands")
+    commands = sub.add_parser("commands", description="Print proof.sh after checking the host preconditions (HOST_PRECONDITION "
+                              "otherwise, before any byte is written).")
     commands.add_argument("--registry", required=True)
-    commands.add_argument("--proof-root", required=True)
-    commands.add_argument("--candidate", required=True)
-    commands.add_argument("--python", default="python3")
+    commands.add_argument("--proof-root", required=True, help="absolute; it and every folder above it root-owned, writable by "
+                          "no group or other, outside every user home (e.g. /srv/kin-ckpt/proof-<stamp>)")
+    commands.add_argument("--candidate", required=True, help="the candidate checkout, on a root-owned chain like --proof-root")
+    commands.add_argument("--python", default="python3", help="the interpreter of every leaf; it must import playwright and pydicom")
     commands.add_argument("--from-unit")
     commands.add_argument("--attempt", type=int, default=1)
     index = sub.add_parser("index")
@@ -2531,8 +2614,12 @@ def main(argv=None):
         elif args.command == "commands":
             require(Path(args.registry).resolve() == (Path(args.proof_root) / "registry.json").resolve(), "REGISTRY_INVALID",
                     "the frozen registry lives at <proof-root>/registry.json")
-            sys.stdout.write(proof_commands(leaves(), proof_root=args.proof_root, candidate=args.candidate, python=args.python,
-                                            from_unit=args.from_unit, attempt=args.attempt))
+            # Before any byte of proof.sh: a host that cannot pass a leaf is refused here, not inside a gate attempt.
+            facts = host_preconditions(args.python, args.proof_root, args.candidate)
+            script = proof_commands(leaves(), proof_root=args.proof_root, candidate=args.candidate, python=args.python,
+                                    from_unit=args.from_unit, attempt=args.attempt)
+            print(json.dumps({"host_preconditions": facts}), file=sys.stderr)
+            sys.stdout.write(script)
         elif args.command == "index":
             result = leaf_index(leaves(), args.unit, args.proof_root, args.run_dir, args.attempt)
             write_index(args.proof_root, result)
