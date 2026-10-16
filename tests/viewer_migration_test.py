@@ -228,7 +228,9 @@ const entry=(n,prefix)=>({v:2,cid:prefix+String(n).padStart(12,'0'),field:'findi
  linkStateAtInsert:'current',headRevisionAtInsert:1,insertedText:TEXT,
  insertedAt:'2026-09-20T00:00:00.000Z',insertedBy:ACTOR});
 const many=(n,prefix)=>Array.from({length:n},(_,i)=>entry(i,prefix||'00000000-0000-4000-8000-'));
-const studyAccess={prepare:async()=>{},require:async()=>{},allowed:async()=>new Set()};
+// WORKLIST-SPLIT-UID: this synthetic study is one source resource, so the source observation passes through.
+const studyAccess={prepare:async()=>{},require:async()=>{},allowed:async()=>new Set(),
+ prepareSourceIdentity:async()=>{},assertUnsplitSource:()=>{}};
 const findings={readableFindings:async(_t,_c,uid,ids)=>ids.map(id=>({id,revision:1,hidden:false,
  sources:[{kind:'item',itemId:ITEM,revision:1,studyUid:uid}],
  links:[{itemId:ITEM,linkState:'current',headRevision:1,headHidden:false}]}))};
