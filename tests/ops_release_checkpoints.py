@@ -19,11 +19,18 @@ behaviour (AGENTS.md section 1-B, item 14).
 Docker and Compose commands are built and run only by the explicit adapter in tests/ops_deploy_host_container_test.py;
 this module coordinates through a backend object (a fake one in the pure tests). Live checkpoints are refused on
 Windows and Docker Desktop (UNSUPPORTED_HOST): v1 supports a native Linux synthetic host only.
+
+Round 6 (consult-checkpoints-r6-20261017): the Orthanc image's own start artifacts are a typed exception of the Orthanc
+role on its pinned image, judged against what that image regenerates (regenerated_descriptor, layer_verdicts) with the
+judgement kept and re-judged at every consumption (layer_valid); and the native smoke's body and cleanup bounds are
+real deadlines of every blocking call (Deadline, run_bounded, DeadlineRunner).
 """
 from __future__ import annotations
 
 import argparse
 import ast
+from contextlib import contextmanager
+import contextvars
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -36,10 +43,12 @@ import posixpath
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,13 +146,11 @@ BINDINGS = ("state", "result", "secrets", "compose_entry", "ledger", "lock", "co
 # The one declared link of a volume payload: PostgreSQL's tablespace link into the emr-access mount (exact contract).
 DECLARED_LINKS = {"pg": (re.compile(r"pg_tblspc/[0-9]{1,10}"), intro.TABLESPACE)}
 # Writable-layer paths a stopped container may differ in and that its image regenerates (pid/cache/log/tmp). Anything
-# else is persistent state outside the declared volumes and binds, which v1 refuses (spec section 3).
-# r5 (found by the native smoke against orthancteam/orthanc:24.12.0): that image's /docker-entrypoint.sh writes a random
-# /etc/hostid over its 'not-generated' placeholder at every container start, runs its configurator with bytecode caching
-# (/startup/__pycache__), and the configurator hard-links each enabled plugin's library from plugins-available into
-# /usr/share/orthanc/plugins; a restored container regenerates all three from the image and its environment.
+# else is persistent state outside the declared volumes and binds, which v1 refuses (spec section 3). r6 (CKPT5-01): the
+# Orthanc image's own start artifacts are no longer global prefixes here; they are the typed, image-bound exception of
+# `layer_verdicts` (the Orthanc role only, on its pinned image, judged against the image's own regeneration).
 TRANSIENT_PATHS = ("/tmp", "/run", "/var/run", "/var/tmp", "/var/cache/nginx", "/var/log/nginx", "/opt/keycloak/data/tmp",
-                   "/home/node/.npm", "/root/.npm", "/root/.cache", "/etc/hostid", "/startup/__pycache__", "/usr/share/orthanc/plugins")
+                   "/home/node/.npm", "/root/.npm", "/root/.cache")
 IDENTITY_FIELDS = ("tool_tree_sha256_at_checkpoint", "tool_tree_sha256_at_resume", "source_tree_sha256", "harness_tree_sha256",
                    "tool_files_actual_raw_sha256", "source_b0_manifest_sha256", "clone_b0_manifest_sha256",
                    "payload_manifest_sha256", "image_ids", "plan_sha256", "target_manifest_sha256", "phase_reached",
@@ -224,6 +231,251 @@ def utc(value):
 
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+# ── real deadlines of the native smoke (r6, consult-checkpoints-r6-20261017 ckpt5_02) ──
+# r5 compared elapsed times after the fact: the adapter's calls kept their own 300/900/3600 s caps and a cleanup remove
+# still received 300 s. A Deadline is one monotonic end shared by every blocking call made while it is active
+# (`deadline_scope`): each call gets min(its own cap, the time left), none starts once nothing is left, and a call cut by
+# the end has its client process group ended and collected, its partial output kept and the cut recorded as an event.
+# A client timeout never stops daemon-side work: what the daemon did or still does is unknown and stays the owner's
+# residue. Outside a scope (the T16 leaves, the pure tests) every call behaves exactly as before.
+REAP_SECONDS = 2.0   # the fixed control allowance to end and collect a cut client tree (recorded apart, never work time)
+_ACTIVE_DEADLINE = contextvars.ContextVar("checkpoint_deadline", default=None)
+
+
+class DeadlineExpired(Refused):
+    """A blocking call was cut by its deadline, or was not started because nothing was left (`event` is the raw)."""
+
+    def __init__(self, detail, event):
+        super().__init__("DEADLINE", detail)
+        self.event = event
+
+
+def command_head(args):
+    """A command's identity for a deadline raw: the product's own redaction (secret values and inline scripts hashed)."""
+    return intro.redact_argv([str(arg) for arg in args])[:8]
+
+
+def _output_fact(data):
+    if data is None:
+        return None
+    raw = data.encode("utf-8", "replace") if isinstance(data, str) else bytes(data)
+    return {"bytes": len(raw), "sha256": sha256(raw), "head": raw[:400].decode("utf-8", "replace")}
+
+
+class Deadline:
+    """One monotonic end (body or cleanup). `shorten` can only move the end earlier (the diagnostics' seam); nothing
+    lengthens or renews it. `events` are the cuts and refused starts; `journal` (a path) receives a row per call start."""
+
+    def __init__(self, seconds, *, label, journal=None):
+        self.label, self.seconds = label, float(seconds)
+        self.started = time.monotonic()
+        self.end = self.started + self.seconds
+        self.journal = Path(journal) if journal else None
+        self.events, self.calls, self.in_call, self.last_inventory = [], 0, False, None
+        self.watch = None   # a watchdog's re-arm, called when the end moves
+
+    def remaining(self):
+        return self.end - time.monotonic()
+
+    def elapsed(self):
+        return round(time.monotonic() - self.started, 3)
+
+    def shorten(self, seconds, *, why):
+        self.end = min(self.end, time.monotonic() + max(0.0, float(seconds)))
+        self.log({"event": "shortened", "remaining": round(self.remaining(), 3), "why": why})
+        if self.watch is not None:
+            self.watch()
+
+    def log(self, row):
+        if self.journal is not None:
+            with open(self.journal, "ab") as stream:
+                stream.write(canonical({"deadline": self.label, "t": self.elapsed(), **row}) + b"\n")
+
+    def record(self, kind, what, effective, **facts):
+        event = {"deadline": self.label, "kind": kind, "what": what, "effective_timeout": None if effective is None else round(effective, 3),
+                 "elapsed": self.elapsed(), "bound_s": self.seconds, "at_utc": now_utc().isoformat(), **facts}
+        self.events.append(event)
+        self.log({"event": kind, **{key: value for key, value in event.items() if key != "deadline"}})
+        return event
+
+    def timeout(self, cap, *, what):
+        """The effective timeout of one call: min(cap, the time left); none is started when nothing is left."""
+        left = self.remaining()
+        if left <= 0:
+            event = self.record("not-started", what, None, cap_s=cap)
+            raise DeadlineExpired("%s deadline (%s s) reached before %s" % (self.label, self.seconds, " ".join(map(str, what[:3]))), event)
+        return min(cap, left) if cap is not None else left
+
+    def check(self, what):
+        """A stage boundary or a synchronous step: refused once the end has passed (never a pass after the end)."""
+        self.timeout(None, what=[what])
+
+    def summary(self):
+        return {"label": self.label, "bound_s": self.seconds, "elapsed_s": self.elapsed(), "calls": self.calls, "events": list(self.events)}
+
+    def run(self, args, *, timeout, check=False, capture_output=False, input=None, **popen):
+        """subprocess.run on the bounded path: its own process group (POSIX), cut at the effective timeout, the tree
+        ended and collected within REAP_SECONDS, partial output kept in the DEADLINE event."""
+        what = command_head(args)
+        effective = self.timeout(timeout, what=what)
+        if capture_output:
+            popen.setdefault("stdout", subprocess.PIPE)
+            popen.setdefault("stderr", subprocess.PIPE)
+        if input is not None:
+            popen["stdin"] = subprocess.PIPE
+        if os.name == "posix":
+            popen["start_new_session"] = True
+        self.calls += 1
+        self.log({"event": "start", "what": what, "timeout": round(effective, 3), "remaining": round(self.remaining(), 3)})
+        started = time.monotonic()
+        process = subprocess.Popen(args, **popen)
+        self.in_call = True
+        try:
+            try:
+                out, err = process.communicate(input, timeout=effective)
+            except subprocess.TimeoutExpired as expired:
+                tree = end_tree(process)
+                out, err, collected = reap(process)
+                partial = {"stdout": _output_fact(out if out is not None else expired.output),
+                           "stderr": _output_fact(err if err is not None else expired.stderr)}
+                event = self.record("cut", what, effective, call_s=round(time.monotonic() - started, 3), partial=partial,
+                                    client_tree={**tree, "collected": collected},
+                                    daemon_side="unknown: a client timeout never stops daemon-side work")
+                raise DeadlineExpired("%s deadline (%s s) cut %s after %.3f s" % (self.label, self.seconds, " ".join(map(str, what[:3])),
+                                                                                   time.monotonic() - started), event) from None
+            except BaseException:
+                end_tree(process)
+                reap(process)
+                raise
+        finally:
+            self.in_call = False
+        completed = subprocess.CompletedProcess(args, process.returncode, out, err)
+        if check and completed.returncode:
+            raise subprocess.CalledProcessError(completed.returncode, args, output=out, stderr=err)
+        return completed
+
+
+def end_tree(process):
+    """End a bounded call's client tree: its whole process group on POSIX (the call was started in its own session),
+    the process itself elsewhere (the pure tests' Windows host). Returns what was done and what is left."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    return {"ended": "process group" if os.name == "posix" else "process", "group_left": group_left(process.pid)}
+
+
+def group_left(pgid):
+    """Live processes of a process group (zombies awaiting their reaper are not live), or None when not observable."""
+    proc = Path("/proc")
+    if os.name != "posix" or not proc.is_dir():
+        return None
+    count = 0
+    for entry in proc.iterdir():
+        if entry.name.isdigit():
+            try:
+                fields = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            if fields[0] != "Z" and int(fields[2]) == pgid:
+                count += 1
+    return count
+
+
+def reap(process):
+    """Collect a cut process and drain its pipes within REAP_SECONDS. Returns (stdout, stderr, collected)."""
+    try:
+        out, err = process.communicate(timeout=REAP_SECONDS)
+        return out, err, True
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        end_tree(process)
+        for pipe in (process.stdout, process.stderr, process.stdin):
+            try:
+                if pipe:
+                    pipe.close()
+            except OSError:
+                pass
+        return None, None, process.poll() is not None
+
+
+def active_deadline():
+    return _ACTIVE_DEADLINE.get()
+
+
+@contextmanager
+def deadline_scope(deadline):
+    """Every bounded call made inside shares `deadline` (no new adapter, stack or observation gets a fresh one)."""
+    token = _ACTIVE_DEADLINE.set(deadline)
+    try:
+        yield deadline
+    finally:
+        _ACTIVE_DEADLINE.reset(token)
+
+
+def run_bounded(args, *, timeout, plain=None, **kwargs):
+    """The one bounded subprocess path of the checkpoint harness: under an active deadline Deadline.run, otherwise
+    exactly `plain` (the caller's subprocess.run) as before."""
+    deadline = active_deadline()
+    if deadline is None:
+        return (plain or subprocess.run)(args, timeout=timeout, **kwargs)
+    return deadline.run(args, timeout=timeout, **kwargs)
+
+
+def pause(seconds):
+    """A poll's sleep inside the active deadline: never past its end, refused once nothing is left."""
+    deadline = active_deadline()
+    if deadline is not None:
+        seconds = deadline.timeout(seconds, what=["sleep", str(seconds)])
+    time.sleep(max(0.0, seconds))
+
+
+def note_inventory(inventory):
+    """The last daemon inventory observed under the active deadline: what a cut cleanup reports as last known."""
+    deadline = active_deadline()
+    if deadline is not None:
+        deadline.last_inventory = {kind: [{"id": item.get("id"), "name": item.get("name"), "labels": item.get("labels") or {}}
+                                          for item in inventory.get(kind) or []] for kind in ("containers", "volumes", "networks")}
+    return inventory
+
+
+class DeadlineRunner:
+    """The product's Runner (HostOps, bound_ops) behind the active deadline: every call gets min(its timeout, the time
+    left) and none starts once nothing is left; the product's own Unknown/TimeoutExpired semantics, worker registration and
+    command raw are kept (the error is re-raised as it is, and a cut is recorded as a deadline event). Outside a scope it
+    forwards unchanged."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __call__(self, args, *, timeout=60, **kwargs):
+        deadline = active_deadline()
+        if deadline is None:
+            return self.inner(args, timeout=timeout, **kwargs)
+        what = command_head(args)
+        effective = deadline.timeout(timeout, what=what)
+        deadline.calls += 1
+        deadline.log({"event": "start", "what": what, "timeout": round(effective, 3), "remaining": round(deadline.remaining(), 3),
+                      "transport": "product Runner"})
+        started = time.monotonic()
+        deadline.in_call = True
+        try:
+            return self.inner(args, timeout=effective, **kwargs)
+        except (intro.Unknown, subprocess.TimeoutExpired) as error:
+            if deadline.remaining() <= 0:
+                deadline.record("cut", what, effective, call_s=round(time.monotonic() - started, 3), transport="product Runner",
+                                outcome="UNKNOWN" if isinstance(error, intro.Unknown) else "timeout",
+                                daemon_side="unknown: a client timeout never stops daemon-side work")
+            raise
+        finally:
+            deadline.in_call = False
 
 
 # ── boundary admission (T01) ──
@@ -320,13 +572,16 @@ def original_records(records_dir, *, entry_root, lock_path):
 
 
 def observation_request(checkpoint_id, *, purpose, plan_sha256, state_raw, leaf=None, parent_manifest_sha256=None, source=None,
-                        nonce=None):
+                        nonce=None, regenerated_sha256=None):
     """The observation's own canonical request: checkpoint and boundary, capture or restore, the leaf, the plan, the closed
     phase's request and result (from the state's last history row), the SHA-256 of the boundary state bytes S, the parent
-    manifest (a restore) and the executing source identity, with a nonce. Its digest is never a phase request's."""
+    manifest (a restore), the executing source identity and (r6, a capture) the SHA-256 of the regenerated-artifact
+    descriptor kept beside it, with a nonce. Its digest is never a phase request's."""
     require(checkpoint_id in CHECKPOINTS and CHECKPOINTS[checkpoint_id]["volumes"], "OBSERVATION_REFUSED", "no volume checkpoint")
     require(purpose in OBSERVATION_PURPOSES, "OBSERVATION_REFUSED", "purpose " + str(purpose))
     require(type(state_raw) is bytes, "OBSERVATION_REFUSED", "the boundary state bytes")
+    require((purpose == "capture") is (regenerated_sha256 is not None), "OBSERVATION_REFUSED",
+            "a capture observation binds its regenerated-artifact descriptor, a restore none")
     try:
         state = json.loads(state_raw)
     except ValueError:
@@ -336,7 +591,7 @@ def observation_request(checkpoint_id, *, purpose, plan_sha256, state_raw, leaf=
             "boundary": CHECKPOINTS[checkpoint_id]["boundary"], "purpose": purpose, "plan_sha256": plan_sha256,
             "state_sha256": sha256(state_raw), "phase_request_sha256": last.get("request_sha256"),
             "result_sha256": last.get("result_sha256"), "leaf": leaf, "parent_manifest_sha256": parent_manifest_sha256,
-            "source": source, "nonce": nonce or uuid.uuid4().hex}
+            "source": source, "regenerated_sha256": regenerated_sha256, "nonce": nonce or uuid.uuid4().hex}
 
 
 def observation_context(*, plan, plan_sha256, target, repository, state_raw, request_sha256, ops, records, host_key, tool):
@@ -441,6 +696,15 @@ def observation_valid(files, *, checkpoint_id, purpose, plan_sha256=None, state_
         fail("the observed state is not the bound state")
     if parent_manifest_sha256 is not None and request.get("parent_manifest_sha256") != parent_manifest_sha256:
         fail("the observation names another parent")
+    # r6: a capture observation keeps the regenerated-artifact descriptor its request names (CKPT5-01); a restore none.
+    if purpose == "capture":
+        descriptor = document(REGENERATED_FILE)
+        if (type(descriptor) is not dict or files[REGENERATED_FILE] != canonical(descriptor) + b"\n"
+                or sha256(files[REGENERATED_FILE]) != request.get("regenerated_sha256")
+                or descriptor.get("kind") != REGENERATED_KIND or descriptor.get("role") != REGENERATED_ROLE):
+            fail("the regenerated-artifact descriptor is not the one the request names")
+    elif REGENERATED_FILE in files or request.get("regenerated_sha256") is not None:
+        fail("a restore observation binds no regenerated-artifact descriptor")
     original = summary.get("original") or {}
     if type(original.get("before")) is not dict or original.get("before") != original.get("after") or not original["before"]:
         fail("the original records changed during the observation")
@@ -471,28 +735,34 @@ def observation_valid(files, *, checkpoint_id, purpose, plan_sha256=None, state_
 
 def observe_boundary(checkpoint_id, *, purpose, records_dir, secrets_dir, entry_root, lock_path, plan, plan_sha256, target,
                      repository, host_key, tool, make_ops, snapshot, state_raw=None, leaf=None, parent_manifest_sha256=None,
-                     source=None, probe=None):
+                     source=None, probe=None, regenerated=None):
     """Observe a volume boundary in an observation-only context and judge it by the product's boundary contract over the
     original S. `make_ops(records)` returns the HostOps writing into the observation's Records with the stack's own
     ComposeEntry root (checked here); `snapshot(ops, context)` runs HostOps.snapshot; `probe(ops, context, snapshot)` may
-    run further commands in the same context (the native smoke's A07). The folder keeps the request, the durable
-    observation state, the snapshot, its command record and logs, a journal and, last, observation.json - also when the
-    observation fails. Returns {"folder", "result_sha256", "summary", "snapshot"}; any error, UNKNOWN, unsettled worker,
-    incomplete fact or changed original byte is a Refused (NOT_A_BOUNDARY, OBSERVATION_UNSETTLED, ORIGINAL_CHANGED, ...)."""
+    run further commands in the same context (the native smoke's A07). A capture binds `regenerated` (r6: the descriptor
+    `regenerated_descriptor` derived from the pinned Orthanc image) by its SHA-256 in the request and keeps it as
+    regenerated-artifacts.json. The folder keeps the request, the durable observation state, the snapshot, its command
+    record and logs, a journal and, last, observation.json - also when the observation fails. Returns {"folder",
+    "result_sha256", "summary", "snapshot", "regenerated"}; any error, UNKNOWN, unsettled worker, incomplete fact or changed
+    original byte is a Refused (NOT_A_BOUNDARY, OBSERVATION_UNSETTLED, ORIGINAL_CHANGED, ...)."""
     started = now_utc().isoformat()
     records_dir = Path(records_dir)
     current = (records_dir / "state.json").read_bytes()
     state_raw = current if state_raw is None else state_raw
     require(state_raw == current, "ORIGINAL_CHANGED", "the boundary state changed before the observation")
     before = original_records(records_dir, entry_root=entry_root, lock_path=lock_path)
+    descriptor_raw = canonical(regenerated) + b"\n" if regenerated is not None else None
     request = observation_request(checkpoint_id, purpose=purpose, plan_sha256=plan_sha256, state_raw=state_raw, leaf=leaf,
-                                  parent_manifest_sha256=parent_manifest_sha256, source=source)
+                                  parent_manifest_sha256=parent_manifest_sha256, source=source,
+                                  regenerated_sha256=sha256(descriptor_raw) if descriptor_raw is not None else None)
     digest = sha256(canonical(request))
     folder = records_dir / OBSERVATION_DIR / (checkpoint_id + "-" + purpose + "-" + digest[:16])
     folder.parent.mkdir(mode=0o700, exist_ok=True)
     folder.mkdir(mode=0o700)
     sink = intro.Records(folder, secrets=secrets_dir)
     sink.write(folder / "request.json", canonical(request) + b"\n")
+    if descriptor_raw is not None:
+        sink.write(folder / REGENERATED_FILE, descriptor_raw)
     sink.begin(OBSERVATION_PHASE, digest)
     sink.journal({"event": "observation-start", "checkpoint": checkpoint_id, "purpose": purpose, "request_sha256": digest})
     observed, context, outcome, code = None, None, "ERROR", None
@@ -543,13 +813,401 @@ def observe_boundary(checkpoint_id, *, purpose, records_dir, secrets_dir, entry_
                       "observation " + folder.name + ": " + str(code))
     observation_valid(folder_files(folder), checkpoint_id=checkpoint_id, purpose=purpose, plan_sha256=plan_sha256,
                       state_sha256=sha256(state_raw), parent_manifest_sha256=parent_manifest_sha256)
-    return {"folder": folder, "result_sha256": result_sha, "summary": summary, "snapshot": observed}
+    return {"folder": folder, "result_sha256": result_sha, "summary": summary, "snapshot": observed, "regenerated": regenerated}
 
 
 def observation_binding(fixture_root, observation):
     """The bundle binding of a capture observation: its observation.json, relative to the fixture root."""
     path = Path(observation["folder"]) / OBSERVATION_RESULT
     return {"path": path.relative_to(fixture_root).as_posix(), "sha256": observation["result_sha256"]}
+
+
+# ── the Orthanc image's regenerated artifacts (r6, consult-checkpoints-r6-20261017 ckpt5_01) ──
+# r5 accepted /etc/hostid, /startup/__pycache__ and /usr/share/orthanc/plugins as global prefixes for every role and
+# image, so any file under them was sealed as "regenerated" without being in the bundle (CKPT5-01). The image's own
+# sources (orthanc-builder 24.12.0: docker-entrypoint.sh writes a random hex hostid over the 'not-generated' placeholder
+# unless FORCE_HOST_ID is set or GENERATE_HOST_ID_IF_MISSING is not true, then runs /startup/generateConfiguration.py,
+# whose configurator links or copies each enabled plugin's library from plugins-available) justify exactly five typed
+# entries, and only for the Orthanc role's container on the pinned Orthanc image: C /etc/hostid (a regular file of 8
+# lowercase hex digits and LF with the placeholder's mode/uid/gid), A /startup/__pycache__ and its direct regular .pyc
+# children equal to what the pristine image's own start generates, A /usr/share/orthanc/plugins/<name>.so equal to the
+# image's plugins-available library of an enabled plugin, and the C directories above exactly those children with their
+# pristine kind/mode/uid/gid. What the image regenerates is learnt from the image itself, never from the running
+# container's diff: a pristine owned helper container of the pinned image ID reads the image's inventory, runs the
+# image's own entrypoint once with the container's startup input (`--version` as Orthanc's argument, so it ends after
+# the generation) and reads what it generated (`regenerated_descriptor`, cached per image ID and startup-input hash).
+# The descriptor is kept in the capture observation (regenerated-artifacts.json, bound by the observation request);
+# the post-stop judgement of every role (docker diff, lstat facts of the writable layer, a verdict per change) is kept
+# beside it (layer-<request16>/writable-layer.json) and bound by the manifest (`layer`); every consumer re-judges it.
+REGENERATED_ROLE = "orthanc"
+REGENERATED_FILE = "regenerated-artifacts.json"
+REGENERATED_KIND = "release-tools-checkpoint-regenerated-artifacts"
+LAYER_FILE = "writable-layer.json"
+LAYER_KIND = "release-tools-checkpoint-writable-layer"
+LAYER_BINDING = re.compile(r"([a-z]+)/records/" + OBSERVATION_DIR + r"/layer-([0-9a-f]{16})/" + re.escape(LAYER_FILE))
+HOSTID, PYCACHE = "/etc/hostid", "/startup/__pycache__"
+PLUGINS, PLUGINS_AVAILABLE = "/usr/share/orthanc/plugins", "/usr/share/orthanc/plugins-available"
+REGENERATED_ANCESTORS = ("/etc", "/startup", "/usr", "/usr/share", "/usr/share/orthanc", PLUGINS)
+# What the image's configurator reads besides its environment (generateConfiguration.py: /etc/orthanc/*.json,
+# /run/secrets/*): mounts there are part of the startup input and are given to the probe read-only.
+CONFIG_INPUTS = ("/etc/orthanc", "/run/secrets")
+META = ("type", "mode", "uid", "gid")
+CONTENT = META + ("size", "sha256")
+REGENERATED_CACHE, REGENERATED_INVENTORY = {}, {}
+# Run inside the pinned image by its own python3 with -B (the reader writes no bytecode): lstat facts and SHA-256 of
+# the paths the contract names. `pre` adds the immutable inventory (entrypoint, /startup sources, plugins-available,
+# the ancestors, the interpreter's cache tag).
+REGENERATED_PROBE = r'''
+import hashlib, json, os, re, stat, sys
+def facts(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return {"type": "absent"}
+    mode = info.st_mode
+    kind = "dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "link" if stat.S_ISLNK(mode) else "other"
+    out = {"type": kind, "mode": stat.S_IMODE(mode), "uid": info.st_uid, "gid": info.st_gid}
+    if kind == "file":
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            head = stream.read(64)
+            digest.update(head)
+            for block in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(block)
+        text = "other"
+        if info.st_size <= 64:
+            text = "placeholder" if head == b"not-generated\n" else "hex8-lf" if re.fullmatch(rb"[0-9a-f]{8}\n", head) else "other"
+        out.update(size=info.st_size, sha256=digest.hexdigest(), inode=info.st_ino, links=info.st_nlink, text=text)
+    return out
+def listing(folder):
+    if os.path.islink(folder) or not os.path.isdir(folder):
+        return None
+    return {name: facts(os.path.join(folder, name)) for name in sorted(os.listdir(folder))}
+stage, entrypoint = sys.argv[1], sys.argv[2]
+plugins, available = "/usr/share/orthanc/plugins", "/usr/share/orthanc/plugins-available"
+out = {"stage": stage, "hostid": facts("/etc/hostid"), "pycache_dir": facts("/startup/__pycache__"),
+       "pycache": listing("/startup/__pycache__"), "plugins_dir": facts(plugins), "plugins": listing(plugins)}
+if stage == "pre":
+    out.update(python={"cache_tag": sys.implementation.cache_tag, "optimize": sys.flags.optimize, "version": sys.version.split()[0],
+                       "no_bytecode": bool(os.environ.get("PYTHONDONTWRITEBYTECODE"))},
+               entrypoint=facts(entrypoint), startup={k: v for k, v in (listing("/startup") or {}).items() if k != "__pycache__"},
+               available=listing(available),
+               ancestors={path: facts(path) for path in ("/etc", "/startup", "/usr", "/usr/share", "/usr/share/orthanc", plugins)})
+print("KIN_REGENERATED " + json.dumps(out, sort_keys=True), flush=True)
+'''
+# The probe container's command: the inventory, the image's own entrypoint once (its exec of Orthanc ends at once with
+# --version, after the hostid and the configurator ran), the generated facts.
+REGENERATED_SHELL = ('python3 -B -c "$1" pre "$2" || exit 97; "$2" --version >/dev/null 2>&1; echo "KIN_REGENERATED_ENTRY $?"; '
+                     'python3 -B -c "$1" post "$2"')
+
+
+def pinned_images(plan, state):
+    """The image IDs the boundary's ComposeEntry generation pins (the side its entry was published from)."""
+    state = state or {}
+    side = "release" if state.get("entry_checkout", state.get("checkout")) == "target" else "previous"
+    return dict(plan[side]["images"])
+
+
+def startup_input(config, image, digest):
+    """The startup input of the Orthanc container that decides what its image regenerates: the image's own entrypoint
+    and command (anything else is a custom startup), the environment (its names and SHA-256 only), the hostid
+    conditions of the entrypoint, the configurator's mounted inputs. Returns (facts, reasons, hostid reasons)."""
+    env = dict(entry.split("=", 1) for entry in config.get("env") or [] if "=" in entry)
+    entry, cmd, user = config.get("entrypoint"), config.get("cmd"), config.get("user") or ""
+    reasons, hostid_reasons = [], []
+    if (entry != image.get("entrypoint") or cmd != image.get("cmd") or type(entry) is not list or len(entry) != 1
+            or not str(entry[0]).startswith("/")):
+        reasons.append("the container does not start with the image's own entrypoint and command")
+    if env.get("BEFORE_ORTHANC_STARTUP_SCRIPT"):
+        reasons.append("a custom startup script (BEFORE_ORTHANC_STARTUP_SCRIPT)")
+    if any("\n" in item for item in config.get("env") or []):
+        reasons.append("an environment value with a line break cannot be given to the probe")
+    generate = env.get("GENERATE_HOST_ID_IF_MISSING")
+    condition = "default" if generate in (None, "") else "true" if generate == "true" else "other"
+    if env.get("FORCE_HOST_ID"):
+        hostid_reasons.append("FORCE_HOST_ID is set (not the default hostid generation)")
+    if condition == "other":
+        hostid_reasons.append("hostid generation is disabled (GENERATE_HOST_ID_IF_MISSING)")
+    mounts = []
+    for mount in config.get("mounts") or []:
+        destination = str(mount.get("destination") or "")
+        if not any(destination == prefix or destination.startswith(prefix + "/") for prefix in CONFIG_INPUTS):
+            continue
+        source = str(mount.get("name") or mount.get("source") or "")
+        if mount.get("type") not in ("bind", "volume") or "," in source or "," in destination or not source:
+            reasons.append("a configurator input mount the probe cannot reproduce: " + destination)
+            continue
+        mounts.append({"destination": destination, "type": mount["type"], "source": source, "content_sha256": digest(mount)})
+    mounts.sort(key=lambda item: item["destination"])
+    payload = {"image": config.get("image"), "entrypoint": entry, "cmd": cmd, "user": user, "env": sorted(config.get("env") or []),
+               "config_mounts": mounts}
+    facts = {"entrypoint": entry, "cmd": cmd, "user": user, "env_names": sorted(env), "env_sha256": sha256(canonical(payload["env"])),
+             "conditions": {"force_host_id": bool(env.get("FORCE_HOST_ID")), "generate_host_id": condition,
+                            "before_startup_script": bool(env.get("BEFORE_ORTHANC_STARTUP_SCRIPT"))},
+             "config_mounts": mounts, "input_sha256": sha256(canonical(payload))}
+    return facts, reasons, hostid_reasons
+
+
+def _comparable(fact):
+    return {key: value for key, value in (fact or {}).items() if key not in ("inode", "links")}
+
+
+def descriptor_from_probe(probe):
+    """The image inventory (`pre`) and the generated set (`post`) of one pristine probe, and why it cannot serve."""
+    pre, post, reasons = probe.get("pre"), probe.get("post"), []
+    if type(pre) is not dict or type(post) is not dict or type(pre.get("python")) is not dict:
+        return None, None, ["the probe answered no complete inventory"]
+    python = pre["python"]
+    tag = python.get("cache_tag")
+    available_raw = pre.get("available") or {}
+    inventory = {"entrypoint": _comparable(pre.get("entrypoint")), "startup": {k: _comparable(v) for k, v in (pre.get("startup") or {}).items()},
+                 "python": python, "hostid": _comparable(pre.get("hostid")),
+                 "available": {k: _comparable(v) for k, v in available_raw.items()},
+                 "plugins": {k: _comparable(v) for k, v in (pre.get("plugins") or {}).items()},
+                 "pycache": _comparable(pre.get("pycache_dir")), "ancestors": {k: _comparable(v) for k, v in (pre.get("ancestors") or {}).items()}}
+    if probe.get("entry_exit") != 0:
+        reasons.append("the image's own start did not complete in the probe (exit %s)" % probe.get("entry_exit"))
+    if not tag or inventory["pycache"].get("type") != "absent":
+        reasons.append("no cache tag of the image's interpreter, or a cache folder already in the image")
+    pycache = {}
+    for name, fact in sorted((post.get("pycache") or {}).items()):
+        stem, _, rest = name.partition(".")
+        if fact.get("type") != "file" or rest != str(tag) + ".pyc" or (stem + ".py") not in inventory["startup"]:
+            reasons.append("an unexpected generated cache file: " + name)
+            continue
+        pycache[name] = _comparable(fact)
+    plugins = {}
+    for name, fact in sorted((post.get("plugins") or {}).items()):
+        if name in inventory["plugins"]:
+            continue
+        origin = available_raw.get(name) or {}
+        if (fact.get("type") != "file" or not name.endswith(".so") or origin.get("type") != "file"
+                or fact.get("sha256") != origin.get("sha256") or fact.get("size") != origin.get("size")):
+            reasons.append("an unexpected generated plugin library: " + name)
+            continue
+        plugins[name] = {**_comparable(fact), "link": "hard link" if fact.get("inode") == origin.get("inode") else "copy"}
+    generated = {"hostid": _comparable(post.get("hostid")), "pycache_dir": _comparable(post.get("pycache_dir")), "pycache": pycache,
+                 "plugins": plugins, "entry_exit": probe.get("entry_exit")}
+    return inventory, generated, reasons
+
+
+def regenerated_descriptor(backend, name, *, pinned, token):
+    """The regenerated-artifact descriptor of one stack's Orthanc container (`name`) on its pinned image ID: never built
+    from that container's own diff. An absent container, another image, a custom startup or an incomplete probe gives a
+    descriptor that applies to nothing (`applicable` false, with its reasons)."""
+    descriptor = {"schema": SCHEMA, "kind": REGENERATED_KIND, "role": REGENERATED_ROLE, "container_name": name, "pinned_image": pinned,
+                  "container_id": None, "actual_image": None, "applicable": False, "reasons": [], "hostid_regenerated": False,
+                  "hostid_reasons": [], "startup": None, "image": None, "generated": None, "probe": None}
+    config = backend.container_config(name)
+    if config is None:
+        return {**descriptor, "reasons": ["no container of the role"]}
+    descriptor.update(container_id=config["id"], actual_image=config["image"])
+    if config["image"] != pinned:
+        return {**descriptor, "reasons": ["the container's image is not the pinned image"]}
+    image = backend.image_config(pinned)
+    startup, reasons, hostid_reasons = startup_input(config, image, backend.config_input_digest)
+    descriptor["startup"] = startup
+    if reasons:
+        return {**descriptor, "reasons": reasons, "hostid_reasons": hostid_reasons}
+    key = (pinned, startup["input_sha256"])
+    cached = REGENERATED_CACHE.get(key)
+    if cached is None:
+        probe = backend.probe_regenerated(pinned, config=config, entrypoint=image["entrypoint"][0], mounts=startup["config_mounts"],
+                                          token=token)
+        inventory, generated, probe_reasons = descriptor_from_probe(probe)
+        if inventory is not None and REGENERATED_INVENTORY.get(pinned, inventory) != inventory:
+            probe_reasons.append("the image inventory differs from the first probe of this image ID")
+        if (probe.get("helper") or {}).get("removed") is not True:
+            probe_reasons.append("the probe helper was not observed removed")
+        cached = {"image": inventory, "generated": generated, "reasons": probe_reasons,
+                  "probe": {"helper": probe.get("helper"), "entry_exit": probe.get("entry_exit"), "observed_utc": now_utc().isoformat(),
+                            "image_id": pinned, "startup_input_sha256": startup["input_sha256"]}}
+        if not probe_reasons:
+            REGENERATED_CACHE[key] = cached
+            REGENERATED_INVENTORY.setdefault(pinned, inventory)
+    else:
+        cached = {**cached, "probe": {**cached["probe"], "reused": True}}
+    reasons = list(cached["reasons"])
+    if not reasons:
+        pristine, generated = cached["image"]["hostid"], cached["generated"]["hostid"]
+        if pristine.get("type") != "file" or pristine.get("text") != "placeholder":
+            hostid_reasons.append("the image has no 'not-generated' hostid placeholder")
+        elif generated.get("text") != "hex8-lf" or any(generated.get(key) != pristine.get(key) for key in META):
+            hostid_reasons.append("the image's own start did not regenerate the hostid in place")
+    return {**descriptor, "applicable": not reasons, "reasons": reasons, "hostid_regenerated": not reasons and not hostid_reasons,
+            "hostid_reasons": hostid_reasons, "image": cached["image"], "generated": cached["generated"], "probe": cached["probe"]}
+
+
+def regenerated_applicable(role, image, descriptor):
+    """The typed exception is the Orthanc role's alone, on the pinned Orthanc image its descriptor was derived from."""
+    return (role == REGENERATED_ROLE and type(descriptor) is dict and descriptor.get("applicable") is True
+            and image == descriptor.get("pinned_image") == descriptor.get("actual_image"))
+
+
+def _same(fact, expected, keys=META):
+    return (type(fact) is dict and type(expected) is dict and fact.get("type") not in (None, "absent")
+            and all(fact.get(key) == expected.get(key) for key in keys))
+
+
+def regenerated_entry(kind, path, descriptor, fact):
+    """The typed entry one docker-diff change is under the contract, or None (refused)."""
+    image, generated, fact = descriptor.get("image") or {}, descriptor.get("generated") or {}, fact or {}
+    parent, _, name = path.rpartition("/")
+    if path == HOSTID:
+        pristine = image.get("hostid") or {}
+        return "hostid" if (kind == "C" and descriptor.get("hostid_regenerated") is True and pristine.get("text") == "placeholder"
+                            and fact.get("type") == "file" and fact.get("text") == "hex8-lf" and _same(fact, pristine)) else None
+    if path == PYCACHE:
+        return "pycache" if kind == "A" and fact.get("type") == "dir" and _same(fact, generated.get("pycache_dir")) else None
+    if parent == PYCACHE:
+        expected = (generated.get("pycache") or {}).get(name)
+        return "pyc" if kind == "A" and fact.get("type") == "file" and _same(fact, expected, CONTENT) else None
+    if parent == PLUGINS:
+        expected = (generated.get("plugins") or {}).get(name)
+        origin = (image.get("available") or {}).get(name)
+        listed = expected is not None and origin is not None
+        content = listed and fact.get("sha256") == expected.get("sha256") == origin.get("sha256") and fact.get("size") == origin.get("size")
+        return "plugin" if kind == "A" and fact.get("type") == "file" and listed and content and _same(fact, expected) else None
+    return None
+
+
+def regenerated_candidates(changes):
+    """The changed paths whose writable-layer facts the typed entries need."""
+    out = []
+    for change in changes:
+        path = change.partition(" ")[2].strip()
+        if path in (HOSTID, PYCACHE, *REGENERATED_ANCESTORS) or path.rpartition("/")[0] in (PYCACHE, PLUGINS):
+            out.append(path)
+    return sorted(set(out))
+
+
+def layer_verdicts(role, changes, *, mounts, image, container_id, descriptor, facts):
+    """One verdict per docker-diff change of a stopped container: transient-or-mount (writable_layer_allowed), a typed
+    regenerated entry, a regenerated entry's exact ancestor, or refused. The Orthanc container judged must be the one
+    the descriptor observed."""
+    applicable = regenerated_applicable(role, image, descriptor) and (role != REGENERATED_ROLE or container_id == descriptor.get("container_id"))
+    facts, rows, approved = facts or {}, [], []
+    for change in changes:
+        kind, _, path = change.partition(" ")
+        path = path.strip()
+        verdict = None
+        if writable_layer_allowed(change, mounts):
+            verdict = "transient-or-mount"
+        elif applicable:
+            entry = regenerated_entry(kind, path, descriptor, facts.get(path))
+            if entry:
+                verdict = "regenerated:" + entry
+                approved.append(path)
+        rows.append([change, verdict])
+    for row in rows:
+        kind, _, path = row[0].partition(" ")
+        path = path.strip()
+        if row[1] is None and applicable and kind == "C" and path in REGENERATED_ANCESTORS and any(child.startswith(path + "/") for child in approved):
+            pristine = ((descriptor.get("image") or {}).get("ancestors") or {}).get(path) or {}
+            fact = facts.get(path) or {}
+            if fact.get("type") == "dir" and pristine.get("type") == "dir" and _same(fact, pristine):
+                row[1] = "regenerated:ancestor"
+    return [{"change": change, "verdict": verdict or "refused"} for change, verdict in rows]
+
+
+def bound_descriptor(fixture_root, bindings):
+    """The capture observation a volume capture binds and the regenerated-artifact descriptor its request names, read
+    back from the fixture tree (the judgement uses exactly the bound bytes). Returns (summary, descriptor, raw)."""
+    binding = bindings.get("observation") or {}
+    require(OBSERVATION_BINDING.fullmatch(str(binding.get("path"))) is not None, "BUNDLE_INVALID",
+            "a volume checkpoint binds its capture observation")
+    path = Path(fixture_root) / binding["path"]
+    raw = path.read_bytes()
+    require(sha256(raw) == binding.get("sha256"), "BUNDLE_INVALID", "the capture observation changed after it was bound")
+    summary = json.loads(raw)
+    request = json.loads((path.parent / "request.json").read_bytes())
+    descriptor_raw = (path.parent / REGENERATED_FILE).read_bytes()
+    require(sha256(descriptor_raw) == request.get("regenerated_sha256") and sha256(canonical(request)) == summary.get("request_sha256"),
+            "BUNDLE_INVALID", "the regenerated-artifact descriptor is not the one the capture observation names")
+    return summary, json.loads(descriptor_raw), descriptor_raw
+
+
+def judge_layer(backend, inventory, names, *, descriptor):
+    """The post-stop judgement of every role's writable layer (all roles judged; an absent container is recorded)."""
+    roles = {}
+    for role in intro.ROLES:
+        container = next((item for item in inventory["containers"] if item["name"] == names[role]), None)
+        if container is None:
+            roles[role] = {"absent": True, "container_name": names[role]}
+            continue
+        mounts = sorted({m.get("destination") for m in container.get("mounts") or [] if m.get("destination")})
+        changes = backend.writable_changes(names[role])
+        image, facts, observable = container.get("image"), {}, True
+        if regenerated_applicable(role, image, descriptor):
+            wanted = regenerated_candidates(changes)
+            if wanted:
+                facts = backend.layer_facts(names[role], wanted)
+                observable = facts is not None
+                facts = facts or {}
+        verdicts = layer_verdicts(role, changes, mounts=mounts, image=image, container_id=container.get("id"), descriptor=descriptor, facts=facts)
+        roles[role] = {"absent": False, "container_id": container.get("id"), "container_name": names[role], "image": image, "mounts": mounts,
+                       "changes": changes, "facts": facts, "layer_observable": observable, "verdicts": verdicts}
+    return roles
+
+
+def write_layer(fixture_root, bindings, roles, *, checkpoint_id, summary, descriptor_raw):
+    """writable-layer.json beside the capture observation (a new folder; the finalised observation is never appended
+    to). Returns (binding, refused changes)."""
+    refused = sorted(role + ": " + row["change"] for role, item in roles.items() for row in item.get("verdicts") or []
+                     if row["verdict"] == "refused")
+    record = {"schema": SCHEMA, "kind": LAYER_KIND, "checkpoint": checkpoint_id,
+              "observation": {"path": bindings["observation"]["path"], "sha256": bindings["observation"]["sha256"],
+                              "request_sha256": summary["request_sha256"]},
+              "descriptor_sha256": sha256(descriptor_raw), "roles": roles, "outcome": "REFUSED" if refused else "ACCEPTED",
+              "refused": refused, "judged_utc": now_utc().isoformat()}
+    label_records = bindings["observation"]["path"].split("/" + OBSERVATION_DIR + "/", 1)[0]
+    rel = label_records + "/" + OBSERVATION_DIR + "/layer-" + summary["request_sha256"][:16] + "/" + LAYER_FILE
+    path = Path(fixture_root) / rel
+    path.parent.mkdir(mode=0o700)
+    raw = canonical(record) + b"\n"
+    with open(path, "xb") as out:
+        out.write(raw)
+    return {"path": rel, "sha256": sha256(raw)}, refused
+
+
+def layer_valid(raw, *, checkpoint_id, observation_sha256, request_sha256, descriptor_raw, image_ids=None):
+    """One writable-layer record at its consumption: canonical, ACCEPTED, bound to this capture observation and its
+    descriptor, every role present, and every recorded verdict exactly what the contract gives for the recorded facts
+    (a role, container, image or descriptor substituted is re-judged and refused). Returns the record."""
+    def fail(reason):
+        raise Refused("LAYER_INVALID", reason)
+    try:
+        record = json.loads(raw)
+        descriptor = json.loads(descriptor_raw)
+    except (TypeError, ValueError):
+        fail("the record or its descriptor is unreadable")
+    if type(record) is not dict or raw != canonical(record) + b"\n" or record.get("kind") != LAYER_KIND:
+        fail("not a canonical writable-layer record")
+    if record.get("checkpoint") != checkpoint_id or record.get("outcome") != "ACCEPTED" or record.get("refused"):
+        fail("another checkpoint, or a refused judgement")
+    observed = record.get("observation") or {}
+    if observed.get("sha256") != observation_sha256 or observed.get("request_sha256") != request_sha256:
+        fail("the record judges another capture observation")
+    if record.get("descriptor_sha256") != sha256(descriptor_raw) or type(descriptor) is not dict:
+        fail("the record judges with another descriptor")
+    if descriptor.get("applicable") is True and image_ids is not None:
+        pinned = {(image_ids.get(side) or {}).get(REGENERATED_ROLE) for side in ("previous", "release") if type(image_ids.get(side)) is dict}
+        if descriptor.get("pinned_image") not in pinned:
+            fail("the descriptor's image is not the bundle's pinned Orthanc image")
+    roles = record.get("roles") if type(record.get("roles")) is dict else {}
+    if set(roles) != set(intro.ROLES):
+        fail("the record does not judge every role")
+    for role, row in sorted(roles.items()):
+        if type(row) is not dict or row.get("absent") is True:
+            continue
+        try:
+            again = layer_verdicts(role, list(row["changes"]), mounts=row["mounts"], image=row["image"], container_id=row["container_id"],
+                                   descriptor=descriptor, facts=row["facts"])
+        except (KeyError, TypeError, AttributeError):
+            fail("an incomplete role row: " + role)
+        if again != row.get("verdicts") or any(item["verdict"] == "refused" for item in again):
+            fail("the recorded verdicts of " + role + " are not the contract's")
+    return record
 
 
 # ── actual-bytes identity (T03) ──
@@ -589,7 +1247,7 @@ def tree_manifest_from_bytes(files):
 def tracked_files(root, prefix=None):
     """The source's tracked paths (Git index of the frozen copy); untracked helpers must be listed explicitly."""
     args = ["git", "-C", str(root), "ls-files", "-z"] + (["--", prefix] if prefix else [])
-    listing = subprocess.run(args, capture_output=True, check=True, timeout=60).stdout.decode("utf-8")
+    listing = run_bounded(args, capture_output=True, check=True, timeout=60).stdout.decode("utf-8")
     return [name for name in listing.split("\0") if name]
 
 
@@ -980,8 +1638,8 @@ class PendingBundle:
 
 def required_bindings(spec):
     """The fixture files a checkpoint's manifest binds: BINDINGS (the lock only where the boundary holds it) and, for a
-    volume checkpoint, its capture observation (r5)."""
-    return [name for name in BINDINGS if name != "lock" or spec["lock"]] + (["observation"] if spec["volumes"] else [])
+    volume checkpoint, its capture observation (r5) and the post-stop writable-layer judgement (r6, CKPT5-01)."""
+    return [name for name in BINDINGS if name != "lock" or spec["lock"]] + (["observation", "layer"] if spec["volumes"] else [])
 
 
 def manifest_complete(manifest):
@@ -1046,12 +1704,23 @@ def load_bundle(directory):
         binding = manifest["bindings"]["observation"]
         found = OBSERVATION_BINDING.fullmatch(str(binding.get("path")))
         require(found is not None, "BUNDLE_INVALID", "observation binding path")
+        files = tree_folder(payload / "fixture-tree.tar", binding["path"].rsplit("/", 1)[0])
         try:
-            observation_valid(tree_folder(payload / "fixture-tree.tar", binding["path"].rsplit("/", 1)[0]),
-                              checkpoint_id=manifest["checkpoint"], purpose="capture", plan_sha256=manifest["identity"]["plan_sha256"],
-                              state_sha256=manifest["bindings"]["state"]["sha256"])
+            summary, _ = observation_valid(files, checkpoint_id=manifest["checkpoint"], purpose="capture",
+                                           plan_sha256=manifest["identity"]["plan_sha256"], state_sha256=manifest["bindings"]["state"]["sha256"])
         except Refused as error:
             raise Refused("BUNDLE_INVALID", "capture observation: " + str(error)) from None
+        # r6: the post-stop writable-layer judgement of that capture, re-read from the fixture member and re-judged.
+        layer = manifest["bindings"]["layer"]
+        judged = LAYER_BINDING.fullmatch(str(layer.get("path")))
+        require(judged is not None and judged.group(1) == found.group(1) and judged.group(2) == summary["request_sha256"][:16],
+                "BUNDLE_INVALID", "the writable-layer binding is not beside the capture observation it judges")
+        try:
+            layer_valid(tree_member_bytes(payload / "fixture-tree.tar", layer["path"]), checkpoint_id=manifest["checkpoint"],
+                        observation_sha256=binding["sha256"], request_sha256=summary["request_sha256"], descriptor_raw=files[REGENERATED_FILE],
+                        image_ids=manifest["identity"]["image_ids"])
+        except Refused as error:
+            raise Refused("BUNDLE_INVALID", "writable layer: " + str(error)) from None
     return manifest, directory
 
 
@@ -1374,6 +2043,9 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
     input cache, taken after the source stack was removed) has no daemon side: `backend` is None."""
     spec = CHECKPOINTS[checkpoint_id]
     require(spec["volumes"] is (backend is not None), "NOT_A_BOUNDARY", "daemon backend and checkpoint kind disagree")
+    descriptor = None
+    if backend is not None:
+        summary, descriptor, descriptor_raw = bound_descriptor(fixture_root, bindings)
     inventory = backend.inventory() if backend is not None else {"containers": [], "volumes": [], "networks": []}
     for item in inventory["containers"]:
         require(owned_resource(item, owned) or item["name"] not in names.values(), "NOT_OWNED", item["name"])
@@ -1381,12 +2053,12 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
         running = {role for role in intro.ROLES if any(c["name"] == names[role] and c["running"] for c in inventory["containers"])} \
             if running is None else running
         stop_for_checkpoint(backend, names, running)
-        for role in intro.ROLES:
-            if any(c["name"] == names[role] for c in inventory["containers"]):
-                mounts = {m.get("destination") for c in inventory["containers"] if c["name"] == names[role] for m in c.get("mounts") or []
-                          if m.get("destination")}
-                unknown = [change for change in backend.writable_changes(names[role]) if not writable_layer_allowed(change, mounts)]
-                require(not unknown, "WRITABLE_LAYER", role + ": " + ",".join(unknown[:5]))
+        # r6 (CKPT5-01): every role judged after the stop, the record kept beside the capture observation before any
+        # bundle byte exists; a refused change is WRITABLE_LAYER and nothing is sealed.
+        roles = judge_layer(backend, inventory, names, descriptor=descriptor)
+        layer, refused = write_layer(fixture_root, bindings, roles, checkpoint_id=checkpoint_id, summary=summary, descriptor_raw=descriptor_raw)
+        require(not refused, "WRITABLE_LAYER", ", ".join(refused[:8]))
+        bindings = {**bindings, "layer": layer}
     extra = mount_inventory(inventory, names, volumes, fixture_root, owned)
     pending = store.begin(checkpoint_id)
     for name, category, path in extra_members:
@@ -2417,14 +3089,29 @@ def observation_reasons(expect, raw, sealed):
         else:
             prefix = "records-" + found.group(1) + "/" + found.group(2) + "/"
             files = {rel[len(prefix):]: data for rel, data in raw.items() if rel.startswith(prefix)}
+            summary = None
             if OBSERVATION_RESULT not in files or sha256(files[OBSERVATION_RESULT]) != binding.get("sha256"):
                 reasons.append("the capture observation the checkpoint binds is not in the raw evidence")
             else:
                 try:
-                    observation_valid(files, checkpoint_id=produces, purpose="capture",
-                                      plan_sha256=(sealed.get("identity") or {}).get("plan_sha256"), state_sha256=state_binding.get("sha256"))
+                    summary, _ = observation_valid(files, checkpoint_id=produces, purpose="capture",
+                                                   plan_sha256=(sealed.get("identity") or {}).get("plan_sha256"), state_sha256=state_binding.get("sha256"))
                 except Refused as error:
                     reasons.append("capture observation: " + str(error))
+            # r6: the post-stop writable-layer judgement the seal binds, among the same raw records and re-judged.
+            layer = bindings.get("layer") or {}
+            judged = LAYER_BINDING.fullmatch(str(layer.get("path")))
+            data = raw.get("records-" + judged.group(1) + "/" + str(layer["path"]).split("/records/", 1)[1]) if judged else None
+            if judged is None or judged.group(1) != found.group(1):
+                reasons.append("the sealed checkpoint binds no writable-layer record beside its capture observation")
+            elif data is None or sha256(data) != layer.get("sha256"):
+                reasons.append("the writable-layer record the checkpoint binds is not in the raw evidence")
+            elif summary is not None:
+                try:
+                    layer_valid(data, checkpoint_id=produces, observation_sha256=binding.get("sha256"), request_sha256=summary["request_sha256"],
+                                descriptor_raw=files.get(REGENERATED_FILE), image_ids=(sealed.get("identity") or {}).get("image_ids"))
+                except Refused as error:
+                    reasons.append("writable-layer record: " + str(error))
             final = raw.get("records-" + found.group(1) + "/state.json")
             if final is None or sha256(final) != state_binding.get("sha256"):
                 reasons.append("the state the checkpoint binds is not the leaf's raw state")
@@ -2866,7 +3553,8 @@ def smoke_verdict(run_dir, evidence):
     require(run.get("status") == "completed" and run.get("exit_code") == 0 and run.get("recorder_exit_code") == 0, "SMOKE_FAILED",
             "the smoke command did not complete with exit 0 (%s, exit %s)" % (run.get("status"), run.get("exit_code")))
     require(type(result) is dict and result.get("outcome") == "PASS" and result.get("skipped") == 0, "SMOKE_FAILED",
-            "smoke outcome %s, skipped %s, failure %s" % (result.get("outcome"), result.get("skipped"), str(result.get("failure"))[:300]))
+            "smoke outcome %s (code %s), skipped %s, failure %s" % (result.get("outcome"), result.get("code"), result.get("skipped"),
+                                                                   str(result.get("failure"))[:300]))
     for name, expected in (("coverage", SMOKE_PATHS), ("oracles", SMOKE_ORACLES)):
         rows = result.get(name) if type(result.get(name)) is dict else {}
         require(sorted(rows) == sorted(expected) and all((rows[key] or {}).get("outcome") == "PASS" and (rows[key] or {}).get("checks", 0) >= 1
@@ -2878,17 +3566,19 @@ def smoke_verdict(run_dir, evidence):
     return result
 
 
-def native_smoke(python, candidate, proof_root, *, stamp=None):
+def native_smoke(python, candidate, proof_root, *, stamp=None, diagnostic=None):
     """Run the native smoke once, as `<python> -B` from the candidate's bytes, through scripts/record-run.py into a new
     <proof_root>/smoke/run-<stamp> (its raw beside it in evidence-<stamp>); its output goes to stderr only. Returns the
-    verified result (smoke_verdict)."""
+    verified result (smoke_verdict). `diagnostic` (r6: body or cleanup) runs the smoke's deliberate deadline failure
+    instead, which never passes. SMOKE_TIMEOUT is the last-resort wrapper only: the smoke's own body and cleanup
+    deadlines bound its calls (and a wrapper kill never removes its pending residue)."""
     folder = Path(proof_root) / "smoke"
     folder.mkdir(mode=0o700, exist_ok=True)
     stamp = stamp or now_utc().strftime("%Y%m%dT%H%M%S%fZ")
     run_dir, evidence = folder / ("run-" + stamp), folder / ("evidence-" + stamp)
     command = [python, "-B", "scripts/record-run.py", "--run-dir", str(run_dir), "--cwd", str(candidate),
                *[item for name in SMOKE_INPUT_FILES for item in ("--file", name)], "--tree", "scripts", "--",
-               python, "-B", SMOKE_MODULE, "--evidence", str(evidence)]
+               python, "-B", SMOKE_MODULE, "--evidence", str(evidence), *(["--deadline-diagnostic", diagnostic] if diagnostic else [])]
     try:
         completed = _smoke_run(command, cwd=str(candidate), capture_output=True, timeout=SMOKE_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as error:
@@ -3026,6 +3716,9 @@ def main(argv=None):
     commands.add_argument("--python", default="python3", help="the interpreter of every leaf; it must import playwright and pydicom")
     commands.add_argument("--from-unit")
     commands.add_argument("--attempt", type=int, default=1)
+    commands.add_argument("--smoke-diagnostic", choices=("body", "cleanup"),
+                          help="run the native smoke's deliberate deadline failure (a body or a cleanup expiry inside a real Docker call) "
+                               "instead of the smoke; it always refuses and never writes proof.sh")
     index = sub.add_parser("index")
     index.add_argument("--registry", required=True)
     index.add_argument("--unit", required=True)
@@ -3076,7 +3769,8 @@ def main(argv=None):
             # r5: the native adapter smoke (also before a retry's script), then the T16 host admission (D1034: RAM, disk,
             # daemon, no foreign container) over the host facts the smoke observed before it created anything; a tiny
             # smoke passing never stands in for those conditions.
-            smoke = native_smoke(args.python, args.candidate, args.proof_root)
+            smoke = native_smoke(args.python, args.candidate, args.proof_root, diagnostic=args.smoke_diagnostic)
+            require(args.smoke_diagnostic is None, "SMOKE_FAILED", "a deadline diagnostic never writes proof.sh")
             host_admission(smoke["host_facts"])
             script = proof_commands(frozen, proof_root=args.proof_root, candidate=args.candidate, python=args.python,
                                     from_unit=args.from_unit, attempt=args.attempt)

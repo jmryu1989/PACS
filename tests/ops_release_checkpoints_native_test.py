@@ -21,6 +21,18 @@ smoke-result.json; a path or oracle without a check, a skip, a failure, an UNKNO
 smoke (exit 1). The assertions are on behaviour (resources, bytes, uid/gid/mode, archive members, snapshot facts, worker
 settlement, refusals), never on argv strings (AGENTS.md section 1-B). The byte identity of the original records is the
 requirement itself (consultation observe_fix) and is asserted as such.
+
+Round 6 (consult-checkpoints-r6-20261017): the body (300 s) and the cleanup (60 s) are real deadlines. The body's end is
+fixed when the smoke takes its token, before the host is observed; every Docker, Compose, Git, HostOps and Engine call
+of the body runs under it (ops_release_checkpoints.Deadline: min(cap, time left), none started once nothing is left,
+a cut client tree ended and collected, partial output kept); the cleanup gets its own end at its start. A smoke-local
+watchdog with the same ends interrupts synchronous work between calls. A deadline event fails the smoke (code DEADLINE)
+and keeps its pending residue even when the cleanup later observes nothing left; only `--release-pending` after the
+owner's inspection releases it. `--deadline-diagnostic body|cleanup` (an explicit argument, never an environment flag)
+runs a deliberate deadline failure instead of the smoke: a harmless real `docker exec` that waits 3 s, started with 1 s
+left of the body or the cleanup; it never passes. The Orthanc image's regenerated artifacts are judged by the typed,
+image-bound contract (A05/A12) and refused natively for a non-plugin file, an unlisted library, an enabled library with
+other bytes, the same image ID under another role and the database role (A05/N05).
 """
 import argparse
 import copy
@@ -32,10 +44,12 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import traceback
 import unittest
@@ -52,9 +66,13 @@ import ops_release_checkpoints_live_test as live  # noqa: E402
 
 intro = cp.intro
 DB_IMAGE, ORTHANC_IMAGE = "postgres:16-alpine", "orthancteam/orthanc:24.12.0"
-# Initial acceptance targets of the consultation: the smoke body at most 5 minutes with prepared images, cleanup bounded
-# apart (60 s). Exceeding either fails the smoke; the measured times are recorded either way.
+# The smoke body at most 5 minutes with prepared images and the cleanup 60 s apart: real deadlines since r6 (the module
+# docstring); the measured times are recorded either way. A diagnostic only shortens them.
 BODY_SECONDS, CLEANUP_SECONDS = 300, 60
+# The deliberate deadline failure (`--deadline-diagnostic`): a real call that waits DIAGNOSTIC_DELAY s, started with
+# DIAGNOSTIC_REMAINING s left (consultation native_proof: a 2-3 s delay cut at 0.2-1 s remaining).
+DIAGNOSTIC_REMAINING, DIAGNOSTIC_DELAY = 1.0, 3
+DIAGNOSTICS = ("body", "cleanup")
 # The tiny fixture's own needs (distinct from T16's D1034: >= 10 GiB RAM, 20 GiB disk, which `commands` requires apart).
 SMOKE_RAM, SMOKE_DISK = 2 * 1024 ** 3, 4 * 1024 ** 3
 # A waiting process that ends with exit 0 on the image's stop signal (TERM, or INT for the postgres image).
@@ -130,8 +148,9 @@ def frozen_observe_48a28dd(stack, records, checkpoint_id, *, request_sha256=None
     (tests/ops_deploy_host_container_test.py:971-983), with the closed phase's Records replaced by a copy of them so the
     fixture's own records stay as they are. Its HostOps gets the ComposeEntry root its default resolved to there (the
     stack root). `request_sha256` set is the digest-only incomplete fix (N02). Returns the snapshot; the contract is the
-    caller's."""
-    runner = intro.Runner(stack.repo)
+    caller's. r6: its product Runner sits behind the smoke's deadline (cp.DeadlineRunner caps each call; nothing else of
+    the frozen body changes)."""
+    runner = cp.DeadlineRunner(intro.Runner(stack.repo))
     host_ops = intro.HostOps(target=stack.target, plan=stack.plan_document, runner=runner, records=records,
                              entry_root=stack.root / "compose-entries")
     machine = intro.Introduction(plan=stack.plan_document, plan_sha256=stack.plan_sha256, target=stack.target,
@@ -231,6 +250,11 @@ class TinyStack:
     def owned(self):
         return {"token": self.token, "projects": {self.project}, "tags": list(self.smoke.owned_tags.get(self.label, ()))}
 
+    def track(self, kind, name):
+        """A helper the adapter creates for this stack (the regenerated-artifact probe) enters the smoke's residue
+        ledger before it exists."""
+        self.smoke.track(kind, name)
+
     def names(self):
         return {role: self.target["containers"][role] for role in intro.ROLES}
 
@@ -264,12 +288,22 @@ class TinyStack:
                    self.target["containers"][role], *args]
         return self.docker.run(command, input=data, check=check, timeout=120)
 
+    def recreate(self, role, *, start):
+        """A fresh container of one role from the stack's own generation (its writable layer empty again)."""
+        self.docker.run(["docker", "rm", "-f", "-v", self.target["containers"][role]])
+        self.docker.compose_create([role])
+        if start:
+            self.docker.compose_start(role)
+            if role == "orthanc":
+                self.wait_orthanc()
+
     def wait_orthanc(self, seconds=90):
+        # Each poll is a bounded call and its sleep stays inside the smoke's deadline (cp.pause).
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             if self.exec("orthanc", "python3", "-c", ORTHANC_READY, check=False).returncode == 0:
                 return
-            time.sleep(1)
+            cp.pause(min(1, max(0.0, deadline - time.monotonic())))
         raise SmokeFailure("Orthanc did not answer within %d s" % seconds)
 
     def model_phase(self, phase, **updates):
@@ -308,7 +342,7 @@ class TinyStack:
 
 
 class Smoke:
-    def __init__(self, evidence):
+    def __init__(self, evidence, *, body_seconds=BODY_SECONDS, cleanup_seconds=CLEANUP_SECONDS, diagnostic=None):
         self.evidence = Path(evidence)
         self.token = uuid.uuid4().hex[:12]
         self.foreign_token = uuid.uuid4().hex[:12]
@@ -321,6 +355,28 @@ class Smoke:
         self.extra_cleanup = []
         self.timings = {}
         self.private = self.fixture_root = None
+        # r6: the seam may only shorten (never lengthen) the two bounds; a diagnostic never passes.
+        cp.require(diagnostic in (None, *DIAGNOSTICS), "SMOKE_INVALID", "diagnostic " + str(diagnostic))
+        self.body_seconds, self.cleanup_seconds = min(BODY_SECONDS, body_seconds), min(CLEANUP_SECONDS, cleanup_seconds)
+        self.diagnostic, self.diagnostic_facts, self.tracked, self.pending, self.negatives = diagnostic, {}, [], None, []
+        # The body's one end, fixed with the token, before the host is observed (consultation ckpt5_02 design).
+        self.body = cp.Deadline(self.body_seconds, label="body", journal=self.evidence / "deadline-calls.jsonl")
+        self.cleanup_deadline = None
+
+    # ── the residue ledger (r6: every helper and the private root enter it as they are created) ──
+    def write_pending(self):
+        document = {"token": self.token, "foreign_token": self.foreign_token, "evidence": str(self.evidence),
+                    "started_utc": getattr(self, "started_utc", None), "projects_suffix": self.token[:10],
+                    "private_root": str(self.private) if self.private is not None else None,
+                    "tracked": [{"kind": kind, "name": name} for kind, name in self.tracked]}
+        partial = self.pending.with_name(self.pending.name + ".partial")
+        partial.write_bytes(cp.canonical(document) + b"\n")
+        os.replace(partial, self.pending)
+
+    def track(self, kind, name):
+        self.tracked.append((kind, str(name)))
+        if self.pending is not None:
+            self.write_pending()
 
     # ── recording ──
     def log(self, row):
@@ -353,13 +409,15 @@ class Smoke:
         return name
 
     def budget(self, stage):
+        """A stage boundary: its time is recorded, and once the body's end has passed nothing more starts (the calls
+        inside a stage are bounded by the same end themselves)."""
         self.timings[stage] = round(time.monotonic() - self.started, 1)
-        if time.monotonic() - self.started > BODY_SECONDS:
-            raise SmokeFailure("the smoke body exceeded %d s at %s" % (BODY_SECONDS, stage))
+        self.body.check("the stage after " + stage)
 
     def git(self, *args, cwd=None):
-        return subprocess.run(["git", "-c", "user.name=kin-smoke", "-c", "user.email=kin-smoke@invalid", "-c", "commit.gpgsign=false",
-                               "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=120)
+        return cp.run_bounded(["git", "-c", "user.name=kin-smoke", "-c", "user.email=kin-smoke@invalid", "-c", "commit.gpgsign=false",
+                               "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=120,
+                              plain=subprocess.run)
 
     def docker(self):
         return rehearsal.CheckpointDocker(None, self.helper)
@@ -700,7 +758,29 @@ class Smoke:
                    all(not item["running"] for item in stopped.values()) and all(state["ExitCode"] in (0, 143) and not state["OOMKilled"]
                                                                                 for state in exits.values()),
                    {name: (state["ExitCode"], state["OOMKilled"]) for name, state in exits.items()})
-        return {"bundle": bundle, "manifest": manifest, "observation": observation}
+        sealed = {"bundle": bundle, "manifest": manifest, "observation": observation}
+        sealed["regenerated"] = self.regenerated(checkpoint_id, sealed)
+        return sealed
+
+    def regenerated(self, checkpoint_id, sealed):
+        """A05/A12 (r6, CKPT5-01): the sealed capture's writable-layer record, re-read from the bundle's fixture member:
+        the Orthanc role on its pinned image, judged against the image's own regeneration (the hostid over its
+        placeholder, the startup cache, the enabled plugin libraries and exactly their folders); its raw is kept."""
+        manifest = sealed["manifest"]
+        record = json.loads(cp.tree_member_bytes(Path(sealed["bundle"]) / "payload" / "fixture-tree.tar", manifest["bindings"]["layer"]["path"]))
+        descriptor = sealed["observation"]["regenerated"]
+        row = record["roles"][cp.REGENERATED_ROLE]
+        kinds = sorted({item["verdict"] for item in row["verdicts"] if item["verdict"].startswith("regenerated:")})
+        self.raw("regenerated-" + checkpoint_id + ".json", {"descriptor": descriptor, "layer": record})
+        self.check(["A05", "A12"], checkpoint_id + ": the Orthanc start's hostid, startup cache, enabled plugins and their folders are accepted as the "
+                   "pinned image's own regeneration, typed and bound in the sealed layer record",
+                   descriptor["applicable"] is True and descriptor["hostid_regenerated"] is True and row["image"] == descriptor["pinned_image"]
+                   and row["container_id"] == descriptor["container_id"] and record["outcome"] == "ACCEPTED"
+                   and {"regenerated:hostid", "regenerated:pycache", "regenerated:pyc", "regenerated:plugin", "regenerated:ancestor"} <= set(kinds),
+                   {"kinds": kinds, "reasons": descriptor["reasons"], "hostid_reasons": descriptor["hostid_reasons"], "changes": row["changes"][:40]})
+        return {"container_id": row["container_id"], "descriptor_sha256": record["descriptor_sha256"], "kinds": kinds,
+                "inventory_sha256": cp.sha256(cp.canonical(descriptor["image"])), "generated_sha256": cp.sha256(cp.canonical(descriptor["generated"])),
+                "probe": descriptor.get("probe")}
 
     def observed(self, stack, checkpoint_id, observation, purpose):
         """A06/A07 over one observation record: the complete product snapshot and its own settled workers."""
@@ -809,6 +889,14 @@ class Smoke:
         token = intro.acquire_lock(stack.repo)
         stack.model_phase("capture", lock_token=token, fenced={"at": intro.utc_now().isoformat(), "model": True})
         sealed = self.capture(stack, "held")
+        seeded = getattr(self, "seeded_regenerated", None) or {}
+        held = sealed["regenerated"]
+        self.check(["A05", "A12"], "held: the seeded cold restore's new Orthanc container regenerated its artifacts again, judged against the "
+                   "same image inventory and generated set (a new random hostid is the exception's meaning, never a carried file)",
+                   seeded.get("container_id") not in (None, held["container_id"]) and seeded.get("inventory_sha256") == held["inventory_sha256"]
+                   and seeded.get("generated_sha256") == held["generated_sha256"]
+                   and {"regenerated:hostid", "regenerated:pyc", "regenerated:plugin"} <= set(held["kinds"]),
+                   {"seeded": seeded, "held": held})
         self.budget("held capture")
         return self.roundtrip(stack, "held", sealed, all_running=False)
 
@@ -866,6 +954,18 @@ class Smoke:
         self.check(["N03"], "a stopped database refuses the observation (its fact is an observation error, not a past PASS)",
                    code in ("NOT_A_BOUNDARY", "OBSERVATION_UNSETTLED") and summary["outcome"] != "PASS"
                    and snapshot["facts"]["database"]["outcome"] == "ERROR", {"code": code, "database": snapshot["facts"]["database"]})
+        # r6 (CKPT5-01): the release generation runs the API role on the pinned Orthanc image ID. A hostid of exactly the
+        # regenerated shape written there is refused: the typed exception is the Orthanc role's alone.
+        stack.docker.compose_start("db")
+        stack.docker.wait_db_ready()
+        api, orthanc_image = stack.target["containers"]["api"], cp.pinned_images(stack.plan_document, json.loads(model))["orthanc"]
+        written = stack.exec("api", "sh", "-c", "printf '0badc0de\\n' > /etc/hostid && sha256sum /etc/hostid && stat -c '%F %s %u:%g %a' /etc/hostid",
+                             user="0").stdout.decode()
+        same_image = json.loads(stack.docker.run(["docker", "inspect", api]).stdout)[0]["Image"] == orthanc_image
+        self.negative(stack, "verified", "the API role on the pinned Orthanc image ID with a regenerated-shaped /etc/hostid",
+                      role="api", target=cp.HOSTID, written=written, extra={"api_runs_the_orthanc_image_id": same_image},
+                      expect=lambda refused, diff: same_image and ("api: C " + cp.HOSTID) in refused
+                      and all(entry in ("api: C /etc", "api: C " + cp.HOSTID) for entry in refused))
         cleanup = cp.cleanup_owned(self.docker(), stack.owned())
         self.check(["A11"], "the late stack's resources are removed by ownership", cleanup["complete"], cleanup)
         cp.preserve_records({stack.label: stack.records.directory}, self.evidence)
@@ -933,6 +1033,7 @@ class Smoke:
         self.check(["A05", "N05"], "a persistent writable-layer file refuses the capture (WRITABLE_LAYER), the transient one is allowed",
                    outcome.startswith("WRITABLE_LAYER") and "/etc/kin-smoke-persistent" in outcome and "kin-smoke-transient" not in outcome, outcome)
         self.check(["A05"], "the refused capture wrote no bundle", sorted(path.name for path in self.store.root.iterdir()) == stored)
+        self.regenerated_negatives(stack)
         # A11: two owned aliases of an image that has no other name: one is kept (its last name), never the image.
         name = stack.target["containers"]["keycloak"]
         image = stack.docker.run(["docker", "commit", "--change", "LABEL kin.ops.run=" + stack.token, name,
@@ -953,6 +1054,71 @@ class Smoke:
         self.check(["A11"], "nothing of the failure stack remains", not cp.owned_remaining(self.docker().inventory(), stack.owned()))
         cp.preserve_records({stack.label: stack.records.directory}, self.evidence)
         del self.stacks["failure"]
+
+    def regenerated_negatives(self, stack):
+        """r6 (CKPT5-01, consultation native_negative) on the forced lineage at HELD, each on a fresh container of its
+        own (never beside an earlier toxic file): after the image's own start, a non-plugin file in the plugins folder,
+        an unlisted library there, and an enabled library with bytes appended are each refused, while the image's
+        regeneration beside them is accepted; then a hostid written in the database role (its actual change kind kept)."""
+        stack.recreate("api", start=False)
+        orthanc = stack.target["containers"]["orthanc"]
+        for label, name in (("a non-plugin file in the Orthanc plugins folder", "persistent-state.json"),
+                            ("an unlisted library in the Orthanc plugins folder", "custom-local.so"),
+                            ("an enabled plugin library with other bytes", None)):
+            stack.recreate("orthanc", start=True)
+            if name is None:
+                listed = sorted(item for item in stack.exec("orthanc", "ls", "-1", cp.PLUGINS).stdout.decode().split() if item.endswith(".so"))
+                cp.require(listed, "SMOKE_FIXTURE", "the image's own start enabled no plugin library to change")
+                name, operation = listed[0], ">>"
+            else:
+                operation = ">"
+            path = cp.PLUGINS + "/" + name
+            written = stack.exec("orthanc", "sh", "-c", "printf 'kin-smoke marker\\n' " + operation + " \"$1\" && sha256sum \"$1\" && stat -c '%F %s %u:%g %a' \"$1\"",
+                                 "sh", path, user="0").stdout.decode()
+            stack.docker.stop(orthanc)
+            stack.docker.compose_start("db")
+            stack.docker.wait_db_ready()
+            changed = operation == ">>"
+            self.negative(stack, "failure-held", label + " (" + path + ")", role="orthanc", target=path, written=written,
+                          expect=lambda refused, diff, path=path, changed=changed: ("orthanc: A " + path) in refused
+                          and all(entry == "orthanc: A " + path or (changed and entry.startswith("orthanc: ") and cp.PLUGINS_AVAILABLE in entry)
+                                  for entry in refused))
+        stack.recreate("orthanc", start=False)
+        stack.docker.compose_start("db")
+        stack.docker.wait_db_ready()
+        written = stack.exec("db", "sh", "-c", "printf '0badc0de\\n' > /etc/hostid && sha256sum /etc/hostid", user="0").stdout.decode()
+        kind = next((line.split(" ", 1)[0] for line in stack.docker.writable_changes(stack.target["containers"]["db"])
+                     if line.split(" ", 1)[-1].strip() == cp.HOSTID), None)
+        self.negative(stack, "failure-held", "a hostid written in the database role (its actual change kind: %s)" % kind, role="db", target=cp.HOSTID,
+                      written=written, extra={"db_hostid_kind": kind},
+                      expect=lambda refused, diff: kind in ("A", "C") and ("db: %s %s" % (kind, cp.HOSTID)) in refused
+                      and all(entry.startswith("db: ") for entry in refused))
+
+    def negative(self, stack, checkpoint_id, label, *, role, target, written, expect, extra=None):
+        """One native refusal on its own resources: the change read back, the real docker diff, the capture through the
+        live consumer (seal_boundary) refused WRITABLE_LAYER before any bundle byte and its layer record kept."""
+        diff = stack.docker.writable_changes(stack.target["containers"][role])
+        folder = stack.records.directory / cp.OBSERVATION_DIR
+        layers = set(folder.glob("layer-*/" + cp.LAYER_FILE))
+        stored = sorted(path.name for path in self.store.root.iterdir())
+        owned = {"token": stack.token, "projects": {stack.project}, "networks": [], "stack": {"root": str(stack.root), "containers": stack.names()}}
+        try:
+            live.seal_boundary(checkpoint_id, stack, store=self.store, fixture_root=self.fixture_root, helper=self.helper,
+                               identity=self.identity(stack, checkpoint_id), owned=owned, execution_kind="fresh",
+                               tls_not_after=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(), before_seal=self.write_context)
+            code = "SEALED"
+        except cp.Refused as error:
+            code = error.code
+        new = sorted(set(folder.glob("layer-*/" + cp.LAYER_FILE)) - layers)
+        record = json.loads(new[0].read_bytes()) if len(new) == 1 else {}
+        refused = record.get("refused") or []
+        row = {"label": label, "checkpoint": checkpoint_id, "role": role, "target": target, "read_back": written, "docker_diff": diff,
+               "code": code, "refused": refused, "layer_outcome": record.get("outcome"),
+               "store_unchanged": sorted(path.name for path in self.store.root.iterdir()) == stored, **(extra or {})}
+        self.negatives.append(row)
+        self.raw("regenerated-negatives.json", self.negatives)
+        self.check(["A05", "N05"], checkpoint_id + ": " + label + " is refused (WRITABLE_LAYER before any bundle byte, its layer record kept)",
+                   code == "WRITABLE_LAYER" and row["store_unchanged"] and record.get("outcome") == "REFUSED" and expect(refused, diff), row)
 
     def git_closure(self):
         """A09: the seal left each clone with its own object closure (checked with the donor moved away), and the r4 real
@@ -978,41 +1144,97 @@ class Smoke:
         self.check(["A09"], "the sealed clone reads its tree and files with the donor moved away (no alternate left)",
                    tree == "tree" and json.loads(shown) == BASE_COMPOSE and not alternates)
 
-    # ── cleanup ──
-    def cleanup(self):
-        """Every owned stack, alias and the foreign sentinel by its own ledger, then the private root; absence observed."""
-        started, errors, remaining = time.monotonic(), [], []
+    # ── cleanup (r6: under its own deadline, created once when the cleanup starts) ──
+    def mine(self, item):
+        labels = item.get("labels") or {}
+        return labels.get("kin.ops.run") in (self.token, self.foreign_token) or str(labels.get("com.docker.compose.project", "")).endswith(self.token[:10])
+
+    def cleanup(self, deadline):
+        """Every owned stack, alias and the foreign sentinel by its own ledger, then the private root; absence observed
+        by a new query. Every call runs under `deadline`: once it is reached nothing more starts, and what could not be
+        observed any more is reported as remaining with verification UNKNOWN (never an empty list taken as absence)."""
+        started, errors, remaining, verified = time.monotonic(), [], [], True
         docker = rehearsal.CheckpointDocker(None, getattr(self, "helper", None))
+        if self.diagnostic:
+            self.lease_probe()
+            if self.diagnostic == "cleanup":
+                try:
+                    self.delayed_call(deadline)
+                except cp.DeadlineExpired:
+                    errors.append("the diagnostic's delayed call was cut by the cleanup deadline")
         for label, stack in list(self.stacks.items()):
             try:
+                deadline.check("preserve the records of " + label)
                 cp.preserve_records({label: stack.records.directory}, self.evidence)
             except Exception as error:
                 errors.append("preserve " + label + ": " + type(error).__name__)
             result = cp.cleanup_owned(docker, stack.owned())
             errors += result["errors"]
             remaining += result["remaining"]
-        if getattr(self, "private_image", None) and docker.image_present(self.private_image):
-            docker.run(["docker", "image", "rm", "-f", self.private_image], check=False)
+        try:
+            if getattr(self, "private_image", None) and docker.image_present(self.private_image):
+                docker.run(["docker", "image", "rm", "-f", self.private_image], check=False)
+        except Exception as error:
+            errors.append("private image: " + type(error).__name__)
         for label, owned in self.extra_cleanup:
             result = cp.cleanup_owned(docker, owned)
             errors += [label + ": " + error for error in result["errors"]]
             remaining += result["remaining"]
         if self.private is not None and self.private.exists():
-            shutil.rmtree(self.private, ignore_errors=True)
+            try:
+                deadline.check("remove the private root")
+                shutil.rmtree(self.private, ignore_errors=True)
+            except cp.DeadlineExpired:
+                pass
             if self.private.exists():
                 errors.append("the private root is not removed: " + str(self.private))
         try:
-            tokens = {self.token, self.foreign_token}
-            left = [item["name"] for kind in ("containers", "volumes", "networks") for item in docker.inventory()[kind]
-                    if (item.get("labels") or {}).get("kin.ops.run") in tokens
-                    or str((item.get("labels") or {}).get("com.docker.compose.project", "")).endswith(self.token[:10])]
+            left = [item["name"] for kind in ("containers", "volumes", "networks") for item in docker.inventory()[kind] if self.mine(item)]
         except Exception as error:
-            left, errors = [], errors + ["re-query: " + type(error).__name__]
+            left, verified = [], False
+            errors.append("re-query: " + type(error).__name__)
+        if deadline.events:
+            verified = False
+        if not verified:
+            remaining += self.last_known(deadline)
         remaining = sorted(set(remaining) | set(left))
         seconds = round(time.monotonic() - started, 1)
-        if seconds > CLEANUP_SECONDS:
-            errors.append("cleanup took %s s (bound %d s)" % (seconds, CLEANUP_SECONDS))
-        return {"complete": not remaining and not errors, "remaining": remaining, "errors": errors, "seconds": seconds}
+        if seconds > self.cleanup_seconds:
+            errors.append("cleanup took %s s (bound %s s)" % (seconds, self.cleanup_seconds))
+        return {"complete": verified and not remaining and not errors, "remaining": remaining, "errors": errors, "seconds": seconds,
+                "verification": "OBSERVED" if verified else "UNKNOWN"}
+
+    def last_known(self, deadline):
+        """What a cleanup that could not observe its end reports: the owned names of the last inventory it or the body
+        saw, the owner labels and projects, the tracked helpers and the private root, each marked unverified."""
+        seen = deadline.last_inventory or self.body.last_inventory or {}
+        out = ["last seen: " + item["name"] for kind in ("containers", "volumes", "networks") for item in seen.get(kind) or [] if self.mine(item)]
+        out += ["unverified: resources labelled kin.ops.run=" + token for token in sorted({self.token, self.foreign_token})]
+        out += ["unverified: Compose projects ending in " + self.token[:10]]
+        out += ["unverified: " + kind + " " + name for kind, name in self.tracked]
+        if self.private is not None:
+            out.append("unverified: private root " + str(self.private))
+        return out
+
+    # ── the deliberate deadline failure (r6, consultation native_proof; `--deadline-diagnostic`) ──
+    def delayed_call(self, deadline):
+        """A harmless real Docker call that waits DIAGNOSTIC_DELAY s, started with DIAGNOSTIC_REMAINING s left of
+        `deadline` (the seam only shortens it). Its start is in deadline-calls.jsonl; its cut is the DEADLINE raw."""
+        deadline.shorten(DIAGNOSTIC_REMAINING, why="deadline diagnostic (" + self.diagnostic + ")")
+        rehearsal.CheckpointDocker(None, self.helper).run(["docker", "exec", self.diagnostic_container, "sh", "-c",
+                                                           "echo started; sleep %d; echo finished" % DIAGNOSTIC_DELAY], timeout=60)
+
+    def lease_probe(self):
+        """A second entry while this smoke's cleanup runs: it must find the live lease taken (SMOKE_BUSY)."""
+        folder = self.evidence / "lease-probe"
+        completed = cp.run_bounded([sys.executable, "-B", str(Path(__file__).resolve()), "--evidence", str(folder)], timeout=30,
+                                   capture_output=True, plain=subprocess.run)
+        try:
+            probed = json.loads((folder / cp.SMOKE_RESULT).read_bytes())
+        except (OSError, ValueError):
+            probed = {}
+        self.diagnostic_facts["lease_probe"] = {"when": "the cleanup's start, before its first removal", "exit": completed.returncode,
+                                                "outcome": probed.get("outcome"), "code": probed.get("code")}
 
 
 def smoke_admission(facts):
@@ -1046,11 +1268,18 @@ def write_result(evidence, result):
     (Path(evidence) / cp.SMOKE_RESULT).write_bytes(cp.canonical(result) + b"\n")
 
 
+def host_root():
+    return Path("/root") if Path("/root").is_dir() else Path(tempfile.gettempdir())
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="RELEASE-TOOLS-CHECKPOINTS native adapter smoke (creates and removes a tiny synthetic "
                                                  "Docker fixture; root on native Linux only)")
     parser.add_argument("--evidence", required=True, help="a new folder for the raw results")
     parser.add_argument("--release-pending", help="release an unfinished smoke's residue file after its owned resources are observed gone")
+    parser.add_argument("--deadline-diagnostic", choices=DIAGNOSTICS,
+                        help="run the deliberate deadline failure instead of the smoke (a real docker exec waiting %d s, started with "
+                             "%s s left of the body or the cleanup); it always fails and keeps its residue" % (DIAGNOSTIC_DELAY, DIAGNOSTIC_REMAINING))
     args = parser.parse_args(argv)
     evidence = Path(args.evidence).absolute()
     evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -1065,12 +1294,10 @@ def main(argv=None):
                 return release_pending(Path(args.release_pending), evidence, result)
             pending = sorted(residue_dir().glob("pending-*.json")) if residue_dir().is_dir() else []
             cp.require(not pending, "SMOKE_RESIDUE", "an earlier smoke left unreleased residue: " + ",".join(str(path) for path in pending))
-            facts = observe_host(Path("/root") if Path("/root").is_dir() else Path(tempfile.gettempdir()))
-            result["host_facts"] = facts
-            smoke_admission(facts)
-            return run_smoke(evidence, facts, result)
+            # The lease is held until run_smoke has recorded its bounded cleanup's result (consultation expiry_rules).
+            return run_smoke(evidence, result, diagnostic=args.deadline_diagnostic)
     except (cp.Refused, gate.Refused) as error:
-        # Every refusal comes before the smoke creates anything (the run itself reports its own failures).
+        # The lease, the marker, the residue and a release: refused before the smoke takes a token or creates anything.
         result.update(outcome="REFUSED", code=getattr(error, "code", "SMOKE_BUSY"), failure=str(error)[:600],
                       cleanup={"complete": True, "remaining": [], "errors": []})
         write_result(evidence, result)
@@ -1087,44 +1314,156 @@ def trust_checkout():
                            "GIT_CONFIG_VALUE_%d" % count: str(ROOT)})
 
 
-def run_smoke(evidence, facts, result):
+class Watchdog:
+    """The smoke-local backstop with the deadline's own absolute end (POSIX main thread, SIGALRM): synchronous work
+    between bounded calls (tar, copies, hashing, rmtree) is interrupted at the end. During a bounded call the call's own
+    effective timeout is the control (the alarm waits for it), and after a deadline event the primary control has fired
+    already, so the alarm never raises twice. Elsewhere (the pure tests' Windows host) it is inert."""
+
+    def __init__(self, deadline):
+        self.deadline, self.armed, self.previous = deadline, False, None
+
+    def __enter__(self):
+        if os.name == "posix" and threading.current_thread() is threading.main_thread():
+            self.previous = signal.signal(signal.SIGALRM, self.alarm)
+            self.armed = True
+            self.deadline.watch = self.arm
+            self.arm()
+        return self
+
+    def arm(self, seconds=None):
+        if self.armed:
+            signal.setitimer(signal.ITIMER_REAL, max(0.01, self.deadline.remaining() if seconds is None else seconds))
+
+    def alarm(self, signum, frame):
+        deadline = self.deadline
+        if deadline.events:
+            return
+        left = deadline.remaining()
+        if left > 0 or deadline.in_call:
+            self.arm(left if left > 0 else 0.05)
+            return
+        event = deadline.record("watchdog", ["synchronous work between calls"], None)
+        raise cp.DeadlineExpired("%s deadline (%s s) reached during synchronous work" % (deadline.label, deadline.seconds), event)
+
+    def __exit__(self, *exc):
+        if self.armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, self.previous)
+            self.deadline.watch, self.armed = None, False
+        return False
+
+
+def rows_of(table):
+    return {key: {"outcome": "PASS" if rows and all(row["outcome"] == "PASS" for row in rows) else "FAIL", "checks": len(rows)}
+            for key, rows in table.items()}
+
+
+def run_smoke(evidence, result, *, diagnostic=None, observe=None, admit=None, work=None, body_seconds=BODY_SECONDS,
+              cleanup_seconds=CLEANUP_SECONDS):
+    """One smoke under the lease main holds. In order: the token, the body deadline and the durable pending residue
+    (before any host query or resource); under the body deadline the host observation, the smoke admission (a refusal
+    there is REFUSED, exit 3, its pending released: nothing was created) and the work (`smoke_run`, or the diagnostic);
+    then the cleanup under its own deadline, created once here. A deadline event in either fails the smoke with code
+    DEADLINE and keeps the pending residue whatever the cleanup observed; a normal smoke releases it on its own observed
+    complete cleanup. `observe`/`admit`/`work` and the two bounds are explicit arguments (the bounds only shorten)."""
     trust_checkout()
-    smoke = Smoke(evidence)
+    smoke = Smoke(evidence, body_seconds=body_seconds, cleanup_seconds=cleanup_seconds, diagnostic=diagnostic)
+    smoke.started_utc = result["started_utc"]
     residue_dir().mkdir(mode=0o700, parents=True, exist_ok=True)
-    pending = residue_dir() / ("pending-" + smoke.token + ".json")
-    pending.write_bytes(cp.canonical({"token": smoke.token, "foreign_token": smoke.foreign_token, "evidence": str(evidence),
-                                      "started_utc": result["started_utc"], "projects_suffix": smoke.token[:10]}) + b"\n")
-    failure = None
+    smoke.pending = residue_dir() / ("pending-" + smoke.token + ".json")
+    smoke.write_pending()
+    failure, refused, body = None, None, smoke.body
     try:
-        smoke_run(smoke, facts)
+        with cp.deadline_scope(body), Watchdog(body):
+            facts = (observe or observe_host)(host_root())
+            result["host_facts"] = facts
+            try:
+                (admit or smoke_admission)(facts)
+            except cp.DeadlineExpired:
+                raise
+            except cp.Refused as error:
+                refused = error
+            if refused is None:
+                (work or (smoke_diagnostic if diagnostic else smoke_run))(smoke, facts)
+                body.check("the end of the smoke body")
     except Exception as error:
         failure = type(error).__name__ + ": " + str(error)[:1500]
         (Path(evidence) / "failure.txt").write_text(traceback.format_exc(), encoding="utf-8")
-    finally:
-        body = round(time.monotonic() - smoke.started, 1)
-        cleanup = smoke.cleanup()
-    coverage = {key: {"outcome": "PASS" if rows and all(row["outcome"] == "PASS" for row in rows) else "FAIL", "checks": len(rows)}
-                for key, rows in smoke.coverage.items()}
-    oracles = {key: {"outcome": "PASS" if rows and all(row["outcome"] == "PASS" for row in rows) else "FAIL", "checks": len(rows)}
-               for key, rows in smoke.oracles.items()}
-    passed = failure is None and cleanup["complete"] and all(row["outcome"] == "PASS" for row in (*coverage.values(), *oracles.values()))
-    result.update(outcome="PASS" if passed else "FAIL", failure=failure, coverage=coverage, oracles=oracles, cleanup=cleanup,
-                  seconds={"body": body, "cleanup": cleanup["seconds"], "stages": smoke.timings},
-                  targets={"body_s": BODY_SECONDS, "cleanup_s": CLEANUP_SECONDS}, ended_utc=cp.now_utc().isoformat())
+    body_seconds_used = round(time.monotonic() - smoke.started, 1)
+    if refused is not None and failure is None:
+        result.update(outcome="REFUSED", code=refused.code, failure=str(refused)[:600], deadline={"body": body.summary()},
+                      cleanup={"complete": True, "remaining": [], "errors": [], "verification": "nothing was created: refused before any resource"})
+        write_result(evidence, result)
+        release(smoke, "refused before any resource", result["outcome"])
+        print("NATIVE_SMOKE_REFUSED " + json.dumps({"code": result["code"], "failure": result["failure"]}), file=sys.stderr)
+        return 3
+    smoke.cleanup_deadline = cleanup_deadline = cp.Deadline(smoke.cleanup_seconds, label="cleanup", journal=smoke.evidence / "deadline-calls.jsonl")
+    try:
+        with cp.deadline_scope(cleanup_deadline), Watchdog(cleanup_deadline):
+            cleanup = smoke.cleanup(cleanup_deadline)
+    except Exception as error:
+        # The cleanup's own failure is kept apart; it never replaces the body's.
+        (Path(evidence) / "failure-cleanup.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        result["cleanup_failure"] = type(error).__name__ + ": " + str(error)[:600]
+        cleanup = {"complete": False, "remaining": sorted(set(smoke.last_known(cleanup_deadline))), "verification": "UNKNOWN",
+                   "errors": ["the cleanup raised " + type(error).__name__], "seconds": round(cleanup_deadline.elapsed(), 1)}
+    events = body.events + cleanup_deadline.events
+    coverage, oracles = rows_of(smoke.coverage), rows_of(smoke.oracles)
+    passed = (failure is None and not events and not diagnostic and cleanup["complete"]
+              and all(row["outcome"] == "PASS" for row in (*coverage.values(), *oracles.values())))
+    code = "DEADLINE" if events else ("DIAGNOSTIC_NO_DEADLINE" if diagnostic else None)
+    keep = bool(events) or not cleanup["complete"]
+    result.update(outcome="PASS" if passed else "FAIL", code=code, failure=failure, coverage=coverage, oracles=oracles, cleanup=cleanup,
+                  seconds={"body": body_seconds_used, "cleanup": cleanup["seconds"], "stages": smoke.timings},
+                  deadline={"body": body.summary(), "cleanup": cleanup_deadline.summary()},
+                  targets={"body_s": smoke.body_seconds, "cleanup_s": smoke.cleanup_seconds}, diagnostic=diagnostic,
+                  diagnostic_facts=smoke.diagnostic_facts or None,
+                  pending={"path": str(smoke.pending), "kept": keep,
+                           "why": "a deadline event: only the owner's inspection and --release-pending release it" if events
+                           else "the cleanup was not observed complete" if keep else None},
+                  ended_utc=cp.now_utc().isoformat())
     write_result(evidence, result)
-    if cleanup["complete"]:
-        with open(residue_dir() / "released.jsonl", "ab") as stream:
-            stream.write(cp.canonical({"token": smoke.token, "evidence": str(evidence), "outcome": result["outcome"],
-                                       "released_utc": cp.now_utc().isoformat(), "by": "the smoke's own observed cleanup"}) + b"\n")
-        pending.unlink()
-    print("NATIVE_SMOKE " + json.dumps({"outcome": result["outcome"], "seconds": result["seconds"], "failure": failure,
-                                        "cleanup": cleanup}), flush=True)
+    if not keep:
+        release(smoke, "the smoke's own observed cleanup", result["outcome"])
+    # Every line of the smoke goes to stderr: its stdout stays empty (commands copies both streams to stderr anyway).
+    print("NATIVE_SMOKE " + json.dumps({"outcome": result["outcome"], "code": code, "seconds": result["seconds"], "failure": failure,
+                                        "cleanup": cleanup, "pending_kept": keep}), file=sys.stderr, flush=True)
     return 0 if passed else 1
+
+
+def release(smoke, by, outcome):
+    with open(residue_dir() / "released.jsonl", "ab") as stream:
+        stream.write(cp.canonical({"token": smoke.token, "evidence": str(smoke.evidence), "outcome": outcome,
+                                   "released_utc": cp.now_utc().isoformat(), "by": by}) + b"\n")
+    smoke.pending.unlink()
+
+
+def smoke_diagnostic(smoke, facts):
+    """The deliberate deadline failure (never a PASS, never a smoke row): one owned waiting container of the prepared
+    database image; `body` cuts a 3 s `docker exec` into it with 1 s of the body left; `cleanup` leaves the body whole
+    and cuts the same call with 1 s of the cleanup left (Smoke.cleanup), after a second entry found the lease taken."""
+    smoke.facts = facts
+    smoke.private = Path(tempfile.mkdtemp(prefix="kin-ckpt-smoke-", dir="/root"))
+    smoke.private.chmod(0o700)
+    smoke.write_pending()
+    listed = rehearsal.CheckpointDocker(None, None).run(["docker", "image", "inspect", DB_IMAGE], check=False)
+    cp.require(listed.returncode == 0, "SMOKE_FIXTURE", "pull " + DB_IMAGE + " before the diagnostic")
+    smoke.helper = json.loads(listed.stdout)[0]["Id"]
+    name = "kin-ckptsmoke-diag-" + smoke.token[:10]
+    smoke.track("diagnostic container", name)
+    rehearsal.CheckpointDocker(None, smoke.helper).run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + smoke.token,
+                                                        "--network", "none", "--entrypoint", SLEEPER[0], smoke.helper, *SLEEPER[1:]])
+    smoke.diagnostic_container = name
+    smoke.extra_cleanup.append(("diagnostic container", {"token": smoke.token, "projects": set()}))
+    if smoke.diagnostic == "body":
+        smoke.delayed_call(smoke.body)
 
 
 def smoke_run(smoke, facts):
     smoke.private = Path(tempfile.mkdtemp(prefix="kin-ckpt-smoke-", dir="/root"))
     smoke.private.chmod(0o700)
+    smoke.write_pending()
     smoke.fixture_root = smoke.private / "fixture"
     smoke.fixture_root.mkdir(mode=0o700)
     smoke.store = cp.BundleStore(smoke.private / "bundles", forbidden=[smoke.fixture_root, smoke.evidence, gate.STATE])
@@ -1140,6 +1479,7 @@ def smoke_run(smoke, facts):
     smoke.budget("baseline oracles")
     clone.exec("api", "sh", "-c", "echo transient > /tmp/kin-smoke-transient")
     sealed = smoke.capture(clone, "seeded", probe=smoke.engine_probe)
+    smoke.seeded_regenerated = sealed["regenerated"]
     smoke.sealed_clone_closure(clone)
     smoke.budget("seeded capture")
     clone = smoke.roundtrip(clone, "seeded", sealed, all_running=True)
@@ -1166,6 +1506,8 @@ def release_pending(path, evidence, result):
             if (item.get("labels") or {}).get("kin.ops.run") in tokens
             or str((item.get("labels") or {}).get("com.docker.compose.project", "")).endswith(pending["projects_suffix"])]
     roots = sorted(str(item) for item in Path("/root").glob("kin-ckpt-smoke-*")) if Path("/root").is_dir() else []
+    if pending.get("private_root") and Path(pending["private_root"]).exists():
+        roots = sorted(set(roots) | {pending["private_root"]})
     cp.require(not left and not roots, "SMOKE_RESIDUE", "still present: " + ",".join(left + roots)[:400])
     with open(residue_dir() / "released.jsonl", "ab") as stream:
         stream.write(cp.canonical({"token": pending["token"], "evidence": pending["evidence"], "outcome": "released after inspection",

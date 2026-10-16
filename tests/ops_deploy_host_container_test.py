@@ -238,8 +238,11 @@ class ContainerTests(unittest.TestCase):
 
 import copy  # noqa: E402
 import hashlib  # noqa: E402
+import re  # noqa: E402
 import secrets  # noqa: E402
+import shutil  # noqa: E402
 import socket  # noqa: E402
+import stat  # noqa: E402
 from datetime import datetime, timedelta, timezone  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
@@ -864,7 +867,10 @@ class CheckpointDocker:
     synthetic stack. tests/ops_release_checkpoints.py decides ownership, order and admission; this adapter only runs
     exact commands against this stack's names, its pinned ComposeEntry and one fixed helper image ID. Every call runs
     without DOCKER_*/COMPOSE_* (checkpoints.daemon_environment), as the Compose calls do, so raw and Compose calls reach
-    the one daemon the host admission observed (CKPT-01)."""
+    the one daemon the host admission observed (CKPT-01). r6: every call, the product HostOps/Engine path of `observe`
+    and the Git and host-fact calls go through checkpoints.run_bounded/DeadlineRunner, so an active deadline (the native
+    smoke's body or cleanup) bounds them; container_config/image_config/probe_regenerated/layer_facts serve the
+    regenerated-artifact contract (checkpoints.regenerated_descriptor, judge_layer)."""
 
     STOP_SECONDS = 120
 
@@ -872,8 +878,10 @@ class CheckpointDocker:
         self.stack, self.helper = stack, helper_image
 
     def run(self, args, *, timeout=300, check=True, **kwargs):
+        """Every Docker/Compose call of the adapter: `timeout` is a cap only; under an active deadline (r6, the native
+        smoke) the call gets min(cap, the time left) on the bounded path of checkpoints.run_bounded."""
         kwargs.setdefault("env", checkpoints.daemon_environment())
-        result = subprocess.run(args, capture_output="stdout" not in kwargs, timeout=timeout, **kwargs)
+        result = checkpoints.run_bounded(args, capture_output="stdout" not in kwargs, timeout=timeout, plain=subprocess.run, **kwargs)
         if check and result.returncode:
             raise RuntimeError("checkpoint command failed: " + " ".join(args[:3]) + " exit " + str(result.returncode))
         return result
@@ -899,7 +907,7 @@ class CheckpointDocker:
             if tag and "<none>" not in tag:
                 tags[ident].add(tag)
         images = [{"id": ident, "tags": sorted(names)} for ident, names in sorted(tags.items())]
-        return {"containers": containers, "volumes": volumes, "networks": networks, "images": images}
+        return checkpoints.note_inventory({"containers": containers, "volumes": volumes, "networks": networks, "images": images})
 
     def stop(self, name):
         stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), name], timeout=self.STOP_SECONDS + 60, check=False)
@@ -958,12 +966,13 @@ class CheckpointDocker:
         self.compose(["start", role])
 
     def wait_db_ready(self, seconds=180):
+        # The poll and its sleep both stay inside the active deadline (checkpoints.pause), never only inside `seconds`.
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             if self.run(["docker", "exec", self.stack.target["containers"]["db"], "pg_isready", "-h", "127.0.0.1", "-U", "kin"],
-                        check=False, timeout=20).returncode == 0:
+                        check=False, timeout=min(20, max(0.01, deadline - time.monotonic()))).returncode == 0:
                 return
-            time.sleep(1)
+            checkpoints.pause(min(1, max(0.0, deadline - time.monotonic())))
         raise RuntimeError("restored database did not become ready within %d s" % seconds)
 
     def remove(self, kind, ident):
@@ -973,18 +982,27 @@ class CheckpointDocker:
                    "networks": ["docker", "network", "rm", ident], "tags": ["docker", "image", "rm", ident]}[kind]
         self.run(command, check=False)
 
-    def observe(self, checkpoint_id, *, purpose, state_raw=None, leaf=None, parent_manifest_sha256=None, source=None, probe=None):
+    def observe(self, checkpoint_id, *, purpose, state_raw=None, leaf=None, parent_manifest_sha256=None, source=None, probe=None,
+                regenerated=None):
         """The product's own observation (HostOps.snapshot) of this stack, judged by its boundary contract over the original
         state bytes, in an observation-only context (r5, checkpoints.observe_boundary): the real Introduction constructor
         without run(), a deep copy of the state, the observation's own request digest and its own Records under
         <records>/checkpoint-observations/. Its HostOps writes only those Records and keeps this stack's ComposeEntry root
         (HostOps would otherwise derive the root from the Records' location); repository, target and lock are the stack's
         own, and every docker exec is still registered and settled as an Engine exec worker. 48a28dd built the context
-        without a request digest on the closed phase's Records (T16 r4: NOT_A_BOUNDARY at every volume boundary). Returns
-        the observation record."""
+        without a request digest on the closed phase's Records (T16 r4: NOT_A_BOUNDARY at every volume boundary). r6: the
+        product Runner sits behind checkpoints.DeadlineRunner (the active deadline caps every call, the product's own
+        Unknown semantics kept), and a capture first derives the regenerated-artifact descriptor of the stack's Orthanc
+        container on its pinned image (checkpoints.regenerated_descriptor) unless one is given. Returns the observation
+        record."""
         stack = self.stack
-        runner = intro.Runner(stack.repo)
+        runner = checkpoints.DeadlineRunner(intro.Runner(stack.repo))
         entry_root = stack.root / "compose-entries"
+        if purpose == "capture" and regenerated is None:
+            state = json.loads(state_raw if state_raw is not None else (stack.records.directory / "state.json").read_bytes())
+            regenerated = checkpoints.regenerated_descriptor(
+                self, stack.target["containers"][checkpoints.REGENERATED_ROLE],
+                pinned=checkpoints.pinned_images(stack.plan_document, state)[checkpoints.REGENERATED_ROLE], token=stack.token)
 
         def make_ops(records):
             return intro.HostOps(target=stack.target, plan=stack.plan_document, runner=runner, records=records, entry_root=entry_root)
@@ -997,7 +1015,117 @@ class CheckpointDocker:
             entry_root=entry_root, lock_path=intro.lock_path(stack.repo), plan=stack.plan_document, plan_sha256=stack.plan_sha256,
             target=stack.target, repository=stack.repo, host_key=stack.target["host_key_sha256"], tool=intro.tool_hashes(),
             make_ops=make_ops, snapshot=snapshot, state_raw=state_raw, leaf=leaf, parent_manifest_sha256=parent_manifest_sha256,
-            source=source, probe=probe)
+            source=source, probe=probe, regenerated=regenerated if purpose == "capture" else None)
+
+    # ── r6 (consult-checkpoints-r6-20261017 ckpt5_01): what the regenerated-artifact contract reads from the daemon ──
+    def container_config(self, name):
+        """The startup facts of one container (None when an exact-name listing that the daemon answered shows none)."""
+        found = self.run(["docker", "container", "inspect", name], check=False)
+        if found.returncode:
+            listed = self.run(["docker", "container", "ls", "-aq", "--no-trunc", "--filter", "name=^/" + name + "$"])
+            if not listed.stdout.decode().strip():
+                return None
+            raise RuntimeError("the daemon lists " + name + " but does not inspect it")
+        item = json.loads(found.stdout)[0]
+        config = item.get("Config") or {}
+        graph = item.get("GraphDriver") or {}
+        return {"id": item["Id"], "name": item["Name"].lstrip("/"), "image": item["Image"], "entrypoint": config.get("Entrypoint"),
+                "cmd": config.get("Cmd"), "user": config.get("User") or "", "env": list(config.get("Env") or []),
+                "mounts": [{"type": m.get("Type"), "name": m.get("Name"), "source": m.get("Source"), "destination": m.get("Destination"),
+                            "rw": bool(m.get("RW"))} for m in item.get("Mounts") or []],
+                "graph": {"driver": graph.get("Name"), "upper": (graph.get("Data") or {}).get("UpperDir")}}
+
+    def image_config(self, image_id):
+        item = json.loads(self.run(["docker", "image", "inspect", image_id]).stdout)[0]
+        config = item.get("Config") or {}
+        return {"id": item["Id"], "entrypoint": config.get("Entrypoint"), "cmd": config.get("Cmd"), "env": list(config.get("Env") or []),
+                "user": config.get("User") or ""}
+
+    @staticmethod
+    def config_input_digest(mount):
+        """SHA-256 of a configurator input mounted from the host (a bind file or folder's bytes); a named volume's
+        content is not read here (None)."""
+        if mount.get("type") != "bind":
+            return None
+        path = Path(str(mount.get("source")))
+        if path.is_file():
+            return checkpoints.sha256(path.read_bytes())
+        if path.is_dir():
+            return checkpoints.sha256(checkpoints.canonical(sorted([item.relative_to(path).as_posix(), checkpoints.sha256(item.read_bytes())]
+                                                                   for item in path.rglob("*") if item.is_file())))
+        return None
+
+    def probe_regenerated(self, image_id, *, config, entrypoint, mounts, token):
+        """A pristine owned helper container of the pinned image ID, network none, with the Orthanc container's own
+        environment (an env file in a private folder, removed at once), user and read-only configurator inputs: the
+        image inventory, its own entrypoint once (Orthanc --version ends after the generation), the generated facts.
+        The helper carries the owner's kin.ops.run label and is removed and observed absent here. Returns the raw facts."""
+        name = "kin-ckpt-regen-" + uuid.uuid4().hex[:16]
+        track = getattr(self.stack, "track", None)
+        if track is not None:
+            track("helper container", name)
+        image_env = set(self.image_config(image_id)["env"])
+        folder = Path(tempfile.mkdtemp(prefix="kin-ckpt-regen-"))
+        try:
+            os.chmod(folder, 0o700)
+            env_file = folder / "env"
+            descriptor = os.open(str(env_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write("".join(item + "\n" for item in config["env"] if item not in image_env))
+            options = [item for mount in mounts for item in ("--mount", "type=%s,source=%s,target=%s,readonly" % (mount["type"], mount["source"],
+                                                                                                               mount["destination"]))]
+            created = self.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, "--label", "kin.ckpt.probe=regenerated",
+                                "--network", "none", *(["--user", config["user"]] if config.get("user") else []), "--env-file", str(env_file),
+                                *options, "--entrypoint", "sh", image_id, "-c", checkpoints.REGENERATED_SHELL, "sh", checkpoints.REGENERATED_PROBE,
+                                entrypoint], timeout=60)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        ident = created.stdout.decode().strip()
+        try:
+            started = self.run(["docker", "start", "-a", ident], check=False, timeout=120)
+        finally:
+            self.run(["docker", "rm", "-f", "-v", ident], check=False, timeout=60)
+            gone = self.run(["docker", "container", "inspect", ident], check=False, timeout=60).returncode != 0 and not \
+                self.run(["docker", "container", "ls", "-aq", "--no-trunc", "--filter", "id=" + ident]).stdout.decode().strip()
+        lines = started.stdout.decode("utf-8", "replace").splitlines()
+        stages = {}
+        for line in lines:
+            if line.startswith("KIN_REGENERATED "):
+                document = json.loads(line[len("KIN_REGENERATED "):])
+                stages[document.get("stage")] = document
+        entry = [line.split()[1] for line in lines if line.startswith("KIN_REGENERATED_ENTRY ")]
+        return {"pre": stages.get("pre"), "post": stages.get("post"), "entry_exit": int(entry[0]) if entry and entry[0].isdigit() else None,
+                "probe_exit": started.returncode,
+                "helper": {"name": name, "id": ident, "labels": {"kin.ops.run": token, "kin.ckpt.probe": "regenerated"}, "removed": gone}}
+
+    def layer_facts(self, name, paths):
+        """lstat facts (and SHA-256 of regular files) of changed paths in one stopped container's writable layer, read
+        from the overlay2 upper directory the daemon reports; None when the storage driver gives no such directory (the
+        typed exception then refuses). /etc/hostid's content class is recorded, never its value."""
+        graph = (self.container_config(name) or {}).get("graph") or {}
+        upper = graph.get("upper")
+        if graph.get("driver") != "overlay2" or not upper or not Path(upper).is_dir():
+            return None
+        out = {}
+        for path in paths:
+            target = Path(upper) / path.lstrip("/")
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                out[path] = {"type": "absent"}
+                continue
+            mode = info.st_mode
+            kind = ("dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "link" if stat.S_ISLNK(mode)
+                    else "whiteout" if stat.S_ISCHR(mode) else "other")
+            fact = {"type": kind, "mode": stat.S_IMODE(mode), "uid": info.st_uid, "gid": info.st_gid}
+            if kind == "file":
+                data = target.read_bytes()
+                text = "other"
+                if len(data) <= 64:
+                    text = "placeholder" if data == b"not-generated\n" else "hex8-lf" if re.fullmatch(rb"[0-9a-f]{8}\n", data) else "other"
+                fact.update(size=len(data), sha256=checkpoints.sha256(data), text=text)
+            out[path] = fact
+        return out
 
     def boundary_facts(self):
         """The product facts a restore must reproduce (CKPT-04), observed through the stack's own containers: per role its
@@ -1033,7 +1161,8 @@ class CheckpointDocker:
     def self_contained_git(fixture_root):
         """Each disposable clone keeps its own object closure (its --shared alternate is the source worktree)."""
         for git_dir in sorted(Path(fixture_root).glob("*/repo/.git")):
-            subprocess.run(["git", "-C", str(git_dir.parent), "repack", "-a", "-d", "-q"], check=True, capture_output=True, timeout=600)
+            checkpoints.run_bounded(["git", "-C", str(git_dir.parent), "repack", "-a", "-d", "-q"], check=True, capture_output=True, timeout=600,
+                                    plain=subprocess.run)
             (git_dir / "objects" / "info" / "alternates").unlink(missing_ok=True)
             CheckpointDocker.git_connected(git_dir.parent)
 
@@ -1042,8 +1171,8 @@ class CheckpointDocker:
         """Every object reachable from the clone's refs, reflogs and index is in its own object store (CalledProcessError
         otherwise). git-fsck(1) has no -q/--quiet (git 2.43 and 2.55 exit 129 on it, T16 run-d1428); --no-progress keeps
         stderr free of progress lines, and dangling objects are reported without failing."""
-        subprocess.run(["git", "-C", str(repo), "fsck", "--connectivity-only", "--no-progress"], check=True, capture_output=True,
-                       timeout=600)
+        checkpoints.run_bounded(["git", "-C", str(repo), "fsck", "--connectivity-only", "--no-progress"], check=True, capture_output=True,
+                                timeout=600, plain=subprocess.run)
 
     @staticmethod
     def host_facts(fixture_root, owned_ids=()):
@@ -1052,16 +1181,17 @@ class CheckpointDocker:
         name); the current context's endpoint and any DOCKER_* endpoint selection in this environment; a query that fails
         or prints an unexpected row is an unobservable daemon (daemon_ok false), never a clean one."""
         environment = checkpoints.daemon_environment()
-        info_run = subprocess.run(["docker", "info", "--format", "{{json .}}"], capture_output=True, timeout=60, env=environment)
+        bounded = lambda args, **kwargs: checkpoints.run_bounded(args, plain=subprocess.run, **kwargs)  # noqa: E731
+        info_run = bounded(["docker", "info", "--format", "{{json .}}"], capture_output=True, timeout=60, env=environment)
         try:
             info = json.loads(info_run.stdout or b"{}") if info_run.returncode == 0 else {}
         except ValueError:
             info = {}
-        endpoint = subprocess.run(["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], capture_output=True,
-                                  text=True, timeout=60, env=environment)
-        listed = subprocess.run(["docker", "ps", "-a", "--no-trunc", "--format",
-                                 '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Label "kin.ops.run"}}\t{{.Label "kin.emrb.live"}}'],
-                                capture_output=True, text=True, timeout=60, env=environment)
+        endpoint = bounded(["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], capture_output=True,
+                           text=True, timeout=60, env=environment)
+        listed = bounded(["docker", "ps", "-a", "--no-trunc", "--format",
+                          '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Label "kin.ops.run"}}\t{{.Label "kin.emrb.live"}}'],
+                         capture_output=True, text=True, timeout=60, env=environment)
         rows = []
         for line in listed.stdout.splitlines() if listed.returncode == 0 else []:
             parts = line.split("\t")
@@ -1092,7 +1222,7 @@ class CheckpointDocker:
         environment = checkpoints.daemon_environment()
 
         def text(args):
-            result = subprocess.run(args, capture_output=True, text=True, timeout=60, env=environment)
+            result = checkpoints.run_bounded(args, capture_output=True, text=True, timeout=60, env=environment, plain=subprocess.run)
             return result.stdout.strip() if result.returncode == 0 else ""
         import importlib.metadata
         try:

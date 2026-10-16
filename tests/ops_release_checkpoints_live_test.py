@@ -410,7 +410,10 @@ def seal_boundary(checkpoint_id, stack, *, store, fixture_root, helper, identity
     the clones' Git closure is sealed; the bundle binds S's own SHA-256 as the state (the archived state.json must be S,
     never a state re-read after the observation) and the capture observation beside it, and the original records must
     still be the observation's `before` bytes. `identity(S)` returns the bundle identity. Returns (bundle, observation).
-    Shared by CheckpointSegments and the native smoke (tests/ops_release_checkpoints_native_test.py)."""
+    Shared by CheckpointSegments and the native smoke (tests/ops_release_checkpoints_native_test.py). r6: the capture
+    observation binds the regenerated-artifact descriptor of the stack's Orthanc container on its pinned image, and
+    capture_checkpoint judges every stopped role's writable layer against it and binds that record (`layer`) before any
+    bundle byte; every call here runs under the caller's active deadline when there is one (the native smoke's)."""
     spec = cp.CHECKPOINTS[checkpoint_id]
     docker = rehearsal.CheckpointDocker(stack, helper)
     with stack.records.lease():

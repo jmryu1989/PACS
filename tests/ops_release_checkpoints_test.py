@@ -8,12 +8,21 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M44 and M46 to temporary copies of tests/ops_release_checkpoints.py and
-(M15-M17, M35) tests/ops_deploy_host_container_test.py only, runs the named contract against the unmodified copies (control)
-and the mutant in fresh processes, and counts a kill only when the control passes and the mutant fails an assertion (an
-import, launch or fixture error is not a kill). M01-M14 are the spec's contracts; M15-M30 were added by hardening round 1
-for CKPT-01..09 (one or more per finding); M31-M42 by round 3 for CKPT2-01..06 (M30 retargeted to the new alias keep);
-M43, M44 and M46 by round 5 (consult-checkpoints-r5-20261016 new_mutants).
+CheckpointMutationContracts (T18) applies M01-M44 and M46-M51 to temporary copies of tests/ops_release_checkpoints.py,
+(M15-M17, M35) tests/ops_deploy_host_container_test.py and (M51) tests/ops_release_checkpoints_native_test.py only, runs
+the named contract against the unmodified copies (control) and the mutant in fresh processes, and counts a kill only when
+the control passes and the mutant fails an assertion (an import, launch or fixture error is not a kill). M01-M14 are the
+spec's contracts; M15-M30 were added by hardening round 1 for CKPT-01..09 (one or more per finding); M31-M42 by round 3
+for CKPT2-01..06 (M30 retargeted to the new alias keep); M43, M44 and M46 by round 5 (consult-checkpoints-r5-20261016
+new_mutants); M47-M51 by round 6 (consult-checkpoints-r6-20261017 new_mutants M47-M49 and the optional library-bytes and
+residue-release ones).
+
+Round 6 (consult-checkpoints-r6-20261017): the regenerated-artifact contract of the Orthanc role on its pinned image
+(CheckpointRegeneratedTests: P5 the role x image x kind/type/content/ancestor/mount matrix, P6 the required layer raw at
+load_bundle/index/BOUND consumers, P7 the descriptor from a pristine probe) and real deadlines (CheckpointDeadlineTests:
+P8 real local children cut on the bounded path, P9 the cleanup's own end and the kept residue), and the `commands`
+diagnostics in CheckpointSmokeTests. Pure only: no Docker daemon is queried (the real entrypoint's host observation is
+answered by its bootstrap).
 
 Round 5 (consult-checkpoints-r5-20261016): the observation-only context over a synthetic Engine behind the product's
 own Runner interface (CheckpointObservationTests: P1 its own request, Records and settled workers; P2 the original records
@@ -225,13 +234,16 @@ def raw_tar(entries):
 
 
 class FakeBackend:
-    """A synthetic daemon: owned containers/volumes of PROJECT, optional foreign resources, recorded calls."""
+    """A synthetic daemon: owned containers/volumes of PROJECT, optional foreign resources, recorded calls. `images` gives
+    each role's container image; `layers` (name -> {path: lstat facts}) is what layer_facts reads from a writable layer."""
 
-    def __init__(self, names, volumes=None, *, foreign=(), running=None):
+    def __init__(self, names, volumes=None, *, foreign=(), running=None, images=None):
         self.calls, self.names = [], names
         running = set(intro.ROLES) if running is None else running
         self.containers = {name: {"id": "id-" + name, "name": name, "labels": {"com.docker.compose.project": PROJECT},
-                                  "running": role in running} for role, name in names.items() if role in intro.ROLES}
+                                  "running": role in running, "image": (images or {}).get(role)}
+                           for role, name in names.items() if role in intro.ROLES}
+        self.layers = {}
         self.volumes = {name: {"id": name, "name": name, "labels": {"com.docker.compose.project": PROJECT,
                                                                     "com.docker.compose.volume": category}}
                         for category, name in (volumes or {}).items()}
@@ -257,6 +269,12 @@ class FakeBackend:
     def writable_changes(self, name):
         self.calls.append(("diff", name))
         return self.diffs.get(name, ["C /run", "A /run/nginx.pid", "C /var", "C /var/cache", "A /var/cache/nginx/proxy_temp"])
+
+    def layer_facts(self, name, paths):
+        self.calls.append(("layer_facts", name))
+        if name not in self.layers:
+            return None
+        return {path: self.layers[name][path] for path in paths if path in self.layers[name]}
 
     def export_volume(self, name, destination):
         self.calls.append(("export", name))
@@ -309,7 +327,61 @@ class FakeBackend:
             del table[name]
 
     def mutations(self):
-        return [call for call in self.calls if call[0] not in ("inventory", "volume_exists", "diff")]
+        return [call for call in self.calls if call[0] not in ("inventory", "volume_exists", "diff", "layer_facts")]
+
+
+# ── r6 (consult-checkpoints-r6-20261017 ckpt5_01): a synthetic regenerated-artifact descriptor of the pinned Orthanc
+# image, shaped as regenerated_descriptor derives one from a probe, and the writable-layer facts of a normal start ──
+def _file(sha, size, mode=0o644, uid=0, gid=0, text="other"):
+    return {"type": "file", "mode": mode, "uid": uid, "gid": gid, "size": size, "sha256": sha, "text": text}
+
+
+def _dir(mode=0o755, uid=0, gid=0):
+    return {"type": "dir", "mode": mode, "uid": uid, "gid": gid}
+
+
+ORTHANC_IMAGE = image("5")
+AVAILABLE = {"libOrthancGdcm.so": _file("a" * 64, 40960, 0o755, 999, 999), "libOrthancDicomWeb.so": _file("b" * 64, 81920, 0o755, 999, 999),
+             "libOrthancTcia.so": _file("c" * 64, 20480, 0o755, 999, 999)}   # available, not enabled by the start input
+ENABLED = ("libOrthancDicomWeb.so", "libOrthancGdcm.so")
+PYC = {"configurator.cpython-311.pyc": _file("d" * 64, 9000), "helpers.cpython-311.pyc": _file("e" * 64, 3000)}
+ORTHANC_START = ["C /etc", "C /etc/hostid", "C /startup", "A /startup/__pycache__", *("A /startup/__pycache__/" + name for name in sorted(PYC)),
+                 "C /tmp", "A /tmp/orthanc.json", "C /usr", "C /usr/share", "C /usr/share/orthanc", "C /usr/share/orthanc/plugins",
+                 *("A /usr/share/orthanc/plugins/" + name for name in ENABLED)]
+
+
+def regenerated_fixture(container_id, *, pinned=ORTHANC_IMAGE, actual=None, applicable=True, hostid=True):
+    ancestors = {path: _dir() for path in ("/etc", "/startup", "/usr", "/usr/share", "/usr/share/orthanc")}
+    ancestors[cp.PLUGINS] = _dir(0o755, 999, 999)
+    inventory = {"entrypoint": _file("f" * 64, 2068, 0o755), "python": {"cache_tag": "cpython-311", "optimize": 0, "version": "3.11.2", "no_bytecode": False},
+                 "startup": {"configurator.py": _file("1" * 64, 11100), "generateConfiguration.py": _file("2" * 64, 3157), "helpers.py": _file("3" * 64, 2455)},
+                 "hostid": _file(hashlib.sha256(b"not-generated\n").hexdigest(), 14, 0o644, 999, 999, "placeholder"),
+                 "available": copy.deepcopy(AVAILABLE), "plugins": {}, "pycache": {"type": "absent"}, "ancestors": ancestors}
+    generated = {"hostid": _file("9" * 64, 9, 0o644, 999, 999, "hex8-lf"), "pycache_dir": _dir(), "pycache": copy.deepcopy(PYC),
+                 "plugins": {name: {**AVAILABLE[name], "link": "hard link"} for name in ENABLED}, "entry_exit": 0}
+    return {"schema": 1, "kind": cp.REGENERATED_KIND, "role": cp.REGENERATED_ROLE, "container_name": PROJECT + "-orthanc", "pinned_image": pinned,
+            "container_id": container_id, "actual_image": actual or pinned, "applicable": applicable, "reasons": [] if applicable else ["synthetic"],
+            "hostid_regenerated": applicable and hostid, "hostid_reasons": [] if hostid else ["synthetic"],
+            "startup": {"entrypoint": ["/docker-entrypoint.sh"], "cmd": ["/tmp/orthanc.json"], "user": "", "env_names": ["ORTHANC__REGISTERED_USERS"],
+                        "env_sha256": "4" * 64, "conditions": {"force_host_id": False, "generate_host_id": "default", "before_startup_script": False},
+                        "config_mounts": [], "input_sha256": "5" * 64},
+            "image": inventory, "generated": generated, "probe": {"helper": {"name": "kin-ckpt-regen-synthetic", "removed": True}, "entry_exit": 0}}
+
+
+def start_facts(descriptor):
+    """The writable-layer facts a normal Orthanc start leaves: exactly the descriptor's generated set and ancestors."""
+    generated, inventory = descriptor["generated"], descriptor["image"]
+    facts = {cp.HOSTID: dict(generated["hostid"]), cp.PYCACHE: dict(generated["pycache_dir"])}
+    facts.update({cp.PYCACHE + "/" + name: dict(fact) for name, fact in generated["pycache"].items()})
+    facts.update({cp.PLUGINS + "/" + name: {k: v for k, v in fact.items() if k != "link"} for name, fact in generated["plugins"].items()})
+    facts.update({path: dict(fact) for path, fact in inventory["ancestors"].items()})
+    return facts
+
+
+def fixture_roles(target, images):
+    return {role: {"absent": False, "container_id": "id-" + target["containers"][role], "container_name": target["containers"][role],
+                   "image": images[role], "mounts": [], "changes": [], "facts": {}, "layer_observable": True, "verdicts": []}
+            for role in intro.ROLES}
 
 
 LEGACY = {"roles": [["kin_legacy_group", False, False, -1], ["kin_legacy_reader", False, True, 3]],
@@ -318,11 +390,13 @@ LEGACY = {"roles": [["kin_legacy_group", False, False, -1], ["kin_legacy_reader"
 B0_MANIFESTS = {"source": b'{"b0":"source"}\n', "clone": b'{"b0":"clone"}\n', "failure": b'{"b0":"failure"}\n'}
 
 
-def realistic(root, checkpoint_id, *, tamper=None):
+def realistic(root, checkpoint_id, *, tamper=None, layer=True, descriptor=None):
     """A completed boundary inside a fixture root as the harness binds it: the lineage stack's state and result, the
     sibling secrets, the Compose pointer, the ledger, the lock, the stage context (with the stack's plan document and
     target), the source B0 and its seed copy, the stack's own B0 - and the identity of exactly those bytes. `tamper`
-    may change the context, state or B0 files after the identity was taken (a bundle whose bytes contradict it)."""
+    may change the context, state or B0 files after the identity was taken (a bundle whose bytes contradict it). A
+    volume checkpoint also has its capture observation (with `descriptor`) and, unless `layer` is false (capture_checkpoint
+    writes its own), a writable-layer record of containers without changes."""
     root = Path(root)
     stack = cp.LINEAGE_STACK[checkpoint_id]
     target = target_fixture(root)
@@ -378,23 +452,36 @@ def realistic(root, checkpoint_id, *, tamper=None):
         bindings[name] = {"path": rel, "sha256": hashlib.sha256(value).hexdigest()}
     if cp.CHECKPOINTS[checkpoint_id]["volumes"]:
         # r5: the capture observation of exactly this state, bound beside it.
-        folder = write_observation(root / stack / "records", checkpoint_id, "capture", plan=plan, target=target, state_raw=files["state"][1])
+        folder = write_observation(root / stack / "records", checkpoint_id, "capture", plan=plan, target=target, state_raw=files["state"][1],
+                                   descriptor=descriptor)
         result_file = folder / cp.OBSERVATION_RESULT
         bindings["observation"] = {"path": result_file.relative_to(root).as_posix(), "sha256": hashlib.sha256(result_file.read_bytes()).hexdigest()}
+        if layer:
+            # r6: the post-stop judgement beside it (here: containers whose writable layers did not change).
+            bindings["layer"], _ = cp.write_layer(root, bindings, fixture_roles(target, cp.pinned_images(plan, parts["state"])),
+                                                  checkpoint_id=checkpoint_id, summary=json.loads(result_file.read_bytes()),
+                                                  descriptor_raw=(folder / cp.REGENERATED_FILE).read_bytes())
     return SimpleNamespace(plan=plan, target=target, state=parts["state"], result=result, raw=raw, bindings=bindings, identity=identity,
                            root=root)
 
 
-def write_observation(records_dir, checkpoint_id, purpose, *, plan, target, state_raw, parent=None):
+def write_observation(records_dir, checkpoint_id, purpose, *, plan, target, state_raw, parent=None, descriptor=None):
     """A complete observation folder as cp.observe_boundary leaves one (r5): the canonical request, the observation state
     with this request's settled Engine exec worker on the database container, the product snapshot, the command record and
-    the log it refers to, the journal and, last, observation.json. Returns the folder."""
+    the log it refers to, the journal and, last, observation.json; a capture keeps its regenerated-artifact descriptor
+    (r6; by default one that applies to nothing). Returns the folder."""
     plan_sha = intro.plan_identity(plan)
-    request = cp.observation_request(checkpoint_id, purpose=purpose, plan_sha256=plan_sha, state_raw=state_raw, parent_manifest_sha256=parent)
+    if purpose == "capture" and descriptor is None:
+        descriptor = regenerated_fixture("id-" + target["containers"]["orthanc"], applicable=False)
+    descriptor_raw = cp.canonical(descriptor) + b"\n" if purpose == "capture" else None
+    request = cp.observation_request(checkpoint_id, purpose=purpose, plan_sha256=plan_sha, state_raw=state_raw, parent_manifest_sha256=parent,
+                                     regenerated_sha256=cp.sha256(descriptor_raw) if descriptor_raw else None)
     digest = cp.sha256(cp.canonical(request))
     folder = Path(records_dir) / cp.OBSERVATION_DIR / (checkpoint_id + "-" + purpose + "-" + digest[:16])
     (folder / "logs").mkdir(parents=True)
     (folder / "request.json").write_bytes(cp.canonical(request) + b"\n")
+    if descriptor_raw:
+        (folder / cp.REGENERATED_FILE).write_bytes(descriptor_raw)
     state = json.loads(state_raw)
     basis = {"checkout": "previous", "lock_token": None, "compose_entry": {"generation": "1" * 64, "sha256": "2" * 64}, **state}
     snapshot = snapshot_fixture(basis, plan, target, cp.CHECKPOINTS[checkpoint_id]["boundary"])
@@ -927,15 +1014,15 @@ class CheckpointClaimTests(unittest.TestCase):
                          "a met negative proof is not a fresh pass")
 
 
-class CheckpointRestoreTests(RefusalAssertions, TempCase):
-    def captured(self, checkpoint_id, backend=None, *, running=None):
+class CaptureFixture:
+    def captured(self, checkpoint_id, backend=None, *, running=None, descriptor=None, fixture=None, store_root=None):
         target = target_fixture()
         names = {role: target["containers"][role] for role in intro.ROLES}
         volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
         backend = backend or FakeBackend(names, volumes, running=running)
-        fixture = self.tempdir()
-        made = realistic(fixture, checkpoint_id)
-        store = cp.BundleStore(self.tempdir() / "bundles", forbidden=[fixture])
+        fixture = fixture or self.tempdir()
+        made = realistic(fixture, checkpoint_id, layer=False, descriptor=descriptor)
+        store = cp.BundleStore(store_root or self.tempdir() / "bundles", forbidden=[fixture])
         boundary = cp.boundary_publishable(checkpoint_id, state=made.state, result=made.result, result_raw=made.raw)
         final = cp.capture_checkpoint(checkpoint_id=checkpoint_id, store=store, backend=backend, boundary=boundary, names=names,
                                       volumes=volumes, fixture_root=fixture, bindings=made.bindings, identity=made.identity,
@@ -944,6 +1031,8 @@ class CheckpointRestoreTests(RefusalAssertions, TempCase):
                                       execution_kind="fresh")
         return final, backend, names, fixture
 
+
+class CheckpointRestoreTests(CaptureFixture, RefusalAssertions, TempCase):
     def test_restore_preserves_boundary_and_uses_only_owned_empty_targets(self):
         """T08 (RQC-02): stop order, writable-layer rule, new volumes only, boundary roles, no seed/provision/migrate."""
         for checkpoint_id, started in (("held", ["db"]), ("introduced", ["db", *intro.RESUME_ORDER]), ("verified", ["db", *intro.RESUME_ORDER])):
@@ -1052,21 +1141,26 @@ class CheckpointRestoreTests(RefusalAssertions, TempCase):
                                   images_present=lambda image_id: True, observe=lambda sid: None)
             self.assertIn(extra, fresh.loaded)
         # r5 (the native smoke): the mount point a declared mount needs, and the folder made to hold it, are no layer
-        # state; a file stored beside it is; the orthancteam image regenerates its hostid, configurator cache and plugins.
-        for name, diffs, allowed in (("a mount point and the folder made for it", ["A /etc/nginx", "A /etc/nginx/certs"], True),
-                                     ("a file beside the mount point", ["A /etc/nginx", "A /etc/nginx/certs", "A /etc/nginx/extra.conf"], False),
-                                     ("the Orthanc image's own start", ["C /etc", "C /etc/hostid", "C /startup", "A /startup/__pycache__",
-                                                                       "A /usr/share/orthanc/plugins/libOrthancGdcm.so"], True),
-                                     ("a mount point of another container", ["A /var/lib/postgresql/emr-access"], False)):
+        # state; a file stored beside it is. r6 (CKPT5-01): the Orthanc image's own start is accepted on the Orthanc role
+        # with the descriptor of its pinned image, and the same changes on another role are refused.
+        descriptor = regenerated_fixture("id-" + names["orthanc"])
+        images = cp.pinned_images(plan_fixture(), {"entry_checkout": "target"})
+        for name, role, diffs, allowed in (("a mount point and the folder made for it", "proxy", ["A /etc/nginx", "A /etc/nginx/certs"], True),
+                                           ("a file beside the mount point", "proxy", ["A /etc/nginx", "A /etc/nginx/certs", "A /etc/nginx/extra.conf"], False),
+                                           ("the Orthanc image's own start on the Orthanc role", "orthanc", ORTHANC_START, True),
+                                           ("the same start changes on another role", "proxy", ORTHANC_START, False),
+                                           ("a mount point of another container", "proxy", ["A /var/lib/postgresql/emr-access"], False)):
             with self.subTest(layer=name):
-                backend = FakeBackend(names, volumes)
+                backend = FakeBackend(names, volumes, images=images)
                 backend.containers[names["proxy"]]["mounts"] = [{"type": "volume", "name": PROJECT + "_proxy-certs",
                                                                  "destination": "/etc/nginx/certs"}]
-                backend.diffs.update({names["proxy"]: diffs})
+                backend.diffs.update({names[role]: diffs})
+                backend.layers[names[role]] = start_facts(descriptor)
                 if allowed:
-                    self.admitted(self.captured, "introduced", backend)
+                    final, _, _, _ = self.admitted(self.captured, "introduced", backend, descriptor=descriptor)
+                    self.admitted(cp.load_bundle, final)
                 else:
-                    self.assertRefused("WRITABLE_LAYER", self.captured, "introduced", backend)
+                    self.assertRefused("WRITABLE_LAYER", self.captured, "introduced", backend, descriptor=descriptor)
 
 
 class CheckpointBudgetTests(RefusalAssertions, TempCase):
@@ -1501,6 +1595,15 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
                 sealed_bindings = {"state": {"path": stack + "/records/state.json", "sha256": hashlib.sha256((records / "state.json").read_bytes()).hexdigest()},
                                    "observation": {"path": stack + "/records/" + folder.relative_to(records).as_posix() + "/" + cp.OBSERVATION_RESULT,
                                                    "sha256": hashlib.sha256((folder / cp.OBSERVATION_RESULT).read_bytes()).hexdigest()}}
+                # r6: the seal's writable-layer record beside that observation, as the leaf's preserved records carry it.
+                judged = self.tempdir("kin-layer-")
+                (judged / stack / "records" / cp.OBSERVATION_DIR).mkdir(parents=True)
+                sealed_bindings["layer"], _ = cp.write_layer(
+                    judged, sealed_bindings, fixture_roles(target, plan["previous"]["images"]), checkpoint_id=expect["produces"],
+                    summary=json.loads((folder / cp.OBSERVATION_RESULT).read_bytes()), descriptor_raw=(folder / cp.REGENERATED_FILE).read_bytes())
+                kept = records / sealed_bindings["layer"]["path"].split("/records/", 1)[1]
+                kept.parent.mkdir()
+                kept.write_bytes((judged / sealed_bindings["layer"]["path"]).read_bytes())
             alter("files", records, stack)
             executing = executing or plans[stack]
         raw_rows = sorted([path.relative_to(evidence).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]
@@ -3124,9 +3227,10 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
 
 
 def git(*args, cwd=None, check=True):
-    """The real git, with a fixed identity so a commit needs no account configuration."""
-    return subprocess.run(["git", "-c", "user.name=checkpoint-test", "-c", "user.email=checkpoint-test@invalid", "-c", "commit.gpgsign=false",
-                           *args], cwd=cwd, check=check, capture_output=True, text=True, timeout=120)
+    """The real git, with a fixed identity so a commit needs no account configuration (on the bounded path, so the native
+    smoke's deadline bounds these calls when the smoke runs this class)."""
+    return cp.run_bounded(["git", "-c", "user.name=checkpoint-test", "-c", "user.email=checkpoint-test@invalid", "-c", "commit.gpgsign=false",
+                           *args], cwd=cwd, check=check, capture_output=True, text=True, timeout=120, plain=subprocess.run)
 
 
 def drop_object(repo, digest):
@@ -3169,8 +3273,8 @@ class CheckpointGitClosureTests(TempCase):
         self.assertTrue((fixture / "source" / "repo" / ".git" / "objects" / "info" / "alternates").is_file())
         self.assertTrue((fixture / "clone" / "repo" / ".git" / "shallow").is_file())
         # A dangling object is reported by fsck but is not a broken closure.
-        subprocess.run(["git", "-C", str(fixture / "clone" / "repo"), "hash-object", "-w", "--stdin"], input="dangling\n", text=True,
-                       check=True, capture_output=True, timeout=60)
+        cp.run_bounded(["git", "-C", str(fixture / "clone" / "repo"), "hash-object", "-w", "--stdin"], input="dangling\n", text=True,
+                       check=True, capture_output=True, timeout=60, plain=subprocess.run)
         rehearsal.CheckpointDocker.self_contained_git(fixture)
         heads = {}
         for name in clones:
@@ -3464,6 +3568,8 @@ class CheckpointObservationTests(RefusalAssertions, TempCase):
     @staticmethod
     def observe(stack, engine, checkpoint_id, **kwargs):
         import ops_deploy_host_container_test as rehearsal
+        # r6: the capture's regenerated-artifact descriptor is given (a pure control never asks a daemon for one).
+        kwargs.setdefault("regenerated", regenerated_fixture("id-" + stack.target["containers"]["orthanc"]))
         with patch.object(rehearsal.intro, "Runner", lambda cwd, **options: engine):
             return rehearsal.CheckpointDocker(stack, None).observe(checkpoint_id, purpose="capture", **kwargs)
 
@@ -3540,7 +3646,8 @@ class CheckpointObservationTests(RefusalAssertions, TempCase):
                                make_ops=lambda records: intro.HostOps(target=other.target, plan=other.plan_document,
                                                                       runner=self.engine(other, other_state, "held"), records=records,
                                                                       entry_root=entry_root),
-                               snapshot=lambda ops, context: copy.deepcopy(reused))
+                               snapshot=lambda ops, context: copy.deepcopy(reused),
+                               regenerated=regenerated_fixture("id-" + other.target["containers"]["orthanc"]))
             without = dict(files)
             stripped = json.loads(without["state.json"])
             stripped["workers"] = {nonce: row for nonce, row in stripped["workers"].items() if nonce in state["workers"]}
@@ -3608,7 +3715,7 @@ class CheckpointObservationTests(RefusalAssertions, TempCase):
             self.assertRefused("BUNDLE_INVALID", cp.check_bindings, changed, bindings, required=["state"])
 
 
-def fake_smoke(outcome="PASS", *, exit_code=0, skipped=0, missing=(), cleanup=None, host=None, error=None, result=True, before=None):
+def fake_smoke(outcome="PASS", *, exit_code=0, skipped=0, missing=(), cleanup=None, host=None, error=None, result=True, before=None, result_code=None):
     """A stand-in for the recorded native smoke run (pure control of `commands` only): it writes the recorder's run.json and
     the smoke's result where `commands` told it to, and records whether stdout was still empty when it ran."""
     seen = []
@@ -3623,7 +3730,7 @@ def fake_smoke(outcome="PASS", *, exit_code=0, skipped=0, missing=(), cleanup=No
         if result:
             evidence.mkdir(parents=True)
             row = {"outcome": "PASS", "checks": 2}
-            document = {"outcome": outcome, "skipped": skipped, "host_facts": host or HOST_FACTS,
+            document = {"outcome": outcome, "code": result_code, "skipped": skipped, "host_facts": host or HOST_FACTS,
                         "coverage": {key: row for key in cp.SMOKE_PATHS if key not in missing},
                         "oracles": {key: row for key in cp.SMOKE_ORACLES if key not in missing},
                         "cleanup": cleanup or {"complete": True, "remaining": [], "errors": []}}
@@ -3636,8 +3743,14 @@ HOST_FACTS = {"os": "linux", "docker_os": "Ubuntu 24.04 LTS", "daemon_ok": True,
               "available_ram_bytes": 16 * 1024 ** 3, "available_disk_bytes": 100 * 1024 ** 3, "required_disk_bytes": 20 * 1024 ** 3,
               "foreign_containers": [], "host_key_sha256": "8" * 64, "architecture": "x86_64", "absolute_fixture_root": "/root",
               "docker_endpoint": "unix:///var/run/docker.sock", "endpoint_selectors": []}
+# The real entrypoint with its gate state redirected and (r6) its host observation answered without a daemon: the
+# pure suite queries no Docker daemon (consultation pure_proof); the admission judges these facts as it judges real ones.
 NATIVE_BOOTSTRAP = ("import sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\nimport ops_release_checkpoints_native_test as native\n"
-                    "native.gate.STATE = Path(sys.argv[2])\nraise SystemExit(native.main(sys.argv[3:]))\n")
+                    "native.gate.STATE = Path(sys.argv[2])\n"
+                    "native.observe_host = lambda root: {'os': 'linux' if sys.platform.startswith('linux') else sys.platform, 'docker_os': 'synthetic',"
+                    " 'daemon_ok': True, 'daemon_identity': 'DAEMON:SYNTHETIC', 'docker_endpoint': 'unix:///var/run/docker.sock',"
+                    " 'endpoint_selectors': native.cp.endpoint_selectors(), 'available_ram_bytes': 0, 'available_disk_bytes': 0, 'foreign_containers': []}\n"
+                    "raise SystemExit(native.main(sys.argv[3:]))\n")
 
 
 class CheckpointSmokeTests(RefusalAssertions, TempCase):
@@ -3671,7 +3784,10 @@ class CheckpointSmokeTests(RefusalAssertions, TempCase):
                  "a path without its checks (A07)": dict(missing=("A07",)), "an oracle without its checks (N01)": dict(missing=("N01",)),
                  "an unconfirmed cleanup": dict(cleanup={"complete": False, "remaining": ["kin-ckptsmoke-x"], "errors": []}),
                  "a smoke that left no result": dict(result=False), "a smoke that could not run": dict(error=subprocess.TimeoutExpired("x", 1)),
-                 "the smoke's own refusal (a busy lease)": dict(outcome="REFUSED", exit_code=3)}
+                 "the smoke's own refusal (a busy lease)": dict(outcome="REFUSED", exit_code=3),
+                 "a smoke that met its deadline (r6)": dict(outcome="FAIL", exit_code=1, result_code="DEADLINE",
+                                                           cleanup={"complete": False, "remaining": ["unverified: private root /root/x"],
+                                                                    "errors": [], "verification": "UNKNOWN"})}
 
         def smoke_only(**kwargs):
             run, _ = fake_smoke(**kwargs)
@@ -3702,6 +3818,12 @@ class CheckpointSmokeTests(RefusalAssertions, TempCase):
                 code, script, err = commands(smoke=run)
                 self.assertEqual((code, script), (2, ""))
                 self.assertIn("CHECKPOINT_REFUSED INSUFFICIENT_RAM", err)
+            for diagnostic in ("body", "cleanup"):
+                with self.subTest(refused="a deadline diagnostic, even one whose smoke reported a pass (r6)", diagnostic=diagnostic):
+                    run, seen = fake_smoke(before=lambda: out.getvalue())
+                    code, script, err = commands("--smoke-diagnostic", diagnostic, smoke=run)
+                    self.assertEqual((code, script, seen), (2, "", [""]))
+                    self.assertIn("CHECKPOINT_REFUSED SMOKE_FAILED", err)
         else:
             # Elsewhere the proof's Linux paths refuse first, still before the smoke and before any byte.
             run, seen = fake_smoke()
@@ -3740,6 +3862,8 @@ class CheckpointSmokeTests(RefusalAssertions, TempCase):
             completed, result = native({"DOCKER_HOST": "unix:///nonexistent/kin-ckpt-smoke.sock"})
             self.assertEqual(completed.returncode, 3, completed.stderr[-800:])
             self.assertIn(result["code"], ("UNSUPPORTED_HOST", "REMOTE_DAEMON"))
+            self.assertEqual(sorted((state.parent / "checkpoint-smoke").glob("pending-*.json")), [],
+                             "an admission refusal created nothing, so its pending residue is released at once")
         self.assertEqual(smoke_roots(), roots, "no smoke fixture was created")
         self.assertEqual({name: data for name, data in ledger().items() if name != "live.lock"}, kept)
 
@@ -3774,10 +3898,558 @@ class CheckpointCompareTests(RefusalAssertions, TempCase):
                              "without two BOUND runs there is no T16 pass")
 
 
+# ── r6 (consult-checkpoints-r6-20261017): the regenerated-artifact contract (CKPT5-01) and real deadlines (CKPT5-02) ──
+
+def bundle_from(test, fixture, made, checkpoint_id="introduced"):
+    """A sealed bundle of an already prepared fixture (its bindings as given), the way seal() makes one."""
+    store = cp.BundleStore(test.tempdir() / "bundles", forbidden=[fixture])
+    pending = store.begin(checkpoint_id)
+    for category in cp.VOLUME_CATEGORIES:
+        pending.add("volume-" + category + ".tar", "volume:" + category, volume_tar(category))
+    tree = pending.directory / "export-fixture.tar"
+    cp.write_tree_archive(fixture, tree)
+    pending.add("fixture-tree.tar", "fixture-tree", tree)
+    tree.unlink()
+    boundary = cp.boundary_publishable(checkpoint_id, state=made.state, result=made.result, result_raw=made.raw)
+    return pending.seal(identity=made.identity, boundary=boundary, bindings=made.bindings,
+                        owned={"token": TOKEN, "projects": [PROJECT], "volumes": {}, "networks": []}, execution_kind="fresh")
+
+
+class CheckpointRegeneratedTests(CaptureFixture, RefusalAssertions, TempCase):
+    """r6 CKPT5-01 (consultation ckpt5_01, negative oracles O6-A/O6-B/O6-C): the Orthanc image's start artifacts are a
+    typed exception of the Orthanc role on its pinned image, judged against the image's own regeneration (the
+    descriptor), never global prefixes; the judgement is a required raw that every consumer re-judges."""
+
+    def judged(self, role, extra, *, facts=None, descriptor=None, images=None, base=True, drop=()):
+        """capture_checkpoint at INTRODUCED with one role's writable layer: a normal Orthanc start (on the Orthanc role)
+        plus `extra` changes, its facts with `facts` changed. Returns (code, layer record, store listing)."""
+        target = target_fixture()
+        names = {item: target["containers"][item] for item in intro.ROLES}
+        volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
+        descriptor = descriptor or regenerated_fixture("id-" + names["orthanc"])
+        backend = FakeBackend(names, volumes, images=images or cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}))
+        backend.diffs[names[role]] = [change for change in (ORTHANC_START if base else []) if change not in drop] + list(extra)
+        backend.layers[names[role]] = {**start_facts(descriptor), **(facts or {})}
+        fixture, store_root = self.tempdir(), self.tempdir() / "bundles"
+        try:
+            self.captured("introduced", backend, descriptor=descriptor, fixture=fixture, store_root=store_root)
+            code = "SEALED"
+        except cp.Refused as error:
+            code = error.code
+        layers = sorted(fixture.glob("*/records/" + cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE))
+        record = json.loads(layers[-1].read_bytes()) if len(layers) == 1 else None
+        return code, record, sorted(path.name for path in store_root.iterdir())
+
+    def assertLayerRefused(self, role, extra, refused, **kwargs):
+        code, record, stored = self.judged(role, extra, **kwargs)
+        self.assertEqual((code, stored), ("WRITABLE_LAYER", []), "refused before store.begin: no bundle, no partial")
+        self.assertEqual((record or {}).get("outcome"), "REFUSED", "the refused judgement is kept as a raw")
+        self.assertEqual(record["refused"], sorted(role + ": " + change for change in refused))
+
+    def test_the_regenerated_exception_is_typed_and_bound_to_the_orthanc_role_and_image(self):
+        """P5 (R6 ①, O6-A, O6-B): exactly the five typed entries on the Orthanc role's container of the pinned image
+        and its descriptor; every other role, image, container, kind, type, content and ancestor refuses before any
+        bundle byte; the mount-point rule and the mount-sibling refusal stay (M47, M48, M50)."""
+        code, record, stored = self.judged("orthanc", [])
+        self.assertEqual((code, record["outcome"], len(stored)), ("SEALED", "ACCEPTED", 1))
+        verdicts = {row["change"]: row["verdict"] for row in record["roles"]["orthanc"]["verdicts"]}
+        self.assertEqual(verdicts["C /etc/hostid"], "regenerated:hostid")
+        self.assertEqual({verdicts[change] for change in ("C /etc", "C /startup", "C /usr", "C /usr/share", "C /usr/share/orthanc",
+                                                          "C /usr/share/orthanc/plugins")}, {"regenerated:ancestor"})
+        self.assertEqual(verdicts["A /startup/__pycache__"], "regenerated:pycache")
+        self.assertEqual({verdicts["A /startup/__pycache__/" + name] for name in PYC}, {"regenerated:pyc"})
+        self.assertEqual({verdicts["A /usr/share/orthanc/plugins/" + name] for name in ENABLED}, {"regenerated:plugin"})
+        self.assertEqual(verdicts["A /tmp/orthanc.json"], "transient-or-mount")
+        same_image = {**cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}), "api": ORTHANC_IMAGE}
+        hostid = {cp.HOSTID: _file("9" * 64, 9, 0o644, 999, 999, "hex8-lf"), "/etc": _dir()}
+        start = [change for change in ORTHANC_START if not cp.writable_layer_allowed(change)]   # /tmp stays transient everywhere
+        cases = {
+            # role and image (M48: the role guard alone refuses the API role on the same image ID)
+            "the API role on the pinned Orthanc image with the same start": ("api", ORTHANC_START, start, dict(images=same_image, base=False)),
+            "the API role on the pinned Orthanc image with a regenerated-shaped hostid": (
+                "api", ["C /etc", "C /etc/hostid"], ["C /etc", "C /etc/hostid"], dict(images=same_image, base=False, facts=hostid)),
+            "the database role's C /etc/hostid (O6-A)": ("db", ["C /etc", "C /etc/hostid"], ["C /etc", "C /etc/hostid"], dict(base=False, facts=hostid)),
+            "the Orthanc role on another image ID": ("orthanc", [], start,
+                                                    dict(images={**cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}), "orthanc": image("8")})),
+            "a descriptor that applies to nothing (a custom startup)": ("orthanc", [], start,
+                                                                       dict(descriptor=regenerated_fixture("id-" + PROJECT + "-orthanc", applicable=False))),
+            "another Orthanc container than the one the descriptor observed": ("orthanc", [], start,
+                                                                              dict(descriptor=regenerated_fixture("id-other-orthanc"))),
+            # /etc/hostid
+            "an added hostid": ("orthanc", ["A /etc/hostid/kept"], ["A /etc/hostid/kept"], {}),
+            "a hostid that is a folder": ("orthanc", [], ["C /etc", "C /etc/hostid"], dict(facts={cp.HOSTID: _dir(0o644, 999, 999)})),
+            "a hostid that is a link": ("orthanc", [], ["C /etc", "C /etc/hostid"], dict(facts={cp.HOSTID: {"type": "link", "mode": 0o777, "uid": 999, "gid": 999}})),
+            "a hostid of another content": ("orthanc", [], ["C /etc", "C /etc/hostid"], dict(facts={cp.HOSTID: _file("8" * 64, 21, 0o644, 999, 999, "other")})),
+            "a hostid of another mode": ("orthanc", [], ["C /etc", "C /etc/hostid"], dict(facts={cp.HOSTID: _file("9" * 64, 9, 0o666, 999, 999, "hex8-lf")})),
+            "a forced hostid (not the default generation)": ("orthanc", [], ["C /etc", "C /etc/hostid"],
+                                                            dict(descriptor=regenerated_fixture("id-" + PROJECT + "-orthanc", hostid=False))),
+            # /startup/__pycache__
+            "an arbitrary .pyc": ("orthanc", ["A /startup/__pycache__/persistent.pyc"], ["A /startup/__pycache__/persistent.pyc"],
+                                  dict(facts={cp.PYCACHE + "/persistent.pyc": _file("7" * 64, 10)})),
+            "a state file in the cache (O6-A)": ("orthanc", ["A /startup/__pycache__/durable-state.json"], ["A /startup/__pycache__/durable-state.json"],
+                                                 dict(facts={cp.PYCACHE + "/durable-state.json": _file("7" * 64, 10)})),
+            "a folder named like a cache file": ("orthanc", [], ["A /startup/__pycache__/helpers.cpython-311.pyc"],
+                                                 dict(facts={cp.PYCACHE + "/helpers.cpython-311.pyc": _dir()})),
+            "a cache file of other bytes": ("orthanc", [], ["A /startup/__pycache__/helpers.cpython-311.pyc"],
+                                            dict(facts={cp.PYCACHE + "/helpers.cpython-311.pyc": _file("6" * 64, 3000)})),
+            "a nested cache file": ("orthanc", ["A /startup/__pycache__/sub/helpers.cpython-311.pyc"],
+                                    ["A /startup/__pycache__/sub/helpers.cpython-311.pyc"], {}),
+            "a changed (not added) cache folder": ("orthanc", ["C /startup/__pycache__"], ["C /startup/__pycache__"],
+                                                   dict(drop=("A /startup/__pycache__",))),
+            "a deleted cache file": ("orthanc", ["D /startup/__pycache__/helpers.cpython-311.pyc"], ["D /startup/__pycache__/helpers.cpython-311.pyc"],
+                                     dict(drop=("A /startup/__pycache__/helpers.cpython-311.pyc",))),
+            # /usr/share/orthanc/plugins (M47: anything but an enabled, available library refuses; M50: its bytes)
+            "a non-plugin file among the plugins (O6-A)": ("orthanc", ["A /usr/share/orthanc/plugins/persistent-state.json"],
+                                                          ["A /usr/share/orthanc/plugins/persistent-state.json"],
+                                                          dict(facts={cp.PLUGINS + "/persistent-state.json": _file("7" * 64, 30)})),
+            "an unlisted library (O6-A)": ("orthanc", ["A /usr/share/orthanc/plugins/custom-local.so"], ["A /usr/share/orthanc/plugins/custom-local.so"],
+                                           dict(facts={cp.PLUGINS + "/custom-local.so": _file("7" * 64, 4096, 0o755, 999, 999)})),
+            "an available library the start does not enable": ("orthanc", ["A /usr/share/orthanc/plugins/libOrthancTcia.so"],
+                                                               ["A /usr/share/orthanc/plugins/libOrthancTcia.so"],
+                                                               dict(facts={cp.PLUGINS + "/libOrthancTcia.so": dict(AVAILABLE["libOrthancTcia.so"])})),
+            "an enabled library with other bytes (O6-B)": ("orthanc", [], ["A /usr/share/orthanc/plugins/libOrthancGdcm.so"],
+                                                          dict(facts={cp.PLUGINS + "/libOrthancGdcm.so": _file("6" * 64, 40960, 0o755, 999, 999)})),
+            "an enabled library that is a link": ("orthanc", [], ["A /usr/share/orthanc/plugins/libOrthancGdcm.so"],
+                                                  dict(facts={cp.PLUGINS + "/libOrthancGdcm.so": {"type": "link", "mode": 0o777, "uid": 999, "gid": 999}})),
+            "a folder among the plugins": ("orthanc", ["A /usr/share/orthanc/plugins/sub"], ["A /usr/share/orthanc/plugins/sub"],
+                                           dict(facts={cp.PLUGINS + "/sub": _dir()})),
+            "a changed enabled library": ("orthanc", ["C /usr/share/orthanc/plugins/libOrthancGdcm.so"], ["C /usr/share/orthanc/plugins/libOrthancGdcm.so"],
+                                          dict(drop=("A /usr/share/orthanc/plugins/libOrthancGdcm.so",))),
+            "a deleted library on another role (O6-A)": ("proxy", ["D /usr/share/orthanc/plugins/libOrthancGdcm.so"],
+                                                         ["D /usr/share/orthanc/plugins/libOrthancGdcm.so"], dict(base=False)),
+            # ancestors
+            "a changed folder without an approved child": ("orthanc", [], ["C /etc"], dict(drop=("C /etc/hostid",))),
+            "the plugins-available folder": ("orthanc", ["C /usr/share/orthanc/plugins-available"], ["C /usr/share/orthanc/plugins-available"], {}),
+            "an ancestor of another mode": ("orthanc", [], ["C /usr/share/orthanc/plugins"], dict(facts={cp.PLUGINS: _dir(0o777, 999, 999)})),
+            "an added ancestor": ("orthanc", ["A /usr/share/orthanc/extra"], ["A /usr/share/orthanc/extra"], {}),
+            # the API role's state in the startup cache and the plugins (O6-A, r5 probe inputs)
+            "the API role's file among the plugins (O6-A)": ("api", ["A /usr/share/orthanc/plugins/persistent-state.json"],
+                                                            ["A /usr/share/orthanc/plugins/persistent-state.json"], dict(base=False)),
+            "the API role's state in the startup cache (O6-A)": ("api", ["A /startup/__pycache__/durable-state.json"],
+                                                                ["A /startup/__pycache__/durable-state.json"], dict(base=False)),
+        }
+        for name, (role, extra, refused, kwargs) in cases.items():
+            with self.subTest(refused=name):
+                self.assertLayerRefused(role, extra, refused, **kwargs)
+        with self.subTest(kept="the mount point and the folder made for it, never a file beside it"):
+            target = target_fixture()
+            names = {item: target["containers"][item] for item in intro.ROLES}
+            for diffs, expected in ((["A /etc/nginx", "A /etc/nginx/certs"], "SEALED"),
+                                    (["A /etc/nginx", "A /etc/nginx/certs", "A /etc/nginx/extra.conf"], "WRITABLE_LAYER")):
+                backend = FakeBackend(names, {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"},
+                                      images=cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}))
+                backend.containers[names["proxy"]]["mounts"] = [{"type": "volume", "name": PROJECT + "_proxy-certs", "destination": "/etc/nginx/certs"}]
+                backend.diffs[names["proxy"]] = diffs
+                try:
+                    self.captured("introduced", backend, descriptor=regenerated_fixture("id-" + names["orthanc"]))
+                    code = "SEALED"
+                except cp.Refused as error:
+                    code = error.code
+                self.assertEqual(code, expected, diffs)
+
+    def test_the_layer_record_is_required_and_rejudged_when_consumed(self):
+        """P6 (R6 ②, O6-C): the descriptor is bound by the capture observation and the post-stop judgement by the
+        manifest; load_bundle, the evidence index and a BOUND index's consumers refuse it missing (also with its raw rows),
+        changed, or with a role, container, image or descriptor substituted; a normal bundle and index stay valid."""
+        target = target_fixture()
+        names = {role: target["containers"][role] for role in intro.ROLES}
+        descriptor = regenerated_fixture("id-" + names["orthanc"])
+        backend = FakeBackend(names, {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"},
+                              images=cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}))
+        backend.diffs[names["orthanc"]] = list(ORTHANC_START)
+        backend.layers[names["orthanc"]] = start_facts(descriptor)
+        final, _, _, _ = self.captured("introduced", backend, descriptor=descriptor)
+        manifest, _ = self.admitted(cp.load_bundle, final)
+        tree = final / "payload" / "fixture-tree.tar"
+        raw = cp.tree_member_bytes(tree, manifest["bindings"]["layer"]["path"])
+        files = cp.tree_folder(tree, manifest["bindings"]["observation"]["path"].rsplit("/", 1)[0])
+        summary = json.loads(files[cp.OBSERVATION_RESULT])
+        arguments = dict(checkpoint_id="introduced", observation_sha256=manifest["bindings"]["observation"]["sha256"],
+                         request_sha256=summary["request_sha256"], descriptor_raw=files[cp.REGENERATED_FILE], image_ids=manifest["identity"]["image_ids"])
+        self.admitted(cp.layer_valid, raw, **arguments)
+        record = json.loads(raw)
+
+        def edited(change):
+            value = copy.deepcopy(record)
+            change(value)
+            return cp.canonical(value) + b"\n"
+
+        def swap(value):
+            value["roles"]["api"], value["roles"]["orthanc"] = value["roles"]["orthanc"], value["roles"]["api"]
+
+        def refused_to_pass(value):
+            value["roles"]["proxy"]["changes"].append("A /etc/kin-kept")
+            value["roles"]["proxy"]["verdicts"].append({"change": "A /etc/kin-kept", "verdict": "transient-or-mount"})
+        cases = {"the Orthanc row under another role": (edited(swap), {}),
+                 "another container ID": (edited(lambda value: value["roles"]["orthanc"].update(container_id="id-other")), {}),
+                 "another image ID": (edited(lambda value: value["roles"]["orthanc"].update(image=image("8"))), {}),
+                 "a refused change recorded as accepted": (edited(refused_to_pass), {}),
+                 "a role left out": (edited(lambda value: value["roles"].pop("keycloak")), {}),
+                 "a refused judgement": (edited(lambda value: value.update(outcome="REFUSED", refused=["api: A /x"])), {}),
+                 "another capture observation": (raw, {"observation_sha256": "0" * 64}),
+                 "another descriptor": (raw, {"descriptor_raw": cp.canonical(regenerated_fixture("id-other")) + b"\n"}),
+                 "a descriptor of another image": (raw, {"image_ids": {"previous": {"orthanc": image("8")}, "release": {"orthanc": image("8")}}}),
+                 "a missing record": (None, {})}
+        for name, (data, changes) in cases.items():
+            with self.subTest(refused=name):
+                self.assertRefused("LAYER_INVALID", cp.layer_valid, data, **{**arguments, **changes})
+        # load_bundle: the binding missing, beside another observation, or the record substituted with its binding.
+        self.assertRefused("BUNDLE_INVALID", seal, self, self.tempdir() / "bundles", "introduced", drop=("layer",))
+        fixture = self.tempdir()
+        made = realistic(fixture, "introduced")
+        made.bindings["layer"] = dict(made.bindings["secrets"])
+        self.assertRefused("BUNDLE_INVALID", cp.load_bundle, bundle_from(self, fixture, made))
+        fixture = self.tempdir()
+        made = realistic(fixture, "introduced")
+        path = fixture / made.bindings["layer"]["path"]
+        substituted = json.loads(path.read_bytes())
+        substituted["roles"]["api"]["changes"] = ["A /etc/kin-kept"]
+        substituted["roles"]["api"]["verdicts"] = [{"change": "A /etc/kin-kept", "verdict": "regenerated:hostid"}]
+        path.write_bytes(cp.canonical(substituted) + b"\n")
+        made.bindings["layer"] = {**made.bindings["layer"], "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        self.assertRefused("BUNDLE_INVALID", cp.load_bundle, bundle_from(self, fixture, made))
+        # The evidence index and its consumers (CheckpointRecordTests' real recorder over a proof layout).
+        records = CheckpointRecordTests(methodName="test_existing_record_run_binds_exact_inputs_outputs_and_exit")
+        records.tempdir = self.tempdir
+        unit = CheckpointRecordTests.UNIT
+
+        def layer_files(change):
+            def alter(kind, value, stack=None):
+                if kind == "files":
+                    for found in sorted(value.glob(cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE)):
+                        change(found)
+                return value
+            return alter
+
+        def rejudged(found):
+            document = json.loads(found.read_bytes())
+            document["roles"]["api"]["changes"] = ["A /etc/kin-kept"]
+            document["roles"]["api"]["verdicts"] = [{"change": "A /etc/kin-kept", "verdict": "transient-or-mount"}]
+            found.write_bytes(cp.canonical(document) + b"\n")
+        removed = layer_files(lambda found: shutil.rmtree(found.parent))
+        for name, alter, reason in (("the record removed with its raw rows", removed, "writable-layer record the checkpoint binds is not in the raw"),
+                                    ("the record rewritten (rows rewritten)", layer_files(rejudged), "writable-layer record the checkpoint binds is not in the raw")):
+            with self.subTest(index=name):
+                proof = records.layout(unit, alter=alter)
+                run_dir, completed = records.record(proof)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                verdict = cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir)
+                self.assertEqual(verdict["verdict"], "UNVERIFIED", name)
+                self.assertTrue(any(reason in item for item in verdict["reasons"]), verdict["reasons"])
+        with self.subTest(index="the record substituted together with the seal's binding"):
+            def rebind(kind, value, stack=None):
+                if kind == "files":
+                    for found in sorted(value.glob(cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE)):
+                        rejudged(found)
+                        rebind.sha = hashlib.sha256(found.read_bytes()).hexdigest()
+                if kind == "manifest":
+                    value["bindings"]["layer"] = {**value["bindings"]["layer"], "sha256": rebind.sha}
+                return value
+            proof = records.layout(unit, alter=rebind)
+            run_dir, completed = records.record(proof)
+            verdict = cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir)
+            self.assertEqual(verdict["verdict"], "UNVERIFIED")
+            self.assertTrue(any("writable-layer record: " in item for item in verdict["reasons"]), verdict["reasons"])
+        with self.subTest(index="the record changed after the BOUND index"):
+            root = self.tempdir("kin-proof-")
+            proof = records.layout(unit, root=root)
+            run_dir, _ = records.record(proof)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cp.main(["index", "--registry", str(root / "registry.json"), "--unit", unit, "--proof-root", str(root),
+                                          "--run-dir", str(run_dir)]), 0)
+            self.admitted(cp.bound_index, root, unit)
+            found = next(proof.evidence.rglob(cp.LAYER_FILE))
+            found.write_bytes(found.read_bytes() + b" ")
+            self.assertRefused("PARENT_UNBOUND", cp.bound_index, root, unit)
+
+    def test_the_descriptor_is_derived_from_the_pinned_image_never_from_the_running_diff(self):
+        """P7 (R6 ①②, consultation binding): the descriptor comes from a pristine probe of the pinned image ID with the
+        container's own startup input, cached per image ID and startup-input hash; an absent container, another image, a
+        custom startup or an incomplete probe applies to nothing; FORCE_HOST_ID or disabled generation drop the hostid
+        entry only; no environment value reaches it."""
+        compile(cp.REGENERATED_PROBE, "regenerated-probe", "exec")
+        pre = {"stage": "pre", "hostid": _file(hashlib.sha256(b"not-generated\n").hexdigest(), 14, 0o644, 999, 999, "placeholder"),
+               "pycache_dir": {"type": "absent"}, "pycache": None, "plugins_dir": _dir(0o755, 999, 999), "plugins": {},
+               "python": {"cache_tag": "cpython-311", "optimize": 0, "version": "3.11.2", "no_bytecode": False}, "entrypoint": _file("f" * 64, 2068, 0o755),
+               "startup": {"configurator.py": _file("1" * 64, 11100), "generateConfiguration.py": _file("2" * 64, 3157), "helpers.py": _file("3" * 64, 2455)},
+               "available": {name: {**fact, "inode": index + 10, "links": 2} for index, (name, fact) in enumerate(sorted(AVAILABLE.items()))},
+               "ancestors": regenerated_fixture("x")["image"]["ancestors"]}
+        post = {"stage": "post", "hostid": _file("9" * 64, 9, 0o644, 999, 999, "hex8-lf"), "pycache_dir": _dir(), "pycache": copy.deepcopy(PYC),
+                "plugins_dir": _dir(0o755, 999, 999), "plugins": {name: {**pre["available"][name]} for name in ENABLED}}
+
+        class Backend:
+            def __init__(self, *, env=("ORTHANC__REGISTERED_USERS={\"admin\":\"" + SECRET_VALUE + "\"}",), entrypoint=("/docker-entrypoint.sh",),
+                         image=ORTHANC_IMAGE, probe=None, absent=False):
+                self.probes, self.absent, self.probe = 0, absent, probe
+                self.config = {"id": "id-orthanc", "name": PROJECT + "-orthanc", "image": image, "entrypoint": list(entrypoint),
+                               "cmd": ["/tmp/orthanc.json"], "user": "", "env": ["PATH=/usr/bin", *env], "mounts": []}
+
+            def container_config(self, name):
+                return None if self.absent else copy.deepcopy(self.config)
+
+            def image_config(self, image_id):
+                return {"id": image_id, "entrypoint": ["/docker-entrypoint.sh"], "cmd": ["/tmp/orthanc.json"], "env": ["PATH=/usr/bin"], "user": ""}
+
+            config_input_digest = staticmethod(lambda mount: None)
+
+            def probe_regenerated(self, image_id, **kwargs):
+                self.probes += 1
+                return copy.deepcopy(self.probe or {"pre": pre, "post": post, "entry_exit": 0, "probe_exit": 0,
+                                                    "helper": {"name": "kin-ckpt-regen-x", "id": "h" * 64, "removed": True}})
+        with patch.dict(cp.REGENERATED_CACHE, clear=True), patch.dict(cp.REGENERATED_INVENTORY, clear=True):
+            backend = Backend()
+            descriptor = self.admitted(cp.regenerated_descriptor, backend, PROJECT + "-orthanc", pinned=ORTHANC_IMAGE, token=TOKEN)
+            self.assertEqual((descriptor["applicable"], descriptor["hostid_regenerated"], backend.probes), (True, True, 1))
+            self.assertEqual(sorted(descriptor["generated"]["pycache"]), sorted(PYC))
+            self.assertEqual(sorted(descriptor["generated"]["plugins"]), sorted(ENABLED))
+            self.assertEqual({fact["link"] for fact in descriptor["generated"]["plugins"].values()}, {"hard link"})
+            self.assertNotIn(SECRET_VALUE, cp.canonical(descriptor).decode(), "names and a hash of the environment only")
+            again = cp.regenerated_descriptor(backend, PROJECT + "-orthanc", pinned=ORTHANC_IMAGE, token=TOKEN)
+            self.assertEqual((backend.probes, again["probe"].get("reused"), again["generated"]), (1, True, descriptor["generated"]),
+                             "the same image ID and startup input reuse the first probe")
+            other = Backend(env=("ORTHANC__REGISTERED_USERS=other",))
+            cp.regenerated_descriptor(other, PROJECT + "-orthanc", pinned=ORTHANC_IMAGE, token=TOKEN)
+            self.assertEqual(other.probes, 1, "another startup input is probed again")
+            for name, backend, applicable, hostid, probes in (
+                    ("no container", Backend(absent=True), False, False, 0),
+                    ("another image", Backend(image=image("8")), False, False, 0),
+                    ("a custom entrypoint", Backend(entrypoint=("/custom.sh",)), False, False, 0),
+                    ("a custom startup script", Backend(env=("BEFORE_ORTHANC_STARTUP_SCRIPT=/x.sh",)), False, False, 0),
+                    ("a forced hostid", Backend(env=("FORCE_HOST_ID=12345678",)), True, False, 1),
+                    ("hostid generation disabled", Backend(env=("GENERATE_HOST_ID_IF_MISSING=false",)), True, False, 1),
+                    ("the image's start failed in the probe", Backend(env=("A=1",), probe={"pre": pre, "post": post, "entry_exit": 1,
+                                                                                         "helper": {"removed": True}}), False, False, 1),
+                    ("a cache file of another interpreter", Backend(env=("A=2",), probe={"pre": pre, "post": {**post, "pycache": {"helpers.cpython-312.pyc": _file("e" * 64, 1)}},
+                                                                                        "entry_exit": 0, "helper": {"removed": True}}), False, False, 1),
+                    ("a generated library unlike the image's", Backend(env=("A=3",), probe={"pre": pre, "post": {**post, "plugins": {"libOrthancGdcm.so": _file("6" * 64, 40960, 0o755, 999, 999)}},
+                                                                                         "entry_exit": 0, "helper": {"removed": True}}), False, False, 1),
+                    ("a probe helper not observed removed", Backend(env=("A=4",), probe={"pre": pre, "post": post, "entry_exit": 0,
+                                                                                       "helper": {"removed": False}}), False, False, 1)):
+                with self.subTest(descriptor=name):
+                    result = cp.regenerated_descriptor(backend, PROJECT + "-orthanc", pinned=ORTHANC_IMAGE, token=TOKEN)
+                    self.assertEqual((result["applicable"], result["hostid_regenerated"], backend.probes), (applicable, hostid, probes), result["reasons"])
+                    self.assertTrue(result["reasons"] or result["hostid_reasons"])
+
+
+DEADLINE_SCENARIO = textwrap.dedent("""\
+    import json, os, subprocess, sys, time
+    sys.path[:0] = [sys.argv[1], sys.argv[2], sys.argv[3]]
+    from unittest.mock import patch
+    import ops_release_checkpoints as cp
+    mode, out = sys.argv[4], {}
+    sleeper = lambda seconds, *prefix: [sys.executable, "-c", "import sys, time; print(*sys.argv[1:], flush=True); time.sleep(%s); print('finished', flush=True)" % seconds, *prefix]
+    tree = ("import subprocess, sys, time; print('started', flush=True); child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(2)'],"
+            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); print('grandchild', child.pid, flush=True); time.sleep(2); print('finished', flush=True)")
+
+    def cut(deadline, args, timeout=30):
+        start = time.monotonic()
+        try:
+            with cp.deadline_scope(deadline):
+                result = cp.run_bounded(args, timeout=timeout, capture_output=True)
+            return {"outcome": "completed", "stdout": result.stdout.decode(), "elapsed": time.monotonic() - start}
+        except cp.DeadlineExpired as error:
+            return {"outcome": error.code, "event": error.event, "elapsed": time.monotonic() - start}
+
+    def alive(pid):
+        try:
+            with open("/proc/%d/stat" % pid) as stream:
+                return stream.read().rsplit(") ", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
+    if mode == "cut":
+        out = cut(cp.Deadline(0.5, label="body"), [sys.executable, "-c", tree])
+        head = ((out.get("event") or {}).get("partial") or {}).get("stdout") or {}
+        words = (head.get("head") or "").split()
+        if os.name == "posix" and "grandchild" in words:
+            time.sleep(0.2)
+            out["grandchild_alive"] = alive(int(words[words.index("grandchild") + 1]))
+    elif mode == "shared":
+        deadline = cp.Deadline(1.2, label="body")
+        out = {"first": cut(deadline, sleeper(0.6, "first")), "second": cut(deadline, sleeper(2, "second"))}
+    elif mode == "expired":
+        import ops_deploy_host_container_test as rehearsal
+        deadline = cp.Deadline(0.05, label="cleanup")
+        time.sleep(0.1)
+        calls, refused = [], {}
+        inner = lambda args, **kwargs: calls.append(args)
+        with patch.object(cp.subprocess, "Popen", lambda *args, **kwargs: calls.append(args)), cp.deadline_scope(deadline):
+            for name, action in (("run_bounded", lambda: cp.run_bounded(sleeper(0), timeout=30)),
+                                 ("adapter inventory", lambda: rehearsal.CheckpointDocker(None, None).inventory()),
+                                 ("poll sleep", lambda: cp.pause(1)), ("product runner", lambda: cp.DeadlineRunner(inner)(["git", "status"]))):
+                try:
+                    action()
+                    refused[name] = "started"
+                except cp.DeadlineExpired as error:
+                    refused[name] = error.event["kind"]
+        out = {"refused": refused, "transport_calls": len(calls), "events": len(deadline.events)}
+    elif mode == "runner":
+        import ops_emr_introduction as intro
+        given = []
+        def inner(args, *, timeout=60, **kwargs):
+            given.append(timeout)
+            try:
+                return subprocess.run(sleeper(2), capture_output=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise intro.Unknown("a client timeout of the product transport") from None
+        deadline = cp.Deadline(0.3, label="body")
+        start = time.monotonic()
+        try:
+            with cp.deadline_scope(deadline):
+                cp.DeadlineRunner(inner)(["git", "status"], timeout=60)
+            out["outcome"] = "completed"
+        except intro.Unknown:
+            out["outcome"] = "UNKNOWN"
+        out.update(elapsed=time.monotonic() - start, given=given, events=deadline.events)
+    print("DEADLINE_SCENARIO " + json.dumps(out, default=str))
+    """)
+
+
+class CheckpointDeadlineTests(RefusalAssertions, TempCase):
+    """r6 CKPT5-02 (consultation ckpt5_02 pure_proof, O6-D/O6-E): real local Python children on the harness's bounded
+    path - never a fake that times itself out - each scenario in its own process under a 5 s watchdog; no daemon."""
+
+    def scenario(self, mode):
+        completed = subprocess.run([sys.executable, "-B", "-c", DEADLINE_SCENARIO, str(Path(cp.__file__).parent), str(ROOT / "scripts"), str(TESTS), mode],
+                                   capture_output=True, timeout=5)
+        line = next((line for line in completed.stdout.decode("utf-8", "replace").splitlines() if line.startswith("DEADLINE_SCENARIO ")), None)
+        self.assertIsNotNone(line, completed.stderr.decode("utf-8", "replace")[-2000:])
+        return json.loads(line[len("DEADLINE_SCENARIO "):])
+
+    def test_a_bounded_call_is_cut_at_the_shared_end_and_its_client_tree_ended(self):
+        """P8 (R6 ③, O6-D): a child that would sleep 2 s, started with 0.5 s left, is cut before it ends, with its start
+        handshake kept and its tree ended and collected; two calls share one end; nothing starts once the end has passed
+        (0 transport calls); the product Runner gets the time left and its UNKNOWN stays UNKNOWN (M49)."""
+        out = self.scenario("cut")
+        self.assertEqual(out["outcome"], "DEADLINE", "the call ended normally after its deadline: " + json.dumps(out)[:400])
+        self.assertLess(out["elapsed"], 1.5, "cut near 0.5 s, never at the child's own 2 s end")
+        event = out["event"]
+        self.assertEqual((event["kind"], event["client_tree"]["collected"]), ("cut", True))
+        self.assertLessEqual(event["effective_timeout"], 0.5)
+        self.assertTrue(event["partial"]["stdout"]["head"].startswith("started"), "the child's start handshake is kept")
+        self.assertNotIn("finished", event["partial"]["stdout"]["head"])
+        if os.name == "posix":
+            self.assertIs(out.get("grandchild_alive"), False, "the client's whole process group ended")
+        shared = self.scenario("shared")
+        self.assertEqual(shared["first"]["outcome"], "completed")
+        self.assertEqual(shared["second"]["outcome"], "DEADLINE")
+        self.assertLess(shared["second"]["event"]["effective_timeout"], 0.75, "the second call got only what the first left")
+        self.assertLess(shared["first"]["elapsed"] + shared["second"]["elapsed"], 2.2)
+        expired = self.scenario("expired")
+        self.assertEqual(expired["transport_calls"], 0, "nothing started after the end")
+        self.assertEqual(expired["refused"], {name: "not-started" for name in ("run_bounded", "adapter inventory", "poll sleep", "product runner")})
+        runner = self.scenario("runner")
+        self.assertEqual(runner["outcome"], "UNKNOWN", "the product transport's own UNKNOWN is kept")
+        self.assertLess(runner["elapsed"], 1.5)
+        self.assertTrue(runner["given"] and runner["given"][0] <= 0.3, runner["given"])
+        self.assertEqual([(row["kind"], row["outcome"]) for row in runner["events"]], [("cut", "UNKNOWN")])
+
+    def test_the_cleanup_has_its_own_end_and_a_deadline_keeps_the_residue(self):
+        """P9 (R6 ③, O6-D/O6-E): the cleanup's own end cuts a removal and reports the last-known owned names and the
+        private root as remaining with verification UNKNOWN; a smoke whose body or host observation met its deadline
+        fails DEADLINE and keeps its pending residue although its cleanup then observed nothing left, and the next
+        entry refuses SMOKE_RESIDUE; a normal smoke's observed cleanup still releases it; an admission refusal releases
+        it at once without a daemon query (M51)."""
+        import ops_release_checkpoints_native_test as native
+        state = self.tempdir("kin-gate-") / "test-gate"
+        state.mkdir()
+        sleeping = {"inventory": 0.0, "remove": 0.0}
+        calls = []
+
+        class SleepingDocker:
+            """An adapter double whose every call is a real local child on the bounded path (no daemon)."""
+
+            def __init__(self, stack, helper):
+                pass
+
+            def call(self, what):
+                calls.append(what)
+                cp.run_bounded([sys.executable, "-c", "import time; time.sleep(%s)" % sleeping[what]], timeout=60, capture_output=True)
+
+            def inventory(self):
+                self.call("inventory")
+                owned = [{"id": "c1", "name": "kin-ckptsmoke-left", "labels": {"kin.ops.run": SleepingDocker.token}}] if SleepingDocker.left else []
+                return cp.note_inventory({"containers": owned, "volumes": [], "networks": [], "images": []})
+
+            def remove(self, kind, ident):
+                self.call("remove")
+
+            def image_present(self, image_id):
+                return False
+        SleepingDocker.left, SleepingDocker.token = True, None
+        quiet = {"os": "linux", "daemon_ok": True}
+        with patch.object(gate, "STATE", state), patch.object(native.rehearsal, "CheckpointDocker", SleepingDocker):
+            residue = native.residue_dir()
+            with self.subTest(cut="the cleanup's own end"):
+                smoke = native.Smoke(self.tempdir("kin-native-evidence-"), cleanup_seconds=0.5)
+                SleepingDocker.token = smoke.token
+                smoke.private = self.tempdir("kin-ckpt-smoke-")
+                sleeping.update(inventory=0.0, remove=2.0)
+                deadline = cp.Deadline(0.5, label="cleanup")
+                started = time.monotonic()
+                with cp.deadline_scope(deadline):
+                    smoke.extra_cleanup.append(("owned", {"token": smoke.token, "projects": set()}))
+                    result = smoke.cleanup(deadline)
+                self.assertLess(time.monotonic() - started, 0.5 + cp.REAP_SECONDS + 1.0, "bounded by its own end, not by its calls")
+                self.assertEqual((result["complete"], result["verification"]), (False, "UNKNOWN"))
+                self.assertIn("last seen: kin-ckptsmoke-left", result["remaining"])
+                self.assertIn("unverified: private root " + str(smoke.private), result["remaining"])
+                self.assertEqual([event["kind"] for event in deadline.events][:1], ["cut"])
+                self.assertEqual((deadline.calls, calls[:2]), (2, ["inventory", "remove"]), "no call started after the end")
+                self.assertTrue(all(event["kind"] == "not-started" for event in deadline.events[1:]))
+            sleeping.update(inventory=0.0, remove=0.0)
+            SleepingDocker.left = False
+
+            def entry(**kwargs):
+                evidence = self.tempdir("kin-native-evidence-") / "evidence"
+                evidence.mkdir()
+                result = {"started_utc": cp.now_utc().isoformat(), "outcome": "REFUSED"}
+                with contextlib.redirect_stderr(io.StringIO()):
+                    code = native.run_smoke(evidence, result, admit=lambda facts: True, **kwargs)
+                return code, result, sorted(residue.glob("pending-*.json"))
+
+            def deadline_work(smoke, facts):
+                cp.run_bounded([sys.executable, "-c", "import time; time.sleep(2)"], timeout=60, capture_output=True)
+            for name, kwargs in (("the body", dict(observe=lambda root: quiet, work=deadline_work, body_seconds=0.3)),
+                                 ("the host observation", dict(observe=lambda root: deadline_work(None, None), body_seconds=0.3))):
+                with self.subTest(deadline=name):
+                    del calls[:]
+                    code, result, pending = entry(**kwargs)
+                    self.assertEqual((code, result["outcome"], result["code"]), (1, "FAIL", "DEADLINE"), result.get("failure"))
+                    self.assertTrue(result["cleanup"]["complete"], "the cleanup observed nothing left")
+                    self.assertEqual(len(pending), 1, "a deadline event keeps the residue whatever the cleanup observed")
+                    self.assertTrue(result["pending"]["kept"])
+                    self.assertTrue(any(event["kind"] == "cut" for event in result["deadline"]["body"]["events"]))
+                    evidence = Path(json.loads(pending[0].read_bytes())["evidence"])
+                    self.assertTrue((evidence / "failure.txt").is_file())
+                    second = self.tempdir("kin-native-evidence-") / "next"
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(native.main(["--evidence", str(second)]), 3)
+                    self.assertEqual(json.loads((second / cp.SMOKE_RESULT).read_bytes())["code"], "SMOKE_RESIDUE")
+                    pending[0].unlink()   # this test's own synthetic residue (no daemon was involved)
+            with self.subTest(released="a normal smoke's observed complete cleanup"):
+                code, result, pending = entry(observe=lambda root: quiet, work=lambda smoke, facts: None)
+                self.assertEqual((code, result["outcome"], result["code"], pending), (1, "FAIL", None, []))
+                self.assertFalse(result["pending"]["kept"])
+            with self.subTest(released="an admission refusal before any resource"):
+                del calls[:]
+
+                def refuse(facts):
+                    raise cp.Refused("UNSUPPORTED_HOST", "synthetic")
+                evidence = self.tempdir("kin-native-evidence-") / "evidence"
+                evidence.mkdir()
+                result = {"started_utc": cp.now_utc().isoformat()}
+                with contextlib.redirect_stderr(io.StringIO()):
+                    code = native.run_smoke(evidence, result, observe=lambda root: quiet, admit=refuse)
+                self.assertEqual((code, result["outcome"], result["code"], sorted(residue.glob("pending-*.json")), calls),
+                                 (3, "REFUSED", "UNSUPPORTED_HOST", [], []))
+
+
 # ── T18: mutants of the checkpoint logic (temporary copies of the harness files only) ──
 
 # The harness file each mutant edits (a temporary copy; the product scripts are never copied or changed).
-MUTANT_TARGETS = {"checkpoints": "ops_release_checkpoints.py", "rehearsal": "ops_deploy_host_container_test.py"}
+MUTANT_TARGETS = {"checkpoints": "ops_release_checkpoints.py", "rehearsal": "ops_deploy_host_container_test.py",
+                  "native": "ops_release_checkpoints_native_test.py"}
 MUTANTS = (
     ("M01", "CheckpointBoundaryTests.test_only_completed_quiet_pre_ponr_boundaries_publish",
      'require(state.get("status") == spec["status"] and state.get("running") is None and state.get("unknown_hold") is None,',
@@ -3911,6 +4583,20 @@ MUTANTS = (
      '    sink = intro.Records(folder, secrets=secrets_dir)', '    sink = intro.Records(records_dir, secrets=secrets_dir)', "checkpoints"),
     ("M46", "CheckpointRecordTests.test_observation_raw_is_required_and_rechecked_when_consumed",   # required observation unchecked
      '        if not restores and parent is not None:', '        if False:', "checkpoints"),
+    # Round 6 (consult-checkpoints-r6-20261017 new_mutants; M50 and M51 are the optional ones the contract needs).
+    ("M47", "CheckpointRegeneratedTests.test_the_regenerated_exception_is_typed_and_bound_to_the_orthanc_role_and_image",   # any plugins file
+     '        return "plugin" if kind == "A" and fact.get("type") == "file" and listed and content and _same(fact, expected) else None',
+     '        return "plugin" if kind == "A" and fact.get("type") == "file" else None', "checkpoints"),
+    ("M48", "CheckpointRegeneratedTests.test_the_regenerated_exception_is_typed_and_bound_to_the_orthanc_role_and_image",   # role guard removed
+     '    return (role == REGENERATED_ROLE and type(descriptor) is dict and descriptor.get("applicable") is True',
+     '    return (type(descriptor) is dict and descriptor.get("applicable") is True', "checkpoints"),
+    ("M49", "CheckpointDeadlineTests.test_a_bounded_call_is_cut_at_the_shared_end_and_its_client_tree_ended",   # remaining ignored
+     '        effective = self.timeout(timeout, what=what)', '        effective = self.timeout(timeout, what=what) and timeout', "checkpoints"),
+    ("M50", "CheckpointRegeneratedTests.test_the_regenerated_exception_is_typed_and_bound_to_the_orthanc_role_and_image",   # library bytes unchecked
+     '        content = listed and fact.get("sha256") == expected.get("sha256") == origin.get("sha256") and fact.get("size") == origin.get("size")',
+     '        content = listed', "checkpoints"),
+    ("M51", "CheckpointDeadlineTests.test_the_cleanup_has_its_own_end_and_a_deadline_keeps_the_residue",   # residue released after a deadline
+     '    keep = bool(events) or not cleanup["complete"]', '    keep = not cleanup["complete"]', "native"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -3919,11 +4605,13 @@ RUN_ONE = textwrap.dedent("""\
     sys.path.insert(2, sys.argv[2])
     import ops_release_checkpoints
     import ops_deploy_host_container_test
+    import ops_release_checkpoints_native_test
     import ops_release_checkpoints_test as contracts
     suite = unittest.defaultTestLoader.loadTestsFromName(sys.argv[4], contracts)
     result = unittest.TestResult()
     suite.run(result)
-    print("MUTANT_RESULT " + json.dumps({"origins": [ops_release_checkpoints.__file__, ops_deploy_host_container_test.__file__],
+    print("MUTANT_RESULT " + json.dumps({"origins": [ops_release_checkpoints.__file__, ops_deploy_host_container_test.__file__,
+                                                     ops_release_checkpoints_native_test.__file__],
           "run": result.testsRun, "skipped": len(result.skipped),
           "failures": [text.strip().splitlines()[-1][:300] for _, text in result.failures],
           "errors": [text.strip().splitlines()[-1][:300] for _, text in result.errors]}))
@@ -3956,8 +4644,8 @@ class CheckpointMutationContracts(TempCase):
         return tests
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
-        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5): control PASS, then an assertion failure in the named contract
-        for each mutant (M01-M44, M46)."""
+        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6): control PASS, then an assertion failure in the named
+        contract for each mutant (M01-M44, M46-M51)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:
