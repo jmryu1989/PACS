@@ -214,7 +214,7 @@ async function world() {
   });
 
   /** One request through its routed handler. The answer is what the HTTP layer would send: status, code, body. */
-  w.send = (label, route, { as, sid = null, uid, body }) => flow.run({ label }, async () => {
+  w.send = (label, route, { as, sid = null, uid, body, query = {} }) => flow.run({ label }, async () => {
     const { controller, key } = ROUTE[route];
     const req = { sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind, headers: {},
       ...(sid ? { sid, authMethod: 'session' } : { authMethod: 'bearer' }) };
@@ -224,6 +224,8 @@ async function world() {
       if (type === RouteParamtypes.PARAM && data === 'uid') args[index] = uid;
       else if (type === RouteParamtypes.BODY && data === undefined) args[index] = body;
       else if (type === RouteParamtypes.REQUEST) args[index] = req;
+      // W5-API: the draft read takes the Check's optional ?insertRequestId= (absent unless a case sends it)
+      else if (type === RouteParamtypes.QUERY && data === 'insertRequestId') args[index] = query.insertRequestId;
       else assert.fail(`the handler asks for argument ${slot} ${JSON.stringify(data)}, which these cases do not provide`);
     }
     try {

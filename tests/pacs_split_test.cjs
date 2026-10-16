@@ -37,8 +37,30 @@ test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   assert.equal(spec.facade.slots.length, 15);
   assert.equal(spec.facade.reexports.length, 13);
 });
+/**
+ * W5-API (D1460): the facade's readDraft forwards the Check's optional insertRequestId, so the spec holds its current signature
+ * and records the landed one beside it (spec.w5_api) - exactly that one forward, nothing else. The landed corpus (c8e4f1b) is
+ * judged with the facade it was approved with: the same spec with that one signature put back.
+ */
+function landedSpec() {
+  const declared = spec.w5_api;
+  assert.equal(declared.unit, 'W5-API');
+  assert.deepEqual(declared.facade_signatures.map(change => change.name), ['readDraft']);
+  const landed = structuredClone(spec);
+  for (const change of declared.facade_signatures) {
+    const forward = landed.facade.forwards.find(item => item.name === change.name);
+    assert.equal(forward.signature_sha256, change.current, change.name);
+    forward.signature_sha256 = change.landed;
+  }
+  delete landed.w5_api;
+  return landed;
+}
 test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
-  assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
+  // historicalSource() builds its source through pacs_source.cjs's export with the spec file's default; give it the landed spec.
+  const sources = require('./pacs_source.cjs'), current = sources.createSource;
+  sources.createSource = options => current({ spec: landedSpec(), ...options });
+  try { assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 }); }
+  finally { sources.createSource = current; }
 });
 test('U0B-STRUCT-SPLIT explicit moved location and re-export resolve in one Program', () => {
   const source = fixture(plain, () => {}, { [path.join(apiSrc, 'pacs.service.ts')]: "export { Worklist } from './pacs/worklist';" });
@@ -187,8 +209,19 @@ test('U0B-CORRESPONDENCE a receiver is read back only as recorded: exact pair an
 });
 
 // ── Nest DI and routes (order section 7 DI/routes, M23/M24) ──
+/** W5-API (D1460): the snapshot minus exactly the declared added parameter decorators (spec.w5_api.route_args) - each present once. */
+function withoutW5Arguments(now) {
+  const declared = spec.w5_api.route_args;
+  assert.deepEqual(declared.map(change => `${change.controller}.${change.handler}`), ['PacsController.draft']);
+  return { ...now, routes: now.routes.map(route => {
+    const change = declared.find(item => item.controller === route.controller && item.handler === route.handler);
+    if (!change) return route;
+    assert.deepEqual(route.args.filter(arg => change.added.includes(arg)), change.added, 'each declared argument is present once');
+    return { ...route, args: route.args.filter(arg => !change.added.includes(arg)) };
+  }) };
+}
 test('U0B-DI Nest metadata equals main before the split: tokens, constructor tokens, scopes, enhancers, middleware, 138 routes', () => {
-  const now = diSnapshot();
+  const now = withoutW5Arguments(diSnapshot());
   assert.deepEqual(now, spec.di);
   assert.equal(now.routes.length, 138);
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
