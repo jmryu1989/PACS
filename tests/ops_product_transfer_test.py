@@ -529,17 +529,36 @@ class Pure(unittest.TestCase):
 
     def test_09_constraints_run_transaction_then_verify_unchanged(self):
         body, _, _, _ = fixture()
-        with patch.object(transfer, 'execute') as execute, patch.object(transfer, 'verify_product') as verify:
-            self.assertTrue(transfer.constraint_probes('owned', body['product'])['rolled_back_unchanged'])
+        contract = {key: state for key, (_, state) in transfer.RECEIPT_PROBES.items()}
+        answer = json.dumps(contract).encode()
+        with patch.object(transfer, 'execute') as execute, patch.object(transfer, 'verify_product') as verify, \
+             patch.object(transfer, 'psql', return_value=answer):
+            result = transfer.constraint_probes('owned', body['product'])
+            self.assertTrue(result['rolled_back_unchanged'])
             sql = execute.call_args.args[2]
             self.assertTrue(sql.startswith('BEGIN;')); self.assertTrue(sql.endswith('ROLLBACK'))
             self.assertIn('WHEN foreign_key_violation', sql); self.assertIn('VALUES(99,', sql)
-            # W5-API: every receipt guard branch is probed after the restore (terminal, tombstone, binding, revision, DELETE,
-            # TRUNCATE) beside the one allowed transition, and the NULL probes of the checks.
-            for probe in ('terminal guard', 'tombstone guard', 'binding guard', 'revision guard', 'delete guard', 'truncate guard',
-                          'NULL reason check', 'NULL applied revision check', 'refused-to-applied accepted'):
-                self.assertIn('insert receipt ' + probe, sql)
             verify.assert_called_once_with('owned', 'kin', body['product'])
+            # W5-API: the restored database's answer per receipt probe is the result, not this SQL's text
+            self.assertEqual(result['receipt_guard'], contract)
+
+    def test_09b_insert_receipt_probes_are_judged_by_the_restored_state(self):
+        """W5-API (O4 R1): after a restore the receipt's CHECKs refuse SQL NULL and bad values (23514), one row per ID (23505), the
+        terminal guard refuses every change of a finished row, a skipped revision, a changed binding, DELETE and TRUNCATE (42501),
+        and the three refused transitions are accepted. Any other answer of the restored database is a product mismatch."""
+        contract = {key: state for key, (_, state) in transfer.RECEIPT_PROBES.items()}
+        self.assertEqual(sorted(state for state in contract.values()),
+                         sorted(['23505'] + ['23514'] * 4 + ['42501'] * 6 + ['accepted'] * 3))
+        for probe, wrong in [('terminal_applied_update', 'accepted'), ('truncate', 'accepted'), ('null_reason_check', 'accepted'),
+                             ('refused_to_discarded', '42501'), ('binding_change', '23514')]:
+            observed = dict(contract, **{probe: wrong})
+            with self.subTest(probe=probe), patch.object(transfer, 'psql', return_value=json.dumps(observed).encode()), \
+                 self.assertRaises(transfer.ProductMismatch) as raised:
+                transfer.insert_receipt_probes('owned')
+            self.assertIn(probe, str(raised.exception))
+        missing = {key: state for key, state in contract.items() if key != 'delete'}
+        with patch.object(transfer, 'psql', return_value=json.dumps(missing).encode()), self.assertRaises(transfer.ProductMismatch):
+            transfer.insert_receipt_probes('owned')
 
     def test_10_receipt_caps_duplicate_json_and_separate_hash(self):
         body, _, _, _ = fixture(); raw = transfer.canonical(body)

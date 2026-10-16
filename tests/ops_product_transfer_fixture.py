@@ -1019,44 +1019,6 @@ def constraint_probes(name, product):
       BEGIN INSERT INTO "AuditLog" (id,actor,action,target) VALUES(-1,'SYNTHETIC','SYNTHETIC','SYNTHETIC');
         DELETE FROM "AuditLog" WHERE id=-1;
         RAISE EXCEPTION 'missing audit append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      -- W5-API: the insert receipts keep one row per ID, their closed values and states (a SQL NULL where a value is required
-      -- is refused, never passed as unknown), and their terminal guard (a trigger, which --no-privileges keeps): a terminal row
-      -- is never changed, no receipt is deleted or truncated, a refused row moves one receipt revision at a time with its binding
-      -- unchanged. Inserted copies take a new ID so that only the probed value differs; the raise after the one allowed
-      -- transition undoes it, and only that raise is caught.
-      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM "ReportDraftInsertReceipt" LIMIT 1;
-        RAISE EXCEPTION 'missing insert receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
-      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
-        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f1','section','recommendation'))::json
-         FROM "ReportDraftInsertReceipt" t WHERE state='refused'));
-        RAISE EXCEPTION 'missing insert receipt section check'; EXCEPTION WHEN check_violation THEN NULL; END;
-      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
-        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f2','reason',NULL))::json
-         FROM "ReportDraftInsertReceipt" t WHERE state='refused'));
-        RAISE EXCEPTION 'missing insert receipt NULL reason check'; EXCEPTION WHEN check_violation THEN NULL; END;
-      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
-        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f3','appliedRevision',NULL))::json
-         FROM "ReportDraftInsertReceipt" t WHERE state='applied'));
-        RAISE EXCEPTION 'missing insert receipt NULL applied revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
-      BEGIN INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt",
-        (SELECT (to_jsonb(t)||jsonb_build_object('insertRequestId','00000000-0000-4000-8000-0000000021f4','requestHash',upper(t."requestHash")))::json
-         FROM "ReportDraftInsertReceipt" t WHERE state='applied'));
-        RAISE EXCEPTION 'missing insert receipt hash check'; EXCEPTION WHEN check_violation THEN NULL; END;
-      BEGIN UPDATE "ReportDraftInsertReceipt" SET "receiptRevision"="receiptRevision"+1 WHERE state='applied';
-        RAISE EXCEPTION 'missing insert receipt terminal guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN UPDATE "ReportDraftInsertReceipt" SET state='refused',"appliedRevision"=NULL,reason='TARGET_HELD',"receiptRevision"="receiptRevision"+1 WHERE state='discarded';
-        RAISE EXCEPTION 'missing insert receipt tombstone guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN UPDATE "ReportDraftInsertReceipt" SET "requestHash"=repeat('c',64),"receiptRevision"="receiptRevision"+1 WHERE state='refused';
-        RAISE EXCEPTION 'missing insert receipt binding guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN UPDATE "ReportDraftInsertReceipt" SET reason='SOURCE_CHANGED' WHERE state='refused';
-        RAISE EXCEPTION 'missing insert receipt revision guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN DELETE FROM "ReportDraftInsertReceipt";
-        RAISE EXCEPTION 'missing insert receipt delete guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN TRUNCATE "ReportDraftInsertReceipt";
-        RAISE EXCEPTION 'missing insert receipt truncate guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN UPDATE "ReportDraftInsertReceipt" SET state='applied',"appliedRevision"="expectedRevision"+1,reason=NULL,
-          "receiptRevision"="receiptRevision"+1 WHERE state='refused';
-        RAISE EXCEPTION 'insert receipt refused-to-applied accepted'; EXCEPTION WHEN raise_exception THEN NULL; END;
       -- EMR-B1 after the restore: the ledger stays placed, append-only for the owner path, closed to the runtime's direct
       -- writes and to its expiry call, and the retention role cannot remove an unexpired prefix.
       IF EXISTS (SELECT 1 FROM emr_access.storage_placement() WHERE tablespace <> 'kin_emr_access') THEN
@@ -1074,10 +1036,78 @@ def constraint_probes(name, product):
       EXECUTE 'RESET ROLE';
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
+    receipt_guard = insert_receipt_probes(name)
     verify_product(name, 'kin', product)
     return dict(version_unique=True, report_study_fk=True, draft_composite_pk=True,
                 viewer_restrict=True, finding_restrict=True, rolled_back_unchanged=True,
-                emr_placement=True, emr_append_only=True, emr_runtime_closed=True, emr_unexpired_kept=True)
+                emr_placement=True, emr_append_only=True, emr_runtime_closed=True, emr_unexpired_kept=True,
+                receipt_guard=receipt_guard)
+
+
+def receipt_copy(state, **changes):
+    """An INSERT of a copy of the restored receipt in `state` with `changes` (a new ID unless the change is the probe)."""
+    pairs = ','.join(sql_literal(key) + ',' + ('NULL' if value is None else value) for key, value in changes.items())
+    return ('INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt", '
+            '(SELECT (to_jsonb(t)||jsonb_build_object(' + pairs + '))::json FROM "ReportDraftInsertReceipt" t WHERE state=' +
+            sql_literal(state) + '))')
+
+
+def receipt_update(state, assignments):
+    return 'UPDATE "ReportDraftInsertReceipt" SET ' + assignments + ' WHERE state=' + sql_literal(state)
+
+
+# W5-API: the insert receipt's CHECKs and terminal guard on the restored database, each judged by the SQLSTATE its statement
+# ends with ('accepted' = it succeeded), never by message text. Every statement runs in its own subtransaction and is undone.
+NEW_ID = lambda n: sql_literal('00000000-0000-4000-8000-0000000021f' + str(n))
+RECEIPT_PROBES = {
+    'primary_key': ('INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM "ReportDraftInsertReceipt" WHERE state=\'applied\'', '23505'),
+    'section_check': (receipt_copy('refused', insertRequestId=NEW_ID(1), section="'recommendation'"), '23514'),
+    'null_reason_check': (receipt_copy('refused', insertRequestId=NEW_ID(2), reason=None), '23514'),
+    'null_applied_revision_check': (receipt_copy('applied', insertRequestId=NEW_ID(3), appliedRevision=None), '23514'),
+    'hash_check': (receipt_copy('applied', insertRequestId=NEW_ID(4), requestHash='upper(t."requestHash")'), '23514'),
+    'terminal_applied_update': (receipt_update('applied', '"receiptRevision"="receiptRevision"+1'), '42501'),
+    'terminal_discarded_update': (receipt_update('discarded', 'state=\'refused\',"appliedRevision"=NULL,reason=\'TARGET_HELD\','
+                                                              '"receiptRevision"="receiptRevision"+1'), '42501'),
+    'binding_change': (receipt_update('refused', '"requestHash"=repeat(\'c\',64),"receiptRevision"="receiptRevision"+1'), '42501'),
+    'revision_not_advanced': (receipt_update('refused', 'reason=\'SOURCE_CHANGED\''), '42501'),
+    'delete': ('DELETE FROM "ReportDraftInsertReceipt"', '42501'),
+    'truncate': ('TRUNCATE "ReportDraftInsertReceipt"', '42501'),
+    'refused_to_applied': (receipt_update('refused', 'state=\'applied\',"appliedRevision"="expectedRevision"+1,reason=NULL,'
+                                                     '"receiptRevision"="receiptRevision"+1'), 'accepted'),
+    'refused_to_discarded': (receipt_update('refused', 'state=\'discarded\',reason=\'INSERT_DISCARDED\','
+                                                       '"receiptRevision"="receiptRevision"+1'), 'accepted'),
+    'refused_reason_change': (receipt_update('refused', 'reason=\'SOURCE_CHANGED\',"receiptRevision"="receiptRevision"+1'), 'accepted'),
+}
+
+
+def receipt_probe_sql():
+    """One rolled-back transaction answering {probe: SQLSTATE | 'accepted'} for RECEIPT_PROBES on a database holding one
+    receipt in each state (the restored product, or the W5-API migration mutant run's seeded database)."""
+    rows = ',\n'.join('(' + sql_literal(key) + ', $probe$' + statement + '$probe$)' for key, (statement, _) in sorted(RECEIPT_PROBES.items()))
+    return ('BEGIN; CREATE FUNCTION pg_temp.w5_receipt_state(statement text) RETURNS text LANGUAGE plpgsql AS $state$\n'
+            'BEGIN\n  BEGIN EXECUTE statement; RAISE SQLSTATE \'W5P00\';\n'
+            '  EXCEPTION WHEN SQLSTATE \'W5P00\' THEN RETURN \'accepted\'; WHEN OTHERS THEN RETURN SQLSTATE; END;\nEND $state$;\n'
+            'SELECT jsonb_object_agg(probe.name, pg_temp.w5_receipt_state(probe.statement)) FROM (VALUES\n' + rows +
+            ') AS probe(name, statement); ROLLBACK')
+
+
+def receipt_probe_differences(states):
+    """{probe: [observed, contract]} for every probe whose observed state is not the contract's (a missing probe included)."""
+    expected = {key: state for key, (_, state) in RECEIPT_PROBES.items()}
+    observed = states if type(states) is dict else {}
+    differ = {key: [observed.get(key), want] for key, want in expected.items() if observed.get(key) != want}
+    differ.update({key: [observed[key], None] for key in observed if key not in expected})
+    return differ
+
+
+def insert_receipt_probes(name):
+    """The states of RECEIPT_PROBES on the restored kin database; a state that differs from the contract is a product mismatch
+    naming the probe."""
+    states = inventory.parse(psql(name, 'kin', receipt_probe_sql()))
+    differ = receipt_probe_differences(states)
+    if differ:
+        raise ProductMismatch('Synthetic product insert receipt probes differ: ' + json.dumps(differ, sort_keys=True))
+    return states
 
 
 def negative_restore(name, folder, product):
