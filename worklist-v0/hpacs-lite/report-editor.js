@@ -214,6 +214,9 @@
       // 인용 줄은 초안과 별개다 — 초안이 없어도 승인본에 이월된 인용은 남아 있다.
       // 아래 분기들이 일찍 빠져나가므로 여기서 먼저 그린다.
       renderCitationBar();
+      // 숨긴 Recommendation의 안내와 이동하지 않은 까닭의 Notice도 초안과 별개로 그 검사의 지금 상태를 따른다.
+      renderRecommendationNotice();
+      if (reportNotice || reportNoticeShown) renderReportNotice();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -272,17 +275,185 @@
       const deferred = !!selectedUid && reportConverge.has(selectedUid);
       // 서버가 이 검사에 쓸 수 없다고 답해 자동 저장을 멈춘 글이다. 한 번 알린 뒤에는 이 줄이 그 사실을 말한다.
       const stopped = deferred && reportSaveFailures.get(selectedUid) === "stop";
+      // 지나갈 수 있는 실패(5xx·결과 모름) 뒤의 글. 결과를 모르는 것과 거절된 것은 다른 말로 한다(W4-PAGE-01).
+      const failure = deferred && !stopped ? reportSaveFailures.get(selectedUid) : undefined;
+      const note = stopped || failure ? reportSaveOutcome.get(selectedUid) : null;
+      const lead = apart ? "" : "● ";
       // 누가 확정했는지는 여기서 알 수 없다 — 내가 누른 Approve가 떠난 뒤의 쓰기도 이 자리에 온다. 아는 사실만 말한다.
+      // 상태 이름은 영어(Draft Saved·Save Failed·Result Unknown·Unsaved Draft), 설명은 한국어다(AGENTS §4).
       $("#draftmsg").innerHTML =
-        (apart ? `<b>● 승인된 판독문에 포함되지 않은 글이 있습니다</b> — 이 화면의 글은 승인본(v${esc(r.version)})과 다릅니다 · `
-               : `<b>● 저장 안 된 초안</b> — `) +
-        (stopped ? `이 화면에 담아 두었습니다 · 서버가 저장을 받지 않아 자동 저장을 멈췄습니다 — 글을 고치면 다시 시도합니다`
-         : deferred ? `이 화면에 담아 두었습니다 · 서버 저장은 아직 확인되지 않았습니다`
-                  : `${esc(at)}에 ${apart ? "초안으로 " : ""}자동 저장됨`) +
+        (apart ? `<b>● 승인된 판독문에 포함되지 않은 글이 있습니다</b> — 이 화면의 글은 승인본(v${esc(r.version)})과 다릅니다 · ` : ``) +
+        (stopped ? `<b>${lead}Save Failed — ${esc(note?.reason ?? "서버가 저장을 받지 않았습니다")}</b> — 이 화면에 담아 두었습니다 · ` +
+                   `서버가 저장을 받지 않아 자동 저장을 멈췄습니다 — 글을 고치면 다시 시도합니다`
+         : failure && note?.outcome === "unknown" ? `<b>${lead}Result Unknown</b> — 저장 결과를 확인하지 못했습니다 · ` +
+                   `입력한 내용은 이 화면에 그대로 있고, 다음 저장이 서버 상태부터 확인합니다`
+         : failure ? `<b>${lead}Save Failed — ${esc(note?.reason ?? "서버가 저장을 받지 않았습니다")}</b> — 이 화면에 담아 두었습니다 · ` +
+                   `다음 자동 저장이 다시 시도합니다`
+         : deferred ? `<b>${lead}Unsaved Draft</b> — 이 화면에 담아 두었습니다 · 서버 저장은 아직 확인되지 않았습니다`
+                  : `<b>${lead}Draft Saved${at ? " " + esc(draftTime(d.at)) : ""}</b> — ${apart ? "초안으로 " : "개인 초안으로 "}자동 저장됨 (확정 전)`) +
         (behind ? ` · <b>주의</b> 이 초안을 쓰기 시작한 뒤 v${esc(r.version)}이 확정됐습니다`
                 : `<span id="drafthint"></span>`);
       renderDraftHint();
     }
+    /** 초안이 확인된 시각(이 화면의 시계로 hh:mm). 모르면 빈 글이다. */
+    function draftTime(at) {
+      const date = at ? new Date(at) : null;
+      return date && !Number.isNaN(date.getTime())
+        ? `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}` : "";
+    }
+
+    /**
+     * 자동 초안 쓰기가 실패한 마지막 까닭(검사마다): `{outcome, reason}`. 저장 실패 기록(`reportSaveFailures`)이 있을 때만
+     * 읽는다 — 그 기록이 지워지면 이 까닭도 더는 말할 것이 아니다. 판정은 초안 명령 경로의 결과를 그대로 옮긴 것이다.
+     */
+    const reportSaveOutcome = new Map();
+
+    /**
+     * 검사를 옮기지 않은 까닭을 말하는 한 줄(W4-PAGE-01/06, W5가 다시 쓰는 Notice). 쓰던 글의 저장이 거절됐거나(Retry),
+     * 결과를 모르거나(Check), 충돌했거나, 글자 조합 중이어서 옮기지 않았다는 사실과 무엇을 누르면 되는지를 말한다. 글은 어느
+     * 쪽이든 화면에 그대로다 — "그래도 떠나기"는 없다(Stay는 이 줄을 닫을 뿐이다). 그 검사·그 선택일 때만 보이고, 기다리던
+     * 저장이 뒤늦게 확인되면 같은 줄이 그 사실을 말한다(Check가 서버의 초안을 읽어 확인한 뒤 그 이동을 이어 간다).
+     */
+    let reportNotice = null, reportNoticeShown = false;
+    function showReportNotice(notice) {
+      if (!["composing", "refused", "unknown", "conflict", "owner"].includes(notice.status)) return;
+      reportNotice = notice;
+      renderReportNotice();
+    }
+    function clearReportNotice() {
+      if (!reportNotice && !reportNoticeShown) return;
+      reportNotice = null;
+      renderReportNotice();
+    }
+    function renderReportNotice() {
+      if (reportNotice && (reportNotice.uid !== selectedUid || reportNotice.seq !== selectionSeq)) reportNotice = null;
+      const n = reportNotice;
+      reportNoticeShown = !!n;
+      $("#report-notice").style.display = n ? "flex" : "none";
+      if (!n) return;
+      const unconfirmed = reportConverge.has(n.uid);
+      // Check가 서버의 지금 초안을 읽고 알게 된 것(checkReportNotice). 그 뒤 이 글의 확인 여부가 바뀌었으면(늦게 닿은 저장, 새로
+      // 친 글) 그 답은 지난 사실이다 — 지금의 상태로 말한다.
+      const checked = n.checked && n.checked.unconfirmed === unconfirmed ? n.checked.what : null;
+      const saved = n.status !== "composing" && !unconfirmed && !checked;
+      // 확인된 글이 초안이면 그 시각을, 확정이 그 글을 판독문으로 받았으면(초안이 없다) 저장됐다는 사실만 말한다.
+      const draftAt = draftTime(appState[n.uid]?.draft?.at);
+      const label = saved ? (appState[n.uid]?.draft ? `Draft Saved${draftAt ? " " + draftAt : ""}` : "Saved")
+        : checked || n.status === "unknown" ? "Result Unknown"
+        : n.status === "composing" ? "Not Moved"
+        : n.status === "conflict" ? "Save Failed — 서버의 초안이 이 화면과 다릅니다"
+        : `Save Failed — ${n.reason ?? "서버가 저장을 받지 않았습니다"}`;
+      const toward = n.target ? ` (${studyLabel(n.target.uid)}(으)로 가려던 이동)` : "";
+      // 서버의 초안에 이 화면의 글이 없다는 것을 읽어서 알았다: 다시 보내는 길(Retry, 쓰기 경로)을 함께 준다.
+      const resend = checked === "different" && unconfirmed;
+      const text = checked === "unread" ? `서버의 저장 상태를 확인하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 ` +
+          "있습니다. 다시 확인하려면 Check를 누르세요."
+        : checked === "changed" ? `확인하는 사이 글이나 선택이 바뀌어 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+          "다시 확인하려면 Check를 누르세요."
+        : resend ? `서버의 초안에 이 화면의 글이 없어 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+          "Retry를 누르면 이 글을 다시 저장하고, 저장이 확인되면 이동합니다."
+        : checked === "different" ? `서버에 있는 이 검사의 초안이 이 화면의 글과 달라 검사를 옮기지 않았습니다${toward} — 이 화면의 글은 ` +
+          "그대로 있습니다. 다른 창에서 그 뒤에 저장했을 수 있습니다. 다시 확인하려면 Check를 누르세요."
+        : saved ? `쓰던 글의 저장이 확인됐습니다. Check를 누르면 서버의 초안을 한 번 더 읽어 이 화면의 글과 견주고 이동합니다${toward}.`
+        : n.status === "composing" ? "글자 조합(한글 입력)이 끝나지 않아 검사를 옮기지 않았습니다 — 입력을 마친 뒤 다시 누르세요."
+        : n.status === "unknown" ? `쓰던 글의 저장을 확인하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+          "Check를 누르면 서버의 초안을 읽어 이 화면의 글과 견주고, 같으면 이동합니다."
+        : n.status === "conflict" ? `검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+          "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고른 뒤 다시 누르세요."
+        : `쓰던 글을 저장하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. 원인을 해결한 뒤 Retry를 누르세요.`;
+      const strong = document.createElement("b");
+      strong.textContent = "● " + label;
+      $("#report-notice-msg").replaceChildren(strong, " — " + text);
+      $("#report-notice-retry").style.display =
+        n.target && (resend || (!checked && !saved && ["refused", "owner"].includes(n.status))) ? "" : "none";
+      $("#report-notice-check").style.display = n.target && (saved || checked || n.status === "unknown") ? "" : "none";
+      $("#report-notice-check").disabled = !!n.checking;
+    }
+    /** Retry: 같은 이동을 같은 관문으로 다시 한다 — 쓰기 경로다(관문이 쓰던 글을 저장하고, 저장이 확인될 때만 옮긴다). */
+    function retryReportNotice() {
+      const n = reportNotice;
+      if (!n?.target || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
+      clearReportNotice();
+      select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
+    }
+    /** 서버가 읽어 준 초안의 작성자가 이 페이지의 계정인가(기관·사용자 ID·작성자 셋 다 같아야 한다). */
+    function sameDraftOwner(owner, mine) {
+      return !!owner && !!mine && owner.sub === mine.sub && (owner.institution ?? null) === (mine.institution ?? null)
+        && owner.author === mine.author;
+    }
+    /**
+     * Check(W4-PAGE-01/02, 설계 v4 §4.2): 쓰기를 다시 보내지 않는다. 초안 명령 경로의 전체 읽기 하나(`draftClient.read`)로 서버가
+     * 지금 가진 이 검사의 초안을 읽어, 누른 순간 이 문서가 가진 초안의 사진(`reportDraftSnapshot`)과 **전부** 견준다 — 같은 검사,
+     * 같은 작성자, 같은 선택(편집기 문맥: 그 사이 다른 검사에 다녀오거나 글을 더 치지 않았다), 세 칸·기준 판·인용과 구조화 목록.
+     * 본문만 같은 것으로는 정하지 않는다. 모두 같을 때만 그 글은 서버가 가진 글이다: 저장이 확인될 때와 같은 자리에서 표시를 내리고
+     * 그 이동을 이어 간다. 읽지 못했거나, 다르거나, 누른 뒤에 글이나 선택이 바뀌었으면 아무것도 보내지 않고 머문다 — 글은 화면에
+     * 그대로이고, Notice가 무엇을 알았는지 말한다. 다시 보내는 것은 Retry(쓰기 경로)의 일이다.
+     */
+    async function checkReportNotice() {
+      const n = reportNotice;
+      if (!n?.target || n.checking || n.uid !== selectedUid || n.seq !== selectionSeq) return;
+      const mine = reportDraftSnapshot(n.uid), at = work.capture("editor");
+      n.checking = true;
+      renderReportNotice();
+      let got = null;
+      try { if (serverMode && !offline && !demoMode) got = await draftClient.read(n.uid, { context: at }); }
+      catch (_) { got = null; }
+      finally { n.checking = false; }
+      const decided = work.commit(at, () => {
+        // 그 사이 Stay를 눌렀거나 다른 까닭의 Notice가 섰다: 이 읽기의 답으로 할 일이 없다.
+        if (reportNotice !== n) return;
+        const read = got?.outcome === "read" ? got.read : null;
+        // 서버가 가져야 할 원문: 이 문서의 초안 글 세 칸과 기준 판, 초안 쓰기가 함께 싣는 목록. 글이 없거나 모두 비었으면 초안 행이
+        // 없어야 한다(빈 초안은 행을 지운다). 목록을 모르면 끝까지 견줄 수 없으므로 확인하지 못한 것이다.
+        const expected = mine.texts && RFIELDS.some(k => mine.texts[k])
+          ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured } : null;
+        const comparable = !!read && (!expected || !!mine.lists);
+        const same = comparable && read.uid === n.uid && sameDraftOwner(read.owner, mine.author)
+          && KinReportDraftClient.sameSnapshot(read.present ? read.snapshot : null, expected);
+        if (!same) {
+          n.checked = { what: comparable ? "different" : "unread", unconfirmed: mine.unconfirmed };
+          renderReportNotice();
+          return;
+        }
+        if (mine.unconfirmed) {
+          // 서버가 이 화면의 글 전부를 가졌다(답만 잃었거나 늦게 닿은 쓰기): 확인된 글이다. 표시는 저장이 확인될 때와 같은 자리에서
+          // 내린다. 초안 명령 경로의 기준은 그 경로의 규칙에 맡긴다 — 관측으로 알리고(나가 있거나 결과를 모르는 명령이 있으면 그
+          // 경로가 받지 않고, 다음 명령이 서버 상태부터 읽는다).
+          reportConverge.delete(n.uid);
+          reportSaveFailures.delete(n.uid);
+          reportSaveOutcome.delete(n.uid);
+          appState[n.uid] = { ...appState[n.uid], draftRevision: read.revision,
+            draft: read.present ? { ...mine.texts, baseVersion: mine.baseVersion, at: read.updatedAt } : null };
+          if (!read.present) { citations.emptied(n.uid); structureState.emptied(n.uid); }
+          draftClient.observe(n.uid, read.revision, read.present ? { ...mine.texts, baseVersion: mine.baseVersion } : null);
+          renderDraftBar();
+        }
+        clearReportNotice();
+        select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
+      });
+      // 확인하는 사이 글을 더 쳤거나 선택·작업 문맥이 바뀌었다: 이 읽기로는 정하지 않는다(보낸 것도 없다).
+      if (!decided) work.commit(work.capture("document"), () => {
+        if (reportNotice === n) { n.checked = { what: "changed", unconfirmed: reportConverge.has(n.uid) }; renderReportNotice(); }
+      });
+    }
+    $("#report-notice-retry").addEventListener("click", retryReportNotice);
+    $("#report-notice-check").addEventListener("click", checkReportNotice);
+    $("#report-notice-stay").addEventListener("click", clearReportNotice);
+
+    /**
+     * 숨긴 Recommendation의 안내(W4-PAGE-12, 설계 v4 §3). 편집기에는 Recommendation 입력칸이 없지만 값은 문서의 일부로 모든
+     * 저장·확정에 실린다(상용구·구조화 서식이 그 칸에 글을 넣는다). 값이 있는데 화면이 말하지 않으면 판독의는 보이지 않는
+     * 문장이 든 판독문에 서명한다. 그래서 값이 있으면 읽기 전용 띠로 그 존재를 알리고, 펼치면 글을 읽을 수 있다. 띠는 편집기가
+     * 아니다 — 숨긴 칸은 그대로 숨어 있고(aria-hidden, tabindex -1) 띠에서 그 칸으로 가는 길도 없다. 검사가 바뀌면 접힌다.
+     */
+    let recommendationNoticeUid = null;
+    function renderRecommendationNotice() {
+      const box = $("#recnote"), value = $("#recommendation").value;
+      if (recommendationNoticeUid !== selectedUid) { box.open = false; recommendationNoticeUid = selectedUid; }
+      box.hidden = !value;
+      $("#recnote-text").textContent = value;
+    }
+    onReportField("input", event => { if (event.target.id === "recommendation") renderRecommendationNotice(); });
 
     /**
      * 승인된 판독문과 내 초안이 갈라져 있는가. 기록된 사실만 본다: 그 검사가 승인 상태(RS A)이고, 내 초안이 있고, 그 초안의

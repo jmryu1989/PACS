@@ -203,7 +203,7 @@
         toast("서버 연결이 끊겨 저장할 수 없습니다. 쓰던 내용을 복사해 두고 연결을 기다리세요.", "err");
         return;
       }
-      const uid = selectedUid;
+      const uid = selectedUid, pressedSeq = selectionSeq;
       const content = {
         findings: $("#findings").value,
         conclusion: $("#conclusion").value,
@@ -216,7 +216,7 @@
         commitInFlight = true;
         // 요청이 나가 있는 동안 버튼을 회색으로. 플래그만으로도 두 번째 호출은 막히지만,
         // 눌리는데 아무 일도 안 일어나는 버튼은 "먹통"으로 읽혀 또 누르게 만든다.
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
+        for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
           if ($(id)) $(id).disabled = true;
         // 내 글을 확정하는 중이라면(초안이 있거나 편집기가 dirty) 기준은 **화면에 그려진 판**이다.
         // `appState.version`은 본문을 다시 그리지 않고도 올라가므로, 그대로 보내면
@@ -362,6 +362,93 @@
       }
       render(); renderRelated(); updateReportButtons();
       announceCommit(uid, action, reason, lateText);
+      // 받아들여진 확정이다. 누른 그 검사·그 선택과, 그 확정이 싣지 않은 글이 남았는지를 부른 쪽(Approve & Next)에 알린다.
+      return { accepted: true, uid, seq: pressedSeq, lateText };
+    }
+
+    /**
+     * Approve & Next(W4-PAGE-04/08 — 설계 v5 §3의 Finalize & Next; 이름은 D1358 ①로 Approve를 지킨다). Approve는 그
+     * 검사에 머물고, 이 단추는 승인이 **서버에 받아들여지고 그 승인본이 편집기에 그려진 뒤에만** 다음 검사로 옮긴다. 결과를
+     * 모르는 확정·거절·점유·낡은 판, 누른 뒤에 친 글이 남은 확정, 글자 조합 때문에 그리지 못한 승인본이면 머문다 — 무엇이 됐는지
+     * 사람이 보지 못한 채 다음 환자로 넘어가지 않는다. 다음 검사는 누른 순간의 줄(queue anchor: 이 검사와 그 자리, 그 다음 검사와
+     * 그 뒤의 후보들)이 정하고, 승인이 받아들여져 그려진 **뒤에** 그 줄로 다시 확인한다(`queueAnchor`/`queueTarget`): 그 사이
+     * 목록이 다시 정렬됐어도 다른 행으로 가지 않고, 승인으로 이 검사가 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫
+     * 행이 아니며, 그 다음 검사가 빠졌으면 그 줄의 다음 후보로, 후보가 없으면 머문다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
+     */
+    async function approveAndNext() {
+      const why = reportCommandBlocked("finalize-next");
+      if (why) { toast(why, "err"); return; }
+      const anchor = queueAnchor(1), asked = studyRequests;
+      const done = await commitReport("approve");
+      if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;
+      // 답을 기다리는 사이 사람이 다른 검사를 골랐다(옮겨졌든 저장을 기다리며 머물렀든): 늦게 온 답이 그 뜻을 덮지 않는다.
+      if (studyRequests !== asked) return;
+      const next = queueTarget(anchor);
+      if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return; }
+      // 여기서는 확인되지 않은 글이 없다(위의 조건) — 관문은 같은 자리에서 옮기므로, 방금 다시 확인한 그 검사로 간다.
+      select(next, { openSelected: true });
+    }
+    /** 편집기가 그 검사의 서버 판독문을 그리고 있는가: 미뤄 둔 다시 그리기도, 확인되지 않은 글도 없는 그 선택의 opening. */
+    function reportShowsAccepted(uid) {
+      return reportRefreshPendingFor !== uid && !reportConverge.has(uid)
+        && reportOpening?.uid === uid && reportOpening.selectionSeq === selectionSeq;
+    }
+    /**
+     * 이 문서가 그 검사에 대해 가진 초안의 사진(W5 인터페이스 ④, impact §10). 읽기만 한다 — 요청도, 표시·기준·화면의 변경도 없다.
+     * 한 동기 구간에서 함께 읽은 값이고 모두 사본이다(부른 쪽이 고쳐도 이 문서의 상태는 그대로다). Notice의 Check가 서버의 전체 읽기를
+     * 이것과 견주고, W5의 Check가 같은 자리를 쓴다.
+     *   uid · author(이 페이지의 계정: 기관·사용자 ID·작성자) · selectionSeq(그 검사가 지금 선택일 때만, 아니면 null)
+     *   revision(초안 명령 경로가 딛고 선 초안 revision, 모르면 null) · baseVersion(이 글이 딛고 선 판)
+     *   texts(이 문서의 초안 글 세 칸: 고른 검사는 편집기의 글, 떠난 검사는 담아 둔 사본. 초안도 확인되지 않은 글도 없으면 null —
+     *     편집기는 저장된 판독문을 보이고 있다) · lists(그 revision에서 서버가 가진 인용·구조화 id, 초안 쓰기가 함께 싣는 목록; 모르면
+     *     null) · unconfirmed(서버가 아직 확인하지 않은 글이 있는가)
+     */
+    function reportDraftSnapshot(uid = selectedUid) {
+      if (!uid) return null;
+      const a = appState[uid] ?? {}, draft = a.prelimHidden ? null : a.draft ?? null;
+      const unconfirmed = reportConverge.has(uid);
+      const texts = !unconfirmed && !draft ? null
+        : Object.fromEntries(RFIELDS.map(k => [k, uid === selectedUid ? $("#" + k).value : String(draft?.[k] ?? "")]));
+      const lists = draftClient.lists(uid);
+      return {
+        uid,
+        author: draftOwner ? { institution: draftOwner.institution ?? null, sub: draftOwner.sub, author: draftOwner.author } : null,
+        selectionSeq: uid === selectedUid ? selectionSeq : null,
+        revision: draftClient.revision(uid),
+        baseVersion: reportBaseVersion(uid, draft?.baseVersion ?? a.version ?? 0),
+        texts,
+        lists: lists ? { citations: [...lists.citations], structured: [...lists.structured] } : null,
+        unconfirmed,
+      };
+    }
+    /**
+     * 판독 명령을 지금 할 수 없는 까닭, 할 수 있으면 null — 명령의 공통 차단점이다(W5 인터페이스 ③, impact §10). command는
+     * "approve"(Approve 단추)·"finalize-next"(Approve & Next)·"next"·"prev"(Next/Prev 단추와 통합 판독 화면의 이전/다음)·
+     * "finalize"(Ctrl+S와 뷰어 창이 넘기는 Finalize)이고, 이 명령들은 모두 실행 직전에 이것을 지난다: 까닭이 있으면 검사를
+     * 옮기지도 확정하지도 않고 그 까닭을 말한다. 까닭이 없으면 지금까지의 같은 길이다(같은 이벤트·같은 클릭 수). W5 Related
+     * Report mode가 자기 까닭을 여기에 더한다(설계 v5 §1.6).
+     *
+     * W4가 정하는 까닭은 단추가 아닌 길(키·다른 문서)로 오는 확정과 Approve & Next의 것뿐이다: 승인 단추가 잠겨 있으면 그 단추가
+     * 말하는 까닭이 그대로 까닭이다(같은 판단을 두 번 하지 않는다). Approve 단추·Next·Prev는 눌릴 때 이미 자기 상태(잠김·목록 끝·
+     * 이동 관문)를 지니므로 W4가 까닭을 더하지 않는다.
+     */
+    function reportCommandBlocked(command) {
+      if (!["finalize", "finalize-next"].includes(command)) return null;
+      if (!selectedUid) return "검사를 선택하세요";
+      if (pendingLeave) return "쓰던 글의 저장을 기다려 검사를 옮기는 중입니다";
+      const button = $("#b-approve");
+      if (button.disabled) return button.title || "지금은 승인할 수 없습니다";
+      return null;
+    }
+    /**
+     * 단축키 목록의 "Finalize (Approve)"(Ctrl+S). 명령을 실행했으면 true — 그때만 브라우저의 페이지 저장을 막는다.
+     * 확정·삽입이 나가 있으면 commitReport는 아무것도 하지 않고 돌아온다(삽입 중에는 Approve 단추도 잠기지 않는다) —
+     * 그때 "실행했다"고 답하면 Ctrl+S가 아무 일도 하지 않은 채 사라진다.
+     */
+    function finalizeCommand() {
+      if (mode !== "Radiology" || commitInFlight || insertInFlight || reportCommandBlocked("finalize")) return false;
+      commitReport("approve");
+      return true;
     }
 
     /** 검사를 사람에게 가리키는 표기: 환자 이름 · 접수번호 · 검사일. 목록에서 사라진 검사는 남은 이름(UID)으로 부른다. */
@@ -413,7 +500,12 @@
     $("#b-prelim")?.addEventListener("click", doPreliminary);
     $("#b-save").addEventListener("click", () => commitReport("save"));
     $("#b-transcribe").addEventListener("click", () => commitReport("save"));
-    $("#b-approve").addEventListener("click", () => commitReport("approve"));
+    $("#b-approve").addEventListener("click", () => {
+      const why = reportCommandBlocked("approve");
+      if (why) { toast(why, "err"); return; }
+      commitReport("approve");
+    });
+    $("#b-approve-next").addEventListener("click", approveAndNext);
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
     function askReason({ title, choices }) {

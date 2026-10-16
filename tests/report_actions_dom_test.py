@@ -121,6 +121,10 @@ MENU = 'report-more'
 # Where each button lives now: in view on the top row or the footer row, or in a section of More.
 TOP = ['b-approve', 'b-save', 'b-prelim', 'b-dictate']
 FOOT = ['b-prev', 'b-next']
+# W4-LAND decided difference (W4-PAGE-04, D1358 labels: Approve kept): Approve & Next joins the footer row in front of
+# Prev/Next - the queue controls stay together and the top row keeps its one line at 1366. It is not one of the 18 base
+# buttons, so the base-equivalence cases above do not count it; the in-view and geometry cases do.
+W4_FOOT = ['b-approve-next']
 SECTIONS = {
     'report-more-reading': ['b-addendum', 'b-transcribe'],
     'report-more-status': ['b-defer', 'b-except', 'b-mark-cvr', 'b-unread'],
@@ -129,11 +133,12 @@ SECTIONS = {
 }
 SECTION_LABELS = {'report-more-reading': 'Reading', 'report-more-status': 'Status', 'report-more-editor': 'Editor',
                   'report-more-output': 'Print and History'}
-NEW_IDS = [MENU] + list(SECTIONS)
+NEW_IDS = [MENU] + list(SECTIONS) + W4_FOOT
 # In view with More closed: the top row with its summary, then the footer. UXR-G-08 asks for at most six; Dictate is
 # the seventh (see the module docstring).
-IN_VIEW = TOP + [MENU + '>summary'] + FOOT
-MAX_IN_VIEW = 7
+IN_VIEW = TOP + [MENU + '>summary'] + W4_FOOT + FOOT
+# Seven before W4; Approve & Next is the eighth (W4-PAGE-04).
+MAX_IN_VIEW = 8
 DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
 # The live page (Astra S7-PINS-R-001-F02): the buttons disabled as main.html serves them, before the page script reads
 # the session and the report and enables or disables them by role and report state. Every other button starts enabled.
@@ -481,10 +486,10 @@ class ReportActionsDOMTest(unittest.TestCase):
     def test_each_button_is_where_it_is_declared_and_seven_controls_are_in_view(self):
         page = self.open_page(1366, 768)
         try:
-            where = {key: (row, menu, section) for key, row, menu, section in page.evaluate(WHERE, BUTTON_IDS)}
+            where = {key: (row, menu, section) for key, row, menu, section in page.evaluate(WHERE, BUTTON_IDS + W4_FOOT)}
             for key in TOP:
                 self.assertEqual(('rbtns', None, None), where[key], key)
-            for key in FOOT:
+            for key in W4_FOOT + FOOT:
                 self.assertEqual(('rfoot2', None, None), where[key], key)
             for section, ids in SECTIONS.items():
                 for key in ids:
@@ -548,8 +553,9 @@ class ReportActionsDOMTest(unittest.TestCase):
         self.assertLessEqual(natural[MENU + '>summary'], buttons + 0.5, f'More is taller than the buttons {where}')
         self.assertLessEqual(m['rbtns']['h'], buttons + 8 + 0.5, f'the top row is taller than one button row {where}')
         foot = m['foot']
-        self.assertEqual(FOOT, [f['key'] for f in foot])
-        self.assertLessEqual(abs((foot[0]['y'] + foot[0]['b']) / 2 - (foot[1]['y'] + foot[1]['b']) / 2), 1, where)
+        self.assertEqual(W4_FOOT + FOOT, [f['key'] for f in foot])
+        for f in foot[1:]:
+            self.assertLessEqual(abs((foot[0]['y'] + foot[0]['b']) / 2 - (f['y'] + f['b']) / 2), 1, f'the footer broke into rows {where}')
         for f in foot:
             self.assertTrue(f['own'], f'{f["key"]} is covered {where}')
             self.assertEqual(FONT, f['font'], f['key'])

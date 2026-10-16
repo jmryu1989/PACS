@@ -109,8 +109,26 @@ function onCommonEnd() {}
 """
 
 
+def _page_markup(start, end):
+    """One element of the delivered main.html, cut from its opening marker through its closing tag."""
+    page = (LITE / 'main.html').read_text(encoding='utf-8')
+    at = page.index(start)
+    return page[at:page.index(end, at) + len(end)]
+
+
 def install_contract(html):
     """Load the same assets for every component; no product source is modified."""
+    # W4: the sliced report region registers the Notice controls and Approve & Next and draws the hidden-Recommendation
+    # notice from its draft bar. A fixture that carries the draft bar / the Approve button carries these as the page has them.
+    if 'id="draftbar"' in html and 'id="report-notice"' not in html:
+        notice = _page_markup('<div class="draftbar" id="report-notice"', '</button>\n        </div>')
+        recnote = _page_markup('<details class="recnote" id="recnote"', '</details>')
+        at = html.rindex('<', 0, html.index('id="draftbar"'))
+        html = html[:at] + notice + recnote + html[at:]
+    if 'id="b-approve"' in html and 'id="b-approve-next"' not in html:
+        at = html.index('id="b-approve"')
+        at = html.rindex('<', 0, at)
+        html = html[:at] + _page_markup('<button class="approve" id="b-approve-next"', '</button>') + html[at:]
     scripts = ''.join('<script>' + (LITE / asset).read_text(encoding='utf-8') + '</script>' for asset in ASSETS)
     html = html.replace('<head>', '<head>' + scripts, 1)
     # Fixtures retain their endpoint-specific fault injection, which is installed before BOOT.

@@ -46,11 +46,11 @@ class CandidateCiTests(unittest.TestCase):
         # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows; S8-CTX: + 2 Tech Note flows;
         # EMR-B1: + the ledger's L01 (emr/units/b.json candidate_cases).
         # W2: + folder edit/save/reapply/relogin. W3: + drawer v3 save/relogin.
-        # CN-N01-A: + 6 OrderCorrectionInvariantTests (invariants 95). Union: 95 + 15 + 13 = 123.
-        # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101). Union: 101 + 15 + 13 = 129.
-        self.assertEqual(len(selected), 129)
+        # CN-N01-A: + 6 OrderCorrectionInvariantTests (invariants 95). W4-FLOW: + Approve & Next / Recommendation round trip.
+        # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101). Union: 101 + 15 + 14 = 130.
+        self.assertEqual(len(selected), 130)
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
-        self.assertEqual([item["case"] for item in selected[-13:]],
+        self.assertEqual([item["case"] for item in selected[-14:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
         self.assertEqual(selected[-1:], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
@@ -92,14 +92,14 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 15)
+            self.assertEqual(len(profile["suites"]), 16)
             command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][2], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 129)
+            self.assertEqual(len(selected), 130)
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.

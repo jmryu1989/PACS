@@ -18,7 +18,7 @@ SHA = re.compile(r"[0-9a-f]{40}")
 BASE = (
     # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (and the selection 105 -> 112).
     # CN-N01-A: OrderCorrectionInvariantTests added six live cases, 89 -> 95 (and the selection 116 -> 122).
-    # WORKLIST-SPLIT-UID: WorklistSplitUidInvariantTests added six live cases, 95 -> 101 (and the selection 123 -> 129).
+    # WORKLIST-SPLIT-UID: WorklistSplitUidInvariantTests added six live cases, 95 -> 101 (and the selection 124 -> 130 after W4-FLOW's 123 -> 124).
     ("invariants_live.py", None, "candidate-invariants", 101),
     ("e2e/test_worklist.py", None, "candidate-worklist", 15),
 )
@@ -37,6 +37,9 @@ FLOWS = (
     ("e2e/test_viewer_tech_note.py", "ViewerTechNoteE2E", "test_viewer_note_02_technician_save_conflict_and_history", "test_viewer_note_02_"),
     ("e2e/test_filter_folders.py", "FilterFoldersE2E", "test_shortcuts_01_folder_edit_save_reapply_relogin", "test_shortcuts_01_"),
     ("e2e/test_workspace_roaming.py", "WorkspaceRoamingE2E", "test_roam_06_v3_drawer_account_save_and_relogin", "test_roam_06_"),
+    # W4-FLOW: Approve & Next under the RS=W filter moves to the row after the approved study, and a template's hidden
+    # Recommendation is announced, approved and shown again (the selection 123 -> 124).
+    ("e2e/test_report_flow.py", "W4ReportFlowE2E", "test_w4_01_approve_next_anchor_recommendation_roundtrip", "test_w4_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
@@ -106,8 +109,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 129 and len({(x["file"], x["case"]) for x in selected}) == 129,
-            "Candidate selection must contain 129 unique exact cases")
+    require(len(selected) == 130 and len({(x["file"], x["case"]) for x in selected}) == 130,
+            "Candidate selection must contain 130 unique exact cases")
     return rows, selected
 
 

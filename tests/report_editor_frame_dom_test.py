@@ -14,7 +14,7 @@ import time
 import unittest
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "worklist-v0/hpacs-lite/report-editor-frame.js"
@@ -1061,7 +1061,12 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         return {k: self.page.locator('#' + k).input_value() for k in FIELDS}
 
     def switch(self, patient):
-        self.page.locator('#rows tr', has_text=patient).first.click()
+        # W4 decided difference (W4-PAGE-06): with unconfirmed text the move waits for that text's draft save, so the
+        # switch is complete when the page has selected the study, not when the click returns.
+        row = self.page.locator('#rows tr', has_text=patient).first
+        uid = row.get_attribute('data-uid')
+        row.click()
+        self.page.wait_for_function('uid => selectedUid === uid', arg=uid)
 
     def keep_hold_claim(self):
         """The page claims the study's hold once two characters are typed, and its answer re-renders the report
@@ -1741,11 +1746,18 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         cdp = self.context.new_cdp_session(self.page)
         cdp.send('Input.imeSetComposition', {'text':'한','selectionStart':1,'selectionEnd':1})
         before = self.texts()
+        writes = len(self.site.puts)
         self.page.locator('#rows tr', has_text=self.h.PATIENT_B).first.dispatch_event('click')
         self.assertEqual(self.texts(), before)
         self.assertEqual(self.page.evaluate('selectedUid'), self.h.UID)
+        # W4 (W4-PAGE-06): the refused activation is said, not silent - the navigation gate's Notice - and it sends
+        # nothing: the open composition is not saved as a draft on the way out.
+        expect(self.page.locator('#report-notice')).to_contain_text('Not Moved')
+        self.page.wait_for_timeout(300)
+        self.assertEqual(writes, len(self.site.puts), 'a refused activation writes no draft')
         cdp.send('Input.insertText', {'text':'한'})
         cdp.detach()
+        # W4 decided difference: the composed syllable is unconfirmed text, so the move waits for its draft save.
         self.switch(self.h.PATIENT_B)
         self.assertEqual(self.texts(), dict.fromkeys(FIELDS, ''))
 
@@ -2011,7 +2023,10 @@ PAGE_MUTANTS = [
      'const applied = false;', 'test_page_citation_and_structure_apply_screen_matches_payload'),
     ('W6-PAGE-13', 'report-toolbar.js', 'const end = frame.read("findings").length;', 'const end = 0;',
      'test_page_clipboard_answer_after_typing_and_undo_is_refused'),
-    ('W6-PAGE-15', 'current-study.js', 'if (reportFrame?.isComposing()) return;', '// Allow a switch during composition.',
+    # W4 moved the composition refusal into the navigation gate (leaveStudyGate); the mutant removes it there.
+    ('W6-PAGE-15', 'current-study.js',
+     'if (reportFrame?.isComposing()) {\n        showReportNotice({ status: "composing", uid, seq, reason });',
+     'if (false) {\n        showReportNotice({ status: "composing", uid, seq, reason });',
      'test_page_composition_refuses_a_queued_study_activation'),
     # Post-W3: the drawer's fallback reads the field when the drawer closes; a kept reference is a removed node after an opening.
     ('W6-PAGE-18-drawer-fallback', 'feature-mounts.js',

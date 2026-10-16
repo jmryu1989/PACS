@@ -122,14 +122,48 @@ def worker(path):
     print("EXACT_TESTS " + json.dumps([test.id() for test in suite]), flush=True)
     files = {(ROOT / item["file"]).resolve().relative_to(ROOT).as_posix() for item in plan["tests"]}
     module = next(iter(files)) if len(files) == 1 else "plan:" + claim["plan_sha256"]
+    # The marker outlives this worker even on success: a descendant may end
+    # before this worker during the parent's termination, so only the parent's
+    # own terminal state may reopen the gate.
     with gate.live_run(unit=plan["unit"], module=module, plan_sha256=claim["plan_sha256"],
-                       attempt=len(ledger["attempts"])) if plan["mode"] == "live" else nullcontext():
+                       attempt=len(ledger["attempts"]), release=False) if plan["mode"] == "live" else nullcontext() as identity:
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         # A failed live run retains the inspection marker, even if it appears
         # to have cleaned up. Do not retry against uncertain shared fixtures.
         if not result.wasSuccessful() or result.skipped:
             raise gate.Refused("Tests failed or skipped; this is not a completed plan")
+        # An exit status alone is not completion (os._exit, a stray sys.exit):
+        # attest the completed suite with the parent's ticket.
+        with completion_path(path).open("x", encoding="utf-8") as stream:
+            json.dump({"ticket_proof": completion_proof(ticket), "marker": identity}, stream)
     return 0
+
+
+def completion_path(frozen):
+    return Path(frozen).with_suffix(".completed.json")
+
+
+def completion_proof(ticket):
+    return hashlib.sha256(("completed\n" + ticket).encode()).hexdigest()
+
+
+def completed_marker(frozen, ticket, plan, row):
+    """The worker's attestation of a completed suite; returns its live marker identity (None for pure)."""
+    try:
+        completion = json.loads(completion_path(frozen).read_bytes())
+    except (OSError, ValueError) as error:
+        raise gate.Refused("Worker exited without attesting a completed plan") from error
+    if not isinstance(completion, dict) or completion.get("ticket_proof") != completion_proof(ticket):
+        raise gate.Refused("Worker completion does not belong to this attempt")
+    marker = completion.get("marker")
+    if plan["mode"] == "pure":
+        if marker is not None:
+            raise gate.Refused("Pure plan attested a live marker")
+        return None
+    gate.validate_identity(marker)
+    if any(marker[key] != row[key] for key in ("attempt", "plan_sha256")) or marker["unit"] != plan["unit"]:
+        raise gate.Refused("Worker completion names another execution")
+    return marker
 
 
 def write_json(path, value):
@@ -166,14 +200,25 @@ def execute(path):
         ledger["attempts"].append(row)
         write_json(ledger_path, ledger)
         process = None
+        marker = None
         try:
             process = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "--worker", str(frozen)], cwd=ROOT,
                                        stdin=subprocess.PIPE, start_new_session=os.name != "nt")
             process.stdin.write((ticket + "\n").encode())
             process.stdin.close()
             code = process.wait(timeout=plan["timeout_seconds"])
-            row.update(status="passed" if code == 0 else "failed", exit_code=code)
+            if code != 0:
+                row.update(status="failed", exit_code=code)
+            else:
+                marker = completed_marker(frozen, ticket, plan, row)
+                row.update(status="passed", exit_code=0)
+        except gate.Refused as error:
+            # Exit 0 without this attempt's attestation: not a completed plan.
+            # A live marker stays for inspection.
+            row.update(status="failed", exit_code=125, worker_exit=0, error=str(error))
         except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            # The worker may still exit normally during termination; this
+            # path never consults it and never releases the live marker.
             row.update(status="interrupted", exit_code=124)
             if process is not None:
                 if os.name == "nt":
@@ -192,6 +237,14 @@ def execute(path):
         finally:
             row["ended"] = time.time()
             write_json(ledger_path, ledger)
+        # Reopen only after the parent's own terminal state is persisted as
+        # passed; the marker is checked to be exactly the one this attempt wrote.
+        if row["status"] == "passed" and marker is not None:
+            try:
+                gate.release_after_success(marker)
+            except gate.Refused as error:
+                row.update(exit_code=125, release_error=str(error))
+                write_json(ledger_path, ledger)
         print("PLAN_RESULT " + json.dumps(row), flush=True)
         return row["exit_code"]
 
