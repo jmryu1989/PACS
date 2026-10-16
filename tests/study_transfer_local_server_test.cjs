@@ -2,7 +2,9 @@
 /* TEST-S9-U4 server half (S9-U4b part (b)): the compiled member import gate, feature controller/service and raw parser in a
  * real Nest HTTP application (the product's controller, services, parser and DI; a test guard stands in for Keycloak), over
  * a recording store that keeps ImportOperation's CHECK shapes, its UNIQUE keys, advisory and row locks and rolls a failed
- * transaction back, and a fake Orthanc HTTP server whose stored "files" answer /tags from their own bytes.
+ * transaction back, and a fake Orthanc HTTP server whose stored "files" answer /tags from their own bytes. The store keeps
+ * the two PostgreSQL meanings a JSON copy loses (round 6, U4BL-01/02): SQL NULL and JSON null stay distinct in a JSONB
+ * column as Prisma 5.22 writes them, and a JSONB value reads back with its object keys in jsonb's own order.
  *   REQ-S9-U4-02/03/05/06/12 (+ the server parts of 01/04/07/08/11) -> RISK-S9-U4-* -> this file; contract S9-U4p 4.1-4.9, 5.2, 6.
  * Every contract 4.8 code is reached by behaviour and asserted by HTTP status, outcome token, final/retry replay, the audit
  * row and the stored row. Transport classes are reproduced by replacing globalThis.fetch for POST /instances only (A-R4-07).
@@ -24,6 +26,7 @@ const { StudyTransferLocalController } = require('/app/dist/study-transfer-local
 const { StudyTransferLocalService } = require('/app/dist/study-transfer-local.service');
 const { studyTransferLocalParser } = require('/app/dist/study-transfer-local-parser');
 const Gate = require('/app/dist/dicom-import-gate.service');
+const { Prisma } = require('/app/node_modules/@prisma/client');
 const { PrismaService } = require('/app/dist/prisma.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AuthService } = require('/app/dist/auth.service');
@@ -149,7 +152,10 @@ function fakeOrthanc() {
 // ── a recording store: ImportOperation (CHECK shapes, PK/UNIQUE), StudyState, AuditLog, rights, locks, rollback ──
 // The two CHECKs of migration 20261015013945_import_operation, clause by clause. SQL three-valued logic is kept the way the
 // migration closes it: every required column is tested IS NOT NULL before its value, so a NULL makes its branch false.
-// (JSON null is not representable here - a JS null is SQL NULL; the JSON-null probes run on PostgreSQL in restore-product.)
+// A stored JSONB column holds SQL NULL as JS null and a JSON null as JSON_NULL: it IS NOT NULL and is neither an object
+// nor an array, so a required-NULL column holding it and a required object that is it both fail their branch, as on
+// PostgreSQL. (The model is no substitute for the PostgreSQL CHECK/null/restore runs; it keeps what this file relies on.)
+const JSON_NULL = Symbol('jsonb null');
 const CHECK_STATUS = { import: ['open', 'settled'], download: ['prepared', 'sending', 'sent', 'incomplete', 'unconfirmed'], 'study-claim': ['reserved'], 'sop-claim': ['reserved'] };
 const present = v => v !== null && v !== undefined;
 const jsonObject = v => present(v) && typeof v === 'object' && !Array.isArray(v);
@@ -173,6 +179,56 @@ function checkShape(row) {
   if (!owner || !kind) throw Object.assign(new Error('check_violation ImportOperation'), { code: 'P2010', meta: { code: '23514' } });
 }
 
+// ── the ImportOperation columns as Prisma 5.22 writes them to PostgreSQL and reads them back ──
+const OP_COLUMNS = ['id', 'institutionId', 'ownerIssuer', 'ownerSubject', 'actor', 'kind', 'studyUid', 'status', 'results', 'manifestSha256',
+  'download', 'claimKey', 'claim', 'createdAt', 'updatedAt'];
+const OP_REQUIRED = new Set(['id', 'institutionId', 'ownerIssuer', 'ownerSubject', 'actor', 'kind', 'status']);   // NOT NULL, no default
+const JSON_COLUMNS = new Set(['results', 'download', 'claim']);   // JSONB; results NOT NULL DEFAULT '[]', download/claim nullable
+const nullType = (value, name) => value instanceof Prisma.NullTypes[name];
+const prismaError = (message, extra) => Object.assign(new Error(message), extra);
+/**
+ * One written column value as it lands in the row, decided before any copy (a JSON copy would turn a null sentinel into
+ * {}). undefined is an omitted field (create: the column default; update: unchanged). On a JSONB column Prisma.DbNull is
+ * SQL NULL, Prisma.JsonNull and a literal null (accepted by Prisma 5.22 through an any-typed value) are the JSON null
+ * value; nested nulls are JSON values and stay. On other columns a literal null is SQL NULL and a null sentinel is refused.
+ */
+function opInput(column, value) {
+  if (value === undefined) return undefined;
+  if (!OP_COLUMNS.includes(column)) throw prismaError(`Unknown argument \`${column}\``, { name: 'PrismaClientValidationError' });
+  const sentinel = ['DbNull', 'JsonNull', 'AnyNull'].find(name => nullType(value, name));
+  if (!JSON_COLUMNS.has(column)) {
+    if (sentinel) throw prismaError(`Invalid value for argument \`${column}\``, { name: 'PrismaClientValidationError' });
+    if (value === null && OP_REQUIRED.has(column)) throw prismaError(`Argument \`${column}\` must not be null`, { name: 'PrismaClientValidationError' });
+    return value instanceof Date ? value.toISOString() : value;
+  }
+  if (sentinel === 'AnyNull') throw prismaError(`Invalid value for argument \`${column}\``, { name: 'PrismaClientValidationError' });
+  if (sentinel === 'DbNull') {
+    if (column === 'results') throw prismaError('null value in column "results" violates not-null constraint', { code: 'P2011', meta: { code: '23502' } });
+    return null;
+  }
+  if (sentinel === 'JsonNull' || value === null) return JSON_NULL;
+  return JSON.parse(JSON.stringify(value));
+}
+/**
+ * A JSONB value as PostgreSQL 16 gives it back: every object's keys in jsonb's storage order - shorter UTF-8 byte length
+ * first, then bytewise - and a new value, never the written one. Array order, strings and numbers stay as they are (JS's
+ * own enumeration of integer-like keys then applies exactly as after JSON.parse of the database's text).
+ */
+const jsonbKeyOrder = (a, b) => { const x = Buffer.from(a, 'utf8'), y = Buffer.from(b, 'utf8'); return x.length - y.length || Buffer.compare(x, y); };
+const jsonbValue = v => (Array.isArray(v) ? v.map(jsonbValue)
+  : v !== null && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort(jsonbKeyOrder).map(k => [k, jsonbValue(v[k])])) : v);
+/** A stored ImportOperation row as Prisma reads it: both nulls of a JSONB column are JS null; JSONB values in jsonb order. */
+function opRead(row) {
+  if (!row) return null;
+  const read = {};
+  for (const column of OP_COLUMNS) {
+    const v = row[column];
+    read[column] = column === 'createdAt' || column === 'updatedAt' ? new Date(v)
+      : JSON_COLUMNS.has(column) ? (v === null || v === JSON_NULL ? null : jsonbValue(v)) : v;
+  }
+  return read;
+}
+
 function store({ institutions } = {}) {
   const s = { ops: new Map(), states: new Map(), audits: [], clock: T0, migration: true, policies: new Map(), sessions: new Set(),
     rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, onAuth: null, expiredTokens: new Set(), idpEnded: new Set(), reads: [],
@@ -185,7 +241,16 @@ function store({ institutions } = {}) {
     map.set(key, prev.then(() => mine)); await prev; held.list.push(release); held.keys.add(map === advisory ? 'a:' + key : 'r:' + key);
   };
   const copy = v => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
-  const out = row => (row ? { ...copy({ ...row, _tx: undefined, createdAt: undefined, updatedAt: undefined }), createdAt: new Date(row.createdAt), updatedAt: new Date(row.updatedAt) } : null);
+  const out = opRead;
+  /** The written fields of one create/update, column by column (opInput), omitted ones left out. */
+  const written = data => {
+    const fields = {};
+    for (const [column, value] of Object.entries(data)) {
+      const stored = opInput(column, value);
+      if (stored !== undefined) fields[column] = stored;
+    }
+    return fields;
+  };
   // PostgreSQL visibility of a created row: until its transaction commits, only that transaction sees it (READ COMMITTED
   // reads never see another transaction's uncommitted insert, and FOR UPDATE finds nothing to lock). A second insert of the
   // same key waits for the first transaction to end, then fails with a unique violation if that one committed.
@@ -219,7 +284,11 @@ function store({ institutions } = {}) {
       },
       create: async ({ data }) => {
         fail();
-        const row = { studyUid: null, results: [], manifestSha256: null, download: null, claimKey: null, claim: null, ...copy(data), createdAt: (data.createdAt ?? new Date(s.clock)).toISOString(), updatedAt: (data.updatedAt ?? new Date(s.clock)).toISOString() };
+        // The column defaults: SQL NULL for the nullable columns, '[]' for results, the database time for the two stamps.
+        const row = { studyUid: null, results: [], manifestSha256: null, download: null, claimKey: null, claim: null,
+          createdAt: new Date(s.clock).toISOString(), updatedAt: new Date(s.clock).toISOString(), ...written(data) };
+        const missing = [...OP_REQUIRED].find(column => row[column] === undefined);
+        if (missing) throw prismaError(`Argument \`${missing}\` is missing`, { name: 'PrismaClientValidationError' });
         await settle(() => s.ops.get(row.id));
         if (row.claimKey !== null) await settle(() => [...s.ops.values()].find(r => r.claimKey === row.claimKey));
         if (s.ops.has(row.id)) throw Object.assign(new Error('Unique constraint failed (id)'), { code: 'P2002' });
@@ -229,7 +298,7 @@ function store({ institutions } = {}) {
       update: async ({ where, data }) => {
         fail();
         const before = s.ops.get(where.id); if (!before) throw Object.assign(new Error('not found'), { code: 'P2025' });
-        const after = { ...before, ...copy({ ...data, updatedAt: undefined }), updatedAt: (data.updatedAt ?? new Date(s.clock)).toISOString() };
+        const after = { ...before, updatedAt: new Date(s.clock).toISOString(), ...written(data) };
         checkShape(after); s.ops.set(where.id, after); s.writes++; undo(() => s.ops.set(where.id, before)); return out(after);
       },
       delete: async ({ where }) => {
@@ -364,8 +433,12 @@ function store({ institutions } = {}) {
     if (s.onCommitted) await s.onCommitted(tx);
     return value;
   };
-  s.op = id => (s.ops.has(id) ? copy({ ...s.ops.get(id), _tx: undefined }) : null);
-  s.claim = key => { const row = [...s.ops.values()].find(r => r.claimKey === key); return row ? copy({ ...row, _tx: undefined }) : null; };
+  // The test's own reads of a stored row (as psql's to_jsonb shows it: stamps as text, both JSONB nulls as null); which
+  // null a JSONB column holds is s.nullKind's.
+  const view = row => (row ? { ...opRead(row), createdAt: row.createdAt, updatedAt: row.updatedAt } : null);
+  s.op = id => view(s.ops.get(id));
+  s.claim = key => view([...s.ops.values()].find(r => r.claimKey === key));
+  s.nullKind = (id, column) => { const v = s.ops.get(id)[column]; return v === null ? 'SQL NULL' : v === JSON_NULL ? 'JSON null' : typeof v; };
   s.file = (id, index) => s.op(id)?.results.find(e => e.index === index);
   s.actions = () => s.audits.map(a => a.action);
   s.advance = ms => { s.clock += ms; };
@@ -2576,17 +2649,18 @@ test('S9U4-B48 the store keeps the migration\'s checks with SQL NULL closed: eac
   const dl = await downloadStudy(h, 1), downloadId = randomUUID();
   assert.equal((await prepare(h, dl, downloadId)).status, 200);
   const row = kind => [...h.s.ops.values()].find(r => r.kind === kind).id;
+  // SQL NULL on a JSONB column is Prisma.DbNull (a literal null there is the JSON null value: S9U4-B69's vectors).
   const violations = [
     ['download manifestSha256 NULL', row('download') && downloadId, { manifestSha256: null }],
-    ['download object NULL', downloadId, { download: null }],
+    ['download object NULL', downloadId, { download: Prisma.DbNull }],
     ['download manifestSha256 malformed', downloadId, { manifestSha256: 'not-a-sha256' }],
     ['download studyUid NULL', downloadId, { studyUid: null }],
     ['download status outside its states', downloadId, { status: 'reserved' }],
     ['study claim key NULL', row('study-claim'), { claimKey: null }],
-    ['study claim NULL', row('study-claim'), { claim: null }],
+    ['study claim NULL', row('study-claim'), { claim: Prisma.DbNull }],
     ['study claim key of another study', row('study-claim'), { claimKey: 'study:2.25.4242.8' }],
     ['SOP claim key NULL', row('sop-claim'), { claimKey: null }],
-    ['SOP claim NULL', row('sop-claim'), { claim: null }],
+    ['SOP claim NULL', row('sop-claim'), { claim: Prisma.DbNull }],
     ['SOP claim key malformed', row('sop-claim'), { claimKey: 'sop:not-a-uid' }],
     ['member import with a reservation key', imported.id, { claimKey: 'sop:2.25.4242.7' }],
     ['member import results not an array', imported.id, { results: {} }],
@@ -2599,11 +2673,17 @@ test('S9U4-B48 the store keeps the migration\'s checks with SQL NULL closed: eac
       error => error.meta?.code === '23514', name);
     assert.deepEqual(h.s.op(id), before, name + ': rolled back');
   }
-  // Any number of member rows without a key; a second row with an existing reservation key is a unique violation.
+  // Any number of member rows without a key; a second row with an existing reservation key is a unique violation. A copy
+  // of a read row is written the way Prisma takes it: its JSONB columns that are SQL NULL by the kind's shape written as
+  // Prisma.DbNull, never as the null they read back as (that literal null is the JSON null value and the check refuses it).
   const copyOf = (id, extra) => ({ ...h.s.op(id), id: randomUUID(), createdAt: new Date(T0), updatedAt: new Date(T0), ...extra });
-  await h.s.prisma.importOperation.create({ data: copyOf(imported.id) });
-  await h.s.prisma.importOperation.create({ data: copyOf(imported.id) });
-  await assert.rejects(h.s.prisma.importOperation.create({ data: copyOf(row('sop-claim')) }), error => error.code === 'P2002');
+  const sqlNull = { download: Prisma.DbNull, claim: Prisma.DbNull };
+  await h.s.prisma.importOperation.create({ data: copyOf(imported.id, sqlNull) });
+  await h.s.prisma.importOperation.create({ data: copyOf(imported.id, sqlNull) });
+  await assert.rejects(h.s.prisma.importOperation.create({ data: copyOf(row('sop-claim'), { download: Prisma.DbNull }) }), error => error.code === 'P2002');
+  const rows = h.s.ops.size;
+  await assert.rejects(h.s.prisma.importOperation.create({ data: copyOf(imported.id) }), error => error.meta?.code === '23514', 'the read nulls copied as they are');
+  assert.equal(h.s.ops.size, rows, 'nothing inserted');
 });
 
 test('S9U4-B49 a restart over the restore fixture\'s phases: the expired prepared attempt is fenced and its initializing claim removed (the next import initialises again), expired dispatching/unknown attempts are reconciled read-only with their holders kept, another instance\'s live attempt and every bound claim stay as they were, the expired sending download closes Unconfirmed with its row, Sent and prepared rows are untouched', async () => {
@@ -4125,5 +4205,265 @@ test('S9U4-B68 the time between a completion\'s own check and the consumption of
     if (mode === 'stage 2 commit success') { assertOneChunk(p, answer, mode); assertApprovalStop(a, p.checkpoint); continue; }
     assert.deepEqual([p.sub.calls - p.mark.W0, p.sub.bytes - p.mark.B0, p.sub.ended, answer.complete], [0, 0, false, false], mode + ': nothing after the local header');
     if (mode === 'stage 1 valid answer') assertRightsStop(a, p.checkpoint); else assertApprovalStop(a, p.checkpoint);
+  }
+});
+
+// ════════════════════════════════ round 6: what PostgreSQL gives back (U4BL-01, U4BL-02, the store's fidelity) ════════════════════════════════
+// The first live batch on ee8b707 failed where this file's store had answered as PostgreSQL does not: a recovery record
+// read back from the JSONB column results in another key order (outcomes: 409 after the re-read) and a literal null on
+// the JSONB claim of a new download stored as the JSON null value (routes: 23514, 503 on prepare). B69 keeps the store's
+// side; B70-B72 are those two failures as server cases (red on ee8b707, green on round 6 - REQ/RISK-S9-U4-05/06/08/13).
+
+// The recovery record as PostgreSQL 16 gave it back (the round 6 live diagnosis: a throwaway postgres:16-alpine with the
+// ImportOperation migration and the API image's Prisma 5.22 client): written in the first order, read in the second.
+const RECOVERY_WRITTEN = ['basis', 'checkedAt', 'adminIssuer', 'adminSubject', 'adminActor', 'requestedAt', 'resolvedAt'];
+const RECOVERY_READ = ['basis', 'checkedAt', 'adminActor', 'resolvedAt', 'adminIssuer', 'requestedAt', 'adminSubject'];
+const until = async (condition, what) => { for (let i = 0; i < 500 && !condition(); i++) await sleep(10); assert.ok(condition(), what); };
+
+test('S9U4-B69 R6-N04 the store keeps the two JSONB nulls apart and reads JSONB back in jsonb order: omitted and Prisma.DbNull are SQL NULL; a literal null and Prisma.JsonNull are the JSON null value, refused 23514 wherever a kind requires SQL NULL or an object, on create and on update with the row and the audit rows unchanged; nested nulls stay JSON values; object keys come back in the PostgreSQL sample\'s order, arrays in theirs, as a new value', async () => {
+  const s = store();
+  const tx = fn => s.prisma.$transaction(fn, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
+  const at = new Date(T0).toISOString();
+  const member = { institutionId: 'inst-a', ownerIssuer: ISSUER, ownerSubject: TECH.sub, actor: TECH.actor };
+  const gate = { institutionId: 'inst-a', ownerIssuer: 'kin-internal', ownerSubject: 'dicom-import-gate', actor: 'dicom-import-gate', status: 'reserved', results: [] };
+  const recovery = Object.fromEntries(RECOVERY_WRITTEN.map(k => [k, k === 'basis' ? 'orthanc-restarted' : k.startsWith('admin') ? 'synthetic-admin' : k === 'resolvedAt' ? null : at]));
+  const make = {
+    import: () => { const study = uid(); return { id: randomUUID(), ...member, kind: 'import', status: 'open', results: [{ index: 0, studyUid: study, outcome: 'unconfirmed',
+      code: 'IMPORT_UNCONFIRMED', writeDisposition: null, attempts: [{ attemptId: randomUUID(), generation: 1, phase: 'unknown', recovery }] }] }; },
+    download: () => ({ id: randomUUID(), ...member, kind: 'download', studyUid: uid(), status: 'prepared', manifestSha256: 'a'.repeat(64),
+      download: { schemaVersion: 1, attempts: [], 'é': 1, ab: 2, b: 3, 10: 'ten', 2: 'two' } }),
+    'study-claim': () => { const study = uid(); return { id: randomUUID(), ...gate, kind: 'study-claim', studyUid: study, claimKey: 'study:' + study,
+      claim: { schemaVersion: 1, phase: 'bound', patientId: null, heldByAttemptId: null } }; },
+    'sop-claim': () => { const study = uid(); return { id: randomUUID(), ...gate, kind: 'sop-claim', studyUid: study, claimKey: 'sop:' + study + '.1.1',
+      claim: { schemaVersion: 1, patientId: 'SYN-S', sha256: null, heldByAttemptId: null } }; },
+  };
+  // migration.sql ImportOperation_kind_check: the JSONB columns each kind requires SQL NULL, and those it requires an object.
+  const requiredNull = { import: ['download', 'claim'], download: ['claim'], 'study-claim': ['download'], 'sop-claim': ['download'] };
+  const requiredObject = { import: [], download: ['download'], 'study-claim': ['claim'], 'sop-claim': ['claim'] };
+  const JSON_NULLS = [['a literal null', null], ['Prisma.JsonNull', Prisma.JsonNull]];
+  const refusedCreate = async (data, name) => {
+    const size = s.ops.size, audited = s.audits.length;
+    await assert.rejects(tx(db => db.importOperation.create({ data })), error => error.meta?.code === '23514', name);
+    assert.deepEqual([s.ops.size, s.audits.length, s.ops.has(data.id)], [size, audited, false], name + ': nothing inserted');
+  };
+  const refusedUpdate = async (id, data, name) => {
+    const before = s.op(id), kinds = ['results', 'download', 'claim'].map(c => s.nullKind(id, c)), audited = s.audits.length;
+    // The audit row in the same transaction rolls back with the refused update.
+    await assert.rejects(tx(async db => { await db.auditLog.create({ data: { actor: 'synthetic', action: 'synthetic.probe', target: id, detail: '{}' } });
+      return db.importOperation.update({ where: { id }, data }); }), error => error.meta?.code === '23514', name);
+    assert.deepEqual([s.op(id), ['results', 'download', 'claim'].map(c => s.nullKind(id, c)), s.audits.length], [before, kinds, audited], name + ': rolled back');
+  };
+  const rows = {};
+  for (const kind of Object.keys(make)) {
+    // Omitted, and Prisma.DbNull: SQL NULL, accepted on create; DbNull on update keeps it SQL NULL.
+    const omitted = make[kind]();
+    await tx(db => db.importOperation.create({ data: omitted }));
+    const explicit = make[kind]();
+    await tx(db => db.importOperation.create({ data: { ...explicit, ...Object.fromEntries(requiredNull[kind].map(c => [c, Prisma.DbNull])) } }));
+    for (const id of [omitted.id, explicit.id]) for (const column of requiredNull[kind]) assert.equal(s.nullKind(id, column), 'SQL NULL', `${kind} ${column}`);
+    await tx(db => db.importOperation.update({ where: { id: omitted.id }, data: Object.fromEntries(requiredNull[kind].map(c => [c, Prisma.DbNull])) }));
+    for (const column of requiredNull[kind]) assert.equal(s.nullKind(omitted.id, column), 'SQL NULL', `${kind} ${column}: DbNull on update`);
+    rows[kind] = omitted.id;
+    // A JSON null where the kind requires SQL NULL: refused on create and on update.
+    for (const column of requiredNull[kind]) for (const [name, value] of JSON_NULLS) {
+      await refusedCreate({ ...make[kind](), [column]: value }, `${kind}: ${column} ${name} on create`);
+      await refusedUpdate(omitted.id, { [column]: value }, `${kind}: ${column} ${name} on update`);
+    }
+    // A JSON null or SQL NULL where the kind requires an object: refused on create and on update.
+    for (const column of requiredObject[kind]) for (const [name, value] of [...JSON_NULLS, ['Prisma.DbNull', Prisma.DbNull]]) {
+      await refusedCreate({ ...make[kind](), [column]: value }, `${kind}: ${column} ${name} on create`);
+      await refusedUpdate(omitted.id, { [column]: value }, `${kind}: ${column} ${name} on update`);
+    }
+    // results is NOT NULL: the JSON null value is no array (23514); SQL NULL is a not-null violation (23502), not a check one.
+    await refusedUpdate(omitted.id, { results: Prisma.JsonNull }, `${kind}: results Prisma.JsonNull`);
+    await assert.rejects(tx(db => db.importOperation.update({ where: { id: omitted.id }, data: { results: Prisma.DbNull } })), error => error.meta?.code === '23502', `${kind}: results SQL NULL`);
+    // An omitted (undefined) field changes nothing.
+    const before = s.op(omitted.id);
+    await tx(db => db.importOperation.update({ where: { id: omitted.id }, data: { download: undefined, claim: undefined } }));
+    assert.deepEqual({ ...s.op(omitted.id), updatedAt: before.updatedAt }, before, `${kind}: undefined is no change`);
+  }
+  // The U4BL-02 write itself: a download with claimKey and claim given as literal nulls - the JSON null claim is refused.
+  await refusedCreate({ ...make.download(), claimKey: null, claim: null }, 'download: claimKey null, claim null (ee8b707 prepare)');
+  // Nested nulls are JSON values: kept inside their object, the column itself an object.
+  assert.deepEqual([s.nullKind(rows['study-claim'], 'claim'), s.op(rows['study-claim']).claim.patientId, s.op(rows['sop-claim']).claim.sha256], ['object', null, null]);
+  // Any number of rows with a SQL NULL claimKey; the second row of an existing key is a unique violation (P2002), not 23514.
+  await assert.rejects(tx(db => db.importOperation.create({ data: { ...make['study-claim'](), studyUid: s.op(rows['study-claim']).studyUid,
+    claimKey: s.op(rows['study-claim']).claimKey } })), error => error.code === 'P2002');
+  // Readback: object keys in jsonb order (shorter UTF-8 byte length first, then bytewise) at every depth - the recovery
+  // record exactly as the PostgreSQL sample - arrays in their own order; each read a new value; the same on a FOR UPDATE.
+  const imported = await s.prisma.importOperation.findUnique({ where: { id: rows.import } });
+  assert.deepEqual(Object.keys(s.ops.get(rows.import).results[0].attempts[0].recovery), RECOVERY_WRITTEN, 'stored as written');
+  assert.deepEqual(Object.keys(imported.results[0].attempts[0].recovery), RECOVERY_READ, 'read back in the sample\'s order');
+  assert.deepEqual(Object.keys(imported.results[0]), ['code', 'index', 'outcome', 'attempts', 'studyUid', 'writeDisposition']);
+  assert.deepEqual(Object.keys(imported.results[0].attempts[0]), ['phase', 'recovery', 'attemptId', 'generation']);
+  const [locked] = await tx(db => db.$queryRaw(['SELECT * FROM "ImportOperation" WHERE id = ', '::uuid FOR UPDATE'], rows.import));
+  assert.deepEqual(Object.keys(locked.results[0].attempts[0].recovery), RECOVERY_READ, 'the same on a locked read');
+  const downloaded = await s.prisma.importOperation.findUnique({ where: { id: rows.download } });
+  // 'b' (1 byte) < 'ab' (2) < 'é' (2 bytes, 0xC3 after 0x61); JS lists integer-like keys first, as after JSON.parse.
+  assert.deepEqual(Object.keys(downloaded.download), ['2', '10', 'b', 'ab', 'é', 'attempts', 'schemaVersion']);
+  assert.deepEqual(Object.keys((await s.prisma.importOperation.findUnique({ where: { id: rows['study-claim'] } })).claim), ['phase', 'patientId', 'schemaVersion', 'heldByAttemptId']);
+  imported.results[0].attempts[0].recovery.basis = 'changed by the reader';
+  assert.equal(s.ops.get(rows.import).results[0].attempts[0].recovery.basis, 'orthanc-restarted', 'a read is a new value, never the stored one');
+  assert.deepEqual([downloaded.createdAt instanceof Date, typeof s.op(rows.download).createdAt], [true, 'string']);
+});
+
+test('S9U4-B70 R6-N03 a download prepare where SQL NULL and JSON null differ (U4BL-02): 200 prepared with claimKey and claim SQL NULL and the fixed manifest under its hash, one prepare row; the same id replays the same view with no second row (also two at once); status and archive answer; claim stays SQL NULL through Sent', async () => {
+  const h = await harness();
+  const study = await downloadStudy(h, 2), id = randomUUID();
+  const first = await prepare(h, study, id);
+  assert.deepEqual([first.status, first.body?.state, first.body?.code ?? null], [200, 'prepared', null], JSON.stringify(first.body));
+  const op = h.s.op(id);
+  assert.deepEqual([op.kind, op.status, op.studyUid, op.claimKey, h.s.nullKind(id, 'claimKey'), h.s.nullKind(id, 'claim'), h.s.nullKind(id, 'download')],
+    ['download', 'prepared', study, null, 'SQL NULL', 'SQL NULL', 'object']);
+  assert.equal(sha(Buffer.from(op.download.manifestCanonical, 'utf8')), op.manifestSha256, 'the stored manifest under its hash');
+  assert.deepEqual([first.body.operationId, first.body.studyUid, first.body.manifestSha256, first.body.preparedAt, first.body.objects, first.body.attempts],
+    [id, study, op.manifestSha256, op.download.preparedAt, 2, []], 'the answer is the stored row\'s');
+  assert.equal(audits(h.s, 'original.download.prepare').length, 1);
+  const replay = await prepare(h, study, id);
+  assert.deepEqual([replay.status, replay.body, audits(h.s, 'original.download.prepare').length], [200, first.body, 1], 'the same id replays the same view, no second row');
+  const twin = randomUUID();
+  const both = await Promise.all([prepare(h, study, twin), prepare(h, study, twin)]);
+  assert.deepEqual([both.map(r => r.status), both[0].body, [...h.s.ops.values()].filter(r => r.id === twin).length, audits(h.s, 'original.download.prepare').length],
+    [[200, 200], both[1].body, 1, 2], 'two prepares of one new id: one row, one prepare row, the same view');
+  const status = await h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: RAD });
+  assert.deepEqual([status.status, status.body.state, status.body.manifestSha256], [200, 'prepared', op.manifestSha256]);
+  const zip = await h.request('GET', archivePath(study, id), { as: RAD });
+  assert.equal(zip.status, 200);
+  await sleep(50);
+  assert.deepEqual([h.s.op(id).status, h.s.nullKind(id, 'claim'), h.s.nullKind(id, 'claimKey')], ['sent', 'SQL NULL', 'SQL NULL'], 'Sent; claim still SQL NULL');
+});
+
+test('S9U4-B71 R6-N01 the admin recovery of an expired unknown attempt whose record reads back from JSONB in jsonb order (U4BL-01): 200 retryable RECOVERED_NO_OBJECT with resolvedAt, the request and result rows of its admin, the holders released, no Orthanc write, and the owner\'s resend stores once as generation 2; a request left unresolved with its reading right (as ee8b707 left them) is not taken over while that right lives and completes after it ran out, its first request row kept', async () => {
+  const h = await harness();
+  const a = await unknownAttempt(h);
+  h.s.advance(31000);
+  const postsBefore = posts(h.orthanc);
+  const r = await recovery(h, a.id, { basis: 'orthanc-restarted', checkedAt: a.attempt.startedAt });
+  // The live run's precondition: the record written in step 1 reads back in another key order.
+  assert.deepEqual(Object.keys(h.s.file(a.id, 0).attempts.at(-1).recovery), RECOVERY_READ, 'the stored record reads back in jsonb key order');
+  assert.deepEqual([r.status, r.body.outcome, r.body.code], [200, 'retryable', 'RECOVERED_NO_OBJECT'], JSON.stringify(r.body));
+  const now = new Date(h.s.clock).toISOString(), file = h.s.file(a.id, 0), mine = file.attempts.at(-1);
+  assert.deepEqual([file.outcome, file.code, mine.recovery.resolvedAt, mine.recovery.requestedAt, mine.recovery.adminSubject, mine.recovery.adminActor, mine.recovery.basis],
+    ['retryable', 'RECOVERED_NO_OBJECT', now, now, ADMIN.sub, ADMIN.actor, 'orthanc-restarted']);
+  const [request] = audits(h.s, 'dicom.import.recovery.request'), results = audits(h.s, 'dicom.import.recovery.result');
+  assert.deepEqual([request.actor, request.detail.attemptId, results.length, results[0].actor, results[0].detail.attemptId, results[0].detail.code],
+    [ADMIN.actor, a.attempt.attemptId, 1, ADMIN.actor, a.attempt.attemptId, 'RECOVERED_NO_OBJECT']);
+  assert.deepEqual([h.s.claim('study:' + a.study).claim.heldByAttemptId, h.s.claim('sop:' + file.sopUid).claim.heldByAttemptId], [null, null], 'holders released');
+  assert.deepEqual([posts(h.orthanc), h.orthanc.count()], [postsBefore, 0], 'the recovery writes no original');
+  const resent = await h.send(a.bytes, { id: a.id });
+  assert.deepEqual([resent.status, resent.body.outcome, resent.body.generation, h.orthanc.count()], [200, 'stored', 2, 1]);
+  // What a failed request leaves (its request row, the record unresolved, an unknown attempt's reading right, the holders):
+  // made here by the product itself - the study left the admin's reach during the re-read (as in S9U4-B54).
+  const h2 = await harness();
+  const b = await unknownAttempt(h2);
+  h2.s.advance(31000);
+  let restore = null;
+  h2.orthanc.fault = call => { if (call.path === '/tools/lookup' && !restore) restore = OUT_OF_REACH.moved(h2, { study: b.study }); return null; };
+  const lost = await recovery(h2, b.id, { basis: 'orthanc-log-checked', checkedAt: b.attempt.startedAt });
+  h2.orthanc.fault = null;
+  restore();
+  const left = h2.s.file(b.id, 0).attempts.at(-1);
+  assert.deepEqual([lost.status, left.recovery.resolvedAt, Date.parse(left.leaseUntil) > h2.s.clock, h2.s.claim('study:' + b.study).claim.heldByAttemptId],
+    [404, null, true, b.attempt.attemptId], 'an unresolved request with its reading right and holders');
+  const early = await recovery(h2, b.id, { basis: 'orthanc-restarted', checkedAt: b.attempt.startedAt }, ADMIN2);
+  assert.deepEqual([early.status, early.body.code, audits(h2.s, 'dicom.import.recovery.request').length, h2.s.file(b.id, 0).attempts.at(-1).recovery.adminSubject],
+    [409, 'RECOVERY_NOT_APPLICABLE', 1, ADMIN.sub], 'its live reading right is not taken over');
+  h2.s.advance(31000);
+  const done = await recovery(h2, b.id, { basis: 'orthanc-restarted', checkedAt: b.attempt.startedAt }, ADMIN2);
+  assert.deepEqual([done.status, done.body.code], [200, 'RECOVERED_NO_OBJECT'], JSON.stringify(done.body));
+  assert.deepEqual([audits(h2.s, 'dicom.import.recovery.request').map(x => x.actor), audits(h2.s, 'dicom.import.recovery.result').map(x => x.actor)],
+    [[ADMIN.actor, ADMIN2.actor], [ADMIN2.actor]], 'the first request row kept, the new request and its result added');
+  assert.deepEqual([h2.s.claim('study:' + b.study).claim.heldByAttemptId, posts(h2.orthanc)], [null, 0]);
+});
+
+test('S9U4-B72 R6-N02 the admin recovery of a may-have-written occupancy over a JSONB readback (U4BL-01): released with its result unchanged and both rows; left unresolved it is recovered again at once; two requests within one DB millisecond with the same checkedAt but another admin and basis - the earlier, answered first, is 409 with no result row and the later 200; an exact object is Stored; a failed Orthanc read is 503 with only the reading right given back, so the next request reads at once', async () => {
+  // A may-have-written occupancy: released; outcome, code and disposition as they were; request and result rows.
+  {
+    const h = await harness();
+    const t = await mayHaveWritten(h);
+    const before = h.s.file(t.id, 1), objects = h.orthanc.count(), postsBefore = posts(h.orthanc);
+    const r = await recovery(h, t.id, evidenceFor(h, t), ADMIN, 1);
+    assert.deepEqual([r.status, r.body.outcome, r.body.code, r.body.writeDisposition], [200, 'rejected', 'SOP_UID_AMBIGUOUS', 'may-have-written'], JSON.stringify(r.body));
+    const after = h.s.file(t.id, 1);
+    assert.deepEqual([after.outcome, after.code, after.writeDisposition, after.attempts.length], [before.outcome, before.code, before.writeDisposition, before.attempts.length]);
+    assert.deepEqual([after.attempts.at(-1).recovery.resolvedAt, h.s.claim('study:' + t.study).claim.heldByAttemptId, h.s.claim('sop:' + after.sopUid).claim.heldByAttemptId],
+      [new Date(h.s.clock).toISOString(), null, null]);
+    assert.deepEqual([audits(h.s, 'dicom.import.recovery.request').length, audits(h.s, 'dicom.import.recovery.result').length, h.orthanc.count(), posts(h.orthanc)],
+      [1, 1, objects, postsBefore], 'both rows; Orthanc untouched');
+  }
+  // Left unresolved by a request that lost the study's reach during its re-read: no reading right to wait for - the next
+  // request recovers it at once and the first request row stays.
+  {
+    const h = await harness();
+    const t = await mayHaveWritten(h);
+    let restore = null;
+    h.orthanc.fault = call => { if (call.path === '/tools/lookup' && !restore) restore = OUT_OF_REACH.moved(h, t); return null; };
+    const lost = await recovery(h, t.id, evidenceFor(h, t), ADMIN, 1);
+    h.orthanc.fault = null;
+    restore();
+    assert.deepEqual([lost.status, h.s.file(t.id, 1).attempts.at(-1).recovery.resolvedAt], [404, null]);
+    const again = await recovery(h, t.id, evidenceFor(h, t), ADMIN2, 1);
+    assert.deepEqual([again.status, again.body.outcome], [200, 'rejected'], JSON.stringify(again.body));
+    assert.deepEqual([audits(h.s, 'dicom.import.recovery.request').map(x => x.actor), audits(h.s, 'dicom.import.recovery.result').map(x => x.actor)],
+      [[ADMIN.actor, ADMIN2.actor], [ADMIN2.actor]]);
+  }
+  // Two admins within one DB millisecond, the same checkedAt, another admin and basis. The later request record replaces
+  // the earlier one; the earlier request's re-read is answered first and finds the record changed: 409, no result row;
+  // the later one then commits. Only the admin, the basis (and the request time) tell the two records apart here.
+  {
+    const h = await harness();
+    const t = await mayHaveWritten(h);
+    const checkedAt = evidenceFor(h, t).checkedAt, clock = h.s.clock;
+    const reads = [];
+    h.orthanc.fault = async call => {
+      if (call.path !== '/tools/lookup') return null;
+      const read = {}; read.held = new Promise(resolve => { read.release = resolve; }); reads.push(read);
+      await read.held;
+      return null;
+    };
+    let first, second;
+    try {
+      first = recovery(h, t.id, { basis: 'orthanc-log-checked', checkedAt }, ADMIN, 1);
+      await until(() => reads.length === 1, 'the first request reads');
+      second = recovery(h, t.id, { basis: 'orthanc-restarted', checkedAt }, ADMIN2, 1);
+      await until(() => reads.length === 2, 'the second request reads');
+      reads[0].release();
+      first = await first;
+      reads[1].release();
+      second = await second;
+    } finally { for (const read of reads) read.release(); h.orthanc.fault = null; }
+    assert.equal(h.s.clock, clock, 'one DB millisecond');
+    assert.deepEqual([[first.status, first.body.code], [second.status, second.body.outcome]], [[409, 'RECOVERY_NOT_APPLICABLE'], [200, 'rejected']]);
+    const requests = audits(h.s, 'dicom.import.recovery.request');
+    assert.deepEqual(requests.map(x => [x.actor, x.detail.basis, x.detail.checkedAt, x.detail.at]),
+      [[ADMIN.actor, 'orthanc-log-checked', checkedAt, new Date(clock).toISOString()], [ADMIN2.actor, 'orthanc-restarted', checkedAt, new Date(clock).toISOString()]]);
+    assert.deepEqual(audits(h.s, 'dicom.import.recovery.result').map(x => [x.actor, x.detail.basis, x.detail.adminSubject]), [[ADMIN2.actor, 'orthanc-restarted', ADMIN2.sub]]);
+    const record = h.s.file(t.id, 1).attempts.at(-1).recovery;
+    assert.deepEqual([record.adminSubject, record.basis, record.resolvedAt], [ADMIN2.sub, 'orthanc-restarted', new Date(clock).toISOString()]);
+  }
+  // An exact object at the re-read: Stored, holders released, no write.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h, { stored: true });
+    h.s.advance(31000);
+    const postsBefore = posts(h.orthanc);
+    const r = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: a.attempt.startedAt });
+    assert.deepEqual([r.status, r.body.outcome, h.s.claim('study:' + a.study).claim.heldByAttemptId, posts(h.orthanc), h.orthanc.count()], [200, 'stored', null, postsBefore, 1], JSON.stringify(r.body));
+  }
+  // A failed re-read: 503 ORTHANC_UNAVAILABLE; the result and holders unchanged, no result row; the reading right given
+  // back by DB time, so the next request reads at once.
+  {
+    const h = await harness();
+    const a = await unknownAttempt(h);
+    h.s.advance(31000);
+    h.orthanc.fault = call => (call.path === '/tools/lookup' ? { status: 500 } : null);
+    const failed = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: a.attempt.startedAt });
+    h.orthanc.fault = null;
+    const last = h.s.file(a.id, 0).attempts.at(-1);
+    assert.deepEqual([failed.status, failed.body.code, h.s.file(a.id, 0).outcome, h.s.claim('study:' + a.study).claim.heldByAttemptId, audits(h.s, 'dicom.import.recovery.result').length],
+      [503, 'ORTHANC_UNAVAILABLE', 'unconfirmed', a.attempt.attemptId, 0]);
+    assert.equal(last.leaseUntil, new Date(h.s.clock).toISOString(), 'only the reading right given back');
+    const again = await recovery(h, a.id, { basis: 'orthanc-log-checked', checkedAt: a.attempt.startedAt });
+    assert.deepEqual([again.status, again.body.code], [200, 'RECOVERED_NO_OBJECT'], JSON.stringify(again.body));
   }
 });
