@@ -3622,3 +3622,508 @@ test('S9U4-B58 the renewal without a chunk and the commit\'s answer complete sta
     assertApprovalStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
   }
 });
+
+// ════════════════════════════════ round 5: an unknown approval is never lost - to a rights stop, to the close, or between two of its own checks (U4BB4-01/04/03/05) ════════════════════════════════
+
+/** The attempt once its close committed: the close waits for every approval still running, each within its own stage deadlines. */
+async function closed(h, id, index = 0, ms = 9000) {
+  for (let waited = 0; waited < ms && h.s.op(id).download.attempts[index].state === 'sending'; waited += 20) await sleep(20);
+  return h.s.op(id).download.attempts[index];
+}
+/** From W0 (object 2's local header) on: exactly one write, the start of object 2's payload; no later record and no finish. */
+function assertOneChunk(p, answer, name) {
+  assert.equal(p.sub.calls - p.mark.W0, 1, name + ': the chunk approved before the stop went out once');
+  const bytes = Buffer.concat(p.sub.chunks), chunk = bytes.subarray(p.at[1].payload);
+  assert.ok(chunk.length > 0 && chunk.equals(p.held.second.subarray(0, chunk.length)), name + ': it is the start of object 2');
+  assert.ok(!bytes.includes(Buffer.from('manifest.json')) && !bytes.includes(CENTRAL_SIG) && !bytes.includes(END_SIG), name + ': no later record');
+  assert.deepEqual([p.sub.ended, answer.complete], [false, false], name + ': no finish');
+  return chunk.length;
+}
+/**
+ * The archive's next stage-2 transaction - the 10 s renewal once the test ticks it, the archive held at its source - is
+ * watched: it commits and releases its locks, and its commit's answer comes back only when the barrier opens, as a success
+ * or as `failure` (committed, the answer lost on its way back). `deny`: that transaction's StudyAccess read refuses (the
+ * policy restored before its answer, so the writer's own approvals still pass).
+ */
+function heldAnswer(h, { failure = null, deny = false } = {}) {
+  const b = barrier();
+  let armed = true, answered = false;
+  h.s.onQuery = async (sql, _values, tx) => {
+    if (armed && tx && casSql(sql)) { armed = false; tx.watched = true; }
+    else if (deny && tx?.watched && policyRead(sql)) h.s.policies.set(RAD.sub, deniedPolicy);
+  };
+  h.s.onCommitted = async tx => {
+    if (!tx.watched) return;
+    if (deny) h.s.policies.delete(RAD.sub);
+    await b.park();
+    answered = true;
+    if (failure) throw failure;
+  };
+  return { ...b, answered: () => answered };
+}
+/** While an approval's answer is outstanding the attempt is not closed as anything that answer could contradict. */
+function assertOpenOrUnconfirmed(a, name) {
+  assert.ok(['sending', 'unconfirmed'].includes(a.state), name + ': with an approval\'s answer outstanding the attempt is not closed ' + a.state);
+}
+const intents = (h, attemptId) => audits(h.s, 'original.download.intent').filter(a => a.detail.attemptId === attemptId);
+
+/**
+ * Object 2's first payload approval supplies its chunk under the lock and its COMMIT is held (its row lock with it) while
+ * the 10 s renewal meets a refused credential; the commit then fails (or, the control, is confirmed). `order`: the rights
+ * stop first, or the commit failure first (the renewal's credential check held until after it).
+ */
+async function commitWithRightsStop(t, order) {
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    const commit = barrier(), rights = barrier();
+    let refused = false;
+    p.onHeader = () => Object.assign(p.mark, { W0: p.sub.calls, B0: p.sub.bytes });
+    // Object 2's first payload approval: the chunk supplied under its lock, then its COMMIT held (its row lock with it).
+    h.s.onQuery = async (sql, _values, tx) => { if (p.armed && tx && casSql(sql)) { p.armed = false; tx.watched = true; } };
+    h.s.onCommit = async tx => {
+      if (!tx.watched) return;
+      await commit.park();
+      if (order !== 'commit confirmed (control)') throw Object.assign(new Error('synthetic commit lost'), { code: 'P1017' });
+    };
+    let answer;
+    try {
+      p.held.release();
+      assert.ok(await within(commit.held, 3000), order + ': the payload chunk supplied under its lock, its commit held');
+      // The 10 s renewal meets a refused credential: at once, or held until after the commit failed.
+      h.s.onAuth = async () => {
+        if (order === 'commit failure first') await rights.park();
+        refused = true;
+        throw new common.UnauthorizedException('synthetic rights refusal');
+      };
+      t.mock.timers.tick(10000);
+      if (order === 'commit failure first') {
+        assert.ok(await within(rights.held, 3000), order + ': the renewal\'s credential check is held');
+        commit.open();
+        await sleep(150);
+        rights.open();
+      } else {
+        for (let i = 0; i < 100 && !refused; i++) await sleep(10);
+        assert.ok(refused, order + ': the renewal stopped the attempt on its rights while the commit was held');
+        await sleep(50);
+        commit.open();
+      }
+      answer = await p.held.archive;
+    } finally { commit.open(); rights.open(); p.held.release(); h.s.onQuery = null; h.s.onAuth = null; h.s.onCommit = null; }
+    const a = await closed(h, p.held.id);
+    const supplied = assertOneChunk(p, answer, order);
+    assert.deepEqual([a.archiveSha256, a.responseFinished, resultRows(h, a.attemptId).length], [null, false, 1], order);
+    if (order === 'commit confirmed (control)') {
+      assert.equal(a.state, 'incomplete', 'a commit confirmed in time with a rights stop is not made unknown');
+      assert.deepEqual(a.objects[0], p.checkpoint[0]);
+      assert.deepEqual(a.objects.slice(1).map(o => [o.complete, o.bytesSupplied, o.sha256]), [[false, supplied, null]], 'the exact counts: object 2\'s supplied chunk');
+    } else assertApprovalStop(a, p.checkpoint);
+  }
+}
+
+test('S9U4-B59 probe-unknown-after-rights (U4BB4-01): a chunk\'s commit that fails after a renewal already stopped the attempt on its rights is an unknown approval - Unconfirmed with the checkpoint as it was, that chunk supplied once and nothing after it, one result row; the rights stop never stands for it', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await commitWithRightsStop(t, 'rights stop first');
+});
+
+test('S9U4-B60 the other order and the control (U4BB4-01): the commit failure first, the rights stop after it - Unconfirmed the same; the commit confirmed in time with the rights stop stays Incomplete with the exact counts (a rights stop is never made unknown wholesale)', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await commitWithRightsStop(t, 'commit failure first');
+  await commitWithRightsStop(t, 'commit confirmed (control)');
+});
+
+/**
+ * The 10 s renewal of an archive held at object 2's source commits and its answer is held; then the writer stops on the
+ * rights (every later credential check refused) or finishes, and the answer - an error, a success, or the renewal's own
+ * rights refusal - comes back after that (or, answerFirst, before the writer goes on).
+ */
+async function outstandingRenewal(t, name, writer, outcome, answerFirst) {
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    const r = heldAnswer(h, { failure: outcome === 'error' ? new Error('synthetic renewal answer lost') : null, deny: outcome === 'refusal' });
+    let answer, before = null, lastCheckpoint = null;
+    try {
+      t.mock.timers.tick(10000);
+      assert.ok(await within(r.held, 3000), name + ': the renewal committed; its answer held after its locks were released');
+      if (answerFirst) { r.open(); for (let i = 0; i < 100 && !r.answered(); i++) await sleep(10); await sleep(50); }
+      if (writer === 'rights') h.s.onAuth = async () => { throw new common.UnauthorizedException('synthetic rights refusal'); };
+      held.release();
+      answer = await held.archive;
+      if (!answerFirst) {
+        await sleep(300);
+        before = h.s.op(held.id).download.attempts[0];
+        lastCheckpoint = before.objects;
+        assertOpenOrUnconfirmed(before, name);
+        r.open();
+      }
+    } finally { r.open(); held.release(); h.s.onQuery = null; h.s.onAuth = null; }
+    const a = await closed(h, held.id);
+    h.s.onCommitted = null;
+    assert.equal(resultRows(h, a.attemptId).length, 1, name + ': one result row');
+    if (outcome === 'error') {
+      assert.deepEqual([a.state, a.archiveSha256, a.responseFinished], ['unconfirmed', null, false], name);
+      assert.deepEqual(a.objects, writer === 'finish' ? lastCheckpoint : checkpoint, name + ': the checkpoint committed before the close');
+    } else if (writer === 'finish' && outcome === 'success') {
+      assert.equal(answer.bytes.length, Number(answer.headers['content-length']), name + ': the whole archive');
+      assert.deepEqual([a.state, a.responseFinished, a.archiveSha256], ['sent', true, createHash('sha256').update(answer.bytes).digest('hex')], name);
+    } else if (writer === 'finish') {
+      assert.deepEqual([a.state, a.archiveSha256, a.responseFinished], ['incomplete', null, false], name + ': a rights stop after the finish is Incomplete');
+      assert.ok(a.objects.length === 2 && a.objects.every(o => o.complete), name + ': the writer\'s exact counts');
+    } else assertRightsStop(a, checkpoint);
+    if (outcome !== 'error' || writer !== 'finish') return;
+    // The HTTP finish did happen; the record keeps the supply unknown and claims nothing taken back. A new attempt then
+    // sends the whole archive with its own intent and result rows; the closed one stays as it was.
+    assert.deepEqual([answer.complete, sub.ended], [true, true]);
+    const retry = await h.request('GET', archivePath(held.study, held.id), { as: RAD });
+    assert.equal(retry.bytes.length, Number(retry.headers['content-length']));
+    await closed(h, held.id, 1);
+    const attempts = h.s.op(held.id).download.attempts;
+    assert.deepEqual(attempts.map(x => x.state), ['unconfirmed', 'sent']);
+    assert.deepEqual(attempts[0], a, 'the closed attempt unchanged');
+    assert.deepEqual([intents(h, attempts[1].attemptId).length, resultRows(h, attempts[1].attemptId).length, resultRows(h, a.attemptId).length], [1, 1, 1]);
+  }
+}
+
+test('S9U4-B61 probe-renewal-answer-after-close (U4BB4-04): the renewal\'s answer still out when the writer stops on the rights - the attempt is not closed Incomplete before it; the answer an error: Unconfirmed with the checkpoint committed before the close, one result row', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await outstandingRenewal(t, 'writer stopped on the rights, the answer an error', 'rights', 'error', false);
+});
+
+test('S9U4-B62 probe-renewal-answer-after-finish (U4BB4-04): the renewal\'s answer still out when the writer finishes - never Sent before it; the answer an error: Unconfirmed, no archive hash, response not finished, the last checkpoint, one result row (the HTTP finish did happen and is not called taken back); a new attempt then sends the whole archive with its own intent and result rows', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await outstandingRenewal(t, 'writer finished, the answer an error', 'finish', 'error', false);
+});
+
+test('S9U4-B63 the controls of an outstanding renewal (U4BB4-04): a success within its deadline after a rights stop leaves Incomplete with the exact counts and after a finish Sent with the archive hash; the renewal\'s own rights refusal within its deadline after a finish is Incomplete; answered before the writer goes on - a success then a rights stop Incomplete, an error Unconfirmed', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  for (const [name, writer, outcome, answerFirst] of [
+    ['writer stopped on the rights, the answer a success in time', 'rights', 'success', false],
+    ['the success answered first, then the rights stop', 'rights', 'success', true],
+    ['the error answered first', 'rights', 'error', true],
+    ['writer finished, the answer a success in time', 'finish', 'success', false],
+    ['writer finished, the renewal refused in time', 'finish', 'refusal', false],
+  ]) await outstandingRenewal(t, name, writer, outcome, answerFirst);
+});
+
+/**
+ * Renewals whose answers are held, one archive each, side by side on one tick; each then plays its order of the writer's
+ * finish, the answer and (where named) the result row's write, held at its audit insert. Every one must end Unconfirmed,
+ * its result row saying the same.
+ */
+async function outstandingSideBySide(t, names) {
+  const runs = [];
+  const closingHeld = h => {
+    const b = barrier();
+    const transaction = h.s.prisma.$transaction;
+    h.s.prisma.$transaction = (fn, options) => transaction(async tx => {
+      const create = tx.auditLog.create;
+      tx.auditLog.create = async args => { if (args.data.action === 'original.download.result') await b.park(); return create(args); };
+      return fn(tx);
+    }, options);
+    return { ...b, restore: () => { h.s.prisma.$transaction = transaction; } };
+  };
+  try {
+    for (const name of names) {
+      const h = await harness();
+      const held = await heldArchive(h);
+      const r = heldAnswer(h, { failure: name.includes('error') ? new Error('synthetic renewal answer lost') : null });
+      const closing = name.includes('result') ? closingHeld(h) : null;
+      runs.push({ name, h, held, r, closing });
+    }
+    const began = Date.now();
+    t.mock.timers.tick(10000);
+    for (const x of runs) assert.ok(await within(x.r.held, 3000), x.name + ': the renewal\'s answer is held');
+    await Promise.all(runs.map(async x => {
+      const { name, h, held, r, closing } = x;
+      if (name === 'a success after its deadline') {
+        // The writer finishes about 3 s into the renewal's stage; the success comes 6 s in - after the stage's own
+        // deadline, though within 5 s of the close.
+        await sleep(Math.max(0, 3000 - (Date.now() - began)));
+        held.release();
+        x.answer = await held.archive;
+        await sleep(Math.max(0, 6000 - (Date.now() - began)));
+        assertOpenOrUnconfirmed(h.s.op(held.id).download.attempts[0], name);
+        r.open();
+      } else if (name === 'an error while the result row is written') {
+        held.release();
+        x.answer = await held.archive;
+        assert.ok(await within(closing.held, 9000), name + ': the result row is being written');
+        r.open();
+        for (let i = 0; i < 100 && !r.answered(); i++) await sleep(10);
+        await sleep(50);
+        closing.open();
+      } else if (name === 'an error within its deadline during the result write') {
+        held.release();
+        x.answer = await held.archive;
+        await sleep(300);
+        r.open();
+        assert.ok(await within(closing.held, 9000), name + ': the result row is being written');
+        closing.open();
+      } else {
+        held.release();
+        x.answer = await held.archive;
+        x.closedFirst = await closed(h, held.id);
+        // A new attempt while the old renewal's answer is still out; that answer then arrives (an error) meanwhile.
+        process.env.ORTHANC_URL = 'http://127.0.0.1:' + h.orthanc.server.address().port;
+        const retry = h.request('GET', archivePath(held.study, held.id), { as: RAD });
+        await sleep(20);
+        r.open();
+        x.retry = await retry;
+      }
+    }));
+  } finally { for (const x of runs) { x.r.open(); x.closing?.open(); x.held.release(); } }
+  for (const { name, h, held, closing, answer, retry, closedFirst } of runs) {
+    const a = await closed(h, held.id);
+    h.s.onQuery = null; h.s.onCommitted = null; closing?.restore();
+    assert.deepEqual([a.state, a.archiveSha256, a.responseFinished, resultRows(h, a.attemptId).length], ['unconfirmed', null, false, 1], name);
+    assert.equal(answer.complete, true, name + ': the writer had finished');
+    const [row] = resultRows(h, a.attemptId);
+    assert.deepEqual([row.detail.state, row.detail.archiveSha256, row.detail.responseFinished], ['unconfirmed', null, false], name + ': the result row says the same');
+    if (retry) {
+      assert.equal(retry.bytes.length, Number(retry.headers['content-length']), name + ': the new attempt sends the whole archive');
+      await closed(h, held.id, 1);
+      const attempts = h.s.op(held.id).download.attempts;
+      assert.deepEqual(attempts.map(x => x.state), ['unconfirmed', 'sent']);
+      assert.deepEqual(attempts[0], closedFirst, name + ': the old attempt unchanged by its late answer');
+      assert.deepEqual([intents(h, attempts[1].attemptId).length, resultRows(h, attempts[1].attemptId).length], [1, 1]);
+    }
+  }
+}
+
+test('S9U4-B64 probe-renewal-error-during-terminal-write (U4BB4-04): the renewal\'s error comes back within its deadline after the writer finished - the result row and the attempt are Unconfirmed, not Sent; the answer held past the deadline, the attempt is closed Unconfirmed and an error arriving while that result row is being written changes nothing - one result row, no archive hash, response not finished', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await outstandingSideBySide(t, ['an error within its deadline during the result write', 'an error while the result row is written']);
+});
+
+test('S9U4-B65 the close waits for an outstanding approval only within that approval\'s own deadline (U4BB4-04): a success after it (still within a fresh 5 s from the close) changes nothing, nor does an old answer during a new attempt; now == deadline at the consumption is expired; a stage consumed in time is not expired again by the close\'s own database wait; the close takes no lock while it waits; an attempt fenced meanwhile is left as it was', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await outstandingSideBySide(t, ['a success after its deadline', 'an old error during a new attempt']);
+  // now == deadline at the consumption: the monotonic clock held still from before the renewal; both writers finish on
+  // it; then the outstanding success is consumed at start + 4999 ms (in time: Sent) and at start + 5000 ms (expired).
+  {
+    const pair = [];
+    for (const offset of [STAGE_MS - 1, STAGE_MS]) {
+      const h = await harness();
+      const held = await heldArchive(h);
+      pair.push({ offset, h, held, r: heldAnswer(h) });
+    }
+    const real = performance.now.bind(performance);
+    let frozen = null;
+    const clock = t.mock.method(performance, 'now', () => frozen ?? real());
+    const start = frozen = real();
+    try {
+      t.mock.timers.tick(10000);
+      for (const x of pair) assert.ok(await within(x.r.held, 3000));
+      for (const x of pair) { x.held.release(); x.answer = await x.held.archive; }
+      for (const x of pair) {
+        frozen = start + x.offset;
+        x.r.open();
+        x.a = await closed(x.h, x.held.id, 0, 3000);
+      }
+    } finally { clock.mock.restore(); for (const x of pair) { x.r.open(); x.held.release(); x.h.s.onQuery = null; x.h.s.onCommitted = null; } }
+    const [inTime, atDeadline] = pair;
+    assert.deepEqual([inTime.a.state, inTime.a.responseFinished], ['sent', true], 'consumed at start + 4999 ms: in time');
+    assert.deepEqual([atDeadline.a.state, atDeadline.a.archiveSha256, atDeadline.a.responseFinished], ['unconfirmed', null, false], 'consumed at start + 5000 ms: expired');
+  }
+  // A stage answered and consumed in time is not expired again by the close's own database wait: the renewal answers at
+  // once; then the close's row read takes 6 s on the monotonic clock (past that renewal's old deadline) - Sent.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const sub = submitted(held.study, held.id);
+    const lease = h.s.op(held.id).download.attempts[0].leaseUntil;
+    h.s.advance(1000);
+    const real = performance.now.bind(performance);
+    let shift = 0;
+    const clock = t.mock.method(performance, 'now', () => real() + shift);
+    h.s.onQuery = async (sql, _values, tx) => { if (sub.ended && tx && sql.includes('WHERE id = ?::uuid FOR UPDATE')) shift = 6000; };
+    let answer;
+    try {
+      t.mock.timers.tick(10000);
+      for (let i = 0; i < 100 && h.s.op(held.id).download.attempts[0].leaseUntil === lease; i++) await sleep(10);
+      assert.notEqual(h.s.op(held.id).download.attempts[0].leaseUntil, lease, 'the renewal committed');
+      await sleep(50);
+      held.release();
+      answer = await held.archive;
+      await closed(h, held.id);
+    } finally { clock.mock.restore(); h.s.onQuery = null; held.release(); }
+    assert.equal(shift, 6000, 'the close\'s database wait passed the renewal\'s old deadline');
+    const [a] = h.s.op(held.id).download.attempts;
+    assert.deepEqual([a.state, a.responseFinished, a.archiveSha256], ['sent', true, createHash('sha256').update(answer.bytes).digest('hex')]);
+  }
+  // No lock while the close waits. (i) Only the answer outstanding (the renewal's locks released): an independent
+  // transaction on the operation row - the status GET's expiry pass - goes through meanwhile; then the success: Sent.
+  // (ii) The renewal's commit itself held (its locks still taken), started by the writer's last write: that transaction
+  // waits for the renewal, not for the close; once the commit answers, both go through - Sent, one result row.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const r = heldAnswer(h);
+    let get;
+    try {
+      t.mock.timers.tick(10000);
+      assert.ok(await within(r.held, 3000));
+      held.release();
+      await held.archive;
+      get = h.request('GET', statusPath(held.study, held.id), { as: RAD });
+      assert.ok(await within(get, 2000), '(i) the operation row is not held while the answer is outstanding');
+      assert.equal(r.answered(), false);
+      const viewed = await get;
+      assert.equal(viewed.status, 200);
+      assertOpenOrUnconfirmed(viewed.body.attempts[0], '(i)');
+      r.open();
+    } finally { r.open(); held.release(); h.s.onQuery = null; }
+    const a = await closed(h, held.id);
+    h.s.onCommitted = null;
+    assert.deepEqual([a.state, a.responseFinished, resultRows(h, a.attemptId).length], ['sent', true, 1], '(i)');
+  }
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const sub = submitted(held.study, held.id);
+    const commit = barrier();
+    let ticked = false, armed = false;
+    sub.onWrite = w => { if (!ticked && w.chunks[w.chunks.length - 1].includes(END_SIG)) { ticked = true; armed = true; t.mock.timers.tick(10000); } };
+    h.s.onQuery = async (sql, _values, tx) => { if (armed && tx && casSql(sql)) { armed = false; tx.watched = true; } };
+    h.s.onCommit = async tx => { if (tx.watched) await commit.park(); };
+    let get, answer;
+    try {
+      held.release();
+      assert.ok(await within(commit.held, 5000), '(ii) the renewal started at the last write; its commit is held with its locks');
+      answer = await held.archive;
+      get = h.request('GET', statusPath(held.study, held.id), { as: RAD });
+      assert.equal(await within(get, 300), false, '(ii) the row is the renewal\'s until its commit');
+      assert.equal(h.s.op(held.id).download.attempts[0].state, 'sending');
+      commit.open();
+      assert.ok(await within(get, 3000), '(ii) the independent transaction goes through after the commit');
+    } finally { commit.open(); held.release(); h.s.onQuery = null; h.s.onCommit = null; }
+    const a = await closed(h, held.id);
+    assert.equal((await get).status, 200);
+    assert.deepEqual([a.state, a.responseFinished, a.archiveSha256, resultRows(h, a.attemptId).length],
+      ['sent', true, createHash('sha256').update(answer.bytes).digest('hex'), 1], '(ii)');
+  }
+  // An attempt fenced while the renewal's answer is out (DB time past the lease, the status GET closes it) is left as it
+  // was by this close: its one lease-expired result row; the later success revives nothing.
+  {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const sub = submitted(held.study, held.id);
+    const r = heldAnswer(h);
+    try {
+      t.mock.timers.tick(10000);
+      assert.ok(await within(r.held, 3000));
+      h.s.advance(31000);
+      const fence = await h.request('GET', statusPath(held.study, held.id), { as: RAD });
+      assert.equal(fence.body.attempts[0].state, 'unconfirmed');
+      const mark = { calls: sub.calls };
+      held.release();
+      await held.archive;
+      r.open();
+      for (let i = 0; i < 100 && !r.answered(); i++) await sleep(10);
+      await sleep(100);
+      assert.equal(sub.calls, mark.calls, 'nothing supplied after the fence');
+    } finally { r.open(); held.release(); h.s.onQuery = null; h.s.onCommitted = null; }
+    const [a] = h.s.op(held.id).download.attempts;
+    assert.deepEqual([a.state, resultRows(h, a.attemptId).map(x => [x.detail.state, x.detail.reason])], ['unconfirmed', [['unconfirmed', 'lease-expired']]]);
+  }
+});
+
+test('S9U4-B66 probe-stage1-next-work (U4BB4-03): a credential answer past stage 1\'s deadline starts no StudyAccess metadata read - Incomplete, nothing supplied, one result row; on the monotonic clock held still the answer at start + 5000 ms reads nothing and at start + 4999 ms the metadata read follows and the whole archive is Sent', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  // The credential check of object 2's first payload approval answers (valid) 5200 ms late with the event loop held.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    let expired = false, reads = 0;
+    h.s.onAuth = async () => { if (p.armed) { p.take(); stall(5200); expired = true; } };
+    h.s.onQuery = async (sql, _values, tx) => { if (expired && !tx && policyRead(sql)) reads++; };
+    try { p.held.release(); await p.held.archive; } finally { h.s.onAuth = null; h.s.onQuery = null; p.held.release(); }
+    assertRightsStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+    assert.equal(reads, 0, 'no metadata read starts after the credential stage ran past its deadline');
+  }
+  // The same on the monotonic clock held still: the credential answering at start + 4999 ms goes on to the metadata
+  // read and the whole archive; at start + 5000 ms nothing is read.
+  for (const offset of [STAGE_MS - 1, STAGE_MS]) {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    const real = performance.now.bind(performance);
+    let frozen = null, start = null, answered = false, reads = 0;
+    const clock = t.mock.method(performance, 'now', () => frozen ?? real());
+    p.onHeader = () => { frozen = start = real(); };
+    h.s.onAuth = async () => { if (p.armed) { p.take(); frozen = start + offset; answered = true; } };
+    h.s.onQuery = async (sql, _values, tx) => { if (answered && !tx && policyRead(sql)) reads++; };
+    let answer;
+    try { p.held.release(); answer = await p.held.archive; } finally { clock.mock.restore(); h.s.onAuth = null; h.s.onQuery = null; p.held.release(); }
+    if (offset === STAGE_MS) {
+      assertRightsStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+      assert.equal(reads, 0, 'expired at the deadline: no metadata read');
+    } else {
+      assert.ok(reads >= 1, 'in time: the metadata read follows');
+      await assertWhole(h, p.held, answer);
+    }
+  }
+});
+
+test('S9U4-B67 probe-sync-supply-return (U4BB4-03): a synchronous supply that ran to stage 2\'s deadline is checked before its transaction returns - the renewal in it rolls back (the lease as it was), Unconfirmed with the checkpoint, no archive hash, response not finished, one result row; the chunk already handed to the response went out once and nothing after it', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  // Object 2's first payload approval renews the lease (DB time 15 s on); its synchronous supply runs to the stage's
+  // deadline on the monotonic clock: the expiry is found before the transaction answers - its renewal rolls back.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    let stalled = false;
+    const oldLease = h.s.op(p.held.id).download.attempts[0].leaseUntil;
+    const real = performance.now.bind(performance);
+    let frozen = null, start = null;
+    const clock = t.mock.method(performance, 'now', () => frozen ?? real());
+    p.sub.onWrite = r => {
+      if (r.bytes === p.at[1].payload) { p.armed = true; Object.assign(p.mark, { W0: p.sub.calls, B0: p.sub.bytes }); h.s.advance(15000); frozen = start = real(); }
+      else if (p.armed && r.bytes > p.at[1].payload) { p.armed = false; frozen = start + STAGE_MS; stalled = true; }
+    };
+    let answer;
+    try { p.held.release(); answer = await p.held.archive; } finally { clock.mock.restore(); p.held.release(); }
+    const a = await closed(h, p.held.id);
+    assert.equal(stalled, true);
+    assertOneChunk(p, answer, 'synchronous supply past the deadline');
+    assertApprovalStop(a, p.checkpoint);
+    assert.deepEqual([a.archiveSha256, a.responseFinished, resultRows(h, a.attemptId).length], [null, false, 1]);
+    assert.equal(a.leaseUntil, oldLease, 'the expiry found before the callback returned rolled its renewal back');
+  }
+});
+
+test('S9U4-B68 the time between a completion\'s own check and the consumption of its result belongs to the stage (U4BB4-05): when the monotonic clock reaches the deadline right after a stage\'s completion was first judged in time, the result is still not taken - a valid stage-1 answer stops Incomplete with nothing supplied, a stage-2 refusal and a stage-2 commit success are expired approvals (Unconfirmed, the checkpoint as it was, nothing more than the chunk already handed over)', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  for (const mode of ['stage 1 valid answer', 'stage 2 refusal', 'stage 2 commit success']) {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    const real = performance.now.bind(performance);
+    let frozen = null, start = null, next = false, moved = false;
+    // The clock is held still from object 2's local header on; armed at the completion, it reaches the stage's
+    // deadline right after the next reading - the completion's own check, made in time.
+    const clock = t.mock.method(performance, 'now', () => {
+      const now = frozen ?? real();
+      if (next) { next = false; moved = true; frozen = start + STAGE_MS; }
+      return now;
+    });
+    p.onHeader = () => { frozen = start = real(); Object.assign(p.mark, { W0: p.sub.calls, B0: p.sub.bytes }); };
+    if (mode === 'stage 1 valid answer') h.s.onQuery = async (sql, _values, tx) => { if (p.armed && !tx && policyRead(sql)) { p.armed = false; next = true; } };
+    else {
+      h.s.onQuery = async (sql, _values, tx) => {
+        if (p.armed && tx && casSql(sql)) { p.armed = false; tx.watched = true; }
+        else if (mode === 'stage 2 refusal' && tx?.watched && policyRead(sql)) h.s.policies.set(RAD.sub, deniedPolicy);
+      };
+      h.s.onCommitted = async tx => { if (tx.watched) next = true; };
+    }
+    let answer;
+    try { p.held.release(); answer = await p.held.archive; } finally { clock.mock.restore(); h.s.onQuery = null; h.s.onCommitted = null; p.held.release(); }
+    const a = await closed(h, p.held.id);
+    assert.equal(moved, true, mode + ': the clock reached the deadline after the completion\'s check');
+    assert.deepEqual([a.archiveSha256, a.responseFinished, resultRows(h, a.attemptId).length], [null, false, 1], mode);
+    if (mode === 'stage 2 commit success') { assertOneChunk(p, answer, mode); assertApprovalStop(a, p.checkpoint); continue; }
+    assert.deepEqual([p.sub.calls - p.mark.W0, p.sub.bytes - p.mark.B0, p.sub.ended, answer.complete], [0, 0, false, false], mode + ': nothing after the local header');
+    if (mode === 'stage 1 valid answer') assertRightsStop(a, p.checkpoint); else assertApprovalStop(a, p.checkpoint);
+  }
+});
