@@ -208,6 +208,39 @@ class WorklistSplitUidDOMTest(unittest.TestCase):
         self.assertEqual(auth.FIELDS["findings"] + " SYN-AFTER", self.site.puts[-1]["findings"])
         self.assertEqual(commits, len(self.site.commits))
 
+    def poll(self):
+        """One periodic list read on the test clock (no Refresh click)."""
+        before = self.site.count("GET", "/api/studies")
+        self.page.clock.run_for(30001)
+        self.wait_until(lambda: self.site.count("GET", "/api/studies") > before, "the periodic list read")
+        self.page.wait_for_timeout(200)
+
+    def test_wsu07_06_the_periodic_list_read_announces_locks_and_returns_like_refresh(self):
+        self.open_main()
+        self.type_report()
+        self.page.clock.run_for(20001)
+        self.page.wait_for_timeout(200)
+        # The open study becomes unresolved between two periodic reads; nobody presses Refresh.
+        self.site.split = {auth.UID}
+        self.poll()
+        expect(self.page.locator("#identity-issues")).to_have_text(TITLE + " " + NOTICE)
+        self.assertEqual(auth.FIELDS, self.editor())
+        for name in auth.FIELDS:
+            self.assertTrue(self.page.locator("#" + name).evaluate("e => e.readOnly"), name)
+        for button in ("#b-save", "#b-approve", "#b-clear"):
+            expect(self.page.locator(button)).to_be_disabled()
+        puts, commits = len(self.site.puts), len(self.site.commits)
+        self.page.clock.run_for(20001)
+        self.page.wait_for_timeout(200)
+        self.assertEqual((puts, commits), (len(self.site.puts), len(self.site.commits)), "a locked study sends no draft write")
+        # Resolved outside the product: the next periodic read clears the notice and unlocks, still without a write.
+        self.site.split = set()
+        self.poll()
+        expect(self.page.locator("#identity-issues")).to_be_hidden()
+        expect(self.page.locator("#findings")).to_be_editable()
+        self.assertEqual(auth.FIELDS, self.editor())
+        self.assertEqual(commits, len(self.site.commits))
+
     def test_wsu07_05_clinician_list_tells_no_normal_study_apart_from_an_excluded_one(self):
         self.site.account = auth.CLINICIAN
         self.site.split = {auth.UID_B}

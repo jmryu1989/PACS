@@ -171,6 +171,9 @@
         return { status: "composing", uid, selectionSeq: seq };
       }
       if (!uid || !reportConverge.has(uid)) return { status: "clear", uid, selectionSeq: seq };
+      // WORKLIST-SPLIT-UID: a study excluded as unresolved never sends its kept text (it stays on this page and its copy),
+      // so there is no save to wait for; leaving it is not blocked by a write that is refused by design.
+      if (appState[uid]?.identityUnresolved) return { status: "clear", uid, selectionSeq: seq };
       return settleStudyText(uid, seq).then(result => ({ ...result, uid, selectionSeq: seq }));
     }
     const LEAVE_TIMEOUT = Symbol("timeout");
