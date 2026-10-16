@@ -319,6 +319,7 @@
     const loaded = [];
     let total = null;
     let after = null;
+    let issues = [];
     try {
       do {
         const data = await request(`/clinician/studies?limit=${PAGE_LIMIT}` + (after === null ? '' : `&after=${encodeURIComponent(after)}`));
@@ -327,6 +328,8 @@
         loaded.push(...data.studies);
         total = page.total;
         after = page.next;
+        // WORKLIST-SPLIT-UID: the completing page names the studies excluded as unresolved (UID and code only).
+        if (after === null && Array.isArray(data.identityIssues)) issues = data.identityIssues.filter(issue => issue && typeof issue.uid === 'string');
         if (after !== null) setListState('loading', `${TEXT.listLoading} (${loaded.length} / ${total})`);
       } while (after !== null);
       // 목록을 읽는 사이 이 브라우저의 세션이 다른 계정으로 바뀌었으면 머리글의 사람과 목록의 주인이 다르다.
@@ -338,7 +341,7 @@
         accountChanged('');
         return;
       }
-      applyList(loaded);
+      applyList(loaded, issues);
     } catch (error) {
       if (!listFresh(mine)) return;
       if (error.status === 403) {
@@ -374,7 +377,7 @@
     return a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0;
   }
 
-  function applyList(rows) {
+  function applyList(rows, issues = []) {
     $('#refresh').disabled = false;
     $('#list-retry').disabled = false;
     studies = [...rows].sort(byStudyDate);
@@ -385,8 +388,10 @@
     resume = null;
     $('#studies').replaceChildren(...studies.map(studyRow));
     rove(focusUid !== null && byUid.has(focusUid) ? focusUid : reopen, focusUid !== null);
-    if (studies.length) setListState('ready', `검사 ${studies.length}건을 표시합니다.`);
-    else setListState('empty', TEXT.listEmpty);
+    // "No normal study" and "excluded as unresolved" read differently: the excluded count is its own sentence, not a row.
+    const excluded = issues.length ? `Patient Identity Conflict ${issues.length} · 환자 식별 불일치로 검사 ${issues.length}건을 목록에서 제외했습니다. 원본 확인이 필요합니다.` : '';
+    if (studies.length) setListState('ready', `검사 ${studies.length}건을 표시합니다.`, excluded);
+    else setListState('empty', TEXT.listEmpty, excluded);
     // 내려 둔 검사가 새 목록에 남아 있으면 판독문도 다시 읽어 식별 줄과 판독문이 같은 시점의 것이 되게 한다.
     if (reopen !== null) {
       if (byUid.has(reopen)) select(reopen);

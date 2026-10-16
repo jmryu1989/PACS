@@ -44,18 +44,24 @@
               || !row.state || typeof row.state !== 'object') throw Object.assign(new Error('목록 페이지 순서 또는 검사 정보가 잘못되었습니다.'),{stale:true});
             previous = row.uid;
           }
+          // WORKLIST-SPLIT-UID: the completing page names the UIDs excluded as unresolved; a middle page says nothing.
+          const issues = page.next === null ? data.identityIssues : undefined;
+          if (issues !== undefined && (!Array.isArray(issues) || issues.some(issue => !issue || typeof issue.uid !== 'string' || !issue.uid
+            || typeof issue.code !== 'string'))) throw Object.assign(new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.'),{stale:true});
           if(!work.commit(at,()=>{draft.rows.push(...rows); draft.total = page.total; draft.next = page.next;
           // S4-U1b: only the page that completes the list carries the absence answer and its time.
           if (page.next === null) draft.observation = { observedAt: data.observedAt, notObserved: data.notObserved };
           // S4-U2: the order answer comes from that same completing page; an absent one stays absent, never [].
           if (page.next === null && data.orderReconciliation !== undefined) draft.observation.orderReconciliation = data.orderReconciliation;
+          // An absent answer stays unknown (null), never "no issue": only a completed [] clears the notice.
+          if (page.next === null) draft.identityIssues = issues === undefined ? null : issues.map(issue => ({ uid: issue.uid, code: issue.code }));
           state('검사 목록을 나누어 불러오는 중…');
           }))throw Object.assign(new Error('목록 조회가 중단되었습니다.'),{stale:true});
         }
         const me = await get('/me');
         if (me?.kind !== 'member' || !same([me.institution,me.sub],owner)) throw Object.assign(new Error('계정이 바뀌어 목록 응답을 적용하지 않았습니다.'),{ownerChanged:true});
         if (!active()) throw Object.assign(new Error('판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'),{stale:true});
-        const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null }; work.commit(at,()=>{pending = null; notice = '';}); return result;
+        const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null, identityIssues:draft.identityIssues ?? null }; work.commit(at,()=>{pending = null; notice = '';}); return result;
       } catch (error) {
         if (mine !== sequence) { error.stale = true; throw error; }
         if (error.code === 'STUDY_LIST_CHANGED') {

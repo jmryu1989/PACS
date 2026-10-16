@@ -186,7 +186,10 @@ async function world() {
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
-  const orthanc = new Proxy({}, { get(_t, key) { return () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); }; } });
+  // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
+  // here); any other Orthanc member is still out of bounds for this harness.
+  const orthanc = new Proxy({}, { get(_t, key) { return key === 'studyIdentityResources' ? async uid => [{ '0020000D': { Value: [uid] } }]
+    : () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); }; } });
   const build = () => {
     const access = new StudyAccessService(recorder, orthanc, {});
     const realPrepare = access.prepare.bind(access);
@@ -1236,7 +1239,7 @@ async function r11Consumer() {
     _kinSourceDigest:'f'.repeat(64)};
   let onRemote=null,onTransaction=null,remoteReads=0;
   const orthanc={reportPreviewStudy:async()=>{remoteReads++;if(onRemote){const f=onRemote;onRemote=null;await f();}return {};},
-    connectStudyIdentity:async()=>({patientId:'SYN-R11'}),viewerReference:async()=>{
+    connectStudyIdentity:async()=>({patientId:'SYN-R11'}),studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}],viewerReference:async()=>{
       if(onRemote){const f=onRemote;onRemote=null;await f();}return structuredClone(tags);}};
   const client=new Proxy(db,{get(target,key){
     if(key==='$transaction')return async(fn,options)=>{if(onTransaction){const f=onTransaction;onTransaction=null;await f();}return target.$transaction(fn,options);};

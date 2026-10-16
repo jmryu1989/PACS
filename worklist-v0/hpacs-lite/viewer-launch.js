@@ -21,6 +21,12 @@
     }
 
     function openFilmbox(uid, priorUid = autoPrior(uid), initialSeriesUid = null) {
+      // WORKLIST-SPLIT-UID: a study (or comparison) the last list excluded as unresolved replaces no window or workspace
+      // pane. A stale button or a direct URL still meets the image gate's 403 on the server.
+      if ([uid, priorUid].some(value => value && appState[value]?.identityUnresolved)) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
+        return false;
+      }
       if (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace')
         return readingWorkspace.open(uid, priorUid, initialSeriesUid);
       return openOhifWindow(uid, priorUid, initialSeriesUid);

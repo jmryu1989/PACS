@@ -142,7 +142,8 @@ test('shared report gate preserves role, unverified, hold and preliminary refusa
   // store, as the real study row would answer them, not through a prototype instance with its study lookup replaced.
   let state = null;
   const db = { $executeRaw: async () => 0, $transaction: async fn => fn(db), studyState: { findUnique: async () => state } };
-  const svc = new PacsService(db, {}, {}, { prepare: async () => {}, require: async () => {} });
+  // WORKLIST-SPLIT-UID: the request's source observation answers one resource per UID here.
+  const svc = new PacsService(db, {}, {}, { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} });
   const caller = { actor: 'reader', roles: ['radiologist'], institution: 'synthetic', sub: 'reader-sub' };
   const study = fields => ({ uid: '1.2', institutionId: 'synthetic', teleInstitutionId: null, ...fields });
   state = study({ ss: 'Verified', rs: 'W' }); assert.equal(await svc.dictationGate('1.2', caller), undefined);
@@ -180,7 +181,7 @@ test('CORE_R11_DICTATION role -> institution -> unverified -> hold -> designatio
   const db = { studyState: { findUnique: async () => structuredClone(state) },
     auditLog: { create: async ({data}) => { audits.push(data); return data; } },
     $executeRaw: async () => 0, $transaction: async fn => fn(db) };
-  const access = { prepare: async () => {}, require: async () => {} };
+  const access = { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} };
   const pacs = new PacsService(db, {}, {}, access);
   const asr = { capability: () => ({ maxBytes: 1048576, enginePin: 'synthetic' }),
     transcribe: async () => { inference++; return {text: 'SYNTHETIC TRANSCRIPT'}; } };

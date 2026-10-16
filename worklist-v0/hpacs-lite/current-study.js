@@ -78,6 +78,8 @@
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
       */
       if (uid === selectedUid) return;
+      // WORKLIST-SPLIT-UID: a stale row, link or keyboard target never selects a study the last list excluded as unresolved.
+      if (appState[uid]?.identityUnresolved) { toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err"); return; }
       if (reportFrame?.isComposing()) return;
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);

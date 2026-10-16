@@ -226,8 +226,9 @@ async function r11Store() {
     auditLog:{create:async({data})=>{audits.push(structuredClone(data));return data;}},$executeRaw:async()=>0,$queryRaw:async()=>[],
     $transaction:async fn=>fn(db)};
   const access={prepare:async()=>{},snapshot:async()=>({policy:{restricted:false}}),allowed:async(c,uids)=>new Set(uids),
-    require:async()=>{},unchanged:async()=>{}};
-  const svc=new PacsService(db,{}, {},access);await start(svc,db,[{id:'hallym',name:'hallym'}]);
+    require:async()=>{},unchanged:async()=>{},prepareSourceIdentity:async()=>{},assertUnsplitSource:()=>{}};
+  // WORKLIST-SPLIT-UID: the full bootstrap reads the source inventory for UIDs two resources share; none here.
+  const svc=new PacsService(db,{studyIdentities:async()=>[]}, {},access);await start(svc,db,[{id:'hallym',name:'hallym'}]);
   return {uid,foreign,oid,states,orders,reports,audits,db,svc};
 }
 test('CORE_R11_BOOTSTRAP scoped orders never enter states; subject-bound P serializer survives rename/recycle',async()=>{

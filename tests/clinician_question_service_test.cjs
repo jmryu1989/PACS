@@ -10,7 +10,8 @@
  *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, no transaction, no write;
  *   (3) the source read fails: 503, no transaction, no write;
  *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService);
- *   (5) a recording Orthanc sees only studyAccessMetadata and studyIdentities(true), and nothing at all when the
+ *   (5) a recording Orthanc sees only studyIdentityResources (every resource of the one study; WORKLIST-SPLIT-UID) and
+ *       studyIdentities(true), and nothing at all when the
  *       policy has no metadata rule.
  * Also pinned over the same stubs: a replay after Closed answers the stored receipt without a write, reuse is
  * 409 REQUEST_ID_REUSED, the audit detail keys, and QUESTION_STATE for a state outside the machine.
@@ -120,7 +121,7 @@ function world(policy, { questions = [] } = {}) {
     },
     studyState: { findMany: async () => { log('root:studies'); return [{ uid }]; } },
   };
-  w.handlers = { studyAccessMetadata: async u => source(u), studyIdentities: async () => [source(uid)] };
+  w.handlers = { studyIdentityResources: async u => [source(u)], studyIdentities: async () => [source(uid)] };
   // Records every member the service stack touches, not only the two it is allowed to use.
   const orthanc = new Proxy({}, { get: (_target, name) => async (...args) => {
     calls.push({ name: String(name), args }); events.push('orthanc:' + String(name));
@@ -146,7 +147,7 @@ test('(1) a metadata rule reads source tags before $transaction and never inside
   const start = w.events.indexOf('tx:start');
   assert.ok(start > 0);
   const reads = w.events.map((event, index) => [event, index]).filter(([event]) => event.startsWith('orthanc:'));
-  assert.deepEqual(reads.map(([event]) => event), ['orthanc:studyAccessMetadata'], 'the UID route prepares one study');
+  assert.deepEqual(reads.map(([event]) => event), ['orthanc:studyIdentityResources'], 'the UID route prepares one study');
   assert.ok(reads.every(([, index]) => index < start), 'the source read ends before the transaction');
   assert.deepEqual(orthancAfterStart(w), []);
   assert.ok(w.events.indexOf('tx:study') > start && w.events.indexOf('tx:receipt') > w.events.indexOf('tx:study'),
@@ -167,7 +168,7 @@ test('(2) a policy change during the source read is 409 STUDY_ACCESS_CHANGED wit
   for (const route of ['create', 'reply', 'close']) {
     const w = world(metadataPolicy(), { questions: [{ id: id(10), studyUid: uid, institutionId: institution,
       authorSub: clinician.sub, authorActor: clinician.actor, authorName: clinician.name, state: 'Open', revision: 1, entryCount: 1 }] });
-    w.handlers.studyAccessMetadata = async u => { w.bumpPolicy(); return source(u); };
+    w.handlers.studyIdentityResources = async u => { w.bumpPolicy(); return [source(u)]; };
     w.handlers.studyIdentities = async () => { w.bumpPolicy(); return [source(uid)]; };
     const call = route === 'create' ? create(w, { ...clinician }, id(11))
       : route === 'reply' ? reply(w, id(10), { ...radiologist }, id(11), 1)
@@ -182,7 +183,7 @@ test('(3) a failed source read is 503 with no transaction and no write', async (
   for (const route of ['create', 'reply']) {
     const w = world(metadataPolicy(), { questions: [{ id: id(20), studyUid: uid, institutionId: institution,
       authorSub: clinician.sub, authorActor: clinician.actor, authorName: clinician.name, state: 'Open', revision: 1, entryCount: 1 }] });
-    w.handlers.studyAccessMetadata = async () => { throw new Error('SYNTHETIC transport failure'); };
+    w.handlers.studyIdentityResources = async () => { throw new Error('SYNTHETIC transport failure'); };
     w.handlers.studyIdentities = async () => { throw new Error('SYNTHETIC transport failure'); };
     const call = route === 'create' ? create(w, { ...clinician }, id(21)) : reply(w, id(20), { ...radiologist }, id(21), 1);
     await assert.rejects(call, code(503), route);
@@ -201,7 +202,7 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
     assert.equal(compiled.includes(name), false, name);
 });
 
-test('(5) only studyAccessMetadata and studyIdentities(true) reach Orthanc, and nothing without a metadata rule', async () => {
+test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, and nothing without a metadata rule', async () => {
   const flows = async w => {
     await create(w, { ...clinician }, id(31));
     await reply(w, id(31), { ...radiologist }, id(32), 1);
@@ -214,7 +215,7 @@ test('(5) only studyAccessMetadata and studyIdentities(true) reach Orthanc, and 
   await flows(metadata);
   assert.ok(metadata.calls.length > 0);
   for (const call of metadata.calls) {
-    assert.ok(['studyAccessMetadata', 'studyIdentities'].includes(call.name), call.name);
+    assert.ok(['studyIdentityResources', 'studyIdentities'].includes(call.name), call.name);
     if (call.name === 'studyIdentities') assert.deepEqual(call.args, [true]);
   }
   for (const policy of [null, uidPolicy()]) {

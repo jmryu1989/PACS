@@ -332,6 +332,9 @@ export class PacsReportEvidence {
 
   /** 판독문 이력 (최신순) */
   async versions(uid: string, c: Caller) {
+    // WORKLIST-SPLIT-UID: each read below observes the source for its own request and, inside the existing scope,
+    // refuses a UID two patient resources answer instead of putting either patient's header on the stored text.
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
     const prev = await this.access.gate(uid, c);
     /**
      * 행이 없는 uid는 없는 검사다. gate()는 "안 보이는 검사"만 404로 바꾸고 "없는 검사"는 null로
@@ -339,6 +342,7 @@ export class PacsReportEvidence {
      * 발견). 이력의 조회 관문은 StudyState 행이다 — 행이 없으면 기관을 가를 수 없고, 가를 수 없으면 거절한다.
      */
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+    this.studyAccess.assertUnsplitSource(c, uid);
     // 본문을 가려놓고 이력에서 읽히면 가린 게 아니다. 같은 규칙을 여기에도 건다.
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
@@ -364,8 +368,10 @@ export class PacsReportEvidence {
    * 그 사이 확정이 끼어들어 "머리에는 없고 초안에는 있는" 없는 상태를 그릴 수 있다.
    */
   async reportCitations(uid: string, c: Caller) {
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
     const prev = await this.access.gate(uid, c);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+    this.studyAccess.assertUnsplitSource(c, uid);
     // 본문을 가려놓고 그 증언이 읽히면 가린 게 아니다. `versions()`와 같은 규칙을 건다.
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
@@ -423,8 +429,10 @@ export class PacsReportEvidence {
    * 확정이 끼어들어 "머리에는 없고 초안에는 있는" 없는 상태를 그릴 수 있다.
    */
   async reportStructure(uid: string, c: Caller) {
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
     const prev = await this.access.gate(uid, c);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+    this.studyAccess.assertUnsplitSource(c, uid);
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
@@ -484,6 +492,7 @@ export class PacsReportEvidence {
      * `require`도 없으므로, 아래 트랜잭션 안의 재검사는 이 호출이 채운 캐시에만 기댈 수 있다.
      */
     await this.studyAccess.prepare(c);
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
     return this.prisma.$transaction(async tx => {
       /**
        * 관문과 판 읽기가 **한 스냅샷** 안에 있다. 밖에서 읽으면 그 사이에 예비 판독이 끼어들어
@@ -491,6 +500,7 @@ export class PacsReportEvidence {
        */
       const prev = await this.access.gate(uid, c, tx);
       if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+      this.studyAccess.assertUnsplitSource(c, uid);
       if (!canReadPreliminary(prev, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);

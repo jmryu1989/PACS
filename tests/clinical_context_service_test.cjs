@@ -42,8 +42,9 @@ const LABELS = { priorReports: 'KIN signed report (head version)', history: 'DIC
   requestTags: 'DICOM header (one original instance)', techNote: 'KIN Tech Note' };
 const KINDS = { priorReports: 'kin.report-version', history: 'dicom.study+kin.study-state',
   requestTags: 'dicom.instance-header', techNote: 'kin.tech-note' };
-const READ_HELPERS = ['studies', 'contextLookup', 'contextSeries', 'contextInstances', 'contextHeader', 'studyAccessMetadata',
-  'studyIdentities'];
+const READ_HELPERS = ['studies', 'contextLookup', 'contextSeries', 'contextInstances', 'contextHeader',
+  // WORKLIST-SPLIT-UID: one study's access preparation reads every resource of that UID.
+  'studyIdentityResources', 'studyIdentities'];
 const WRITE_METHODS = ['create', 'createMany', 'update', 'updateMany', 'upsert', 'delete', 'deleteMany'];
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -200,7 +201,7 @@ function world(studies, { policies = {}, orders = true } = {}) {
   const handlers = {
     studies: async () => { if (w.fail.studies) throw w.fail.studies; return inOrthanc().map(qido); },
     studyIdentities: async () => inOrthanc().map(qido),
-    studyAccessMetadata: async uid => { const s = inOrthanc().find(x => x.uid === uid); return s ? qido(s) : null; },
+    studyIdentityResources: async uid => inOrthanc().filter(x => x.uid === uid).map(qido),
     contextLookup: async uid => {
       if (w.fail.lookup) throw w.fail.lookup;
       const s = inOrthanc().find(x => x.uid === uid);
@@ -613,7 +614,7 @@ test('CC-S07 a DB lock or timeout in R6 or R7(a), inside StudyAccess too, is 503
   const tagRule = { version: 1, restricted: true, startsAt: null, endsAt: null,
     rules: [{ patientId: null, modalities: ['CT'], dateFrom: null, dateTo: null, studyUids: [] }] };
   w = fullWorld({ policies: { [reader.sub]: tagRule } });
-  w.at('orthanc:studyAccessMetadata', () => { throw dbError('P2028'); });
+  w.at('orthanc:studyIdentityResources', () => { throw dbError('P2028'); });
   result = await barrier(w, reader);
   assert.deepEqual([result.status, result.body], [503, { message: '검사 원본의 접근 조건을 확인하지 못했습니다', error: 'Service Unavailable', statusCode: 503 }],
     'R3 original metadata failure');
