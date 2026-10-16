@@ -717,7 +717,8 @@ class ExecutionSelectionTests(unittest.TestCase):
         # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests
         # 95 -> 100: S9-U4b added the five LiveInvariantTests.test_s9_u4_* cases (REQ-S9-U4-02/03/05/06/12); 100 -> 101: S9U4CleanupTests;
         # 101 -> 102: S9U4RegisterTests (S9-U4b round 6, U4BL-03)
-        for filename, count in [('tests/invariants_live.py', 102), ('tests/e2e/test_worklist.py', 15)]:
+        # Worklist 15 -> 17: S9-U4b part (c) WorklistE2E.test_s9_u4_download_states / _import_retry_and_account_change.
+        for filename, count in [('tests/invariants_live.py', 102), ('tests/e2e/test_worklist.py', 17)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
         # The eight U5 cases are selected by name, in the classes the pure oracle judges them in.
@@ -891,7 +892,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
             self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
-            if index<2:self.assertEqual(len(plan['tests']),[102,15][index])  # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 102: S9-U4b
+            if index<2:self.assertEqual(len(plan['tests']),[102,17][index])  # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 102: S9-U4b; worklist 15 -> 17: S9-U4b part (c)
             if class_name:
                 self.assertTrue(all(row['case'].startswith(class_name+'.')
                                     for row in plan['tests']))

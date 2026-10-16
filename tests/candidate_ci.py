@@ -22,7 +22,9 @@ BASE = (
     # round 2: the pure S9U4CleanupTests fault control of their cleanup (U4BB-15), 100 -> 101 (the selection 128 -> 129);
     # round 6: the pure S9U4RegisterTests control of the identity case's registration check (U4BL-03), 101 -> 102 (129 -> 130).
     ("invariants_live.py", None, "candidate-invariants", 102),
-    ("e2e/test_worklist.py", None, "candidate-worklist", 15),
+    # S9-U4b part (c): WorklistE2E.test_s9_u4_download_states and .test_s9_u4_import_retry_and_account_change
+    # (REQ-S9-U4-09/10), 15 -> 17 (the selection 131 -> 133).
+    ("e2e/test_worklist.py", None, "candidate-worklist", 17),
 )
 FLOWS = (
     ("e2e/test_document_session.py", "DocumentSessionE2E", "test_binding_stays_with_its_document_when_cookie_is_replaced", "test_binding_"),
@@ -111,8 +113,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 131 and len({(x["file"], x["case"]) for x in selected}) == 131,
-            "Candidate selection must contain 131 unique exact cases")
+    require(len(selected) == 133 and len({(x["file"], x["case"]) for x in selected}) == 133,
+            "Candidate selection must contain 133 unique exact cases")
     return rows, selected
 
 
