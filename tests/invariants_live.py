@@ -2290,6 +2290,31 @@ def s9u4_cleanup(orthanc_request: Callable[..., HttpResult], run_psql: Callable[
     return failures
 
 
+def s9u4_registered(list_studies: Callable[[], HttpResult], run_psql: Callable[[str], list[str]], uid: str, *,
+                    institution: str, origin: str, bound: float = 30.0, clock: Callable[[], float] = time.monotonic,
+                    pause: Callable[[float], None] = time.sleep) -> list[HttpResult]:
+    """U4BL-03: a seeded study's registration confirmed by the StudyState row the product created, not by the list. Each
+    round calls the product's own registration path (list_studies: the worklist's lazy registration, GET /studies) and then
+    reads StudyState for exactly this UID; registered is exactly one row with the expected institution and origin. A
+    Study UID seeded with two PatientIDs is two Orthanc study resources, and how the list shows such a UID is the
+    worklist's own contract: the list answers are returned for the caller's own assertions and never stand in for the
+    row. No row, another institution or another origin within the bound fails (AssertionError); nothing is written."""
+    if not S9U4_SYNTHETIC_UID.fullmatch(uid):
+        raise ValueError(f"not a synthetic UID: {uid}")
+    expected = [f"{institution}|{origin}"]
+    answers: list[HttpResult] = []
+    deadline = clock() + bound
+    while True:
+        answers.append(list_studies())
+        rows = run_psql(f"SELECT coalesce(\"institutionId\", '') || '|' || origin FROM \"StudyState\" WHERE uid='{uid}';")
+        if rows == expected:
+            return answers
+        if clock() >= deadline:
+            raise AssertionError(f"the seeded study did not register as {expected[0]}: {uid} (StudyState rows {rows}, "
+                                 f"list answers {[a.status for a in answers[-3:]]})")
+        pause(0.25)
+
+
 class S9U4CleanupTests(unittest.TestCase):
     """U4BB-15 / U4BB2-04 pure fault controls of s9u4_cleanup over a scripted Orthanc and a recording psql (no LiveStack).
     Every lookup row, before and after the delete, must be a dict with a known Type and a string ID in Orthanc's own form:
@@ -2429,6 +2454,84 @@ class S9U4CleanupTests(unittest.TestCase):
         self.assertEqual(statements, [])
         self.assertIn("every database row of the scope is kept for inspection", str(raised.exception))
         self.assertIn("deleted before the failure: none", str(raised.exception))
+
+
+class S9U4RegisterTests(unittest.TestCase):
+    """U4BL-03 (R6-N06) pure controls of s9u4_registered over a scripted list and a scripted StudyState read (no LiveStack):
+    registered only by exactly one row of the exact UID with the expected institution and origin - also while the list
+    answers 409 or 500 or never shows the UID (a Study UID split over two patients) - and a failure, within the bound, for
+    no row, another institution, another origin or two rows, however the list answers. Each round asks the list first;
+    only SELECTs are read. LiveInvariantTests.s9u4_register_row expects the writer's origin. The UIDs are synthetic."""
+
+    def test_s9u4_registered_reads_the_product_row_never_the_list(self) -> None:
+        uid = "2.25.4242424244"
+
+        def run(rows_by_round: list[list[str]], lists: list[HttpResult], *, institution: str = "hallym", origin: str = "dicom"
+                ) -> tuple[list[HttpResult] | AssertionError, list[str], int]:
+            sql: list[str] = []
+            now = [0.0]
+            calls = [0]
+
+            def list_studies() -> HttpResult:
+                calls[0] += 1
+                return lists[min(calls[0], len(lists)) - 1]
+
+            def read(statement: str) -> list[str]:
+                sql.append(statement)
+                return rows_by_round[min(len(sql), len(rows_by_round)) - 1]
+
+            def pause(seconds: float) -> None:
+                now[0] += seconds
+
+            try:
+                answer: list[HttpResult] | AssertionError = s9u4_registered(list_studies, read, uid, institution=institution, origin=origin,
+                                                                            bound=5.0, clock=lambda: now[0], pause=pause)
+            except AssertionError as failure:
+                answer = failure
+            return answer, sql, calls[0]
+
+        changed = HttpResult(409, {"code": "STUDY_LIST_CHANGED"}, "")
+        broken = HttpResult(500, {}, "")
+        healthy_without = HttpResult(200, {"studies": [{"uid": "2.25.1"}]}, "")
+        healthy_with = HttpResult(200, {"studies": [{"uid": uid}]}, "")
+        # The row the product made: registered, whatever the list answered - each round asked the list before the read.
+        for lists in ([changed], [broken, changed], [healthy_without], [healthy_with]):
+            answer, sql, calls = run([[], [], ["hallym|dicom"]], lists)
+            self.assertIsInstance(answer, list, lists)
+            self.assertEqual((len(answer), calls, len(sql)), (3, 3, 3), lists)
+            self.assertTrue(all(s.startswith("SELECT ") and f"uid='{uid}'" in s for s in sql), sql)
+        answer, _sql, _calls = run([["hallym|gateway"]], [changed], origin="gateway")
+        self.assertIsInstance(answer, list, "the Gateway writer's origin")
+        # No row, another institution, another origin, an unassigned row or two rows: a failure within the bound - also
+        # while the list shows the UID normally.
+        for rows, lists in (([], [healthy_with]), ([], [changed]), (["inst-b|dicom"], [healthy_with]), (["hallym|local-import"], [healthy_with]),
+                            (["|dicom"], [healthy_with]), (["hallym|dicom", "hallym|dicom"], [healthy_with])):
+            answer, sql, calls = run([rows], lists)
+            self.assertIsInstance(answer, AssertionError, (rows, lists))
+            self.assertIn(uid, str(answer))
+            self.assertEqual(calls, len(sql))
+            self.assertLessEqual(len(sql), 5.0 / 0.25 + 1, "bounded")
+        with self.assertRaises(ValueError):
+            s9u4_registered(lambda: changed, lambda _s: [], "1.2.3; DROP TABLE x", institution="hallym", origin="dicom")
+
+        # The live helper: the list through the stack as the given user, the read through psql, the writer's origin.
+        class Stack:
+            requests: list[tuple[str, str, str]] = []
+
+            def request(self, method: str, path: str, user: str) -> HttpResult:
+                self.requests.append((method, path, user))
+                return changed
+
+        class Case:
+            stack = Stack()
+
+        for writer, ingest, origin in (("rest", "cstore", "dicom"), ("cstore", "cstore", "dicom"), ("cstore", "gateway", "gateway"), ("rest", "gateway", "dicom")):
+            reads: list[str] = []
+            with patch.dict(globals(), {"psql": lambda s, reads=reads, origin=origin: reads.append(s) or [f"hallym|{origin}"]}), \
+                    patch.dict(os.environ, {"KIN_TEST_INGEST": ingest}):
+                answers = LiveInvariantTests.s9u4_register_row(Case(), uid, writer=writer)
+            self.assertEqual((len(answers), len(reads), Case.stack.requests[-1]), (1, 1, ("GET", "/studies", "jmryu")), (writer, ingest))
+
 
 class LiveInvariantTests(unittest.TestCase):
     @classmethod
@@ -5224,6 +5327,25 @@ class LiveInvariantTests(unittest.TestCase):
             time.sleep(0.25)
         self.fail(f"the seeded study did not register: {uid}")
 
+    def s9u4_register_row(self, uid: str, user: str = "jmryu", *, writer: str) -> list[HttpResult]:
+        """U4BL-03: a seed whose Study UID spans two patients is two Orthanc study resources, so its registration is
+        confirmed by the StudyState row the product's own registration made (s9u4_registered), never by the list. The
+        writer decides the origin: the worklist registers an Orthanc REST or C-STORE seed ('dicom'); a seed sent through
+        the Gateway (KIN_TEST_INGEST=gateway) is announced by it ('gateway'). The list's health is the caller's assertion."""
+        ingest = os.environ.get("KIN_TEST_INGEST", "cstore").strip().lower()
+        origin = "gateway" if writer == "cstore" and ingest == "gateway" else "dicom"
+        return s9u4_registered(lambda: self.stack.request("GET", "/studies", user), psql, uid, institution="hallym", origin=origin)
+
+    def s9u4_list_healthy(self, *listed: str, user: str = "jmryu") -> None:
+        """The worklist keeps answering after a two-patient seed (U4BL-03): the full list and its first page answer 200 and
+        the full list still shows the given other studies. How the split UID itself is shown is the worklist's contract."""
+        for path in ("/studies", "/studies?limit=100"):
+            answer = self.stack.request("GET", path, user)
+            self.assertEqual(answer.status, 200, (path, answer.text[:300]))
+            if path == "/studies":
+                shown = {s.get("uid") for s in answer.body.get("studies", [])}
+                self.assertTrue(set(listed) <= shown, (path, sorted(set(listed) - shown)))
+
     def s9u4_set_attempt(self, op: str, index: int, **fields: Any) -> dict[str, Any]:
         """Rewrite the last attempt of one file as a stopped process would have left it (DB only, never Orthanc)."""
         row = self.s9u4_operation(op)
@@ -5348,16 +5470,20 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual((self.s9u4_claim("study:" + cstored)["phase"], self.s9u4_claim("study:" + cstored)["patientId"]), ("bound", "S9U4-CS1"))
             self.assertEqual(first_seed["patientId"], "S9U4-CS1")
             # Two C-STORE originals of different patients under one Study UID, in both store orders: refused before any write.
+            # Orthanc keeps them as two study resources: their registration is read from the StudyState row the product
+            # made (U4BL-03), and the list keeps answering for the other studies of this case.
             for order in (("S9U4-CS2", "S9U4-CS3"), ("S9U4-CS3", "S9U4-CS2")):
                 mixed = self.s9u4_new_study(scope)
                 for patient in order:
                     self.s9u4_cstore(scope, mixed, patient, name="S9U4^" + patient.replace("-", ""))
-                self.s9u4_register(mixed)
-                count = len(self.s9u4_study_instances(mixed))
+                self.s9u4_register_row(mixed, writer="cstore")
+                seeded = {i: self.s9u4_sha(i) for i in self.s9u4_study_instances(mixed)}
                 op, r = self.s9u4_import("tech", s9u4_dicom(study=mixed, series=mixed + ".9", sop=s9u4_uid(), patient_id=order[0], name=None))
                 scope["operations"].append(op)
                 self.assertEqual((r.status, r.body.get("code")), (409, "EXISTING_STUDY_IDENTITY_UNRESOLVED"), (order, r.text))
-                self.assertEqual((len(self.s9u4_study_instances(mixed)), self.s9u4_claim("study:" + mixed)), (count, None), "zero writes, no claim")
+                self.assertEqual((len(self.s9u4_study_instances(mixed)), self.s9u4_claim("study:" + mixed)), (len(seeded), None), "zero writes, no claim")
+                self.assertEqual({i: self.s9u4_sha(i) for i in seeded}, seeded, "the seeded originals byte for byte")
+                self.s9u4_list_healthy(study, legacy, cstored)
             # U4P5-01 positive controls: one SOP with another institution's issuer, the owner's id beside its alias, one SOP
             # with another name under the same PatientID (one index value), and two patient branches - in both store orders.
             # (IssuerOfPatientID cannot be set through the C-STORE writer; these seeds use Orthanc's own REST upload.)
@@ -5370,11 +5496,16 @@ class LiveInvariantTests(unittest.TestCase):
                 [dict(patient_id="S9U4-X"), dict(patient_id="S9U4-Y")],
             ]
             for seeds in controls:
+                # Two PatientIDs under one Study UID are two Orthanc study resources: registration from the product's row.
+                two_patients = len({values["patient_id"] for values in seeds}) > 1
                 for order in (seeds, list(reversed(seeds))):
                     uid = self.s9u4_new_study(scope)
                     for n, values in enumerate(order):
                         self.s9u4_orthanc_upload(s9u4_dicom(study=uid, series=f"{uid}.{n + 1}", sop=s9u4_uid(), **values))
-                    self.s9u4_register(uid)
+                    if two_patients:
+                        self.s9u4_register_row(uid, writer="rest")
+                    else:
+                        self.s9u4_register(uid)
                     count = len(self.stack._orthanc_request("POST", "/tools/find", json.dumps({"Level": "Instance",
                         "Query": {"StudyInstanceUID": uid}}).encode()).body)
                     op, r = self.s9u4_import("tech", s9u4_dicom(study=uid, series=uid + ".9", sop=s9u4_uid(), patient_id="S9U4-X",
@@ -5384,6 +5515,8 @@ class LiveInvariantTests(unittest.TestCase):
                     self.assertIsNone(self.s9u4_claim("study:" + uid), "no claim bound")
                     self.assertEqual(len(self.stack._orthanc_request("POST", "/tools/find", json.dumps({"Level": "Instance",
                         "Query": {"StudyInstanceUID": uid}}).encode()).body), count, "zero writes")
+                    if two_patients:
+                        self.s9u4_list_healthy(study, legacy, cstored)
             # The bounds: exactly 4,096 consistent instances bind and store; 4,097 are refused before any header read.
             for total, expected in ((4096, (200, "stored")), (4097, (409, "EXISTING_STUDY_IDENTITY_UNRESOLVED"))):
                 uid = self.s9u4_new_study(scope)
