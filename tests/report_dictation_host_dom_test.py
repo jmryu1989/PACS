@@ -134,7 +134,8 @@ MARKERS = {
     "REPORT_CSS": ("    /* Report */", "    .citefield {"),
     "MODAL_CSS": (".modal { display: none;", "/* ══ 클릭 피드백"),
     "RBTNS_HTML": ('<div class="rbtns">', "\n        </div>"),
-    "BARS_HTML": ('<div class="draftbar" id="draftbar"', '<div id="citelist"'),
+    # W4: the Notice row that says why a study move did not happen sits right above the draft bar.
+    "BARS_HTML": ('<div class="draftbar" id="report-notice"', '<div id="citelist"'),
     # The citation list and the dictation pane, up to the report fields.
     "DICTATION_HTML": ('<div id="citelist"', '<div class="redit">'),
     "REDIT_HTML": ('<div class="redit">', "\n        </div>"),
@@ -989,6 +990,147 @@ class ReportDictationHostDOMTest(unittest.TestCase):
                          "both stretch across the pane as before")
         self.assertEqual({"boxSizing": "border-box", "lineHeight": "normal", "minHeight": "17.6px"}, value["text"],
                          "the one-line minimum is a reading-review rule; the plain transcript is untouched")
+
+    # ── HD-17 / HD-18 (W4F-04): the dictation region's requirements as behaviour and geometry ──
+    # The region W4 re-bound (the review pane, then the read-only Recommendation notice W4-PAGE-12 placed below it, then
+    # the report fields) and the reading layout's review rules (U4L Astra B3, CE7/D2). These replace the text pins
+    # finding_command_test.cjs held on the same requirements (the dictation block's function text, CSS strings, selector
+    # counts, the pane's ID list and a slice ending at an HTML comment): a comment-only edit failed those while the page
+    # behaved the same (D73 / finding class C2).
+    REGION = """() => { const box = el => { const r = el.getBoundingClientRect();
+        return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height, width: r.width }; };
+      const pane = $('#dictation-pane'), text = $('#dictation-text'), meta = $('#dictation-meta'), actions = $('.dictation-actions');
+      const cs = getComputedStyle(pane), ts = getComputedStyle(text);
+      // One whole line: the stated pitch (reading review), else the plain transcript's own minimum.
+      const line = Number.isFinite(parseFloat(ts.lineHeight)) ? parseFloat(ts.lineHeight) : parseFloat(ts.minHeight);
+      const contentWidth = pane.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      const value = { rbtns: box($('.rbtns')), pane: box(pane), paneContentWidth: contentWidth,
+               paneContentRight: pane.getBoundingClientRect().right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth),
+               status: box($('#dictation-status')), meta: box(meta), actions: box(actions),
+               text: { ...box(text), client: text.clientHeight, scroll: text.scrollHeight, line },
+               note: box($('#recnote')), redit: box($('.redit')), reditMin: parseFloat(getComputedStyle($('.redit')).minHeight) || 0,
+               rfoot: box($('.rfoot2')), frame: box($('#frame')), cap: Math.min(innerHeight * 0.3, 168),
+               panelScrolls: ['auto', 'scroll'].includes(getComputedStyle($('.report-p')).overflowY),
+               fields: ['findings', 'conclusion'].map(k => [k, $('#' + k).getBoundingClientRect().height,
+                                                           parseFloat(getComputedStyle($('#' + k)).minHeight)]) };
+      // Whether meta's text and the actions fit on one row of the pane (with these fonts): meta's one-line width, read
+      // with its width and wrapping released for this one synchronous measurement, then put back.
+      const kept = meta.getAttribute('style');
+      meta.style.cssText += ';flex:none;width:max-content;white-space:nowrap';
+      const needs = meta.getBoundingClientRect().width;
+      if (kept === null) meta.removeAttribute('style'); else meta.setAttribute('style', kept);
+      value.footFits = needs + (parseFloat(getComputedStyle(meta.parentElement).columnGap) || 0) + value.actions.width
+        <= contentWidth + 0.5;
+      return value; }"""
+    RECOMMENDATION = "SYN 3개월 뒤 추적 CT 권고"
+
+    def region(self):
+        self.page.evaluate("()=>new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        return self.page.evaluate(self.REGION)
+
+    def open_with_recommendation(self, viewport, frame=None, reading=False, recommendation=True):
+        if self.opened:
+            self.tearDown()
+            self.setUp()
+        self.page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        state = default_state()
+        if recommendation:
+            # A stored draft that carries a Recommendation value: the product path that shows the notice on reopening.
+            state[UID]["draft"]["recommendation"] = self.RECOMMENDATION
+        self.open(state=state)
+        if reading:
+            # The reading layout: the served reading-workspace.css with the class reading-workspace.js puts on <body>.
+            self.page.add_style_tag(path=str(LITE / "reading-workspace.css"))
+            self.page.evaluate("() => document.body.classList.add('reading')")
+        if frame:
+            self.page.evaluate("([w, h]) => { const f = $('#frame'); f.style.width = w + 'px'; f.style.height = h + 'px'; }",
+                               list(frame))
+        notice = self.page.locator("#recnote")
+        self.assertEqual(recommendation, notice.is_visible())
+        if recommendation:
+            self.assertTrue(notice.get_by_text("Recommendation (existing value · read only)", exact=True).is_visible())
+
+    def assert_stacked(self, value, where, footer="column"):
+        """Top to bottom in the column: buttons, review pane, notice (when shown), report fields, then the footer:
+        "column" - inside the column; "scroll" - inside the column or in the report panel's own scroll range (the W3/W6
+        rule for short windows: on screen or in a container the reader scrolls with the wheel); None - not checked."""
+        self.assertLessEqual(value["rbtns"]["bottom"], value["pane"]["top"] + 0.5, where)
+        below_pane = value["note"] if value["note"]["height"] else value["redit"]
+        self.assertLessEqual(value["pane"]["bottom"], below_pane["top"] + 0.5, where)
+        self.assertLessEqual(value["note"]["bottom"] if value["note"]["height"] else 0, value["redit"]["top"] + 0.5, where)
+        if footer:
+            inside = value["rfoot"]["bottom"] <= value["frame"]["bottom"] + 0.5
+            self.assertTrue(inside or (footer == "scroll" and value["panelScrolls"]), "the footer is reachable: " + where)
+        for name, height, minimum in value["fields"]:
+            self.assertGreaterEqual(height + 0.5, minimum, "%s %s" % (where, name))
+        # The pane's own rows are whole inside it: status, a transcript of at least one whole line that scrolls in its own
+        # box, then meta and the actions.
+        for row in ("status", "text", "meta", "actions"):
+            self.assertGreater(value[row]["height"], 0, "%s %s" % (where, row))
+            self.assertGreaterEqual(value[row]["top"] + 0.5, value["pane"]["top"], "%s %s" % (where, row))
+            self.assertLessEqual(value[row]["bottom"], value["pane"]["bottom"] + 0.5, "%s %s" % (where, row))
+        self.assertGreater(value["text"]["line"], 0, where)
+        self.assertGreaterEqual(value["text"]["client"] + 0.5, value["text"]["line"], "at least one whole line: " + where)
+        self.assertGreater(value["text"]["scroll"], value["text"]["client"], "a long transcript scrolls inside: " + where)
+
+    def test_hd17_the_read_only_recommendation_notice_sits_between_the_review_pane_and_the_fields(self):
+        """W4-PAGE-12 placed the read-only Recommendation notice right below the dictation pane. With the notice shown and
+        the review open, the pane stays bounded and above the notice, the notice keeps its height above the fields, the
+        fields keep their minimum heights and the footer stays in the column at both viewports (in a small frame: in the
+        column or in the report panel's scroll range); closing the pane restores the exact layout."""
+        for viewport, frame in (((1680, 1100), None), ((1366, 768), None), ((1366, 768), (460, 420))):
+            where = "%s frame=%s" % (viewport, frame)
+            self.open_with_recommendation(viewport, frame)
+            before = self.region()
+            self.assertEqual(0, before["pane"]["height"], "a hidden pane takes no room: " + where)
+            self.review("가" * TEXT_CAP)
+            opened = self.region()
+            self.assertLessEqual(opened["pane"]["height"], 168.5, where)
+            self.assert_stacked(opened, where, footer="scroll" if frame else "column")
+            self.assertGreater(opened["note"]["height"], 0, where)
+            self.assertEqual(before["note"]["height"], opened["note"]["height"], "the notice keeps its own height: " + where)
+            self.page.click("#dictation-cancel")
+            self.page.click("#dictation-close")
+            self.assertEqual(before, self.region(), "closing restores the exact layout: " + where)
+
+    def test_hd18_in_the_reading_layout_the_review_pane_gives_way_down_to_its_own_rows(self):
+        """U4L (Astra B3, CE7/D2) as geometry: in the reading layout's report column (420 px wide), with the transcript
+        shown, the pane prefers the plain cap when the column has room and gives way when it is short - the report fields
+        keep the reading layout's minimum and the footer stays in the column - and at the column's own minimum height
+        (370 px, `body.reading .report-p`) it is down to its own rows without clipping them: status, one whole transcript
+        line that scrolls in its own box, then meta and the actions - the actions a row of their own size at the pane's
+        right edge, on meta's row when both fit and on the next row when they do not. The same holds with the read-only
+        Recommendation notice below the pane, and the footer stays in the column at the 370 px minimum too, with and
+        without the notice (W4 integration: with the notice it sat 16.5 px below until the field region gave way). The cap
+        is the plain rule's own expression, min(30vh, 168px): on a 500 px tall window the pane with room is 30vh, not
+        168 px."""
+        for viewport, frame, room in (((1680, 1100), (420, 1000), "roomy"), ((1680, 500), (420, 1000), "roomy"),
+                                      ((1680, 1100), (420, 420), "short"), ((1680, 1100), (420, 370), "minimum")):
+            for recommendation in (False, True):
+                where = "viewport=%s frame=%s notice=%s" % (viewport, frame, recommendation)
+                self.open_with_recommendation(viewport, frame, reading=True, recommendation=recommendation)
+                self.review("가" * TEXT_CAP)
+                value = self.region()
+                if room == "roomy":
+                    self.assertAlmostEqual(value["cap"], value["pane"]["height"], delta=0.5,
+                                           msg="with room the pane takes the plain cap: " + where)
+                else:
+                    self.assertLess(value["pane"]["height"], value["cap"] - 1, "a short column: the pane gives way: " + where)
+                    self.assertGreaterEqual(value["redit"]["height"] + 0.5, value["reditMin"], where)
+                self.assertGreater(value["reditMin"], 0, "the reading layout's field minimum applies: " + where)
+                self.assert_stacked(value, where, footer="column")
+                self.assertGreater(value["text"]["line"], 0, "the transcript line has a stated pitch: " + where)
+                self.assertLess(value["actions"]["width"], value["paneContentWidth"] - 1,
+                                "the actions are a row of their own size beside meta, not a stretched block: " + where)
+                self.assertAlmostEqual(value["paneContentRight"], value["actions"]["right"], delta=1,
+                                       msg="the actions sit at the pane's right edge: " + where)
+                if value["footFits"]:
+                    self.assertTrue(value["meta"]["top"] < value["actions"]["bottom"] and value["actions"]["top"] < value["meta"]["bottom"],
+                                    "meta and the actions fit, so they share one row: " + where)
+                    self.assertLessEqual(value["meta"]["right"], value["actions"]["left"] + 0.5, where)
+                else:
+                    self.assertGreaterEqual(value["actions"]["top"] + 0.5, value["meta"]["bottom"],
+                                            "they do not fit: the actions wrap to the next row: " + where)
 
 
 if __name__ == "__main__":

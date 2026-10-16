@@ -18,6 +18,13 @@ Round 8 (Astra review of rounds 6+7, W3R7-02..06) adds the cases at the end: a d
 on (window turning under a held pointer), a late account Load gives way to a drag, Study Panel saves never move
 the page (tab changes, first Templates open, failed/recovered saves said in the panel), the Reading Workspace with
 the largest report column, and Default during a drag. They drive real mouse, keyboard and window-size changes.
+
+W4-LAND decided difference (D1371, same rule as W6R1-05): the node counts of test_default_is_round_6 leave out the
+closed Workspace Shortcuts dialog's subtree, found by its role and name in both trees (nodes_outside_shortcuts). W4-SC's
+shortcut v2 gives that dialog its Worklist/Viewer tabs (+7 nodes once fable/w4-sc is merged); a closed dialog is no part
+of a paint, its contents are W4-SC's cases, and the requirement these counts carry - the Study Panel's options exist only
+in the opened panel, nothing else is added to the first paint but the declared W6/W4 report nodes - is unchanged. The
+dialog must be present and closed in every count, so it cannot leave the count by being opened or moved.
 """
 import io
 import json
@@ -29,6 +36,8 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
+from study_panel_page_dom_test import W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
+from study_panel_page_dom_test import HIDE_W4, W4_REPORT_NODES
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -61,6 +70,14 @@ DEFAULT_SIZES = ((1920, 1080), (1366, 768), (2560, 1440), (1200, 1920), (1440, 2
 BOUND_SIZES = ((1200, 1920), (1440, 2560), (900, 1200), (1920, 1080), (1366, 768),
                (840, 768), (860, 700), (900, 768), (1024, 768), (900, 600), (1280, 720), (800, 768))
 SCALES = (1, 1.2, 1.4)
+
+
+def nodes_outside_shortcuts(page):
+    """Every element of the page except the closed Workspace Shortcuts dialog and what it holds (module header)."""
+    dialog = page.get_by_role('dialog', name='Workspace Shortcuts', exact=True, include_hidden=True)
+    expect(dialog).to_have_count(1)
+    held = dialog.evaluate("d => { if (d.open) throw Error('Workspace Shortcuts is open'); return 1 + d.querySelectorAll('*').length; }")
+    return page.evaluate("() => document.querySelectorAll('*').length") - held
 
 
 def within_panel(facts):
@@ -186,13 +203,14 @@ class StudyPanelSizeDOM(unittest.TestCase):
             expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
             wait_startup(page, site)
             settle(page)
-            facts = {'first_paint_nodes': page.evaluate("() => document.querySelectorAll('*').length")}
+            facts = {'first_paint_nodes': nodes_outside_shortcuts(page)}
             self.click_row(page, 0, f'{width}x{height}')
             self.open_panel(page)
             page.mouse.move(width - 1, height - 1)
             settle(page)
-            facts['nodes'] = page.evaluate("() => document.querySelectorAll('*').length")
+            facts['nodes'] = nodes_outside_shortcuts(page)
             facts['panel'], facts['page'] = self.panel(page), page.evaluate(PAGE)
+            facts['w6'] = w6_facts(page)
             del facts['panel']['edge']
             drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
             controls = [c.bounding_box() for c in (drawer.get_by_role('combobox', name='Text Size'),
@@ -201,6 +219,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 left, top = min(c['x'] for c in controls), min(c['y'] for c in controls)
                 mask = [left, top, max(c['x'] + c['width'] for c in controls) - left, max(c['y'] + c['height'] for c in controls) - top]
             if picture:
+                page.evaluate(HIDE_W4)   # W4-LAND decided difference (study_panel_page_dom_test.py W4_REPORT_NODES)
                 cover(page, [mask])
                 settle(page)
                 facts['pixels'] = page.screenshot(animations='disabled', caret='hide',
@@ -229,9 +248,21 @@ class StudyPanelSizeDOM(unittest.TestCase):
                     mine, mask = self.default_panel(current, width, height, picture=picture)
                     theirs, _ = self.default_panel(Path(temporary), width, height, mask=mask, picture=picture)
                     with self.subTest(width=width, height=height):
-                        self.assertEqual(theirs['first_paint_nodes'], mine['first_paint_nodes'], 'first paint')
-                        for key in ('panel', 'page'):
-                            self.assertEqual(theirs[key], mine[key], key)
+                        # W6-PAGE-22 (D1300, W6_REPORT_FIELDS in study_panel_page_dom_test.py): a decided difference.
+                        # W6's report section adds W6_FIRST_PAINT_NODES nodes, its two field boxes are left out of the
+                        # page facts and its scroller's pixels are not compared; what lies below the scroller is compared
+                        # where the scroller leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable);
+                        # everything else stays round 6's.
+                        # W4-LAND: + W4_REPORT_NODES (Approve & Next and the two report rows hidden at first paint); the
+                        # closed Workspace Shortcuts dialog is outside both counts (module header, D1371).
+                        self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES,
+                                         mine['first_paint_nodes'], 'first paint')
+                        self.assertEqual(theirs['panel'], mine['panel'], 'panel')
+                        page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
+                        self.assertEqual(page_facts(theirs), page_facts(mine), 'page')
+                        where = f'{width}x{height}'
+                        assert_w6_reachable(self, mine['w6'], where)
+                        w6_moved(self, theirs['w6'], mine['w6'], 0, where)
                         # Round 6's tab click rewrote the toolbar status line, which wraps at 900x1200 and 768x1024 and
                         # pushed its panel down (W3R7-04, fixed this round). So each tab's content is round 6's within
                         # the panel, and the panel itself stays where it opened, which is round 6's place (above).
@@ -254,10 +285,12 @@ class StudyPanelSizeDOM(unittest.TestCase):
                             self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
                         # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
                         # controls' row and the edge (stated in the round-7 report).
-                        self.assertEqual(7, mine['nodes'] - theirs['nodes'])
+                        self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES, mine['nodes'] - theirs['nodes'])
                         if picture:
-                            difference = picture_difference(self.browser, theirs['pixels'], mine['pixels'])[0]
-                            self.assertEqual(0, difference.get('over'), f'open panel pixels differ outside the new controls: {difference}')
+                            regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
+                            for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
+                                self.assertFalse(difference.get('outside') or difference.get('size'), difference)
+                                self.assertEqual(0, difference['over'], f'open panel pixels differ outside the new controls/W6 scroller: {difference}')
             finally:
                 auth.ROOT = current
 

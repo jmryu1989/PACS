@@ -6,6 +6,7 @@ PV-01..PV-07: only the isolated verifier boundary (evaluate: the one place that 
 returns the digest stream of an export) is replaced by a synthetic stream; its real behaviour on PostgreSQL is
 tests/audit_store_db_test.py. Backup roots, folders and the ledger are made with the public commands (init, plan), the
 public seal function and files; times enter only through a snapshot manifest's created_utc and retention --as-of.
+PV-11 runs init/plan with the tool's folder unwritable and starts a second ledger writer while one is writing.
 PV-08 runs the real evaluate with its existing timeout argument against FakeDocker below: a test-side docker CLI whose
 exporter and verifier are real processes that stall, refuse to read or fail as a case asks. Assertions are on exit
 codes, the documented report, file contents (ids, digests, states), elapsed time and whether processes and containers
@@ -806,6 +807,198 @@ class AuditIntegrityPure(unittest.TestCase):
         code, report = ws.cli("retention", ws.root, "--as-of", "2026-10-02T06:00:00Z")
         self.assertEqual((code, report["uncommitted"]), (1, []))
         self.assertIsNotNone(report["discontinuity"])
+
+    # PV-11 (RT-P3-LEDGER-LOCK, prep5 readiness5 §3 B3): the ledger's writers take turns where the ledger lives.
+    def test_pv11_ledger_writers_need_no_write_beside_the_tool_and_still_take_turns(self):
+        """Production installs the tool where the operating account cannot write (/opt/kin-deploy, root 0755) and runs
+        init as that account, which owns the backup root; init exited 2 (PermissionError) and wrote nothing. init and
+        plan succeed while the tool's folder cannot be written, and the ledger still has one writer at a time: an init,
+        a plan or a seal that starts while another writer of the same root is under way is refused and writes nothing;
+        an existing ledger is still never replaced, and nothing of the turn-taking stays behind in the root."""
+        def unwritable(ws):
+            installed = Path(ws.temp.name) / "installed"
+            if os.name == "posix" and os.geteuid() != 0:
+                installed.mkdir()
+                installed.chmod(0o555)          # as /opt/kin-deploy is to the operating account
+                self.addCleanup(installed.chmod, 0o755)
+            else:
+                installed.write_text("a regular file: nothing can be created below it\n")
+                installed = installed / "kin-deploy"
+            ws.repo = installed
+
+        unwritable(self.ws)
+        code, report = self.ws.cli("init", self.ws.root, "--years", 5)
+        self.assertEqual((code, report), (0, {"exit": 0, "ledger": "init", "years": 5}))
+        code, report = self.ws.cli("plan", self.ws.root, "--years", 6)
+        self.assertEqual((code, report), (0, {"exit": 0, "plan": 6}))
+        self.assertEqual(self.ws.cli("init", self.ws.root, "--years", 7)[0], 2, "an existing ledger is never replaced")
+        self.assertEqual([entry.get("years") for entry in self.ws.ledger()["entries"]], [5, 6])
+
+        def while_writing(ws, action):
+            """Run action while a writer of ws's root is writing the ledger; returns what it saw and what it did."""
+            real, seen = audit.replace_json, {}
+
+            def write(path, body):
+                if Path(path).name == audit.LEDGER and "result" not in seen:
+                    seen["before"] = ws.tree()
+                    try:
+                        seen["result"] = action()
+                    except Exception as error:   # a refused seal raises; its type is the outcome
+                        seen["result"] = type(error).__name__
+                    seen["after"] = ws.tree()
+                return real(path, body)
+            return patch.object(audit, "replace_json", side_effect=write), seen
+
+        # two inits of one root: the second starts while the first writes; it is refused and the first one's ledger stays
+        fresh = Workspace()
+        self.addCleanup(fresh.close)
+        unwritable(fresh)
+        writing, seen = while_writing(fresh, lambda: fresh.cli("init", fresh.root, "--years", 4))
+        with writing:
+            self.assertEqual(fresh.cli("init", fresh.root, "--years", 3)[0], 0)
+        self.assertEqual(seen["result"][0], 2, seen["result"])
+        self.assertEqual(seen["before"], seen["after"])
+        self.assertEqual([entry["years"] for entry in fresh.ledger()["entries"]], [3])
+
+        # a seal that starts while a plan writes is refused before it writes anything; afterwards it seals
+        folder = self.ws.backup("2026-10-01T01:00:00Z")
+        writing, seen = while_writing(self.ws, lambda: self.ws.seal(folder, stream({1: "a"})))
+        with writing:
+            self.assertEqual(self.ws.cli("plan", self.ws.root, "--years", 8)[0], 0)
+        self.assertEqual(seen["result"], "Refused")
+        self.assertEqual(seen["before"], seen["after"])
+        self.assertNotIn(audit.CHECKPOINT, [path.name for path in folder.iterdir()])
+        self.ws.seal(folder, stream({1: "a"}))
+        self.assertEqual([entry["kind"] for entry in self.ws.ledger()["entries"]], ["init", "plan", "plan", "seal"])
+
+        # a plan or an init that starts while a seal is under way is refused and writes nothing
+        later = self.ws.backup("2026-10-02T01:00:00Z")
+        during = {}
+
+        def evaluation(*_):
+            during["before"] = self.ws.tree()
+            during["plan"] = self.ws.cli("plan", self.ws.root, "--years", 9)
+            during["init"] = self.ws.cli("init", self.ws.root, "--after-loss", "--reason", "a concurrent init")
+            during["after"] = self.ws.tree()
+            return stream({1: "a", 2: "b"})
+        with patch.object(audit, "evaluate", side_effect=evaluation):
+            audit.seal(later, self.ws.root, self.ws.manifest(later))
+        self.assertEqual((during["plan"][0], during["init"][0]), (2, 2), during)
+        self.assertEqual(during["before"], during["after"])
+        self.assertEqual([entry["kind"] for entry in self.ws.ledger()["entries"]], ["init", "plan", "plan", "seal", "seal"])
+        # nothing of the turn-taking stays behind: the root holds the ledger and the backup folders only
+        for ws in (self.ws, fresh):
+            self.assertEqual(sorted(path.name for path in ws.root.iterdir() if not path.is_dir()), [audit.LEDGER])
+
+    # PV-12 (P3R1-01, Astra review of 7adea16): a retention change and the daily rotation of the same root take turns.
+    def test_pv12_a_retention_plan_never_lands_inside_a_rotations_deletion(self):
+        """The plan moved off the operations lock (PV-11) and lost its turn-taking with rotation, which takes its last
+        retention decision, renames the set and deletes it under that lock: a `plan --years 6` succeeded right before the
+        deletion and the rotation then deleted a sealed set the new period keeps. With real daily sets (every component,
+        sealed into the ledger), a plan that starts at either point - after the last retention decision, before the
+        rename; after the rename, before the deletion - is refused and writes nothing, so a set the ledger's period keeps
+        never disappears after a plan that succeeded. The other way round, a rotation that starts while a plan writes,
+        or while a ledger lock is left behind by a writer that died, is refused, deletes nothing and leaves the lock."""
+        old, new = datetime(2023, 1, 1, 20, 0, 2, tzinfo=timezone.utc), datetime(2026, 10, 15, 20, 0, 2, tzinfo=timezone.utc)
+        now = datetime(2026, 10, 16, tzinfo=timezone.utc)
+
+        def daily_set(ws, created):
+            """A whole daily set as backup() leaves it (each component, SHA-256 and size in its manifest), then sealed."""
+            folder = ws.root / (created.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8])
+            folder.mkdir(mode=0o700)
+            sums, sizes = {}, {}
+            for component in ops.FILES:
+                raw = ("synthetic " + component + " " + uuid.uuid4().hex).encode()
+                (folder / component).write_bytes(raw)
+                sums[component], sizes[component] = hashlib.sha256(raw).hexdigest(), len(raw)
+            ops.write_json(folder / "manifest.json", {"format": 1, "complete": True, "created_utc": created.isoformat(),
+                                                      "postgres_image": IMAGE, "ready": True, "resume_failures": [],
+                                                      "sha256": sums, "bytes": sizes})
+            ws.seal(folder, stream({1: "a"}))
+            return folder
+
+        def rotation(ws):
+            with patch.object(ops, "ROOT", ws.repo):
+                return ops.rotate(ws.root, 1, now=now)
+
+        def gone(folder):
+            return not folder.exists() and not (folder.parent / (ops.ROTATING + folder.name)).exists()
+
+        for point in ("before the rename", "before the deletion"):
+            with self.subTest(point=point):
+                ws = Workspace()
+                self.addCleanup(ws.close)
+                ws.init("--years", 2)
+                kept_by_six = daily_set(ws, old)       # past 2 years at `now`, inside 6
+                daily_set(ws, new)
+                seen = {}
+
+                def plan_here(path):
+                    if Path(path).name.removeprefix(ops.ROTATING) == kept_by_six.name and "plan" not in seen:
+                        seen["before"] = ws.ledger()
+                        seen["plan"] = ws.cli("plan", ws.root, "--years", 6)
+                        seen["after"] = ws.ledger()
+                real_rename, real_rmtree = ops.os.rename, ops.shutil.rmtree
+
+                def rename(source, destination, *args, **kwargs):
+                    if point == "before the rename":
+                        plan_here(source)
+                    return real_rename(source, destination, *args, **kwargs)
+
+                def rmtree(path, *args, **kwargs):
+                    if point == "before the deletion":
+                        plan_here(path)
+                    return real_rmtree(path, *args, **kwargs)
+                with patch.object(ops.os, "rename", side_effect=rename), patch.object(ops.shutil, "rmtree", side_effect=rmtree):
+                    result = rotation(ws)
+                self.assertIn("plan", seen, "the plan ran inside the rotation's deletion")
+                self.assertFalse(seen["plan"][0] == 0 and gone(kept_by_six),
+                                 "a plan succeeded and the rotation then deleted a set its period keeps")
+                self.assertEqual((seen["plan"][0], seen["plan"][1].get("error")), (2, "Refused"), seen["plan"])
+                self.assertEqual(seen["before"], seen["after"])
+                self.assertEqual((result["deleted"], audit.ledger_years(ws.ledger()["entries"])), ([kept_by_six.name], 2))
+                # the turn was only the rotation's: the plan goes through afterwards and nothing is left in the root
+                self.assertEqual(ws.cli("plan", ws.root, "--years", 6), (0, {"exit": 0, "plan": 6}))
+                self.assertEqual(sorted(path.name for path in ws.root.iterdir() if not path.is_dir()), [audit.LEDGER])
+
+        # a rotation that starts while a plan writes the ledger is refused and deletes nothing; afterwards the new period
+        # keeps the set
+        ws = Workspace()
+        self.addCleanup(ws.close)
+        ws.init("--years", 2)
+        kept_by_six = daily_set(ws, old)
+        daily_set(ws, new)
+        real, during = audit.replace_json, {}
+
+        def write(path, body):
+            if Path(path).name == audit.LEDGER and "rotation" not in during:
+                during["before"] = ws.tree()
+                try:
+                    during["rotation"] = rotation(ws)
+                except Exception as error:
+                    during["rotation"] = type(error).__name__
+                during["after"] = ws.tree()
+            return real(path, body)
+        with patch.object(audit, "replace_json", side_effect=write):
+            self.assertEqual(ws.cli("plan", ws.root, "--years", 6)[0], 0)
+        self.assertEqual(during["rotation"], "Refused")
+        self.assertEqual(during["before"], during["after"])
+        result = rotation(ws)
+        self.assertEqual((result["deleted"], result["retained"].get(kept_by_six.name)), ([], "audit-retention"))
+        self.assertTrue(kept_by_six.is_dir())
+
+        # a ledger lock left by a writer that died: rotation refuses, deletes nothing and never removes that lock
+        ws = Workspace()
+        self.addCleanup(ws.close)
+        ws.init("--years", 2)
+        expired = daily_set(ws, old)
+        daily_set(ws, new)
+        (ws.root / audit.LEDGER_LOCK).write_text("a writer that died")
+        before = ws.tree()
+        with self.assertRaises(audit.Refused):
+            rotation(ws)
+        self.assertEqual(ws.tree(), before)
+        self.assertTrue(expired.is_dir())
 
 
 TARGET = "kin-syn-target"   # the named database's container in PV-08

@@ -42,13 +42,13 @@ class ShortcutAccountE2E(WorkspaceShortcutsE2E):
   expect(p.locator('#workspace-shortcuts-account-save')).to_be_disabled();expect(p.locator('#workspace-shortcuts-account-load')).to_be_enabled()
   with q.expect_response(lambda r:r.request.method=='GET' and r.url.endswith('/api/workspace-shortcuts')) as saved:
    q.locator('#workspace-shortcuts-account-load').click()
-  self.assertEqual(saved.value.json()['bindings']['report'],'KeyT')
+  self.assertEqual(saved.value.json()['bindings']['report'],'Control+Alt+KeyT')
   p.unroute('**/api/workspace-shortcuts',fail_save)
   p.locator('#workspace-shortcuts-account-load').click();expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+T');self.account_ready(p)
   self.assign(p,'report','Control+Alt+N');self.save(p)
   with q.expect_response(lambda r:r.request.method=='GET' and r.url.endswith('/api/workspace-shortcuts')) as saved:
    q.locator('#workspace-shortcuts-account-load').click()
-  self.assertEqual(saved.value.json()['bindings']['report'],'KeyN');expect(q.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+N')
+  self.assertEqual(saved.value.json()['bindings']['report'],'Control+Alt+KeyN');expect(q.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+N')
 
  def test_account_04_invalid_saved_keys_can_be_repaired(self):
   a,b=self.pair();p=self.login();self.workspace(p,a);self.seed(p)
@@ -62,6 +62,25 @@ class ShortcutAccountE2E(WorkspaceShortcutsE2E):
   p.locator('#workspace-shortcuts-account-save').click();p.wait_for_function('()=>holdShortcuts');p.locator('#workspace-shortcuts-cancel').click();p.evaluate('()=>{window.fetch=shortcutFetch;releaseShortcuts()}');self.editor(p);self.account_ready(p);expect(p.locator('#workspace-shortcuts-account-status')).to_contain_text('계정 설정이 있습니다');expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+4')
   p.evaluate("""()=>{window.holdShortcuts=false;window.fetch=async(...args)=>{const response=await shortcutFetch(...args);if(String(args[0]).endsWith('/workspace-shortcuts')){holdShortcuts=true;await new Promise(resolve=>window.releaseShortcuts=resolve)}return response}}""")
   p.locator('#workspace-shortcuts-account-load').click();p.wait_for_function('()=>holdShortcuts');end_document(p);expect(p.locator('#workspace-shortcuts-dialog')).to_have_count(0);p.evaluate('()=>releaseShortcuts()');expect(p.locator('#workspace-shortcuts-account-status')).to_have_count(0)
+
+ def test_account_06_v1_account_migrates_to_v2(self):
+  a,b=self.pair();p=self.login();self.workspace(p,a)
+  # Setup-only legacy account write, through the authenticated public API.
+  self.editor(p);self.account_ready(p)
+  seeded=p.evaluate("""async()=>{
+   const transport=KinSessionTransport.page(), context=KinWorkContext.capture('document');
+   const head=(await transport.request('/api/workspace-shortcuts',{context})).body;
+   const response=await transport.request('/api/workspace-shortcuts',{context,method:'PUT',headers:{'Content-Type':'application/json','X-KIN-CSRF':'1'},
+    body:JSON.stringify({expectedOwner:head.owner,revision:head.revision,bindings:{...KinWorkspaceShortcuts.defaults,report:'KeyR'}})});
+   return {status:response.status,body:response.body};
+  }""")
+  self.assertEqual(seeded['status'],200);self.assertEqual(seeded['body']['bindings']['report'],'KeyR')
+  p.locator('#workspace-shortcuts-account-load').click();expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+R')
+  expect(p.locator('#workspace-shortcut-finalize')).to_have_value('Control+S');self.account_ready(p)
+  with p.expect_response(lambda r:r.request.method=='PUT' and r.url.endswith('/api/workspace-shortcuts')) as saved:self.save(p)
+  body=saved.value.json();self.assertEqual(body['bindings']['version'],2);self.assertEqual(body['bindings']['report'],'Control+Alt+KeyR')
+  self.assertEqual(body['bindings']['finalize'],'Control+KeyS');self.assertEqual(body['revision'],seeded['body']['revision']+1)
+  self.apply(p)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ShortcutAccountE2E(n) for n in loader.getTestCaseNames(ShortcutAccountE2E) if n.startswith('test_account_'))
 if __name__=='__main__':unittest.main(verbosity=2)

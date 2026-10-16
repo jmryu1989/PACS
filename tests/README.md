@@ -16,6 +16,8 @@ REQ-WS7 → RISK-WS7 (노드·포커스 손실·늦은 콜백) → **WS7-RW-RELO
 
 REQ-WS2 → RISK-WS2 (Related 행 가림) → **S7-RL-NOTICE-PORTRAIT**: `related_layout_dom_test.py`의 `RelatedLayoutDOMTest.test_s7_rl_notice_portrait_row_hit_area_and_first_line`은 900×1200·768×1024 및 800/840/860×768에서 안내 보임/숨김, 행 1개/다수/저장 크기를 대조한다. 행 viewport 비율 1.0·15점 hit test·중심 클릭과 이전 판독문 첫 줄의 상태별 노출을 검증한다.
 
+REQ-WS7 → RISK-WS7 (단축키 초기화·잘못된 명령·계정 설정 하향 덮어쓰기) → **TEST-WS7-SHORTCUT-MIGRATION / TEST-W4-SC-SERVER**: `node --test tests/workspace_shortcuts_test.cjs`와 `node --test tests/workspace_shortcuts_v2_service_test.cjs`는 W4-SC의 v1 키별 이행, v2 nullable 바인딩·예약 키·사용자 키 우선, Finalize 기본 `Control+KeyS`, Worklist/Viewer 설정, 계정 형식·owner/revision CAS·v1→v2·하향 PUT 409·실패 보존을 확인한다. `read()`는 기존 소비자에게 v1 키를 제공하며, v2 소비자는 `readV2()`를 사용한다. W4-FLOW의 page dispatcher는 `readV2()` 결과의 `action(map, event) === 'finalize'`를 실행하고 실제 명령 실행 시에만 브라우저 기본 동작을 막는다. 이미 열린 별도 Viewer는 기존 snapshot을 유지하고 다음 열기부터 새 키를 적용한다. 두 suite는 `worklist-ux.yml`의 runtime/measurements에서 원문 기록과 함께 실행한다. 실제 계정·별도 창 e2e와 Finalize 실행은 통합 및 live 검증이며 이 순수 시험의 통과로 대체하지 않는다. D1371 프레임은 `KinReportCommands.finalize()`가 true를 반환할 때만 기본 동작을 막는다. `e2e/test_workspace_shortcuts.py`의 프레임 시험 훅은 준비용이며 실제 승인 관문은 FLOW가 정의한다. 저장소를 읽지 못하면 기본 키를 유지하고 관측된 손상 값만 미배정하며, 지원하지 않는 버전·읽을 수 없는 형태는 한 안내로 전체 미배정한다. 계정의 invalid 행은 현재 revision에서 복구할 수 있고 유효한 v2 행의 v1 덮어쓰기는 409로 보존한다.
+
 ## 실행 입구와 중단 조건 (2026-09-11)
 
 REQ-DEV-EXECUTION-GATE → RISK-DEV-ACCIDENTAL-LIVE/CONCURRENT-FIXTURES/UNBOUNDED-RETRY → TEST-DEV-EXECUTION-GATE (`execution_guard_test.py`). `LiveStack`을 쓰는 아래 과거 직접 실행 예시는 이제 공용 실행기로 감싼다. 순수 모델 시험에서 실환경 TestCase가 import로 따라온 사고를 막기 위해 일반 `unittest`에서는 LiveStack 생성 자체가 거부된다.
@@ -34,7 +36,7 @@ python scripts/run-tests.py --plan ../tmp/my-work/tests.json
 
 단위는 같은 결함 수정 동안 유지한다. 시도 수는 증거 디렉터리와 별도로 OS 계정의 영구 상태 디렉터리 `<unit>.json`에 누적되고 성공 후 반복·최대 3회 초과·한도 상향을 거부한다. Windows는 OS 계정의 Local AppData 아래 `KIN/PACS/test-gate`, Linux는 계정 홈 아래 `.local/state/kin-pacs/test-gate`이며 TMP/TEMP/TMPDIR/HOME 환경변수로 분리되지 않는다. 시간 초과는 자기 시험 프로세스 트리를 종료하고 실패로 남긴다. `record-run.py`로 이 실행기를 감싸면 기존 원문/exit/전후 해시 기록을 그대로 보존할 수 있다.
 
-실환경 실행은 사용자 계정의 호스트 공용 OS 잠금을 소유하며, 실패/중단하면 `live-needs-inspection.json`을 남긴다. 실행 책임자는 marker와 해당 unit 원장을 읽고 자기 합성 fixture 정리·현행 보존 검사를 마친 뒤 `inspection.md`와 같은 디렉터리에 새 `inspection.json` sidecar를 작성한다. JSON에는 marker의 `unit`, `module`, `plan_sha256`, `attempt`(정수), `pid`(원 worker 정수), `started_at`을 정확히 기록하고, 실제 `exit`(정수), `artifacts`(Markdown·실행 로그·stack 캡처의 경로 배열), `stack`(Compose `ps --all` 및 daemon container 목록의 exit/output), `inspected_at`(점검 완료 시각, timezone 포함 ISO-8601), `inspector`(점검 책임자)를 넣는다. `inspected_at`은 `started_at`보다 뒤이고 현재 시각 이하여야 하며 JSON 파일 mtime도 marker보다 뒤여야 한다. `tests/`에서 `python -c "import live_test_gate as g; g.release_after_inspection('../tmp/my-work/inspection.json')"`으로 제출한다. 이 API가 `live.lock` 안에서 실행 식별자·시각·원문 SHA-256 재사용을 검사하고 점검 원장을 flush/fsync한 뒤 marker를 해제한다. 별도 commander 프로세스도 제출할 수 있으나 marker 직접 삭제·기록 재사용·pid-only 구형 marker 자동 승인은 허용하지 않는다. 거절이나 원장 I/O 실패에서는 marker를 유지한다. 원본/기존 행은 정리 대상이 아니며 unit의 실패 상태와 시도 수는 초기화하지 않는다. 시간 경과·PID 소멸도 해제 근거가 아니다. 이 확인은 개발 실행자의 일이며 사용자에게 매번 승인·정리를 맡기지 않는다.
+실환경 실행은 사용자 계정의 호스트 공용 OS 잠금을 소유하며, 실패/중단하면 `live-needs-inspection.json`을 남긴다. marker는 live 허가 전에 실행 식별자와 함께 원자적으로 쓰이고 worker는 성공해도 지우지 않는다. 부모 실행기만 자기 최종 상태(기한 안 exit 0 + 그 시도 ticket의 완료 증명)를 원장에 passed로 기록한 뒤 marker가 자기 식별자와 정확히 같을 때 해제한다(W4X-02). 종료 중 worker가 먼저 정상 종료해도 interrupted/124·완료 증명 없는 exit 0·skip은 marker를 유지한다. 실행 책임자는 marker와 해당 unit 원장을 읽고 자기 합성 fixture 정리·현행 보존 검사를 마친 뒤 `inspection.md`와 같은 디렉터리에 새 `inspection.json` sidecar를 작성한다. JSON에는 marker의 `unit`, `module`, `plan_sha256`, `attempt`(정수), `pid`(원 worker 정수), `started_at`을 정확히 기록하고, 실제 `exit`(정수), `artifacts`(Markdown·실행 로그·stack 캡처의 경로 배열), `stack`(Compose `ps --all` 및 daemon container 목록의 exit/output), `inspected_at`(점검 완료 시각, timezone 포함 ISO-8601), `inspector`(점검 책임자)를 넣는다. `inspected_at`은 `started_at`보다 뒤이고 현재 시각 이하여야 하며 JSON 파일 mtime도 marker보다 뒤여야 한다. `tests/`에서 `python -c "import live_test_gate as g; g.release_after_inspection('../tmp/my-work/inspection.json')"`으로 제출한다. 이 API가 `live.lock` 안에서 실행 식별자·시각·원문 SHA-256 재사용을 검사하고 점검 원장을 flush/fsync한 뒤 marker를 해제한다. 별도 commander 프로세스도 제출할 수 있으나 marker 직접 삭제·기록 재사용·pid-only 구형 marker 자동 승인은 허용하지 않는다. 거절이나 원장 I/O 실패에서는 marker를 유지한다. 원본/기존 행은 정리 대상이 아니며 unit의 실패 상태와 시도 수는 초기화하지 않는다. 시간 경과·PID 소멸도 해제 근거가 아니다. 이 확인은 개발 실행자의 일이며 사용자에게 매번 승인·정리를 맡기지 않는다.
 
 이 장치는 동일 계정의 악의적 코드에 대한 sandbox가 아니다. 직접 SQL/다른 시험 도구·Docker·원본 자격증명 접근과 Codex 앱 전체 호출/토큰 상한은 별도 경계다. 원본과 완전히 분리된 로컬 시험 환경을 구축했다고 해석하지 않는다. 모듈 import 자체도 임의 Python을 실행하므로 순수 모드는 LiveStack 입구 제한이며 OS 네트워크 차단이 아니다.
 
@@ -718,6 +720,21 @@ python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pa
 - 봉인: `backup`은 writer 정지 구간에 뜬 `kin.dump`가 완성되고 writer 재개·준비 확인이 끝난 뒤(실패해도) 그 덤프의 AuditLog 행을
   격리 검증 DB에서 digest로 만들어 백업 폴더의 `audit-checkpoint.json`(0600)에 쓰고, manifest의 `sha256`·`bytes`에 선언한 뒤(형식 1 그대로)
   백업 부모의 `audit-ledger.json`에 덧붙인다(K → manifest → 장부 순서). 정지 시간은 늘지 않고 봉인은 `kin-db`에 명령을 보내지 않는다.
+- 장부를 쓰는 `init`·`plan`·봉인과 `rotate`의 삭제 구간은 백업 부모 안의 장부 잠금(`.kin-audit-ledger.lock`, 0600, 소유자만 해제)으로
+  한 번에 하나만 돈다. 도구 폴더에는 쓰지 않으므로 보호 설치(`/opt/kin-deploy`, root 0755)를 백업 부모 소유 계정으로 실행해도 된다.
+  봉인(`backup` 안)과 rotation은 운영 잠금 → 장부 잠금 순서로만 잡고 `init`·`plan`은 장부 잠금만 잡는다. 어느 쪽도 기다리지 않고,
+  죽은 실행이 남긴 잠금은 지우거나 건너뛰지 않고 계속 거절한다(RT-P3-LEDGER-LOCK·P3R1-01, `ops_audit_integrity_test.py` PV-11·PV-12).
+  경합했을 때의 결과는 진입점마다 다르다:
+  - `init`·`plan` CLI: 종료코드 2(`{"error": "Refused"}`), 장부·백업 부모는 그대로다.
+  - 봉인(`ops_audit_integrity.seal`): `Refused`를 올리고 체크포인트·manifest 선언·장부를 쓰지 않는다. `backup` CLI는 이를 실패로 남긴다:
+    완성된 백업 폴더는 지우지 않고 그 manifest에 `backup_error = {"stage": "seal audit", "type": "Refused"}`를 기록하며 종료코드 1이다
+    (봉인되지 않은 그 세트는 rotation에서 `audit-undeclared`가 아니라 일반 세대로 판단된다; 다음 백업 전에 원인을 확인한다).
+  - `rotate`(단독 또는 `backup` 뒤): 아무것도 삭제·이름변경하지 않고 실패(종료코드 1)한다. 보존기간 변경(`plan`)은 rotation의 마지막
+    보존 판정→이름변경→삭제 사이에 끼어들 수 없으므로, 성공한 `plan`의 새 기간 안의 세트를 그 rotation이 지우지 않는다.
+- 읽기 전용 `verify`·`retention`은 잠금을 잡지도 깨지도 않는다. 단 `retention`은 진행 중인 봉인 전체의 일관된 snapshot이 아니다:
+  봉인이 manifest 선언을 쓴 뒤 장부에 덧붙이기 전 사이에 조회하면 그 세트를 `uncommitted`로 보고(종료코드 1)하고, 봉인이 끝난 뒤 같은
+  조회는 종료코드 0이다(P3R1-04, P3 이전부터의 관측 한계). 백업 실행 시각과 겹친 `retention`의 `uncommitted`는 백업이 끝난 뒤 다시
+  조회해 판정하고, 다시 조회해도 남을 때만 중단된 봉인으로 다룬다. `verify`는 고정된 체크포인트와 내보내기를 읽으므로 해당하지 않는다.
 - 장부가 없으면 봉인하지 않는다(자동으로 처음부터 시작하지 않음): manifest `backup_error = {"stage": "seal audit", "type": "LedgerMissing"}`,
   종료코드 1. 선언된 체크포인트가 있는 부모의 `init`은 거절되고 `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
 - 이전 봉인과 행이 다르거나(과거 사건: `previous_verification` failed/unverifiable), 이번 덤프의 가드가 무력하거나 표 모양이 다르면(현재 결함)
@@ -1444,6 +1461,266 @@ checks ownership labels and removes only the fixture's containers/network/tag.
 The isolated `ops_deploy_entry.py` requires a separately provisioned root-owned
 policy/library/repository and request-bound operator evidence. Running scripts
 from a developer checkout does not grant deployment authority.
+
+## EMR-introduction release mode (INTERIM-RELEASE-TOOLS)
+
+Round 4 수용 계약: 이 절은 배포 가능 판정이 아니다. 같은 최종 bytes의 Windows/Linux-root 행렬,
+기존 재현 시험과 mutant, 정상·강제 L-09b 합성 리허설, 독립 검수까지 완료해야 한다.
+관측은 `OK(value)`·성공한 조회의 `ABSENT`·`ERROR(reason)`을 구분한다. 변경 또는 미결 작업 뒤
+관측 실패는 durable UNKNOWN이며 새 phase 요청으로 해제하지 않는다. 모든 보조 작업의 서버 쪽 종료를
+확인한 뒤 정리·재시도·복원한다. 최초 cron 재개 전 L-11b, 복구 cron 재개 전 RB-04c에 표지를 보존한다.
+DB 무변경 release도 RL-01의 첫 해제 전에 PONR을 기록한다.
+
+Part B의 Linux browser는 root systemd/cgroup v2와 보호 설치 Python/Playwright/Chromium 경로가 필요하다.
+`Type=exec`, `ExitType=cgroup`, `KillMode=control-group`, `Restart=no`의 transient service를 생성하며
+입력과 출력은 run의 private 작업 저장소에 둔다. unit 신원·main exit·cgroup 전체 종료·잔존 zombie 부재를
+대조한 뒤에만 profile을 지운다. 조회 실패는 UNKNOWN으로 보존하고 재진입의 관측만으로 hold를 풀지 않는다.
+Windows는 suspended-create → Job 할당 → resume 및 전체 Job 종료를 검사한다. Windows 성공으로 Linux
+검증을 대신하지 않는다. Linux 설치 환경이 준비되지 않으면 L-01에서 거절한다.
+
+첫 smoke 시도는 phase에 제한된 300초, 재시도는 총 120초이며 각 마지막 20초는 정리 시간이다. 모든
+helper·HTTP·pagination·browser 작업에 같은 monotonic deadline의 남은 시간을 전달한다. 작업 deadline 뒤
+새 작업을 시작하지 않고 정리도 최종 deadline을 넘겨 연장하지 않는다. 끝내지 못한 정리는 UNKNOWN이다.
+인증·소유권·allowlist의 영구 거절은 재시도하지 않는다. 임시 member/client 삭제는 소유 marker와 기록한
+불변 ID를 함께 확인한다. 원래 쿠키의 logout replay와 기존 업무 화면 8개 검사는 유지한다.
+`tests/ops_deploy_smoke_test.py`는 실제 subprocess/Windows Job/느린 HTTP·pagination의 시간 제한과
+systemd 관측 계약을 검사한다. 실제 Linux Chromium의 crash/hang/setsid/double-fork 및 entry crash는
+별도 systemd 실행 환경의 필수 증거이며 순수 관측 fixture로 통과 처리하지 않는다.
+Windows의 고정 명령 실행도 같은 Job 경계로 CLI와 plugin을 묶는다. Compose plugin이 출력 파이프를
+물고 있어도 공통 smoke deadline 안에 회수해야 하며, stdin/stdout 파일·바이너리 입력·cwd/env 보존을 함께 검사한다.
+
+Part C의 `kin-pg16-logical-v1`은 PostgreSQL 16 카탈로그 목록과 객체별 속성 목록을 닫힌 집합으로 검사한다.
+schema·table/view/sequence/index·column ACL·enum/domain·routine·constraint·trigger·RLS policy·default ACL·
+dependency·comment를 구조화된 `(database, schema, kind, name, qualifier)` 키로 비교한다. OID·물리 tuple 배치·
+WAL/transaction horizon·planner 통계는 논리 복원 값이 아니다. large object·publication·event trigger·FDW·
+partition·추가 extension·외부 verifier 등 v1 미지원 항목은 checkout 보정 전 admission과 fenced capture에서 거절한다.
+마지막 큰 열을 삭제한 뒤 남는 기본 TOAST 저장소도 물리 배치로 본다. 저장소가 없는 복원본의 기본 정책과
+대조하되 TOAST 옵션·소유자·ACL·tablespace 및 index 옵션의 차이는 계속 검출한다.
+PostgreSQL이 중복 저장한 동일 의존성은 한 관계로 비교하며 대상·열·종류가 다른 의존성은 구분한다.
+`NOLOGIN` 역할도 저장 verifier를 조사하며 미보존 verifier가 있으면 거절한다. 설정은
+v1의 명시 목록(`ops_backup.py`의 `RESTORE_SETTINGS`)과 실제 PostgreSQL 설정 목록에 함께 속해야 하며
+role·database·role-in-DB 범위를 재현한다. 표시·인코딩·timeout·transaction 기본값·memory·search_path·row_security
+설정을 포함하고 preload library·역할 전환·temp_tablespaces·그 밖의 설정 및 postgres/template 설정 변경은 거절한다.
+스칼라 설정은 보조 연결에 활성화하지 않고 저장한다. 유일한 인용 목록 설정인 search_path만 PostgreSQL이 파싱하여
+재현하므로 짧은 timeout이나 읽기 전용 transaction 설정이 복원 연결의 쓰기를 막지 않는다.
+두 DB의 모든 사용자 schema/table/column 값을 NULL·중복 행·원래 JSON text까지
+비교한다. 한 table당 100,000행·1,000,000셀·64 MiB를 넘으면 materialize 전에 거절한다.
+보존된 `standard_conforming_strings`·`client_encoding` 설정과 관계없이 도구의 SQL 리터럴은 명시적 escape를,
+private 입출력과 daily/held/Bfail dump는 UTF-8을 사용한다. 실제 PG16 시험은 역슬래시·따옴표·한글 값과
+설정의 동시 복원을 검사하며 held capture가 실행한 실제 export를 복원한다.
+공용 조회는 `pg_catalog,public` 순서로 이름을 해석해 카탈로그 충돌을 막고 기존 seed의 public 테이블 조회를 유지한다.
+격리된 복원 대상의 작업 연결에만 쓰기 가능 상태와 자체 timeout을
+적용한다. 보존할 역할·DB 기본 설정은 변경하지 않으며 복원 뒤에도 원래 값과 대조한다.
+
+`postgres`, `template0`, `template1` 및 시스템 객체는 같은 image digest의 `initdb` 결과와 대조한다.
+원본 `template0`의 연결 설정은 바꾸지 않는다. 소유 helper의 private 물리 복사본에서만 연결을 열며
+원본 volume을 helper에 mount하지 않는다. `pg_basebackup`의 checkpoint/WAL 활동은 발생한다.
+현재 경계 조사는 합계 DB 크기 1 GiB 이내, helper memory 3 GiB/tmpfs 2 GiB의 v1 범위다.
+이 범위를 넘거나 기본 경계가 다른 cluster는 변경 전에 거절하며 generic PostgreSQL 복원을 보장하지 않는다.
+
+clone 변환은 실제 Keycloak 26.7.3 이미지에서만 실행한다. kin realm의 정확한 기존 행에서 secret·해당 origin
+URL·SMTP·IdP enabled 필드만 바꾸고 양 DB의 나머지 값을 다시 비교한다. 새 master administrator도
+새 immutable ID·credential·temporary marker·정확한 역할 행을 검증한 뒤 나머지 전체 값을 대조한다.
+테이블 이름으로 비교를 면제하지 않는다. 지원 버전·행·필드 계약이 맞지 않으면 거절한다.
+계약 근거는 [PostgreSQL 16 catalog](https://www.postgresql.org/docs/16/catalogs.html) 및
+[고정 Keycloak bootstrap 구현](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/services/managers/ApplianceBootstrap.java)이다.
+순수 계약 시험은 `tests/ops_backup_restore_test.py`, 실제 SQL/복원 검증은 `tests/ops_backup_held_test.py`의
+격리 PG16 fixture에서 수행한다. 순수 시험은 실제 PostgreSQL 쿼리의 성공 증거가 아니다.
+
+`tests/ops_deploy_round5_test.py`는 등록 exec의 개별 Engine ID, 관측 전용 작업과 호스트 변경의 구분,
+소유 복원 서버의 생성·준비·정리, 실제 held manifest를 받는 RB-02와 clone 변환 본문을 확인한다.
+감독 명령의 오류는 browser 자체의 확정 timeout과 구분하며, UNKNOWN이면 profile·비밀 입력과 hold를 유지한다.
+capture가 변경 전에 거절되면 이전 운영 entry와 daily backup lock을 복구한다. realm의 기본 required action,
+조건부 OTP와 비밀번호 정책은 fence 전에 읽기 전용으로 검사한다.
+
+PG16 시험에는 비밀번호가 있는 bootstrap kin의 verifier 재현, 누락·추가 verifier 거절, 과거 이름을 가진
+Keycloak index 컬럼과 중첩 CHECK의 dump/restore 동등성이 포함된다. 지원하지 않는 trigger·policy·rule comment,
+builtin membership 변경, 추가 template 속성은 capture admission에서 거절하고, 비어 있는 임시 namespace는 허용한다.
+Windows Job·Linux systemd·Docker exec의 실제 종료, healthcheck와 겹치는 300회 exec, 단명 프로세스와 겹치는
+200회 browser unit 및 정상·강제 복구·forward 리허설은 격리 실행 기록으로 별도 확인한다.
+
+지원 운영 명령은 root 보호 설치본의 `/opt/kin-deploy/entry.py compose config` 및
+`/opt/kin-deploy/entry.py compose recreate [db|api|keycloak|orthanc|proxy ...]`다. checkout 밖의
+`<state_dir>/compose-entries/<generation>/`에 논리 파일·고정 bytes·환경·runtime override의 해시를
+보존하고 완전한 세대만 active pointer로 활성화한다. 기본 tag가 오래되어도 고정 image ID를 사용한다.
+원시 env/config는 증거 export에 넣지 않는다. bare Compose와 기존 explicit `-f` 운영 절차는 폐기한다.
+interim policy가 설치되어 있으면 보호 entry의 기존 API 배포 lane은 거절한다. runner/host bytes는 유지한다.
+임의 root 명령까지 차단한다고 주장하지 않는다. 미이관 cron/helper가 하나라도 실행 가능하면 배포 불가다.
+
+Compose 소비자 inventory와 현재 연결:
+
+| 소비자 | 입력 수명·연결 또는 차단 | 필요한 실행 증거 |
+|---|---|---|
+| HostOps의 capture/introduce/verify/reopen 및 re-entry | `compose()` → active immutable entry; 직접 초기 config는 변경 전 입력 고정에만 사용 | phase별 관측 행렬·실제 config |
+| I-RV, rollback, rollback_reopen | 같은 entry, 이전 이미지 ID와 fresh recovery project/volume 세대 | 복원 뒤 새 프로세스 recreate |
+| one-shot provision/migrate/Keycloak/helper | 같은 entry와 등록된 worker; 비밀은 private 입력, 명령 기록은 해시 | CLI 실패 뒤 서버 종료·UNKNOWN 보존 |
+| backup/restore의 docker run/exec | Compose 호출 없음; HostOps의 등록·이미지·자원 경계로 실행 | daemon worker 종료·보존 |
+| 보호 설치 확인·운영자 recreate | `entry.py compose config/recreate`; 종료 상태·동일 plan/tool/host/entry, 실제 allowlist를 변경 전에 확인 | 원본 overlay/env/proxy가 없어도 새 명령 실행 |
+| 기존 API-only entry | interim policy 존재 시 실행 거절; runner/host 원본 유지 | 보호 설치의 거절 시험 |
+| `ops_deploy_preflight.py`의 COMPOSE 목록 | API-only 읽기 검증의 선언; 실행 caller가 아니며 interim entry에 목록을 제공하지 않음 | consumer 소스 대조 |
+| `emr-compose.py` | 선언 검사·SQL 출력만 수행; Docker/DB 실행 없음 | consumer 소스 대조 |
+| monitor/notify | 직접 Compose 실행 없음 | 설치된 실제 cron/timer/스크립트의 해시·명령 목록 대조 |
+| cron/helper 및 기존 runbook | 공통 entry 이관 또는 실행 불가를 설치 담당자가 입증; `.env`만 바꾼 이관은 불인정 | G04/G05/G06/G13/W4의 대상별 실행 증거, 미이관 0 |
+
+생산 논리 순서는 `docker-compose.yml`, `docker-compose.prod.yml`,
+`/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, `docker-compose.monitor.yml`이다.
+VM은 prod 다음, Halo 앞에 rehearsal override를 삽입한다. 마지막 생성 runtime override는 이미지·포트·복구
+project/volume만 담는다. v1에서 service `env_file` 의존성은 bundle admission 거절 대상이다.
+격리 합성 rehearsal은 보호 plan에 선언한 Halo overlay·bind source·external network 신원을 사용한다.
+파일 순서와 proxy의 읽기 전용 bind 목적지는 동일하게 검사하며, 생산 target의 고정 신원 검사는 유지한다.
+
+최종 stage-exit의 실환경 선행 관문:
+
+| 관문 | 배포 전에 보존할 관측·실행 근거 |
+|---|---|
+| R3-01/05/09 | 보호 설치 Python과 browser pin으로 Linux root `env -i` Chromium 실행, 실제 Keycloak 버전·필드, Docker 29 inspect 대조 |
+| R3-03/10 | 실제 B0의 소요·최대 메모리·disk/inode·WAL 여유 측정, backup root 소유권과 audit ledger 확인 |
+| R3-11/15 | 최종 plan·bundle digest, 동일 최종 change SHA의 CI·G3·독립 판정·두 합성 리허설 |
+| R3-07 | 고정 host key의 인증 SSH로 root 보호 저장소에 원자 전송, host/plan/B0/tool/run 및 1회 사용 receipt 결속 |
+| R3-13 | D1034 여유 RAM 10 GiB·다른 kin.emrb.live/kin.ops.run 부재를 기록하고 한 자기 stack만 실행; 이전 위반 기록 보존 |
+| R3-17 | 실제 realm OTP 흐름·network 소비자 목록·TLS/AppArmor·audit·bind 대조 및 미이관 자동 소비자 0 |
+
+수용된 제한의 고정 문구:
+
+- R3-04: ordinary daily는 기존 counts/catalog/EMR 검증 범위 유지. held B0/B1 exact 검증과 구별하며 daily exact-value 통과라고 보고하지 않음
+- R3-06: 이번 고정 release DOM locator 사용 가능. 제품 DOM/문구를 시험 때문에 바꾸지 않음. Stage9 최종 release에서 다시 검증
+- R3-07: 별도 producer 서명은 추가하지 않음. 승인 executor·host-key 고정 SSH·root 보호 저장·hash manifest·원자 설치·one-use로 신뢰 경계를 닫음. 임의 전달 bundle은 거절
+- R3-12: r2 비밀번호 6개 덮어쓰기 사실 보존; 해당 파일을 원시 증거로 인용하지 않음. r4 원시 기록은 수정 없이 별도 보존
+- R3-14: native 오류/exit 의미를 그대로 기록. signature 적응은 허용하되 원 acceptance와 positive control을 유지. “오류가 났으니 취약성 소멸” 판정 금지
+- R3-16: PurePosixPath/Desktop 정규화는 유지. 임의 플랫폼 확대 불필요. 실제 VM manifest 경로의 config/inspect 일치는 별도 필수
+- 범용 PG 기능 미지원은 실제 inventory 조사 후 admission 거절
+
+UNKNOWN/호스트 상실은 자동 rollback 보장 밖의 **보존 정지**로 명시하고, 담당자의 수동 진단·복구 경로와
+연락 책임을 실행 계획에 둔다. 야간 응답자가 없으면 다음 담당자 확인까지 maintenance/lock을 유지하는 장애
+시간을 수용해야 한다. 사람 부재를 이유로 강제 재개하지 않는다. 외부 backup OFF·retention/reader NOLOGIN·
+서비스 감사 이력 유지도 바꾸지 않는다.
+
+The API-only runner keeps refusing a release that brings the EMR-B storage; `scripts/ops_emr_introduction.py` is
+that release's own mode (requests with `"mode": "emr-introduction"` are routed there by `ops_deploy_entry.py`, with
+its own disabled-by-default policy `/etc/kin-deploy/emr-introduction.json`; `python scripts/ops_emr_introduction.py
+example policy|target` prints placeholders). Phases follow one another only: capture (observe-before, write fence,
+pre-EMR B0 with the writers held, isolated B0 restore check) → introduce (provisioning, installer migration, Keycloak
+cache option, member-rights import, API as node/kin_runtime, UI/proxy, ingress still fenced) → verify (fenced HTTPS
+smoke with a login made after the member import, the worklist UID and the frame bytes, the one-shot EMR probe
+`scripts/ops_emr_probe.py`, B1 and its same-point restore) → reopen; release (before any database change) and rollback
+are the exits. A rollback restores B0 into fresh volumes of a recovery Compose project pinned in the immutable common
+entry with the previous image IDs. The supported recreate command retains those recovery volumes; the restore ends
+RESTORED behind the maintenance ingress, and only `rollback_reopen` (the previous version's own login
+made after the restore, worklist UID and frame bytes) opens anything. One phase of a plan runs at a time (an OS lease
+the kernel frees with a dead process); a phase that never recorded its end is classified NEEDS_ATTENTION, never re-run.
+Every step records the host before and after it and every command it ran (`commands-<phase>-<request>.jsonl`: redacted
+argv, environment names, input hash, exit/timeout, output hashes). Production's introduce requires, once, the v2
+local-restore receipt that a rehearsal of exactly that production plan and B0 produced on the plan's rehearsal host
+(per-phase steps and result hashes, B0/B1/Bfail/recovery/previous-version smoke cross-checked, at most seven days old;
+`verify-receipt --bundle` re-checks the run directory); external backup stays OFF and no offsite receipt is claimed.
+Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (the
+introduced release's daily backup seals into it).
+
+The target manifest names the host's own wiring instead of tolerating drift: `declared_overlays` (a compose file
+outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds)
+with `external_networks` per service. In `compose_files` a production target lists the overlay immediately after
+`docker-compose.prod.yml` (where Compose renders the host's modified file byte-identically); a rehearsal lists
+`docker-compose.prod.yml`, its one rehearsal override (which replaces the proxy's volumes), then the overlay (D09).
+`tracked_overlay_reconcile` (only `docker-compose.prod.yml`) puts the modified tracked file back to the commit only
+after Compose renders the current files, the commit plus the overlay, and the declared list byte-identically. With
+declared overlays L-00b retains the legacy `COMPOSE_FILE=<the declared list>` line for the plan's compose digest
+(`prepare-env --target` and `compose-digest --target` produce it). That line does not authorize bare Compose or
+override explicit `-f` callers. Re-entry loads the immutable generation; first admission checks the overlay file
+(hash) and every folder above it (root or the allowed
+owner, not writable by others, no link; IRT2-19) and its bind sources. The first admission captures the verified
+overlay bytes and all effective interpolation values into the persistent immutable bundle. Subsequent calls and
+ordinary recreate read that bundle after the original inputs or proxy vanish. Any bundle corruption is a refusal;
+there is no checkout fallback. Temporary working copies remain private and may be removed after the plan ends;
+the active entry's inputs remain. Before a seed nothing runs to resolve from: the required VM monitor file needs
+`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`. Omitting monitor is not an alternative. A rehearsal binds no host path
+outside its checkout except its declared overlay binds and that one monitor bind (the proxy's read-only
+`/var/run/kin-monitor-public` with `docker-compose.monitor.yml` listed), so the clone may keep the folder where
+production does, outside the checkout (RT-P3-MONITOR-BIND). The supervised browser runs its interpreter with `-B` and
+`PYTHONDONTWRITEBYTECODE=1`, so no smoke or probe writes `__pycache__` into the protected install (RT-P3-PYCACHE).
+With `fix_checkout_mode` the capture first makes the checkout and its `.git` 0700, as the operator command after the
+release requires (RT-P3-GIT-MODE; recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+A rollback judges the checkout by that operator command's rule too, so an operating account's 0700 checkout whose
+`.git` alone is 0755 is restored to 0700 after approval, the lease and a durable `host_changed` record (P3R1-02).
+L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and
+bind mounts, networks, published ports; IRT2-02) and accepts as backup root this tool's own private folder or the
+operating account's 0700 folder (policy `repository_owner`; B0/B1/Bfail are then handed to that account, whose daily
+backups and ledger live there; IRT2-03). A clone's seed refuses a proxy certificate volume that is absent, empty, or
+whose key is not the certificate's own or whose chain does not verify against `ca_file` (D30), and compares the
+restored rows with the seed's `values.json` before and after its own recorded Keycloak changes (only their tables may
+differ; IRT2-24). Unattended (policy `smoke.browser_cmd`, D1062): L-01 proves the browser command (an executable file;
+a blank page within 60 s; `PLAYWRIGHT_BROWSERS_PATH` resolves) and the planned member's realm roles and top-level group
+(D01/D02). A temporary member `kin-smoke-<run>` (marked as this run's; a same-named account or client is never changed
+or deleted, IRT2-23) with a generated password in the secrets folder (never among the records; discarded with the
+member, IRT2-15) signs in through headless Chromium - the product's own sign-in; the worklist row and its Modality
+cell, the folders, the Reading Workspace with OHIF, the shortcuts dialog and the standalone viewer's image (IRT2-11);
+the logout, after which the ended session's original cookie is sent again from outside the browser and must be
+refused (IRT2-12) - then a temporary public client's Authorization Code + PKCE login for the token the API checks (the
+chain is verified first and the browser trusts only that leaf's SPKI pin; the origin's host:port maps to the
+maintenance port; the code is read from an unresolvable `.invalid` redirect; the profile lives in the secrets folder
+and is removed). The browser runs in its own process group (Windows: job object) and a timeout ends the whole tree
+(D17). A settled smoke failure gets one retry within 120 s with its own client and profile, the first attempt's record
+kept beside (D07); the eight checks become the executor's record, and the member is disabled and deleted before any
+reopen. The browser command carries its browsers' path itself (`/usr/bin/env
+PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers ...`). Production's receipt is admitted only together with its
+producer's run bundle: the rehearsal run directory's `result-*.json` and `journal.jsonl`, copied to
+`state/emr-bundles/<receipt sha256>/` (protected like the state) before the introduce request (IRT2-01). A step whose
+host could not be observed before it does not run; after a change it ends UNKNOWN (IRT2-22).
+
+- `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
+  allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state
+  machine (order, retained lock, budget/window, revert before the first database change, automatic rollback only when
+  no one-shot worker can be alive, none after an unknown end or past the point of no return). Its root-only class
+  needs an isolated Linux root fixture.
+- `python -B tests/ops_backup_held_test.py`: `ops_backup.capture_held()` never starts or stops a container, refuses
+  running writers before writing, refuses any EMR trace (EMR role, `emr_*` schema, tablespace) and any pre-EMR catalog
+  a rollback could not rebuild exactly (a further LOGIN role, role settings, another database or tablespace) in the
+  pre-EMR shape, and its result validates as a held capture; `ops_backup.restore_pre_snapshot()` replays the further
+  NOLOGIN roles and memberships, restores kin and keycloak with `--create` (owners and privileges kept) and compares
+  the whole catalog, also in the isolated B0 restore check. The catalog covers column, type, large-object and
+  foreign-server privileges, publications, event triggers, user mappings, function/view/trigger definitions and
+  sequence states; a membership another role than kin granted, and a kin whose attributes differ from a fresh
+  cluster's bootstrap kin, are refused at capture (IRT2-16/17); `values.json` (row count and SHA-256 per table of
+  every schema of both databases) is compared after every held restore (IRT2-24). Daily EMR sets record their role
+  catalog in the manifest and `rehearse` replays it in a kin-bootstrapped cluster (D23; older sets keep the
+  `pg_dumpall` path, which PostgreSQL 16 refuses for a `GRANTED BY kin` membership); a source database outside the
+  daily set (it dumps kin and keycloak) and its settings are named in the rehearsal result, not compared, while a
+  held capture still refuses it (R5-02, `ops_backup_test.py`). Its real-cluster class needs the
+  local image `postgres:16-alpine`.
+  `python -B tests/ops_backup_rotation_test.py`: after a complete, error-free `backup` (default `--rotate-keep 7`,
+  D1047; `--no-rotate` leaves the sets) and in `ops_backup.py rotate [--dry-run]` (the dry run lists exactly the plan
+  the run executes), rotation keeps N physically whole daily sets (every manifest component with its size and
+  SHA-256), never counts or deletes an incomplete set, never deletes release/held/protected/latest-verified sets,
+  re-judges an interrupted deletion (`.rotating-<name>`) by its original name and folder and leaves it in place when
+  anything protects it, and only thins a set that the audit ledger alone still retains (`validate_backup` then refuses it).
+  C-ROTATE는 계획·rename 직후·중단 삭제 재개·archive 삭제 직전에 같은 작업 잠금 소유권, 루트/세트 신원,
+  현재 manifest와 모든 component 해시, hold/protect/latest/audit 및 현재 complete 세대의 keep 조건을 다시 검사한다.
+  변화·조회 실패·불완전 세트는 `preserved-stop`과 CLI 실패로 남기며 남은 파일을 보존한다. orphan도 삭제하지 않는다.
+  `thinned.json`은 원 세트와 manifest/archive hash·크기에 결속한 v1 `THIN_PLANNED` → `THINNED_COMPLETE` 기록이다.
+  잘림·링크·불일치 marker는 삭제 근거가 아니다. 계획 marker와 archive가 모두 유효한 중단 thin만 재개할 수 있으며,
+  archive 삭제 뒤 완료 기록 전 중단된 세트는 자동 완료로 추정하지 않는다. 완료 marker가 있어도 남은 모든 component를
+  검증하며, archive가 아직 있으면 그 bytes도 검사한다. dry-run은 잠금 파일을 포함해 쓰지 않는다.
+  검사와 삭제 사이에는 보호 루트와 같은 잠금을 사용하는 소비자 계약을 적용한다. 악성 root 동시 변조를 보장하지 않는다.
+- The provision-first rule (Astra DR2-09): the mode refuses a database that already carries an EMR role, an `emr_*`
+  schema, the tablespace or a migration beyond the previous history before provisioning, instead of repairing it;
+  after the migration every relation of every `emr_*` schema, with its TOAST table and TOAST index, must be in
+  `kin_emr_access`.
+- `python -B tests/ops_emr_probe_test.py`: the probe verdict; with `KIN_TEST_API_IMAGE` set it runs the probe script
+  in that production image against a disposable provisioned and migrated PostgreSQL.
+- `tests/ops_deploy_host_container_test.py EmrIntroductionRehearsal` (opt-in `KIN_TEST_EMR_REHEARSAL=1` plus
+  `KIN_TEST_PREVIOUS_API_IMAGE`, `KIN_TEST_PREVIOUS_PROXY_IMAGE` built from the previous commit and
+  `KIN_TEST_API_IMAGE`, `KIN_TEST_PROXY_IMAGE` from the target): the fully synthetic rehearsal with the product's own
+  compose files on a local daemon - a source stack's B0 (with a synthetic DICOM frame and further NOLOGIN roles, a
+  membership, an owned schema and grants) seeds a clone with other names and secrets, which runs every phase through
+  rollback, rollback_reopen and an ordinary compose recreate, and produces the receipt (checked for its production
+  plan once, refused the second time). The clone carries a declared overlay (an external network and a host-file bind
+  outside its checkout, after the rehearsal override) that every proxy recreation keeps, and its certificate volume
+  check is shown refusing an absent and an empty volume first. The smoke runs unattended with the mode's reference
+  browser (`ops_emr_introduction.py browser-smoke`, Playwright Chromium): real Authorization Code + PKCE logins through
+  the clone's loopback maintenance ingress (a direct grant carries no `auth_time`, which the product refuses after the
+  member import). `KIN_TEST_EMR_REHEARSAL_EVIDENCE=<dir>` keeps each stack's run records. It is not a
+  rehearsal of a production backup copy, a real realm, production TLS or data volume; that is the separate rehearsal
+  on a disposable host.
+
 # 뷰어 반전 정밀도
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,
@@ -2536,6 +2813,32 @@ D1160 파일럿 답(크기 조절 옵션, 지금 화면이 기본): REQ-WS7-PANE
 - `tests/worklist_image_thumbnails_dom_test.py`
 - `tests/worklist_toolbar_dom_test.py`
 
+
+W6-LAND: REQ-WS5/WS6/WS7 → RISK-UID/HISTORY/DUPLICATE-INPUT →
+`report_editor_frame_dom_test.py` (TEST-REF-*; `--page` 실제 제공 HTML/bundle 연결, `--mutants` 모듈 반례, `--page-mutants` PAGE 연결 반례, `--integrated-module-mutants` 원래 M01..M34를 제공 페이지에서 검증).
+PAGE-05는 녹음 시점 문서·필드·커서·본문과 frame capture를 함께 보존한다. 녹음→입력→Backspace/Undo→늦은 Insert는 판독문을 바꾸지 않고 받아쓴 글을 남긴 채 재고정을 요구하며(HD05와 같은 계약, Redo 유지), 칸 클릭이나 Pin Caret 뒤 새 Insert는 새 위치에 넣는다. 무변경 수용, 검사 전환 취소도 실제 controller/session으로 검사한다.
+숨긴 Recommendation은 저장·재열람·일괄 거절에 그대로 들어가지만 키보드 초점과 받아쓰기 대상이 되지 않는다(상용구 더블클릭·미리보기 Insert·Clear·인용·구조화·받아쓰기 삽입·Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z).
+판독문 칸의 공유 스크롤 영역에는 고정 최소 높이가 없다. 열의 남은 높이를 차지하고, 그 아래 바닥줄과 알림 줄보다 먼저 줄어든다. 가로 배치에서 열 자체의 줄이 열보다 길면 문서가 아니라 열이 스크롤한다.
+W3 기준선 두 시험의 결정된 차이(D1300): `study_panel_page_dom_test.py`(W2 9d6984b 첫 화면)와 `study_panel_size_dom_test.py`(round 6 ea2a037 기본 패널)는 Findings/Conclusion 두 칸의 상자, 공유 스크롤 영역(.redit)의 픽셀, 첫 화면 node +1만 비교에서 뺀다. 스크롤 영역 아래(바닥줄·알림 줄)는 스크롤 영역이 남긴 자리에서 기하와 픽셀로 비교하고(`w6_moved`, `w6_regions`), 문서 루트가 넘치지 않으며 각 줄이 창 안이나 사용자가 휠로 스크롤할 수 있는 영역 안에 있음을 단언한다(`assert_w6_reachable`). 뺀 영역은 이 파일의 `--page` 사례(PAGE-22: W3 BOUND 크기·1366x768·짧은 창, 패널 닫힘/열림)가 맡는다.
+`report_dictation_host_dom_test.py` HD13(1366x768 460x420 frame에서 바닥줄이 frame 안)은 기준선 실패가 아니다. 519d6c5에서 통과하고 W6의 200 px 최소 높이가 깨뜨렸던 것을 r2에서 제품으로 고쳐 단언 변경 없이 통과한다.
+Related 왕복 사례의 커서 판정은 그 브라우저가 그린 줄 상자를 잰다(칸의 계산된 글꼴·줄 높이·안쪽 여백과 내용 폭을 가진 블록에 커서 앞 글을 넣어 높이를 잰다). 글꼴·줄 높이·여백 상수를 가정하지 않으므로 Linux CI(Arial 계열 12px, normal 14px)와 Windows에서 같은 기준으로 판정한다(W6R2-01).
+W6 frame 소비자(W6R2-03/04): 제공 페이지 밖에서 판독 영역 코드를 잘라 쓰는 하니스는 그 코드가 쓰는 report frame 모듈(`report-editor-frame.js`)을 실제 페이지처럼 함께 싣는다. 공용 계약(`report_page_contract.py` ASSETS)을 쓰는 citation/cursor/host/input/rebase/structure, 자체 모듈 목록을 쓰는 `report_dictation_capture_dom_test.py`(PAGE_SCRIPTS = 페이지의 script 태그 = NC-11 script-src 목록, CAP-00과 CAP-01이 일치를 단언), 추출한 Log out 처리기를 쓰는 `clinician_question_dom_test.py`(페이지의 frame 상태·mount·필드 위임을 그대로 잘라 main.html의 실제 판독문 칸 위에 올린다)가 이에 해당한다.
+숨긴 Recommendation에 글을 직접 넣는 하니스는 세 칸 자료를 만드는 준비 단계이며 사용자가 그 칸에 닿는다는 근거가 아니다(W6R2-02): `auth_logout_dom_test.py` select_and_type, `report_session_page_dom_test.py` type_report, `report_text_boundaries_dom_test.py`의 빈 칸 만들기, `report_dictation_input_dom_test.py` DI-02, `e2e/test_workspace_roaming.py` roam_01, `e2e/test_return_to_current.py` d03c_03. 상용구 단축어는 `e2e/test_template_preservation.py` d09a_03이 보이는 Findings/Conclusion에서 실제 키 입력과 Tab으로 검사하고, Recommendation은 상용구 삽입→초안 저장→새 세션 재열람과 작성자 경계로 검사한다.
+`worklist-ux.yml`의 measurements가 다섯 실행의 원문과 source tree/45-source order 입력을
+`tmp/workspace-ui-ci/report-editor-frame*`에 기록한다. 숨긴 Recommendation을 포함한 세 필드의
+저장 계약은 유지하며, 서버 CAS/migration/candidate 선택 ID는 변경하지 않는다.
+한글 OS IME와 의사 직접 확인, post-W3 통합 live 및 후보 CI/G3/교차 검수는 별도 관문이다.
+
+W4-FLOW(W4-LAND): W4-PAGE-01/04/05/06/08/10/12 → RISK-LOST-TEXT/WRONG-STUDY/FIRST-ROW-JUMP/HIDDEN-RECOMMENDATION →
+`report_flow_dom_test.py`(제공 split 페이지 + 합성 HTTP, 여러 검사의 초안 행·revision·판독문을 각각 가진 `FlowSite`; `--mutants` 반례 27개 = 번들·main.html 26 + 제공 자산 1).
+SAVE-OUTCOME: 서버가 확인하지 않은 글이 있는 검사를 떠나는 모든 길(행 클릭·Enter·Next/Prev·우클릭 메뉴·질문/자문/즐겨찾기 열기·Approve & Next)은 한 관문을 지나 그 글의 초안 저장이 확인된 뒤에만 옮긴다. 거절(Retry)·결과 모름(Check, 3초 상한)·충돌·글자 조합 중이면 머물고 Notice로 말한다(Leave anyway 없음). 확인되지 않은 글이 없으면 지금처럼 같은 이벤트 안에서 옮긴다(의사 마찰 0, 동기 전환을 단언). Check는 쓰기를 다시 보내지 않는다(W4F-01): 초안 명령 경로의 읽기(`draftClient.read`) 하나로 서버의 초안을 읽어 누른 순간의 초안 사진(같은 검사·작성자·선택, 세 칸·기준 판·인용/구조화 목록)과 전부 같을 때만 옮기고, 읽기 실패·불일치·더 친 글·A→B→A·늦은 성공 뒤 다른 창의 저장이면 PUT 없이 머문다 — 서버에 이 글이 없음을 읽었으면 Retry(쓰기 경로)를 함께 보인다. 초안 표시줄 어휘는 Draft Saved hh:mm / Save Failed — 사유 / Result Unknown / Unsaved Draft다.
+QUEUE-ANCHOR: Approve & Next(바닥줄, Prev 앞; 이름은 D1358 ①로 Approve 유지)는 승인이 받아들여지고 그 승인본이 편집기에 그려진 뒤에만 누른 순간의 줄에서 다음 검사로 간다. 승인으로 W 필터에서 빠져도 첫 행으로 가지 않고, 일반 Next/Prev도 같은 규칙이다(정렬·새로 고침 포함). 결과 모름·거절·늦은 답(그 사이 다른 검사를 고름, A→B→A)은 옮기지 않는다. 목적지는 누른 순간의 줄(UID·자리·그 다음 후보들)이 정하고(W4F-02), 승인이 받아들여져 그려진 뒤·쓰던 글의 저장을 기다린 뒤·Notice의 Retry/Check로 옮길 때 그 줄로 다시 확인한다: 그 사이 다시 정렬돼도 다른 행으로 가지 않고, 목적지가 필터·새로 고침으로 빠졌으면 그 줄의 다음 후보로, 남은 후보가 없으면 머문다.
+RECOMMENDATION-ROUNDTRIP: 상용구가 숨긴 Recommendation에 값을 넣으면 읽기 전용 띠 "Recommendation (existing value · read only)"가 그 글을 보이고, 자동 저장·재열람·새 문서·승인 payload에 그대로 실린다(숨긴 칸 직접 입력 없음). MENU-TARGET: 행 메뉴는 그 행이 지금 선택일 때만 열리고, 행·오더 메뉴의 모든 항목(지금 선택에 닿는 Match·Unmatch·Modify Exam 포함)은 메뉴를 연 그 선택(검사 UID·선택 순번·고른 오더)이 그대로일 때만 실행된다 — 바뀌었으면 요청 없이 그렇다고 말한다(W4F-03). W5 인터페이스(W4F-05): Approve·Approve & Next·Next/Prev·Ctrl+S는 모두 판독 명령의 공통 차단점 `reportCommandBlocked`를 지나고(까닭이 있으면 이동·확정 0, 없으면 같은 동기 경로·클릭 수), 읽기 전용 초안 사진 `reportDraftSnapshot`({uid, author, selectionSeq, revision, baseVersion, texts} + lists·unconfirmed, 사본)이 있다 — W5가 까닭과 Check를 더하는 자리이며 W5 화면·서버 기능은 없다(시험의 W5_REASON은 준비용 대역). Ctrl+S Finalize(Approve)(D1371): 페이지 dispatcher는 `readV2()`의 v2 단축키 표를 읽고(Ctrl+Alt+5·Ctrl+Alt+T도 그 표에서 그대로 동작), `finalize`는 `window.KinReportCommands.finalize()`로 실행해 true(명령이 실제로 실행됨)일 때만 브라우저 기본 동작을 막는다. 같은 hook은 W4-SC의 viewer frame 전달이 부르며, 승인(A)·확정/삽입 진행 중·잠긴 Approve에서는 false다. W4-SC 모델이 이 branch에 병합된 뒤(D1420) 준비용 대역(`finalize`가 든 v2 fixture 표)은 지웠다: Ctrl+S 사례는 실제 v2 모델(`readV2`·`action`)로만 돌고, `readV2`가 없는 모델에서는 실패한다.
+결정된 차이(소비자 재결속): `report_actions_dom_test.py`(바닥줄에 Approve & Next, 보이는 control 8), `report_session_page_dom_test.py`(거절된 쓰기 뒤 B로 옮기지 않고 A에서 목록 갱신을 받음), `report_editor_frame_dom_test.py`(`switch`는 선택이 바뀔 때까지 기다림, W6-PAGE-15 반례 위치가 관문으로 이동하고 조합 거절의 Notice를 함께 봄), `report_page_contract.py`·`report_dictation_host/input_dom_test.py`(잘라 쓰는 판독 영역이 등록하는 Notice·Approve & Next·Recommendation 띠 markup을 main.html에서 그대로 실음), `study_panel_page_dom_test.py`·`study_panel_size_dom_test.py`(첫 화면 node +10, 그림에서는 새 단추를 그 자리에서 보이지 않게 두고 나머지 픽셀·상자를 그대로 비교; size의 node 수는 닫힌 Workspace Shortcuts dialog 하위를 역할·이름으로 두 tree 모두에서 빼고 센다 — W4-SC v2의 두 탭(+7)은 그 시험 몫, D1371), `finding_command_test.cjs`의 U4L wiring 문자열 고정(함수 본문·CSS 문자열·selector 개수·ID 목록·HTML 주석에서 끝나는 조각)은 `report_dictation_host_dom_test.py` HD15–HD18의 행동·geometry 단언이 맡는다(W4F-04: HD17 = W4가 다시 묶은 받아쓰기 창–Recommendation 띠–판독문 칸의 쌓임과 경계, HD18 = 판독 화면에서 검토 창이 plain 상한을 따르고 짧은 열에서 자기 줄까지 양보하며 meta·단추가 한 줄; 주석만 바꾼 페이지에서도 같은 결과), `report_dictation_input_dom_test.py`(받아쓰기 창 조각은 다음 요소인 Recommendation 띠 앞에서 끝남), `report_text_boundaries`·`report_citation`(다른 검사로 옮긴 U5 상태는 `enterStudy` 준비 단계로 세움). Approve & Next는 `updateReportButtons`에서 Approve와 같은 잠금·사유를 따른다.
+후보 FLOW `e2e/test_report_flow.py` W4ReportFlowE2E.test_w4_01(선택 123 → 124)과 W6DoctorPathE2E 등 live 단위는 지휘자 실행 몫이다.
+W4 통합 수정(D1426): 초안 사진 사례의 "읽어도 아무것도 보내지 않음" 비교는 수신 critical-result 목록이 제 경로로 첫 쪽을 읽는 배경 요청 `GET /api/critical-results`만 양쪽에서 빼고 다른 모든 요청(쓰기·초안/판독문 읽기)은 그대로 센다 — 재시도·대기 연장 없이 판정 기준만 고쳤다(D1318; 고치기 전 부하 아래 5/12, 통합 검사 4/12).
+Reading Workspace의 Ctrl+S는 viewer 문서만 `VIEWER_STAND_IN`으로 대신한 두 사례가 실제 Finalize로 검사한다: 묶인 viewer frame의 Ctrl+S는 입력한 글로 approve 확정 1건을 보내고 브라우저 기본 동작을 막으며 승인(A) 뒤에는 막지 않고 두 번째 확정이 없고, top 문서의 Ctrl+S도 확정 정확히 1건이다 — frame 전달을 뺀 `reading-workspace.js` 사본을 그 URL로 내주는 반례 `frame-does-not-forward-finalize`(`ASSET_MUTANTS`, 번들·main.html 반례 규약은 그대로)가 `--mutants`에서 함께 세어진다.
+판독 열 최소 높이(370px)에서 읽기 전용 Recommendation 띠와 받아쓰기 검토가 함께 열리면 바닥줄이 열 밖 16.5px에 있던 것을 `reading-workspace.css`의 한 규칙(그때만 `.redit` 최소 160px, Findings/Conclusion은 각자 최소 이상, 띠가 없으면 변화 없음)으로 고쳤고, HD18은 그 최소 높이에서도 띠 유무 모두 바닥줄이 열 안에 있음을 단언한다.
 
 W3의 U0b 이력 계약(C6)은 `U0B-HISTORY`에서 승인된 U0b Git blob의 member/SQL 해시를 계속 검사한다. `U0B-STRUCT-NORMAL`과 R02는 현재 concern 소유권·facade forwarding·DI를 검사하고 v3 동작은 `workspace_layout_v3_service_test.cjs`가 검사한다. citation/structure migration의 `assert_behaviour`는 현재 소유권과 고정 이력을 모두 실행한다. 역사 기준 SHA·baseline은 바꾸지 않는다.
 

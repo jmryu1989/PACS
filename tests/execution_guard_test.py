@@ -47,6 +47,9 @@ TG01_EXCLUDED = {
     'tests/ops_deploy_host_container_test.py': 'creates its own kin-api/kin-proxy for the ops contract (Linux CI)',
     'tests/migration_rehearsal.py': 'operator tool bound to the ops_backup backup source',
     'tests/gateway_pipeline_live.py': 'container-object operations only on the proven-empty hosted gateway-e2e daemon',
+    'tests/ops_emr_introduction_test.py': 'kin-db is injected into a resolved-model fixture to assert check_resolved '
+                                          'refuses a production container; its real docker calls name only its own '
+                                          'token-labelled volumes and networkless check containers',
 }
 TG02_EXCLUDED = {
     'tests/audit_store_db_test.py': 'only its own labelled networkless containers, no Compose; its docker(*args) '
@@ -54,6 +57,17 @@ TG02_EXCLUDED = {
     'tests/ops_deploy_host_container_test.py': 'its own disposable project (--project-directory, -f)',
     'tests/gateway_pipeline_live.py': 'its own gateway project (-p, --env-file, -f) with a scrubbed environment',
     'tests/measurement_ci.py': 'its own hosted project (-p project, env=env) on a proven-empty daemon',
+    'tests/ops_deploy_round4_test.py': 'mock of the scripts/ops_emr_introduction.py Compose contract: argv filters '
+                                       'over the FakeDocker call recorder; its real Compose runs are only `config` '
+                                       'renders of its own temporary ComposeEntry via the tool Runner, no container',
+    'tests/ops_deploy_smoke_test.py': 'mock of the scripts/ops_emr_introduction.py Compose contract: fake-runner argv, '
+                                      'a TimeoutExpired argv and a Runner whose process tree is a patched Python '
+                                      'child; no Compose process is started',
+    'tests/ops_emr_introduction_test.py': 'mock of the scripts/ops_emr_introduction.py Compose contract (FakeDocker '
+                                          'recorder and its filters, HostOps.cmd on fake runners), plus real runs on '
+                                          'its own temporary checkout only: `config` renders (--project-directory, -f) '
+                                          'and a docker(*args) wrapper for its own labelled volumes and networkless '
+                                          'containers, no Compose',
 }
 Violation = namedtuple('Violation', 'rule file line detail')
 OPAQUE = object()
@@ -608,6 +622,33 @@ class InspectionReleaseTests(unittest.TestCase):
         self.ledger.write_text('not json\n', encoding='utf-8')
         self.assert_closed(lambda: gate.release_after_inspection(self.record))
 
+    def test_supervised_success_reopens_only_through_its_own_identity(self):
+        # A supervised worker's success is not the execution's success: the gate stays closed until the parent decides.
+        with gate.live_run(**self.identity, release=False) as identity:
+            gate.require_live_run()
+        original = self.marker.read_bytes()
+        self.assertEqual(json.loads(original), identity)
+        with self.assertRaises(gate.Refused):
+            with gate.live_run(**self.identity):
+                self.fail('A supervised success admitted another run before its parent released it')
+        for key, value in (('unit', 'another-unit'), ('attempt', 2), ('pid', identity['pid'] + 1),
+                           ('started_at', (datetime.now(timezone.utc) - timedelta(days=1)).isoformat())):
+            with self.subTest(field=key):
+                with self.assertRaises(gate.Refused):
+                    gate.release_after_success({**identity, key: value})
+                self.assertEqual(self.marker.read_bytes(), original)
+        with gate.exclusive(self.state / 'live.lock'):
+            with self.assertRaises(gate.LeaseBusy):
+                gate.release_after_success(identity, wait_seconds=0.3)
+        self.assertEqual(self.marker.read_bytes(), original)
+        self.assertFalse(self.ledger.exists())
+        gate.release_after_success(identity)
+        self.assertFalse(self.marker.exists())
+        with self.assertRaises(gate.Refused):
+            gate.release_after_success(identity)
+        with gate.live_run(**self.identity):
+            gate.require_live_run()
+
 
 class ExecutionGuardTests(unittest.TestCase):
     def setUp(self):
@@ -625,7 +666,7 @@ class ExecutionGuardTests(unittest.TestCase):
             'runner.ROOT=Path('+repr(str(self.tests.parent))+')\n'
             'runner.gate.STATE=Path('+repr(str(self.state))+')\n'
             'runner.__file__=__file__\nraise SystemExit(runner.main())\n', encoding='utf-8')
-        (self.tests/'probe.py').write_text('''import json, socket, subprocess, sys, time, unittest
+        (self.tests/'probe.py').write_text('''import json, os, socket, subprocess, sys, time, unittest
 from pathlib import Path
 from live_test_gate import require_live_run
 BASE=Path(__file__).parent
@@ -633,6 +674,9 @@ class Probe(unittest.TestCase):
  def test_pass(self): (BASE/'passed').write_text('yes')
  def test_fail(self): self.fail('intentional synthetic failure')
  def test_live(self): require_live_run(); (BASE/'live').write_text('yes')
+ def test_live_skip(self): require_live_run(); self.skipTest('synthetic skip')
+ def test_exit_zero(self): os._exit(0)
+ def test_live_exit_zero(self): require_live_run(); os._exit(0)
  def test_hold(self):
   require_live_run()
   with socket.create_connection(json.loads((BASE/'address.json').read_text()), timeout=75) as ready:
@@ -858,6 +902,170 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
         self.assertFalse((self.tests/'escaped').exists())
         self.assertEqual(self.run_plan(path).returncode, 125)
         self.assertTrue((self.state/'live-needs-inspection.json').exists())
+
+    def child_first_bootstrap(self):
+        """The real runner and gate under one explicit termination schedule (W4X-02).
+
+        At the parent's termination call the owned descendant is ended first and the
+        worker is awaited until it exits on its own, before the real termination runs.
+        Another unit then asks for the live gate after the worker's exit, after the
+        termination call and after the parent's final ledger write; every answer is
+        logged. Only this fixture's bootstrap changes, never the probe test.
+        """
+        (self.tests/'descendant.py').write_text(
+            'import os\nfrom pathlib import Path\nPath(__file__).with_suffix(".pid").write_text(str(os.getpid()))\n'
+            + (self.tests/'descendant.py').read_text(), encoding='utf-8')
+        log = self.path/'child-first.jsonl'
+        hook = '''
+import json, os, signal, sys
+_log = Path(''' + repr(str(log)) + ''')
+_plain = ''' + repr(str(self.bootstrap)) + '''
+_run, _popen, _write_json = runner.subprocess.run, runner.subprocess.Popen, runner.write_json
+_workers, _state = [], {}
+def _record(**row):
+    with _log.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps(row) + '\\n')
+def _probe(point):
+    unit = 'race-' + str(len(_state.setdefault('probes', [])) + 1)
+    _state['probes'].append(unit)
+    plan = runner.gate.STATE.parent / (unit + '-input.json')
+    plan.write_text(json.dumps(dict(unit=unit, mode='live', tests=[dict(file='tests/probe.py', case='Probe.test_live')],
+                                    max_attempts=3, timeout_seconds=30)), encoding='utf-8')
+    marker = runner.gate.STATE / 'live-needs-inspection.json'
+    before = marker.read_text(encoding='utf-8') if marker.exists() else None
+    other = _run([sys.executable, '-B', _plain, '--plan', str(plan)], capture_output=True, timeout=60)
+    _record(point=point, unit=unit, exit=other.returncode, stderr=other.stderr.decode('utf-8', 'replace'),
+            marker=before, live_written=(runner.ROOT / 'tests/live').exists())
+def _child_first():
+    _state['terminating'] = True
+    child = int((runner.ROOT / 'tests/descendant.pid').read_text())
+    if os.name == 'nt':
+        _run(['taskkill', '/PID', str(child), '/T', '/F'], capture_output=True, timeout=30)
+    else:
+        os.kill(child, signal.SIGKILL)
+    _record(point='worker-exit', exit=_workers[0].wait(timeout=60))
+    _probe('after-worker-exit')
+class _Recorded(_popen):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _workers.append(self)
+def _terminate_run(command, *args, **kwargs):
+    if not (command and command[0] == 'taskkill') or 'terminating' in _state:
+        return _run(command, *args, **kwargs)
+    _child_first()
+    try:
+        return _run(command, *args, **kwargs)
+    finally:
+        _probe('after-termination')
+def _terminate_group(pid, number):
+    _child_first()
+    try:
+        _killpg(pid, number)
+    finally:
+        _probe('after-termination')
+def _ledger(path, value):
+    _write_json(path, value)
+    if 'terminating' in _state and path.name == 'probe.json':
+        _probe('after-ledger-write')
+if '--plan' in sys.argv:
+    runner.subprocess.Popen, runner.subprocess.run, runner.write_json = _Recorded, _terminate_run, _ledger
+    if hasattr(os, 'killpg'):
+        _killpg = os.killpg
+        runner.os.killpg = _terminate_group
+'''
+        path = self.path/'child-first-bootstrap.py'
+        path.write_text(self.bootstrap.read_text().replace('raise SystemExit(runner.main())',
+                                                             hook + 'raise SystemExit(runner.main())'), encoding='utf-8')
+        return path, log
+
+    def test_worker_exit_during_termination_keeps_marker_and_refuses_every_unit(self):
+        bootstrap, log = self.child_first_bootstrap()
+        listener = self.readiness_listener()
+        path = self.plan(case='test_timeout', mode='live', timeout=30)
+        with subprocess.Popen([sys.executable, '-B', str(bootstrap), '--plan', str(path)],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as runner:
+            ready = self.child_ready(listener)
+            self.assertIsNone(runner.poll(), 'Runner expired before descendant readiness')
+            stdout, stderr = runner.communicate(timeout=180)
+            self.assertEqual(runner.returncode, 124, stderr)
+        try:
+            ready.sendall(b'G')
+            closed = ready.recv(1)
+        except (ConnectionResetError, BrokenPipeError):
+            closed = b''
+        self.assertEqual(closed, b'', stdout)
+        self.assertFalse((self.tests/'escaped').exists())
+        rows = [json.loads(line) for line in log.read_text(encoding='utf-8').splitlines()]
+        # The schedule really happened: the worker ended normally before the parent finalised.
+        self.assertEqual([row['point'] for row in rows],
+                         ['worker-exit', 'after-worker-exit', 'after-termination', 'after-ledger-write'], rows)
+        self.assertEqual(rows[0]['exit'], 0, rows)
+        result = json.loads(next(line[len('PLAN_RESULT '):] for line in stdout.decode().splitlines()
+                                 if line.startswith('PLAN_RESULT ')))
+        self.assertEqual((result['status'], result['exit_code']), ('interrupted', 124))
+        for row in rows[1:]:
+            with self.subTest(point=row['point']):
+                self.assertEqual(row['exit'], 125, row)
+                self.assertIn('fixture inspection', row['stderr'])
+                self.assertEqual(row['marker'], rows[1]['marker'])
+                self.assertFalse(row['live_written'])
+                self.assertFalse((self.state/(row['unit'] + '.json')).exists())
+        marker_path = self.state/'live-needs-inspection.json'
+        marker = json.loads(marker_path.read_bytes())
+        self.assertEqual(json.loads(rows[1]['marker']), marker)
+        self.assertEqual((marker['unit'], marker['module'], marker['attempt'], marker['plan_sha256']),
+                         ('probe', 'tests/probe.py', 1, result['plan_sha256']))
+        same = self.run_plan(path)
+        self.assertEqual(same.returncode, 125)
+        self.assertIn(b'inspection', same.stderr)
+        self.assertEqual(len(json.loads((self.state/'probe.json').read_bytes())['attempts']), 1)
+        other = self.run_plan(self.plan(unit='other', case='test_live', mode='live'))
+        self.assertEqual(other.returncode, 125)
+        self.assertIn(b'fixture inspection', other.stderr)
+        self.assertFalse((self.tests/'live').exists())
+        self.assertEqual(json.loads(marker_path.read_bytes()), marker)
+        # The preserved marker is the one an inspection releases.
+        record = self.path/'inspection.json'
+        record.write_text(json.dumps({**marker, 'exit': 124, 'artifacts': ['run.log'], 'stack': {'containers': []},
+                                      'inspected_at': datetime.now(timezone.utc).isoformat(),
+                                      'inspector': 'commander'}), encoding='utf-8')
+        stamp = max(time.time_ns(), marker_path.stat().st_mtime_ns + 1_000_000)
+        os.utime(record, ns=(stamp, stamp))
+        with patch.object(gate, 'STATE', self.state):
+            gate.release_after_inspection(record)
+        self.assertEqual(self.run_plan(self.plan(unit='admitted', case='test_live', mode='live')).returncode, 0)
+
+    def test_live_success_is_reopened_by_the_parent_and_admits_the_next_unit(self):
+        result = self.run_plan(self.plan(unit='first', case='test_live', mode='live'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.state/'live-needs-inspection.json').exists())
+        self.assertEqual(json.loads((self.state/'first.json').read_bytes())['attempts'][-1]['status'], 'passed')
+        (self.tests/'live').unlink()
+        self.assertEqual(self.run_plan(self.plan(unit='second', case='test_live', mode='live')).returncode, 0)
+        self.assertTrue((self.tests/'live').exists())
+
+    def test_exit_status_zero_without_a_completed_plan_is_not_success(self):
+        for unit, case, mode in (('pure-exit', 'test_exit_zero', 'pure'), ('live-exit', 'test_live_exit_zero', 'live')):
+            with self.subTest(mode=mode):
+                result = self.run_plan(self.plan(unit=unit, case=case, mode=mode))
+                self.assertEqual(result.returncode, 125, result.stderr)
+                row = json.loads((self.state/(unit + '.json')).read_bytes())['attempts'][-1]
+                self.assertEqual(row['status'], 'failed')
+                marker = self.state/'live-needs-inspection.json'
+                self.assertEqual(marker.exists(), mode == 'live')
+        self.assertEqual(json.loads(marker.read_bytes())['unit'], 'live-exit')
+        other = self.run_plan(self.plan(unit='next', case='test_live', mode='live'))
+        self.assertEqual(other.returncode, 125)
+        self.assertIn(b'fixture inspection', other.stderr)
+        self.assertFalse((self.tests/'live').exists())
+
+    def test_skipped_live_run_stays_closed_for_other_units(self):
+        self.assertEqual(self.run_plan(self.plan(case='test_live_skip', mode='live')).returncode, 125)
+        self.assertEqual(json.loads((self.state/'live-needs-inspection.json').read_bytes())['unit'], 'probe')
+        result = self.run_plan(self.plan(unit='next', case='test_live', mode='live'))
+        self.assertEqual(result.returncode, 125)
+        self.assertIn(b'fixture inspection', result.stderr)
+        self.assertFalse((self.tests/'live').exists())
 
     def test_descendant_fixture_can_observe_release_without_termination(self):
         listener = self.readiness_listener()

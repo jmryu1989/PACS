@@ -41,14 +41,17 @@
       // 붙여넣기는 편집기에 쓴다. 클립보드를 읽는 사이 검사가 바뀌었거나, 로그아웃 준비·세션 종료가 있었거나, 그 칸의 글이
       // 달라졌으면 쓰지 않는다 — 읽기 전에 본 글 위에 덮어쓰지 않는다. (붙여넣기 자체의 편집 안전은 편집기 단위의 몫이다.)
       const at = work.capture("editor");
+      const frame = mountReportFrame();
+      if (!frame) return;
+      const end = frame.read("findings").length;
+      const insertion = frame.capture("findings", { start: end, end });
       let text;
       try { text = await navigator.clipboard.readText(); } catch (e) { return; }
       work.commit(at, () => {
         if (reportWriteBlock()) return;
         // Findings 끝에 붙인다. 붙여 넣은 글은 타이핑한 글과 같은 이 문서의 편집이다 — 표시 없이 대입만 하면 자동 저장도
         // 로그아웃도 그 글을 모르고 다음 폴링이 서버 글로 덮는다(U5CLI-F09).
-        const end = $("#findings").value.length;
-        editReport([{ field: "findings", start: end, end, text }]);
+        editReport([{ field: "findings", at: insertion, text }]);
       });
     });
     const reportPreview = KinReportPreview({ api, actorName: displayActor, toast,
@@ -65,14 +68,37 @@
      * Next가 "다음"이 아니라 "처음"이 되는 것이다. Prev는 `list[-2]`라 아무 일도 안 났다 —
      * 두 버튼이 서로 다르게 틀렸다.
      * 목록 밖이면 방향에 맞게 끝에서 시작한다: Next는 첫 번째, Prev는 마지막.
+     *
+     * 단, 선택이 목록에서 **빠진 것**은 목록 밖이 아니다(W4-PAGE-05, 설계 v5 §3 "첫 행 회귀 없음"). Approve로 그 검사가 W 필터에서
+     * 빠지면 Next는 "처음"이 아니라 그 검사가 서 있던 자리의 다음이어야 한다.
+     *
+     * 그래서 목적지는 **누른 순간의 줄(queue anchor)**이 정한다: 지금 검사(UID)와 그 자리(index), 그 다음(Prev는 그 앞) 검사와
+     * 그 뒤의 후보들을 누른 순간의 목록 순서 그대로 잡아 둔다. 지금 검사가 목록에서 빠져 있으면 그 검사가 마지막으로 보였던
+     * 순서에서 잡고, 그 검사를 본 순서가 아예 없을 때만(목록 밖에서 연 검사) 예전처럼 끝에서 시작한다. 쓰던 글의 저장을 기다리거나
+     * (Next·Prev) 승인이 받아들여져 그려질 때까지 기다린 뒤에는(Approve & Next) 그 줄로 목적지를 **다시 확인한다**: 그 사이 목록이
+     * 다시 정렬됐어도 다른 행으로 가지 않고, 그 다음 검사가 필터·새로 고침으로 목록에서 빠졌으면 그 줄에서 그 뒤의 첫 검사(지금
+     * 목록에 있는 것)로 가며, 남은 후보가 없으면 머문다 — 목록의 첫 행으로 튀지 않는다.
      */
+    function queueAnchor(step) {
+      const list = orderedStudies().map(s => s.uid), uid = selectedUid;
+      let order = list, index = list.indexOf(uid);
+      if (index === -1 && uid && queueSeen?.uid === uid) { order = queueSeen.order; index = order.indexOf(uid); }
+      const ahead = index === -1 ? (step > 0 ? list : [...list].reverse())
+        : step > 0 ? order.slice(index + 1) : order.slice(0, index).reverse();
+      const shown = new Set(list), from = ahead.findIndex(id => id !== uid && shown.has(id));
+      return { uid, index, step, next: from === -1 ? null : ahead[from], candidates: from === -1 ? [] : ahead.slice(from) };
+    }
+    /** 누른 순간의 줄에서 지금 갈 곳: 그때의 다음 검사가 아직 목록에 있으면 그 검사, 빠졌으면 그 줄에서 그 뒤의 첫 검사, 없으면 null. */
+    function queueTarget(anchor) {
+      const shown = new Set(orderedStudies().map(s => s.uid));
+      return anchor.candidates.find(id => id !== anchor.uid && shown.has(id)) ?? null;
+    }
     function move(step) {
-      const list = orderedStudies();
-      if (!list.length) return;
-      const i = list.findIndex(s => s.uid === selectedUid);
-      if (i === -1) { select(step > 0 ? list[0].uid : list[list.length - 1].uid, { openSelected: true }); return; }
-      const next = list[i + step];
-      if (next) select(next.uid, { openSelected: true });
+      // 판독 명령의 공통 차단점(W5 인터페이스): 까닭이 있으면 옮기지 않는다.
+      const why = reportCommandBlocked(step > 0 ? "next" : "prev");
+      if (why) { toast(why, "err"); return; }
+      const anchor = queueAnchor(step);
+      if (anchor.next) select(anchor.next, { openSelected: true, revalidate: () => queueTarget(anchor) });
     }
     $("#b-prev").addEventListener("click", () => move(-1));
     $("#b-next").addEventListener("click", () => move(1));

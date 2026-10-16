@@ -106,6 +106,7 @@ class ReportSessionPageTest(unittest.TestCase):
 
     def type_report(self, fields=auth.FIELDS):
         self.page.locator("#rows tr", has_text=auth.PATIENT).first.click()
+        # Setup, not a user path (W6R2-02): three-field data, the hidden Recommendation filled directly.
         for key, value in fields.items():
             self.page.locator("#" + key).fill(value)
 
@@ -214,9 +215,11 @@ class ReportSessionPageTest(unittest.TestCase):
         if update in ('patch', 'refused-patch', 'tele'):
             self.begin_metadata_change(update)
         self.site.put_answers = [(503, {'code': 'REPORT_DRAFT_UNAVAILABLE', 'message': 'SYN'})]
+        # W4 decided difference (W4-PAGE-06): a refused write keeps the reader on A with the Notice instead of moving to B;
+        # the list updates below then arrive while A's unconfirmed text is on screen.
         self.page.locator('#rows tr', has_text=auth.PATIENT_B).first.click()
-        expect(self.page.locator('#clinical')).to_contain_text(auth.PATIENT_B)
         self.wait(lambda: len(self.site.puts) == 1)
+        expect(self.page.locator('#report-notice')).to_contain_text('Save Failed')
         expect(self.page.locator('#toast')).to_contain_text('서버 저장 실패')
         self.assertIsNone(self.site.stored())
         lists = self.site.count('GET', '/api/studies')
@@ -234,7 +237,6 @@ class ReportSessionPageTest(unittest.TestCase):
         if update in ('patch', 'tele'):
             expect(self.page.locator('#rows tr', has_text=auth.PATIENT).first).to_contain_text(
                 'Unverified' if update == 'patch' else 'cancelled', ignore_case=True)
-        self.page.locator('#rows tr', has_text=auth.PATIENT).first.click()
         expect(self.page.locator('#clinical')).to_contain_text(auth.PATIENT)
         self.assert_text()
         self.page.clock.run_for(20001)

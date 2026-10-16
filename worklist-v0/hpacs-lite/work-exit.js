@@ -123,6 +123,13 @@
       const begin = () => {
         // 기다리는 사이 취소했거나 세션이 끝났으면(닫힌 화면이 이어받았다) 여기서 할 일이 없다.
         if (logoutPrep !== prep || prep.state !== "waiting" || work.state() !== "active") return;
+        if (reportFrame?.isComposing()) {
+          // Finish the native composition before freezing the recovery/save snapshot.
+          // A delayed compositionend resumes this same logout click, unless it was cancelled.
+          document.addEventListener("compositionend", () => queueMicrotask(begin), { once: true });
+          document.activeElement?.blur();
+          if (reportFrame.isComposing()) { showLogoutPanel(prep); return; }
+        }
         Object.assign(prep, captureReport());
         saveForLogout(prep);
       };

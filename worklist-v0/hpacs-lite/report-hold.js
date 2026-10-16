@@ -100,10 +100,9 @@
     }
 
     // 판독문에 두 글자 이상 쓰면 그때 점유가 시작된다
-    ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
-      $(sel).addEventListener("input", () => {
+    onReportField("input", () => {
         updateReportTemplateButton();
         if (!selectedUid) return;
         const total = $("#findings").value.length + $("#conclusion").value.length + $("#recommendation").value.length;
         if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);
-      }));
+      });
