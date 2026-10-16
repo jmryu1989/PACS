@@ -919,7 +919,12 @@ class CheckpointDocker:
     def volume_exists(self, name):
         if self.run(["docker", "volume", "inspect", name], check=False).returncode == 0:
             return True
-        self.run(["docker", "info", "--format", "{{.ServerVersion}}"])
+        # A failed inspect is an absent volume only when the daemon answers. r5 (the native smoke on the CI runner): the
+        # Docker 28 CLI's `docker info --format` exits 0 with an empty answer when the daemon is unreachable, so the answer
+        # itself (a server version) is required, not only the exit code.
+        info = self.run(["docker", "info", "--format", "{{.ServerVersion}}"], check=False)
+        if info.returncode or not info.stdout.decode(errors="replace").strip():
+            raise RuntimeError("the daemon did not answer; a failed volume inspect is not an absent volume")
         return False
 
     def image_present(self, image_id):
