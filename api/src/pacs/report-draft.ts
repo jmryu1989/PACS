@@ -208,10 +208,50 @@ export class PacsReportDraft {
         ownerSub: owner.sub, ownerAuthor: owner.author, requestHash: asked.requestHash, proposalHash: asked.proposalHash,
         expectedEpoch: expected.epoch, expectedRevision: expected.revision, sourceUid: related.source.uid,
         sourceVersion: related.source.version, targetBaseVersion: related.targetBaseVersion, section: related.section };
+      /**
+       * 영수증만으로 끝나는 답: 같은 ID의 다른 요청(ID_REUSED)과 이미 끝난 영수증(applied·discarded)의 replay·취소 답. Source는 쓰지
+       * 않는다 — 과거 적용을 답하는 데 지금 Source를 다시 읽을 이유가 없고, Source의 원본 조회 실패·권한 상실·행 경합이 이미
+       * 적용된 삽입의 답을 막아서는 안 된다(O4 R1). 영수증이 없거나 refused면 null: 새 적용·재시도·취소 판정으로 간다.
+       */
+      const settled = (receipt: any, envelope: any) => {
+        if (!receipt) return null;
+        // 같은 ID의 다른 요청: 이 호출만 거절하고 그 행은 바꾸지도, 답하지도 않는다.
+        if (!relatedSameBinding(receipt, owner, uid, related, expected, asked.requestHash, asked.proposalHash))
+          return { refusal: relatedInsertIdReused() };
+        const view = relatedResult(related.insertRequestId, receipt, envelope, true, asked);
+        if (receipt.state === 'applied') {
+          if (related.intent === 'discard') return { refusal: relatedInsertRefusal('RELATED_INSERT_NOT_DISCARDABLE', envelope, view) };
+          // 정확한 replay: 쓰기·감사·revision 증가 없이 지금 봉투와 영수증. clear/discard/commit/force/세대 교체 뒤에도 다시 넣지 않는다.
+          return view.result === 'applied' ? { body: { ...envelope, relatedInsert: view } }
+            : { refusal: relatedInsertRefusal('RELATED_INSERT_SUPERSEDED', envelope, view) };
+        }
+        if (receipt.state === 'discarded')
+          return related.intent === 'discard' ? { body: { ...envelope, relatedInsert: view } }
+            : { refusal: relatedInsertRefusal('RELATED_INSERT_DISCARDED', envelope, view) };
+        return null;
+      };
+      /**
+       * 먼저 지금 Target의 개인 초안 읽기 관문(역할·기관·StudyAccess·예비 판독)과 owner 아래, 한 RepeatableRead 스냅숏에서 내 초안과
+       * 영수증을 읽어 끝난 영수증·ID_REUSED를 답한다. Source 준비도 Source 행 잠금도 없다. 쓰기가 없으므로 잠그지 않는다 — 이
+       * 스냅숏 뒤에 끝난 영수증은 아래 잠근 트랜잭션이 CAS 전에 다시 판정한다.
+       */
+      await this.studyAccess.prepare(c,[uid]);
+      const early = await this.prisma.$transaction(async tx => {
+        const state = await this.access.gate(uid, c, tx);
+        if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
+        if (!canReadPreliminary(state, c))
+          throw new ForbiddenException(
+            `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+        const mine = await this.access.myDraft(uid, c.actor, tx);
+        const stored = await tx.reportDraftInsertReceipt.findUnique({ where: { insertRequestId: related.insertRequestId } });
+        return settled(stored, draftEnvelope(uid, owner, state.draftEpoch, mine));
+      }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+      if (early?.refusal) throw early.refusal;
+      if (early) return early.body;
       const outcome = await this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch,
         async () => {
           await this.studyAccess.prepare(c,[uid]);
-          // 취소는 Source를 읽지 않는다. 적용·재시도만 Source의 현재 가독을 다시 요구한다.
+          // 취소는 Source를 읽지 않는다. 새 적용·refused 재시도만 Source의 현재 가독을 다시 요구한다(잠금 밖, 유한하게).
           if (related.intent === 'apply') await this.studyAccess.prepare(c,[related.source.uid]);
         }, async (tx, state, audit) => {
         // 지금 Target 개인 초안의 가독이 영수증 판정보다 먼저다(replay도 지금 권한 아래에서만 답한다).
@@ -228,9 +268,9 @@ export class PacsReportDraft {
         const receipt = receipts[0] ?? null;
         const envelope = draftEnvelope(uid, owner, state.draftEpoch, row);
         const view = (stored: any) => relatedResult(related.insertRequestId, stored, envelope, true, asked);
-        // 같은 ID의 다른 요청: 이 호출만 거절하고 그 행은 바꾸지도, 답하지도 않는다.
-        if (receipt && !relatedSameBinding(receipt, owner, uid, related, expected, asked.requestHash, asked.proposalHash))
-          return { refusal: relatedInsertIdReused() };
+        // 잠금 아래 다시 판정한다: 앞의 스냅숏 뒤에 경쟁한 요청이 적용·취소했으면 그 끝난 영수증으로 답한다(놓치지 않는다).
+        const decided = settled(receipt, envelope);
+        if (decided) return decided;
         // 영수증 행의 전이는 refused에서만, receiptRevision 하나씩 (migration의 guard와 같은 규칙).
         const move = async (from: any, to: { state: string; appliedRevision: number | null; reason: string | null }) => {
           const moved = await tx.reportDraftInsertReceipt.updateMany({
@@ -241,22 +281,12 @@ export class PacsReportDraft {
         };
         if (related.intent === 'discard') {
           // 거절이 확인된 그 receiptRevision의 삽입만 취소 표식이 된다. 초안 본문·revision과 Source는 건드리지 않는다.
-          if (!receipt || receipt.state === 'applied')
-            return { refusal: relatedInsertRefusal('RELATED_INSERT_NOT_DISCARDABLE', envelope, view(receipt)) };
-          if (receipt.state === 'discarded') return { body: { ...envelope, relatedInsert: view(receipt) } };
+          if (!receipt) return { refusal: relatedInsertRefusal('RELATED_INSERT_NOT_DISCARDABLE', envelope, view(receipt)) };
           if (receipt.receiptRevision !== related.expectedReceiptRevision)
             return { refusal: relatedInsertRefusal('RELATED_INSERT_RECEIPT_CHANGED', envelope, view(receipt)) };
           const fenced = await move(receipt, { state: 'discarded', appliedRevision: null, reason: 'INSERT_DISCARDED' });
           return { body: { ...envelope, relatedInsert: view(fenced) } };
         }
-        // 정확한 replay: 쓰기·감사·revision 증가 없이 지금 봉투와 영수증. clear/discard/commit/force/세대 교체 뒤에도 다시 넣지 않는다.
-        if (receipt?.state === 'applied') {
-          const replay = view(receipt);
-          return replay.result === 'applied' ? { body: { ...envelope, relatedInsert: replay } }
-            : { refusal: relatedInsertRefusal('RELATED_INSERT_SUPERSEDED', envelope, replay) };
-        }
-        if (receipt?.state === 'discarded')
-          return { refusal: relatedInsertRefusal('RELATED_INSERT_DISCARDED', envelope, view(receipt)) };
         // 새 적용 또는 refused의 같은 ID 재시도. 업무 거절은 초안을 쓰기 전, 아직 유효한 이 트랜잭션에서 refused 행으로 남긴다
         // (같은 사유면 행을 다시 쓰지 않는다). DB 오류는 여기서 잡지 않는다 — 결과를 모르는 채 거절 행을 쓰지 않는다.
         const refuse = async (reason: RelatedInsertRefusal) => {

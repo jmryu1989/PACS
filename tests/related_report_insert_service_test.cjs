@@ -27,7 +27,7 @@ const fs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
 if (!fs.existsSync('/app/dist/pacs')) require('./service_test_loader.cjs');
 
-const { HttpException, NotFoundException, RequestMethod } = require('/app/node_modules/@nestjs/common');
+const { HttpException, NotFoundException, RequestMethod, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
 const { PATH_METADATA, METHOD_METADATA, ROUTE_ARGS_METADATA } = require('/app/node_modules/@nestjs/common/constants');
 const { RouteParamtypes } = require('/app/node_modules/@nestjs/common/enums/route-paramtypes.enum');
 const { Prisma } = require('/app/node_modules/@prisma/client');
@@ -86,10 +86,12 @@ function draftChecks(row) {
 }
 
 function storeDouble() {
-  const store = { tables: {}, events: [], ops: [], faults: [], hooks: {}, queue: Promise.resolve(), seq: 0 };
+  // lockedRows: StudyState rows another transaction holds; taking them fails as a lock wait past lock_timeout (55P03)
+  const store = { tables: {}, events: [], ops: [], faults: [], hooks: {}, lockedRows: new Set(), queue: Promise.resolve(), seq: 0 };
   const event = (label, what) => store.events.push(label + ' ' + what);
-  const fault = (model, op) => {
-    const at = store.faults.findIndex(f => f.model === model && f.op === op);
+  // a fault may name the row it hits (where.uid), so that it lands on the Source read and not on the Target's
+  const fault = (model, op, where) => {
+    const at = store.faults.findIndex(f => f.model === model && f.op === op && (f.uid === undefined || f.uid === where?.uid));
     if (at >= 0) throw store.faults.splice(at, 1)[0].error;
   };
   const same = (a, b) => (a instanceof Date || b instanceof Date ? +a === +b : (a ?? null) === (b ?? null));
@@ -126,7 +128,7 @@ function storeDouble() {
     const check = row => { if (name === 'reportDraftInsertReceipt') receiptChecks(row); if (name === 'reportDraft') draftChecks(row); };
     return {
       async findUnique({ where, select } = {}) {
-        fault(name, 'findUnique'); event(label, `read ${name} ${JSON.stringify(where)}`);
+        fault(name, 'findUnique', where); event(label, `read ${name} ${JSON.stringify(where)}`);
         const row = rows().find(r => matches(r, where)), out = row ? read(name, row, select) : null;
         if (store.hooks.afterRead?.model === name) { const { fn } = store.hooks.afterRead; store.hooks.afterRead = null; await fn(); }
         return out;
@@ -182,6 +184,7 @@ function storeDouble() {
     let m;
     if ((m = /^SELECT (\*|uid) FROM "StudyState" WHERE uid = \? FOR (UPDATE|SHARE)$/.exec(sql))) {
       event(label, `lock StudyState ${values[0]} ${m[2]}`);
+      if (store.lockedRows.has(values[0])) throw sqlError('55P03', `canceling statement due to lock timeout (${values[0]})`);
       return (t.studyState ?? []).filter(r => r.uid === values[0]).map(r => (m[1] === '*' ? copy(r) : { uid: r.uid }));
     }
     if (/FROM "ReportDraft" WHERE uid = \? AND author = \? FOR UPDATE$/.test(sql)) {
@@ -254,7 +257,10 @@ const ROUTES = { put: route(RequestMethod.PUT, 'studies/:uid/report'), read: rou
 function world({ source = SOURCE_LOW } = {}) {
   const store = storeDouble();
   const sa = { denied: new Set(),
-    async prepare(c, uids) { store.events.push('root prepare ' + JSON.stringify(uids ?? null)); },
+    // prepareFails: studies whose access metadata cannot be read now (the real prepare answers 503 before any lock)
+    prepareFails: new Set(),
+    async prepare(c, uids) { store.events.push('root prepare ' + JSON.stringify(uids ?? null));
+      if ((uids ?? []).some(uid => sa.prepareFails.has(uid))) throw new ServiceUnavailableException('검사 원본의 접근 조건을 확인하지 못했습니다'); },
     async require(c, uids, tx) { store.events.push(`${tx ? 'tx' : 'root'} require ${JSON.stringify(uids)}`);
       if (uids.some(uid => sa.denied.has(uid))) throw new NotFoundException('검사를 찾을 수 없습니다'); },
     async allowed(c, uids) { return new Set(uids.filter(uid => !sa.denied.has(uid))); },
@@ -790,7 +796,7 @@ test('W5API-20 an audit or receipt write that fails rolls back the draft, the au
 
 test('W5API-21 a database error while judging the Source never becomes a refused receipt', async () => {
   const w = world(), body = insertBody(w), before = w.snapshot();
-  w.store.faults.push({ model: 'studyState', op: 'findUnique', error: Object.assign(new Error('SYN connection lost'), { code: 'P1017' }) });
+  w.store.faults.push({ model: 'studyState', op: 'findUnique', uid: w.source, error: Object.assign(new Error('SYN connection lost'), { code: 'P1017' }) });
   const failed = await w.send('put', { body });
   assert.notEqual(failed.code, 'RELATED_INSERT_REFUSED', JSON.stringify(failed.body));
   assert.equal(w.receipt(body.relatedInsert.insertRequestId), null);
@@ -838,7 +844,11 @@ test('W5API-25 lock order: session -> policy -> Source/Target rows in one UID or
       void data;
     }
     await w.controller[key](...args);
-    const locks = w.store.events.slice(events).filter(e => /^tx (lock|require)/.test(e));
+    // the write transaction (the read-only replay check before it locks nothing and is W5API-28's)
+    const seen = w.store.events.slice(events), from = seen.indexOf('tx lock session'), check = seen.indexOf('tx commit');
+    assert.ok(check > 0 && check < from, 'a read-only replay check commits before the write transaction takes the session lock');
+    assert.equal(seen.slice(0, check).some(e => /^tx lock/.test(e) || e.includes(source)), false, 'the replay check locks nothing and reads no Source');
+    const locks = seen.slice(from).filter(e => /^tx (lock|require)/.test(e));
     const rows = [TARGET, source].sort().map(uid => `tx lock StudyState ${uid} ${uid === TARGET ? 'UPDATE' : 'SHARE'}`);
     assert.deepEqual(locks.slice(0, 2 + rows.length + 2), ['tx lock session', `tx require ${JSON.stringify([TARGET])}`, ...rows,
       'tx lock ReportDraft', 'tx lock ReportDraftInsertReceipt'], source);
@@ -898,4 +908,83 @@ test('W5API-27 store double fidelity: each receipt CHECK clause and guard branch
   e => e.meta?.code === '23514');
   const [entry] = (await w.store.client.reportDraft.findUnique({ where: { uid_author: { uid: TARGET, author: A.actor } } })).citations;
   assert.deepEqual(Object.keys(entry).slice(0, 3), ['v', 'cid', 'field'], 'shorter keys first');
+});
+
+// ── A-02 / A-03 (Astra W5A-01): a finished receipt is answered under the current Target gate alone ──
+
+test('W5API-28 applied and discarded replays, ID_REUSED and SUPERSEDED need no Source: failing Source preparation, lost Source access, a locked Source row', async () => {
+  for (const blocker of ['prepare', 'access', 'lock']) {
+    const w = world();
+    const applied = insertBody(w);
+    assert.equal((await w.send('put', { body: applied })).status, 200, blocker);
+    // an insertion frozen on the old revision: refused (DRAFT_CONFLICT), then discarded
+    const stale = insertBody(w);
+    assert.equal((await w.send('put', { body: stale })).body.relatedInsert.reason, 'DRAFT_CONFLICT', blocker);
+    assert.equal((await w.send('put', { body: discardOf(stale, 1) })).status, 200, blocker);
+    if (blocker === 'prepare') w.sa.prepareFails.add(w.source);
+    if (blocker === 'access') w.sa.denied.add(w.source);
+    if (blocker === 'lock') w.store.lockedRows.add(w.source);
+    const before = w.snapshot(), events = w.store.events.length;
+    const replay = await w.send('put', { body: applied });
+    assert.equal(replay.status, 200, `${blocker}: the applied replay ${JSON.stringify(replay.body)}`);
+    assertAnswer(replay.body.relatedInsert, { result: 'applied', state: 'applied', currentMatches: true }, blocker + ' applied replay');
+    const discarded = await w.send('put', { body: stale });
+    assert.deepEqual([discarded.status, discarded.code], [409, 'RELATED_INSERT_DISCARDED'], blocker);
+    assert.equal((await w.send('put', { body: discardOf(stale, 1) })).status, 200, blocker + ': a resent discard');
+    const other = { ...applied, relatedInsert: { ...applied.relatedInsert, selectionSeq: 99 } };
+    assert.deepEqual([(await w.send('put', { body: other })).code], ['ID_REUSED'], blocker);
+    assert.equal(w.store.events.slice(events).some(e => e.includes(w.source)), false, `${blocker}: no Source preparation, lock or read`);
+    assert.equal(w.snapshot(), before, blocker + ': nothing written');
+    // a genuinely new insertion does need the Source: it meets the blocker and leaves no row on a non-refusal
+    const fresh = insertBody(w, { revision: 2, seed: { findings: w.draft().findings, conclusion: 'SYN draft conclusion\n',
+      recommendation: 'SYN draft recommendation', baseVersion: 1 } });
+    const blocked = await w.send('put', { body: fresh });
+    if (blocker === 'access') assert.equal(blocked.body.relatedInsert.reason, 'SOURCE_UNAVAILABLE', blocker);
+    else {
+      assert.equal(blocked.status, 503, `${blocker}: ${JSON.stringify(blocked.body)}`);
+      assert.equal(w.receipt(fresh.relatedInsert.insertRequestId), null, blocker + ': no refused row for an unknown outcome');
+    }
+    // the Target gate still decides first, and a moved draft is still SUPERSEDED
+    Object.assign(w.store.rows('studyState').find(r => r.uid === TARGET), { rs: 'P', preDoc: B.actor, preReviewer: 'syn-x' });
+    assert.equal((await w.send('put', { body: applied })).status, 403, blocker);
+    Object.assign(w.store.rows('studyState').find(r => r.uid === TARGET), { rs: 'A', preDoc: null, preReviewer: null });
+    w.sa.denied.add(TARGET);
+    assert.equal((await w.send('put', { body: applied })).status, 404, blocker);
+    w.sa.denied.delete(TARGET);
+    Object.assign(w.draft(), { findings: 'SYN typed after the insert', revision: 3 });
+    assert.equal((await w.send('put', { body: applied })).code, 'RELATED_INSERT_SUPERSEDED', blocker);
+  }
+});
+
+test('W5API-29 after a new draft epoch a refused receipt is judged before the epoch: its retry is a durable DRAFT_CONFLICT and it can still be discarded', async () => {
+  const w = world(), body = insertBody(w);
+  hold(w);
+  assert.equal((await w.send('put', { body })).body.relatedInsert.reason, 'TARGET_HELD');
+  release(w);
+  w.store.rows('studyState').find(r => r.uid === TARGET).draftEpoch = randomUUID();   // a force-discard rotated the epoch
+  const retry = await w.send('put', { body });
+  assert.deepEqual([retry.status, retry.code], [409, 'RELATED_INSERT_REFUSED'], JSON.stringify(retry.body));
+  assertAnswer(retry.body.relatedInsert, { state: 'refused', reason: 'DRAFT_CONFLICT', receiptRevision: 2, discardable: true }, 'old epoch');
+  const discard = await w.send('put', { body: discardOf(body, 2) });
+  assert.equal(discard.status, 200, JSON.stringify(discard.body));
+  assertAnswer(discard.body.relatedInsert, { state: 'discarded', receiptRevision: 3 }, 'discard after the epoch');
+});
+
+test('W5API-30 a receipt finished between the replay check and the lock is judged again under the lock: a late discard meets the applied retry', async () => {
+  const w = world(), body = insertBody(w);
+  hold(w);
+  await w.send('put', { body });
+  release(w);
+  const id = body.relatedInsert.insertRequestId;
+  // the discard's replay check reads the refused receipt; a retry then commits applied before the discard takes the Target lock
+  w.store.hooks.afterRead = { model: 'reportDraftInsertReceipt', fn: () => {
+    Object.assign(w.store.rows('reportDraftInsertReceipt').find(r => r.insertRequestId === id),
+      { state: 'applied', appliedRevision: 2, reason: null, receiptRevision: 2 });
+    Object.assign(w.draft(), { findings: body.findings, revision: 2 });
+  } };
+  const late = await w.send('put', { body: discardOf(body, 1) });
+  assert.equal(w.store.hooks.afterRead, null, 'the concurrent apply landed between the check and the lock');
+  assert.deepEqual([late.status, late.code], [409, 'RELATED_INSERT_NOT_DISCARDABLE'], JSON.stringify(late.body));
+  assertAnswer(late.body.relatedInsert, { state: 'applied', result: 'applied' }, 'judged under the lock');
+  assert.equal(w.receipt(id).state, 'applied');
 });

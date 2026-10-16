@@ -1,8 +1,9 @@
 /*
  * W5 Related Report 삽입(O4 R1, D1423)의 순수 규칙: `relatedInsert` 요청의 모양, 요청·제안의 SHA-256, 원문 판에서 삽입 글을
  * 다시 만드는 줄 규칙, 영수증의 답 모양. IO가 없다 — 잠금·읽기·쓰기는 `pacs/report-draft.ts`의 초안 트랜잭션 한 곳에 있다.
- * 이 규칙을 그 concern 파일 안에 두지 않는 이유: S9-U0b 분할 명세가 concern 파일마다 멤버·선언 목록을 고정하므로, 새 규칙은
- * `report-citation.ts`·`report-structure.ts`처럼 옆의 규칙 모듈에 둔다.
+ * 따로 두는 이유는 책임이다: 이 파일은 "무엇이 같은 요청이고, 그 판에서 어떤 글이 나오며, 영수증이 무엇이라 답하는가"라는
+ * 입력·digest·글·결과의 순수 규칙만 갖고, "언제 어떤 순서로 잠그고 무엇을 읽고 쓰는가"(트랜잭션 IO)는 초안 concern이 갖는다.
+ * 인용의 `report-citation.ts`·구조화의 `report-structure.ts`가 같은 나눔이다 — 규칙은 DB 없이 그 자체로 읽히고 시험된다.
  */
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
