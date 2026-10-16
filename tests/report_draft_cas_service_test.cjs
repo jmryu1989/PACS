@@ -187,8 +187,10 @@ async function world() {
     return typeof value === 'function' ? value.bind(base) : value;
   } });
   // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
-  // here); any other Orthanc member is still out of bounds for this harness.
+  // here), and the full bootstrap reads the inventory only to leave out a UID answered twice (none here); any other
+  // Orthanc member is still out of bounds for this harness.
   const orthanc = new Proxy({}, { get(_t, key) { return key === 'studyIdentityResources' ? async uid => [{ '0020000D': { Value: [uid] } }]
+    : key === 'studyIdentities' ? async () => []
     : () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); }; } });
   const build = () => {
     const access = new StudyAccessService(recorder, orthanc, {});
