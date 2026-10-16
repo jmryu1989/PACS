@@ -749,7 +749,8 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         static = [r for r in waterfall.rows.values() if "/worklist/" in r.get("url", "") and "status" in r]
         assert static and all(r["protocol"] == "h2" for r in static), "static protocol mismatch"
         scripts = [r for r in static if urlparse(r["url"]).path.endswith(".js")]
-        assert len(scripts) == (60 if stack.side == "candidate" else 56), "execution request count"
+        # The candidate side's scripts: the expected requests above, one each (S9-U4b part (c) added study-transfer-local.js).
+        assert len(scripts) == (61 if stack.side == "candidate" else 56), "execution request count"
         assert all(urlparse(r["url"]).netloc == urlparse(stack.origin).netloc for r in scripts), "script-src 'self' compatibility"
         document = next(r for r in wire if r["name"] == "main.html")
         result["csp"] = {"header": document["headers"].get("content-security-policy"),
