@@ -1727,7 +1727,8 @@ checkpoints live in `tests/ops_release_checkpoints.py` (identity, admission, bun
 index, parent map and the generated proof commands), the stage table of `tests/ops_deploy_host_container_test.py`
 (`STAGE_METHODS`, `SyntheticStack.descriptor/restored`, the `CheckpointDocker` adapter, the only place that builds
 Docker/Compose commands for a checkpoint) and the opt-in leaves of `tests/ops_release_checkpoints_live_test.py`
-(`CheckpointSegments`).
+(`CheckpointSegments`, and the capture/restore consumers `seal_boundary`/`restore_boundary` they share with the native
+smoke `tests/ops_release_checkpoints_native_test.py`, round 5 below).
 
 - Fresh stays fresh. The three `EmrIntroductionRehearsal` methods run every stage of their scenario in one process
   (`normal`: source, seed, capture, introduce, verify, normal-tail; `forward`: the same prefix with every verify
@@ -1813,9 +1814,13 @@ against a frozen copy (CKPT2-02: the product's `SystemdBrowser.command` writes n
 the next `runtime_identity` and the index's `--tree scripts` binding pass; the real browser stays a T16 condition), the
 per-attempt retry, the seal's Git calls against the real git (`CheckpointGitClosureTests`: shared and shallow fixture
 clones keep their own object closure; a missing object raises), the `commands` host preconditions
-(`CheckpointHostPreconditionTests`: a real venv without Playwright or pydicom, non-root or user-home paths), and T18
-(M01–M42, each killed only by an assertion after its control passed). Root on Linux for the ComposeEntry fork contract
-and the root-owned `commands` path (CI uses sudo).
+(`CheckpointHostPreconditionTests`: a real venv without Playwright or pydicom, non-root or user-home paths), the r5
+observation context over a synthetic Engine (`CheckpointObservationTests`: its own request, Records and settled exec
+workers, the original records byte-identical, the 48a28dd and digest-only contexts as diagnostics), the observation raw
+at the seal, the index and every consumer (`CheckpointRecordTests.test_observation_raw_is_required_and_rechecked_when_consumed`),
+the `commands` smoke precondition (`CheckpointSmokeTests`), and T18 (M01–M44 and M46, each killed only by an assertion
+after its control passed). Root on Linux for the ComposeEntry fork contract and the root-owned `commands` path (CI uses
+sudo). These are pure controls; the adapter's own commands run only in the native smoke below.
 
 Linux proofs T16/T17 (pending until run on a native Linux synthetic host with the persistent live slot, as the gate
 account (root); `P` is an absolute proof folder, `B` the candidate checkout; the four `KIN_TEST_*_IMAGE`,
@@ -1839,7 +1844,8 @@ Copy `a` is input A (`HostOps.backup_readiness` raises the deterministic L-11a S
 
 Host preconditions (T16 run-d1428 spent two of the first leaf's three gate attempts on them; `commands` now checks them
 before it writes a byte of `proof.sh` and refuses with `CHECKPOINT_REFUSED HOST_PRECONDITION`, exit 2, so a host that
-cannot pass costs no attempt; on success it prints the observed facts as `{"host_preconditions": ...}` on stderr):
+cannot pass costs no attempt; on success it prints the observed facts as `{"host_preconditions": ...}` on stderr; since
+round 5 it then runs the mandatory native smoke and T16's host admission before the script, see round 5 below):
 
 - `--python` is the interpreter of every leaf (recorder, runner, tests). It must import Playwright (the smoke browser)
   and pydicom (the synthetic study, `synthetic_dicom`); the versions are printed. Use the smoke venv by its absolute
@@ -1899,6 +1905,110 @@ exactly L-11a STOP, status VERIFIED and no PONR, late-resume and the fresh contr
 `t16_pass`, and no owned resource or alias remains. T17 passes when early-refusal is BOUND with `PREFIX_CHANGED` for C
 and for C with a late body too, before any restore, with the bundle bytes, the daemon inventory and the fixture root
 unchanged. A fresh control that exceeds 3600 s stays a real timeout.
+
+### Round 5: the observation context, the native smoke, the restart (consult-checkpoints-r5-20261016, D1446)
+
+T16 on 48a28dd (r4) stopped at prefix-seed: `CheckpointDocker.observe` built the product's `Introduction` without
+`run()`, so no request digest existed; the snapshot's first registered docker exec (`register_worker`) raised
+AttributeError, the database and fences facts became observation errors and every volume boundary was NOT_A_BOUNDARY; it
+also appended its commands to the closed seed phase's command record (seq 6899–6916). REQ (a separate observation
+record, the judged state bound, a real adapter) → RISK (a false boundary, rewritten past records, late discovery inside
+gate leaves) → TEST (the four r5 pure contracts above, the native smoke A01–A12/N01–N05, then T16/T17).
+
+- Observation lifecycle (`ops_release_checkpoints.observe_boundary`, `CheckpointDocker.observe`): the real `Introduction`
+  constructor without run()/finish(), a deep copy of the boundary state bytes S, phase `checkpoint-observe`, retrying
+  false and the SHA-256 of the observation's own canonical request (checkpoint, boundary, capture or restore, leaf,
+  plan, the closed phase's request and result, SHA-256 of S, the parent bundle on a restore, the source trees, a
+  nonce). Its own Records live in `<records>/checkpoint-observations/<checkpoint>-<purpose>-<request16>/` (request.json,
+  the observation's state.json with its workers, snapshot.json, `commands-checkpoint-observe-<request16>.jsonl`, logs/,
+  journal.jsonl, and last observation.json with the outcome and the SHA-256 of every other file); HostOps writes only
+  those Records and keeps the stack's own ComposeEntry root (HostOps derives the root from the Records' location
+  otherwise; the observed generation must equal the state's). Every docker exec is registered, its Engine exec ID and
+  server exit observed and settled QUIET; a boundary state with an unsettled worker, a running phase or an UNKNOWN hold is
+  refused before any command (never cleared). The original run directory (state, plan, journal, results, closed command
+  records, logs, the lease file), the ComposeEntry files and the operations lock are hashed before and after and must be
+  byte-identical; an error, an unsettled worker, an incomplete fact, a database fact this observation did not read
+  itself (`observed_database`), or a changed original byte refuses (NOT_A_BOUNDARY, OBSERVATION_UNSETTLED,
+  ORIGINAL_CHANGED, OBSERVATION_REFUSED) and the folder stays with outcome REFUSED/ERROR. An observation is never a
+  phase PASS or a history row.
+- State binding (`ops_release_checkpoints_live_test.seal_boundary`): one operation under the stack's phase lease. S is
+  read once, judged by `boundary_publishable`, observed, the boundary facts taken, the context written, Git sealed; the
+  bundle's state binding is the SHA-256 of S itself (the archived state.json must be S), the capture observation is bound
+  beside it (`observation`, required for every volume checkpoint), and the originals must still be the observation's
+  `before` bytes. `load_bundle` re-reads that observation from the fixture member and requires it complete and observing
+  the bound state. A restore (`restore_boundary`) observes under the restored stack's lease with purpose restore, names the
+  parent bundle and never writes it.
+- Raw evidence: the observation folders are preserved with the records (`preserve_records`), never counted as phase
+  results; `index` requires, for a leaf that sealed a volume checkpoint, the bound capture observation among the raw
+  records (same SHA-256, complete) and the bound state as the leaf's raw state, and for a leaf that restored one, its
+  own restore observation of that parent observing the state the parent bound; a missing folder (also when its rows left
+  `raw_records` with it), a changed file or another parent is UNVERIFIED, and a BOUND index whose observation file changed
+  is PARENT_UNBOUND at every consumer.
+- The mandatory native smoke (`tests/ops_release_checkpoints_native_test.py`): `commands` runs it after the host
+  preconditions and before any byte of proof.sh, on the first run and on a `--from-unit` retry, as `<--python> -B` from
+  `$B` through `scripts/record-run.py` into `$P/smoke/run-<stamp>` (its raw in `$P/smoke/evidence-<stamp>`: smoke-log.jsonl
+  with every check, smoke-result.json with the A01–A12 and N01–N05 rows, host-facts.json, the bundle manifests, the
+  preserved records with every observation folder, the N01/N02 diagnostic copies); its output goes to stderr only. Then
+  `commands` applies T16's D1034 admission (≥ 10 GiB RAM, 20 GiB disk, a local daemon, no foreign container) to the host
+  facts the smoke observed before it created anything; the tiny smoke never stands in for it. The smoke holds the gate's
+  own `live.lock` for its whole run and refuses an inspection marker (SMOKE_INSPECTION), a busy lease (SMOKE_BUSY), an
+  earlier smoke's unreleased residue (SMOKE_RESIDUE: `~/.local/state/kin-pacs/checkpoint-smoke/pending-<token>.json`,
+  removed only by its own observed complete cleanup or by `--release-pending <file>` once nothing it owned is observed),
+  and anything but root on native Linux with one local `unix://` daemon (UNSUPPORTED_HOST, REMOTE_DAEMON). It never uses
+  `live_run`, a gate attempt or the ledger. A failed, skipped, refused or uncleaned smoke is `CHECKPOINT_REFUSED
+  SMOKE_FAILED`, exit 2, an empty proof.sh, no leaf attempt spent. The CI `runtime` job runs the same entrypoint under sudo
+  (step "RELEASE-TOOLS-CHECKPOINTS native adapter smoke A01-A12 and N01-N05"; Orthanc image and pydicom prepared in the step
+  before it; raw under `tmp/runtime-ci/release-tools-checkpoints-native*`, uploaded with the record-run artifact).
+- What the smoke runs: a tiny fixture of its own (a PostgreSQL 16 with a minimal SQL model, the real Orthanc image with
+  the synthetic instance, three waiting roles of fixed images; its own donor repository and `--shared` clones, ComposeEntry
+  generations, explicit phase-end records; a foreign sentinel and owned aliases) through A01 inventory, A02 existence and
+  daemon errors, A03 readonly volume exports, stdin loads, markers with bytes/uid/gid/mode, the tablespace link and the
+  refusal of linked or cut archives before any write, A04 Compose create/start and database readiness (HELD's database
+  alone and the all-running branch), A05 normal stops and the writable-layer rule, A06 the product snapshot at seeded,
+  held, introduced, verified (release generation, maintenance ingress, after migration) and failure-held, A07 Engine exec
+  workers (nonzero and passing exits, no exec while one is unsettled), A08 the boundary facts with the real frame, A09 the
+  sealed clones' Git closure and the r4 real-Git contracts, A10 host and runtime facts, A11 owned cleanup with foreign
+  preservation and the kept last alias, A12 seeded and held as capture → `load_bundle` → cleanup → cold restore →
+  observation → `restored_mapping`. N01 applies 48a28dd's observation to a copy of SEEDED's records (database and fences
+  AttributeError, NOT_A_BOUNDARY, no seal, the closed command record appended); N02 the digest-only fix (the contract
+  passes, the state and the closed command record are rewritten, caught by the byte guard); N03 a wrong migration
+  checksum, an unsettled worker and a stopped database; N04 tampered copies of a real observation folder and a state
+  changed during the observation; N05 an occupied volume, an absent image and a persistent writable-layer file. It
+  proves the adapter's transport and observation, never a product seed, migration, login, reading or recovery, and never
+  a T16 phase PASS; targets: body ≤ 300 s with prepared images, cleanup ≤ 60 s (both enforced; the measured times are in
+  smoke-result.json).
+- Found by the smoke while r5 was written (each would have stopped a later T16 leaf): `archive_members` accepted a cut
+  archive (tarfile stops quietly at a truncated header), so a damaged volume tar reached the daemon's tar; the
+  writable-layer rule refused the mount points the daemon creates for declared mounts (`A /var/lib/postgresql/emr-access`,
+  the folder made for `/etc/nginx/certs`) and the orthancteam image's own start (a random `/etc/hostid`,
+  `/startup/__pycache__`, the plugin links in `/usr/share/orthanc/plugins`). The keycloak, API and proxy images run in the
+  smoke only as waiting roles: their own writable-layer changes are first observed at T16.
+- Restart, never a carry: r5 changes the harness and the source outside `scripts/`, so a 48a28dd bundle is not admissible
+  (`admit_same_tree` compares source, harness, root and runtime; source-b0 is same-tree only; a fork refuses a harness or
+  source change; the parent must be in the request's own store). The 9-leaf chain restarts at prefix-source in a NEW
+  proof root P' (prefix-source → prefix-seed → prefix-capture → prefix-introduce → prefix-verify → late-fault →
+  late-resume → fresh-control → early-refusal → compare), after the smoke passed in that same `commands` run. The r4
+  prefix-source BOUND (source manifest `9f020a60d07c9b594d8b356fb692b7f266b509c565d5478391dc7dd9726533d7`, created
+  2026-10-16T10:54:44.077424+00:00, window end 18:38:48.668993+00:00) stays 48a28dd's historical evidence, cited only as
+  such; nothing of it is rewritten or copied into P'. The operator records a contrast table beside P': (a) old and new full
+  commits with the exact diff and blob SHAs, (b) whether the scripts TOOL_FILES, the source stage, the product SHAs and
+  image IDs are actually equal, (c) every changed consumer (observe, records, capture, restore, index, commands) with each
+  source/harness/runtime hash, (d) plan/target/source-B0/clone-B0, payload and manifest, host/daemon/arch/root, (e) the
+  original created/window/TLS/deadline and the raw files' integrity, (f) which results are historical facts only and why
+  the admission invariance does not hold.
+- Ledger and stop rules: the D1437 move is executed only on a new commander disposition naming the r5 fix SHA, after the
+  gate account shows no running live run, owns `live.lock`, the r4 prefix-seed fixture was inspected and the marker was
+  released: exactly the existing `<unit>.json` and `<unit>-attempt-<n>.json` of the nine proof units move into the
+  48a28dd evidence with their before/after listings, raw SHAs and the disposition (a missing file is recorded as
+  missing); `inspections.jsonl`, `live.lock`, every `<unit>.lock` inode and other units stay. A new independent native
+  defect, a false BOUND, lost raw or polluted state in the r5 smoke or T16/T17 stops the chain and automatic retries,
+  keeps the raw, owned data and inspection state, and goes to an Astra consultation; there is no automatic r6, no new
+  unit for the same failure and no fresh budget from an empty commit or folder. A deterministic defect never spends a
+  remaining attempt. Environment shortfalls are recorded as incomplete, apart from candidate defects.
+- Verification limits: the smoke's native runs are on a native Linux daemon only (CI `runtime`, the T16 VM); a run on
+  Docker Desktop is a development diagnostic. The pure controls (a synthetic Engine, FakeBackend) prove contracts, not the
+  adapter's commands. Neither the smoke nor the pure suite replaces T16/T17, the final-SHA PR CI, G3 or the independent
+  delta review; until T16/T17 pass on the r5 SHA in P' the observation fix is proven natively only by the smoke.
 
 # 뷰어 반전 정밀도
 

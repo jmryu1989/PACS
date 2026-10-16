@@ -141,6 +141,9 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
         cp.stage_entry(gate, facts, expected)
         rehearsal.ops.require_local_docker()  # the product's own local-daemon rule as well (CKPT-01)
         helper = self.image_id("postgres:16-alpine")
+        # r5: what every observation request of this leaf names (consult-checkpoints-r5-20261016 observe_fix).
+        observation_leaf = {"unit": request["unit"], "case": case, "attempt": marker["attempt"], "stage": stage}
+        observation_source = {key: actual[key]["sha256"] for key in ("tool", "source", "harness")}
         cleanup, executed, inherited, results, admission = {"complete": False}, [], [], {}, None
         observed_outcome, passed, ctx, records, before_names = {"outcome": "PASS"}, False, None, {}, {}
         current, restoring = None, False
@@ -177,7 +180,8 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
                     # D1034 again directly before the first mutation.
                     cp.host_admission(rehearsal.CheckpointDocker.host_facts(fixture_root), expected)
                     restoring = True
-                    ctx, results["restore"] = self.restore(manifest, parent_dir, fixture_root, helper)
+                    ctx, results["restore"] = self.restore(manifest, parent_dir, fixture_root, helper, leaf=observation_leaf,
+                                                           source=observation_source)
                     if admission:
                         self.fork(ctx, manifest)
                 else:
@@ -203,7 +207,8 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
                                               admission_sha256=cp.sha256(cp.canonical(admission)) if admission else None)
                 produces = cp.leaf_produces(leaf)
                 if produces:
-                    produced = self.capture(produces, ctx, store, fixture_root, actual, facts, helper, manifest, parent_dir, request, runtime)
+                    produced = self.capture(produces, ctx, store, fixture_root, actual, facts, helper, manifest, parent_dir, request, runtime,
+                                            leaf=observation_leaf, source=observation_source)
                     results["checkpoint"] = {"path": str(produced), "manifest_sha256": produced.name}
             passed = True
         finally:
@@ -254,33 +259,24 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
                 "release": {"api": self.image_id(os.environ["KIN_TEST_API_IMAGE"]), "proxy": self.image_id(os.environ["KIN_TEST_PROXY_IMAGE"]),
                             **shared}}
 
-    def restore(self, manifest, parent_dir, fixture_root, helper):
+    def restore(self, manifest, parent_dir, fixture_root, helper, *, leaf=None, source=None):
         """Cold restore, then the product facts observed at the checkpoint observed again (only container IDs may differ;
         their old -> new correspondence is returned for the segment)."""
-        owned = manifest["owned"]
-        target = SimpleNamespace(root=Path(owned["stack"]["root"]), repo=Path(owned["stack"]["root"]) / "repo", token=owned["token"],
-                                 target={"containers": owned["stack"]["containers"]})
-        docker = rehearsal.CheckpointDocker(target, helper)
         holder = {}
 
-        def observe(sid):
-            holder["ctx"] = self.load_context(fixture_root)
-            stack = getattr(holder["ctx"], LINEAGE_STACK[manifest["checkpoint"]])
-            rehearsal.CheckpointDocker(stack, helper).observe(manifest["checkpoint"])
-        cp.restore_checkpoint(manifest, parent_dir, backend=docker, fixture_root=fixture_root, names=owned["stack"]["containers"],
-                              images_present=docker.image_present, observe=observe)
-        ctx = holder.get("ctx") or self.load_context(fixture_root)
+        def load(root):
+            holder["ctx"] = self.load_context(root)
+            return getattr(holder["ctx"], LINEAGE_STACK[manifest["checkpoint"]])
+        stack, _, mapping = restore_boundary(manifest, parent_dir, fixture_root=fixture_root, helper=helper, load=load, leaf=leaf,
+                                             source=source)
+        ctx = holder["ctx"]
         identity = manifest["identity"]
-        stack = getattr(ctx, LINEAGE_STACK[manifest["checkpoint"]])
         state = stack.records.state()
         self.assertEqual(stack.plan_sha256, identity["plan_sha256"])
         self.assertEqual(state["plan_sha256"], identity["plan_sha256"])
         for name in json.loads((fixture_root / SECRETS_INVENTORY).read_bytes()):
             path = fixture_root / name["path"]
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), name["sha256"], "restored secret " + name["path"])
-        mapping = None
-        if cp.CHECKPOINTS[manifest["checkpoint"]]["volumes"]:
-            mapping = cp.restored_mapping(manifest["boundary"]["facts"], rehearsal.CheckpointDocker(stack, helper).boundary_facts())
         # No login, session or token is carried over: the next phase's own smoke logs in after this restore.
         return ctx, mapping
 
@@ -348,35 +344,20 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
         path.write_bytes(cp.canonical(document) + b"\n")
         path.chmod(0o600)
 
-    def capture(self, checkpoint_id, ctx, store, fixture_root, actual, facts, helper, parent, parent_dir, request, runtime):
+    def capture(self, checkpoint_id, ctx, store, fixture_root, actual, facts, helper, parent, parent_dir, request, runtime, *,
+                leaf=None, source=None):
         stack = getattr(ctx, LINEAGE_STACK[checkpoint_id])
         self.assertEqual(actual["tool_files"], stack.plan_document["tool"], "the plan binds the executing tool files")
-        state = stack.records.state()
-        result_path = next(path for path in sorted(stack.records.directory.glob("result-*.json"))
-                           if hashlib.sha256(path.read_bytes()).hexdigest() == state["history"][-1]["result_sha256"])
-        result_raw = result_path.read_bytes()
-        docker = rehearsal.CheckpointDocker(stack, helper)
         spec = cp.CHECKPOINTS[checkpoint_id]
-        boundary = cp.boundary_publishable(checkpoint_id, state=state, result=json.loads(result_raw), result_raw=result_raw)
-        if spec["volumes"]:
-            docker.observe(checkpoint_id)
-            # What a restore must observe again (CKPT-04), taken while the boundary's services still run.
-            boundary["facts"] = docker.boundary_facts()
-        boundary.update(window_end=stack.plan_document["window"]["end"], tls_not_after=certificate_not_after(stack.ca))
-        self.write_context(ctx, fixture_root)
-        secrets = [{"path": path.relative_to(fixture_root).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-                   for path in sorted(stack.records.secrets.rglob("*")) if path.is_file()] if stack.records.secrets.exists() else []
-        (fixture_root / SECRETS_INVENTORY).write_bytes(cp.canonical(secrets) + b"\n")
-        rehearsal.CheckpointDocker.self_contained_git(fixture_root)
-        rel = lambda path: Path(path).relative_to(fixture_root).as_posix()
-        digest = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        files = {"state": stack.records.directory / "state.json", "result": result_path, "secrets": fixture_root / SECRETS_INVENTORY,
-                 "compose_entry": stack.root / "compose-entries" / "active.json", "ledger": stack.backups / intro_ledger(),
-                 "context": fixture_root / CONTEXT_FILE}
-        if spec["lock"]:
-            files["lock"] = intro.lock_path(stack.repo)
-        bindings = {name: {"path": rel(path), "sha256": digest(path)} for name, path in files.items()}
-        identity = {"tool_tree_sha256_at_checkpoint": actual["tool"]["sha256"], "tool_tree_sha256_at_resume": None,
+
+        def before_seal():
+            self.write_context(ctx, fixture_root)
+            secrets = [{"path": path.relative_to(fixture_root).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                       for path in sorted(stack.records.secrets.rglob("*")) if path.is_file()] if stack.records.secrets.exists() else []
+            (fixture_root / SECRETS_INVENTORY).write_bytes(cp.canonical(secrets) + b"\n")
+
+        def identity(state):
+            return {"tool_tree_sha256_at_checkpoint": actual["tool"]["sha256"], "tool_tree_sha256_at_resume": None,
                     "source_tree_sha256": actual["source"]["sha256"], "harness_tree_sha256": actual["harness"]["sha256"],
                     "tool_files_actual_raw_sha256": actual["tool_files"],
                     "source_b0_manifest_sha256": (getattr(ctx, "b0", None) or {}).get("manifest_sha256"),
@@ -395,14 +376,12 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
         owned = {"token": stack.token, "projects": {stack.project},
                  "networks": [{"name": stack.halo_network, "labels": {"kin.ops.run": stack.token}}] if stack.halo_network and spec["volumes"] else [],
                  "stack": {"root": str(stack.root), "containers": {role: stack.target["containers"][role] for role in intro.ROLES}}}
-        names = owned["stack"]["containers"]
-        volumes = {**stack.target["volumes"], "proxy_certs": stack.project + "_proxy-certs"}
         try:
-            return cp.capture_checkpoint(checkpoint_id=checkpoint_id, store=store, backend=docker if spec["volumes"] else None,
-                                         boundary=boundary, names=names, volumes=volumes, fixture_root=fixture_root, bindings=bindings,
-                                         identity=identity, owned=owned, execution_kind=request["execution_kind"],
-                                         parent=cp.parent_reference(parent, parent_dir) if parent else None,
-                                         extra_members=[("tool-tree.tar", "tool-tree", tool_tar)])
+            produced, _ = seal_boundary(checkpoint_id, stack, store=store, fixture_root=fixture_root, helper=helper, identity=identity,
+                                        owned=owned, execution_kind=request["execution_kind"], tls_not_after=certificate_not_after(stack.ca),
+                                        parent=cp.parent_reference(parent, parent_dir) if parent else None, before_seal=before_seal,
+                                        extra_members=[("tool-tree.tar", "tool-tree", tool_tar)], leaf=leaf, source=source)
+            return produced
         finally:
             tool_tar.unlink(missing_ok=True)
 
@@ -421,6 +400,82 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
             results.append(cp.cleanup_owned(rehearsal.CheckpointDocker(stack, helper), owned))
         return {"complete": all(item["complete"] for item in results), "removed": [n for item in results for n in item["removed"]],
                 "remaining": [n for item in results for n in item["remaining"]], "errors": [e for item in results for e in item["errors"]]}
+
+
+def seal_boundary(checkpoint_id, stack, *, store, fixture_root, helper, identity, owned, execution_kind, tls_not_after, parent=None,
+                  before_seal=None, extra_members=(), leaf=None, source=None, probe=None):
+    """r5 (consult-checkpoints-r5-20261016 observe_fix): one checkpoint as one operation under the stack's own phase lease.
+    The boundary state bytes S are read once; boundary_publishable judges them; a volume boundary is observed in the
+    observation-only context (CheckpointDocker.observe) and its product facts taken; `before_seal` writes the stage context;
+    the clones' Git closure is sealed; the bundle binds S's own SHA-256 as the state (the archived state.json must be S,
+    never a state re-read after the observation) and the capture observation beside it, and the original records must
+    still be the observation's `before` bytes. `identity(S)` returns the bundle identity. Returns (bundle, observation).
+    Shared by CheckpointSegments and the native smoke (tests/ops_release_checkpoints_native_test.py)."""
+    spec = cp.CHECKPOINTS[checkpoint_id]
+    docker = rehearsal.CheckpointDocker(stack, helper)
+    with stack.records.lease():
+        state_path = stack.records.directory / "state.json"
+        state_raw = state_path.read_bytes()
+        state = json.loads(state_raw)
+        result_path = next(path for path in sorted(stack.records.directory.glob("result-*.json"))
+                           if hashlib.sha256(path.read_bytes()).hexdigest() == state["history"][-1]["result_sha256"])
+        result_raw = result_path.read_bytes()
+        boundary = cp.boundary_publishable(checkpoint_id, state=state, result=json.loads(result_raw), result_raw=result_raw)
+        observation = None
+        if spec["volumes"]:
+            observation = docker.observe(checkpoint_id, purpose="capture", state_raw=state_raw, leaf=leaf, source=source, probe=probe,
+                                         parent_manifest_sha256=(parent or {}).get("manifest_sha256"))
+            # What a restore must observe again (CKPT-04), taken while the boundary's services still run.
+            boundary["facts"] = docker.boundary_facts()
+        boundary.update(window_end=stack.plan_document["window"]["end"], tls_not_after=tls_not_after)
+        if before_seal is not None:
+            before_seal()
+        rehearsal.CheckpointDocker.self_contained_git(fixture_root)
+        rel = lambda path: Path(path).relative_to(fixture_root).as_posix()
+        digest = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        files = {"result": result_path, "secrets": fixture_root / SECRETS_INVENTORY, "compose_entry": stack.root / "compose-entries" / "active.json",
+                 "ledger": stack.backups / intro_ledger(), "context": fixture_root / CONTEXT_FILE}
+        if spec["lock"]:
+            files["lock"] = intro.lock_path(stack.repo)
+        bindings = {name: {"path": rel(path), "sha256": digest(path)} for name, path in files.items()}
+        bindings["state"] = {"path": rel(state_path), "sha256": cp.sha256(state_raw)}
+        if observation is not None:
+            bindings["observation"] = cp.observation_binding(fixture_root, observation)
+            now = cp.original_records(stack.records.directory, entry_root=stack.root / "compose-entries", lock_path=intro.lock_path(stack.repo))
+            cp.require(now == observation["summary"]["original"]["before"], "ORIGINAL_CHANGED",
+                       "the original records changed between the observation and the seal")
+        volumes = {**stack.target["volumes"], "proxy_certs": stack.project + "_proxy-certs"}
+        produced = cp.capture_checkpoint(checkpoint_id=checkpoint_id, store=store, backend=docker if spec["volumes"] else None,
+                                         boundary=boundary, names=owned["stack"]["containers"], volumes=volumes, fixture_root=fixture_root,
+                                         bindings=bindings, identity=identity(state), owned=owned, execution_kind=execution_kind,
+                                         parent=parent, extra_members=extra_members)
+    return produced, observation
+
+
+def restore_boundary(manifest, parent_dir, *, fixture_root, helper, load, leaf=None, source=None):
+    """r5: the cold restore (cp.restore_checkpoint) whose final observation runs under the restored stack's phase lease in
+    the observation-only context (purpose restore, naming the parent bundle; the parent bundle is never written), then the
+    boundary's product facts observed again (cp.restored_mapping). `load(fixture_root)` returns the restored lineage
+    stack. Returns (stack, restore observation or None, mapping or None). Shared by CheckpointSegments and the native
+    smoke."""
+    owned = manifest["owned"]
+    target = SimpleNamespace(root=Path(owned["stack"]["root"]), repo=Path(owned["stack"]["root"]) / "repo", token=owned["token"],
+                             target={"containers": owned["stack"]["containers"]})
+    docker = rehearsal.CheckpointDocker(target, helper)
+    holder = {}
+
+    def observe(sid):
+        holder["stack"] = stack = load(fixture_root)
+        with stack.records.lease():
+            holder["observation"] = rehearsal.CheckpointDocker(stack, helper).observe(
+                manifest["checkpoint"], purpose="restore", leaf=leaf, source=source, parent_manifest_sha256=Path(parent_dir).name)
+    cp.restore_checkpoint(manifest, parent_dir, backend=docker, fixture_root=fixture_root, names=owned["stack"]["containers"],
+                          images_present=docker.image_present, observe=observe)
+    stack = holder["stack"] if "stack" in holder else load(fixture_root)
+    mapping = None
+    if cp.CHECKPOINTS[manifest["checkpoint"]]["volumes"]:
+        mapping = cp.restored_mapping(manifest["boundary"]["facts"], rehearsal.CheckpointDocker(stack, helper).boundary_facts())
+    return stack, holder.get("observation"), mapping
 
 
 def intro_ledger():

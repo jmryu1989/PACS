@@ -138,8 +138,12 @@ BINDINGS = ("state", "result", "secrets", "compose_entry", "ledger", "lock", "co
 DECLARED_LINKS = {"pg": (re.compile(r"pg_tblspc/[0-9]{1,10}"), intro.TABLESPACE)}
 # Writable-layer paths a stopped container may differ in and that its image regenerates (pid/cache/log/tmp). Anything
 # else is persistent state outside the declared volumes and binds, which v1 refuses (spec section 3).
+# r5 (found by the native smoke against orthancteam/orthanc:24.12.0): that image's /docker-entrypoint.sh writes a random
+# /etc/hostid over its 'not-generated' placeholder at every container start, runs its configurator with bytecode caching
+# (/startup/__pycache__), and the configurator hard-links each enabled plugin's library from plugins-available into
+# /usr/share/orthanc/plugins; a restored container regenerates all three from the image and its environment.
 TRANSIENT_PATHS = ("/tmp", "/run", "/var/run", "/var/tmp", "/var/cache/nginx", "/var/log/nginx", "/opt/keycloak/data/tmp",
-                   "/home/node/.npm", "/root/.npm", "/root/.cache")
+                   "/home/node/.npm", "/root/.npm", "/root/.cache", "/etc/hostid", "/startup/__pycache__", "/usr/share/orthanc/plugins")
 IDENTITY_FIELDS = ("tool_tree_sha256_at_checkpoint", "tool_tree_sha256_at_resume", "source_tree_sha256", "harness_tree_sha256",
                    "tool_files_actual_raw_sha256", "source_b0_manifest_sha256", "clone_b0_manifest_sha256",
                    "payload_manifest_sha256", "image_ids", "plan_sha256", "target_manifest_sha256", "phase_reached",
@@ -276,6 +280,276 @@ def boundary_contract(checkpoint_id, snapshot, *, state, plan, target):
     except intro.Stop as error:
         raise Refused("NOT_A_BOUNDARY", "product boundary contract: " + str(error)) from None
     return True
+
+
+# ── the observation-only context of a volume checkpoint (r5, consult-checkpoints-r5-20261016 observe_fix) ──
+# The product observation (HostOps.snapshot) registers and settles an Engine exec worker for every docker exec it runs
+# (pg_isready, the migration rows, the database clients), and register_worker reads the running phase's request digest.
+# 48a28dd observed through an Introduction that never ran: no request digest (AttributeError, so the database and fences
+# facts were observation errors and every volume boundary NOT_A_BOUNDARY), and the shared Records of the closed phase,
+# whose commands file the observation appended to and whose state.json a digest-only fix would rewrite. An observation
+# therefore runs in its own context: the real Introduction constructor without run()/finish(), a deep copy of the
+# boundary state bytes S, its own canonical request (whose bytes are kept) and its own Records under
+# <records>/checkpoint-observations/<id>/, while HostOps keeps the stack's own ComposeEntry root and reads the original
+# repository, target and lock. The original state, results, journal, closed command records, ComposeEntry and lock are
+# hashed before and after and must be byte-identical; the observation is never a phase PASS or a history row.
+OBSERVATION_DIR = "checkpoint-observations"
+OBSERVATION_PHASE = "checkpoint-observe"
+OBSERVATION_PURPOSES = ("capture", "restore")
+OBSERVATION_RESULT = "observation.json"
+OBSERVATION_BINDING = re.compile(r"([a-z]+)/records/(" + OBSERVATION_DIR + r"/[a-z0-9-]{1,100})/" + re.escape(OBSERVATION_RESULT))
+
+
+def original_records(records_dir, *, entry_root, lock_path):
+    """{label: sha256} of what an observation must leave byte-identical: every file of the stack's run directory (state,
+    plan, journal, results, closed command records, logs, the phase lease file) outside the observation folders, every
+    file of its ComposeEntry root, and the operations lock (None when absent)."""
+    rows = {}
+    for prefix, base in (("records/", Path(records_dir)), ("compose-entries/", Path(entry_root))):
+        for path in sorted(base.rglob("*")) if base.is_dir() else []:
+            rel = path.relative_to(base).as_posix()
+            if prefix == "records/" and rel.split("/", 1)[0] == OBSERVATION_DIR:
+                continue
+            if path.is_symlink():
+                rows[prefix + rel] = "link:" + os.readlink(path)
+            elif path.is_file():
+                rows[prefix + rel] = sha256(path.read_bytes())
+    lock = Path(lock_path)
+    rows["lock"] = sha256(lock.read_bytes()) if lock.is_file() else None
+    return dict(sorted(rows.items()))
+
+
+def observation_request(checkpoint_id, *, purpose, plan_sha256, state_raw, leaf=None, parent_manifest_sha256=None, source=None,
+                        nonce=None):
+    """The observation's own canonical request: checkpoint and boundary, capture or restore, the leaf, the plan, the closed
+    phase's request and result (from the state's last history row), the SHA-256 of the boundary state bytes S, the parent
+    manifest (a restore) and the executing source identity, with a nonce. Its digest is never a phase request's."""
+    require(checkpoint_id in CHECKPOINTS and CHECKPOINTS[checkpoint_id]["volumes"], "OBSERVATION_REFUSED", "no volume checkpoint")
+    require(purpose in OBSERVATION_PURPOSES, "OBSERVATION_REFUSED", "purpose " + str(purpose))
+    require(type(state_raw) is bytes, "OBSERVATION_REFUSED", "the boundary state bytes")
+    try:
+        state = json.loads(state_raw)
+    except ValueError:
+        raise Refused("OBSERVATION_REFUSED", "the boundary state is not JSON") from None
+    last = ((state.get("history") or [{}])[-1] if type(state) is dict else {}) or {}
+    return {"schema": SCHEMA, "kind": "release-tools-checkpoint-observation", "checkpoint": checkpoint_id,
+            "boundary": CHECKPOINTS[checkpoint_id]["boundary"], "purpose": purpose, "plan_sha256": plan_sha256,
+            "state_sha256": sha256(state_raw), "phase_request_sha256": last.get("request_sha256"),
+            "result_sha256": last.get("result_sha256"), "leaf": leaf, "parent_manifest_sha256": parent_manifest_sha256,
+            "source": source, "nonce": nonce or uuid.uuid4().hex}
+
+
+def observation_context(*, plan, plan_sha256, target, repository, state_raw, request_sha256, ops, records, host_key, tool):
+    """The product's Introduction, constructed but never run: a deep copy of S, phase checkpoint-observe, the observation
+    request digest, no retry. A boundary state with an unsettled worker, a running phase or an UNKNOWN hold is refused here
+    (never cleared): register_worker would refuse it later anyway, and a clean copy would hide it."""
+    state = json.loads(state_raw)
+    require(type(state) is dict and state.get("plan_sha256") == plan_sha256, "OBSERVATION_REFUSED", "the state belongs to another plan")
+    unsettled = sorted(str(nonce) for nonce, row in (state.get("workers") or {}).items() if (row or {}).get("state") != "QUIET")
+    require(not unsettled and state.get("running") is None and state.get("unknown_hold") is None, "OBSERVATION_REFUSED",
+            "the boundary state has an unsettled worker, a running phase or an UNKNOWN hold: " + ",".join(unsettled))
+    require(type(request_sha256) is str and HASH.fullmatch(request_sha256) is not None, "OBSERVATION_REFUSED", "request digest")
+    machine = intro.Introduction(plan=plan, plan_sha256=plan_sha256, target=target,
+                                 production=copy.deepcopy(intro.EXAMPLE_POLICY["production"]) | {"host_key_sha256": "a" * 64},
+                                 ops=ops, records=records, repository=repository, host_key=host_key, tool=tool)
+    machine.state = copy.deepcopy(state)
+    machine.phase = OBSERVATION_PHASE
+    machine.request_sha256 = request_sha256
+    machine.retrying = False
+    return machine
+
+
+def observed_database(snapshot, state, request_sha256):
+    """The database fact was read now, by this observation: ready with a migration list, and at least one Engine exec worker
+    of this observation request on the observed database container settled QUIET with its server exit observed. A database
+    fact carried over from an earlier observation (no such worker) is not an observation."""
+    facts = (snapshot or {}).get("facts") or {}
+    database, db = facts.get("database") or {}, ((facts.get("containers") or {}).get("value") or {}).get("db") or {}
+    require(database.get("outcome") == "OK" and (database.get("value") or {}).get("ready") is True
+            and type(database["value"].get("migrations")) is list, "NOT_A_BOUNDARY", "the database fact was not observed")
+    require(db.get("outcome") == "OK", "NOT_A_BOUNDARY", "the database container was not observed")
+    execs = [row for row in ((state or {}).get("workers") or {}).values()
+             if row.get("request_sha256") == request_sha256 and row.get("kind") == "exec" and row.get("state") == "QUIET"
+             and row.get("container_id") == db["value"]["id"] and HASH.fullmatch(str(row.get("exec_id"))) is not None
+             and (row.get("exec_observation") or {}).get("Running") is False and type(row.get("server_exit")) is int]
+    require(execs, "NOT_A_BOUNDARY", "no settled exec of this observation read the database")
+    return len(execs)
+
+
+def folder_files(folder):
+    """{relative path: bytes} of every regular file of one observation folder (a link or special file refuses)."""
+    out = {}
+    for path in sorted(Path(folder).rglob("*")):
+        rel = path.relative_to(folder).as_posix()
+        require(not path.is_symlink() and (path.is_dir() or path.is_file()), "OBSERVATION_INVALID", "link or special file " + rel)
+        if path.is_file():
+            out[rel] = path.read_bytes()
+    return out
+
+
+def write_observation_result(folder, *, request_sha256, checkpoint_id, purpose, outcome, code, before, after,
+                             original_state_sha256, started_utc, ended_utc=None):
+    """observation.json, written last: the outcome and the SHA-256 of every other file of the folder."""
+    folder = Path(folder)
+    files = {rel: sha256(data) for rel, data in folder_files(folder).items() if rel != OBSERVATION_RESULT}
+    summary = {"schema": SCHEMA, "kind": "release-tools-checkpoint-observation-result", "request_sha256": request_sha256,
+               "checkpoint": checkpoint_id, "purpose": purpose, "outcome": outcome, "code": code, "files": files,
+               "original": {"before": before, "after": after}, "original_state_sha256": original_state_sha256,
+               "started_utc": started_utc, "ended_utc": ended_utc or now_utc().isoformat()}
+    raw = canonical(summary) + b"\n"
+    intro.Records(folder).write(folder / OBSERVATION_RESULT, raw)
+    return summary, sha256(raw)
+
+
+def observation_valid(files, *, checkpoint_id, purpose, plan_sha256=None, state_sha256=None, parent_manifest_sha256=None):
+    """One observation folder's bytes ({relative path: bytes}) at its consumption: a PASS result naming exactly the other
+    files by their SHA-256; its canonical request (checkpoint, purpose, plan, the bound state S, the parent) and digest;
+    a complete, quiet product snapshot whose database fact this observation read itself (observed_database); a durable
+    observation state whose every worker is QUIET; the command record and every log it refers to; and the original
+    records byte-identical before and after. Returns (summary, request)."""
+    def fail(reason):
+        raise Refused("OBSERVATION_INVALID", reason)
+
+    def document(name):
+        if name not in files:
+            fail(name + " missing")
+        try:
+            return json.loads(files[name])
+        except ValueError:
+            fail(name + " unreadable")
+
+    summary = document(OBSERVATION_RESULT)
+    if type(summary) is not dict or files[OBSERVATION_RESULT] != canonical(summary) + b"\n":
+        fail("the result is not canonical")
+    if summary.get("kind") != "release-tools-checkpoint-observation-result" or summary.get("outcome") != "PASS":
+        fail("the observation did not pass: " + str(summary.get("code")))
+    if summary.get("checkpoint") != checkpoint_id or summary.get("purpose") != purpose:
+        fail("another checkpoint or purpose")
+    listed = summary.get("files") if type(summary.get("files")) is dict else {}
+    if set(files) != set(listed) | {OBSERVATION_RESULT}:
+        fail("files missing or undeclared: " + ",".join(sorted(set(files) ^ (set(listed) | {OBSERVATION_RESULT})))[:300])
+    for name, digest in listed.items():
+        if sha256(files[name]) != digest:
+            fail(name + " changed")
+    request = document("request.json")
+    if type(request) is not dict or files["request.json"] != canonical(request) + b"\n" or sha256(canonical(request)) != summary.get("request_sha256"):
+        fail("the request is not the one the result names")
+    if (request.get("kind") != "release-tools-checkpoint-observation" or request.get("checkpoint") != checkpoint_id
+            or request.get("purpose") != purpose or (plan_sha256 is not None and request.get("plan_sha256") != plan_sha256)):
+        fail("the request names another checkpoint, purpose or plan")
+    if request.get("state_sha256") != summary.get("original_state_sha256") or (state_sha256 is not None and request.get("state_sha256") != state_sha256):
+        fail("the observed state is not the bound state")
+    if parent_manifest_sha256 is not None and request.get("parent_manifest_sha256") != parent_manifest_sha256:
+        fail("the observation names another parent")
+    original = summary.get("original") or {}
+    if type(original.get("before")) is not dict or original.get("before") != original.get("after") or not original["before"]:
+        fail("the original records changed during the observation")
+    snapshot, state = document("snapshot.json"), document("state.json")
+    if not intro.workers_quiet(snapshot):
+        fail("the snapshot is incomplete or a worker is pending")
+    workers = (state or {}).get("workers") if type(state) is dict else None
+    if type(workers) is not dict or any((row or {}).get("state") != "QUIET" for row in workers.values()):
+        fail("an observation worker is not settled")
+    try:
+        observed_database(snapshot, state, summary["request_sha256"])
+    except Refused as error:
+        fail(str(error))
+    commands = "commands-" + OBSERVATION_PHASE + "-" + summary["request_sha256"][:16] + ".jsonl"
+    if commands not in files:
+        fail("the observation command record is missing")
+    references = []
+    for line in files[commands].splitlines():
+        try:
+            _log_references(json.loads(line), references)
+        except ValueError:
+            fail("an unreadable command record line")
+    for log, digest in references:
+        if log not in files or sha256(files[log]) != digest:
+            fail("a log the command record refers to is missing or changed: " + log)
+    return summary, request
+
+
+def observe_boundary(checkpoint_id, *, purpose, records_dir, secrets_dir, entry_root, lock_path, plan, plan_sha256, target,
+                     repository, host_key, tool, make_ops, snapshot, state_raw=None, leaf=None, parent_manifest_sha256=None,
+                     source=None, probe=None):
+    """Observe a volume boundary in an observation-only context and judge it by the product's boundary contract over the
+    original S. `make_ops(records)` returns the HostOps writing into the observation's Records with the stack's own
+    ComposeEntry root (checked here); `snapshot(ops, context)` runs HostOps.snapshot; `probe(ops, context, snapshot)` may
+    run further commands in the same context (the native smoke's A07). The folder keeps the request, the durable
+    observation state, the snapshot, its command record and logs, a journal and, last, observation.json - also when the
+    observation fails. Returns {"folder", "result_sha256", "summary", "snapshot"}; any error, UNKNOWN, unsettled worker,
+    incomplete fact or changed original byte is a Refused (NOT_A_BOUNDARY, OBSERVATION_UNSETTLED, ORIGINAL_CHANGED, ...)."""
+    started = now_utc().isoformat()
+    records_dir = Path(records_dir)
+    current = (records_dir / "state.json").read_bytes()
+    state_raw = current if state_raw is None else state_raw
+    require(state_raw == current, "ORIGINAL_CHANGED", "the boundary state changed before the observation")
+    before = original_records(records_dir, entry_root=entry_root, lock_path=lock_path)
+    request = observation_request(checkpoint_id, purpose=purpose, plan_sha256=plan_sha256, state_raw=state_raw, leaf=leaf,
+                                  parent_manifest_sha256=parent_manifest_sha256, source=source)
+    digest = sha256(canonical(request))
+    folder = records_dir / OBSERVATION_DIR / (checkpoint_id + "-" + purpose + "-" + digest[:16])
+    folder.parent.mkdir(mode=0o700, exist_ok=True)
+    folder.mkdir(mode=0o700)
+    sink = intro.Records(folder, secrets=secrets_dir)
+    sink.write(folder / "request.json", canonical(request) + b"\n")
+    sink.begin(OBSERVATION_PHASE, digest)
+    sink.journal({"event": "observation-start", "checkpoint": checkpoint_id, "purpose": purpose, "request_sha256": digest})
+    observed, context, outcome, code = None, None, "ERROR", None
+    try:
+        ops = make_ops(sink)
+        require(Path(ops.entry.root) == Path(entry_root).absolute() and ops.records is sink, "OBSERVATION_REFUSED",
+                "the observation's HostOps must write its own Records and keep the stack's ComposeEntry root")
+        context = observation_context(plan=plan, plan_sha256=plan_sha256, target=target, repository=repository, state_raw=state_raw,
+                                      request_sha256=digest, ops=ops, records=sink, host_key=host_key, tool=tool)
+        observed = snapshot(ops, context)
+        if probe is not None:
+            probe(ops, context, observed)
+        outcome = "OBSERVED"
+    except Refused as error:
+        code = error.code + ": " + str(error)[:300]
+    except Exception as error:  # an exception of the transport may quote values: keep its class only
+        code = "OBSERVATION_ERROR: " + type(error).__name__
+    finally:
+        if context is not None:
+            sink.save(context.state)
+        if observed is not None:
+            sink.write(folder / "snapshot.json", canonical(observed) + b"\n")
+    after = original_records(records_dir, entry_root=entry_root, lock_path=lock_path)
+    if outcome == "OBSERVED":
+        outcome = "REFUSED"
+        workers = (context.state.get("workers") or {}).values()
+        if after != before:
+            code = "ORIGINAL_CHANGED: " + ",".join(sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key)))[:300]
+        elif any(row.get("state") != "QUIET" for row in workers):
+            code = "OBSERVATION_UNSETTLED: an observation worker did not settle QUIET"
+        else:
+            try:
+                boundary_contract(checkpoint_id, observed, state=json.loads(state_raw), plan=plan, target=target)
+                observed_database(observed, context.state, digest)
+                outcome, code = "PASS", None
+            except Refused as error:
+                code = error.code + ": " + str(error)[:300]
+            except Exception as error:  # the preflight migration check raises RuntimeError, not Stop
+                code = "NOT_A_BOUNDARY: " + type(error).__name__ + ": " + str(error)[:200]
+    sink.journal({"event": "observation-end", "checkpoint": checkpoint_id, "purpose": purpose, "request_sha256": digest,
+                  "outcome": outcome, **({"code": code} if code else {})})
+    summary, result_sha = write_observation_result(folder, request_sha256=digest, checkpoint_id=checkpoint_id, purpose=purpose,
+                                                   outcome=outcome, code=code, before=before, after=after,
+                                                   original_state_sha256=sha256(state_raw), started_utc=started)
+    if outcome != "PASS":
+        name = (code or "NOT_A_BOUNDARY").split(":", 1)[0]
+        raise Refused(name if name in ("ORIGINAL_CHANGED", "OBSERVATION_UNSETTLED", "OBSERVATION_REFUSED") else "NOT_A_BOUNDARY",
+                      "observation " + folder.name + ": " + str(code))
+    observation_valid(folder_files(folder), checkpoint_id=checkpoint_id, purpose=purpose, plan_sha256=plan_sha256,
+                      state_sha256=sha256(state_raw), parent_manifest_sha256=parent_manifest_sha256)
+    return {"folder": folder, "result_sha256": result_sha, "summary": summary, "snapshot": observed}
+
+
+def observation_binding(fixture_root, observation):
+    """The bundle binding of a capture observation: its observation.json, relative to the fixture root."""
+    path = Path(observation["folder"]) / OBSERVATION_RESULT
+    return {"path": path.relative_to(fixture_root).as_posix(), "sha256": observation["result_sha256"]}
 
 
 # ── actual-bytes identity (T03) ──
@@ -704,6 +978,12 @@ class PendingBundle:
         return final
 
 
+def required_bindings(spec):
+    """The fixture files a checkpoint's manifest binds: BINDINGS (the lock only where the boundary holds it) and, for a
+    volume checkpoint, its capture observation (r5)."""
+    return [name for name in BINDINGS if name != "lock" or spec["lock"]] + (["observation"] if spec["volumes"] else [])
+
+
 def manifest_complete(manifest):
     """Every required category is present: volumes as payload or declared absent, and the fixture bindings."""
     spec = CHECKPOINTS.get(manifest.get("checkpoint"))
@@ -714,7 +994,7 @@ def manifest_complete(manifest):
         for category in VOLUME_CATEGORIES:
             listed = ("volume:" + category in categories) + (category in manifest["absent"])
             require(listed == 1, "BUNDLE_INVALID", "volume " + category + " neither captured nor declared absent")
-    required = [name for name in BINDINGS if name != "lock" or spec["lock"]]
+    required = required_bindings(spec)
     bindings = manifest.get("bindings") or {}
     for name in required:
         require(type(bindings.get(name)) is dict and HASH.fullmatch(str(bindings[name].get("sha256"))) is not None
@@ -760,6 +1040,18 @@ def load_bundle(directory):
             archive_members(payload / member["name"], category=category)
     # The bound fixture files are re-read from the fixture member itself, not trusted from the manifest's own claims.
     check_bindings(payload / "fixture-tree.tar", manifest["bindings"], required=sorted(manifest["bindings"]))
+    if CHECKPOINTS[manifest["checkpoint"]]["volumes"]:
+        # r5: the capture observation the seal binds, re-read from the fixture member and judged complete; it observed
+        # exactly the state the bundle binds (the S boundary_publishable verified).
+        binding = manifest["bindings"]["observation"]
+        found = OBSERVATION_BINDING.fullmatch(str(binding.get("path")))
+        require(found is not None, "BUNDLE_INVALID", "observation binding path")
+        try:
+            observation_valid(tree_folder(payload / "fixture-tree.tar", binding["path"].rsplit("/", 1)[0]),
+                              checkpoint_id=manifest["checkpoint"], purpose="capture", plan_sha256=manifest["identity"]["plan_sha256"],
+                              state_sha256=manifest["bindings"]["state"]["sha256"])
+        except Refused as error:
+            raise Refused("BUNDLE_INVALID", "capture observation: " + str(error)) from None
     return manifest, directory
 
 
@@ -774,8 +1066,18 @@ def archive_members(path, *, category=None):
     try:
         with tarfile.open(path, "r:") as archive:
             members = archive.getmembers()
+        size = Path(path).stat().st_size
+        # r5 (the native smoke, A03): tarfile stops quietly at a truncated header, and a member's data is only read on
+        # extraction, so a cut archive would reach the daemon's tar and be written in part. Every member's data must lie
+        # inside the file and the end-of-archive marker (two zero blocks) must follow the last one.
+        end = max([member.offset_data + -(-member.size // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE for member in members] or [0])
+        with open(path, "rb") as stream:
+            stream.seek(end)
+            tail = stream.read(2 * tarfile.BLOCKSIZE)
     except (tarfile.TarError, OSError) as error:
         raise Refused("ARCHIVE_INVALID", type(error).__name__) from None
+    require(all(member.offset_data + member.size <= size for member in members) and tail == bytes(2 * tarfile.BLOCKSIZE),
+            "ARCHIVE_INVALID", "a truncated or damaged archive (member data or the end-of-archive marker missing)")
     names, links, normalised = set(), set(), []
     for member in members:
         name = member.name[2:] if member.name.startswith("./") else member.name
@@ -848,6 +1150,17 @@ def check_bindings(archive_path, bindings, *, required):
         binding = bindings.get(name)
         require(binding is not None, "BUNDLE_INVALID", "binding " + name + " missing")
         require(tree_member_sha256(archive_path, binding["path"]) == binding["sha256"], "BUNDLE_INVALID", "binding " + name + " differs")
+
+
+def tree_folder(archive_path, folder):
+    """{path relative to `folder`: bytes} of every regular member under one folder of a fixture-tree archive."""
+    prefix, out = folder.rstrip("/") + "/", {}
+    with tarfile.open(archive_path, "r:") as archive:
+        for member in archive.getmembers():
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            if name.startswith(prefix) and member.isfile():
+                out[name[len(prefix):]] = archive.extractfile(member).read()
+    return out
 
 
 def tree_member_bytes(archive_path, name):
@@ -992,10 +1305,19 @@ def restored_mapping(recorded, observed):
 
 # ── capture and restore coordination (T08) through the backend adapter ──
 
-def writable_layer_allowed(change):
+def writable_layer_allowed(change, mounts=()):
+    """`mounts`: the container's own mount destinations. The daemon creates a mount point that the image lacks in the
+    writable layer (`A /var/lib/postgresql/emr-access` for the product's emr-access volume; found by the r5 native smoke):
+    the folder itself is not state, its contents are the mounted volume's."""
     kind, _, path = change.partition(" ")
     path = path.strip()
     if any(path == prefix or path.startswith(prefix + "/") for prefix in TRANSIENT_PATHS):
+        return True
+    if kind in ("A", "C") and path in mounts:
+        return True
+    # A folder the daemon created to hold a mount point (`A /etc/nginx` for a certificates mount on an image without it) or
+    # changed for it is listed as A/C <dir>; anything stored beside the mount point is listed on its own and refuses.
+    if kind in ("A", "C") and any(mount.startswith(path.rstrip("/") + "/") for mount in mounts):
         return True
     # A changed parent directory of a transient path is listed by `diff` as C <dir>.
     return kind == "C" and any(prefix.startswith(path.rstrip("/") + "/") for prefix in TRANSIENT_PATHS)
@@ -1061,7 +1383,9 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
         stop_for_checkpoint(backend, names, running)
         for role in intro.ROLES:
             if any(c["name"] == names[role] for c in inventory["containers"]):
-                unknown = [change for change in backend.writable_changes(names[role]) if not writable_layer_allowed(change)]
+                mounts = {m.get("destination") for c in inventory["containers"] if c["name"] == names[role] for m in c.get("mounts") or []
+                          if m.get("destination")}
+                unknown = [change for change in backend.writable_changes(names[role]) if not writable_layer_allowed(change, mounts)]
                 require(not unknown, "WRITABLE_LAYER", role + ": " + ",".join(unknown[:5]))
     extra = mount_inventory(inventory, names, volumes, fixture_root, owned)
     pending = store.begin(checkpoint_id)
@@ -1085,7 +1409,7 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
             archive.unlink()
     tree = pending.directory / "export-fixture.tar"
     write_tree_archive(fixture_root, tree)
-    required = [name for name in BINDINGS if name != "lock" or spec["lock"]]
+    required = required_bindings(spec)
     check_bindings(tree, bindings, required=required)
     pending.add("fixture-tree.tar", "fixture-tree", tree)
     tree.unlink()
@@ -2055,11 +2379,12 @@ def raw_contract(segment, expect, evidence):
     elif admission_path.exists() or segment.get("admission_sha256") is not None:
         reasons.append("an admission from a leaf that is not an admitted fork")
     checkpoint = (segment.get("results") or {}).get("checkpoint")
+    sealed = None
     if expect["produces"] and type(checkpoint) is dict:
         folder = Path(str(checkpoint.get("path")))
         try:
             data = (folder / "manifest.json").read_bytes()
-            manifest = json.loads(data)
+            manifest = sealed = json.loads(data)
             if sha256(data) != checkpoint.get("manifest_sha256") or folder.name != checkpoint.get("manifest_sha256"):
                 reasons.append("the sealed checkpoint's manifest is not the one the segment names")
             elif expect["bundles"] is not None and folder.parent.resolve() != Path(expect["bundles"]).resolve():
@@ -2071,7 +2396,68 @@ def raw_contract(segment, expect, evidence):
             bound["checkpoint"] = {"path": str((folder / "manifest.json").resolve()), "sha256": sha256(data)}
         except (OSError, ValueError, AttributeError):
             reasons.append("the sealed checkpoint's manifest is missing or unreadable")
+            sealed = None
+    reasons += observation_reasons(expect, raw, sealed if type(sealed) is dict else None)
     return reasons, bound
+
+
+def observation_reasons(expect, raw, sealed):
+    """r5: the capture observation a sealed volume checkpoint binds and the restore observation of a consumed volume
+    checkpoint, read from this attempt's raw evidence (`raw`: the listed files whose SHA-256 matched): present, complete
+    (observation_valid) and bound to the state the bundle binds. A folder deleted together with its raw_records rows is
+    still a missing observation; the parent's inherited capture observation never stands in for this leaf's restore."""
+    reasons = []
+    produces, consumes = expect["produces"], expect["consumes"]
+    if produces and CHECKPOINTS[produces]["volumes"] and sealed is not None:
+        bindings = sealed.get("bindings") if type(sealed.get("bindings")) is dict else {}
+        binding, state_binding = bindings.get("observation") or {}, bindings.get("state") or {}
+        found = OBSERVATION_BINDING.fullmatch(str(binding.get("path")))
+        if found is None:
+            reasons.append("the sealed checkpoint binds no capture observation")
+        else:
+            prefix = "records-" + found.group(1) + "/" + found.group(2) + "/"
+            files = {rel[len(prefix):]: data for rel, data in raw.items() if rel.startswith(prefix)}
+            if OBSERVATION_RESULT not in files or sha256(files[OBSERVATION_RESULT]) != binding.get("sha256"):
+                reasons.append("the capture observation the checkpoint binds is not in the raw evidence")
+            else:
+                try:
+                    observation_valid(files, checkpoint_id=produces, purpose="capture",
+                                      plan_sha256=(sealed.get("identity") or {}).get("plan_sha256"), state_sha256=state_binding.get("sha256"))
+                except Refused as error:
+                    reasons.append("capture observation: " + str(error))
+            final = raw.get("records-" + found.group(1) + "/state.json")
+            if final is None or sha256(final) != state_binding.get("sha256"):
+                reasons.append("the state the checkpoint binds is not the leaf's raw state")
+    if consumes and CHECKPOINTS[consumes]["volumes"] and expect["outcome"].get("outcome") != "REFUSED":
+        try:
+            parent = json.loads((Path(str(expect["bundles"])) / str(expect["parent_manifest_sha256"]) / "manifest.json").read_bytes())
+            parent_state = parent["bindings"]["state"]["sha256"]
+        except (OSError, ValueError, TypeError, KeyError):
+            parent, parent_state = None, None
+            reasons.append("the consumed checkpoint's manifest is unreadable or binds no state")
+        prefix = "records-" + LINEAGE_STACK[consumes] + "/" + OBSERVATION_DIR + "/"
+        folders = {}
+        for rel, data in raw.items():
+            if rel.startswith(prefix) and rel.count("/") >= 3:
+                name, _, inner = rel[len(prefix):].partition("/")
+                folders.setdefault(name, {})[inner] = data
+        restores = []
+        for name, files in sorted(folders.items()):
+            try:
+                request = json.loads(files.get("request.json") or b"null")
+            except ValueError:
+                request = None
+            if type(request) is not dict or request.get("purpose") != "restore" or request.get("checkpoint") != consumes:
+                continue
+            try:
+                observation_valid(files, checkpoint_id=consumes, purpose="restore", state_sha256=parent_state,
+                                  parent_manifest_sha256=expect["parent_manifest_sha256"])
+                restores.append(name)
+            except Refused as error:
+                reasons.append("restore observation " + name + ": " + str(error))
+        if not restores and parent is not None:
+            reasons.append("no restore observation of the consumed " + consumes + " checkpoint in the raw evidence")
+    return reasons
 
 
 def _resolved(cwd, name):
@@ -2448,6 +2834,72 @@ def host_preconditions(python, proof_root, candidate, *, platform=None, homes=No
     return {"paths": paths, "python": python_precondition(python, cwd=str(candidate), run=run)}
 
 
+# ── the mandatory native adapter smoke of `commands` (r5, consult-checkpoints-r5-20261016 adapter_smoke) ──
+# T16 r4 met two adapter defects only inside gate leaves (r3: `git fsck -q`; r4: the observation context), because no pure
+# test runs CheckpointDocker against a real daemon. `commands` therefore runs, after the host preconditions and before a
+# byte of proof.sh, the native smoke: a tiny throwaway fixture (real Docker, Git, Compose and Engine exec; no LiveStack,
+# rehearsal stage or product phase) through every CheckpointDocker path and the live capture/restore consumers (A01-A12)
+# plus the native negative oracles, under the gate's own live.lock and refused while an inspection marker exists. Its raw
+# goes into <proof_root>/smoke/; a failure, skip, UNKNOWN or unconfirmed cleanup writes no script and spends no leaf
+# attempt. CI's runtime job runs the same entrypoint. It is not a T16 leaf and never re-runs one.
+SMOKE_MODULE = "tests/ops_release_checkpoints_native_test.py"
+SMOKE_PATHS = tuple("A%02d" % number for number in range(1, 13))
+SMOKE_ORACLES = ("N01", "N02", "N03", "N04", "N05")
+SMOKE_RESULT = "smoke-result.json"
+SMOKE_INPUT_FILES = (SMOKE_MODULE, "tests/ops_release_checkpoints_test.py", *LEAF_INPUT_FILES)
+SMOKE_TIMEOUT = 1200
+
+
+def _smoke_run(command, **kwargs):
+    return subprocess.run(command, **kwargs)
+
+
+def smoke_verdict(run_dir, evidence):
+    """The recorded smoke run (record-run run.json) and its result: completed with exit 0, outcome PASS, nothing skipped,
+    every path A01-A12 and every native oracle PASS with at least one check, cleanup complete with nothing remaining. Any
+    other or unreadable result refuses (SMOKE_FAILED)."""
+    try:
+        run = json.loads((Path(run_dir) / "run.json").read_bytes())
+        result = json.loads((Path(evidence) / SMOKE_RESULT).read_bytes())
+    except (OSError, ValueError) as error:
+        raise Refused("SMOKE_FAILED", "the smoke left no readable run.json or " + SMOKE_RESULT + ": " + type(error).__name__) from None
+    require(run.get("status") == "completed" and run.get("exit_code") == 0 and run.get("recorder_exit_code") == 0, "SMOKE_FAILED",
+            "the smoke command did not complete with exit 0 (%s, exit %s)" % (run.get("status"), run.get("exit_code")))
+    require(type(result) is dict and result.get("outcome") == "PASS" and result.get("skipped") == 0, "SMOKE_FAILED",
+            "smoke outcome %s, skipped %s, failure %s" % (result.get("outcome"), result.get("skipped"), str(result.get("failure"))[:300]))
+    for name, expected in (("coverage", SMOKE_PATHS), ("oracles", SMOKE_ORACLES)):
+        rows = result.get(name) if type(result.get(name)) is dict else {}
+        require(sorted(rows) == sorted(expected) and all((rows[key] or {}).get("outcome") == "PASS" and (rows[key] or {}).get("checks", 0) >= 1
+                                                         for key in expected), "SMOKE_FAILED", name + " incomplete")
+    cleanup = result.get("cleanup") or {}
+    require(cleanup.get("complete") is True and not cleanup.get("remaining") and not cleanup.get("errors"), "SMOKE_FAILED",
+            "the smoke's cleanup was not observed complete: " + json.dumps(cleanup)[:300])
+    require(type(result.get("host_facts")) is dict, "SMOKE_FAILED", "the smoke recorded no host facts")
+    return result
+
+
+def native_smoke(python, candidate, proof_root, *, stamp=None):
+    """Run the native smoke once, as `<python> -B` from the candidate's bytes, through scripts/record-run.py into a new
+    <proof_root>/smoke/run-<stamp> (its raw beside it in evidence-<stamp>); its output goes to stderr only. Returns the
+    verified result (smoke_verdict)."""
+    folder = Path(proof_root) / "smoke"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    stamp = stamp or now_utc().strftime("%Y%m%dT%H%M%S%fZ")
+    run_dir, evidence = folder / ("run-" + stamp), folder / ("evidence-" + stamp)
+    command = [python, "-B", "scripts/record-run.py", "--run-dir", str(run_dir), "--cwd", str(candidate),
+               *[item for name in SMOKE_INPUT_FILES for item in ("--file", name)], "--tree", "scripts", "--",
+               python, "-B", SMOKE_MODULE, "--evidence", str(evidence)]
+    try:
+        completed = _smoke_run(command, cwd=str(candidate), capture_output=True, timeout=SMOKE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Refused("SMOKE_FAILED", "the native smoke could not run to its end: " + type(error).__name__) from None
+    for stream in (completed.stdout, completed.stderr):
+        if stream:
+            sys.stderr.write(stream.decode("utf-8", errors="replace"))
+    print(json.dumps({"native_smoke": {"run_dir": str(run_dir), "evidence": str(evidence), "exit": completed.returncode}}), file=sys.stderr)
+    return smoke_verdict(run_dir, evidence)
+
+
 # ── source copies for the Linux proofs ──
 
 def mutate_body(text, qualified, replacement):
@@ -2538,7 +2990,7 @@ def write_index(proof_root, result):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="RELEASE-TOOLS-CHECKPOINTS helper (no Docker)")
+    parser = argparse.ArgumentParser(description="RELEASE-TOOLS-CHECKPOINTS helper (no Docker, except the native smoke `commands` runs)")
     sub = parser.add_subparsers(dest="command", required=True)
     registry = sub.add_parser("registry")
     registry.add_argument("--out", required=True)
@@ -2564,7 +3016,9 @@ def main(argv=None):
     copy_parser.add_argument("--out", required=True)
     copy_parser.add_argument("--mutant", choices=sorted(MUTANT_SOURCES))
     commands = sub.add_parser("commands", description="Print proof.sh after checking the host preconditions (HOST_PRECONDITION "
-                              "otherwise, before any byte is written).")
+                              "otherwise) and running the mandatory native adapter smoke (" + SMOKE_MODULE + ": it creates and "
+                              "removes a tiny synthetic Docker fixture under the live gate's lease; SMOKE_FAILED otherwise), then the "
+                              "T16 host admission; nothing is written to stdout before all of them passed.")
     commands.add_argument("--registry", required=True)
     commands.add_argument("--proof-root", required=True, help="absolute; it and every folder above it root-owned, writable by "
                           "no group or other, outside every user home (e.g. /srv/kin-ckpt/proof-<stamp>)")
@@ -2616,9 +3070,18 @@ def main(argv=None):
                     "the frozen registry lives at <proof-root>/registry.json")
             # Before any byte of proof.sh: a host that cannot pass a leaf is refused here, not inside a gate attempt.
             facts = host_preconditions(args.python, args.proof_root, args.candidate)
-            script = proof_commands(leaves(), proof_root=args.proof_root, candidate=args.candidate, python=args.python,
+            frozen = leaves()
+            proof_commands(frozen, proof_root=args.proof_root, candidate=args.candidate, python=args.python, from_unit=args.from_unit,
+                           attempt=args.attempt)
+            # r5: the native adapter smoke (also before a retry's script), then the T16 host admission (D1034: RAM, disk,
+            # daemon, no foreign container) over the host facts the smoke observed before it created anything; a tiny
+            # smoke passing never stands in for those conditions.
+            smoke = native_smoke(args.python, args.candidate, args.proof_root)
+            host_admission(smoke["host_facts"])
+            script = proof_commands(frozen, proof_root=args.proof_root, candidate=args.candidate, python=args.python,
                                     from_unit=args.from_unit, attempt=args.attempt)
-            print(json.dumps({"host_preconditions": facts}), file=sys.stderr)
+            print(json.dumps({"host_preconditions": facts, "native_smoke": {key: smoke.get(key) for key in ("outcome", "seconds", "coverage")}}),
+                  file=sys.stderr)
             sys.stdout.write(script)
         elif args.command == "index":
             result = leaf_index(leaves(), args.unit, args.proof_root, args.run_dir, args.attempt)

@@ -968,19 +968,31 @@ class CheckpointDocker:
                    "networks": ["docker", "network", "rm", ident], "tags": ["docker", "image", "rm", ident]}[kind]
         self.run(command, check=False)
 
-    def observe(self, checkpoint_id):
-        """The product's own observation (HostOps.snapshot) of the restored stack, judged by its boundary contract."""
+    def observe(self, checkpoint_id, *, purpose, state_raw=None, leaf=None, parent_manifest_sha256=None, source=None, probe=None):
+        """The product's own observation (HostOps.snapshot) of this stack, judged by its boundary contract over the original
+        state bytes, in an observation-only context (r5, checkpoints.observe_boundary): the real Introduction constructor
+        without run(), a deep copy of the state, the observation's own request digest and its own Records under
+        <records>/checkpoint-observations/. Its HostOps writes only those Records and keeps this stack's ComposeEntry root
+        (HostOps would otherwise derive the root from the Records' location); repository, target and lock are the stack's
+        own, and every docker exec is still registered and settled as an Engine exec worker. 48a28dd built the context
+        without a request digest on the closed phase's Records (T16 r4: NOT_A_BOUNDARY at every volume boundary). Returns
+        the observation record."""
         stack = self.stack
-        runner, host_ops = stack.ops()
-        machine = intro.Introduction(plan=stack.plan_document, plan_sha256=stack.plan_sha256, target=stack.target,
-                                     production=copy.deepcopy(intro.EXAMPLE_POLICY["production"]) | {"host_key_sha256": "a" * 64},
-                                     ops=host_ops, records=stack.records, repository=stack.repo,
-                                     host_key=stack.target["host_key_sha256"], tool=intro.tool_hashes())
-        machine.state, machine.phase = stack.records.state(), "checkpoint-observe"
-        with intro.bound_ops(stack.repo, runner):
-            snapshot = host_ops.snapshot(machine)
-        checkpoints.boundary_contract(checkpoint_id, snapshot, state=machine.state, plan=stack.plan_document, target=stack.target)
-        return snapshot
+        runner = intro.Runner(stack.repo)
+        entry_root = stack.root / "compose-entries"
+
+        def make_ops(records):
+            return intro.HostOps(target=stack.target, plan=stack.plan_document, runner=runner, records=records, entry_root=entry_root)
+
+        def snapshot(ops, context):
+            with intro.bound_ops(stack.repo, runner):
+                return ops.snapshot(context)
+        return checkpoints.observe_boundary(
+            checkpoint_id, purpose=purpose, records_dir=stack.records.directory, secrets_dir=stack.records.secrets,
+            entry_root=entry_root, lock_path=intro.lock_path(stack.repo), plan=stack.plan_document, plan_sha256=stack.plan_sha256,
+            target=stack.target, repository=stack.repo, host_key=stack.target["host_key_sha256"], tool=intro.tool_hashes(),
+            make_ops=make_ops, snapshot=snapshot, state_raw=state_raw, leaf=leaf, parent_manifest_sha256=parent_manifest_sha256,
+            source=source, probe=probe)
 
     def boundary_facts(self):
         """The product facts a restore must reproduce (CKPT-04), observed through the stack's own containers: per role its

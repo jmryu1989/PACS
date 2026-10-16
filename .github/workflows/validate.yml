@@ -1312,10 +1312,10 @@ jobs:
         run: sudo python3 -B tests/ops_deploy_host_test.py
       # RELEASE-TOOLS-CHECKPOINTS (D1338, hardening 1 D1354, round 3 D1366): pure checkpoint contracts T01-T15 (the real
       # rehearsal stage methods over a synthetic product), host adapter, bundle inputs, raw records, the raw-evidence
-      # index, lineage, retries, the supervised browser child against a frozen copy, comparison, and mutants M01-M42; no
+      # index, lineage, retries, the supervised browser child against a frozen copy, comparison, the r5 observation context and commands smoke contracts, and mutants M01-M44 and M46; no
       # Docker. The child runs as root because the ComposeEntry fork contract needs root-owned protected folders, as the
       # product entry does.
-      - name: RELEASE-TOOLS-CHECKPOINTS boundary, bundle, identity, fork admission, budget, gate, time, cleanup, record, stage and lineage contracts with 42 mutants
+      - name: RELEASE-TOOLS-CHECKPOINTS boundary, bundle, identity, fork admission, budget, gate, time, cleanup, record, stage, lineage and observation contracts with 45 mutants
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/release-tools-checkpoints --cwd . --file tests/ops_release_checkpoints.py --file tests/ops_release_checkpoints_test.py --file tests/ops_release_checkpoints_live_test.py --file tests/ops_deploy_host_container_test.py --file tests/ops_deploy_host_test.py --file tests/live_test_gate.py --tree scripts -- sudo python3 -B tests/ops_release_checkpoints_test.py
       - name: Offline export inventory and image integrity
         run: python3 tests/ops_export_inventory_test.py
@@ -1357,6 +1357,26 @@ jobs:
         run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
       - name: Prepare disposable database image
         run: docker pull postgres:16-alpine
+      # RELEASE-TOOLS-CHECKPOINTS round 5 (consult-checkpoints-r5-20261016 adapter_smoke, real_backend_ci): the native adapter
+      # smoke that `tests/ops_release_checkpoints.py commands` runs before proof.sh - CheckpointDocker and the live
+      # capture/restore consumers against this runner's real Docker, Git, Compose and Engine exec on a tiny throwaway fixture
+      # (A01-A12, N01-N05). The images are prepared here, never inside the smoke; a refusal or skip fails the step. Its raw
+      # evidence lands in tmp/runtime-ci and goes up with the record-run upload below.
+      - name: Prepare the RELEASE-TOOLS-CHECKPOINTS native smoke (the fixture's Orthanc image and pydicom)
+        timeout-minutes: 5
+        run: |
+          docker pull orthancteam/orthanc:24.12.0
+          python3 -m venv "$RUNNER_TEMP/ckpt-smoke-python"
+          "$RUNNER_TEMP/ckpt-smoke-python/bin/python" -m pip install --disable-pip-version-check pydicom==2.4.4
+      - name: RELEASE-TOOLS-CHECKPOINTS native adapter smoke A01-A12 and N01-N05 (real Docker, Git, Compose and Engine exec)
+        timeout-minutes: 8
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/release-tools-checkpoints-native --cwd . --file tests/ops_release_checkpoints_native_test.py --file tests/ops_release_checkpoints_test.py --file tests/ops_release_checkpoints.py --file tests/ops_release_checkpoints_live_test.py --file tests/ops_deploy_host_container_test.py --file tests/ops_deploy_host_test.py --file tests/live_test_gate.py --tree scripts -- sudo "$RUNNER_TEMP/ckpt-smoke-python/bin/python" -B tests/ops_release_checkpoints_native_test.py --evidence tmp/runtime-ci/release-tools-checkpoints-native-evidence
+      - name: RELEASE-TOOLS-CHECKPOINTS native smoke evidence made readable for the upload
+        if: always()
+        run: |
+          if [ -d tmp/runtime-ci/release-tools-checkpoints-native-evidence ]; then
+            sudo chown -R "$(id -u):$(id -g)" tmp/runtime-ci/release-tools-checkpoints-native-evidence
+          fi
       - name: Findings migration preservation, restrict, action CHECK and synthetic dump/restore
         # Explicit selection: the old-image case (test_04) is excluded because it skips without KIN_TEST_OLD_API_IMAGE.
         # The citation runtime case needs the image built above; it is the only place the application

@@ -8,11 +8,19 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M42 to temporary copies of tests/ops_release_checkpoints.py and (M15-M17,
-M35) tests/ops_deploy_host_container_test.py only, runs the named contract against the unmodified copies (control) and
-the mutant in fresh processes, and counts a kill only when the control passes and the mutant fails an assertion (an
+CheckpointMutationContracts (T18) applies M01-M44 and M46 to temporary copies of tests/ops_release_checkpoints.py and
+(M15-M17, M35) tests/ops_deploy_host_container_test.py only, runs the named contract against the unmodified copies (control)
+and the mutant in fresh processes, and counts a kill only when the control passes and the mutant fails an assertion (an
 import, launch or fixture error is not a kill). M01-M14 are the spec's contracts; M15-M30 were added by hardening round 1
-for CKPT-01..09 (one or more per finding); M31-M42 by round 3 for CKPT2-01..06 (M30 retargeted to the new alias keep).
+for CKPT-01..09 (one or more per finding); M31-M42 by round 3 for CKPT2-01..06 (M30 retargeted to the new alias keep);
+M43, M44 and M46 by round 5 (consult-checkpoints-r5-20261016 new_mutants).
+
+Round 5 (consult-checkpoints-r5-20261016): the observation-only context over a synthetic Engine behind the product's
+own Runner interface (CheckpointObservationTests: P1 its own request, Records and settled workers; P2 the original records
+byte-identical, the judged state bound, 48a28dd's and the digest-only contexts as diagnostics), the observation raw at the
+seal, the index and its consumers (CheckpointRecordTests P3), and the `commands` smoke precondition (CheckpointSmokeTests
+P4). These are pure controls; the adapter's own commands run in tests/ops_release_checkpoints_native_test.py only. The
+original records' byte identity is the requirement itself (consultation observe_fix), so P2 compares bytes.
 
 Round 3 (consult answer.json round3_acceptance): the index reads the raw evidence (CheckpointRecordTests, CKPT2-01) and
 every consumer re-checks a BOUND index (CKPT2-03); the product's supervised browser command leaves the frozen source
@@ -368,8 +376,46 @@ def realistic(root, checkpoint_id, *, tamper=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(value)
         bindings[name] = {"path": rel, "sha256": hashlib.sha256(value).hexdigest()}
+    if cp.CHECKPOINTS[checkpoint_id]["volumes"]:
+        # r5: the capture observation of exactly this state, bound beside it.
+        folder = write_observation(root / stack / "records", checkpoint_id, "capture", plan=plan, target=target, state_raw=files["state"][1])
+        result_file = folder / cp.OBSERVATION_RESULT
+        bindings["observation"] = {"path": result_file.relative_to(root).as_posix(), "sha256": hashlib.sha256(result_file.read_bytes()).hexdigest()}
     return SimpleNamespace(plan=plan, target=target, state=parts["state"], result=result, raw=raw, bindings=bindings, identity=identity,
                            root=root)
+
+
+def write_observation(records_dir, checkpoint_id, purpose, *, plan, target, state_raw, parent=None):
+    """A complete observation folder as cp.observe_boundary leaves one (r5): the canonical request, the observation state
+    with this request's settled Engine exec worker on the database container, the product snapshot, the command record and
+    the log it refers to, the journal and, last, observation.json. Returns the folder."""
+    plan_sha = intro.plan_identity(plan)
+    request = cp.observation_request(checkpoint_id, purpose=purpose, plan_sha256=plan_sha, state_raw=state_raw, parent_manifest_sha256=parent)
+    digest = cp.sha256(cp.canonical(request))
+    folder = Path(records_dir) / cp.OBSERVATION_DIR / (checkpoint_id + "-" + purpose + "-" + digest[:16])
+    (folder / "logs").mkdir(parents=True)
+    (folder / "request.json").write_bytes(cp.canonical(request) + b"\n")
+    state = json.loads(state_raw)
+    basis = {"checkout": "previous", "lock_token": None, "compose_entry": {"generation": "1" * 64, "sha256": "2" * 64}, **state}
+    snapshot = snapshot_fixture(basis, plan, target, cp.CHECKPOINTS[checkpoint_id]["boundary"])
+    db = snapshot["facts"]["containers"]["value"]["db"]["value"]["id"]
+    observed = copy.deepcopy(state)
+    observed.setdefault("workers", {})["observation-1"] = {
+        "nonce": "observation-1", "kind": "exec", "resource": target["containers"]["db"], "state": "QUIET", "plan_sha256": plan_sha,
+        "request_sha256": digest, "container_id": db, "exec_id": "e" * 64, "client_exit": 0, "server_exit": 0,
+        "exec_observation": {"ID": "e" * 64, "ContainerID": db, "Running": False, "ExitCode": 0}}
+    (folder / "state.json").write_bytes(intro.canonical(observed) + b"\n")
+    (folder / "snapshot.json").write_bytes(cp.canonical(snapshot) + b"\n")
+    log = b"synthetic observation stderr\n"
+    (folder / "logs" / "failed-0.err").write_bytes(log)
+    row = {"seq": 1, "argv": ["docker", "exec"], "outcome": "exit", "exit": 0, "failure_log": {"file": "logs/failed-0.err", "sha256": cp.sha256(log)}}
+    (folder / ("commands-" + cp.OBSERVATION_PHASE + "-" + digest[:16] + ".jsonl")).write_bytes(intro.canonical(row) + b"\n")
+    (folder / "journal.jsonl").write_bytes(intro.canonical({"event": "observation-end", "outcome": "PASS"}) + b"\n")
+    originals = {"records/state.json": cp.sha256(state_raw), "lock": None}
+    cp.write_observation_result(folder, request_sha256=digest, checkpoint_id=checkpoint_id, purpose=purpose, outcome="PASS", code=None,
+                                before=originals, after=dict(originals), original_state_sha256=cp.sha256(state_raw),
+                                started_utc=datetime.now(timezone.utc).isoformat())
+    return folder
 
 
 def identity_fixture(**changes):
@@ -580,6 +626,15 @@ class CheckpointBundleTests(RefusalAssertions, TempCase):
         self.assertEqual(len(self.admitted(cp.archive_members, path, category="pg")), 4)
         path.write_bytes(volume_tar("orthanc", extra=[("./pg_tblspc/16384", tarfile.SYMTYPE, intro.TABLESPACE)]))
         self.assertRefused("ARCHIVE_INVALID", cp.archive_members, path, category="orthanc")
+        # r5 (found by the native smoke): a cut archive is refused before the daemon's tar writes any part of it.
+        raw = volume_tar("pg", extra=[("./big.bin", tarfile.REGTYPE, b"x" * 4096)])
+        with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
+            last = archive.getmembers()[-1]
+        end = last.offset_data + -(-last.size // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+        for label, data in (("a cut header", raw[:700]), ("cut member data", raw[:last.offset_data + 100]), ("no end-of-archive marker", raw[:end])):
+            with self.subTest(archive=label):
+                path.write_bytes(data)
+                self.assertRefused("ARCHIVE_INVALID", cp.archive_members, path, category="pg")
         with self.subTest(overlap="bundle root inside the fixture"):
             fixture = self.tempdir()
             self.assertRefused("BUNDLE_INVALID", cp.BundleStore, fixture / "bundles", forbidden=[fixture])
@@ -996,6 +1051,22 @@ class CheckpointRestoreTests(RefusalAssertions, TempCase):
             cp.restore_checkpoint(manifest, directory, backend=fresh, fixture_root=self.tempdir() / "restored", names=names,
                                   images_present=lambda image_id: True, observe=lambda sid: None)
             self.assertIn(extra, fresh.loaded)
+        # r5 (the native smoke): the mount point a declared mount needs, and the folder made to hold it, are no layer
+        # state; a file stored beside it is; the orthancteam image regenerates its hostid, configurator cache and plugins.
+        for name, diffs, allowed in (("a mount point and the folder made for it", ["A /etc/nginx", "A /etc/nginx/certs"], True),
+                                     ("a file beside the mount point", ["A /etc/nginx", "A /etc/nginx/certs", "A /etc/nginx/extra.conf"], False),
+                                     ("the Orthanc image's own start", ["C /etc", "C /etc/hostid", "C /startup", "A /startup/__pycache__",
+                                                                       "A /usr/share/orthanc/plugins/libOrthancGdcm.so"], True),
+                                     ("a mount point of another container", ["A /var/lib/postgresql/emr-access"], False)):
+            with self.subTest(layer=name):
+                backend = FakeBackend(names, volumes)
+                backend.containers[names["proxy"]]["mounts"] = [{"type": "volume", "name": PROJECT + "_proxy-certs",
+                                                                 "destination": "/etc/nginx/certs"}]
+                backend.diffs.update({names["proxy"]: diffs})
+                if allowed:
+                    self.admitted(self.captured, "introduced", backend)
+                else:
+                    self.assertRefused("WRITABLE_LAYER", self.captured, "introduced", backend)
 
 
 class CheckpointBudgetTests(RefusalAssertions, TempCase):
@@ -1358,11 +1429,14 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
                   "source": {"sha256": "2" * 64}, "harness": {"sha256": "3" * 64}, "tool_files": {}}
         source_path = root / (leaf["source"] + ".source-manifest.json")
         source_path.write_bytes(cp.canonical(source) + b"\n")
-        parent_sha = None
+        parent_sha = parent_state = None
         if leaf["parent"]:
             consumes = cp.STAGES[leaf["stage"]]["consumes"]
-            parent_raw = cp.canonical({"checkpoint": consumes, "kind": "release-tools-checkpoint",
-                                       "lineage": cp.CHECKPOINTS[consumes]["lineage"]}) + b"\n"
+            # The state the parent bundle binds: a restore observes exactly these bytes (r5).
+            parent_state = intro.canonical({"plan_sha256": "f" * 64, "status": cp.CHECKPOINTS[consumes]["status"], "history": []}) + b"\n"
+            parent_raw = cp.canonical({"checkpoint": consumes, "kind": "release-tools-checkpoint", "lineage": cp.CHECKPOINTS[consumes]["lineage"],
+                                       "bindings": {"state": {"path": cp.LINEAGE_STACK[consumes] + "/records/state.json",
+                                                              "sha256": hashlib.sha256(parent_state).hexdigest()}}}) + b"\n"
             parent_sha = hashlib.sha256(parent_raw).hexdigest()
             parent_path = root / "out" / "bundles" / parent_sha / "manifest.json"
             parent_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1378,7 +1452,7 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
             paths["request"].write_bytes(cp.canonical(request) + b"\n")
         expectation = cp.leaf_expectation(leaves, unit, root, attempt)
         expect = expectation["expect"]
-        plans, executing = {}, None
+        plans, executing, sealed_bindings = {}, None, None
         for stack in sorted({row["stack"] for row in expect["results"]}):
             records = evidence / ("records-" + stack)
             (records / "logs").mkdir(parents=True)
@@ -1414,6 +1488,19 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
             plan_raw = alter("plan", intro.canonical(plan) + b"\n", stack)
             if plan_raw is not None:
                 (records / "plan.json").write_bytes(plan_raw)
+            # r5: the restore observation of the consumed checkpoint and the capture observation of the sealed one, as the
+            # leaf's preserved records carry them.
+            target = target_fixture(root)
+            consumed = expect["consumes"]
+            if (consumed and cp.CHECKPOINTS[consumed]["volumes"] and cp.LINEAGE_STACK[consumed] == stack
+                    and expect["outcome"]["outcome"] != "REFUSED"):
+                write_observation(records, consumed, "restore", plan=plan, target=target, state_raw=parent_state, parent=parent_sha)
+            if expect["produces"] and cp.CHECKPOINTS[expect["produces"]]["volumes"] and cp.LINEAGE_STACK[expect["produces"]] == stack:
+                folder = write_observation(records, expect["produces"], "capture", plan=plan, target=target,
+                                           state_raw=(records / "state.json").read_bytes())
+                sealed_bindings = {"state": {"path": stack + "/records/state.json", "sha256": hashlib.sha256((records / "state.json").read_bytes()).hexdigest()},
+                                   "observation": {"path": stack + "/records/" + folder.relative_to(records).as_posix() + "/" + cp.OBSERVATION_RESULT,
+                                                   "sha256": hashlib.sha256((folder / cp.OBSERVATION_RESULT).read_bytes()).hexdigest()}}
             alter("files", records, stack)
             executing = executing or plans[stack]
         raw_rows = sorted([path.relative_to(evidence).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]
@@ -1423,7 +1510,7 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
         if expect["produces"]:
             manifest = alter("manifest", {"checkpoint": expect["produces"], "execution_kind": leaf["execution_kind"],
                                           "parent": {"manifest_sha256": parent_sha} if parent_sha else None,
-                                          "identity": {"plan_sha256": executing}})
+                                          "identity": {"plan_sha256": executing}, "bindings": sealed_bindings})
             manifest_raw = cp.canonical(manifest) + b"\n"
             folder = root / "out" / "bundles" / hashlib.sha256(manifest_raw).hexdigest()
             folder.mkdir(parents=True)
@@ -1728,6 +1815,107 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
                          Path(parent.results["checkpoint"]["path"]).name)
         next(parent.evidence.rglob("state.json")).write_bytes(b'{"history":[]}\n')
         self.assertRefused("PARENT_UNBOUND", cp.leaf_request, parent.leaves, "release-tools-checkpoints-proof-late-resume", root)
+
+    def test_observation_raw_is_required_and_rechecked_when_consumed(self):
+        """r5 P3 (consult observe_fix raw_evidence_after, R5-ACCEPTANCE item 2, N04): a volume checkpoint's capture
+        observation is bound by the seal and re-read from the fixture member (load_bundle) and from the evidence (index); a
+        leaf that restored a volume checkpoint carries its own restore observation naming that parent and observing the
+        state the parent bound. A missing observation - also when its files left the raw list with it (M46) -, a changed
+        observation file, an observation of another parent, and an observation file edited after the index (PARENT_UNBOUND)
+        are refused."""
+        capture = "release-tools-checkpoints-proof-prefix-capture"
+        late = "release-tools-checkpoints-proof-late-fault"
+        for unit in (self.UNIT, capture, late):
+            with self.subTest(bound=unit):
+                proof = self.layout(unit)
+                verdict = self.verdict(proof)
+                self.assertEqual(verdict["verdict"], "BOUND", verdict["reasons"])
+                self.assertTrue(any("/" + cp.OBSERVATION_DIR + "/" in rel for rel, _ in verdict["raw"]["files"]))
+
+        def drop(purpose):
+            def change(kind, value, stack=None):
+                if kind == "files":
+                    for request in sorted(value.glob(cp.OBSERVATION_DIR + "/*/request.json")):
+                        if json.loads(request.read_bytes())["purpose"] == purpose:
+                            shutil.rmtree(request.parent)
+                return value
+            return change
+
+        def edit(purpose, name, old, new):
+            def change(kind, value, stack=None):
+                if kind == "files":
+                    for request in sorted(value.glob(cp.OBSERVATION_DIR + "/*/request.json")):
+                        if json.loads(request.read_bytes())["purpose"] == purpose:
+                            path = request.parent / name
+                            path.write_bytes(path.read_bytes().replace(old, new))
+                return value
+            return change
+
+        def unbound(kind, value, stack=None):
+            return {**value, "bindings": {"state": value["bindings"]["state"]}} if kind == "manifest" else value
+
+        cases = {"the capture observation removed with its raw rows": (self.UNIT, drop("capture"), None, "capture observation"),
+                 "the restore observation removed with its raw rows (M46)": (capture, drop("restore"), None, "no restore observation"),
+                 "the restore observation removed with its raw rows, late fault": (late, drop("restore"), None, "no restore observation"),
+                 "a capture observation snapshot changed (rows rewritten)": (self.UNIT, edit("capture", "snapshot.json", b'"ready":true', b'"ready":false'),
+                                                                           None, "capture observation"),
+                 "a restore observation of another parent": (capture, edit("restore", "request.json", b'"parent_manifest_sha256":"',
+                                                                           b'"parent_manifest_sha256":"0'), None, "restore observation"),
+                 "a seal that binds no observation": (self.UNIT, unbound, None, "binds no capture observation"),
+                 "an observation file changed after the run": (capture, None, lambda proof: next(proof.evidence.rglob("snapshot.json")).write_bytes(b"{}\n"),
+                                                              "raw record changed")}
+        for name, (unit, alter, after, reason) in cases.items():
+            with self.subTest(refused=name):
+                proof = self.layout(unit, alter=alter)
+                run_dir, completed = self.record(proof)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                if after:
+                    after(proof)
+                verdict = cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir)
+                self.assertEqual(verdict["verdict"], "UNVERIFIED", name)
+                self.assertTrue(any(reason in item for item in verdict["reasons"]), verdict["reasons"])
+        with self.subTest(refused="an observation file edited after the BOUND index"):
+            root = self.tempdir("kin-proof-")
+            proof = self.layout(capture, root=root)
+            run_dir, _ = self.record(proof)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cp.main(["index", "--registry", str(root / "registry.json"), "--unit", capture, "--proof-root", str(root),
+                                          "--run-dir", str(run_dir)]), 0)
+            self.admitted(cp.bound_index, root, capture)
+            path = next(path for path in proof.evidence.rglob(cp.OBSERVATION_RESULT))
+            path.write_bytes(path.read_bytes() + b" ")
+            self.assertRefused("PARENT_UNBOUND", cp.bound_index, root, capture)
+        # The fixture member of a volume bundle: the bound observation must be there, complete, and observe the bound state.
+        with self.subTest(bundle="the capture observation re-read from the fixture member"):
+            self.admitted(cp.load_bundle, seal(self, self.tempdir() / "bundles", "held"))
+            self.assertRefused("BUNDLE_INVALID", seal, self, self.tempdir() / "bundles", "held", drop=("observation",))
+
+            def damaged(store_root, change):
+                fixture = self.tempdir("kin-fixture-")
+                made = realistic(fixture, "held")
+                folder = fixture / Path(made.bindings["observation"]["path"]).parent
+                change(folder, made)
+                store = cp.BundleStore(store_root, forbidden=[fixture])
+                pending = store.begin("held")
+                for category in cp.VOLUME_CATEGORIES:
+                    pending.add("volume-" + category + ".tar", "volume:" + category, volume_tar(category))
+                tree = pending.directory / "export-fixture.tar"
+                cp.write_tree_archive(fixture, tree)
+                pending.add("fixture-tree.tar", "fixture-tree", tree)
+                tree.unlink()
+                boundary = cp.boundary_publishable("held", state=made.state, result=made.result, result_raw=made.raw)
+                return pending.seal(identity=made.identity, boundary=boundary, bindings=made.bindings, owned={"token": TOKEN, "projects": [PROJECT],
+                                    "volumes": {}, "networks": []}, execution_kind="fresh")
+            for label, change in (("its snapshot deleted", lambda folder, made: (folder / "snapshot.json").unlink()),
+                                  ("an observation of another state", lambda folder, made: (folder.parent.parent / "state.json").write_bytes(b"{}\n"))):
+                with self.subTest(damaged=label):
+                    try:
+                        final = damaged(self.tempdir() / "bundles", change)
+                    except cp.Refused as error:
+                        # A changed state no longer matches its own binding: the seal itself refuses.
+                        self.assertEqual(error.code, "BUNDLE_INVALID")
+                        continue
+                    self.assertRefused("BUNDLE_INVALID", cp.load_bundle, final)
 
 
 STAGE_IMAGES = {"previous": {"api": image("1"), "proxy": image("2"), "db": image("3"), "keycloak": image("4"), "orthanc": image("5")},
@@ -3128,8 +3316,10 @@ class CheckpointHostPreconditionTests(RefusalAssertions, TempCase):
         root, candidate = self.tempdir("kin-proof-"), self.tempdir("kin-candidate-")
         (root / "registry.json").write_bytes(cp.canonical([dict(leaf) for leaf in cp.DEFAULT_PROOF_LEAVES]) + b"\n")
         if os.name == "posix" and os.geteuid() == 0:
-            # Root (CI): the temporary folders are under /root, a root-owned chain.
-            code, out, err = commands(root, candidate, python)
+            # Root (CI): the temporary folders are under /root, a root-owned chain. r5: an admitted host then runs the native
+            # smoke (CheckpointSmokeTests); a passing one stands in for it here.
+            with patch.object(cp, "_smoke_run", fake_smoke()[0]):
+                code, out, err = commands(root, candidate, python)
             self.assertEqual(code, 0, err)
             self.assertTrue(out.startswith("#!/usr/bin/env bash\n"))
             facts = json.loads(err.strip().splitlines()[-1])["host_preconditions"]
@@ -3147,6 +3337,411 @@ class CheckpointHostPreconditionTests(RefusalAssertions, TempCase):
                 self.assertEqual((code, out), (2, ""), "refused before any byte of proof.sh")
                 self.assertIn("CHECKPOINT_REFUSED HOST_PRECONDITION", err)
                 self.assertIn(reason, err)
+
+
+# ── r5 (consult-checkpoints-r5-20261016): the observation-only context, the original records, the observation raw and
+# the native smoke of `commands`; pure controls only - the native backend is tests/ops_release_checkpoints_native_test.py ──
+
+def engine_response(status, body=b"", *, stream=b""):
+    """One Engine HTTP answer as `docker system dial-stdio` relays it (101 carries the multiplexed exec stream)."""
+    if status == 101:
+        return b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n" + stream
+    reason = {200: "OK", 201: "Created"}[status]
+    return ("HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % (status, reason, len(body))).encode() + body
+
+
+class FakeEngine:
+    """A synthetic daemon behind the product's Runner interface, answering exactly what HostOps.snapshot asks: exact-name
+    container listings, inspect, git rev-parse, the worker label listing, and Engine exec create/start/inspect over
+    `docker system dial-stdio` with the Engine's HTTP and stream framing. A pure control: it never stands in for the native
+    smoke (no claim about the real adapter's argv). `exec_running` answers an exec that never ends; `on_call` sees every
+    call (to change a file mid-observation)."""
+
+    def __init__(self, target, plan, state, *, boundary, exec_running=False, on_call=None):
+        self.calls, self.execs, self.exec_running, self.on_call = [], {}, exec_running, on_call
+        side = "release" if state["checkout"] == "target" else "previous"
+        self.sha = plan[side]["sha"]
+        running = set(intro.ROLES) if intro.BOUNDARY_RUNNING[boundary] == "all" else set(intro.BOUNDARY_RUNNING[boundary].split())
+        after = boundary in ("L-09b", "L-10e")
+        self.migrations = plan["migrations"]["after" if after else "before"]
+        port = (target["ports"]["public"][0] if boundary in intro.PUBLIC_BOUNDARIES else target["ports"]["maintenance"]).split(":")[1]
+        self.items = {}
+        for index, role in enumerate(intro.ROLES):
+            name = target["containers"][role]
+            self.items[name] = {"Id": "%064x" % (index + 1), "Name": "/" + name, "Image": plan[side]["images"][role], "ExecIDs": [],
+                                "State": {"Running": role in running, "Restarting": False, "Status": "running" if role in running else "exited",
+                                          "ExitCode": 0},
+                                "Config": {"Labels": {"com.docker.compose.project": target["project"], "com.docker.compose.service": role}},
+                                "HostConfig": {"PortBindings": {"443/tcp": [{"HostIp": "127.0.0.1", "HostPort": port}]} if role == "proxy" else {}}}
+
+    def __call__(self, args, *, input=None, timeout=60, env=None, output=None, stdin=None):
+        self.calls.append(list(args))
+        if self.on_call is not None:
+            self.on_call(list(args))
+        answer = lambda out, code=0: subprocess.CompletedProcess(args, code, out, b"")
+        if args[:3] == ["docker", "container", "ls"]:
+            name = next(arg for arg in args if arg.startswith("name=^/"))[len("name=^/"):-1]
+            return answer((name + "\n").encode() if name in self.items else b"")
+        if args[:2] == ["docker", "inspect"]:
+            return answer(json.dumps([self.items[args[2]]]).encode())
+        if args[:3] == ["git", "rev-parse", "HEAD"]:
+            return answer((self.sha + "\n").encode())
+        if args[:2] == ["docker", "ps"]:
+            return answer(b"")
+        if args[:3] == ["docker", "system", "dial-stdio"]:
+            return answer(self.engine(input))
+        raise AssertionError("FakeEngine does not model " + " ".join(args[:3]))
+
+    def engine(self, raw):
+        from urllib.parse import unquote
+        head, _, rest = raw.partition(b"\r\n\r\n")
+        method, path, _ = head.split(b"\r\n")[0].decode().split(" ")
+        length = int(next(line.split(b":", 1)[1] for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")))
+        body, path = (json.loads(rest[:length]) if length else None), path[len("/v1.45"):]
+        if method == "POST" and path.startswith("/containers/") and path.endswith("/exec"):
+            ident = hashlib.sha256(("exec %d" % len(self.execs)).encode()).hexdigest()
+            self.execs[ident] = {"container": unquote(path[len("/containers/"):-len("/exec")]), "cmd": body["Cmd"]}
+            return engine_response(201, json.dumps({"Id": ident}).encode())
+        ident = path.split("/")[2]
+        if method == "POST" and path.endswith("/start"):
+            code, out = self.output(self.execs[ident]["cmd"])
+            self.execs[ident]["exit"] = code
+            return engine_response(101, stream=(bytes([1, 0, 0, 0]) + len(out).to_bytes(4, "big") + out) if out else b"")
+        if method == "GET" and path.endswith("/json"):
+            row = self.execs[ident]
+            return engine_response(200, json.dumps({"ID": ident, "ContainerID": row["container"], "Running": self.exec_running,
+                                                    "ExitCode": None if self.exec_running else row.get("exit", 0)}).encode())
+        raise AssertionError("FakeEngine does not model " + method + " " + path)
+
+    def output(self, cmd):
+        text = " ".join(cmd)
+        if cmd[0] == "pg_isready":
+            return 0, b"accepting connections\n"
+        if "_prisma_migrations" in text:
+            return 0, json.dumps([[name, checksum, True, False] for name, checksum in self.migrations]).encode()
+        if "pg_stat_activity" in text:
+            return 0, b"0\n"
+        if cmd[:2] == ["sh", "-c"] and cmd[2].startswith("exit "):
+            return int(cmd[2].split()[1]), b""
+        return 0, b""
+
+
+class CheckpointObservationTests(RefusalAssertions, TempCase):
+    """r5 P1/P2 (consult observe_fix, R5-ACCEPTANCE items 1 and 4): CheckpointDocker.observe runs the product's HostOps
+    and Introduction (constructed, never run) over a synthetic Engine; the stack holds a closed phase's real records."""
+
+    def stack(self, checkpoint_id):
+        root = self.tempdir("kin-observe-")
+        target = target_fixture(root)
+        plan, state, result, raw = boundary_fixture(checkpoint_id, plan_fixture(target, root))
+        plan_sha = intro.plan_identity(plan)
+        clone = root / "clone"
+        clone.mkdir(mode=0o700)
+        repo = Path(target["repository"])
+        repo.mkdir(mode=0o700)
+        entry = intro.ComposeEntry(clone / "compose-entries")
+        pointer = entry.publish(repository=repo, project=PROJECT, sources=[("docker-compose.yml", b"services: {}\n")], env_raw=b"",
+                                values={}, runtime="services: {}\n", plan_sha256=plan_sha, validate=lambda command, environment: None)
+        state["compose_entry"] = {**pointer, "root": str(entry.root)}
+        if state["lock_token"]:
+            (repo / ".kin-ops.lock").write_text(state["lock_token"])
+        records = intro.Records(clone / "records")
+        phase = cp.CHECKPOINTS[checkpoint_id]["phase"]
+        # The closed phase's own records, as a phase run in this process leaves them (its command record still named).
+        records.begin(phase, result["request_sha256"])
+        records.command({"step": intro.STEPS[phase][-1][0], "argv": ["docker", "inspect", target["containers"]["db"]], "exit": 0})
+        records.put("plan.json", plan)
+        records.write(records.directory / ("result-" + phase + "-" + result["request_sha256"][:16] + ".json"), raw)
+        records.save(state)
+        records.journal({"event": "phase-end", "phase": phase})
+        with records.lease():
+            pass
+        return SimpleNamespace(root=clone, repo=repo, target=target, plan_document=plan, plan_sha256=plan_sha, records=records), state
+
+    def engine(self, stack, state, checkpoint_id, **kwargs):
+        return FakeEngine(stack.target, stack.plan_document, state, boundary=cp.CHECKPOINTS[checkpoint_id]["boundary"], **kwargs)
+
+    @staticmethod
+    def observe(stack, engine, checkpoint_id, **kwargs):
+        import ops_deploy_host_container_test as rehearsal
+        with patch.object(rehearsal.intro, "Runner", lambda cwd, **options: engine):
+            return rehearsal.CheckpointDocker(stack, None).observe(checkpoint_id, purpose="capture", **kwargs)
+
+    @staticmethod
+    def files(stack):
+        return {path.relative_to(stack.root).as_posix(): path.read_bytes() for path in sorted(stack.root.rglob("*"))
+                if path.is_file() and cp.OBSERVATION_DIR not in path.parts}
+
+    def test_observation_context_settles_its_own_workers_and_refuses_an_unsettled_state(self):
+        """P1: the observation has its own request digest, its own Records and a copy of S; every docker exec of the product
+        snapshot is a registered Engine exec worker of that request, settled QUIET with its server exit; the boundary's own
+        workers and history are kept as they were; an unsettled boundary state, an exec that never ends, and a database
+        fact this observation did not read itself are refused (M43)."""
+        stack, state = self.stack("held")
+        state_raw = (stack.records.directory / "state.json").read_bytes()
+        engine = self.engine(stack, state, "held")
+        record = self.admitted(self.observe, stack, engine, "held")
+        folder = record["folder"]
+        self.assertEqual(folder.parent, stack.records.directory / cp.OBSERVATION_DIR)
+        files = cp.folder_files(folder)
+        summary, request = self.admitted(cp.observation_valid, files, checkpoint_id="held", purpose="capture", plan_sha256=stack.plan_sha256,
+                                         state_sha256=hashlib.sha256(state_raw).hexdigest())
+        self.assertNotEqual(summary["request_sha256"], state["history"][-1]["request_sha256"], "never the phase's request digest")
+        self.assertEqual(request["phase_request_sha256"], state["history"][-1]["request_sha256"])
+        observed = json.loads(files["state.json"])
+        mine = [row for nonce, row in observed["workers"].items() if nonce not in state["workers"]]
+        db = engine.items[stack.target["containers"]["db"]]["Id"]
+        self.assertGreaterEqual(len(mine), 3, "pg_isready, the migration rows and the database clients")
+        for row in mine:
+            self.assertEqual((row["kind"], row["state"], row["request_sha256"], row["container_id"], row["server_exit"]),
+                             ("exec", "QUIET", summary["request_sha256"], db, 0))
+            self.assertIn(row["exec_id"], engine.execs, "an Engine exec ID the daemon issued")
+            self.assertEqual(row["exec_observation"], {"ID": row["exec_id"], "ContainerID": db, "Running": False, "ExitCode": 0})
+        self.assertEqual({nonce: observed["workers"][nonce] for nonce in state["workers"]}, state["workers"], "the boundary's workers kept")
+        self.assertEqual(observed["history"], state["history"], "an observation is never a phase history row")
+        self.assertEqual(record["snapshot"]["facts"]["database"]["value"]["migrations"],
+                         [[name, checksum, True, False] for name, checksum in stack.plan_document["migrations"]["before"]])
+        rows = [json.loads(line) for line in files["commands-" + cp.OBSERVATION_PHASE + "-" + summary["request_sha256"][:16] + ".jsonl"].splitlines()]
+        # One row per HostOps command: the plain daemon and Git calls, and each registered exec (carried by the Engine).
+        self.assertEqual(len(rows), len([call for call in engine.calls if call[:3] != ["docker", "system", "dial-stdio"]]) + len(mine),
+                         "every command of the observation is in its own command record")
+        with self.subTest(probe="a nonzero exec in the same context"):
+            other, other_state = self.stack("held")
+            probe_engine = self.engine(other, other_state, "held")
+
+            def probe(ops, context, snapshot):
+                result = ops.cmd(["docker", "exec", ops.names["db"], "sh", "-c", "exit 3"], check=False)
+                worker = list(context.state["workers"].values())[-1]
+                probe.seen = (result.returncode, worker["server_exit"], worker["client_exit"], worker["state"])
+            self.admitted(self.observe, other, probe_engine, "held", probe=probe)
+            self.assertEqual(probe.seen, (3, 3, 3, "QUIET"))
+        with self.subTest(refused="an unsettled worker in the boundary state"):
+            other, other_state = self.stack("held")
+            other_state["workers"]["w1"]["state"] = "PLANNED"
+            other.records.save(other_state)
+            refused_engine = self.engine(other, other_state, "held")
+            self.assertRefused("OBSERVATION_REFUSED", self.observe, other, refused_engine, "held")
+            self.assertEqual(refused_engine.calls, [], "refused before any command")
+        with self.subTest(refused="an exec whose end the Engine never reports"):
+            other, other_state = self.stack("held")
+            hanging = self.engine(other, other_state, "held", exec_running=True)
+            self.assertRefused("OBSERVATION_UNSETTLED", self.observe, other, hanging, "held")
+            latest = next((other.records.directory / cp.OBSERVATION_DIR).iterdir())
+            self.assertEqual(json.loads((latest / cp.OBSERVATION_RESULT).read_bytes())["outcome"], "REFUSED", "the failed observation is kept")
+            self.assertIn("UNKNOWN", [row["state"] for row in json.loads((latest / "state.json").read_bytes())["workers"].values()])
+        with self.subTest(refused="a database fact this observation did not read (M43)"):
+            other, other_state = self.stack("held")
+            reused = copy.deepcopy(record["snapshot"])
+            entry_root = other.root / "compose-entries"
+            self.assertRefused("NOT_A_BOUNDARY", cp.observe_boundary, "held", purpose="capture", records_dir=other.records.directory,
+                               secrets_dir=other.records.secrets, entry_root=entry_root, lock_path=intro.lock_path(other.repo),
+                               plan=other.plan_document, plan_sha256=other.plan_sha256, target=other.target, repository=other.repo,
+                               host_key="b" * 64, tool=intro.tool_hashes(),
+                               make_ops=lambda records: intro.HostOps(target=other.target, plan=other.plan_document,
+                                                                      runner=self.engine(other, other_state, "held"), records=records,
+                                                                      entry_root=entry_root),
+                               snapshot=lambda ops, context: copy.deepcopy(reused))
+            without = dict(files)
+            stripped = json.loads(without["state.json"])
+            stripped["workers"] = {nonce: row for nonce, row in stripped["workers"].items() if nonce in state["workers"]}
+            without["state.json"] = intro.canonical(stripped) + b"\n"
+            summary_doc = json.loads(without[cp.OBSERVATION_RESULT])
+            summary_doc["files"]["state.json"] = hashlib.sha256(without["state.json"]).hexdigest()
+            without[cp.OBSERVATION_RESULT] = cp.canonical(summary_doc) + b"\n"
+            self.assertRefused("OBSERVATION_INVALID", cp.observation_valid, without, checkpoint_id="held", purpose="capture")
+
+    def test_the_original_records_stay_byte_identical_and_bind_the_sealed_state(self):
+        """P2: the closed phase's state, result, journal, command record, the ComposeEntry and the lock are byte-identical
+        before and after an observation, which writes only its own folder (M44); 48a28dd's observation context leaves the
+        database and fences facts as errors and appends to the closed command record (N01), the digest-only fix rewrites the
+        state and the closed command record (N02); a state changed during the observation refuses it; the seal binds the
+        state that was judged, so a different archived state refuses."""
+        import ops_release_checkpoints_native_test as native
+        import ops_deploy_host_container_test as rehearsal
+        stack, state = self.stack("seeded")
+        before = self.files(stack)
+        record = self.admitted(self.observe, stack, self.engine(stack, state, "seeded"), "seeded")
+        self.assertEqual(self.files(stack), before, "the original records are byte-identical")
+        self.assertEqual(record["summary"]["original"]["before"], record["summary"]["original"]["after"])
+        self.assertEqual(sorted({path.relative_to(stack.root).parts[1] for path in stack.root.rglob("*") if path.is_file()
+                                 and path.relative_to(stack.root).as_posix() not in before}), [cp.OBSERVATION_DIR])
+        for name, digest in (("n01", None), ("n02", "d" * 64)):
+            with self.subTest(diagnostic=name):
+                copied = self.tempdir("kin-diagnostic-") / "records"
+                shutil.copytree(stack.records.directory, copied, ignore=shutil.ignore_patterns(cp.OBSERVATION_DIR))
+                records = intro.Records(copied)
+                records.commands_file, records.seq = stack.records.commands_file, 1
+                listing = lambda: {path.name: path.read_bytes() for path in copied.iterdir() if path.is_file()}
+                prior = listing()
+                engine = self.engine(stack, state, "seeded")
+                with patch.object(rehearsal.intro, "Runner", lambda cwd, **options: engine):
+                    snapshot = native.frozen_observe_48a28dd(stack, records, "seeded", request_sha256=digest)
+                changed = sorted(key for key in set(prior) | set(listing()) if prior.get(key) != listing().get(key))
+                if digest is None:
+                    self.assertEqual((snapshot["facts"]["database"], snapshot["facts"]["fences"]),
+                                     ({"outcome": "ERROR", "reason": "AttributeError"}, {"outcome": "ERROR", "reason": "AttributeError"}))
+                    self.assertRefused("NOT_A_BOUNDARY", cp.boundary_contract, "seeded", snapshot, state=state, plan=stack.plan_document,
+                                       target=stack.target)
+                    self.assertEqual(changed, [stack.records.commands_file], "48a28dd appended to the closed command record")
+                else:
+                    self.admitted(cp.boundary_contract, "seeded", snapshot, state=state, plan=stack.plan_document, target=stack.target)
+                    self.assertEqual(changed, sorted([stack.records.commands_file, "state.json"]), "the digest-only fix rewrote both")
+        with self.subTest(refused="the state changed during the observation"):
+            other, other_state = self.stack("seeded")
+            path = other.records.directory / "state.json"
+
+            def rewrite(args):
+                if args[:3] == ["docker", "system", "dial-stdio"] and b'"edited"' not in path.read_bytes():
+                    path.write_bytes(path.read_bytes().replace(b'"status":"SEEDED"', b'"status":"SEEDED","edited":true'))
+            self.assertRefused("ORIGINAL_CHANGED", self.observe, other, self.engine(other, other_state, "seeded", on_call=rewrite), "seeded")
+            latest = next((other.records.directory / cp.OBSERVATION_DIR).iterdir())
+            self.assertEqual(json.loads((latest / cp.OBSERVATION_RESULT).read_bytes())["outcome"], "REFUSED")
+        with self.subTest(refused="an archived state that is not the judged one"):
+            state_raw = (stack.records.directory / "state.json").read_bytes()
+            bindings = {"state": {"path": "clone/records/state.json", "sha256": hashlib.sha256(state_raw).hexdigest()}}
+            tree = self.tempdir() / "tree.tar"
+            cp.write_tree_archive(stack.root.parent, tree, exclude=("clone/compose-entries",))
+            self.admitted(cp.check_bindings, tree, bindings, required=["state"])
+            (stack.records.directory / "state.json").write_bytes(state_raw.replace(b'"SEEDED"', b'"SEEDED "'))
+            changed = self.tempdir() / "tree.tar"
+            cp.write_tree_archive(stack.root.parent, changed, exclude=("clone/compose-entries",))
+            self.assertRefused("BUNDLE_INVALID", cp.check_bindings, changed, bindings, required=["state"])
+
+
+def fake_smoke(outcome="PASS", *, exit_code=0, skipped=0, missing=(), cleanup=None, host=None, error=None, result=True, before=None):
+    """A stand-in for the recorded native smoke run (pure control of `commands` only): it writes the recorder's run.json and
+    the smoke's result where `commands` told it to, and records whether stdout was still empty when it ran."""
+    seen = []
+
+    def run(command, **kwargs):
+        seen.append(before() if before else None)
+        if error is not None:
+            raise error
+        run_dir, evidence = Path(command[command.index("--run-dir") + 1]), Path(command[command.index("--evidence") + 1])
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"status": "completed", "exit_code": exit_code, "recorder_exit_code": 0}))
+        if result:
+            evidence.mkdir(parents=True)
+            row = {"outcome": "PASS", "checks": 2}
+            document = {"outcome": outcome, "skipped": skipped, "host_facts": host or HOST_FACTS,
+                        "coverage": {key: row for key in cp.SMOKE_PATHS if key not in missing},
+                        "oracles": {key: row for key in cp.SMOKE_ORACLES if key not in missing},
+                        "cleanup": cleanup or {"complete": True, "remaining": [], "errors": []}}
+            (evidence / cp.SMOKE_RESULT).write_bytes(cp.canonical(document) + b"\n")
+        return subprocess.CompletedProcess(command, exit_code, b"NATIVE_SMOKE synthetic\n", b"")
+    return run, seen
+
+
+HOST_FACTS = {"os": "linux", "docker_os": "Ubuntu 24.04 LTS", "daemon_ok": True, "daemon_identity": "DAEMON:SYNTHETIC",
+              "available_ram_bytes": 16 * 1024 ** 3, "available_disk_bytes": 100 * 1024 ** 3, "required_disk_bytes": 20 * 1024 ** 3,
+              "foreign_containers": [], "host_key_sha256": "8" * 64, "architecture": "x86_64", "absolute_fixture_root": "/root",
+              "docker_endpoint": "unix:///var/run/docker.sock", "endpoint_selectors": []}
+NATIVE_BOOTSTRAP = ("import sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\nimport ops_release_checkpoints_native_test as native\n"
+                    "native.gate.STATE = Path(sys.argv[2])\nraise SystemExit(native.main(sys.argv[3:]))\n")
+
+
+class CheckpointSmokeTests(RefusalAssertions, TempCase):
+    """r5 P4 (consult adapter_smoke, R5-ACCEPTANCE item 3, N05): `commands` runs the native smoke after the host
+    preconditions and before any byte of proof.sh, also for a retry; a smoke that fails, is skipped, is incomplete, did not
+    clean up or did not run writes no script and spends no gate attempt; the T16 host admission is checked apart from the
+    smoke; the real smoke entrypoint refuses a busy lease, an inspection marker, unreleased residue and a host that is not
+    native before it creates anything."""
+
+    def test_commands_runs_the_native_smoke_before_any_byte_and_spends_no_attempt(self):
+        root, candidate, state = self.tempdir("kin-proof-"), self.tempdir("kin-candidate-"), self.tempdir("kin-gate-") / "test-gate"
+        state.mkdir()
+        (root / "registry.json").write_bytes(cp.canonical([dict(leaf) for leaf in cp.DEFAULT_PROOF_LEAVES]) + b"\n")
+        (state / "release-tools-checkpoints-proof-prefix-source.json").write_text('{"attempts":[{"status":"failed"}]}\n')
+        (state / "inspections.jsonl").write_text('{"record_sha256":"' + "0" * 64 + '"}\n')
+        ledger = lambda: {path.name: path.read_bytes() for path in state.iterdir()}
+        kept = ledger()
+        out = io.StringIO()
+
+        def commands(*extra, smoke):
+            out.seek(0)
+            out.truncate()
+            err = io.StringIO()
+            with patch.object(cp, "host_preconditions", lambda *args, **kwargs: {"paths": {}, "python": {"modules": {}}}), \
+                    patch.object(cp, "_smoke_run", smoke), patch.object(gate, "STATE", state), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cp.main(["commands", "--registry", str(root / "registry.json"), "--proof-root", str(root), "--candidate", str(candidate),
+                                "--python", sys.executable, *extra])
+            return code, out.getvalue(), err.getvalue()
+        cases = {"a smoke that failed": dict(outcome="FAIL", exit_code=1), "a skipped smoke": dict(skipped=1),
+                 "a path without its checks (A07)": dict(missing=("A07",)), "an oracle without its checks (N01)": dict(missing=("N01",)),
+                 "an unconfirmed cleanup": dict(cleanup={"complete": False, "remaining": ["kin-ckptsmoke-x"], "errors": []}),
+                 "a smoke that left no result": dict(result=False), "a smoke that could not run": dict(error=subprocess.TimeoutExpired("x", 1)),
+                 "the smoke's own refusal (a busy lease)": dict(outcome="REFUSED", exit_code=3)}
+
+        def smoke_only(**kwargs):
+            run, _ = fake_smoke(**kwargs)
+            with patch.object(cp, "_smoke_run", run), contextlib.redirect_stderr(io.StringIO()):
+                return cp.native_smoke(sys.executable, candidate, root)
+        self.assertEqual(self.admitted(smoke_only)["outcome"], "PASS")
+        for name, kwargs in cases.items():
+            with self.subTest(verdict=name):
+                self.assertRefused("SMOKE_FAILED", smoke_only, **kwargs)
+        if os.name == "posix":
+            run, seen = fake_smoke(before=lambda: out.getvalue())
+            code, script, err = commands(smoke=run)
+            self.assertEqual((code, seen), (0, [""]), err)
+            self.assertTrue(script.startswith("#!/usr/bin/env bash\n"), "the script follows the passed smoke")
+            self.assertEqual(json.loads(err.strip().splitlines()[-1])["native_smoke"]["outcome"], "PASS")
+            run, seen = fake_smoke(before=lambda: out.getvalue())
+            code, script, err = commands("--from-unit", "release-tools-checkpoints-proof-prefix-seed", "--attempt", "2", smoke=run)
+            self.assertEqual((code, seen, script.startswith("#!/usr/bin/env bash\n")), (0, [""], True), "a retry runs the smoke as well")
+            for name, kwargs in cases.items():
+                with self.subTest(refused=name):
+                    run, seen = fake_smoke(**kwargs)
+                    for extra in ((), ("--from-unit", "release-tools-checkpoints-proof-prefix-seed", "--attempt", "2")):
+                        code, script, err = commands(*extra, smoke=run)
+                        self.assertEqual((code, script), (2, ""), name)
+                        self.assertIn("CHECKPOINT_REFUSED SMOKE_FAILED", err)
+            with self.subTest(refused="a host that passes the tiny smoke but not T16's D1034"):
+                run, _ = fake_smoke(host={**HOST_FACTS, "available_ram_bytes": 4 * 1024 ** 3})
+                code, script, err = commands(smoke=run)
+                self.assertEqual((code, script), (2, ""))
+                self.assertIn("CHECKPOINT_REFUSED INSUFFICIENT_RAM", err)
+        else:
+            # Elsewhere the proof's Linux paths refuse first, still before the smoke and before any byte.
+            run, seen = fake_smoke()
+            code, script, err = commands(smoke=run)
+            self.assertEqual((code, script, seen), (2, "", []), err)
+        self.assertEqual(ledger(), kept, "the gate ledger and inspections are never touched")
+        self.assertEqual(sorted(path.name for path in root.iterdir()), ["registry.json", "smoke"], "no plan, request, run or index")
+        # The real entrypoint, with its gate state redirected: each refusal comes before anything is created.
+        bootstrap = self.tempdir("kin-native-") / "bootstrap.py"
+        bootstrap.write_text(NATIVE_BOOTSTRAP, encoding="utf-8")
+        smoke_roots = lambda: sorted(Path("/root").glob("kin-ckpt-smoke-*")) if os.name == "posix" and Path("/root").is_dir() else []
+        roots = smoke_roots()
+
+        def native(environment=None):
+            evidence = self.tempdir("kin-native-evidence-") / "evidence"
+            completed = subprocess.run([sys.executable, "-B", str(bootstrap), str(TESTS), str(state), "--evidence", str(evidence)],
+                                       capture_output=True, timeout=300, env={**os.environ, **(environment or {})})
+            return completed, json.loads((evidence / cp.SMOKE_RESULT).read_bytes())
+        with self.subTest(refused="the live lease held by another run"):
+            with gate.exclusive(state / "live.lock"):
+                completed, result = native()
+            self.assertEqual((completed.returncode, result["outcome"], result["code"]), (3, "REFUSED", "SMOKE_BUSY"), completed.stderr[-800:])
+        with self.subTest(refused="an inspection marker"):
+            (state / "live-needs-inspection.json").write_text("{}\n")
+            completed, result = native()
+            (state / "live-needs-inspection.json").unlink()
+            self.assertEqual((completed.returncode, result["code"]), (3, "SMOKE_INSPECTION"), completed.stderr[-800:])
+        with self.subTest(refused="an earlier smoke's unreleased residue"):
+            residue = state.parent / "checkpoint-smoke"
+            residue.mkdir()
+            (residue / "pending-0123456789ab.json").write_text("{}\n")
+            completed, result = native()
+            shutil.rmtree(residue)
+            self.assertEqual((completed.returncode, result["code"]), (3, "SMOKE_RESIDUE"), completed.stderr[-800:])
+        with self.subTest(refused="a host that is not root on native Linux with one local daemon"):
+            completed, result = native({"DOCKER_HOST": "unix:///nonexistent/kin-ckpt-smoke.sock"})
+            self.assertEqual(completed.returncode, 3, completed.stderr[-800:])
+            self.assertIn(result["code"], ("UNSUPPORTED_HOST", "REMOTE_DAEMON"))
+        self.assertEqual(smoke_roots(), roots, "no smoke fixture was created")
+        self.assertEqual({name: data for name, data in ledger().items() if name != "live.lock"}, kept)
 
 
 class CheckpointCompareTests(RefusalAssertions, TempCase):
@@ -3309,6 +3904,13 @@ MUTANTS = (
     ("M42", "CheckpointBytecodeTests.test_supervised_browser_child_keeps_the_frozen_source_admissible",   # CKPT2-02: new files ignored
      '    reasons += ["input appeared during the run: " + after[path]["requested"] for path in sorted(set(after) - set(before))]',
      '    reasons += []', "checkpoints"),
+    # Round 5 (consult-checkpoints-r5-20261016 new_mutants).
+    ("M43", "CheckpointObservationTests.test_observation_context_settles_its_own_workers_and_refuses_an_unsettled_state",   # database fact not read
+     '    require(execs, "NOT_A_BOUNDARY", "no settled exec of this observation read the database")', '    pass', "checkpoints"),
+    ("M44", "CheckpointObservationTests.test_the_original_records_stay_byte_identical_and_bind_the_sealed_state",   # the original Records as sink
+     '    sink = intro.Records(folder, secrets=secrets_dir)', '    sink = intro.Records(records_dir, secrets=secrets_dir)', "checkpoints"),
+    ("M46", "CheckpointRecordTests.test_observation_raw_is_required_and_rechecked_when_consumed",   # required observation unchecked
+     '        if not restores and parent is not None:', '        if False:', "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -3354,8 +3956,8 @@ class CheckpointMutationContracts(TempCase):
         return tests
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
-        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06): control PASS, then an assertion failure in the named contract for
-        each mutant (M01-M42)."""
+        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5): control PASS, then an assertion failure in the named contract
+        for each mutant (M01-M44, M46)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:
