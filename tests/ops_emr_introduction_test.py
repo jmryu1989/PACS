@@ -2994,6 +2994,13 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         dialog, the standalone viewer's image - must have been reached in the real browser; any one missing is no pass."""
         self.assertTrue(intro.folders_valid(json.loads(W2_ANSWERS["/api/filter-folders"])))
         self.assertTrue(intro.shortcuts_valid(json.loads(W2_ANSWERS["/api/workspace-shortcuts"])))
+        v2 = {"version": 2, "list": "Control+Alt+Digit1", "image": None, "prior": "Control+Alt+Digit3",
+              "report": "Control+Alt+Digit4", "context": "Control+Alt+Digit5", "note": "Control+Alt+Digit6",
+              "tools": "Control+Alt+Digit7", "nativeTools": "Control+Alt+Digit9", "previous": "Control+Alt+ArrowLeft",
+              "next": "Control+Alt+ArrowRight", "finalize": "Control+KeyS"}
+        answer = {"owner": ["a", "b"], "revision": 2, "bindings": v2, "invalid": False}
+        self.assertTrue(intro.shortcuts_valid(answer))
+        self.assertFalse(intro.shortcuts_valid(dict(answer, bindings=dict(v2, report="Control+KeyS"))))
         for body in (False, None, [], {"owner": ["a", "b"], "revision": -1, "folders": [], "filters": []},
                      {"owner": ["a", "b"], "revision": 0, "folders": [{"path": "x"}], "filters": []}):
             self.assertFalse(intro.folders_valid(body), body)

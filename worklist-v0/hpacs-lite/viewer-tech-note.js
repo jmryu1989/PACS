@@ -547,18 +547,18 @@ window.kinViewerTechNote=function(services,session=null){
       if(shortcutMap||!owner)return;
       const api=window.KinWorkspaceShortcuts;
       let storage;try{storage=window.localStorage;}catch(_){}
-      shortcutMap=api.read(storage,JSON.stringify(owner));
+      shortcutMap=(api.readV2||api.read)(storage,JSON.stringify(owner));
       if(readingChannel)describeReturn('연결된 판독문으로 · '+api.display(shortcutMap.report));
       for(const [action,code] of Object.entries(shortcutActions)){
         const target=action==='note'?button:toolButtons.get(code);
-        target.setAttribute('aria-keyshortcuts',api.display(shortcutMap[action]));
+        if(shortcutMap[action])target.setAttribute('aria-keyshortcuts',api.display(shortcutMap[action]));else target.removeAttribute('aria-keyshortcuts');
       }
       toolHint.textContent=Object.entries(shortcutActions).map(([action,code])=>(action==='note'?button:toolButtons.get(code)).textContent+' '+api.display(shortcutMap[action])).join(' · ')+' · Focus Comparison Control+Alt+8 (Tab 이동·Enter 선택)';
     }
     const key=e=>{
-      if(!live()||!owner||!shortcutMap||e.defaultPrevented||e.repeat||e.isComposing||e.getModifierState('AltGraph')||!e.ctrlKey||!e.altKey||e.shiftKey||e.metaKey||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
+      if(!live()||!owner||!shortcutMap||e.defaultPrevented||e.repeat||e.isComposing||e.getModifierState('AltGraph')||!e.ctrlKey||e.shiftKey||e.metaKey||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
       const action=window.KinWorkspaceShortcuts.action(shortcutMap,e);
-      const code=e.code==='Digit8'?'Digit8':shortcutActions[action];
+      const code=e.altKey&&e.code==='Digit8'?'Digit8':shortcutActions[action];
       if(!code)return;
       e.preventDefault();if(code==='Digit6')open();else focusTool(code);
     };
