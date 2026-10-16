@@ -962,10 +962,14 @@ class Smoke:
         written = stack.exec("api", "sh", "-c", "printf '0badc0de\\n' > /etc/hostid && sha256sum /etc/hostid && stat -c '%F %s %u:%g %a' /etc/hostid",
                              user="0").stdout.decode()
         same_image = json.loads(stack.docker.run(["docker", "inspect", api]).stdout)[0]["Image"] == orthanc_image
+        # The judged row itself must show the API container on the pinned Orthanc image with its hostid change refused
+        # (a role-blind rule would accept exactly this change); the waiting role's tmpfs mount points, which the
+        # Orthanc image lacks, are refused beside it (the smoke fixture's own tmpfs; never an Orthanc artifact).
         self.negative(stack, "verified", "the API role on the pinned Orthanc image ID with a regenerated-shaped /etc/hostid",
                       role="api", target=cp.HOSTID, written=written, extra={"api_runs_the_orthanc_image_id": same_image},
-                      expect=lambda refused, diff: same_image and ("api: C " + cp.HOSTID) in refused
-                      and all(entry in ("api: C /etc", "api: C " + cp.HOSTID) for entry in refused))
+                      expect=lambda refused, diff, record: same_image and record["roles"]["api"]["image"] == orthanc_image
+                      and {"change": "C " + cp.HOSTID, "verdict": "refused"} in record["roles"]["api"]["verdicts"]
+                      and ("api: C " + cp.HOSTID) in refused and all(entry.startswith("api: ") for entry in refused))
         cleanup = cp.cleanup_owned(self.docker(), stack.owned())
         self.check(["A11"], "the late stack's resources are removed by ownership", cleanup["complete"], cleanup)
         cp.preserve_records({stack.label: stack.records.directory}, self.evidence)
@@ -1080,7 +1084,7 @@ class Smoke:
             stack.docker.wait_db_ready()
             changed = operation == ">>"
             self.negative(stack, "failure-held", label + " (" + path + ")", role="orthanc", target=path, written=written,
-                          expect=lambda refused, diff, path=path, changed=changed: ("orthanc: A " + path) in refused
+                          expect=lambda refused, diff, record, path=path, changed=changed: ("orthanc: A " + path) in refused
                           and all(entry == "orthanc: A " + path or (changed and entry.startswith("orthanc: ") and cp.PLUGINS_AVAILABLE in entry)
                                   for entry in refused))
         stack.recreate("orthanc", start=False)
@@ -1091,7 +1095,7 @@ class Smoke:
                      if line.split(" ", 1)[-1].strip() == cp.HOSTID), None)
         self.negative(stack, "failure-held", "a hostid written in the database role (its actual change kind: %s)" % kind, role="db", target=cp.HOSTID,
                       written=written, extra={"db_hostid_kind": kind},
-                      expect=lambda refused, diff: kind in ("A", "C") and ("db: %s %s" % (kind, cp.HOSTID)) in refused
+                      expect=lambda refused, diff, record: kind in ("A", "C") and ("db: %s %s" % (kind, cp.HOSTID)) in refused
                       and all(entry.startswith("db: ") for entry in refused))
 
     def negative(self, stack, checkpoint_id, label, *, role, target, written, expect, extra=None):
@@ -1118,7 +1122,7 @@ class Smoke:
         self.negatives.append(row)
         self.raw("regenerated-negatives.json", self.negatives)
         self.check(["A05", "N05"], checkpoint_id + ": " + label + " is refused (WRITABLE_LAYER before any bundle byte, its layer record kept)",
-                   code == "WRITABLE_LAYER" and row["store_unchanged"] and record.get("outcome") == "REFUSED" and expect(refused, diff), row)
+                   code == "WRITABLE_LAYER" and row["store_unchanged"] and record.get("outcome") == "REFUSED" and expect(refused, diff, record), row)
 
     def git_closure(self):
         """A09: the seal left each clone with its own object closure (checked with the donor moved away), and the r4 real
