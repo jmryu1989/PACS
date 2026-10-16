@@ -422,9 +422,11 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         const now = await this.gate.clock(tx);
         const download = { schemaVersion: 1, targetStudyUid: uid, destination: 'browser-download', preparedAt: now.toISOString(),
           manifestCanonical: built.manifestCanonical, attempts: [] as any[] };
-        const row = { id: operationId, ...owner, kind: 'download', studyUid: uid, status: 'prepared', results: [],
-          manifestSha256: built.manifestSha256, download, claimKey: null, claim: null };
-        await tx.importOperation.create({ data: { ...row, createdAt: now, updatedAt: now } });
+        // claimKey and claim are left out, so both are the columns' SQL NULL that the kind check requires of a download
+        // (U4BL-02): a literal null on the JSONB claim is written as the JSON null value, which is not NULL. The answer is
+        // made from the row the database returned, which reads both back as null.
+        const row = await tx.importOperation.create({ data: { id: operationId, ...owner, kind: 'download', studyUid: uid, status: 'prepared',
+          results: [], manifestSha256: built.manifestSha256, download, createdAt: now, updatedAt: now } });
         await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.prepare', target: uid,
           detail: JSON.stringify({ institutionId: owner.institutionId, operationId, studyUid: uid, manifestSha256: built.manifestSha256,
             objects: built.manifest.objects.length, bytes: totalBytes(built.manifest), ownerIssuer: owner.ownerIssuer,

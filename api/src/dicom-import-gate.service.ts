@@ -1258,10 +1258,16 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
    * What the admin recovery read, as one comparable value: the attempt (id, generation, phase, lease), the file's result,
    * both claims' holders and the recovery record itself (whose admin, basis and time tell two requests apart even within
    * one database millisecond). The result is committed only if this is still exactly what it was.
+   * Every value is listed by position, the recovery record's seven fields too (U4BL-01): the record of step 1 is the one
+   * just built and that of step 3 is read back from the JSONB column, which keeps no key order, so the order of an
+   * object's keys must never decide equality. A change of format adds its fields here.
    */
   private recoverySnapshot(entry: ImportFileEntry, mine: ImportAttempt, claims: Map<string, ClaimRow>): string {
+    const recovery = mine.recovery;
     return JSON.stringify([mine.attemptId, mine.generation, mine.phase, mine.leaseUntil, entry.outcome, entry.code, entry.writeDisposition,
-      mine.recovery, [...claims.entries()].map(([key, row]) => [key, row ? row.claim.heldByAttemptId : null])]);
+      recovery === null ? null : [recovery.basis, recovery.checkedAt, recovery.adminIssuer, recovery.adminSubject, recovery.adminActor,
+        recovery.requestedAt, recovery.resolvedAt],
+      [...claims.entries()].map(([key, row]) => [key, row ? row.claim.heldByAttemptId : null])]);
   }
 
   /**
