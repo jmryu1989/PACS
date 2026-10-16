@@ -31,6 +31,16 @@ def emr_catalog():
         memberships=0, runtime_grants=['AuditLog:INSERT', 'AuditLog:SELECT'], default_acl=['public:r:fixture-test-only'])
 
 
+def clinical_catalog():
+    """A synthetic emr_clinical catalog of the shape clinical_catalog_contract accepts (the hosted run observes the real one)."""
+    return dict(schema=dict(owner='kin_emr_owner', acl=['fixture-test-only']),
+        relations=[dict(name=name, kind='r', owner='kin_emr_owner', tablespace='kin_emr_access', acl=None) for name in transfer.CLINICAL_TABLES],
+        columns=[dict(column_name='fixture-test-only')], constraints=[dict(name='fixture-test-only')], triggers=[dict(name='fixture-test-only')],
+        functions=[dict(signature='emr_clinical.fixture_test_only()', owner='kin_emr_owner', security_definer=True,
+                        config=['search_path=pg_catalog, pg_temp'], acl=None, body_sha256='0'*64)],
+        runtime_grants=[])
+
+
 def fixture():
     body, files, pg_config, orth_config = combined_fixture()
     catalog = dict(tables=transfer.TABLES, columns=[dict(column_name='fixture-test-only')],
@@ -38,7 +48,8 @@ def fixture():
         sequence_settings=[dict(sequencename=name) for name in transfer.SEQUENCES])
     product = dict(migrations=MIGRATIONS, study_uid=UID, catalog=catalog,
                    rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
-                   emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows()))
+                   emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows(),
+                            clinical=dict(catalog=clinical_catalog(), rows=transfer.expected_clinical_rows())))
     return dict(body, schema=2, profile=transfer.PROFILE, product=product,
                 relation=transfer.relation(body['snapshot'])), files, pg_config, orth_config
 
@@ -283,7 +294,14 @@ class Pure(unittest.TestCase):
         # EMR-B1 added schema emr_access (46 migration files after the W2 union): still 51 public tables and the same public rows; its 8 tables are
         # observed schema-qualified beside them with 8 synthetic rows (two chained viewing entries, the heads of both streams, a placed and
         # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
-        self.assertEqual(len(transfer.MIGRATIONS), 46)
+        # EMR-D R2 added schema emr_clinical and then its original-decision migration (48 migration files with the W2 union):
+        # still 51 public tables and the same public rows; its 7 tables are
+        # observed schema-qualified with 7 synthetic rows (a unit, its version and reference, its register row, an attempt,
+        # an SR adoption and an SR purpose end).
+        self.assertEqual(len(transfer.MIGRATIONS), 48)
+        clinical = transfer.expected_clinical_rows()
+        self.assertEqual(sorted(clinical), transfer.CLINICAL_TABLES)
+        self.assertEqual({name: len(value) for name, value in clinical.items()}, {name: 1 for name in transfer.CLINICAL_TABLES})
         self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
@@ -414,7 +432,8 @@ class Pure(unittest.TestCase):
         actual['rows']['ReportVersion'].reverse()
         actual['emr']['rows']['access_entry'].reverse()
         with patch.object(transfer, 'observe', return_value=actual): transfer.verify_product('owned', 'kin', product)
-        for section in ('catalog', 'rows', 'sequences', 'emr-catalog', 'emr-rows', 'emr-acl', 'emr-jit'):
+        actual['emr']['clinical']['rows']['version'].reverse()
+        for section in ('catalog', 'rows', 'sequences', 'emr-catalog', 'emr-rows', 'emr-acl', 'emr-jit', 'clinical-catalog', 'clinical-rows'):
             changed = copy.deepcopy(actual)
             if section == 'catalog': changed[section]['constraints'][0]['name'] = 'different'
             if section == 'rows': changed[section]['ReportVersion'][0]['findings'] = 'SYNTHETIC foreign'
@@ -424,6 +443,9 @@ class Pure(unittest.TestCase):
             if section == 'emr-rows': changed['emr']['rows']['access_entry'].pop()
             if section == 'emr-acl': changed['emr']['catalog']['runtime_grants'] = []
             if section == 'emr-jit': changed['emr']['catalog']['functions'][0]['config'].remove('jit=off')
+            # EMR-D R2: a restore that lost a clinical function grant or a stored version is a mismatch too.
+            if section == 'clinical-catalog': changed['emr']['clinical']['catalog']['functions'][0]['acl'] = ['=X/kin_emr_owner']
+            if section == 'clinical-rows': changed['emr']['clinical']['rows']['version'].pop()
             with patch.object(transfer, 'observe', return_value=changed), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', product)
 
@@ -536,6 +558,12 @@ class Pure(unittest.TestCase):
                 self.assertEqual(len(inserted), 0 if table == 'chain_head' else len(rows), table)
             [head] = [text for text in sql if 'UPDATE emr_access.chain_head' in text]
             self.assertIn(transfer.expected_emr_rows()['chain_head'][0]['hash'], head)
+            # EMR-D R2: every expected clinical-store fact is seeded, schema-qualified, parents before their references.
+            for table, rows in transfer.expected_clinical_rows().items():
+                inserted = [text for text in sql if 'INSERT INTO emr_clinical.'+table+' ' in text]
+                self.assertEqual(len(inserted), len(rows), table)
+            order = [next(i for i, text in enumerate(sql) if 'INSERT INTO emr_clinical.'+table+' ' in text) for table in ('unit', 'version', 'attachment')]
+            self.assertEqual(order, sorted(order))
             for text in sql:
                 if text.startswith('INSERT INTO "ReportVersion"'): self.assertNotIn('"id"', text.split(' SELECT ')[0])
 

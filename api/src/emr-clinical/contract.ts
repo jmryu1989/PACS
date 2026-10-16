@@ -158,8 +158,13 @@ export const CLINICAL_SURFACES = freeze({
     action: 'restore', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: ['reading'],
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Hidden'], to: 'Visible' },
   // reader-assignment.service.ts:79 write: allocation only, no free text exists to smuggle a clinical entry through.
+  // The client's `revision` is the allocation row's own revision, which a tele-channel close also moves without any D
+  // version (closeReaderAssignments). It stays part of the request's meaning (its identity: the same request replays,
+  // another revision under the same request ID is refused) and the row's owner checks it under its row lock; the D unit
+  // guards its own history by head and sequence (commit_version, StaleHead). Comparing it with the D revision would turn
+  // an exact resend into a conflict after the first commit.
   'assignment.write': { ...base, record: 'assignment', model: 'ReaderAssignment', route: 'POST studies/:uid/reader-assignment', opens: 'if-absent',
-    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], normalize: { readerSub: 'lower' }, textField: null, text: 'none', revisionField: 'revision', act: 'additional-entry',
+    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], normalize: { readerSub: 'lower' }, textField: null, text: 'none', revisionField: null, act: 'additional-entry',
     paths: ['admin', 'technician', 'radiologist'].map(role => ({ relation: 'any' as const, role, capacity: S, kind: 'assignment' as const })),
     from: [null, 'Assigned', 'Unassigned'], to: 'reader' },
   // pacs.service.ts:1181 saveTechNote (base version, whole text, trimmed reason, attempt ID). The radiographer signs their
@@ -211,9 +216,20 @@ export interface ActorFacts {
  * Part 1 is one institution: every D record is written and read only by its managing institution. Another institution
  * (including a tele reading one) needs a recorded 의료법 제21조의2 transfer basis and the Part 2 activation of
  * inter-institution reading (legal register 2026-10-09 LR-20 / delta D-4, LR-51), which D does not provide.
+ *
+ * One exception, the reader assignment only (user decision D1190): the receiving institution of the study's open tele
+ * channel is our company, whose coordinators assign its radiologist, so it keeps its own allocation row of the study
+ * (records.ts writingInstitution). An allocation carries no text and no clinical entry; every other record kind keeps the
+ * managing institution's boundary.
  */
 export interface StudyFacts {
   studyId: string; managingInstitutionId: string; patient: PatientLinkSnapshot;
+  /**
+   * C's study reader: the receiving institution of the study's tele channel while it is open (StudyState.teleInstitutionId),
+   * else null. Absent means no open channel, as for an admitted input stored before this fact existed (B1 keeps every
+   * admitted input exactly; its recovery must decide what its admission decided).
+   */
+  teleInstitutionId?: string | null;
 }
 export interface ClinicalVersion {
   formatVersion: 'emr-clinical/1';

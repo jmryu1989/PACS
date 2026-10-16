@@ -1,14 +1,42 @@
+import { businessResponse } from './emr-clinical/response';
 import { StudyAccessService } from './study-access.service';
-import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { KeycloakService, KeycloakUser } from './keycloak.service';
 import type { Caller } from './pacs.service';
+import type { ClinicalWritePlan } from './emr-clinical/records';
+import { ClinicalWriteResult, ProjectionRefused, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, registerClinicalProjection,
+  requireClinicalRuntime } from './emr-clinical/services';
 const uuid=(v:any)=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 const conflict=()=>new ConflictException('배정이 바뀌었습니다. 최신 배정을 확인하고 다시 시도하세요');
+const forbidden=()=>new ForbiddenException('판독의는 미배정 검사를 본인에게 배정하거나 본인 배정만 해제할 수 있습니다');
+const busy=()=>new ServiceUnavailableException('배정 처리 중입니다. 같은 요청으로 다시 시도하세요');
+const NOT_WAITING='대기·보류 상태의 검사만 배정을 바꿀 수 있습니다.', HELD='판독 중인 검사입니다. 작성자가 점유를 해제한 뒤 다시 확인하세요.';
 const ACTION='reader.assignment';
 // S7-U3a (D-S7-09 a): a row belongs to one institution of one study, the owner's or the tele receiver's.
 const key=(studyUid:string,institutionId:string)=>({studyUid_institutionId:{studyUid,institutionId}});
+/**
+ * EMR-D: each user write of an assignment is one operational version of the D unit of (study, institution): allocation
+ * only, no text, never a clinical signature (records.ts 'assignment.write'). The request goes to D exactly as received:
+ * its revision is the allocation row's (which the channel closes below also move) and is part of the request's identity,
+ * so a resend of the same request answers the same result and only another meaning under the same request ID is refused
+ * (DR2-04). The row's revision is checked under its row lock in project(); D keeps its own history by head and sequence.
+ *
+ * The answer of a write is that request's own committed result (DR3-01): the revision it wrote, the reader it assigned (the
+ * display facts it was admitted with, kept with its original) and the history up to that revision - the same at every
+ * resend, after any later assignment, whatever happened to that reader's account since. The reader's eligibility is a
+ * fact of a new request only (D's admission hook). What is checked today: that the caller may still read the study, and
+ * the caller's own controls (canManage, blocked).
+ */
+const unitId=(studyUid:string,institutionId:string)=>'assignment:'+createHash('sha256').update(JSON.stringify([studyUid,institutionId])).digest('hex');
+const OWN:Readonly<Record<string,()=>HttpException>>=Object.freeze({
+  StaleRevision:conflict, ProjectionConflict:conflict, RequestIdReused:conflict, OwnerChanged:conflict, StateTransitionRefused:conflict,
+  ASSIGNMENT_NOT_WAITING:()=>new ConflictException(NOT_WAITING), ASSIGNMENT_HELD:()=>new ConflictException(HELD),
+  ProjectionForbidden:forbidden, ActorPathRefused:()=>new ForbiddenException('소속 기관 업무 사용자 전용입니다'),
+  NotFound:()=>new NotFoundException('검사를 찾을 수 없습니다'), ProjectionNotFound:()=>new NotFoundException('검사를 찾을 수 없습니다'),
+});
+type AssignmentProjection={caller:Caller;fingerprint:string;revision:number;reader:{sub:string;actor:string;name:string}|null};
 
 /**
  * S7-U3a (REQ-S7-U3a-CLOSE -> RISK-S7-U3a-ORPHAN-AFTER-CLOSE): runs in the transaction of a write that is about to take
@@ -44,13 +72,15 @@ export async function closeReaderAssignments(tx:any,uid:string,admits:{instituti
 
 @Injectable()
 export class ReaderAssignmentService {
-  constructor(private prisma:PrismaService,private keycloak:KeycloakService, private studyAccess:StudyAccessService){}
+  constructor(private prisma:PrismaService,private keycloak:KeycloakService, private studyAccess:StudyAccessService){
+    registerClinicalProjection('assignment',(tx,plan,projection,caller)=>this.project(tx,plan,projection as AssignmentProjection,caller),{db:prisma,access:studyAccess});
+  }
   private member(c:Caller){if(c.kind!=='member'||!c.roles.some(r=>['admin','technician','radiologist'].includes(r))||![c.institution,c.sub,c.actor].every(x=>typeof x==='string'&&x.length>0&&x.length<=256))throw new ForbiddenException('소속 기관 업무 사용자 전용입니다');}
   private manager(c:Caller){return c.roles.some(r=>['admin','technician'].includes(r));}
   private eligible(u:KeycloakUser|null,c:Caller){return !!u&&u.enabled&&!u.serviceAccountClientId&&u.groups.length===1&&u.groups[0]===c.institution&&u.roles.includes('radiologist')&&(u.email||u.username).length<=256;}
   private publicReader(u:KeycloakUser){return {sub:u.id,actor:u.email||u.username,name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)};}
-  async candidates(c:Caller){this.member(c);return {owner:[c.institution,c.sub],canManage:this.manager(c),readers:(await this.keycloak.assignmentReaders(c.institution!)).filter(u=>this.eligible(u,c)&&(this.manager(c)||u.id===c.sub)).map(u=>this.publicReader(u))};}
-  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T>{try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);},{maxWait:4000,timeout:8000});}catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw new ServiceUnavailableException('배정 처리 중입니다. 같은 요청으로 다시 시도하세요');throw e;}}
+  async candidates(c:Caller,request?:unknown){this.member(c);return businessResponse(request,'GET reader-candidates',{type:'candidates',owner:[c.institution,c.sub],canManage:this.manager(c),readers:(await this.keycloak.assignmentReaders(c.institution!)).filter(u=>this.eligible(u,c)&&(this.manager(c)||u.id===c.sub)).map(u=>this.publicReader(u))});}
+  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T>{try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);},{maxWait:4000,timeout:8000});}catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw busy();throw e;}}
   private async study(tx:any,uid:string,c:Caller,lock:'share'|'update'|null=null){
     if(typeof uid!=='string'||uid.length>64||!/^\d+(?:\.\d+)+$/.test(uid))throw new BadRequestException('검사 UID를 확인하세요');
     // A read holds the row shared until its transaction ends (S7-U3a-R-001-F01): a channel close, which locks this row
@@ -63,7 +93,7 @@ export class ReaderAssignmentService {
     // body an unknown UID gets, as gate() answers.
     const s=rows[0];if(!s||s.institutionId!==c.institution&&s.teleInstitutionId!==c.institution)throw new NotFoundException('검사를 찾을 수 없습니다');await this.studyAccess.require(c,[uid],tx);return s;
   }
-  private blocked(s:any){return !['W','H'].includes(s.rs)?'대기·보류 상태의 검사만 배정을 바꿀 수 있습니다.':s.holder&&s.heldAt&&Date.now()-new Date(s.heldAt).getTime()<300000?'판독 중인 검사입니다. 작성자가 점유를 해제한 뒤 다시 확인하세요.':'';}
+  private blocked(s:any){return !['W','H'].includes(s.rs)?NOT_WAITING:s.holder&&s.heldAt&&Date.now()-new Date(s.heldAt).getTime()<300000?HELD:'';}
   private async result(tx:any,s:any,c:Caller){
     const row=await tx.readerAssignment.findUnique({where:key(s.uid,c.institution!)});
     // This institution's entries only, and none from a channel that closed (revision up to closedRevision). The CASE
@@ -75,30 +105,87 @@ export class ReaderAssignmentService {
       ORDER BY at DESC, id DESC LIMIT 20`;
     return {owner:[c.institution,c.sub],studyUid:s.uid,revision:row?.revision??0,reader:row?.readerSub?{sub:row.readerSub,actor:row.readerActor,name:row.readerName}:null,canManage:this.manager(c),blocked:this.blocked(s),history:history.map((h:any)=>({at:h.at,actor:h.actor,detail:JSON.parse(h.detail)}))};
   }
-  async read(uid:string,c:Caller){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c));}
-  async write(uid:string,c:Caller,b:any){
+  async read(uid:string,c:Caller,request?:unknown){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>businessResponse(request,'GET studies/:uid/reader-assignment',{type:'assignment',...await this.result(tx,await this.study(tx,uid,c,'share'),c)}));}
+
+  /** The legacy row of one committed assignment version, inside the clinical commit transaction (registered projector). */
+  private async project(tx:any,plan:Readonly<ClinicalWritePlan>,p:AssignmentProjection,trusted?:Caller){
+    const c:Caller=projectedCaller(p.caller, trusted),uid=clinicalText(plan.version.studyId);
+    await this.studyAccess.snapshot(c,tx);
+    const s=await this.study(tx,uid,c,'update'),row=await tx.readerAssignment.findUnique({where:key(uid,c.institution!)});
+    if((row?.revision??0)!==p.revision)throw conflict();
+    // The reader's display facts were checked for this original before admission; a version naming a reader needs them.
+    if((plan.version.readerId===null)!==(p.reader===null))throw new ProjectionRefused('ProjectionConflict');
+    const readerSub=p.reader?.sub??null;
+    if(!this.manager(c)&&((row?.readerSub&&row.readerSub!==c.sub)||(readerSub&&readerSub!==c.sub)))throw forbidden();
+    const blocked=this.blocked(s);if(blocked)throw new ProjectionRefused(blocked===HELD?'ASSIGNMENT_HELD':'ASSIGNMENT_NOT_WAITING');
+    // The first write after a reopened channel opens a closed row again; closedRevision stays as its history floor.
+    const data={institutionId:c.institution!,revision:(row?.revision??0)+1,readerSub:p.reader?.sub??null,readerActor:p.reader?.actor??null,readerName:p.reader?.name??null,changedBy:c.actor,lastRequest:plan.requestId,lastFingerprint:p.fingerprint,closedAt:null};
+    await tx.readerAssignment.upsert({where:key(uid,c.institution!),create:{studyUid:uid,...data},update:data});
+    await tx.auditLog.create({data:{actor:c.actor,action:ACTION,target:uid,detail:JSON.stringify({institution:c.institution,revision:data.revision,from:row?.readerActor??null,to:data.readerActor})}});
+  }
+
+  async write(uid:string,c:Caller,b:any,request?:unknown){
     this.member(c);
+    const runtime=requireClinicalRuntime();
     if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join()!=='expectedOwner,readerSub,requestId,revision'||!Number.isInteger(b.revision)||b.revision<0||b.revision>=2147483647||!uuid(b.requestId)||(b.readerSub!==null&&!uuid(b.readerSub)))throw new BadRequestException('배정 요청 형식을 확인하세요');
     if(JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub]))throw conflict();
     await this.study(this.prisma,uid,c);
-    const readerSub=b.readerSub?.toLowerCase()??null,requestId=b.requestId.toLowerCase();
+    const readerSub=b.readerSub?.toLowerCase()??null;
     const fingerprint=createHash('sha256').update(JSON.stringify({subject:c.sub,institution:c.institution,uid,readerSub,revision:b.revision})).digest('hex');
-    const previous=await this.prisma.readerAssignment.findUnique({where:key(uid,c.institution!)});
-    const replay=previous?.lastRequest===requestId&&previous?.lastFingerprint===fingerprint;
-    const user=readerSub&&!replay?await this.keycloak.getUser(readerSub):null;
-    if(readerSub&&!replay&&!this.eligible(user,c))throw new BadRequestException('현재 같은 기관의 활성 판독의를 선택하세요');
+    const recordId=unitId(uid,c.institution!);
+    let result:ClinicalWriteResult;
+    try{
+      result=await runtime.write(request,{surface:'assignment.write',studyId:uid,recordId,body:b,readerSubject:readerSub,
+        caller:{subject:c.sub,institutionId:c.institution},projection:null,
+        // A request D has not registered yet: the reader must be assignable now, and its display facts are kept with it.
+        admission:async()=>{
+          const user=readerSub?await this.keycloak.getUser(readerSub):null;
+          if(readerSub&&!this.eligible(user,c))throw new BadRequestException('현재 같은 기관의 활성 판독의를 선택하세요');
+          const projection:AssignmentProjection={caller:{kind:c.kind,institution:c.institution,sub:c.sub,actor:c.actor,roles:[...c.roles]},fingerprint,
+            revision:b.revision,reader:user?this.publicReader(user):null};
+          return projection;
+        }});
+    }catch(e){throw clinicalRefusal(e,OWN);}
+    const code=outcomeCode(result.outcome);
+    if(code!==null)throw clinicalHttpError(code,OWN);
+    return this.answer(uid,c,b.revision+1,readerSub,result.projection,request);
+  }
+
+  /**
+   * The committed result of one allocation request (DR3-01): the row revision it wrote (its request revision + 1, which the
+   * projection admitted only at that row revision), the reader it assigned as kept with its original, and this
+   * institution's history up to that revision since the channel close before it. Read under today's visibility of the study;
+   * owner, canManage and blocked are the caller's controls now.
+   */
+  private async answer(uid:string,c:Caller,revision:number,readerSub:string|null,kept:unknown,request:unknown){
+    let reader:AssignmentProjection['reader']=null;
+    if(readerSub!==null){
+      const r=(kept as AssignmentProjection|null|undefined)?.reader;
+      // Without the facts the original was committed with there is no answer of this request yet (the same request again).
+      if(!r||typeof r.sub!=='string'||r.sub.toLowerCase()!==readerSub)throw busy();
+      reader={sub:r.sub,actor:r.actor,name:r.name};
+    }
     return this.run(c,async tx=>{
-      const s=await this.study(tx,uid,c,'update'),row=await tx.readerAssignment.findUnique({where:key(uid,c.institution!)});
-      if(row?.lastRequest===requestId){if(row.lastFingerprint!==fingerprint)throw conflict();return this.result(tx,s,c);}
-      if((row?.revision??0)!==b.revision)throw conflict();
-      if(!this.manager(c)&&((row?.readerSub&&row.readerSub!==c.sub)||(readerSub&&readerSub!==c.sub)))throw new ForbiddenException('판독의는 미배정 검사를 본인에게 배정하거나 본인 배정만 해제할 수 있습니다');
-      const blocked=this.blocked(s);if(blocked)throw new ConflictException(blocked);
-      const reader=user?this.publicReader(user):null;
-      // The first write after a reopened channel opens a closed row again; closedRevision stays as its history floor.
-      const data={institutionId:c.institution!,revision:(row?.revision??0)+1,readerSub:reader?.sub??null,readerActor:reader?.actor??null,readerName:reader?.name??null,changedBy:c.actor,lastRequest:requestId,lastFingerprint:fingerprint,closedAt:null};
-      await tx.readerAssignment.upsert({where:key(uid,c.institution!),create:{studyUid:uid,...data},update:data});
-      await tx.auditLog.create({data:{actor:c.actor,action:ACTION,target:uid,detail:JSON.stringify({institution:c.institution,revision:data.revision,from:row?.readerActor??null,to:data.readerActor})}});
-      return this.result(tx,s,c);
+      const s=await this.study(tx,uid,c,'share');
+      return businessResponse(request,'POST studies/:uid/reader-assignment',{type:'assignment',owner:[c.institution,c.sub],studyUid:s.uid,revision,reader,canManage:this.manager(c),blocked:this.blocked(s),
+        history:await this.historyThrough(tx,s.uid,c.institution!,revision)});
     });
+  }
+  /**
+   * This institution's entries with revisions up to `through`, after the last channel close before it (its closedRevision
+   * then): the history the write of revision `through` was answered with, whatever was written after it.
+   */
+  private async historyThrough(tx:any,uid:string,institution:string,through:number){
+    const history:any[]=await tx.$queryRaw`SELECT h.at, h.actor, h.detail FROM "AuditLog" h
+      WHERE h.target = ${uid} AND h.action = ${ACTION}
+        AND CASE WHEN h.action = ${ACTION} THEN (h.detail::jsonb ->> 'institution') = ${institution}
+          AND (h.detail::jsonb ->> 'revision')::int <= ${through}
+          AND (h.detail::jsonb ->> 'revision')::int > (SELECT COALESCE(max((f.detail::jsonb ->> 'revision')::int), 0) FROM "AuditLog" f
+            WHERE f.target = ${uid} AND f.action = ${ACTION}
+              AND CASE WHEN f.action = ${ACTION} THEN (f.detail::jsonb ->> 'institution') = ${institution}
+                AND (f.detail::jsonb ->> 'closed') IS NOT NULL AND (f.detail::jsonb ->> 'revision')::int < ${through} ELSE FALSE END)
+          ELSE FALSE END
+      ORDER BY h.at DESC, h.id DESC LIMIT 20`;
+    return history.map((h:any)=>({at:h.at,actor:h.actor,detail:JSON.parse(h.detail)}));
   }
 }

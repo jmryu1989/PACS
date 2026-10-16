@@ -1,0 +1,174 @@
+{
+  "note": "EMR-D a5 (Astra D114 consult R5A2-SQL, decision 1, section 1.5): the cases of the raw-client/receiver flow proof (tests/admin_audit_raw_flow.cjs) on producer.ts and consumer.ts. The unedited pair passes the gate with every candidate as marked and the witnesses named under `positive`; each variant puts exactly one defect of its class into it, every `find` occurring exactly once in its file, and must fail as `expect` says: `unresolved_includes` names a tagged line that is unresolved with the reason given (other entries the defect takes with it are recorded, never counted instead), `unlisted` the actions the inventory refuses. A variant that does not apply or does not parse is no kill. Nothing here is read from the checker's output; the table is empty, so any audit write is unlisted.",
+  "positive": {
+    "verdict": "empty",
+    "witnesses": [
+      { "group": "RF-P", "kind": "producers", "at": "carrier", "callee": "port.respond", "producers_include": ["synFlowBind", "synFlowMake", "new `SynFlowRuntime`"], "targets_include": ["`respond`"] },
+      { "group": "RF-C", "kind": "callback slot", "field": "wake", "producers_include": ["every call of `onWake`", "the arrow function at"] , "arrow_at": "wake-arrow" },
+      { "group": "RF-H", "kind": "consumers", "label_includes": "client in `db` of the object literal", "at": "carrier" },
+      { "group": "RF-H", "kind": "consumers", "label_includes": "client in `tx` of the object literal", "at": "carrier" },
+      { "group": "RF-H", "kind": "consumers", "label_includes": "client in `tx` of the object literal", "at": "spread" },
+      { "group": "RF-C", "kind": "consumers", "label_includes": "an instance of `SynFlowStore` handed on", "at": "store-field" },
+      { "group": "RF-P", "kind": "consumers", "label_includes": "an instance of `SynFlowRuntime` handed on", "at": "factory" },
+      { "group": "RF-H", "kind": "consumers", "label_includes": "an instance of `SynFlowAccess` handed on", "at": "carrier" }
+    ],
+    "client_reads": ["context-access", "context-read", "spread-transaction", "ping"],
+    "proved_through_the_raw_flow": [
+      { "tag": "seal", "rule": "W3 `decision` of `seal`" },
+      { "tag": "owner-tuple", "rule": "W3 `c` of `owner`" }
+    ]
+  },
+  "cases": [
+    {
+      "id": "RF-P",
+      "title": "producers: an interface-typed port runs the method of each concrete producer; an opaque, shadow or cast producer is never hidden behind the interface",
+      "variants": [
+        {
+          "id": "RF-P1", "name": "a second producer of the bound port is an opaque factory",
+          "edits": [
+            { "file": "consumer.ts", "find": "export function synFlowCompose(db: SynFlowPrisma) { synFlowBind(synFlowMake(db)); } // @rf:compose",
+              "replace": "export function synFlowCompose(db: SynFlowPrisma) { synFlowBind(synFlowMake(db)); } // @rf:compose\nexport function synFlowReboot() { synFlowBind(synFlowOpaque()); }\ndeclare function synFlowOpaque(): import('./producer').SynFlowPort;" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "which this proof does not follow" } ] }
+        },
+        {
+          "id": "RF-P2", "name": "another implementation with the same apparent type hides a raw audit write",
+          "edits": [
+            { "file": "producer.ts", "find": "// end of producer.ts",
+              "replace": "export class SynFlowShadow implements SynFlowPort {\n  async respond(request: unknown, context: SynFlowContext) { await context.tx.$executeRaw`INSERT INTO \"AuditLog\" (action) VALUES ('syn.flow-shadow')`; return 0; }\n  async refuse(request: unknown, code: string) { void code; }\n}\nexport function synFlowShadowBind() { synFlowBind(new SynFlowShadow()); }\n// end of producer.ts" }
+          ],
+          "expect": { "unlisted": ["syn.flow-shadow"] }
+        },
+        {
+          "id": "RF-P3", "name": "an interface cast alone produces the port",
+          "edits": [
+            { "file": "consumer.ts", "find": "export function synFlowCompose(db: SynFlowPrisma) { synFlowBind(synFlowMake(db)); } // @rf:compose",
+              "replace": "export function synFlowCompose(db: SynFlowPrisma) { synFlowBind(synFlowMake(db)); } // @rf:compose\nexport function synFlowCast(value: unknown) { synFlowBind(value as import('./producer').SynFlowPort); }" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "which this proof does not follow" } ] }
+        }
+      ]
+    },
+    {
+      "id": "RF-H",
+      "title": "holders: a context's clients and access service reach the same seeds through aliases, fixed destructuring and known spreads; a dynamic key, an opaque consumer, a slot write or a later unknown spread is refused",
+      "variants": [
+        {
+          "id": "RF-H1", "name": "a later dynamic key replaces a member of the context",
+          "edits": [
+            { "file": "consumer.ts", "find": "      return port.respond(request, { db: this.prisma, tx, caller: c, access: this.access }); // @rf:carrier",
+              "replace": "      const context = { db: this.prisma, tx, caller: c, access: this.access }; // @rf:carrier\n      (context as any)[synFlowKey()] = this.prisma;\n      return port.respond(request, context);" },
+            { "file": "consumer.ts", "find": "// end of consumer.ts", "replace": "declare function synFlowKey(): string;\n// end of consumer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "is read by a key the program does not fix" } ] }
+        },
+        {
+          "id": "RF-H1b", "name": "a later fixed key replaces the context's client",
+          "edits": [
+            { "file": "consumer.ts", "find": "      return port.respond(request, { db: this.prisma, tx, caller: c, access: this.access }); // @rf:carrier",
+              "replace": "      const context = { db: this.prisma, tx, caller: c, access: this.access }; // @rf:carrier\n      context.tx = synFlowOther();\n      return port.respond(request, context);" },
+            { "file": "consumer.ts", "find": "// end of consumer.ts", "replace": "declare function synFlowOther(): any;\n// end of consumer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "writes the slot `tx` it is followed through" } ] }
+        },
+        {
+          "id": "RF-H2", "name": "an alias of the context is handed to an opaque consumer",
+          "edits": [
+            { "file": "consumer.ts", "find": "      return port.respond(request, { db: this.prisma, tx, caller: c, access: this.access }); // @rf:carrier",
+              "replace": "      const context = { db: this.prisma, tx, caller: c, access: this.access }; // @rf:carrier\n      synFlowSink(context);\n      return port.respond(request, context);" },
+            { "file": "consumer.ts", "find": "// end of consumer.ts", "replace": "declare function synFlowSink(value: unknown): void;\n// end of consumer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "is handed to `synFlowSink`, which this proof does not follow" } ] }
+        },
+        {
+          "id": "RF-H3", "name": "a last unknown spread may mask the context's members",
+          "edits": [
+            { "file": "consumer.ts", "find": "      return port.respond(request, { db: this.prisma, tx, caller: c, access: this.access }); // @rf:carrier",
+              "replace": "      return port.respond(request, { db: this.prisma, tx, caller: c, access: this.access, ...synFlowExtra() }); // @rf:carrier" },
+            { "file": "consumer.ts", "find": "// end of consumer.ts", "replace": "declare function synFlowExtra(): any;\n// end of consumer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "of its object literal (a later spread, computed key, accessor or method)" } ] }
+        }
+      ]
+    },
+    {
+      "id": "RF-C",
+      "title": "callbacks: the store's callback slot holds only the runtime's arrow and its receiver stays in the consumer graph; an opaque registration, a receiver handed out or an extracted registration is refused",
+      "variants": [
+        {
+          "id": "RF-C1", "name": "another registration of the callback gives an opaque function",
+          "edits": [
+            { "file": "producer.ts", "find": "    this.store.onWake(request => this.schedule(request)); // @rf:wake-arrow",
+              "replace": "    this.store.onWake(request => this.schedule(request)); // @rf:wake-arrow\n    this.store.onWake(synFlowOpaqueWake);" },
+            { "file": "producer.ts", "find": "// end of producer.ts", "replace": "declare const synFlowOpaqueWake: (request: string) => void;\n// end of producer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "seal", "reason": "is handed on as `this` of `this.wake`" } ] }
+        },
+        {
+          "id": "RF-C2", "name": "the store hands itself to an external sink",
+          "edits": [
+            { "file": "producer.ts", "find": "  wakeUp(request: string) { this.wake?.(request); } // @rf:wake-call",
+              "replace": "  wakeUp(request: string) { this.wake?.(request); } // @rf:wake-call\n  expose() { synFlowStoreSink(this); }" },
+            { "file": "producer.ts", "find": "// end of producer.ts", "replace": "declare function synFlowStoreSink(value: unknown): void;\n// end of producer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "seal", "reason": "is handed to `synFlowStoreSink`, which this proof does not follow" } ] }
+        },
+        {
+          "id": "RF-C3", "name": "the registration method is taken out and called with another this",
+          "edits": [
+            { "file": "producer.ts", "find": "    this.store.onWake(request => this.schedule(request)); // @rf:wake-arrow",
+              "replace": "    this.store.onWake(request => this.schedule(request)); // @rf:wake-arrow\n    const register = this.store.onWake;\n    register.call(this.store, function (this: unknown) { void this; });" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "seal", "reason": "is taken out at" } ] }
+        }
+      ]
+    },
+    {
+      "id": "RF-R",
+      "title": "recursion: a closed mutual recursion carrying the context with a concrete seed passes in either module order; a late escape in the cycle and a cycle without a concrete seed are refused",
+      "order_independent": true,
+      "variants": [
+        {
+          "id": "RF-R1", "name": "a branch of the cycle found last hands the context out",
+          "edits": [
+            { "file": "producer.ts", "find": "  return synFlowPing(ctx, n); // @rf:pong",
+              "replace": "  if (n === 7) synFlowLateSink(ctx);\n  return synFlowPing(ctx, n); // @rf:pong" },
+            { "file": "producer.ts", "find": "// end of producer.ts", "replace": "declare function synFlowLateSink(value: unknown): void;\n// end of producer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "is handed to `synFlowLateSink`, which this proof does not follow" } ] }
+        },
+        {
+          "id": "RF-R2", "name": "the port comes from a cycle with no concrete producer",
+          "edits": [
+            { "file": "consumer.ts", "find": "      const port = synFlowPort();", "replace": "      const port = synFlowLoop(0);" },
+            { "file": "consumer.ts", "find": "// end of consumer.ts",
+              "replace": "function synFlowLoop(n: number): import('./producer').SynFlowPort { return synFlowLoop2(n); }\nfunction synFlowLoop2(n: number): import('./producer').SynFlowPort { return synFlowLoop(n + 1); }\n// end of consumer.ts" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "carrier", "reason": "which this proof does not follow" } ] }
+        }
+      ]
+    },
+    {
+      "id": "RF-S",
+      "title": "scalars and fragments: the seal's primitive values and a fixed non-audit composition pass under the existing rules; a fragment in the primitive supply and a hidden audit write in a reachable callback fail",
+      "variants": [
+        {
+          "id": "RF-S1", "name": "the seal's cause supply mixes in a raw fragment, its receiver type kept",
+          "edits": [
+            { "file": "producer.ts", "find": "    await this.seal(this.decision(code, dispatched ? 'rollback' : 'not-dispatched')); // @rf:seal-supply",
+              "replace": "    await this.seal(this.decision(code, dispatched ? 'rollback' : (Prisma.raw('not-dispatched') as any))); // @rf:seal-supply" }
+          ],
+          "expect": { "unresolved_includes": [ { "tag": "seal-supply", "reason": "is asserted to `any`" }, { "tag": "seal", "reason": "so its type is no evidence" } ] }
+        },
+        {
+          "id": "RF-S2", "name": "the reachable callback writes an unregistered audit row by raw SQL",
+          "edits": [
+            { "file": "producer.ts", "find": "    this.store.onWake(request => this.schedule(request)); // @rf:wake-arrow",
+              "replace": "    this.store.onWake(request => { void this.db.$executeRaw`INSERT INTO \"AuditLog\" (action) VALUES ('syn.flow-hidden')`; this.schedule(request); }); // @rf:wake-arrow" }
+          ],
+          "expect": { "unlisted": ["syn.flow-hidden"] }
+        }
+      ]
+    }
+  ]
+}

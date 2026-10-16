@@ -138,6 +138,7 @@ const fs=require('fs'), assert=require('assert');
 assert.notStrictEqual(process.getuid(),0);
 for(const p of ['dist/main.js','dist/emr-runtime/store.js','prisma/migrations/0_init/migration.sql',
   'prisma/migrations/20261008120000_emr_b/migration.sql', 'prisma/migrations/20261010120000_emr_seal_attempts/migration.sql', 'prisma/migrations/20261010150000_emr_read_jit_off/migration.sql', 'prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
+  'prisma/migrations/20261012120000_emr_d/migration.sql', 'prisma/migrations/20261013010000_emr_d_original_decisions/migration.sql', 'dist/emr-clinical/store.js',
   'node_modules/prisma/build/index.js','node_modules/.prisma/client/index.js']) assert(fs.existsSync(p),p);
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
@@ -183,7 +184,8 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
                           '20261005120000_idp_session_end', '20261005130000_member_isolation',
                           '20261006000000_tech_note_attempt_id',
                           '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects',
-                          '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts'])
+                          '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
+                          '20261012120000_emr_d', '20261013010000_emr_d_original_decisions'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         ops.run(["docker", "exec", name, "node", "-e",
             "fetch('http://127.0.0.1:3000/api/me').then(r=>{if(r.status!==401)process.exit(1)})"

@@ -6,6 +6,10 @@ synthetic runtime secret), and the restore keeps owners and privileges - a resto
 ledger's security-definer functions to the restoring superuser and lose the runtime grants. pg_dump carries neither
 roles nor tablespaces; they are never assumed to come back with the dump. The API's seal and failure journal live on
 its own state volume, outside this database dump (their restore consistency is the EMR-B live L07 case).
+
+EMR-D round 2: schema emr_clinical (the clinical version store, the same owner role and tablespace, runtime EXECUTE on
+its functions only) is observed, seeded and probed the same way: its catalog and rows travel with the dump, its
+placement, append-only guards and closed runtime tables survive the restore.
 """
 import argparse
 from datetime import datetime
@@ -102,7 +106,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
               'api/prisma/migrations/20261008120000_emr_b/migration.sql', 'api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql',
               'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql',
-              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql']
+              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
+              'api/prisma/migrations/20261012120000_emr_d/migration.sql',
+              'api/prisma/migrations/20261013010000_emr_d_original_decisions/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -121,6 +127,8 @@ EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtim
 # The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
 EMR_TABLESPACE = '/tmp/emr-access/ts'
 EMR_CHAIN_ID = '00000000-0000-4000-8000-00000000e001'
+# EMR-D R2: schema emr_clinical, observed schema-qualified beside emr_access.
+CLINICAL_TABLES = sorted(['attachment', 'attempt', 'request', 'sr_adoption', 'sr_purpose_end', 'unit', 'version'])
 EMR_HISTORY_CHAIN_ID = '00000000-0000-4000-8000-00000000e002'
 
 
@@ -524,6 +532,33 @@ def expected_emr_rows():
     return rows
 
 
+def expected_clinical_rows():
+    """Deterministic synthetic clinical-store facts: one unit with one unsigned version and its reference, its committed
+    register row, one attempt, one SR adoption and one SR purpose end. Bodies are synthetic text."""
+    stamp = jsonb_time(datetime(2026, 9, 6, 0, 0, 0, 123000))
+    record_id, version_id, original = 'SYNTHETIC-question-1', 'SYNTHETIC-version-1', '00000000-0000-4000-8000-00000000d101'
+    return {
+        'unit': [dict(record_id=record_id, record='question', study_id='2.25.900', managing_institution_id='SYNTHETIC-hospital',
+            patient='{"assigningAuthority":"SYNTHETIC-hospital","linkId":"SYNTHETIC-link","patientId":"SYNTHETIC-patient"}',
+            author_id='00000000-0000-4000-8000-00000000d201', recipient_id=None, state='Open', revision=1, head_version_id=version_id,
+            head_sha256='ab'*32, clinical_entry=False, created_at=stamp, updated_at=stamp)],
+        'version': [dict(record_id=record_id, sequence=1, version_id=version_id, sha256='ab'*32, entry='state-change',
+            body='{"synthetic":true}', signature=None, committed_at=stamp)],
+        'attachment': [dict(record_id=record_id, sequence=1, position=0, kind='measurement', ref_record_id='SYNTHETIC-item-1',
+            ref_version_id='SYNTHETIC-item-1-r1', ref_sha256='cd'*32)],
+        'request': [dict(record='question', actor_id='00000000-0000-4000-8000-00000000d201', request_id='SYNTHETIC-request-1',
+            fingerprint='ef'*32, original_id=original, epoch=1, phase='commit-dispatched', state='committed', seed='{"synthetic":true}',
+            facts='{"synthetic":true}', envelope=None, checkpoint=None, terminal='{"synthetic":true}', record_id=record_id,
+            access_event='{"synthetic":true}', confirmed=True, admitted_at=stamp, updated_at=stamp, rejection_decision=None)],
+        'attempt': [dict(attempt_id='SYNTHETIC-attempt-1', code='Observed', record='question', actor_id='00000000-0000-4000-8000-00000000d201',
+            request_id='SYNTHETIC-request-1', original_id=original, recorded_at=stamp)],
+        'sr_adoption': [dict(record_id='SYNTHETIC-sr-1', version_id='SYNTHETIC-sr-version-1', sha256='12'*32, bytes_sha256='34'*32,
+            sop_instance_uid='2.25.901', study_id='2.25.900', managing_institution_id='SYNTHETIC-hospital', body='{"synthetic":true}',
+            signature='{"synthetic":true}', access_event='{"synthetic":true}', confirmed=True, committed_at=stamp)],
+        'sr_purpose_end': [dict(record_id='SYNTHETIC-sr-2', bytes_sha256='56'*32, purpose_end='preparation-window-ended', observed_at=stamp)],
+    }
+
+
 def sql_literal(text):
     return "'"+text.replace("'", "''")+"'"
 
@@ -577,11 +612,21 @@ def seed_emr(name, db):
         ", hash = "+sql_literal(row['hash'])+" WHERE stream = "+sql_literal(row['stream'])+"; " for row in (viewing, history))+"COMMIT")
 
 
+def seed_clinical(name, db):
+    data = expected_clinical_rows()
+    # Parents first (unit -> version -> attachment); the guards refuse only UPDATE/DELETE/TRUNCATE, never these inserts.
+    for table in ('unit', 'version', 'attachment', 'request', 'attempt', 'sr_adoption', 'sr_purpose_end'):
+        for row in data[table]:
+            execute(name, db, 'BEGIN; INSERT INTO emr_clinical.'+table+' SELECT * FROM json_populate_record(NULL::emr_clinical.'+table+', '+
+                    sql_literal(json.dumps(row))+'); COMMIT')
+
+
 def create_product(name, db, uid):
     command(['docker', 'exec', name, 'createdb', '-U', 'postgres', db])
     for raw in migration_sources():
         execute(name, db, raw.decode())
     seed_emr(name, db)
+    seed_clinical(name, db)
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -660,6 +705,50 @@ SELECT jsonb_build_object(
 """.replace('ROLES', EMR_ROLE_LIST)
 
 
+# EMR-D R2: the same schema-qualified facts of emr_clinical (owners, placement, ACLs, function definitions and settings,
+# guards, and any table grant of the runtime there - there must be none).
+# A table's ACL is observed as its effective privileges: COALESCE(relacl, acldefault('r', owner)). The migration's
+# REVOKE ALL ON ALL TABLES ... FROM PUBLIC stores the owner-only default explicitly on the tables nobody is granted
+# (request, attempt). pg_dump emits no GRANT/REVOKE for an ACL equal to the default, so the restore leaves relacl NULL -
+# the same privileges, a different catalog value. The effective form compares privileges, not that storage detail.
+CLINICAL_CATALOG_SQL = """
+SELECT jsonb_build_object(
+ 'schema',(SELECT jsonb_build_object('owner',pg_get_userbyid(nspowner),'acl',(SELECT jsonb_agg(a::text ORDER BY a::text) FROM unnest(nspacl) a))
+   FROM pg_namespace WHERE nspname='emr_clinical'),
+ 'relations',(SELECT jsonb_agg(jsonb_build_object('name',c.relname,'kind',c.relkind,'owner',pg_get_userbyid(c.relowner),
+     'tablespace',COALESCE(t.spcname,'database-default'),'acl',(SELECT jsonb_agg(a::text ORDER BY a::text)
+       FROM unnest(CASE WHEN c.relkind='r' THEN COALESCE(c.relacl, acldefault('r', c.relowner)) ELSE c.relacl END) a))
+     ORDER BY c.relname COLLATE "C")
+   FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_tablespace t ON t.oid=c.reltablespace
+   WHERE n.nspname='emr_clinical' AND c.relkind IN ('r','i')),
+ 'columns',(SELECT jsonb_agg(to_jsonb(x) ORDER BY x.table_name COLLATE "C",x.ordinal_position)
+   FROM (SELECT table_name,column_name,ordinal_position,data_type,is_nullable,column_default FROM information_schema.columns
+     WHERE table_schema='emr_clinical') x),
+ 'constraints',(SELECT jsonb_agg(jsonb_build_object('table',c.relname,'name',k.conname,'definition',pg_get_constraintdef(k.oid,true))
+     ORDER BY c.relname COLLATE "C",k.conname COLLATE "C")
+   FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='emr_clinical'),
+ 'triggers',(SELECT jsonb_agg(jsonb_build_object('table',c.relname,'name',g.tgname,'enabled',g.tgenabled::text,'definition',pg_get_triggerdef(g.oid))
+     ORDER BY c.relname COLLATE "C",g.tgname COLLATE "C")
+   FROM pg_trigger g JOIN pg_class c ON c.oid=g.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+   WHERE n.nspname='emr_clinical' AND NOT g.tgisinternal),
+ 'functions',(SELECT jsonb_agg(jsonb_build_object('signature',p.oid::regprocedure::text,'owner',pg_get_userbyid(p.proowner),
+     'security_definer',p.prosecdef,'config',p.proconfig,'acl',(SELECT jsonb_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a),
+     'body_sha256',encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')) ORDER BY p.oid::regprocedure::text COLLATE "C")
+   FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='emr_clinical'),
+ 'runtime_grants',(SELECT COALESCE(jsonb_agg(x.table_name || ':' || x.privilege_type ORDER BY x.table_name COLLATE "C",x.privilege_type COLLATE "C"),'[]'::jsonb)
+   FROM information_schema.role_table_grants x WHERE x.grantee='kin_runtime' AND x.table_schema='emr_clinical'))
+"""
+
+
+def clinical_catalog_contract(value):
+    require(type(value) is dict and set(value) == {'schema', 'relations', 'columns', 'constraints', 'triggers', 'functions', 'runtime_grants'})
+    require(value['schema']['owner'] == 'kin_emr_owner')
+    require(sorted(r['name'] for r in value['relations'] if r['kind'] == 'r') == CLINICAL_TABLES)
+    require(all(r['owner'] == 'kin_emr_owner' and r['tablespace'] == 'kin_emr_access' for r in value['relations']))
+    require(all(f['owner'] == 'kin_emr_owner' for f in value['functions']))
+    require(value['runtime_grants'] == [])
+
+
 def emr_catalog_contract(value):
     require(type(value) is dict and set(value) == {'tablespace', 'schema', 'relations', 'columns', 'constraints', 'triggers',
                                                     'functions', 'roles', 'memberships', 'runtime_grants', 'default_acl'})
@@ -694,7 +783,13 @@ def observe(name, db):
     emr_rows = {table: inventory.parse(psql(name, db,
         'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_access."'+table+'" t'))
         for table in EMR_TABLES}
-    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows))
+    clinical_catalog = inventory.parse(psql(name, db, CLINICAL_CATALOG_SQL))
+    clinical_catalog_contract(clinical_catalog)
+    clinical_rows = {table: inventory.parse(psql(name, db,
+        'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_clinical."'+table+'" t'))
+        for table in CLINICAL_TABLES}
+    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows,
+        clinical=dict(catalog=clinical_catalog, rows=clinical_rows)))
 
 
 def sorted_rows(rows):
@@ -732,6 +827,47 @@ def bounded_diagnostic(report):
     return text[:DIAGNOSTIC_BYTES]
 
 
+def metadata_difference(expected, actual):
+    """catalog_difference for a catalog whose facts are lists, objects or scalars (the EMR and clinical catalogs): a list
+    is compared item by item, anything else as one item."""
+    report = {}
+    for key in sorted(set(expected) | set(actual)):
+        left, right = expected.get(key), actual.get(key)
+        if canonical(left) == canonical(right):
+            continue
+        items = lambda value: value if type(value) is list else ([] if value is None else [value])
+        left_set, right_set = {canonical(item).decode() for item in items(left)}, {canonical(item).decode() for item in items(right)}
+        report[key] = dict(expected_count=len(left_set), actual_count=len(right_set),
+                           only_expected=sorted(left_set - right_set)[:DIAGNOSTIC_ENTRIES], only_actual=sorted(right_set - left_set)[:DIAGNOSTIC_ENTRIES])
+    return report
+
+
+def row_difference(expected, actual):
+    """Which synthetic tables and columns differ - names and counts only, never row values."""
+    report = {}
+    for table in sorted(set(expected) | set(actual)):
+        left, right = expected.get(table) or [], actual.get(table) or []
+        if canonical(left) == canonical(right):
+            continue
+        columns = sorted({column for row in left + right for column in row})
+        values = lambda rows, column: sorted(canonical(row.get(column)).decode() for row in rows)
+        report[table] = dict(expected_count=len(left), actual_count=len(right), only_expected=[], only_actual=[],
+                             differing_columns=[c for c in columns if values(left, c) != values(right, c)][:DIAGNOSTIC_ENTRIES])
+    return report
+
+
+def emr_difference(expected, actual):
+    """The emr product's sub-key that differs (catalog / rows / clinical.catalog / clinical.rows), each bounded."""
+    report = {}
+    for path, difference in (('catalog', metadata_difference), ('rows', row_difference),
+                             ('clinical.catalog', metadata_difference), ('clinical.rows', row_difference)):
+        left, right = expected, actual
+        for part in path.split('.'):
+            left, right = (left or {}).get(part) or {}, (right or {}).get(part) or {}
+        report.update({path+'.'+key: value for key, value in difference(left, right).items()})
+    return report
+
+
 def verify_product(name, db, expected):
     actual = observe(name, db)
     for key in ('catalog', 'rows', 'sequences', 'emr'):
@@ -739,11 +875,15 @@ def verify_product(name, db, expected):
         if key == 'rows':
             left, right = sorted_rows(left), sorted_rows(right)
         if key == 'emr':
-            left, right = dict(left, rows=sorted_rows(left['rows'])), dict(right, rows=sorted_rows(right['rows']))
+            left, right = (dict(side, rows=sorted_rows(side['rows']), clinical=dict(side['clinical'], rows=sorted_rows(side['clinical']['rows'])))
+                           for side in (left, right))
         if canonical(left) != canonical(right):
             if key == 'catalog':
                 print('Synthetic catalog difference (expected vs restored, schema metadata only): '+
                       bounded_diagnostic(catalog_difference(right, left)), file=sys.stderr, flush=True)
+            if key == 'emr':
+                print('Synthetic emr difference (expected vs restored; catalog metadata, row tables and columns only): '+
+                      bounded_diagnostic(emr_difference(right, left)), file=sys.stderr, flush=True)
             raise ProductMismatch('Synthetic product '+key+' mismatch')
     return actual
 
@@ -755,9 +895,12 @@ def product_contract(product):
     catalog_contract(product['catalog'])
     require(canonical(sorted_rows(product['rows'])) == canonical(sorted_rows(expected_rows(product['study_uid']))))
     require(canonical(product['sequences']) == canonical(expected_sequences()))
-    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows'})
+    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows', 'clinical'})
     emr_catalog_contract(product['emr']['catalog'])
     require(canonical(sorted_rows(product['emr']['rows'])) == canonical(sorted_rows(expected_emr_rows())))
+    require(type(product['emr']['clinical']) is dict and set(product['emr']['clinical']) == {'catalog', 'rows'})
+    clinical_catalog_contract(product['emr']['clinical']['catalog'])
+    require(canonical(sorted_rows(product['emr']['clinical']['rows'])) == canonical(sorted_rows(expected_clinical_rows())))
 
 
 def relation(snapshot):
@@ -1007,12 +1150,28 @@ def constraint_probes(name, product):
       BEGIN EXECUTE 'SET LOCAL ROLE kin_emr_retention'; PERFORM emr_access.expire_reserved(1, 'SYNTHETIC-probe-attempt', 'SYNTHETIC-probe-bundle');
         RAISE EXCEPTION 'unexpired prefix removed'; EXCEPTION WHEN SQLSTATE 'EB004' THEN NULL; END;
       EXECUTE 'RESET ROLE';
+      -- EMR-D R2 after the restore: the clinical store stays placed, append-only for the owner path, its projection and
+      -- register rows move only through their functions, and the runtime reaches the functions but no table.
+      IF EXISTS (SELECT 1 FROM emr_clinical.storage_placement() WHERE tablespace <> 'kin_emr_access') THEN
+        RAISE EXCEPTION 'clinical placement lost'; END IF;
+      BEGIN DELETE FROM emr_clinical.version;
+        RAISE EXCEPTION 'missing clinical append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN UPDATE emr_clinical.unit SET revision = revision + 1;
+        RAISE EXCEPTION 'missing clinical projection guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN UPDATE emr_clinical.request SET confirmed = false;
+        RAISE EXCEPTION 'missing clinical register guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; INSERT INTO emr_clinical.attempt SELECT * FROM emr_clinical.attempt;
+        RAISE EXCEPTION 'runtime writes the clinical store directly'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      EXECUTE 'SET LOCAL ROLE kin_runtime';
+      IF (SELECT count(*) FROM emr_clinical.open_requests(10)) <> 0 THEN RAISE EXCEPTION 'clinical register reopened'; END IF;
+      EXECUTE 'RESET ROLE';
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)
     return dict(version_unique=True, report_study_fk=True, draft_composite_pk=True,
                 viewer_restrict=True, finding_restrict=True, rolled_back_unchanged=True,
-                emr_placement=True, emr_append_only=True, emr_runtime_closed=True, emr_unexpired_kept=True)
+                emr_placement=True, emr_append_only=True, emr_runtime_closed=True, emr_unexpired_kept=True,
+                clinical_placement=True, clinical_append_only=True, clinical_runtime_closed=True)
 
 
 def negative_restore(name, folder, product):

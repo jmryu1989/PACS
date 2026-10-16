@@ -549,13 +549,43 @@ test('TEST-D-03 read_scope: a write from another institution is refused before a
   refused(() => plan('question.create', actor('c9', ['clinician'], 'inst-b'), null, qBody(actor('c9', ['clinician'], 'inst-b'))), 'NotFound');
   refused(() => plan('finding.create', rTele, null, { requestId: randomUUID(), item: {} }, { content: SNAPSHOT }), 'NotFound',
     'M-D-05: a reading institution is another institution in Part 1');
+  // M-D-05 with user decision D1190 (S7-U3a REQ-S7-U3a-TELE-ASSIGN): the reader assignment is the one kind the receiving
+  // institution of the study's OPEN tele channel writes - its own allocation row, never the owner's; the owner never writes
+  // the receiver's; a closed or redirected channel ends it; every other kind keeps the managing institution.
   const assignment = (a, unit, revision) => ({ requestId: randomUUID(), expectedOwner: owner(a), revision, readerSub: randomUUID() });
   const ownerRow = R.applyPlan(null, plan('assignment.write', admin, null, assignment(admin, null, 0), { readerId: 'r1' }));
-  const teleAdmin = actor('ta', ['admin'], 'inst-tele');
+  const teleAdmin = actor('ta', ['admin'], 'inst-tele'), thirdAdmin = actor('za', ['admin'], 'inst-z');
+  const open = { ...study, teleInstitutionId: 'inst-tele' }, closed = { ...study, teleInstitutionId: null };
   refused(() => plan('assignment.write', teleAdmin, ownerRow, assignment(teleAdmin, ownerRow, 1), { readerId: 'rt' }), 'NotFound',
     'M-D-05: another institution cannot write the assignment');
+  refused(() => plan('assignment.write', teleAdmin, ownerRow, assignment(teleAdmin, ownerRow, 1), { readerId: 'rt', study: open }), 'NotFound',
+    'M-D-05: the receiver of an open channel cannot write the owner\'s row');
   refused(() => R.planClinicalRead({ actor: teleAdmin, unit: ownerRow, scope: 'current' }), 'NotFound');
   refused(() => plan('assignment.write', teleAdmin, null, assignment(teleAdmin, null, 0), { readerId: 'rt' }), 'NotFound', 'no row is opened for another institution');
+  refused(() => plan('assignment.write', teleAdmin, null, assignment(teleAdmin, null, 0), { readerId: 'rt', study: closed }), 'NotFound',
+    'D1190: no row is opened for a receiver whose channel is closed');
+  refused(() => plan('assignment.write', thirdAdmin, null, assignment(thirdAdmin, null, 0), { readerId: 'rz', study: open }), 'NotFound',
+    'D1190: a third institution opens no row while the channel is open to another');
+  const teleRow = R.applyPlan(null, plan('assignment.write', teleAdmin, null, assignment(teleAdmin, null, 0), { readerId: 'rt', study: open }));
+  assert.deepEqual([teleRow.managingInstitutionId, teleRow.versions[0].actingInstitutionId, teleRow.versions[0].entry, teleRow.versions[0].text],
+    ['inst-a', 'inst-tele', 'assignment', null], 'D1190: the receiver of the open channel opens its own allocation row, an operational version');
+  const body = assignment(teleAdmin, teleRow, 1);
+  assert.equal(R.applyPlan(teleRow, plan('assignment.write', teleAdmin, teleRow, body, { readerId: 'rt2', study: open })).revision, 2,
+    'D1190: and writes it again while the channel stays open');
+  for (const [at, why] of [[closed, 'a closed channel'], [{ ...study, teleInstitutionId: 'inst-z' }, 'a channel redirected to another institution']]) {
+    refused(() => plan('assignment.write', teleAdmin, teleRow, body, { readerId: 'rt2', study: at }), 'NotFound', 'D1190: ' + why + ' ends the receiver\'s writes');
+    refused(() => R.prepareClinicalWrite(input('assignment.write', teleAdmin, teleRow, body, { readerId: 'rt2', study: at })), 'NotFound',
+      'D1190: ' + why + ' answers no outcome of the receiver\'s request');
+  }
+  refused(() => plan('assignment.write', admin, teleRow, assignment(admin, teleRow, 1), { readerId: 'r1', study: open }), 'NotFound',
+    'M-D-05: the owner cannot write the receiver\'s row');
+  refused(() => R.planClinicalRead({ actor: teleAdmin, unit: teleRow, scope: 'current' }), 'NotFound',
+    'a body read keeps the managing boundary (an allocation answer is a business response without a D body)');
+  const teleClinician = actor('ct', ['clinician'], 'inst-tele');
+  refused(() => plan('finding.create', rTele, null, { requestId: randomUUID(), item: {} }, { content: SNAPSHOT, study: open }), 'NotFound',
+    'M-D-05 with D1190: an open channel admits no finding of the receiver');
+  refused(() => plan('question.create', teleClinician, null, qBody(teleClinician), { study: open }), 'NotFound',
+    'M-D-05 with D1190: an open channel admits no question of the receiver');
   assert.equal(ownerRow.managingInstitutionId, 'inst-a');
 });
 

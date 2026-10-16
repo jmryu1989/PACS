@@ -1,0 +1,686 @@
+{
+  "unit": "EMR-D",
+  "round": "R5d-workflow",
+  "base_sha": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
+  "round_bases": {
+    "R2-server": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
+    "R3-server": "bfddc3d09cadf50cfa87e42518d30e910f7eaf4f",
+    "R4-server": "a980357ac43fe3ce8a1f5a9574ed4968c7d76c6a",
+    "R5d-workflow": "e01ca30ee641277bab141e001dcf0da627eaa1f8"
+  },
+  "dependencies": {
+    "landed": [
+      "EMR-A contract (PR #142): RecordKind, VersionReference, PatientLinkSnapshot, access events, routes, signature v1",
+      "EMR-B1 (PR #163/#165): AccessLedgerStore withAppendTransaction/appendInTransaction/confirm/settleTransaction, migrations 20261008120000_emr_b, 20261010120000_emr_seal_attempts, 20261010150000_emr_read_jit_off, roles kin_emr_owner/kin_runtime/kin_emr_reader/kin_emr_retention, tablespace kin_emr_access",
+      "EMR-C1 (PR #154, unwired modules): api/src/emr-signature verifySignatureV2, KeyReader/AnchorReader/KeyPolicy/TimePolicy ports, canonicalPayloadV2",
+      "EMR-D-R1 (PR #154): api/src/emr-clinical/contract.ts, records.ts (ClinicalStorePort, SignaturePort, plans)",
+      "EMR-H-R1 (PR #154, unwired modules): api/src/emr-retention"
+    ],
+    "not_landed": [
+      "EMR-B2 verified authentication context and the server start composition in main.ts (ClinicalContextSource; composeClinicalRuntime call)",
+      "EMR-C2 key registry, anchor and policy storage (SignatureVerificationPorts), the clinical study reader (ClinicalStudySource) and the page/native signature channel",
+      "EMR-H-R2 purpose-end destruction of emr_clinical.sr_purpose_end candidates"
+    ]
+  },
+  "owned_paths": {
+    "R5a-core": ["api/src/emr-clinical/response.ts", "api/prisma/migrations/20261013010000_emr_d_original_decisions/migration.sql", "tests/emr/d/response_test.cjs", "tests/emr/d/recovery_test.cjs", "tests/emr/d/r5a_scenarios.cjs"],
+    "R5c-integration": ["tests/emr/d/astra_hosted_live.py", "tests/emr/d/receipt_key_test.cjs"],
+    "R1": [
+      "api/src/emr-clinical/contract.ts",
+      "api/src/emr-clinical/records.ts",
+      "tests/emr/d/contract_test.cjs",
+      "tests/emr/d/mutants.py",
+      ".github/workflows/emr-d.yml"
+    ],
+    "R2-server": [
+      "api/src/emr-clinical/store.ts",
+      "api/src/emr-clinical/signing.ts",
+      "api/src/emr-clinical/runtime.ts",
+      "api/src/emr-clinical/services.ts",
+      "api/src/clinician-question.service.ts",
+      "api/src/image-request.service.ts",
+      "api/src/consultation.service.ts",
+      "api/src/finding.service.ts",
+      "api/src/manual-sr.service.ts",
+      "api/src/reader-assignment.service.ts",
+      "api/src/clinician-question.controller.ts",
+      "api/src/image-request.controller.ts",
+      "api/src/consultation.controller.ts",
+      "api/src/finding.controller.ts",
+      "api/src/manual-sr.controller.ts",
+      "api/src/reader-assignment.controller.ts",
+      "api/src/finding-input.ts",
+      "api/src/manual-sr-dicom.ts",
+      "api/prisma/migrations/20261012120000_emr_d/migration.sql",
+      "emr/units/d.json",
+      "tests/emr/d/server_test.cjs",
+      "tests/emr/d/device.cjs",
+      "tests/emr/d/live.py",
+      "tests/emr/d/live_driver.cjs"
+    ],
+    "R3-server": [
+      "api/src/emr-clinical/sources.ts",
+      "tests/emr/d/server_mutants.py"
+    ],
+    "R4-server": [
+      "tests/emr/d/same_source.py"
+    ],
+    "R2-migration-same-commit": [
+      "tests/production_image_test.py",
+      "tests/ops_product_transfer_fixture.py",
+      "tests/ops_product_transfer_test.py"
+    ],
+    "R2-page (another worker, after W6)": [
+      "worklist-v0/hpacs-lite/consultations.js",
+      "worklist-v0/hpacs-lite/finding-command.js",
+      "worklist-v0/hpacs-lite/finding-link-model.js",
+      "worklist-v0/hpacs-lite/reading-findings.js",
+      "worklist-v0/hpacs-lite/viewer-findings.js",
+      "worklist-v0/hpacs-lite/reader-assignment.js",
+      "tests/clinician_question_dom_test.py",
+      "tests/clinician_request_dom_test.py",
+      "tests/finding_command_test.cjs",
+      "tests/e2e/test_consultations.py",
+      "tests/e2e/test_manual_sr.py"
+    ]
+  },
+  "routes": {
+    "writes": {
+      "question.create": "POST studies/:uid/questions",
+      "question.reply": "POST questions/:id/entries",
+      "question.close": "POST questions/:id/close",
+      "consultation.create": "POST studies/:uid/consultations",
+      "consultation.accept|complete|cancel": "POST consultations/:id",
+      "image-request.create": "POST studies/:uid/image-requests",
+      "image-request.accept|close|decline|cancel": "POST image-requests/:id",
+      "finding.create": "POST studies/:uid/findings",
+      "finding.edit|hide|restore": "POST studies/:uid/findings/:id/revisions",
+      "assignment.write": "POST studies/:uid/reader-assignment",
+      "manual-sr adoption": "POST studies/:uid/manual-sr/:id/store"
+    },
+    "reads_logged_before_body": {
+      "question": "GET questions/:id",
+      "consultation": "GET consultations/:id",
+      "image-request": "GET image-requests/:id"
+    },
+    "responses_with_text_logged_before_body": {
+      "consultation list": "GET consultations",
+      "consultation write answer": "POST studies/:uid/consultations, POST consultations/:id",
+      "image-request list": "GET image-requests",
+      "image-request study list": "GET studies/:uid/image-requests",
+      "finding list": "GET studies/:uid/findings",
+      "finding revisions": "GET studies/:uid/findings/:id/revisions",
+      "finding write answer": "POST studies/:uid/findings, POST studies/:uid/findings/:id/revisions",
+      "manual SR store answer": "POST studies/:uid/manual-sr/:id/store"
+    },
+    "responses_without_text": "question list (#1) and study list (#3), question and image-request write answers (applied receipts), assignment answers, every error body",
+    "added": [],
+    "note": "D adds no Nest route; the six controllers pass the request itself so that B2/C ports read the verified context and the carried device signature from it"
+  },
+  "records": {
+    "kinds_written": [
+      "clinical-question",
+      "clinical-answer",
+      "consultation",
+      "image-request",
+      "finding",
+      "assignment",
+      "manual-sr"
+    ],
+    "signed": "a clinical-entry version only, by its own author's registered device key (C v2 verification); no proxy, no service account, no server key",
+    "unsigned": "operational notes (technician/administrator processing), state changes and assignments"
+  },
+  "schema": {
+    "name": "emr_clinical",
+    "owner": "kin_emr_owner",
+    "tablespace": "kin_emr_access",
+    "tables": {
+      "unit": [
+        "clinical-question",
+        "clinical-answer",
+        "consultation",
+        "image-request",
+        "finding",
+        "assignment",
+        "tech-note",
+        "operational-note"
+      ],
+      "version": [
+        "clinical-question",
+        "clinical-answer",
+        "consultation",
+        "image-request",
+        "finding",
+        "assignment",
+        "tech-note",
+        "operational-note",
+        "signature-evidence"
+      ],
+      "attachment": [
+        "clinical-question",
+        "consultation",
+        "finding",
+        "image-request"
+      ],
+      "request": [
+        "clinical-question",
+        "clinical-answer",
+        "consultation",
+        "image-request",
+        "finding",
+        "assignment",
+        "tech-note",
+        "operational-note"
+      ],
+      "attempt": [
+        "system-operation"
+      ],
+      "sr_adoption": [
+        "manual-sr",
+        "signature-evidence"
+      ],
+      "sr_purpose_end": [
+        "manual-sr"
+      ]
+    },
+    "runtime_functions": [
+      "storage_placement()",
+      "admit(text,text,text,text,text,text,text,text)",
+      "observe(text,text,text,text,text,boolean)",
+      "checkpoint(text,text,text,uuid,integer,text,text,text)",
+      "commit_version(text,text,text,uuid,integer,text,text,text,text,text,text,text,boolean,integer,text,text,text,text,text,text,text,text)",
+      "seal_rejected(text,text,text,uuid,integer,text,text)",
+      "recover(text,text,text,text)",
+      "confirm_request(text,text,text,uuid)",
+      "note_attempt(text,text,text,text,text,uuid)",
+      "open_requests(integer)",
+      "unit_for(text)",
+      "units_for(text[])",
+      "references_to(text)",
+      "adopt_sr(text,text,text,text,text,text,text,text,text,text)",
+      "confirm_sr(text)",
+      "open_sr_adoptions(integer)",
+      "sr_adoption_for(text)",
+      "record_sr_purpose_end(text,text,text)",
+      "sr_purpose_ends(text[])",
+      "response_facts(text,text[])",
+      "remember_rejection(text,text,text,uuid,integer,text)",
+      "rejection_for(uuid)",
+      "lock_request(text,text,text)"
+    ],
+    "reader_functions": [
+      "storage_placement()",
+      "unit_for(text)",
+      "references_to(text)",
+      "sr_adoption_for(text)",
+      "sr_purpose_ends(text[])"
+    ],
+    "reader_tables": [
+      "unit",
+      "version",
+      "attachment",
+      "sr_adoption",
+      "sr_purpose_end"
+    ],
+    "sqlstates": {
+      "ED001": "EmrClinicalPlacementRequired",
+      "ED002": "RequestIdReused",
+      "ED003": "StaleRevision",
+      "ED004": "PermitFenced",
+      "ED005": "ClinicalVersionInvalid",
+      "ED006": "SrAlreadyAdopted"
+    },
+    "classification_note": "A's SQL_STORAGE_CLASSIFICATION (api/src/emr-contract/classification.ts, not a D path) lists emr_access only; registering emr_clinical there is the A/B owner's exact one-table patch (see the D result blockers)"
+  },
+  "migrations": {
+    "added": [
+      "20261012120000_emr_d",
+      "20261013010000_emr_d_original_decisions"
+    ],
+    "count": 48,
+    "latest_before": "20261012120000_emr_d"
+  },
+  "composition": {
+    "adapters": "before the runtime: composeEmrAdapters({ ...runtimeAdapters, stored: clinicalStoredReader(runtimeAdapters.stored) }) (api/src/emr-clinical/sources.ts) so that A resolves the source versions a finding incorporates; composeClinicalRuntime refuses (ClinicalSourcesNotComposed) otherwise",
+    "call": "composeClinicalRuntime({ db, ledger, context, studies, signatures }) once at server start, then runtime.start() (restart scan of open originals and unconfirmed SR adoptions)",
+    "db": "B1 EmrLedgerClient (the ledger's own pool)",
+    "ledger": "B1 AccessLedgerStore after seal.recoverAtStart()",
+    "context": "B2 ClinicalContextSource.facts(request): verified ActorFacts (immutable identity, roles, institution, signing registration), trusted ingress address, request ID, member(subject) resolver, and C's carried device signature {jws, osUserId}",
+    "studies": "C ClinicalStudySource.facts(db, studyId): managing institution, the receiving institution of the study's open tele channel (teleInstitutionId, null when none; only the reader assignment consults it, user decision D1190) and patient link snapshot",
+    "signatures": "C SignatureVerificationPorts: KeyReader of registered device keys, KeyPolicy (production: tpm-nonexportable only), AnchorReader, reviewed TimePolicy",
+    "services": "the six owning services reach unit D through api/src/emr-clinical/services.ts (the port, projection registration, readClinicalRows/readClinicalUnits/readClinicalSources, wording); Nest constructs them before the server start has B1's ledger, B2's context and C's ports, so the start binds the composed runtime once (bindClinicalPort; a second binding is refused, nothing per request replaces it)",
+    "raw_sql_check": "tests/admin_audit_attribution_test.cjs (shared, CI writer) must read the real composition: see the EMR-D round 3 result integration_remaining DR2-08 for the observed unresolved candidates and the exact rule change",
+    "absent": "every owning service answers 503 EMR_CLINICAL_RUNTIME_REQUIRED before any database work; no legacy write or body path remains"
+  },
+  "cases": {
+    "contract": {
+      "file": "tests/emr/d/contract_test.cjs",
+      "round": "R1",
+      "count": 106,
+      "cases": ["TEST-D-01 clinical_vs_operational: a question and its answer are signed clinical entries of their own authors", "TEST-D-01 clinical_vs_operational: consultation and finding text is signed; acceptance only moves state", "TEST-D-01 clinical_vs_operational: reader assignment carries no text and never a clinical signature", "TEST-D-01 clinical_vs_operational: staff processing text is an operational note; a clinician's request text is adopted and signed", "TEST-D-01 clinical_vs_operational: a radiographer signs their own Tech Note; an administrator never signs in their place", "TEST-D-01 clinical_vs_operational: body claims of authority are refused and server facts alone decide the class", "TEST-D-01 clinical_vs_operational: no registered signer, a service account or a foreign path plans nothing", "TEST-D-01 clinical_vs_operational: planned kinds belong to the A route and the signing request is a valid A payload", "TEST-D-02 versions_and_sr: every change appends a version; earlier text stays exact and the projection is the fold", "TEST-D-02 versions_and_sr: a rewritten, dropped or reordered earlier version is refused, never projected", "TEST-D-02 versions_and_sr: a finding correction keeps the original and incorporates source copies, not the comparison link", "TEST-D-02 versions_and_sr: the 24-hour window ends only an unattempted, unadopted, unreferenced, unheld copy Orthanc confirms absent", "TEST-D-02 versions_and_sr: Orthanc reconciliation adopts only the exact bytes this server authorized", "TEST-D-02 versions_and_sr: the store intent is the author's signature over the exact SR bytes; others are refused", "TEST-D-03 read_scope: the author and institution readers are served; another clinician and another institution are not", "TEST-D-03 read_scope: a write from another institution is refused before anything else is examined", "TEST-D-03 read_scope: bodies are handed out only after the access event for exactly those versions is durable", "TEST-D-03 read_scope: summaries, receipts and refusals carry no clinical text", "TEST-D-04 atomic_retry: one commit per request; a replay returns the stored receipt without signing again", "TEST-D-04 atomic_retry: a failed, unverified or proxy signature commits nothing and leaves the record unchanged", "TEST-D-04 atomic_retry: a lost commit answer is resolved by the stored receipt, never guessed", "TEST-D-04 atomic_retry: a stale revision, a forbidden transition or a regressed clock is refused before any signing", "TEST-D-04 atomic_retry: an opening write replays from the re-read unit; a new amendment still needs its reason", "TEST-D-04 atomic_retry: the same request ID with another image-request.create kind is refused", "TEST-D-04 atomic_retry: the same request ID with another image-request.create counterparty is refused", "TEST-D-04 atomic_retry: the same request ID with another image-request.create counterpartyInstitutionId is refused", "TEST-D-04 atomic_retry: the same request ID with another image-request.create reason is refused", "TEST-D-04 atomic_retry: the same request ID with another consultation.create recipientSub is refused", "TEST-D-04 atomic_retry: the same request ID with another consultation.create reason is refused", "TEST-D-04 atomic_retry: the same request ID with another question.create body is refused", "TEST-D-04 atomic_retry: the same request ID with another question.reply body is refused", "TEST-D-04 atomic_retry: the same request ID with another question.reply revision is refused", "TEST-D-04 atomic_retry: the same request ID with another question.close note is refused", "TEST-D-04 atomic_retry: the same request ID with another consultation.complete note is refused", "TEST-D-04 atomic_retry: the same request ID with another consultation.accept action is refused", "TEST-D-04 atomic_retry: the same request ID with another image-request.close note is refused", "TEST-D-04 atomic_retry: the same request ID with another assignment.write readerSub is refused", "TEST-D-04 atomic_retry: the same request ID with another assignment.write revision is refused", "TEST-D-04 atomic_retry: the same request ID with another tech-note.write text is refused", "TEST-D-04 atomic_retry: the same request ID with another tech-note.write reason is refused", "TEST-D-04 atomic_retry: the same request ID with another tech-note.write baseVersion is refused", "TEST-D-04 atomic_retry: the same request ID with another finding.create item is refused", "TEST-D-04 atomic_retry: the same request ID with another finding.hide item is refused", "TEST-D-04 atomic_retry: the same request ID with another finding.hide reason is refused", "TEST-D-04 atomic_retry: a lost answer with no visible receipt stays unknown and resolves to the late real outcome", "TEST-D-03 read_scope: a rewritten author or recipient projection is refused and no body is provided", "TEST-D-02 versions_and_sr: an Orthanc observation contradicting an adopted SR is a conflict, never adopted", "TEST-D-02 versions_and_sr: hide and restore in the reading context need no typed reason and are signed corrections keeping the original", "TEST-D-04 atomic_retry: a resend whose receipt lookup fails stays unknown until the late original is visible", "TEST-D-02 versions_and_sr: a Tech Note amendment in the acquisition context needs no typed reason and is a signed correction keeping the original", "CONSULT C01 original clinical commit has one jointly stored terminal", "CONSULT C02 operational acceptance never invents a medical signature", "CONSULT C03 original sign throw is sealed before failure", "CONSULT C04 original verify throw is sealed before failure", "CONSULT C05 invalid verification is never adopted", "CONSULT C06 another signer is never adopted", "CONSULT C07 another version or hash is never adopted", "CONSULT C08 original rollback needs its durable fenced rejection", "CONSULT C09 failed sealing stays unknown until recovery seals the original cause", "CONSULT C10 a lost commit answer reconciles the exact original success", "CONSULT C11 absent receipt never grants a second execution", "CONSULT C12 lookup outages never replace the original result", "CONSULT C13 only atomic admission can establish a previously absent original", "CONSULT C14 mismatched commit evidence cannot answer success", "CONSULT C15 pending resend cannot invoke a failing signer", "CONSULT C16 pending resend cannot invoke a failing verifier", "CONSULT C17 pending resend cannot adopt invalid verification", "CONSULT C18 even successful resend ports have no execution permit", "CONSULT C19 a bare old transaction rollback is only an attempt error", "CONSULT C20 resend cannot invoke its timeout transaction", "CONSULT C21 the next observation returns an already observable terminal immediately", "CONSULT C22 another original cannot supply terminal evidence", "CONSULT C23 concurrent observers add O but never duplicate H or L", "CONSULT C24 concurrent equal admissions create exactly one original", "CONSULT C25 concurrent different meanings cannot replace the winning original", "CONSULT C26 committed meanings remain immutable and body free", "CONSULT C27 another original or epoch rollback cannot seal this request", "CONSULT C28 a rejected ID only ever looks up the same failure", "CONSULT C29 a late unknown cannot erase the request terminal already applied", "CONSULT C30 observer never replans current revision time or context", "CONSULT C31 first Tech Note replays after context and generated IDs change", "CONSULT C32 an older request returns its own receipt after another commit", "CONSULT C33 restart before admission has no phantom original or effect", "CONSULT C34 recovery after lost admission resumes the same original", "CONSULT C35 prepared recovery preserves original time version text and context reason", "CONSULT C36 signed recovery adopts the preserved signature without signing again", "CONSULT C37 restart observes the late original transaction commit", "CONSULT C38 restart seals only the dispatched originals proved rollback", "CONSULT C39 the recovery epoch fences a late old writer before effects", "CONSULT C40 elapsed time cannot discard a pending original or intent", "CONSULT C41 lost rejection response survives a restarted healthy signer", "CONSULT C42 a pending Tech Note keeps the original context cause in version signature and H", "CONSULT C43 reading hide and restore keep automatic reasons and signed originals", "CONSULT C44 acquisition amendments and clearing are signed reasoned corrections", "CONSULT C45 a rejected context needs a new ID for a corrected explicit reason", "CONSULT C46 each outcome lookup enforces current institution access", "CONSULT C47 an H failure rolls back every clinical effect and seals the original", "CONSULT C48 receipt observation is separate from durable body provision and display", "CONSULT C49 automatic next lookup applies observable original success with no user event", "CONSULT C50 automatic lookups survive two outages without guessing or prompting", "CONSULT C51 repeated absence keeps automatic lookup on the original ID", "CONSULT C52 actual view ABA and account-generation application", "CONSULT C53 original sign wait timeout never fails a still running original", "CONSULT C54 original verify wait timeout never fails a still running original", "CONSULT C55 fenced cancellation before late sign prevents verify and commit", "CONSULT C56 fenced cancellation before late verify prevents commit"],
+      "skipped": [
+        "CONSULT C52 actual view ABA and account-generation application"
+      ]
+    },
+    "server": {
+      "file": "tests/emr/d/server_test.cjs",
+      "cases": [
+        "TEST-D-01 clinical_vs_operational server: the author's device signature over the planned entry is accepted for that author only",
+        "TEST-D-04 atomic_retry server: an absent, altered, held, inactive, offline or foreign-request signature is refused before any commit",
+        "TEST-D-02 versions_and_sr server: a manual SR adoption is the author's signature over the exact SOP and bytes",
+        "TEST-D-03 read_scope server: a write's access event names exactly its version, in both streams, with the bound context",
+        "TEST-D-04 atomic_retry server: without the EMR composition every owning service refuses before touching the database",
+        "TEST-D-01 clinical_vs_operational server: refusals reach the caller as closed errors without clinical text",
+        "TEST-D-04 atomic_retry server: a recovery releases the original it took over - after a transient store failure the next recovery commits it once, and an original still executing is never fenced",
+        "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
+        "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
+        "TEST-D-02 versions_and_sr server: a manual SR adoption counts only once its access event is durable - a ledger that cannot confirm it leaves it unconfirmed, and the same event confirms it later",
+        "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes",
+        "EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA",
+        "EMR-D refusal matrix: every evidence boundary rejects its own counterexample",
+        "TEST-D-04 atomic_retry server: the runtime is not composed unless A's stored-record reader serves the sources D cites",
+        "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
+        "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition",
+        "TEST-D-04 atomic_retry server: an allocation request answers its own committed result - after a later allocation, beside a parallel duplicate and after its reader's account changed; only another meaning under its request ID is refused, and nothing is answered where the study is not visible today",
+        "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
+        "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
+        "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
+        "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
+        "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration",
+          "R5 response boundary: all declared clinical and business variants reject unsigned or unauthorized body egress",
+          "R5 original request: recovery, ownership, metadata authorization and maximum seed matrices preserve original outcomes",
+        "A5R-05 receipt key: a request ID another image request receipt holds is that request's 409 REQUEST_ID_REUSED terminal, with nothing written"
+      ],
+      "round3_findings": {
+        "DR2-04": "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
+        "DR2-06": "TEST-D-04 atomic_retry server: a recovery releases the original it took over - after a transient store failure the next recovery commits it once, and an original still executing is never fenced",
+        "DR2-01": "TEST-D-02 versions_and_sr server: a manual SR adoption counts only once its access event is durable - a ledger that cannot confirm it leaves it unconfirmed, and the same event confirms it later",
+        "DR2-02/03": "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
+        "DR2-05": "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
+        "DR2-07": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes",
+        "DR2-08": "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition"
+      },
+      "round4_findings": {
+        "DR3-01": "TEST-D-04 atomic_retry server: an allocation request answers its own committed result - after a later allocation, beside a parallel duplicate and after its reader's account changed; only another meaning under its request ID is refused, and nothing is answered where the study is not visible today",
+        "DR3-01 (same class, consultation write answers)": "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
+        "DR3-02": "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
+        "DR3-03": "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
+        "DR3-04": "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
+        "DR3-05/06": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes"
+      },
+      "round5d_findings": {
+        "DR4-06 / R5-21 / DR3-05": "EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA",
+        "DR4-07 / R5-22": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes"
+      }
+    },
+    "live": {
+      "file": "tests/emr/d/live.py",
+      "class": "EmrDLive",
+      "profile_suites": [
+        [
+          "emr/d/live.py",
+          "EmrDLive",
+          "ci-emr-d"
+        ]
+      ],
+      "cases": [
+        "test_d00_schema_roles_and_placement",
+        "test_d01_clinical_vs_operational",
+        "test_d02_versions_and_sr",
+        "test_d03_read_scope",
+        "test_d03b_provision_not_durable",
+        "test_d04_atomic_retry",
+        "test_d_flow_write_amend_reopen",
+        "test_m_d_01_clinical_entry_as_assignment",
+        "test_m_d_02_version_text_dropped",
+        "test_m_d_03_unbound_signature_succeeds",
+        "test_m_d_04_adopted_sr_cleared",
+        "test_m_d_05_institution_boundary_skipped",
+        "test_dr2_01_sr_published_only_when_durable",
+        "test_dr2_02_signed_text_served",
+        "test_dr2_03_text_needs_durable_provision",
+        "test_dr2_04_assignment_same_request",
+        "test_dr2_05_incorporated_sources_fixed",
+        "test_dr3_01_assignment_answer_of_its_request",
+        "test_dr3_02_legacy_finding_without_text",
+        "test_dr3_03_marks_of_one_job_one_reference",
+        "test_dr3_04_recovery_keeps_stale_source",
+        "test_r5a_nc01_metadata_policy_and_recovery",
+        "test_r5a_nc02_maximum_history_sql",
+        "test_r5a_nc04_business_ack",
+        "test_r5a_nc05_original_refusal_seal_retry",
+        "test_r5a_nc06_absent_admission_race",
+        "test_d1190_tele_assignment_receiver_row"
+      ]
+    }
+  },
+  "ci": {
+    "recorded_inputs": {
+      "typecheck": ["api/src", "api/tsconfig.json", "api/package-lock.json", "api/prisma/schema.prisma"],
+      "contract": ["api/src/emr-clinical", "api/src/emr-contract", "tests/emr/d/contract_test.cjs", "api/tsconfig.json", "api/package-lock.json"],
+      "mutants": ["api/src/emr-clinical", "api/src/emr-contract", "tests/emr/d/mutants.py", "tests/emr/d/same_source.py", "scripts/record-run.py", "tests/emr/d/contract_test.cjs", "api/tsconfig.json",
+        "api/package-lock.json"],
+      "server": ["api/src", "api/prisma", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
+        "api/package-lock.json", "api/start-production.sh", "api/.dockerignore", "api/Dockerfile", "tests/emr/d", "emr/units/d.json",
+        ".github/workflows/emr-d.yml", "scripts/record-run.py", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"],
+      "server-mutants": ["api/src", "api/prisma", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
+        "api/package-lock.json", "api/start-production.sh", "api/.dockerignore", "api/Dockerfile", "tests/emr/d", "emr/units/d.json",
+        ".github/workflows/emr-d.yml", "scripts/record-run.py", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"],
+      "image": ["api/Dockerfile", "api/.dockerignore", "api/package.json", "api/package-lock.json", "api/prisma", "api/tsconfig.json", "api/nest-cli.json",
+        "api/src", "api/start-production.sh"],
+      "live": ["emr/units/d.json", "tests/emr/d", "api/prisma/migrations", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py",
+        "tmp/emr-d-ci/image-identity.txt"]
+    },
+    "produced_inputs": ["tmp/emr-d-ci/image-identity.txt"],
+    "outputs": {
+      "typecheck": {"kind": "tsc"},
+      "contract": {"kind": "junit", "declared": "contract"},
+      "mutants": {"kind": "mutants", "declared": "pure"},
+      "server": {"kind": "junit", "declared": "server"},
+      "server-mutants": {"kind": "mutants", "declared": "server"},
+      "image": {"kind": "exit"},
+      "live": {"kind": "run-tests", "declared": "live"}
+    },
+    "outputs_note": "R5-21: what each recording step's stdout.log holds and the declaration its collected cases must equal - junit: node's junit report (cases.<declared>: exactly its cases, none skipped; or its count and exactly its declared skips); mutants: the driver's JSON summary (every mutant killed, every equivalent holding; mutants.<declared>: exactly its ids and equivalents); run-tests: scripts/run-tests.py's EXACT_TESTS and PLAN_RESULT lines (cases.<declared>: its class and exactly its cases, plan passed); exit: the exit code alone. produced_inputs: inputs an earlier step of the same run writes, compared with that file as it is when tests/emr/d/same_source.py runs; every other input is compared with TARGET_SHA's git objects",
+    "note": "DR3-05: what each recording step's command consumes, by step id (= its run directory under tmp/emr-d-ci). typecheck: the sources, the compiler configuration and the lock that pins the compiler and the type packages, and the Prisma schema the generated client is typed from; contract and mutants: the D/A sources, the contract test (and the mutant driver), the compiler configuration and lock; server: every source it compiles, the migration directory its declaration case reads, the declaration, the workflow, Dockerfile and build context files its workflow case runs the recorders over, the recorder itself, the gate, runner and provisioning script; server-mutants: what it copies and links for every mutant (the same set) and its own baseline run; image: the Dockerfile, its ignore file and every path its COPY lines take from the build context; live: its declaration (live.py reads it), the driver and device files it mounts, the migrations the image applies, B's provisioning SQL, the gate and the runner, and the identity of the image it runs (id and revision label). server_test.cjs checks the workflow's recorders against this table; tests/emr/d/same_source.py checks every record of a run against it"
+  },
+  "mutants": {
+    "pure": {"file": "tests/emr/d/mutants.py", "ids": ["M-D-01", "M-D-02", "M-D-03", "M-D-04", "M-D-05", "M-D-R1-01a", "M-D-R1-01b", "M-D-R1-02", "M-D-R1-03", "M-D-R1-04", "M-D-R1-05", "M-D-R1-06", "M-D-R1-03b", "M-D-R2-01", "M-C01", "M-C02", "M-C03", "M-C04", "M-C05", "M-C06", "M-C07", "M-C08", "M-C09", "M-C10", "M-C11", "M-C12"], "not_run": [{"id": "M-D-06", "status": "not_run", "reason": "delayed-response UID+sequence/account-generation check is page code (consultations.js, finding-command.js, reading-findings.js, clinician.js); round 2 DOM case TEST-D-05 ui_reopen owns it"}], "equivalents": []},
+    "server": {
+      "file": "tests/emr/d/server_mutants.py",
+      "note": "rounds 3 and 4: each reverts one fix of Astra's DR2-01..08 on bfddc3d or DR3-01..06 on a980357 (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs; round 5 part d: Astra's AR4-M08/AR4-M09 on e01ca30 and boundary mutants of the evidence check and the workflow (R5-21..23, several keeping the checking text while its effect is gone); the equivalents write the workflow, the identity step and the evidence check differently (notation, an if statement, an extracted function, renamed names, other quotes, a ./ path) and must leave every case they name passing",
+      "ids": [
+        "M-D-R3-DR2-01",
+        "M-D-R3-DR2-02",
+        "M-D-R3-DR2-03",
+        "M-D-R3-DR2-04",
+        "M-D-R3-DR2-05",
+        "M-D-R3-DR2-06",
+        "M-D-R3-DR2-07a",
+        "M-D-R3-DR2-07b",
+        "M-D-R3-DR2-08",
+        "M-D-R3-AM10",
+        "M-D-R4-DR3-01a",
+        "M-D-R4-DR3-01b",
+        "M-D-R4-DR3-01c",
+        "M-D-R4-DR3-02",
+        "M-D-R4-DR3-03",
+        "M-D-R4-DR3-04a",
+        "M-D-R4-DR3-04b",
+        "M-D-R4-DR3-04c",
+        "M-D-R4-DR3-05a",
+        "M-D-R4-DR3-05b",
+        "M-D-R4-DR3-05d",
+        "M-D-R4-DR3-06",
+        "AR4-M08",
+        "AR4-M09",
+        "M-D-R5-21a",
+        "M-D-R5-21c",
+        "M-D-R5-21e",
+        "M-D-R5-21f",
+        "M-D-R5-21g",
+        "M-D-R5-21h",
+        "M-D-R5-21i",
+        "M-D-R5-21j",
+        "M-D-R5-21k",
+        "M-D-R5-21l",
+        "M-D-R5-22a",
+        "M-D-R5-22b",
+        "M-D-R5-22c",
+        "M-D-R5-22d",
+        "M-D-R5-22e",
+        "M-D-R5-22g",
+        "M-D-R5-23a",
+        "M-D-R5-23b",
+        "M-D-R4-DR3-05missing",
+        "M-D-D5D-01",
+        "M-D-D5D-01-raw",
+        "M-D-D5D-02",
+        "M-D-D5D-03",
+        "M-D-D5D-04",
+        "M-D-D5D-05",
+        "M-D-D5D-06",
+        "M-D-D5D-06-condition",
+        "M-D-D5D-06-missing",
+        "M-D-D5D-06-early",
+        "M-D-D5D-07",
+        "M-D-D5D-08",
+        "M-D-D5D-07-summary",
+        "M-D-D5D-08-command",
+        "M-D-REF-S01",
+        "M-D-REF-S02",
+        "M-D-REF-S03",
+        "M-D-REF-S04",
+        "M-D-REF-J01",
+        "M-D-REF-J03",
+        "M-D-REF-J02",
+        "M-D-REF-M01",
+        "M-D-REF-M02",
+        "M-D-REF-M03",
+        "M-D-REF-M04",
+        "M-D-REF-L02",
+        "M-D-REF-L03",
+        "M-D-REF-T01",
+        "M-D-REF-C21",
+        "M-D-REF-C02",
+        "M-D-REF-C03",
+        "M-D-REF-C04",
+        "M-D-REF-C05",
+        "M-D-REF-C06",
+        "M-D-REF-C07",
+        "M-D-REF-C08",
+        "M-D-REF-C09",
+        "M-D-REF-C10",
+        "M-D-REF-C11",
+        "M-D-REF-C12",
+        "M-D-REF-C13",
+        "M-D-REF-C14",
+        "M-D-REF-C15",
+        "M-D-REF-C16",
+        "M-D-REF-C17",
+        "M-D-REF-C18",
+        "M-D-REF-C25",
+        "M-D-REF-C19",
+        "M-D-REF-C24",
+        "M-D-REF-G05",
+        "M-D-REF-G01",
+        "M-D-REF-G06",
+        "M-D-REF-G03",
+        "M-D-REF-G04",
+        "M-D-REF-J04",
+        "M-D-REF-M05",
+        "M-D-REF-M06",
+        "M-D-REF-L05",
+        "M-D-REF-L01",
+        "M-D-REF-O01",
+        "M-D-REF-O02",
+        "M-D-REF-C01",
+        "M-D-REF-C22",
+        "M-D-REF-C23",
+        "M-D-REF-G07",
+        "M-D-GATE-step-error",
+        "M-D-GATE-job-error",
+        "M-D-GATE-job-skip",
+        "M-D-GATE-job-success",
+        "M-D-GATE-needs-main",
+        "M-D-GATE-needs-mutants",
+        "M-D-GATE-serialized",
+        "M-D-GATE-producer-skip",
+        "M-D-GATE-producer-error",
+        "M-D-GATE-gate-sha",
+        "M-D-GATE-gate-checkout",
+        "M-D-GATE-download-skip",
+        "M-D-GATE-download-path",
+        "M-D-GATE-download-run",
+        "M-D-GATE-download-repo",
+        "M-D-GATE-upload-skip",
+        "M-D-GATE-upload-path",
+        "M-D-GATE-upload-empty",
+        "M-D-GATE-missing-job",
+        "M-D-GATE-budget-emr-d",
+        "M-D-GATE-budget-emr-d-server-mutants",
+        "M-D-GATE-budget-emr-d-gate",
+        "M-D-GATE-producer-sha",
+        "M-D-GATE-producer-checkout",
+        "M-D-GATE-upload-order",
+        "M-D-GATE-step-deleted",
+        "M-D-GATE-job-default-if",
+        "M-D-GATE-step-error-expression",
+        "M-D-PRODUCER-main-missing",
+        "M-D-PRODUCER-main-noop",
+        "M-D-PRODUCER-main-skip",
+        "M-D-PRODUCER-main-ignore",
+        "M-D-PRODUCER-server-mutants-missing",
+        "M-D-PRODUCER-server-mutants-noop",
+        "M-D-PRODUCER-server-mutants-skip",
+        "M-D-PRODUCER-server-mutants-ignore",
+        "M-D-GATE-partial-main",
+        "M-D-GATE-partial-server-mutants",
+        "M-D-REF-T02",
+        "M-D-R5A-01",
+        "M-D-R5A-02",
+        "M-D-R5A-03",
+        "M-D-R5A-04",
+        "M-D-R5A-05",
+        "M-D-R5A-06",
+        "M-D-R5A-07",
+        "M-D-R5A-08",
+        "M-D-R5A-09",
+        "M-D-R5A-10",
+        "M-D-R5A-11",
+        "M-D-R5A-12",
+        "M-D-R5A-13",
+        "M-D-R5A-14",
+        "M-D-R5A-15",
+        "M-D-R5A-16",
+        "M-D-REF-M07",
+        "M-D-D5D4-01a",
+        "M-D-D5D4-01b"
+      ],
+      "equivalents": [
+        "E-D-R4-DR3-06a",
+        "E-D-R4-DR3-06b",
+        "E-D-R5-22a",
+        "E-D-R5-22b",
+        "E-D-R5-23a",
+        "E-D-R5-23b",
+        "E-D-R5-23c",
+        "E-D-R4-DR3-05c",
+        "AE5D-01",
+        "AE5D-02",
+        "AE5D-03",
+        "AE5D-04",
+        "E-D-D5D-06",
+        "E-D-D5D2-needs-block",
+        "E-D-D5D2-bare-if",
+        "E-D-D5D2-status-or",
+        "E-D-D5D2-job-or",
+        "E-D-D5D2-false-errors"
+      ],
+      "subvariants_note": "D5D4-01: the mandatory subvariants of each family, declared here independently of the driver's SUBVARIANTS table; the family is killed only when its original mutation and every subvariant are killed. The workflow case of tests/emr/d/server_test.cjs requires the driver's table to equal this one, and tests/emr/d/same_source.py compares each family's summary subvariants with it",
+      "subvariants": {
+        "M-D-PRODUCER-main-noop": ["R3-SC-13", "M-D-D5D3-select-without-typecheck", "M-D-D5D3-select-without-contract", "M-D-D5D3-select-without-mutants", "M-D-D5D3-select-without-server", "M-D-D5D3-select-without-image", "M-D-D5D3-select-without-live"],
+        "M-D-GATE-upload-skip": ["R3-OM-21", "M-D-D5D3-gate-upload-missing", "M-D-D5D3-gate-upload-default-if"],
+        "M-D-GATE-upload-empty": ["R3-OM-22"],
+        "M-D-D5D-07": ["R3-T3", "R3-T2", "M-D-D5D3-kill-parent-only"],
+        "M-D-PRODUCER-server-mutants-noop": ["M-D-D5D3-select-wrong-mutant-record"],
+        "M-D-GATE-upload-path": ["M-D-D5D3-gate-upload-path"],
+        "M-D-GATE-upload-order": ["M-D-D5D3-gate-upload-order"]
+      }
+    },
+    "live": [
+      {
+        "id": "M-D-01",
+        "file": "emr-clinical/contract.js",
+        "kill": "test_m_d_01_clinical_entry_as_assignment",
+        "behaviour": "a clinician's question is recorded as an assignment: committed without a signature (TEST-D-01 check of test_d01_clinical_vs_operational)"
+      },
+      {
+        "id": "M-D-02",
+        "file": "emr-clinical/store.js",
+        "kill": "test_m_d_02_version_text_dropped",
+        "behaviour": "a version is stored without its text: the earlier note is not retrievable after the legacy row is overwritten (TEST-D-02 check of test_d02_versions_and_sr)"
+      },
+      {
+        "id": "M-D-03",
+        "file": "emr-clinical/signing.js",
+        "kill": "test_m_d_03_unbound_signature_succeeds",
+        "behaviour": "a signature over another text is accepted: a write answers success and commits (TEST-D-04 check of test_d04_atomic_retry)"
+      },
+      {
+        "id": "M-D-04",
+        "file": "emr-clinical/records.js",
+        "kill": "test_m_d_04_adopted_sr_cleared",
+        "behaviour": "the 24-hour window ends an adopted, upload-pending SR: the clean-up no longer completes with the adopted bytes kept (TEST-D-02 SR check of test_d02_versions_and_sr)"
+      },
+      {
+        "id": "M-D-05",
+        "file": "emr-clinical/records.js",
+        "kill": "test_m_d_05_institution_boundary_skipped",
+        "behaviour": "the institution boundary is skipped: another institution's verified reader receives a body through the runtime (TEST-D-03 check of test_d03_read_scope)"
+      }
+    ],
+    "not_run": [
+      {
+        "id": "M-D-06",
+        "reason": "the delayed-response sequence check lives in page code (TEST-D-05 ui_reopen), the page round's"
+      }
+    ]
+  },
+  "hosted": {
+    "file": "tests/emr/d/astra_hosted_live.py",
+    "runner": "scripts/run-tests.py --plan <plan> --mode live only; each plan names this file and exactly the cases of one unit below, whose attempts the runner's ledger keeps",
+    "image": "AstraHosted: KIN_TEST_API_IMAGE verified against KIN_EMR_D_IMAGE_IDENTITY for TARGET_SHA = this checkout's HEAD (tests/emr/d/live.py verified_image, D5D-03); AstraB: b_image with this checkout read-only",
+    "b_image": "node:22-bookworm",
+    "files": {"tests/finding_input_test.cjs": 12, "tests/clinician_question_service_test.cjs": 12, "tests/image_request_service_test.cjs": 13, "tests/reader_assignment_scope_test.cjs": 15, "tests/emr/b/contract_test.cjs": 21},
+    "units": {
+      "emr-d-r5a2-hosted-regressions": ["AstraHosted.test_assignment_scope", "AstraHosted.test_finding_input", "AstraHosted.test_image_request_service", "AstraHosted.test_question_service"],
+      "emr-d-r5a2-b-linux": ["AstraB.test_b_contract"]
+    }
+  },
+  "expected": {
+    "server": 25,
+    "live": 27,
+    "live_mutants": 5,
+    "migrations": 48,
+    "note": "declared before running; never generated from a run's own result"
+  },
+  "candidate_flow": "EmrDLive.test_d_flow_write_amend_reopen",
+  "req_risk_test": [
+    {
+      "req": "REQ-EMR-01/03/04",
+      "risk": "RISK-D-01",
+      "test": "TEST-D-01 clinical_vs_operational: server_test cases 1 and 6, live test_d01_clinical_vs_operational, M-D-01"
+    },
+    {
+      "req": "REQ-EMR-03/05/17",
+      "risk": "RISK-D-02",
+      "test": "TEST-D-02 versions_and_sr: server_test case 3, live test_d02_versions_and_sr and test_d_flow_write_amend_reopen, M-D-02, M-D-04"
+    },
+    {
+      "req": "REQ-EMR-07/10",
+      "risk": "RISK-D-03",
+      "test": "TEST-D-03 read_scope: server_test case 4, live test_d03_read_scope and test_d03b_provision_not_durable, M-D-05"
+    },
+    {
+      "req": "REQ-EMR-01/07",
+      "risk": "RISK-D-04",
+      "test": "TEST-D-04 atomic_retry: server_test cases 2, 5 and 7, live test_d04_atomic_retry, M-D-03"
+    },
+    {
+      "req": "REQ-EMR-10",
+      "risk": "RISK-D-05",
+      "test": "TEST-D-05 ui_reopen: page round (not in this round)"
+    },
+    {
+      "req": "REQ-S7-U3a-TELE-ASSIGN (user decision D1190)",
+      "risk": "RISK-S7-U3a-CROSS-TENANT-ASSIGN, RISK-D-03",
+      "test": "TEST-D-03 read_scope contract case 'a write from another institution is refused before anything else is examined' (M-D-05 with D1190), tests/reader_assignment_scope_test.cjs through the hosted unit emr-d-r5a2-hosted-regressions, live test_d1190_tele_assignment_receiver_row"
+    },
+    {
+      "req": "REQ-S5-U4p-IDEMPOTENCY, REQ-EMR-01/07 (Astra A5R-05)",
+      "risk": "RISK-D-04",
+      "test": "server_test case 'A5R-05 receipt key' (tests/emr/d/receipt_key_test.cjs: the probe, the route variants and the concurrent receipt key)"
+    }
+  ]
+}
