@@ -23,9 +23,10 @@
      *
      * `keepalive`는 탭이 닫히는 중에도 요청이 끝까지 가게 한다(beforeunload용). 그 답은 볼 수 없다.
      *
-     * 결과: 서버가 이 쓰기를 받았음을 답으로 확인했으면(비서버 모드는 로컬 저장) "saved"로 끝난다. 값 없이 끝나면 저장을
-     * 확인한 것이 없다 — 보낼 것이 없었거나, 남의 점유·권한·오프라인·삽입 중 미룸으로 보내지 않았거나, 서버가 거절했거나,
-     * 충돌했거나, 결과를 모른다. 확인되지 않은 글은 수렴 표시로 남아 다음 저장이 다시 가져간다.
+     * 결과: 서버가 이 쓰기를 받았음을 답으로 확인했으면(비서버 모드는 로컬 저장) "saved"로 끝난다. 보낸 쓰기가 저장되지
+     * 않았으면 그 결과의 이름(refused·unknown·conflict·owner…)으로 끝나고, 값 없이 끝나면 보낸 것이 없다 — 보낼 것이
+     * 없었거나, 남의 점유·권한·오프라인·삽입 중 미룸으로 보내지 않았다. 확인되지 않은 글은 수렴 표시로 남아 다음 저장이 다시
+     * 가져간다.
      */
     async function stashReport({ keepalive = false } = {}) {
       if (!selectedUid) return;
@@ -131,9 +132,12 @@
         draftNotSaved(uid, at, result, { quiet: moot || (failed && reportSaveFailures.has(uid)), converge: false });
         if (failed && !moot) work.commit(at, () => {
           reportSaveFailures.set(uid, standing ? "stop" : "retry");
+          // 무엇이 실패했는지(거절·결과 모름과 그 까닭)를 표시줄과 이동 관문이 같은 말로 전한다(W4-PAGE-01).
+          reportSaveOutcome.set(uid, { outcome: result.outcome, reason: draftFailureText(result) });
           if (uid === selectedUid) renderDraftBar();
         });
-        return;
+        // 저장되지 않았다: 부른 쪽(검사 이동의 관문)이 그 결과로 정하도록 결과의 이름을 돌려준다.
+        return result.outcome;
       }
       return work.commit(at, () => {
         const now = appState[uid] ?? {};

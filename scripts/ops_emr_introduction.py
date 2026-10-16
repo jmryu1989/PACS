@@ -1482,14 +1482,33 @@ def folders_valid(body):
 
 
 def shortcuts_valid(body):
-    """IRT2-11: GET /api/workspace-shortcuts by its contract (api/src/pacs/preferences.ts): owner, revision, the invalid
-    flag, and either no bindings yet or exactly the ten workspace keys bound to allowed keys."""
+    """IRT2-11: GET /api/workspace-shortcuts follows preferences.ts: exact v1 or v2 bindings."""
     if not (type(body) is dict and _owner_valid(body.get("owner")) and type(body.get("revision")) is int and body["revision"] >= 0
             and type(body.get("invalid")) is bool):
         return False
     bindings = body.get("bindings")
-    return bindings is None or (type(bindings) is dict and set(bindings) == set(SHORTCUT_KEYS) and all(
-        type(value) is str and re.fullmatch(r"Digit[1-79]|Key[ABD-Z]|ArrowLeft|ArrowRight", value) for value in bindings.values()))
+    if bindings is None:
+        return True
+    if type(bindings) is not dict:
+        return False
+    v2 = type(bindings.get("version")) in (int, float) and bindings["version"] == 2
+    names = set(SHORTCUT_KEYS) | ({"version", "finalize"} if v2 else set())
+    if set(bindings) != names:
+        return False
+    used = set()
+    for name in names - ({"version"} if v2 else set()):
+        value = bindings[name]
+        if v2 and value is None:
+            continue
+        if type(value) is not str or value in used:
+            return False
+        key = value.removeprefix("Control+Alt+") if v2 else value
+        if not (v2 and value == "Control+KeyS") and not (
+                (not v2 or value.startswith("Control+Alt+")) and
+                re.fullmatch(r"Digit[1-9]|Key[A-Z]|ArrowLeft|ArrowRight", key) and key not in ("KeyC", "Digit8")):
+            return False
+        used.add(value)
+    return True
 
 
 def product_logout_refused(session):

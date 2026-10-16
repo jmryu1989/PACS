@@ -390,6 +390,14 @@ class ReportTextBoundaries(h.LogoutDOMTest):
     def switch(self, patient):
         self.page.locator("#rows tr", has_text=patient).first.click()
 
+    def leave(self, patient):
+        """W4 decided difference (W4-PAGE-06): leaving a study with unconfirmed text now waits for that text's draft save,
+        so the U5 states these cases start from - a study left while its write or command is still out, or several studies
+        holding unconfirmed text - are no longer reached by a click. They are set up with the switching primitive the
+        navigation gate calls (enterStudy): setup only; the gate itself is tests/report_flow_dom_test.py's."""
+        uid = self.page.locator("#rows tr", has_text=patient).first.get_attribute("data-uid")
+        self.page.evaluate("uid => enterStudy(uid)", uid)
+
     def prepare_conflict(self):
         self.page.clock.install()
         self.open_main()
@@ -404,7 +412,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.open_main()
         self.select_and_type()
         self.site.put_answers = ["hold"]
-        self.switch(h.PATIENT_B)
+        self.leave(h.PATIENT_B)
         self.wait_until(lambda: self.site.held_puts, "A write")
         self.page.fill("#findings", "SYN B latest")
         self.log_out_main()
@@ -473,7 +481,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                     self.site.put_answers = [(403, {"code": "SYN_REFUSED"})] if outcome == "refused" else [outcome]
                     if outcome == "abort":
                         self.site.draft_read_answers = ["abort"]
-                self.switch(h.PATIENT_B)
+                self.leave(h.PATIENT_B)
                 self.wait_until(lambda: self.site.puts, "A write")
                 self.page.fill("#findings", "SYN B recovery")
                 self.site.ended.add(self.site.cookie)
@@ -519,11 +527,11 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         expect(self.page.locator("#dbstat")).to_contain_text("서버 연결 끊김")
         latest = "SYN typed offline"
         self.page.fill("#findings", latest)
-        self.switch(h.PATIENT_B)
-        self.switch(h.PATIENT)
+        self.leave(h.PATIENT_B)
+        self.leave(h.PATIENT)
         expect(self.page.locator("#findings")).to_have_value(latest)
         expect(self.page.locator("#draftmsg")).not_to_contain_text("자동 저장됨")
-        self.switch(h.PATIENT_B)
+        self.leave(h.PATIENT_B)
         self.log_out_main()
         expect(self.panel_title()).to_have_text("Draft Not Saved")
         self.assertEqual([], self.site.logouts)
@@ -878,7 +886,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.open_main()
                 self.select_and_type()
                 self.site.put_answers = [(500, {"message": "SYN refused"})] * 2
-                self.switch(h.PATIENT_B)
+                self.leave(h.PATIENT_B)
                 self.wait_until(lambda: len(self.site.puts) == 1, "A refused")
                 self.page.fill("#findings", "SYN B safe")
                 self.log_out_main()
@@ -909,7 +917,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.select_and_type()
         self.site.put_answers = [(500, {"message": "SYN refused"})] * 2 + [
             (409, {"code": "REPORT_HELD", "message": "SYN held"})]
-        self.switch(h.PATIENT_B)
+        self.leave(h.PATIENT_B)
         self.wait_until(lambda: len(self.site.puts) == 1, "A refused")
         self.page.fill("#findings", "SYN B held")
         self.log_out_main()
@@ -1557,7 +1565,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.wait_until(lambda: self.site.held_commits, "the command is out")
         self.page.locator("#" + field).press_sequentially(self.LATE)
         if leave:
-            self.switch(h.PATIENT_B)
+            self.leave(h.PATIENT_B)
             self.page.wait_for_timeout(200)
         self.site.accept(self.site.held_commits.pop(), self.site.commits[-1], rs)
         row = self.page.locator("#rows tr", has_text=h.PATIENT).first
@@ -1909,7 +1917,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         whether the screen says the text is a draft (the bar with Discard Draft)."""
         expected = {"editor": editor, "bar": draft, "discard": draft}
         if self.page.locator("#rows tr.sel", has_text=h.PATIENT).count():
-            self.switch(h.PATIENT_B)
+            self.leave(h.PATIENT_B)
         self.switch(h.PATIENT)
         self.page.wait_for_timeout(500)
         self.assertEqual(expected, self.shown(), f"{what}: on coming back to the study in the same document")
@@ -1939,7 +1947,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.site.commit_answers = ["hold"]
         self.page.locator(control).click()
         self.wait_until(lambda: self.site.held_commits, "the command is out")
-        self.switch(h.PATIENT_B)
+        self.leave(h.PATIENT_B)
         self.page.locator("#findings").press_sequentially("SYN-B typed meanwhile")
         self.page.wait_for_timeout(300)
         return self.site.held_commits.pop(), self.site.commits[-1]
@@ -2366,7 +2374,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.open_main()
         self.select_and_type()
         self.site.put_answers = [refusal]
-        self.switch(h.PATIENT_B)
+        self.leave(h.PATIENT_B)
         self.wait_until(lambda: len(self.site.puts) == 1, "A refused on leaving it")
         self.page.fill("#findings", "SYN B recovery")
         self.site.ended.add(self.site.cookie)

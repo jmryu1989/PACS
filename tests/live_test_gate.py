@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import os
 import re
+import time
 
 
 def state_directory():
@@ -31,6 +32,10 @@ _permitted_pid = None
 
 
 class Refused(RuntimeError):
+    pass
+
+
+class LeaseBusy(Refused):
     pass
 
 
@@ -142,7 +147,7 @@ def exclusive(path):
                 import fcntl
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
-            raise Refused("Another run owns the test lease: " + str(path)) from error
+            raise LeaseBusy("Another run owns the test lease: " + str(path)) from error
         try:
             yield
         finally:
@@ -153,8 +158,41 @@ def exclusive(path):
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def release_after_success(identity, wait_seconds=10):
+    """A supervising parent reopens the gate for its own confirmed-successful execution only.
+
+    The lease is briefly held by other runs' preflight checks, so a busy lease is
+    retried for a bounded time; any other refusal leaves the marker in place.
+    """
+    validate_identity(identity)
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            with exclusive(STATE / "live.lock"):
+                marker = STATE / "live-needs-inspection.json"
+                try:
+                    current = json.loads(marker.read_bytes())
+                except (OSError, ValueError) as error:
+                    raise Refused("No readable live marker for this execution") from error
+                if current != identity:
+                    # Never clear a marker this execution did not write.
+                    raise Refused("Live marker does not identify this execution")
+                marker.unlink()
+                return
+        except LeaseBusy:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
 @contextmanager
-def live_run(unit, module, plan_sha256, attempt):
+def live_run(unit, module, plan_sha256, attempt, release=True):
+    """Grant live permission under the lease with a persisted marker.
+
+    release=False keeps the marker after a successful body: a supervised worker
+    cannot see its parent's deadline or interruption, so only the parent decides
+    whether the execution succeeded (release_after_success).
+    """
     global _permitted_pid
     if _permitted_pid is not None:
         raise Refused("Nested live runs are forbidden")
@@ -167,13 +205,18 @@ def live_run(unit, module, plan_sha256, attempt):
         identity = dict(unit=unit, module=module, plan_sha256=plan_sha256, attempt=attempt,
                         pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat())
         validate_identity(identity)
-        quarantine.write_text(json.dumps(identity) + "\n", encoding="utf-8")
+        # Atomic: a termination mid-write must not leave a marker without its
+        # identity, which no inspection could match and release.
+        temporary = STATE / "live-needs-inspection.new"
+        temporary.write_text(json.dumps(identity) + "\n", encoding="utf-8")
+        os.replace(str(temporary), str(quarantine))
         _permitted_pid = os.getpid()
         try:
-            yield
+            yield dict(identity)
         except BaseException:
             raise
         else:
-            quarantine.unlink()
+            if release:
+                quarantine.unlink()
         finally:
             _permitted_pid = None

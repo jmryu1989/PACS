@@ -665,7 +665,9 @@ class ReportCitationDOMTest(unittest.TestCase):
                            " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
         self.press_insert()
         self.page.wait_for_function("()=>outstanding()===1")
-        self.page.evaluate("()=>{ select('%s'); type(['OTHER PATIENT TEXT', '', '']); }" % OTHER)
+        # W4 decided difference (W4-PAGE-06): select() waits for the outstanding insertion before it moves; the move
+        # while it is out is set up with the gate's switching primitive (enterStudy), setup only.
+        self.page.evaluate("()=>{ enterStudy('%s'); type(['OTHER PATIENT TEXT', '', '']); }" % OTHER)
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>toasts.some(t=>t.message.includes('늦게 도착'))")
         value = self.page.evaluate("snapshot()")
@@ -688,7 +690,9 @@ class ReportCitationDOMTest(unittest.TestCase):
                            " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
         self.press_insert()
         self.page.wait_for_function("()=>outstanding()===1")
-        self.page.evaluate("()=>{ select('%s'); select('%s'); load({force: true}); }" % (OTHER, UID))
+        # W4 decided difference (W4-PAGE-06): select() waits for the outstanding insertion before it moves; the move
+        # while it is out is set up with the gate's switching primitive (enterStudy), setup only.
+        self.page.evaluate("()=>{ enterStudy('%s'); enterStudy('%s'); load({force: true}); }" % (OTHER, UID))
         self.assertEqual(UID, self.page.evaluate("selectedUid"))
         self.assertEqual(started + 2, self.page.evaluate("snapshot().seq"))
         self.page.evaluate("release()")
@@ -708,7 +712,9 @@ class ReportCitationDOMTest(unittest.TestCase):
                            " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
         self.press_insert()
         self.page.wait_for_function("()=>outstanding()===1")
-        self.page.evaluate("()=>{ select('%s'); }" % OTHER)
+        # W4 decided difference (W4-PAGE-06): select() waits for the outstanding insertion before it moves; the move
+        # while it is out is set up with the gate's switching primitive (enterStudy), setup only.
+        self.page.evaluate("()=>{ enterStudy('%s'); }" % OTHER)
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>toasts.some(t=>t.message.includes('늦게 도착'))")
         self.page.evaluate("()=>select('%s')" % UID)
@@ -807,7 +813,9 @@ class ReportCitationDOMTest(unittest.TestCase):
                            " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
         self.press_insert()
         self.page.wait_for_function("()=>outstanding()===1")
-        self.page.evaluate("()=>select('%s')" % OTHER)
+        # W4 decided difference (W4-PAGE-06): select() waits for the outstanding insertion before it moves; the move
+        # while it is out is set up with the gate's switching primitive (enterStudy), setup only.
+        self.page.evaluate("()=>enterStudy('%s')" % OTHER)
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>toasts.some(t=>t.message.includes('늦게 도착'))")
         info = self.page.evaluate("citeInfo('%s')" % UID)
@@ -903,7 +911,9 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.evaluate(type_js([EXISTING + "\n타이머 중", "", ""]))
         self.page.evaluate("autosaveTick()")
         self.assertEqual(1, len(self.page.evaluate("snapshot().calls")), "the timer stands aside for an insertion")
-        self.page.evaluate("()=>select('%s')" % OTHER)
+        # W4 decided difference (W4-PAGE-06): select() waits for the outstanding insertion before it moves; the move
+        # while it is out is set up with the gate's switching primitive (enterStudy), setup only.
+        self.page.evaluate("()=>enterStudy('%s')" % OTHER)
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>toasts.some(t=>t.message.includes('늦게 도착'))")
         self.page.evaluate("()=>select('%s')" % UID)

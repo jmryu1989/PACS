@@ -281,10 +281,13 @@
       return consultationFilter ? tagged.filter(s => consultationFilter.uids.has(s.uid)) : tagged;
     }
     // Navigation and its position indicator must use the same order the reader sees.
+    // 고른 검사가 보인 마지막 순서도 기억한다: 그 검사가 Approve로 필터에서 빠진 뒤의 Next/Prev는 그 자리에서 이어 간다(W4-PAGE-05).
+    let queueSeen = null;
     function orderedStudies() {
       const list = filtered();
       if (sortDir !== 0 && sortKey)
         list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+      if (selectedUid && list.some(s => s.uid === selectedUid)) queueSeen = { uid: selectedUid, order: list.map(s => s.uid) };
       return list;
     }
     let resultPage = 0, resultQuery = '', resultPageSize = 100;
@@ -473,6 +476,13 @@
       }
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
+      }
+      // Approve & Next는 Approve와 같은 확정이다(W4-PAGE-04): 같은 때, 같은 까닭으로 잠긴다 — 같은 판단을 따로 하지 않는다.
+      const approveNext = $("#b-approve-next");
+      if (approveNext) {
+        approveNext.disabled = $("#b-approve").disabled;
+        approveNext.title = $("#b-approve").title
+          || "승인한 뒤 목록의 다음 검사로 갑니다 — 승인이 확인되고 화면에 그려진 뒤에만 이동하고, 결과를 모르거나 거절되면 이 검사에 머뭅니다";
       }
       // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
       renderDraftHint();

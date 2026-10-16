@@ -79,7 +79,7 @@ window.KinReadingWorkspace = function (app) {
   hints.id = 'reading-shortcuts';
   const shortcutButtons = {list,image:imageFocus,prior:priorFocus,report:reportFocus,context,note,tools:toolsFocus,nativeTools:nativeToolsFocus,previous,next};
   const shortcuts = KinWorkspaceShortcuts.create({host:nav,owner:app.noteOwner,allowed:app.allowed,changed:map=>{
-    for(const [id,b] of Object.entries(shortcutButtons))b.setAttribute('aria-keyshortcuts',KinWorkspaceShortcuts.display(map[id]));
+    for(const [id,b] of Object.entries(shortcutButtons)){if(map[id])b.setAttribute('aria-keyshortcuts',KinWorkspaceShortcuts.display(map[id]));else b.removeAttribute('aria-keyshortcuts');}
     hints.textContent=Object.entries(shortcutButtons).map(([id,b])=>b.textContent+' '+KinWorkspaceShortcuts.display(map[id])).join(' · ')+' (입력 중 검사 이동 제외)';
   }});
   const host = node('section'); host.id = 'reading-viewer'; host.hidden = true;
@@ -338,6 +338,11 @@ window.KinReadingWorkspace = function (app) {
       e.preventDefault(); closeContext(); context.focus(); return;
     }
     const command = shortcuts.action(e);
+    // Frame keydown cannot reach the page dispatcher; both use the same command gate.
+    if(command==='finalize'){
+      if(doc!==document&&window.KinReportCommands?.finalize?.()===true)e.preventDefault();
+      return;
+    }
     if (!active) {
       // List/report navigation is also useful before opening the integrated
       // viewer. Only focus a visible local pane; do not open or retarget images.
@@ -590,9 +595,9 @@ window.KinReadingWorkspace = function (app) {
             doc.addEventListener('keydown', e => keyboard(e, doc), true); boundDocuments.add(doc);
           }
           const keyMap=shortcuts.read();
-          for(const [id,selector] of Object.entries({image:'#kin-viewer-focus-2',report:'#kin-viewer-focus-4',tools:'#kin-viewer-focus-7',nativeTools:'#kin-viewer-focus-9',note:'#kin-viewer-note-open'}))doc.querySelector(selector)?.setAttribute('aria-keyshortcuts',KinWorkspaceShortcuts.display(keyMap[id]));
+          for(const [id,selector] of Object.entries({image:'#kin-viewer-focus-2',report:'#kin-viewer-focus-4',tools:'#kin-viewer-focus-7',nativeTools:'#kin-viewer-focus-9',note:'#kin-viewer-note-open'})){const button=doc.querySelector(selector);if(keyMap[id])button?.setAttribute('aria-keyshortcuts',KinWorkspaceShortcuts.display(keyMap[id]));else button?.removeAttribute('aria-keyshortcuts');}
           const toolHint=doc.querySelector('#kin-viewer-tool-focus > p');
-          if(toolHint){const key=id=>keyMap[id].replace(/^Digit|^Key/,'');toolHint.textContent='Ctrl+Alt+'+key('tools')+' 측정 도구 · 8 비교 작업 도구 · '+key('nativeTools')+' 기본 영상 도구 (Tab 이동·Enter 선택) · '+key('image')+' 선택 영상 · '+key('report')+' 판독문으로';}
+          if(toolHint){const key=id=>KinWorkspaceShortcuts.display(keyMap[id]);toolHint.textContent=key('tools')+' 측정 도구 · Control+Alt+8 비교 작업 도구 · '+key('nativeTools')+' 기본 영상 도구 (Tab 이동·Enter 선택) · '+key('image')+' 선택 영상 · '+key('report')+' 판독문으로';}
           if (!loaded) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }

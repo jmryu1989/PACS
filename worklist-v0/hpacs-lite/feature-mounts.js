@@ -9,7 +9,8 @@
       identity: () => { const s=KinAuth.session(); return s?.state==='approved' ? [s.institution,s.sub] : null; },
       current: () => selectedUid, study: uid => studies.find(s => s.uid===uid), select,
       applyFolder: (value,id) => favoriteList.apply(value,id), changed: value => favoriteList.adopt(value), ended: () => favoriteList.end(),
-      openSavedView: (uid,job) => { select(uid,{deferViewer:true});readingWorkspace.openJob(uid,job); },
+      // The saved view opens on its study only once the selection has moved there (W4 navigation gate).
+      openSavedView: (uid,job) => whenSelected(select(uid,{deferViewer:true}),uid,()=>readingWorkspace.openJob(uid,job)),
       notice: message => toast(message,'err'),
     });
     $('#favorite-open').onclick = () => favorites.open();
