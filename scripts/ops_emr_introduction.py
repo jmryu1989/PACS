@@ -99,6 +99,9 @@ COMPOSE_NAME = re.compile(r"docker-compose(?:\.[a-z0-9-]+)?\.yml")
 PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 TAG = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 FENCED = "#kin-emr-introduction-fenced# "
+# The tracked monitor file and the one bind it brings (the proxy's read-only public folder, ${KIN_MONITOR_PUBLIC_DIR}).
+MONITOR_FILE = "docker-compose.monitor.yml"
+MONITOR_PUBLIC_TARGET = "/var/run/kin-monitor-public"
 TOOL_FILES = ("ops_emr_introduction.py", "ops_emr_probe.py", "ops_backup.py", "ops_deploy_preflight.py", "ops_deploy_host.py",
               "ops_audit_integrity.py", "ops_deploy_entry.py", "ops_deploy_runner.py")
 OPERATOR_SMOKE_CHECKS = ("login_pkce", "logout_old_session_refused", "worklist_uid", "ohif_frame", "w2_folders",
@@ -602,8 +605,9 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
     """The resolved Compose model (selected, secret-free fields) is exactly the manifest's target before anything uses it:
     project, container names, every named volume (and which service mounts which at which path), networks, published
     ports (proxy only on the planned ingress, any other service on loopback only), origin settings and, when the caller
-    pins them, images. A rehearsal binds nothing outside its own checkout. recovery: after a rollback the project and
-    the pg/Orthanc volumes are the recovery ones."""
+    pins them, images. A rehearsal binds nothing outside its own checkout but its declared overlay binds and the monitor
+    file's public folder (RT-P3-MONITOR-BIND). recovery: after a rollback the project and the pg/Orthanc volumes are the
+    recovery ones."""
     project = recovery["project"] if recovery else target["project"]
     require(model["project"] == project, "Resolved compose project differs")
     expected = {role: target["containers"][role] for role in ROLES}
@@ -652,8 +656,14 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
         require(all(bind in binds for bind in declared_binds.get(role, [])), "A declared overlay bind is missing from the resolved model: " + role)
         if target["kind"] == "rehearsal":
             repository = path_of(target["repository"])
+            # RT-P3-MONITOR-BIND: the tracked monitor file binds ${KIN_MONITOR_PUBLIC_DIR}, which production keeps outside
+            # its checkout; a clone of that shape may bind it there too, but only as that file declares it (the proxy's
+            # one read-only bind at the monitor target, with the file listed). Any other outside path stays refused.
+            monitor = [bind for bind in binds if bind[1] == MONITOR_PUBLIC_TARGET] \
+                if role == "proxy" and MONITOR_FILE in target["compose_files"] else []
             for bind in binds:
-                require(bind[0] == repository or repository in bind[0].parents or bind in declared_binds.get(role, []),
+                require(bind[0] == repository or repository in bind[0].parents or bind in declared_binds.get(role, [])
+                        or (monitor == [bind] and bind[2] is True),
                         "A rehearsal binds a host path outside its checkout: " + role)
     for role, ports in model["ports"].items():
         if role == "proxy":
@@ -2930,8 +2940,11 @@ class SystemdBrowser:
         require(Path(args[1]).resolve() == Path(__file__).resolve(), "browser 모듈이 보호 설치 도구와 다릅니다")
         require(browsers is not None and Path(browsers).is_absolute(), "Chromium 설치 경로를 명시해야 합니다")
         protected_host.protected(Path(browsers), directory=True)
-        return ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent",
-                "PLAYWRIGHT_BROWSERS_PATH=" + browsers, *args]
+        # RT-P3-PYCACHE: the interpreter runs the protected install's own files; it must not write bytecode beside them
+        # (the first smoke created lib/__pycache__ in /opt/kin-deploy). -B for this interpreter, the variable for any
+        # Python it starts.
+        return ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent", "PYTHONDONTWRITEBYTECODE=1",
+                "PLAYWRIGHT_BROWSERS_PATH=" + browsers, args[0], "-B", *args[1:]]
 
     def supervisor_timeout(self, cap):
         """A supervisor command's own bound: its cap, within the attempt's cleanup end. The browser's work deadline is
@@ -4532,16 +4545,19 @@ class HostOps:
 
     # ── IRT-13 / IRT-11: recorded pre-fence corrections of the checkout ──
     def checkout_mode(self, intro):
-        """With the manifest's fix_checkout_mode: the checkout becomes 0700 and its .git loses group/other write (never
-        recursively), modes recorded before and after; then the checkout is checked as private like any other run."""
+        """With the manifest's fix_checkout_mode: the checkout and its .git become 0700 (never recursively), modes
+        recorded before and after; then the checkout is checked as private like any other run. RT-P3-GIT-MODE: .git
+        becomes 0700, not only free of group/other write, because the operator command after the release
+        (compose_operation) requires an operating account's .git to be private; a 0755 .git left here made every later
+        `compose config`/`recreate` refuse on a deployed host."""
         git = self.repo / ".git"
         before = {"checkout": oct(self.repo.stat().st_mode & 0o7777), ".git": oct(git.stat().st_mode & 0o7777)}
         if self.t["fix_checkout_mode"]:
-            if before["checkout"] != "0o700" or git.stat().st_mode & 0o022:
+            if before["checkout"] != "0o700" or before[".git"] != "0o700":
                 intro.state["host_changed"] = True
                 intro.save()
             os.chmod(self.repo, 0o700)
-            os.chmod(git, git.stat().st_mode & 0o7777 & ~0o022)
+            os.chmod(git, 0o700)
         after = {"checkout": oct(self.repo.stat().st_mode & 0o7777), ".git": oct(git.stat().st_mode & 0o7777)}
         self.repository_check()
         return {"fixed": self.t["fix_checkout_mode"], "before": before, "after": after}
@@ -6342,6 +6358,15 @@ class IntroductionHost:
                 owned_private(self.repository, self.owner, private=True, directory=True)
                 owned_private(self.repository / ".git", self.owner, directory=True)
 
+        def recovered_check():
+            """P3R1-02: what a recovery leaves must also pass the operator command after it (compose_operation), whose
+            rule for an operating account's checkout requires its .git private; checkout 0700 with .git 0755 passes
+            repository_check, and a rollback that skipped the correction left every later `compose config`/`recreate`
+            refused. Root's checkout keeps repository_check's rule, which is compose_operation's rule for it."""
+            repository_check()
+            if self.owner is not None:
+                owned_private(self.repository / ".git", self.owner, private=True, directory=True)
+
         def ownership_check():
             """Everything repository_check requires except the mode bits of the checkout and of its .git: owner, no link,
             the ancestors' owners and modes."""
@@ -6361,12 +6386,12 @@ class IntroductionHost:
             # when only the checkout's mode was reopened since the capture (owner, links and ancestors still checked),
             # and records it as a warning; introduce, verify and reopen keep refusing.
             try:
-                repository_check()
+                (recovered_check if request["phase"] in RECOVERY_PHASES else repository_check)()
             except RuntimeError as error:
                 if request["phase"] not in RECOVERY_PHASES:
                     raise
                 # IRT2-07: owner, links and ancestors still hold; only the mode of the checkout and its .git was opened
-                # again. The capture's own correction is made again (checkout 0700, .git without group/other write, never
+                # again. The capture's own correction is made again (checkout and .git 0700, RT-P3-GIT-MODE; never
                 # recursive), recorded, and the full check must then pass; the rollback's steps check the content (a clean
                 # tracked tree, the planned compose files and .env) before they use it.
                 ownership_check()
@@ -6381,10 +6406,10 @@ class IntroductionHost:
                     machine.state["host_changed"] = True
                     machine.save()
                     os.chmod(self.repository, 0o700)
-                    os.chmod(git, git.lstat().st_mode & 0o7777 & ~0o022)
+                    os.chmod(git, 0o700)
                     warning["restored"] = {name: oct(path.lstat().st_mode & 0o7777)
                                            for name, path in (("checkout", self.repository), (".git", git))}
-                    repository_check()
+                    recovered_check()
         approval = approval_valid(decode(host.read_secure(self.state / "emr-approvals" / (digest + ".json"))), digest,
                                   request["phase"], int(time.time()), plan["target_kind"], unattended=browser_cmd is not None)
         evidence = {kind: self.document("emr-evidence", value) for kind, value in approval["evidence"].items()}

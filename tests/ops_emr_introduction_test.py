@@ -2333,6 +2333,57 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         self.overlay.write_bytes(self.overlay.read_bytes() + b"# changed\n")
         refuses(self, ops_host.declared_overlay_facts, message="differs from the manifest")
 
+    def test_119_a_rehearsal_binds_the_monitor_public_folder_where_production_keeps_it_and_nothing_else_outside(self):
+        """RT-P3-MONITOR-BIND (prep3 readiness3 §3-1, D1311): an operational rehearsal lists docker-compose.monitor.yml
+        last, and that file binds ${KIN_MONITOR_PUBLIC_DIR} read-only into the proxy. Production keeps the folder outside
+        its checkout (/home/ubuntu/.kin-monitor-public); a clone with production's shape binds it outside its checkout
+        too, and that one bind - the proxy's read-only monitor folder with the monitor file listed - is accepted. Every
+        other host path outside the checkout is still refused, and so is the monitor bind in any other shape."""
+        self.production_host()
+        rehearsal = target_fixture("rehearsal", str(self.repo))
+        # The operational check names the overlay file by its POSIX name (the VM's paths); written that way here too.
+        overlays = [dict(entry, file=Path(entry["file"]).as_posix()) for entry in copy.deepcopy(self.target["declared_overlays"])]
+        rehearsal.update(compose_files=["docker-compose.yml", "docker-compose.prod.yml", self.override.as_posix(), self.overlay.as_posix(),
+                                        "docker-compose.monitor.yml"],
+                         external_networks=copy.deepcopy(self.target["external_networks"]), declared_overlays=overlays)
+        intro.target_valid(rehearsal, operational=True)
+        monitor_target = "/var/run/kin-monitor-public"
+        # Beside the checkout, as production's /home/ubuntu/.kin-monitor-public is beside /home/ubuntu/pacs-starter-kit.
+        outside = {"type": "bind", "source": str(self.root / ".kin-monitor-public"), "target": monitor_target, "read_only": True}
+        for maintenance in (False, True):
+            model = resolved_model(rehearsal, target_checkout=False, maintenance=maintenance)
+            model["mounts"]["proxy"].append(dict(outside))
+            check = lambda model, target=rehearsal, maintenance=maintenance: intro.check_resolved(
+                model, target, target_checkout=False, maintenance=maintenance)
+            with self.subTest(maintenance=maintenance):
+                check(model)
+            inside = copy.deepcopy(model)
+            inside["mounts"]["proxy"][-1]["source"] = str(self.repo / ".kin-monitor-public")   # the D1311 data workaround
+            check(inside)
+            elsewhere = {"type": "bind", "source": str(self.root / "elsewhere"), "target": "/etc/nginx/conf.d/x.conf", "read_only": True}
+            for name, change in {
+                    "the monitor bind writable": lambda m: m["mounts"]["proxy"][-1].__setitem__("read_only", False),
+                    "the monitor folder at another target": lambda m: m["mounts"]["proxy"][-1].__setitem__("target", monitor_target + "-x"),
+                    "the monitor folder on another service": lambda m: m["mounts"]["api"].append(m["mounts"]["proxy"].pop()),
+                    "a second outside folder at the monitor target": lambda m: m["mounts"]["proxy"].append(
+                        dict(outside, source=str(self.root / "second-monitor"))),
+                    "another outside bind beside the monitor bind": lambda m: m["mounts"]["proxy"].append(dict(elsewhere)),
+                    "another outside bind on another service": lambda m: m["mounts"]["orthanc"].append(dict(elsewhere))}.items():
+                bad = copy.deepcopy(model)
+                change(bad)
+                with self.subTest(case=name, maintenance=maintenance):
+                    refuses(self, check, bad, message="outside its checkout")
+            unlisted = copy.deepcopy(rehearsal)
+            unlisted["compose_files"].remove("docker-compose.monitor.yml")
+            with self.subTest(case="the monitor file not listed", maintenance=maintenance):
+                refuses(self, check, model, unlisted, message="outside its checkout")
+        # Production is as production runs it: no rehearsal rule, its monitor folder outside its checkout.
+        images = plan_fixture(self.target)["previous"]["images"]
+        production = resolved_model(self.target, target_checkout=False, maintenance=False, images=images)
+        production["mounts"]["proxy"].append(dict(outside, source="/home/ubuntu/.kin-monitor-public"))
+        intro.target_valid(self.target, operational=False)
+        intro.check_resolved(production, self.target, target_checkout=False, maintenance=False, images=images)
+
     @unittest.skipUnless(shutil.which("docker"), "needs the docker CLI (`docker compose config` only: no container, no daemon change)")
     def test_86_compose_itself_drops_an_overlay_merged_before_the_rehearsal_override(self):
         """IRT-11 (D1066): the product's compose files, the generated rehearsal override (`volumes: !override` on the
@@ -2571,6 +2622,29 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         (reopened.entry.root / context.state["compose_entry"]["generation"] / "environment.json").write_bytes(b"{}")
         with self.assertRaises(intro.Stop):
             intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records).prepare(context)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode bits")
+    def test_122_the_declared_checkout_correction_leaves_git_private(self):
+        """RT-P3-GIT-MODE: with fix_checkout_mode, L-00a leaves the checkout and its .git at 0700 whatever their modes were
+        (an open checkout; production after its window: checkout 0700, .git 0755), records both before and after and
+        marks the host changed; contents below .git are not touched. An already private checkout is recorded unchanged."""
+        git = self.repo / ".git"
+        (git / "objects").mkdir(parents=True, exist_ok=True)
+        (git / "objects").chmod(0o755)
+        self.target["fix_checkout_mode"] = True
+        for name, (checkout, git_mode, changed) in {"open checkout and .git": (0o775, 0o775, True),
+                                                    "production after its window": (0o700, 0o755, True),
+                                                    "already private": (0o700, 0o700, False)}.items():
+            self.repo.chmod(checkout)
+            git.chmod(git_mode)
+            ops_host, _, context = self.host(prepare=False)
+            with self.subTest(case=name):
+                detail = ops_host.checkout_mode(context)
+                self.assertEqual(detail, {"fixed": True, "before": {"checkout": oct(checkout), ".git": oct(git_mode)},
+                                          "after": {"checkout": "0o700", ".git": "0o700"}})
+                self.assertEqual(((self.repo.stat().st_mode & 0o7777), (git.stat().st_mode & 0o7777)), (0o700, 0o700))
+                self.assertEqual((git / "objects").stat().st_mode & 0o777, 0o755, "never recursive")
+                self.assertEqual(bool(context.state.get("host_changed")), changed)
 
     def test_91_the_seed_names_each_compose_variable_the_clone_env_lacks(self):
         """D28: before the seed no clone stack runs, so a VM target whose compose files require KIN_MONITOR_PUBLIC_DIR
@@ -3417,6 +3491,48 @@ class HelperTests(unittest.TestCase):
         for source in ("/run/desktop/mnt/host/c/Users/x", "/home/ubuntu/.kin-monitor-public"):
             self.assertEqual(intro.host_bind_source(source, "/srv/kin/repository"), source)
 
+    @unittest.skipUnless(os.name == "posix" and Path("/usr/bin/env").is_file(), "the supervised browser command is a POSIX host's")
+    def test_120_the_supervised_browser_smoke_writes_no_bytecode_into_the_tools_folder(self):
+        """RT-P3-PYCACHE (prep3 readiness3 §3-2, prep5 readiness5 note 2): the supervised smoke and the L-01 probe run the
+        protected install's own ops_emr_introduction.py; the first one wrote /opt/kin-deploy/lib/__pycache__ into that
+        install. The command the supervisor runs, executed as built against a copy of the tool folder, leaves no
+        __pycache__ there, while the policy's command run as it is does (the control: the entry imports cacheable
+        modules from its folder). The host admission of the command (root, systemd with cgroup v2, protected paths) is
+        given here; the policy's interpreter, tool path and subcommand are kept."""
+        import ops_deploy_host
+        scripts = Path(intro.__file__).resolve().parent
+        browsers = tempfile.TemporaryDirectory(prefix="kin-browsers-")
+        self.addCleanup(browsers.cleanup)
+        policy = ["/usr/bin/env", "PLAYWRIGHT_BROWSERS_PATH=" + browsers.name, sys.executable, intro.__file__, "browser-smoke"]
+        host = {"/run/systemd/system", "/sys/fs/cgroup/cgroup.controllers"}
+        real_dir, real_file = Path.is_dir, Path.is_file
+        with patch.object(intro.os, "geteuid", return_value=0), patch.object(ops_deploy_host, "protected"), \
+                patch.object(Path, "is_dir", lambda path: str(path) in host or real_dir(path)), \
+                patch.object(Path, "is_file", lambda path: str(path) in host or real_file(path)):
+            command = intro.SystemdBrowser.command(policy)
+        self.assertEqual(command[:2], ["/usr/bin/env", "-i"])
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=" + browsers.name, command)
+        self.assertEqual([item for item in command if item in (sys.executable, intro.__file__, "browser-smoke")],
+                         [sys.executable, intro.__file__, "browser-smoke"])
+
+        def run(argv):
+            folder = Path(tempfile.mkdtemp(prefix="kin-lib-"))
+            self.addCleanup(shutil.rmtree, folder, True)
+            for path in scripts.glob("ops_*.py"):
+                shutil.copy2(path, folder / path.name)
+            tool = str(folder / Path(intro.__file__).name)
+            result = subprocess.run([tool if item == intro.__file__ else item for item in argv], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+            # an empty spec is refused by the entry itself (after its imports), with its record-safe error line
+            self.assertEqual(result.returncode, 1, result.stderr[-2000:])
+            self.assertIn(b'"valid": false', result.stderr)
+            return folder
+
+        control = run(["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent", *policy[2:]])
+        self.assertTrue((control / "__pycache__").is_dir(), "the control writes bytecode beside the tool")
+        supervised = run(command)
+        self.assertFalse((supervised / "__pycache__").exists(), sorted(p.name for p in supervised.rglob("*")))
+
     def test_44_env_parsing_compose_digest_and_override(self):
         values = intro.parse_env(b"# comment\nA=1\nB='two words'\n export=x\nC=\"q\"\nbad line\n")
         self.assertEqual(values, {"A": "1", "B": "two words", "C": "q", "export": "x"})
@@ -3772,7 +3888,7 @@ class ProtectedHostTests(unittest.TestCase):
 
     def test_83_a_declared_checkout_mode_correction_is_applied_recorded_and_then_checked(self):
         """IRT-13: an open checkout (0775, .git 0775) passes only with fix_checkout_mode: the capture's L-00a makes it 0700
-        and its .git 0755 (no recursion), records both modes, and the privacy check then runs as usual."""
+        and its .git 0700 (RT-P3-GIT-MODE; no recursion), records both modes, and the privacy check then runs as usual."""
         (self.repo / "inner").mkdir(mode=0o775)
         self.repo.chmod(0o775)
         (self.repo / ".git").chmod(0o775)
@@ -3781,9 +3897,36 @@ class ProtectedHostTests(unittest.TestCase):
         first = json.loads(next(runs.glob("result-capture-*.json")).read_text())["steps"][0]
         self.assertEqual((first["step"], first["outcome"]), ("L-00a", "PASS"))
         self.assertEqual(first["detail"], {"fixed": True, "before": {"checkout": "0o775", ".git": "0o775"},
-                                           "after": {"checkout": "0o700", ".git": "0o755"}})
+                                           "after": {"checkout": "0o700", ".git": "0o700"}})
         self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / "inner").stat().st_mode & 0o777)), (0o700, 0o775))
         self.assertEqual(result["status"], "CAPTURE_FAILED", "the run went on past L-00a (to the fence made to fail)")
+
+    def test_121_a_deployed_hosts_0755_git_is_made_private_by_the_next_capture_and_the_operator_command_then_admits_it(self):
+        """RT-P3-GIT-MODE (prep7-window report-window.md, 차단; D1355): production after its window - an operating-account
+        checkout at 0700 whose .git L-00a had left at 0755 - refused every `entry.py compose config`/`recreate`, whose
+        rule requires that .git private. The next capture's L-00a (fix_checkout_mode) makes .git 0700 and records it, and
+        the operator command's checkout rule then admits the checkout; with .git as it was, that rule refuses."""
+        owner = {"uid": 1000, "gid": 1000}
+        policy = json.loads(self.policy_path.read_bytes())
+        policy["repository_owner"] = owner
+        self.write(self.policy_path, policy)
+        git = self.repo / ".git"
+        for path in (self.repo, git):
+            os.chown(path, 1000, 1000)
+        self.repo.chmod(0o700)
+        git.chmod(0o755)
+        operator_rule = lambda: intro.owned_private(git, owner, private=True, directory=True)   # compose_operation's .git rule
+        with self.assertRaisesRegex(intro.Stop, "not private"):
+            operator_rule()
+        result, runs, docker = self.installed_run(target_changes={"fix_checkout_mode": True},
+                                                  prepare=lambda runs: os.chown(self.repo / ".env", 1000, 1000))
+        first = json.loads(next(runs.glob("result-capture-*.json")).read_text())["steps"][0]
+        self.assertEqual((first["step"], first["outcome"]), ("L-00a", "PASS"), result)
+        self.assertEqual(first["detail"], {"fixed": True, "before": {"checkout": "0o700", ".git": "0o755"},
+                                           "after": {"checkout": "0o700", ".git": "0o700"}})
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), (git.stat().st_mode & 0o777), git.stat().st_uid), (0o700, 0o700, 1000))
+        operator_rule()
+        self.assertEqual(intro.IntroductionHost(self.policy_path).owner, owner)
 
     def test_84_an_open_checkout_without_the_declaration_is_refused_before_any_step(self):
         self.repo.chmod(0o775)
@@ -3896,8 +4039,8 @@ class ProtectedHostTests(unittest.TestCase):
         self.assertEqual(result["status"], "RESTORED", result)
         (warning,) = result["warnings"]
         self.assertEqual((warning["kind"], warning["modes"], warning["restored"]),
-                         ("checkout-mode", {"checkout": "0o775", ".git": "0o775"}, {"checkout": "0o700", ".git": "0o755"}))
-        self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / ".git").stat().st_mode & 0o777)), (0o700, 0o755))
+                         ("checkout-mode", {"checkout": "0o775", ".git": "0o775"}, {"checkout": "0o700", ".git": "0o700"}))
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / ".git").stat().st_mode & 0o777)), (0o700, 0o700))
         (written,) = runs.glob("result-rollback-*.json")
         self.assertEqual(json.loads(written.read_text())["warnings"], result["warnings"])
         journal = [json.loads(line) for line in (runs / "journal.jsonl").read_text().splitlines()]
@@ -3910,6 +4053,72 @@ class ProtectedHostTests(unittest.TestCase):
         os.chown(self.repo / ".git", 1000, 1000)
         with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
             self.assertEqual(intro.IntroductionHost(self.policy_path).execute(request("rollback"))["status"], "REJECTED")
+
+    def test_123_a_rollback_on_an_operating_accounts_0700_checkout_with_a_0755_git_leaves_the_operator_command_admitted(self):
+        """P3R1-02 (Astra review of 7adea16): the deployed shape of RT-P3-GIT-MODE - an operating-account checkout at 0700
+        whose .git is 0755 - met by a recovery. The rollback records the opened mode as its warning, makes .git 0700
+        after approval, the lease and a durable host_changed record (non-recursive), and the operator command's .git rule
+        then admits the checkout; before, the rollback ran without the correction and that rule refused afterwards. An
+        ownership change is still refused."""
+        owner = {"uid": 1000, "gid": 1000}
+        policy = json.loads(self.policy_path.read_bytes())
+        policy["repository_owner"] = owner
+        self.write(self.policy_path, policy)
+        git = self.repo / ".git"
+        (git / "objects").mkdir(mode=0o755, exist_ok=True)
+        (git / "objects").chmod(0o755)
+        for path in (self.repo, git):
+            os.chown(path, 1000, 1000)
+        self.repo.chmod(0o700)
+        git.chmod(0o755)
+        operator_rule = lambda: intro.owned_private(git, owner, private=True, directory=True)   # compose_operation's .git rule
+        with self.assertRaisesRegex(intro.Stop, "not private"):
+            operator_rule()
+        target = self.operational_target()
+        target["fix_checkout_mode"] = True
+        plan = plan_fixture(target)
+        now = datetime.now(timezone.utc)
+        plan.update(window={"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=2)).isoformat()},
+                    tool=intro.tool_hashes())
+        self.document("emr-targets", target)
+        plan_sha = self.document("emr-plans", plan)
+        runs = self.state / "emr-runs" / plan_sha
+        runs.mkdir(mode=0o700)
+        token = intro.acquire_lock(self.repo)
+        state = intro.new_state(plan_sha, plan)
+        state.update(status="INTRODUCED", lock_token=token, db_changed=True, checkout="target",
+                     b0={"dir": "/b0", "manifest_sha256": "8" * 64}, fenced={"running_before": []})
+        self.write(runs / "state.json", state)
+        shared = FakeOps()
+        shared.cron_state, shared.ingress_state = "fenced", "maintenance"
+
+        def rollback():
+            raw = json.dumps({"version": 1, "mode": intro.MODE, "phase": "rollback", "plan_sha256": plan_sha,
+                              "nonce": os.urandom(16).hex()}).encode()
+            self.approve(raw)
+            with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
+                return intro.IntroductionHost(self.policy_path).execute(raw)
+        result = rollback()
+        self.assertEqual(result["status"], "RESTORED", result)
+        self.assertEqual([warning["kind"] for warning in result.get("warnings", [])], ["checkout-mode"],
+                         "the rollback met the opened .git and recorded it")
+        (warning,) = result["warnings"]
+        self.assertEqual((warning["kind"], warning["modes"], warning["restored"]),
+                         ("checkout-mode", {"checkout": "0o700", ".git": "0o755"}, {"checkout": "0o700", ".git": "0o700"}))
+        self.assertTrue(json.loads((runs / "state.json").read_text())["host_changed"])
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), (git.stat().st_mode & 0o777), ((git / "objects").stat().st_mode & 0o777),
+                          git.stat().st_uid), (0o700, 0o700, 0o755, 1000))
+        operator_rule()
+        # Owner is still the rule for a recovery: another account's .git is refused (by the entry, before any request
+        # runs), its mode untouched.
+        state = json.loads((runs / "state.json").read_text())
+        state.update(status="INTRODUCED", rollback_attempted=False)
+        self.write(runs / "state.json", state)
+        git.chmod(0o755)
+        os.chown(git, 1001, 1001)
+        with self.assertRaises(intro.Stop):
+            rollback()
+        self.assertEqual((git.stat().st_mode & 0o777), 0o755)
 
 
 if __name__ == "__main__":

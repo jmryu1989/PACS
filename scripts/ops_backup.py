@@ -1944,6 +1944,7 @@ DAILY_NAME = re.compile(r"\d{8}-\d{6}-[a-f0-9]{8}")   # the folders backup() cre
 HOLD_FILE = "restore-hold.json"
 THINNED_FILE = "thinned.json"
 ROTATING = ".rotating-"
+_rotation_ledger_lease = ContextVar("rotation_ledger_lease", default=None)
 DAILY_GENERATIONS = 7   # D1047 (user, 2026-10-12): the last seven daily sets beside the release sets
 
 
@@ -2125,7 +2126,8 @@ def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared, *, f
 def rotate(root, keep, protect=(), dry_run=False, now=None):
     """Plan and destructive transitions use the same current completeness/retention admission under one lease.
 
-    The protected root and the shared operations lock exclude cooperating writers during the last check and delete;
+    The protected root, the shared operations lock and the root's audit ledger lock exclude cooperating writers (a
+    backup, a rehearsal, a seal, a retention plan or init) during the last check and delete;
     this is not a defense against a concurrently malicious root user. Incomplete or changed sets remain in place.
     """
     if type(keep) is not int or not 1 <= keep <= 365:
@@ -2134,6 +2136,18 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
     if not dry_run and _operations_lease.get() is None:
         with lock():
             return rotate(root, keep, protect, dry_run, now)
+    if not dry_run and _rotation_ledger_lease.get() is None:
+        # P3R1-01: the retention period is changed (ops_audit_integrity plan) under the backup root's ledger lock, not the
+        # operations lock beside the tool (RT-P3-LEDGER-LOCK); the destructive part holds that ledger lock too, so a plan
+        # never succeeds between its final retention decision and the rename/delete. Taken after the operations lock
+        # (operations -> ledger, as the seal does), never waited for, never broken: a held one refuses and deletes nothing.
+        import ops_audit_integrity as audit
+        with audit.ledger_lock(root) as ledger_lease:
+            context = _rotation_ledger_lease.set(ledger_lease)
+            try:
+                return rotate(root, keep, protect, dry_run, now)
+            finally:
+                _rotation_ledger_lease.reset(context)
     root_identity = _rotation_identity(root)
     instant = lambda: now or datetime.now(timezone.utc)
     def plan_now(*, focus=None):
@@ -2141,9 +2155,10 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
             raise RuntimeError("백업 루트의 신원이 바뀌었습니다")
         lease = _operations_lease.get()
         if not dry_run:
-            if lease is None or lease.retained:
+            if lease is None or lease.retained or _rotation_ledger_lease.get() is None:
                 raise RuntimeError("삭제 작업 잠금을 확인할 수 없습니다")
             lease.verify()
+            _rotation_ledger_lease.get().verify()
         return _rotation_plan(root, keep, set(protect), _referenced(root), *_retention_window(root, instant()), focus=focus)
     # Unlink and marker replacement are separate durable operations. If only replacement was interrupted, validate
     # the manifest-bound transition and every remaining byte before finishing its metadata; no archive is deleted.
