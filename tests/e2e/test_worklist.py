@@ -638,16 +638,27 @@ class WorklistE2E(unittest.TestCase):
         return rows[0]
 
     def sign_in_again(self, page, actor):
-        """Log Out in this tab, then the real login form again: a new session in the same tab (its sessionStorage stays)."""
+        """Log Out in this tab, then the real login form again: a new session in the same tab (its sessionStorage stays).
+        After a Log Out the landing keeps its end notice and never signs in by itself (index.html boot: an end record
+        stops the automatic login), so the person presses its Login button; Keycloak then shows its form - with the
+        username field, or, while its own SSO is still known, the attempted username and its restart-login link."""
         page.once("dialog", lambda dialog: dialog.accept())
         page.locator("#logout").click()
         page.wait_for_url("**/index.html**", timeout=30000)
-        page.goto(self.stack.proxy + "/")
+        name = self.stack.username(actor)
         try:
-            page.locator("#username").fill(self.stack.username(actor))
+            page.locator("#signin").click()
+            page.locator("#password").wait_for(state="visible", timeout=30000)
+            attempted = page.locator("#kc-attempted-username")
+            if not page.locator("#username").is_visible() and attempted.count() and attempted.inner_text().strip() != name:
+                with page.expect_navigation():
+                    page.locator("#reset-login").click()
+            if page.locator("#username").is_visible():
+                page.locator("#username").fill(name)
             page.locator("#password").fill(self.stack.passwords[actor])
             page.locator("#kc-login").click()
         except Exception:
+            # Playwright's call log can include fill() values; never print credentials.
             raise RuntimeError("Real BFF login form could not be submitted") from None
         page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
         expect(page.locator("#dbstat")).to_contain_text("DB Connected")

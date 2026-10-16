@@ -294,8 +294,11 @@ class TransferPanelPage(rf.ReportFlowPage):
         chosen = self.files(3)
         self.choose(chosen)
         for sent in (1, 2, 3):
-            self.wait(lambda: len(self.site.held_imports) == 1, "upload %d out" % sent)
+            # Wait for any upload to be held, then count: a page that sends several at once is caught by the C-02 assertion
+            # whichever moment the poll first sees them, never only by a wait that times out.
+            self.wait(lambda: len(self.site.held_imports) >= 1, "upload %d out" % sent)
             self.settle(300)
+            self.assertEqual(1, len(self.site.held_imports), "C-02 exactly one upload in flight")
             self.assertEqual(sent, len(self.site.imports), "C-02 exactly one upload in flight")
             self.site.release_import()
         self.wait(lambda: self.state_of(2) == "Stored", "the third result")
