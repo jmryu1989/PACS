@@ -179,14 +179,22 @@ async function world() {
     if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
       await hit('tx-start');
       const out = await fn(view(tx));
-      // the work is done and nothing is committed yet: the request holds the study row here
+      // the work is done and nothing is committed yet: the request holds the study row here. W5-API: a transaction that took no
+      // row lock and wrote nothing has no transaction ID and holds no row (the read-only receipt check of a relatedInsert PUT,
+      // before its write): its end is the point 'read-commit', so a case that holds or fails `commit` reaches the write.
+      const [{ holds }] = await tx.$queryRawUnsafe('SELECT txid_current_if_assigned() IS NOT NULL AS holds');
+      if (!holds) { await hit('read-commit'); return out; }
       await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
       return out;
     }, options);
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
-  const orthanc = new Proxy({}, { get(_t, key) { return () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); }; } });
+  // W5-API: a case that restricts StudyAccess by DICOM tags answers the one-study metadata lookup through w.metadata
+  const orthanc = new Proxy({}, { get(_t, key) {
+    if (key === 'studyAccessMetadata' && w.metadata) return w.metadata;
+    return () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); };
+  } });
   const build = () => {
     const access = new StudyAccessService(recorder, orthanc, {});
     const realPrepare = access.prepare.bind(access);
@@ -1558,4 +1566,77 @@ test('W5-PG-06 the same ID on two Targets at once: the primary key lets one comm
   assert.deepEqual(brief(b), { ok: false, status: 409, code: 'ID_REUSED' });
   assert.deepEqual(Object.keys(b.body).sort(), ['code', 'message'], 'nothing of the other Target\'s receipt');
   assert.deepEqual([(await w.row(y, A)).revision, await w.audits(y), (await receiptOf(w, X)).targetUid], [1, [], x]);
+});
+
+test('W5-PG-07 a finished receipt is answered under the Target alone: applied and discarded replay and ID_REUSED while the Source metadata lookup fails, the Source is out of A\'s scope or its row is locked; a new apply still needs the Source; an excluded Target is 404', async () => {
+  const w = await world();
+  const source = await w.study({ rs: 'A', draft: false }), uid = await w.study(), other = await w.study();
+  const opened = await w.token(uid, A);
+  const I1 = relatedBody(opened, uid, source);
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I1 })).ok, true);
+  // I2 sent at the boundary I1 has since moved: refused (DRAFT_CONFLICT), then discarded
+  const I2 = relatedBody(opened, uid, source);
+  assert.deepEqual([(await w.send('X', 'put', { as: A, uid, body: I2 })).body.relatedInsert.reason], ['DRAFT_CONFLICT']);
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: asDiscard(I2, 1) })).ok, true);
+  const current = await w.row(uid, A), token = await w.token(uid, A);
+  const fresh = () => relatedBody(token, uid, source, { seed: { findings: current.findings, conclusion: current.conclusion,
+    recommendation: current.recommendation, baseVersion: current.baseVersion } });
+  const reused = relatedBody(await w.token(other, A), other, source, { id: I1.relatedInsert.insertRequestId });
+  const finished = async what => {
+    const before = await w.state(uid), receipts = await w.base.reportDraftInsertReceipt.findMany({ orderBy: { insertRequestId: 'asc' } });
+    const replay = await w.send('X', 'put', { as: A, uid, body: I1 });
+    assert.deepEqual([replay.ok, replay.body?.relatedInsert?.result, replay.body?.revision], [true, 'applied', token], what + ': applied replay');
+    const tomb = await w.send('X', 'put', { as: A, uid, body: I2 });
+    assert.deepEqual([brief(tomb), tomb.body?.relatedInsert?.state], [{ ok: false, status: 409, code: 'RELATED_INSERT_DISCARDED' }, 'discarded'], what);
+    const resent = await w.send('X', 'put', { as: A, uid, body: asDiscard(I2, 1) });
+    assert.deepEqual([resent.ok, resent.body?.relatedInsert?.state], [true, 'discarded'], what + ': the resent discard');
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid: other, body: reused })), { ok: false, status: 409, code: 'ID_REUSED' }, what);
+    assert.deepEqual(await w.state(uid), before, what + ': the answers wrote nothing');
+    assert.deepEqual(await w.base.reportDraftInsertReceipt.findMany({ orderBy: { insertRequestId: 'asc' } }), receipts, what + ': no receipt changed');
+  };
+  const policy = rules => w.base.$executeRaw`INSERT INTO "StudyAccessPolicy" (institution, subject, revision, policy, reason, "updatedBy", "updatedAt")
+    VALUES (${INST}, ${A.sub}, 1, ${JSON.stringify({ version: 1, restricted: true, startsAt: null, endsAt: null, rules })}::jsonb,
+      'SYNTHETIC policy', 'SYNTHETIC-admin', now())
+    ON CONFLICT (institution, subject) DO UPDATE SET revision = "StudyAccessPolicy".revision + 1, policy = EXCLUDED.policy, "updatedAt" = now()`;
+  const only = (...studyUids) => ({ patientId: null, modalities: [], dateFrom: null, dateTo: null, studyUids });
+  try {
+    // (1) the Targets by UID, every CT study by its tags: the Source's metadata lookup fails
+    await policy([only(uid, other), { ...only(), modalities: ['CT'] }]);
+    w.metadata = async asked => {
+      if (asked === source) throw new Error('SYN Orthanc unavailable');
+      return { '0020000D': { Value: [asked] }, '00080061': { Value: ['CT'] } };
+    };
+    await finished('Source metadata lookup failing');
+    const blocked = fresh();
+    const unprepared = await w.send('X', 'put', { as: A, uid, body: blocked });
+    assert.deepEqual([unprepared.ok, unprepared.status], [false, 503], JSON.stringify(unprepared.body));
+    assert.equal(await receiptOf(w, blocked), null, 'a new apply that could not prepare its Source leaves no receipt');
+    // (2) the Targets only: A has lost the Source
+    w.metadata = null;
+    await policy([only(uid, other)]);
+    await finished('Source out of scope');
+    const lost = await w.send('X', 'put', { as: A, uid, body: fresh() });
+    assert.deepEqual([lost.code, lost.body?.relatedInsert?.reason], ['RELATED_INSERT_REFUSED', 'SOURCE_UNAVAILABLE']);
+    // (3) the Source only: the Target is out of scope, and so is every answer about it
+    await policy([only(source)]);
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid, body: I1 })), { ok: false, status: 404, code: null });
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid, body: I2 })), { ok: false, status: 404, code: null });
+  } finally {
+    w.metadata = null;
+    await w.base.$executeRaw`DELETE FROM "StudyAccessPolicy" WHERE subject = ${A.sub}`;
+  }
+  // (4) another transaction holds the Source row: the finished answers do not wait for it
+  const locked = deferred(), release = deferred();
+  const holder = w.base.$transaction(async tx => {
+    await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR UPDATE`;
+    locked.resolve();
+    await release.promise;
+  }, { timeout: 20000 });
+  try {
+    await locked.promise;
+    await within(finished('Source row locked'), 'the finished answers while the Source row is locked', 2500);
+  } finally {
+    release.resolve();
+    await holder;
+  }
 });
