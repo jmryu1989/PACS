@@ -7,7 +7,9 @@ to several, each with its own stored draft row, revision and report, so the queu
 driven through the page's own controls.
 
 The Ctrl+S cases run on the shipped W4-SC shortcut model (D1358, D1371: readV2 with `finalize`); its setup-only stand-in
-was removed once the model was merged onto this branch (D1420), so a model without readV2 fails them.
+was removed once the model was merged onto this branch (D1420), so a model without readV2 fails them. The two Reading
+Workspace Ctrl+S cases serve only the viewer document as a stand-in (VIEWER_STAND_IN), so the workspace binds its real
+keyboard listener there.
 Setup-only, documented where used: the hook case marks an insertion as out (`insertInFlight`), which the citation and
 structure suites drive for real; W5_REASON stands in
 for a future W5 Related Report mode contributing a reason at the common command block (impact section 10, item 3) - the
@@ -241,6 +243,16 @@ W5_BLOCK_OFF = "() => { reportCommandBlocked = window.__w4CommandBlocked; }"
 # (the page's dispatcher stops the event at the window, so nothing after it could observe the flag).
 CTRL_S = """() => { const e = new KeyboardEvent('keydown', { key: 's', code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true });
   document.querySelector('#findings').dispatchEvent(e); return e.defaultPrevented; }"""
+# The same keydown sent in the bound viewer frame's document (keyboard events do not leave an iframe).
+FRAME_CTRL_S = """() => { const doc = document.querySelector('#reading-frame').contentDocument;
+  const e = new KeyboardEvent('keydown', { key: 's', code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true });
+  doc.querySelector('.cornerstone-canvas').dispatchEvent(e); return e.defaultPrevented; }"""
+# The viewer document the Reading Workspace binds to: a canvas and the two workspace-state functions it waits for. Only
+# this document is a stand-in; the page, its dispatcher, the shortcut model and KinReportCommands are the shipped ones.
+VIEWER_STAND_IN = """<!doctype html><title>SYN viewer stand-in</title><body><div class="cornerstone-canvas" tabindex="0">SYN</div>
+<script>window.kinViewerHistoryWorkspaceState=()=>({busy:false,dirty:false});
+window.kinViewerJobWorkspaceState=()=>({busy:false,dirty:false});</script></body>"""
+CRITICAL_RESULT_LIST = ("GET", "/api/critical-results")
 
 
 class ReportFlowPage(unittest.TestCase):
@@ -248,6 +260,7 @@ class ReportFlowPage(unittest.TestCase):
     count = 3
     bundle_source = None
     html_source = None
+    asset_source = None  # (file, body): one shipped script outside the bundle served as a one-off copy (ASSET_MUTANTS)
 
     @classmethod
     def setUpClass(cls):
@@ -270,6 +283,9 @@ class ReportFlowPage(unittest.TestCase):
         if self.html_source is not None:
             self.context.route("**/main.html", lambda route: route.fulfill(
                 body=self.html_source, content_type="text/html; charset=utf-8"))
+        if self.asset_source is not None:
+            self.context.route("**/" + self.asset_source[0], lambda route: route.fulfill(
+                body=self.asset_source[1], content_type="text/javascript; charset=utf-8"))
         self.page = self.context.new_page()
         self.page.set_default_timeout(10000)
         self.page.set_default_navigation_timeout(30000)
@@ -1049,6 +1065,47 @@ class ReportFlowPage(unittest.TestCase):
         self.assertEqual([h.UID], [uid for uid, _ in self.site.flow_commits], "one approval, by the first call")
         self.assertEqual(h.PATIENT_B, self.selected())
 
+    def enter_reading_with_a_bound_viewer(self):
+        """The Reading Workspace button, with the viewer document served as VIEWER_STAND_IN; returns once the viewer frame
+        is shown and usable (the workspace binds its keyboard to the document before it lets the frame be used)."""
+        viewer_loads = []
+        self.context.route("**/ohif/viewer*", lambda route, request: (
+            viewer_loads.append(request.url), route.fulfill(body=VIEWER_STAND_IN, content_type="text/html; charset=utf-8")))
+        self.page.locator("#m-reading").click()
+        self.wait(lambda: viewer_loads, "the viewer document request")
+        self.wait(lambda: self.page.evaluate("() => { const f = document.querySelector('#reading-frame'); "
+                                             "return !!f && !f.hidden && !f.inert; }"), "the usable viewer frame")
+
+    def test_ctrl_s_in_the_bound_viewer_frame_runs_the_real_finalize_once(self):
+        """D1371 end to end on the merged tree: Ctrl+S pressed in the viewer frame of the Reading Workspace approves the
+        report with the typed text exactly once and prevents the browser's Save Page; once approved (A) it runs nothing
+        and leaves the browser default alone."""
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN A from the viewer frame")
+        self.enter_reading_with_a_bound_viewer()
+        self.assertTrue(self.page.evaluate(FRAME_CTRL_S), "the command runs: the browser's Save Page is prevented")
+        self.wait(lambda: self.site.flow_commits, "the approval by the frame's Ctrl+S")
+        self.wait(lambda: self.site.store[h.UID]["report"]["rs"] == "A", "the approval")
+        self.settle(300)
+        self.assertFalse(self.page.evaluate(FRAME_CTRL_S), "approved (A): nothing ran, the browser default is left alone")
+        self.settle()
+        self.assertEqual([("approve", "SYN A from the viewer frame")],
+                         [(body["action"], body["findings"]) for _, body in self.site.flow_commits], "exactly one commit")
+
+    def test_ctrl_s_in_the_reading_workspace_top_document_runs_the_real_finalize_once(self):
+        """The top document of the Reading Workspace (a bound viewer frame beside it): one Ctrl+S, one approval."""
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN A from the top document")
+        self.enter_reading_with_a_bound_viewer()
+        self.page.locator("#findings").focus()
+        self.assertTrue(self.page.evaluate(CTRL_S), "the command runs: the browser's Save Page is prevented")
+        self.wait(lambda: self.site.flow_commits, "the approval by the top document's Ctrl+S")
+        self.settle(300)
+        self.assertEqual([("approve", "SYN A from the top document")],
+                         [(body["action"], body["findings"]) for _, body in self.site.flow_commits], "exactly one commit")
+
     # ── W5 interface: the common command block and the read-only draft snapshot (W4F-05) ──
     def test_a_command_block_reason_stops_every_report_command_and_none_keeps_the_same_path(self):
         """W5_COMMAND_BLOCK (W4F-05): Approve, Approve & Next, Next, Prev and Ctrl+S all consume the common block. With a
@@ -1096,7 +1153,11 @@ class ReportFlowPage(unittest.TestCase):
           s.texts.findings = 'SYN changed by the caller'; s.lists.citations.push('SYN-CID'); s.author.sub = 'SYN-OTHER';
           return [s, reportDraftSnapshot(), $('#findings').value, draftClient.lists(selectedUid)]; }""")
         self.settle(300)
-        self.assertEqual(calls, self.site.calls, "reading the snapshot sends nothing")
+        # The received critical-result list reads its first page in the background on its own path once the page allows
+        # it (a read that changes nothing); on a loaded host it lands inside this window (pre-fix 5/12 under load). It is
+        # left out of both sides; every other request - any write, draft or report read - still counts.
+        self.assertEqual([c for c in calls if c != CRITICAL_RESULT_LIST],
+                         [c for c in self.site.calls if c != CRITICAL_RESULT_LIST], "reading the snapshot sends nothing")
         self.assertEqual({"findings": "SYN A snapshot", "conclusion": "", "recommendation": ""}, changed[1]["texts"])
         self.assertEqual((True, [], h.owner_of(h.RAD)["sub"]),
                          (changed[1]["unconfirmed"], changed[1]["lists"]["citations"], changed[1]["author"]["sub"]))
@@ -1208,11 +1269,20 @@ MUTANTS = [
      'if (mode !== "Radiology" || reportCommandBlocked("finalize")) return false;',
      "test_report_commands_finalize_answers_true_only_when_the_command_ran"),
 ]
+# A shipped script outside the bundle (main.html loads it with its own script tag) cannot be changed through the bundle or
+# main.html, so its one-off copy is served at its own URL (ReportFlowPage.asset_source); counted with MUTANTS.
+ASSET_MUTANTS = [
+    # D1371: keyboard events do not leave an iframe, so the bound viewer frame forwards its Finalize key to the page's report
+    # commands; without that, Ctrl+S in the frame does nothing.
+    ("frame-does-not-forward-finalize", "reading-workspace.js",
+     "if(doc!==document&&window.KinReportCommands?.finalize?.()===true)e.preventDefault();", "",
+     "test_ctrl_s_in_the_bound_viewer_frame_runs_the_real_finalize_once"),
+]
 
 
 def run_mutants():
     case = ReportFlowPage
-    names = sorted({row[-1] for row in MUTANTS})
+    names = sorted({row[-1] for row in MUTANTS + ASSET_MUTANTS})
     baseline = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
     if not baseline.wasSuccessful() or baseline.skipped:
         print("W4 FLOW BASELINE FAILED; no kills claimed")
@@ -1235,8 +1305,22 @@ def run_mutants():
         killed += int(caught)
     case.bundle_source = None
     case.html_source = None
-    print("W4 FLOW mutants killed: %s/%s" % (killed, len(MUTANTS)))
-    return 0 if killed == len(MUTANTS) else 1
+    for label, file, old, new, name in ASSET_MUTANTS:
+        source = (LITE / file).read_text(encoding="utf-8")
+        if source.count(old) != 1:
+            raise AssertionError("mutation location not unique: " + label)
+        case.asset_source = (file, source.replace(old, new, 1))
+        output = io.StringIO()
+        result = unittest.TextTestRunner(stream=output, verbosity=2).run(unittest.TestSuite([case(name)]))
+        caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
+        print(label, file, "KILLED" if caught else "NOT PROVEN", flush=True)
+        print(output.getvalue(), end="")
+        killed += int(caught)
+    case.asset_source = None
+    total = len(MUTANTS) + len(ASSET_MUTANTS)
+    print("W4 FLOW mutants killed: %s/%s (bundle sources and main.html %s, served assets %s)" % (
+        killed, total, len(MUTANTS), len(ASSET_MUTANTS)))
+    return 0 if killed == total else 1
 
 
 def main():

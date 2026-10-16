@@ -1100,10 +1100,10 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         (370 px, `body.reading .report-p`) it is down to its own rows without clipping them: status, one whole transcript
         line that scrolls in its own box, then meta and the actions - the actions a row of their own size at the pane's
         right edge, on meta's row when both fit and on the next row when they do not. The same holds with the read-only
-        Recommendation notice below the pane. At the 370 px minimum the footer is not checked: whether it still fits
-        there depends on the fonts' line heights, and the reading layout's column (`.right`, overflow auto) scrolls to it
-        (with the notice it sits 16.5 px below on the reference host - recorded in the W4 round-2 report). The cap is the
-        plain rule's own expression, min(30vh, 168px): on a 500 px tall window the pane with room is 30vh, not 168 px."""
+        Recommendation notice below the pane, and the footer stays in the column at the 370 px minimum too, with and
+        without the notice (W4 integration: with the notice it sat 16.5 px below until the field region gave way). The cap
+        is the plain rule's own expression, min(30vh, 168px): on a 500 px tall window the pane with room is 30vh, not
+        168 px."""
         for viewport, frame, room in (((1680, 1100), (420, 1000), "roomy"), ((1680, 500), (420, 1000), "roomy"),
                                       ((1680, 1100), (420, 420), "short"), ((1680, 1100), (420, 370), "minimum")):
             for recommendation in (False, True):
@@ -1118,7 +1118,7 @@ class ReportDictationHostDOMTest(unittest.TestCase):
                     self.assertLess(value["pane"]["height"], value["cap"] - 1, "a short column: the pane gives way: " + where)
                     self.assertGreaterEqual(value["redit"]["height"] + 0.5, value["reditMin"], where)
                 self.assertGreater(value["reditMin"], 0, "the reading layout's field minimum applies: " + where)
-                self.assert_stacked(value, where, footer=None if room == "minimum" else "column")
+                self.assert_stacked(value, where, footer="column")
                 self.assertGreater(value["text"]["line"], 0, "the transcript line has a stated pitch: " + where)
                 self.assertLess(value["actions"]["width"], value["paneContentWidth"] - 1,
                                 "the actions are a row of their own size beside meta, not a stretched block: " + where)
