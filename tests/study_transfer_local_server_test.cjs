@@ -175,7 +175,7 @@ function checkShape(row) {
 
 function store({ institutions } = {}) {
   const s = { ops: new Map(), states: new Map(), audits: [], clock: T0, migration: true, policies: new Map(), sessions: new Set(),
-    rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, expiredTokens: new Set(), idpEnded: new Set(), reads: [],
+    rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, onAuth: null, expiredTokens: new Set(), idpEnded: new Set(), reads: [],
     institutions: institutions ?? [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }] };
   for (const c of [TECH, TECH2, RAD, ADMIN, ADMIN2, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: c.roles });
   const advisory = new Map(), rows = new Map();
@@ -390,11 +390,13 @@ common.Injectable()(TestGuard);
  * AuthService's public checks over the store: a cookie session lives while its row does; a synthetic bearer token
  * 'tok:<sub>' verifies until it is marked expired, and its provider session 'idp:<sub>' until it is marked ended. The
  * real verification and marks are AuthService's own suites; this file asserts what the routes do with their answers.
+ * A test may hold or slow a credential check before it answers (s.onAuth), as it may a statement (s.onQuery).
  */
 function fakeAuth(s) {
   return {
-    hasSession: async req => { if (s.authFailure) throw s.authFailure(); return s.sessions.has(req.sid); },
+    hasSession: async req => { if (s.onAuth) await s.onAuth(); if (s.authFailure) throw s.authFailure(); return s.sessions.has(req.sid); },
     verifyAccessToken: async raw => {
+      if (s.onAuth) await s.onAuth();
       if (s.authFailure) throw s.authFailure();
       if (!raw.startsWith('tok:') || s.expiredTokens.has(raw)) throw new common.UnauthorizedException('토큰 검증 실패: synthetic');
       return { sub: raw.slice(4), sid: 'idp:' + raw.slice(4) };
@@ -3289,5 +3291,334 @@ test('S9U4-B55 a stored file result must rest on its last attempt by the transit
     const reverted = await h.send(bytes, { id: first.id });
     assert.deepEqual([reverted.status, reverted.body.code], [409, 'PATIENT_ISSUER_CONFLICT'], 'a final result stays final');
     assert.deepEqual([audits(h.s, 'dicom.import.intent').length, posts(h.orthanc)], [intents, 0], 'no new intent, no Orthanc write');
+  }
+});
+
+// ════════════════════════════════ round 4: each approval stage bounded as a whole, on every completion (U4BB3-01) ════════════════════════════════
+
+/** The contract's bound of one approval stage (REQ-S9-U4-08: each stage as a whole within 5 s, both within 10 s). */
+const STAGE_MS = 5000;
+/** The event loop held by synchronous work for ms: no timer callback runs meanwhile, and afterwards promise continuations run first. */
+function stall(ms) {
+  const until = performance.now() + ms;
+  while (performance.now() < until) { /* the event loop is held */ }
+}
+const DESCRIPTOR_SIG = Buffer.from([0x50, 0x4b, 0x07, 0x08]);
+const stateRead = sql => sql.includes('FROM "StudyState" WHERE uid = ? FOR SHARE');
+
+/**
+ * A held archive (object 1 supplied and checkpointed, object 2 held at its source) that a test releases: `armed` turns
+ * true when object 2's local header is submitted, so the next approval met is that of object 2's first payload chunk;
+ * take() records W0/B0 there. onHeader, if set, runs at that submission.
+ */
+async function atFirstPayload(h) {
+  const held = await heldArchive(h);
+  const at = layout(h, held.id), sub = submitted(held.study, held.id);
+  const p = { held, at, sub, checkpoint: h.s.op(held.id).download.attempts[0].objects, mark: {}, armed: false, onHeader: null };
+  p.take = () => { p.armed = false; Object.assign(p.mark, { W0: sub.calls, B0: sub.bytes }); };
+  sub.onWrite = r => { if (r.bytes === at[1].payload) { p.armed = true; p.onHeader?.(); } };
+  return p;
+}
+
+/**
+ * The old attempt after an approval was held past its bound, from W0/B0 on: no write call and no byte, not one payload
+ * byte of object 2, no later record (its descriptor, the manifest entry, the central directory, the end record), no
+ * finish of the response; no archive hash, response not finished, exactly one result row. Its state and objects are
+ * the caller's to check.
+ */
+async function assertNoSupplyAfter(h, held, sub, mark, at) {
+  const answer = await held.archive;
+  for (let i = 0; i < 100 && h.s.op(held.id).download.attempts[0].state === 'sending'; i++) await sleep(20);
+  await sleep(80);
+  assert.deepEqual([sub.calls - mark.W0, sub.bytes - mark.B0], [0, 0], 'no sink write call and no byte after the approval was held');
+  const bytes = Buffer.concat(sub.chunks);
+  assert.equal(bytes.length, sub.bytes);
+  assert.equal(Math.max(0, sub.bytes - at[1].payload), 0, 'not one payload byte of object 2');
+  assert.ok(!bytes.subarray(at[0].end).includes(DESCRIPTOR_SIG), 'no descriptor of object 2');
+  assert.ok(!bytes.includes(Buffer.from('manifest.json')) && !bytes.includes(CENTRAL_SIG) && !bytes.includes(END_SIG), 'no manifest entry, central directory or end record');
+  assert.deepEqual([sub.ended, answer.complete], [false, false], 'no finish of the response');
+  const [a] = h.s.op(held.id).download.attempts;
+  assert.deepEqual([a.archiveSha256, a.responseFinished], [null, false]);
+  assert.equal(resultRows(h, a.attemptId).length, 1, 'exactly one result row');
+  return a;
+}
+/** A stop of stage 1 is the rights': Incomplete with the writer's exact counts - object 1 as checkpointed, object 2 opened with nothing supplied. */
+function assertRightsStop(a, checkpoint) {
+  assert.equal(a.state, 'incomplete');
+  assert.deepEqual(a.objects[0], checkpoint[0], 'the completed object as it was checkpointed');
+  assert.deepEqual(a.objects.slice(1).map(o => [o.complete, o.bytesSupplied, o.sha256]), [[false, 0, null]], 'object 2 opened, not one byte of it supplied');
+}
+/** A stop of stage 2 is an unknown approval: Unconfirmed with the checkpoint committed before it, deep-equal (hashes, bytes, complete). */
+function assertApprovalStop(a, checkpoint) {
+  assert.deepEqual([a.state, a.objects], ['unconfirmed', checkpoint]);
+}
+/** The whole archive went out and the attempt is Sent. */
+async function assertWhole(h, held, answer) {
+  assert.equal(answer.bytes.length, Number(answer.headers['content-length']), 'the whole archive');
+  await sleep(50);
+  assert.deepEqual(h.s.op(held.id).download.attempts.map(a => [a.state, a.responseFinished]), [['sent', true]]);
+}
+
+test('S9U4-B56 approval stage 1 - the credential and the StudyAccess metadata outside the lock - is bounded as a whole (U4BB3-01): an answer after its deadline is never taken as one, whether the late answer or the stage\'s timer runs first, valid, refused or failed alike - no further write or byte, no stage 2, Incomplete with the exact counts (Unconfirmed when a fence came meanwhile); its reads share one deadline and now == deadline is expired; an answer within it goes on; a new attempt after the stop sends the whole archive', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });   // only the approvals before each chunk act, never the 10 s timer
+  // N1 and its siblings, the late answer first: object 2's first payload approval meets its StudyAccess read (valid) or
+  // its credential check (refused: the token expired meanwhile; failed) 5200 ms late with the event loop held, so the
+  // promise continuation runs before the stage's timer could.
+  for (const [name, where, answer] of [['valid (N1)', 'read', () => {}], ['refused', 'credential', h => h.s.expiredTokens.add('tok:' + RAD.sub)],
+    ['failed', 'credential', () => { throw new Error('synthetic provider failure'); }]]) {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    let elapsed = null;
+    const late = () => { p.take(); const begun = performance.now(); stall(5200); elapsed = performance.now() - begun; answer(h); };
+    if (where === 'read') h.s.onQuery = async (sql, _values, tx) => { if (p.armed && !tx && policyRead(sql)) late(); };
+    else h.s.onAuth = async () => { if (p.armed) late(); };
+    try { p.held.release(); await p.held.archive; } finally { h.s.onQuery = null; h.s.onAuth = null; p.held.release(); }
+    assert.ok(elapsed >= 5200 && p.mark.B0 === p.at[1].payload, name + ': held 5200 ms after object 1\'s checkpoint and object 2\'s local header');
+    assertRightsStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+    if (name !== 'valid (N1)') continue;
+    // A new attempt after the stop: the whole archive, Sent; the stopped attempt stays as it was.
+    const retry = await h.request('GET', archivePath(p.held.study, p.held.id), { as: RAD });
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.equal(retry.bytes.length, Number(retry.headers['content-length']));
+    await sleep(50);
+    assert.deepEqual(h.s.op(p.held.id).download.attempts.map(a => a.state), ['incomplete', 'sent']);
+  }
+  // One deadline for the stage's reads: the credential check and the StudyAccess read each answer in 2600 ms - in time
+  // alone, 5200 ms together - with no timer able to run meanwhile.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    let second = false;
+    h.s.onAuth = async () => { if (p.armed) { p.take(); second = true; stall(2600); } };
+    h.s.onQuery = async (sql, _values, tx) => { if (second && !tx && policyRead(sql)) { second = false; stall(2600); } };
+    try { p.held.release(); await p.held.archive; } finally { h.s.onQuery = null; h.s.onAuth = null; p.held.release(); }
+    assertRightsStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+  }
+  // Within the deadline: the same StudyAccess read answering valid after 4000 ms goes on - the whole archive, Sent.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    h.s.onQuery = async (sql, _values, tx) => { if (p.armed && !tx && policyRead(sql)) { p.take(); stall(4000); } };
+    let answer;
+    try { p.held.release(); answer = await p.held.archive; } finally { h.s.onQuery = null; p.held.release(); }
+    await assertWhole(h, p.held, answer);
+  }
+  // The deadline's edge, on the process's monotonic clock held still by the test from object 2's local header on (its
+  // timers stay real): the StudyAccess answer at exactly start + 5000 ms is expired - nothing more, Incomplete; at
+  // start + 4999 ms it is in time - the whole archive, Sent.
+  for (const [offset, expected] of [[STAGE_MS, 'expired'], [STAGE_MS - 1, 'in time']]) {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    const real = performance.now.bind(performance);
+    let frozen = null, start = null;
+    const clock = t.mock.method(performance, 'now', () => frozen ?? real());
+    p.onHeader = () => { frozen = start = real(); };
+    h.s.onQuery = async (sql, _values, tx) => { if (p.armed && !tx && policyRead(sql)) { p.take(); frozen = start + offset; } };
+    let answer;
+    try { p.held.release(); answer = await p.held.archive; } finally { h.s.onQuery = null; clock.mock.restore(); p.held.release(); }
+    if (expected === 'in time') await assertWhole(h, p.held, answer);
+    else assertRightsStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+  }
+  // The timer first: the stage's check is held past its deadline with the event loop free, so its timer stops the
+  // archive while the check is still held; then the check answers - valid, refused or failed: nothing supplied, no
+  // stage 2, the attempt not reopened. A fence committed while the check was held makes it Unconfirmed (the fence wins).
+  // The four archives run side by side, one 5 s wait for all.
+  const runs = [];
+  try {
+    for (const [name, where, answer, fence] of [['valid', 'read', () => {}], ['refused', 'credential', h => h.s.expiredTokens.add('tok:' + RAD.sub)],
+      ['failed', 'read', () => { throw new Error('synthetic store failure'); }], ['valid after a fence', 'read', () => {}, true]]) {
+      const h = await harness();
+      const p = await atFirstPayload(h);
+      const b = barrier();
+      const hold = async () => { p.take(); await b.park(); answer(h); };
+      if (where === 'read') h.s.onQuery = async (sql, _values, tx) => { if (p.armed && !tx && policyRead(sql)) await hold(); };
+      else h.s.onAuth = async () => { if (p.armed) await hold(); };
+      runs.push({ name, h, p, b, fence });
+      p.held.release();
+      assert.ok(await within(b.held, 3000), name + ': the check is held');
+      if (fence) {
+        h.s.advance(31000);
+        assert.equal((await h.request('GET', statusPath(p.held.study, p.held.id), { as: RAD })).body.attempts[0].state, 'unconfirmed', 'the fence committed');
+      }
+    }
+    for (const r of runs) assert.ok(await within(r.p.held.archive, 8000), r.name + ': the stage\'s timer stopped the archive while its check was held');
+  } finally { for (const r of runs) { r.b.open(); r.h.s.onQuery = null; r.h.s.onAuth = null; r.p.held.release(); } }
+  for (const r of runs) {
+    const a = await assertNoSupplyAfter(r.h, r.p.held, r.p.sub, r.p.mark, r.p.at);
+    if (r.fence) assertApprovalStop(a, r.p.checkpoint); else assertRightsStop(a, r.p.checkpoint);
+  }
+  // A new attempt after the timeout sends the whole archive; the late valid answer reopened nothing. (Its own fake
+  // Orthanc again: the variable belongs to the harness made last.)
+  const [{ h, p }] = runs;
+  process.env.ORTHANC_URL = 'http://127.0.0.1:' + h.orthanc.server.address().port;
+  const retry = await h.request('GET', archivePath(p.held.study, p.held.id), { as: RAD });
+  assert.equal(retry.status, 200, JSON.stringify(retry.body));
+  assert.equal(retry.bytes.length, Number(retry.headers['content-length']));
+  await sleep(50);
+  assert.deepEqual(h.s.op(p.held.id).download.attempts.map(a => a.state), ['incomplete', 'sent']);
+});
+
+test('S9U4-B57 approval stage 2 - from the wait for its lock to its commit\'s answer - is bounded as a whole (U4BB3-01): a rights answer under the lock after the deadline is an expired approval, valid, refused or failed alike, whether the late answer or the stage\'s timer runs first - no further write or byte, Unconfirmed with the checkpoint as it was (N2); its reads share one deadline and now == deadline is expired; a refusal within the deadline stays the rights\' answer (Incomplete) and a valid answer within it goes on', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  // N2 and its siblings, the late answer first: the StudyAccess read inside object 2's first payload approval, under the
+  // operation row lock, answers 5200 ms late with the event loop held - refusing, valid, or failing.
+  for (const [name, answer] of [['refusal (N2)', h => h.s.policies.set(RAD.sub, deniedPolicy)], ['valid', () => {}],
+    ['failure', () => { throw new Error('synthetic store failure'); }]]) {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    let elapsed = null;
+    h.s.onQuery = async (sql, _values, tx) => {
+      if (p.armed && tx && policyRead(sql)) { p.take(); const begun = performance.now(); stall(5200); elapsed = performance.now() - begun; answer(h); }
+    };
+    try { p.held.release(); await p.held.archive; } finally { h.s.onQuery = null; p.held.release(); }
+    assert.ok(elapsed >= 5200 && p.mark.B0 === p.at[1].payload, name + ': held 5200 ms after object 1\'s checkpoint and object 2\'s local header');
+    assertApprovalStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+  }
+  // Within the deadline the same refusal after 4000 ms is the rights' answer: Incomplete with the exact counts.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    h.s.onQuery = async (sql, _values, tx) => { if (p.armed && tx && policyRead(sql)) { p.take(); stall(4000); h.s.policies.set(RAD.sub, deniedPolicy); } };
+    try { p.held.release(); await p.held.archive; } finally { h.s.onQuery = null; p.held.release(); }
+    assertRightsStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+  }
+  // One deadline for the stage's reads: the StudyState read and the StudyAccess read under the lock, 2600 ms each.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    let second = false;
+    h.s.onQuery = async (sql, _values, tx) => {
+      if (p.armed && tx && stateRead(sql)) { p.take(); second = true; stall(2600); }
+      else if (second && tx && policyRead(sql)) { second = false; stall(2600); }
+    };
+    try { p.held.release(); await p.held.archive; } finally { h.s.onQuery = null; p.held.release(); }
+    assertApprovalStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+  }
+  // The deadline's edge on the monotonic clock held still from object 2's local header (stage 2 then starts at that
+  // instant): the StudyAccess answer under the lock at exactly start + 5000 ms is expired - Unconfirmed; at + 4999 ms
+  // it is in time - the whole archive, Sent.
+  for (const [offset, expected] of [[STAGE_MS, 'expired'], [STAGE_MS - 1, 'in time']]) {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    const real = performance.now.bind(performance);
+    let frozen = null, start = null;
+    const clock = t.mock.method(performance, 'now', () => frozen ?? real());
+    p.onHeader = () => { frozen = start = real(); };
+    h.s.onQuery = async (sql, _values, tx) => { if (p.armed && tx && policyRead(sql)) { p.take(); frozen = start + offset; } };
+    let answer;
+    try { p.held.release(); answer = await p.held.archive; } finally { h.s.onQuery = null; clock.mock.restore(); p.held.release(); }
+    if (expected === 'in time') await assertWhole(h, p.held, answer);
+    else assertApprovalStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+  }
+  // The timer first: the read under the lock held past the deadline with the event loop free; the stage's timer stops
+  // the archive; then the read answers valid, refused or failed - nothing supplied, nothing of it committed, Unconfirmed.
+  const runs = [];
+  try {
+    for (const [name, answer] of [['valid', () => {}], ['refusal', h => h.s.policies.set(RAD.sub, deniedPolicy)], ['failure', () => { throw new Error('synthetic store failure'); }]]) {
+      const h = await harness();
+      const p = await atFirstPayload(h);
+      const b = barrier();
+      h.s.onQuery = async (sql, _values, tx) => { if (p.armed && tx && policyRead(sql)) { p.take(); await b.park(); answer(h); } };
+      runs.push({ name, h, p, b });
+      p.held.release();
+      assert.ok(await within(b.held, 3000), name + ': the read under the lock is held');
+    }
+    for (const r of runs) assert.ok(await within(r.p.held.archive, 8000), r.name + ': the stage\'s timer stopped the archive while its read was held');
+  } finally { for (const r of runs) { r.b.open(); r.h.s.onQuery = null; r.p.held.release(); } }
+  for (const r of runs) assertApprovalStop(await assertNoSupplyAfter(r.h, r.p.held, r.p.sub, r.p.mark, r.p.at), r.p.checkpoint);
+});
+
+test('S9U4-B58 the renewal without a chunk and the commit\'s answer complete stage 2 too (U4BB3-01): a 10 s renewal that runs past its deadline is rolled back when its transaction finds it, and is an expired approval when only its commit\'s answer is late or its timer runs first - Unconfirmed, the checkpoint as it was, no further supply; a chunk whose commit answer - success or failure - comes late went out once and nothing follows it; a refusal that meets a lost lease, and a credential stage past its bound after the renewal fenced the attempt, are Unconfirmed (the fence wins)', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  // The 10 s renewal (no chunk) of an archive held at object 2's source; the DB clock 10 s on, so a renewal shows as a
+  // new lease. Its own write stalls 5200 ms: the transaction finds the stage expired after the write and rolls it back.
+  // Its commit's answer comes 5200 ms late: the renewal committed (it is not claimed rolled back), its answer is not
+  // taken. Its row read is held with the event loop free: the timer stops the archive; the released read renews nothing.
+  for (const mode of ['its write stalls', 'its commit answer is late', 'its timer runs first']) {
+    const h = await harness();
+    const held = await heldArchive(h);
+    const at = layout(h, held.id), sub = submitted(held.study, held.id);
+    const checkpoint = h.s.op(held.id).download.attempts[0].objects;
+    h.s.advance(10000);
+    const lease = h.s.op(held.id).download.attempts[0].leaseUntil;
+    const mark = { W0: sub.calls, B0: sub.bytes };
+    const b = barrier();
+    let armed = true;
+    if (mode === 'its write stalls') h.s.failNextWrite = () => { if (armed) { armed = false; stall(5200); } return false; };
+    if (mode === 'its commit answer is late') h.s.onCommitted = async tx => { if (armed && tx.casOperation === held.id) { armed = false; stall(5200); } };
+    if (mode === 'its timer runs first') h.s.onQuery = async (sql, _values, tx) => { if (armed && tx && casSql(sql)) { armed = false; await b.park(); } };
+    try {
+      t.mock.timers.tick(10000);
+      assert.ok(await within(held.archive, 8000), mode + ': the renewal\'s verdict stopped the archive at its held source');
+    } finally { b.open(); h.s.failNextWrite = null; h.s.onCommitted = null; h.s.onQuery = null; held.release(); }
+    assert.equal(armed, false, mode + ': the renewal met the hold');
+    const a = await assertNoSupplyAfter(h, held, sub, mark, at);
+    assertApprovalStop(a, checkpoint);
+    if (mode === 'its commit answer is late') assert.ok(Date.parse(a.leaseUntil) > Date.parse(lease), 'the late renewal had committed');
+    else assert.equal(a.leaseUntil, lease, mode + ': the renewal rolled back with its transaction');
+  }
+  // A chunk approval whose commit answer comes late after its supply under the lock - a success, or the commit itself
+  // failing: the chunk went out exactly once, nothing after it, Unconfirmed with the checkpoint as it was. The late
+  // answer first (the event loop held 5200 ms), then the timer first (the answer held 5500 ms with the loop free).
+  const commits = [];
+  const lateCommit = async (kind, order) => {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    p.onHeader = () => Object.assign(p.mark, { W0: p.sub.calls, B0: p.sub.bytes });
+    const wait = () => (order === 'late answer first' ? stall(5200) : sleep(5500));
+    // The payload approval's transaction: the first chunk check after object 2's local header.
+    h.s.onQuery = async (sql, _values, tx) => { if (p.armed && tx && casSql(sql)) { p.armed = false; tx.watched = true; } };
+    if (kind === 'success') h.s.onCommitted = async tx => { if (tx.watched) await wait(); };
+    else h.s.onCommit = async tx => { if (tx.watched) { await wait(); throw Object.assign(new Error('synthetic commit lost'), { code: 'P1017' }); } };
+    p.held.release();
+    commits.push({ name: kind + ', ' + order, h, p });
+  };
+  const assertOnce = async ({ name, h, p }) => {
+    const answer = await p.held.archive;
+    for (let i = 0; i < 100 && h.s.op(p.held.id).download.attempts[0].state === 'sending'; i++) await sleep(20);
+    await sleep(80);
+    h.s.onQuery = null; h.s.onCommit = null; h.s.onCommitted = null;
+    assert.equal(p.mark.B0, p.at[1].payload, name);
+    assert.equal(p.sub.calls - p.mark.W0, 1, name + ': the approved chunk went out once');
+    const bytes = Buffer.concat(p.sub.chunks), chunk = bytes.subarray(p.at[1].payload);
+    assert.ok(chunk.length > 0 && chunk.equals(p.held.second.subarray(0, chunk.length)), name + ': it is the start of object 2, once');
+    assert.ok(!bytes.includes(Buffer.from('manifest.json')) && !bytes.includes(CENTRAL_SIG) && !bytes.includes(END_SIG), name + ': no later record');
+    assert.deepEqual([p.sub.ended, answer.complete], [false, false], name + ': no finish');
+    const [a] = h.s.op(p.held.id).download.attempts;
+    assertApprovalStop(a, p.checkpoint);
+    assert.deepEqual([a.archiveSha256, a.responseFinished, resultRows(h, a.attemptId).length], [null, false, 1], name);
+  };
+  for (const kind of ['success', 'failure']) { await lateCommit(kind, 'late answer first'); await assertOnce(commits.pop()); }
+  for (const kind of ['success', 'failure']) await lateCommit(kind, 'timer first');
+  for (const c of commits) await assertOnce(c);
+  // The fence wins. A refusal under the lock while the DB clock passed the lease: the approval's lease check fences it -
+  // Unconfirmed with the checkpoint as it was, not Incomplete.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    h.s.onQuery = async (sql, _values, tx) => { if (p.armed && tx && policyRead(sql)) { p.take(); h.s.policies.set(RAD.sub, deniedPolicy); h.s.advance(31000); } };
+    try { p.held.release(); await p.held.archive; } finally { h.s.onQuery = null; p.held.release(); }
+    assertApprovalStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
+  }
+  // The 10 s renewal fences the attempt - its stage 2 runs 5200 ms past its bound - while a chunk's credential stage is
+  // held past its own bound, whose timer then runs: the rights stop that comes second does not undo the fence.
+  {
+    const h = await harness();
+    const p = await atFirstPayload(h);
+    const b = barrier();
+    let renewal = false;
+    h.s.onQuery = async (sql, _values, tx) => {
+      if (p.armed && !tx && policyRead(sql)) { p.take(); await b.park(); }
+      else if (renewal && tx && casSql(sql)) { renewal = false; stall(5200); }
+    };
+    try {
+      p.held.release();
+      assert.ok(await within(b.held, 3000), 'the chunk\'s credential stage is held');
+      renewal = true;
+      t.mock.timers.tick(10000);
+      assert.ok(await within(p.held.archive, 8000), 'the archive stopped');
+    } finally { b.open(); h.s.onQuery = null; p.held.release(); }
+    assert.equal(renewal, false, 'the renewal met the hold');
+    assertApprovalStop(await assertNoSupplyAfter(h, p.held, p.sub, p.mark, p.at), p.checkpoint);
   }
 });

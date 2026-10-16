@@ -36,7 +36,8 @@ const NO_PROGRESS_MS = 30000;
 const RENEW_BELOW_MS = 20000;
 /**
  * Upper bound of each of an approval's two stages (the credential outside the lock; the locked transaction with the
- * supply), each as a whole: a stage that does not answer in time stops the archive, and a late answer supplies nothing.
+ * supply up to its commit's answer), each as a whole on one monotonic deadline set before it starts - so both together
+ * stay within 10 s: a stage that does not answer in time stops the archive, and a late answer supplies nothing.
  */
 const CHECK_BOUND_MS = 5000;
 const DOWNLOAD_ROLES = ['radiologist', 'technician'];
@@ -529,8 +530,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     res.setHeader('Content-Length', String(plan.plan.totalSize));
     res.setHeader('Cache-Control', 'no-store');
     const stop = new AbortController();
-    const target: SupplyTarget = { operationId: op.id, attemptId: attempt.attemptId, number: attempt.number, uid, c, req,
-      fenced: false, late: false };
+    const target: SupplyTarget = { operationId: op.id, attemptId: attempt.attemptId, number: attempt.number, uid, c, req, stop: null };
     let lastWritten = 0;
     const lost = () => { if (!res.writableFinished) stop.abort(); };
     res.once('close', lost);
@@ -560,44 +560,58 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
       clearInterval(renew);
       res.removeListener('close', lost);
     }
-    await this.closeAttempt(op.id, owner, attempt.attemptId, result, target.fenced).catch(() => undefined);
+    await this.closeAttempt(op.id, owner, attempt.attemptId, result, target).catch(() => undefined);
   }
 
   /**
    * 5.2 steps 5-6 / 5.3, contract 3 (U4BB2-01): the approval of one archive chunk, and that chunk's supply under it.
    *   1. Outside any lock, within CHECK_BOUND_MS: the request's own credential (AuthService), and the StudyAccess
    *      metadata a restricted policy needs.
-   *   2. One short transaction, within CHECK_BOUND_MS as a whole, in the order every writer of the row uses: the
-   *      operation's advisory lock, then its row; the member rights, the study's own institution (its StudyState held)
-   *      and StudyAccess read in it; then the database's time and this attempt's place - still the last attempt (its id
-   *      and number), sending, its lease live.
-   *   3. While that row lock is still held, with no await after the last database answer: the cancellation latch and the
-   *      monotonic deadline are read, and `supply` runs once - the chunk's accounting and its sink.write.
+   *   2. One short transaction, within CHECK_BOUND_MS as a whole up to its commit's answer, in the order every writer of
+   *      the row uses: the operation's advisory lock, then its row; the member rights, the study's own institution (its
+   *      StudyState held) and StudyAccess read in it; then the database's time and this attempt's place - still the last
+   *      attempt (its id and number), sending, its lease live.
+   *   3. While that row lock is still held, with no await after the last database answer: the stage's deadline and the
+   *      attempt's stop reason are read, and `supply` runs once - the chunk's accounting and its sink.write.
    *   4. The transaction ends; the writer waits for the receiver's drain outside it. Source reads, Orthanc and the drain
    *      never hold the lock.
    * A fence (an expiry by GET or startup, a retry's new attempt) needs the same row lock: it commits either before step 2
    * reads the row - then nothing is supplied - or after the chunk was handed to the response. The order is the one in
    * which the server submits bytes to the response; bytes already submitted are not called back. Every chunk is approved
    * afresh: no time window, no answer kept from an earlier chunk.
+   * Time (U4BB3-01): each stage runs on one monotonic deadline fixed before its work starts - stage 1 at start + 5 s,
+   * stage 2 at its own start + 5 s (never past start + 10 s) - shared by everything it waits for; no read, renewal or
+   * answer starts a new budget. Every completion (an answer, a refusal, a failure, a renewal without a chunk, the commit's
+   * answer) is judged against it first, whether or not its timer could run: now >= deadline is expired. An expired stage
+   * stops the attempt for good - stage 1 as a rights stop, stage 2 as an unknown approval - and its late answer is never
+   * taken as one: no supply, no renewal, no next stage.
    * Verdicts: undefined - supplied (or, without a chunk, kept and renewed); 'fenced' - the attempt is no longer this
-   * one's, its lease is gone, or the approval itself timed out or failed (Unconfirmed; it wins over a lost right);
-   * 'aborted' - the rights alone are refused or could not be confirmed (Incomplete). A stage that timed out sets a
-   * permanent latch: the archive stops, and its late answer supplies nothing.
+   * one's, its lease is gone, or the approval itself failed or ran past its bound (Unconfirmed; it wins over a lost
+   * right); 'aborted' - the rights alone are refused or could not be confirmed in time (Incomplete). Either is the
+   * attempt's permanent stop reason, read by every approval in flight; a later success never clears it.
    */
-  private async approve(t: SupplyTarget, supply: (() => boolean) | null): Promise<'fenced' | 'aborted' | undefined> {
-    if (t.fenced || t.late) return 'fenced';
-    const prepared = await bounded(this.rightsBeforeLock(t.c, t.uid, t.req)).then(() => true, () => false);
-    if (t.fenced || t.late) return 'fenced';
-    if (!prepared) return 'aborted';
-    const deadline = performance.now() + CHECK_BOUND_MS;
+  private async approve(t: SupplyTarget, supply: (() => boolean) | null): Promise<StopReason | undefined> {
+    if (t.stop) return t.stop;
+    const start = performance.now();
+    const credential = new ApprovalStage(t, start + CHECK_BOUND_MS, 'aborted');
+    const prepared = await bounded(credential, () => this.rightsBeforeLock(t.c, t.uid, t.req)).then(() => true, () => false);
+    // Where stage 1's answer is consumed: past this check only stage 2's own deadline counts.
+    const first = credential.stopped();
+    if (first) return first;
+    if (!prepared) return stopAttempt(t, 'aborted');
+    const locked = new ApprovalStage(t, Math.min(performance.now() + CHECK_BOUND_MS, start + 2 * CHECK_BOUND_MS), 'fenced');
+    let verdict: StopReason | undefined;
+    let unknown = false;
     try {
-      const verdict = await bounded(this.supplyUnderLock(t, supply, deadline), () => { t.late = true; });
-      if (verdict === 'fenced') t.fenced = true;
-      return verdict;
-    } catch {
-      t.fenced = true;
-      return 'fenced';
+      verdict = await bounded(locked, () => this.supplyUnderLock(t, supply, locked));
+    } catch (failure) {
+      unknown = !(failure instanceof ApprovalStopped);
     }
+    // The commit's answer - success, refusal or failure - counts only within stage 2's deadline.
+    const second = locked.stopped();
+    if (second) return second;
+    if (unknown) return stopAttempt(t, 'fenced');
+    return verdict ? stopAttempt(t, verdict) : undefined;
   }
 
   /** Approval step 1: the credential the guard admitted, still live; the StudyAccess metadata prepared before any lock. */
@@ -606,41 +620,55 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     await this.studyAccess.prepare(c, [uid]);
   }
 
-  /** Approval steps 2-3 (see approve); a late approval throws, so the transaction - and any renewal in it - rolls back. */
-  private supplyUnderLock(t: SupplyTarget, supply: (() => boolean) | null, deadline: number): Promise<'fenced' | 'aborted' | undefined> {
+  /**
+   * Approval steps 2-3 (see approve), on stage 2's deadline from the wait for a connection on. Back from each of its own
+   * waits, before the next step or branch, the stage is checked: expired (or the attempt stopped by another approval)
+   * throws, so the transaction - and any renewal in it - rolls back and nothing is supplied.
+   */
+  private supplyUnderLock(t: SupplyTarget, supply: (() => boolean) | null, stage: ApprovalStage): Promise<StopReason | undefined> {
+    const live = () => { if (stage.stopped()) throw new ApprovalStopped(); };
     return this.gate.write(async tx => {
+      live();
       await this.gate.lockOperationKey(tx, t.operationId);
+      live();
       const rows: any[] = await tx.$queryRaw`SELECT status, download->'attempts'->-1->>'attemptId' AS "attemptId",
         download->'attempts'->-1->>'number' AS "number", download->'attempts'->-1->>'state' AS "state",
         download->'attempts'->-1->>'leaseUntil' AS "leaseUntil"
         FROM "ImportOperation" WHERE id = ${t.operationId}::uuid AND kind = 'download' FOR UPDATE`;
+      live();
       let refused = false;
       try {
-        if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, t.c, 'download');
+        if (process.env.AUTH_REQUIRED !== 'false') {
+          await this.memberRightsNow(tx, t.c, 'download');
+          live();
+        }
         await this.ownStudyLocked(tx, t.uid, t.c);
       } catch (failure) {
         // A refusal (403/404, StudyAccess unable to confirm a changed scope) is the rights' answer; anything else leaves
         // this approval's database answer unknown.
-        if (!(failure instanceof HttpException) || failure.getStatus() >= 500) throw failure;
+        if (failure instanceof ApprovalStopped || !(failure instanceof HttpException) || failure.getStatus() >= 500) throw failure;
         refused = true;
       }
+      // A refusal too counts only within the deadline: one that came late is an expired approval, not the rights' answer.
+      live();
       const now = await this.gate.clock(tx);
+      live();
       const last = rows[0];
       const left = last ? Date.parse(last.leaseUntil) - now.getTime() : NaN;
       if (!last || last.status !== 'sending' || last.attemptId !== t.attemptId || last.number !== String(t.number)
           || last.state !== 'sending' || !(left > 0)) return 'fenced';
       if (refused) return 'aborted';
       if (!supply || left < RENEW_BELOW_MS) {
-        if (t.late) throw new LateApproval();
         const { op, stored } = await this.lockDownload(tx, t.operationId);
+        live();
         const download = JSON.parse(JSON.stringify(stored!.download));
         download.attempts[download.attempts.length - 1].leaseUntil = new Date(now.getTime() + LEASE_MS).toISOString();
         await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
+        live();
       }
       if (!supply) return undefined;
-      // From the last database answer to the response: synchronous, under the row lock. A stage past its bound - its
-      // timer already run (the latch) or not yet (the monotonic deadline) - supplies nothing.
-      if (t.late || performance.now() >= deadline) throw new LateApproval();
+      // From the last database answer to the response: synchronous, under the row lock, no await in between.
+      live();
       supply();
       return undefined;
     });
@@ -723,21 +751,23 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   /**
    * 5.2 step 7 / B-04, under the same CAS as every chunk: Sent, responseFinished, the archive hash and the result row only
    * after the writer's own finish and while this attempt still holds a live lease. A lease that ran out by now closes it
-   * Unconfirmed with its checkpoints as they were; a stop on its source, a length/MD5 mismatch, the receiver or a
-   * cancellation is Incomplete with the writer's exact counters; a lost or unknown approval (`fenced`, whatever stop the
-   * writer reported after it) or any other stop is Unconfirmed. An attempt already closed by someone else (it was fenced)
-   * is left as it is: that close wrote its result row.
+   * Unconfirmed with its checkpoints as they were; a lost or unknown approval (the attempt's stop reason `fenced`,
+   * whatever the writer reported, its finish included) is Unconfirmed; a stop on its source, a length/MD5 mismatch, the
+   * receiver, a cancellation or the rights is Incomplete with the writer's exact counters; any other stop is Unconfirmed.
+   * An attempt already closed by someone else (it was fenced) is left as it is: that close wrote its result row.
    */
-  private async closeAttempt(operationId: string, owner: ImportOwner, attemptId: string, result: any, fenced: boolean) {
+  private async closeAttempt(operationId: string, owner: ImportOwner, attemptId: string, result: any, t: SupplyTarget) {
     await this.gate.write(async tx => {
       const { op, now, stored } = await this.lockDownload(tx, operationId);
+      // The stop reason as it is now, after this close's last wait: an approval still in flight may have set it meanwhile.
+      const fenced = t.stop === 'fenced';
       const download = JSON.parse(JSON.stringify(stored!.download));
       const mine = download.attempts[download.attempts.length - 1];
       if (!mine || mine.attemptId !== attemptId || mine.state !== 'sending') return;
       if (Date.parse(mine.leaseUntil) <= now.getTime()) {
         await this.expireSending(tx, op, mine, now);
       } else {
-        const state = result?.state === 'finished' ? 'sent' : !fenced && INCOMPLETE_REASONS.includes(result?.reason) ? 'incomplete' : 'unconfirmed';
+        const state = fenced ? 'unconfirmed' : result?.state === 'finished' ? 'sent' : INCOMPLETE_REASONS.includes(result?.reason) ? 'incomplete' : 'unconfirmed';
         mine.state = state;
         mine.endedAt = now.toISOString();
         if (state !== 'unconfirmed' && Array.isArray(result?.objects)) mine.objects = result.objects;
@@ -782,30 +812,67 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   }
 }
 
-/** The archive and the chunk an approval is for, with its two latches (set once, never cleared). */
+/**
+ * Why an attempt supplies nothing more: 'aborted' - the rights alone were refused or not confirmed in time (Incomplete);
+ * 'fenced' - its lease or an approval was lost, failed or ran past its bound (Unconfirmed).
+ */
+type StopReason = 'aborted' | 'fenced';
+
+/** The archive (one attempt) its approvals are for, with the attempt's permanent stop reason. */
 interface SupplyTarget {
   operationId: string; attemptId: string; number: number; uid: string; c: Caller; req: any;
-  /** The attempt's lease or approval was lost or is unknown: no further chunk, and the close is Unconfirmed. */
-  fenced: boolean;
-  /** An approval stage ran past its bound: its late answer must supply nothing (read synchronously before a supply). */
-  late: boolean;
+  /** Set by the first approval that finds one, read by every approval in flight, never cleared; a new attempt starts with none. */
+  stop: StopReason | null;
 }
 
-/** An approval whose time ran out by the time it could supply: thrown inside its transaction, so nothing of it commits. */
-class LateApproval extends Error {
-  constructor() { super('approval past its bound'); }
+/** Stops the attempt for good; 'fenced' always wins over 'aborted', whichever came first. */
+function stopAttempt(t: SupplyTarget, reason: StopReason): StopReason {
+  if (t.stop !== 'fenced') t.stop = reason;
+  return t.stop;
 }
 
 /**
- * A stage that does not answer within CHECK_BOUND_MS rejects; `expired` runs first (it sets the permanent latch the late
- * work reads before it could supply). A late answer is never taken as one.
+ * One stage of an approval: its monotonic deadline, fixed before its work starts and never moved, and its expiry - set
+ * once, by the stage's timer or by the first completion that finds now >= deadline - which stops the attempt with the
+ * stage's own reason (stage 1 'aborted', stage 2 'fenced').
  */
-function bounded<T>(work: Promise<T>, expired?: () => void): Promise<T> {
+class ApprovalStage {
+  private expired = false;
+  constructor(private readonly t: SupplyTarget, readonly deadline: number, private readonly reason: StopReason) {}
+
+  expire(): StopReason {
+    this.expired = true;
+    return stopAttempt(this.t, this.reason);
+  }
+
+  /** The first check of every completion of the stage: its expiry (read now, timer or not), else the attempt's stop reason. */
+  stopped(): StopReason | null {
+    if (this.expired || performance.now() >= this.deadline) return this.expire();
+    return this.t.stop;
+  }
+}
+
+/** Thrown where an approval finds its stage expired or its attempt stopped: inside a transaction, nothing of it commits. */
+class ApprovalStopped extends Error {
+  constructor() { super('approval stopped'); }
+}
+
+/**
+ * Runs a stage's work within the stage's deadline. The timer is set before the work starts (so its synchronous part
+ * counts too) for the time left, and expires the stage when it runs. The work's own answer - a value or a failure - is
+ * checked against the stage first, so an answer after the deadline is never taken as one, also when a stalled event loop
+ * runs it before the timer. A late answer is not cancelled: it is still consumed here, and the work's own checks keep
+ * it from supplying or renewing anything.
+ */
+function bounded<T>(stage: ApprovalStage, work: () => Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => { expired?.(); reject(new Error('check deadline')); }, CHECK_BOUND_MS);
+  const expiry = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { stage.expire(); reject(new ApprovalStopped()); }, Math.max(0, stage.deadline - performance.now()));
   });
-  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+  const answer = new Promise<T>(resolve => resolve(work())).then(
+    value => { if (stage.stopped()) throw new ApprovalStopped(); return value; },
+    failure => { if (stage.stopped()) throw new ApprovalStopped(); throw failure; });
+  return Promise.race([answer, expiry]).finally(() => clearTimeout(timer));
 }
 
 /** One reading's objects as a comparable text: the same set with the same values, whatever the enumeration order. */
