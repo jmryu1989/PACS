@@ -1204,10 +1204,26 @@
       studyIdentityIssues = next;
       renderIdentityIssues(false);
     }
-    /** 건수와 한국어 설명만 쓴다(환자·기관 값 없음). 관측에 실패한 뒤에는 마지막 관측의 안내임을 함께 말한다. */
+    /**
+     * 건수와 한국어 설명만 쓴다(환자·기관 값 없음). 관측에 실패한 뒤에는 마지막 관측의 안내임을 함께 말한다.
+     * 안내 줄은 처음 필요할 때 관측 부재 안내(#not-observed) 바로 아래에 만든다 — 말할 것이 없는 동안 빈 자리를 두지 않는다.
+     */
     function renderIdentityIssues(unobserved) {
-      const box = $("#identity-issues"), n = studyIdentityIssues.size;
-      if (!box) return;
+      const n = studyIdentityIssues.size;
+      let box = $("#identity-issues");
+      if (!box) {
+        const anchor = $("#not-observed");
+        if (!n || !anchor) return;
+        box = document.createElement("div");
+        box.id = "identity-issues";
+        box.setAttribute("role", "status");
+        box.style.cssText = "padding:2px 10px;font-size:12px";
+        const title = document.createElement("strong"), text = document.createElement("span");
+        title.textContent = "Patient Identity Conflict";
+        text.id = "identity-issues-text";
+        box.append(title, " ", text);
+        anchor.after(box);
+      }
       box.hidden = !n;
       $("#identity-issues-text").textContent = !n ? "" : `${n} · 환자 식별 불일치로 검사 ${n}건을 목록에서 제외했습니다. 원본 확인이 필요합니다.`
         + (unobserved ? " · 관측 불가 · 마지막 관측 기준입니다." : "");
@@ -1774,7 +1790,8 @@
           work.commit(at, () => {
             folderLoadState = 'unknown';
             // A superseded or changed-list answer is not a failed observation; the last one still stands.
-            if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') { markObservationUnavailable(); renderIdentityIssues(true); }
+            if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();
+            if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') renderIdentityIssues(true);
             $("#err").textContent = "검사 목록을 불러오지 못했습니다. 현재 목록과 입력은 유지했습니다 — " + e.message;
             toast("검사 목록 실패: " + e.message, "err");
             render();
