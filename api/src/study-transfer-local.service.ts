@@ -593,22 +593,24 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   private async approve(t: SupplyTarget, supply: (() => boolean) | null): Promise<StopReason | undefined> {
     if (t.stop) return t.stop;
     const start = performance.now();
-    const credential = new ApprovalStage(t, start + CHECK_BOUND_MS, 'aborted');
-    const prepared = await bounded(credential, () => this.rightsBeforeLock(t.c, t.uid, t.req)).then(() => true, () => false);
+    const credential: ApprovalStage = { deadline: start + CHECK_BOUND_MS, expired: false };
+    const credentialStopped = () => stageStopped(t, credential, 'aborted');
+    const prepared = await bounded(credential, credentialStopped, () => this.rightsBeforeLock(t.c, t.uid, t.req)).then(() => true, () => false);
     // Where stage 1's answer is consumed: past this check only stage 2's own deadline counts.
-    const first = credential.stopped();
+    const first = credentialStopped();
     if (first) return first;
     if (!prepared) return stopAttempt(t, 'aborted');
-    const locked = new ApprovalStage(t, Math.min(performance.now() + CHECK_BOUND_MS, start + 2 * CHECK_BOUND_MS), 'fenced');
+    const locked: ApprovalStage = { deadline: Math.min(performance.now() + CHECK_BOUND_MS, start + 2 * CHECK_BOUND_MS), expired: false };
+    const lockedStopped = () => stageStopped(t, locked, 'fenced');
     let verdict: StopReason | undefined;
     let unknown = false;
     try {
-      verdict = await bounded(locked, () => this.supplyUnderLock(t, supply, locked));
+      verdict = await bounded(locked, lockedStopped, () => this.supplyUnderLock(t, supply, lockedStopped));
     } catch (failure) {
       unknown = !(failure instanceof ApprovalStopped);
     }
     // The commit's answer - success, refusal or failure - counts only within stage 2's deadline.
-    const second = locked.stopped();
+    const second = lockedStopped();
     if (second) return second;
     if (unknown) return stopAttempt(t, 'fenced');
     return verdict ? stopAttempt(t, verdict) : undefined;
@@ -625,8 +627,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * waits, before the next step or branch, the stage is checked: expired (or the attempt stopped by another approval)
    * throws, so the transaction - and any renewal in it - rolls back and nothing is supplied.
    */
-  private supplyUnderLock(t: SupplyTarget, supply: (() => boolean) | null, stage: ApprovalStage): Promise<StopReason | undefined> {
-    const live = () => { if (stage.stopped()) throw new ApprovalStopped(); };
+  private supplyUnderLock(t: SupplyTarget, supply: (() => boolean) | null, stopped: () => StopReason | null): Promise<StopReason | undefined> {
+    const live = () => { if (stopped()) throw new ApprovalStopped(); };
     return this.gate.write(async tx => {
       live();
       await this.gate.lockOperationKey(tx, t.operationId);
@@ -833,23 +835,17 @@ function stopAttempt(t: SupplyTarget, reason: StopReason): StopReason {
 
 /**
  * One stage of an approval: its monotonic deadline, fixed before its work starts and never moved, and its expiry - set
- * once, by the stage's timer or by the first completion that finds now >= deadline - which stops the attempt with the
- * stage's own reason (stage 1 'aborted', stage 2 'fenced').
+ * once, by the stage's timer or by the first completion that finds now >= deadline - never cleared.
  */
-class ApprovalStage {
-  private expired = false;
-  constructor(private readonly t: SupplyTarget, readonly deadline: number, private readonly reason: StopReason) {}
+interface ApprovalStage { readonly deadline: number; expired: boolean }
 
-  expire(): StopReason {
-    this.expired = true;
-    return stopAttempt(this.t, this.reason);
-  }
-
-  /** The first check of every completion of the stage: its expiry (read now, timer or not), else the attempt's stop reason. */
-  stopped(): StopReason | null {
-    if (this.expired || performance.now() >= this.deadline) return this.expire();
-    return this.t.stop;
-  }
+/**
+ * The first check of every completion of a stage: its expiry, read now whether or not its timer could run, stops the
+ * attempt with the stage's own reason (stage 1 'aborted', stage 2 'fenced'); otherwise the attempt's own stop reason.
+ */
+function stageStopped(t: SupplyTarget, stage: ApprovalStage, reason: StopReason): StopReason | null {
+  if (!stage.expired && performance.now() >= stage.deadline) stage.expired = true;
+  return stage.expired ? stopAttempt(t, reason) : t.stop;
 }
 
 /** Thrown where an approval finds its stage expired or its attempt stopped: inside a transaction, nothing of it commits. */
@@ -860,18 +856,18 @@ class ApprovalStopped extends Error {
 /**
  * Runs a stage's work within the stage's deadline. The timer is set before the work starts (so its synchronous part
  * counts too) for the time left, and expires the stage when it runs. The work's own answer - a value or a failure - is
- * checked against the stage first, so an answer after the deadline is never taken as one, also when a stalled event loop
- * runs it before the timer. A late answer is not cancelled: it is still consumed here, and the work's own checks keep
- * it from supplying or renewing anything.
+ * read through the stage's check (`stopped`) first, so an answer after the deadline is never taken as one, also when a
+ * stalled event loop runs it before the timer. A late answer is not cancelled: it is still consumed here, and the work's
+ * own checks keep it from supplying or renewing anything.
  */
-function bounded<T>(stage: ApprovalStage, work: () => Promise<T>): Promise<T> {
+function bounded<T>(stage: ApprovalStage, stopped: () => StopReason | null, work: () => Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiry = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => { stage.expire(); reject(new ApprovalStopped()); }, Math.max(0, stage.deadline - performance.now()));
+    timer = setTimeout(() => { stage.expired = true; stopped(); reject(new ApprovalStopped()); }, Math.max(0, stage.deadline - performance.now()));
   });
   const answer = new Promise<T>(resolve => resolve(work())).then(
-    value => { if (stage.stopped()) throw new ApprovalStopped(); return value; },
-    failure => { if (stage.stopped()) throw new ApprovalStopped(); throw failure; });
+    value => { if (stopped()) throw new ApprovalStopped(); return value; },
+    failure => { if (stopped()) throw new ApprovalStopped(); throw failure; });
   return Promise.race([answer, expiry]).finally(() => clearTimeout(timer));
 }
 
