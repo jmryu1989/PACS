@@ -356,6 +356,16 @@ test('TEST-WSU-06 a deleted row or a same-size different UID set at an await bou
     await rejects(swap.pacs.listStudies(caller(), query), 409, 'STUDY_LIST_CHANGED');
   }
 });
+test('TEST-WSU-06 a same-size answer that names another known UID with identical fields is still a changed list', async () => {
+  // Page one is UID 100; the database answers the page details (and later the final read) with UID 101's row instead:
+  // same count, a row the enumeration also knows with the very same access fields. Only the exact UID set tells them apart.
+  const states = [stateRow(NORMAL, { institutionId: 'hallym' }), stateRow('2.25.101', { institutionId: 'hallym' })];
+  for (const when of [2, 3]) {
+    const w = await world({ resources: [resource(NORMAL, 'SYN-PID-N'), resource('2.25.101', 'SYN-PID-M')], states }).start();
+    w.hooks.find = async (arg, n) => { if (n === when && arg?.where?.uid) arg.where.uid.in = ['2.25.101']; };
+    await rejects(w.pacs.listStudies(caller(), { limit: '1' }), 409, 'STUDY_LIST_CHANGED');
+  }
+});
 test('TEST-WSU-06 every access field changed before the details, before the response or during the order side is detected', async () => {
   const changes = { institutionId: 'center', teleInstitutionId: 'other', rs: 'P', preDoc: 'someone', preReviewer: 'reviewer',
     preDocSub: 'sub-x', preReviewerSub: 'sub-y' };
@@ -484,12 +494,18 @@ test('TEST-WSU-08 a source observation is per request: an earlier single answer 
 
 // ── TEST-WSU-09 derived projections (M-WSU-04) ──
 test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliation, and is not restored by bootstrap or unassigned', async () => {
-  const w = await world({ resources: [A({ accession: 'ACC-1' }), B({ accession: 'ACC-2' }), resource(NORMAL, 'SYN-PID-N', { accession: 'ACC-3' })],
+  // SPLIT is linked to order O-S; 2.25.901 is an unlinked split whose two resources carry ACC-4 (first) and ACC-5 (last).
+  const OPEN = '2.25.901';
+  const w = await world({ resources: [A({ accession: 'ACC-1' }), B({ accession: 'ACC-2' }), resource(NORMAL, 'SYN-PID-N', { accession: 'ACC-3' }),
+      resource(OPEN, 'SYN-PID-C', { accession: 'ACC-4' }), resource(OPEN, 'SYN-PID-D', { accession: 'ACC-5' })],
     states: [stateRow(SPLIT, { institutionId: 'hallym', matched: 'U' }), stateRow(NORMAL, { institutionId: 'hallym', matched: 'U' }),
+      stateRow(OPEN, { institutionId: 'hallym', matched: 'U' }),
       stateRow('2.25.555', { institutionId: 'hallym', matched: 'M', orderOid: 'O-LINKED' })] }).start();
   w.orders = [{ oid: 'O-1', institutionId: 'hallym', accession: 'ACC-1', matched: 'U', studyUid: null },
     { oid: 'O-2', institutionId: 'hallym', accession: 'ACC-2', matched: 'U', studyUid: null },
     { oid: 'O-3', institutionId: 'hallym', accession: 'ACC-3', matched: 'U', studyUid: null },
+    { oid: 'O-4', institutionId: 'hallym', accession: 'ACC-4', matched: 'U', studyUid: null },
+    { oid: 'O-5', institutionId: 'hallym', accession: 'ACC-5', matched: 'U', studyUid: null },
     { oid: 'O-S', institutionId: 'hallym', accession: 'ACC-1', matched: 'M', studyUid: SPLIT }];
   w.states.get(SPLIT).matched = 'M'; w.states.get(SPLIT).orderOid = 'O-S';
   for (const query of [undefined, { limit: '100' }]) {
@@ -498,6 +514,7 @@ test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliatio
     const orders = Object.fromEntries(listed.orderReconciliation.orders.map(o => [o.oid, o]));
     assert.deepEqual(orders['O-1'].candidates, []);
     assert.deepEqual(orders['O-2'].candidates, []);
+    assert.deepEqual([orders['O-4'].candidates, orders['O-5'].candidates], [[], []], 'neither resource accession of a split is a candidate');
     assert.deepEqual(orders['O-3'].candidates, [NORMAL], 'other orders still reconcile');
     assert.equal('O-S' in orders, false, 'the linked order of a split UID is not reconciled against either resource');
     assert.equal(JSON.stringify(listed.orderReconciliation).includes(SPLIT), false);
