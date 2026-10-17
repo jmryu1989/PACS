@@ -15,7 +15,34 @@ const os = require('node:os');
  */
 const STARTUP_BOUNDARY = Object.freeze({ problems: [], calls: ['api/src/emr-runtime/application.ts EmrRuntimeOwner.run'],
   starts: ['api/src/main.ts bootstrap awaited'], delegations: ['api/src/emr-runtime/application.ts EmrApplicationRuntime.start'] });
-const COMPOSE_LINE = '      composeEmrAdapters(runtimeAdapters);\n';
+/**
+ * The R4-09 refusal controls, built from the TypeScript AST of the product files (D73: no product text is spliced or
+ * required): a second statement of the located compose call after it, a public member added to the owner, a holder
+ * member that repeats the located compose call, and main's await of the holder's start turned into `void`. Each place
+ * must be found exactly once; only counts and texts leave this function.
+ */
+function startupControls(ts, root) {
+  const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+  const parse = (file, text) => ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const find = (sf, match) => { const out = []; const visit = node => { if (match(node)) out.push(node); ts.forEachChild(node, visit); }; visit(sf); return out; };
+  const once = (found, what) => { if (found.length !== 1) throw new Error(`${what}: ${found.length} places, not one`); return found[0]; };
+  const insert = (text, at, added) => text.slice(0, at) + added + text.slice(at);
+  const applicationFile = 'api/src/emr-runtime/application.ts', mainFile = 'api/src/main.ts';
+  const application = read(applicationFile), main = read(mainFile);
+  const app = parse(applicationFile, application), entry = parse(mainFile, main);
+  const composeCall = once(find(app, node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
+    && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'composeEmrAdapters'), 'compose call statement');
+  const classNamed = name => once(find(app, node => ts.isClassDeclaration(node) && node.name?.text === name), name);
+  const call = composeCall.getText(app), newline = application.includes('\r\n') ? '\r\n' : '\n';
+  const holderStart = once(find(entry, node => ts.isAwaitExpression(node) && ts.isCallExpression(node.expression)
+    && ts.isPropertyAccessExpression(node.expression.expression) && node.expression.expression.name.text === 'start'), 'awaited start in main');
+  return {
+    twice: insert(application, composeCall.end, newline + call),
+    rebind: insert(application, classNamed('EmrRuntimeOwner').members.end, `${newline}  rebind(): void {}`),
+    holderComposes: insert(application, classNamed('EmrApplicationRuntime').members.end, `${newline}  reopen(): void { ${call} }`),
+    unawaited: main.slice(0, holderStart.getStart(entry)) + 'void ' + main.slice(holderStart.expression.getStart(entry)),
+  };
+}
 let boundaryProgram;
 function startupBoundary({ ts, parsed, root }, overrides = {}) {
   const key = file => path.resolve(file).replaceAll('\\', '/').toLowerCase();
@@ -123,9 +150,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
   const ts = require(path.join(root, 'api/node_modules/typescript'));
   const config = ts.readConfigFile(path.join(root, 'api/tsconfig.json'), ts.sys.readFile);
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, path.join(root, 'api'));
-  const application = fs.readFileSync(path.join(root, 'api/src/emr-runtime/application.ts'), 'utf8').replace(/\r\n/g, '\n');
-  assert(application.includes(COMPOSE_LINE));
-  const twice = application.replace(COMPOSE_LINE, COMPOSE_LINE + COMPOSE_LINE);
+  const { twice } = startupControls(ts, root);
   assert.deepEqual(startupBoundary({ ts, parsed, root }, { 'api/src/emr-runtime/application.ts': twice }), STARTUP_BOUNDARY);
 } else {
   const assert = require('node:assert/strict');
@@ -1877,21 +1902,16 @@ if (process.argv.includes('--emr-inventory-generator')) {
       'EmrApplicationRuntime.start called other than awaited by main.ts: api/src/syn-startup-restart.ts:2 (again)',
       'EmrRuntimeOwner.start called outside EmrApplicationRuntime.start: api/src/syn-startup-second-owner.ts:2 (synSecondOwner)',
     ]) assert(fixtures.includes(expected), `${expected}: ${JSON.stringify(fixtures)}`);
-    const application = fs.readFileSync(path.join(api, 'src/emr-runtime/application.ts'), 'utf8').replace(/\r\n/g, '\n');
-    const main = fs.readFileSync(path.join(api, 'src/main.ts'), 'utf8').replace(/\r\n/g, '\n');
-    const swap = (text, from, to) => { assert(text.includes(from), from); return text.replace(from, to); };
+    const application = fs.readFileSync(path.join(api, 'src/emr-runtime/application.ts'), 'utf8');
+    const controls = startupControls(ts, root);
     for (const [name, overrides, expected] of [
-      ['a second call in the start', { 'api/src/emr-runtime/application.ts': swap(application, COMPOSE_LINE, COMPOSE_LINE + COMPOSE_LINE) },
-        'composeEmrAdapters has 2 startup calls, not one'],
-      ['a reset export', { 'api/src/emr-runtime/application.ts': application + 'export function resetEmrRuntime(): void {}\n' },
+      ['a second call in the start', { 'api/src/emr-runtime/application.ts': controls.twice }, 'composeEmrAdapters has 2 startup calls, not one'],
+      ['a reset export', { 'api/src/emr-runtime/application.ts': application + '\nexport function resetEmrRuntime(): void {}\n' },
         'application.ts exports EmrApplicationRuntime, EmrRuntimeOwner, EmrStartupFailure, EmrStartupPhase, EmrStartupResources, resetEmrRuntime'],
-      ['a rebind member', { 'api/src/emr-runtime/application.ts': swap(application, '  requireResources(): Readonly<EmrStartupResources> {\n    if',
-        "  rebind(): void { this.state = 'cold'; }\n  requireResources(): Readonly<EmrStartupResources> {\n    if") },
-        'EmrRuntimeOwner exposes close, rebind, requireResources, start'],
-      ['a holder that composes', { 'api/src/emr-runtime/application.ts': swap(application, '  close(): Promise<void> { return this.owner.close(); }\n',
-        '  close(): Promise<void> { return this.owner.close(); }\n  reopen(): void { composeEmrAdapters(runtimeAdapters); }\n') },
+      ['a rebind member', { 'api/src/emr-runtime/application.ts': controls.rebind }, 'EmrRuntimeOwner exposes close, rebind, requireResources, start'],
+      ['a holder that composes', { 'api/src/emr-runtime/application.ts': controls.holderComposes },
         'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/emr-runtime/application.ts'],
-      ['a start main does not await', { 'api/src/main.ts': swap(main, '  await app.get(EmrApplicationRuntime).start(', '  void app.get(EmrApplicationRuntime).start(') },
+      ['a start main does not await', { 'api/src/main.ts': controls.unawaited },
         'EmrApplicationRuntime.start called other than awaited by main.ts: api/src/main.ts'],
     ]) {
       const { problems } = startupBoundary(context, overrides);

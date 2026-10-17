@@ -1,4 +1,4 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2-BASE M43-M55 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2-BASE M43-M56 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
@@ -151,8 +151,8 @@ MUTANTS = {
     # ── EMR-B2-BASE (D1507 narrowed): the owner's MUT-B2SH classes, the start-time shutdown (I13), consult M13, G-4 and two
     # ops boundaries. The request-fact classes (MUT-B2SH-09..16, consult M05/M06) move with request-context to the next unit.
     "M43": ("MUT-B2SH-01: init hooks run before the awaited EMR start", [
-        ("api/src/main.ts", "  await app.get(EmrApplicationRuntime).start();\n  startup.phase = 'init';\n  await app.init();\n",
-         "  startup.phase = 'init';\n  await app.init();\n  await app.get(EmrApplicationRuntime).start();\n")]),
+        ("api/src/main.ts", "    await runtime.start();\n    ownerStarting = false;\n    if (stopRequested) return;\n    startup.phase = 'init';\n    await app.init();\n",
+         "    startup.phase = 'init';\n    await app.init();\n    await runtime.start();\n    ownerStarting = false;\n")]),
     "M44": ("MUT-B2SH-03: a concurrent, failed or closed start may start again", [
         ("api/src/emr-runtime/application.ts", "    if (this.state !== 'cold') refuse('EmrStartupRepeated');\n",
          "    if (this.state === 'ready') refuse('EmrStartupRepeated');\n")]),
@@ -190,6 +190,8 @@ MUTANTS = {
     "M55": ("ready refused before the start completed: the resources are handed out once they exist, also while closing", [
         ("api/src/emr-runtime/application.ts", "    if (this.state !== 'ready' || !this.resources) refuse('EmrRuntimeNotReady');\n",
          "    if (!this.resources) refuse('EmrRuntimeNotReady');\n")]),
+    "M56": ("I13: a stop signal during the start reaches the owner only in Nest's last shutdown stage, after every destroy hook", [
+        ("api/src/main.ts", "    if (ownerStarting) void runtime.close();\n", "    void ownerStarting;\n")]),
 }
 
 

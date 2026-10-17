@@ -51,11 +51,30 @@ async function bootstrap() {
   app.setGlobalPrefix('api');
   // EMR-B2-BASE: the EMR ledger owner starts once, after the module graph and before every init hook (timers) and the
   // listener; a refused start never opens either. A is composed with B's readers.
-  await app.get(EmrApplicationRuntime).start();
-  startup.phase = 'init';
-  await app.init();
-  startup.phase = 'listen';
-  await app.listen(3000, '0.0.0.0');
+  // A stop signal during the start ends the owner's start when the signal arrives (I13): Nest reaches the owner only in its
+  // last shutdown stage, after every provider's destroy hooks, and an awaiting hook there would let the start go on to
+  // fence, recover and compose meanwhile. After the owner's start the signal only keeps init and the listener closed;
+  // Nest's own shutdown (registered above) still drains and then closes the owner.
+  const runtime = app.get(EmrApplicationRuntime);
+  let ownerStarting = true, stopRequested = false;
+  const stopSignal = () => {
+    stopRequested = true;
+    if (ownerStarting) void runtime.close();
+  };
+  const signals = ['SIGTERM', 'SIGINT'] as const;
+  for (const signal of signals) process.once(signal, stopSignal);
+  try {
+    await runtime.start();
+    ownerStarting = false;
+    if (stopRequested) return;
+    startup.phase = 'init';
+    await app.init();
+    if (stopRequested) return;
+    startup.phase = 'listen';
+    await app.listen(3000, '0.0.0.0');
+  } finally {
+    for (const signal of signals) process.removeListener(signal, stopSignal);
+  }
   app.flushLogs();
   console.log('[KIN API] http://localhost:3000/api');
   if (process.env.AUTH_REQUIRED === 'false')

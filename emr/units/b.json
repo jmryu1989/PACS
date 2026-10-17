@@ -460,6 +460,7 @@
         "C27 shutdown keeps the HTTP drain and then disconnects once; a stop signal during the start ends it at the wait it is in; a failed start releases only what it created, within 5 s, and deletes no state",
         "C28 every start-up phase that fails ends the process with one closed line and no listener, timer, buffered log or secret",
         "C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-shutdown start is refused and nothing is composed or recovered twice",
+        "C30 a stop signal during the start ends it although a co-provider destroy hook still awaits: nothing is fenced, recovered, composed, initialized or listened after it, and the client is released once",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
@@ -491,9 +492,9 @@
     }
   },
   "expected": {
-    "contract": 27,
+    "contract": 28,
     "live": 13,
-    "mutants": 52,
+    "mutants": 53,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -876,6 +877,13 @@
         "C25"
       ],
       "behaviour": "ready refused before the start completed: resources handed out while closing"
+    },
+    {
+      "id": "M56",
+      "kill": [
+        "C30"
+      ],
+      "behaviour": "I13: a stop signal during the start reaches the owner only in Nest's last shutdown stage"
     }
   ],
   "candidate_cases": [

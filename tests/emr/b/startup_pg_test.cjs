@@ -97,7 +97,7 @@ test('P04 SIGTERM while the start recovers over PostgreSQL ends the start there:
   assert.deepEqual([result.code, result.signal, result.timedOut], [null, 'SIGTERM', false], result.stderr);
   assert.equal(result.stderrLines.length, 1, result.stderr);
   assert.deepEqual(LINE.exec(result.stderrLines[0]).slice(1, 3), ['recovery', 'EmrStartupInterrupted']);
-  inOrder(result.names, ['fence', 'recovery', 'held', 'runtime-onApplicationShutdown', 'owner-close', 'released', 'disconnect', 'start-failed']);
+  inOrder(result.names, ['fence', 'recovery', 'held', 'owner-close', 'runtime-onApplicationShutdown', 'released', 'disconnect', 'start-failed']);
   for (const name of ['compose', 'ready', 'init', 'bind']) assert(!result.names.includes(name), name);
   assert.equal(count(result.names, 'disconnect'), 1);
 });

@@ -1746,8 +1746,9 @@ function contractSuite() {
       assert.deepEqual([result.signal, result.timedOut], ['SIGTERM', false], 'SIGTERM ends it without SIGKILL');
       for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(state, kept)), kept + ' stays');
     } finally { fs.rmSync(state, { recursive: true, force: true }); }
-    // SIGTERM while the start waits (I13 in the real main): Nest's shutdown reaches the owner, which lets the step in flight
-    // return and ends the start there; the process ends by the signal with the one closed line and its client released once.
+    // SIGTERM while the start waits (I13 in the real main): main asks the owner to stop when the signal arrives, the step in
+    // flight returns and the start ends there; the process ends by the signal with the one closed line and its client
+    // released once (C30: the same with a destroy hook that awaits).
     for (const point of ['connect', 'role', 'recovery']) {
       const dir = startup.stateDirectory('c27-' + point);
       try {
@@ -1761,7 +1762,7 @@ function contractSuite() {
         for (const name of ['fence', 'ledger', 'recovery', 'compose', 'ready', 'init', 'auth-init', 'bind']) {
           assert.equal(late.includes(name), false, `${point}: no ${name} after the shutdown began`);
         }
-        inOrder(held.names, ['held', 'runtime-onApplicationShutdown', 'owner-close', 'released', 'disconnect', 'start-failed']);
+        inOrder(held.names, ['held', 'owner-close', 'runtime-onApplicationShutdown', 'released', 'disconnect', 'start-failed']);
         assert.equal(count(held.names, 'disconnect'), 1, point);
         const failed = held.events.find(e => e.what === 'start-failed');
         assert.deepEqual([failed.phase, failed.interrupted, failed.code], [point, true, 'EmrStartupInterrupted']);
@@ -1861,6 +1862,30 @@ function contractSuite() {
       for (const name of ['compose', 'recovery', 'client', 'disconnect']) assert.equal(count(result.names, name), 1, name);
       assert.equal(result.code, 0);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('C30 a stop signal during the start ends it although a co-provider destroy hook still awaits: nothing is fenced, recovered, composed, initialized or listened after it, and the client is released once', async () => {
+    // Nest runs every destroy hook before its shutdown hooks; the co-provider's hook here awaits 1.5 s, and the held step
+    // returns as soon as that hook began, i.e. long before Nest's own shutdown stage.
+    for (const point of ['connect', 'role', 'recovery']) {
+      const dir = startup.stateDirectory('c30-' + point);
+      try {
+        const held = await startup.run({ db: 'memory', hold: point, slowDestroy: 1500 }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+          if (event.what === 'held') child.kill('SIGTERM');
+          if (event.what === 'slow-destroy') child.send('release');
+        } });
+        assert.deepEqual([held.code, held.signal, held.timedOut], [null, 'SIGTERM', false], point + ': ' + held.stderr.slice(0, 2000));
+        closedLine(held, point, 'EmrStartupInterrupted');
+        const late = held.names.slice(held.names.indexOf('held') + 1);
+        for (const name of ['fence', 'ledger', 'recovery', 'compose', 'ready', 'init', 'auth-init', 'bind']) {
+          assert.equal(late.includes(name), false, `${point}: no ${name} after the stop signal`);
+        }
+        inOrder(held.names, ['held', 'owner-close', 'released', 'disconnect', 'start-failed', 'slow-destroy-done', 'runtime-onApplicationShutdown']);
+        assert.equal(count(held.names, 'disconnect'), 1, point);
+        const failed = held.events.find(e => e.what === 'start-failed');
+        assert.deepEqual([failed.phase, failed.interrupted, failed.code], [point, true, 'EmrStartupInterrupted'], point);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
   });
 
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {

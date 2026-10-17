@@ -5161,18 +5161,22 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
       const key = `${entry.file}@${entry.start} ${entry.kind}`;
       after.set(key, [...(after.get(key) ?? []), entry]);
     }
+    const taintedHere = other => other.status === 'unresolved' && escapedAt.length > 0
+      && other.reason.includes('so its type is no evidence') && escapedAt.some(at => other.reason.includes(at));
     let target = null, tainted = 0;
     for (const entry of base.candidates) {
-      let key = `${entry.file}@${moved(edits, entry.file, entry.start)} ${entry.kind}`;
-      if (!after.has(key) && entry.kind === 'raw SQL naming emr_access') key = `${entry.file}@${moved(edits, entry.file, entry.start)} raw call`;
+      const place = `${entry.file}@${moved(edits, entry.file, entry.start)}`, own = `${place} ${entry.kind}`;
+      // A ledger call whose type evidence the added code's fragment tainted is no longer "raw SQL naming emr_access" but a
+      // plain raw call at the same place. That counts only as that taint: unresolved, naming a fragment of the added code.
+      const rekinded = !after.has(own) && entry.kind === 'raw SQL naming emr_access', key = rekinded ? `${place} raw call` : own;
       const same = after.get(key) ?? [];
-      const at = same.findIndex(other => other.status === entry.status), now = same.splice(at >= 0 ? at : 0, 1)[0];
+      const at = rekinded ? same.findIndex(taintedHere) : same.findIndex(other => other.status === entry.status);
+      const now = rekinded ? (at >= 0 ? same.splice(at, 1)[0] : undefined) : same.splice(at >= 0 ? at : 0, 1)[0];
       if (!same.length) after.delete(key);
-      assert.ok(now, `${site.file}:${site.line} (${why}): ${key} is no longer found`);
+      assert.ok(now, `${site.file}:${site.line} (${why}): ${own} is no longer found`);
       if (entry.file === site.file && entry.start === site.start) { target = now; continue; }
       if (now.status === entry.status) continue;
-      assert.ok(now.status === 'unresolved' && escapedAt.length && now.reason.includes('so its type is no evidence')
-        && escapedAt.some(at => now.reason.includes(at)), `${key}: ${entry.status} -> ${now.status}: ${now.reason}`);
+      assert.ok(taintedHere(now), `${key}: ${entry.status} -> ${now.status}: ${now.reason}`);
       tainted++;
     }
     assert.deepEqual([...after.keys()], [], 'candidates that are neither old nor of the added code');

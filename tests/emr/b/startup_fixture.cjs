@@ -187,6 +187,13 @@ function child(scenario) {
           : key.startsWith('$') ? async () => [] : delegate(key)) });
       }
       async onModuleInit() { send('prisma-init'); if (scenario.init === 'fail') throw failure(leak('P1001')); }
+      // `slowDestroy: ms`: a co-provider whose destroy hook awaits (Nest runs every destroy hook before the shutdown hooks).
+      async onModuleDestroy() {
+        if (!scenario.slowDestroy) return;
+        send('slow-destroy');
+        await new Promise(resolve => setTimeout(resolve, scenario.slowDestroy));
+        send('slow-destroy-done');
+      }
       async onApplicationShutdown() { send('prisma-shutdown'); }
       async $connect() {}
       async $disconnect() {}
