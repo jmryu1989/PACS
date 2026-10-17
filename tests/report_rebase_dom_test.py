@@ -145,6 +145,10 @@ let selectedUid = "UIDVALUE", heldUid = null, heartbeat = null, user = "doctor@k
 let appState = INITIALSTATE, studies = [{uid: "UIDVALUE"}, {uid: "OTHERVALUE"}];
 let calls = [], structCalls = [], replies = [], toasts = [], confirms = [], confirmAnswer = false, clipboard = [];
 const studyPriority = { get: () => false };
+// W5 (order-list-store.js): the page's Related Report mode binding and the base-rule marker, declared as the page
+// declares them; null = no mode asset (the sliced region holds no Related Report mode).
+let relatedMode = null;
+const RELATED_BASE = Object.freeze({ base: true });
 const KinAuth = { has: () => true, logout: async () => {} };
 const reportPreview = { close() {} };
 const displayActor = value => String(value ?? "").split("@")[0];

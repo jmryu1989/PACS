@@ -181,6 +181,8 @@ const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
 let sess = window.synSession;
 let serverMode = window.synMode.serverMode, demoMode = false, offline = window.synMode.offline;
 let selectedUid = null;
+// W5 (order-list-store.js): the page's Related Report mode binding, which the block's Send CVR reason reads; null = no mode.
+let relatedMode = null;
 let studies = window.synStudies;
 let appState = window.synAppState;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
