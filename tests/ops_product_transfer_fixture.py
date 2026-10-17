@@ -1138,6 +1138,16 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'JSON null in a member import NULL column accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "ImportOperation" SET results='{}'::jsonb WHERE kind='import';
         RAISE EXCEPTION 'member import results that are not an array accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      -- B-3 (D1486): the value lists written in the explicit text form keep their values, on the restored database too: a
+      -- status outside the kind's list and a reservation kind with a member owner are check violations; another value
+      -- of the list is accepted (only the raise afterwards undoes it).
+      BEGIN UPDATE "ImportOperation" SET status='sent' WHERE kind='import';
+        RAISE EXCEPTION 'import status outside its states accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET "ownerSubject"='SYNTHETIC-member' WHERE kind='sop-claim';
+        RAISE EXCEPTION 'reservation with a member owner accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ImportOperation" SET status='settled' WHERE kind='import';
+        UPDATE "ImportOperation" SET status='incomplete' WHERE kind='download';
+        RAISE EXCEPTION 'listed statuses accepted'; EXCEPTION WHEN raise_exception THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));

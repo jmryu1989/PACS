@@ -27,9 +27,13 @@ CREATE TABLE "ImportOperation" (
 
     CONSTRAINT "ImportOperation_pkey" PRIMARY KEY ("id"),
     -- Owner fields are never empty; only the gate's own reservations carry the internal owner, and a member row never can.
+    -- A value list on a VARCHAR column is written in the explicit text form ("col"::text = ANY (ARRAY['v'::text, ...]))
+    -- that PostgreSQL deparses the same before and after pg_dump/restore (the findings migration's precedent); `IN (...)`
+    -- on VARCHAR is stored as ARRAY[...::character varying]::text[] and restored as ARRAY[...::character varying::text],
+    -- so a restored database's catalog would differ from the migrated one. Same values, same NULL behaviour.
     CONSTRAINT "ImportOperation_owner_check" CHECK (
         length("institutionId") > 0 AND length("ownerIssuer") > 0 AND length("ownerSubject") > 0 AND length("actor") > 0
-        AND (("kind" IN ('study-claim', 'sop-claim'))
+        AND (("kind"::text = ANY (ARRAY['study-claim'::text, 'sop-claim'::text]))
              = ("ownerIssuer" = 'kin-internal' AND "ownerSubject" = 'dicom-import-gate' AND "actor" = 'dicom-import-gate'))
         AND ("studyUid" IS NULL OR ("studyUid" ~ '^[0-9]+(\.[0-9]+)*$' AND length("studyUid") <= 64))),
     -- One closed shape per kind (contract 4.4 table): status values, which columns are required and which stay NULL.
@@ -38,10 +42,11 @@ CREATE TABLE "ImportOperation" (
     -- to false as well. SQL NULL and JSON null stay distinct: a required-NULL column holding JSON null is not NULL, and a
     -- JSON null where an object is required is not an object.
     CONSTRAINT "ImportOperation_kind_check" CHECK (COALESCE(
-        ("kind" = 'import' AND "status" IN ('open', 'settled') AND "studyUid" IS NULL
+        ("kind" = 'import' AND "status"::text = ANY (ARRAY['open'::text, 'settled'::text]) AND "studyUid" IS NULL
             AND CASE WHEN jsonb_typeof("results") = 'array' THEN jsonb_array_length("results") <= 100 ELSE false END
             AND "manifestSha256" IS NULL AND "download" IS NULL AND "claimKey" IS NULL AND "claim" IS NULL)
-        OR ("kind" = 'download' AND "status" IN ('prepared', 'sending', 'sent', 'incomplete', 'unconfirmed')
+        OR ("kind" = 'download'
+            AND "status"::text = ANY (ARRAY['prepared'::text, 'sending'::text, 'sent'::text, 'incomplete'::text, 'unconfirmed'::text])
             AND "studyUid" IS NOT NULL AND "results" = '[]'::jsonb
             AND "manifestSha256" IS NOT NULL AND "manifestSha256" ~ '^[0-9a-f]{64}$'
             AND "download" IS NOT NULL AND jsonb_typeof("download") = 'object'
