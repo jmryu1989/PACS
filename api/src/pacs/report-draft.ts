@@ -245,11 +245,17 @@ export class PacsReportDraft {
        * 먼저 지금 Target의 개인 초안 읽기 관문(역할·기관·StudyAccess·예비 판독)과 owner 아래, 한 RepeatableRead 스냅숏에서 내 초안과
        * 영수증을 읽어 끝난 영수증·ID_REUSED를 답한다. Source 준비도 Source 행 잠금도 없다. 쓰기가 없으므로 잠그지 않는다 — 이
        * 스냅숏 뒤에 끝난 영수증은 아래 잠근 트랜잭션이 CAS 전에 다시 판정한다.
+       * WORKLIST-SPLIT-UID: Target의 원본 관찰은 트랜잭션 밖의 유한한 준비에 있고, 두 환자 자원이 답하는 Target이면 영수증을
+       * 읽기 전에 409 STUDY_IDENTITY_UNRESOLVED다 — 이미 적용·취소·거절된 영수증이 있어도 그 내용도 봉투도 답하지 않는다.
        */
-      await this.studyAccess.prepare(c,[uid]);
+      await draftBounded((async () => {
+        await this.studyAccess.prepare(c,[uid]);
+        await this.studyAccess.prepareSourceIdentity(c,[uid]);
+      })());
       const early = await this.prisma.$transaction(async tx => {
         const state = await this.access.gate(uid, c, tx);
         if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
+        this.studyAccess.assertUnsplitSource(c, uid);
         if (!canReadPreliminary(state, c))
           throw new ForbiddenException(
             `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
@@ -262,8 +268,11 @@ export class PacsReportDraft {
       const outcome = await this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch,
         async () => {
           await this.studyAccess.prepare(c,[uid]);
-          // 취소는 Source를 읽지 않는다. 새 적용·refused 재시도만 Source의 현재 가독을 다시 요구한다(잠금 밖, 유한하게).
-          if (related.intent === 'apply') await this.studyAccess.prepare(c,[related.source.uid]);
+          // 취소는 Source를 읽지 않는다. 새 적용·refused 재시도만 Source의 현재 가독과 원본 관찰을 다시 요구한다(잠금 밖, 유한하게).
+          if (related.intent === 'apply') {
+            await this.studyAccess.prepare(c,[related.source.uid]);
+            await this.studyAccess.prepareSourceIdentity(c,[related.source.uid]);
+          }
         }, async (tx, state, audit) => {
         // 지금 Target 개인 초안의 가독이 영수증 판정보다 먼저다(replay도 지금 권한 아래에서만 답한다).
         if (!canReadPreliminary(state, c))
@@ -319,6 +328,10 @@ export class PacsReportDraft {
         try { sourceState = await this.access.gate(related.source.uid, c, tx); }
         catch (error: any) { if (!(error instanceof NotFoundException)) throw error; }
         if (!sourceState || !canReadPreliminary(sourceState, c)) return refuse('SOURCE_UNAVAILABLE');
+        // WORKLIST-SPLIT-UID: 두 환자 자원이 답하는 Source의 판·머리·글은 쓰지 않는다(409 STUDY_IDENTITY_UNRESOLVED). 원본을
+        // 관찰하지 못한 요청은 503 STUDY_SOURCE_UNAVAILABLE이다. 둘 다 업무 거절이 아니므로 영수증 행을 남기지 않는다 —
+        // 트랜잭션은 아무것도 쓰지 않고 끝나며, 같은 ID의 재시도·Check·취소는 그대로 열려 있다.
+        this.studyAccess.assertUnsplitSource(c, related.source.uid);
         const version = await tx.reportVersion.findUnique({
           where: { uid_version: { uid: related.source.uid, version: related.source.version } },
           select: { action: true, findings: true, conclusion: true, recommendation: true } });

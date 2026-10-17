@@ -196,7 +196,8 @@ async function world() {
   // W5-API: a case that restricts StudyAccess by DICOM tags answers the one-study metadata lookup through w.metadata
   const orthanc = new Proxy({}, { get(_t, key) {
     if (key === 'studyAccessMetadata' && w.metadata) return w.metadata;
-    return key === 'studyIdentityResources' ? async uid => [{ '0020000D': { Value: [uid] } }]
+    // W5-API: a UID in w.split is answered by two original resources (the split a WORKLIST-SPLIT-UID case needs)
+    return key === 'studyIdentityResources' ? async uid => (w.split?.has(uid) ? [1, 2] : [1]).map(() => ({ '0020000D': { Value: [uid] } }))
       : key === 'studyIdentities' ? async () => []
       : () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); };
   } });
@@ -1643,5 +1644,57 @@ test('W5-PG-07 a finished receipt is answered under the Target alone: applied an
   } finally {
     release.resolve();
     await holder;
+  }
+});
+
+test('W5-PG-08 WORKLIST-SPLIT-UID: a split Target is 409 STUDY_IDENTITY_UNRESOLVED to every insertion PUT and Check whatever its receipt, with nothing written; a split Source refuses a new apply and a refused retry without a receipt row, while replay, Check and discard still answer', async () => {
+  const w = await world();
+  const source = await w.study({ rs: 'A', draft: false }), uid = await w.study();
+  const opened = await w.token(uid, A);
+  const I1 = relatedBody(opened, uid, source);
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I1 })).ok, true);
+  const I2 = relatedBody(opened, uid, source);                  // refused (DRAFT_CONFLICT), then discarded
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I2 })).body.relatedInsert.reason, 'DRAFT_CONFLICT');
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: asDiscard(I2, 1) })).ok, true);
+  const current = await w.row(uid, A), token = await w.token(uid, A);
+  const seed = { findings: current.findings, conclusion: current.conclusion, recommendation: current.recommendation, baseVersion: current.baseVersion };
+  const I3 = relatedBody(token, uid, source, { seed });
+  await w.base.studyState.update({ where: { uid }, data: { holder: B.actor, heldAt: new Date() } });
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I3 })).body.relatedInsert.reason, 'TARGET_HELD');
+  await w.base.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+  const receipts = () => w.base.reportDraftInsertReceipt.findMany({ orderBy: { insertRequestId: 'asc' } });
+  try {
+    // (1) the Target is split: every answer is the identity refusal, before any receipt, with nothing of either
+    w.split = new Set([uid]);
+    const before = await w.state(uid), stored = await receipts();
+    for (const [label, body] of [['applied replay', I1], ['discarded apply', I2], ['resent discard', asDiscard(I2, 1)], ['refused retry', I3],
+        ['refused discard', asDiscard(I3, 1)], ['new ID', relatedBody(token, uid, source, { seed })]]) {
+      const answer = await w.send('X', 'put', { as: A, uid, body });
+      assert.deepEqual(brief(answer), { ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' }, label);
+      assert.deepEqual(Object.keys(answer.body).sort(), ['code', 'message'], label + ': no receipt or envelope');
+    }
+    for (const body of [I1, I2, I3]) {
+      const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: body.relatedInsert.insertRequestId } });
+      assert.deepEqual([brief(check), Object.keys(check.body).sort()], [{ ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' }, ['code', 'message']]);
+    }
+    assert.deepEqual([await w.state(uid), await receipts()], [before, stored], 'the split Target: nothing written');
+    // (2) the Target is whole, the Source is split: a new apply and the refused retry are refused without a receipt row
+    w.split = new Set([source]);
+    const fresh = relatedBody(token, uid, source, { seed });
+    const blocked = await w.send('X', 'put', { as: A, uid, body: fresh });
+    assert.deepEqual(brief(blocked), { ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' }, JSON.stringify(blocked.body));
+    assert.equal(await receiptOf(w, fresh), null, 'an identity refusal is not a refused receipt');
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid, body: I3 })), { ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' });
+    assert.deepEqual([await w.state(uid), await receipts()], [before, stored], 'the split Source: nothing written, the refused receipt unchanged');
+    const replay = await w.send('X', 'put', { as: A, uid, body: I1 });
+    assert.deepEqual([replay.ok, replay.body?.relatedInsert?.result], [true, 'applied'], JSON.stringify(replay.body));
+    assert.equal((await w.send('X', 'put', { as: A, uid, body: I2 })).code, 'RELATED_INSERT_DISCARDED');
+    const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: I1.relatedInsert.insertRequestId } });
+    assert.deepEqual([check.ok, check.body?.relatedInsert?.result], [true, 'applied']);
+    const discard = await w.send('X', 'put', { as: A, uid, body: asDiscard(I3, 1) });
+    assert.deepEqual([discard.ok, discard.body?.relatedInsert?.state], [true, 'discarded'], JSON.stringify(discard.body));
+    assert.deepEqual(await w.state(uid), before, 'the discard wrote no draft and no audit row');
+  } finally {
+    w.split = null;
   }
 });

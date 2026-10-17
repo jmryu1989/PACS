@@ -27,7 +27,7 @@ const fs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
 if (!fs.existsSync('/app/dist/pacs')) require('./service_test_loader.cjs');
 
-const { HttpException, NotFoundException, RequestMethod, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
+const { ConflictException, HttpException, NotFoundException, RequestMethod, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
 const { PATH_METADATA, METHOD_METADATA, ROUTE_ARGS_METADATA } = require('/app/node_modules/@nestjs/common/constants');
 const { RouteParamtypes } = require('/app/node_modules/@nestjs/common/enums/route-paramtypes.enum');
 const { Prisma } = require('/app/node_modules/@prisma/client');
@@ -264,6 +264,17 @@ function world({ source = SOURCE_LOW } = {}) {
     async require(c, uids, tx) { store.events.push(`${tx ? 'tx' : 'root'} require ${JSON.stringify(uids)}`);
       if (uids.some(uid => sa.denied.has(uid))) throw new NotFoundException('검사를 찾을 수 없습니다'); },
     async allowed(c, uids) { return new Set(uids.filter(uid => !sa.denied.has(uid))); },
+    // WORKLIST-SPLIT-UID, as StudyAccessService: split = UIDs two original resources answer now; unobservable = UIDs whose
+    // resources cannot be read now. The observation is per request (per Caller), outside the transaction; the assertion
+    // refuses a split (409) or a UID this request did not observe (503).
+    split: new Set(), unobservable: new Set(), observed: new WeakMap(),
+    async prepareSourceIdentity(c, uids) { store.events.push('root identity ' + JSON.stringify(uids));
+      const seen = sa.observed.get(c) ?? new Map(); sa.observed.set(c, seen);
+      for (const uid of uids) if (!seen.has(uid)) seen.set(uid, sa.unobservable.has(uid) ? null : sa.split.has(uid) ? 2 : 1); },
+    assertUnsplitSource(c, uid) { store.events.push('assert unsplit ' + uid);
+      const count = sa.observed.get(c)?.get(uid);
+      if (typeof count !== 'number') throw new ServiceUnavailableException({ code: 'STUDY_SOURCE_UNAVAILABLE', message: 'SYN source unobserved' });
+      if (count > 1) throw new ConflictException({ code: 'STUDY_IDENTITY_UNRESOLVED', message: 'SYN split' }); },
   };
   const trap = name => new Proxy({}, { get(_t, key) { return () => { throw new Error(`harness: ${name}.${String(key)} must not be reached`); }; } });
   const w = { store, sa, source, epoch: randomUUID() };
@@ -987,4 +998,88 @@ test('W5API-30 a receipt finished between the replay check and the lock is judge
   assert.deepEqual([late.status, late.code], [409, 'RELATED_INSERT_NOT_DISCARDABLE'], JSON.stringify(late.body));
   assertAnswer(late.body.relatedInsert, { state: 'applied', result: 'applied' }, 'judged under the lock');
   assert.equal(w.receipt(id).state, 'applied');
+});
+
+/** An applied, a discarded and a refused insertion on the Target, each through the product (the W5API-28 fixture plus a hold). */
+async function finishedInsertions(w) {
+  const applied = insertBody(w);
+  assert.equal((await w.send('put', { body: applied })).status, 200);
+  const discarded = insertBody(w);            // frozen on the old revision: refused (DRAFT_CONFLICT), then discarded
+  assert.equal((await w.send('put', { body: discarded })).body.relatedInsert.reason, 'DRAFT_CONFLICT');
+  assert.equal((await w.send('put', { body: discardOf(discarded, 1) })).status, 200);
+  const seed = { findings: w.draft().findings, conclusion: 'SYN draft conclusion\n', recommendation: 'SYN draft recommendation', baseVersion: 1 };
+  const refused = insertBody(w, { revision: 2, seed });
+  hold(w);
+  assert.equal((await w.send('put', { body: refused })).body.relatedInsert.reason, 'TARGET_HELD');
+  release(w);
+  return { applied, discarded, refused, fresh: () => insertBody(w, { revision: 2, seed }) };
+}
+
+test('W5API-31 WORKLIST-SPLIT-UID: a Target two patient resources answer is 409 STUDY_IDENTITY_UNRESOLVED to every insertion PUT and Check - applied, discarded or refused receipt, or a new ID - before any receipt is read, with no receipt or envelope in the answer and nothing written', async () => {
+  const w = world(), { applied, discarded, refused, fresh } = await finishedInsertions(w);
+  w.sa.split.add(TARGET);
+  const before = w.snapshot(), events = w.store.events.length;
+  for (const [label, body] of [['applied replay', applied], ['discarded apply', discarded], ['resent discard', discardOf(discarded, 1)],
+      ['refused retry', refused], ['refused discard', discardOf(refused, 1)], ['applied discard', discardOf(applied, 1)], ['new ID', fresh()]]) {
+    const answer = await w.send('put', { body });
+    assert.deepEqual([answer.status, answer.code], [409, 'STUDY_IDENTITY_UNRESOLVED'], `${label}: ${JSON.stringify(answer.body)}`);
+    assert.deepEqual(Object.keys(answer.body).sort(), ['code', 'message'], label + ': no receipt, revision or envelope');
+  }
+  for (const body of [applied, discarded, refused, fresh()]) {
+    const check = await w.send('read', { query: { insertRequestId: body.relatedInsert.insertRequestId } });
+    assert.deepEqual([check.status, check.code, Object.keys(check.body).sort()], [409, 'STUDY_IDENTITY_UNRESOLVED', ['code', 'message']]);
+  }
+  assert.equal(w.snapshot(), before, 'nothing written');
+  const seen = w.store.events.slice(events);
+  assert.equal(seen.some(e => /reportDraftInsertReceipt|ReportDraftInsertReceipt|ReportDraft\b|reportDraft /.test(e)), false,
+    'neither a receipt nor a draft is read or locked: ' + seen.join(' | '));
+  assert.equal(seen.some(e => e.includes(w.source)), false, 'no Source preparation, observation or read');
+  // scope still decides first: an out-of-scope split Target is 404, never the split answer
+  w.sa.denied.add(TARGET);
+  assert.equal((await w.send('put', { body: applied })).status, 404);
+  assert.equal((await w.send('read', { query: { insertRequestId: applied.relatedInsert.insertRequestId } })).status, 404);
+  w.sa.denied.delete(TARGET);
+  // a Target whose resources cannot be observed now is 503 STUDY_SOURCE_UNAVAILABLE, equally before the receipt
+  w.sa.split.delete(TARGET); w.sa.unobservable.add(TARGET);
+  const unobserved = await w.send('put', { body: applied });
+  assert.deepEqual([unobserved.status, unobserved.code], [503, 'STUDY_SOURCE_UNAVAILABLE']);
+  w.sa.unobservable.delete(TARGET);
+  assert.equal((await w.send('put', { body: applied })).status, 200, 'resolved: the replay answers again');
+  assert.equal(w.snapshot(), before, 'still nothing written');
+});
+
+test('W5API-32 WORKLIST-SPLIT-UID: a split Source refuses a new apply and a refused retry (409, no receipt row or change, nothing written) after the Source scope gate; replay, Check and discard need no Source observation and still answer under the Target', async () => {
+  for (const blocker of ['split', 'unobservable']) {
+    const w = world(), { applied, discarded, refused, fresh } = await finishedInsertions(w);
+    w.sa[blocker].add(w.source);
+    const before = w.snapshot(), events = w.store.events.length;
+    const want = blocker === 'split' ? [409, 'STUDY_IDENTITY_UNRESOLVED'] : [503, 'STUDY_SOURCE_UNAVAILABLE'];
+    const newApply = fresh();
+    const blocked = await w.send('put', { body: newApply });
+    assert.deepEqual([blocked.status, blocked.code], want, `${blocker} new apply: ${JSON.stringify(blocked.body)}`);
+    assert.equal(w.receipt(newApply.relatedInsert.insertRequestId), null, blocker + ': no refused row for an identity refusal');
+    const retry = await w.send('put', { body: refused });
+    assert.deepEqual([retry.status, retry.code], want, blocker + ' refused retry');
+    assert.equal(w.snapshot(), before, blocker + ': nothing written, the refused receipt unchanged');
+    const observed = w.store.events.slice(events);
+    assert.ok(observed.includes('root identity ' + JSON.stringify([w.source])), blocker + ': a new apply observes its Source outside the transaction');
+    const unsplitAt = observed.indexOf('assert unsplit ' + w.source);
+    const sourceGate = observed.findIndex(e => e === `tx require ${JSON.stringify([w.source])}`);
+    assert.ok(sourceGate >= 0 && unsplitAt > sourceGate, blocker + ': the Source scope gate decides before the identity refusal');
+    assert.equal(observed.slice(unsplitAt).some(e => /read (reportVersion|report) .*/.test(e) && e.includes(w.source)), false,
+      blocker + ': no Source version or head is read');
+    // the finished answers are unchanged and never touch the Source
+    const quiet = w.store.events.length;
+    const replay = await w.send('put', { body: applied });
+    assert.equal(replay.status, 200, blocker);
+    assertAnswer(replay.body.relatedInsert, { result: 'applied', state: 'applied', currentMatches: true }, blocker + ' replay');
+    assert.deepEqual([(await w.send('put', { body: discarded })).code], ['RELATED_INSERT_DISCARDED'], blocker);
+    assert.equal((await w.send('put', { body: discardOf(discarded, 1) })).status, 200, blocker + ': resent discard');
+    const check = await w.send('read', { query: { insertRequestId: applied.relatedInsert.insertRequestId } });
+    assert.deepEqual([check.status, check.body.relatedInsert.result], [200, 'applied'], blocker + ': Check');
+    const discard = await w.send('put', { body: discardOf(refused, 1) });
+    assert.equal(discard.status, 200, `${blocker}: the refused insertion is still discardable ${JSON.stringify(discard.body)}`);
+    assertAnswer(discard.body.relatedInsert, { state: 'discarded', receiptRevision: 2 }, blocker + ' discard');
+    assert.equal(w.store.events.slice(quiet).some(e => e.includes(w.source)), false, blocker + ': no Source observation, gate or read');
+  }
 });
