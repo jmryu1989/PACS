@@ -142,7 +142,7 @@ class ContainerTests(unittest.TestCase):
         previous_image = json.loads(self.command(["docker", "image", "inspect", image]))[0]["Id"]
         # EMR-B1: the server holds only the runtime role (trust authentication in this internal fixture network) and its
         # state volume; the installer credential migrates once, in its own container, before the server exists.
-        env = {"DATABASE_URL": "postgresql://kin_runtime@" + self.db + ":5432/kin", "KIN_EMR_STATE_DIR": pre.EMR_STATE,
+        env = {"DATABASE_URL": "postgresql://kin_runtime@" + self.db + ":5432/kin", "KIN_EMR_STATE_DIR": pre.EMR_STATE, "KIN_EMR_PROXY_HOST": "kin-proxy",
                "DEPLOYMENT_MODE": "production", "AUTH_REQUIRED": "true",
                "KC_ISSUER": "http://127.0.0.1:1/auth/realms/kin", "KC_JWKS_URL": "http://127.0.0.1:1/certs",
                "KC_AUDIENCE": "kin-api", "KC_WEB_SECRET": uuid.uuid4().hex, "KIN_COOKIE_SECRET": uuid.uuid4().hex,

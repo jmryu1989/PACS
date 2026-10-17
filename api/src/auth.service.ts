@@ -10,6 +10,12 @@ import { ChangeAnswer, KeycloakService, RosterWriteFailure, within } from './key
 import { rightsAllow, lockMemberRights } from './member-rights';
 import { importMemberRights } from './member-rights-import';
 import { clinicianOnly } from './clinician-policy';
+import { promises as dns } from 'node:dns';
+import { refuse } from './emr-contract/validation';
+import { EmrApplicationRuntime } from './emr-runtime/application';
+import {
+  createEmrRequestContext, EmrAuthenticatedRequestSource, EmrRequestCapture, EmrVerifiedAdmission,
+} from './emr-runtime/request-context';
 
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const SESSION_TOUCH_MS = 5 * 60 * 1000;
@@ -199,7 +205,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly flying = new Map<string, number>();
 
-  constructor(private prisma: PrismaService, private keycloak: KeycloakService) {}
+  /** EMR-B2-BASE: the read port of verified member request facts, created once; its writer stays private to this service. */
+  readonly emrRequestContext: EmrAuthenticatedRequestSource;
+  private readonly emrCapture: EmrRequestCapture;
+
+  constructor(private prisma: PrismaService, private keycloak: KeycloakService, emr: EmrApplicationRuntime) {
+    const context = createEmrRequestContext({ runtime: emr, issuer: () => process.env.KC_ISSUER,
+      member: subject => this.emrMember(subject), lookup: host => dns.lookup(host, { all: true }) });
+    this.emrRequestContext = context.source;
+    this.emrCapture = context.capture;
+  }
 
   async onModuleInit() {
     // Realm startup may follow API startup. Entry checks the committed marker while this single task retries.
@@ -623,6 +638,28 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
     await this.refuseEndedIdpSession(claims, raw);
     return rights;
+  }
+
+  /**
+   * EMR-B2-BASE: AuthGuard's final member success hands its verified admission here - its only caller (the TypeScript
+   * checker of tests/emr/b/contract_test.cjs C35 holds that). Capture copies and freezes it under the request object; it
+   * reads nothing, writes nothing and changes no session, cookie, timer or audit row.
+   */
+  captureEmrRequest(request: unknown, response: unknown, admission: EmrVerifiedAdmission): void {
+    // Called as a plain function: the request writer never receives this service as its `this`.
+    const capture = this.emrCapture;
+    capture(request, response, admission);
+  }
+
+  /** member(subject) of the request facts: that subject's current rights through the reader admission uses, no JWT roles. */
+  private async emrMember(subject: string): Promise<void> {
+    let rights: any;
+    try { rights = await this.entryRights(subject); }
+    catch (error: any) {
+      const code = typeof error?.getResponse === 'function' ? error.getResponse()?.code : undefined;
+      refuse(code === 'AUTH_RIGHTS_PENDING' ? 'EmrMemberRightsPending' : code === 'AUTH_STORAGE_FAILURE' ? 'EmrMemberUnavailable' : 'EmrMemberRefused');
+    }
+    if (!rightsAllow(rights)) refuse('EmrMemberRefused');
   }
 
   private authenticationAfter(authTime: unknown, boundary: Date): boolean {

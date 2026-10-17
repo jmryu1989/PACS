@@ -1729,30 +1729,104 @@ class ClinicianPolicySpec(unittest.TestCase):
             "allowed_additions": sorted(declared),
         }, ensure_ascii=True, sort_keys=True))
 
-    def test_06_guard_source_pins(self):
-        guard = self.guard
-        self.assertIn("import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';", guard)
-        self.assertRegex(guard, r"import \{\s*APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,?\s*\} from './clinician-policy';")
-        self.assertNotIn("new Set(['radiologist'", guard, "guard must not keep its own role literal")
-        self.assertIn("req.roles = ['radiologist', 'technician', 'admin'];", guard, "AUTH_REQUIRED=false dev roles unchanged (no clinician)")
-        self.assertIn("const isLogout = req.method === 'POST' && path === '/api/auth/logout';", guard)
-        self.assertIn("if (state !== 'APPROVED' && !isLogout)", guard)
-        membership = guard.index("code: state === 'PENDING' ? 'INSTITUTION_PENDING' : 'INSTITUTION_INVALID'")
-        gate = guard.index("req.clinicianOnly = clinicianOnly(req.roles);")
-        # S7-U5: the CSRF check is AuthService.requireCsrf; the guard's last call of it is the one every non-GET cookie
-        # request passes after the membership and clinician gates (the earlier one is the logout's own).
-        csrf = guard.rindex("this.auth.requireCsrf(req)")
-        returned = guard.rindex("return true;")
-        self.assertLess(membership, gate)
-        self.assertLess(gate, csrf)
-        self.assertLess(csrf, returned)
-        block = guard[gate:csrf]
-        self.assertRegex(block, r"if \(req\.clinicianOnly\) \{")
-        self.assertRegex(block, r"routeKey\(\s*this\.reflector\.get\(METHOD_METADATA, ctx\.getHandler\(\)\),\s*this\.reflector\.get\(PATH_METADATA, ctx\.getClass\(\)\),\s*this\.reflector\.get\(PATH_METADATA, ctx\.getHandler\(\)\),\s*\)")
-        self.assertRegex(block, r"if \(!clinicianRouteAllowed\(key\)\)\s*throw new ForbiddenException\(\{ code: CLINICIAN_ROUTE_DENIED \}\);")
-        self.assertNotIn("originalUrl", block, "the gate reads route metadata, not the request URL")
-        gateway_return = guard.index("req.kind = 'gateway';")
-        self.assertLess(gateway_return, membership, "gateway identities return before the member checks")
+    def test_06_guard_gates_and_their_order_by_behaviour(self):
+        """The guard's member gates as behaviour of the compiled AuthGuard (installed TypeScript through
+        tests/service_test_loader.cjs) - EMR-B2-BASE replaces the former literal/index/regex pins of this method, a D73
+        finding (spec TEST-B2SH-08/11/15). The AuthService is the product's; only its token verification, session read and
+        rights read answer fixed synthetic facts here, so each verdict is the guard's own: development roles without
+        clinician; a gateway identity returns before any member rights are read; pending and invalid members are refused
+        except on logout; the clinician gate reads the route's Nest metadata, never the URL; membership comes before the
+        clinician gate, and both before the cookie CSRF rule."""
+        script = r"""
+require('./tests/service_test_loader.cjs');
+require('/app/node_modules/reflect-metadata');
+const { Controller, Get, Post } = require('/app/node_modules/@nestjs/common');
+const { Reflector } = require('/app/node_modules/@nestjs/core');
+const { ExecutionContextHost } = require('/app/node_modules/@nestjs/core/helpers/execution-context-host');
+const { AuthGuard } = require('/app/dist/auth.guard');
+const { AuthService } = require('/app/dist/auth.service');
+class Routes { me() {} read() {} write() {} logout() {} gateway() {} }
+Controller()(Routes);
+const at = (name, decorator) => decorator(Routes.prototype, name, Object.getOwnPropertyDescriptor(Routes.prototype, name));
+at('me', Get('me')); at('read', Get('syn/read')); at('write', Post('syn/write')); at('logout', Post('auth/logout')); at('gateway', Get('gateway/syn'));
+const rights = role => ({ version: 1, approved: true, suspended: false, institution: 'hospital-a', roles: [role], newAuthAfter: null });
+const facts = {
+  member: { claims: { sub: 'member', realm_access: { roles: ['admin'] } }, rights: rights('radiologist') },
+  clinician: { claims: { sub: 'clinician', realm_access: { roles: [] } }, rights: rights('clinician') },
+  pending: { claims: { sub: 'pending', realm_access: { roles: [] } }, rights: { ...rights('radiologist'), institution: null } },
+  invalid: { claims: { sub: 'invalid', realm_access: { roles: [] } }, rights: { ...rights('radiologist'), approved: false } },
+  gateway: { claims: { sub: 'gateway', azp: 'gw-agent', groups: ['/hospital-a'], realm_access: { roles: ['gateway'] } } },
+  adjacent: { claims: { sub: 'adjacent', azp: 'gw-agent', groups: ['/hospital-a'], realm_access: { roles: ['gateway', 'radiologist'] } } },
+};
+const service = new AuthService({}, {}, undefined);
+let reads = 0;
+service.verifyAccessToken = async raw => ({ iss: 'https://identity.example.test/realms/kin', ...facts[raw].claims });
+service.bearerRights = async claims => { reads++; return facts[claims.sub].rights; };
+service.authenticateSession = async sid => ({ sid, sub: sid, accessToken: sid });
+service.sessionRights = async session => { reads++; return facts[session.sub].rights; };
+const guard = new AuthGuard(new Reflector(), service);
+const call = async (handler, { url, method = 'GET', bearer, session, csrf, dev }) => {
+  const headers = {};
+  if (bearer) headers.authorization = 'Bearer ' + bearer;
+  if (session) { headers.cookie = 'kin_sid=' + session; headers['x-kin-session'] = service.sessionRef(session); }
+  if (csrf) headers['x-kin-csrf'] = '1';
+  const req = { method, originalUrl: url, url, headers }, res = { setHeader() {}, headersSent: false };
+  const before = reads;
+  if (dev) process.env.AUTH_REQUIRED = 'false';
+  try {
+    await guard.canActivate(new ExecutionContextHost([req, res], Routes, Routes.prototype[handler]));
+    return { admitted: true, roles: req.roles, reads: reads - before };
+  } catch (error) {
+    const body = error && typeof error.getResponse === 'function' ? error.getResponse() : null;
+    return { admitted: false, status: error && typeof error.getStatus === 'function' ? error.getStatus() : null,
+      code: body && typeof body === 'object' ? body.code ?? null : null, reads: reads - before };
+  } finally { process.env.AUTH_REQUIRED = 'true'; }
+};
+(async () => {
+  process.env.AUTH_REQUIRED = 'true';
+  const out = {
+    dev: await call('read', { url: '/api/syn/read', dev: true }),
+    gateway: await call('gateway', { url: '/api/gateway/syn', bearer: 'gateway' }),
+    adjacent: await call('gateway', { url: '/api/gateway/syn', bearer: 'adjacent' }),
+    pending: await call('read', { url: '/api/syn/read', bearer: 'pending' }),
+    invalid: await call('read', { url: '/api/syn/read', bearer: 'invalid' }),
+    pending_logout: await call('logout', { url: '/api/auth/logout', method: 'POST', bearer: 'pending' }),
+    session_logout: await call('logout', { url: '/api/auth/logout', method: 'POST', session: 'pending', csrf: true }),
+    session_logout_no_csrf: await call('logout', { url: '/api/auth/logout', method: 'POST', session: 'pending' }),
+    clinician_metadata_allowed: await call('me', { url: '/api/syn/read', bearer: 'clinician' }),
+    clinician_metadata_denied: await call('read', { url: '/api/me', bearer: 'clinician' }),
+    pending_before_csrf: await call('write', { url: '/api/syn/write', method: 'POST', session: 'pending' }),
+    gate_before_csrf: await call('write', { url: '/api/syn/write', method: 'POST', session: 'clinician' }),
+    member_no_csrf: await call('write', { url: '/api/syn/write', method: 'POST', session: 'member' }),
+    member_csrf: await call('write', { url: '/api/syn/write', method: 'POST', session: 'member', csrf: true }),
+    member_bearer_write: await call('write', { url: '/api/syn/write', method: 'POST', bearer: 'member' }),
+  };
+  console.log('GUARD_BEHAVIOUR ' + JSON.stringify(out));
+})().catch(error => { console.error(error && error.stack); process.exit(1); });
+"""
+        result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=300)
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:] + result.stderr[-2000:])
+        line = next(line for line in result.stdout.splitlines() if line.startswith("GUARD_BEHAVIOUR "))
+        seen = json.loads(line[len("GUARD_BEHAVIOUR "):])
+        denied = lambda status, code, reads: {"admitted": False, "status": status, "code": code, "reads": reads}
+        self.assertEqual(seen["dev"], {"admitted": True, "roles": ["radiologist", "technician", "admin"], "reads": 0},
+                         "AUTH_REQUIRED=false development roles, never clinician")
+        self.assertEqual(seen["gateway"]["admitted"], True)
+        self.assertEqual(seen["gateway"]["reads"], 0, "a gateway identity returns before any member rights are read")
+        self.assertEqual(seen["adjacent"], denied(403, "GATEWAY_IDENTITY_INVALID", 0))
+        self.assertEqual(seen["pending"], denied(403, "INSTITUTION_PENDING", 1))
+        self.assertEqual(seen["invalid"], denied(403, "INSTITUTION_INVALID", 1))
+        self.assertEqual(seen["pending_logout"]["admitted"], True, "a pending member can still log out")
+        self.assertEqual((seen["session_logout"]["admitted"], seen["session_logout"]["reads"]), (True, 0), "logout needs no session refresh or rights")
+        self.assertEqual(seen["session_logout_no_csrf"], denied(403, "AUTH_CSRF_REQUIRED", 0))
+        self.assertEqual((seen["clinician_metadata_allowed"]["admitted"], seen["clinician_metadata_allowed"]["roles"]), (True, ["clinician"]),
+                         "the gate reads the route metadata (GET me), not the URL")
+        self.assertEqual(seen["clinician_metadata_denied"], denied(403, "CLINICIAN_ROUTE_DENIED", 1), "a clinician URL of an allowed route opens nothing")
+        self.assertEqual(seen["pending_before_csrf"], denied(403, "INSTITUTION_PENDING", 1), "membership before the clinician gate and CSRF")
+        self.assertEqual(seen["gate_before_csrf"], denied(403, "CLINICIAN_ROUTE_DENIED", 1), "the clinician gate before CSRF")
+        self.assertEqual(seen["member_no_csrf"], denied(403, "AUTH_CSRF_REQUIRED", 1), "a cookie write needs CSRF after both gates")
+        self.assertEqual(seen["member_csrf"]["admitted"], True)
+        self.assertEqual(seen["member_bearer_write"]["admitted"], True, "a bearer write is not a CSRF target")
 
     def test_07_member_console_and_keycloak_client_share_the_role_list(self):
         # D73/D623: DB rows already hold PACS roles; the old row-filter string is no longer a contract.

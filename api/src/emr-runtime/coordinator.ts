@@ -112,6 +112,9 @@ export class StateCoordinator {
       }
     }
   }
+  /** True only while this process holds the lifetime writer fence of the directory. A coordinator that found another
+   * owner is that owner's IPC client; the API start refuses there before any recovery (EMR-B2-BASE, G-4). */
+  get holdsWriterFence(): boolean { return !this.transport && this.owner !== undefined; }
   ownerAlive(owner: string): boolean {
     if (this.transport) return this.call('owner-alive', owner);
     if (owner === this.ownerId && this.ownerFd !== undefined) return true;

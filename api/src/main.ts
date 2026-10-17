@@ -1,5 +1,8 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import type { INestApplication } from '@nestjs/common';
+import { EmrApplicationRuntime, EmrStartupFailure } from './emr-runtime/application';
+import { startupFailureMessage } from './emr-runtime/manifest';
 import { dictationParser } from './dictation-parser';
 
 async function bootstrap() {
@@ -19,7 +22,9 @@ async function bootstrap() {
         process.exit(1);
       }
 
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  // EMR-B2-BASE: a provider refusal while Nest builds the module graph (abortOnError off) reaches the one closed line at the
+  // end of this file instead of Nest's English error, stack and exit; Nest's own logs stay buffered until the server listens.
+  const app = startup.app = await NestFactory.create(AppModule, { rawBody: true, abortOnError: false, bufferLogs: true, autoFlushLogs: false });
   app.use(dictationParser());
   /**
    * 모든 `/api/` 응답의 기본값은 `no-store`다(S7-U5 A016). 예전에는 경로 목록에 든 곳만 그랬고, 목록에 없는 GET(판독 이력·
@@ -44,12 +49,34 @@ async function bootstrap() {
   if (corsOrigins.length)
     app.enableCors({ origin: corsOrigins, credentials: false });
   app.setGlobalPrefix('api');
-
+  // EMR-B2-BASE: the EMR ledger owner starts once, after the module graph and before every init hook (timers) and the
+  // listener; a refused start never opens either. This build composes A with B's readers only (no clinical plan).
+  await app.get(EmrApplicationRuntime).start({ mode: 'base' });
+  startup.phase = 'init';
+  await app.init();
+  startup.phase = 'listen';
   await app.listen(3000, '0.0.0.0');
+  app.flushLogs();
   console.log('[KIN API] http://localhost:3000/api');
   if (process.env.AUTH_REQUIRED === 'false')
     console.warn('[KIN API] ⚠️  인증이 꺼져 있습니다 (AUTH_REQUIRED=false). 사내망 밖에 노출하지 마세요.');
   else
     console.log(`[KIN API] 인증: Keycloak (iss=${process.env.KC_ISSUER})`);
 }
-bootstrap();
+/**
+ * EMR-B2-BASE: a start that failed anywhere (create, the EMR owner's phases, init, listen) prints one closed line - never
+ * a provider message, which can carry a connection string - then closes what exists (the app and the owner's resources,
+ * each once) for at most 5 s and exits nonzero. A supervisor restart is a new process with its own recovery.
+ */
+const startup: { phase: 'create' | 'init' | 'listen'; app?: INestApplication } = { phase: 'create' };
+bootstrap().catch(async error => {
+  const failure = error instanceof EmrStartupFailure ? error : null;
+  console.error('[KIN API] ' + startupFailureMessage(failure ? failure.phase : startup.phase, failure ? failure.failure : error));
+  const app = startup.app;
+  const cleanup = (async () => {
+    try { await app?.close(); } catch { /* the line above is the failure */ }
+    try { await app?.get(EmrApplicationRuntime).onApplicationShutdown(); } catch { /* the line above is the failure */ }
+  })();
+  await Promise.race([cleanup, new Promise(done => setTimeout(done, 5000))]);
+  process.exit(1);
+});

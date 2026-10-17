@@ -222,6 +222,16 @@ export class AuthGuard implements CanActivate {
 
     // Bearer 호출은 CSRF 대상이 아니다. 브라우저가 자동으로 싣는 쿠키 호출만 헤더를 요구한다.
     if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method)) this.auth.requireCsrf(req);
+    /**
+     * EMR-B2-BASE: only here, after signature/iss/aud/exp, the session binding or the bearer end marker, the final DB rights
+     * and institution, the clinician route and CSRF all passed, does the request get its member facts - from the payload
+     * and the rights this guard verified, never from req.* fields. The dev, gateway, logout and public returns get none.
+     */
+    this.auth.captureEmrRequest(req, res, {
+      issuer: payload.iss, subject: payload.sub, displayName: typeof payload.name === 'string' ? payload.name : null,
+      roles: rights.roles, institutionId: rights.institution, rightsVersion: rights.version, authMethod: method,
+      sessionRef: method === 'session' ? this.auth.sessionRef(admittedSession.sid) : null,
+    });
     return true;
   }
 }

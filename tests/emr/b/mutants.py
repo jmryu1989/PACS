@@ -1,10 +1,11 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14-M37 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2-BASE M43-M63 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
 and a name pattern, live cases (Lnn) through the copy's own scripts/run-tests.py with a plan that selects exactly those
-EmrBLedgerLive cases and a production API image built from the mutated copy. A mutant is killed only when every declared
-kill case has a behavioural assertion failure; a harness error, build failure, a missing case or a refusal before the case ran is not a kill.
+EmrBLedgerLive cases and a production API image built from the mutated copy, unittest cases (P:<file>:<Class>.<test>,
+the EMR-B2-BASE ops boundaries) through that file with verbosity 2. A mutant is killed only when every declared kill
+case has a behavioural assertion failure; a harness error, build failure, a skip, a missing case or a refusal before the case ran is not a kill.
 
 Per mutant the record keeps the exact change, the cases, the expected failure, each run's exit code and raw log path, and
 the changed file's SHA-256 before the change, while mutated, and after the restore (which must equal the first).
@@ -147,7 +148,77 @@ MUTANTS = {
         ("api/src/emr-runtime/seal.ts", "      if (!intent) this.addIntent", "      if (false) this.addIntent")]),
     "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
         ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
-
+    # ── EMR-B2-BASE: MUT-B2SH-01..16 (spec requirement-risk-test.json), consult M05/M06/M13 and two ops boundaries ──
+    "M43": ("MUT-B2SH-01: init hooks run before the awaited EMR start", [
+        ("api/src/main.ts", "  await app.get(EmrApplicationRuntime).start({ mode: 'base' });\n  startup.phase = 'init';\n  await app.init();\n",
+         "  startup.phase = 'init';\n  await app.init();\n  await app.get(EmrApplicationRuntime).start({ mode: 'base' });\n")]),
+    "M44": ("MUT-B2SH-02: a clinical plan without its factory falls back to the base start", [
+        ("api/src/emr-runtime/application.ts", "      const clinical = startupPlan(plan);\n",
+         "      const chosen = startupPlan(plan), clinical = chosen && typeof chosen.prepare === 'function' ? chosen : null;\n")]),
+    "M45": ("MUT-B2SH-03: a concurrent or failed start may start again", [
+        ("api/src/emr-runtime/application.ts", "    if (this.state !== 'new') refuse('EmrStartupRepeated');\n",
+         "    if (this.state === 'ready') refuse('EmrStartupRepeated');\n")]),
+    "M46": ("MUT-B2SH-04: A binds B's bare readers instead of the prepared clinical readers", [
+        ("api/src/emr-runtime/application.ts", "      composeEmrAdapters(adapters);\n", "      composeEmrAdapters(runtimeAdapters);\n")]),
+    "M47": ("MUT-B2SH-05: a second ledger store over the same client", [
+        ("api/src/emr-runtime/application.ts", "      const ledger = new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n",
+         "      new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n"
+         "      const ledger = new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n")]),
+    "M48": ("MUT-B2SH-06: the dedicated client disconnects before the HTTP server drained (and twice)", [
+        ("api/src/emr-runtime/application.ts", "    return this.background ??= this.stopBackground();\n",
+         "    return this.background ??= this.stopBackground().then(() => this.owned.db?.$disconnect());\n")]),
+    "M49": ("MUT-B2SH-07: the fatal handler prints the raw error beside its closed line", [
+        ("api/src/main.ts", "failure ? failure.failure : error));\n", "failure ? failure.failure : error), error);\n")]),
+    "M50": ("MUT-B2SH-08: a clinical readiness rejection is swallowed and the server listens", [
+        ("api/src/emr-runtime/application.ts", "        await lifecycle.checkReady();\n", "        await lifecycle.checkReady().catch(() => undefined);\n")]),
+    "M51": ("MUT-B2SH-09: the request facts are captured before the cookie CSRF check", [
+        ("api/src/auth.guard.ts", "    if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method)) this.auth.requireCsrf(req);\n",
+         "    const csrfLater = () => { if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method)) this.auth.requireCsrf(req); };\n"),
+        ("api/src/auth.guard.ts", "    });\n    return true;\n  }\n}", "    });\n    csrfLater();\n    return true;\n  }\n}")]),
+    "M52": ("MUT-B2SH-10: a request without a capability gets facts from its own fields", [
+        ("api/src/emr-runtime/request-context.ts", "      if (!entry) refuse('EmrRequestFactsRequired');\n",
+         "      if (!entry) return Object.freeze({ kind: 'member', roles: (request as any)?.roles ?? [], identity: { id: 'unverified', issuer: '',"
+         " subject: String((request as any)?.sub) } } as any);\n")]),
+    "M53": ("MUT-B2SH-11: one process-wide materialization answers every request", [
+        ("api/src/emr-runtime/request-context.ts", "  const entries = new WeakMap<object, Entry>();\n",
+         "  const entries = new WeakMap<object, Entry>();\n  let shared: Promise<Readonly<EmrAuthenticatedRequestFacts>> | undefined;\n"),
+        ("api/src/emr-runtime/request-context.ts", "      return entry.facts ??= materialize(entry);\n", "      return shared ??= materialize(entry);\n")]),
+    "M54": ("MUT-B2SH-12: facts are still delivered after the response ended or the client went away", [
+        ("api/src/emr-runtime/request-context.ts", "  const alive = (entry: Entry) => { if (entry.ended) refuse('EmrRequestEnded'); };\n",
+         "  const alive = (entry: Entry) => { void entry; };\n")]),
+    "M55": ("MUT-B2SH-13: the identity is joined by display name without the issuer", [
+        ("api/src/emr-runtime/request-context.ts", "      (iss, sub) => ledger.withAppendTransaction(tx => ledger.resolveIdentity(tx, iss, sub)));\n",
+         "      (iss, sub) => ledger.withAppendTransaction(tx => ledger.resolveIdentity(tx, 'any-issuer', displayName ?? sub)));\n")]),
+    "M56": ("MUT-B2SH-14: member(subject) accepts an unknown, suspended or unapproved subject", [
+        ("api/src/auth.service.ts", "    if (!rightsAllow(rights)) refuse('EmrMemberRefused');\n", "")]),
+    "M57": ("MUT-B2SH-15: a direct caller's own X-Real-IP is believed", [
+        ("api/src/emr-runtime/request-context.ts",
+         "    const trustedProxyIp = Object.freeze(ingressAddress(entry.peer, { 'x-real-ip': entry.realIp }, await peers.current()));\n",
+         "    const trustedProxyIp = Object.freeze(ingressAddress(entry.peer, { 'x-real-ip': entry.realIp }, new Set([String(entry.peer).replace(/^::ffff:/, '')])));\n")]),
+    "M58": ("MUT-B2SH-16: base facts carry a synthetic signing registration", [
+        ("api/src/emr-runtime/request-context.ts", "  readonly requestId: string;\n  readonly trustedProxyIp",
+         "  readonly requestId: string;\n  readonly signingRegistrationId: string | null;\n  readonly trustedProxyIp"),
+        ("api/src/emr-runtime/request-context.ts", "sessionRef: a.sessionRef, requestId, trustedProxyIp,",
+         "sessionRef: a.sessionRef, requestId, signingRegistrationId: 'synthetic-registration', trustedProxyIp,")]),
+    "M59": ("consult M05: the institution comes from a request header instead of the verified rights", [
+        ("api/src/auth.guard.ts", "institutionId: rights.institution, rightsVersion: rights.version,",
+         "institutionId: req.headers['x-kin-institution'] ?? rights.institution, rightsVersion: rights.version,")]),
+    "M60": ("consult M06: a failed proxy lookup trusts any private-range peer", [
+        ("api/src/emr-runtime/request-context.ts",
+         "    const trustedProxyIp = Object.freeze(ingressAddress(entry.peer, { 'x-real-ip': entry.realIp }, await peers.current()));\n",
+         "    const resolved = await peers.current(), peer = String(entry.peer);\n"
+         "    const trustedProxyIp = Object.freeze(ingressAddress(entry.peer, { 'x-real-ip': entry.realIp }, resolved.size ? resolved"
+         " : new Set(/^(10\\.|192\\.168\\.|172\\.(1[6-9]|2\\d|3[01])\\.)/.test(peer) ? [peer] : [])));\n")]),
+    "M61": ("consult M13: a wrong runtime role still reaches the listener", [
+        ("api/src/emr-runtime/application.ts", "      if (this.config.verifyRole) await verifyRuntimeConnection(db);\n", "")]),
+    "M62": ("L-10: the probe appends and recovers beside a live API owner", [
+        ("scripts/ops_emr_probe.py",
+         "  if(operation==='append'&&!coordinator.holdsWriterFence)throw Object.assign(new Error('EmrStateOwnerBusy'),{code:'EmrStateOwnerBusy'});\n", "")]),
+    "M63": ("isolated restore: the recovery runs on a state volume a running container mounts", [
+        ("scripts/ops_backup.py",
+         "    if run([\"docker\", \"ps\", \"-q\", \"--filter\", \"volume=\" + state_volume]).stdout.decode(\"utf-8\").split():\n"
+         "        raise RuntimeError(\"EMR recovery refused: the state volume is mounted by a running container\")\n",
+         "    return\n")]),
 }
 
 
@@ -259,6 +330,29 @@ def live_verdict(text, cases, code):
     harness = bool(re.search(r"^ERROR: ", text, re.M))
     return {"failed": sorted(failed), "harness_errors": harness,
             "killed": code != 0 and failed == set(cases) and not harness}
+
+
+def unittest_verdict(text, cases, code):
+    """A Python unittest kill case `P:<file>:<Class>.<test>`: its own FAIL heading (a behavioural assertion); an ERROR,
+    a skip or a missing case is not a kill."""
+    methods = {case: case.rsplit(".", 1)[1] for case in cases}
+    failed = {case for case, method in methods.items() if re.search(r"^FAIL: " + re.escape(method) + r" \(", text, re.M)}
+    harness = bool(re.search(r"^ERROR: ", text, re.M)) or any(
+        re.search(r"^" + re.escape(method) + r" \([\w.]+\)(?:\n(?!test_)[^\n]*?)? \.\.\. skipped", text, re.M) for method in methods.values())
+    return {"failed": sorted(failed), "harness_errors": harness, "killed": code != 0 and failed == set(cases) and not harness}
+
+
+def unittest_kills(copy, cases, out, name, env):
+    """Run each declared unittest case (P:<file>:<Class>.<test>) of the mutated copy with verbosity 2."""
+    runs, text, code = [], "", 0
+    for index, case in enumerate(cases):
+        _, path, test = case.split(":", 2)
+        log = out / ("%s-unittest-%d.log" % (name, index))
+        exit_code, seconds = run([sys.executable, "-B", path, "-v", test], cwd=copy, env=env, timeout=900, log=log)
+        runs.append({"case": case, "exit": exit_code, "seconds": seconds, "log": str(log)})
+        text += log.read_text(encoding="utf-8", errors="replace") + "\n"
+        code = code or exit_code
+    return {"kind": "unittest", "cases": cases, "exit": code, "runs": runs, **unittest_verdict(text, [c.split(":", 2)[2] for c in cases], code)}
 
 
 def contract_kills(copy, cases, out, name, env):
@@ -467,6 +561,16 @@ def self_test():
         def test_missing_case_and_wrong_case_are_not_kills(self):
             self.assertFalse(contract_verdict("not ok 1 - test file\n", ["C13"], 1)["killed"])
             self.assertFalse(live_verdict("FAIL: test_b04_chain_tail_and_crash_recovery (live.EmrBLedgerLive)\n", ["L05"], 1)["killed"])
+
+        def test_unittest_assertion_error_and_skip_are_distinct(self):
+            case = ["EmrRestoreVerification.test_b2_restore"]
+            failed = "FAIL: test_b2_restore (__main__.EmrRestoreVerification.test_b2_restore)\nAssertionError: x\n"
+            self.assertTrue(unittest_verdict(failed, case, 1)["killed"])
+            self.assertFalse(unittest_verdict(failed, case, 0)["killed"])
+            self.assertFalse(unittest_verdict("ERROR: test_b2_restore (__main__.EmrRestoreVerification.test_b2_restore)\n", case, 1)["killed"])
+            skipped = "test_b2_restore (__main__.EmrRestoreVerification.test_b2_restore) ... skipped 'Linux only'\n"
+            self.assertFalse(unittest_verdict(skipped, case, 1)["killed"])
+            self.assertFalse(unittest_verdict("FAIL: test_other (__main__.EmrRestoreVerification.test_other)\n", case, 1)["killed"])
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(VerdictTest)
     return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
 
@@ -519,8 +623,11 @@ def main(argv=None):
                     runs = []
                     contract = [case for case in kill if case.startswith("C")]
                     live = [case for case in kill if case.startswith("L")]
+                    python = [case for case in kill if case.startswith("P:")]
                     if contract:
                         runs.append(contract_kills(copy, contract, out, name, env))
+                    if python:
+                        runs.append(unittest_kills(copy, python, out, name, env))
                     if name in {"M32", "M33", "M34", "M35"}:
                         runs.append(invariant_witness(copy, out, name, env))
                     if live and args.contract_only:

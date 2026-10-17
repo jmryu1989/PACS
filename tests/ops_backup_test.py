@@ -160,6 +160,9 @@ class Host:
         self.catalog = {"synthetic": "catalog"}
         self.restored_catalog = None
         self.restore_answer = "EMR_RESTORE_VERIFIED"
+        # EMR-B2-BASE: the containers `docker ps --filter volume=` reports for a restored state volume, and every helper run.
+        self.live_mounts = []
+        self.helpers = []
         # D23: the cluster's role catalog the backup records, and (when set) what a rehearsal's restore comes out with.
         self.role_catalog = daily_role_catalog()
         self.restored_role_catalog = None
@@ -196,6 +199,7 @@ class Host:
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     def fake_archive(self, args, **kwargs):
+        self.helpers.append(list(args))
         if "-sk" in args:
             return "8 /source"
         if kwargs.get("output") is not None:
@@ -246,7 +250,8 @@ class Host:
         def rehearsal_run(args, **kwargs):
             self.events.append(("command", list(args)))
             self.cluster.observe(args, kwargs.get("input_file"))
-            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            mounts = args[:2] == ["docker", "ps"] and any(str(arg).startswith("volume=") for arg in args)
+            return SimpleNamespace(returncode=0, stdout=("\n".join(self.live_mounts) if mounts else "").encode(), stderr=b"")
         with patch.object(ops, "run", side_effect=rehearsal_run), patch.object(ops, "text", side_effect=self.cluster.text), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
                 patch.object(ops, "emr_catalog", return_value=self.restored_catalog or self.catalog), \
@@ -825,6 +830,9 @@ class BackupSafetyTests(unittest.TestCase):
                 # PostgreSQL itself.
                 if args[:3] == ["docker", "run", "-d"]:
                     clusters.append(DailyCluster(json.loads((sealed / "manifest.json").read_text(encoding="utf-8"))["role_catalog"]))
+                if args[:2] == ["docker", "ps"]:
+                    # EMR-B2-BASE restore_copy_only: no running container (no live API) mounts the restored copy here.
+                    return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
                 if args[:2] == ["docker", "exec"] and "pg_restore" in args:
                     clusters[-1].observe(args, kwargs.get("input_file"))
                 elif args[:2] == ["docker", "exec"] and ("mkdir" in args or "psql" in args):
@@ -1087,6 +1095,36 @@ class EmrRestoreVerification(unittest.TestCase):
                 self.assertFalse(result["success"])
         with self.assertRaisesRegex(ops.RestoreAdmissionError, "the databases are not exactly kin and keycloak"):
             ops.supported_catalog(captured, shape="post")
+
+    def test_b2_restore_recovers_only_its_own_copy_never_a_volume_a_running_owner_mounts(self):
+        """EMR-B2-BASE (consult files[2], OA9): the live API owns its state volume and recovers it at its own start. The
+        restore check asks Docker which running containers mount the volume it restored into, right before its recovery:
+        none - its own copy - recovers as before; one (a live owner) refuses with no recovery run. Both rehearsal paths:
+        a daily set with its role catalog and an older set without one."""
+        recovery = lambda: [args for args in self.host.helpers if "node" in args and any("recoverAtStart" in str(arg) for arg in args)]
+        older = dict(self.manifest)
+        older.pop("role_catalog")
+        for label, manifest in (("daily set", self.manifest), ("older set", older)):
+            with self.subTest(path=label):
+                ops.write_json(self.folder / "manifest.json", manifest)
+                self.host.live_mounts, self.host.helpers = [], []
+                result, error, _, _ = self.host.rehearse(self.folder, self.answer)
+                self.assertIsNone(error, error)
+                self.assertTrue(result["success"])
+                checks = [event[1] for event in self.host.events if event[0] == "command" and event[1][:2] == ["docker", "ps"]]
+                self.assertEqual(len(checks), 1)
+                volume = next(arg for arg in checks[0] if arg.startswith("volume=")).split("=", 1)[1]
+                self.assertTrue(volume.endswith("-emr-state"), volume)
+                self.assertEqual(len(recovery()), 1)
+                mounted = next(args for args in recovery())
+                self.assertIn(f"type=volume,source={volume},target={ops.EMR_STATE}", mounted, "the recovery runs on that same copy")
+                self.host.live_mounts, self.host.helpers = ["0123456789ab"], []
+                result, error, _, _ = self.host.rehearse(self.folder, self.answer)
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIn("EMR recovery refused", str(error))
+                self.assertFalse(result["success"])
+                self.assertEqual(recovery(), [], "no recovery beside a live owner")
+        ops.write_json(self.folder / "manifest.json", self.manifest)
 
     def test_unsafe_emr_archive_refused_despite_matching_checksum(self):
         archive_path = self.folder / 'emr-state.tgz'

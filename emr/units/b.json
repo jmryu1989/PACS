@@ -110,6 +110,12 @@
       "tests/emr/b/noninferiority_test.py",
       "tests/emr/b/verification_plan.cjs",
       "tests/emr/b/power_design.py"
+    ],
+    "B2-base": [
+      "api/src/emr-runtime/application.ts",
+      "api/src/emr-runtime/request-context.ts",
+      "tests/emr/b/startup_fixture.cjs",
+      "tests/emr/b/startup_pg_test.cjs"
     ]
   },
   "models": {
@@ -449,6 +455,18 @@
         "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
         "C22 bounded lanes keep two verification connections free across small pools and shared stores",
         "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
+        "C24 base start-up order: the owner starts once after the module graph and before every init hook and the listener; A is composed once with B readers",
+        "C25 clinical start-up order with a test factory: prepared readers bind A once, then compose, readiness and start once; a missing or failing part stops the process",
+        "C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery",
+        "C27 shutdown keeps the HTTP drain, then stops background work, ends in-flight requests, disposes and disconnects once; a failed start releases only what it created, within 5 s, and deletes no state",
+        "C28 every start-up phase that fails ends the process with one closed line and no listener, timer, buffered log or secret",
+        "C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-shutdown start is refused and nothing is composed or recovered twice",
+        "C30 only a member request that passed every guard check carries facts; refused, public, logout, gateway and development requests carry none and leave nothing behind",
+        "C31 facts belong to one request object for its lifetime: interleaved A/B/A and two sessions of one subject stay apart; a copy, an ended response, an abort or a late lookup gets none",
+        "C32 one immutable identity per verified issuer and subject; member(subject) is a current approved member of the same issuer or a closed refusal, never a minted ID",
+        "C33 the captured rights are a copy of what the guard verified; a request that never reads its facts does no new IO, and the existing session verdicts stay",
+        "C34 the ingress address is known only from a resolved proxy peer with one valid X-Real-IP; DNS is bounded and never guessed; one server request ID per request; no credential is a fact",
+        "C35 the public request and startup types are the declared ones; only AuthGuard captures, only AuthService creates the source, and neither imports clinical, signature or report code",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
@@ -480,9 +498,9 @@
     }
   },
   "expected": {
-    "contract": 21,
+    "contract": 33,
     "live": 13,
-    "mutants": 39,
+    "mutants": 60,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -774,6 +792,153 @@
         "C21"
       ],
       "behaviour": "merged reservation loses recovery intent"
+    },
+    {
+      "id": "M43",
+      "kill": [
+        "C24"
+      ],
+      "behaviour": "MUT-B2SH-01: init hooks and the listener run before the awaited EMR start"
+    },
+    {
+      "id": "M44",
+      "kill": [
+        "C25"
+      ],
+      "behaviour": "MUT-B2SH-02: a clinical plan without its factory falls back to the base start"
+    },
+    {
+      "id": "M45",
+      "kill": [
+        "C29"
+      ],
+      "behaviour": "MUT-B2SH-03: a concurrent or failed start may start again"
+    },
+    {
+      "id": "M46",
+      "kill": [
+        "C25"
+      ],
+      "behaviour": "MUT-B2SH-04: A binds B readers instead of the prepared clinical readers"
+    },
+    {
+      "id": "M47",
+      "kill": [
+        "C26"
+      ],
+      "behaviour": "MUT-B2SH-05: a second ledger store beside the owner's"
+    },
+    {
+      "id": "M48",
+      "kill": [
+        "C27"
+      ],
+      "behaviour": "MUT-B2SH-06: the dedicated client disconnects before in-flight requests end, and twice"
+    },
+    {
+      "id": "M49",
+      "kill": [
+        "C28"
+      ],
+      "behaviour": "MUT-B2SH-07: the fatal path prints the raw error"
+    },
+    {
+      "id": "M50",
+      "kill": [
+        "C25"
+      ],
+      "behaviour": "MUT-B2SH-08: a clinical readiness rejection is swallowed and the server listens"
+    },
+    {
+      "id": "M51",
+      "kill": [
+        "C30"
+      ],
+      "behaviour": "MUT-B2SH-09: request facts captured before the final CSRF check"
+    },
+    {
+      "id": "M52",
+      "kill": [
+        "C30"
+      ],
+      "behaviour": "MUT-B2SH-10: a request without a capability gets facts from req fields"
+    },
+    {
+      "id": "M53",
+      "kill": [
+        "C31"
+      ],
+      "behaviour": "MUT-B2SH-11: one shared materialization answers every request"
+    },
+    {
+      "id": "M54",
+      "kill": [
+        "C31"
+      ],
+      "behaviour": "MUT-B2SH-12: facts delivered after the response ended or the request was aborted"
+    },
+    {
+      "id": "M55",
+      "kill": [
+        "C32"
+      ],
+      "behaviour": "MUT-B2SH-13: identity joined by display name without the issuer"
+    },
+    {
+      "id": "M56",
+      "kill": [
+        "C32"
+      ],
+      "behaviour": "MUT-B2SH-14: member(subject) accepts an unknown, suspended or unapproved subject"
+    },
+    {
+      "id": "M57",
+      "kill": [
+        "C34"
+      ],
+      "behaviour": "MUT-B2SH-15: a direct caller's own X-Real-IP is believed"
+    },
+    {
+      "id": "M58",
+      "kill": [
+        "C35"
+      ],
+      "behaviour": "MUT-B2SH-16: base facts carry a synthetic signing registration"
+    },
+    {
+      "id": "M59",
+      "kill": [
+        "C30"
+      ],
+      "behaviour": "consult M05: the institution comes from a mutable request header"
+    },
+    {
+      "id": "M60",
+      "kill": [
+        "C34"
+      ],
+      "behaviour": "consult M06: a failed proxy lookup trusts any private-range peer"
+    },
+    {
+      "id": "M61",
+      "kill": [
+        "C28"
+      ],
+      "behaviour": "consult M13: a wrong runtime role still reaches the listener"
+    },
+    {
+      "id": "M62",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeOwnerTests.test_07_an_append_beside_a_live_owner_and_an_observation_without_one_are_refused"
+      ],
+      "behaviour": "L-10: the probe appends and recovers beside a live API owner"
+    },
+    {
+      "id": "M63",
+      "kill": [
+        "P:tests/ops_backup_test.py:EmrRestoreVerification.test_b2_restore_recovers_only_its_own_copy_never_a_volume_a_running_owner_mounts"
+      ],
+      "behaviour": "isolated restore: the recovery runs on a state volume a running container mounts"
     }
   ],
   "candidate_cases": [

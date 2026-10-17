@@ -12,6 +12,12 @@ snapshot while the caller keeps every writer fenced and never resumes them itsel
 After a complete, error-free backup the older daily sets rotate (D1047: keep 7): rotate() deletes complete daily sets
 beyond the newest N, never a release, held, protected, latest-verified or incomplete set, and only thins (Orthanc archive
 removed) a set the audit ledger still retains.
+
+EMR state (EMR-B2-BASE): the live API process is the lifetime owner of /var/lib/kin-emr - it holds the writer fence and
+runs the start-up recovery itself. A capture tars that volume only while the writers (the API among them) are fenced,
+in the same pause as the database dump; a restore check recovers only its own restored copy in an isolated cluster and
+refuses a volume a running container mounts (restore_copy_only). Nothing here starts a second owner or a second
+recovery beside the live API, and no new backup, schedule or retention job is part of this file.
 """
 from __future__ import annotations
 
@@ -552,6 +558,15 @@ def rehearse_audit(directory, manifest, container, user="postgres"):
     return {"verified": code == 0, **report}
 
 
+def restore_copy_only(state_volume):
+    """EMR-B2-BASE: the live API process owns its state volume for its lifetime (the writer fence) and recovers it in its
+    own start. A restore check recovers only the copy it restored itself: a volume that any running container mounts -
+    the live API's first of all - is refused before a recovery script starts, so no second recoverAtStart ever runs
+    beside a live owner."""
+    if run(["docker", "ps", "-q", "--filter", "volume=" + state_volume]).stdout.decode("utf-8").split():
+        raise RuntimeError("EMR recovery refused: the state volume is mounted by a running container")
+
+
 EMR_RECOVERY_SCRIPT = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
 const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
 const {AccessSeal}=require('/app/dist/emr-runtime/seal');
@@ -618,6 +633,7 @@ def rehearse_held(directory, manifest, *, daily=False):
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
                            "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
                            manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
+            restore_copy_only(state_volume)
             checked = temporary_run(["--network", "container:" + name, "--read-only", "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
                                      "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node",
                                      manifest["running_images"]["kin-api"]["id"], "-e", EMR_RECOVERY_SCRIPT])
@@ -716,6 +732,7 @@ new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtSta
 .then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
             # The optional reader login may correctly be disabled in the source catalog. Use the disposable restore
             # administrator for this read-only ledger check; do not alter the preserved source role attributes.
+            restore_copy_only(state_volume)
             checked = temporary_run(["--network", "container:"+name, "--read-only", "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
                 "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node", api_image, "-e", recovery])
             if checked != "EMR_RESTORE_VERIFIED":

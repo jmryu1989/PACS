@@ -1431,6 +1431,744 @@ function contractSuite() {
     } finally { w.cleanup(); }
   });
 
+  // ════════════════ EMR-B2-BASE: the startup owner, the fatal line and the request facts (C24-C35) ════════════════
+  // C24-C29 run the real main.ts in child processes (tests/emr/b/startup_fixture.cjs): the database clients are the
+  // fixture's (no PostgreSQL here; tests/emr/b/startup_pg_test.cjs runs the same starts over a disposable database), the
+  // writer fence, failure journal, seal and recovery are the product's (Linux). Assertions read exit codes, the stderr
+  // line's closed phase/code, the order of observed product calls and HTTP answers - never product text beyond that.
+  const startup = require('./startup_fixture.cjs');
+  const http = require('node:http');
+  const request = (port, pathname) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: pathname }, res => {
+      let body = ''; res.setEncoding('utf8');
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    }).on('error', reject);
+  });
+  const LINE = /^\[KIN API\] 기동 실패\(([a-z]+)(?:\/([A-Za-z0-9]+))?\): [^\n]+\. 기동을 중단합니다\.$/;
+  const SECRETS = ['Leaked', 'Secret', 'SELECT', 'postgresql://', 'synthetic-', 'not-the-runtime-role', 'rolsuper', '[Nest]', '    at '];
+  /** A refused start: nonzero exit, one closed line (phase, mapped code or none), no secret, no listener unless asked. */
+  function refused(result, phase, code = null, { listened = false, initialized = false } = {}) {
+    assert.equal(result.timedOut, false, 'the process ended by itself');
+    assert.deepEqual([result.code, result.signal], [1, null], result.stderr);
+    assert.equal(result.stderrLines.length, 1, result.stderr);
+    const match = LINE.exec(result.stderrLines[0]);
+    assert(match, result.stderrLines[0]);
+    assert.deepEqual([match[1], match[2] ?? null], [phase, code]);
+    for (const secret of SECRETS) assert(!(result.stdout + result.stderr).includes(secret), secret);
+    assert(!result.stdout.includes('Nest application successfully started'), 'buffered logs stay unflushed');
+    assert.equal(result.names.includes('bind'), listened, 'listener');
+    assert.equal(result.names.includes('auth-init'), initialized, 'init hooks and their timers');
+  }
+  /** The first index of each name, all present and in this order. */
+  function inOrder(names, expected) {
+    const at = expected.map(name => names.indexOf(name));
+    assert(at.every(index => index >= 0), JSON.stringify({ missing: expected.filter((_, n) => at[n] < 0), names }));
+    assert.deepEqual([...at].sort((a, b) => a - b), at, JSON.stringify(names));
+  }
+  const count = (names, name) => names.filter(item => item === name).length;
+  const env = (state, overrides) => startup.environment(state, overrides);
+  let productProgram;
+  /** The product's TypeScript program (api/src) with its checker, built once for the static parts of C26 and C35. */
+  function product() {
+    if (!productProgram) productProgram = ts.createProgram(parsed.fileNames, parsed.options);
+    const checker = productProgram.getTypeChecker();
+    const resolve = symbol => (symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+    const rel = file => path.relative(root, file.fileName).replaceAll('\\', '/');
+    const sources = productProgram.getSourceFiles().filter(file => parsed.fileNames.includes(file.fileName));
+    const exported = (suffix, name) => resolve(checker.getExportsOfModule(checker.getSymbolAtLocation(sources.find(file => rel(file) === suffix)))
+      .find(symbol => symbol.name === name));
+    const ownerOf = node => {
+      let at = node.parent;
+      while (at && !ts.isFunctionLike(at)) at = at.parent;
+      if (!at) return 'module scope';
+      const owner = at.parent && ts.isClassLike(at.parent) && at.parent.name ? at.parent.name.text + '.' : '';
+      return owner + (ts.isConstructorDeclaration(at) ? 'constructor' : at.name && ts.isIdentifier(at.name) ? at.name.text : 'a function expression');
+    };
+    return { checker, resolve, rel, sources, exported, ownerOf };
+  }
+  /** Where product code outside B1's own modules creates the ledger's parts or runs start-up recovery. */
+  function productConstructions() {
+    const { checker, resolve, rel, sources, exported, ownerOf } = product();
+    const classes = new Map([['EmrLedgerClient', 'client.ts'], ['StateCoordinator', 'coordinator.ts'], ['FailureJournal', 'failure-journal.ts'],
+      ['AccessSeal', 'seal.ts'], ['PrismaLedgerSql', 'store.ts'], ['AccessLedgerStore', 'store.ts']]
+      .map(([name, file]) => [exported('api/src/emr-runtime/' + file, name), name]));
+    const recover = checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(exported('api/src/emr-runtime/seal.ts', 'AccessSeal')), 'recoverAtStart');
+    const found = [];
+    for (const file of sources.filter(file => !rel(file).startsWith('api/src/emr-runtime/') || /\/(application|request-context)\.ts$/.test(rel(file)))) {
+      const visit = node => {
+        if (ts.isNewExpression(node)) {
+          const name = classes.get(resolve(checker.getSymbolAtLocation(node.expression)));
+          if (name) found.push(`${name} ${rel(file)} ${ownerOf(node)}`);
+        }
+        if (ts.isPropertyAccessExpression(node) && resolve(checker.getSymbolAtLocation(node.name)) === recover) found.push(`recoverAtStart ${rel(file)} ${ownerOf(node)}`);
+        ts.forEachChild(node, visit);
+      };
+      visit(file);
+    }
+    return found.sort();
+  }
+  /** A start that reaches its listener: `after(event, child)` acts on the events; the case ends the process. */
+  const listening = (scenario, environment, after) => startup.run(scenario, { env: environment, timeoutMs: 60000,
+    onEvent: async (event, child, events) => { if (await after(event, child, events)) child.kill('SIGTERM'); } });
+
+  test('C24 base start-up order: the owner starts once after the module graph and before every init hook and the listener; A is composed once with B readers', async () => {
+    const state = startup.stateDirectory('c24');
+    const seen = {};
+    const result = await listening({ db: 'memory' }, env(state), async (event, child) => {
+      if (event.what === 'listening') {
+        seen.health = await request(event.port, '/api/health');
+        seen.me = await request(event.port, '/api/me');
+        child.send('modules');
+      }
+      if (event.what === 'modules') { seen.modules = event.clinical; return true; }
+      return false;
+    });
+    try {
+      inOrder(result.names, ['created', 'start', 'client', 'connect', 'fence', 'ledger', 'recovery', 'recovered', 'compose', 'ready',
+        'init', 'auth-init', 'initialized', 'bind', 'listening']);
+      for (const name of ['start', 'client', 'connect', 'fence', 'recovery', 'compose', 'ready', 'init', 'bind']) assert.equal(count(result.names, name), 1, name);
+      assert.deepEqual(result.events.find(e => e.what === 'start').base, true, 'main asks for the base plan');
+      const composed = result.events.find(e => e.what === 'compose');
+      assert.deepEqual([composed.base, composed.clinical], [true, false], 'A binds B readers in base mode');
+      assert(!result.names.some(name => name.startsWith('clinical-')), 'no clinical factory runs in base mode');
+      assert.deepEqual(seen.modules, [], 'base mode loads no clinical or signature module');
+      assert.equal(result.events.find(e => e.what === 'fence').owner, true);
+      assert.equal(seen.health.status, 200);
+      assert.equal(JSON.parse(seen.health.body).ok, true);
+      assert.equal(seen.me.status, 401);
+      for (const answer of [seen.health, seen.me]) assert.equal(answer.headers['cache-control'], 'no-store', 'the API no-store default stays');
+      // Nest's buffered start-up logs appear only once the server listens.
+      assert(result.stdout.includes('Nest application successfully started'));
+      assert.deepEqual([result.signal, result.timedOut], ['SIGTERM', false]);
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+  });
+
+  test('C25 clinical start-up order with a test factory: prepared readers bind A once, then compose, readiness and start once; a missing or failing part stops the process', async () => {
+    const state = startup.stateDirectory('c25');
+    let readers = null;
+    const ok = await listening({ db: 'memory', clinical: 'ok' }, env(state), async (event, child) => {
+      if (event.what === 'listening') child.send('readers');
+      if (event.what === 'readers') { readers = event.clinical; return true; }
+      return false;
+    });
+    try {
+      inOrder(ok.names, ['created', 'start', 'connect', 'fence', 'recovered', 'clinical-prepare', 'compose', 'clinical-compose', 'clinical-check',
+        'clinical-start', 'ready', 'init', 'auth-init', 'bind', 'listening']);
+      for (const name of ['clinical-prepare', 'compose', 'clinical-compose', 'clinical-check', 'clinical-start']) assert.equal(count(ok.names, name), 1, name);
+      const prepare = ok.events.find(e => e.what === 'clinical-prepare');
+      assert.deepEqual([prepare.frozen, prepare.base, prepare.sameClient, prepare.sameLedger], [true, true, true, true], 'the factory gets the frozen started resources');
+      const composed = ok.events.find(e => e.what === 'compose');
+      assert.deepEqual([composed.base, composed.clinical], [false, true], 'A binds the prepared readers, never B first');
+      assert.equal(readers, true, "A's composed clinical reader is the prepared one");
+      // Shutdown: background stop before the HTTP server closes; dispose, then the client, after it closed.
+      inOrder(ok.names, ['listening', 'runtime-beforeApplicationShutdown', 'clinical-stop', 'server-close', 'server-closed', 'clinical-dispose', 'disconnect']);
+      for (const name of ['clinical-stop', 'clinical-dispose', 'disconnect']) assert.equal(count(ok.names, name), 1, name);
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    for (const [kind, code, expect] of [
+      ['no-factory', 'EmrClinicalFactoryRequired', { compose: 0, dispose: 0, client: 0 }],
+      ['prepare-reject', 'P1001', { compose: 0, dispose: 0, client: 1 }],
+      ['prepared-invalid', 'EmrClinicalPreparedInvalid', { compose: 0, dispose: 1, client: 1 }],
+      ['check-reject', 'P1001', { compose: 1, dispose: 1, client: 1, stop: 0 }],
+      ['start-throw', 'P1001', { compose: 1, dispose: 1, client: 1, stop: 1 }],
+    ]) {
+      const dir = startup.stateDirectory('c25-' + kind);
+      try {
+        const result = await startup.run({ db: 'memory', clinical: kind }, { env: env(dir), timeoutMs: 60000 });
+        refused(result, 'clinical', code);
+        assert(!result.names.includes('ready'), kind + ': never ready');
+        assert.equal(count(result.names, 'compose'), expect.compose, kind + ': A composition');
+        assert.equal(count(result.names, 'clinical-dispose'), expect.dispose, kind + ': dispose of what the factory returned');
+        assert.equal(count(result.names, 'client'), expect.client, kind + ': client');
+        assert.equal(count(result.names, 'disconnect'), expect.client, kind + ': its one disconnect');
+        if ('stop' in expect) assert.equal(count(result.names, 'clinical-stop'), expect.stop, kind + ': stop only of a started lifecycle');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+  });
+
+  test('C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery', async () => {
+    const state = startup.stateDirectory('c26');
+    let resources = null, second = null;
+    const first = await listening({ db: 'memory' }, env(state, { DATABASE_URL: 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin?connection_limit=7' }),
+      async (event, child) => {
+        if (event.what === 'listening') {
+          second = await startup.run({ db: 'memory' }, { env: env(state), timeoutMs: 60000 });
+          child.send('resources');
+        }
+        if (event.what === 'resources') { resources = event; return true; }
+        return false;
+      });
+    try {
+      const { at: _, what: __, ...facts } = resources;
+      assert.deepEqual(facts, { same: true, frozen: true, keys: ['adapters', 'db', 'ledger'], client: true, clients: 1, ledger: true, stores: 1,
+        base: true, ordinarySeparate: true, poolSize: 7 });
+      const client = first.events.find(e => e.what === 'client'), ledger = first.events.find(e => e.what === 'ledger');
+      assert.deepEqual([client.poolSize, client.connectionLimit, ledger.poolSize, ledger.sameClient], [7, 7, 7, true]);
+      for (const name of ['client', 'fence', 'ledger', 'recovery']) assert.equal(count(first.names, name), 1, name);
+      // G-4: the second API process on the same state directory is a client of the first one's fence; it stops before recovery.
+      refused(second, 'fence', 'EmrStateOwnerBusy');
+      assert.equal(second.events.find(e => e.what === 'fence').owner, false);
+      assert(!second.names.includes('recovery') && !second.names.includes('ledger'), 'no second recovery beside a live owner');
+      assert.equal(count(second.names, 'disconnect'), 1);
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    // Without connection_limit the client gets the append pool, and the store the same capacity.
+    const plain = startup.stateDirectory('c26-pool');
+    try {
+      const result = await listening({ db: 'memory' }, env(plain), async event => event.what === 'listening');
+      const client = result.events.find(e => e.what === 'client'), ledger = result.events.find(e => e.what === 'ledger');
+      assert.deepEqual([client.poolSize, client.connectionLimit, ledger.poolSize], [6, 6, 6]);
+    } finally { fs.rmSync(plain, { recursive: true, force: true }); }
+    // No other product code creates a client, fence, journal, seal or store, or runs recovery (installed TypeScript checker).
+    const owners = productConstructions();
+    assert.deepEqual(owners, ['AccessLedgerStore', 'AccessSeal', 'EmrLedgerClient', 'FailureJournal', 'PrismaLedgerSql', 'StateCoordinator', 'recoverAtStart']
+      .map(name => `${name} api/src/emr-runtime/application.ts EmrApplicationRuntime.start`));
+  });
+
+  test('C27 shutdown keeps the HTTP drain, then stops background work, ends in-flight requests, disposes and disconnects once; a failed start releases only what it created, within 5 s, and deletes no state', async () => {
+    const state = startup.stateDirectory('c27');
+    let slow = null;
+    const result = await startup.run({ db: 'memory', slowMillis: 1500 }, { env: env(state), timeoutMs: 60000, onEvent: (event, child) => {
+      if (event.what === 'listening') slow = request(event.port, '/syn-slow');
+      if (event.what === 'slow-begin') child.kill('SIGTERM');
+    } });
+    try {
+      const answer = await slow;
+      assert.deepEqual([answer.status, answer.body], [200, 'slow-ok'], 'the in-flight request finished');
+      inOrder(result.names, ['slow-begin', 'runtime-beforeApplicationShutdown', 'server-close', 'slow-done', 'server-closed',
+        'runtime-onApplicationShutdown', 'disconnect']);
+      assert.equal(count(result.names, 'disconnect'), 1);
+      assert(result.names.indexOf('prisma-shutdown') > result.names.indexOf('server-closed'));
+      assert.deepEqual([result.signal, result.timedOut], ['SIGTERM', false], 'SIGTERM ends it without SIGKILL');
+      for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(state, kept)), kept + ' stays');
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    // A failed recovery: the client created and connected is disconnected once; the fence and journal stay on disk.
+    const failed = startup.stateDirectory('c27-failed');
+    try {
+      const result = await startup.run({ db: 'memory', recovery: 'refuse' }, { env: env(failed), timeoutMs: 60000 });
+      refused(result, 'recovery', 'SealCorrupt');
+      inOrder(result.names, ['start-failed', 'runtime-onApplicationShutdown', 'disconnect']);
+      assert.equal(count(result.names, 'disconnect'), 1, 'released once although app.close and main both finish the owner');
+      for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(failed, kept)), kept + ' stays');
+    } finally { fs.rmSync(failed, { recursive: true, force: true }); }
+    // A cleanup that never ends is cut at 5 s; one that throws is silent: neither adds a line or hides the first one.
+    for (const disconnect of ['hang', 'throw']) {
+      const dir = startup.stateDirectory('c27-' + disconnect);
+      try {
+        const result = await startup.run({ db: 'memory', connect: 'refuse', disconnect }, { env: env(dir), timeoutMs: 60000 });
+        refused(result, 'connect', 'P1001');
+        if (disconnect === 'hang') assert(result.millisAfterStderr >= 4500 && result.millisAfterStderr < 8000, String(result.millisAfterStderr));
+        else assert(result.millisAfterStderr < 4500, String(result.millisAfterStderr));
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+  });
+
+  test('C28 every start-up phase that fails ends the process with one closed line and no listener, timer, buffered log or secret', async () => {
+    const occupied = http.createServer(() => {});
+    await new Promise(resolve => occupied.listen(0, '127.0.0.1', resolve));
+    const exposed = startup.stateDirectory('c28-exposed');
+    fs.chmodSync(exposed, 0o755);
+    const url = 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin';
+    try {
+      for (const [name, scenario, overrides, phase, code, extra] of [
+        ['create', { db: 'memory', create: 'fail' }, {}, 'create', null],
+        ['no proxy', { db: 'memory' }, { KIN_EMR_PROXY_HOST: undefined }, 'config', 'EmrProxyHostRequired'],
+        ['loopback proxy', { db: 'memory' }, { KIN_EMR_PROXY_HOST: '127.0.0.1' }, 'config', 'EmrProxyHostInvalid'],
+        ['proxy range', { db: 'memory' }, { KIN_EMR_PROXY_HOST: '10.0.0.0/8' }, 'config', 'EmrProxyHostInvalid'],
+        ['no database URL', { db: 'memory' }, { DATABASE_URL: undefined }, 'config', 'EmrDatabaseUrlRequired'],
+        ['another database', { db: 'memory' }, { DATABASE_URL: 'mysql://kin_runtime:Synthetic-Fixture-Secret-0001@db/kin' }, 'config', 'EmrDatabaseUrlRequired'],
+        ['small pool', { db: 'memory' }, { DATABASE_URL: url + '?connection_limit=2' }, 'config', 'EmrAppendPoolTooSmall'],
+        ['relative state', { db: 'memory' }, { KIN_EMR_STATE_DIR: 'kin-emr' }, 'config', 'EmrStateDirectoryRequired'],
+        ['unreachable database', { db: 'pg' }, { DATABASE_URL: url + '?connect_timeout=2' }, 'connect', 'P1001'],
+        ['connect error text', { db: 'memory', connect: 'refuse', leakCode: 'Leaked\nCode' }, {}, 'connect', null],
+        ['runtime role', { db: 'memory', role: 'refused' }, {}, 'role', 'EmrRuntimeRefused'],
+        ['missing state', { db: 'memory' }, { KIN_EMR_STATE_DIR: path.join(os.tmpdir(), 'emr-b2-absent-' + randomUUID()) }, 'fence', 'EmrStateDirectoryRequired'],
+        ['exposed state', { db: 'memory' }, { KIN_EMR_STATE_DIR: exposed }, 'fence', 'EmrStateDirectoryExposed'],
+        ['seal recovery', { db: 'memory', recovery: 'refuse' }, {}, 'recovery', 'SealCorrupt'],
+        ['second composition', { db: 'memory', precompose: true }, {}, 'compose', 'EmrAdaptersAlreadyComposed'],
+        ['clinical factory', { db: 'memory', clinical: 'no-factory' }, {}, 'clinical', 'EmrClinicalFactoryRequired'],
+        ['init hook', { db: 'memory', init: 'fail', leakCode: 'Leaked\nCode' }, {}, 'init', null, { initialized: true }],
+        ['listen', { db: 'memory', port: occupied.address().port }, {}, 'listen', 'EADDRINUSE', { listened: true, initialized: true }],
+      ]) {
+        const dir = startup.stateDirectory('c28');
+        try {
+          const result = await startup.run(scenario, { env: env(dir, overrides), timeoutMs: 60000 });
+          try { refused(result, phase, code, extra); } catch (error) { error.message = `${name}: ${error.message}`; throw error; }
+          if (['config', 'create'].includes(phase)) assert(!result.names.includes('client'), name + ': nothing connects');
+          if (!['config', 'create'].includes(phase) && scenario.db === 'memory') assert.equal(count(result.names, 'disconnect'), 1, name);
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+    } finally {
+      occupied.close();
+      fs.rmSync(exposed, { recursive: true, force: true });
+    }
+  });
+
+  test('C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-shutdown start is refused and nothing is composed or recovered twice', async () => {
+    require(path.join(api, 'node_modules/reflect-metadata'));
+    const { EmrApplicationRuntime, EmrStartupFailure } = load('emr-runtime/application.ts');
+    const dir = startup.stateDirectory('c29');
+    const saved = {}, values = { DATABASE_URL: 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin?connect_timeout=1',
+      KIN_EMR_STATE_DIR: dir, KIN_EMR_PROXY_HOST: 'proxy', DEPLOYMENT_MODE: undefined };
+    for (const [key, value] of Object.entries(values)) { saved[key] = process.env[key]; if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    try {
+      const runtime = new EmrApplicationRuntime();
+      code(() => runtime.requireResources(), 'EmrRuntimeNotReady');
+      let settled = false;
+      // The first start's outcome is held at once, so its failure is an observed value, never an unhandled rejection.
+      const first = runtime.start({ mode: 'base' }).then(() => 'started', error => error).finally(() => { settled = true; });
+      await rejects(runtime.start({ mode: 'base' }), 'EmrStartupRepeated');
+      assert.equal(settled, false, 'refused while the first start is still preparing');
+      const failure = await first;
+      assert.ok(failure instanceof EmrStartupFailure && failure.phase === 'connect', String(failure?.phase ?? failure));
+      await rejects(runtime.start({ mode: 'base' }), 'EmrStartupRepeated');
+      code(() => runtime.requireResources(), 'EmrRuntimeNotReady');
+      await runtime.onApplicationShutdown();
+      await rejects(runtime.start({ mode: 'base' }), 'EmrStartupRepeated');
+    } finally {
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+    // After ready and after shutdown in the real process: refused, the same resources, one composition and one recovery.
+    let ready = null, stopped = null;
+    try {
+      const result = await startup.run({ db: 'memory' }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+        if (event.what === 'listening') child.send('reenter');
+        if (event.what === 'reenter-ready') ready = event;
+        if (event.what === 'reenter-stopped') stopped = event;
+      } });
+      assert.deepEqual([ready.again, ready.same], ['EmrStartupRepeated', true]);
+      assert.deepEqual([stopped.resources, stopped.again], ['EmrRuntimeNotReady', 'EmrStartupRepeated']);
+      for (const name of ['compose', 'recovery', 'client', 'disconnect']) assert.equal(count(result.names, name), 1, name);
+      assert.equal(result.code, 0);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // ── C30-C35: verified request facts over the real AuthGuard and AuthService (a real HTTP server on loopback, signed
+  // RS256 tokens of a fixture key, an in-memory session/rights store and a fixture ledger that resolves identities) ──
+  const ISSUER = 'https://identity.example.test/realms/kin';
+  let authWorld = null;
+  require('node:test').after(() => { if (authWorld) authWorld.close(); });
+  async function authHarness() {
+    if (authWorld) return authWorld;
+    require(path.join(api, 'node_modules/reflect-metadata'));
+    const jose = require(path.join(api, 'node_modules/jose'));
+    const { Controller, Get, Post, SetMetadata } = require(path.join(api, 'node_modules/@nestjs/common'));
+    const { Reflector } = require(path.join(api, 'node_modules/@nestjs/core'));
+    const { ExecutionContextHost } = require(path.join(api, 'node_modules/@nestjs/core/helpers/execution-context-host'));
+    const key = await jose.generateKeyPair('RS256'), stranger = await jose.generateKeyPair('RS256');
+    const jwk = { ...(await jose.exportJWK(key.publicKey)), kid: 'syn-key', alg: 'RS256', use: 'sig' };
+    const jwks = http.createServer((req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ keys: [jwk] })); });
+    await new Promise(resolve => jwks.listen(0, '127.0.0.1', resolve));
+    Object.assign(process.env, { AUTH_REQUIRED: 'true', KC_ISSUER: ISSUER, KC_JWKS_URL: `http://127.0.0.1:${jwks.address().port}/certs`,
+      KC_AUDIENCE: 'kin-api', KC_WEB_SECRET: 'synthetic-web-secret', KIN_COOKIE_SECRET: 'synthetic-cookie-secret', PUBLIC_ORIGIN: 'https://pacs.example.test' });
+    const { AuthService } = load('auth.service.ts'), { AuthGuard } = load('auth.guard.ts');
+    const store = { rights: new Map(), sessions: new Map(), importReady: true, down: false, calls: [] };
+    const read = (name, value) => async ({ where } = {}) => { store.calls.push(name); if (store.down) throw new Error('synthetic storage down'); return value(where); };
+    const prisma = {
+      memberRightsImport: { findUnique: read('import', () => (store.importReady ? { id: 'realm-v1' } : null)) },
+      memberRights: { findUnique: read('rights', where => store.rights.get(where.sub) ?? null) },
+      authSession: { findUnique: read('session', where => store.sessions.get(where.sid) ?? null), updateMany: async () => ({ count: 1 }), findMany: async () => [] },
+      idpSessionEnd: { findUnique: async () => null },
+    };
+    const ledger = { identities: new Map(), resolves: 0, gate: null,
+      async withAppendTransaction(work) { return work({ synthetic: 'transaction' }); },
+      async resolveIdentity(tx, issuer, subject) {
+        this.resolves++;
+        if (this.gate) await this.gate;
+        const id = issuer + '\n' + subject;
+        if (!this.identities.has(id)) this.identities.set(id, randomUUID());
+        return this.identities.get(id);
+      } };
+    const runtime = { trustedProxyHost: '192.0.2.10', requireResources: () => Object.freeze({ db: {}, ledger, adapters: CTX.runtimeAdapters }) };
+    const service = new AuthService(prisma, {}, runtime), guard = new AuthGuard(new Reflector(), service);
+    const route = (cls, name, decorator) => decorator(cls.prototype, name, Object.getOwnPropertyDescriptor(cls.prototype, name));
+    class SynMember { read() {} write() {} me() {} open() {} logout() {} gateway() {} }
+    Controller('syn')(SynMember);
+    route(SynMember, 'read', Get('read')); route(SynMember, 'write', Post('write')); route(SynMember, 'open', Get('open'));
+    route(SynMember, 'open', SetMetadata('public', true)); route(SynMember, 'logout', Post('logout')); route(SynMember, 'gateway', Get('gateway'));
+    class SynSession { me() {} }
+    Controller()(SynSession); route(SynSession, 'me', Get('me'));
+    const routes = { '/api/syn/read': [SynMember, 'read'], '/api/syn/write': [SynMember, 'write'], '/api/syn/open': [SynMember, 'open'],
+      '/api/auth/logout': [SynMember, 'logout'], '/api/gateway/syn': [SynMember, 'gateway'], '/api/syn/me': [SynSession, 'me'] };
+    const inside = new Map();
+    const server = http.createServer(async (req, res) => {
+      req.originalUrl = req.url;
+      const [cls, name] = routes[req.url];
+      let verdict;
+      try { verdict = { admitted: await guard.canActivate(new ExecutionContextHost([req, res], cls, cls.prototype[name])) }; }
+      catch (error) { verdict = { admitted: false, status: typeof error?.getStatus === 'function' ? error.getStatus() : 500, code: error?.getResponse?.()?.code ?? null }; }
+      const handler = inside.get(req.headers['x-syn-case']);
+      const result = handler ? await handler(req, res, verdict) : null;
+      if (!res.writableEnded) res.end(JSON.stringify({ verdict, result }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const token = (subject, claims = {}, options = {}) => {
+      const jwt = new jose.SignJWT({ realm_access: { roles: ['admin'] }, groups: ['/hospital-a'], azp: 'kin-web', name: 'Synthetic Doctor', ...claims })
+        .setProtectedHeader({ alg: 'RS256', kid: 'syn-key' }).setIssuer(options.issuer ?? ISSUER).setAudience(options.audience ?? 'kin-api')
+        .setSubject(subject).setIssuedAt().setExpirationTime(options.expires ?? '10m');
+      return jwt.sign(options.key ?? key.privateKey);
+    };
+    const member = (sub, overrides = {}) => store.rights.set(sub, { sub, version: 3, approved: true, suspended: false, institution: 'hospital-a',
+      roles: ['radiologist'], newAuthAfter: null, ...overrides });
+    const session = async (sub, claims) => {
+      const sid = 's2.' + randomUUID() + '.' + randomUUID() + '.synthetic';
+      store.sessions.set(sid, { sid, sub, accessToken: await token(sub, claims), refreshToken: 'synthetic-refresh', atExpiresAt: new Date(Date.now() + 600000),
+        createdAt: new Date(), lastSeenAt: new Date(), entryProofHash: null, entryProofExpiresAt: null, idpSid: null, rightsVersion: 3, institution: 'hospital-a' });
+      return sid;
+    };
+    /** One request: `cookie` sid (with its binding unless `binding: null`), or `bearer`; `handler` runs after the guard. */
+    const call = (pathname, { method = 'GET', sid, bearer, binding, csrf = true, headers = {}, handler, abort } = {}) => new Promise((resolve, reject) => {
+      const id = randomUUID();
+      if (handler) inside.set(id, handler);
+      const sent = { 'x-syn-case': id, ...headers };
+      if (sid) { sent.cookie = 'kin_sid=' + encodeURIComponent(sid); if (binding !== null) sent['x-kin-session'] = binding ?? service.sessionRef(sid); }
+      if (bearer) sent.authorization = 'Bearer ' + bearer;
+      if (method !== 'GET' && csrf) sent['x-kin-csrf'] = '1';
+      const req = http.request({ host: '127.0.0.1', port: server.address().port, path: pathname, method, headers: sent }, res => {
+        let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; });
+        res.on('end', () => { inside.delete(id); try { resolve(JSON.parse(body)); } catch { resolve({ raw: body }); } });
+      });
+      req.on('error', error => { inside.delete(id); if (abort) resolve({ aborted: true }); else reject(error); });
+      req.end();
+      if (abort) abort(req);
+    });
+    const facts = async req => { try { return { facts: await service.emrRequestContext.facts(req) }; } catch (error) { return { refused: error?.code ?? error?.name }; } };
+    authWorld = { service, guard, store, ledger, runtime, token, member, session, call, facts, stranger, close: () => { server.close(); jwks.close(); } };
+    return authWorld;
+  }
+
+  test('C30 only a member request that passed every guard check carries facts; refused, public, logout, gateway and development requests carry none and leave nothing behind', async () => {
+    const w = await authHarness();
+    w.member('member-a'); w.member('clinician-c', { roles: ['clinician'] }); w.member('pending-p', { institution: null });
+    w.member('suspended-s', { suspended: true }); w.member('unapproved-u', { approved: false });
+    const sid = await w.session('member-a');
+    const take = (req, res, verdict) => w.facts(req).then(found => ({ verdict, ...found }));
+    // A session member: facts from the verified payload and the DB rights (the token's own roles are not the rights).
+    let { result } = await w.call('/api/syn/read', { sid, handler: take });
+    assert.deepEqual(Object.keys(result.facts).sort(), ['authMethod', 'identity', 'institutionId', 'kind', 'member', 'requestId', 'rightsVersion', 'roles', 'sessionRef', 'trustedProxyIp']
+      .filter(k => k !== 'member'), 'facts as JSON (member is a function)');
+    assert.deepEqual([result.facts.kind, result.facts.authMethod, result.facts.sessionRef, result.facts.roles, result.facts.institutionId, result.facts.rightsVersion],
+      ['member', 'session', w.service.sessionRef(sid), ['radiologist'], 'hospital-a', 3]);
+    assert.deepEqual([result.facts.identity.issuer, result.facts.identity.subject], [ISSUER, 'member-a']);
+    assert.deepEqual(result.facts.trustedProxyIp, { status: 'unresolved', reason: 'not-observed' }, 'a loopback peer is never the proxy');
+    // A bearer member: no session reference.
+    ({ result } = await w.call('/api/syn/read', { bearer: await w.token('member-a'), handler: take }));
+    assert.deepEqual([result.facts.authMethod, result.facts.sessionRef, result.facts.identity.subject], ['bearer', null, 'member-a']);
+    // A cookie write: facts only after CSRF passed.
+    ({ result } = await w.call('/api/syn/write', { method: 'POST', sid, handler: take }));
+    assert.equal(result.facts.authMethod, 'session');
+    const none = async (pathname, options, status, code) => {
+      const { result } = await w.call(pathname, { ...options, handler: take });
+      assert.equal(result.refused, 'EmrRequestFactsRequired', JSON.stringify(result));
+      if (status !== undefined) assert.deepEqual([result.verdict.admitted, result.verdict.status, result.verdict.code], [false, status, code], JSON.stringify(result.verdict));
+      else assert.equal(result.verdict.admitted, true, JSON.stringify(result.verdict));
+    };
+    await none('/api/syn/write', { method: 'POST', sid, csrf: false }, 403, 'AUTH_CSRF_REQUIRED');
+    await none('/api/syn/read', { sid, binding: null }, 428, 'AUTH_SESSION_REQUIRED');
+    await none('/api/syn/read', { bearer: await w.token('member-a', {}, { key: w.stranger.privateKey }) }, 401, null);
+    await none('/api/syn/read', { bearer: await w.token('member-a', {}, { issuer: 'https://other.example.test/realms/kin' }) }, 401, null);
+    await none('/api/syn/read', { bearer: await w.token('member-a', {}, { audience: 'other-api' }) }, 401, null);
+    await none('/api/syn/read', { bearer: await w.token('member-a', {}, { expires: Math.floor(Date.now() / 1000) - 60 }) }, 401, null);
+    await none('/api/syn/read', { bearer: await w.token('pending-p') }, 403, 'INSTITUTION_PENDING');
+    await none('/api/syn/read', { bearer: await w.token('unapproved-u') }, 403, 'INSTITUTION_INVALID');
+    await none('/api/syn/read', { bearer: await w.token('suspended-s') }, 401, 'AUTH_SESSION_ENDED');
+    await none('/api/syn/read', { bearer: await w.token('clinician-c') }, 403, 'CLINICIAN_ROUTE_DENIED');
+    ({ result } = await w.call('/api/syn/me', { bearer: await w.token('clinician-c'), handler: take }));
+    assert.deepEqual(result.facts.roles, ['clinician'], 'an allowed clinician route is a member path');
+    await none('/api/syn/open', {});
+    await none('/api/auth/logout', { method: 'POST', sid });
+    await none('/api/gateway/syn', { bearer: await w.token('gateway-g', { azp: 'gw-synthetic', realm_access: { roles: ['gateway'] }, groups: ['/hospital-a'] }) });
+    process.env.AUTH_REQUIRED = 'false';
+    try { await none('/api/syn/read', { headers: { 'x-kin-sub': 'member-a', 'x-kin-user': 'member-a' } }); }
+    finally { process.env.AUTH_REQUIRED = 'true'; }
+    // Fields of req and of the request are never the facts: changed after admission, they change nothing; a second
+    // capture of the same request is refused and ends the request's facts.
+    ({ result } = await w.call('/api/syn/read', { sid, headers: { 'x-real-ip': '198.51.100.7', 'x-request-id': 'client-chosen',
+      'x-kin-institution': 'hospital-b', 'x-kin-sub': 'member-b', 'x-kin-session': w.service.sessionRef(sid) }, handler: async (req, res) => {
+      Object.assign(req, { sub: 'member-b', roles: ['admin'], institution: 'hospital-b', actor: 'someone', sessionId: 'other' });
+      req.headers['x-real-ip'] = '203.0.113.1';
+      const found = await w.facts(req);
+      const again = (() => { try { w.service.captureEmrRequest(req, res, { issuer: ISSUER, subject: 'member-b', displayName: null, roles: ['admin'],
+        institutionId: 'hospital-b', rightsVersion: 9, authMethod: 'bearer', sessionRef: null }); return 'accepted'; } catch (error) { return error.code; } })();
+      return { ...found, again, after: await w.facts(req) };
+    } }));
+    assert.deepEqual([result.facts.identity.subject, result.facts.roles, result.facts.institutionId, result.facts.sessionRef],
+      ['member-a', ['radiologist'], 'hospital-a', w.service.sessionRef(sid)]);
+    assert.notEqual(result.facts.requestId, 'client-chosen');
+    assert.deepEqual([result.again, result.after.refused], ['EmrRequestAlreadyCaptured', 'EmrRequestEnded']);
+  });
+
+  test('C31 facts belong to one request object for its lifetime: interleaved A/B/A and two sessions of one subject stay apart; a copy, an ended response, an abort or a late lookup gets none', async () => {
+    const w = await authHarness();
+    w.member('aba-a'); w.member('aba-b', { institution: 'hospital-b', roles: ['technician'] });
+    const [sidA1, sidA2, sidB] = [await w.session('aba-a'), await w.session('aba-a'), await w.session('aba-b')];
+    let release, later = new Promise(resolve => { release = resolve; });
+    const order = [];
+    const handler = label => async req => {
+      if (label === 'A1') await later;
+      const first = await w.facts(req), second = await w.facts(req);
+      order.push(label);
+      const copies = [];
+      for (const copy of [{ ...req }, Object.create(req), JSON.parse(JSON.stringify({ headers: req.headers })), {}]) copies.push((await w.facts(copy)).refused);
+      return { first: first.facts, same: first.facts.requestId === second.facts.requestId && first.facts.identity.id === second.facts.identity.id, copies };
+    };
+    const a1 = w.call('/api/syn/read', { sid: sidA1, handler: handler('A1') });
+    const b = await w.call('/api/syn/read', { sid: sidB, handler: handler('B') });
+    const a2 = await w.call('/api/syn/read', { sid: sidA2, handler: handler('A2') });
+    release();
+    const first = await a1;
+    assert.deepEqual(order, ['B', 'A2', 'A1'], 'the first request completes last');
+    for (const [answer, sub, institution, sid] of [[first, 'aba-a', 'hospital-a', sidA1], [b, 'aba-b', 'hospital-b', sidB], [a2, 'aba-a', 'hospital-a', sidA2]]) {
+      const { result } = answer;
+      assert.deepEqual([result.first.identity.subject, result.first.institutionId, result.first.sessionRef, result.same], [sub, institution, w.service.sessionRef(sid), true]);
+      assert.deepEqual(result.copies, ['EmrRequestFactsRequired', 'EmrRequestFactsRequired', 'EmrRequestFactsRequired', 'EmrRequestFactsRequired']);
+    }
+    assert.equal(first.result.first.identity.id, a2.result.first.identity.id, 'one subject, one immutable identity');
+    assert.notEqual(first.result.first.requestId, a2.result.first.requestId, 'one request ID per request');
+    assert.notEqual(first.result.first.sessionRef, a2.result.first.sessionRef, 'two sessions of one subject stay apart');
+    assert.deepEqual(b.result.first.roles, ['technician']);
+    // Each handler below answers before it finishes; `outcome` settles when it has.
+    const settle = () => { let done; const promise = new Promise(resolve => { done = resolve; }); return { promise, done }; };
+    // After the response finished: neither the facts nor a member lookup of facts read before.
+    const ended = settle();
+    await w.call('/api/syn/read', { sid: sidA1, handler: async (req, res) => {
+      const before = await w.service.emrRequestContext.facts(req);
+      await new Promise(resolve => res.end('done', resolve));
+      const member = await before.member('aba-b').then(() => 'accepted', error => error.code);
+      ended.done({ after: (await w.facts(req)).refused, member });
+    } });
+    assert.deepEqual(await ended.promise, { after: 'EmrRequestEnded', member: 'EmrRequestEnded' });
+    // A lookup that began before the end and resolves after it is refused.
+    const late = settle();
+    let unblock;
+    w.ledger.gate = new Promise(resolve => { unblock = resolve; });
+    try {
+      await w.call('/api/syn/read', { sid: sidA1, handler: async (req, res) => {
+        const pending = w.service.emrRequestContext.facts(req).then(() => 'delivered', error => error.code);
+        await new Promise(resolve => res.end('done', resolve));
+        unblock();
+        late.done(await pending);
+      } });
+      assert.equal(await late.promise, 'EmrRequestEnded');
+    } finally { w.ledger.gate = null; }
+    // A client that went away: the request ends with its response's close.
+    const aborted = settle();
+    await w.call('/api/syn/read', { sid: sidA1, abort: req => setTimeout(() => req.destroy(), 100), handler: async (req, res) => {
+      await new Promise(resolve => res.once('close', resolve));
+      aborted.done((await w.facts(req)).refused);
+    } });
+    assert.equal(await aborted.promise, 'EmrRequestEnded');
+  });
+
+  test('C32 one immutable identity per verified issuer and subject; member(subject) is a current approved member of the same issuer or a closed refusal, never a minted ID', async () => {
+    const w = await authHarness();
+    w.member('id-a'); w.member('id-b'); w.member('id-gone', { suspended: true }); w.member('id-unapproved', { approved: false }); w.member('id-nowhere', { institution: null });
+    const take = req => w.service.emrRequestContext.facts(req);
+    const named = async (sub, name) => (await w.call('/api/syn/read', { bearer: await w.token(sub, { name }), handler: async req => (await take(req)).identity })).result;
+    const first = await named('id-a', 'Kim Synthetic'), renamed = await named('id-a', 'Lee Synthetic'), namesake = await named('id-b', 'Kim Synthetic');
+    assert.equal(first.id, renamed.id, 'a renamed subject keeps its identity');
+    assert.notEqual(first.id, namesake.id, 'a namesake is another identity');
+    const { result } = await w.call('/api/syn/read', { bearer: await w.token('id-a'), handler: async req => {
+      const facts = await take(req), outcome = async subject => facts.member(subject).then(identity => identity, error => error.code);
+      const before = w.ledger.resolves;
+      const refused = {};
+      for (const subject of ['id-unknown', 'id-gone', 'id-unapproved', 'id-nowhere', '', 42]) refused[String(subject)] = await outcome(subject);
+      const minted = w.ledger.resolves - before;
+      w.store.importReady = false; refused.pending = await outcome('id-b'); w.store.importReady = true;
+      w.store.down = true; refused.down = await outcome('id-b'); w.store.down = false;
+      return { b: await outcome('id-b'), refused, minted };
+    } });
+    assert.deepEqual([result.b.issuer, result.b.subject, result.b.id], [ISSUER, 'id-b', namesake.id], 'the same issuer, the existing identity');
+    assert.deepEqual(result.refused, { 'id-unknown': 'EmrMemberRefused', 'id-gone': 'EmrMemberRefused', 'id-unapproved': 'EmrMemberRefused',
+      'id-nowhere': 'EmrMemberRefused', '': 'EmrMemberRefused', 42: 'EmrMemberRefused', pending: 'EmrMemberRightsPending', down: 'EmrMemberUnavailable' });
+    assert.equal(result.minted, 0, 'no identity is resolved for a refused subject');
+    // Another issuer never gets facts, whatever the caller hands the capture seam.
+    const { result: other } = await w.call('/api/syn/open', { handler: async (req, res) => {
+      const code = (() => { try { w.service.captureEmrRequest(req, res, { issuer: 'https://other.example.test/realms/kin', subject: 'id-a', displayName: null,
+        roles: ['radiologist'], institutionId: 'hospital-a', rightsVersion: 3, authMethod: 'bearer', sessionRef: null }); return 'accepted'; } catch (error) { return error.code; } })();
+      return { code, facts: (await w.facts(req)).refused };
+    } });
+    assert.deepEqual(other, { code: 'EmrRequestIssuerRefused', facts: 'EmrRequestFactsRequired' });
+  });
+
+  test('C33 the captured rights are a copy of what the guard verified; a request that never reads its facts does no new IO, and the existing session verdicts stay', async () => {
+    const w = await authHarness();
+    w.member('copy-a');
+    const sid = await w.session('copy-a');
+    const dns = require('node:dns').promises, lookup = dns.lookup;
+    let lookups = 0;
+    dns.lookup = (...args) => { lookups++; return lookup.apply(dns, args); };
+    try {
+      const resolves = w.ledger.resolves;
+      w.store.calls.length = 0;
+      const { result } = await w.call('/api/syn/read', { sid, handler: async () => 'no facts read' });
+      assert.equal(result, 'no facts read');
+      assert.deepEqual([w.ledger.resolves - resolves, lookups], [0, 0], 'no identity or ingress work without a reader');
+      assert.deepEqual([...new Set(w.store.calls)].sort(), ['import', 'rights', 'session'], 'the guard reads what it read before');
+      // The rights row the guard verified, changed afterwards in the store and on req: the facts keep the copy.
+      const { result: copied } = await w.call('/api/syn/read', { sid, handler: async req => {
+        w.store.rights.get('copy-a').roles.push('admin');
+        req.roles.push('admin');
+        return (await w.facts(req)).facts.roles;
+      } });
+      assert.deepEqual(copied, ['radiologist']);
+      w.store.rights.get('copy-a').roles.pop();
+      // A changed rights version ends the session as before: no facts.
+      w.member('copy-a', { version: 4 });
+      const { result: stale } = await w.call('/api/syn/read', { sid, handler: (req, res, verdict) => w.facts(req).then(found => ({ verdict, ...found })) });
+      assert.deepEqual([stale.verdict.admitted, stale.verdict.status, stale.verdict.code, stale.refused], [false, 401, 'AUTH_SESSION_ENDED', 'EmrRequestFactsRequired']);
+    } finally { dns.lookup = lookup; }
+  });
+
+  test('C34 the ingress address is known only from a resolved proxy peer with one valid X-Real-IP; DNS is bounded and never guessed; one server request ID per request; no credential is a fact', async () => {
+    const { createEmrRequestContext } = load('emr-runtime/request-context.ts');
+    const net = require('node:net');
+    const { mock } = require('node:test');
+    const flush = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); };
+    const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+    const ledger = { async withAppendTransaction(work) { return work({}); }, async resolveIdentity(tx, issuer, subject) { return '00000000-0000-4000-8000-' + subject.padStart(12, '0').slice(-12); } };
+    const runtime = { trustedProxyHost: 'proxy', requireResources: () => Object.freeze({ db: {}, ledger, adapters: CTX.runtimeAdapters }) };
+    const world = () => {
+      const lookups = [];
+      const context = createEmrRequestContext({ runtime, issuer: () => ISSUER, member: async () => {}, lookup: host => { const call = deferred(); lookups.push({ host, call }); return call.promise; } });
+      const exchange = (peer, headers = {}) => {
+        const socket = new net.Socket();
+        Object.defineProperty(socket, 'remoteAddress', { value: peer });
+        const req = new http.IncomingMessage(socket); req.headers = headers;
+        const res = new http.ServerResponse(req);
+        context.capture(req, res, { issuer: ISSUER, subject: '7', displayName: null, roles: ['radiologist'], institutionId: 'hospital-a', rightsVersion: 1,
+          authMethod: 'session', sessionRef: 'ref-7' });
+        return req;
+      };
+      return { lookups, context, exchange };
+    };
+    mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+    try {
+      const w = world();
+      const ingress = async (peer, headers, answer) => {
+        const pending = w.context.source.facts(w.exchange(peer, headers));
+        await flush();
+        if (answer) answer();
+        return (await pending).trustedProxyIp;
+      };
+      const known = address => ({ status: 'known', value: { address, source: 'trusted-proxy' } }), unknown = { status: 'unresolved', reason: 'not-observed' };
+      // Cold: the first lookup answers the proxy's address; loopback and malformed answers are never trusted.
+      assert.deepEqual(await ingress('192.0.2.10', { 'x-real-ip': '198.51.100.7' }, () => {
+        assert.equal(w.lookups.length, 1, 'the proxy name is looked up before any peer is trusted');
+        w.lookups[0].call.resolve([{ address: '192.0.2.10' }, { address: '127.0.0.1' }, { address: '::1' }, { address: 'not-ip' }]);
+      }), known('198.51.100.7'));
+      assert.equal(w.lookups[0].host, 'proxy');
+      // Fresh for 5 s: no new lookup; the IPv4-mapped peer is the same peer.
+      mock.timers.tick(4000);
+      assert.deepEqual(await ingress('::ffff:192.0.2.10', { 'x-real-ip': '198.51.100.8' }), known('198.51.100.8'));
+      for (const [peer, headers] of [
+        ['203.0.113.9', { 'x-real-ip': '198.51.100.7' }],                       // a direct caller
+        ['127.0.0.1', { 'x-real-ip': '198.51.100.7' }],                         // loopback is never the proxy
+        ['203.0.113.9', { 'x-forwarded-for': '198.51.100.7', host: 'proxy' }],  // XFF and Host are not sources
+        ['192.0.2.10', { 'x-forwarded-for': '198.51.100.7' }],                  // the proxy without X-Real-IP
+        ['192.0.2.10', { 'x-real-ip': '198.51.100.7, 198.51.100.9' }],          // more than one
+        ['192.0.2.10', { 'x-real-ip': 'not-an-address' }],                      // not an IP
+      ]) assert.deepEqual(await ingress(peer, headers), unknown, JSON.stringify([peer, headers]));
+      assert.equal(w.lookups.length, 1, 'served from the fresh set');
+      // Stale (5-60 s): a new lookup that has not answered gets 200 ms, then the verified set serves.
+      mock.timers.tick(2000);
+      const stale = w.context.source.facts(w.exchange('192.0.2.10', { 'x-real-ip': '198.51.100.7' }));
+      await flush(); mock.timers.tick(200); await flush();
+      assert.deepEqual((await stale).trustedProxyIp, known('198.51.100.7'));
+      assert.equal(w.lookups.length, 2);
+      // A lookup older than 5 s is abandoned for a new one; its late answer never replaces the newer set.
+      mock.timers.tick(5001);
+      const fresh = w.context.source.facts(w.exchange('192.0.2.20', { 'x-real-ip': '198.51.100.7' }));
+      await flush();
+      assert.equal(w.lookups.length, 3, 'a new lookup after the abandoned one');
+      w.lookups[2].call.resolve([{ address: '192.0.2.20' }]);
+      assert.deepEqual((await fresh).trustedProxyIp, known('198.51.100.7'));
+      w.lookups[1].call.resolve([{ address: '192.0.2.10' }]);
+      await flush();
+      assert.deepEqual(await ingress('192.0.2.10', { 'x-real-ip': '198.51.100.7' }), unknown, 'the older answer did not replace the newer set');
+      assert.deepEqual(await ingress('192.0.2.20', { 'x-real-ip': '198.51.100.7' }), known('198.51.100.7'));
+      // Expired (over 60 s without a verified answer): failed and empty lookups leave no trusted peer - not the last set,
+      // and not a private-range peer either.
+      mock.timers.tick(61_000);
+      const failing = w.context.source.facts(w.exchange('10.0.0.5', { 'x-real-ip': '198.51.100.7' }));
+      await flush(); w.lookups[w.lookups.length - 1].call.reject(new Error('ENOTFOUND proxy'));
+      assert.deepEqual((await failing).trustedProxyIp, unknown);
+      assert.deepEqual(await ingress('192.0.2.20', { 'x-real-ip': '198.51.100.7' }, () => w.lookups[w.lookups.length - 1].call.reject(new Error('ENOTFOUND'))), unknown);
+      mock.timers.tick(6000);
+      const empty = w.context.source.facts(w.exchange('192.168.0.5', { 'x-real-ip': '198.51.100.7' }));
+      await flush(); w.lookups[w.lookups.length - 1].call.resolve([]);
+      assert.deepEqual((await empty).trustedProxyIp, unknown);
+      // Cold without an answer: 500 ms, then unresolved.
+      const cold = world();
+      const waiting = cold.context.source.facts(cold.exchange('192.0.2.10', { 'x-real-ip': '198.51.100.7' }));
+      await flush(); mock.timers.tick(499); await flush();
+      let settled = false; waiting.then(() => { settled = true; }, () => { settled = true; });
+      await flush();
+      assert.equal(settled, false, 'still waiting within the cold bound');
+      mock.timers.tick(1); await flush();
+      assert.deepEqual((await waiting).trustedProxyIp, unknown);
+    } finally { mock.timers.reset(); }
+    // One server request ID per request, kept across reads; no header ID, token, cookie or session secret in the facts.
+    const plain = world();
+    const req = plain.exchange('203.0.113.9', { 'x-request-id': 'client-chosen', cookie: 'kin_sid=Synthetic-Session-Secret', authorization: 'Bearer Synthetic.Token.Value' });
+    const first = plain.context.source.facts(req);
+    await flush(); plain.lookups[0].call.resolve([]);
+    const [one, two] = [await first, await plain.context.source.facts(req)];
+    const other = plain.context.source.facts(plain.exchange('203.0.113.9'));
+    await flush();
+    assert.equal(one.requestId, two.requestId);
+    assert.match(one.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.notEqual(one.requestId, 'client-chosen');
+    assert.notEqual((await other).requestId, one.requestId);
+    const text = JSON.stringify(one);
+    for (const secret of ['Synthetic-Session-Secret', 'Synthetic.Token.Value', 'kin_sid', 'client-chosen']) assert(!text.includes(secret), secret);
+    assert(Object.isFrozen(one) && Object.isFrozen(one.roles) && Object.isFrozen(one.identity) && Object.isFrozen(one.trustedProxyIp));
+  });
+
+  test('C35 the public request and startup types are the declared ones; only AuthGuard captures, only AuthService creates the source, and neither imports clinical, signature or report code', () => {
+    const { checker, resolve, rel, sources, exported, ownerOf } = product();
+    const facts = exported('api/src/emr-runtime/request-context.ts', 'EmrAuthenticatedRequestFacts');
+    assert.deepEqual(checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(facts)).map(p => p.name).sort(),
+      ['authMethod', 'identity', 'institutionId', 'kind', 'member', 'requestId', 'rightsVersion', 'roles', 'sessionRef', 'trustedProxyIp'],
+      'no signing registration, signature, patient link or verifier is a B fact');
+    const source = exported('api/src/emr-runtime/request-context.ts', 'EmrAuthenticatedRequestSource');
+    assert.deepEqual(checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(source)).map(p => p.name), ['facts'], 'the read port has no writer');
+    const resources = exported('api/src/emr-runtime/application.ts', 'EmrStartupResources');
+    assert.deepEqual(checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(resources)).map(p => p.name).sort(), ['adapters', 'db', 'ledger']);
+    const service = exported('api/src/auth.service.ts', 'AuthService');
+    const capture = checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(service), 'captureEmrRequest');
+    const factory = exported('api/src/emr-runtime/request-context.ts', 'createEmrRequestContext');
+    const calls = [];
+    for (const file of sources) {
+      const visit = node => {
+        if (ts.isCallExpression(node)) {
+          const callee = ts.isPropertyAccessExpression(node.expression) ? node.expression.name : node.expression;
+          const symbol = resolve(checker.getSymbolAtLocation(callee));
+          if (symbol === capture) calls.push(`captureEmrRequest ${rel(file)} ${ownerOf(node)}`);
+          if (symbol === factory) calls.push(`createEmrRequestContext ${rel(file)} ${ownerOf(node)}`);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(file);
+    }
+    assert.deepEqual(calls.sort(), ['captureEmrRequest api/src/auth.guard.ts AuthGuard.admit', 'createEmrRequestContext api/src/auth.service.ts AuthService.constructor']);
+    // The startup owner and the request facts reach no clinical (D), signature (C2) or report code.
+    const seen = new Set(), reached = [];
+    const walk = file => {
+      if (seen.has(file.fileName)) return;
+      seen.add(file.fileName);
+      reached.push(rel(file));
+      for (const statement of file.statements) {
+        const specifier = (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) && statement.moduleSpecifier;
+        if (!specifier || !ts.isStringLiteral(specifier) || !specifier.text.startsWith('.')) continue;
+        const target = ts.resolveModuleName(specifier.text, file.fileName, parsed.options, ts.sys).resolvedModule;
+        const next = target && sources.find(candidate => path.resolve(candidate.fileName) === path.resolve(target.resolvedFileName));
+        if (next) walk(next);
+      }
+    };
+    for (const name of ['application.ts', 'request-context.ts']) walk(sources.find(file => rel(file) === 'api/src/emr-runtime/' + name));
+    assert.deepEqual(reached.filter(file => /\/emr-(clinical|signature|report|image)\//.test(file)), []);
+  });
+
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {
     // The declaration against the contract and the runtime manifest, both ways.
     assert.deepEqual(declaration.models.sql, Cl.SQL_STORAGE_CLASSIFICATION);

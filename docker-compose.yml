@@ -233,6 +233,8 @@ services:
       DATABASE_URL: postgresql://kin_runtime:${KIN_EMR_RUNTIME_PASSWORD:?KIN_EMR_RUNTIME_PASSWORD를 .env에 설정하세요}@db:5432/kin
       # 원장 seal·보호 실패 저널: DB 밖의 이 서버 전용 볼륨(DB 역할은 쓸 수 없다).
       KIN_EMR_STATE_DIR: /var/lib/kin-emr
+      # EMR-B2: 접속지(X-Real-IP)를 믿는 상대는 이 이름이 DNS로 가리키는 프록시 주소뿐이다(같은 파일의 `proxy` 서비스).
+      KIN_EMR_PROXY_HOST: proxy
       # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
       AUTH_REQUIRED: "true"
       # iss는 **브라우저가 본 주소**다 — 토큰에 그렇게 박혀 오기 때문.

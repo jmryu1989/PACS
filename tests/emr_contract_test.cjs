@@ -1732,18 +1732,138 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const result = spawnSync(process.execPath, ['-e', script], { cwd: root, encoding: 'utf8', timeout: 30000 });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
   });
-  test('TEST-EMR-01/19-A R4-09: TypeScript symbols restrict adapter composition calls to the server composition module', () => {
-    const program = ts.createProgram(parsed.fileNames, parsed.options), checker = program.getTypeChecker();
-    const resolve = symbol => symbol?.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-    const file = program.getSourceFiles().find(f => f.fileName.replaceAll('\\', '/').endsWith('/emr-contract/composition.ts'));
-    const compose = checker.getExportsOfModule(checker.getSymbolAtLocation(file)).find(s => s.name === 'composeEmrAdapters');
-    assert(compose);
-    for (const source of program.getSourceFiles().filter(f => parsed.fileNames.includes(f.fileName))) {
+  /**
+   * EMR-B2-BASE (TEST-B2SH-03): the installed TypeScript checker over api/src (plus `overrides`, path -> text, for the
+   * refusal fixtures below) - every reference to A's composeEmrAdapters and to EmrApplicationRuntime.start, aliases and
+   * namespace imports resolved. Only file names, owners and lines are compared; no AST object reaches an assertion.
+   */
+  let boundaryProgram;
+  function startupBoundary(overrides = {}) {
+    const key = file => path.resolve(file).replaceAll('\\', '/').toLowerCase();
+    const replaced = new Map(Object.entries(overrides).map(([file, text]) => [key(path.join(root, file)), text]));
+    const host = ts.createCompilerHost(parsed.options);
+    const readFile = host.readFile.bind(host), fileExists = host.fileExists.bind(host), getSourceFile = host.getSourceFile.bind(host);
+    host.fileExists = file => replaced.has(key(file)) || fileExists(file);
+    host.readFile = file => (replaced.has(key(file)) ? replaced.get(key(file)) : readFile(file));
+    host.getSourceFile = (file, language, onError, fresh) => (replaced.has(key(file))
+      ? ts.createSourceFile(file, replaced.get(key(file)), language, true) : getSourceFile(file, language, onError, fresh));
+    const added = Object.keys(overrides).map(file => path.join(root, file).replaceAll('\\', '/'))
+      .filter(file => !parsed.fileNames.some(name => key(name) === key(file)));
+    const program = ts.createProgram([...parsed.fileNames, ...added], parsed.options, host, boundaryProgram);
+    if (!Object.keys(overrides).length) boundaryProgram = program;
+    const checker = program.getTypeChecker();
+    const resolve = symbol => (symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+    const product = new Set([...parsed.fileNames, ...added].map(key));
+    const sources = program.getSourceFiles().filter(file => product.has(key(file.fileName)));
+    const rel = file => path.relative(root, file.fileName).replaceAll('\\', '/');
+    const exportsOf = suffix => checker.getExportsOfModule(checker.getSymbolAtLocation(sources.find(file => rel(file) === suffix)));
+    const compose = exportsOf('api/src/emr-contract/composition.ts').find(symbol => symbol.name === 'composeEmrAdapters');
+    const applicationExports = exportsOf('api/src/emr-runtime/application.ts');
+    const runtime = resolve(applicationExports.find(symbol => symbol.name === 'EmrApplicationRuntime'));
+    const runtimeClass = runtime?.declarations?.find(ts.isClassDeclaration);
+    const start = runtime && checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(runtime), 'start');
+    const problems = [], calls = [], starts = [];
+    const ownerOf = node => { let at = node.parent; while (at && !ts.isFunctionLike(at)) at = at.parent; return at; };
+    const ownerName = owner => !owner ? 'module scope' : ts.isConstructorDeclaration(owner) ? 'constructor'
+      : owner.name && ts.isIdentifier(owner.name) ? owner.name.text : 'a function expression';
+    const where = (file, node) => `${rel(file)}:${file.getLineAndCharacterOfPosition(node.getStart()).line + 1}`;
+    for (const file of sources) {
+      // Only names that can denote either symbol are resolved: their own names and the local names an import renames them
+      // to (a value alias, a re-export or a namespace member spells the own name and is judged there).
+      const names = new Set(['composeEmrAdapters', 'start']);
+      const imports = node => {
+        if (ts.isImportSpecifier(node) && node.propertyName && names.has(node.propertyName.text)) names.add(node.name.text);
+        ts.forEachChild(node, imports);
+      };
+      imports(file);
       const visit = node => {
-        if (ts.isCallExpression(node) && resolve(checker.getSymbolAtLocation(node.expression)) === compose) assert.equal(source, file);
+        if (ts.isIdentifier(node) && names.has(node.text)) {
+          const symbol = resolve(checker.getSymbolAtLocation(node));
+          const target = symbol === compose ? 'composeEmrAdapters' : start && symbol === start ? 'EmrApplicationRuntime.start' : null;
+          const parent = node.parent;
+          const declaration = parent && (ts.isFunctionDeclaration(parent) || ts.isMethodDeclaration(parent)) && parent.name === node;
+          if (target && !declaration && !ts.isImportSpecifier(parent)) {
+            const callee = ts.isPropertyAccessExpression(parent) && parent.name === node ? parent : node;
+            const call = ts.isCallExpression(callee.parent) && callee.parent.expression === callee ? callee.parent : null;
+            const owner = ownerOf(node);
+            if (!call) problems.push(`${target} referenced as a value at ${where(file, node)}`);
+            else if (target === 'composeEmrAdapters') {
+              const allowed = rel(file) === 'api/src/emr-runtime/application.ts' && owner && ts.isMethodDeclaration(owner)
+                && owner.parent === runtimeClass && ownerName(owner) === 'start';
+              if (allowed) calls.push(`${rel(file)} EmrApplicationRuntime.start`);
+              else problems.push(`composeEmrAdapters called outside EmrApplicationRuntime.start: ${where(file, node)} (${ownerName(owner)})`);
+            } else if (rel(file) === 'api/src/main.ts' && ts.isAwaitExpression(call.parent)) starts.push(`${rel(file)} ${ownerName(owner)} awaited`);
+            else problems.push(`EmrApplicationRuntime.start called other than awaited by main.ts: ${where(file, node)} (${ownerName(owner)})`);
+          }
+        }
         ts.forEachChild(node, visit);
       };
-      visit(source);
+      visit(file);
+    }
+    if (calls.length !== 1) problems.push(`composeEmrAdapters has ${calls.length} startup calls, not one`);
+    if (starts.length !== 1) problems.push(`main.ts awaits EmrApplicationRuntime.start ${starts.length} times, not once`);
+    // The startup contract is these exports and these public members: no reset, rebind or second-start surface.
+    const exported = applicationExports.map(symbol => symbol.name).sort();
+    const contract = ['EmrApplicationRuntime', 'EmrClinicalLifecycle', 'EmrStartupFailure', 'EmrStartupPhase', 'EmrStartupPlan',
+      'EmrStartupResources', 'PreparedClinicalStartup', 'trustablePeer'];
+    if (JSON.stringify(exported) !== JSON.stringify(contract)) problems.push(`application.ts exports ${exported.join(', ')}`);
+    const members = (runtimeClass?.members ?? []).filter(member => member.name && ts.isIdentifier(member.name)
+      && !(ts.getCombinedModifierFlags(member) & (ts.ModifierFlags.Private | ts.ModifierFlags.Static))).map(member => member.name.text).sort();
+    const surface = ['beforeApplicationShutdown', 'onApplicationShutdown', 'requireResources', 'start', 'trustedProxyHost'];
+    if (JSON.stringify(members) !== JSON.stringify(surface)) problems.push(`EmrApplicationRuntime exposes ${members.join(', ')}`);
+    return { problems, calls, starts };
+  }
+  test('TEST-EMR-01/19-A R4-09: TypeScript symbols restrict adapter composition to the startup owner that main.ts awaits once', () => {
+    // EMR-B2-BASE re-binds this check (TEST-B2SH-03): composition.ts alone was the allowed caller while nothing composed;
+    // the sole product call is now EmrApplicationRuntime.start, reached only from main.ts's awaited start. The order in time
+    // (start before init and listen) is the behaviour case C24 of tests/emr/b/contract_test.cjs.
+    const real = startupBoundary();
+    assert.deepEqual(real, { problems: [], calls: ['api/src/emr-runtime/application.ts EmrApplicationRuntime.start'],
+      starts: ['api/src/main.ts bootstrap awaited'] });
+    // Refusal fixtures: each added file is its own place (one program holds them all); each changed product file is its own.
+    const head = "import { composeEmrAdapters } from './emr-contract/composition';\nimport { runtimeAdapters } from './emr-runtime/context';\n";
+    const fixture = name => `api/src/syn-startup-${name}.ts`;
+    const added = {
+      [fixture('constructor')]: head + 'export class SynOwner { constructor() { composeEmrAdapters(runtimeAdapters); } }\n',
+      [fixture('handler')]: "import { Controller, Get } from '@nestjs/common';\n" + head +
+        "@Controller('syn') export class SynController { @Get('compose') read() { return composeEmrAdapters(runtimeAdapters); } }\n",
+      [fixture('guard')]: head + 'export class SynGuard { async canActivate() { composeEmrAdapters(runtimeAdapters); return true; } }\n',
+      [fixture('init')]: head + 'export class SynService { onModuleInit() { composeEmrAdapters(runtimeAdapters); } }\n',
+      [fixture('alias')]: head.replace('{ composeEmrAdapters }', '{ composeEmrAdapters as bindReaders }') +
+        'export function synAlias() { return bindReaders(runtimeAdapters); }\n',
+      [fixture('namespace')]: "import * as composition from './emr-contract/composition';\nimport { runtimeAdapters } from './emr-runtime/context';\n" +
+        'export function synNamespace() { return composition.composeEmrAdapters(runtimeAdapters); }\n',
+      [fixture('value')]: head + 'const again = composeEmrAdapters;\nexport function synValue() { return again(runtimeAdapters); }\n',
+      [fixture('restart')]: "import { EmrApplicationRuntime } from './emr-runtime/application';\n" +
+        "export class SynRestart { constructor(private readonly runtime: EmrApplicationRuntime) {} again() { return this.runtime.start({ mode: 'base' }); } }\n",
+    };
+    const fixtures = startupBoundary(added).problems;
+    for (const expected of [
+      'composeEmrAdapters called outside EmrApplicationRuntime.start: api/src/syn-startup-constructor.ts:3 (constructor)',
+      'composeEmrAdapters called outside EmrApplicationRuntime.start: api/src/syn-startup-handler.ts:4 (read)',
+      'composeEmrAdapters called outside EmrApplicationRuntime.start: api/src/syn-startup-guard.ts:3 (canActivate)',
+      'composeEmrAdapters called outside EmrApplicationRuntime.start: api/src/syn-startup-init.ts:3 (onModuleInit)',
+      'composeEmrAdapters called outside EmrApplicationRuntime.start: api/src/syn-startup-alias.ts:3 (synAlias)',
+      'composeEmrAdapters called outside EmrApplicationRuntime.start: api/src/syn-startup-namespace.ts:3 (synNamespace)',
+      'composeEmrAdapters referenced as a value at api/src/syn-startup-value.ts:3',
+      'EmrApplicationRuntime.start called other than awaited by main.ts: api/src/syn-startup-restart.ts:2 (again)',
+    ]) assert(fixtures.includes(expected), `${expected}: ${JSON.stringify(fixtures)}`);
+    const application = fs.readFileSync(path.join(api, 'src/emr-runtime/application.ts'), 'utf8');
+    const main = fs.readFileSync(path.join(api, 'src/main.ts'), 'utf8');
+    const swap = (text, from, to) => { assert(text.includes(from), from); return text.replace(from, to); };
+    for (const [name, overrides, expected] of [
+      ['a second call in start', { 'api/src/emr-runtime/application.ts': swap(application, '      composeEmrAdapters(adapters);\n',
+        '      composeEmrAdapters(adapters);\n      composeEmrAdapters(adapters);\n') }, 'composeEmrAdapters has 2 startup calls, not one'],
+      ['a reset export', { 'api/src/emr-runtime/application.ts': application + 'export function resetEmrRuntime(): void {}\n' },
+        'application.ts exports EmrApplicationRuntime, EmrClinicalLifecycle, EmrStartupFailure, EmrStartupPhase, EmrStartupPlan, EmrStartupResources, PreparedClinicalStartup, resetEmrRuntime, trustablePeer'],
+      ['a rebind member', { 'api/src/emr-runtime/application.ts': swap(application, '  requireResources(): Readonly<EmrStartupResources> {',
+        '  rebind(): void { this.state = \'new\'; }\n  requireResources(): Readonly<EmrStartupResources> {') },
+        'EmrApplicationRuntime exposes beforeApplicationShutdown, onApplicationShutdown, rebind, requireResources, start, trustedProxyHost'],
+      ['a start main does not await', { 'api/src/main.ts': swap(main, '  await app.get(EmrApplicationRuntime).start(', '  void app.get(EmrApplicationRuntime).start(') },
+        'EmrApplicationRuntime.start called other than awaited by main.ts: api/src/main.ts'],
+    ]) {
+      const { problems } = startupBoundary(overrides);
+      assert(problems.some(problem => problem.includes(expected)), `${name}: ${JSON.stringify(problems)}`);
     }
   });
   test('TEST-EMR-13/19-A R4-11 Y2c: full processing claims cannot publish a clinical Addendum after expiry under a hold', () => {
