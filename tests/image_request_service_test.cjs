@@ -14,9 +14,11 @@
  *   (3) the source read fails: 503, no transaction, no write (create, change, replay);
  *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService); the
  *       compiled module resolves neither service's module at load or while serving every route (Node's own module
- *       resolution, never a match on the compiled text), and a recording Connect store (the Transfer, TransferBasis and
- *       ProcessingAgreement delegates and tables) sees no call over every route; a comment naming them all is the same
- *       module, a real require or a real Connect call is refused;
+ *       resolution, never a match on the compiled text), and a recording Connect store sees no call over every route: no
+ *       call on the transfer, transferBasis or processingAgreement delegate (root or transaction client) and no raw
+ *       statement, $queryRaw or the transaction's $executeRaw, naming the "Transfer", "TransferBasis" or
+ *       "ProcessingAgreement" table; a comment naming them all is the same module, a real require, a delegate call, a raw
+ *       write or a raw read of a Connect table is refused;
  *   (5) a recording Orthanc sees only studyIdentityResources and studyIdentities(true) across create, accept, replay, read,
  *       forStudy, list and close, and nothing at all when the policy has no metadata rule.
  * Also pinned over the same stubs: every applied requestId replays its stored receipt without a write, after Closed and
@@ -100,9 +102,15 @@ function world(policy, { requests = [], receipts = [], Service = ImageRequestSer
         : sql.includes('"StudyState"') ? 'study' : 'unknown';
   const lockOf = sql => sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR KEY SHARE') ? ' FOR KEY SHARE'
     : sql.includes('FOR SHARE') ? ' FOR SHARE' : '';
+  // Every raw statement, read or write, passes the same observation: one naming a Connect table is recorded, not run.
+  const connectSql = (where, sql) => {
+    if (!CONNECT_TABLE.test(sql)) return false;
+    connect.push(where + ':sql ' + sql.match(CONNECT_TABLE)[0]);
+    return true;
+  };
   const query = async (where, view, index, strings, values) => {
     const sql = strings.join('?');
-    if (CONNECT_TABLE.test(sql)) { connect.push(where + ':sql ' + sql.match(CONNECT_TABLE)[0]); return []; }
+    if (connectSql(where, sql)) return [];
     const k = kind(sql);
     log(where + ':' + k, lockOf(sql));
     let rows;
@@ -120,7 +128,7 @@ function world(policy, { requests = [], receipts = [], Service = ImageRequestSer
   };
   const client = (view, index) => ({
     ...connectDelegates('tx'),
-    $executeRaw: async () => { log('tx:execute'); return 0; },
+    $executeRaw: async strings => { if (connectSql('tx', strings.join('?'))) return 0; log('tx:execute'); return 0; },
     $queryRaw: (strings, ...values) => query('tx', view, index, strings, values),
     studyImageRequest: {
       create: async ({ data }) => { log('tx:write'); writes.request++; store.requests.set(data.id, { ...data }); return data; },
@@ -297,12 +305,13 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
     seen[name] = { forbidden: loaded.forbidden(), connect, same: behaviour === expected.behaviour };
   }
   // A real Connect call from a service that otherwise behaves the same: through the injected PrismaService, a delegate
-  // inside the write transaction and a raw read of a Connect table.
+  // inside the write transaction, a raw write of a Connect table in a transaction and a raw read of one.
   class Transferring extends ImageRequestService {
     constructor(prisma, access) { super(prisma, access); this.connectStore = prisma; }
     async create(...args) {
       const result = await super.create(...args);
       await this.connectStore.$transaction(tx => tx.transfer.create({ data: {} }));
+      await this.connectStore.$transaction(tx => tx.$executeRaw`INSERT INTO "Transfer" (id) VALUES (${'SYNTHETIC'})`);
       await this.connectStore.$queryRaw`SELECT id FROM "ProcessingAgreement"`;
       return result;
     }
@@ -314,7 +323,7 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
     named: { forbidden: [], connect: [], same: true },
     orthanc: { forbidden: ['orthanc.service.js'], connect: [], same: true },
     connect: { forbidden: ['connect.service.js'], connect: [], same: true },
-    transferring: { connect: ['tx:transfer.create', 'root:sql "ProcessingAgreement"'] },
+    transferring: { connect: ['tx:transfer.create', 'tx:sql "Transfer"', 'root:sql "ProcessingAgreement"'] },
   });
 });
 
