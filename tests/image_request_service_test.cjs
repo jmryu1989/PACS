@@ -16,9 +16,10 @@
  *       compiled module resolves neither service's module at load or while serving every route (Node's own module
  *       resolution, never a match on the compiled text), and a recording Connect store sees no call over every route: no
  *       call on the transfer, transferBasis or processingAgreement delegate (root or transaction client) and no raw
- *       statement, $queryRaw or the transaction's $executeRaw, naming the "Transfer", "TransferBasis" or
- *       "ProcessingAgreement" table; a comment naming them all is the same module, a real require, a delegate call, a raw
- *       write or a raw read of a Connect table is refused;
+ *       statement, $queryRaw or the transaction's $executeRaw, whose SQL outside comments references the "Transfer",
+ *       "TransferBasis" or "ProcessingAgreement" table; a JS comment or string, or a SQL comment, naming them all behaves
+ *       the same and passes; a real require (at load or reached only in view=mine), a delegate call, a raw write or a
+ *       raw read of a Connect table is refused;
  *   (5) a recording Orthanc sees only studyIdentityResources and studyIdentities(true) across create, accept, replay, read,
  *       forStudy, list and close, and nothing at all when the policy has no metadata rule.
  * Also pinned over the same stubs: every applied requestId replays its stored receipt without a write, after Closed and
@@ -102,14 +103,17 @@ function world(policy, { requests = [], receipts = [], Service = ImageRequestSer
         : sql.includes('"StudyState"') ? 'study' : 'unknown';
   const lockOf = sql => sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR KEY SHARE') ? ' FOR KEY SHARE'
     : sql.includes('FOR SHARE') ? ' FOR SHARE' : '';
-  // Every raw statement, read or write, passes the same observation: one naming a Connect table is recorded, not run.
+  // Every raw statement, read or write, passes the same observation: one whose SQL text references a Connect table is
+  // recorded, not run. The text is the tagged template's literal parts (values are bound parameters, never SQL) with the
+  // SQL comments (`-- ...` to the end of a line, `/* ... */`) removed, so a comment naming a table is not a reference.
+  const statementText = strings => strings.join('?').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
   const connectSql = (where, sql) => {
     if (!CONNECT_TABLE.test(sql)) return false;
     connect.push(where + ':sql ' + sql.match(CONNECT_TABLE)[0]);
     return true;
   };
   const query = async (where, view, index, strings, values) => {
-    const sql = strings.join('?');
+    const sql = statementText(strings);
     if (connectSql(where, sql)) return [];
     const k = kind(sql);
     log(where + ':' + k, lockOf(sql));
@@ -128,7 +132,7 @@ function world(policy, { requests = [], receipts = [], Service = ImageRequestSer
   };
   const client = (view, index) => ({
     ...connectDelegates('tx'),
-    $executeRaw: async strings => { if (connectSql('tx', strings.join('?'))) return 0; log('tx:execute'); return 0; },
+    $executeRaw: async strings => { if (connectSql('tx', statementText(strings))) return 0; log('tx:execute'); return 0; },
     $queryRaw: (strings, ...values) => query('tx', view, index, strings, values),
     studyImageRequest: {
       create: async ({ data }) => { log('tx:write'); writes.request++; store.requests.set(data.id, { ...data }); return data; },
@@ -273,6 +277,12 @@ function loadCompiled(source) {
     .call(module.exports, module.exports, recording, module, compiledFile, dirname(compiledFile));
   return { exports: module.exports, forbidden: () => resolved.filter(file => forbiddenFiles.includes(file)).map(file => basename(file)) };
 }
+/**
+ * Module code that, once the exported class exists, makes its list() require `file` only for view=mine: a dependency
+ * reached in one contractual branch, which only a check covering that branch can see.
+ */
+const requiredInMine = (name, file) => `\n{ const list = exports.${name}.prototype.list;\n`
+  + `  exports.${name}.prototype.list = function (c, q) { if (q && q.view === 'mine') require(${JSON.stringify(file)}); return list.call(this, c, q); }; }\n`;
 /** What a class does over every route, timestamps aside, and what the recording Connect store saw. */
 const observe = async Service => {
   const w = world(metadataPolicy(), { Service });
@@ -289,12 +299,15 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   const names = 'OrthancService ConnectService ./orthanc.service ./connect.service "Transfer" "TransferBasis" "ProcessingAgreement"'
     + ' prisma.transfer prisma.transferBasis prisma.processingAgreement';
   // The contrast both ways: a comment and an unused string naming every forbidden service, delegate and table is the same
-  // module and passes; a real require of either service module, or a real Connect call, is refused.
+  // module and passes; a real require of either service module, at load or only in the clinician's own list (view=mine),
+  // or a real Connect call, is refused.
   const variants = {
     compiled,
     named: `/* ${names} */\n${compiled}\nvoid ${JSON.stringify(names)}; // ${names}\n`,
     orthanc: `${compiled}\nrequire("./orthanc.service");\n`,
     connect: `${compiled}\nrequire("./connect.service");\n`,
+    mineOrthanc: compiled + requiredInMine('ImageRequestService', './orthanc.service'),
+    mineConnect: compiled + requiredInMine('ImageRequestService', './connect.service'),
   };
   const expected = await observe(ImageRequestService);
   assert.deepEqual(expected.connect, [], 'every route of the compiled service');
@@ -318,13 +331,35 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   }
   const transferring = await observe(Transferring);
   seen.transferring = { connect: [...new Set(transferring.connect)] };
+  // A SQL comment naming the Connect tables is not a reference: the same extra statements with and without such comments
+  // (a block comment in a write, a line comment in a read) behave identically and reach no Connect table.
+  const lockTimeout = withComments => class extends ImageRequestService {
+    constructor(prisma, access) { super(prisma, access); this.store = prisma; }
+    async create(...args) {
+      const result = await super.create(...args);
+      await this.store.$transaction(tx => withComments
+        ? tx.$executeRaw`SET LOCAL lock_timeout = '3s' /* not "Transfer", "TransferBasis" or "ProcessingAgreement" */`
+        : tx.$executeRaw`SET LOCAL lock_timeout = '3s'`);
+      await (withComments
+        ? this.store.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1}) -- never "ProcessingAgreement"
+          `
+        : this.store.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1})`);
+      return result;
+    }
+  };
+  const [plain, commented] = [await observe(lockTimeout(false)), await observe(lockTimeout(true))];
+  seen.sqlComments = { connect: commented.connect, same: commented.behaviour === plain.behaviour };
   assert.deepEqual(seen, {
     compiled: { forbidden: [], connect: [], same: true },
     named: { forbidden: [], connect: [], same: true },
     orthanc: { forbidden: ['orthanc.service.js'], connect: [], same: true },
     connect: { forbidden: ['connect.service.js'], connect: [], same: true },
+    mineOrthanc: { forbidden: ['orthanc.service.js'], connect: [], same: true },
+    mineConnect: { forbidden: ['connect.service.js'], connect: [], same: true },
     transferring: { connect: ['tx:transfer.create', 'tx:sql "Transfer"', 'root:sql "ProcessingAgreement"'] },
+    sqlComments: { connect: [], same: true },
   });
+  assert.deepEqual(plain.connect, []);
 });
 
 test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, and nothing without a metadata rule', async () => {

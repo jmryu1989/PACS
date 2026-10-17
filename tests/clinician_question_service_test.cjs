@@ -10,8 +10,9 @@
  *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, no transaction, no write;
  *   (3) the source read fails: 503, no transaction, no write;
  *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService), and the
- *       compiled module resolves neither service's module at load or while serving every route (Node's own module
- *       resolution, never a match on the compiled text: a comment naming them is the same module, a real require is not);
+ *       compiled module resolves neither service's module at load or while serving every route and both list views,
+ *       mine and inbox (Node's own module resolution, never a match on the compiled text: a comment naming them is the
+ *       same module; a real require, at load or reached only in view=mine, is not);
  *   (5) a recording Orthanc sees only studyIdentityResources (every resource of the one study; WORKLIST-SPLIT-UID) and
  *       studyIdentities(true), and nothing at all when the
  *       policy has no metadata rule.
@@ -204,6 +205,7 @@ const flows = async w => {
   await w.svc.read(id(31), { ...clinician });
   await w.svc.forStudy(uid, { ...radiologist });
   await w.svc.list({ ...radiologist }, { view: 'inbox' });
+  await w.svc.list({ ...clinician }, { view: 'mine' });
   await close(w, id(31), { ...clinician }, id(33), 2);
 };
 
@@ -225,6 +227,12 @@ function loadCompiled(source) {
     .call(module.exports, module.exports, recording, module, compiledFile, dirname(compiledFile));
   return { exports: module.exports, forbidden: () => resolved.filter(file => forbiddenFiles.includes(file)).map(file => basename(file)) };
 }
+/**
+ * Module code that, once the exported class exists, makes its list() require `file` only for view=mine: a dependency
+ * reached in one contractual branch, which only a check covering that branch can see.
+ */
+const requiredInMine = (name, file) => `\n{ const list = exports.${name}.prototype.list;\n`
+  + `  exports.${name}.prototype.list = function (c, q) { if (q && q.view === 'mine') require(${JSON.stringify(file)}); return list.call(this, c, q); }; }\n`;
 /** What a class does over the flows, timestamps aside: every statement, every Orthanc call and the write counts. */
 const behaviour = async Service => {
   const w = world(metadataPolicy(), { Service });
@@ -240,12 +248,15 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   const compiled = readFileSync(compiledFile, 'utf8');
   const names = 'OrthancService ConnectService ./orthanc.service ./connect.service';
   // The contrast both ways: a comment and an unused string naming both services is the same module and passes; a real
-  // require of either service module is refused, however the rest of the module behaves.
+  // require of either service module, at load or only in the clinician's own list (view=mine), is refused, however the
+  // rest of the module behaves.
   const variants = {
     compiled,
     named: `/* ${names} */\n${compiled}\nvoid ${JSON.stringify(names)}; // ${names}\n`,
     orthanc: `${compiled}\nrequire("./orthanc.service");\n`,
     connect: `${compiled}\nrequire("./connect.service");\n`,
+    mineOrthanc: compiled + requiredInMine('ClinicianQuestionService', './orthanc.service'),
+    mineConnect: compiled + requiredInMine('ClinicianQuestionService', './connect.service'),
   };
   const expected = await behaviour(ClinicianQuestionService);
   const seen = {};
@@ -259,6 +270,8 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
     named: { forbidden: [], same: true },
     orthanc: { forbidden: ['orthanc.service.js'], same: true },
     connect: { forbidden: ['connect.service.js'], same: true },
+    mineOrthanc: { forbidden: ['orthanc.service.js'], same: true },
+    mineConnect: { forbidden: ['connect.service.js'], same: true },
   });
 });
 
