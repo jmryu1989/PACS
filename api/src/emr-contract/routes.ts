@@ -88,6 +88,10 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // on the person's recovery action, so both causes are real.
   { kinds: ['access-audit'], operation: 'write', causes: ['user-view', 'background-fetch'],
     routes: ['POST studies/:uid/viewer-context-events'] },
+  // W9-LITE: the ordered same-patient viewing set's minimal source metadata, read on the person's Open, page, compare or Retry.
+  // Its access record is the read's own provision record, not a write of the business request.
+  { kinds: ['study-metadata'], operation: 'read', causes: ['user-view'],
+    routes: ['POST studies/viewing-set/resolve'] },
   { kinds: ['clinical-context', 'report-version', 'tech-note', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/clinical-context'] },
   { kinds: ['report-version', 'report-head', 'key-image', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],

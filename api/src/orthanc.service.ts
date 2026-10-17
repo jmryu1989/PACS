@@ -378,6 +378,21 @@ export class OrthancService {
     return uid;
   }
 
+  /**
+   * W9-LITE viewing set: every original Study resource that answers one UID, with the member's minimal display tags named
+   * explicitly (PatientName, PatientID, InstitutionName, StudyDate, ModalitiesInStudy, StudyDescription, AccessionNumber).
+   * Like studyIdentityResources(): one row for a normal study, two or more for a UID two patient resources share, [] for
+   * none; a row naming another UID or a malformed answer is a failed read (503), never a smaller array. The caller's
+   * signal cancels the fetch and its body.
+   */
+  async viewingSetStudy(uid: string, signal: AbortSignal): Promise<any[]> {
+    const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
+      '&includefield=00100010,00100020,00080080,00080020,00080061,00081030,00080050', undefined, signal);
+    if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || OrthancService.tag(row, '0020000D') !== uid))
+      throw new ServiceUnavailableException('원본 검사의 소속을 확인할 수 없습니다');
+    return rows;
+  }
+
   /** DICOM 태그 한 칸 꺼내기 (PN 타입은 {Alphabetic: "..."} 로 온다) */
   static tag(st: any, key: string): string {
     const v = st?.[key]?.Value?.[0];

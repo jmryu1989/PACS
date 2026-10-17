@@ -5356,6 +5356,64 @@
       ]
     }
   },
+  "di_additions_w9": {
+    "unit": "W9-API",
+    "decision": "D1500",
+    "note": "W9-LITE server half: the viewing-set resolve controller, its service and the unbound access-record port that the shared Module A binds on the EMR-B2 base (one route); U0B-DI compares the snapshot minus exactly these with di",
+    "controllers": [
+      "MultiStudyViewController"
+    ],
+    "providers": [
+      "MultiStudyViewService",
+      "ViewingSetAccess=ViewingSetAccessUnbound"
+    ],
+    "injectables": {
+      "MultiStudyViewController": {
+        "params": [
+          "MultiStudyViewService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "MultiStudyViewService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService",
+          "ViewingSetAccess"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ViewingSetAccessUnbound": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "routes": [
+      {
+        "controller": "MultiStudyViewController",
+        "handler": "resolve",
+        "method": "POST",
+        "paths": [
+          "/|studies/viewing-set/resolve"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      }
+    ]
+  },
   "di_source": "5f1155a27d1a134d9afd8ad5b596970044064970 (main before round 2), compiled by the same TypeScript and Nest",
   "di": {
     "controllers": [
