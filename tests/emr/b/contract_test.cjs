@@ -1078,7 +1078,7 @@ function contractSuite() {
     code(() => resolveOrder(migrated, orderEvent(overlappingId, { act: 'creation', signature: null })), 'OrderClassificationUnconfirmed');
   });
 
-  test('C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart', () => {
+  test('C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart', async () => {
     const event = orderEvent('received', { act: 'receipt', signature: null });
     const facts = orderFacts({ objectKind: 'received-order', origin: 'received-ris',
       source: { systemId: 'ris', recordId: 'external', versionId: 'source-v1', at: '2020-01-02T00:00:00.000Z', signatureEvidenceId: 'original-signature' },
@@ -1102,6 +1102,27 @@ function contractSuite() {
     code(() => C.parseOrderFact({ ...duplicate, event: { ...event, at: fulfilment.at } }, fact), 'OrderClinicalVersionImmutable');
     const fixed = inSnapshot({ ...noHolds('received'), orderFacts: new Map([['received', [fact, duplicate]]]) }, () => Cl.resolveStoredRecord(M.emrAdapters().stored, 'received', event.eventId));
     assert.equal(fixed.row.duplicateOf, event.eventId); assert.equal(fixed.event.at, orderAt);
+    // The ledger function receives each fact's link to its predecessor exactly as parsed: null for the first fact, the
+    // predecessor's event ID for the resend; a link that is not a non-empty string is refused before any row is written.
+    const written = [], rows = [];
+    const tx = { $queryRaw: async (strings, ...values) => {
+      const text = strings.join('?');
+      if (text.includes('emr_access.order_facts_for')) return rows.filter(r => r.recordId === values[0]).map(r => ({ body: r.body }));
+      assert(text.includes('emr_access.record_order_fact'), 'only the order fact reader and writer are called');
+      written.push({ recordId: values[0], eventId: values[1], previousEventId: values[2], body: values[3] });
+      rows.push({ recordId: values[0], body: values[3] });
+      return [{ done: '' }];
+    } };
+    const ledgerStore = Object.create(RT.AccessLedgerStore.prototype);
+    await ledgerStore.recordOrderFact(tx, structuredClone(fact));
+    for (const bad of [7, '', ' ', { toString: () => 'order-event' }, ['order-event'], undefined]) {
+      await assert.rejects(ledgerStore.recordOrderFact(tx, { ...structuredClone(duplicate), previousEventId: bad }));
+      assert.equal(written.length, 1, 'a refused link writes nothing');
+    }
+    await ledgerStore.recordOrderFact(tx, structuredClone(duplicate));
+    assert.deepEqual(written.map(w => [w.eventId, w.previousEventId]), [['order-event', null], ['resend', 'order-event']]);
+    assert.deepEqual(written.map(w => JSON.parse(w.body).previousEventId), [null, 'order-event']);
+    assert.deepEqual((await ledgerStore.orderFacts(tx, 'received')).map(f => f.previousEventId), [null, 'order-event']);
   });
 
   test('C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure', () => {

@@ -339,9 +339,9 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       return replay;
     }
     const fact = parseOrderFact(input, history[history.length - 1]);
-    const run = tx as RawQuery;
+    const run = tx as RawQuery, previousEventId = fact.previousEventId === null ? null : string(fact.previousEventId);
     await run.$queryRaw`SELECT emr_access.record_order_fact(${recordId}::text, ${eventId}::text,
-      ${fact.previousEventId}::text, ${JSON.stringify(fact)}::text)::text AS done`;
+      ${previousEventId}::text, ${JSON.stringify(fact)}::text)::text AS done`;
     return fact;
   }
   async orderFacts(tx: object, recordId: string): Promise<readonly Readonly<OrderFact>[]> {
