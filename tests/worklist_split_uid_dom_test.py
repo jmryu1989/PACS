@@ -311,6 +311,22 @@ class WorklistSplitUidDOMTest(unittest.TestCase):
         self.assertEqual(auth.FIELDS, self.editor())
         self.assertEqual(commits, len(self.site.commits))
 
+    def test_wsu07_09_a_failed_periodic_read_marks_the_kept_notice_as_the_last_observation(self):
+        # Astra WSU-05 (spec section 3.1): a failed observation keeps the last notice and says it is the last observation,
+        # whether the reader pressed Refresh (wsu07_03) or the periodic read failed with nobody pressing anything.
+        self.site.split = {auth.UID_B}
+        self.open_main()
+        box = self.page.locator("#identity-issues")
+        expect(box).to_have_text(TITLE + " " + NOTICE)
+        self.site.list_answers = [(503, {"code": "SYN_DOWN", "message": "SYN unavailable"})]
+        self.poll()
+        expect(box).to_contain_text(NOTICE)
+        expect(box).to_contain_text(UNOBSERVED)
+        self.assertNotIn(auth.PATIENT_B, self.page.locator("body").inner_text())
+        # The next periodic read is answered: the notice is that observation's again, without the mark.
+        self.poll()
+        expect(box).to_have_text(TITLE + " " + NOTICE)
+
     def test_wsu07_05_clinician_list_tells_no_normal_study_apart_from_an_excluded_one(self):
         self.site.account = auth.CLINICIAN
         self.site.split = {auth.UID_B}

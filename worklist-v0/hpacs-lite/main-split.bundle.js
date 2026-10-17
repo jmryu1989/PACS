@@ -7743,6 +7743,8 @@
           if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
           // The first failure already says 관측 불가 beside the kept list; going offline waits for two.
           markObservationUnavailable();
+          // The kept identity notice is from the last observation too (spec §3.1), as after a failed manual load.
+          renderIdentityIssues(true);
           /**
            * **일하는 도중에 서버가 죽는 경우.**
            *
