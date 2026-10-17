@@ -5,10 +5,13 @@ Only fixture setup and assertions use the API; workflows use real UI actions.
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
+import ssl
 import subprocess
 import sys
 import time
@@ -16,12 +19,14 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request, urlopen
 import uuid
+import zipfile
 
 from playwright.sync_api import expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from invariants_live import LiveStack, ROOT, psql  # noqa: E402
+from invariants_live import LiveStack, ROOT, psql, s9u4_cleanup, s9u4_dicom, s9u4_uid  # noqa: E402
 from document_session import document_request
 
 
@@ -601,6 +606,309 @@ class WorklistE2E(unittest.TestCase):
         state = self.state(fixture)
         self.assertEqual(state["findings"], final_text)
         self.assertIsNone(state.get("draft"))
+
+    # ── S9-U4b part (c): the transfer panel on the real stack (REQ-S9-U4-09/10; contract S9-U4p 4.4, 4.6, 5.3, 6) ──
+    TRANSFER_KEY = "kin-study-transfer-local"
+    SENT = "서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요."
+
+    def transfer_box(self, page, operation):
+        return page.locator(f'#study-transfer section[data-operation="{operation}"]')
+
+    def transfer_requests(self, page):
+        """Every request of this page to the transfer routes, as (method, path): the panel's own traffic."""
+        seen = []
+        page.on("request", lambda request: seen.append((request.method, urlsplit(request.url).path))
+                if re.search(r"/api/(dicom-import|admin/dicom-import|studies/[^/]+/original-downloads)", request.url) else None)
+        return seen
+
+    def download_operation(self, page, fixture, operations):
+        """Download Originals from the row menu; the preparation's operation id, shown Ready."""
+        page.locator(f'#rows tr[data-uid="{fixture.uid}"]').click(button="right")
+        with page.expect_response(lambda r: r.request.method == "POST"
+                                  and r.url.endswith(f"/studies/{fixture.uid}/original-downloads")) as prepared:
+            page.locator("#ctx").get_by_text("Download Originals", exact=True).click()
+        self.assertEqual(prepared.value.status, 200, prepared.value.text())
+        operation = prepared.value.json()["operationId"]
+        operations.append(operation)
+        expect(self.transfer_box(page, operation).locator(".study-transfer-state")).to_have_text("Ready")
+        return operation
+
+    def download_row(self, operation):
+        self.assertRegex(operation, r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        rows = psql(f"SELECT status || '|' || jsonb_array_length(download->'attempts') FROM \"ImportOperation\" WHERE id='{operation}';")
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def sign_in_again(self, page, actor):
+        """Log Out in this tab, then the real login form again: a new session in the same tab (its sessionStorage stays).
+        After a Log Out the landing keeps its end notice and never signs in by itself (index.html boot: an end record
+        stops the automatic login), so the person presses its Login button; Keycloak then shows its form - with the
+        username field, or, while its own SSO is still known, the attempted username and its restart-login link."""
+        page.once("dialog", lambda dialog: dialog.accept())
+        page.locator("#logout").click()
+        page.wait_for_url("**/index.html**", timeout=30000)
+        name = self.stack.username(actor)
+        try:
+            page.locator("#signin").click()
+            page.locator("#password").wait_for(state="visible", timeout=30000)
+            attempted = page.locator("#kc-attempted-username")
+            if not page.locator("#username").is_visible() and attempted.count() and attempted.inner_text().strip() != name:
+                with page.expect_navigation():
+                    page.locator("#reset-login").click()
+            if page.locator("#username").is_visible():
+                page.locator("#username").fill(name)
+            page.locator("#password").fill(self.stack.passwords[actor])
+            page.locator("#kc-login").click()
+        except Exception:
+            # Playwright's call log can include fill() values; never print credentials.
+            raise RuntimeError("Real BFF login form could not be submitted") from None
+        page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
+        expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+
+    def native_download(self, page, fixture, operation):
+        """One Download press on the real stack (D1489): one bound grant POST answered 200, then the browser's own GET of the
+        archive with that grant only - the doctor's BFF cookie is the only credential the browser adds, nothing injected.
+        Returns the Playwright download and the grant value read from its URL. No assertion message prints the URL or the
+        value (DG-T05: the raw grant appears in no CI output)."""
+        with page.expect_download() as started:
+            with page.expect_response(lambda r: r.request.method == "POST"
+                                      and r.url.endswith(f"/original-downloads/{operation}/archive/grant")) as granted:
+                self.transfer_box(page, operation).get_by_role("button", name="Download", exact=True).click()
+        self.assertEqual(granted.value.status, 200, "the grant request")
+        download = started.value
+        url = urlsplit(download.url)
+        self.assertEqual(url.path, f"/api/studies/{fixture.uid}/original-downloads/{operation}/archive", "nothing but the UID and the id")
+        found = re.fullmatch(r"grant=([A-Za-z0-9_-]{43})", url.query)
+        self.assertTrue(found, "the query is exactly one grant: no PHI, name, cookie, token or session id")
+        self.assertFalse(fixture.patient_id in download.url, "no patient value in the archive URL")
+        self.assertEqual(download.suggested_filename, f"KIN-originals-{operation[:8]}.zip", "the server's filename (an archive.json here is the refusal body)")
+        self.assertIsNone(download.failure(), "the archive reached the browser's download list")
+        return download, found.group(1)
+
+    def archive_supplied(self, path, operation, number):
+        """The saved file is the server's whole ZIP of the prepared manifest: the ZIP signature, every central-directory
+        entry in manifest order and then manifest.json, each object's length and MD5 as prepared and its CRC-32, the final
+        manifest's per-object SHA-256 equal to the saved bytes and to the attempt's recorded objects, the archive SHA-256
+        the attempt's. Attempt <number> is Sent with the writer's own finish and was opened by a consumed grant."""
+        with open(path, "rb") as saved:
+            data = saved.read()
+        self.assertEqual(data[:4], b"PK\x03\x04")
+        [stored] = psql(f"SELECT download::text FROM \"ImportOperation\" WHERE id='{operation}';")
+        download = json.loads(stored)
+        manifest = json.loads(download["manifestCanonical"])["objects"]
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertIsNone(archive.testzip(), "every entry's CRC-32")
+            self.assertEqual([info.filename for info in archive.infolist()], [o["path"] for o in manifest] + ["manifest.json"],
+                             "the whole central directory in manifest order")
+            final = json.loads(archive.read("manifest.json"))
+            bodies = [archive.read(o["path"]) for o in manifest]
+        self.assertEqual([(len(b), hashlib.md5(b).hexdigest()) for b in bodies], [(o["bytes"], o["md5"]) for o in manifest])
+        sha = [hashlib.sha256(b).hexdigest() for b in bodies]
+        self.assertEqual([(o["sopUid"], o["sha256"]) for o in final["objects"]], [(o["sopUid"], s) for o, s in zip(manifest, sha)])
+        attempt = download["attempts"][number - 1]
+        self.assertEqual((len(download["attempts"]), attempt["state"], attempt["responseFinished"]), (number, "sent", True))
+        self.assertEqual(([o["sha256"] for o in attempt["objects"]], attempt["archiveSha256"]), (sha, hashlib.sha256(data).hexdigest()))
+        self.assertEqual((download["schemaVersion"], download["activeArchiveGrant"]), (2, None), "format 2, the grant consumed")
+        use = download["archiveGrantUses"][-1]
+        self.assertEqual(use["attemptId"], attempt["attemptId"], "the grant opened this attempt")
+        return stored, attempt, use
+
+    def download_audit(self, operation):
+        rows = psql(f"SELECT action || E'\\t' || detail FROM \"AuditLog\" WHERE detail::jsonb->>'operationId'='{operation}' ORDER BY id;")
+        return [(action, json.loads(detail)) for action, detail in (line.split("\t", 1) for line in rows)]
+
+    def test_s9_u4_download_states(self):
+        """REQ-S9-U4-09 with the D1489 grant (REQ-S9-U4-DG-01..06): Download Originals in an authenticated member session
+        with no terminal registration: Ready, one bound grant request and the browser's own download of the archive with
+        that grant, then Sent with the note that saving is checked in the browser. The saved file is checked as a whole
+        ZIP against the prepared manifest; the row and the audit link prepare, grant, intent and result; the raw grant is
+        in no stored row, audit row, proxy or API log. A client that drops the stream leaves Incomplete; an attempt a
+        stopped server left sending is Unconfirmed; both are downloaded again for the same operation with a new grant;
+        Sent only by a new preparation; no Range/resume, no text saying the file was saved."""
+        fixture = self.fixture()
+        operations = []
+        try:
+            page = self.login("doctor")
+            self.select(page, fixture)
+            operation = self.download_operation(page, fixture, operations)
+            box = self.transfer_box(page, operation)
+            since = str(int(time.time()) - 5)
+            download, grant = self.native_download(page, fixture, operation)
+            stored, attempt, use = self.archive_supplied(download.path(), operation, 1)
+            self.assertEqual(use["hash"], hashlib.sha256(("kin-original-download-grant-v1:" + grant).encode()).hexdigest(),
+                             "the row keeps the domain-separated hash of this grant")
+            audit = self.download_audit(operation)
+            self.assertEqual([action for action, _ in audit], ["original.download.prepare", "original.download.grant",
+                                                               "original.download.intent", "original.download.result"])
+            issued, intent, result = audit[1][1], audit[2][1], audit[3][1]
+            self.assertEqual((issued["phase"], issued["grantId"], issued["grantHash"]), ("issued", use["grantId"], use["hash"]))
+            self.assertEqual((intent["attemptId"], intent["grantId"], intent["bindingMethod"], intent["destination"]),
+                             (attempt["attemptId"], use["grantId"], "archive-grant", "browser-download"))
+            self.assertEqual((result["attemptId"], result["state"]), (attempt["attemptId"], "sent"))
+            self.assertEqual(len({detail["institutionId"] for _, detail in audit}), 1, "one record-time institution")
+            self.assertFalse(grant in stored or any(grant in json.dumps(detail) for _, detail in audit), "the raw grant is stored nowhere")
+            status = self.stack.request("GET", f"/studies/{fixture.uid}/original-downloads/{operation}", "doctor")
+            self.assertEqual((status.body["state"], status.body["archiveRequest"]["state"], status.body["archiveRequest"]["attemptId"]),
+                             ("sent", "consumed", attempt["attemptId"]))
+            # SRU4-1: the same grant on the non-canonical spellings never reaches the API's general log path - the proxy
+            # refuses each with 400 before any location and logs it in the archive format (no query).
+            base = f"/api/studies/{fixture.uid}/original-downloads/{operation}"
+            origin = "{0.scheme}://{0.netloc}".format(urlsplit(page.url))
+            aliases = [f"/api/studies/{fixture.uid}/original-downloads/{operation.upper()}/archive", base + "/archive/",
+                       "/API" + base[len("/api"):] + "/archive", base]
+            for path in aliases:
+                self.assertEqual(page.request.get(origin + path + "?grant=" + grant).status, 400, "a grant outside the archive path")
+            logs = subprocess.run(["docker", "compose", "logs", "--no-color", "--since", since, "proxy", "api"], cwd=ROOT,
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+            self.assertEqual(logs.returncode, 0, "the proxy and API logs could be read")
+            self.assertFalse(grant in logs.stdout + logs.stderr, "the raw grant is in no proxy or API log line")
+            self.assertIn(f'"GET /api/studies/{fixture.uid}/original-downloads/{operation}/archive" 200 ', logs.stdout,
+                          "the archive GET is logged by the archive location's format (method, path, status)")
+            for path in aliases:
+                self.assertIn(f'"GET {path}" 400 ', logs.stdout, "each refused spelling is logged by the archive format")
+            expect(box.locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
+            expect(box.locator(".study-transfer-reason")).to_have_text(self.SENT)
+            for claim in ("저장했습니다", "저장되었습니다", "보관했습니다"):
+                self.assertNotIn(claim, page.locator("#study-transfer").inner_text(), "no text says the file was saved")
+            self.assertEqual(box.get_by_role("button", name="Download", exact=True).count(), 0, "Sent is not downloaded again")
+            self.assertEqual(page.locator("#study-transfer").get_by_role("button", name=re.compile("Resume|Range")).count(), 0)
+            self.assertEqual(self.download_row(operation), "sent|1")
+            again = self.stack.bearer_request("GET", f"/studies/{fixture.uid}/original-downloads/{operation}/archive",
+                                              self.stack.token("doctor"), headers={"Range": "bytes=10-"})
+            self.assertEqual((again.status, (again.body or {}).get("code")), (409, "DOWNLOAD_ALREADY_SENT"), "no Range resume")
+            with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/original-downloads")) as fresh:
+                box.get_by_role("button", name="Prepare Again").click()
+            operations.append(fresh.value.json()["operationId"])
+            self.assertNotEqual(operations[-1], operation, "after Sent a new operation is prepared")
+
+            # Incomplete (5.2 step 6): a client that takes the headers and drops the stream. Offered again, same operation.
+            dropped = self.download_operation(page, fixture, operations)
+            insecure = ssl.create_default_context()
+            insecure.check_hostname, insecure.verify_mode = False, ssl.CERT_NONE
+            request = Request(self.stack.api + f"/studies/{fixture.uid}/original-downloads/{dropped}/archive",
+                              headers={"Authorization": "Bearer " + self.stack.token("doctor")})
+            with urlopen(request, context=insecure, timeout=30) as stream:
+                stream.read(64)
+            deadline = time.monotonic() + 30
+            while self.download_row(dropped) != "incomplete|1" and time.monotonic() < deadline:
+                time.sleep(0.5)
+            self.assertEqual(self.download_row(dropped), "incomplete|1")
+            page.reload()
+            expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+            expect(self.transfer_box(page, dropped).locator(".study-transfer-state")).to_have_text("Incomplete", timeout=30000)
+            expect(self.transfer_box(page, dropped).get_by_role("button", name="Download", exact=True)).to_be_visible()
+            # The same operation again, with a new grant: a second attempt, Sent.
+            again, _ = self.native_download(page, fixture, dropped)
+            self.archive_supplied(again.path(), dropped, 2)
+            expect(self.transfer_box(page, dropped).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
+            self.assertEqual(self.download_row(dropped), "sent|2")
+
+            # Unconfirmed (5.2 step 7): an attempt a stopped server left sending, its lease run out; the status read closes it.
+            stopped = self.download_operation(page, fixture, operations)
+            [row] = psql(f"SELECT download::text || '|' || \"manifestSha256\" FROM \"ImportOperation\" WHERE id='{stopped}';")
+            stored, manifest = row.rsplit("|", 1)
+            body = json.loads(stored)
+            body["attempts"].append({"attemptId": str(uuid.uuid4()), "number": 1, "ownerSubject": self.stack.user_ids["doctor"],
+                                     "actor": self.stack.actor("doctor"), "manifestSha256": manifest,
+                                     "destination": "browser-download", "state": "sending",
+                                     "startedAt": "2026-01-01T00:00:00.000Z", "endedAt": None, "ownerInstance": str(uuid.uuid4()),
+                                     "leaseUntil": "2026-01-01T00:00:30.000Z", "objects": [], "archiveSha256": None,
+                                     "responseFinished": False})
+            psql(f"UPDATE \"ImportOperation\" SET download = '{json.dumps(body).replace(chr(39), chr(39) * 2)}'::jsonb, "
+                 f"status = 'sending' WHERE id='{stopped}';")
+            page.reload()
+            expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+            expect(self.transfer_box(page, stopped).locator(".study-transfer-state")).to_have_text("Unconfirmed", timeout=30000)
+            expect(self.transfer_box(page, stopped).get_by_role("button", name="Download", exact=True)).to_be_visible()
+            again, _ = self.native_download(page, fixture, stopped)
+            self.archive_supplied(again.path(), stopped, 2)
+            expect(self.transfer_box(page, stopped).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
+            self.assertEqual(self.download_row(stopped), "sent|2")
+        finally:
+            # The download rows of this case; the fixture's own cleanup removes its study, originals and audit rows.
+            ids = [op for op in operations if re.fullmatch(r"[0-9a-f-]{36}", op)]
+            if ids:
+                psql("DELETE FROM \"ImportOperation\" WHERE kind='download' AND id IN (" + ",".join(f"'{op}'" for op in ids) + ");")
+
+    def test_s9_u4_import_retry_and_account_change(self):
+        """REQ-S9-U4-10: a file left Retry Needed (another attempt holds its study) is resumed by the same person after a new
+        login - fresh authorisation, the same operation, index and bytes - and stored once the holder is gone. A network
+        error never logs out. Another person signing in in the same tab never reads, sees or resumes that operation."""
+        study = s9u4_uid()
+        studies, operations = [study], []
+        patient = "S9U4C-" + study[-6:]
+        first = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id=patient)
+        data = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id=patient)
+        upload = ROOT / "tmp" / ("s9u4c-" + study[-8:] + ".dcm")
+        upload.parent.mkdir(parents=True, exist_ok=True)
+        upload.write_bytes(data)
+        try:
+            # Another file of the study, stored through the route; its attempt is then made a live dispatching one that
+            # holds the study, as a running worker would (the live suite's s9u4_set_attempt / s9u4_hold form, DB only).
+            held_op = str(uuid.uuid4())
+            operations.append(held_op)
+            stored = self.stack.bearer_request("POST", "/dicom-import", self.stack.token("tech"), first, headers={
+                "Content-Type": "application/dicom", "X-KIN-Operation-Id": held_op, "X-KIN-File-Index": "0"})
+            self.assertEqual(stored.status, 200, stored.text)
+            [results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{held_op}';")
+            original = json.loads(results)
+            entry = json.loads(results)[0]
+            entry["attempts"][-1].update(phase="dispatching", leaseUntil="2099-01-01T00:00:00.000Z", finishedAt=None,
+                                         transport=None, outcome="unconfirmed", code="IMPORT_UNCONFIRMED")
+            entry["outcome"], entry["code"] = "unconfirmed", "IMPORT_UNCONFIRMED"
+            quote = lambda value: json.dumps(value).replace(chr(39), chr(39) * 2)
+            psql(f"UPDATE \"ImportOperation\" SET results = '{quote([entry])}'::jsonb, status = 'open' WHERE id='{held_op}';")
+            keys = (f"study:{study}", f"sop:{entry['sopUid']}")
+            psql("UPDATE \"ImportOperation\" SET claim = jsonb_set(claim, '{heldByAttemptId}', "
+                 f"'\"{entry['attempts'][-1]['attemptId']}\"') WHERE \"claimKey\" IN ('{keys[0]}', '{keys[1]}');")
+            page = self.login("tech")
+            seen = self.transfer_requests(page)
+            page.locator("[data-tab=Technician]").click()
+            with page.expect_file_chooser() as chooser:
+                page.locator("#t-import").click()
+            chooser.value.set_files(str(upload))
+            row = page.locator('#study-transfer li[data-index="0"]')
+            expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed", timeout=30000)
+            posts = [path for method, path in seen if method == "POST"]
+            self.assertEqual(posts, ["/api/dicom-import"])
+            operation = page.locator("#study-transfer section[data-operation]").first.get_attribute("data-operation")
+            operations.append(operation)
+            # A network error on the retry: the session stays and the operation is read back, nothing guessed or re-sent.
+            page.route("**/api/dicom-import", lambda route: route.abort("connectionreset"))
+            row.get_by_role("button", name="Retry", exact=True).click()
+            expect(row.locator(".study-transfer-state")).to_have_text(re.compile("Retry Needed|Not Sent"), timeout=30000)
+            page.unroute("**/api/dicom-import")
+            self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "a network error never logs out")
+            # The same person signs in again in this tab: the operation is read with the new session and resumed.
+            self.sign_in_again(page, "tech")
+            expect(page.locator("#study-transfer section[data-operation]")).to_have_count(1, timeout=30000)
+            row = page.locator('#study-transfer li[data-index="0"]')
+            expect(row.locator(".study-transfer-state")).to_have_text(re.compile("Retry Needed|Not Sent"))
+            # The other worker finishes: its stored result and the free claims come back exactly as they were.
+            psql(f"UPDATE \"ImportOperation\" SET results = '{quote(original)}'::jsonb, status = 'settled' WHERE id='{held_op}';")
+            psql("UPDATE \"ImportOperation\" SET claim = jsonb_set(claim, '{heldByAttemptId}', 'null') "
+                 f"WHERE \"claimKey\" IN ('{keys[0]}', '{keys[1]}');")
+            with page.expect_file_chooser() as chooser:
+                page.locator("#study-transfer").get_by_role("button", name="Choose Files Again").click()
+            chooser.value.set_files(str(upload))
+            expect(row.locator(".study-transfer-state")).to_have_text("Stored", timeout=60000)
+            [results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{operation}';")
+            [entry] = json.loads(results)
+            self.assertEqual((entry["index"], entry["outcome"], entry["sha256"]), (0, "stored", hashlib.sha256(data).hexdigest()),
+                             "the same operation, index and bytes were resumed")
+            # Another person in the same tab: the kept record is dropped and the operation is never read or shown.
+            self.sign_in_again(page, "jmryu")
+            before = len(seen)
+            page.wait_for_timeout(5000)
+            self.assertEqual([r for r in seen[before:] if operation in r[1]], [], "another person never queries the operation")
+            self.assertEqual(page.locator("#study-transfer section[data-operation]").count(), 0)
+            self.assertIsNone(page.evaluate(f"sessionStorage.getItem('{self.TRANSFER_KEY}')"))
+        finally:
+            upload.unlink(missing_ok=True)
+            deleted = []
+            failures = s9u4_cleanup(self.stack._orthanc_request, psql, studies, operations, deleted)
+            if failures:
+                raise RuntimeError("S9-U4 (c) cleanup failed; rows kept for inspection: " + "; ".join(failures))
 
 
 if __name__ == "__main__":
