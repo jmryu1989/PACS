@@ -302,7 +302,9 @@ c.Module({controllers:[Probe],providers:[PrismaService]})(ProbeModule);
                 self.assertEqual(self.fatal_lines(self.stopped_with_error(name)), [expected])
         volume = "kin-rehearsal-" + uuid.uuid4().hex[:16] + "-emr-state"
         token = uuid.uuid4().hex
-        self.addCleanup(ops.remove_owned_if_present, "volume", volume, token)
+        # A class cleanup registered before the two containers that mount it: class cleanups run last-in first-out, so
+        # both containers are removed before their volume (a volume in use cannot be removed).
+        self.addClassCleanup(ops.remove_owned_if_present, "volume", volume, token)
         ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, volume])
         mount = "type=volume,source=" + volume + ",target=/var/lib/kin-emr"
         first = self.api("owner", mounts=[mount])

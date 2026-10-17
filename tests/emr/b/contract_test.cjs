@@ -1752,7 +1752,7 @@ function contractSuite() {
     try {
       const failed = await startup.run({ db: 'memory', recovery: 'refuse' }, { env: env(failedState), timeoutMs: 60000 });
       refused(failed, 'recovery', 'SealCorrupt');
-      inOrder(failed.names, ['start-failed', 'disconnect']);
+      inOrder(failed.names, ['recovery', 'disconnect']);
       assert.equal(count(failed.names, 'disconnect'), 1, 'released once although the start, app.close and main all end the owner');
       for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(failedState, kept)), kept + ' stays');
     } finally { fs.rmSync(failedState, { recursive: true, force: true }); }
