@@ -259,7 +259,8 @@
    *   owner()    [institution, sub]
    *   actorName(actor) 표시 이름
    */
-  function mount({ apiBase, current, study, report, online, radiologist, owner, actorName, onAccountChanged }) {
+  // `blocked()` (optional, W5): the page's reason the entry waits now (Related Report mode), or null.
+  function mount({ apiBase, current, study, report, online, radiologist, owner, actorName, onAccountChanged, blocked = () => null }) {
     const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
     // Capture at registration, not when a delayed callback runs.
     const guarded = (effect, scope = 'document') => {
@@ -365,8 +366,10 @@
 
     function paintEntry() {
       let enabled = false, title;
+      const waiting = blocked();
       if (ended) title = TEXT.entry.ended;
       else if (lock !== null) title = lock.text;
+      else if (waiting) title = waiting;
       else if (!online()) title = TEXT.entry.offline;
       else if (!radiologist()) title = TEXT.entry.role;
       else if (target === null) title = TEXT.entry.none;

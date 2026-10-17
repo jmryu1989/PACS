@@ -11,6 +11,17 @@
       $("#prior-report-content").style.display = "none";
       for (const id of ["#prior-findings", "#prior-conclusion", "#prior-recommendation"])
         $(id).textContent = "";
+      // W5: the Source display context follows (an empty Source never keeps an older read's text).
+      relatedMode?.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
+    }
+
+    /**
+     * 지금의 승인 판독문: 폐기 기록을 뺀 가장 새 판이 approve/addendum일 때만 그 판이다(W5 Source는 승인/추가기재 ReportVersion뿐).
+     * 그 뒤에 취소(reset) 같은 판이 섰으면 예전 승인을 지금의 승인본으로 보이지 않는다 — 서버도 그런 Source의 삽입을 받지 않는다.
+     */
+    function relatedReportHead(list) {
+      const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
+      return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
     }
 
     /**
@@ -19,6 +30,9 @@
      * 목록 응답의 `state`에도 현재 Report가 있지만 내 초안이 함께 올 수 있다. 그 값을 그대로
      * 그리면 prior의 미확정 초안이 "이전 판독문"으로 보인다. 이미 쓰는 이력 조회 경로에서
      * approve/addendum 판만 골라 읽어야 읽기 전용의 의미가 맞는다.
+     *
+     * W5(설계 v5 §1.5): 읽기마다 요청 번호가 있고, 답은 그 번호·검사·판독 대상·선택이 그대로일 때만 쓴다(A→B→A의 늦은 답 포함).
+     * Load Failed(다시 읽기)와 Access Restricted(403/404: 권한·범위)를 가르고, 승인본이 없는 것은 실패가 아니다.
      */
     async function loadRelatedReport() {
       const s = relatedStudy();
@@ -29,18 +43,20 @@
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
+      const shown = view => relatedMode?.showSource({ seq, uid, ...view });
       $("#prior-report-meta").textContent = relatedReportMeta(s);
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
       $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
       $("#prior-report-status").style.display = "";
       $("#prior-report-content").style.display = "none";
+      shown({ state: s.rs === "A" ? "loading" : "none" });
 
       let report = null;
       try {
         if (serverMode && s.rs === "A") {
           const list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at);
           if (stale()) return;
-          report = list.find(v => v.action === "addendum" || v.action === "approve") ?? null;
+          report = relatedReportHead(list);
         } else if (!serverMode && s.rs === "A") {
           // 서버가 없는 데모에서는 이력 API가 없으므로 확정본만 사용한다. draft는 절대 고르지 않는다.
           const r = appState[uid] ?? {};
@@ -51,11 +67,14 @@
         }
       } catch (e) {
         if (stale()) return;
-        $("#prior-report-status").textContent = `판독문 조회 실패: ${e.message}`;
+        const restricted = e?.status === 403 || e?.status === 404;
+        $("#prior-report-status").textContent = restricted
+          ? "이 판독문을 볼 권한이 없습니다 (Access Restricted)" : `판독문 조회 실패: ${e.message}`;
+        shown({ state: restricted ? "restricted" : "failed" });
         return;
       }
       if (stale()) return;
-      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; return; }
+      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return; }
       $("#prior-report-meta").textContent =
         `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
@@ -64,15 +83,21 @@
       $("#prior-recommendation").textContent = report.recommendation ?? "";
       $("#prior-report-status").style.display = "none";
       $("#prior-report-content").style.display = "";
+      shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
+        author: displayActor(report.author) || null, at: typeof report.at === "string" ? report.at.replace("T", " ").slice(0, 16) : null,
+        texts: { findings: report.findings ?? "", conclusion: report.conclusion ?? "", recommendation: report.recommendation ?? "" } });
     }
 
     function returnToReportStudy() {
       if (!cur() || !relatedUid) return;
+      // W5: in Related Report mode this is Back to Current Draft — the editor comes back with its caret, selection and scroll.
+      const left = relatedMode?.exit() ?? null;
       // 같은 판독 행 재선택은 의도적으로 무동작이다. 영상만 돌아가려다 판독문을 재로딩하거나 점유를 풀면 안 된다.
       relatedUid = null;
       ++relatedReportSeq;
       clearRelatedReport();
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
+      if (left) { updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
       $("#related-current").focus({ preventScroll: true });
     }
 
@@ -86,4 +111,92 @@
       if (uid === relatedUid) return;
       relatedUid = uid;
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadRelatedReport();
+    }
+
+    /**
+     * W5 Related Report mode entry (설계 v5 §1.2, D1423 R2/R4/R6). A row click, Enter or the Related Report key opens the mode on
+     * that Source — but only from a Target whose text the server has confirmed: the W4 move gate (leaveStudyGate) must answer
+     * clear or saved, and nothing that decides the Target's text may be out (a commit, a citation/structure insert, a discard,
+     * a draft command), within the same bounded wait. Otherwise the reader stays where they are and the one Notice says why
+     * (its Retry/Check continue this entry; the Source is never selected as the Target). Inside the mode a new Source is a
+     * Source move: no gate (the Source is read-only), a pending Insert stays as it is.
+     */
+    let relatedEntrySeq = 0;
+    async function enterRelatedMode(uid, { focus = true } = {}) {
+      if (!relatedMode || work.state() !== "active") return;
+      if (relatedMode.active()) {
+        if (uid !== relatedUid) previewRelated(uid);
+        if (focus) relatedMode.focus();
+        return;
+      }
+      const current = cur(), source = studies.find(s => s.uid === uid);
+      if (!current || !source || source.uid === current.uid || !current.sourcePatientKey
+          || source.sourcePatientKey !== current.sourcePatientKey) return;
+      const target = selectedUid, seq = selectionSeq, owner = draftOwner, opening = reportOpening, ticket = ++relatedEntrySeq;
+      const refuse = (status, reason) => showReportNotice({ status, uid: target, seq, reason, action: { kind: "related-enter", source: uid } });
+      // WORKLIST-SPLIT-UID: neither the Target nor the Source may be a study two patient resources answer.
+      if (appState[target]?.identityUnresolved || appState[uid]?.identityUnresolved) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
+        return;
+      }
+      if (!opening || opening.uid !== target || opening.selectionSeq !== seq) return;
+      if (relatedInsertPending(target)) { relatedInsertNotice(target); return; }
+      if (reportFrame?.isComposing()) { refuse("composing"); return; }
+      // The same Target opening (a re-render of the same opening keeps it; another selection, even of the same study, does not).
+      const same = () => ticket === relatedEntrySeq && selectedUid === target && selectionSeq === seq && reportOpening?.uid === target
+        && reportOpening?.selectionSeq === seq && draftOwner === owner && work.state() === "active" && !relatedMode.active();
+      const deadline = Date.now() + LEAVE_WAIT_MS;
+      for (;;) {
+        if (workBusy() || draftClient.busy(target)) {
+          const left = deadline - Date.now();
+          if (left <= 0) { if (same()) refuse("unknown"); return; }
+          await leaveWithin(Promise.all([workIdle(), draftClient.settled(target)]), left);
+          if (!same()) return;
+          continue;
+        }
+        let pass = leaveStudyGate("related");
+        if (pass instanceof Promise) pass = await pass;
+        if (!same()) return;
+        // An answer for no Target is not an entry permission (R4); a stale one belongs to a move that no longer stands.
+        if (pass.uid !== target || pass.status === "stale") return;
+        if (pass.status !== "clear" && pass.status !== "saved") { refuse(pass.status, pass.reason); return; }
+        if (workBusy() || draftClient.busy(target) || reportConverge.has(target)) {
+          if (Date.now() >= deadline) { refuse("unknown"); return; }
+          continue;
+        }
+        break;
+      }
+      if (appState[target]?.identityUnresolved || appState[uid]?.identityUnresolved || relatedInsertPending(target)) return;
+      if (uid !== relatedUid) previewRelated(uid);
+      if (relatedUid !== uid) return;
+      relatedMode.enter({ target, selectionSeq: seq, owner, opening, focus });
+      // The controls that wait for Back say so now (report buttons, Send CVR, the draft line).
+      renderClinical(); updateReportButtons(); renderDraftBar();
+    }
+
+    /**
+     * The Related row's own action (click, Enter): the mode's entry. W5-PHASE-A-INTERIM: a page that does not serve the mode's
+     * asset keeps the row's preview; Phase B serves the asset and deletes this guard with the mount guard in page-boot.js.
+     */
+    function relatedActivate(uid, options) {
+      if (!relatedMode) { previewRelated(uid); return; }
+      enterRelatedMode(uid, options);
+    }
+
+    /**
+     * The Related Report and Report Editor keys (Ctrl+Alt+3/4 or their remaps) and the reading workspace buttons: the mode's
+     * entry for the viewed Related study and its Back. True when the mode took the key; otherwise the caller's focus action runs.
+     */
+    function relatedModeCommand(which) {
+      if (!relatedMode || work.state() !== "active") return false;
+      if (which === "report") {
+        if (!relatedMode.active()) return false;
+        returnToReportStudy();
+        return true;
+      }
+      if (which !== "prior") return false;
+      if (relatedMode.active()) { relatedMode.focus(); return true; }
+      if (!relatedUid || relatedUid === selectedUid) return false;
+      enterRelatedMode(relatedUid, { focus: true });
+      return true;
     }

@@ -121,12 +121,320 @@
      * 다시 누르라"고 하지 않는다. 그 표시들이 내려가는 자리(자기 것만 내린다)가 기다리는 쪽을 깨운다.
      */
     const idleWaiters = [];
-    function workBusy() { return commitInFlight || insertInFlight || discardsOut > 0; }
+    // W5: requests of explicit Related inserts on the wire (an apply, a Retry, a Discard). Log out and the mode's entry wait
+    // for their answers like a commit's: the answer decides what the editor's text is.
+    let relatedInsertsOut = 0;
+    function workBusy() { return commitInFlight || insertInFlight || discardsOut > 0 || relatedInsertsOut > 0; }
     function workIdle() {
       return workBusy() ? new Promise(resolve => idleWaiters.push(resolve)) : Promise.resolve();
     }
     function wakeIdle() {
       if (!workBusy()) for (const wake of idleWaiters.splice(0)) wake();
+    }
+
+    /**
+     * ── W5 Related Report insert: the operation in the Target's Draft command state (D1423 R1/R3/R6) ──
+     *
+     * One explicit Insert is one operation of its Target (owner, uid, editor opening), not of Related Report mode: Back, a
+     * Source move or a new mode never ends it. Its request is frozen at the click (relatedInsertFreeze) and is the only body
+     * every Retry resends; nothing here builds a new ID, a new expectedRevision or an ordinary PUT for it. While it is pending
+     * the Target's ordinary writes, preservation, unload write, discard and commit stay out of the way (here, in the save
+     * paths, in work-exit and in the draft client's own hold): they would carry the inserted text without its receipt.
+     * It ends only on evidence: applied (the receipt and the whole current draft equal the frozen proposal), discarded
+     * (the tombstone came first, then the exact inverse native edit), or handed to the existing draft conflict review for an
+     * explicit choice (SUPERSEDED, ID_REUSED, a refused request shape, or a discarded insert whose text was edited since).
+     */
+    const relatedInserts = new Map();
+    const RELATED_PENDING = ["editing", "sending", "unknown", "refused", "checking", "discarding", "discard-unknown"];
+    const RELATED_REVIEW = ["superseded", "id-reused", "invalid"];
+    const RELATED_PENDING_REASON = "Related Report에서 넣은 글의 저장 결과를 아직 확인하지 못했습니다 — 안내줄의 Check 또는 Retry로 먼저 확인하세요";
+    const RELATED_IDENTITY = "환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.";
+    const RELATED_REFUSALS = {
+      DRAFT_CONFLICT: "그 사이 이 초안이 바뀌었습니다(다른 창의 저장 등)",
+      TARGET_UNVERIFIED: "촬영 확인 전(Unverified) 검사라 넣을 수 없습니다",
+      TARGET_HELD: "다른 판독의가 이 검사를 판독 중입니다",
+      SOURCE_UNAVAILABLE: "이전 판독문을 지금 읽을 수 없습니다(권한·상태)",
+      SOURCE_CHANGED: "이전 판독문이 그 사이 바뀌었습니다 — 다시 열어 확인하세요",
+      SEED_CHANGED: "판독문이 그 사이 바뀌었습니다",
+    };
+    const relatedRefusal = reason => RELATED_REFUSALS[reason] || "서버가 이 삽입을 받지 않았습니다";
+    /** The Target's operation that is not settled yet (it holds the Target's writes and moves), or null. */
+    function relatedInsertPending(uid) {
+      const op = uid ? relatedInserts.get(uid) : null;
+      return op && RELATED_PENDING.includes(op.state) ? op : null;
+    }
+    /** reportWriteBlock's W5 part outside the mode: a pending operation blocks writes, except its own admitted native edit. */
+    function relatedInsertWriteBlock(uid, admission) {
+      const op = relatedInsertPending(uid);
+      return op && !(admission && admission.op === op) ? RELATED_PENDING_REASON : null;
+    }
+    function relatedInsertLabel(op) {
+      return op.state === "applied" ? "Draft Saved" + (draftTime(op.at) ? " " + draftTime(op.at) : "")
+        : op.state === "refused" ? "Save Failed" : ["unknown", "discard-unknown"].includes(op.state) ? "Result Unknown"
+        : op.state === "checking" ? "Checking" : op.state === "discarding" ? "Discarding Insert"
+        : op.state === "discarded" ? "Insert Discarded" : RELATED_REVIEW.includes(op.state) ? "Draft Conflict" : "Saving Insert";
+    }
+    /** The Target card's draft line (design v5 section 1.4): what the server has confirmed, never a guess. */
+    function relatedDraftStatus(uid) {
+      const op = relatedInsertPending(uid);
+      if (op) return relatedInsertLabel(op);
+      if (draftClient.conflict(uid)) return "Draft Conflict";
+      if (reportConverge.has(uid)) return !reportSaveFailures.has(uid) ? "Unsaved Draft"
+        : reportSaveOutcome.get(uid)?.outcome === "unknown" ? "Result Unknown" : "Save Failed";
+      const draft = appState[uid]?.draft;
+      return draft ? "Draft Saved" + (draftTime(draft.at) ? " " + draftTime(draft.at) : "") : "No Draft";
+    }
+    /** Why the explicit Insert cannot be offered now (page side; the mode adds its own Source checks). */
+    function relatedInsertBlock() {
+      const uid = selectedUid, source = relatedStudy();
+      if (!uid || !cur() || !source) return "판독 대상과 이전 판독문을 확인할 수 없습니다";
+      // WORKLIST-SPLIT-UID: a study two patient resources answer is never a Target or a Source.
+      if (appState[uid]?.identityUnresolved || appState[source.uid]?.identityUnresolved) return RELATED_IDENTITY;
+      if (!serverMode || offline || demoMode) return "서버에 연결돼 있을 때만 넣을 수 있습니다";
+      if (relatedInsertPending(uid)) return RELATED_PENDING_REASON;
+      const why = reportEditorBlock(RELATED_BASE);
+      if (why) return why;
+      if (work.state() !== "active" || workBusy() || draftClient.busy(uid)) return "진행 중인 저장·확정이 끝난 뒤 다시 누르세요";
+      if (reportConverge.has(uid) || draftClient.conflict(uid) || draftClient.uncertain(uid))
+        return "현재 초안의 저장이 확인되지 않았습니다 — Back to Current Draft로 돌아가 저장을 확인한 뒤 다시 시도하세요";
+      if (reportFrame?.isComposing()) return "글자 조합(한글 입력)이 끝난 뒤 다시 누르세요";
+      if (reportOpening?.uid !== uid || reportOpening?.selectionSeq !== selectionSeq) return "판독 대상의 편집기가 아직 열리지 않았습니다";
+      return null;
+    }
+    /**
+     * The seed of an Insert: the draft the server holds at this line's revision ('private-draft'), or, with no draft, the
+     * Target's report head at its version ('report-head', or 'empty' when all three head texts are empty).
+     */
+    function relatedInsertSeedOf(uid) {
+      const stored = draftClient.stored(uid), a = appState[uid] ?? {};
+      if (!stored) return { reason: "현재 초안의 저장 상태를 확인하지 못했습니다 — 잠시 뒤 다시 누르세요" };
+      const draft = stored.snapshot;
+      const texts = Object.fromEntries(RFIELDS.map(k => [k, String((draft ? draft[k] : a[k]) ?? "")]));
+      // The editor shows LF; a stored CR would make the seed the server checks differ from the text the reader sees.
+      if (RFIELDS.some(k => texts[k].includes("\r")))
+        return { reason: "이 판독문에는 다른 줄바꿈 형식의 글이 있어 넣지 않았습니다 — 한 번 저장한 뒤 다시 시도하세요" };
+      return { revision: stored.revision, texts, kind: draft ? "private-draft" : RFIELDS.some(k => texts[k]) ? "report-head" : "empty",
+        baseVersion: draft ? draft.baseVersion : (Number.isSafeInteger(a.version) ? a.version : 0),
+        citations: draft ? [...draft.citations] : [], structured: draft ? [...draft.structured] : [] };
+    }
+    /** Before the confirmation enables Insert (R2): the Target's draft line settled and its stored draft known. */
+    async function relatedInsertPrepare() {
+      const uid = selectedUid, seq = selectionSeq, why = relatedInsertBlock();
+      if (why) return why;
+      const at = work.capture("study");
+      if (!draftClient.stored(uid)) await draftClient.prime(uid, { owner: draftOwner, context: at });
+      await draftClient.settled(uid);
+      if (!work.admits(at) || selectedUid !== uid || selectionSeq !== seq) return "판독 대상이 바뀌어 넣지 않았습니다";
+      return relatedInsertBlock() || relatedInsertSeedOf(uid).reason || null;
+    }
+    /** The confirmation's preview: the seed texts the Insert would append to, and the Target named as the reader knows it. */
+    function relatedInsertSeed() {
+      const uid = selectedUid, s = cur();
+      const label = s ? [s.name, s.id, s.date, shownStudyDesc(s), s.acc ? "AccNo " + s.acc : ""].filter(Boolean).join(" · ") : String(uid ?? "");
+      const seed = uid && s ? relatedInsertSeedOf(uid) : { reason: "판독 대상을 확인할 수 없습니다" };
+      return seed.reason ? { reason: seed.reason, label } : { texts: seed.texts, label };
+    }
+    const relatedFreeze = value => {
+      if (value && typeof value === "object" && !Object.isFrozen(value)) { Object.values(value).forEach(relatedFreeze); Object.freeze(value); }
+      return value;
+    };
+    /**
+     * The click (R1, R2): every condition again, synchronously, then one immutable request (one insertRequestId, owner,
+     * Target, the original CAS, the Source parts, the whole proposal) and the operation registered before the native edit
+     * runs, so no reentrant listener can send an ordinary write of the edited text. Nothing is sent here.
+     */
+    function relatedInsertFreeze({ section, parts, source, admission }) {
+      const uid = selectedUid, owner = draftOwner, related = relatedStudy();
+      if (!["findings", "conclusion"].includes(section) || !relatedMode) return { refused: "넣을 칸을 확인할 수 없습니다" };
+      const why = relatedInsertBlock() || reportEditorBlock(admission);
+      if (why) return { refused: why };
+      if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
+          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "addendum"].includes(source.action))
+        return { refused: "표시된 이전 판독문이 바뀌었습니다 — 다시 확인한 뒤 누르세요" };
+      const seed = relatedInsertSeedOf(uid);
+      if (seed.reason) return { refused: seed.reason };
+      if (!RFIELDS.every(k => reportFrame.read(k) === seed.texts[k]))
+        return { refused: "편집기의 글이 서버에 저장된 초안과 달라 넣지 않았습니다 — Back to Current Draft로 돌아가 저장을 확인하세요" };
+      if (reportBaseVersion(uid, seed.baseVersion) !== seed.baseVersion)
+        return { refused: "편집기가 보이는 판과 서버의 판이 달라 넣지 않았습니다 — 목록을 새로 고친 뒤 다시 시도하세요" };
+      const planned = relatedMode.insertion(seed.texts[section], parts, source.texts);
+      if (!planned.text.replace(/\n/g, "")) return { refused: "넣을 글이 없습니다" };
+      const at = reportFrame.capture(section, { start: planned.offset, end: planned.offset });
+      const proposal = { ...seed.texts, [section]: seed.texts[section] + planned.text };
+      const id = crypto.randomUUID();
+      const request = relatedFreeze({
+        expectedOwner: { institution: owner.institution ?? null, sub: owner.sub, author: owner.author },
+        expectedRevision: seed.revision,
+        findings: proposal.findings, conclusion: proposal.conclusion, recommendation: proposal.recommendation,
+        baseVersion: seed.baseVersion, citationIds: seed.citations, structureIds: seed.structured,
+        relatedInsert: {
+          intent: "apply", insertRequestId: id,
+          source: { uid: source.uid, version: source.version, action: source.action,
+            parts: parts.map(part => ({ field: part.field, start: part.start, end: part.end })) },
+          targetUid: uid, targetBaseVersion: seed.baseVersion, section, position: "end", offset: planned.offset, text: planned.text,
+          selectionSeq, contentRevision: at.revision + 1, sourceGeneration: source.seq, seedKind: seed.kind,
+        },
+      });
+      const op = { id, uid, owner, opening: reportOpening, selectionSeq, field: section, offset: planned.offset, text: planned.text,
+        before: seed.texts[section], after: proposal[section], request,
+        proposal: relatedFreeze({ ...proposal, baseVersion: seed.baseVersion, citations: [...seed.citations], structured: [...seed.structured] }),
+        source: relatedFreeze({ uid: source.uid, version: source.version, action: source.action }),
+        state: "editing", turn: null, receiptRevision: null, reason: null, at: null, reverted: null };
+      relatedInserts.set(uid, op);
+      return { op, at, text: planned.text };
+    }
+    /** The one native edit (R2), inside the mode's synchronous admission span. */
+    function relatedInsertEdit(frozen, admission) {
+      const op = frozen.op;
+      if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return false;
+      return editReport([{ field: op.field, at: frozen.at, text: frozen.text }], { admission }) && reportFrame.read(op.field) === op.after;
+    }
+    /** A native edit that did not happen: nothing was sent, so there is nothing to answer for; any changed text stays. */
+    function relatedInsertAbandon(op) {
+      if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return;
+      relatedInserts.delete(op.uid);
+      if (reportFrame && reportFrame.read(op.field) !== op.before)
+        toast("Related Report 글을 넣지 못했습니다 — 편집기의 글이 바뀌었을 수 있으니 확인하세요. 서버에는 보내지 않았습니다.", "err");
+    }
+    /** After an applied native edit only: the frozen request leaves through the Target's own draft command line. */
+    function relatedInsertSubmit(op) {
+      if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return;
+      op.turn = reportEditedAt.get(op.uid) ?? reportEdits;
+      relatedInsertSend(op, "apply");
+    }
+    async function relatedInsertSend(op, kind, context = work.capture("document"), session = undefined) {
+      const before = op.state, writes = kind !== "check";
+      op.state = kind === "check" ? "checking" : kind === "discard" ? "discarding" : "sending";
+      relatedInsertShow(op);
+      if (writes) relatedInsertsOut += 1;
+      let got;
+      try {
+        got = kind === "check" ? await draftClient.checkInsert(op.uid, op.request, { context, session })
+          : kind === "discard" ? await draftClient.discardInsert(op.uid, op.request, op.receiptRevision, { context, session })
+          : await draftClient.relatedInsert(op.uid, op.request, { context, session });
+      } catch (error) { got = { outcome: "unknown", error }; }
+      finally {
+        if (writes) { relatedInsertsOut -= 1; wakeIdle(); }
+      }
+      relatedInsertSettle(op, got, kind, before);
+      return got;
+    }
+    /**
+     * An answer settles its own operation, whatever the mode or the Source shows now (R6); the screen follows only for the
+     * same Target opening. Absence of evidence is never success: unknown keeps the original request for Check or a same-ID
+     * Retry, and Discard is offered only for a durable refused receipt.
+     */
+    function relatedInsertSettle(op, got, kind, before) {
+      if (relatedInserts.get(op.uid) !== op) return;
+      switch (got?.outcome) {
+        case "applied": relatedInsertApplied(op, got.envelope); break;
+        case "refused": case "receipt-changed":
+          op.state = "refused"; op.receiptRevision = got.receiptRevision; op.reason = got.reason ?? op.reason; break;
+        case "discarded": relatedInsertReverted(op, got.envelope); break;
+        case "superseded": case "id-reused": case "invalid": relatedInsertHandoff(op, got); break;
+        case "unsent": op.state = before === "editing" ? "unknown" : before; break;
+        case "absent": op.state = before === "discard-unknown" ? before : "unknown"; op.reason = "RECEIPT_ABSENT"; break;
+        default: op.state = kind === "discard" || before === "discard-unknown" ? "discard-unknown" : "unknown";
+      }
+      relatedInsertShow(op);
+    }
+    function relatedInsertApplied(op, envelope) {
+      const uid = op.uid, later = reportEditedSince(uid, op.turn ?? 0), a = appState[uid] ?? {};
+      op.state = "applied";
+      op.at = envelope.updatedAt ?? new Date().toISOString();
+      draftClient.retireInsert(uid, op.id);
+      reportSaveFailures.delete(uid);
+      reportSaveOutcome.delete(uid);
+      // Text typed after the Insert stays this document's unconfirmed text, now on the applied revision.
+      if (later) { appState[uid] = { ...a, draftRevision: envelope.revision }; return; }
+      appState[uid] = { ...a, draftRevision: envelope.revision, draft: { findings: op.proposal.findings, conclusion: op.proposal.conclusion,
+        recommendation: op.proposal.recommendation, baseVersion: op.proposal.baseVersion, at: op.at } };
+      const local = uid === selectedUid && reportFrame ? reportFrame.read() : a.draft;
+      if (local && RFIELDS.every(k => (local[k] ?? "") === op.proposal[k])) reportConverge.delete(uid);
+    }
+    /**
+     * The tombstone is confirmed: the server will never apply this request. Only then, and only while the editor still holds
+     * exactly the inserted text in the same opening with nothing edited since, one native edit removes that span (under the
+     * mode's admission while the mode holds the editor). Otherwise the text stays for an explicit choice.
+     */
+    function relatedInsertReverted(op, envelope = null) {
+      const uid = op.uid;
+      op.state = "discarded";
+      const exact = uid === selectedUid && reportOpening?.uid === uid && reportOpening?.selectionSeq === op.selectionSeq
+        && selectionSeq === op.selectionSeq && !!reportFrame && reportFrame.read(op.field) === op.after
+        && !reportEditedSince(uid, op.turn ?? 0) && work.state() === "active";
+      let reverted = false;
+      if (exact) {
+        const at = reportFrame.capture(op.field, { start: op.offset, end: op.offset + op.text.length });
+        const edit = admission => editReport([{ field: op.field, at, text: "" }], { admission });
+        const removed = relatedMode ? relatedMode.admit({ field: op.field, at, text: "", op }, edit) : edit(null);
+        reverted = !!removed && reportFrame.read(op.field) === op.before;
+      }
+      draftClient.retireInsert(uid, op.id, reverted ? undefined : { conflict: envelope ?? null });
+      if (reverted) {
+        op.reverted = true;
+        // The editor holds the seed again; it is saved text only when the server's draft at this line's revision is it.
+        const stored = draftClient.stored(uid), texts = reportFrame.read();
+        const kept = stored && RFIELDS.every(k => texts[k] === String((stored.snapshot ? stored.snapshot[k] : appState[uid]?.[k]) ?? ""));
+        if (kept) { reportConverge.delete(uid); reportSaveFailures.delete(uid); }
+        return;
+      }
+      op.reverted = false;
+      reportConverge.add(uid);
+      if (uid === selectedUid && work.state() === "active") {
+        keepReportEditor();
+        if (!draftClient.conflict(uid)?.latest) readDraftConflict(uid);
+      }
+    }
+    /** SUPERSEDED, ID_REUSED or a refused request shape: never re-applied, never a new ID; an explicit choice decides. */
+    function relatedInsertHandoff(op, got) {
+      op.state = got.outcome;
+      draftClient.retireInsert(op.uid, op.id, { conflict: got.envelope ?? null });
+      reportConverge.add(op.uid);
+      if (op.uid === selectedUid && work.state() === "active") {
+        keepReportEditor();
+        if (!draftClient.conflict(op.uid)?.latest) readDraftConflict(op.uid);
+      }
+    }
+    function relatedInsertRetry(op) {
+      if (relatedInserts.get(op.uid) !== op || !["unknown", "refused"].includes(op.state)) return;
+      if (appState[op.uid]?.identityUnresolved) { toast(RELATED_IDENTITY, "err"); return; }
+      relatedInsertSend(op, "apply");
+    }
+    function relatedInsertCheck(op, context = undefined, session = undefined) {
+      if (relatedInserts.get(op.uid) !== op || !["unknown", "discard-unknown"].includes(op.state)) return Promise.resolve(null);
+      return relatedInsertSend(op, "check", context, session);
+    }
+    function relatedInsertDiscard(op) {
+      if (relatedInserts.get(op.uid) !== op || !["refused", "discard-unknown"].includes(op.state) || !Number.isSafeInteger(op.receiptRevision)) return;
+      if (appState[op.uid]?.identityUnresolved) { toast(RELATED_IDENTITY, "err"); return; }
+      relatedInsertSend(op, "discard");
+    }
+    /** The one Notice speaks for an operation that needs the reader (its own action: Retry/Check/Discard Insert); the rest follows. */
+    function relatedInsertShow(op) {
+      if (work.state() !== "active") return;
+      if (op.uid === selectedUid && op.selectionSeq === selectionSeq) {
+        const n = reportNotice, mine = n?.action?.kind === "related-insert" && n.action.op === op;
+        if (RELATED_PENDING.includes(op.state) || RELATED_REVIEW.includes(op.state) || (op.state === "discarded" && !op.reverted)) {
+          showReportNotice({ status: op.state === "refused" ? "refused" : RELATED_PENDING.includes(op.state) ? "unknown" : "conflict",
+            uid: op.uid, seq: op.selectionSeq, action: { kind: "related-insert", op }, ...(mine && n.target ? { target: n.target } : {}) });
+        } else if (mine) {
+          // Settled. A move the reader asked for continues when nothing is unconfirmed now (as W4's Check does).
+          const target = n.target;
+          clearReportNotice();
+          if (target && !reportConverge.has(op.uid)) select(target.uid, { ...target.options, revalidate: target.revalidate });
+        }
+        renderDraftBar();
+        updateReportButtons();
+      }
+      if (op.state === "applied") relatedMode?.announce("삽입됨 · " + relatedInsertLabel(op));
+      else if (op.state === "discarded" && op.reverted) relatedMode?.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
+      relatedMode?.refresh();
+    }
+    /** Shows the pending operation's Notice again (a refused command or entry names it). */
+    function relatedInsertNotice(uid) {
+      const op = relatedInsertPending(uid);
+      if (op) relatedInsertShow(op);
     }
     /**
      * 초안의 명령 프로토콜(S7-U5 U5S-REQ-15·17, report-draft-client.js). 이 문서가 초안을 바꾸는 모든 길 — 자동 저장·검사

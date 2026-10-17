@@ -74,7 +74,9 @@
       if (selectedUid === uid) renderDraftBar();
       draftClient.keep(uid, { ...next, baseVersion });
       // WORKLIST-SPLIT-UID: a study the last list excluded as unresolved keeps its text here and sends nothing (not "saved").
-      if (deferWrite || offline || a.prelimHidden || a.identityUnresolved || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
+      // W5: neither does a study whose explicit Related insert is not settled: its text goes only with that operation's request.
+      if (deferWrite || offline || a.prelimHidden || a.identityUnresolved || relatedInsertPending(uid) || heldByOther(cur())
+          || (serverMode && draftClient.conflict(uid))) return;
       if (!serverMode) { if (empty) appState[uid].draft = null; saveApp(); reportConverge.delete(uid); return "saved"; }
 
       return saveReportDraft(uid, { keepalive });
@@ -98,7 +100,8 @@
     async function reportTextToSend(uid, at) {
       if (!work.admits(at)) return null;
       if (reportUnknownCommits.has(uid) && (await learnCommitOutcome(uid, at)).outcome === "unknown") return null;
-      if (!work.admits(at) || !reportConverge.has(uid)) return null;
+      // W5: a Related insert that became pending while this write waited holds the text for its own request.
+      if (!work.admits(at) || !reportConverge.has(uid) || relatedInsertPending(uid)) return null;
       return unconfirmedReport(uid);
     }
 
@@ -188,7 +191,7 @@
         const draft = unconfirmedReport(uid);
         if (!draft) continue;
         const a = appState[uid];
-        if (a.prelimHidden || a.identityUnresolved || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
+        if (a.prelimHidden || a.identityUnresolved || relatedInsertPending(uid) || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
         const conflict = draftClient.conflict(uid);
         if (conflict) {
           draftClient.keep(uid, draft);

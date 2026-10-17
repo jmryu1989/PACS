@@ -294,6 +294,9 @@ window.KinReadingWorkspace = function (app) {
   }
   function focusPane(which) {
     if (!active || ended || !app.allowed()) return;
+    // W5 (D1423 R4): Related Report opens the page's Related Report mode for the viewed Related study and Report Editor is its
+    // Back, when the page has the mode (the same hook the viewer frame's Finalize uses); otherwise they only move focus.
+    if ((which === 'prior' || which === 'report') && window.KinReportCommands?.related?.(which) === true) return;
     if (which === 'context') {
       closeList(); document.body.classList.add('reading-context-open'); context.setAttribute('aria-expanded', 'true');
       $('#clinical').focus(); $('#clinical').scrollIntoView({ block: 'nearest' }); redrawRetainedViewer(); return;
