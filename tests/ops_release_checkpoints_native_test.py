@@ -848,11 +848,18 @@ class Smoke:
         self.refusal(["N05"], checkpoint_id + ": an occupied volume name refuses the restore", "RESOURCE_EXISTS", cp.restore_checkpoint, manifest, bundle,
                      backend=stack.docker, fixture_root=self.fixture_root, names=stack.names(), images_present=stack.docker.image_present,
                      observe=lambda sid: None)
+        # r7 SR7-1: the restore takes its manifest from the bundle, so an image ID changed in the caller's copy is no
+        # longer the bundle's; the image the bundle pins is made absent instead by asking the real daemon for an ID it
+        # does not hold in its place.
+        absent, helper = "sha256:" + "0" * 64, manifest["identity"]["image_ids"]["helper"]
         stale = copy.deepcopy(manifest)
-        stale["identity"]["image_ids"]["helper"] = "sha256:" + "0" * 64
-        self.refusal(["N05"], checkpoint_id + ": an image that is not present refuses the restore", "STALE_IMAGE", cp.restore_checkpoint, stale, bundle,
-                     backend=stack.docker, fixture_root=self.fixture_root, names=stack.names(), images_present=stack.docker.image_present,
-                     observe=lambda sid: None)
+        stale["identity"]["image_ids"]["helper"] = absent
+        self.refusal(["N05"], checkpoint_id + ": a manifest copy whose image ID is not the bundle's refuses the restore", "BUNDLE_INVALID",
+                     cp.restore_checkpoint, stale, bundle, backend=stack.docker, fixture_root=self.fixture_root, names=stack.names(),
+                     images_present=stack.docker.image_present, observe=lambda sid: None)
+        self.refusal(["N05"], checkpoint_id + ": an image that is not present refuses the restore", "STALE_IMAGE", cp.restore_checkpoint, manifest, bundle,
+                     backend=stack.docker, fixture_root=self.fixture_root, names=stack.names(),
+                     images_present=lambda image: stack.docker.image_present(absent if image == helper else image), observe=lambda sid: None)
         ids = lambda listing: {kind: sorted(item["id"] for item in listing[kind]) for kind in ("containers", "volumes", "networks")}
         self.check(["N05"], checkpoint_id + ": the refused restores created no resource and no fixture root",
                    ids(self.docker().inventory()) == ids(before) and not self.fixture_root.exists())
