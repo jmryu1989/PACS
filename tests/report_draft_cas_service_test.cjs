@@ -193,11 +193,14 @@ async function world() {
   // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
   // here), and the full bootstrap reads the inventory only to leave out a UID answered twice (none here); any other
   // Orthanc member is still out of bounds for this harness.
-  // W5-API: a case that restricts StudyAccess by DICOM tags answers the one-study metadata lookup through w.metadata
+  // W5-API: a case that restricts StudyAccess by DICOM tags answers the one-study resource lookup (since #180 the access
+  // metadata of one UID is read from all of its resources) through w.metadata; a UID in w.split is answered by two
+  // original resources (the split a WORKLIST-SPLIT-UID case needs).
   const orthanc = new Proxy({}, { get(_t, key) {
-    if (key === 'studyAccessMetadata' && w.metadata) return w.metadata;
-    // W5-API: a UID in w.split is answered by two original resources (the split a WORKLIST-SPLIT-UID case needs)
-    return key === 'studyIdentityResources' ? async uid => (w.split?.has(uid) ? [1, 2] : [1]).map(() => ({ '0020000D': { Value: [uid] } }))
+    return key === 'studyIdentityResources' ? async uid => {
+        const row = w.metadata ? await w.metadata(uid) : { '0020000D': { Value: [uid] } };
+        return w.split?.has(uid) ? [row, row] : [row];
+      }
       : key === 'studyIdentities' ? async () => []
       : () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); };
   } });
