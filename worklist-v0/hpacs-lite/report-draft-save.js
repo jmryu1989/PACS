@@ -73,7 +73,8 @@
       if (!demoMode) reportConverge.add(uid);
       if (selectedUid === uid) renderDraftBar();
       draftClient.keep(uid, { ...next, baseVersion });
-      if (deferWrite || offline || a.prelimHidden || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
+      // WORKLIST-SPLIT-UID: a study the last list excluded as unresolved keeps its text here and sends nothing (not "saved").
+      if (deferWrite || offline || a.prelimHidden || a.identityUnresolved || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
       if (!serverMode) { if (empty) appState[uid].draft = null; saveApp(); reportConverge.delete(uid); return "saved"; }
 
       return saveReportDraft(uid, { keepalive });
@@ -187,7 +188,7 @@
         const draft = unconfirmedReport(uid);
         if (!draft) continue;
         const a = appState[uid];
-        if (a.prelimHidden || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
+        if (a.prelimHidden || a.identityUnresolved || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
         const conflict = draftClient.conflict(uid);
         if (conflict) {
           draftClient.keep(uid, draft);

@@ -1183,6 +1183,56 @@
       });
     }
 
+    /**
+     * WORKLIST-SPLIT-UID. 같은 Study UID에 두 환자의 원본 자원이 있어 서버가 정상 목록에서 뺀 검사(마지막 완성 목록 기준).
+     * 검사마다의 잠금은 그 검사의 상태 칸(`appState[uid].identityUnresolved`)에 둔다 — 편집기·단추·저장·영상 열기가 이미 읽는
+     * 자리다. 검색·Related·비교 후보는 목록 행에서 오므로 이 UID가 없다. 서버가 같은 행위를 409·403으로 거절하므로 이 표시는
+     * 경계가 아니다. 완성된 목록만 표시를 바꾸고, 그 목록이 이 칸을 말하지 않으면(모름) 그대로 둔다.
+     * 안내(건수)와 잠금은 따로 간다: 안내는 이번 완성 목록이 말한 그대로이고, 잠금은 그 UID가 이번 완성 목록의 정상 행(원본
+     * 하나)으로 돌아왔을 때만 풀린다. 안내에서 빠진 것만으로는(범위·원격판독·접근 조건이 바뀌어 보이지 않게 됨) 풀지 않는다.
+     */
+    let studyIdentityIssues = new Set();
+    function applyIdentityIssues(issues, rows) {
+      if (!Array.isArray(issues)) return;
+      const next = new Set(issues.map(issue => issue.uid));
+      const single = new Set(Array.isArray(rows) ? rows.map(row => row?.uid) : []);
+      for (const uid of Object.keys(appState))
+        if (appState[uid]?.identityUnresolved && single.has(uid) && !next.has(uid)) delete appState[uid].identityUnresolved;
+      for (const uid of next) {
+        // Only a study this page already knew can be open, kept or launched; an unseen UID has nothing to lock.
+        if (!appState[uid]) continue;
+        appState[uid] = { ...appState[uid], identityUnresolved: true };
+        // 잠긴 검사의 확인되지 않은 글은 화면과 사본에 남는다. 원본이 정리되어 돌아와도 스스로 다시 보내지 않는다 — 사람이 고칠 때 저장한다.
+        if (reportConverge.has(uid)) reportSaveFailures.set(uid, "stop");
+      }
+      studyIdentityIssues = next;
+      renderIdentityIssues(false);
+    }
+    /**
+     * 건수와 한국어 설명만 쓴다(환자·기관 값 없음). 관측에 실패한 뒤에는 마지막 관측의 안내임을 함께 말한다.
+     * 안내 줄은 처음 필요할 때 관측 부재 안내(#not-observed) 바로 아래에 만든다 — 말할 것이 없는 동안 빈 자리를 두지 않는다.
+     */
+    function renderIdentityIssues(unobserved) {
+      const n = studyIdentityIssues.size;
+      let box = $("#identity-issues");
+      if (!box) {
+        const anchor = $("#not-observed");
+        if (!n || !anchor) return;
+        box = document.createElement("div");
+        box.id = "identity-issues";
+        box.setAttribute("role", "status");
+        box.style.cssText = "padding:2px 10px;font-size:12px";
+        const title = document.createElement("strong"), text = document.createElement("span");
+        title.textContent = "Patient Identity Conflict";
+        text.id = "identity-issues-text";
+        box.append(title, " ", text);
+        anchor.after(box);
+      }
+      box.hidden = !n;
+      $("#identity-issues-text").textContent = !n ? "" : `${n} · 환자 식별 불일치로 검사 ${n}건을 목록에서 제외했습니다. 원본 확인이 필요합니다.`
+        + (unobserved ? " · 관측 불가 · 마지막 관측 기준입니다." : "");
+    }
+
     let listLoadSequence = 0;
     // studyPriority·Quick Match·검색·기능 패널의 종료가 부르는 목록·칩·판독 단추 그리기 묶음이다. 분할된 script 사이의 입력·종료가 미정의를 만나지 않게 이 생성보다 앞에 둔다(S9-U0a-PRE).
     function savedFilterDays(value) {
@@ -1519,6 +1569,17 @@
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
+      // WORKLIST-SPLIT-UID: the selected UID was excluded as unresolved. Its text stays (loadReport keeps it) and is read-only;
+      // every write and the paste/clear editors are off. The server refuses the same actions on its own.
+      const unresolved = !!appState[selectedUid]?.identityUnresolved;
+      if (unresolved) {
+        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+          "#b-prelim", "#b-draft-keep", "#b-draft-load", "#b-draft-discard", "#b-report-reload", "#b-report-template", "#b-mark-cvr"]) {
+          const el = $(id);
+          if (el) { el.disabled = true; el.title = "환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다."; }
+        }
+        for (const id of ["#findings", "#conclusion", "#recommendation"]) $(id).readOnly = true;
+      }
       // Approve & Next는 Approve와 같은 확정이다(W4-PAGE-04): 같은 때, 같은 까닭으로 잠긴다 — 같은 판단을 따로 하지 않는다.
       const approveNext = $("#b-approve-next");
       if (approveNext) {
@@ -1533,6 +1594,7 @@
       // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
       // 녹음·요청은 여기서 끝난다 — select()에 두면 그 구역을 실행하는 다른 시험 틀이 깨진다.
       dictation.refresh();
+      if (unresolved && $("#b-dictate")) $("#b-dictate").disabled = true;
     }
     const validUserFilters = value => Array.isArray(value)
       ? value.filter(uf => uf && typeof uf === "object" && typeof uf.name === "string") : [];
@@ -1714,6 +1776,7 @@
         // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
           studies = r.studies.map(fromApi);
           folderLoadState = 'complete';
+          applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           studyPriority.observed(r.studies.map(s=>s.uid));
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
@@ -1742,6 +1805,7 @@
             folderLoadState = 'unknown';
             // A superseded or changed-list answer is not a failed observation; the last one still stands.
             if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();
+            if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') renderIdentityIssues(true);
             $("#err").textContent = "검사 목록을 불러오지 못했습니다. 현재 목록과 입력은 유지했습니다 — " + e.message;
             toast("검사 목록 실패: " + e.message, "err");
             render();
@@ -2132,6 +2196,11 @@
         if (pendingLeave) pendingLeave.target = null;
         return { status: "same", uid };
       }
+      // WORKLIST-SPLIT-UID: a stale row, link or keyboard target never selects a study the last list excluded as unresolved.
+      if (appState[uid]?.identityUnresolved) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
+        return { status: "unresolved", uid };
+      }
       // 기다리는 이동이 있으면 마지막으로 고른 검사가 그 이동의 목적지다(저장은 한 번만 기다린다).
       if (pendingLeave) { pendingLeave.target = { uid, options, revalidate }; return pendingLeave.done; }
       const pass = leaveStudyGate("select");
@@ -2238,6 +2307,9 @@
       if (!KinAuth.has("radiologist")) return { status: "refused", reason: "판독의 권한이 없어 저장할 수 없습니다" };
       const a = appState[uid] ?? {};
       if (a.prelimHidden) return { status: "refused", reason: "다른 판독의의 예비 판독(RS: P)입니다" };
+      // WORKLIST-SPLIT-UID: an unresolved study's kept text is never sent. It is a refused save, answered like the others
+      // (Retry/Check/Stay, no target switch, nothing written); the text stays in the editor.
+      if (a.identityUnresolved) return { status: "refused", reason: "환자 식별 불일치로 이 검사의 글을 저장할 수 없습니다. 원본 확인이 필요합니다" };
       const held = heldByOther(studies.find(s => s.uid === uid));
       if (held) return { status: "refused", reason: `${displayActor(held)} 님이 판독 중입니다` };
       return null;
@@ -4248,7 +4320,9 @@
       const locked = !!r.prelimHidden;
       if (locked) reportPreview.close();
       // 자동 저장된 내 초안은 DOM과 같아 dirty가 아니어도, 잠금 전환이 그 글을 지워서는 안 된다.
-      let preserveValue = !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
+      // WORKLIST-SPLIT-UID: a study whose UID two patient resources now answer keeps its text, caret, undo and revision as
+      // they are; no render replaces it, forced or not, until a later list returns it as one resource.
+      let preserveValue = !!r.identityUnresolved || !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
       reportRefreshPendingFor = preserveValue && (locked || reportDirty()) ? selectedUid : null;
       const src = locked ? {} : reportSource();
       const frame = mountReportFrame();
@@ -4283,7 +4357,8 @@
                                  ["#recommendation", "Please enter recommendation"]]) {
         const el = $(sel);
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
-        el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
+        el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist")
+          || !!r.identityUnresolved;
       }
       renderDraftBar();
       updateReportTemplateButton();
@@ -6024,7 +6099,8 @@
       if (!demoMode) reportConverge.add(uid);
       if (selectedUid === uid) renderDraftBar();
       draftClient.keep(uid, { ...next, baseVersion });
-      if (deferWrite || offline || a.prelimHidden || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
+      // WORKLIST-SPLIT-UID: a study the last list excluded as unresolved keeps its text here and sends nothing (not "saved").
+      if (deferWrite || offline || a.prelimHidden || a.identityUnresolved || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
       if (!serverMode) { if (empty) appState[uid].draft = null; saveApp(); reportConverge.delete(uid); return "saved"; }
 
       return saveReportDraft(uid, { keepalive });
@@ -6138,7 +6214,7 @@
         const draft = unconfirmedReport(uid);
         if (!draft) continue;
         const a = appState[uid];
-        if (a.prelimHidden || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
+        if (a.prelimHidden || a.identityUnresolved || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
         const conflict = draftClient.conflict(uid);
         if (conflict) {
           draftClient.keep(uid, draft);
@@ -6366,6 +6442,11 @@
       // 삽입이 나가 있는 동안도 같다 — 그 응답 전에 서명하면 사람이 확인한 문장이
       // 이번 판에 들어갈지 다음 판에 들어갈지가 도착 순서로 정해진다.
       if (commitInFlight || insertInFlight) return;
+      // WORKLIST-SPLIT-UID: no decision of any kind is sent for a study the last list excluded as unresolved; the text stays.
+      if (appState[selectedUid]?.identityUnresolved) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다. 입력한 글은 화면에 그대로 있습니다.", "err");
+        return;
+      }
       /**
        * 이 검사에 결과를 모르는 확정이 남아 있으면, 같은 글을 또 확정하기 전에 서버가 무엇을 가졌는지부터 안다. 답을 잃은
        * 확정 뒤에 사람이 가장 먼저 하는 일이 같은 단추를 다시 누르는 것이다 — 그 확정이 서버에 있는데 옛 판을 기준으로
@@ -6901,8 +6982,11 @@
         else {
           keepReportEditor();
           const context = work.capture("document");
+          // WORKLIST-SPLIT-UID: an unresolved study's kept text is not sent on the way out either; it stays in the copy, and
+          // the browser's own warning below still asks before the text is lost.
           for (const report of pending)
-            draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
+            if (!appState[report.uid]?.identityUnresolved)
+              draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
         }
       }
       if (serverMode && heldUid) {
@@ -7074,6 +7158,9 @@
           });
           continue;
         }
+        // WORKLIST-SPLIT-UID: an unresolved study's text is not preserved to the server; the logout stops with it named
+        // (Retry, Back to Editing or an explicit discard) and the text stays on this page.
+        if (appState[report.uid]?.identityUnresolved) { report.reason = "identity"; continue; }
         /**
          * 이 검사에 결과를 모르는 확정이 남아 있으면, 잡아 둔 글을 초안으로 보존하기 전에 서버의 판독 상태부터 읽는다
          * (준비 문맥으로). 그 글이 이미 판독문으로 확정돼 있으면 보존할 것이 없다 — 초안으로 다시 쓰면 다음 로그인에서
@@ -7377,6 +7464,8 @@
         for (const report of prep.reports) {
           if (report.safe) continue;
           if (!work.commit(at, () => { prep.uid = report.uid; prep.texts = report.texts; report.reason = null; })) return;
+          // WORKLIST-SPLIT-UID: Recover Draft does not send an unresolved study's text either; it stays here with its reason.
+          if (appState[report.uid]?.identityUnresolved) { if (!work.commit(at, () => { report.reason = "identity"; })) return; continue; }
           // 결과를 모르는 확정이 남은 검사는 그 글을 초안으로 쓰기 전에 판독 상태부터 읽는다(보존 저장과 같다).
           if (reportUnknownCommits.has(report.uid)) {
             say("서버의 판독 상태를 확인하는 중입니다…");
@@ -7466,6 +7555,7 @@
       refused: "서버가 판독문 초안 저장을 받아들이지 않았습니다.",
       unknown: "판독문 초안 저장의 결과를 확인하지 못했습니다. 저장됐을 수도 있고 아닐 수도 있습니다.",
       conflict: "서버에 이 화면과 다른 초안이 있어 판독문 초안을 저장하지 않았습니다. Overwrite Server Draft를 누르면 이 화면의 내용으로 덮어씁니다.",
+      identity: "환자 식별 불일치로 이 검사의 판독문 초안을 저장하지 않았습니다. 원본 확인이 필요합니다.",
     };
 
     function logoutStatus(prep, text) {
@@ -7581,6 +7671,7 @@
           if (!live() || commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
+          applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
           const arrivalNotice = arrivals?.ok && arrivals.changes.length
@@ -8153,6 +8244,12 @@
     }
 
     function openFilmbox(uid, priorUid = autoPrior(uid), initialSeriesUid = null) {
+      // WORKLIST-SPLIT-UID: a study (or comparison) the last list excluded as unresolved replaces no window or workspace
+      // pane. A stale button or a direct URL still meets the image gate's 403 on the server.
+      if ([uid, priorUid].some(value => value && appState[value]?.identityUnresolved)) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
+        return false;
+      }
       if (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace')
         return readingWorkspace.open(uid, priorUid, initialSeriesUid);
       return openOhifWindow(uid, priorUid, initialSeriesUid);

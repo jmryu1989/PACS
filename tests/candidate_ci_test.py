@@ -47,8 +47,9 @@ class CandidateCiTests(unittest.TestCase):
         # EMR-B1: + the ledger's L01 (emr/units/b.json candidate_cases).
         # W2: + folder edit/save/reapply/relogin. W3: + drawer v3 save/relogin.
         # CN-N01-A: + 6 OrderCorrectionInvariantTests (invariants 95). W4-FLOW: + Approve & Next / Recommendation round trip.
-        # Union: 95 + 15 + 14 = 124.
-        self.assertEqual(len(selected), 124)
+        # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101). Union: 101 + 15 + 14 = 130.
+        self.assertEqual(len(selected), 130)
+        self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
         self.assertEqual([item["case"] for item in selected[-14:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
@@ -69,7 +70,7 @@ class CandidateCiTests(unittest.TestCase):
     def test_configuration_uses_target_runner_plans_evidence_and_540_seconds(self):
         class FakeRunner:
             def module_plan(self, filename, unit, mode, timeout, class_name):
-                count = 95 if unit == "candidate-invariants" else 15
+                count = 101 if unit == "candidate-invariants" else 15
                 return {"tests": [{"file": filename, "case": "Local.test_" + str(i)} for i in range(count)]}
             def load_module(self, path):
                 filename = path.relative_to(candidate.TOOLS_ROOT / "tests").as_posix()
@@ -98,7 +99,7 @@ class CandidateCiTests(unittest.TestCase):
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 124)
+            self.assertEqual(len(selected), 130)
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.

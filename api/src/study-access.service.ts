@@ -6,6 +6,7 @@ import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
 import type { Caller } from './pacs.service';
 import { StudyAccessPolicy, StudyAccessMetadata, normalizeAccessPolicy, accessPolicyMatches, accessWindowOpen, ruleNeedsMetadata, validAccessUid } from './study-access-policy';
+import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE, STUDY_SOURCE_UNAVAILABLE, STUDY_SOURCE_UNAVAILABLE_MESSAGE } from './study-source-groups';
 
 export interface AccessSnapshot { revision:number; policy:StudyAccessPolicy; windowOpen:boolean; needsInstitutionReview:boolean; management?:{reason:string;updatedBy:string|null;updatedAt:Date|null} }
 type WriteRequest = { expectedOwner: unknown; policy: unknown; reason: string; requestId: string; revision: number };
@@ -17,7 +18,12 @@ const conflict=()=>new ConflictException({code:'STUDY_ACCESS_CHANGED',message:'�
 @Injectable()
 export class StudyAccessService {
   constructor(private prisma:PrismaService,private orthanc:OrthancService,private keycloak:KeycloakService) {}
-  private prepared=new WeakMap<Caller,{all:boolean;metadata:Map<string,StudyAccessMetadata|null>}>();
+  // WORKLIST-SPLIT-UID: every original resource of a UID keeps its own tags. Keeping only the last row let one
+  // patient's tags decide the access to a UID another patient's resource also answers.
+  private prepared=new WeakMap<Caller,{all:boolean;metadata:Map<string,StudyAccessMetadata[]|null>}>();
+  // Request-scoped source observation (resource count per UID, or unavailable). It is never a policy decision and
+  // never outlives the request: a past list success or another request's read is not evidence of one resource.
+  private sources=new WeakMap<Caller,Map<string,number|null>>();
   private owner(c:Caller) {
     if(c.kind!=='member'||![c.institution,c.sub,c.actor].every(v=>typeof v==='string'&&v.length>0&&v.length<=256))
       throw new ForbiddenException('소속 기관 회원 전용입니다');
@@ -73,12 +79,24 @@ export class StudyAccessService {
     try {
       // No transaction is accepted here. Callers prepare source tags before
       // acquiring clinical locks; require(...,tx) only evaluates these tags.
-      const rows=requested?.length===1?[await this.orthanc.studyAccessMetadata(requested[0])]:await this.orthanc.studyIdentities(true);
-      for(const row of rows){const uid=OrthancService.tag(row,'0020000D');if(validAccessUid(uid))cache.metadata.set(uid,this.metadata(row));}
+      // One UID reads all of its resources; the batch keeps every enumeration row, so one UID's two resources
+      // never make another UID's preparation fail.
+      const rows=requested?.length===1?await this.orthanc.studyIdentityResources(requested[0]):await this.orthanc.studyIdentities(true);
+      const fresh=new Map<string,StudyAccessMetadata[]>();
+      for(const row of rows){const uid=OrthancService.tag(row,'0020000D');if(validAccessUid(uid))fresh.set(uid,[...fresh.get(uid)??[],this.metadata(row)]);}
+      for(const [uid,list] of fresh)cache.metadata.set(uid,list);
       if(requested?.length!==1)cache.all=true;
       for(const uid of requested??[])if(!cache.metadata.has(uid))cache.metadata.set(uid,null);
     } catch(e) {throw new ServiceUnavailableException('검사 원본의 접근 조건을 확인하지 못했습니다');}
     await this.unchanged(c,scope);
+  }
+  /**
+   * The policy applied to each original resource on its own, then AND across the resources: one resource passing
+   * never lets another through, and fields of two resources are never joined into one tuple. A UID with no
+   * prepared resource keeps the existing UID-only evaluation.
+   */
+  private resourcesMatch(policy:StudyAccessPolicy,uid:string,list:StudyAccessMetadata[]|null|undefined) {
+    return list?.length?list.every(metadata=>accessPolicyMatches(policy,uid,metadata)):accessPolicyMatches(policy,uid,undefined);
   }
   async allowed(c:Caller,uids:string[],tx?:any):Promise<Set<string>> {
     if(tx===this.prisma)tx=undefined;
@@ -92,7 +110,7 @@ export class StudyAccessService {
       if(!tx)await this.prepare(c,remaining,policy);
       const cache=this.prepared.get(c);
       if(!cache||remaining.some(uid=>!cache.all&&!cache.metadata.has(uid)))throw conflict();
-      for(const uid of remaining)if(accessPolicyMatches(policy.policy,uid,cache.metadata.get(uid)??undefined))result.add(uid);
+      for(const uid of remaining)if(this.resourcesMatch(policy.policy,uid,cache.metadata.get(uid)))result.add(uid);
     }
     // Read scopes can spend time at Orthanc; check revision and expiry again.
     const latest=tx?policy:await this.unchanged(c,policy);
@@ -102,6 +120,29 @@ export class StudyAccessService {
   async require(c:Caller,uids:string[],tx?:any) {
     const allowed=await this.allowed(c,uids,tx);
     if(uids.some(uid=>!allowed.has(uid)))throw new NotFoundException('검사를 찾을 수 없습니다');
+  }
+  /**
+   * WORKLIST-SPLIT-UID source observation for this request, separate from the access policy: how many original Study
+   * resources answer each UID now. Call it outside any transaction (it reads Orthanc); a failed read is recorded as
+   * unknown and refused by assertUnsplitSource, so scope and role refusals, which the caller checks first, are never
+   * replaced by a source answer. It is not a rule of require(): an import must still reach its own identity gate.
+   */
+  async prepareSourceIdentity(c:Caller,uids:string[]) {
+    let seen=this.sources.get(c);if(!seen){seen=new Map();this.sources.set(c,seen);}
+    for(const uid of [...new Set(uids)]){
+      if(seen.has(uid))continue;
+      try{seen.set(uid,(await this.orthanc.studyIdentityResources(uid)).length);}catch{seen.set(uid,null);}
+    }
+  }
+  /**
+   * After the caller's scope checks: 409 STUDY_IDENTITY_UNRESOLVED when two or more resources answer the UID, 503
+   * STUDY_SOURCE_UNAVAILABLE when this request could not observe the source (or never prepared it). No resource is
+   * not a split; the caller's existing missing-source behaviour decides that case.
+   */
+  assertUnsplitSource(c:Caller,uid:string) {
+    const count=this.sources.get(c)?.get(uid);
+    if(typeof count!=='number')throw new ServiceUnavailableException({code:STUDY_SOURCE_UNAVAILABLE,message:STUDY_SOURCE_UNAVAILABLE_MESSAGE});
+    if(count>1)throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
   }
   async status(c:Caller) {
     const s=await this.snapshot(c);

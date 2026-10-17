@@ -5659,6 +5659,223 @@ class CriticalResultInvariantTests(CriticalResultHarness, unittest.TestCase):
         self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 1, "receipts": 1, "audits": 1})
 
 
+class WorklistSplitUidInvariantTests(unittest.TestCase):
+    """WORKLIST-SPLIT-UID TEST-WSU-10 (spec-worklist-split-uid-20261016 section 6): a Study UID that two patient resources
+    answer, on the real Orthanc, API, PostgreSQL and nginx of an isolated synthetic stack, entered only through the shared
+    run-tests entrance. Each resource is one synthetic C-STORE (scripts/send_cstore.py; the second reuses the Study UID
+    under another PatientID). Observed: the API answers (paged and unpaged, exact UIDs and counts), the StudyState and
+    study.arrived rows, nginx's image gate and every original resource's bytes. Cleanup removes every Orthanc Study
+    resource of each owned UID (LiveStack.cleanup_fixture compares each resource's own UID) and the owned DB rows."""
+
+    ISSUE = "STUDY_IDENTITY_UNRESOLVED"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.stack = LiveStack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
+        cls.addClassCleanup(cls.stack.cleanup_all)
+        cls.stack.require_stack()
+
+    def store(self, patient_id: str, uid: str | None = None, institution: str = "한림병원") -> str:
+        """One synthetic resource; with `uid`, a second Study resource under the same Study UID for another patient."""
+        run = uuid.uuid4().hex
+        command = self.stack.fixture_command(institution, f"SPLITUID^{run[:10]}", patient_id)
+        if uid is not None:
+            command += ["--study-uid", uid]
+        done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        found = re.search(r"StudyUID\s+([0-9.]+)", done.stdout)
+        self.assertIsNotNone(found, done.stdout)
+        if uid is not None:
+            self.assertEqual(found.group(1), uid)
+        uid = found.group(1)
+        if uid not in self.stack.active:
+            self.stack.active[uid] = Fixture(uid, patient_id, institution, "jmryu", "SPLITUID-" + run)
+            self.addCleanup(self.stack.cleanup_fixture, uid)
+        return uid
+
+    def split(self, first: str = "A", second: str = "B", institutions: tuple[str, str] = ("한림병원", "한림병원")) -> str:
+        run = uuid.uuid4().hex[:10]
+        uid = self.store(f"SPLITUID-{first}-{run}", institution=institutions[0])
+        self.store(f"SPLITUID-{second}-{run}", uid, institution=institutions[1])
+        self.assertEqual(len(self.resources(uid)), 2, "the environment keeps two Study resources for one UID")
+        return uid
+
+    def resources(self, uid: str) -> list[str]:
+        lookup = self.stack._orthanc_request("POST", "/tools/lookup", uid.encode("ascii"))
+        self.assertEqual(lookup.status, 200, lookup.text)
+        return sorted(item["ID"] for item in lookup.body if item.get("Type") == "Study")
+
+    def originals(self, uid: str) -> dict[str, str]:
+        """sha256 of every stored instance file of every resource of this UID."""
+        out = {}
+        for study in self.resources(uid):
+            for instance in self.stack._orthanc_request("GET", f"/studies/{quote(study)}/instances").body:
+                out[instance["ID"]] = hashlib.sha256(self.stack.orthanc_bytes(f"/instances/{quote(instance['ID'])}/file")).hexdigest()
+        return out
+
+    def rows(self, uid: str) -> tuple[int, int]:
+        states = psql(f'SELECT count(*) FROM "StudyState" WHERE uid={sql_text(uid)}')
+        arrived = psql(f"SELECT count(*) FROM \"AuditLog\" WHERE target={sql_text(uid)} AND action='study.arrived'")
+        return int(states[0]), int(arrived[0])
+
+    def listing(self, user: str, limit: int | None = None) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+        """(normal UIDs, identityIssues of the completing answer, every pagination block)."""
+        if limit is None:
+            listed = self.stack.request("GET", "/studies", user)
+            self.assertEqual(listed.status, 200, listed.text)
+            return [row["uid"] for row in listed.body["studies"]], listed.body["identityIssues"], []
+        uids, pages, after = [], [], None
+        while True:
+            listed = self.stack.request("GET", f"/studies?limit={limit}" + (f"&after={quote(after)}" if after else ""), user)
+            self.assertEqual(listed.status, 200, listed.text)
+            uids += [row["uid"] for row in listed.body["studies"]]
+            pages.append(listed.body["pagination"])
+            after = listed.body["pagination"]["next"]
+            if after is None:
+                return uids, listed.body["identityIssues"], pages
+            self.assertNotIn("identityIssues", listed.body, "a middle page says nothing about issues")
+
+    def issue(self, uid: str) -> dict[str, str]:
+        return {"uid": uid, "code": self.ISSUE}
+
+    def test_split_uid_01_cold_both_orders(self) -> None:
+        for first, second in (("A", "B"), ("B", "A")):
+            with self.subTest(order=first + second):
+                uid = self.split(first, second)
+                before = self.originals(uid)
+                # Two first lists race over one cold UID: one row and one arrival audit, two successful answers.
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    answers = list(pool.map(lambda _: self.stack.request("GET", "/studies", "doctor"), range(2)))
+                for listed in answers:
+                    self.assertEqual(listed.status, 200, listed.text)
+                    self.assertNotIn(uid, [row["uid"] for row in listed.body["studies"]])
+                    self.assertIn(self.issue(uid), listed.body["identityIssues"])
+                    self.assertNotIn(f"SPLITUID-{first}", json.dumps(listed.body, ensure_ascii=False))
+                self.assertEqual(self.rows(uid), (1, 1))
+                self.assertEqual(psql(f'SELECT "institutionId" FROM "StudyState" WHERE uid={sql_text(uid)}'), ["hallym"])
+                self.assertEqual(self.originals(uid), before)
+
+    def test_split_uid_02_warm_already_registered(self) -> None:
+        run = uuid.uuid4().hex[:10]
+        uid = self.store("SPLITUID-A-" + run)
+        normal, _, _ = self.listing("doctor")
+        self.assertIn(uid, normal, "one resource is a normal study")
+        self.assertEqual(self.rows(uid), (1, 1))
+        state = psql(f'SELECT to_jsonb(s) - \'updatedAt\' FROM "StudyState" s WHERE uid={sql_text(uid)}')
+        self.store("SPLITUID-B-" + run, uid)
+        for limit in (None, 100):
+            normal, issues, _ = self.listing("doctor", limit)
+            self.assertNotIn(uid, normal)
+            self.assertIn(self.issue(uid), issues)
+        self.assertEqual(self.rows(uid), (1, 1), "a warm re-list neither registers nor audits again")
+        self.assertEqual(psql(f'SELECT to_jsonb(s) - \'updatedAt\' FROM "StudyState" s WHERE uid={sql_text(uid)}'), state)
+
+    def test_split_uid_03_paged_and_single_control(self) -> None:
+        with self.stack.fixture() as single:
+            uid = self.split()
+            whole, whole_issues, _ = self.listing("doctor")
+            paged, paged_issues, pages = self.listing("doctor", 1)
+            self.assertEqual(sorted(whole), sorted(paged))
+            self.assertIn(single.uid, paged)
+            self.assertNotIn(uid, paged)
+            self.assertEqual({page["total"] for page in pages}, {len(paged)})
+            self.assertEqual([page["offset"] for page in pages], list(range(len(paged))))
+            self.assertIn(self.issue(uid), whole_issues)
+            self.assertIn(self.issue(uid), paged_issues)
+            # A stable split never breaks a later walk.
+            again, _, _ = self.listing("doctor", 1)
+            self.assertEqual(sorted(again), sorted(paged))
+
+    def test_split_uid_04_policy_intersection(self) -> None:
+        run = uuid.uuid4().hex[:10]
+        uid = self.store("SPLITUID-A-" + run)
+        self.store("SPLITUID-B-" + run, uid)
+        subject = self.stack.user_ids["doctor2"]
+        reason = "SYNTHETIC WORKLIST-SPLIT-UID policy"
+
+        def remove_policy() -> None:
+            for table in ("StudyAccessRevision", "StudyAccessPolicy"):
+                for raw in psql(f'SELECT to_jsonb(t)::text FROM "{table}" t WHERE subject=' + sql_text(subject)):
+                    self.assertEqual(json.loads(raw)["reason"], reason, raw)
+                    self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)=' + sql_text(raw) + "::jsonb RETURNING 1"), ["1"])
+            for raw in psql('SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE target=' + sql_text(subject) + " AND action='study.access'"):
+                self.assertEqual(json.loads(json.loads(raw)["detail"])["reason"], reason, raw)
+                self.assertEqual(psql(past_audit_guard('DELETE FROM "AuditLog" t WHERE to_jsonb(t)=' + sql_text(raw) + "::jsonb RETURNING 1")), ["1"])
+        self.addCleanup(remove_policy)
+        owner = self.stack.request("GET", "/me", "jmryu").body
+        rule = lambda pid: {"patientId": pid, "modalities": [], "dateFrom": None, "dateTo": None, "studyUids": []}
+        for revision, rules, visible in ((0, [rule("SPLITUID-A-" + run)], False), (1, [rule("SPLITUID-B-" + run)], False),
+                                         (2, [rule("SPLITUID-A-" + run), rule("SPLITUID-B-" + run)], True)):
+            with self.subTest(rules=[r["patientId"] for r in rules]):
+                wrote = self.stack.request("POST", f"/admin/users/{quote(subject)}/study-access", "jmryu", {
+                    "expectedOwner": [owner["institution"], owner["sub"]], "revision": revision, "reason": reason,
+                    "requestId": str(uuid.uuid4()), "policy": {"version": 1, "restricted": True, "startsAt": None,
+                                                                "endsAt": None, "rules": rules}})
+                self.assertEqual(wrote.status, 201, wrote.text)
+                for limit in (None, 100):
+                    _, issues, _ = self.listing("doctor2", limit)
+                    self.assertEqual(self.issue(uid) in issues, visible)
+                held = self.stack.request("POST", f"/studies/{quote(uid)}/hold", "doctor2")
+                self.assertEqual((held.status, (held.body or {}).get("code") if visible else None), (409, self.ISSUE) if visible else (404, None), held.text)
+
+    def test_split_uid_05_institution_and_tele(self) -> None:
+        uid = self.split()
+        self.assertNotIn(self.issue(uid), self.listing("kdoctor")[1], "another institution sees nothing")
+        opened = self.stack.request("PATCH", f"/studies/{quote(uid)}", "doctor", {"ts": "wait", "teleTo": "kin-center"})
+        self.assertEqual(opened.status, 200, opened.text)
+        for limit in (None, 100):
+            normal, issues, _ = self.listing("kdoctor", limit)
+            self.assertIn(self.issue(uid), issues)
+            self.assertNotIn(uid, normal)
+        closed = self.stack.request("PATCH", f"/studies/{quote(uid)}", "doctor", {"ts": "cancelled"})
+        self.assertEqual(closed.status, 200, closed.text)
+        self.assertNotIn(self.issue(uid), self.listing("kdoctor")[1], "a cancelled referral shows nothing")
+        # One resource with an unknown institution name: the cold registration stays unassigned and nobody is told.
+        run = uuid.uuid4().hex[:10]
+        mixed = self.store("SPLITUID-A-" + run)
+        self.store("SPLITUID-B-" + run, mixed, institution="SPLITUID-UNKNOWN-SITE")
+        for user in ("doctor", "kdoctor"):
+            self.assertNotIn(self.issue(mixed), self.listing(user)[1])
+        self.assertEqual(psql(f'SELECT coalesce("institutionId", \'NULL\') FROM "StudyState" WHERE uid={sql_text(mixed)}'), ["NULL"])
+
+    def test_split_uid_06_direct_actions_and_preservation(self) -> None:
+        with self.stack.fixture() as single:
+            uid = self.split()
+            self.listing("doctor")
+            before, rows = self.originals(uid), self.rows(uid)
+            refused = {
+                "draft put": ("PUT", f"/studies/{quote(uid)}/report", {"findings": "SPLITUID text"}),
+                "draft read": ("GET", f"/studies/{quote(uid)}/draft", None),
+                "commit": ("POST", f"/studies/{quote(uid)}/report/commit", {"action": "approve", "baseVersion": 0,
+                                                                            "findings": "SPLITUID", "conclusion": "", "recommendation": ""}),
+                "hold": ("POST", f"/studies/{quote(uid)}/hold", None),
+                "versions": ("GET", f"/studies/{quote(uid)}/report/versions", None),
+            }
+            for name, (method, path, body) in refused.items():
+                with self.subTest(entry=name):
+                    answer = self.stack.request(method, path, "doctor", body)
+                    self.assertEqual((answer.status, (answer.body or {}).get("code")), (409, self.ISSUE), answer.text)
+            for path in (f"/dicom-web/studies/{uid}/series", f"/dicom-web/studies?StudyInstanceUID={uid}"):
+                self.assertEqual(self.stack.dicom_request(path, "doctor").status, 403, path)
+            self.assertEqual(self.stack.dicom_request(f"/dicom-web/studies/{single.uid}/series", "doctor").status, 200)
+            released = self.stack.request("POST", f"/studies/{quote(uid)}/release", "doctor")
+            self.assertEqual((released.status, released.body), (201, {"ok": True}), released.text)
+            for table in ("ReportDraft", "Report", "ReportVersion"):
+                self.assertEqual(psql(f'SELECT count(*) FROM "{table}" WHERE uid={sql_text(uid)}'), ["0"], table)
+            self.assertEqual((self.originals(uid), self.rows(uid)), (before, rows))
+            # The originals are corrected outside the product (the test removes the resource it stored second, after
+            # checking it is this UID's): the next list has one resource and returns the study on the same row.
+            last = self.resources(uid)[-1]
+            detail = self.stack._orthanc_request("GET", f"/studies/{quote(last)}")
+            self.assertEqual(detail.body["MainDicomTags"]["StudyInstanceUID"], uid)
+            self.assertIn(self.stack._orthanc_request("DELETE", f"/studies/{quote(last)}").status, (200, 204))
+            normal, issues, _ = self.listing("doctor")
+            self.assertIn(uid, normal)
+            self.assertNotIn(self.issue(uid), issues)
+            self.assertEqual(self.rows(uid), rows, "the same StudyState and arrival audit")
+
+
 def tearDownModule() -> None:
     # U5 사례가 하나라도 돈 실행만 끝에 요약 한 줄을 남긴다. 판정은 각 시험의 단언이 이미 했다.
     if U5_LINES or U5_PRECONDITIONS:
