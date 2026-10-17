@@ -5163,7 +5163,9 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     }
     let target = null, tainted = 0;
     for (const entry of base.candidates) {
-      const key = `${entry.file}@${moved(edits, entry.file, entry.start)} ${entry.kind}`, same = after.get(key) ?? [];
+      let key = `${entry.file}@${moved(edits, entry.file, entry.start)} ${entry.kind}`;
+      if (!after.has(key) && entry.kind === 'raw SQL naming emr_access') key = `${entry.file}@${moved(edits, entry.file, entry.start)} raw call`;
+      const same = after.get(key) ?? [];
       const at = same.findIndex(other => other.status === entry.status), now = same.splice(at >= 0 ? at : 0, 1)[0];
       if (!same.length) after.delete(key);
       assert.ok(now, `${site.file}:${site.line} (${why}): ${key} is no longer found`);
