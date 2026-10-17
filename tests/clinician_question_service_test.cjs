@@ -9,7 +9,10 @@
  *   (1) a metadata rule: the source tags are read before $transaction, and the callback makes no Orthanc call;
  *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, no transaction, no write;
  *   (3) the source read fails: 503, no transaction, no write;
- *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService);
+ *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService), and the
+ *       compiled module resolves neither service's module at load or while serving every route and both list views,
+ *       mine and inbox (Node's own module resolution, never a match on the compiled text: a comment naming them is the
+ *       same module; a real require, at load or reached only in view=mine, is not);
  *   (5) a recording Orthanc sees only studyIdentityResources (every resource of the one study; WORKLIST-SPLIT-UID) and
  *       studyIdentities(true), and nothing at all when the
  *       policy has no metadata rule.
@@ -23,6 +26,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { createRequire } = require('node:module');
+const { basename, dirname } = require('node:path');
+const vm = require('node:vm');
 const { ClinicianQuestionService, QUESTION_AUDIT_ACTION } = require('/app/dist/clinician-question.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { OWNER_ONLY_AUDIT_ACTIONS } = require('/app/dist/pacs.service');
@@ -52,7 +58,7 @@ const code = (status, value) => e => typeof e?.getStatus === 'function' && e.get
  * `between({event: step})` runs each step once, right after that statement of the NEXT transaction to start, as a
  * commit landing between two statements of that transaction; statements of other transactions never trigger it.
  */
-function world(policy, { questions = [] } = {}) {
+function world(policy, { questions = [], Service = ClinicianQuestionService } = {}) {
   const events = [], statements = [], transactions = [], calls = [], audits = [];
   const writes = { question: 0, update: 0, entry: 0, audit: 0 };
   const store = { questions: new Map(questions.map(q => [q.id, { ...q }])), entries: new Map(), study: { rs: 'W' }, versions: [] };
@@ -129,7 +135,7 @@ function world(policy, { questions = [] } = {}) {
     return handler ? handler(...args) : null;
   } });
   w.access = new StudyAccessService(prisma, orthanc, {});
-  w.svc = new ClinicianQuestionService(prisma, w.access);
+  w.svc = new Service(prisma, w.access);
   w.bumpPolicy = () => { w.policyRow = { ...w.policyRow, revision: w.policyRow.revision + 1 }; };
   return w;
 }
@@ -192,25 +198,84 @@ test('(3) a failed source read is 503 with no transaction and no write', async (
   }
 });
 
-test('(4) the service is constructed from PrismaService and StudyAccessService only', () => {
+/** Every route of the service once: create, answer, read, forStudy, both list views, close. */
+const flows = async w => {
+  await create(w, { ...clinician }, id(31));
+  await reply(w, id(31), { ...radiologist }, id(32), 1);
+  await w.svc.read(id(31), { ...clinician });
+  await w.svc.forStudy(uid, { ...radiologist });
+  await w.svc.list({ ...radiologist }, { view: 'inbox' });
+  await w.svc.list({ ...clinician }, { view: 'mine' });
+  await close(w, id(31), { ...clinician }, id(33), 2);
+};
+
+/**
+ * The resolved-import contract (D73 section 15: Node's own module resolution, no match on source text). The compiled
+ * module runs once more from the given source under a require that records the file each specifier resolves to, at load
+ * and while its class serves the flows, so a lazy require is seen too. `forbidden()` lists the resolved OrthancService and
+ * ConnectService modules among them.
+ */
+const compiledFile = require.resolve('/app/dist/clinician-question.service');
+const forbiddenFiles = ['/app/dist/orthanc.service', '/app/dist/connect.service'].map(name => require.resolve(name));
+function loadCompiled(source) {
+  const resolved = [];
+  const real = createRequire(compiledFile);
+  const recording = Object.assign(name => { resolved.push(real.resolve(name)); return real(name); },
+    { resolve: real.resolve, cache: real.cache });
+  const module = { exports: {} };
+  vm.compileFunction(source, ['exports', 'require', 'module', '__filename', '__dirname'], { filename: compiledFile })
+    .call(module.exports, module.exports, recording, module, compiledFile, dirname(compiledFile));
+  return { exports: module.exports, forbidden: () => resolved.filter(file => forbiddenFiles.includes(file)).map(file => basename(file)) };
+}
+/**
+ * Module code that, once the exported class exists, makes its list() require `file` only for view=mine: a dependency
+ * reached in one contractual branch, which only a check covering that branch can see.
+ */
+const requiredInMine = (name, file) => `\n{ const list = exports.${name}.prototype.list;\n`
+  + `  exports.${name}.prototype.list = function (c, q) { if (q && q.view === 'mine') require(${JSON.stringify(file)}); return list.call(this, c, q); }; }\n`;
+/** What a class does over the flows, timestamps aside: every statement, every Orthanc call and the write counts. */
+const behaviour = async Service => {
+  const w = world(metadataPolicy(), { Service });
+  await flows(w);
+  return JSON.stringify([w.statements, w.calls, w.writes]);
+};
+
+test('(4) the service is constructed from PrismaService and StudyAccessService only and depends on neither OrthancService nor ConnectService', async () => {
   const types = Reflect.getMetadata('design:paramtypes', ClinicianQuestionService);
   assert.deepEqual(types.map(type => type.name), ['PrismaService', 'StudyAccessService']);
   assert.equal(types.includes(OrthancService), false);
   assert.equal(types.includes(ConnectService), false);
-  const compiled = readFileSync('/app/dist/clinician-question.service.js', 'utf8');
-  for (const name of ['OrthancService', 'ConnectService', './orthanc.service', './connect.service'])
-    assert.equal(compiled.includes(name), false, name);
+  const compiled = readFileSync(compiledFile, 'utf8');
+  const names = 'OrthancService ConnectService ./orthanc.service ./connect.service';
+  // The contrast both ways: a comment and an unused string naming both services is the same module and passes; a real
+  // require of either service module, at load or only in the clinician's own list (view=mine), is refused, however the
+  // rest of the module behaves.
+  const variants = {
+    compiled,
+    named: `/* ${names} */\n${compiled}\nvoid ${JSON.stringify(names)}; // ${names}\n`,
+    orthanc: `${compiled}\nrequire("./orthanc.service");\n`,
+    connect: `${compiled}\nrequire("./connect.service");\n`,
+    mineOrthanc: compiled + requiredInMine('ClinicianQuestionService', './orthanc.service'),
+    mineConnect: compiled + requiredInMine('ClinicianQuestionService', './connect.service'),
+  };
+  const expected = await behaviour(ClinicianQuestionService);
+  const seen = {};
+  for (const [name, source] of Object.entries(variants)) {
+    const loaded = loadCompiled(source);
+    const same = await behaviour(loaded.exports.ClinicianQuestionService) === expected;
+    seen[name] = { forbidden: loaded.forbidden(), same };
+  }
+  assert.deepEqual(seen, {
+    compiled: { forbidden: [], same: true },
+    named: { forbidden: [], same: true },
+    orthanc: { forbidden: ['orthanc.service.js'], same: true },
+    connect: { forbidden: ['connect.service.js'], same: true },
+    mineOrthanc: { forbidden: ['orthanc.service.js'], same: true },
+    mineConnect: { forbidden: ['connect.service.js'], same: true },
+  });
 });
 
 test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, and nothing without a metadata rule', async () => {
-  const flows = async w => {
-    await create(w, { ...clinician }, id(31));
-    await reply(w, id(31), { ...radiologist }, id(32), 1);
-    await w.svc.read(id(31), { ...clinician });
-    await w.svc.forStudy(uid, { ...radiologist });
-    await w.svc.list({ ...radiologist }, { view: 'inbox' });
-    await close(w, id(31), { ...clinician }, id(33), 2);
-  };
   const metadata = world(metadataPolicy());
   await flows(metadata);
   assert.ok(metadata.calls.length > 0);
