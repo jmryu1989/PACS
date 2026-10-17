@@ -43,6 +43,14 @@ jobs:
       - name: W2 account shortcut CAS and unavailable-target retention
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/filter-shortcuts --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/filter_shortcuts_service_test.cjs -- node --test tests/filter_shortcuts_service_test.cjs
+      # W9-API (D1500): the viewing-set resolve over the real StudyAccess service/interceptor and a real Nest HTTP app on
+      # 127.0.0.1; the mutants step breaks one server rule per variant in its own copy of api/src.
+      - name: W9 viewing-set resolve and access-event contract
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w9-viewing-set-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/multi_study_view_service_test.cjs -- node --test tests/multi_study_view_service_test.cjs
+      - name: W9 viewing-set server mutation counterexamples
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w9-viewing-set-mutants --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/multi_study_view_service_test.cjs --file tests/multi_study_view_mutants.py -- python3 -B tests/multi_study_view_mutants.py --out tmp/workspace-ui-ci/w9-viewing-set-mutants/records
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         if: ${{ !cancelled() }}
         run: |
