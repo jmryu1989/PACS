@@ -1,10 +1,11 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14-M37 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2-BASE M43-M56 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
 and a name pattern, live cases (Lnn) through the copy's own scripts/run-tests.py with a plan that selects exactly those
-EmrBLedgerLive cases and a production API image built from the mutated copy. A mutant is killed only when every declared
-kill case has a behavioural assertion failure; a harness error, build failure, a missing case or a refusal before the case ran is not a kill.
+EmrBLedgerLive cases and a production API image built from the mutated copy, unittest cases (P:<file>:<Class>.<test>,
+the EMR-B2-BASE ops boundaries) through that file with verbosity 2. A mutant is killed only when every declared kill
+case has a behavioural assertion failure; a harness error, build failure, a skip, a missing case or a refusal before the case ran is not a kill.
 
 Per mutant the record keeps the exact change, the cases, the expected failure, each run's exit code and raw log path, and
 the changed file's SHA-256 before the change, while mutated, and after the restore (which must equal the first).
@@ -147,7 +148,50 @@ MUTANTS = {
         ("api/src/emr-runtime/seal.ts", "      if (!intent) this.addIntent", "      if (false) this.addIntent")]),
     "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
         ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
-
+    # ── EMR-B2-BASE (D1507 narrowed): the owner's MUT-B2SH classes, the start-time shutdown (I13), consult M13, G-4 and two
+    # ops boundaries. The request-fact classes (MUT-B2SH-09..16, consult M05/M06) move with request-context to the next unit.
+    "M43": ("MUT-B2SH-01: init hooks run before the awaited EMR start", [
+        ("api/src/main.ts", "    await runtime.start();\n    ownerStarting = false;\n    if (stopRequested) return;\n    startup.phase = 'init';\n    await app.init();\n",
+         "    startup.phase = 'init';\n    await app.init();\n    await runtime.start();\n    ownerStarting = false;\n")]),
+    "M44": ("MUT-B2SH-03: a concurrent, failed or closed start may start again", [
+        ("api/src/emr-runtime/application.ts", "    if (this.state !== 'cold') refuse('EmrStartupRepeated');\n",
+         "    if (this.state === 'ready') refuse('EmrStartupRepeated');\n")]),
+    "M45": ("MUT-B2SH-05: a second ledger store over the same client", [
+        ("api/src/emr-runtime/application.ts", "      const ledger = new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n",
+         "      new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n"
+         "      const ledger = new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n")]),
+    "M46": ("MUT-B2SH-06: the dedicated client is released before the HTTP server drained", [
+        ("api/src/emr-runtime/application.ts", "  onApplicationShutdown(): Promise<void> { return this.owner.close(); }\n",
+         "  onApplicationShutdown(): Promise<void> { return this.owner.close(); }\n"
+         "  beforeApplicationShutdown(): Promise<void> { return this.owner.close(); }\n")]),
+    "M47": ("MUT-B2SH-07: the fatal handler prints the raw error beside its closed line", [
+        ("api/src/main.ts", "failure ? failure.failure : error));\n", "failure ? failure.failure : error), error);\n")]),
+    "M48": ("consult M13: a wrong runtime role still reaches the listener", [
+        ("api/src/emr-runtime/application.ts",
+         "      if (this.config.verifyRole) {\n        await verifyRuntimeConnection(db);\n        this.proceed();\n      }\n", "")]),
+    "M49": ("I13: a close during the start is looked at only at its end (late steps fence, recover and compose)", [
+        ("api/src/emr-runtime/application.ts", "    if (this.state !== 'starting') refuse('EmrStartupInterrupted');\n  }\n", "    void 0;\n  }\n"),
+        ("api/src/emr-runtime/application.ts", "      this.state = 'ready';\n",
+         "      if (this.state !== 'starting') refuse('EmrStartupInterrupted');\n      this.state = 'ready';\n")]),
+    "M50": ("I13: the close releases the client under the step in flight instead of waiting for it", [
+        ("api/src/emr-runtime/application.ts", "      try { await this.starting; } catch { /* the start reports its own end */ }\n", "")]),
+    "M51": ("I13: a late-returned client is released by both the start and the close (no single release)", [
+        ("api/src/emr-runtime/application.ts", "    return this.releasing ??= (async () => {\n", "    return this.releasing = (async () => {\n")]),
+    "M52": ("G-4: a start beside a live owner continues as its IPC client into recovery", [
+        ("api/src/emr-runtime/application.ts", "      if (!coordinator.holdsWriterFence) refuse('EmrStateOwnerBusy');\n", "")]),
+    "M53": ("L-10: the probe appends and recovers beside a live API owner", [
+        ("scripts/ops_emr_probe.py",
+         "  if(operation==='append'&&!coordinator.holdsWriterFence)throw Object.assign(new Error('EmrStateOwnerBusy'),{code:'EmrStateOwnerBusy'});\n", "")]),
+    "M54": ("isolated restore: the recovery runs on a state volume a running container mounts", [
+        ("scripts/ops_backup.py",
+         "    if run([\"docker\", \"ps\", \"-q\", \"--filter\", \"volume=\" + state_volume]).stdout.decode(\"utf-8\").split():\n"
+         "        raise RuntimeError(\"EMR recovery refused: the state volume is mounted by a running container\")\n",
+         "    return\n")]),
+    "M55": ("ready refused before the start completed: the resources are handed out once they exist, also while closing", [
+        ("api/src/emr-runtime/application.ts", "    if (this.state !== 'ready' || !this.resources) refuse('EmrRuntimeNotReady');\n",
+         "    if (!this.resources) refuse('EmrRuntimeNotReady');\n")]),
+    "M56": ("I13: a stop signal during the start reaches the owner only in Nest's last shutdown stage, after every destroy hook", [
+        ("api/src/main.ts", "    if (ownerStarting) void runtime.close();\n", "    void ownerStarting;\n")]),
 }
 
 
@@ -259,6 +303,29 @@ def live_verdict(text, cases, code):
     harness = bool(re.search(r"^ERROR: ", text, re.M))
     return {"failed": sorted(failed), "harness_errors": harness,
             "killed": code != 0 and failed == set(cases) and not harness}
+
+
+def unittest_verdict(text, cases, code):
+    """A Python unittest kill case `P:<file>:<Class>.<test>`: its own FAIL heading (a behavioural assertion); an ERROR,
+    a skip or a missing case is not a kill."""
+    methods = {case: case.rsplit(".", 1)[1] for case in cases}
+    failed = {case for case, method in methods.items() if re.search(r"^FAIL: " + re.escape(method) + r" \(", text, re.M)}
+    harness = bool(re.search(r"^ERROR: ", text, re.M)) or any(
+        re.search(r"^" + re.escape(method) + r" \([\w.]+\)(?:\n(?!test_)[^\n]*?)? \.\.\. skipped", text, re.M) for method in methods.values())
+    return {"failed": sorted(failed), "harness_errors": harness, "killed": code != 0 and failed == set(cases) and not harness}
+
+
+def unittest_kills(copy, cases, out, name, env):
+    """Run each declared unittest case (P:<file>:<Class>.<test>) of the mutated copy with verbosity 2."""
+    runs, text, code = [], "", 0
+    for index, case in enumerate(cases):
+        _, path, test = case.split(":", 2)
+        log = out / ("%s-unittest-%d.log" % (name, index))
+        exit_code, seconds = run([sys.executable, "-B", path, "-v", test], cwd=copy, env=env, timeout=900, log=log)
+        runs.append({"case": case, "exit": exit_code, "seconds": seconds, "log": str(log)})
+        text += log.read_text(encoding="utf-8", errors="replace") + "\n"
+        code = code or exit_code
+    return {"kind": "unittest", "cases": cases, "exit": code, "runs": runs, **unittest_verdict(text, [c.split(":", 2)[2] for c in cases], code)}
 
 
 def contract_kills(copy, cases, out, name, env):
@@ -467,6 +534,16 @@ def self_test():
         def test_missing_case_and_wrong_case_are_not_kills(self):
             self.assertFalse(contract_verdict("not ok 1 - test file\n", ["C13"], 1)["killed"])
             self.assertFalse(live_verdict("FAIL: test_b04_chain_tail_and_crash_recovery (live.EmrBLedgerLive)\n", ["L05"], 1)["killed"])
+
+        def test_unittest_assertion_error_and_skip_are_distinct(self):
+            case = ["EmrRestoreVerification.test_b2_restore"]
+            failed = "FAIL: test_b2_restore (__main__.EmrRestoreVerification.test_b2_restore)\nAssertionError: x\n"
+            self.assertTrue(unittest_verdict(failed, case, 1)["killed"])
+            self.assertFalse(unittest_verdict(failed, case, 0)["killed"])
+            self.assertFalse(unittest_verdict("ERROR: test_b2_restore (__main__.EmrRestoreVerification.test_b2_restore)\n", case, 1)["killed"])
+            skipped = "test_b2_restore (__main__.EmrRestoreVerification.test_b2_restore) ... skipped 'Linux only'\n"
+            self.assertFalse(unittest_verdict(skipped, case, 1)["killed"])
+            self.assertFalse(unittest_verdict("FAIL: test_other (__main__.EmrRestoreVerification.test_other)\n", case, 1)["killed"])
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(VerdictTest)
     return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
 
@@ -519,8 +596,11 @@ def main(argv=None):
                     runs = []
                     contract = [case for case in kill if case.startswith("C")]
                     live = [case for case in kill if case.startswith("L")]
+                    python = [case for case in kill if case.startswith("P:")]
                     if contract:
                         runs.append(contract_kills(copy, contract, out, name, env))
+                    if python:
+                        runs.append(unittest_kills(copy, python, out, name, env))
                     if name in {"M32", "M33", "M34", "M35"}:
                         runs.append(invariant_witness(copy, out, name, env))
                     if live and args.contract_only:

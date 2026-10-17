@@ -1078,7 +1078,7 @@ function contractSuite() {
     code(() => resolveOrder(migrated, orderEvent(overlappingId, { act: 'creation', signature: null })), 'OrderClassificationUnconfirmed');
   });
 
-  test('C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart', () => {
+  test('C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart', async () => {
     const event = orderEvent('received', { act: 'receipt', signature: null });
     const facts = orderFacts({ objectKind: 'received-order', origin: 'received-ris',
       source: { systemId: 'ris', recordId: 'external', versionId: 'source-v1', at: '2020-01-02T00:00:00.000Z', signatureEvidenceId: 'original-signature' },
@@ -1102,6 +1102,27 @@ function contractSuite() {
     code(() => C.parseOrderFact({ ...duplicate, event: { ...event, at: fulfilment.at } }, fact), 'OrderClinicalVersionImmutable');
     const fixed = inSnapshot({ ...noHolds('received'), orderFacts: new Map([['received', [fact, duplicate]]]) }, () => Cl.resolveStoredRecord(M.emrAdapters().stored, 'received', event.eventId));
     assert.equal(fixed.row.duplicateOf, event.eventId); assert.equal(fixed.event.at, orderAt);
+    // The ledger function receives each fact's link to its predecessor exactly as parsed: null for the first fact, the
+    // predecessor's event ID for the resend; a link that is not a non-empty string is refused before any row is written.
+    const written = [], rows = [];
+    const tx = { $queryRaw: async (strings, ...values) => {
+      const text = strings.join('?');
+      if (text.includes('emr_access.order_facts_for')) return rows.filter(r => r.recordId === values[0]).map(r => ({ body: r.body }));
+      assert(text.includes('emr_access.record_order_fact'), 'only the order fact reader and writer are called');
+      written.push({ recordId: values[0], eventId: values[1], previousEventId: values[2], body: values[3] });
+      rows.push({ recordId: values[0], body: values[3] });
+      return [{ done: '' }];
+    } };
+    const ledgerStore = Object.create(RT.AccessLedgerStore.prototype);
+    await ledgerStore.recordOrderFact(tx, structuredClone(fact));
+    for (const bad of [7, '', ' ', { toString: () => 'order-event' }, ['order-event'], undefined]) {
+      await assert.rejects(ledgerStore.recordOrderFact(tx, { ...structuredClone(duplicate), previousEventId: bad }));
+      assert.equal(written.length, 1, 'a refused link writes nothing');
+    }
+    await ledgerStore.recordOrderFact(tx, structuredClone(duplicate));
+    assert.deepEqual(written.map(w => [w.eventId, w.previousEventId]), [['order-event', null], ['resend', 'order-event']]);
+    assert.deepEqual(written.map(w => JSON.parse(w.body).previousEventId), [null, 'order-event']);
+    assert.deepEqual((await ledgerStore.orderFacts(tx, 'received')).map(f => f.previousEventId), [null, 'order-event']);
   });
 
   test('C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure', () => {
@@ -1429,6 +1450,442 @@ function contractSuite() {
         error => error.code === 'SealUnavailable' && error.detail === 'replay-verification-limit');
       assert.equal(snapshots, 0, 'far replay cannot occupy a pool slot');
     } finally { w.cleanup(); }
+  });
+
+  // ═══════════════════ EMR-B2-BASE: the startup owner, its lifetime and the fatal line (C24-C29) ═══════════════════
+  // C24 and C26-C29 run the real main.ts in child processes (tests/emr/b/startup_fixture.cjs): the database clients are
+  // the fixture's (no PostgreSQL here; tests/emr/b/startup_pg_test.cjs runs the same starts over a disposable database),
+  // the writer fence, failure journal, seal and recovery are the product's (Linux). C25 runs the owner itself over inert
+  // doubles, every interleaving deterministic. Assertions read exit codes and signals, the stderr line's closed phase and
+  // code, the order of observed product calls and HTTP answers - never product text beyond that, never a large object.
+  const startup = require('./startup_fixture.cjs');
+  const http = require('node:http');
+  const request = (port, pathname) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: pathname }, res => {
+      let body = ''; res.setEncoding('utf8');
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    }).on('error', reject);
+  });
+  const LINE = /^\[KIN API\] 기동 실패\(([a-z]+)(?:\/([A-Za-z0-9]+))?\): [^\n]+\. 기동을 중단합니다\.$/;
+  const SECRETS = ['Leaked', 'Secret', 'SELECT', 'postgresql://', 'synthetic-', 'not-the-runtime-role', 'rolsuper', '[Nest]', '    at '];
+  /** The one closed line of a stopped start: its phase and mapped code (or none), and no secret anywhere in the output. */
+  function closedLine(result, phase, code = null) {
+    assert.equal(result.stderrLines.length, 1, result.stderr.slice(0, 2000));
+    const match = LINE.exec(result.stderrLines[0]);
+    assert(match, result.stderrLines[0]);
+    assert.deepEqual([match[1], match[2] ?? null], [phase, code]);
+    for (const secret of SECRETS) assert(!(result.stdout + result.stderr).includes(secret), secret);
+    assert(!result.stdout.includes('Nest application successfully started'), 'buffered logs stay unflushed');
+    assert.equal(result.overflow, 0);
+  }
+  /** A refused start: nonzero exit, one closed line, no secret, no listener or init hook unless asked. */
+  function refused(result, phase, code = null, { listened = false, initialized = false } = {}) {
+    assert.equal(result.timedOut, false, 'the process ended by itself');
+    assert.deepEqual([result.code, result.signal], [1, null], result.stderr.slice(0, 2000));
+    closedLine(result, phase, code);
+    assert.equal(result.names.includes('bind'), listened, 'listener');
+    assert.equal(result.names.includes('auth-init'), initialized, 'init hooks and their timers');
+  }
+  /** The first index of each name, all present and in this order. */
+  function inOrder(names, expected) {
+    const at = expected.map(name => names.indexOf(name));
+    assert(at.every(index => index >= 0), JSON.stringify({ missing: expected.filter((_, n) => at[n] < 0), names }));
+    assert.deepEqual([...at].sort((a, b) => a - b), at, JSON.stringify(names));
+  }
+  const count = (names, name) => names.filter(item => item === name).length;
+  const env = (state, overrides) => startup.environment(state, overrides);
+  let productProgram;
+  /** The product's TypeScript program (api/src) with its checker, built once for the static part of C26. */
+  function product() {
+    if (!productProgram) productProgram = ts.createProgram(parsed.fileNames, parsed.options);
+    const checker = productProgram.getTypeChecker();
+    const resolve = symbol => (symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+    const rel = file => path.relative(root, file.fileName).replaceAll('\\', '/');
+    const sources = productProgram.getSourceFiles().filter(file => parsed.fileNames.includes(file.fileName));
+    const exported = (suffix, name) => resolve(checker.getExportsOfModule(checker.getSymbolAtLocation(sources.find(file => rel(file) === suffix)))
+      .find(symbol => symbol.name === name));
+    const ownerOf = node => {
+      let at = node.parent;
+      while (at && !ts.isFunctionLike(at)) at = at.parent;
+      if (!at) return 'module scope';
+      const owner = at.parent && ts.isClassLike(at.parent) && at.parent.name ? at.parent.name.text + '.' : '';
+      return owner + (ts.isConstructorDeclaration(at) ? 'constructor' : at.name && ts.isIdentifier(at.name) ? at.name.text : 'a function expression');
+    };
+    return { checker, resolve, rel, sources, exported, ownerOf };
+  }
+  /** Where product code outside B1's own modules creates the ledger's parts or runs start-up recovery (names only). */
+  function productConstructions() {
+    const { checker, resolve, rel, sources, exported, ownerOf } = product();
+    const classes = new Map([['EmrLedgerClient', 'client.ts'], ['StateCoordinator', 'coordinator.ts'], ['FailureJournal', 'failure-journal.ts'],
+      ['AccessSeal', 'seal.ts'], ['PrismaLedgerSql', 'store.ts'], ['AccessLedgerStore', 'store.ts'], ['EmrRuntimeOwner', 'application.ts']]
+      .map(([name, file]) => [exported('api/src/emr-runtime/' + file, name), name]));
+    const recover = checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(exported('api/src/emr-runtime/seal.ts', 'AccessSeal')), 'recoverAtStart');
+    const found = [];
+    for (const file of sources.filter(file => !rel(file).startsWith('api/src/emr-runtime/') || rel(file).endsWith('/application.ts'))) {
+      const visit = node => {
+        if (ts.isNewExpression(node)) {
+          const name = classes.get(resolve(checker.getSymbolAtLocation(node.expression)));
+          if (name) found.push(`${name} ${rel(file)} ${ownerOf(node)}`);
+        }
+        if (ts.isPropertyAccessExpression(node) && resolve(checker.getSymbolAtLocation(node.name)) === recover) found.push(`recoverAtStart ${rel(file)} ${ownerOf(node)}`);
+        ts.forEachChild(node, visit);
+      };
+      visit(file);
+    }
+    return found.sort();
+  }
+  /** A start that reaches its listener: `after(event, child)` acts on the events; the case ends the process. */
+  const listening = (scenario, environment, after) => startup.run(scenario, { env: environment, timeoutMs: 60000,
+    onEvent: async (event, child, events) => { if (await after(event, child, events)) child.kill('SIGTERM'); } });
+
+  /**
+   * The owner (api/src/emr-runtime/application.ts, unchanged text) compiled in this process with inert doubles for its B1
+   * parts, as tests: an in-memory client that records connect/disconnect, a fence that records its creation, a seal whose
+   * recovery records itself, and a gate at one wait (connect, role or recovery) that the case opens. Nothing touches a
+   * database, a file or the network. Each world is its own module instance (A's composition is a recorded double too).
+   */
+  function ownerWorld({ hold = null, connect = 'ok', disconnect = 'ok', env: overrides = {} } = {}) {
+    const events = [];
+    let open, entered;
+    const gate = new Promise(resolve => { open = resolve; });
+    const arrived = new Promise(resolve => { entered = resolve; });
+    const wait = async point => {
+      if (hold !== point) return;
+      events.push('held:' + point); entered();
+      const outcome = await gate;
+      events.push('resumed:' + point);
+      if (outcome === 'reject') throw Object.assign(new Error('postgresql://kin_runtime:Leaked-Secret-0005@db/kin'), { code: 'P1001' });
+    };
+    const adapters = Object.freeze({ marker: 'b-readers' });
+    class Client {
+      constructor(url) { events.push('client'); this.url = url; this.emrAppendPoolSize = 6; }
+      async $connect() {
+        events.push('connect');
+        await wait('connect');
+        if (connect === 'reject') throw Object.assign(new Error('postgresql://kin_runtime:Leaked-Secret-0006@db/kin'), { code: 'P1001' });
+      }
+      async $disconnect() { events.push('disconnect'); if (disconnect === 'throw') throw new Error('Leaked'); }
+    }
+    const doubles = {
+      '@nestjs/common': { Injectable: () => target => target },
+      '../emr-contract/composition': { composeEmrAdapters: given => { events.push(given === adapters ? 'compose' : 'compose-other'); } },
+      '../emr-contract/validation': load('emr-contract/validation.ts'),
+      './admission': load('emr-runtime/admission.ts'),
+      './client': { EmrLedgerClient: Client },
+      './context': { runtimeAdapters: adapters },
+      './coordinator': { StateCoordinator: class { constructor() { events.push('fence'); } get holdsWriterFence() { return true; } } },
+      './failure-journal': { FailureJournal: class { constructor() { events.push('journal'); } } },
+      './manifest': { verifyRuntimeConnection: async () => { events.push('role'); await wait('role'); } },
+      './seal': { AccessSeal: class { async recoverAtStart() { events.push('recover'); await wait('recovery'); } } },
+      './store': { AccessLedgerStore: class { constructor() { events.push('store'); } }, PrismaLedgerSql: class {} },
+    };
+    const file = path.join(api, 'src/emr-runtime/application.ts');
+    const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: parsed.options, fileName: file }).outputText;
+    const Module = require('node:module');
+    const mod = new Module(file, module);
+    mod.filename = file;
+    mod.require = name => (name.startsWith('node:') ? require(name) : Object.prototype.hasOwnProperty.call(doubles, name) ? doubles[name]
+      : assert.fail('unexpected import ' + name));
+    mod._compile(code, file);
+    const values = { DATABASE_URL: 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin',
+      KIN_EMR_STATE_DIR: path.join(os.tmpdir(), 'emr-b2-inert-state-never-created'), DEPLOYMENT_MODE: 'production', ...overrides };
+    const owner = new mod.exports.EmrRuntimeOwner(values);
+    return { owner, events, arrived, open, adapters, exports: mod.exports };
+  }
+  /** Lets every queued promise reaction run, so "not yet settled" is an observation, not a race. */
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+  test('C24 base start-up order: the owner starts once after the module graph and before every init hook and the listener; A is composed once with B readers', async () => {
+    const state = startup.stateDirectory('c24');
+    const seen = {};
+    const result = await listening({ db: 'memory' }, env(state), async (event, child) => {
+      if (event.what === 'listening') {
+        seen.health = await request(event.port, '/api/health');
+        seen.me = await request(event.port, '/api/me');
+        child.send('modules');
+      }
+      if (event.what === 'modules') { seen.modules = event.clinical; return true; }
+      return false;
+    });
+    try {
+      inOrder(result.names, ['created', 'start', 'client', 'connect', 'connected', 'role', 'fence', 'ledger', 'recovery', 'recovered', 'compose',
+        'ready', 'init', 'auth-init', 'initialized', 'bind', 'listening']);
+      for (const name of ['start', 'client', 'connect', 'role', 'fence', 'recovery', 'compose', 'ready', 'init', 'bind']) assert.equal(count(result.names, name), 1, name);
+      assert.equal(result.events.find(e => e.what === 'compose').base, true, 'A binds B readers');
+      assert.deepEqual(seen.modules, [], 'the start loads no clinical or signature module');
+      assert.equal(result.events.find(e => e.what === 'fence').owner, true);
+      assert.equal(seen.health.status, 200);
+      assert.equal(JSON.parse(seen.health.body).ok, true);
+      assert.equal(seen.me.status, 401);
+      for (const answer of [seen.health, seen.me]) assert.equal(answer.headers['cache-control'], 'no-store', 'the API no-store default stays');
+      // Nest's buffered start-up logs appear only once the server listens.
+      assert(result.stdout.includes('Nest application successfully started'));
+      assert.deepEqual([result.signal, result.timedOut, result.overflow], ['SIGTERM', false, 0]);
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+  });
+
+  test('C25 a close during the start (I13): the start stops at the wait it is in - nothing further is fenced, recovered or composed - releases its client once, and the close ends only after it', async () => {
+    const after = (events, marker) => events.slice(events.indexOf(marker) + 1);
+    for (const point of ['connect', 'role', 'recovery']) {
+      const w = ownerWorld({ hold: point });
+      const started = w.owner.start().then(() => 'ready', error => error);
+      await w.arrived;
+      let closed = false;
+      const closing = w.owner.close().then(() => { closed = true; });
+      await settle();
+      assert.equal(closed, false, point + ': the close waits for the step in flight');
+      assert.equal(count(w.events, 'disconnect'), 0, point + ': nothing is released under the step in flight');
+      w.events.push('closing');
+      w.open('resolve');
+      const failure = await started;
+      await closing;
+      assert(failure instanceof w.exports.EmrStartupFailure, point);
+      assert.deepEqual([failure.phase, failure.interrupted, failure.failure?.code], [point, true, 'EmrStartupInterrupted'], point);
+      assert.deepEqual(after(w.events, 'closing'), ['resumed:' + point, 'disconnect'], point + ': the late step ends the start');
+      for (const later of ['fence', 'recover', 'compose', 'compose-other', 'store']) {
+        assert.equal(after(w.events, 'held:' + point).includes(later), false, `${point}: no ${later} after the shutdown began`);
+      }
+      code(() => w.owner.requireResources(), 'EmrRuntimeNotReady');
+      await rejects(w.owner.start(), 'EmrStartupRepeated');
+      await w.owner.close();
+      assert.equal(count(w.events, 'disconnect'), 1, point + ': released exactly once');
+    }
+    // A step that fails while the close waits reports its own failure (still marked interrupted) and is released once.
+    const failing = ownerWorld({ hold: 'connect' });
+    const failed = failing.owner.start().then(() => 'ready', error => error);
+    await failing.arrived;
+    const closing = failing.owner.close();
+    failing.open('reject');
+    const failure = await failed;
+    await closing;
+    assert.deepEqual([failure.phase, failure.interrupted, failure.failure?.code], ['connect', true, 'P1001']);
+    assert.deepEqual(failing.events, ['client', 'connect', 'held:connect', 'resumed:connect', 'disconnect']);
+    // Ready, then closed: the bundle is the same frozen object until the close, refused after it; the close is one release.
+    const ready = ownerWorld();
+    await ready.owner.start();
+    const first = ready.owner.requireResources();
+    assert.deepEqual([first === ready.owner.requireResources(), Object.isFrozen(first), first.adapters === ready.adapters, Object.keys(first).sort().join()],
+      [true, true, true, 'adapters,db,ledger']);
+    assert.deepEqual(ready.events, ['client', 'connect', 'role', 'fence', 'journal', 'store', 'recover', 'compose']);
+    await Promise.all([ready.owner.close(), ready.owner.close()]);
+    await ready.owner.close();
+    code(() => ready.owner.requireResources(), 'EmrRuntimeNotReady');
+    assert.equal(count(ready.events, 'disconnect'), 1);
+    // Closed before any start: nothing is created, and no start follows.
+    const cold = ownerWorld();
+    await cold.owner.close();
+    await rejects(cold.owner.start(), 'EmrStartupRepeated');
+    assert.deepEqual(cold.events, []);
+    // A start that fails by itself: released once, not interrupted; a later close adds nothing; a release error is silent.
+    const broken = ownerWorld({ connect: 'reject', disconnect: 'throw' });
+    const own = await broken.owner.start().then(() => 'ready', error => error);
+    assert.deepEqual([own.phase, own.interrupted, own.failure?.code], ['connect', false, 'P1001']);
+    await broken.owner.close();
+    assert.deepEqual(broken.events, ['client', 'connect', 'disconnect']);
+    // Outside production the role check is not run (as before this unit) and the start has two waits.
+    const development = ownerWorld({ env: { DEPLOYMENT_MODE: 'development' } });
+    await development.owner.start();
+    assert.equal(development.events.includes('role'), false);
+  });
+
+  test('C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery', async () => {
+    const state = startup.stateDirectory('c26');
+    let resources = null, second = null;
+    const first = await listening({ db: 'memory' }, env(state, { DATABASE_URL: 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin?connection_limit=7' }),
+      async (event, child) => {
+        if (event.what === 'listening') {
+          second = await startup.run({ db: 'memory' }, { env: env(state), timeoutMs: 60000 });
+          child.send('resources');
+        }
+        if (event.what === 'resources') { resources = event; return true; }
+        return false;
+      });
+    try {
+      const { at: _, what: __, ...facts } = resources;
+      assert.deepEqual(facts, { same: true, frozen: true, keys: ['adapters', 'db', 'ledger'], client: true, clients: 1, ledger: true, stores: 1,
+        base: true, ordinarySeparate: true, poolSize: 7 });
+      const client = first.events.find(e => e.what === 'client'), ledger = first.events.find(e => e.what === 'ledger');
+      assert.deepEqual([client.poolSize, client.connectionLimit, ledger.poolSize, ledger.sameClient], [7, 7, 7, true]);
+      for (const name of ['client', 'fence', 'ledger', 'recovery']) assert.equal(count(first.names, name), 1, name);
+      // G-4: the second API process on the same state directory is a client of the first one's fence; it stops before recovery.
+      refused(second, 'fence', 'EmrStateOwnerBusy');
+      assert.equal(second.events.find(e => e.what === 'fence').owner, false);
+      assert(!second.names.includes('recovery') && !second.names.includes('ledger'), 'no second recovery beside a live owner');
+      assert.equal(count(second.names, 'disconnect'), 1);
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    // Without connection_limit the client gets the append pool, and the store the same capacity.
+    const plain = startup.stateDirectory('c26-pool');
+    try {
+      const result = await listening({ db: 'memory' }, env(plain), async event => event.what === 'listening');
+      const client = result.events.find(e => e.what === 'client'), ledger = result.events.find(e => e.what === 'ledger');
+      assert.deepEqual([client.poolSize, client.connectionLimit, ledger.poolSize], [6, 6, 6]);
+    } finally { fs.rmSync(plain, { recursive: true, force: true }); }
+    // No other product code creates the owner, a client, fence, journal, seal or store, or runs recovery (TypeScript checker).
+    assert.deepEqual(productConstructions(), [
+      ...['AccessLedgerStore', 'AccessSeal', 'EmrLedgerClient', 'FailureJournal', 'PrismaLedgerSql', 'StateCoordinator']
+        .map(name => `${name} api/src/emr-runtime/application.ts EmrRuntimeOwner.run`),
+      'EmrRuntimeOwner api/src/emr-runtime/application.ts EmrApplicationRuntime.constructor',
+      'recoverAtStart api/src/emr-runtime/application.ts EmrRuntimeOwner.run',
+    ].sort());
+  });
+
+  test('C27 shutdown keeps the HTTP drain and then disconnects once; a stop signal during the start ends it at the wait it is in; a failed start releases only what it created, within 5 s, and deletes no state', async () => {
+    const state = startup.stateDirectory('c27');
+    let slow = null;
+    const result = await startup.run({ db: 'memory', slowMillis: 1500 }, { env: env(state), timeoutMs: 60000, onEvent: (event, child) => {
+      if (event.what === 'listening') slow = request(event.port, '/syn-slow');
+      if (event.what === 'slow-begin') child.kill('SIGTERM');
+    } });
+    try {
+      const answer = await slow;
+      assert.deepEqual([answer.status, answer.body], [200, 'slow-ok'], 'the in-flight request finished');
+      inOrder(result.names, ['slow-begin', 'server-close', 'slow-done', 'server-closed', 'runtime-onApplicationShutdown', 'owner-close', 'disconnect']);
+      assert.equal(count(result.names, 'disconnect'), 1);
+      assert(result.names.indexOf('prisma-shutdown') > result.names.indexOf('server-closed'));
+      assert.deepEqual([result.signal, result.timedOut], ['SIGTERM', false], 'SIGTERM ends it without SIGKILL');
+      for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(state, kept)), kept + ' stays');
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    // SIGTERM while the start waits (I13 in the real main): main asks the owner to stop when the signal arrives, the step in
+    // flight returns and the start ends there; the process ends by the signal with the one closed line and its client
+    // released once (C30: the same with a destroy hook that awaits).
+    for (const point of ['connect', 'role', 'recovery']) {
+      const dir = startup.stateDirectory('c27-' + point);
+      try {
+        const held = await startup.run({ db: 'memory', hold: point }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+          if (event.what === 'held') child.kill('SIGTERM');
+          if (event.what === 'runtime-onApplicationShutdown') child.send('release');
+        } });
+        assert.deepEqual([held.code, held.signal, held.timedOut], [null, 'SIGTERM', false], point + ': ' + held.stderr.slice(0, 2000));
+        closedLine(held, point, 'EmrStartupInterrupted');
+        const late = held.names.slice(held.names.indexOf('runtime-onApplicationShutdown') + 1);
+        for (const name of ['fence', 'ledger', 'recovery', 'compose', 'ready', 'init', 'auth-init', 'bind']) {
+          assert.equal(late.includes(name), false, `${point}: no ${name} after the shutdown began`);
+        }
+        inOrder(held.names, ['held', 'owner-close', 'runtime-onApplicationShutdown', 'released', 'disconnect', 'start-failed']);
+        assert.equal(count(held.names, 'disconnect'), 1, point);
+        const failed = held.events.find(e => e.what === 'start-failed');
+        assert.deepEqual([failed.phase, failed.interrupted, failed.code], [point, true, 'EmrStartupInterrupted']);
+        assert.equal(held.names.includes('compose'), false, point + ': A is never composed by an interrupted start');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+    // A failed recovery: the client created and connected is disconnected once; the fence and journal stay on disk.
+    const failedState = startup.stateDirectory('c27-failed');
+    try {
+      const failed = await startup.run({ db: 'memory', recovery: 'refuse' }, { env: env(failedState), timeoutMs: 60000 });
+      refused(failed, 'recovery', 'SealCorrupt');
+      inOrder(failed.names, ['recovery', 'disconnect']);
+      assert.equal(count(failed.names, 'disconnect'), 1, 'released once although the start, app.close and main all end the owner');
+      for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(failedState, kept)), kept + ' stays');
+    } finally { fs.rmSync(failedState, { recursive: true, force: true }); }
+    // A release that never ends is cut at 5 s; one that throws is silent: neither adds a line or hides the first one.
+    for (const disconnect of ['hang', 'throw']) {
+      const dir = startup.stateDirectory('c27-' + disconnect);
+      try {
+        const cut = await startup.run({ db: 'memory', connect: 'refuse', disconnect }, { env: env(dir), timeoutMs: 60000 });
+        refused(cut, 'connect', 'P1001');
+        if (disconnect === 'hang') assert(cut.millisAfterStderr >= 4500 && cut.millisAfterStderr < 8000, String(cut.millisAfterStderr));
+        else assert(cut.millisAfterStderr < 4500, String(cut.millisAfterStderr));
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+  });
+
+  test('C28 every start-up phase that fails ends the process with one closed line and no listener, timer, buffered log or secret', async () => {
+    const occupied = http.createServer(() => {});
+    await new Promise(resolve => occupied.listen(0, '127.0.0.1', resolve));
+    const exposed = startup.stateDirectory('c28-exposed');
+    fs.chmodSync(exposed, 0o755);
+    const url = 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin';
+    try {
+      for (const [name, scenario, overrides, phase, code, extra] of [
+        ['create', { db: 'memory', create: 'fail' }, {}, 'create', null],
+        ['no database URL', { db: 'memory' }, { DATABASE_URL: undefined }, 'config', 'EmrDatabaseUrlRequired'],
+        ['another database', { db: 'memory' }, { DATABASE_URL: 'mysql://kin_runtime:Synthetic-Fixture-Secret-0001@db/kin' }, 'config', 'EmrDatabaseUrlRequired'],
+        ['small pool', { db: 'memory' }, { DATABASE_URL: url + '?connection_limit=2' }, 'config', 'EmrAppendPoolTooSmall'],
+        ['relative state', { db: 'memory' }, { KIN_EMR_STATE_DIR: 'kin-emr' }, 'config', 'EmrStateDirectoryRequired'],
+        ['unreachable database', { db: 'pg' }, { DATABASE_URL: url + '?connect_timeout=2' }, 'connect', 'P1001'],
+        ['connect error text', { db: 'memory', connect: 'refuse', leakCode: 'Leaked\nCode' }, {}, 'connect', null],
+        ['runtime role', { db: 'memory', role: 'refused' }, {}, 'role', 'EmrRuntimeRefused'],
+        ['missing state', { db: 'memory' }, { KIN_EMR_STATE_DIR: path.join(os.tmpdir(), 'emr-b2-absent-' + randomUUID()) }, 'fence', 'EmrStateDirectoryRequired'],
+        ['exposed state', { db: 'memory' }, { KIN_EMR_STATE_DIR: exposed }, 'fence', 'EmrStateDirectoryExposed'],
+        ['seal recovery', { db: 'memory', recovery: 'refuse' }, {}, 'recovery', 'SealCorrupt'],
+        ['second composition', { db: 'memory', precompose: true }, {}, 'compose', 'EmrAdaptersAlreadyComposed'],
+        ['init hook', { db: 'memory', init: 'fail', leakCode: 'Leaked\nCode' }, {}, 'init', null, { initialized: true }],
+        ['listen', { db: 'memory', port: occupied.address().port }, {}, 'listen', 'EADDRINUSE', { listened: true, initialized: true }],
+      ]) {
+        const dir = startup.stateDirectory('c28');
+        try {
+          const result = await startup.run(scenario, { env: env(dir, overrides), timeoutMs: 60000 });
+          try { refused(result, phase, code, extra); } catch (error) { error.message = `${name}: ${error.message}`; throw error; }
+          if (['config', 'create'].includes(phase)) assert(!result.names.includes('client'), name + ': nothing connects');
+          if (!['config', 'create'].includes(phase) && scenario.db === 'memory') assert.equal(count(result.names, 'disconnect'), 1, name);
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+    } finally {
+      occupied.close();
+      fs.rmSync(exposed, { recursive: true, force: true });
+    }
+  });
+
+  test('C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-shutdown start is refused and nothing is composed or recovered twice', async () => {
+    // The owner over inert doubles: a second start while the first waits, after its failure and after a close.
+    const w = ownerWorld({ hold: 'connect', connect: 'reject' });
+    let settled = false;
+    // The first start's outcome is held at once, so its failure is an observed value, never an unhandled rejection.
+    const first = w.owner.start().then(() => 'started', error => error).finally(() => { settled = true; });
+    await w.arrived;
+    // Judged after a settle, never awaited: a second start that is wrongly let through would wait at the same gate.
+    let second = 'pending';
+    w.owner.start().then(() => { second = 'started'; }, error => { second = error?.code ?? 'error'; });
+    await settle();
+    assert.equal(second, 'EmrStartupRepeated', 'a second start while the first waits is refused at once');
+    assert.equal(settled, false, 'refused while the first start is still waiting');
+    w.open('resolve');
+    const failure = await first;
+    assert.deepEqual([failure.phase, failure.interrupted, failure.failure?.code], ['connect', false, 'P1001']);
+    await rejects(w.owner.start(), 'EmrStartupRepeated');
+    code(() => w.owner.requireResources(), 'EmrRuntimeNotReady');
+    await w.owner.close();
+    await rejects(w.owner.start(), 'EmrStartupRepeated');
+    assert.deepEqual([count(w.events, 'client'), count(w.events, 'connect'), count(w.events, 'disconnect')], [1, 1, 1]);
+    // After ready and after shutdown in the real process: refused, the same resources, one composition and one recovery.
+    const dir = startup.stateDirectory('c29');
+    let ready = null, stopped = null;
+    try {
+      const result = await startup.run({ db: 'memory' }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+        if (event.what === 'listening') child.send('reenter');
+        if (event.what === 'reenter-ready') ready = event;
+        if (event.what === 'reenter-stopped') stopped = event;
+      } });
+      assert.deepEqual([ready.again, ready.same], ['EmrStartupRepeated', true]);
+      assert.deepEqual([stopped.resources, stopped.again], ['EmrRuntimeNotReady', 'EmrStartupRepeated']);
+      for (const name of ['compose', 'recovery', 'client', 'disconnect']) assert.equal(count(result.names, name), 1, name);
+      assert.equal(result.code, 0);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('C30 a stop signal during the start ends it although a co-provider destroy hook still awaits: nothing is fenced, recovered, composed, initialized or listened after it, and the client is released once', async () => {
+    // Nest runs every destroy hook before its shutdown hooks; the co-provider's hook here awaits 1.5 s, and the held step
+    // returns as soon as that hook began, i.e. long before Nest's own shutdown stage.
+    for (const point of ['connect', 'role', 'recovery']) {
+      const dir = startup.stateDirectory('c30-' + point);
+      try {
+        const held = await startup.run({ db: 'memory', hold: point, slowDestroy: 1500 }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+          if (event.what === 'held') child.kill('SIGTERM');
+          if (event.what === 'slow-destroy') child.send('release');
+        } });
+        assert.deepEqual([held.code, held.signal, held.timedOut], [null, 'SIGTERM', false], point + ': ' + held.stderr.slice(0, 2000));
+        closedLine(held, point, 'EmrStartupInterrupted');
+        const late = held.names.slice(held.names.indexOf('held') + 1);
+        for (const name of ['fence', 'ledger', 'recovery', 'compose', 'ready', 'init', 'auth-init', 'bind']) {
+          assert.equal(late.includes(name), false, `${point}: no ${name} after the stop signal`);
+        }
+        inOrder(held.names, ['held', 'owner-close', 'released', 'disconnect', 'start-failed', 'slow-destroy-done', 'runtime-onApplicationShutdown']);
+        assert.equal(count(held.names, 'disconnect'), 1, point);
+        const failed = held.events.find(e => e.what === 'start-failed');
+        assert.deepEqual([failed.phase, failed.interrupted, failed.code], [point, true, 'EmrStartupInterrupted'], point);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
   });
 
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {
