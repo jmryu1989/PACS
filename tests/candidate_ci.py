@@ -40,6 +40,9 @@ FLOWS = (
     # W4-FLOW: Approve & Next under the RS=W filter moves to the row after the approved study, and a template's hidden
     # Recommendation is announced, approved and shown again (the selection 123 -> 124).
     ("e2e/test_report_flow.py", "W4ReportFlowE2E", "test_w4_01_approve_next_anchor_recommendation_roundtrip", "test_w4_01_"),
+    # W5-UI: Related Report mode - the Source read, the typed Target saved first, one reviewed Insert whose reply is lost,
+    # the same-ID Retry replaying its receipt, Back, Approve and reopen (the selection 130 -> 131).
+    ("e2e/test_related_report_mode.py", "RelatedReportModeE2E", "test_w5_01_prior_insert_loss_check_back_commit_reopen", "test_w5_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
@@ -109,8 +112,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 130 and len({(x["file"], x["case"]) for x in selected}) == 130,
-            "Candidate selection must contain 130 unique exact cases")
+    require(len(selected) == 131 and len({(x["file"], x["case"]) for x in selected}) == 131,
+            "Candidate selection must contain 131 unique exact cases")
     return rows, selected
 
 

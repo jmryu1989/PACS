@@ -48,9 +48,10 @@ class CandidateCiTests(unittest.TestCase):
         # W2: + folder edit/save/reapply/relogin. W3: + drawer v3 save/relogin.
         # CN-N01-A: + 6 OrderCorrectionInvariantTests (invariants 95). W4-FLOW: + Approve & Next / Recommendation round trip.
         # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101). Union: 101 + 15 + 14 = 130.
-        self.assertEqual(len(selected), 130)
+        # W5-UI: + the Related Report mode insert/loss/Retry/Back/commit flow. 101 + 15 + 15 = 131.
+        self.assertEqual(len(selected), 131)
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
-        self.assertEqual([item["case"] for item in selected[-14:]],
+        self.assertEqual([item["case"] for item in selected[-15:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
         self.assertEqual(selected[-1:], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
@@ -92,14 +93,14 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 16)
+            self.assertEqual(len(profile["suites"]), 17)
             command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][2], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 130)
+            self.assertEqual(len(selected), 131)
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.
