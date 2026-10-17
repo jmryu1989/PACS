@@ -6,6 +6,7 @@ Only fixture setup and assertions use the API; workflows use real UI actions.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 import uuid
+import zipfile
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -663,11 +665,66 @@ class WorklistE2E(unittest.TestCase):
         page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
         expect(page.locator("#dbstat")).to_contain_text("DB Connected")
 
+    def native_download(self, page, fixture, operation):
+        """One Download press on the real stack (D1489): one bound grant POST answered 200, then the browser's own GET of the
+        archive with that grant only - the doctor's BFF cookie is the only credential the browser adds, nothing injected.
+        Returns the Playwright download and the grant value read from its URL. No assertion message prints the URL or the
+        value (DG-T05: the raw grant appears in no CI output)."""
+        with page.expect_download() as started:
+            with page.expect_response(lambda r: r.request.method == "POST"
+                                      and r.url.endswith(f"/original-downloads/{operation}/archive/grant")) as granted:
+                self.transfer_box(page, operation).get_by_role("button", name="Download", exact=True).click()
+        self.assertEqual(granted.value.status, 200, "the grant request")
+        download = started.value
+        url = urlsplit(download.url)
+        self.assertEqual(url.path, f"/api/studies/{fixture.uid}/original-downloads/{operation}/archive", "nothing but the UID and the id")
+        found = re.fullmatch(r"grant=([A-Za-z0-9_-]{43})", url.query)
+        self.assertTrue(found, "the query is exactly one grant: no PHI, name, cookie, token or session id")
+        self.assertFalse(fixture.patient_id in download.url, "no patient value in the archive URL")
+        self.assertEqual(download.suggested_filename, f"KIN-originals-{operation[:8]}.zip", "the server's filename (an archive.json here is the refusal body)")
+        self.assertIsNone(download.failure(), "the archive reached the browser's download list")
+        return download, found.group(1)
+
+    def archive_supplied(self, path, operation, number):
+        """The saved file is the server's whole ZIP of the prepared manifest: the ZIP signature, every central-directory
+        entry in manifest order and then manifest.json, each object's length and MD5 as prepared and its CRC-32, the final
+        manifest's per-object SHA-256 equal to the saved bytes and to the attempt's recorded objects, the archive SHA-256
+        the attempt's. Attempt <number> is Sent with the writer's own finish and was opened by a consumed grant."""
+        with open(path, "rb") as saved:
+            data = saved.read()
+        self.assertEqual(data[:4], b"PK\x03\x04")
+        [stored] = psql(f"SELECT download::text FROM \"ImportOperation\" WHERE id='{operation}';")
+        download = json.loads(stored)
+        manifest = json.loads(download["manifestCanonical"])["objects"]
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertIsNone(archive.testzip(), "every entry's CRC-32")
+            self.assertEqual([info.filename for info in archive.infolist()], [o["path"] for o in manifest] + ["manifest.json"],
+                             "the whole central directory in manifest order")
+            final = json.loads(archive.read("manifest.json"))
+            bodies = [archive.read(o["path"]) for o in manifest]
+        self.assertEqual([(len(b), hashlib.md5(b).hexdigest()) for b in bodies], [(o["bytes"], o["md5"]) for o in manifest])
+        sha = [hashlib.sha256(b).hexdigest() for b in bodies]
+        self.assertEqual([(o["sopUid"], o["sha256"]) for o in final["objects"]], [(o["sopUid"], s) for o, s in zip(manifest, sha)])
+        attempt = download["attempts"][number - 1]
+        self.assertEqual((len(download["attempts"]), attempt["state"], attempt["responseFinished"]), (number, "sent", True))
+        self.assertEqual(([o["sha256"] for o in attempt["objects"]], attempt["archiveSha256"]), (sha, hashlib.sha256(data).hexdigest()))
+        self.assertEqual((download["schemaVersion"], download["activeArchiveGrant"]), (2, None), "format 2, the grant consumed")
+        use = download["archiveGrantUses"][-1]
+        self.assertEqual(use["attemptId"], attempt["attemptId"], "the grant opened this attempt")
+        return stored, attempt, use
+
+    def download_audit(self, operation):
+        rows = psql(f"SELECT action || E'\\t' || detail FROM \"AuditLog\" WHERE detail::jsonb->>'operationId'='{operation}' ORDER BY id;")
+        return [(action, json.loads(detail)) for action, detail in (line.split("\t", 1) for line in rows)]
+
     def test_s9_u4_download_states(self):
-        """REQ-S9-U4-09: Download Originals in an authenticated member session with no terminal registration: Ready, the
-        browser's own download of the archive, then Sent with the note that saving is checked in the browser. A client
-        that drops the stream leaves Incomplete; an attempt a stopped server left sending is Unconfirmed; both are offered
-        again for the same operation; Sent only by a new preparation; no Range/resume, no text saying the file was saved."""
+        """REQ-S9-U4-09 with the D1489 grant (REQ-S9-U4-DG-01..06): Download Originals in an authenticated member session
+        with no terminal registration: Ready, one bound grant request and the browser's own download of the archive with
+        that grant, then Sent with the note that saving is checked in the browser. The saved file is checked as a whole
+        ZIP against the prepared manifest; the row and the audit link prepare, grant, intent and result; the raw grant is
+        in no stored row, audit row, proxy or API log. A client that drops the stream leaves Incomplete; an attempt a
+        stopped server left sending is Unconfirmed; both are downloaded again for the same operation with a new grant;
+        Sent only by a new preparation; no Range/resume, no text saying the file was saved."""
         fixture = self.fixture()
         operations = []
         try:
@@ -675,15 +732,30 @@ class WorklistE2E(unittest.TestCase):
             self.select(page, fixture)
             operation = self.download_operation(page, fixture, operations)
             box = self.transfer_box(page, operation)
-            with page.expect_download() as started:
-                box.get_by_role("button", name="Download", exact=True).click()
-            download = started.value
-            self.assertEqual(download.suggested_filename, f"KIN-originals-{operation[:8]}.zip")
-            self.assertIsNone(download.failure(), "the archive reached the browser's download list")
-            with open(download.path(), "rb") as saved:
-                self.assertEqual(saved.read(4), b"PK\x03\x04")
-            self.assertEqual(urlsplit(download.url).query, "", "no PHI or credential in the archive URL")
-            self.assertNotIn(fixture.patient_id, download.url)
+            since = str(int(time.time()) - 5)
+            download, grant = self.native_download(page, fixture, operation)
+            stored, attempt, use = self.archive_supplied(download.path(), operation, 1)
+            self.assertEqual(use["hash"], hashlib.sha256(("kin-original-download-grant-v1:" + grant).encode()).hexdigest(),
+                             "the row keeps the domain-separated hash of this grant")
+            audit = self.download_audit(operation)
+            self.assertEqual([action for action, _ in audit], ["original.download.prepare", "original.download.grant",
+                                                               "original.download.intent", "original.download.result"])
+            issued, intent, result = audit[1][1], audit[2][1], audit[3][1]
+            self.assertEqual((issued["phase"], issued["grantId"], issued["grantHash"]), ("issued", use["grantId"], use["hash"]))
+            self.assertEqual((intent["attemptId"], intent["grantId"], intent["bindingMethod"], intent["destination"]),
+                             (attempt["attemptId"], use["grantId"], "archive-grant", "browser-download"))
+            self.assertEqual((result["attemptId"], result["state"]), (attempt["attemptId"], "sent"))
+            self.assertEqual(len({detail["institutionId"] for _, detail in audit}), 1, "one record-time institution")
+            self.assertFalse(grant in stored or any(grant in json.dumps(detail) for _, detail in audit), "the raw grant is stored nowhere")
+            status = self.stack.request("GET", f"/studies/{fixture.uid}/original-downloads/{operation}", "doctor")
+            self.assertEqual((status.body["state"], status.body["archiveRequest"]["state"], status.body["archiveRequest"]["attemptId"]),
+                             ("sent", "consumed", attempt["attemptId"]))
+            logs = subprocess.run(["docker", "compose", "logs", "--no-color", "--since", since, "proxy", "api"], cwd=ROOT,
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+            self.assertEqual(logs.returncode, 0, "the proxy and API logs could be read")
+            self.assertFalse(grant in logs.stdout + logs.stderr, "the raw grant is in no proxy or API log line")
+            self.assertIn(f'"GET /api/studies/{fixture.uid}/original-downloads/{operation}/archive" 200 ', logs.stdout,
+                          "the archive GET is logged by the archive location's format (method, path, status)")
             expect(box.locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
             expect(box.locator(".study-transfer-reason")).to_have_text(self.SENT)
             for claim in ("저장했습니다", "저장되었습니다", "보관했습니다"):
@@ -715,6 +787,11 @@ class WorklistE2E(unittest.TestCase):
             expect(page.locator("#dbstat")).to_contain_text("DB Connected")
             expect(self.transfer_box(page, dropped).locator(".study-transfer-state")).to_have_text("Incomplete", timeout=30000)
             expect(self.transfer_box(page, dropped).get_by_role("button", name="Download", exact=True)).to_be_visible()
+            # The same operation again, with a new grant: a second attempt, Sent.
+            again, _ = self.native_download(page, fixture, dropped)
+            self.archive_supplied(again.path(), dropped, 2)
+            expect(self.transfer_box(page, dropped).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
+            self.assertEqual(self.download_row(dropped), "sent|2")
 
             # Unconfirmed (5.2 step 7): an attempt a stopped server left sending, its lease run out; the status read closes it.
             stopped = self.download_operation(page, fixture, operations)
@@ -733,6 +810,10 @@ class WorklistE2E(unittest.TestCase):
             expect(page.locator("#dbstat")).to_contain_text("DB Connected")
             expect(self.transfer_box(page, stopped).locator(".study-transfer-state")).to_have_text("Unconfirmed", timeout=30000)
             expect(self.transfer_box(page, stopped).get_by_role("button", name="Download", exact=True)).to_be_visible()
+            again, _ = self.native_download(page, fixture, stopped)
+            self.archive_supplied(again.path(), stopped, 2)
+            expect(self.transfer_box(page, stopped).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
+            self.assertEqual(self.download_row(stopped), "sent|2")
         finally:
             # The download rows of this case; the fixture's own cleanup removes its study, originals and audit rows.
             ids = [op for op in operations if re.fullmatch(r"[0-9a-f-]{36}", op)]
