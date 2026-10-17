@@ -179,7 +179,11 @@ async function world() {
     if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
       await hit('tx-start');
       const out = await fn(view(tx));
-      // the work is done and nothing is committed yet: the request holds the study row here
+      // the work is done and nothing is committed yet: the request holds the study row here. W5-API: a transaction that took no
+      // row lock and wrote nothing has no transaction ID and holds no row (the read-only receipt check of a relatedInsert PUT,
+      // before its write): its end is the point 'read-commit', so a case that holds or fails `commit` reaches the write.
+      const [{ holds }] = await tx.$queryRawUnsafe('SELECT txid_current_if_assigned() IS NOT NULL AS holds');
+      if (!holds) { await hit('read-commit'); return out; }
       await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
       return out;
     }, options);
@@ -189,9 +193,17 @@ async function world() {
   // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
   // here), and the full bootstrap reads the inventory only to leave out a UID answered twice (none here); any other
   // Orthanc member is still out of bounds for this harness.
-  const orthanc = new Proxy({}, { get(_t, key) { return key === 'studyIdentityResources' ? async uid => [{ '0020000D': { Value: [uid] } }]
-    : key === 'studyIdentities' ? async () => []
-    : () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); }; } });
+  // W5-API: a case that restricts StudyAccess by DICOM tags answers the one-study resource lookup (since #180 the access
+  // metadata of one UID is read from all of its resources) through w.metadata; a UID in w.split is answered by two
+  // original resources (the split a WORKLIST-SPLIT-UID case needs).
+  const orthanc = new Proxy({}, { get(_t, key) {
+    return key === 'studyIdentityResources' ? async uid => {
+        const row = w.metadata ? await w.metadata(uid) : { '0020000D': { Value: [uid] } };
+        return w.split?.has(uid) ? [row, row] : [row];
+      }
+      : key === 'studyIdentities' ? async () => []
+      : () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); };
+  } });
   const build = () => {
     const access = new StudyAccessService(recorder, orthanc, {});
     const realPrepare = access.prepare.bind(access);
@@ -219,7 +231,7 @@ async function world() {
   });
 
   /** One request through its routed handler. The answer is what the HTTP layer would send: status, code, body. */
-  w.send = (label, route, { as, sid = null, uid, body }) => flow.run({ label }, async () => {
+  w.send = (label, route, { as, sid = null, uid, body, query = {} }) => flow.run({ label }, async () => {
     const { controller, key } = ROUTE[route];
     const req = { sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind, headers: {},
       ...(sid ? { sid, authMethod: 'session' } : { authMethod: 'bearer' }) };
@@ -229,6 +241,8 @@ async function world() {
       if (type === RouteParamtypes.PARAM && data === 'uid') args[index] = uid;
       else if (type === RouteParamtypes.BODY && data === undefined) args[index] = body;
       else if (type === RouteParamtypes.REQUEST) args[index] = req;
+      // W5-API: the draft read takes the Check's optional ?insertRequestId= (absent unless a case sends it)
+      else if (type === RouteParamtypes.QUERY && data === 'insertRequestId') args[index] = query.insertRequestId;
       else assert.fail(`the handler asks for argument ${slot} ${JSON.stringify(data)}, which these cases do not provide`);
     }
     try {
@@ -1375,5 +1389,315 @@ test('STUDY_TAG_DESIGNATION_RENAME_RECYCLE raw SQL read and FOR SHARE write',asy
     assert.deepEqual(await read(w.y),[]);const before=await w.db.studyTagCatalog.findMany({where:{institution:INST}});
     await w.refusal(write(w.y),404);assert.deepEqual(await w.db.studyTagCatalog.findMany({where:{institution:INST}}),before);
     await w.designate(field,null);assert.deepEqual(await read(w.y),[w.uid]);await write(w.y);assert.deepEqual(await read(w.renamed),[]);
+  }
+});
+
+// ── W5-API (O4 R1, D1460): the Related Report insertion over the real receipt table, its locks and its guard ──
+// What tests/related_report_insert_service_test.cjs's store double cannot prove: row locks and waits, READ COMMITTED
+// re-reads after a wait, the primary key across transactions, the migration's CHECKs and terminal guard as DDL, and the
+// receipt surviving a new process. The Source is an approved study of the same institution (its v1 head); the Target is
+// A's draft at revision 1. Expected values are the W5 wire contract's literals.
+
+const W5_SOURCE = { findings: 'SYN approved head', conclusion: 'SYN head c' };
+/** The fixed relatedInsert PUT of the W5 page: the whole proposal plus the operation, built from the R1 line rule. */
+function relatedBody(token, uid, source, { id = randomUUID(), seed = { findings: 'SYN first draft', conclusion: '', recommendation: '', baseVersion: 0 } } = {}) {
+  const parts = [{ field: 'findings', start: 0, end: W5_SOURCE.findings.length }, { field: 'conclusion', start: 0, end: W5_SOURCE.conclusion.length }];
+  const text = (seed.findings === '' || seed.findings.endsWith('\n') ? '' : '\n') + W5_SOURCE.findings + '\n\n' + W5_SOURCE.conclusion;
+  return { expectedOwner: ownerOf(A), expectedRevision: token, ...seed, findings: seed.findings + text, citationIds: [], structureIds: [],
+    relatedInsert: { intent: 'apply', insertRequestId: id, source: { uid: source, version: 1, action: 'approve', parts }, targetUid: uid,
+      targetBaseVersion: seed.baseVersion, section: 'findings', position: 'end', offset: seed.findings.length, text,
+      selectionSeq: 1, contentRevision: 1, sourceGeneration: 1, seedKind: 'private-draft' } };
+}
+const asDiscard = (body, receiptRevision) => ({ ...body, relatedInsert: { ...body.relatedInsert, intent: 'discard', expectedReceiptRevision: receiptRevision } });
+const receiptOf = (w, body) => w.base.reportDraftInsertReceipt.findUnique({ where: { insertRequestId: body.relatedInsert.insertRequestId } });
+async function untilBlocked(w, what) {
+  for (const until = performance.now() + 2500; !(await w.blocked()) && performance.now() < until;) await new Promise(r => setTimeout(r, 5));
+  assert.equal(await w.blocked(), true, what);
+}
+
+test('W5-PG-01 first apply: draft +1, report.draft and the applied receipt in one commit; a new process replays the same ID from the table with zero writes; clear and force keep the receipt', async () => {
+  const w = await world();
+  const source = await w.study({ rs: 'A', draft: false }), uid = await w.study();
+  const body = relatedBody(await w.token(uid, A), uid, source);
+  const first = await w.send('X', 'put', { as: A, uid, body });
+  assert.equal(first.ok, true, JSON.stringify(first.body));
+  const epoch = await w.epoch(uid);
+  assert.deepEqual([first.body.revision, first.body.relatedInsert.result, first.body.relatedInsert.appliedRevision], [`${epoch}:2`, 'applied', `${epoch}:2`]);
+  const receipt = await receiptOf(w, body);
+  assert.deepEqual([receipt.state, receipt.appliedRevision, receipt.receiptRevision, receipt.expectedEpoch, receipt.targetUid, receipt.sourceUid],
+    ['applied', 2, 1, epoch, uid, source]);
+  assert.deepEqual(await w.audits(uid), [`${A.actor} report.draft`]);
+  const after = await w.state(uid);
+  w.restart();
+  const replay = await w.send('X', 'put', { as: A, uid, body });
+  assert.deepEqual([replay.ok, replay.body.relatedInsert.result, replay.body.revision], [true, 'applied', `${epoch}:2`]);
+  assert.deepEqual(await w.state(uid), after, 'the replay wrote nothing: data, revision and audit');
+  const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: body.relatedInsert.insertRequestId } });
+  assert.deepEqual([check.body.relatedInsert.result, check.body.relatedInsert.currentMatches], ['applied', true]);
+  const foreign = await w.send('R', 'read', { as: B, uid, query: { insertRequestId: body.relatedInsert.insertRequestId } });
+  assert.deepEqual([foreign.body.relatedInsert.reason, foreign.body.relatedInsert.requestHash], ['ID_REUSED', null]);
+  const cleared = await w.send('C', 'put', { as: A, uid, body: { expectedOwner: ownerOf(A), expectedRevision: `${epoch}:2`, findings: '',
+    conclusion: '', recommendation: '', baseVersion: 0, citationIds: [], structureIds: [] } });
+  assert.equal(cleared.ok, true, JSON.stringify(cleared.body));
+  const late = await w.send('X', 'put', { as: A, uid, body });
+  assert.deepEqual(brief(late), { ok: false, status: 409, code: 'RELATED_INSERT_SUPERSEDED' });
+  assert.deepEqual([late.body.relatedInsert.state, late.body.relatedInsert.reason], ['applied', 'SUPERSEDED']);
+  assert.equal((await w.row(uid, A)).present, false, 'not re-inserted after the clear');
+  const forced = await w.send('F', 'force', { as: ADMIN, uid, body: { expectedOwner: ownerOf(ADMIN), expectedEpoch: epoch } });
+  assert.equal(forced.ok, true, JSON.stringify(forced.body));
+  assert.equal((await w.send('X', 'put', { as: A, uid, body })).code, 'RELATED_INSERT_SUPERSEDED', 'the receipt outlives a new epoch');
+  assert.equal((await receiptOf(w, body)).state, 'applied');
+});
+
+for (const winner of ['retry', 'discard']) {
+  test(`W5-PG-02 Retry against Discard in flight together, the ${winner} commits first: the other waits on the Target row and then sees it - never both`, async () => {
+    const w = await world();
+    const source = await w.study({ rs: 'A', draft: false }), uid = await w.study();
+    const body = relatedBody(await w.token(uid, A), uid, source);
+    await w.base.studyState.update({ where: { uid }, data: { holder: B.actor, heldAt: new Date() } });
+    const refused = await w.send('X', 'put', { as: A, uid, body });
+    assert.deepEqual([refused.code, refused.body.relatedInsert.reason, refused.body.relatedInsert.receiptRevision], ['RELATED_INSERT_REFUSED', 'TARGET_HELD', 1]);
+    await w.base.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+    const discard = asDiscard(body, 1);
+    const [first, second] = winner === 'retry' ? [['R', body], ['D', discard]] : [['D', discard], ['R', body]];
+    const held = w.gate(first[0], 'commit');
+    const one = w.send(first[0], 'put', { as: A, uid, body: first[1] });
+    await held.arrived();
+    const two = w.send(second[0], 'put', { as: A, uid, body: second[1] });
+    await untilBlocked(w, 'the second request waits for the first at the Target row');
+    held.release();
+    const [a, b] = [await one, await two];
+    w.gates.length = 0;
+    assert.equal(a.ok, true, JSON.stringify(a.body));
+    if (winner === 'retry') {
+      assert.deepEqual(brief(b), { ok: false, status: 409, code: 'RELATED_INSERT_NOT_DISCARDABLE' });
+      assert.equal(b.body.relatedInsert.state, 'applied');
+      assert.deepEqual([(await receiptOf(w, body)).state, (await w.row(uid, A)).revision], ['applied', 2]);
+      assert.deepEqual(await w.audits(uid), [`${A.actor} report.draft`]);
+    } else {
+      assert.deepEqual(brief(b), { ok: false, status: 409, code: 'RELATED_INSERT_DISCARDED' });
+      assert.deepEqual([(await receiptOf(w, body)).state, (await w.row(uid, A)).revision], ['discarded', 1]);
+      assert.deepEqual(await w.audits(uid), [], 'the discard that won leaves the late retry nothing to insert');
+    }
+  });
+}
+
+test('W5-PG-03 A<-B and B<-A in flight together, either one held first: one row order, both apply, no deadlock and no lock-wait failure', async () => {
+  for (const heldFirst of ['X', 'Y']) {
+    const w = await world();
+    const a = await w.study({ rs: 'A' }), b = await w.study({ rs: 'A' });
+    const seed = { findings: 'SYN first draft', conclusion: '', recommendation: '', baseVersion: 1 };
+    const requests = { X: [a, relatedBody(await w.token(a, A), a, b, { seed })], Y: [b, relatedBody(await w.token(b, A), b, a, { seed })] };
+    const other = heldFirst === 'X' ? 'Y' : 'X';
+    const held = w.gate(heldFirst, 'commit');
+    const one = w.send(heldFirst, 'put', { as: A, uid: requests[heldFirst][0], body: requests[heldFirst][1] });
+    await held.arrived();
+    const two = w.send(other, 'put', { as: A, uid: requests[other][0], body: requests[other][1] });
+    await untilBlocked(w, heldFirst + ' held: the other insertion waits on one of the two rows before holding any');
+    held.release();
+    const answers = [await one, await two];
+    w.gates.length = 0;
+    for (const answer of answers) assert.deepEqual([answer.ok, answer.body?.relatedInsert?.result], [true, 'applied'], JSON.stringify(answer.body));
+    assert.deepEqual([(await w.row(a, A)).revision, (await w.row(b, A)).revision], [2, 2]);
+  }
+});
+
+for (const point of ['audit', 'commit']) {
+  test(`W5-PG-04 a failure at ${point}: the draft, its report.draft row and the receipt roll back together; the Check says unknown; the same ID applies once`, async () => {
+    const w = await world();
+    const source = await w.study({ rs: 'A', draft: false }), uid = await w.study();
+    const body = relatedBody(await w.token(uid, A), uid, source);
+    const before = await w.state(uid);
+    w.fault('X', point, new Error('SYN failure at ' + point));
+    const failed = await w.send('X', 'put', { as: A, uid, body });
+    assert.deepEqual([failed.ok, failed.code], [false, 'NOT_HTTP'], 'an unknown outcome, never a refusal');
+    assert.deepEqual(await w.state(uid), before);
+    assert.equal(await receiptOf(w, body), null, 'no receipt of a rolled back insertion, and no refused row');
+    const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: body.relatedInsert.insertRequestId } });
+    assert.deepEqual([check.body.relatedInsert.result, check.body.relatedInsert.reason], ['unknown', 'RECEIPT_ABSENT']);
+    const retried = await w.send('X', 'put', { as: A, uid, body });
+    assert.equal(retried.ok, true, JSON.stringify(retried.body));
+    assert.deepEqual([(await w.row(uid, A)).revision, (await w.audits(uid)).length, (await receiptOf(w, body)).state], [2, 1, 'applied']);
+  });
+}
+
+test('W5-PG-05 the migration on PostgreSQL: NULL-closed CHECKs; UPDATE of a terminal row, DELETE and TRUNCATE refused (42501); a refused row moves one receipt revision at a time with its binding', async () => {
+  const w = await world();
+  const sqlstate = async sql => { try { await w.base.$executeRawUnsafe(sql); return 'ok'; }
+    catch (error) { return error?.meta?.code ?? String(error?.message ?? error); } };
+  const columns = '"insertRequestId","targetUid","ownerInstitution","ownerSub","ownerAuthor","requestHash","proposalHash","expectedEpoch",' +
+    '"expectedRevision","sourceUid","sourceVersion","targetBaseVersion",section,state,"appliedRevision",reason,"receiptRevision","updatedAt"';
+  const row = (id, values = {}) => {
+    const v = { section: "'findings'", state: "'refused'", appliedRevision: 'NULL', reason: "'TARGET_HELD'", requestHash: `'${'a'.repeat(64)}'`,
+      ownerSub: "'syn-sub-pg'", expectedRevision: '3', receiptRevision: '1', ...values };
+    return `INSERT INTO "ReportDraftInsertReceipt" (${columns}) VALUES ('${id}','2.25.9501','${INST}',${v.ownerSub},'syn-pg@synthetic.test',` +
+      `${v.requestHash},'${'b'.repeat(64)}','${randomUUID()}',${v.expectedRevision},'2.25.9502',1,0,${v.section},${v.state},` +
+      `${v.appliedRevision},${v.reason},${v.receiptRevision},now())`;
+  };
+  for (const [label, values] of [['section', { section: "'recommendation'" }], ['uppercase hash', { requestHash: `'${'A'.repeat(64)}'` }],
+      ['refused without a reason (SQL NULL)', { reason: 'NULL' }], ['refused with an open reason', { reason: "'ANYTHING'" }],
+      ['applied without its revision (SQL NULL)', { state: "'applied'", reason: 'NULL' }],
+      ['applied revision not +1', { state: "'applied'", appliedRevision: '9', reason: 'NULL' }],
+      ['discarded with another reason', { state: "'discarded'" }], ['expected revision at the Int maximum', { expectedRevision: '2147483647' }]])
+    assert.equal(await sqlstate(row(randomUUID(), values)), '23514', label);
+  assert.equal(await sqlstate(row(randomUUID(), { ownerSub: 'NULL' })), '23502', 'SQL NULL owner');
+  const applied = randomUUID(), refused = randomUUID();
+  assert.equal(await sqlstate(row(applied, { state: "'applied'", appliedRevision: '4', reason: 'NULL' })), 'ok');
+  assert.equal(await sqlstate(row(applied, { state: "'applied'", appliedRevision: '4', reason: 'NULL' })), '23505', 'one row per ID');
+  assert.equal(await sqlstate(row(refused)), 'ok');
+  const update = (id, set) => `UPDATE "ReportDraftInsertReceipt" SET ${set} WHERE "insertRequestId" = '${id}'`;
+  assert.equal(await sqlstate(update(applied, '"receiptRevision" = 2')), '42501', 'a terminal row is never changed');
+  assert.equal(await sqlstate(update(refused, `reason = 'SOURCE_CHANGED'`)), '42501', 'one receipt revision at a time');
+  assert.equal(await sqlstate(update(refused, `"requestHash" = '${'c'.repeat(64)}', "receiptRevision" = 2`)), '42501', 'the binding is immutable');
+  assert.equal(await sqlstate(`DELETE FROM "ReportDraftInsertReceipt" WHERE "insertRequestId" = '${refused}'`), '42501');
+  assert.equal(await sqlstate('TRUNCATE "ReportDraftInsertReceipt"'), '42501');
+  assert.equal(await sqlstate(update(refused, `state = 'discarded', reason = 'INSERT_DISCARDED', "receiptRevision" = 2`)), 'ok');
+  assert.equal(await sqlstate(update(refused, `state = 'refused', reason = 'TARGET_HELD', "receiptRevision" = 3`)), '42501', 'the tombstone is terminal');
+  const [{ triggers }] = await w.base.$queryRawUnsafe(`SELECT count(*)::int AS triggers FROM pg_trigger
+    WHERE tgrelid = '"ReportDraftInsertReceipt"'::regclass AND NOT tgisinternal`);
+  assert.equal(triggers, 2, 'the row and the TRUNCATE guard');
+});
+
+test('W5-PG-06 the same ID on two Targets at once: the primary key lets one commit; the other answers ID_REUSED and its draft write rolls back', async () => {
+  const w = await world();
+  const source = await w.study({ rs: 'A', draft: false }), x = await w.study(), y = await w.study();
+  const id = randomUUID();
+  const X = relatedBody(await w.token(x, A), x, source, { id }), Y = relatedBody(await w.token(y, A), y, source, { id });
+  const held = w.gate('X', 'commit');
+  const one = w.send('X', 'put', { as: A, uid: x, body: X });
+  await held.arrived();
+  const two = w.send('Y', 'put', { as: A, uid: y, body: Y });
+  await untilBlocked(w, 'Y waits on the uncommitted key of X');
+  held.release();
+  const [a, b] = [await one, await two];
+  w.gates.length = 0;
+  assert.equal(a.ok, true, JSON.stringify(a.body));
+  assert.deepEqual(brief(b), { ok: false, status: 409, code: 'ID_REUSED' });
+  assert.deepEqual(Object.keys(b.body).sort(), ['code', 'message'], 'nothing of the other Target\'s receipt');
+  assert.deepEqual([(await w.row(y, A)).revision, await w.audits(y), (await receiptOf(w, X)).targetUid], [1, [], x]);
+});
+
+test('W5-PG-07 a finished receipt is answered under the Target alone: applied and discarded replay and ID_REUSED while the Source metadata lookup fails, the Source is out of A\'s scope or its row is locked; a new apply still needs the Source; an excluded Target is 404', async () => {
+  const w = await world();
+  const source = await w.study({ rs: 'A', draft: false }), uid = await w.study(), other = await w.study();
+  const opened = await w.token(uid, A);
+  const I1 = relatedBody(opened, uid, source);
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I1 })).ok, true);
+  // I2 sent at the boundary I1 has since moved: refused (DRAFT_CONFLICT), then discarded
+  const I2 = relatedBody(opened, uid, source);
+  assert.deepEqual([(await w.send('X', 'put', { as: A, uid, body: I2 })).body.relatedInsert.reason], ['DRAFT_CONFLICT']);
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: asDiscard(I2, 1) })).ok, true);
+  const current = await w.row(uid, A), token = await w.token(uid, A);
+  const fresh = () => relatedBody(token, uid, source, { seed: { findings: current.findings, conclusion: current.conclusion,
+    recommendation: current.recommendation, baseVersion: current.baseVersion } });
+  const reused = relatedBody(await w.token(other, A), other, source, { id: I1.relatedInsert.insertRequestId });
+  const finished = async what => {
+    const before = await w.state(uid), receipts = await w.base.reportDraftInsertReceipt.findMany({ orderBy: { insertRequestId: 'asc' } });
+    const replay = await w.send('X', 'put', { as: A, uid, body: I1 });
+    assert.deepEqual([replay.ok, replay.body?.relatedInsert?.result, replay.body?.revision], [true, 'applied', token], what + ': applied replay');
+    const tomb = await w.send('X', 'put', { as: A, uid, body: I2 });
+    assert.deepEqual([brief(tomb), tomb.body?.relatedInsert?.state], [{ ok: false, status: 409, code: 'RELATED_INSERT_DISCARDED' }, 'discarded'], what);
+    const resent = await w.send('X', 'put', { as: A, uid, body: asDiscard(I2, 1) });
+    assert.deepEqual([resent.ok, resent.body?.relatedInsert?.state], [true, 'discarded'], what + ': the resent discard');
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid: other, body: reused })), { ok: false, status: 409, code: 'ID_REUSED' }, what);
+    assert.deepEqual(await w.state(uid), before, what + ': the answers wrote nothing');
+    assert.deepEqual(await w.base.reportDraftInsertReceipt.findMany({ orderBy: { insertRequestId: 'asc' } }), receipts, what + ': no receipt changed');
+  };
+  const policy = rules => w.base.$executeRaw`INSERT INTO "StudyAccessPolicy" (institution, subject, revision, policy, reason, "updatedBy", "updatedAt")
+    VALUES (${INST}, ${A.sub}, 1, ${JSON.stringify({ version: 1, restricted: true, startsAt: null, endsAt: null, rules })}::jsonb,
+      'SYNTHETIC policy', 'SYNTHETIC-admin', now())
+    ON CONFLICT (institution, subject) DO UPDATE SET revision = "StudyAccessPolicy".revision + 1, policy = EXCLUDED.policy, "updatedAt" = now()`;
+  const only = (...studyUids) => ({ patientId: null, modalities: [], dateFrom: null, dateTo: null, studyUids });
+  try {
+    // (1) the Targets by UID, every CT study by its tags: the Source's metadata lookup fails
+    await policy([only(uid, other), { ...only(), modalities: ['CT'] }]);
+    w.metadata = async asked => {
+      if (asked === source) throw new Error('SYN Orthanc unavailable');
+      return { '0020000D': { Value: [asked] }, '00080061': { Value: ['CT'] } };
+    };
+    await finished('Source metadata lookup failing');
+    const blocked = fresh();
+    const unprepared = await w.send('X', 'put', { as: A, uid, body: blocked });
+    assert.deepEqual([unprepared.ok, unprepared.status], [false, 503], JSON.stringify(unprepared.body));
+    assert.equal(await receiptOf(w, blocked), null, 'a new apply that could not prepare its Source leaves no receipt');
+    // (2) the Targets only: A has lost the Source
+    w.metadata = null;
+    await policy([only(uid, other)]);
+    await finished('Source out of scope');
+    const lost = await w.send('X', 'put', { as: A, uid, body: fresh() });
+    assert.deepEqual([lost.code, lost.body?.relatedInsert?.reason], ['RELATED_INSERT_REFUSED', 'SOURCE_UNAVAILABLE']);
+    // (3) the Source only: the Target is out of scope, and so is every answer about it
+    await policy([only(source)]);
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid, body: I1 })), { ok: false, status: 404, code: null });
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid, body: I2 })), { ok: false, status: 404, code: null });
+  } finally {
+    w.metadata = null;
+    await w.base.$executeRaw`DELETE FROM "StudyAccessPolicy" WHERE subject = ${A.sub}`;
+  }
+  // (4) another transaction holds the Source row: the finished answers do not wait for it
+  const locked = deferred(), release = deferred();
+  const holder = w.base.$transaction(async tx => {
+    await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR UPDATE`;
+    locked.resolve();
+    await release.promise;
+  }, { timeout: 20000 });
+  try {
+    await locked.promise;
+    await within(finished('Source row locked'), 'the finished answers while the Source row is locked', 2500);
+  } finally {
+    release.resolve();
+    await holder;
+  }
+});
+
+test('W5-PG-08 WORKLIST-SPLIT-UID: a split Target is 409 STUDY_IDENTITY_UNRESOLVED to every insertion PUT and Check whatever its receipt, with nothing written; a split Source refuses a new apply and a refused retry without a receipt row, while replay, Check and discard still answer', async () => {
+  const w = await world();
+  const source = await w.study({ rs: 'A', draft: false }), uid = await w.study();
+  const opened = await w.token(uid, A);
+  const I1 = relatedBody(opened, uid, source);
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I1 })).ok, true);
+  const I2 = relatedBody(opened, uid, source);                  // refused (DRAFT_CONFLICT), then discarded
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I2 })).body.relatedInsert.reason, 'DRAFT_CONFLICT');
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: asDiscard(I2, 1) })).ok, true);
+  const current = await w.row(uid, A), token = await w.token(uid, A);
+  const seed = { findings: current.findings, conclusion: current.conclusion, recommendation: current.recommendation, baseVersion: current.baseVersion };
+  const I3 = relatedBody(token, uid, source, { seed });
+  await w.base.studyState.update({ where: { uid }, data: { holder: B.actor, heldAt: new Date() } });
+  assert.equal((await w.send('X', 'put', { as: A, uid, body: I3 })).body.relatedInsert.reason, 'TARGET_HELD');
+  await w.base.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+  const receipts = () => w.base.reportDraftInsertReceipt.findMany({ orderBy: { insertRequestId: 'asc' } });
+  try {
+    // (1) the Target is split: every answer is the identity refusal, before any receipt, with nothing of either
+    w.split = new Set([uid]);
+    const before = await w.state(uid), stored = await receipts();
+    for (const [label, body] of [['applied replay', I1], ['discarded apply', I2], ['resent discard', asDiscard(I2, 1)], ['refused retry', I3],
+        ['refused discard', asDiscard(I3, 1)], ['new ID', relatedBody(token, uid, source, { seed })]]) {
+      const answer = await w.send('X', 'put', { as: A, uid, body });
+      assert.deepEqual(brief(answer), { ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' }, label);
+      assert.deepEqual(Object.keys(answer.body).sort(), ['code', 'message'], label + ': no receipt or envelope');
+    }
+    for (const body of [I1, I2, I3]) {
+      const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: body.relatedInsert.insertRequestId } });
+      assert.deepEqual([brief(check), Object.keys(check.body).sort()], [{ ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' }, ['code', 'message']]);
+    }
+    assert.deepEqual([await w.state(uid), await receipts()], [before, stored], 'the split Target: nothing written');
+    // (2) the Target is whole, the Source is split: a new apply and the refused retry are refused without a receipt row
+    w.split = new Set([source]);
+    const fresh = relatedBody(token, uid, source, { seed });
+    const blocked = await w.send('X', 'put', { as: A, uid, body: fresh });
+    assert.deepEqual(brief(blocked), { ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' }, JSON.stringify(blocked.body));
+    assert.equal(await receiptOf(w, fresh), null, 'an identity refusal is not a refused receipt');
+    assert.deepEqual(brief(await w.send('X', 'put', { as: A, uid, body: I3 })), { ok: false, status: 409, code: 'STUDY_IDENTITY_UNRESOLVED' });
+    assert.deepEqual([await w.state(uid), await receipts()], [before, stored], 'the split Source: nothing written, the refused receipt unchanged');
+    const replay = await w.send('X', 'put', { as: A, uid, body: I1 });
+    assert.deepEqual([replay.ok, replay.body?.relatedInsert?.result], [true, 'applied'], JSON.stringify(replay.body));
+    assert.equal((await w.send('X', 'put', { as: A, uid, body: I2 })).code, 'RELATED_INSERT_DISCARDED');
+    const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: I1.relatedInsert.insertRequestId } });
+    assert.deepEqual([check.ok, check.body?.relatedInsert?.result], [true, 'applied']);
+    const discard = await w.send('X', 'put', { as: A, uid, body: asDiscard(I3, 1) });
+    assert.deepEqual([discard.ok, discard.body?.relatedInsert?.state], [true, 'discarded'], JSON.stringify(discard.body));
+    assert.deepEqual(await w.state(uid), before, 'the discard wrote no draft and no audit row');
+  } finally {
+    w.split = null;
   }
 });

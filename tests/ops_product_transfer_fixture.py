@@ -102,9 +102,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
               'api/prisma/migrations/20261008120000_emr_b/migration.sql', 'api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql',
               'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql',
-              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql']
+              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
+              'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql']
+# W5-API (52 tables, 47 migrations): ReportDraftInsertReceipt, its three synthetic rows (refused, applied, discarded), one
+# primary key, two checks, one index and the terminal guard's two triggers. Not measured on a stack when written: estimated
+# at about 6 KB of catalog and rows, well inside the cap above.
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
-                 'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
+                 'ReportDraft', 'ReportDraftInsertReceipt', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
@@ -146,6 +150,25 @@ def migration_sources():
 
 def migration_records():
     return [dict(path=path, sha256=image_transfer.sha(raw)) for path, raw in zip(MIGRATIONS, migration_sources())]
+
+
+def insert_receipt_rows(uid):
+    """W5-API (O4 R1): one Related Report insert receipt in each state, every column with a value where its state has one.
+    The refused row has changed its reason once (receipt revision 2); the applied row wrote the draft revision after the one
+    it expected and has no reason; the discarded row is the tombstone of a cancelled insertion. They are bound to SYNTHETIC-reader1's
+    draft of this study and to the study's draft epoch; the Source study is another synthetic UID (receipts carry no FK).
+    No text: only the request and proposal SHA-256 values."""
+    owner = dict(targetUid=uid, ownerInstitution='SYNTHETIC-hospital', ownerSub='SYNTHETIC-reader1-sub', ownerAuthor='SYNTHETIC-reader1',
+                 expectedEpoch='00000000-0000-4000-8000-0000000000d1', sourceUid='2.25.4242.21', sourceVersion=2, targetBaseVersion=2,
+                 createdAt=STAMP, updatedAt=STAMP)
+    return [
+        dict(insertRequestId='00000000-0000-4000-8000-000000002101', **owner, requestHash='a1' * 32, proposalHash='b1' * 32,
+             expectedRevision=3, section='findings', state='refused', appliedRevision=None, reason='TARGET_HELD', receiptRevision=2),
+        dict(insertRequestId='00000000-0000-4000-8000-000000002102', **owner, requestHash='a2' * 32, proposalHash='b2' * 32,
+             expectedRevision=2, section='conclusion', state='applied', appliedRevision=3, reason=None, receiptRevision=1),
+        dict(insertRequestId='00000000-0000-4000-8000-000000002103', **owner, requestHash='a3' * 32, proposalHash='b3' * 32,
+             expectedRevision=3, section='findings', state='discarded', appliedRevision=None, reason='INSERT_DISCARDED', receiptRevision=2),
+    ]
 
 
 def expected_rows(uid):
@@ -216,6 +239,7 @@ def expected_rows(uid):
         revision=4 - number, present=True, updatedAt=STAMP) for number in (1, 2)]
     rows['ReportDraft'].append(dict(uid=uid, author='SYNTHETIC-reader3', findings='', conclusion='', recommendation='',
         baseVersion=0, citations=None, structured=None, revision=5, present=False, updatedAt=STAMP))
+    rows['ReportDraftInsertReceipt'] = insert_receipt_rows(uid)
     # S4-U2: the Order table had no synthetic row, so a dump that lost the new accession value would
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
@@ -587,7 +611,7 @@ def create_product(name, db, uid):
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
-                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
+                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt', 'ReportDraftInsertReceipt',
                   'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
@@ -677,7 +701,10 @@ def catalog_contract(value):
     require(value['tables'] == TABLES)
     # The additive appearance table takes the product above 256 columns. Keep
     # byte/output budgets and exact catalog comparison; bound other lists as before.
-    require(all(type(value[key]) is list and 0 < len(value[key]) <= (512 if key == 'columns' else 256) for key in value))
+    # W5-API: ReportDraftInsertReceipt's 19 columns take the product past 512 (508 scalar fields in schema.prisma before it, 527
+    # with it; the hosted catalog is the authority), so
+    # the column list gets the next power of two; the receipt byte cap and the exact comparison are unchanged.
+    require(all(type(value[key]) is list and 0 < len(value[key]) <= (1024 if key == 'columns' else 256) for key in value))
     require(sorted(item['sequencename'] for item in value['sequence_settings']) == SEQUENCES)
 
 
@@ -1009,10 +1036,78 @@ def constraint_probes(name, product):
       EXECUTE 'RESET ROLE';
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
+    receipt_guard = insert_receipt_probes(name)
     verify_product(name, 'kin', product)
     return dict(version_unique=True, report_study_fk=True, draft_composite_pk=True,
                 viewer_restrict=True, finding_restrict=True, rolled_back_unchanged=True,
-                emr_placement=True, emr_append_only=True, emr_runtime_closed=True, emr_unexpired_kept=True)
+                emr_placement=True, emr_append_only=True, emr_runtime_closed=True, emr_unexpired_kept=True,
+                receipt_guard=receipt_guard)
+
+
+def receipt_copy(state, **changes):
+    """An INSERT of a copy of the restored receipt in `state` with `changes` (a new ID unless the change is the probe)."""
+    pairs = ','.join(sql_literal(key) + ',' + ('NULL' if value is None else value) for key, value in changes.items())
+    return ('INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM json_populate_record(NULL::"ReportDraftInsertReceipt", '
+            '(SELECT (to_jsonb(t)||jsonb_build_object(' + pairs + '))::json FROM "ReportDraftInsertReceipt" t WHERE state=' +
+            sql_literal(state) + '))')
+
+
+def receipt_update(state, assignments):
+    return 'UPDATE "ReportDraftInsertReceipt" SET ' + assignments + ' WHERE state=' + sql_literal(state)
+
+
+# W5-API: the insert receipt's CHECKs and terminal guard on the restored database, each judged by the SQLSTATE its statement
+# ends with ('accepted' = it succeeded), never by message text. Every statement runs in its own subtransaction and is undone.
+NEW_ID = lambda n: sql_literal('00000000-0000-4000-8000-0000000021f' + str(n))
+RECEIPT_PROBES = {
+    'primary_key': ('INSERT INTO "ReportDraftInsertReceipt" SELECT * FROM "ReportDraftInsertReceipt" WHERE state=\'applied\'', '23505'),
+    'section_check': (receipt_copy('refused', insertRequestId=NEW_ID(1), section="'recommendation'"), '23514'),
+    'null_reason_check': (receipt_copy('refused', insertRequestId=NEW_ID(2), reason=None), '23514'),
+    'null_applied_revision_check': (receipt_copy('applied', insertRequestId=NEW_ID(3), appliedRevision=None), '23514'),
+    'hash_check': (receipt_copy('applied', insertRequestId=NEW_ID(4), requestHash='upper(t."requestHash")'), '23514'),
+    'terminal_applied_update': (receipt_update('applied', '"receiptRevision"="receiptRevision"+1'), '42501'),
+    'terminal_discarded_update': (receipt_update('discarded', 'state=\'refused\',"appliedRevision"=NULL,reason=\'TARGET_HELD\','
+                                                              '"receiptRevision"="receiptRevision"+1'), '42501'),
+    'binding_change': (receipt_update('refused', '"requestHash"=repeat(\'c\',64),"receiptRevision"="receiptRevision"+1'), '42501'),
+    'revision_not_advanced': (receipt_update('refused', 'reason=\'SOURCE_CHANGED\''), '42501'),
+    'delete': ('DELETE FROM "ReportDraftInsertReceipt"', '42501'),
+    'truncate': ('TRUNCATE "ReportDraftInsertReceipt"', '42501'),
+    'refused_to_applied': (receipt_update('refused', 'state=\'applied\',"appliedRevision"="expectedRevision"+1,reason=NULL,'
+                                                     '"receiptRevision"="receiptRevision"+1'), 'accepted'),
+    'refused_to_discarded': (receipt_update('refused', 'state=\'discarded\',reason=\'INSERT_DISCARDED\','
+                                                       '"receiptRevision"="receiptRevision"+1'), 'accepted'),
+    'refused_reason_change': (receipt_update('refused', 'reason=\'SOURCE_CHANGED\',"receiptRevision"="receiptRevision"+1'), 'accepted'),
+}
+
+
+def receipt_probe_sql():
+    """One rolled-back transaction answering {probe: SQLSTATE | 'accepted'} for RECEIPT_PROBES on a database holding one
+    receipt in each state (the restored product, or the W5-API migration mutant run's seeded database)."""
+    rows = ',\n'.join('(' + sql_literal(key) + ', $probe$' + statement + '$probe$)' for key, (statement, _) in sorted(RECEIPT_PROBES.items()))
+    return ('BEGIN; CREATE FUNCTION pg_temp.w5_receipt_state(statement text) RETURNS text LANGUAGE plpgsql AS $state$\n'
+            'BEGIN\n  BEGIN EXECUTE statement; RAISE SQLSTATE \'W5P00\';\n'
+            '  EXCEPTION WHEN SQLSTATE \'W5P00\' THEN RETURN \'accepted\'; WHEN OTHERS THEN RETURN SQLSTATE; END;\nEND $state$;\n'
+            'SELECT jsonb_object_agg(probe.name, pg_temp.w5_receipt_state(probe.statement)) FROM (VALUES\n' + rows +
+            ') AS probe(name, statement); ROLLBACK')
+
+
+def receipt_probe_differences(states):
+    """{probe: [observed, contract]} for every probe whose observed state is not the contract's (a missing probe included)."""
+    expected = {key: state for key, (_, state) in RECEIPT_PROBES.items()}
+    observed = states if type(states) is dict else {}
+    differ = {key: [observed.get(key), want] for key, want in expected.items() if observed.get(key) != want}
+    differ.update({key: [observed[key], None] for key in observed if key not in expected})
+    return differ
+
+
+def insert_receipt_probes(name):
+    """The states of RECEIPT_PROBES on the restored kin database; a state that differs from the contract is a product mismatch
+    naming the probe."""
+    states = inventory.parse(psql(name, 'kin', receipt_probe_sql()))
+    differ = receipt_probe_differences(states)
+    if differ:
+        raise ProductMismatch('Synthetic product insert receipt probes differ: ' + json.dumps(differ, sort_keys=True))
+    return states
 
 
 def negative_restore(name, folder, product):
