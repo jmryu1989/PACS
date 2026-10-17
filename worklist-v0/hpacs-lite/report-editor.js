@@ -147,7 +147,9 @@
       const locked = !!r.prelimHidden;
       if (locked) reportPreview.close();
       // 자동 저장된 내 초안은 DOM과 같아 dirty가 아니어도, 잠금 전환이 그 글을 지워서는 안 된다.
-      let preserveValue = !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
+      // WORKLIST-SPLIT-UID: a study whose UID two patient resources now answer keeps its text, caret, undo and revision as
+      // they are; no render replaces it, forced or not, until a later list returns it as one resource.
+      let preserveValue = !!r.identityUnresolved || !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
       reportRefreshPendingFor = preserveValue && (locked || reportDirty()) ? selectedUid : null;
       const src = locked ? {} : reportSource();
       const frame = mountReportFrame();
@@ -182,7 +184,8 @@
                                  ["#recommendation", "Please enter recommendation"]]) {
         const el = $(sel);
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
-        el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
+        el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist")
+          || !!r.identityUnresolved;
       }
       renderDraftBar();
       updateReportTemplateButton();

@@ -52,7 +52,10 @@ class CandidateCiTests(unittest.TestCase):
         # W4-FLOW: + Approve & Next / Recommendation round trip. Union on main: 95 + 15 + 14 = 124.
         # Merge of main 59fc5a5 into S9-U4b: 102 + 15 + 14 = 131.
         # S9-U4b part (c): + WorklistE2E.test_s9_u4_download_states / _import_retry_and_account_change. 102 + 17 + 14 = 133.
-        self.assertEqual(len(selected), 133)
+        # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101 on main: 101 + 15 + 14 = 130).
+        # Merge of main 848b7e5 into S9-U4b: 108 + 17 + 14 = 139.
+        self.assertEqual(len(selected), 139)
+        self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
         self.assertEqual([item["case"] for item in selected[-14:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
@@ -73,7 +76,7 @@ class CandidateCiTests(unittest.TestCase):
     def test_configuration_uses_target_runner_plans_evidence_and_540_seconds(self):
         class FakeRunner:
             def module_plan(self, filename, unit, mode, timeout, class_name):
-                count = 102 if unit == "candidate-invariants" else 17
+                count = 108 if unit == "candidate-invariants" else 17
                 return {"tests": [{"file": filename, "case": "Local.test_" + str(i)} for i in range(count)]}
             def load_module(self, path):
                 filename = path.relative_to(candidate.TOOLS_ROOT / "tests").as_posix()
@@ -102,7 +105,7 @@ class CandidateCiTests(unittest.TestCase):
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 133)   # S9-U4b (c) + W4-FLOW: 102 + 17 + 14
+            self.assertEqual(len(selected), 139)   # S9-U4b (c) + W4-FLOW + WORKLIST-SPLIT-UID: 108 + 17 + 14
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.

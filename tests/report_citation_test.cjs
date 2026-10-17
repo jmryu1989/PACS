@@ -105,6 +105,8 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const studyAccess = { prepare: async () => calls.push({ call: 'prepare' }),
+    // WORKLIST-SPLIT-UID: the request's source observation; this store answers one resource per UID.
+    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {},
     // The third argument is the transaction client. Recording it is what tells a re-check that
     // runs inside the snapshot from one that ran outside it - the two were indistinguishable.
     // `refuseTxRequire` refuses ONLY the tx-bound call, which is the revocation the new read

@@ -9,6 +9,7 @@ import type { PrismaService } from '../prisma.service';
 import { OrthancService } from '../orthanc.service';
 import type { KeycloakService } from '../keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS } from '../seed';
+import { groupSources, unresolvedSource } from '../study-source-groups';
 import { toClient } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -97,8 +98,11 @@ export class PacsInstitutions {
     if (!orphans.length) return { studies: [], institutions: this.institutions.map(i => ({ id: i.id, name: i.name })) };
     const set = await this.studyAccess.allowed(c,orphans.map(o=>o.uid));
     const qido = await this.orthanc.studies();
+    // WORKLIST-SPLIT-UID: a UID two patient resources answer is not two assignable patients; it is left out here and
+    // its assignment is refused below. No global error list is added on this route.
+    const sources = groupSources(qido, st => OrthancService.tag(st, '0020000D'));
     const studies = qido
-      .filter(st => set.has(OrthancService.tag(st, '0020000D')))
+      .filter(st => set.has(OrthancService.tag(st, '0020000D')) && !unresolvedSource(sources.byUid.get(OrthancService.tag(st, '0020000D'))))
       .map(st => ({
         uid: OrthancService.tag(st, '0020000D'),
         id: OrthancService.tag(st, '00100020'),
@@ -119,6 +123,9 @@ export class PacsInstitutions {
    * 바뀐다. 이 통로는 "고아를 집에 보내는" 것 하나만 한다.
    */
   async assignInstitution(uid: string, institutionId: string, c: Caller) {
+    // WORKLIST-SPLIT-UID: observed before the transaction; an unassigned UID two patient resources answer is not
+    // resolved by choosing an institution for it.
+    await this.studyAccess.prepareSourceIdentity(c,[uid]);
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'admin', '검사 기관 배정');
     inst(c);
@@ -130,6 +137,7 @@ export class PacsInstitutions {
     if (s.institutionId)
       throw new BadRequestException(
         `이미 ${this.instName(s.institutionId)}에 배정된 검사입니다. 기관 이동은 이 통로로 하지 않습니다.`);
+    this.studyAccess.assertUnsplitSource(c, uid);
     const saved = await tx.studyState.update({
       where: { uid }, data: { institutionId, reqHosp: this.instName(institutionId) },
     });

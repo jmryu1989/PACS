@@ -174,6 +174,11 @@
       // 삽입이 나가 있는 동안도 같다 — 그 응답 전에 서명하면 사람이 확인한 문장이
       // 이번 판에 들어갈지 다음 판에 들어갈지가 도착 순서로 정해진다.
       if (commitInFlight || insertInFlight) return;
+      // WORKLIST-SPLIT-UID: no decision of any kind is sent for a study the last list excluded as unresolved; the text stays.
+      if (appState[selectedUid]?.identityUnresolved) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다. 입력한 글은 화면에 그대로 있습니다.", "err");
+        return;
+      }
       /**
        * 이 검사에 결과를 모르는 확정이 남아 있으면, 같은 글을 또 확정하기 전에 서버가 무엇을 가졌는지부터 안다. 답을 잃은
        * 확정 뒤에 사람이 가장 먼저 하는 일이 같은 단추를 다시 누르는 것이다 — 그 확정이 서버에 있는데 옛 판을 기준으로

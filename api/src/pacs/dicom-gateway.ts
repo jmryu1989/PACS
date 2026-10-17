@@ -92,6 +92,10 @@ export class PacsDicomGateway {
     // 미등록(기관 미확정) 검사는 기본 거부 — 워크리스트를 한 번 열면 lazy 등록이 기관을 박는다.
     if (!s || !this.access.visible(s, me)) throw new ForbiddenException('열람 권한이 없습니다');
     try{await this.studyAccess.require(c,[uid]);}catch(e){throw new ForbiddenException('열람 권한이 없습니다');}
+    // WORKLIST-SPLIT-UID: an old list or a typed URL can still name a UID two patient resources answer. Only after the
+    // scope checks, this request observes the source; auth_request cannot carry 409/503, so every source refusal is 403.
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
+    try { this.studyAccess.assertUnsplitSource(c, uid); } catch { throw new ForbiddenException('열람 권한이 없습니다'); }
   }
 
   /**
@@ -298,6 +302,9 @@ export class PacsDicomGateway {
     const study = await this.prisma.studyState.findUnique({ where: { uid: actualUid } });
     if (!study || !this.access.visible(study, me)) throw new ForbiddenException('열람 권한이 없습니다');
     await this.studyAccess.require(c,[actualUid]);
+    // WORKLIST-SPLIT-UID: inside the caller's scope, a UID two patient resources answer is refused by its code.
+    await this.studyAccess.prepareSourceIdentity(c, [actualUid]);
+    this.studyAccess.assertUnsplitSource(c, actualUid);
     return { id: instances[0].ID };
   }
 }

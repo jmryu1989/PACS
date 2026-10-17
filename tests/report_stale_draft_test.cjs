@@ -68,7 +68,8 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
     reportDraft: { findUnique: async () => row },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
-  const studyAccess = { prepare: async () => {}, require: async () => {} };
+  // WORKLIST-SPLIT-UID: the request's source observation answers one resource per UID here.
+  const studyAccess = { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} };
   const keycloak = { usersInGroupWithRole: async () => [] };
   // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
   // readable set is the honest stub — reaching it at all would be the defect.

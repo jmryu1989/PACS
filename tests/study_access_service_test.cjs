@@ -5,7 +5,7 @@ const {of,lastValueFrom,tap}=require('/app/node_modules/rxjs');
 const caller={kind:'member',institution:'synthetic',sub:'synthetic-sub',actor:'synthetic-actor',roles:['radiologist']};
 const policy=()=>({version:1,restricted:true,startsAt:null,endsAt:null,rules:[{patientId:'SYNTHETIC',modalities:[],dateFrom:null,dateTo:null,studyUids:[]}]});
 const uid='2.25.1234';
-function service(initial){const normalized=v=>v.map(r=>({institution:caller.institution,...r}));let rows=normalized(initial),rootQueries=0;const db={$queryRaw:async()=>{rootQueries++;return rows;}};const orth={studyAccessMetadata:async()=>null,studyIdentities:async()=>[]};return {svc:new StudyAccessService(db,orth,{getUser:async id=>({id,enabled:true,groups:[caller.institution],roles:['radiologist'],serviceAccountClientId:null})}),orth,db,set:v=>{rows=normalized(v);},queries:()=>rootQueries};}
+function service(initial){const normalized=v=>v.map(r=>({institution:caller.institution,...r}));let rows=normalized(initial),rootQueries=0;const db={$queryRaw:async()=>{rootQueries++;return rows;}};const orth={studyIdentityResources:async()=>[],studyIdentities:async()=>[]};return {svc:new StudyAccessService(db,orth,{getUser:async id=>({id,enabled:true,groups:[caller.institution],roles:['radiologist'],serviceAccountClientId:null})}),orth,db,set:v=>{rows=normalized(v);},queries:()=>rootQueries};}
 test('malformed/missing storage fails closed; absent policy preserves default scope',async()=>{
   const f=service([]);assert.deepEqual([...await f.svc.allowed(caller,[uid])],[uid]);
   f.set([{revision:1,policy:{}}]);await assert.rejects(f.svc.allowed(caller,[uid]),e=>e.getStatus()===503);
@@ -14,9 +14,9 @@ test('malformed/missing storage fails closed; absent policy preserves default sc
 test('missing single source and real nonmatching source both deny without existence oracle',async()=>{
   const f=service([{revision:1,policy:policy()}]);
   await assert.rejects(f.svc.require({...caller},[uid]),e=>e.getStatus()===404);
-  f.orth.studyAccessMetadata=async()=>({'0020000D':{Value:[uid]},'00100020':{Value:['OTHER']}});
+  f.orth.studyIdentityResources=async()=>[{'0020000D':{Value:[uid]},'00100020':{Value:['OTHER']}}];
   await assert.rejects(f.svc.require({...caller},[uid]),e=>e.getStatus()===404);
-  f.orth.studyAccessMetadata=async()=>{throw Error('transport');};await assert.rejects(f.svc.require({...caller},[uid]),e=>e.getStatus()===503);
+  f.orth.studyIdentityResources=async()=>{throw Error('transport');};await assert.rejects(f.svc.require({...caller},[uid]),e=>e.getStatus()===503);
 });
 test('transaction scope stays on one pooled connection, takes shared advisory lock',async()=>{
   const f=service([]),calls=[];const p=policy();p.rules=[{all:true}];
@@ -60,15 +60,53 @@ test('legacy synthetic keys remain valid without restriction and are hidden unde
 
 test('conditional clinical transaction uses prepared source tags without network or root connection',async()=>{
   const f=service([{revision:1,policy:policy()}]),request={...caller};let network=0;
-  f.orth.studyAccessMetadata=async()=>{network++;return {'0020000D':{Value:[uid]},'00100020':{Value:['SYNTHETIC']}};};
+  f.orth.studyIdentityResources=async()=>{network++;return [{'0020000D':{Value:[uid]},'00100020':{Value:['SYNTHETIC']}}];};
   const tx={$queryRaw:async(strings)=>strings.join('?').includes('pg_advisory')?[{locked:1}]:[{institution:caller.institution,revision:1,policy:policy()}]};
   await assert.rejects(f.svc.require(request,[uid],tx),e=>e.getStatus()===409);assert.equal(network,0);
   await f.svc.prepare(request,[uid]);const before=f.queries();
-  f.orth.studyAccessMetadata=async()=>{throw Error('network inside transaction');};
+  f.orth.studyIdentityResources=async()=>{throw Error('network inside transaction');};
   await f.svc.require(request,[uid],tx);assert.equal(network,1);assert.equal(f.queries(),before);
   const changed=policy();changed.rules[0].patientId='OTHER';
   const changedTx={$queryRaw:async(strings)=>strings.join('?').includes('pg_advisory')?[]:[{institution:caller.institution,revision:2,policy:changed}]};
   await assert.rejects(f.svc.require(request,[uid],changedTx),e=>e.getStatus()===404);
+});
+
+// WORKLIST-SPLIT-UID TEST-WSU-04: one UID answered by two patient resources. The policy is applied to every resource on
+// its own and AND-ed; the single-UID preparation (all resources of that UID) and the batch preparation (every enumeration
+// row) decide the same way in both resource orders, and another UID keeps its own answer.
+test('TEST-WSU-04 policy intersection across every resource, single and batch preparation alike',async()=>{
+  const resourceOf=(pid,date)=>({'0020000D':{Value:[uid]},'00100020':{Value:[pid]},'00080020':{Value:[date]},'00080061':{Value:['CT']}});
+  const other={'0020000D':{Value:['2.25.5678']},'00100020':{Value:['SYN-A']},'00080020':{Value:['20261001']},'00080061':{Value:['CT']}};
+  const r=over=>({patientId:null,modalities:[],dateFrom:null,dateTo:null,studyUids:[],...over});
+  const cases=[['A only',[r({patientId:'SYN-A'})],false],['B only',[r({patientId:'SYN-B'})],false],
+    ['each resource by its own rule',[r({patientId:'SYN-A'}),r({patientId:'SYN-B'})],true],
+    ['A patient with B date (a joined tuple)',[r({patientId:'SYN-A',dateFrom:'2026-10-05',dateTo:'2026-10-05'})],false],
+    ['explicit UID keeps its meaning',[r({studyUids:[uid]})],true],['all keeps its meaning',[{all:true}],true]];
+  for(const [label,rules,expected] of cases)for(const order of [[resourceOf('SYN-A','20261001'),resourceOf('SYN-B','20261005')],[resourceOf('SYN-B','20261005'),resourceOf('SYN-A','20261001')]]){
+    const p={version:1,restricted:true,startsAt:null,endsAt:null,rules};
+    const f=service([{revision:1,policy:p}]);
+    f.orth.studyIdentityResources=async asked=>asked===uid?order:[other];f.orth.studyIdentities=async()=>[order[0],other,order[1]];
+    const single={...caller},batch={...caller};
+    await f.svc.prepare(single,[uid]);await f.svc.prepare(batch);
+    assert.equal((await f.svc.allowed(single,[uid])).has(uid),expected,label+' single');
+    assert.equal((await f.svc.allowed(batch,[uid,'2.25.5678'])).has(uid),expected,label+' batch');
+    if(rules.some(x=>x.patientId==='SYN-A'&&!x.dateFrom))assert.equal((await f.svc.allowed(batch,['2.25.5678'])).has('2.25.5678'),true,label+' other UID');
+    if(expected)await f.svc.require({...caller},[uid]);else await assert.rejects(f.svc.require({...caller},[uid]),e=>e.getStatus()===404);
+  }
+});
+// TEST-WSU-08 (shared part): the request's source observation is its own contract, outside the policy decision.
+test('TEST-WSU-08 source observation: split 409, unobservable or unprepared 503, none and one pass, per request only',async()=>{
+  const f=service([]),one=[{'0020000D':{Value:[uid]}}];let answer=one;
+  f.orth.studyIdentityResources=async()=>{if(answer instanceof Error)throw answer;return answer;};
+  const code=(fn,status,wanted)=>assert.throws(fn,e=>e.getStatus()===status&&e.getResponse().code===wanted);
+  const c1={...caller};code(()=>f.svc.assertUnsplitSource(c1,uid),503,'STUDY_SOURCE_UNAVAILABLE');
+  await f.svc.prepareSourceIdentity(c1,[uid]);f.svc.assertUnsplitSource(c1,uid);
+  answer=[...one,...one];f.svc.assertUnsplitSource(c1,uid);   // the same request keeps its own observation
+  const c2={...caller};await f.svc.prepareSourceIdentity(c2,[uid]);code(()=>f.svc.assertUnsplitSource(c2,uid),409,'STUDY_IDENTITY_UNRESOLVED');
+  answer=[];const c3={...caller};await f.svc.prepareSourceIdentity(c3,[uid]);f.svc.assertUnsplitSource(c3,uid);
+  answer=Error('transport');const c4={...caller};await f.svc.prepareSourceIdentity(c4,[uid]);code(()=>f.svc.assertUnsplitSource(c4,uid),503,'STUDY_SOURCE_UNAVAILABLE');
+  // An unrestricted caller still observes; the policy (unrestricted) and the import gate are not this contract.
+  answer=[...one,...one];const c5={...caller};assert.deepEqual([...await f.svc.allowed(c5,[uid])],[uid]);await f.svc.require(c5,[uid]);
 });
 
 // S7-U4a fix1 (Astra S7-U4a-R-001 F02): snapshot() passes the original error on as the 503's cause. What every caller gets
