@@ -60,7 +60,10 @@ export class PacsReportDraft {
 
   private async reportDraftGate(uid: string, c: Caller, tx: any) {
     need(c.roles, 'radiologist', '판독문 저장');
-    return this.reportDraftRules(await this.access.gate(uid,c,tx), c);
+    const prev = await this.access.gate(uid,c,tx);
+    // WORKLIST-SPLIT-UID: observed before the transaction by the caller (dictationGate); refused inside the scope only.
+    if (prev) this.studyAccess.assertUnsplitSource(c, uid);
+    return this.reportDraftRules(prev, c);
   }
 
   /**
@@ -83,7 +86,9 @@ export class PacsReportDraft {
       work: (tx: Prisma.TransactionClient, state: any,
         audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>) => Promise<T>): Promise<T> {
     const me = inst(c);
-    await draftBounded(prepare());
+    // WORKLIST-SPLIT-UID: the request's own source observation is part of the same bounded preparation, outside the
+    // transaction; no Orthanc read ever happens under the study lock.
+    await draftBounded((async () => { await prepare(); await this.studyAccess.prepareSourceIdentity(c, [uid]); })());
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       if (session !== null) {
@@ -95,6 +100,9 @@ export class PacsReportDraft {
       const states = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       const state = states[0];
       if (!state || !this.access.visible(state, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
+      // Every draft change, clear, discard, forced discard and commit of a UID two patient resources answer is refused
+      // before any write: no Verified or emergency state makes either patient's header the report's patient.
+      this.studyAccess.assertUnsplitSource(c, uid);
       if (state.draftEpoch !== epoch) throw draftConflict();
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
       return work(tx, state, audit);
@@ -146,9 +154,11 @@ export class PacsReportDraft {
     need(c.roles, 'radiologist', '판독문 초안 조회');
     const owner: DraftOwner = { institution: inst(c), sub: c.sub, author: c.actor };
     await this.studyAccess.prepare(c,[uid]);
+    await this.studyAccess.prepareSourceIdentity(c,[uid]);
     return this.prisma.$transaction(async tx => {
       const state = await this.access.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
+      this.studyAccess.assertUnsplitSource(c, uid);
       if (!canReadPreliminary(state, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
@@ -157,6 +167,7 @@ export class PacsReportDraft {
   }
 
   async dictationGate(uid: string, c: Caller) {
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
     return this.access.scopeWrite(uid, c, async tx => { await this.reportDraftGate(uid, c, tx); });
   }
 

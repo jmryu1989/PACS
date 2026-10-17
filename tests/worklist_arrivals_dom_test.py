@@ -58,6 +58,9 @@ IDENTITY = "\n".join(extract_function(MAIN, name) for name in ("applyStudyIdenti
 # S4-U4: renderObservation now draws Now Retry, and the request is the shipped function too. The slice starts at
 # `function`, so its `async` is put back here; api() and KinAuth.has() are the harness's recorded stand-ins.
 RETRY = "async " + extract_function(MAIN, "requestGatewayRetry")
+# WORKLIST-SPLIT-UID: the poll hands the completed list's identityIssues to the shipped rule. Sliced the same way; the
+# replies below carry none, so it returns at once and draws nothing (tests/worklist_split_uid_dom_test.py drives it).
+SPLIT = "\n".join(extract_function(MAIN, name) for name in ("applyIdentityIssues", "renderIdentityIssues"))
 # S7-U5: the sliced functions pass their writes through the page's work-context gate. The shipped module is loaded as it
 # is and follows a session that is at work for the whole case (the gate's own transitions are tests/session_work_gate_test.cjs's
 # and tests/auth_logout_dom_test.py's); accountReplaced() is main.html's bound identity check, which has no server here.
@@ -108,6 +111,8 @@ OBSERVESTATE
 ORDERSTATE
 IDENTITYSTATE
 RETRYSTATE
+let studyIdentityIssues=new Set();
+SPLITSTATE
 $('#receipt-retry').addEventListener('click',requestGatewayRetry);
 function syncStudy(uid){const study=studies.find(item=>item.uid===uid),state=appState[uid];if(!study||!state)return;for(const key of ['rs','ss','em','holder','version'])if(state[key]!==undefined)study[key]=state[key]}
 function render(){renders++;rows.innerHTML=studies.map(s=>`<tr data-uid="${s.uid}"><td data-count>${s.count}</td><td data-series>${s.series}</td></tr>`).join('')}
@@ -119,7 +124,7 @@ window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(app
 render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
    .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
-   .replace("WORKCONTEXT", WORK).replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY)
+   .replace("WORKCONTEXT", WORK).replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY).replace("SPLITSTATE", SPLIT)
 
 OWNER = ["hospital", "reader-sub"]
 

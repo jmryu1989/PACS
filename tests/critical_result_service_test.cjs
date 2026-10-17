@@ -225,7 +225,9 @@ async function world({ policies = {} } = {}) {
   const orthanc = new Proxy({}, { get: (_t, name) => async (...args) => {
     log.push('orthanc:' + String(name));
     if (w.orthancFail) throw new Error('SYNTHETIC Orthanc down');
-    if (name === 'reportPreviewStudy' || name === 'studyAccessMetadata') return source(args[0]);
+    if (name === 'reportPreviewStudy') return source(args[0]);
+    // WORKLIST-SPLIT-UID: one study's access preparation reads every resource of that UID (one here).
+    if (name === 'studyIdentityResources') return [source(args[0])];
     if (name === 'studyIdentities') return (await base.$queryRaw`SELECT uid FROM "StudyState" ORDER BY uid`).map(row => source(row.uid));
     return null;
   } });
@@ -459,7 +461,7 @@ test('SV06 Keycloak, Orthanc and source-tag reads end before the transaction; a 
   await w.svc.read(id(34), S());
   await w.svc.recipients(UID, S());
   assert.deepEqual(networkInside(w.log), [], 'no Keycloak or Orthanc call inside any transaction callback');
-  assert.ok(w.log.includes('orthanc:studyAccessMetadata') && w.log.includes('orthanc:studyIdentities') && w.log.includes('orthanc:reportPreviewStudy'));
+  assert.ok(w.log.includes('orthanc:studyIdentityResources') && w.log.includes('orthanc:studyIdentities') && w.log.includes('orthanc:reportPreviewStudy'));
   // failures before the transaction: 503 UNAVAILABLE, no transaction, no write
   for (const [label, fail] of [['DB rights', 'rightsFail'], ['Orthanc', 'orthancFail']]) {
     const f = await world();

@@ -33,6 +33,28 @@ test('cancel and superseded responses cannot overwrite new checkpoint; changed o
  who=['other','subject'];await assert.rejects(client.read(),e=>e.ownerChanged===true);
 });
 
+// WORKLIST-SPLIT-UID TEST-WSU-03/07: the completing page's identityIssues travel with the completed, owner-checked batch.
+// A middle page says nothing about them; a completing page without the field is unknown (null), never []; a malformed
+// field refuses the batch; a cancelled or superseded read never publishes its issues.
+test('identity issues come only with the completed batch, unknown stays null and malformed refuses',async()=>{
+ const issue={uid:'9999',code:'STUDY_IDENTITY_UNRESOLVED'};
+ const paged=(issues,middle)=>path=>{if(path==='/me')return me;const offset=Number(new URL('http://local'+path).searchParams.get('after')||0),body=page(offset);
+  if(offset===200&&issues!==undefined)body.identityIssues=issues;if(offset===0&&middle!==undefined)body.identityIssues=middle;return body;};
+ const read=async(request,options)=>create({identity:()=>owner,changed:()=>{},request:async p=>request(p)}).read(options);
+ assert.deepEqual((await read(paged([issue]))).identityIssues,[issue]);
+ assert.deepEqual((await read(paged([]))).identityIssues,[]);
+ assert.equal((await read(paged(undefined))).identityIssues,null);
+ assert.equal((await read(paged(undefined,[issue]))).identityIssues,null,'a middle page is not the answer');
+ for(const bad of [{},[{uid:''}],[{uid:'9999'}],[null],'x'])await assert.rejects(read(paged(bad)),e=>e.stale===true);
+ // A read superseded before it completes never hands its issues to anyone.
+ let release,first=true;const client=create({identity:()=>owner,changed:()=>{},request:async path=>{
+  if(first&&path.includes('after=200')){first=false;await new Promise(r=>release=r);}return paged([issue])(path);}});
+ const old=client.read();while(!release)await new Promise(r=>setImmediate(r));
+ const next=client.read();release();
+ await assert.rejects(old,e=>e.stale===true);
+ assert.deepEqual((await next).identityIssues,[issue]);
+});
+
 test('request timeout retains retry checkpoint and explicit cancel alone pauses polling',async()=>{
  const client=create({identity:()=>owner,changed:()=>{},timeoutMs:5,request:async(path,signal)=>new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(Object.assign(new Error('timeout'),{name:'AbortError'}))))});
  await assert.rejects(client.read(),e=>e.name==='AbortError');assert.equal(client.resumable,true);assert.equal(client.paused,false);

@@ -337,11 +337,16 @@ export function clinicianPagination(pagination: any) {
 /**
  * 임상의 목록 응답. 워크리스트 응답에서 studies(좁힌 행)·serverTime·pagination만 남긴다 —
  * observedAt·notObserved·orderReconciliation은 기사·엔지니어링 화면의 칸이라 버린다.
+ * WORKLIST-SPLIT-UID: 목록을 끝내는 응답의 identityIssues는 UID와 코드만 새로 만들어 싣는다. "정상 검사 0건"과
+ * "환자 식별 불일치로 제외됨"을 화면이 구분하게 하는 최소 칸이다 — 환자·기관·판독 칸은 어느 경우에도 없다.
  */
 export function clinicianList(list: any, snapshots: any[]) {
   const byUid = new Map((Array.isArray(snapshots) ? snapshots : []).map(snapshot => [snapshot?.uid, snapshot]));
   const studies = (Array.isArray(list?.studies) ? list.studies : []).map((row: any) => clinicianStudyRow(row, byUid.get(row?.uid)));
   return { studies, serverTime: typeof list?.serverTime === 'string' ? list.serverTime : null,
+    ...(Array.isArray(list?.identityIssues) ? { identityIssues: list.identityIssues
+      .filter((issue: any) => typeof issue?.uid === 'string' && typeof issue?.code === 'string')
+      .map((issue: any) => ({ uid: issue.uid as string, code: issue.code as string })) } : {}),
     ...(list?.pagination ? { pagination: clinicianPagination(list.pagination) } : {}) };
 }
 

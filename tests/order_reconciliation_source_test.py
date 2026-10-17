@@ -398,9 +398,9 @@ class ServerPins(unittest.TestCase):
         self.assertNotIn("accession", SEED, "the product never invents a seed accession")
 
     def test_identity_enumeration_default_is_unchanged_and_accession_is_opt_in(self):
-        self.assertIn("async studyIdentities(accessMetadata = false, accession = false): Promise<any[]> {", ORTHANC)
-        self.assertIn("RequestedTags:['StudyInstanceUID','InstitutionName',\n        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] });", ORTHANC)
-        self.assertIn("Object.assign(source, { '00080050': { Value:[typeof value === 'string' ? value : ''] } });", ORTHANC)
+        # WORKLIST-SPLIT-UID (spec F05, D73): the request and the carried accession are asserted on the compiled public
+        # studyIdentities() over a recording transport, not on its source text.
+        assert_behaviour('study_source_test.cjs', '^TEST-WSU-01 enumeration default')
         assert_behaviour('order_reconciliation_server_test.cjs', '^S4-U2 paged list')
 
 

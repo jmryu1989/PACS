@@ -112,7 +112,9 @@ function fixture({ state = STATE,
     reportDraft: { findUnique: async () => row },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
-  const studyAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() };
+  // WORKLIST-SPLIT-UID: the request's source observation answers one resource per UID here.
+  const studyAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set(),
+    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} };
   const findings = { readableFindings: async () => [] };
   // S9-U0b: the catalog seam (P7) lives on the report evidence concern. The write paths and the read are the report
   // concerns PacsService forwards these four calls to, composed here as the facade composes them, over this fixture's store.
@@ -527,7 +529,8 @@ test('the injection seam validates BEFORE it replaces, so a refused catalog chan
    * "non-empty" check would pass even while an injected catalog leaked across instances. What the
    * shipped constant actually IS stays pinned independently, by canonical hash, in the next test.
    */
-  const stubAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() };
+  const stubAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set(),
+    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} };
   const untouched = new PacsReportEvidence({}, stubAccess, { readableFindings: async () => [] }, new PacsAccess({}, stubAccess));
   assert.deepEqual([...untouched.structureCatalog], [...structure.STRUCTURE_CATALOG],
     'an untouched instance must still hold the shipped catalog, not an injected one');
