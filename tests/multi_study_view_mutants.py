@@ -49,8 +49,10 @@ MUTANTS = [
     dict(id='M04-scope', spec=True, title='the last member skips the visibility, own-institution and tele checks', file=SERVICE,
          case='W9API-03', expect='must be judged on its own',
          old=MEMBER_LOOP, new='      for (const m of members.slice(0, -1)) {\n        if (!m.state ||'),
+    # The post-read source-tag match (SRW9-1) still refuses this member, so the kill is the pre-read rule: a member StudyAccess
+    # refuses is never read at all.
     dict(id='M04-access', spec=True, title='the last member skips the StudyAccess decision', file=SERVICE,
-         case='W9API-04', expect='StudyAccess refusal must be applied',
+         case='W9API-04', expect='only allowed members are read by the resolve',
          old='      for (const m of candidates) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;',
          new='      for (const m of candidates.slice(0, -1)) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;'),
     dict(id='M05-admin', spec=True, title='admin gets an other-institution exception', file=SERVICE,
@@ -136,6 +138,10 @@ MUTANTS = [
          old="      if (!(refs instanceof Map) || refs.size !== ready.length || new Set(refs.values()).size !== ready.length\n"
              "          || ready.some(m => typeof refs.get(m.uid) !== 'string' || !refs.get(m.uid))) {",
          new='      if (!(refs instanceof Map)) {'),
+    dict(id='X18-served-rows-unmatched', title='the served rows are not held to a source-tag policy (SRW9-1)', file=SERVICE,
+         case='W9API-19', expect='a row the policy refuses must never be served',
+         old='        else if (sourcePolicy && !m.rows.every(row => this.studyAccess.matches(policy, m.uid, row))) m.code = W9_MEMBER_UNAVAILABLE;',
+         new='        else if (false) m.code = W9_MEMBER_UNAVAILABLE;'),
 ]
 NOT_APPLICABLE = {
     'M16': 'metadata/other-member reference accepted as an image display: the view-observations route is not in W9-API (D1500 D-6, Module A)',
@@ -152,7 +158,7 @@ def tap_cases(text):
     """Top-level `ok`/`not ok` lines and the YAML block that follows each (node --test-reporter=tap)."""
     cases, lines = {}, text.replace('\r\n', '\n').split('\n')
     for index, line in enumerate(lines):
-        match = re.match(r'^(not ok|ok) \d+ - (.*?)( # SKIP.*)?$', line)
+        match = re.match(r'^(not ok|ok) \d+ - (.*?)( # (?:SKIP|TODO).*)?$', line)
         if not match:
             continue
         block = []
@@ -168,7 +174,9 @@ def run(tree, out_dir, pattern=None):
     node = shutil.which('node')
     if not node:
         raise SystemExit('node is not on PATH')
-    command = [node, '--test', '--test-reporter=tap'] + ([f'--test-name-pattern={pattern}'] if pattern else []) + [str(TEST)]
+    # A bounded heap per variant run (host rule D1507): a runaway variant fails as a crash (broken), never as a kill.
+    command = [node, '--max-old-space-size=3072', '--test', '--test-reporter=tap'] + \
+        ([f'--test-name-pattern={pattern}'] if pattern else []) + [str(TEST)]
     env = dict(os.environ, KIN_TEST_API_SRC=str(tree))
     done = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, timeout=600)
     text = done.stdout.decode('utf-8', 'replace') + '\n' + done.stderr.decode('utf-8', 'replace')

@@ -84,6 +84,11 @@ export type TransferOutcome = 'ended' | 'aborted';
  * The access-record port of the resolve (spec §7 prepareMember/finishTransfer over the existing B1 store). prepare() resolves
  * only when every target's provide-prepared event is durable; finish() records the observed transfer of that body. The
  * owner and the event planner are the shared Module A on the EMR-B2 base (consult D1483, D1500 D-2); they bind here.
+ *
+ * Binding precondition: no real store is bound here before the resolve re-checks the caller's membership and session
+ * (EMR-B2 verified request facts) between the source wait and prepare(); this build has no such seam (W9API-20, pending).
+ * A prepare() that rejects owns what it already made durable: it records those events' end (aborted / storage-failed)
+ * through its own journal before rejecting, because the resolve sends no body and calls no finish() after a rejection.
  */
 export abstract class ViewingSetAccess {
   abstract prepare(provision: ViewingSetProvision): Promise<ViewingSetReceipts>;
@@ -180,9 +185,14 @@ export class MultiStudyViewService {
       // A-03: only the admitted members' sources, each failure its own; then the one-resource rule before any key.
       const admitted = members.filter(m => !m.code);
       await this.readSources(admitted, deadline.signal);
+      // StudyAccess decided on the source rows its own preparation read. What is served is this later read, so a policy
+      // that reads source tags must hold for every row served (the same per-resource AND); a tag that changed between the
+      // two reads makes that member unavailable like any other refusal, before the split answer can name it.
+      const sourcePolicy = this.studyAccess.needsMetadata(policy);
       for (const m of admitted) {
         if (!Array.isArray(m.rows)) m.code = W9_LOAD_FAILED;
         else if (!m.rows.length) m.code = W9_MEMBER_UNAVAILABLE;
+        else if (sourcePolicy && !m.rows.every(row => this.studyAccess.matches(policy, m.uid, row))) m.code = W9_MEMBER_UNAVAILABLE;
         else if (unresolvedSource(m.rows)) m.code = STUDY_IDENTITY_UNRESOLVED;
         else {
           const patientId = m.rows[0]?.['00100020']?.Value?.[0];

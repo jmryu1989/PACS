@@ -633,3 +633,40 @@ test('W9API-18 T16 server part: the real route key, its EMR classification and t
   assert.equal(clinicianRouteAllowed(key), false, 'a clinician-only member is refused by the guard before the service');
   assert.equal(routeContract(key).operation, 'read');
 });
+
+test('W9API-19 T03 A-02/A-03 (SRW9-1): a source-tag policy holds for every row the resolve serves, not only for the rows StudyAccess read', async () => {
+  // StudyAccess prepares from its own source read; the resolve serves a later read. Between the two, the PatientID changes.
+  const moved = (w, uids) => { w.onRead = uid => { if (uids.includes(uid)) w.byUid.get(uid).rows = [sourceRow(uid, { pid: 'SYN-PID-2' })]; }; };
+  const both = [study({ pid: 'SYN-PID-1' }), study({ pid: 'SYN-PID-1' })];
+  const w = world(both, { policy: patientRule('SYN-PID-1') });
+  moved(w, ids(both));
+  const served = 'a row the policy refuses must never be served';
+  const answer = await opens(resolveFor(w, reader(), body(ids(both))), served);
+  assert.deepEqual([codes(answer), answer.scopeStatus, answer.sourcePatientKey], [[MU, MU], 'rejected', null], served);
+  assert.equal(w.port.prepared.length, 0, 'nothing refused is provided');
+  assert.ok(!JSON.stringify(answer).includes('SYN-PID-2'), 'the refused PatientID is not in the answer');
+  // one member moved: that member is unavailable at its place, the other stays ready (not a patient mismatch)
+  const one = [study({ pid: 'SYN-PID-1' }), study({ pid: 'SYN-PID-1' })];
+  const w1 = world(one, { policy: patientRule('SYN-PID-1') });
+  moved(w1, [one[1].uid]);
+  const partial = await opens(resolveFor(w1, reader(), body(ids(one))), served);
+  assert.deepEqual(codes(partial), ['ready', MU], 'the moved member is unavailable at its place');
+  assert.deepEqual(w1.port.prepared[0].targets.map(t => t.uid), [one[0].uid]);
+  // every resource of a UID: one served resource outside the policy refuses the member before any split answer names it
+  const splitUid = nextUid();
+  const split = study({ uid: splitUid, rows: [sourceRow(splitUid, { pid: 'SYN-PID-1' }), sourceRow(splitUid, { pid: 'SYN-PID-1' })] });
+  const ws = world([one[0], split], { policy: patientRule('SYN-PID-1') });
+  ws.onRead = uid => { if (uid === splitUid) ws.byUid.get(uid).rows = [sourceRow(splitUid, { pid: 'SYN-PID-1' }), sourceRow(splitUid, { pid: 'SYN-PID-3' })]; };
+  assert.deepEqual(codes(await opens(resolveFor(ws, reader(), body(ids([one[0], split]))), 'a split read')), ['ready', MU],
+    'a served resource outside the policy refuses the member before the split answer');
+  // control: unchanged rows under the same policy open, and an unrestricted caller is not held to source tags
+  const wc = world(one, { policy: patientRule('SYN-PID-1') });
+  assert.deepEqual(codes(await opens(resolveFor(wc, reader(), body(ids(one))), 'unchanged rows')), ['ready', 'ready']);
+  const wu = world(both);
+  moved(wu, ids(both));
+  assert.deepEqual(codes(await opens(resolveFor(wu, reader(), body(ids(both))), 'an unrestricted caller')), ['ready', 'ready']);
+});
+
+// SRW9-2 binding precondition: Module A binds a real store only when this case runs - EMR-B2 verified request facts let the
+// resolve re-check the caller's membership and session between the source wait and prepare() (A-05 remainder).
+test.todo('W9API-20 a membership or session change during the source wait refuses the resolve before prepare (pending: EMR-B2 request facts)');
