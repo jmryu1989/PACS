@@ -24,6 +24,12 @@ Round 6 (consult-checkpoints-r6-20261017): the Orthanc image's own start artifac
 role on its pinned image, judged against what that image regenerates (regenerated_descriptor, layer_verdicts) with the
 judgement kept and re-judged at every consumption (layer_valid); and the native smoke's body and cleanup bounds are
 real deadlines of every blocking call (Deadline, run_bounded, DeadlineRunner).
+
+Round 7 (consult-checkpoints-r7-20261017, CKPT6-01): that record is a closed five-role map whose every row is judged
+against the capture it describes - the bound capture snapshot, the boundary facts taken before the stop, the owned and
+target names and the side's pinned image - by one implementation (layer_valid over layer_context) at its generation
+before store.begin, in load_bundle, in the index from the raw records, at every consumption of a BOUND index
+(rejudged_reasons), at parent admission and before a restore.
 """
 from __future__ import annotations
 
@@ -1170,44 +1176,235 @@ def write_layer(fixture_root, bindings, roles, *, checkpoint_id, summary, descri
     return {"path": rel, "sha256": sha256(raw)}, refused
 
 
-def layer_valid(raw, *, checkpoint_id, observation_sha256, request_sha256, descriptor_raw, image_ids=None):
-    """One writable-layer record at its consumption: canonical, ACCEPTED, bound to this capture observation and its
-    descriptor, every role present, and every recorded verdict exactly what the contract gives for the recorded facts
-    (a role, container, image or descriptor substituted is re-judged and refused). Returns the record."""
+# r7 (consult-checkpoints-r7-20261017 layer_valid_contract, CKPT6-01): the record's closed schema. r6 skipped a role row
+# that was not an object and believed `absent: true`, so a null row, a false absence or another container's ID or
+# image sealed and indexed BOUND. Every row is now closed and judged against the capture it claims to describe.
+LAYER_KEYS = frozenset(("schema", "kind", "checkpoint", "observation", "descriptor_sha256", "roles", "outcome", "refused", "judged_utc"))
+LAYER_PRESENT_KEYS = frozenset(("absent", "container_id", "container_name", "image", "mounts", "changes", "facts", "layer_observable",
+                                "verdicts"))
+LAYER_ABSENT_KEYS = frozenset(("absent", "container_name"))
+LAYER_FACT_KEYS = {"absent": frozenset(("type",)), "file": frozenset(("type", "mode", "uid", "gid", "size", "sha256", "text")),
+                   **{kind: frozenset(("type", "mode", "uid", "gid")) for kind in ("dir", "link", "whiteout", "other")}}
+SNAPSHOT_CONTAINER_KEYS = frozenset(("id", "image", "running", "restarting", "project", "service"))
+LAYER_CHANGE = re.compile(r"([ACD]) (/.*)")
+
+
+def _posix_absolute(value):
+    """A normalised absolute POSIX path (a mount destination, a diff path, a fact path)."""
+    return (type(value) is str and value.startswith("/") and not value.startswith("//") and "\x00" not in value
+            and posixpath.normpath(value) == value)
+
+
+def _layer_fact(fact):
+    """One lstat fact of a writable-layer path, with exactly its kind's keys and non-negative integer metadata."""
+    if type(fact) is not dict or fact.get("type") not in LAYER_FACT_KEYS or set(fact) != LAYER_FACT_KEYS[fact["type"]]:
+        return False
+    if fact["type"] == "absent":
+        return True
+    natural = lambda value: type(value) is int and value >= 0  # noqa: E731
+    if not all(natural(fact[key]) for key in ("mode", "uid", "gid")) or fact["mode"] > 0o7777:
+        return False
+    return fact["type"] != "file" or (natural(fact["size"]) and type(fact["sha256"]) is str and HASH.fullmatch(fact["sha256"]) is not None
+                                      and fact["text"] in ("placeholder", "hex8-lf", "other"))
+
+
+def layer_valid(raw, *, checkpoint_id, observation, observation_files, identity, boundary, owned, plan, state_raw, target_names):
+    """One writable-layer record at its consumption, judged in the complete bound context of its capture (every input is
+    required; none may be omitted to skip a check): `observation` the seal's binding of the capture observation and
+    `observation_files` that folder's bytes (re-judged by observation_valid: snapshot, request, descriptor); `identity`,
+    `boundary` (its facts, taken before the stop) and `owned` (the stack's container names) of the manifest; the lineage
+    stack's `plan` document and the bound state bytes S (`state_raw`), which pick the pinned side; `target_names`, the
+    containers of the bound target (the raw evidence has no target, so the index passes the owned names).
+    The record is canonical with exactly its envelope keys, ACCEPTED with an empty refused list, and judges exactly the
+    five roles. A present row has exactly its nine typed fields; its container ID, name, image and mount destinations
+    are the capture's (snapshot, boundary facts, owned/target name, the side's pin) and its verdicts are exactly what
+    layer_verdicts gives again, none refused. An absent row has exactly `absent: true` and the bound name, and only a
+    role the capture observed ABSENT (never a stopped one) may be one. Returns the record; LAYER_INVALID otherwise."""
     def fail(reason):
         raise Refused("LAYER_INVALID", reason)
+    if (type(observation) is not dict or type(observation_files) is not dict or type(identity) is not dict or type(boundary) is not dict
+            or type(owned) is not dict or type(plan) is not dict or type(state_raw) is not bytes or type(target_names) is not dict):
+        fail("the bound capture, plan, state, boundary facts or container names are missing")
+    if sha256(observation_files.get(OBSERVATION_RESULT) or b"") != observation.get("sha256"):
+        fail("the bound capture observation is not the one the seal binds")
     try:
+        summary, request = observation_valid(observation_files, checkpoint_id=checkpoint_id, purpose="capture",
+                                             plan_sha256=identity.get("plan_sha256"), state_sha256=sha256(state_raw))
+    except Refused as error:
+        fail("the bound capture observation: " + str(error))
+    try:
+        state, snapshot = json.loads(state_raw), json.loads(observation_files["snapshot.json"])
+        descriptor_raw = observation_files[REGENERATED_FILE]
+        descriptor, plan_sha = json.loads(descriptor_raw), intro.plan_identity(plan)
         record = json.loads(raw)
-        descriptor = json.loads(descriptor_raw)
-    except (TypeError, ValueError):
-        fail("the record or its descriptor is unreadable")
-    if type(record) is not dict or raw != canonical(record) + b"\n" or record.get("kind") != LAYER_KIND:
-        fail("not a canonical writable-layer record")
-    if record.get("checkpoint") != checkpoint_id or record.get("outcome") != "ACCEPTED" or record.get("refused"):
-        fail("another checkpoint, or a refused judgement")
-    observed = record.get("observation") or {}
-    if observed.get("sha256") != observation_sha256 or observed.get("request_sha256") != request_sha256:
-        fail("the record judges another capture observation")
-    if record.get("descriptor_sha256") != sha256(descriptor_raw) or type(descriptor) is not dict:
-        fail("the record judges with another descriptor")
-    if descriptor.get("applicable") is True and image_ids is not None:
-        pinned = {(image_ids.get(side) or {}).get(REGENERATED_ROLE) for side in ("previous", "release") if type(image_ids.get(side)) is dict}
-        if descriptor.get("pinned_image") not in pinned:
-            fail("the descriptor's image is not the bundle's pinned Orthanc image")
-    roles = record.get("roles") if type(record.get("roles")) is dict else {}
-    if set(roles) != set(intro.ROLES):
-        fail("the record does not judge every role")
-    for role, row in sorted(roles.items()):
-        if type(row) is not dict or row.get("absent") is True:
+    except (KeyError, TypeError, ValueError):
+        fail("the record, the bound state, snapshot or descriptor is unreadable")
+    # The plan and the side whose pins the boundary's ComposeEntry generation used (consultation C5).
+    if type(state) is not dict or not plan_sha == identity.get("plan_sha256") == state.get("plan_sha256") == request.get("plan_sha256"):
+        fail("the plan document, the state S, the observation request and the identity name different plans")
+    entry = state.get("entry_checkout", state.get("checkout"))
+    if entry not in ("previous", "target"):
+        fail("the state S names no checkout side its pinned images come from")
+    sides = {side: (plan.get(side) or {}).get("images") if type(plan.get(side)) is dict else None for side in ("previous", "release")}
+    images = identity.get("image_ids")
+    if type(images) is not dict or any(type(value) is not dict or images.get(side) != value for side, value in sides.items()):
+        fail("the identity's image IDs are not the plan's two sides")
+    side = "release" if entry == "target" else "previous"
+    pins = sides[side]
+    if any(IMAGE_ID.fullmatch(str(pins.get(role))) is None for role in intro.ROLES):
+        fail("the plan's " + side + " side does not pin an image ID of every role")
+    stack = owned.get("stack") if type(owned.get("stack")) is dict else {}
+    names, projects = stack.get("containers"), owned.get("projects")
+    if (type(names) is not dict or type(projects) is not list
+            or any(type(names.get(role)) is not str or not names[role] or target_names.get(role) != names[role] for role in intro.ROLES)):
+        fail("the owned container names are not the bound target's")
+    # What the capture observed (consultation C2/C3): an explicit OK or ABSENT per role in its snapshot, and the
+    # boundary facts the seal took before the stop for exactly the present ones.
+    observed = (((snapshot.get("facts") or {}).get("containers") or {}).get("value") if type(snapshot) is dict else None)
+    if type(observed) is not dict or set(observed) != set(intro.ROLES):
+        fail("the capture snapshot does not observe exactly the five roles")
+    present = {}
+    for role in intro.ROLES:
+        item = observed[role]
+        if item == {"outcome": "ABSENT"}:
             continue
-        try:
-            again = layer_verdicts(role, list(row["changes"]), mounts=row["mounts"], image=row["image"], container_id=row["container_id"],
-                                   descriptor=descriptor, facts=row["facts"])
-        except (KeyError, TypeError, AttributeError):
-            fail("an incomplete role row: " + role)
-        if again != row.get("verdicts") or any(item["verdict"] == "refused" for item in again):
+        value = item.get("value") if type(item) is dict and set(item) == {"outcome", "value"} and item.get("outcome") == "OK" else None
+        if (type(value) is not dict or set(value) != SNAPSHOT_CONTAINER_KEYS or value["service"] != role or type(value["running"]) is not bool
+                or not all(type(value[key]) is str and value[key] for key in ("id", "image", "project"))):
+            fail(role + ": the capture snapshot observed the role neither present (OK) nor ABSENT")
+        present[role] = value
+    facts = boundary.get("facts") if type(boundary.get("facts")) is dict else {}
+    containers = facts.get("containers")
+    if type(containers) is not dict or set(containers) != set(present):
+        fail("the boundary facts do not record exactly the roles the capture observed present")
+    for role, value in present.items():
+        fact = containers[role]
+        if type(fact) is not dict or any(fact.get(key) != value[key] for key in ("id", "image", "project", "running")):
+            fail(role + ": the boundary facts record another container than the capture snapshot")
+        if value["project"] not in projects:
+            fail(role + ": the observed container belongs to another Compose project")
+        mounts = fact.get("mounts")
+        if type(mounts) is not list or not all(type(item) is list and len(item) == 3 and type(item[0]) is str and type(item[1]) is str
+                                               and type(item[2]) is bool for item in mounts):
+            fail(role + ": the boundary mount facts are not [destination, source, rw] rows")
+    # The record's envelope.
+    if type(record) is not dict or raw != canonical(record) + b"\n" or set(record) != LAYER_KEYS or record["kind"] != LAYER_KIND:
+        fail("not a canonical writable-layer record")
+    if type(record["schema"]) is not int or record["schema"] != SCHEMA or type(record["judged_utc"]) is not str:
+        fail("the record's schema or judgement time")
+    if record["checkpoint"] != checkpoint_id or record["outcome"] != "ACCEPTED" or type(record["refused"]) is not list or record["refused"]:
+        fail("another checkpoint, or a refused judgement")
+    if record["observation"] != {"path": observation.get("path"), "sha256": observation.get("sha256"), "request_sha256": summary["request_sha256"]}:
+        fail("the record judges another capture observation")
+    if record["descriptor_sha256"] != sha256(descriptor_raw) or type(descriptor) is not dict:
+        fail("the record judges with another descriptor")
+    # The Orthanc descriptor describes this capture's Orthanc container on the side's pin (consultation C6).
+    if descriptor.get("container_name") != names[REGENERATED_ROLE] or descriptor.get("pinned_image") != pins[REGENERATED_ROLE]:
+        fail("orthanc: the descriptor names another container or another pinned image")
+    orthanc = present.get(REGENERATED_ROLE)
+    claimed = (descriptor.get("container_id"), descriptor.get("actual_image"))
+    if orthanc is None and (claimed != (None, None) or descriptor.get("applicable") is not False):
+        fail("orthanc: the descriptor claims a container the capture observed ABSENT")
+    if orthanc is not None and claimed != (orthanc["id"], orthanc["image"]):
+        fail("orthanc: the descriptor observed another container or image than the capture")
+    roles = record["roles"]
+    if type(roles) is not dict or set(roles) != set(intro.ROLES):
+        fail("the record does not judge exactly the five roles")
+    for role in intro.ROLES:
+        row = roles[role]
+        if type(row) is not dict:
+            fail(role + ": the role row is not an object")
+        if type(row.get("absent")) is not bool:
+            fail(role + ": absent is not a JSON boolean")
+        if row["absent"]:
+            if set(row) != LAYER_ABSENT_KEYS or row["container_name"] != names[role]:
+                fail(role + ": an absent row has exactly absent and the bound container name")
+            if role in present:
+                fail(role + ": recorded absent although the capture observed its container (a stopped container is present)")
+            continue
+        if set(row) != LAYER_PRESENT_KEYS:
+            fail(role + ": the present row's fields are not " + ",".join(sorted(LAYER_PRESENT_KEYS)))
+        if role not in present:
+            fail(role + ": recorded present although the capture observed it ABSENT")
+        if type(row["container_id"]) is not str or row["container_id"] != present[role]["id"]:
+            fail(role + ": container_id is not the container the capture observed")
+        if type(row["container_name"]) is not str or row["container_name"] != names[role]:
+            fail(role + ": container_name is not the bound container name")
+        if type(row["image"]) is not str or IMAGE_ID.fullmatch(row["image"]) is None:
+            fail(role + ": image is not an image ID")
+        if row["image"] != present[role]["image"] or row["image"] != pins[role]:
+            fail(role + ": image is not the observed image of the " + side + " side's pin")
+        mounts = row["mounts"]
+        if type(mounts) is not list or not all(_posix_absolute(item) for item in mounts) or mounts != sorted(set(mounts)):
+            fail(role + ": mounts is not a sorted list of distinct absolute destinations")
+        if set(mounts) != {item[0] for item in containers[role]["mounts"]}:
+            fail(role + ": mounts are not the mount destinations the boundary facts observed")
+        changes = row["changes"]
+        if type(changes) is not list or not all(type(item) is str and LAYER_CHANGE.fullmatch(item) is not None
+                                                and _posix_absolute(LAYER_CHANGE.fullmatch(item).group(2)) for item in changes):
+            fail(role + ": changes is not a list of A/C/D absolute-path diff lines")
+        if len({item[2:] for item in changes}) != len(changes):
+            fail(role + ": a path is listed twice in changes")
+        if type(row["facts"]) is not dict or not all(_posix_absolute(path) and _layer_fact(fact) for path, fact in row["facts"].items()):
+            fail(role + ": facts is not a map of absolute paths to lstat facts")
+        if type(row["layer_observable"]) is not bool or (row["layer_observable"] is False and row["facts"]):
+            fail(role + ": layer_observable is not a JSON boolean, or an unobservable layer carries facts")
+        verdicts = row["verdicts"]
+        if type(verdicts) is not list or not all(type(item) is dict and set(item) == {"change", "verdict"} and type(item["change"]) is str
+                                                 and type(item["verdict"]) is str for item in verdicts):
+            fail(role + ": verdicts is not a list of {change, verdict}")
+        if row["layer_observable"] is False and any(item["verdict"].startswith("regenerated:") for item in verdicts):
+            fail(role + ": an unobservable layer claims a regenerated entry")
+        again = layer_verdicts(role, changes, mounts=mounts, image=row["image"], container_id=row["container_id"], descriptor=descriptor,
+                               facts=row["facts"])
+        if again != verdicts or any(item["verdict"] == "refused" for item in again):
             fail("the recorded verdicts of " + role + " are not the contract's")
     return record
+
+
+def layer_context(manifest, member, folder):
+    """The bound context (layer_valid's arguments but the record) a sealed or about-to-be-sealed volume checkpoint judges
+    its writable layer in, read from one fixture tree: `member(rel)` gives a file's bytes or None, `folder(rel)` the
+    {relative path: bytes} of a folder (the bundle's fixture member, or the fixture root before the seal). The capture
+    observation folder and the state S the bindings name, the lineage stack's plan document and target names from the
+    bound stage context, and the manifest's identity, boundary facts and owned names; nothing is observed again. An
+    unreadable input is passed on as such, for layer_valid to refuse."""
+    bindings = manifest.get("bindings") if type(manifest.get("bindings")) is dict else {}
+    observation, context = bindings.get("observation") or {}, bindings.get("context") or {}
+    try:
+        document = json.loads(member(str(context.get("path"))) or b"null")
+    except ValueError:
+        document = None
+    stacks = document.get("stacks") if type(document) is dict and type(document.get("stacks")) is dict else {}
+    stack = stacks.get(LINEAGE_STACK.get(manifest.get("checkpoint")))
+    stack = stack if type(stack) is dict else {}
+    target = stack.get("target") if type(stack.get("target")) is dict else {}
+    return {"checkpoint_id": manifest.get("checkpoint"), "observation": observation,
+            "observation_files": folder(str(observation.get("path")).rsplit("/", 1)[0]), "identity": manifest.get("identity"),
+            "boundary": manifest.get("boundary"), "owned": manifest.get("owned"), "plan": stack.get("plan_document"),
+            "state_raw": member(str((bindings.get("state") or {}).get("path"))), "target_names": target.get("containers")}
+
+
+def bundle_layer(manifest, directory):
+    """The writable-layer record of a sealed volume bundle, re-read from its fixture member and judged in its bound context
+    (layer_valid over layer_context). Returns the record; LAYER_INVALID otherwise."""
+    tree = Path(directory) / "payload" / "fixture-tree.tar"
+    return layer_valid(tree_member_bytes(tree, str(manifest["bindings"]["layer"].get("path"))),
+                       **layer_context(manifest, lambda rel: tree_member_bytes(tree, rel), lambda rel: tree_folder(tree, rel)))
+
+
+def fixture_layer(manifest, fixture_root):
+    """The same judgement of the record capture_checkpoint just wrote, read from the fixture root before any bundle byte."""
+    root = Path(fixture_root)
+
+    def member(rel):
+        path = root / rel
+        return path.read_bytes() if path.is_file() and not path.is_symlink() else None
+
+    def folder(rel):
+        path = root / rel
+        return folder_files(path) if path.is_dir() and not path.is_symlink() else {}
+    return layer_valid(member(str(manifest["bindings"]["layer"].get("path"))), **layer_context(manifest, member, folder))
 
 
 # ── actual-bytes identity (T03) ──
@@ -1710,15 +1907,14 @@ def load_bundle(directory):
                                            plan_sha256=manifest["identity"]["plan_sha256"], state_sha256=manifest["bindings"]["state"]["sha256"])
         except Refused as error:
             raise Refused("BUNDLE_INVALID", "capture observation: " + str(error)) from None
-        # r6: the post-stop writable-layer judgement of that capture, re-read from the fixture member and re-judged.
+        # r6: the post-stop writable-layer judgement of that capture, re-read from the fixture member and re-judged; r7: in
+        # the bound context of that capture (its snapshot, the boundary facts, the owned and target names, the plan and S).
         layer = manifest["bindings"]["layer"]
         judged = LAYER_BINDING.fullmatch(str(layer.get("path")))
         require(judged is not None and judged.group(1) == found.group(1) and judged.group(2) == summary["request_sha256"][:16],
                 "BUNDLE_INVALID", "the writable-layer binding is not beside the capture observation it judges")
         try:
-            layer_valid(tree_member_bytes(payload / "fixture-tree.tar", layer["path"]), checkpoint_id=manifest["checkpoint"],
-                        observation_sha256=binding["sha256"], request_sha256=summary["request_sha256"], descriptor_raw=files[REGENERATED_FILE],
-                        image_ids=manifest["identity"]["image_ids"])
+            bundle_layer(manifest, directory)
         except Refused as error:
             raise Refused("BUNDLE_INVALID", "writable layer: " + str(error)) from None
     return manifest, directory
@@ -2059,6 +2255,11 @@ def capture_checkpoint(*, checkpoint_id, store, backend, boundary, names, volume
         layer, refused = write_layer(fixture_root, bindings, roles, checkpoint_id=checkpoint_id, summary=summary, descriptor_raw=descriptor_raw)
         require(not refused, "WRITABLE_LAYER", ", ".join(refused[:8]))
         bindings = {**bindings, "layer": layer}
+        # r7 (CKPT6-01): the record just written is judged at once by the contract every consumer applies, in the context
+        # the seal will carry (the capture observation, these boundary facts and owned names, the bound plan and S): a
+        # schema or identity contradiction is LAYER_INVALID here, its raw kept, and nothing is sealed.
+        fixture_layer({"checkpoint": checkpoint_id, "identity": identity, "boundary": boundary, "bindings": bindings,
+                       "owned": {"projects": sorted(owned["projects"]), "stack": owned.get("stack")}}, fixture_root)
     extra = mount_inventory(inventory, names, volumes, fixture_root, owned)
     pending = store.begin(checkpoint_id)
     for name, category, path in extra_members:
@@ -2102,6 +2303,12 @@ def restore_checkpoint(manifest, bundle_dir, *, backend, fixture_root, names, im
     B0 bytes are recomputed from the bundle (bundle_inputs) before the first daemon call or file is created."""
     spec = CHECKPOINTS[manifest["checkpoint"]]
     actions = [("inputs", bundle_inputs(manifest, bundle_dir))]
+    # r7 (CKPT6-01): a manifest loaded earlier is not trusted; the bundle's current bytes are judged again (load_bundle,
+    # the writable layer in its bound context included) and must be the ones the given manifest binds, before any image,
+    # daemon, fixture or product call.
+    current, _ = load_bundle(bundle_dir)
+    require(current["checkpoint"] == manifest["checkpoint"] and current["bindings"] == manifest["bindings"], "BUNDLE_INVALID",
+            "the manifest given is not the bundle's")
     images = manifest["identity"]["image_ids"]
     for side, value in images.items():
         for image in (value.values() if type(value) is dict else [value]):
@@ -3107,9 +3314,19 @@ def observation_reasons(expect, raw, sealed):
             elif data is None or sha256(data) != layer.get("sha256"):
                 reasons.append("the writable-layer record the checkpoint binds is not in the raw evidence")
             elif summary is not None:
+                # r7: in the bound context, from this attempt's raw records (the stack's plan.json and state S) and the
+                # sealed manifest (identity, boundary facts, owned names; the raw evidence carries no target, so the owned
+                # names stand for it here and load_bundle compares the bound target as well).
+                stack = "records-" + found.group(1) + "/"
                 try:
-                    layer_valid(data, checkpoint_id=produces, observation_sha256=binding.get("sha256"), request_sha256=summary["request_sha256"],
-                                descriptor_raw=files.get(REGENERATED_FILE), image_ids=(sealed.get("identity") or {}).get("image_ids"))
+                    plan = json.loads(raw.get(stack + "plan.json") or b"null")
+                except ValueError:
+                    plan = None
+                owned = sealed.get("owned") if type(sealed.get("owned")) is dict else {}
+                try:
+                    layer_valid(data, checkpoint_id=produces, observation=binding, observation_files=files, identity=sealed.get("identity"),
+                                boundary=sealed.get("boundary"), owned=owned, plan=plan, state_raw=raw.get(stack + "state.json"),
+                                target_names=(owned.get("stack") or {}).get("containers") if type(owned.get("stack")) is dict else None)
                 except Refused as error:
                     reasons.append("writable-layer record: " + str(error))
             final = raw.get("records-" + found.group(1) + "/state.json")
@@ -3293,7 +3510,40 @@ def bound_index(proof_root, unit):
     except (KeyError, TypeError, ValueError):
         raise Refused("PARENT_UNBOUND", unit + ": the index or its segment is incomplete") from None
     require(type(segment) is dict, "PARENT_UNBOUND", unit + ": the segment is not an object")
+    reasons = rejudged_reasons(proof_root, unit, index)
+    require(not reasons, "PARENT_UNBOUND", unit + ": its evidence judged again: " + "; ".join(reasons)[:900])
     return index, segment, stdout
+
+
+def rejudged_reasons(proof_root, unit, index):
+    """r7 (CKPT6-01): a BOUND index's evidence judged again at its consumption by the same semantic contract the index
+    applied (observation_reasons: the capture observation and the writable-layer record of the sealed volume checkpoint
+    in its bound context, the restore observation of a consumed one), over the current bytes of the raw records it bound
+    and the sealed manifest, with the expectation derived from the frozen registry (<proof_root>/registry.json) and the
+    attempt's own request (leaf_expectation). A BOUND and matching hashes alone never stand. Returns the reasons."""
+    try:
+        leaves = registry_valid(json.loads((Path(proof_root) / "registry.json").read_bytes()))
+        runs = [attempt for attempt in range(1, MAX_ATTEMPTS + 1)
+                if attempt_paths(proof_root, unit, attempt)["run"].resolve() == Path(index["run_dir"]).resolve()]
+        require(len(runs) == 1, "INDEX_INPUT", "the index names no attempt's run folder")
+        expect = leaf_expectation(leaves, unit, proof_root, runs[0])["expect"]
+    except (OSError, ValueError, TypeError, KeyError, Refused) as error:
+        return ["the registry, the attempt or its request cannot be read again: " + type(error).__name__ + ": " + str(error)[:200]]
+    evidence, raw = Path(index["raw"]["evidence"]), {}
+    for rel, _ in index["raw"]["files"]:
+        try:
+            raw[rel] = (evidence / rel).read_bytes()
+        except OSError:
+            continue
+    sealed = None
+    if index["raw"]["checkpoint"] is not None:
+        try:
+            sealed = json.loads(Path(index["raw"]["checkpoint"]["path"]).read_bytes())
+        except (OSError, ValueError):
+            return ["the sealed checkpoint's manifest is unreadable"]
+    if expect["produces"] and type(sealed) is not dict:
+        return ["the index binds no sealed checkpoint of " + expect["produces"]]
+    return observation_reasons(expect, raw, sealed if type(sealed) is dict else None)
 
 
 def resolve_parent(leaves, unit, proof_root):
@@ -3313,6 +3563,11 @@ def resolve_parent(leaves, unit, proof_root):
     require(sha256(raw) == checkpoint.get("manifest_sha256") == path.parent.name, "PARENT_UNBOUND", "the parent bundle changed")
     require(type(manifest) is dict and manifest.get("checkpoint") == STAGES[leaf["stage"]]["consumes"], "PARENT_UNBOUND",
             "the parent sealed " + str(manifest.get("checkpoint") if type(manifest) is dict else manifest))
+    # r7: the parent reference is issued only for a bundle whose current bytes load (the writable layer included).
+    try:
+        load_bundle(path.parent)
+    except Refused as error:
+        raise Refused("PARENT_UNBOUND", "the parent bundle does not load: " + str(error)) from None
     return {"path": str(path.resolve()), "sha256": sha256(raw)}
 
 

@@ -8,14 +8,21 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M44 and M46-M51 to temporary copies of tests/ops_release_checkpoints.py,
+CheckpointMutationContracts (T18) applies M01-M44 and M46-M54 to temporary copies of tests/ops_release_checkpoints.py,
 (M15-M17, M35) tests/ops_deploy_host_container_test.py and (M51) tests/ops_release_checkpoints_native_test.py only, runs
 the named contract against the unmodified copies (control) and the mutant in fresh processes, and counts a kill only when
 the control passes and the mutant fails an assertion (an import, launch or fixture error is not a kill). M01-M14 are the
 spec's contracts; M15-M30 were added by hardening round 1 for CKPT-01..09 (one or more per finding); M31-M42 by round 3
 for CKPT2-01..06 (M30 retargeted to the new alias keep); M43, M44 and M46 by round 5 (consult-checkpoints-r5-20261016
 new_mutants); M47-M51 by round 6 (consult-checkpoints-r6-20261017 new_mutants M47-M49 and the optional library-bytes and
-residue-release ones).
+residue-release ones); M52-M54 by round 7 (consult-checkpoints-r7-20261017 mutants: a non-object row skipped, an absence
+not corroborated, a row's image not bound).
+
+Round 7 (consult-checkpoints-r7-20261017, CKPT6-01): the writable-layer record is a closed five-role map judged against
+the capture it describes (CheckpointLayerContractTests, oracles O7-*) at its generation, load_bundle, the index, every
+consumption of a BOUND index, parent admission and the restore. The synthetic fixtures now draw every container fact from
+one source (container_ids, boundary_facts_of; the r6 control had two unrelated container IDs and no boundary facts), the
+proof layout seals a real bundle, and the parent-map tests bind their parent through a really recorded index.
 
 Round 6 (consult-checkpoints-r6-20261017): the regenerated-artifact contract of the Orthanc role on its pinned image
 (CheckpointRegeneratedTests: P5 the role x image x kind/type/content/ancestor/mount matrix, P6 the required layer raw at
@@ -158,14 +165,23 @@ def boundary_fixture(checkpoint_id, plan=None):
     return plan, state, result, raw
 
 
-def snapshot_fixture(state, plan, target, sid, *, running=None):
-    """The product's observation schema at a boundary (intro.observed/checkpoint_valid), all facts OK."""
+def container_ids(target, ids=None):
+    """r7: the one source of truth of the synthetic containers' IDs: the ID FakeBackend gives a role's container (or the
+    new IDs a case names), used alike by the snapshot, the boundary facts, the descriptor and the layer rows
+    (consult-checkpoints-r7-20261017 design_doubts_now: the r6 fixture used two unrelated IDs)."""
+    return {role: (ids or {}).get(role, "id-" + target["containers"][role]) for role in intro.ROLES}
+
+
+def snapshot_fixture(state, plan, target, sid, *, running=None, ids=None, absent=()):
+    """The product's observation schema at a boundary (intro.observed/checkpoint_valid), all facts OK (`absent` roles
+    observed ABSENT, a fact the product's schema allows)."""
     side = "release" if state["checkout"] == "target" else "previous"
     desired = set(intro.ROLES) if intro.BOUNDARY_RUNNING[sid] == "all" else set(intro.BOUNDARY_RUNNING[sid].split())
-    desired = desired if running is None else running
-    containers = {role: {"outcome": "OK", "value": {"id": "c" + str(index) * 8, "image": plan[side]["images"][role],
-                                                     "running": role in desired, "restarting": False, "project": target["project"],
-                                                     "service": role}} for index, role in enumerate(intro.ROLES)}
+    desired = (desired if running is None else running) - set(absent)
+    known = container_ids(target, ids)
+    containers = {role: {"outcome": "ABSENT"} if role in absent else
+                  {"outcome": "OK", "value": {"id": known[role], "image": plan[side]["images"][role], "running": role in desired,
+                                              "restarting": False, "project": target["project"], "service": role}} for role in intro.ROLES}
     after = sid in ("L-09b", "L-10e")
     rows = [[name, checksum, True, False] for name, checksum in plan["migrations"]["after" if after else "before"]]
     ingress = "public" if sid in intro.PUBLIC_BOUNDARIES else ("maintenance" if "proxy" in desired else "closed")
@@ -329,6 +345,16 @@ class FakeBackend:
     def mutations(self):
         return [call for call in self.calls if call[0] not in ("inventory", "volume_exists", "diff", "layer_facts")]
 
+    def boundary_facts(self):
+        """What CheckpointDocker.boundary_facts records of these containers (one inspection with the inventory's mounts)."""
+        return {"containers": {role: {"id": item["id"], "image": item["image"], "running": item["running"],
+                                      "project": item["labels"].get("com.docker.compose.project"),
+                                      "mounts": sorted([mount["destination"], mount.get("name") or mount.get("source") or "", True]
+                                                       for mount in item.get("mounts") or [] if mount.get("destination")),
+                                      "networks": []}
+                               for role, name in self.names.items() if role in intro.ROLES
+                               for item in [self.containers.get(name)] if item is not None}}
+
 
 # ── r6 (consult-checkpoints-r6-20261017 ckpt5_01): a synthetic regenerated-artifact descriptor of the pinned Orthanc
 # image, shaped as regenerated_descriptor derives one from a probe, and the writable-layer facts of a normal start ──
@@ -378,10 +404,20 @@ def start_facts(descriptor):
     return facts
 
 
-def fixture_roles(target, images):
-    return {role: {"absent": False, "container_id": "id-" + target["containers"][role], "container_name": target["containers"][role],
+def fixture_roles(target, images, ids=None):
+    known = container_ids(target, ids)
+    return {role: {"absent": False, "container_id": known[role], "container_name": target["containers"][role],
                    "image": images[role], "mounts": [], "changes": [], "facts": {}, "layer_observable": True, "verdicts": []}
             for role in intro.ROLES}
+
+
+def boundary_facts_of(snapshot, mounts=None):
+    """The boundary facts CheckpointDocker.boundary_facts takes beside a capture (before the stop), coherent with the
+    capture snapshot: per present role its container ID, image, running state, project, mounts and networks."""
+    return {"containers": {role: {"id": item["value"]["id"], "image": item["value"]["image"], "running": item["value"]["running"],
+                                  "project": item["value"]["project"], "mounts": sorted((mounts or {}).get(role, [])),
+                                  "networks": [item["value"]["project"] + "_default"]}
+                           for role, item in snapshot["facts"]["containers"]["value"].items() if item["outcome"] == "OK"}}
 
 
 LEGACY = {"roles": [["kin_legacy_group", False, False, -1], ["kin_legacy_reader", False, True, 3]],
@@ -390,7 +426,7 @@ LEGACY = {"roles": [["kin_legacy_group", False, False, -1], ["kin_legacy_reader"
 B0_MANIFESTS = {"source": b'{"b0":"source"}\n', "clone": b'{"b0":"clone"}\n', "failure": b'{"b0":"failure"}\n'}
 
 
-def realistic(root, checkpoint_id, *, tamper=None, layer=True, descriptor=None):
+def realistic(root, checkpoint_id, *, tamper=None, layer=True, descriptor=None, ids=None, absent=()):
     """A completed boundary inside a fixture root as the harness binds it: the lineage stack's state and result, the
     sibling secrets, the Compose pointer, the ledger, the lock, the stage context (with the stack's plan document and
     target), the source B0 and its seed copy, the stack's own B0 - and the identity of exactly those bytes. `tamper`
@@ -450,29 +486,52 @@ def realistic(root, checkpoint_id, *, tamper=None, layer=True, descriptor=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(value)
         bindings[name] = {"path": rel, "sha256": hashlib.sha256(value).hexdigest()}
+    facts = None
     if cp.CHECKPOINTS[checkpoint_id]["volumes"]:
         # r5: the capture observation of exactly this state, bound beside it.
         folder = write_observation(root / stack / "records", checkpoint_id, "capture", plan=plan, target=target, state_raw=files["state"][1],
-                                   descriptor=descriptor)
+                                   descriptor=descriptor, ids=ids, absent=absent)
         result_file = folder / cp.OBSERVATION_RESULT
         bindings["observation"] = {"path": result_file.relative_to(root).as_posix(), "sha256": hashlib.sha256(result_file.read_bytes()).hexdigest()}
+        # r7: the boundary facts the seal takes beside that observation (the same containers).
+        facts = boundary_facts_of(json.loads((folder / "snapshot.json").read_bytes()))
         if layer:
             # r6: the post-stop judgement beside it (here: containers whose writable layers did not change).
-            bindings["layer"], _ = cp.write_layer(root, bindings, fixture_roles(target, cp.pinned_images(plan, parts["state"])),
-                                                  checkpoint_id=checkpoint_id, summary=json.loads(result_file.read_bytes()),
+            roles = fixture_roles(target, cp.pinned_images(plan, parts["state"]), ids=ids)
+            roles.update({role: {"absent": True, "container_name": target["containers"][role]} for role in absent})
+            bindings["layer"], _ = cp.write_layer(root, bindings, roles, checkpoint_id=checkpoint_id, summary=json.loads(result_file.read_bytes()),
                                                   descriptor_raw=(folder / cp.REGENERATED_FILE).read_bytes())
     return SimpleNamespace(plan=plan, target=target, state=parts["state"], result=result, raw=raw, bindings=bindings, identity=identity,
-                           root=root)
+                           root=root, facts=facts, stack={"root": str(root / stack), "containers": {role: target["containers"][role]
+                                                                                                     for role in intro.ROLES}})
 
 
-def write_observation(records_dir, checkpoint_id, purpose, *, plan, target, state_raw, parent=None, descriptor=None):
+def sealed_boundary(checkpoint_id, made):
+    """The manifest boundary the seal records: the product's boundary_publishable and, at a volume checkpoint, the
+    boundary facts taken beside the capture observation (seal_boundary)."""
+    boundary = cp.boundary_publishable(checkpoint_id, state=made.state, result=made.result, result_raw=made.raw)
+    return {**boundary, "facts": made.facts} if made.facts is not None else boundary
+
+
+def sealed_owned(made, **extra):
+    return {"token": TOKEN, "projects": [PROJECT], "volumes": {}, "networks": [], "stack": made.stack, **extra}
+
+
+def absent_descriptor(target):
+    """The descriptor regenerated_descriptor gives when the stack has no Orthanc container (it applies to nothing)."""
+    return {**regenerated_fixture(None, applicable=False), "container_name": target["containers"]["orthanc"], "container_id": None,
+            "actual_image": None, "reasons": ["no container of the role"], "startup": None, "image": None, "generated": None, "probe": None}
+
+
+def write_observation(records_dir, checkpoint_id, purpose, *, plan, target, state_raw, parent=None, descriptor=None, ids=None, absent=()):
     """A complete observation folder as cp.observe_boundary leaves one (r5): the canonical request, the observation state
     with this request's settled Engine exec worker on the database container, the product snapshot, the command record and
     the log it refers to, the journal and, last, observation.json; a capture keeps its regenerated-artifact descriptor
-    (r6; by default one that applies to nothing). Returns the folder."""
+    (r6; by default one that applies to nothing, of the observed Orthanc container). Returns the folder."""
     plan_sha = intro.plan_identity(plan)
     if purpose == "capture" and descriptor is None:
-        descriptor = regenerated_fixture("id-" + target["containers"]["orthanc"], applicable=False)
+        descriptor = absent_descriptor(target) if "orthanc" in absent else \
+            regenerated_fixture(container_ids(target, ids)["orthanc"], applicable=False)
     descriptor_raw = cp.canonical(descriptor) + b"\n" if purpose == "capture" else None
     request = cp.observation_request(checkpoint_id, purpose=purpose, plan_sha256=plan_sha, state_raw=state_raw, parent_manifest_sha256=parent,
                                      regenerated_sha256=cp.sha256(descriptor_raw) if descriptor_raw else None)
@@ -484,7 +543,7 @@ def write_observation(records_dir, checkpoint_id, purpose, *, plan, target, stat
         (folder / cp.REGENERATED_FILE).write_bytes(descriptor_raw)
     state = json.loads(state_raw)
     basis = {"checkout": "previous", "lock_token": None, "compose_entry": {"generation": "1" * 64, "sha256": "2" * 64}, **state}
-    snapshot = snapshot_fixture(basis, plan, target, cp.CHECKPOINTS[checkpoint_id]["boundary"])
+    snapshot = snapshot_fixture(basis, plan, target, cp.CHECKPOINTS[checkpoint_id]["boundary"], ids=ids, absent=absent)
     db = snapshot["facts"]["containers"]["value"]["db"]["value"]["id"]
     observed = copy.deepcopy(state)
     observed.setdefault("workers", {})["observation-1"] = {
@@ -534,7 +593,6 @@ def seal(test, store_root, checkpoint_id, *, faults=None, absent=(), drop=(), ex
          derived=False, tamper=None):
     fixture = fixture or test.tempdir("kin-fixture-")
     made = realistic(fixture, checkpoint_id, tamper=tamper)
-    state, result, raw = made.state, made.result, made.raw
     bindings = dict(made.bindings)
     bindings.update(extra_bindings or {})
     for name in drop:
@@ -550,10 +608,8 @@ def seal(test, store_root, checkpoint_id, *, faults=None, absent=(), drop=(), ex
     cp.write_tree_archive(fixture, tree)
     pending.add("fixture-tree.tar", "fixture-tree", tree)
     tree.unlink()
-    boundary = cp.boundary_publishable(checkpoint_id, state=state, result=result, result_raw=raw)
-    return pending.seal(identity=made.identity, boundary=boundary, bindings=bindings,
-                        owned={"token": TOKEN, "projects": [PROJECT], "volumes": {}, "networks": []}, execution_kind="fresh",
-                        parent=parent, derived=derived)
+    return pending.seal(identity=made.identity, boundary=sealed_boundary(checkpoint_id, made), bindings=bindings, owned=sealed_owned(made),
+                        execution_kind="fresh", parent=parent, derived=derived)
 
 
 class CheckpointBoundaryTests(RefusalAssertions, TempCase):
@@ -1022,12 +1078,20 @@ class CaptureFixture:
         backend = backend or FakeBackend(names, volumes, running=running)
         fixture = fixture or self.tempdir()
         made = realistic(fixture, checkpoint_id, layer=False, descriptor=descriptor)
+        # r7: the containers run the boundary generation's pinned images unless a case gives another one, and the seal's
+        # boundary facts are taken from the same daemon before the stop (seal_boundary).
+        pins = cp.pinned_images(made.plan, made.state)
+        for role, name in names.items():
+            if backend.containers.get(name, {}).get("image", "") is None:
+                backend.containers[name]["image"] = pins[role]
+        boundary = {**cp.boundary_publishable(checkpoint_id, state=made.state, result=made.result, result_raw=made.raw),
+                    "facts": backend.boundary_facts()}
         store = cp.BundleStore(store_root or self.tempdir() / "bundles", forbidden=[fixture])
-        boundary = cp.boundary_publishable(checkpoint_id, state=made.state, result=made.result, result_raw=made.raw)
         final = cp.capture_checkpoint(checkpoint_id=checkpoint_id, store=store, backend=backend, boundary=boundary, names=names,
                                       volumes=volumes, fixture_root=fixture, bindings=made.bindings, identity=made.identity,
                                       owned={"token": TOKEN, "projects": {PROJECT}, "networks": [{"name": PROJECT + "-halo",
-                                                                                                   "labels": {"kin.ops.run": TOKEN}}]},
+                                                                                                   "labels": {"kin.ops.run": TOKEN}}],
+                                             "stack": made.stack},
                                       execution_kind="fresh")
         return final, backend, names, fixture
 
@@ -1088,9 +1152,22 @@ class CheckpointRestoreTests(CaptureFixture, RefusalAssertions, TempCase):
             self.assertRefused("RESOURCE_EXISTS", cp.restore_checkpoint, manifest, directory, backend=fresh, fixture_root=occupied,
                                names=names, images_present=lambda image_id: True, observe=lambda sid: None)
         with self.subTest(refused="a lock token that differs from the state"):
+            # r7: the restore judges the bundle's current bytes again, so the lock that differs from the state is sealed
+            # with its own binding (a bundle edited after its seal is BUNDLE_INVALID before this check).
             fresh = FakeBackend(names, {}, running=set())
             fresh.containers.clear()
-            altered = self.tempdir() / ("f" * 64)
+            fixture = self.tempdir()
+            made = realistic(fixture, "introduced")
+            lock = fixture / made.bindings["lock"]["path"]
+            lock.write_text("another-token")
+            made.bindings["lock"] = {**made.bindings["lock"], "sha256": hashlib.sha256(lock.read_bytes()).hexdigest()}
+            locked, locked_dir = cp.load_bundle(bundle_from(self, fixture, made))
+            self.assertRefused("LOCK_MISMATCH", cp.restore_checkpoint, locked, locked_dir, backend=fresh, fixture_root=self.tempdir() / "r",
+                               names=names, images_present=lambda image_id: True, observe=lambda sid: None)
+        with self.subTest(refused="a bundle edited after its seal"):
+            fresh = FakeBackend(names, {}, running=set())
+            fresh.containers.clear()
+            altered = self.tempdir() / directory.name
             shutil.copytree(directory, altered)
             tree = altered / "payload" / "fixture-tree.tar"
             work = self.tempdir()
@@ -1098,8 +1175,9 @@ class CheckpointRestoreTests(CaptureFixture, RefusalAssertions, TempCase):
             (work / "x" / "clone/repo/.kin-ops.lock").write_text("another-token")
             tree.unlink()
             cp.write_tree_archive(work / "x", tree)
-            self.assertRefused("LOCK_MISMATCH", cp.restore_checkpoint, manifest, altered, backend=fresh, fixture_root=self.tempdir() / "r",
+            self.assertRefused("BUNDLE_INVALID", cp.restore_checkpoint, manifest, altered, backend=fresh, fixture_root=self.tempdir() / "r",
                                names=names, images_present=lambda image_id: True, observe=lambda sid: None)
+            self.assertEqual(fresh.mutations(), [])
         target = target_fixture()
         names = {role: target["containers"][role] for role in intro.ROLES}
         volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
@@ -1546,7 +1624,7 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
             paths["request"].write_bytes(cp.canonical(request) + b"\n")
         expectation = cp.leaf_expectation(leaves, unit, root, attempt)
         expect = expectation["expect"]
-        plans, executing, sealed_bindings = {}, None, None
+        plans, executing, sealed = {}, None, None
         for stack in sorted({row["stack"] for row in expect["results"]}):
             records = evidence / ("records-" + stack)
             (records / "logs").mkdir(parents=True)
@@ -1576,7 +1654,9 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
                                 "request_sha256": request_sha, "seconds": 1.0, "result_sha256": hashlib.sha256(result_raw).hexdigest(),
                                 "steps": [[step["step"], step["outcome"]] for step in result["steps"]]})
                 journal.append({"event": "phase-end", "phase": row["phase"], "status": result["status"]})
-            state = alter("state", {"plan_sha256": plans[stack], "status": history[-1]["status"], "history": history}, stack)
+            # r7: the side the boundary's pinned images come from is part of S (layer_valid picks the pins by it).
+            state = alter("state", {"plan_sha256": plans[stack], "status": history[-1]["status"], "history": history, "checkout": "previous",
+                                    "entry_checkout": "previous"}, stack)
             (records / "state.json").write_bytes(intro.canonical(state) + b"\n")
             (records / "journal.jsonl").write_bytes(b"".join(intro.canonical(entry) + b"\n" for entry in journal))
             plan_raw = alter("plan", intro.canonical(plan) + b"\n", stack)
@@ -1589,21 +1669,14 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
             if (consumed and cp.CHECKPOINTS[consumed]["volumes"] and cp.LINEAGE_STACK[consumed] == stack
                     and expect["outcome"]["outcome"] != "REFUSED"):
                 write_observation(records, consumed, "restore", plan=plan, target=target, state_raw=parent_state, parent=parent_sha)
-            if expect["produces"] and cp.CHECKPOINTS[expect["produces"]]["volumes"] and cp.LINEAGE_STACK[expect["produces"]] == stack:
-                folder = write_observation(records, expect["produces"], "capture", plan=plan, target=target,
-                                           state_raw=(records / "state.json").read_bytes())
-                sealed_bindings = {"state": {"path": stack + "/records/state.json", "sha256": hashlib.sha256((records / "state.json").read_bytes()).hexdigest()},
-                                   "observation": {"path": stack + "/records/" + folder.relative_to(records).as_posix() + "/" + cp.OBSERVATION_RESULT,
-                                                   "sha256": hashlib.sha256((folder / cp.OBSERVATION_RESULT).read_bytes()).hexdigest()}}
-                # r6: the seal's writable-layer record beside that observation, as the leaf's preserved records carry it.
-                judged = self.tempdir("kin-layer-")
-                (judged / stack / "records" / cp.OBSERVATION_DIR).mkdir(parents=True)
-                sealed_bindings["layer"], _ = cp.write_layer(
-                    judged, sealed_bindings, fixture_roles(target, plan["previous"]["images"]), checkpoint_id=expect["produces"],
-                    summary=json.loads((folder / cp.OBSERVATION_RESULT).read_bytes()), descriptor_raw=(folder / cp.REGENERATED_FILE).read_bytes())
-                kept = records / sealed_bindings["layer"]["path"].split("/records/", 1)[1]
-                kept.parent.mkdir()
-                kept.write_bytes((judged / sealed_bindings["layer"]["path"]).read_bytes())
+            if expect["produces"] and cp.LINEAGE_STACK[expect["produces"]] == stack:
+                folder = None
+                if cp.CHECKPOINTS[expect["produces"]]["volumes"]:
+                    folder = write_observation(records, expect["produces"], "capture", plan=plan, target=target,
+                                               state_raw=(records / "state.json").read_bytes())
+                # r7: the checkpoint this leaf sealed is a real bundle of the request's store, made from these records.
+                sealed = self.seal_leaf(root, expect["produces"], stack=stack, records=records, plan=plan, target=target, observation=folder,
+                                        parent_sha=parent_sha, execution_kind=leaf["execution_kind"])
             alter("files", records, stack)
             executing = executing or plans[stack]
         raw_rows = sorted([path.relative_to(evidence).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]
@@ -1611,13 +1684,15 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
         phase_rows = cp.phase_results({stack: evidence / ("records-" + stack) for stack in plans})
         results, admission = {}, None
         if expect["produces"]:
-            manifest = alter("manifest", {"checkpoint": expect["produces"], "execution_kind": leaf["execution_kind"],
-                                          "parent": {"manifest_sha256": parent_sha} if parent_sha else None,
-                                          "identity": {"plan_sha256": executing}, "bindings": sealed_bindings})
-            manifest_raw = cp.canonical(manifest) + b"\n"
-            folder = root / "out" / "bundles" / hashlib.sha256(manifest_raw).hexdigest()
-            folder.mkdir(parents=True)
-            (folder / "manifest.json").write_bytes(manifest_raw)
+            manifest = json.loads((sealed / "manifest.json").read_bytes())
+            altered = alter("manifest", copy.deepcopy(manifest))
+            folder = sealed
+            if altered != manifest:
+                # A manifest changed after the seal: another bundle name over the same payload.
+                manifest_raw = cp.canonical(altered) + b"\n"
+                folder = root / "out" / "bundles" / hashlib.sha256(manifest_raw).hexdigest()
+                shutil.copytree(sealed / "payload", folder / "payload")
+                (folder / "manifest.json").write_bytes(manifest_raw)
             results["checkpoint"] = {"path": str(folder), "manifest_sha256": folder.name}
         if expect["admission"]:
             admission = alter("admission", {"schema": 1, "kind": "checkpoint-admission", "checkpoint": expect["consumes"],
@@ -1650,6 +1725,72 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
         command.write_text(self.COMMAND, encoding="utf-8")
         return SimpleNamespace(root=root, leaves=leaves, expectation=expectation, segment=segment, copy_root=copy_root, command=command,
                                unit=unit, attempt=attempt, evidence=evidence, plans=plans, results=results)
+
+    def seal_leaf(self, root, checkpoint_id, *, stack, records, plan, target, observation, parent_sha, execution_kind):
+        """r7: the checkpoint a leaf sealed, as a real bundle in <root>/out/bundles that load_bundle accepts, made from the
+        leaf's own records: its state S and last result, and at a volume checkpoint its capture observation, the boundary
+        facts of the same containers and the writable-layer record (written beside the observation and kept in the leaf's
+        records, as seal_boundary leaves them). Returns the bundle folder."""
+        spec = cp.CHECKPOINTS[checkpoint_id]
+        fixture = self.tempdir("kin-leaf-fixture-")
+        own = fixture / stack / "records"
+        own.mkdir(parents=True)
+        state_raw = (records / "state.json").read_bytes()
+        state = json.loads(state_raw)
+        last = (state.get("history") or [{}])[-1]
+        result = records / ("result-" + str(last.get("phase")) + "-" + str(last.get("request_sha256"))[:16] + ".json")
+        names = {role: target["containers"][role] for role in intro.ROLES}
+        context = {"previous_sha": "a" * 40, "target_sha": "b" * 40,
+                   "images": {"previous": dict(plan["previous"]["images"]), "release": dict(plan["release"]["images"])}, "legacy": None,
+                   "members": plan["members"], "b0": None, "copy_dir": None, "production_plan": None,
+                   "stacks": {stack: {"label": stack, "root": str(fixture / stack), "plan_document": plan, "plan_sha256": intro.plan_identity(plan),
+                                      "target": target_fixture(root / stack)}}}   # the plan's own target (the same names)
+        files = {"state": (stack + "/records/state.json", state_raw),
+                 "result": (stack + "/records/" + result.name, result.read_bytes() if result.is_file() else b"{}\n"),
+                 "secrets": (stack + "/records.secrets/compose-env-values.json", b"{}\n"),
+                 "compose_entry": (stack + "/compose-entries/active.json", b'{"generation":"1","sha256":"2"}\n'),
+                 "ledger": (stack + "/backups/audit-ledger.json", b'{"entries":[]}\n'), "context": (cp.CONTEXT_FILE, cp.canonical(context) + b"\n")}
+        if spec["lock"]:
+            files["lock"] = (stack + "/repo/.kin-ops.lock", str(state.get("lock_token") or "").encode())
+        bindings = {}
+        for name, (rel, value) in files.items():
+            (fixture / rel).parent.mkdir(parents=True, exist_ok=True)
+            (fixture / rel).write_bytes(value)
+            bindings[name] = {"path": rel, "sha256": hashlib.sha256(value).hexdigest()}
+        boundary = {"checkpoint": checkpoint_id, "status": spec["status"], "boundary": spec["boundary"],
+                    "window_end": plan["window"]["end"], "tls_not_after": plan["window"]["end"]}
+        if observation is not None:
+            copied = own / cp.OBSERVATION_DIR / observation.name
+            shutil.copytree(observation, copied)
+            bindings["observation"] = {"path": (copied / cp.OBSERVATION_RESULT).relative_to(fixture).as_posix(),
+                                       "sha256": hashlib.sha256((copied / cp.OBSERVATION_RESULT).read_bytes()).hexdigest()}
+            boundary["facts"] = boundary_facts_of(json.loads((copied / "snapshot.json").read_bytes()))
+            bindings["layer"], _ = cp.write_layer(fixture, bindings, fixture_roles(target, cp.pinned_images(plan, state)), checkpoint_id=checkpoint_id,
+                                                  summary=json.loads((copied / cp.OBSERVATION_RESULT).read_bytes()),
+                                                  descriptor_raw=(copied / cp.REGENERATED_FILE).read_bytes())
+            kept = records / bindings["layer"]["path"].split("/records/", 1)[1]
+            kept.parent.mkdir()
+            kept.write_bytes((fixture / bindings["layer"]["path"]).read_bytes())
+        store = cp.BundleStore(root / "out" / "bundles", forbidden=[fixture])
+        pending = store.begin(checkpoint_id)
+        if spec["volumes"]:
+            for category in cp.VOLUME_CATEGORIES:
+                pending.declare_absent(category)
+        tree = pending.directory / "export-fixture.tar"
+        cp.write_tree_archive(fixture, tree)
+        pending.add("fixture-tree.tar", "fixture-tree", tree)
+        tree.unlink()
+        identity = identity_fixture(phase_reached=checkpoint_id, plan_sha256=intro.plan_identity(plan),
+                                    target_manifest_sha256=plan["target_manifest_sha256"], tool_files_actual_raw_sha256=dict(plan["tool"]),
+                                    image_ids={"previous": dict(plan["previous"]["images"]), "release": dict(plan["release"]["images"]),
+                                               "helper": image("3")}, absolute_fixture_root=str(fixture))
+        parent = {"manifest_sha256": parent_sha, "payload_manifest_sha256": "0" * 64,
+                  "checkpoint": cp.STAGES[next(name for name, item in cp.STAGES.items() if item["produces"] == checkpoint_id)]["consumes"]} \
+            if parent_sha else None
+        return pending.seal(identity=identity, boundary=boundary, bindings=bindings,
+                            owned={"token": TOKEN, "projects": [PROJECT], "volumes": {}, "networks": [],
+                                   "stack": {"root": str(fixture / stack), "containers": names}},
+                            execution_kind=execution_kind, parent=parent)
 
     def record(self, proof, mode="ok", *, changes=None, files=None, verdict=None):
         spec = proof.root / ("spec-" + proof.unit + "-" + str(proof.attempt) + ".json")
@@ -2006,9 +2147,8 @@ class CheckpointRecordTests(RefusalAssertions, TempCase):
                 cp.write_tree_archive(fixture, tree)
                 pending.add("fixture-tree.tar", "fixture-tree", tree)
                 tree.unlink()
-                boundary = cp.boundary_publishable("held", state=made.state, result=made.result, result_raw=made.raw)
-                return pending.seal(identity=made.identity, boundary=boundary, bindings=made.bindings, owned={"token": TOKEN, "projects": [PROJECT],
-                                    "volumes": {}, "networks": []}, execution_kind="fresh")
+                return pending.seal(identity=made.identity, boundary=sealed_boundary("held", made), bindings=made.bindings,
+                                    owned=sealed_owned(made), execution_kind="fresh")
             for label, change in (("its snapshot deleted", lambda folder, made: (folder / "snapshot.json").unlink()),
                                   ("an observation of another state", lambda folder, made: (folder.parent.parent / "state.json").write_bytes(b"{}\n"))):
                 with self.subTest(damaged=label):
@@ -2522,8 +2662,13 @@ class CheckpointInputsTests(RefusalAssertions, TempCase):
     from observation; the product facts of a restored boundary compared with those of the checkpoint."""
 
     def bundle(self, checkpoint_id="introduced", tamper=None):
-        store = self.tempdir() / "bundles"
-        return cp.load_bundle(seal(self, store, checkpoint_id, tamper=tamper))
+        """A sealed bundle. A tampered one (bytes that contradict its identity) is read by its manifest bytes: since r7 the
+        writable layer's bound context makes load_bundle refuse those whose plan or state changed, and bundle_inputs and
+        the restore must still refuse every one of them on their own, before any daemon call."""
+        final = seal(self, self.tempdir() / "bundles", checkpoint_id, tamper=tamper)
+        if tamper is None:
+            return cp.load_bundle(final)
+        return json.loads((final / "manifest.json").read_bytes()), final
 
     def test_bundle_inputs_runtime_and_restored_facts_are_recomputed(self):
         """CKPT-04 (RQC-02/03): mismatches refuse with zero daemon calls; runtime pins; only IDs may differ after a restore."""
@@ -2922,8 +3067,23 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
         sealed = {name: seal(self, store, name) for name in ("introduced", "verified")}
         return root, leaves, sealed
 
+    def bound(self, root, unit):
+        """r7: a parent leaf's BOUND index as `index` writes it over really recorded evidence (CheckpointRecordTests.layout:
+        its raw records, capture observation and writable-layer record, and the real sealed bundle in <root>/out/bundles),
+        which every consumption judges again. Returns the sealed bundle."""
+        records = CheckpointRecordTests(methodName="test_existing_record_run_binds_exact_inputs_outputs_and_exit")
+        records.tempdir = self.tempdir
+        proof = records.layout(unit, root=root)
+        run_dir, completed = records.record(proof)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cp.main(["index", "--registry", str(root / "registry.json"), "--unit", unit, "--proof-root", str(root),
+                                      "--run-dir", str(run_dir)]), 0)
+        return Path(proof.results["checkpoint"]["path"])
+
     def bind(self, root, unit, bundle, *, verdict="BOUND"):
-        """A parent leaf's index as `index` writes it, over a segment that names the bundle it sealed."""
+        """A parent leaf's index as `index` writes it, over a segment that names the bundle it sealed. Its evidence is not
+        recorded: since r7 every consumption judges a BOUND index's evidence again, so such an index is a refused one."""
         segment = root / "evidence" / unit / "attempt-1" / "segment.json"
         segment.parent.mkdir(parents=True)
         segment.write_bytes(cp.canonical({"results": {"checkpoint": {"path": str(bundle), "manifest_sha256": bundle.name}}}) + b"\n")
@@ -2977,12 +3137,11 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
         root, leaves, sealed = self.proof()
         with self.subTest(refused="no BOUND parent index yet"):
             self.assertRefused("PARENT_UNBOUND", cp.leaf_request, leaves, unit("late-resume"), root)
-        self.bind(root, unit("prefix-introduce"), sealed["introduced"])
+        introduced = self.bound(root, unit("prefix-introduce"))
         for name, source in (("late-resume", "b"), ("early-refusal", "c"), ("prefix-verify", "a")):
             with self.subTest(request=name):
                 request = self.admitted(cp.leaf_request, leaves, unit(name), root)
-                self.assertEqual(request["parent_manifest"], {"path": str((sealed["introduced"] / "manifest.json").resolve()),
-                                                              "sha256": sealed["introduced"].name})
+                self.assertEqual(request["parent_manifest"], {"path": str((introduced / "manifest.json").resolve()), "sha256": introduced.name})
                 self.assertEqual(Path(request["source_manifest"]["path"]).name, source + ".source-manifest.json")
                 self.assertEqual((request["output_root"], request["evidence_root"]),
                                  (str((root / "out").resolve()), str((root / "evidence" / unit(name) / "attempt-1").resolve())))
@@ -3087,7 +3246,7 @@ class CheckpointLineageTests(RefusalAssertions, TempCase):
         name = "release-tools-checkpoints-proof-late-resume"
         root, leaves, sealed = self.proof()
         self.fresh_layout(root, leaves)
-        self.bind(root, "release-tools-checkpoints-proof-prefix-introduce", sealed["introduced"])
+        self.bound(root, "release-tools-checkpoints-proof-prefix-introduce")
         (root / ("plan-" + name + ".json")).write_bytes(cp.canonical(cp.leaf_plan(leaves, name)) + b"\n")
         first, second = cp.attempt_paths(root, name, 1), cp.attempt_paths(root, name, 2)
         request = self.admitted(cp.leaf_request, leaves, name, root)
@@ -3910,9 +4069,8 @@ def bundle_from(test, fixture, made, checkpoint_id="introduced"):
     cp.write_tree_archive(fixture, tree)
     pending.add("fixture-tree.tar", "fixture-tree", tree)
     tree.unlink()
-    boundary = cp.boundary_publishable(checkpoint_id, state=made.state, result=made.result, result_raw=made.raw)
-    return pending.seal(identity=made.identity, boundary=boundary, bindings=made.bindings,
-                        owned={"token": TOKEN, "projects": [PROJECT], "volumes": {}, "networks": []}, execution_kind="fresh")
+    return pending.seal(identity=made.identity, boundary=sealed_boundary(checkpoint_id, made), bindings=made.bindings,
+                        owned=sealed_owned(made), execution_kind="fresh")
 
 
 class CheckpointRegeneratedTests(CaptureFixture, RefusalAssertions, TempCase):
@@ -4063,9 +4221,9 @@ class CheckpointRegeneratedTests(CaptureFixture, RefusalAssertions, TempCase):
         tree = final / "payload" / "fixture-tree.tar"
         raw = cp.tree_member_bytes(tree, manifest["bindings"]["layer"]["path"])
         files = cp.tree_folder(tree, manifest["bindings"]["observation"]["path"].rsplit("/", 1)[0])
-        summary = json.loads(files[cp.OBSERVATION_RESULT])
-        arguments = dict(checkpoint_id="introduced", observation_sha256=manifest["bindings"]["observation"]["sha256"],
-                         request_sha256=summary["request_sha256"], descriptor_raw=files[cp.REGENERATED_FILE], image_ids=manifest["identity"]["image_ids"])
+        # r7: the record is judged in its whole bound context (the capture folder, plan, S, boundary facts, names).
+        arguments = cp.layer_context(manifest, lambda rel: cp.tree_member_bytes(tree, rel), lambda rel: cp.tree_folder(tree, rel))
+        self.assertEqual(arguments["observation_files"], files)
         self.admitted(cp.layer_valid, raw, **arguments)
         record = json.loads(raw)
 
@@ -4086,9 +4244,10 @@ class CheckpointRegeneratedTests(CaptureFixture, RefusalAssertions, TempCase):
                  "a refused change recorded as accepted": (edited(refused_to_pass), {}),
                  "a role left out": (edited(lambda value: value["roles"].pop("keycloak")), {}),
                  "a refused judgement": (edited(lambda value: value.update(outcome="REFUSED", refused=["api: A /x"])), {}),
-                 "another capture observation": (raw, {"observation_sha256": "0" * 64}),
-                 "another descriptor": (raw, {"descriptor_raw": cp.canonical(regenerated_fixture("id-other")) + b"\n"}),
-                 "a descriptor of another image": (raw, {"image_ids": {"previous": {"orthanc": image("8")}, "release": {"orthanc": image("8")}}}),
+                 "another capture observation": (raw, {"observation": {**arguments["observation"], "sha256": "0" * 64}}),
+                 "another descriptor": (raw, {"observation_files": {**files, cp.REGENERATED_FILE: cp.canonical(regenerated_fixture("id-other")) + b"\n"}}),
+                 "a descriptor of another image": (raw, {"identity": {**arguments["identity"], "image_ids": {
+                     "previous": {"orthanc": image("8")}, "release": {"orthanc": image("8")}}}}),
                  "a missing record": (None, {})}
         for name, (data, changes) in cases.items():
             with self.subTest(refused=name):
@@ -4445,6 +4604,417 @@ class CheckpointDeadlineTests(RefusalAssertions, TempCase):
                                  (3, "REFUSED", "UNSUPPORTED_HOST", [], []))
 
 
+# ── r7 (consult-checkpoints-r7-20261017, CKPT6-01): the closed writable-layer row contract at every consumer (O7) ──
+# Each substitution is applied alone to one coherent synthetic capture (snapshot, boundary facts, owned and target names,
+# plan, S and record from one source of truth) and every envelope hash that names the changed bytes is rebound (the layer
+# bytes and the manifest binding, then a new seal; the raw rows; the index), so a refusal is the contract's, never a
+# plain hash mismatch. The oracle helpers use only APIs 0535bc8 has as well: the same oracle ran red on the baseline and
+# green on r7 (evidence oracles-on-0535bc8.json / oracles-on-r7.json).
+O7_ROW_CHANGES = {
+    # O7-SCHEMA (accepted by 0535bc8)
+    "orthanc row null": lambda record: record["roles"].update(orthanc=None),
+    "keycloak row a list": lambda record: record["roles"].update(keycloak=[]),
+    "proxy row without container_name": lambda record: record["roles"]["proxy"].pop("container_name"),
+    "proxy row without layer_observable": lambda record: record["roles"]["proxy"].pop("layer_observable"),
+    # O7-PRESENCE
+    "orthanc falsely absent": lambda record: record["roles"].update(orthanc={"absent": True,
+                                                                            "container_name": record["roles"]["orthanc"]["container_name"]}),
+    # O7-IDENTITY
+    "api container ID substituted": lambda record: record["roles"]["api"].update(container_id="id-other-api"),
+    "api image substituted": lambda record: record["roles"]["api"].update(image="sha256:" + "8" * 64),
+    "api and orthanc rows exchanged": lambda record: record["roles"].update(api=record["roles"]["orthanc"], orthanc=record["roles"]["api"]),
+    # O7-MOUNT-VERDICT
+    "api mount invented for an accepted change": lambda record: record["roles"]["api"].update(
+        mounts=["/etc/kin-kept"], changes=["A /etc/kin-kept"], verdicts=[{"change": "A /etc/kin-kept", "verdict": "transient-or-mount"}]),
+}
+# Regressions: refused by 0535bc8 already (kept, never counted as red).
+O7_REFUSED_BEFORE = {
+    "keycloak role left out": lambda record: record["roles"].pop("keycloak"),
+    "an extra role": lambda record: record["roles"].update(extra=dict(record["roles"]["db"])),
+    "proxy refused change recorded accepted": lambda record: record["roles"]["proxy"].update(
+        changes=["A /etc/kin-kept"], verdicts=[{"change": "A /etc/kin-kept", "verdict": "transient-or-mount"}]),
+}
+
+
+def _outcome(action):
+    try:
+        action()
+        return "ACCEPTED"
+    except cp.Refused as error:
+        return error.code + ": " + str(error)
+
+
+def o7_bundle(test, change=None, *, checkpoint_id="introduced", descriptor=None, absent=(), ids=None):
+    """A sealed bundle of one coherent capture with `change(record)` applied to its writable-layer record and the record's
+    binding rebound before the seal. Returns (outcome of load_bundle, bundle folder)."""
+    fixture = test.tempdir("kin-o7-")
+    made = realistic(fixture, checkpoint_id, descriptor=descriptor, absent=absent, ids=ids)
+    if change is not None:
+        path = fixture / made.bindings["layer"]["path"]
+        record = json.loads(path.read_bytes())
+        change(record)
+        path.write_bytes(cp.canonical(record) + b"\n")
+        made.bindings["layer"] = {**made.bindings["layer"], "sha256": cp.sha256(path.read_bytes())}
+    final = bundle_from(test, fixture, made, checkpoint_id)
+    return _outcome(lambda: cp.load_bundle(final)), final
+
+
+def o7_index(test, change=None, *, unit=None, root=None):
+    """One recorded leaf (CheckpointRecordTests.layout + the real recorder) whose raw writable-layer record has `change`
+    applied, with the seal's binding rebound to it. Returns (proof, run folder, leaf_index result)."""
+    records = CheckpointRecordTests(methodName="test_existing_record_run_binds_exact_inputs_outputs_and_exit")
+    records.tempdir = test.tempdir
+
+    def alter(kind, value, stack=None):
+        if change is not None and kind == "files":
+            for found in sorted(value.glob(cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE)):
+                record = json.loads(found.read_bytes())
+                change(record)
+                found.write_bytes(cp.canonical(record) + b"\n")
+                alter.sha = cp.sha256(found.read_bytes())
+        if change is not None and kind == "manifest":
+            value["bindings"]["layer"] = {**value["bindings"]["layer"], "sha256": alter.sha}
+        return value
+    proof = records.layout(unit or CheckpointRecordTests.UNIT, root=root, alter=alter)
+    run_dir, completed = records.record(proof)
+    test.assertEqual(completed.returncode, 0, completed.stderr)
+    return proof, run_dir, cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir)
+
+
+def o7_forged_parent(test, change):
+    """The parent leaf (prefix-introduce) recorded over a substituted record, its index written BOUND/[] as the 0535bc8
+    validator wrote it over exactly such evidence; then the BOUND consumers. Returns their outcomes."""
+    root = test.tempdir("kin-proof-")
+    unit = "release-tools-checkpoints-proof-prefix-introduce"
+    proof, run_dir, index = o7_index(test, change, unit=unit, root=root)
+    cp.write_index(root, {**index, "verdict": "BOUND", "reasons": []})
+    (root / "b.source-manifest.json").write_bytes(cp.canonical({"root": str(root / "b")}) + b"\n")
+    return {"bound_index": _outcome(lambda: cp.bound_index(root, unit)),
+            "leaf_request": _outcome(lambda: cp.leaf_request(proof.leaves, "release-tools-checkpoints-proof-late-resume", root))}
+
+
+def o7_restore(test, final):
+    """restore_checkpoint over the bundle's manifest bytes (as an earlier consumer read them) with a synthetic daemon:
+    the outcome, the daemon calls and whether a fixture root was created."""
+    names = {role: PROJECT + "-" + role for role in intro.ROLES}
+    backend = FakeBackend(names, {}, running=set())
+    backend.containers.clear()
+    target_root = test.tempdir() / "restored"
+    manifest = json.loads((Path(final) / "manifest.json").read_bytes())
+    outcome = _outcome(lambda: cp.restore_checkpoint(manifest, final, backend=backend, fixture_root=target_root, names=names,
+                                                     images_present=lambda image_id: True, observe=lambda sid: None))
+    return {"outcome": outcome, "daemon_calls": len(backend.calls), "fixture_root_created": target_root.exists()}
+
+
+def layer_oracles(test):
+    """The O7 matrix through the consumers both trees have: load_bundle over a rebound seal (the reviewer's
+    layer-substitution probe and its extensions), leaf_index over a rebound raw record (the layer-index probe and its
+    extensions), a BOUND index the old validator wrote over such evidence consumed by bound_index and leaf_request, and
+    restore_checkpoint over a rebound bundle. Returns {case: outcome}."""
+    rows = {}
+    bundle = lambda change=None, **kwargs: o7_bundle(test, change, **kwargs)[0]  # noqa: E731
+    rows["bundle: control"] = bundle()
+    rows["bundle: held control (db running, the rest stopped but present)"] = bundle(checkpoint_id="held")
+    rows["bundle: control with new container IDs (a later capture after a cold restore)"] = bundle(
+        ids={role: "new-" + PROJECT + "-" + role for role in intro.ROLES})
+    rows["bundle: orthanc observed ABSENT and recorded absent (format positive)"] = bundle(absent=("orthanc",))
+    for name, change in {**O7_ROW_CHANGES, **O7_REFUSED_BEFORE}.items():
+        rows["bundle: " + name] = bundle(change)
+    rows["bundle: held: stopped api falsely absent"] = bundle(
+        lambda record: record["roles"].update(api={"absent": True, "container_name": record["roles"]["api"]["container_name"]}), checkpoint_id="held")
+    rows["bundle: orthanc descriptor of another container"] = bundle(descriptor=regenerated_fixture("id-other-orthanc", applicable=False))
+    for name in ("control", "orthanc row null", "orthanc falsely absent", "api container ID substituted", "api image substituted",
+                 "api mount invented for an accepted change"):
+        _, _, index = o7_index(test, O7_ROW_CHANGES.get(name))
+        rows["index: " + name] = index["verdict"] + ": " + json.dumps(index["reasons"])
+    forged = o7_forged_parent(test, O7_ROW_CHANGES["orthanc row null"])
+    rows["bound_index: BOUND index over a null orthanc row"] = forged["bound_index"]
+    rows["leaf_request: parent BOUND over a null orthanc row"] = forged["leaf_request"]
+    rows["restore: bundle with a null orthanc row"] = json.dumps(o7_restore(test, o7_bundle(test, O7_ROW_CHANGES["orthanc row null"])[1]))
+    rows["restore: control"] = json.dumps(o7_restore(test, o7_bundle(test)[1]))
+    return rows
+
+
+def rebound(arguments, raw, *, record=None, snapshot=None, boundary=None):
+    """layer_valid's arguments and record with `snapshot(value)`, `boundary(value)` or `record(value)` applied and every hash
+    naming the changed bytes rebound (snapshot.json -> observation.json's file list -> the seal's observation binding ->
+    the record's observation SHA-256)."""
+    arguments, document = copy.deepcopy(arguments), json.loads(raw)
+    if snapshot is not None:
+        files = dict(arguments["observation_files"])
+        value = json.loads(files["snapshot.json"])
+        snapshot(value)
+        files["snapshot.json"] = cp.canonical(value) + b"\n"
+        summary = json.loads(files[cp.OBSERVATION_RESULT])
+        summary["files"] = {name: cp.sha256(data) for name, data in files.items() if name != cp.OBSERVATION_RESULT}
+        files[cp.OBSERVATION_RESULT] = cp.canonical(summary) + b"\n"
+        arguments["observation_files"] = files
+        arguments["observation"] = {**arguments["observation"], "sha256": cp.sha256(files[cp.OBSERVATION_RESULT])}
+        document["observation"]["sha256"] = arguments["observation"]["sha256"]
+    if boundary is not None:
+        boundary(arguments["boundary"])
+    if record is not None:
+        record(document)
+    return cp.canonical(document) + b"\n", arguments
+
+
+class CheckpointLayerContractTests(CaptureFixture, RefusalAssertions, TempCase):
+    """r7 CKPT6-01 (consult-checkpoints-r7-20261017 layer_valid_contract, oracles O7-*): the writable-layer record is a
+    closed five-role map whose rows are judged against the capture they describe - the bound snapshot, the boundary
+    facts taken before the stop, the owned and target names and the side's pinned image - at its generation (before
+    store.begin), by load_bundle, by the index from the raw records, at every consumption of a BOUND index, at parent
+    admission and before a restore. Assertions name the requirement (CKPT7_*) and the role; no message text is pinned."""
+
+    def context(self, checkpoint_id="introduced", **kwargs):
+        """A coherent sealed capture's record and the bound context load_bundle judges it in."""
+        outcome, final = o7_bundle(self, checkpoint_id=checkpoint_id, **kwargs)
+        self.assertEqual(outcome, "ACCEPTED", "CKPT7_VALID_CAPTURE_ACCEPTED")
+        manifest, _ = cp.load_bundle(final)
+        tree = final / "payload" / "fixture-tree.tar"
+        return (cp.tree_member_bytes(tree, manifest["bindings"]["layer"]["path"]),
+                cp.layer_context(manifest, lambda rel: cp.tree_member_bytes(tree, rel), lambda rel: cp.tree_folder(tree, rel)), final)
+
+    def refusedFor(self, requirement, role, action, *args, code="LAYER_INVALID", **kwargs):
+        error = self.assertRefused(code, action, *args, **kwargs)
+        if role is not None:
+            self.assertIn(role, str(error), requirement + ": the refusal names the role")
+        return error
+
+    def test_a_closed_role_row_is_judged_against_its_bound_capture(self):
+        """O7-CONTROL/SCHEMA/PRESENCE/IDENTITY/MOUNT-VERDICT (R7 1-2): the record and each row are closed and typed; presence,
+        container ID, name, image and mount destinations are the bound capture's; the recorded verdicts are re-judged.
+        A substitution with its hashes rebound is LAYER_INVALID directly and BUNDLE_INVALID at load_bundle; the coherent
+        seeded/held/new-ID/absent-format captures and the normal mount and Orthanc start are accepted (M52-M54)."""
+        # Controls (CKPT7_VALID_CAPTURE_ACCEPTED, CKPT7_STOPPED_IS_PRESENT).
+        for name, kwargs in (("introduced", {}), ("seeded", {"checkpoint_id": "seeded"}), ("held: db running, the rest stopped", {"checkpoint_id": "held"}),
+                             ("new container IDs", {"ids": {role: "new-" + PROJECT + "-" + role for role in intro.ROLES}}),
+                             ("orthanc observed ABSENT, recorded absent (a format positive, not a native absent boundary)", {"absent": ("orthanc",)})):
+            with self.subTest(control=name):
+                raw, arguments, final = self.context(**kwargs)
+                self.admitted(cp.layer_valid, raw, **arguments)
+                self.assertEqual(self.admitted(cp.bundle_layer, cp.load_bundle(final)[0], final)["outcome"], "ACCEPTED")
+        # Rebound row substitutions at load_bundle (the reviewer's probe and its extensions): never sealed and loadable.
+        for name, change in {**O7_ROW_CHANGES, **O7_REFUSED_BEFORE}.items():
+            with self.subTest(bundle=name):
+                outcome, _ = o7_bundle(self, change)
+                self.assertTrue(outcome.startswith("BUNDLE_INVALID: ") and "writable layer: LAYER_INVALID" in outcome,
+                                {"orthanc row null": "CKPT7_ROW_REQUIRED", "orthanc falsely absent": "CKPT7_ABSENCE_CORROBORATED",
+                                 "api image substituted": "CKPT7_IMAGE_PIN_BOUND"}.get(name, "CKPT7_ROW_SCHEMA_CLOSED") + ": " + name + ": " + outcome)
+        with self.subTest(bundle="held: a stopped container recorded absent"):
+            for role in ("api", "orthanc"):
+                outcome, _ = o7_bundle(self, lambda record: record["roles"].update(
+                    **{role: {"absent": True, "container_name": record["roles"][role]["container_name"]}}), checkpoint_id="held")
+                self.assertTrue(outcome.startswith("BUNDLE_INVALID: ") and role in outcome, "CKPT7_STOPPED_IS_PRESENT: " + outcome)
+        with self.subTest(bundle="the Orthanc descriptor of another container"):
+            outcome, _ = o7_bundle(self, descriptor=regenerated_fixture("id-other-orthanc", applicable=False))
+            self.assertTrue(outcome.startswith("BUNDLE_INVALID: ") and "orthanc" in outcome, "CKPT7_CONTAINER_ID_BOUND: " + outcome)
+        raw, arguments, _ = self.context()
+        record = json.loads(raw)
+        names = {role: record["roles"][role]["container_name"] for role in intro.ROLES}
+
+        def row(role, **changes):
+            return lambda value: value["roles"][role].update(changes)
+
+        def drop(role, key):
+            return lambda value: value["roles"][role].pop(key)
+        # CKPT7_EXACT_ROLE_SET, CKPT7_ROW_REQUIRED, CKPT7_ROW_SCHEMA_CLOSED: direct, with the role named.
+        schema = {
+            "orthanc row null": ("orthanc", lambda value: value["roles"].update(orthanc=None)),
+            "api row a list": ("api", lambda value: value["roles"].update(api=[])),
+            "db row a string": ("db", lambda value: value["roles"].update(db="present")),
+            "keycloak row a number": ("keycloak", lambda value: value["roles"].update(keycloak=1)),
+            "proxy row a boolean": ("proxy", lambda value: value["roles"].update(proxy=True)),
+            "api row an empty object": ("api", lambda value: value["roles"].update(api={})),
+            "proxy row with an extra key": ("proxy", row("proxy", note="kept")),
+            "api absent missing": ("api", drop("api", "absent")),
+            "api absent null": ("api", row("api", absent=None)),
+            "api absent 0": ("api", row("api", absent=0)),
+            "api absent 1": ("api", row("api", absent=1)),
+            "api absent a string": ("api", row("api", absent="false")),
+            "proxy container_id not a string": ("proxy", row("proxy", container_id=7)),
+            "proxy container_name not a string": ("proxy", row("proxy", container_name=None)),
+            "proxy image not an image ID": ("proxy", row("proxy", image="nginx:latest")),
+            "proxy mounts a string": ("proxy", row("proxy", mounts="/etc/nginx/certs")),
+            "proxy mounts unsorted": ("proxy", row("proxy", mounts=["/b", "/a"])),
+            "proxy mounts relative": ("proxy", row("proxy", mounts=["etc/nginx"])),
+            "proxy changes a string": ("proxy", row("proxy", changes="A /x")),
+            "proxy changes of another kind": ("proxy", row("proxy", changes=["R /x"], verdicts=[{"change": "R /x", "verdict": "refused"}])),
+            "proxy changes listing a path twice": ("proxy", row("proxy", changes=["C /run", "A /run"],
+                                                                verdicts=[{"change": "C /run", "verdict": "transient-or-mount"},
+                                                                          {"change": "A /run", "verdict": "transient-or-mount"}])),
+            "proxy facts a list": ("proxy", row("proxy", facts=[])),
+            "proxy facts with an untyped fact": ("proxy", row("proxy", facts={"/etc/hostid": {"type": "file"}})),
+            "proxy facts with a boolean mode": ("proxy", row("proxy", facts={"/etc": {"type": "dir", "mode": True, "uid": 0, "gid": 0}})),
+            "proxy layer_observable null": ("proxy", row("proxy", layer_observable=None)),
+            "proxy unobservable with facts": ("proxy", row("proxy", layer_observable=False, facts={"/etc": _dir()})),
+            "proxy verdicts a dict": ("proxy", row("proxy", verdicts={})),
+            "proxy verdict with an extra key": ("proxy", row("proxy", changes=["C /run"], verdicts=[{"change": "C /run", "verdict": "transient-or-mount",
+                                                                                                     "note": 1}])),
+            "an absent row with present fields": ("orthanc", lambda value: value["roles"]["orthanc"].update(absent=True)),
+            "an absent row of another name": ("orthanc", lambda value: value["roles"].update(orthanc={"absent": True, "container_name": "other"})),
+            "a role left out": (None, lambda value: value["roles"].pop("keycloak")),
+            "an extra role": (None, lambda value: value["roles"].update(worker=dict(value["roles"]["db"]))),
+            "a missing refused list": (None, lambda value: value.pop("refused")),
+            "refused null": (None, lambda value: value.update(refused=None)),
+            "schema true": (None, lambda value: value.update(schema=True)),
+            "an extra envelope key": (None, lambda value: value.update(note="x")),
+        }
+        for name, (role, change) in schema.items():
+            with self.subTest(schema=name):
+                data, changed = rebound(arguments, raw, record=change)
+                self.refusedFor("CKPT7_ROW_SCHEMA_CLOSED", role, cp.layer_valid, data, **changed)
+        # CKPT7_ABSENCE_CORROBORATED, CKPT7_STOPPED_IS_PRESENT: presence against the snapshot and the boundary facts.
+        absent_raw, absent_arguments, _ = self.context(absent=("orthanc",))
+        present_row = {**record["roles"]["orthanc"]}
+        presence = {
+            "orthanc falsely absent": (raw, arguments, dict(record=lambda value: value["roles"].update(
+                orthanc={"absent": True, "container_name": names["orthanc"]}))),
+            "orthanc absent with the boundary row removed too": (raw, arguments, dict(
+                record=lambda value: value["roles"].update(orthanc={"absent": True, "container_name": names["orthanc"]}),
+                boundary=lambda value: value["facts"]["containers"].pop("orthanc"))),
+            "orthanc observed ABSENT, recorded present": (absent_raw, absent_arguments, dict(record=lambda value: value["roles"].update(orthanc=present_row))),
+            "orthanc observed ABSENT, a boundary row present": (absent_raw, absent_arguments, dict(
+                boundary=lambda value: value["facts"]["containers"].update(orthanc={"id": present_row["container_id"], "image": present_row["image"],
+                                                                                    "running": True, "project": PROJECT, "mounts": [], "networks": []}))),
+        }
+        for status in ({"outcome": "ERROR", "reason": "OSError"}, {"outcome": "UNKNOWN"}, None, "missing"):
+            presence["the snapshot's orthanc " + json.dumps(status) + " taken as absent"] = (absent_raw, absent_arguments, dict(
+                snapshot=lambda value, status=status: (value["facts"]["containers"]["value"].pop("orthanc") if status == "missing"
+                                                       else value["facts"]["containers"]["value"].update(orthanc=status))))
+        for name, (data, context, changes) in presence.items():
+            with self.subTest(presence=name):
+                changed_raw, changed = rebound(context, data, **changes)
+                self.refusedFor("CKPT7_ABSENCE_CORROBORATED", None, cp.layer_valid, changed_raw, **changed)
+        # CKPT7_CONTAINER_ID_BOUND, CKPT7_CONTAINER_NAME_BOUND, CKPT7_IMAGE_PIN_BOUND, CKPT7_ROLE_ROW_BOUND.
+        other_side = arguments["identity"]["image_ids"]["previous"]["api"]
+        identity = {
+            "api container ID (an empty diff)": ("api", row("api", container_id="id-other-api")),
+            "api container name": ("api", row("api", container_name=names["proxy"])),
+            "orthanc container name": ("orthanc", row("orthanc", container_name=names["api"])),
+            "api image sha256:888...": ("api", row("api", image="sha256:" + "8" * 64)),
+            "api image of the other side": ("api", row("api", image=other_side)),
+            "api image of the helper": ("api", row("api", image=arguments["identity"]["image_ids"]["helper"])),
+            "api and orthanc rows exchanged": ("api", lambda value: value["roles"].update(api=value["roles"]["orthanc"], orthanc=value["roles"]["api"])),
+        }
+        for name, (role, change) in identity.items():
+            with self.subTest(identity=name):
+                data, changed = rebound(arguments, raw, record=change)
+                self.refusedFor("CKPT7_IMAGE_PIN_BOUND" if "image" in name else "CKPT7_CONTAINER_ID_BOUND", role, cp.layer_valid, data, **changed)
+        with self.subTest(identity="the snapshot, the boundary facts and the row agree on an image outside the side's pin"):
+            outside = "sha256:" + "9" * 64
+            data, changed = rebound(arguments, raw, record=row("api", image=outside),
+                                    snapshot=lambda value: value["facts"]["containers"]["value"]["api"]["value"].update(image=outside),
+                                    boundary=lambda value: value["facts"]["containers"]["api"].update(image=outside))
+            self.refusedFor("CKPT7_IMAGE_PIN_BOUND", "api", cp.layer_valid, data, **changed)
+        with self.subTest(identity="the bound inputs: another plan side, no stack names, another target"):
+            for change in (lambda value: value["identity"]["image_ids"].update(release=value["identity"]["image_ids"]["previous"]),
+                           lambda value: value["owned"].pop("stack"), lambda value: value["target_names"].update(api="other-api"),
+                           lambda value: value.update(plan=None), lambda value: value.update(state_raw=None)):
+                changed = copy.deepcopy(arguments)
+                change(changed)
+                self.refusedFor("CKPT7_ROLE_ROW_BOUND", None, cp.layer_valid, raw, **changed)
+        # CKPT7_MOUNT_OBSERVATION_BOUND, CKPT7_RECORDED_VERDICT_REJUDGED.
+        mounted = dict(record=row("api", mounts=["/etc/kin-kept"], changes=["A /etc/kin-kept"],
+                                  verdicts=[{"change": "A /etc/kin-kept", "verdict": "transient-or-mount"}]))
+        verdicts = {
+            "an invented mount for an accepted change": ("api", mounted),
+            "the same change accepted without the mount": ("api", dict(record=row("api", changes=["A /etc/kin-kept"],
+                                                                                   verdicts=[{"change": "A /etc/kin-kept", "verdict": "transient-or-mount"}]))),
+            "a verdict left out": ("proxy", dict(record=row("proxy", changes=["C /run"], verdicts=[]))),
+            "a verdict added": ("proxy", dict(record=row("proxy", verdicts=[{"change": "C /run", "verdict": "transient-or-mount"}]))),
+            "verdicts reordered": ("proxy", dict(record=row("proxy", changes=["C /run", "A /run/nginx.pid"], verdicts=[
+                {"change": "A /run/nginx.pid", "verdict": "transient-or-mount"}, {"change": "C /run", "verdict": "transient-or-mount"}]))),
+            "another regenerated kind": ("proxy", dict(record=row("proxy", changes=["C /run"], verdicts=[{"change": "C /run",
+                                                                                                       "verdict": "regenerated:hostid"}]))),
+            "a mount observed but not recorded": ("api", dict(boundary=lambda value: value["facts"]["containers"]["api"].update(
+                mounts=[["/var/lib/kin-emr", PROJECT + "_emr-state", True]]))),
+        }
+        for name, (role, changes) in verdicts.items():
+            with self.subTest(verdict=name):
+                data, changed = rebound(arguments, raw, **changes)
+                self.refusedFor("CKPT7_MOUNT_OBSERVATION_BOUND", role, cp.layer_valid, data, **changed)
+        with self.subTest(verdict="a real mount point and its folder, observed and recorded, are accepted; a sibling is not"):
+            for diffs, expected in ((["C /var", "C /var/lib", "A /var/lib/kin-emr"], "SEALED"),
+                                    (["C /var", "C /var/lib", "A /var/lib/kin-emr", "A /var/lib/kept"], "WRITABLE_LAYER")):
+                target = target_fixture()
+                backend = FakeBackend({role: target["containers"][role] for role in intro.ROLES}, {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"})
+                backend.containers[target["containers"]["api"]]["mounts"] = [{"type": "volume", "name": PROJECT + "_emr-state", "destination": "/var/lib/kin-emr"}]
+                backend.diffs[target["containers"]["api"]] = diffs
+                code = _outcome(lambda: cp.load_bundle(self.captured("introduced", backend)[0]))
+                self.assertEqual(code if code == "ACCEPTED" else code.split(":")[0], "ACCEPTED" if expected == "SEALED" else expected,
+                                 "CKPT7_MOUNT_OBSERVATION_BOUND: " + code)
+        # Generation: the same judgement right after write_layer, before store.begin (the raw kept, nothing sealed).
+        target = target_fixture()
+        names = {role: target["containers"][role] for role in intro.ROLES}
+        for name, prepare in (("the daemon reports another image than the capture observed", lambda b: b.containers[names["api"]].update(image="sha256:" + "8" * 64)),
+                              ("a container left between the capture observation and the stop", lambda b: b.containers.pop(names["keycloak"]))):
+            with self.subTest(generation=name):
+                backend = FakeBackend(names, {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"})
+                prepare(backend)
+                fixture, store_root = self.tempdir(), self.tempdir() / "bundles"
+                self.assertRefused("LAYER_INVALID", self.captured, "introduced", backend, fixture=fixture, store_root=store_root)
+                self.assertEqual(sorted(path.name for path in store_root.iterdir()), [], "CKPT7_REQUIRED_RAW_RETAINED: nothing sealed, no partial")
+                self.assertEqual(len(list(fixture.glob("*/records/" + cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE))), 1,
+                                 "CKPT7_REQUIRED_RAW_RETAINED: the judged record is kept")
+                self.assertFalse([call for call in backend.calls if call[0] == "export"], "no volume was exported")
+
+    def test_every_consumer_rejudges_the_row_with_its_hashes_rebound(self):
+        """O7-CONSUMERS/O7-RAW (R7 3-4): the index over a rebound raw record is UNVERIFIED with the layer reason, never
+        BOUND; a BOUND index the old validator wrote over such evidence is PARENT_UNBOUND at every consumption and no
+        parent request is issued from it; a rebound bundle is refused by restore_checkpoint before any daemon call or
+        fixture root; repeated consumption of a valid BOUND index stays accepted and a raw change after it is refused."""
+        rows = layer_oracles(self)
+        for name, outcome in rows.items():
+            with self.subTest(oracle=name):
+                consumer, _, case = name.partition(": ")
+                control = case.startswith(("control", "held control", "orthanc observed ABSENT"))
+                if consumer == "bundle":
+                    self.assertEqual(outcome == "ACCEPTED", control, "CKPT7_REBOUND_RAW_UNVERIFIED: " + outcome)
+                elif consumer == "index":
+                    self.assertEqual(outcome.startswith("BOUND: []"), control, "CKPT7_REBOUND_RAW_UNVERIFIED: " + outcome)
+                    if not control:
+                        self.assertIn("writable-layer record: LAYER_INVALID", outcome, "CKPT7_REBOUND_RAW_UNVERIFIED")
+                elif consumer in ("bound_index", "leaf_request"):
+                    self.assertTrue(outcome.startswith("PARENT_UNBOUND: ") and "LAYER_INVALID" in outcome, "CKPT7_BOUND_CONSUMPTION_REJUDGES: " + outcome)
+                else:
+                    result = json.loads(outcome)
+                    if control:
+                        self.assertEqual(result["outcome"], "ACCEPTED", "CKPT7_VALID_CAPTURE_ACCEPTED")
+                    else:
+                        self.assertEqual((result["outcome"].split(":")[0], result["daemon_calls"], result["fixture_root_created"]),
+                                         ("BUNDLE_INVALID", 0, False), "CKPT7_PARENT_REFUSED_BEFORE_RESTORE: " + outcome)
+        # Repeated consumption of one valid BOUND index; a raw change after it; a forged BOUND over rebound evidence.
+        root = self.tempdir("kin-proof-")
+        unit = "release-tools-checkpoints-proof-prefix-introduce"
+        proof, run_dir, index = o7_index(self, unit=unit, root=root)
+        self.assertEqual(index["verdict"], "BOUND", index["reasons"])
+        cp.write_index(root, index)
+        (root / "b.source-manifest.json").write_bytes(cp.canonical({"root": str(root / "b")}) + b"\n")
+        for attempt in (1, 2):
+            with self.subTest(consumed=attempt):
+                self.admitted(cp.bound_index, root, unit)
+                self.admitted(cp.resolve_parent, proof.leaves, "release-tools-checkpoints-proof-late-resume", root)
+        record = next(proof.evidence.rglob(cp.LAYER_FILE))
+        original = record.read_bytes()
+        record.write_bytes(original.replace(b'"absent":false', b'"absent":true', 1))
+        self.refusedFor("CKPT7_BOUND_CONSUMPTION_REJUDGES", None, cp.bound_index, root, unit, code="PARENT_UNBOUND")
+        record.write_bytes(original)
+        self.admitted(cp.bound_index, root, unit)
+        # The parent bundle itself is loaded when the parent reference is issued: a damaged one is no parent.
+        tree = Path(proof.results["checkpoint"]["path"]) / "payload" / "fixture-tree.tar"
+        kept = tree.read_bytes()
+        tree.write_bytes(kept[:-1] + bytes([kept[-1] ^ 1]))
+        self.refusedFor("CKPT7_PARENT_REFUSED_BEFORE_RESTORE", None, cp.resolve_parent, proof.leaves, "release-tools-checkpoints-proof-late-resume",
+                        root, code="PARENT_UNBOUND")
+        tree.write_bytes(kept)
+        # The original capture observation and S stay byte-identical through every consumption (CKPT7_ORIGINAL_OBSERVATION_UNCHANGED).
+        before = {path.relative_to(proof.evidence).as_posix(): cp.sha256(path.read_bytes()) for path in proof.evidence.rglob("*") if path.is_file()}
+        self.admitted(cp.bound_index, root, unit)
+        cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir)
+        self.assertEqual({path.relative_to(proof.evidence).as_posix(): cp.sha256(path.read_bytes()) for path in proof.evidence.rglob("*")
+                          if path.is_file()}, before, "CKPT7_ORIGINAL_OBSERVATION_UNCHANGED")
+
+
 # ── T18: mutants of the checkpoint logic (temporary copies of the harness files only) ──
 
 # The harness file each mutant edits (a temporary copy; the product scripts are never copied or changed).
@@ -4597,6 +5167,15 @@ MUTANTS = (
      '        content = listed', "checkpoints"),
     ("M51", "CheckpointDeadlineTests.test_the_cleanup_has_its_own_end_and_a_deadline_keeps_the_residue",   # residue released after a deadline
      '    keep = bool(events) or not cleanup["complete"]', '    keep = not cleanup["complete"]', "native"),
+    # Round 7 (consult-checkpoints-r7-20261017 mutants R7-M-ROW/ABSENT/IMAGE).
+    ("M52", "CheckpointLayerContractTests.test_a_closed_role_row_is_judged_against_its_bound_capture",   # a non-object row skipped
+     '        if type(row) is not dict:\n            fail(role + ": the role row is not an object")',
+     '        if type(row) is not dict:\n            continue', "checkpoints"),
+    ("M53", "CheckpointLayerContractTests.test_a_closed_role_row_is_judged_against_its_bound_capture",   # absence not corroborated
+     '            if role in present:\n                fail(role + ": recorded absent', '            if False:\n                fail(role + ": recorded absent',
+     "checkpoints"),
+    ("M54", "CheckpointLayerContractTests.test_a_closed_role_row_is_judged_against_its_bound_capture",   # a row's image not bound
+     '        if row["image"] != present[role]["image"] or row["image"] != pins[role]:', '        if False:', "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -4644,8 +5223,8 @@ class CheckpointMutationContracts(TempCase):
         return tests
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
-        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6): control PASS, then an assertion failure in the named
-        contract for each mutant (M01-M44, M46-M51)."""
+        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6, r7): control PASS, then an assertion failure in the named
+        contract for each mutant (M01-M44, M46-M54)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:

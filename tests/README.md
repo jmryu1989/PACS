@@ -2079,6 +2079,7 @@ contracts above, the native negatives and deadline diagnostics below, then T16/T
   when its raw-list rows left with it -, changed, not beside its capture observation, or with a role, container, image
   or descriptor substituted: `layer_valid` re-judges every recorded row with the same contract. File names are a
   placement; the tests assert the required raw, its identity and its consumption.
+  Every consumption checks a closed present/absent role row against the bound capture snapshot, boundary mount facts and that role’s pinned plan image; a contradictory or incomplete row refuses, including when its hashes were rebound.
 - The upstream sources that justify the entries (orthanc-builder 24.12.0; the pinned image ID's own bytes are what the
   descriptor reads): [docker-entrypoint.sh](https://github.com/orthanc-server/orthanc-builder/blob/24.12.0/docker/orthanc/docker-entrypoint.sh#L15)
   writes a random `printf '%x'` of 268435456..4294967295 (8 hex digits) with LF over a missing or `not-generated`

@@ -765,9 +765,11 @@ class Smoke:
     def regenerated(self, checkpoint_id, sealed):
         """A05/A12 (r6, CKPT5-01): the sealed capture's writable-layer record, re-read from the bundle's fixture member:
         the Orthanc role on its pinned image, judged against the image's own regeneration (the hostid over its
-        placeholder, the startup cache, the enabled plugin libraries and exactly their folders); its raw is kept."""
+        placeholder, the startup cache, the enabled plugin libraries and exactly their folders); its raw is kept. r7: the
+        record read here is the one judged again in its bound context (cp.bundle_layer), never bytes trusted from the
+        earlier load_bundle."""
         manifest = sealed["manifest"]
-        record = json.loads(cp.tree_member_bytes(Path(sealed["bundle"]) / "payload" / "fixture-tree.tar", manifest["bindings"]["layer"]["path"]))
+        record = cp.bundle_layer(manifest, sealed["bundle"])
         descriptor = sealed["observation"]["regenerated"]
         row = record["roles"][cp.REGENERATED_ROLE]
         kinds = sorted({item["verdict"] for item in row["verdicts"] if item["verdict"].startswith("regenerated:")})
