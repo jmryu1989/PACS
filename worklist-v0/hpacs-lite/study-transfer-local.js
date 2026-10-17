@@ -577,7 +577,8 @@ window.KinStudyTransferLocal = function (app) {
         // A lost answer or a refusal starts nothing: the operation's state is read again, and Download asks anew.
         op.notice = failed ? TEXT.lost : answer.body?.message || TEXT.httpFailure(answer.status);
         render();
-        readDownload(op);
+        // The notice is the answer to this press; the read that follows keeps it unless the server has its own to say.
+        readDownload(op, false, true);
         return;
       }
       const link = document.createElement('a');
@@ -609,7 +610,7 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   /** GET .../original-downloads/:operationId: the state the server recorded. Sent is not a saved file (5.3). */
-  async function readDownload(op, polled = false) {
+  async function readDownload(op, polled = false, keepNotice = false) {
     if (!live(op)) return;
     if (!usable()) { op.polling = false; op.lost = true; return; }
     const gen = op.gen, seq = ++op.readSeq, at = work.capture('document');
@@ -630,7 +631,7 @@ window.KinStudyTransferLocal = function (app) {
       // The browser's own GET answers this page nothing: a refused or expired grant is known from the status (D1489).
       const request = answer.body.archiveRequest;
       const unstarted = request && (request.state === 'refused' || request.state === 'expired') && RESTARTABLE.includes(op.state);
-      op.notice = unstarted && typeof request.message === 'string' ? request.message : '';
+      op.notice = unstarted && typeof request.message === 'string' ? request.message : keepNotice ? op.notice : '';
       if (polled && op.polling) {
         op.polls++;
         const waiting = op.state === op.startedFrom;

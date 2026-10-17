@@ -82,6 +82,9 @@ MUTANTS = [
      "    const applied = (effect => (effect(), true))(() => {\n      if (!live(op) || op.gen !== gen) return;\n      op.inFlight = false;\n"
      "      if (false) { render(); return; }",
      "test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why", "C-07"),
+    # A refused or lost grant is a notice; the status read that follows it must not wipe it (hosted G3/CI on b64abb4).
+    ("refusal-notice-wiped-by-its-read", ASSET, "        readDownload(op, false, true);", "        readDownload(op);",
+     "test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why", "C-06"),
     # The grant lives in memory and the one link only.
     ("grant-kept-in-storage", ASSET,
      "      link.href = base + '?grant=' + encodeURIComponent(grant);\n      grant = null;",

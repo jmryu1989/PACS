@@ -605,8 +605,10 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.site.grant_answers = [(409, {"code": "DOWNLOAD_IN_PROGRESS", "message": "SYN-SERVER in progress"})]
         reads = len(self.site.download_reads)
         box.get_by_role("button", name="Download", exact=True).click()
-        expect(box).to_contain_text("SYN-SERVER in progress")
         self.wait(lambda: len(self.site.download_reads) > reads, "C-06 the state read again after a refusal")
+        self.settle(200)
+        # The refusal is the answer to the press: the status read that follows (no archiveRequest of its own) keeps it.
+        expect(box, "C-06 a refused grant stays a notice after its status read").to_contain_text("SYN-SERVER in progress")
         self.assertEqual([], self.downloads, "C-06 a refused grant downloads nothing")
         self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"), "C-07 a refusal never logs out")
         view = download_view(op, UID_A)
