@@ -33,7 +33,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import (
     HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen,
@@ -5445,6 +5445,14 @@ class LiveInvariantTests(unittest.TestCase):
         [now] = psql("SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"');")
         return now
 
+    def s9u4_orthanc_ready(self) -> bool:
+        """Orthanc answers GET /system with 200. A connection reset, refused or closed while it starts (its published port
+        is taken before the HTTP server listens) is "not ready", like any other non-200; nothing else is swallowed."""
+        try:
+            return self.stack._orthanc_request("GET", "/system").status == 200
+        except (ConnectionError, URLError, TimeoutError):
+            return False
+
     def s9u4_new_study(self, scope: dict[str, list[str]]) -> str:
         uid = s9u4_uid()
         scope["studies"].append(uid)
@@ -5775,9 +5783,13 @@ class LiveInvariantTests(unittest.TestCase):
                 self.assertNotEqual(poll.status, 503, "a Gateway route never meets the member readiness check")
             finally:
                 subprocess.run(["docker", "compose", "start", "orthanc"], cwd=ROOT, check=True, capture_output=True, timeout=120)
+                # B-4 (D1318): while Orthanc starts, its published port can take a connection and reset or refuse it -
+                # "not ready yet" within the same 120 s, never an error of the case; past the deadline the case fails
+                # by name instead of going on against a stopped Orthanc.
                 deadline = time.monotonic() + 120
-                while time.monotonic() < deadline and self.stack._orthanc_request("GET", "/system").status != 200:
+                while not self.s9u4_orthanc_ready() and time.monotonic() < deadline:
                     time.sleep(1)
+                self.assertTrue(self.s9u4_orthanc_ready(), "S9-U4 restart: Orthanc did not answer GET /system 200 within 120 s of its start")
             # Before a restart, each on a study of its own (one holder per Study): a prepared attempt whose original never
             # reached Orthanc (the object is removed, as for a send that never happened) and one whose identical object is
             # already there; an expired dispatching attempt whose object exists; another instance's live dispatching attempt;
@@ -5877,12 +5889,15 @@ class LiveInvariantTests(unittest.TestCase):
                              ("GET", f"/studies/2.25.1/original-downloads/{some}"), ("GET", f"/studies/2.25.1/original-downloads/{some}/archive"),
                              ("POST", f"/admin/dicom-import/{some}/files/0/recovery")]:
             self.assertEqual(self.stack.bearer_request(method, path, gateway, {} if method == "POST" else None).status, 403, path)
+        # B-4: the import below needs a running Orthanc; a previous case that left it stopped or starting is named here,
+        # not met later as a missing field of a refusal body.
+        self.assertTrue(self.s9u4_orthanc_ready(), "S9-U4 precondition: Orthanc does not answer GET /system 200 (a previous case left it unavailable)")
         with self.s9u4_scope() as scope:
             study = self.s9u4_new_study(scope)
             large = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-B", pixel=2 * 1024 * 1024 + 2)
             op, accepted = self.s9u4_import("tech", large)
             scope["operations"].append(op)
-            self.assertEqual((accepted.status, accepted.body["outcome"]), (200, "stored"), accepted.text)
+            self.assertEqual((accepted.status, (accepted.body or {}).get("outcome")), (200, "stored"), accepted.text)
             for alias in ("/api/DICOM-import", "/api/dicom-import/"):
                 status, _ = s9u4_proxy_post(self.stack.proxy, alias, self.stack.token("tech"), len(large))
                 self.assertEqual(status, 413, alias + " stays on /api/'s 2m at nginx")
@@ -5896,7 +5911,9 @@ class LiveInvariantTests(unittest.TestCase):
             rows = [line.split("\t") for line in psql(f"SELECT action || E'\\t' || detail FROM \"AuditLog\" WHERE detail::jsonb->>'operationId'='{download}' ORDER BY id;")]
             self.assertEqual([action for action, _ in rows], ["original.download.prepare", "original.download.intent", "original.download.result"])
             self.assertTrue(all(json.loads(detail)["institutionId"] == "hallym" for _, detail in rows))
-            self.assertEqual(json.loads(rows[-1][1])["state"], "sent")
+            # The whole result row on failure (its reason: source-error, sink-closed, aborted, ...), so an Incomplete here
+            # says whether the source, the receiver or a right stopped the archive (B-4 evidence).
+            self.assertEqual(json.loads(rows[-1][1])["state"], "sent", rows[-1][1])
             # The reader's role revoked while the archive streams (contract 5.3, U4BB-03): the check before the next chunk
             # stops the supply - never the whole archive - and the attempt closes Incomplete with its result row.
             big = self.s9u4_new_study(scope)
