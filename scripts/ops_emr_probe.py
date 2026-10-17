@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """One-shot EMR ledger probe of the EMR-introduction release (INTERIM-RELEASE-TOOLS item 7, plan L-10 / TEST-IR-06.6).
 
-B1 has no HTTP route that appends to the access ledger and the Nest AppModule does not assemble the ledger, so a 200
-from the worklist proves nothing about it (emr/units/b.json:159). This probe runs the product's compiled modules inside
-the target API image, with the API's own runtime credential and state volume (EmrLedgerClient, StateCoordinator,
-FailureJournal, PrismaLedgerSql, AccessSeal, AccessLedgerStore):
+B1 has no HTTP route that appends to the access ledger, so a 200 from the worklist proves nothing about it
+(emr/units/b.json:159). This probe runs the product's compiled modules inside the target API image, with the API's own
+runtime credential and state volume (EmrLedgerClient, StateCoordinator, FailureJournal, PrismaLedgerSql, AccessSeal,
+AccessLedgerStore).
 
-  process 1  recoverAtStart -> append one synthetic event -> durable receipt -> the same event again (replay)
-  process 2  recoverAtStart (a new process: restart recovery) -> the same entry and the same sealed position
+EMR-B2-BASE: the API process now owns the ledger for its lifetime - it holds the writer fence of /var/lib/kin-emr and
+runs the start-up recovery itself (EmrApplicationRuntime.start). A probe process can therefore never run beside it:
 
-The event is a service job (executor "service", cause "service-job", an in-process surface with no patient target)
-whose work context names the plan's synthetic study selector, so the ledger never shows it as a person's viewing.
-There is no raw SQL write, no new route, and the ledger rows are kept (no cleanup). The verdict binds: one new row,
-zero duplicates on replay, the external seal over that row, and the same chain after restart.
+  append    only while the target API is stopped (writers fenced, the same quiesce the captures use): this process is
+            the sole owner - it refuses (EmrStateOwnerBusy) before any connection or recovery while another process holds
+            the fence - then recoverAtStart -> one synthetic event -> durable receipt -> the same event again (replay)
+  (the real API owner restarts: the release tool starts the API service; its own start recovers the state)
+  observe   beside that live owner, read only: a client of its fence (state reads over its IPC, never an owner, never a
+            recovery) and the runtime credential's chain reads -> the same entry, the same sealed position, no new
+            failure record
+
+A helper process's restart never stands in for the API owner's restart. The event is a service job (executor
+"service", cause "service-job", an in-process surface with no patient target) whose work context names the plan's
+synthetic study selector, so the ledger never shows it as a person's viewing. There is no raw SQL write, no new route,
+and the ledger rows are kept (no cleanup). The verdict binds: one new row, zero duplicates on replay, the external seal
+over that row, and the same chain and seal after the API owner's restart.
 
   python scripts/ops_emr_probe.py event --plan PLAN.json         the synthetic event the plan's probe fields give
   python scripts/ops_emr_probe.py verify FIRST.json SECOND.json --event-id ID
@@ -49,21 +58,28 @@ const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
 const position=t=>({sequence:Number(t.sequence),hash:t.hash});
 const sealedViewing=seal=>{const s=seal.read();return s==='absent'?null:{sequence:Number(s.streams.viewing.sequence),hash:s.streams.viewing.hash};};
 (async()=>{
+  if(operation!=='append'&&operation!=='observe')throw Object.assign(new Error('ProbeOperation'),{code:'ProbeOperationUnknown'});
   const state=process.env.KIN_EMR_STATE_DIR;
+  // append: the sole owner, decided before any connection or recovery; observe: the live API owner's client only.
+  const coordinator=operation==='append'?new StateCoordinator(state):new StateCoordinator(state,undefined,'retention');
+  if(operation==='append'&&!coordinator.holdsWriterFence)throw Object.assign(new Error('EmrStateOwnerBusy'),{code:'EmrStateOwnerBusy'});
+  const journal=new FailureJournal(state,coordinator);
   const db=new EmrLedgerClient(process.env.DATABASE_URL);
   await db.$connect();
   try{
-    const coordinator=new StateCoordinator(state);
-    const journal=new FailureJournal(state,coordinator);
     const sql=new PrismaLedgerSql(db);
     const seal=new AccessSeal(state,sql,journal);
-    const store=new AccessLedgerStore(db,sql,seal,journal,db.emrAppendPoolSize);
-    const recovery=await seal.recoverAtStart();
     const eventId=operation==='append'?input.event.eventId:input.eventId;
-    const result={operation,recovery:{recovered:recovery.recovered,notCommitted:recovery.notCommitted},
-      tail_before:position(await sql.tail('viewing')),existed_before:(await sql.entryForEvent('viewing',eventId))!==null,
-      journal_before:journal.all().length};
-    if(operation==='append'){
+    const result={operation,owner:coordinator.holdsWriterFence};
+    const store=operation==='append'?new AccessLedgerStore(db,sql,seal,journal,db.emrAppendPoolSize):null;
+    if(store){
+      const recovery=await seal.recoverAtStart();
+      result.recovery={recovered:recovery.recovered,notCommitted:recovery.notCommitted};
+    }
+    result.tail_before=position(await sql.tail('viewing'));
+    result.existed_before=(await sql.entryForEvent('viewing',eventId))!==null;
+    result.journal_before=journal.all().length;
+    if(store){
       result.receipt=await store.append(input.event);
       result.tail_after=position(await sql.tail('viewing'));
       result.replay=await store.append(input.event);
@@ -106,9 +122,12 @@ def _position(value):
 
 
 def verify(first, second, event_id):
-    """The probe's verdict from the two processes' own outputs; anything short of the full chain is a refusal."""
-    for value, operation in ((first, "append"), (second, "restart")):
+    """The probe's verdict from the two processes' own outputs; anything short of the full chain is a refusal. The second
+    is the read-only observation after the API owner's own restart: it must have been a client, never the owner."""
+    for value, operation in ((first, "append"), (second, "observe")):
         require(type(value) is dict and value.get("operation") == operation and "error" not in value, "Probe process failed: " + operation)
+    require(first.get("owner") is True, "The append did not run as the sole owner")
+    require(second.get("owner") is False and "recovery" not in second, "The observation was an owner or ran a recovery")
     receipt = first["receipt"]
     require(type(receipt) is dict and receipt.get("eventId") == event_id and type(receipt.get("durableAt")) is str, "No durable receipt for the event")
     require(first["replay"] == receipt, "The replay did not return the original receipt")
@@ -125,16 +144,21 @@ def verify(first, second, event_id):
     if not first["existed_before"]:
         require(sealed == after, "The external seal is not at the entry")
     require(first["recovery"]["notCommitted"] == 0 and first["journal_after"] == first["journal_before"], "The probe left a failure record")
-    require(second["existed_before"] is True and second["stored"] == stored, "Restart recovery lost the entry")
-    require(_position(second["tail_before"]) == replay and _position(second["sealed"]) == sealed, "Restart recovery changed the chain")
-    require(second["recovery"]["recovered"] == 0 and second["recovery"]["notCommitted"] == 0, "Restart recovery found unsealed work")
-    require(second["journal_after"] == first["journal_after"], "Restart recovery left a failure record")
+    # The API owner's restart recovered the state: the same entry and seal, and (its recovery journals what it settles)
+    # no new failure record. An unsealed or unsettled append would have moved the seal or added a record.
+    require(second["existed_before"] is True and second["stored"] == stored, "The API owner's restart lost the entry")
+    require(_position(second["tail_before"]) == replay and _position(second["sealed"]) == sealed, "The API owner's restart changed the chain")
+    require(second["journal_after"] == second["journal_before"] == first["journal_after"], "The API owner's restart left a failure record")
     return {"event_id": event_id, "receipt": receipt, "entry": {"sequence": stored["sequence"], "hash": stored["hash"]},
             "sealed": sealed, "added": added, "replay_duplicates": 0, "restart": "same chain and seal"}
 
 
-def run(host_ops, intro):
-    """Two one-shot processes of the target API service (its runtime credential, its state volume), never the server."""
+def run(host_ops, intro, quiesce=None, restart=None):
+    """The append as a one-shot process of the target API service (its runtime credential, its state volume) while the
+    API is stopped, the API owner's own restart, then the read-only observation beside it. `quiesce` stops the writers
+    and `restart` starts the API and waits for its health; the release tool supplies both (EMR-B2-BASE hand-over).
+    Without them nothing runs: an append beside the live API would refuse anyway (EmrStateOwnerBusy)."""
+    require(callable(quiesce) and callable(restart), "L-10 needs the API quiesced before the append and restarted before the observation")
     event = intro.state.get("probe_event")
     if event is None:
         # Persisted before the first append: a re-run replays the identical event (the same ID with other content
@@ -142,12 +166,14 @@ def run(host_ops, intro):
         event = probe_event(intro.plan["probe"])
         intro.state["probe_event"] = event
         intro.save()
+    quiesce()
     first_run = host_ops.one_shot(intro, "api", ["-e", PROBE_SCRIPT, "append", json.dumps({"event": event})], timeout=300,
                                   entrypoint="node", name="emr-probe")
     require(first_run["exit"] == 0 and first_run["container_exit"] == 0, "Probe append process failed")
-    second_run = host_ops.one_shot(intro, "api", ["-e", PROBE_SCRIPT, "restart", json.dumps({"eventId": event["eventId"]})],
-                                   timeout=300, entrypoint="node", name="emr-probe-restart")
-    require(second_run["exit"] == 0 and second_run["container_exit"] == 0, "Probe restart process failed")
+    restart()
+    second_run = host_ops.one_shot(intro, "api", ["-e", PROBE_SCRIPT, "observe", json.dumps({"eventId": event["eventId"]})],
+                                   timeout=300, entrypoint="node", name="emr-probe-observe")
+    require(second_run["exit"] == 0 and second_run["container_exit"] == 0, "Probe observation process failed")
     first, second = result_line(first_run["stdout"]), result_line(second_run["stdout"])
     evidence = verify(first, second, event["eventId"])
     digest = intro.records.put("probe-evidence.json", {"evidence": evidence, "first": first, "second": second,
