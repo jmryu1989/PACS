@@ -4693,14 +4693,17 @@ def o7_forged_parent(test, change):
             "leaf_request": _outcome(lambda: cp.leaf_request(proof.leaves, "release-tools-checkpoints-proof-late-resume", root))}
 
 
-def o7_restore(test, final):
-    """restore_checkpoint over the bundle's manifest bytes (as an earlier consumer read them) with a synthetic daemon:
-    the outcome, the daemon calls and whether a fixture root was created."""
+def o7_restore(test, final, forge=None):
+    """restore_checkpoint over the bundle's manifest bytes (as an earlier consumer read them; `forge(manifest)` alters
+    that in-memory copy only, the bundle untouched) with a synthetic daemon: the outcome, the daemon calls and whether a
+    fixture root was created."""
     names = {role: PROJECT + "-" + role for role in intro.ROLES}
     backend = FakeBackend(names, {}, running=set())
     backend.containers.clear()
     target_root = test.tempdir() / "restored"
     manifest = json.loads((Path(final) / "manifest.json").read_bytes())
+    if forge is not None:
+        forge(manifest)
     outcome = _outcome(lambda: cp.restore_checkpoint(manifest, final, backend=backend, fixture_root=target_root, names=names,
                                                      images_present=lambda image_id: True, observe=lambda sid: None))
     return {"outcome": outcome, "daemon_calls": len(backend.calls), "fixture_root_created": target_root.exists()}
@@ -4983,6 +4986,20 @@ class CheckpointLayerContractTests(CaptureFixture, RefusalAssertions, TempCase):
                     else:
                         self.assertEqual((result["outcome"].split(":")[0], result["daemon_calls"], result["fixture_root_created"]),
                                          ("BUNDLE_INVALID", 0, False), "CKPT7_PARENT_REFUSED_BEFORE_RESTORE: " + outcome)
+        # SR7-1: the restore takes nothing from a manifest read earlier but the bundle's own - an owned network, an owned
+        # volume or the boundary changed in the caller's copy (the bundle intact) refuses before any daemon call.
+        final = o7_bundle(self)[1]
+        for name, forge in {
+            "an owned network added": lambda manifest: manifest["owned"].setdefault("networks", []).append({"name": "forged-net", "labels": {}}),
+            "an owned volume added": lambda manifest: manifest["owned"].setdefault("volumes", {}).update(
+                {"extra:forged-volume": {"name": "forged-volume", "labels": {}, "member": "fixture-tree.tar"}}),
+            "the boundary replaced": lambda manifest: manifest.update(boundary={"forged": True}),
+        }.items():
+            with self.subTest(forged_manifest=name):
+                result = o7_restore(self, final, forge)
+                self.assertEqual((result["outcome"].split(":")[0], result["daemon_calls"], result["fixture_root_created"]),
+                                 ("BUNDLE_INVALID", 0, False), "CKPT7_PARENT_REFUSED_BEFORE_RESTORE: " + name + ": " + json.dumps(result))
+        self.assertEqual(o7_restore(self, final)["outcome"], "ACCEPTED", "CKPT7_VALID_CAPTURE_ACCEPTED")
         # Repeated consumption of one valid BOUND index; a raw change after it; a forged BOUND over rebound evidence.
         root = self.tempdir("kin-proof-")
         unit = "release-tools-checkpoints-proof-prefix-introduce"

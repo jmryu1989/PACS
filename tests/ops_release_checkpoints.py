@@ -2305,10 +2305,10 @@ def restore_checkpoint(manifest, bundle_dir, *, backend, fixture_root, names, im
     actions = [("inputs", bundle_inputs(manifest, bundle_dir))]
     # r7 (CKPT6-01): a manifest loaded earlier is not trusted; the bundle's current bytes are judged again (load_bundle,
     # the writable layer in its bound context included) and must be the ones the given manifest binds, before any image,
-    # daemon, fixture or product call.
+    # daemon, fixture or product call. The whole manifest given must be the bundle's (SR7-1): its owned volumes and
+    # networks and its boundary are what the restore creates and keeps, so no field of an earlier read is trusted.
     current, _ = load_bundle(bundle_dir)
-    require(current["checkpoint"] == manifest["checkpoint"] and current["bindings"] == manifest["bindings"], "BUNDLE_INVALID",
-            "the manifest given is not the bundle's")
+    require(current == manifest, "BUNDLE_INVALID", "the manifest given is not the bundle's")
     images = manifest["identity"]["image_ids"]
     for side, value in images.items():
         for image in (value.values() if type(value) is dict else [value]):
