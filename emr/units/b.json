@@ -110,6 +110,11 @@
       "tests/emr/b/noninferiority_test.py",
       "tests/emr/b/verification_plan.cjs",
       "tests/emr/b/power_design.py"
+    ],
+    "B2-base": [
+      "api/src/emr-runtime/application.ts",
+      "tests/emr/b/startup_fixture.cjs",
+      "tests/emr/b/startup_pg_test.cjs"
     ]
   },
   "models": {
@@ -449,6 +454,12 @@
         "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
         "C22 bounded lanes keep two verification connections free across small pools and shared stores",
         "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
+        "C24 base start-up order: the owner starts once after the module graph and before every init hook and the listener; A is composed once with B readers",
+        "C25 a close during the start (I13): the start stops at the wait it is in - nothing further is fenced, recovered or composed - releases its client once, and the close ends only after it",
+        "C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery",
+        "C27 shutdown keeps the HTTP drain and then disconnects once; a stop signal during the start ends it at the wait it is in; a failed start releases only what it created, within 5 s, and deletes no state",
+        "C28 every start-up phase that fails ends the process with one closed line and no listener, timer, buffered log or secret",
+        "C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-shutdown start is refused and nothing is composed or recovered twice",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
@@ -480,9 +491,9 @@
     }
   },
   "expected": {
-    "contract": 21,
+    "contract": 27,
     "live": 13,
-    "mutants": 39,
+    "mutants": 52,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -774,6 +785,97 @@
         "C21"
       ],
       "behaviour": "merged reservation loses recovery intent"
+    },
+    {
+      "id": "M43",
+      "kill": [
+        "C24"
+      ],
+      "behaviour": "MUT-B2SH-01: init hooks run before the awaited EMR start"
+    },
+    {
+      "id": "M44",
+      "kill": [
+        "C29"
+      ],
+      "behaviour": "MUT-B2SH-03: a concurrent, failed or closed start may start again"
+    },
+    {
+      "id": "M45",
+      "kill": [
+        "C26"
+      ],
+      "behaviour": "MUT-B2SH-05: a second ledger store over the same client"
+    },
+    {
+      "id": "M46",
+      "kill": [
+        "C27"
+      ],
+      "behaviour": "MUT-B2SH-06: the dedicated client is released before the HTTP server drained"
+    },
+    {
+      "id": "M47",
+      "kill": [
+        "C28"
+      ],
+      "behaviour": "MUT-B2SH-07: the fatal handler prints the raw error"
+    },
+    {
+      "id": "M48",
+      "kill": [
+        "C28"
+      ],
+      "behaviour": "consult M13: a wrong runtime role still reaches the listener"
+    },
+    {
+      "id": "M49",
+      "kill": [
+        "C25"
+      ],
+      "behaviour": "I13: a close during the start is looked at only at its end"
+    },
+    {
+      "id": "M50",
+      "kill": [
+        "C25"
+      ],
+      "behaviour": "I13: the close releases the client under the step in flight"
+    },
+    {
+      "id": "M51",
+      "kill": [
+        "C25"
+      ],
+      "behaviour": "I13: a late-returned client is released twice"
+    },
+    {
+      "id": "M52",
+      "kill": [
+        "C26"
+      ],
+      "behaviour": "G-4: a start beside a live owner continues into recovery"
+    },
+    {
+      "id": "M53",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeOwnerTests.test_07_an_append_beside_a_live_owner_and_an_observation_without_one_are_refused"
+      ],
+      "behaviour": "L-10: the probe appends and recovers beside a live API owner"
+    },
+    {
+      "id": "M54",
+      "kill": [
+        "P:tests/ops_backup_test.py:EmrRestoreVerification.test_b2_restore_recovers_only_its_own_copy_never_a_volume_a_running_owner_mounts"
+      ],
+      "behaviour": "isolated restore: the recovery runs on a state volume a running container mounts"
+    },
+    {
+      "id": "M55",
+      "kill": [
+        "C25"
+      ],
+      "behaviour": "ready refused before the start completed: resources handed out while closing"
     }
   ],
   "candidate_cases": [

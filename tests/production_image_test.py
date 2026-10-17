@@ -79,9 +79,11 @@ class ProductionImageTests(unittest.TestCase):
         code = int(ops.text(["docker", "wait", name], timeout=180))
         return code, self.logs(name)
 
-    def api(self, suffix, **overrides):
+    def api(self, suffix, mounts=(), **overrides):
+        # EMR-B2-BASE: the API owns the EMR ledger state for its lifetime (the image's own 0700 directory unless a case
+        # mounts a volume); its start refuses without that setting.
         env = {
-            "DATABASE_URL": RUNTIME_URL,
+            "DATABASE_URL": RUNTIME_URL, "KIN_EMR_STATE_DIR": "/var/lib/kin-emr",
             "DEPLOYMENT_MODE": "production", "AUTH_REQUIRED": "true",
             "KC_ISSUER": "http://127.0.0.1:1/auth/realms/kin",
             "KC_JWKS_URL": "http://127.0.0.1:1/certs", "KC_AUDIENCE": "kin-api",
@@ -94,7 +96,10 @@ class ProductionImageTests(unittest.TestCase):
         env.update(overrides)
         args = ["--network", "container:" + self.db]
         for key, value in env.items():
-            args += ["-e", key + "=" + value]
+            if value is not None:
+                args += ["-e", key + "=" + value]
+        for mount in mounts:
+            args += ["--mount", mount]
         return self.container(suffix, [*args, self.image_id])
 
     def wait_running_api(self, name):
@@ -213,12 +218,14 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
         self.stopped_with_error(name)
 
     def test_06_production_refuses_the_installer_credential(self):
-        """EMR-B1 start boundary: in production the server opens only as the least-privilege runtime role."""
+        """EMR-B1 start boundary: in production the server opens only as the least-privilege runtime role.
+        EMR-B2-BASE: the EMR owner's start refuses it before any init hook or listener, in one closed line that names the
+        phase and the refusal class - never its problem list or any provider text."""
         name = self.api("installer", DATABASE_URL=INSTALLER_URL)
         logs = self.stopped_with_error(name)
-        self.assertIn("EmrRuntimeRefused", logs)
-        for problem in ("not-the-runtime-role", "rolsuper"):
-            self.assertIn(problem, logs)
+        self.assertEqual(self.fatal_lines(logs), ["[KIN API] 기동 실패(role/EmrRuntimeRefused)"])
+        for detail in ("not-the-runtime-role", "rolsuper", "postgres@", "[Nest]"):
+            self.assertNotIn(detail, logs)
 
     def test_04_production_refuses_disabled_auth(self):
         """TEST-C1-03: packaging must retain the production authentication guard."""
@@ -273,6 +280,45 @@ c.Module({controllers:[Probe],providers:[PrismaService]})(ProbeModule);
             if client.poll() is None:
                 client.kill()
                 client.communicate(timeout=15)
+
+    def fatal_lines(self, logs):
+        """Everything the stopped process printed must be its one closed start-up line; returns it cut after the phase/code."""
+        lines = [line for line in logs.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, logs[-2000:])
+        return [line.split(":", 1)[0] for line in lines]
+
+    def test_07_emr_start_settings_and_state_ownership_refuse_before_listening(self):
+        """EMR-B2-BASE (TEST-B2SH-06/16, OA9): a missing, exposed or absent state directory and a second API process on the
+        same state volume each stop the server with its one closed line and nonzero exit - the second owner before any
+        recovery of its own, while the first keeps serving."""
+        # Started together (none reaches a listener), then judged one by one.
+        refusals = [(self.api(suffix, **overrides), expected) for suffix, overrides, expected in (
+            ("no-state", {"KIN_EMR_STATE_DIR": None}, "[KIN API] 기동 실패(config/EmrStateDirectoryRequired)"),
+            ("exposed-state", {"KIN_EMR_STATE_DIR": "/tmp"}, "[KIN API] 기동 실패(fence/EmrStateDirectoryExposed)"),
+            ("absent-state", {"KIN_EMR_STATE_DIR": "/var/lib/kin-emr/absent"}, "[KIN API] 기동 실패(fence/EmrStateDirectoryRequired)"),
+        )]
+        for name, expected in refusals:
+            with self.subTest(expected):
+                self.assertEqual(self.fatal_lines(self.stopped_with_error(name)), [expected])
+        volume = "kin-rehearsal-" + uuid.uuid4().hex[:16] + "-emr-state"
+        token = uuid.uuid4().hex
+        self.addCleanup(ops.remove_owned_if_present, "volume", volume, token)
+        ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, volume])
+        mount = "type=volume,source=" + volume + ",target=/var/lib/kin-emr"
+        first = self.api("owner", mounts=[mount])
+        self.addCleanup(ops.run, ["docker", "stop", "--time", "10", first])
+        self.wait_running_api(first)
+        second = self.api("second-owner", mounts=[mount])
+        self.assertEqual(self.fatal_lines(self.stopped_with_error(second)), ["[KIN API] 기동 실패(fence/EmrStateOwnerBusy)"])
+        ops.run(["docker", "exec", first, "node", "-e",
+                 "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(r.status!==200)process.exit(1)}).catch(()=>process.exit(1))"])
+        # The owner's SIGTERM ends it without SIGKILL; a new process on the same volume recovers it and serves again.
+        ops.run(["docker", "stop", "--time", "10", first])
+        self.assertNotEqual(json.loads(ops.text(["docker", "inspect", first]))[0]["State"]["ExitCode"], 137, "Shutdown needed SIGKILL")
+        ops.run(["docker", "start", second])
+        self.wait_running_api(second)
+        self.assertNotIn("기동 실패", self.logs(second).split("[KIN API] 기동 실패(fence/EmrStateOwnerBusy)", 1)[1])
+        ops.run(["docker", "stop", "--time", "10", second])
 
 
 if __name__ == "__main__":
