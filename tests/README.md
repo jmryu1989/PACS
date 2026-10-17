@@ -1721,6 +1721,438 @@ host could not be observed before it does not run; after a change it ends UNKNOW
   rehearsal of a production backup copy, a real realm, production TLS or data volume; that is the separate rehearsal
   on a disposable host.
 
+## RELEASE-TOOLS-CHECKPOINTS — resumable rehearsal checkpoints (test harness only)
+
+Astra spec `spec-release-tools-checkpoints-20261015` (D1336, order D1338; hardening 1 D1354): REQ RQC-01..12 → RISK
+RSK-01..12 → TEST T01..T18. `scripts/**`, `tests/live_test_gate.py` and the runner/recorder are unchanged; the
+checkpoints live in `tests/ops_release_checkpoints.py` (identity, admission, bundles, cleanup, time, claims, evidence
+index, parent map and the generated proof commands), the stage table of `tests/ops_deploy_host_container_test.py`
+(`STAGE_METHODS`, `SyntheticStack.descriptor/restored`, the `CheckpointDocker` adapter, the only place that builds
+Docker/Compose commands for a checkpoint) and the opt-in leaves of `tests/ops_release_checkpoints_live_test.py`
+(`CheckpointSegments`, and the capture/restore consumers `seal_boundary`/`restore_boundary` they share with the native
+smoke `tests/ops_release_checkpoints_native_test.py`, round 5 below).
+
+- Fresh stays fresh. The three `EmrIntroductionRehearsal` methods run every stage of their scenario in one process
+  (`normal`: source, seed, capture, introduce, verify, normal-tail; `forward`: the same prefix with every verify
+  assertion, then forward-tail, whose verdict must itself be DEPLOYED with every required fact true; `forced`:
+  forced-capture, forced-tail), under `require_live_run()` (run them through `scripts/run-tests.py`), and refuse a set
+  `KIN_TEST_EMR_CHECKPOINT_REQUEST`. With `KIN_TEST_EMR_REHEARSAL_EVIDENCE` a fresh method also writes its own
+  `segment.json` there after its stacks are removed (the live marker, the raw records `keep_records` preserved, phase
+  results, the observed absence of every owned resource and alias, unchanged inputs); an unobserved cleanup fails it.
+  Only such a run is a fresh end-to-end pass; every checkpoint consumption records `fresh_e2e=false`,
+  `release_gate_eligible=false`, and its inherited phases apart from its executed ones. A derived (fork) run never makes
+  a receipt and never counts as a final-candidate pass.
+- Boundaries: `source-b0` (source B0 input cache), `seeded`, `held`, `introduced`, `verified`, and the separate forced
+  lineage's `failure-held`, only after the phase's own PASS result, its history row, quiet workers, no UNKNOWN hold, no
+  point of no return, and the product's boundary contract (`checkpoint_valid`; for `seeded` with the released lock).
+  Never inside L-09b/L-10c/L-11a, never NEEDS_ATTENTION/CAPTURE_FAILED/a failed HELD, never `docker commit`.
+- A bundle is private (0700/0600) under `<output_root>/bundles`, outside the fixture and evidence roots: the declared
+  volumes (stopped proxy → api → keycloak → orthanc, the database last; a forced kill, an unconfirmed stop, unknown
+  writable-layer state, an anonymous or foreign volume or a bind outside the fixture tree refuses; another named volume
+  of the project is captured as an extra member), the fixture tree (each clone's own Git objects, records and sibling
+  secrets, the operations lock, the ComposeEntry generations, the backup root with its audit ledger, the CA, overlays,
+  the stage context), the tool tree bytes, the product facts observed at the boundary (containers, mounts, networks,
+  images, migrations, legacy roles/grants, realm members, study rows, EMR roles, the synthetic frame), and an identity of
+  the actual bytes (tool/source/harness trees, the eight TOOL_FILES, source and clone B0 separately, image IDs, plan and
+  target, host key, daemon, absolute root, runtime: Python, Docker, Compose, Playwright, Chromium, architecture and the
+  module origins). manifest.json is written last and names the bundle by its sha256; a child names its parent by that
+  manifest SHA and, separately, by its payload SHA; a `.partial-*` is never consumed; nothing is rewritten; a tar with a
+  duplicate path or a member under a link (in any order) refuses.
+- Resume: same host, daemon, architecture and absolute root; plan, target and both B0 recomputed from the bundle's own
+  bytes before anything is created (every plan-dependent path must lie inside the fixture root); new volume objects only;
+  containers from the pinned ComposeEntry with the same image IDs (HELD: all created, the database alone started); no
+  seed, provision or migration; the product's observation is judged again, and the boundary's product facts must be
+  observed again (only container IDs may differ; the old → new correspondence is recorded). Same tool tree →
+  `checkpoint-resume` (original plan and state bytes). Changed tool tree → `diagnostic-fork` only when the exact
+  difference lies inside `HostOps.proxy_ui` (from `held` or `failure-held`), `HostOps.fenced_smoke`/`probe` or
+  `HostOps.final_allowlist`/`backup_readiness` (from `introduced`, or the earlier `held`), and the suffix re-runs the
+  first affected phase; `verified` with a changed tool is refused as `VERIFIED_PLAN_BINDING` (its smoke binds the parent
+  plan); `HostOps.prepare`, any shared helper, the phase machine, an import, constant, default, decorator or other file
+  is `PREFIX_CHANGED`/`UNCLASSIFIED_CHANGE` before any restore. One transition A→B only; a derived checkpoint is never a
+  donor. A request whose parent manifest is not the checkpoint this stage consumes, of its lineage, sealed in the
+  request's own bundle store and not derived, is refused before the bundle is read.
+- Host: every Docker/Compose call of a checkpoint stage runs without `DOCKER_*`/`COMPOSE_*`; any `DOCKER_HOST`,
+  `DOCKER_CONTEXT`, `DOCKER_CONFIG` or TLS selection, or a current context that is not a local `unix://` socket, is
+  `REMOTE_DAEMON`. D1034 (≥ 10 GiB available RAM, a daemon that answers, and no foreign container running or stopped:
+  a `kin-*` name, a `kin.ops.run` or a `kin.emrb.live` label, whatever the name) is measured inside each leaf before its
+  first query and again directly before the restore; a failed or malformed listing is `DAEMON_UNAVAILABLE`.
+- Budgets: one stable unit per leaf, fixed before the first run in the commander's registry
+  (`KIN_TEST_EMR_CHECKPOINT_REGISTRY`, default the nine proof leaves of `DEFAULT_PROOF_LEAVES`, each with its source
+  copy and its parent leaf); at most 3 attempts of at most 3600 s each (restore, phases, export and cleanup included); a
+  passed, running or interrupted unit is never repeated; a new output folder, source SHA or evidence folder never names
+  a new unit. A failed leaf keeps the gate's marker until `release_after_inspection` with the real inspection
+  (`inspection_record`).
+- Evidence: each leaf preserves its raw product records (state, journal, phase results, command records, logs; never
+  `<records>.secrets`, the Compose values file, env files, smoke-member passwords or browser profiles) into its evidence
+  root before its private fixture is removed (a failed leaf keeps the fixture for inspection), and writes one
+  `segment.json` with its parent identity and its own current identity (source trees, executed plan, resume time) apart,
+  the parent chain, phase results, raw record hashes, inputs before/after and cleanup; it prints the segment's path and
+  SHA once. `index` binds a recorded run only when every recorded input is unchanged, every required input of the leaf
+  was declared, the logs, the exact selection, the runner's passed result, the announced segment SHA and the segment's
+  claims all agree, and the raw evidence itself does (CKPT2-01): every listed raw record exists with its SHA-256 and
+  none is unlisted; per stack plan.json, state.json and journal.jsonl are there, the state names the plan.json identity,
+  the leaf's own phases are the tail of the state history, each binds its raw result, and the result's phase, status,
+  steps, request and plan equal the fixed leaf contract (`expected_results`: the complete PASS sequence, or input A's
+  L-11a STOP at VERIFIED, or the forced L-09b rollback at RESTORED); the referenced command records and logs are there;
+  a leaf with phases names the plan its results ran under (the fresh method binds source and clone plans apart; only
+  T17 has no phase and no plan); a fork's admission.json and a sealed checkpoint's manifest are bound by their bytes
+  (`BOUND`, else `UNVERIFIED` with reasons). Every consumer of a BOUND index (`request`'s parent, `compare`) re-reads
+  run.json, stdout/stderr, the segment and every bound raw file, admission and checkpoint manifest and refuses a change,
+  a missing file or a read error (`PARENT_UNBOUND`; `compare` then has no `t16_pass`) (CKPT2-03).
+- Time: a bundle is reusable until min(created + 8 h, plan window end, TLS notAfter) and only if the declared suffix
+  and teardown fit; a future creation time refuses; no window, approval, certificate or receipt time is rewritten; the
+  next phase logs in again after the restore. Expiry refuses reuse and never deletes a bundle.
+- Cleanup: exact labels and recorded IDs only; the image aliases a fixture tagged (`<project>-api:latest`,
+  `<project>-proxy:latest`) are removed only while another tag keeps the shared image (its last name is kept and
+  reported); the image ID is never removed; absence is observed by a new query.
+- Platform: Windows and Docker Desktop are `UNSUPPORTED_HOST` (pure tests only there); the leaves skip elsewhere with
+  their reason.
+
+Pure contracts (CI `runtime`, any OS): `python -B tests/ops_release_checkpoints_test.py` — T01–T15 (T15 runs the real
+stage methods of the three scenarios over a synthetic product: each wrong data, rights, realm, frame, overlay,
+ordinary-entry, image or receipt outcome must fail in the stage that owns its assertion), the host adapter, bundle
+inputs, raw records and lineage contracts, the raw-evidence index and its consumers, the supervised browser child
+against a frozen copy (CKPT2-02: the product's `SystemdBrowser.command` writes no bytecode into `scripts/`/`tests/`, so
+the next `runtime_identity` and the index's `--tree scripts` binding pass; the real browser stays a T16 condition), the
+per-attempt retry, the seal's Git calls against the real git (`CheckpointGitClosureTests`: shared and shallow fixture
+clones keep their own object closure; a missing object raises), the `commands` host preconditions
+(`CheckpointHostPreconditionTests`: a real venv without Playwright or pydicom, non-root or user-home paths), the r5
+observation context over a synthetic Engine (`CheckpointObservationTests`: its own request, Records and settled exec
+workers, the original records byte-identical, the 48a28dd and digest-only contexts as diagnostics), the observation raw
+at the seal, the index and every consumer (`CheckpointRecordTests.test_observation_raw_is_required_and_rechecked_when_consumed`),
+the `commands` smoke precondition (`CheckpointSmokeTests`), the r6 regenerated-artifact contract
+(`CheckpointRegeneratedTests`: the role × image × kind/type/content/ancestor/mount matrix, the required layer raw at
+load_bundle/index/BOUND consumers, the descriptor from a pristine probe) and real deadlines (`CheckpointDeadlineTests`:
+local Python children on the bounded path under a 5 s scenario watchdog, the cleanup's own end, the kept residue), and
+T18 (M01–M44 and M46–M51, each killed only by an assertion after its control passed). Root on Linux for the ComposeEntry
+fork contract and the root-owned `commands` path (CI uses sudo). These are pure controls (no Docker daemon is queried;
+the real entrypoint's host observation is answered by its bootstrap); the adapter's own commands run only in the
+native smoke below.
+
+Linux proofs T16/T17 (pending until run on a native Linux synthetic host with the persistent live slot, as the gate
+account (root); `P` is an absolute proof folder, `B` the candidate checkout; the four `KIN_TEST_*_IMAGE`,
+`PLAYWRIGHT_BROWSERS_PATH` and the installed Playwright as for the fresh rehearsal; the script exports
+`KIN_TEST_ISOLATED_INSTALL=1`). The parent map is fixed in the registry, not taken from "the previous leaf":
+
+| Leaf (unit `release-tools-checkpoints-proof-…`) | Copy | Case | Parent leaf → checkpoint | Kind |
+|---|---|---|---|---|
+| prefix-source | a | `CheckpointSegments.test_source_checkpoint` | — | fresh (seals source-b0) |
+| prefix-seed | a | `CheckpointSegments.test_seed_checkpoint` | prefix-source → source-b0 | reseed-from-recorded-b0 (seals seeded) |
+| prefix-capture | a | `CheckpointSegments.test_capture_checkpoint` | prefix-seed → seeded | checkpoint-resume (seals held) |
+| prefix-introduce | a | `CheckpointSegments.test_introduce_checkpoint` | prefix-capture → held | checkpoint-resume (seals introduced) |
+| prefix-verify | a | `CheckpointSegments.test_verify_checkpoint` | prefix-introduce → introduced | checkpoint-resume (seals verified) |
+| late-fault | a | `CheckpointSegments.test_original_late_fault` | prefix-verify → verified | checkpoint-resume, expects L-11a STOP |
+| late-resume | b | `CheckpointSegments.test_late_change_resume` | prefix-introduce → introduced | diagnostic-fork, verify + forward-tail |
+| fresh-control | b | `EmrIntroductionRehearsal.test_emr_introduction_rehearsal_forward_entry_after_reopen` | — (no request) | fresh |
+| early-refusal | c | `CheckpointSegments.test_earlier_change_refused` | prefix-introduce → introduced | diagnostic-fork, expects PREFIX_CHANGED |
+
+Copy `a` is input A (`HostOps.backup_readiness` raises the deterministic L-11a STOP), `b` the unmodified candidate B,
+`c` input C (`HostOps.prepare` changed).
+
+Host preconditions (T16 run-d1428 spent two of the first leaf's three gate attempts on them; `commands` now checks them
+before it writes a byte of `proof.sh` and refuses with `CHECKPOINT_REFUSED HOST_PRECONDITION`, exit 2, so a host that
+cannot pass costs no attempt; on success it prints the observed facts as `{"host_preconditions": ...}` on stderr; since
+round 5 it then runs the mandatory native smoke and T16's host admission before the script, see round 5 below):
+
+- `--python` is the interpreter of every leaf (recorder, runner, tests). It must import Playwright (the smoke browser)
+  and pydicom (the synthetic study, `synthetic_dicom`); the versions are printed. Use the smoke venv by its absolute
+  path, e.g. `/opt/kin-smoke/py/bin/python3` with Playwright and `pydicom==2.4.4` (the version CI pins), owned by root.
+- `P` and `B` must each lie on a chain of folders owned by uid 0 that neither group nor others can write (no link on
+  the path, no sticky `/tmp` either), outside every user home (`/home/<user>` from the account database). The product
+  refuses the declared overlay (IRT2-19) and the browser module (`ops_deploy_host.protected`) anywhere else, and both
+  live in the copies under `P`. Use e.g. `/srv/kin-ckpt/proof-<stamp>` (made by root, mode 0700) and a root-owned
+  candidate checkout such as `/srv/kin-ckpt/candidate`.
+- Native Linux, as root (the gate account), with the leaves' Docker, RAM and image conditions above.
+
+The exact command sequence is generated from the frozen registry and run unchanged (as root):
+
+```text
+python3 -B $B/tests/ops_release_checkpoints.py registry --out $P/registry.json      # or the commander's frozen registry
+python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B --python /opt/kin-smoke/py/bin/python3 > $P/proof.sh && sudo -E bash $P/proof.sh
+```
+
+Gate budget: every leaf is one stable unit with at most 3 attempts in the gate account's persistent ledger
+(`/root/.local/state/kin-pacs/test-gate/<unit>.json`); a leaf that fails, environment causes included, spends one; a
+`commands` refusal spends none. A spent budget is never reset for the same candidate SHA. A NEW candidate SHA (a fix)
+runs in a NEW proof root `P'` (never the old `P`), and its leaves start from an empty ledger only after the old SHA's
+ledger files of the nine `release-tools-checkpoints-proof-*` units (`<unit>.json`, `<unit>-attempt-<n>.json`) were moved
+out of `test-gate/` into the old SHA's evidence with its inspection, on the commander's recorded disposition naming the
+new SHA; nothing is deleted, `inspections.jsonl` and every other unit's ledger stay, and the marker must already be
+released. The old ledger stays the old SHA's result; a fresh ledger is never an acceptance of anything, and only the
+new SHA's own BOUND leaves and `compare` count.
+
+`proof.sh` makes the three source copies (`source-copy`, each with its source manifest), then for every leaf in registry
+order: `plan` (the registered exact selection), `request` (checkpoint leaves only; the parent manifest is resolved from
+the parent leaf's BOUND index and must be the checkpoint this stage consumes), the run through `scripts/record-run.py`
+from the leaf's copy with `--file` for the plan, registry, source manifest, request and parent manifest and the five
+harness files, `--tree scripts`, and `scripts/run-tests.py --plan` (checkpoint leaves with
+`KIN_TEST_EMR_CHECKPOINTS=1`, `KIN_TEST_EMR_CHECKPOINT_REQUEST`, `KIN_TEST_EMR_CHECKPOINT_REGISTRY`; the fresh control
+with `KIN_TEST_EMR_REHEARSAL=1`, `KIN_TEST_EMR_REHEARSAL_EVIDENCE=$P/evidence/<unit>/attempt-1` and no request), then
+`index --attempt 1` (`$P/index/<unit>.json` only when BOUND). It ends with `compare`, which exits 0 only for `t16_pass`:
+both forward verdicts DEPLOYED with every required fact true, equal, and both runs BOUND (equal failures are not a pass).
+
+Retry (CKPT2-06): after a failed leaf `U` and its real inspection (`release_after_inspection`), generate the rest of the
+sequence as attempt `N` (2 or 3) of the same unit and run it unchanged:
+
+```text
+python3 -B $B/tests/ops_release_checkpoints.py commands --registry $P/registry.json --proof-root $P --candidate $B --python /opt/kin-smoke/py/bin/python3 --from-unit U --attempt N > $P/proof-U-N.sh && sudo -E bash $P/proof-U-N.sh
+```
+
+It makes no source copy and runs no earlier (BOUND) leaf again; `retry` first reads the gate ledger and refuses unless the
+marker was released, the failed leaf's kept fixture root `$P/out/fixture` was cleared by that inspection, and every
+earlier attempt of `U` is `failed` below the budget (an interrupted, running or passed
+attempt is final for `run-tests.py`, and an inspection alone never makes it retryable); `U` keeps its unit, its gate plan
+file `$P/plan-U.json`, its parent and the gate ledger, and only `$P/request-U-N.json`, `$P/runs/U-N` and
+`$P/evidence/U/attempt-N` are new (an existing one is refused before anything is written, so the earlier attempt's raw
+records and segment keep their bytes; the fresh control refuses an existing evidence folder before any stage); `index
+--attempt N` reads exactly that attempt; the later leaves follow as their attempt 1.
+
+T16 passes when prefix-source..prefix-verify are each BOUND with their sealed checkpoint, late-fault is BOUND with
+exactly L-11a STOP, status VERIFIED and no PONR, late-resume and the fresh control are BOUND and `compare` reports
+`t16_pass`, and no owned resource or alias remains. T17 passes when early-refusal is BOUND with `PREFIX_CHANGED` for C
+and for C with a late body too, before any restore, with the bundle bytes, the daemon inventory and the fixture root
+unchanged. A fresh control that exceeds 3600 s stays a real timeout.
+
+### Round 5: the observation context, the native smoke, the restart (consult-checkpoints-r5-20261016, D1446)
+
+T16 on 48a28dd (r4) stopped at prefix-seed: `CheckpointDocker.observe` built the product's `Introduction` without
+`run()`, so no request digest existed; the snapshot's first registered docker exec (`register_worker`) raised
+AttributeError, the database and fences facts became observation errors and every volume boundary was NOT_A_BOUNDARY; it
+also appended its commands to the closed seed phase's command record (seq 6899–6916). REQ (a separate observation
+record, the judged state bound, a real adapter) → RISK (a false boundary, rewritten past records, late discovery inside
+gate leaves) → TEST (the four r5 pure contracts above, the native smoke A01–A12/N01–N05, then T16/T17).
+
+- Observation lifecycle (`ops_release_checkpoints.observe_boundary`, `CheckpointDocker.observe`): the real `Introduction`
+  constructor without run()/finish(), a deep copy of the boundary state bytes S, phase `checkpoint-observe`, retrying
+  false and the SHA-256 of the observation's own canonical request (checkpoint, boundary, capture or restore, leaf,
+  plan, the closed phase's request and result, SHA-256 of S, the parent bundle on a restore, the source trees, a
+  nonce). Its own Records live in `<records>/checkpoint-observations/<checkpoint>-<purpose>-<request16>/` (request.json,
+  the observation's state.json with its workers, snapshot.json, `commands-checkpoint-observe-<request16>.jsonl`, logs/,
+  journal.jsonl, and last observation.json with the outcome and the SHA-256 of every other file); HostOps writes only
+  those Records and keeps the stack's own ComposeEntry root (HostOps derives the root from the Records' location
+  otherwise; the observed generation must equal the state's). Every docker exec is registered, its Engine exec ID and
+  server exit observed and settled QUIET; a boundary state with an unsettled worker, a running phase or an UNKNOWN hold is
+  refused before any command (never cleared). The original run directory (state, plan, journal, results, closed command
+  records, logs, the lease file), the ComposeEntry files and the operations lock are hashed before and after and must be
+  byte-identical; an error, an unsettled worker, an incomplete fact, a database fact this observation did not read
+  itself (`observed_database`), or a changed original byte refuses (NOT_A_BOUNDARY, OBSERVATION_UNSETTLED,
+  ORIGINAL_CHANGED, OBSERVATION_REFUSED) and the folder stays with outcome REFUSED/ERROR. An observation is never a
+  phase PASS or a history row.
+- State binding (`ops_release_checkpoints_live_test.seal_boundary`): one operation under the stack's phase lease. S is
+  read once, judged by `boundary_publishable`, observed, the boundary facts taken, the context written, Git sealed; the
+  bundle's state binding is the SHA-256 of S itself (the archived state.json must be S), the capture observation is bound
+  beside it (`observation`, required for every volume checkpoint), and the originals must still be the observation's
+  `before` bytes. `load_bundle` re-reads that observation from the fixture member and requires it complete and observing
+  the bound state. A restore (`restore_boundary`) observes under the restored stack's lease with purpose restore, names the
+  parent bundle and never writes it.
+- Raw evidence: the observation folders are preserved with the records (`preserve_records`), never counted as phase
+  results; `index` requires, for a leaf that sealed a volume checkpoint, the bound capture observation among the raw
+  records (same SHA-256, complete) and the bound state as the leaf's raw state, and for a leaf that restored one, its
+  own restore observation of that parent observing the state the parent bound; a missing folder (also when its rows left
+  `raw_records` with it), a changed file or another parent is UNVERIFIED, and a BOUND index whose observation file changed
+  is PARENT_UNBOUND at every consumer.
+- The mandatory native smoke (`tests/ops_release_checkpoints_native_test.py`): `commands` runs it after the host
+  preconditions and before any byte of proof.sh, on the first run and on a `--from-unit` retry, as `<--python> -B` from
+  `$B` through `scripts/record-run.py` into `$P/smoke/run-<stamp>` (its raw in `$P/smoke/evidence-<stamp>`: smoke-log.jsonl
+  with every check, smoke-result.json with the A01–A12 and N01–N05 rows, host-facts.json, the bundle manifests, the
+  preserved records with every observation folder, the N01/N02 diagnostic copies); its output goes to stderr only. Then
+  `commands` applies T16's D1034 admission (≥ 10 GiB RAM, 20 GiB disk, a local daemon, no foreign container) to the host
+  facts the smoke observed before it created anything; the tiny smoke never stands in for it. The smoke holds the gate's
+  own `live.lock` for its whole run and refuses an inspection marker (SMOKE_INSPECTION), a busy lease (SMOKE_BUSY), an
+  earlier smoke's unreleased residue (SMOKE_RESIDUE: `~/.local/state/kin-pacs/checkpoint-smoke/pending-<token>.json`,
+  removed only by its own observed complete cleanup - since round 6 only when no deadline event occurred - or by
+  `--release-pending <file>` once nothing it owned is observed),
+  and anything but root on native Linux with one local `unix://` daemon (UNSUPPORTED_HOST, REMOTE_DAEMON). It never uses
+  `live_run`, a gate attempt or the ledger. A failed, skipped, refused or uncleaned smoke is `CHECKPOINT_REFUSED
+  SMOKE_FAILED`, exit 2, an empty proof.sh, no leaf attempt spent. The CI `runtime` job runs the same entrypoint under sudo
+  (step "RELEASE-TOOLS-CHECKPOINTS native adapter smoke A01-A12 and N01-N05"; Orthanc image and pydicom prepared in the step
+  before it; raw under `tmp/runtime-ci/release-tools-checkpoints-native*`, uploaded with the record-run artifact).
+- What the smoke runs: a tiny fixture of its own (a PostgreSQL 16 with a minimal SQL model, the real Orthanc image with
+  the synthetic instance, three waiting roles of fixed images; its own donor repository and `--shared` clones, ComposeEntry
+  generations, explicit phase-end records; a foreign sentinel and owned aliases) through A01 inventory, A02 existence and
+  daemon errors, A03 readonly volume exports, stdin loads, markers with bytes/uid/gid/mode, the tablespace link and the
+  refusal of linked or cut archives before any write, A04 Compose create/start and database readiness (HELD's database
+  alone and the all-running branch), A05 normal stops and the writable-layer rule, A06 the product snapshot at seeded,
+  held, introduced, verified (release generation, maintenance ingress, after migration) and failure-held, A07 Engine exec
+  workers (nonzero and passing exits, no exec while one is unsettled), A08 the boundary facts with the real frame, A09 the
+  sealed clones' Git closure and the r4 real-Git contracts, A10 host and runtime facts, A11 owned cleanup with foreign
+  preservation and the kept last alias, A12 seeded and held as capture → `load_bundle` → cleanup → cold restore →
+  observation → `restored_mapping`. N01 applies 48a28dd's observation to a copy of SEEDED's records (database and fences
+  AttributeError, NOT_A_BOUNDARY, no seal, the closed command record appended); N02 the digest-only fix (the contract
+  passes, the state and the closed command record are rewritten, caught by the byte guard); N03 a wrong migration
+  checksum, an unsettled worker and a stopped database; N04 tampered copies of a real observation folder and a state
+  changed during the observation; N05 an occupied volume, an absent image and a persistent writable-layer file. It
+  proves the adapter's transport and observation, never a product seed, migration, login, reading or recovery, and never
+  a T16 phase PASS. In r5 the body (300 s with prepared images) and the cleanup (60 s) were only compared with the
+  measured times after the fact, while each call kept its own 300/900/3600 s cap (CKPT5-02); round 6 below makes them
+  deadlines of every call and states exactly what that covers.
+- What r5's CI raw shows (CKPT5-03, the consultation's fixed wording): 'r5 CI 원문은 seeded/held/introduced/verified/failure-held 다섯 경계 종류의 purpose=capture 관찰을 실행했다. 성공한 checkpoint 봉인과 cold restore는 seeded/held 두 종류이다. introduced/verified는 capture 목적의 snapshot 관찰이며, failure-held는 관찰 후 의도한 persistent-layer 음성으로 봉인이 거절됐다. introduced/verified/failure-held의 purpose=restore와 boundary_facts의 DB absent/not-running 및 role absent 가지는 이 smoke에서 미실행이다. 다섯 개 successful bundle/cold restore를 뜻하지 않는다.'
+  In the fixed nine leaves 'introduced/verified restore는 아직 미실행인 T16에서 확인할 예정이고, failure-held restore와 DB/role absent boundary_facts는 별도 미검증으로 유지한다. 해당 원문이 생기기 전 완료로 세지 않는다' (introduced is
+  consumed by prefix-verify and late-resume, verified by late-fault; no leaf of the registry consumes failure-held, and
+  forced-tail is defined but not registered). Neither the smoke nor this README adds a smoke stage or a forced leaf for
+  them.
+- Found by the smoke while r5 was written (each would have stopped a later T16 leaf): `archive_members` accepted a cut
+  archive (tarfile stops quietly at a truncated header), so a damaged volume tar reached the daemon's tar; the
+  writable-layer rule refused the mount points the daemon creates for declared mounts (`A /var/lib/postgresql/emr-access`,
+  the folder made for `/etc/nginx/certs`) and the orthancteam image's own start (a random `/etc/hostid`,
+  `/startup/__pycache__`, the plugin links in `/usr/share/orthanc/plugins`; r5 allowed those three as global prefixes for
+  every role and image, which round 6 replaces by the typed, image-bound contract, CKPT5-01). The keycloak, API and proxy
+  images run in the smoke only as waiting roles: their own writable-layer changes are first observed at T16.
+- Restart, never a carry: r5 changes the harness and the source outside `scripts/`, so a 48a28dd bundle is not admissible
+  (`admit_same_tree` compares source, harness, root and runtime; source-b0 is same-tree only; a fork refuses a harness or
+  source change; the parent must be in the request's own store). The 9-leaf chain restarts at prefix-source in a NEW
+  proof root P' (prefix-source → prefix-seed → prefix-capture → prefix-introduce → prefix-verify → late-fault →
+  late-resume → fresh-control → early-refusal → compare), after the smoke passed in that same `commands` run. The r4
+  prefix-source BOUND (source manifest `9f020a60d07c9b594d8b356fb692b7f266b509c565d5478391dc7dd9726533d7`, created
+  2026-10-16T10:54:44.077424+00:00, window end 18:38:48.668993+00:00) stays 48a28dd's historical evidence, cited only as
+  such; nothing of it is rewritten or copied into P'. The operator records a contrast table beside P': (a) old and new full
+  commits with the exact diff and blob SHAs, (b) whether the scripts TOOL_FILES, the source stage, the product SHAs and
+  image IDs are actually equal, (c) every changed consumer (observe, records, capture, restore, index, commands) with each
+  source/harness/runtime hash, (d) plan/target/source-B0/clone-B0, payload and manifest, host/daemon/arch/root, (e) the
+  original created/window/TLS/deadline and the raw files' integrity, (f) which results are historical facts only and why
+  the admission invariance does not hold.
+- Ledger and stop rules: the D1437 move is executed only on a new commander disposition naming the r5 fix SHA, after the
+  gate account shows no running live run, owns `live.lock`, the r4 prefix-seed fixture was inspected and the marker was
+  released: exactly the existing `<unit>.json` and `<unit>-attempt-<n>.json` of the nine proof units move into the
+  48a28dd evidence with their before/after listings, raw SHAs and the disposition (a missing file is recorded as
+  missing); `inspections.jsonl`, `live.lock`, every `<unit>.lock` inode and other units stay. A new independent native
+  defect, a false BOUND, lost raw or polluted state in the r5 smoke or T16/T17 stops the chain and automatic retries,
+  keeps the raw, owned data and inspection state, and goes to an Astra consultation; there is no automatic r6, no new
+  unit for the same failure and no fresh budget from an empty commit or folder. A deterministic defect never spends a
+  remaining attempt. Environment shortfalls are recorded as incomplete, apart from candidate defects.
+- Verification limits: the smoke's native runs are on a native Linux daemon only (CI `runtime`, the T16 VM); a run on
+  Docker Desktop is a development diagnostic. The pure controls (a synthetic Engine, FakeBackend) prove contracts, not the
+  adapter's commands. Neither the smoke nor the pure suite replaces T16/T17, the final-SHA PR CI, G3 or the independent
+  delta review; until T16/T17 pass on the r5 SHA in P' the observation fix is proven natively only by the smoke.
+
+### Round 6: the regenerated-artifact contract and real deadlines (consult-checkpoints-r6-20261017, D1469/D1471)
+
+r5's delta review (NEEDS_FIX): CKPT5-01 (P1) the three Orthanc start paths were global writable-layer prefixes for every
+role and image, so a file under them that no image regenerates (the API role's `plugins/persistent-state.json`, an
+unlisted `custom-local.so`, the database role's `C /etc/hostid`) was sealed without its bytes; CKPT5-02 (P2) the smoke's
+300 s/60 s were compared after the fact while every call kept its own 300/900/3600 s cap (a cleanup remove still got
+300 s); CKPT5-03 (P3) the coverage wording (round 5 above). REQ (only what the pinned image itself regenerates is not
+state; bounded smoke) → RISK (a lost file sealed as regenerated; a smoke that hangs a leaf host) → TEST (the pure
+contracts above, the native negatives and deadline diagnostics below, then T16/T17).
+
+- The regenerated-artifact contract (`ops_release_checkpoints.regenerated_descriptor`, `layer_verdicts`, `judge_layer`,
+  `layer_valid`). It applies only when the role is `orthanc`, the container's actual `inspect.Image` equals the
+  boundary generation's pinned Orthanc image ID (`pinned_images`) and the descriptor derived from that ID (and the
+  judged container is the one the descriptor observed); the API role on the same image ID is not excepted. Exactly five
+  typed entries: `C /etc/hostid` as a regular file of 8 lowercase hex digits and LF with the image placeholder's
+  mode/uid/gid, only under the default start condition (FORCE_HOST_ID unset, GENERATE_HOST_ID_IF_MISSING unset or true,
+  the image's `not-generated` placeholder present); `A /startup/__pycache__` and its direct regular `.pyc` children
+  equal (type, bytes, size, mode, uid, gid) to what the pristine image's own start generates for its `/startup/*.py`
+  and cache tag; `A /usr/share/orthanc/plugins/<name>.so` whose name the image's plugins-available lists and the same
+  start enables, its bytes and size equal to that library and its metadata to the generated one (a hard link or the
+  configurator's copy); the `C` folders `/etc`, `/startup`, `/usr`, `/usr/share`, `/usr/share/orthanc`,
+  `/usr/share/orthanc/plugins` only above an accepted child and with their pristine kind/mode/uid/gid. Everything else
+  refuses: A/D/C of another kind, a folder, link or other type, other content or metadata, a descendant, an arbitrary
+  `.pyc` or state file in the cache, a nested cache file, an unlisted or listed-but-not-enabled library, an enabled one
+  with other bytes, plugins-available, any other role or image, a descriptor that applies to nothing (no container,
+  another image, a custom entrypoint/command, BEFORE_ORTHANC_STARTUP_SCRIPT, a failed or incomplete probe). The
+  existing transient prefixes (`/tmp`, `/run`, ...), the mount-point/ancestor rule and the mount-sibling refusal are
+  unchanged. Every role is judged after the stop and before `store.begin` or any export; a refusal is WRITABLE_LAYER
+  naming each `role: change`, and nothing is sealed.
+- The descriptor (never built from the running container's own diff): once per pinned image ID and startup input, a
+  pristine helper container of that image ID (owner label `kin.ops.run=<token>`, `kin.ckpt.probe=regenerated`, network
+  none, the Orthanc container's own environment through an env file in a private folder removed at once, its user and
+  its configurator inputs under `/etc/orthanc` and `/run/secrets` read-only) reads the image inventory with the image's
+  own `python3 -B` (entrypoint, `/startup` sources, the interpreter's cache tag, the hostid placeholder, every
+  plugins-available library's type/size/mode/uid/gid/SHA-256, the ancestors), runs the image's own entrypoint once with
+  `--version` as Orthanc's argument (the entrypoint writes the hostid and runs the configurator, then Orthanc prints its
+  version and ends) and reads what that generated. The helper is removed and observed absent (its name enters the
+  smoke's residue ledger before it exists; the owner's cleanup also removes it by label). The startup-input SHA-256 covers
+  image, entrypoint, command, user, the full environment (only names and that hash are recorded, never a value) and the
+  configurator inputs' content; the cache is per (image ID, startup-input hash) and the image inventory per image ID.
+  The writable-layer facts of a stopped container are lstat facts and SHA-256 of the changed paths in its overlay2 upper
+  folder (the daemon's `GraphDriver.Data.UpperDir`; another storage driver gives none and the exception refuses);
+  `/etc/hostid` is recorded as its content class only.
+- Records and consumption: the capture observation keeps `regenerated-artifacts.json` (the descriptor, its probe
+  reference) and its request names its SHA-256 (`regenerated_sha256`), so `observation.files` binds it before
+  observation.json is written; a restore observation has none. The post-stop judgement is
+  `<records>/checkpoint-observations/layer-<request16>/writable-layer.json` (the capture observation's path, SHA-256 and
+  request digest, the descriptor's SHA-256, per role the container ID, name, actual image, mounts, the full diff, the
+  facts and a verdict per change, ACCEPTED or REFUSED) in a folder of its own, never appended to the finalised
+  observation or a phase record; the manifest binds it as the required `layer` binding. `load_bundle`, the evidence
+  index (`observation_reasons`) and every BOUND-index consumer (`bound_index` re-hashes it) refuse it missing - also
+  when its raw-list rows left with it -, changed, not beside its capture observation, or with a role, container, image
+  or descriptor substituted: `layer_valid` re-judges every recorded row with the same contract. File names are a
+  placement; the tests assert the required raw, its identity and its consumption.
+  Every consumption checks a closed present/absent role row against the bound capture snapshot, boundary mount facts and that role’s pinned plan image; a contradictory or incomplete row refuses, including when its hashes were rebound.
+- The upstream sources that justify the entries (orthanc-builder 24.12.0; the pinned image ID's own bytes are what the
+  descriptor reads): [docker-entrypoint.sh](https://github.com/orthanc-server/orthanc-builder/blob/24.12.0/docker/orthanc/docker-entrypoint.sh#L15)
+  writes a random `printf '%x'` of 268435456..4294967295 (8 hex digits) with LF over a missing or `not-generated`
+  hostid unless FORCE_HOST_ID is set or GENERATE_HOST_ID_IF_MISSING is not true, then runs `generateConfiguration.py`
+  in `/startup`; the [Dockerfile](https://github.com/orthanc-server/orthanc-builder/blob/24.12.0/docker/orthanc/Dockerfile#L373)
+  writes the placeholder (orthanc:orthanc); [generateConfiguration.py](https://github.com/orthanc-server/orthanc-builder/blob/24.12.0/docker/orthanc/generateConfiguration.py#L10)
+  imports `helpers` and `configurator` (their cache) and installs the enabled plugins; the
+  [configurator](https://github.com/orthanc-server/orthanc-builder/blob/24.12.0/docker/orthanc/configurator.py#L142)
+  links each enabled library from plugins-available (a copy across file systems) and skips an existing target. The
+  hostid is regenerated in each new container (a cold restore), not overwritten at every restart of the same one.
+- Real deadlines (`ops_release_checkpoints.Deadline`, `deadline_scope`, `run_bounded`, `DeadlineRunner`, `pause`, the
+  native module's `run_smoke` and `Watchdog`). Start: the smoke's body end (300 s) is fixed when it takes its token,
+  before its pending residue is written and before the host is observed; host observation and the smoke admission run
+  under it (an expiry there is DEADLINE with its raw and residue, an admission refusal stays REFUSED, exit 3, and
+  releases the residue because nothing was created). Propagation: while a deadline is active every blocking call of the
+  harness gets min(its own cap, the time left) and none starts once nothing is left - every CheckpointDocker call and
+  its consumers (inventory, stop, diff, exports to a file, loads from a stdin pipe, volumes, images, Compose
+  create/start/up, boundary facts, the regenerated-artifact probe), the direct Git and host calls (`Smoke.git`,
+  `self_contained_git`/`git_connected`, `host_facts`, `runtime_facts`, `tracked_files`/`source_identity`, the r4 Git
+  contracts the smoke runs), the product's HostOps/Runner/Engine path through `DeadlineRunner` (worker registration,
+  command raws and the product's own Unknown/timeout semantics unchanged), the polls and their sleeps (`wait_db_ready`,
+  `wait_orthanc`, `pause`) and every cleanup inventory/remove/re-query; a new adapter, stack or observation shares the
+  same end. Calls on the bounded path run in their own POSIX process group: at the end the group is killed and collected
+  within REAP_SECONDS (2 s, a fixed control allowance recorded apart), its pipes drained, the partial stdout/stderr kept;
+  a product-transport call keeps the product's own termination (its bounded Engine handshake, its Unknown). A
+  smoke-local watchdog (SIGALRM on the POSIX main thread) with the same end interrupts synchronous work between calls
+  (tar, copies, hashing, rmtree); during a call the call's own timeout is the control. A client timeout never stops
+  daemon-side work: what the daemon did or still does is unknown and stays residue. Expiry: the smoke fails with code
+  DEADLINE; smoke-result.json carries per deadline its bound, elapsed, call count and events (cut, not-started,
+  watchdog: stage, effective timeout, elapsed, partial output, the client tree's end), deadline-calls.jsonl a row per
+  call start, failure.txt the body's traceback; worker UNKNOWN and the original phase raws stay as they are. Cleanup:
+  its own end (60 s) is created once when it starts (never per stack or call); the lease stays held until its result is
+  written; once its end is reached nothing more starts, and what could not be observed is reported as `remaining` - the
+  owned names of the last inventory, the owner labels and projects, the tracked helpers and the private root, each
+  `unverified` - with `verification: UNKNOWN` (an empty list is never taken as absence); an exception of the cleanup
+  itself is kept apart (failure-cleanup.txt) and never replaces the body's failure. Residue: a deadline event keeps the
+  pending file even when the cleanup observed nothing left; only the owner's inspection and `--release-pending` (which
+  still requires nothing owned to be observed and the private root gone) release it; a normal smoke still releases its
+  own on an observed complete cleanup. `commands` prints nothing (stdout 0 bytes) and touches no leaf attempt or ledger.
+  SMOKE_TIMEOUT (1200 s, the `commands` wrapper) and the CI job's 30 minutes are last-resort wrappers only, never the
+  smoke's bound; a wrapper kill never removes a pending file.
+- Deliberate diagnostics (explicit arguments only, never an environment flag, no fake backend or relaxed admission; the
+  seam only shortens a bound and never passes): `ops_release_checkpoints_native_test.py --deadline-diagnostic body|cleanup`
+  and `ops_release_checkpoints.py commands ... --smoke-diagnostic body|cleanup` run, after the real host observation and
+  admission, one owned waiting container and a harmless real `docker exec` into it that waits 3 s, started with 1 s left
+  of the body (`body`) or of the cleanup (`cleanup`, after the body ended whole). During the cleanup a second entry is
+  started and must find the lease taken (SMOKE_BUSY). A diagnostic always fails (DEADLINE, or DIAGNOSTIC_NO_DEADLINE) and
+  `commands` with it never writes proof.sh. CI's `runtime` job runs, after the normal smoke on the same SHA, the body
+  expiry on the native entrypoint and the cleanup expiry through `commands` (a root-owned copy of the checkout and proof
+  root under `/srv/kin-ckpt-ci`), each checked for the DEADLINE raw with its call start, the lease probe, the kept
+  residue (UNKNOWN remaining after the cut cleanup), stdout 0 bytes and an unchanged gate ledger; then the next entry
+  must refuse SMOKE_RESIDUE, the owner removes exactly what carries the residue's token label and its recorded private
+  root, and `--release-pending` releases it (step "RELEASE-TOOLS-CHECKPOINTS deadline diagnostics ...", raw under
+  `tmp/runtime-ci/release-tools-checkpoints-deadline`).
+- Native negatives of CKPT5-01 (A05/N05 rows of the normal smoke, raw `regenerated-negatives.json`, each on a fresh
+  container of its own): after the Orthanc image's own start, `plugins/persistent-state.json`, an unlisted
+  `custom-local.so` and an enabled library with bytes appended are each refused while the regeneration beside them is
+  accepted; the API role on the pinned Orthanc image ID with a regenerated-shaped `C /etc/hostid` is refused; a hostid
+  written in the database role is refused with its actual change kind recorded (the postgres image has no hostid, so
+  the expected kind is A, never reported as C). Positives (A05/A12, raw `regenerated-<checkpoint>.json`): the seeded
+  capture accepts the start's hostid, cache, plugins and folders as typed entries, and the held capture accepts them
+  again from the seeded cold restore's new container against the same image inventory and generated set.
+- r6 coverage appendix (the operator extends it with the T16/T17 rows): CKPT5-01 pure - the matrix, the required raw,
+  the descriptor (P5-P7, M47/M48/M50); native - the positives and five negatives above; T16 - each prefix leaf's own
+  capture must show the descriptor, the stopped-layer record and its consumption for the real product Orthanc
+  (configurator inputs `/etc/orthanc/*.json` mounted from the fixture). CKPT5-02 pure - a 2 s child cut at 0.5 s with its
+  tree ended, the shared end, nothing started after it, the product Runner's UNKNOWN, the cleanup's own end and UNKNOWN
+  residue, the kept residue and SMOKE_RESIDUE (P8/P9, M49/M51); native - the normal smoke within 300/60 and the two
+  diagnostics above; T16 - the normal `commands` smoke within 300/60 with an observed complete cleanup and no pending
+  left. Not verified here: a non-overlay2 storage driver (the exception refuses), FORCE_HOST_ID or other startup inputs
+  (refused, not supported), daemon-side completion of a cut call, an OS-level uninterruptible I/O, and anything of
+  T16/T17.
+
 # 뷰어 반전 정밀도
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,

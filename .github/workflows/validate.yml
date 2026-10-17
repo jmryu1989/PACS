@@ -1213,7 +1213,7 @@ jobs:
           retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1314,6 +1314,14 @@ jobs:
         run: python3 -B tests/ops_deploy_runner_test.py
       - name: Protected deployment host files, UID boundary and synthetic HTTPS
         run: sudo python3 -B tests/ops_deploy_host_test.py
+      # RELEASE-TOOLS-CHECKPOINTS (D1338, hardening 1 D1354, round 3 D1366): pure checkpoint contracts T01-T15 (the real
+      # rehearsal stage methods over a synthetic product), host adapter, bundle inputs, raw records, the raw-evidence
+      # index, lineage, retries, the supervised browser child against a frozen copy, comparison, the r5 observation context and commands smoke contracts,
+      # the r6 regenerated-artifact contract and real deadlines (local children only), and mutants M01-M44 and M46-M54; no
+      # Docker. The child runs as root because the ComposeEntry fork contract needs root-owned protected folders, as the
+      # product entry does.
+      - name: RELEASE-TOOLS-CHECKPOINTS boundary, bundle, identity, fork admission, budget, gate, time, cleanup, record, stage, lineage, observation, regenerated-artifact and deadline contracts with 53 mutants
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/release-tools-checkpoints --cwd . --file tests/ops_release_checkpoints.py --file tests/ops_release_checkpoints_test.py --file tests/ops_release_checkpoints_live_test.py --file tests/ops_deploy_host_container_test.py --file tests/ops_deploy_host_test.py --file tests/live_test_gate.py --tree scripts -- sudo python3 -B tests/ops_release_checkpoints_test.py
       - name: Offline export inventory and image integrity
         run: python3 tests/ops_export_inventory_test.py
       - name: Offline storage listing and read-only index reconciliation
@@ -1354,6 +1362,133 @@ jobs:
         run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
       - name: Prepare disposable database image
         run: docker pull postgres:16-alpine
+      # RELEASE-TOOLS-CHECKPOINTS round 5 (consult-checkpoints-r5-20261016 adapter_smoke, real_backend_ci): the native adapter
+      # smoke that `tests/ops_release_checkpoints.py commands` runs before proof.sh - CheckpointDocker and the live
+      # capture/restore consumers against this runner's real Docker, Git, Compose and Engine exec on a tiny throwaway fixture
+      # (A01-A12, N01-N05). The images are prepared here, never inside the smoke; a refusal or skip fails the step. Its raw
+      # evidence lands in tmp/runtime-ci and goes up with the record-run upload below.
+      - name: Prepare the RELEASE-TOOLS-CHECKPOINTS native smoke (the fixture's Orthanc image and pydicom)
+        timeout-minutes: 5
+        run: |
+          docker pull orthancteam/orthanc:24.12.0
+          python3 -m venv "$RUNNER_TEMP/ckpt-smoke-python"
+          # Playwright (no browser) only so this interpreter passes the commands path's --python precondition (r6 diagnostic).
+          "$RUNNER_TEMP/ckpt-smoke-python/bin/python" -m pip install --disable-pip-version-check pydicom==2.4.4 playwright==1.60.0
+      - name: RELEASE-TOOLS-CHECKPOINTS native adapter smoke A01-A12 and N01-N05 (real Docker, Git, Compose and Engine exec)
+        timeout-minutes: 8
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/release-tools-checkpoints-native --cwd . --file tests/ops_release_checkpoints_native_test.py --file tests/ops_release_checkpoints_test.py --file tests/ops_release_checkpoints.py --file tests/ops_release_checkpoints_live_test.py --file tests/ops_deploy_host_container_test.py --file tests/ops_deploy_host_test.py --file tests/live_test_gate.py --tree scripts -- sudo "$RUNNER_TEMP/ckpt-smoke-python/bin/python" -B tests/ops_release_checkpoints_native_test.py --evidence tmp/runtime-ci/release-tools-checkpoints-native-evidence
+      # Round 6 (consult-checkpoints-r6-20261017 native_proof), after the normal smoke above on the same SHA and one at a
+      # time: a body expiry on this native entrypoint and a cleanup expiry through `commands --smoke-diagnostic`, each a
+      # real `docker exec` that waits 3 s started with 1 s left (explicit arguments only; the seam can only shorten). Each
+      # must show the DEADLINE raw with the call's start, a second entry refused SMOKE_BUSY during its cleanup, its pending
+      # residue kept, stdout empty and the gate's ledger unchanged; the next entry must refuse SMOKE_RESIDUE until the
+      # owner's inspection and the existing --release-pending. Raw under tmp/runtime-ci/release-tools-checkpoints-deadline.
+      - name: RELEASE-TOOLS-CHECKPOINTS deadline diagnostics (body expiry on the native entrypoint, cleanup expiry through commands)
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          out="$PWD/tmp/runtime-ci/release-tools-checkpoints-deadline"
+          py="$RUNNER_TEMP/ckpt-smoke-python/bin/python"
+          mkdir -p "$out"
+          state=$(sudo "$py" -B -c 'import sys; sys.path.insert(0, "tests"); import live_test_gate as gate; print(gate.STATE)')
+          residue="$(dirname "$state")/checkpoint-smoke"
+          ledger() { sudo find "$state" -maxdepth 1 -type f -exec sha256sum {} + | sort; }
+          smoke() { sudo "$py" -B tests/ops_release_checkpoints_native_test.py "$@"; }
+          pending() { sudo find "$residue" -maxdepth 1 -name 'pending-*.json' | sort; }
+          refused_residue() {
+            set +e; smoke --evidence "$1"; code=$?; set -e
+            test "$code" = 3
+            sudo grep -q '"code":"SMOKE_RESIDUE"' "$1/smoke-result.json"
+          }
+          verify() {
+            sudo "$py" -B - "$@" <<'PY'
+          import json, sys
+          from pathlib import Path
+          evidence, where = Path(sys.argv[1]), sys.argv[2]
+          result = json.loads((evidence / "smoke-result.json").read_bytes())
+          cut = [event for event in result["deadline"][where]["events"] if event["kind"] == "cut"]
+          starts = [json.loads(line) for line in (evidence / "deadline-calls.jsonl").read_bytes().splitlines()]
+          lease = (result.get("diagnostic_facts") or {}).get("lease_probe") or {}
+          problems = [name for name, ok in (
+              ("FAIL DEADLINE", (result["outcome"], result["code"], result["diagnostic"]) == ("FAIL", "DEADLINE", where)),
+              ("a cut with 0.2-1 s left", bool(cut) and 0.2 <= cut[0]["effective_timeout"] <= 1.0 and cut[0]["client_tree"]["collected"]),
+              ("its call start", any(row.get("event") == "start" and row.get("deadline") == where and "exec" in row.get("what", []) for row in starts)),
+              ("the lease taken during the cleanup", lease.get("code") == "SMOKE_BUSY"),
+              ("the pending residue kept", result["pending"]["kept"] is True),
+              ("UNKNOWN residue after a cut cleanup", where == "body" or (result["cleanup"]["verification"] == "UNKNOWN" and bool(result["cleanup"]["remaining"]))))
+              if not ok]
+          print(json.dumps({"where": where, "cut": cut[:1], "cleanup": result["cleanup"], "lease_probe": lease, "problems": problems}))
+          sys.exit(1 if problems else 0)
+          PY
+          }
+          # 1. Body expiry on the CI native entrypoint (through record-run, as the normal smoke step).
+          ledger > "$out/ledger-before.txt"
+          set +e
+          python3 scripts/record-run.py --run-dir "$out/body-run" --cwd . --file tests/ops_release_checkpoints_native_test.py --file tests/ops_release_checkpoints_test.py --file tests/ops_release_checkpoints.py --file tests/ops_release_checkpoints_live_test.py --file tests/ops_deploy_host_container_test.py --file tests/ops_deploy_host_test.py --file tests/live_test_gate.py --tree scripts -- sudo "$py" -B tests/ops_release_checkpoints_native_test.py --evidence "$out/body-evidence" --deadline-diagnostic body
+          code=$?
+          set -e
+          test "$code" = 1
+          test ! -s "$out/body-run/stdout.log"
+          verify "$out/body-evidence" body | tee "$out/body-verdict.json"
+          test -n "$(pending)"
+          refused_residue "$out/body-next-entry"
+          smoke --evidence "$out/body-release" --release-pending "$(pending)"
+          test -z "$(pending)"
+          ledger > "$out/ledger-after-body.txt"
+          cmp "$out/ledger-before.txt" "$out/ledger-after-body.txt"
+          # 2. Cleanup expiry through `commands` (root-owned candidate copy and proof root, its own host preconditions).
+          cand=/srv/kin-ckpt-ci/candidate
+          proof=/srv/kin-ckpt-ci/proof
+          sudo mkdir -p -m 755 /srv/kin-ckpt-ci
+          sudo cp -a "$PWD" "$cand"
+          sudo chown -R 0:0 "$cand"
+          sudo chmod 755 "$cand"
+          sudo mkdir -m 700 "$proof"
+          sudo "$py" -B "$cand/tests/ops_release_checkpoints.py" registry --out "$proof/registry.json" > /dev/null
+          set +e
+          sudo "$py" -B "$cand/tests/ops_release_checkpoints.py" commands --registry "$proof/registry.json" --proof-root "$proof" --candidate "$cand" --python "$py" --smoke-diagnostic cleanup > "$out/commands-stdout.txt" 2> "$out/commands-stderr.txt"
+          code=$?
+          set -e
+          test "$code" = 2
+          test ! -s "$out/commands-stdout.txt"
+          grep -q 'CHECKPOINT_REFUSED SMOKE_FAILED' "$out/commands-stderr.txt"
+          sudo ls -A "$proof" > "$out/commands-proof-root.txt"
+          test "$(cat "$out/commands-proof-root.txt" | tr '\n' ' ')" = "registry.json smoke "
+          sudo cp -a "$proof/smoke" "$out/commands-smoke"
+          verify "$(sudo find "$out/commands-smoke" -maxdepth 1 -type d -name 'evidence-*' | head -n 1)" cleanup | tee "$out/commands-verdict.json"
+          test -n "$(pending)"
+          refused_residue "$out/commands-next-entry"
+          # The owner's inspection of the cut cleanup's residue: exactly its own labelled resources and its recorded private root.
+          sudo "$py" -B - "$(pending)" > "$out/commands-inspection.json" <<'PY'
+          import json, shutil, subprocess, sys
+          from pathlib import Path
+          pending = json.loads(Path(sys.argv[1]).read_bytes())
+          removed = []
+          for kind, listing, remove in ((["ps", "-aq", "--no-trunc"], "container", ["rm", "-f", "-v"]), (["volume", "ls", "-q"], "volume", ["volume", "rm"]),
+                                        (["network", "ls", "-q", "--no-trunc"], "network", ["network", "rm"])):
+              ids = subprocess.run(["docker", *kind, "--filter", "label=kin.ops.run=" + pending["token"]], capture_output=True, text=True, check=True,
+                                   timeout=60).stdout.split()
+              if ids:
+                  subprocess.run(["docker", *remove, *ids], capture_output=True, check=True, timeout=120)
+                  removed += [listing + " " + ident for ident in ids]
+          root = pending.get("private_root")
+          if root and Path(root).exists():
+              shutil.rmtree(root)
+              removed.append("private root " + root)
+          print(json.dumps({"pending": sys.argv[1], "token": pending["token"], "tracked": pending.get("tracked"), "removed": removed}))
+          PY
+          smoke --evidence "$out/commands-release" --release-pending "$(pending)"
+          test -z "$(pending)"
+          ledger > "$out/ledger-after-commands.txt"
+          cmp "$out/ledger-before.txt" "$out/ledger-after-commands.txt"
+      - name: RELEASE-TOOLS-CHECKPOINTS native smoke evidence made readable for the upload
+        if: always()
+        run: |
+          for folder in tmp/runtime-ci/release-tools-checkpoints-native-evidence tmp/runtime-ci/release-tools-checkpoints-deadline; do
+            if [ -d "$folder" ]; then
+              sudo chown -R "$(id -u):$(id -g)" "$folder"
+            fi
+          done
       - name: Findings migration preservation, restrict, action CHECK and synthetic dump/restore
         # Explicit selection: the old-image case (test_04) is excluded because it skips without KIN_TEST_OLD_API_IMAGE.
         # The citation runtime case needs the image built above; it is the only place the application
