@@ -224,7 +224,8 @@ def main():
     parser.add_argument('--out', required=True)
     parser.add_argument('--only', nargs='*')
     args = parser.parse_args()
-    out = Path(args.out)
+    # Absolute: the copies reach node through KIN_TEST_API_SRC, which the loader joins as a path, not a module name.
+    out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     chosen = [m for m in MUTANTS if not args.only or m['id'] in args.only]
     if args.only and len(chosen) != len(set(args.only)):
