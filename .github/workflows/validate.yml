@@ -1530,7 +1530,8 @@ jobs:
           done
           python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
           docker run --rm --network "container:$db" -e DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin kin-api:ci sh /app/start-production.sh migrate
-          python3 scripts/record-run.py --run-dir tmp/runtime-ci/emr-b2-base-startup --cwd . --tree api/src --file api/prisma/schema.prisma --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/ops_product_transfer_fixture.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_EMR_B2_RUNTIME_URL=postgresql://kin_runtime@127.0.0.1:5432/kin -e KIN_EMR_B2_INSTALLER_URL=postgresql://postgres@127.0.0.1:5432/kin -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test --test-reporter=tap /tests/emr/b/startup_pg_test.cjs
+          python3 scripts/record-run.py --run-dir tmp/runtime-ci/emr-b2-base-startup --cwd . --tree api/src --file api/prisma/schema.prisma --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/ops_product_transfer_fixture.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_EMR_B2_RUNTIME_URL=postgresql://kin_runtime@127.0.0.1:5432/kin -e KIN_EMR_B2_INSTALLER_URL=postgresql://postgres@127.0.0.1:5432/kin -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test --test-reporter=tap /tests/emr/b/startup_pg_test.cjs \
+            || { tail -c 30000 tmp/runtime-ci/emr-b2-base-startup/stdout.log; tail -c 5000 tmp/runtime-ci/emr-b2-base-startup/stderr.log; exit 1; }
       - name: Record exact image identity
         env:
           CODE_SHA: ${{ github.sha }}

@@ -59,9 +59,9 @@ function configuration(env: Readonly<Record<string, string | undefined>>): Confi
 /**
  * States: cold -> starting -> ready -> stopping -> closed, or starting -> failed. Every transition happens without an
  * await in between, so a close that arrives while the start waits (connect, role check, recovery) is seen by the start
- * right after that wait: nothing further is created, fenced, recovered or composed, the start releases what it created
- * and rejects, and only then does the close finish. The close never releases under a step in flight, so a client whose
- * connect returns late is released exactly once.
+ * right after that wait: nothing further is created, fenced, recovered or composed, the start begins the one release of
+ * what it created and rejects, and the close finishes only after that release. The close never releases under a step in
+ * flight, so a client whose connect returns late is released exactly once.
  */
 export class EmrRuntimeOwner {
   private readonly config: Configuration;
@@ -95,7 +95,7 @@ export class EmrRuntimeOwner {
 
   /**
    * The explicit end, once (main.ts's failure path and Nest's shutdown both reach this one promise). During a start: the
-   * stop is requested and the start is awaited, which ends at its next step with its client released. After ready: the
+   * stop is requested and the start is awaited, which ends at its next step, then its client's release. After ready: the
    * client is released - Nest calls this after the HTTP server drained its requests. The writer fence is held for the
    * process lifetime and ends with it: no lock file, state or journal is removed or closed here. A release error is not
    * reported: it must not mask the failure that ended the process or print provider text.
@@ -132,7 +132,9 @@ export class EmrRuntimeOwner {
     } catch (error) {
       const interrupted = this.state === 'stopping';
       if (!interrupted) this.state = 'failed';
-      await this.release();
+      // The release begins here, once; the start does not wait for it (a disconnect that never ends must not keep the
+      // failure from main.ts's line and its bounded exit). close() waits for this same release.
+      void this.release();
       throw new EmrStartupFailure(phase, error, interrupted);
     }
   }
