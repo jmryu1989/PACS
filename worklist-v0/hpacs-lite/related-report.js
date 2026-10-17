@@ -90,7 +90,8 @@
 
     function returnToReportStudy() {
       if (!cur() || !relatedUid) return;
-      // W5: in Related Report mode this is Back to Current Draft — the editor comes back with its caret, selection and scroll.
+      // W5: in Related Report mode, Return to Current also leaves the mode — the editor comes back with its caret, selection
+      // and scroll (Back to Current Draft alone keeps the Related study viewed: backToCurrentDraft).
       const left = relatedMode?.exit() ?? null;
       // 같은 판독 행 재선택은 의도적으로 무동작이다. 영상만 돌아가려다 판독문을 재로딩하거나 점유를 풀면 안 된다.
       relatedUid = null;
@@ -99,6 +100,20 @@
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
       if (left) { updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
       $("#related-current").focus({ preventScroll: true });
+    }
+
+    /**
+     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4): leaves the mode and gives the editor back with its caret,
+     * selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source, so its report stays in the
+     * Related Report pane beside the editor (reading while writing, D1244); Return to Current (#related-return) is the separate
+     * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
+     */
+    function backToCurrentDraft() {
+      const left = relatedMode?.exit() ?? null;
+      if (!left) return false;
+      renderClinical(); updateReportButtons(); renderDraftBar();
+      relatedMode.restore(left);
+      return true;
     }
 
     function previewRelated(uid) {
@@ -188,13 +203,9 @@
      * entry for the viewed Related study and its Back. True when the mode took the key; otherwise the caller's focus action runs.
      */
     function relatedModeCommand(which) {
-      if (!relatedMode || work.state() !== "active") return false;
-      if (which === "report") {
-        if (!relatedMode.active()) return false;
-        returnToReportStudy();
-        return true;
-      }
-      if (which !== "prior") return false;
+      if (!relatedMode) return false;
+      if (which === "report") return backToCurrentDraft();
+      if (which !== "prior" || work.state() !== "active") return false;
       if (relatedMode.active()) { relatedMode.focus(); return true; }
       if (!relatedUid || relatedUid === selectedUid) return false;
       enterRelatedMode(relatedUid, { focus: true });

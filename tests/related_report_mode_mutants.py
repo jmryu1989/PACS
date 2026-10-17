@@ -76,6 +76,27 @@ MUTANTS = [
     ("reentrant-entry-older-wins", "related-report.js",
      "const same = () => ticket === relatedEntrySeq && selectedUid === target", "const same = () => selectedUid === target",
      "test_w5_a_second_entry_while_the_first_waits_is_the_one_that_enters"),
+    # PAGE-06: Back is never refused (a Target the refreshed list no longer holds must not strand the reader in the mode).
+    ("back-refused-without-a-listed-target", "related-report.js",
+     "    function backToCurrentDraft() {\n      const left", "    function backToCurrentDraft() {\n      if (!cur()) return false;\n      const left",
+     "test_w5_back_is_never_refused_when_a_refresh_leaves_the_target_out_of_the_list"),
+    # body.reading parity: the mode keys treat the list overlay and a hidden Related panel as the panes' keys do.
+    ("related-key-leaves-the-panel-hidden", "reading-workspace.js",
+     "      if (which === 'prior' && panelValues.relatedHidden) setRelatedHidden(false);\n      closeList();\n      return;",
+     "      closeList();\n      return;",
+     "test_w5_reading_workspace_panels_follow_the_mode_keys_as_they_follow_the_panes"),
+    ("mode-keys-leave-the-list-open", "reading-workspace.js",
+     "      if (which === 'prior' && panelValues.relatedHidden) setRelatedHidden(false);\n      closeList();\n      return;",
+     "      if (which === 'prior' && panelValues.relatedHidden) setRelatedHidden(false);\n      return;",
+     "test_w5_reading_workspace_panels_follow_the_mode_keys_as_they_follow_the_panes"),
+    # Return to Current in the mode gives the viewing back to the Target and must also leave the mode.
+    ("return-to-current-stays-in-the-mode", "related-report.js",
+     "      const left = relatedMode?.exit() ?? null;\n      // 같은 판독 행", "      const left = null;\n      // 같은 판독 행",
+     "test_w5_return_to_current_leaves_the_mode_and_gives_the_viewing_back_to_the_target"),
+    # PAGE-06 / D1244: Back keeps the Source viewed beside the editor (reading while writing); only Return to Current resets it.
+    ("back-forgets-the-viewed-study", "page-boot.js",
+     "back: backToCurrentDraft,", "back: returnToReportStudy,",
+     "test_w5_escape_closes_the_confirmation_first_then_leaves_and_the_keys_enter_and_back"),
     ("restriction-not-restored", "related-report-mode.js",
      "finally { if (was && held === was) { editor.hidden = true; editor.inert = true; } }", "finally {}",
      "test_w5_reentrant_writes_during_the_native_edit_are_refused_and_the_text_is_exactly_the_insertion"),

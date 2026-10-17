@@ -994,6 +994,39 @@ class RelatedModePage(unittest.TestCase):
         ordinary = [body for _, body in self.site.flow_puts if "relatedInsert" not in body]
         self.assertEqual(revision, ordinary[-1]["expectedRevision"], "on the applied revision")
 
+    def test_w5_back_is_never_refused_when_a_refresh_leaves_the_target_out_of_the_list(self):
+        """A refresh that no longer lists the Target (paged out, filtered, removed) never strands the reader in the mode:
+        Back to Current Draft still brings the editor back, visible and focused, with its text."""
+        self.open()
+        self.open_target()
+        self.page.locator("#findings").fill("SYN A kept")
+        self.autosave()
+        self.enter()
+        self.site.hidden.add(UID_A)
+        lists = self.site.count("GET", "/api/studies")
+        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.wait(lambda: self.site.count("GET", "/api/studies") > lists, "the refresh")
+        self.settle(300)
+        expect(self.page.locator("#related-current")).to_have_text("판독 대상을 선택하세요")
+        self.back()
+        self.assertEqual([False, False], self.editor_hidden())
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.assertEqual("SYN A kept", self.value())
+
+    def test_w5_return_to_current_leaves_the_mode_and_gives_the_viewing_back_to_the_target(self):
+        self.open()
+        self.open_target()
+        self.page.locator("#findings").fill("SYN A kept")
+        self.autosave()
+        self.enter()
+        self.page.locator("#related-return").click()
+        expect(self.mode()).to_be_hidden()
+        self.assertEqual([False, False], self.editor_hidden())
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.assertEqual((UID_A, None), (self.js("selectedUid"), self.js("relatedUid")))
+        expect(self.page.locator("#prior-findings")).to_have_text("")
+        self.assertEqual("SYN A kept", self.value())
+
     def test_w5_clean_navigation_closes_the_mode_and_moves_and_prev_next_stay_available(self):
         self.open()
         self.open_target()
@@ -1073,9 +1106,16 @@ class RelatedModePage(unittest.TestCase):
         self.page.keyboard.press("Escape")
         expect(self.mode()).to_be_hidden()
         expect(self.page.locator("#findings")).to_be_focused()
+        # Back keeps the Source viewed: its report stays in the Related Report pane beside the editor (reading while writing),
+        # and Related Report opens the mode on it again.
+        self.assertEqual((UID_A, UID_B), (self.js("selectedUid"), self.js("relatedUid")))
+        expect(self.page.locator("#prior-findings")).to_have_text(PRIOR_B["findings"])
         self.page.keyboard.press("Control+Alt+3")
-        self.settle()
-        expect(self.mode()).to_be_hidden()        # Back returned the Viewed Study to the Target: nothing to open
+        expect(self.mode()).to_be_visible()
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
+        self.page.keyboard.press("Control+Alt+4")
+        expect(self.mode()).to_be_hidden()
+        expect(self.page.locator("#findings")).to_be_focused()
         self.page.locator(f'[data-related-open="{UID_C}"]').click()
         self.wait(lambda: self.js("relatedUid") == UID_C, "Compare Images C views C")
         self.page.bring_to_front()
@@ -1203,6 +1243,34 @@ class RelatedModePage(unittest.TestCase):
         expect(self.mode()).to_be_hidden()
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertEqual(self.whole(), self.value())
+
+    def test_w5_reading_workspace_panels_follow_the_mode_keys_as_they_follow_the_panes(self):
+        """Related Report from the open list overlay shows a Related panel the reader hid and closes the overlay (as it does
+        for the pane); Report Editor from the overlay leaves the mode and closes it (as it does for the editor)."""
+        self.open()
+        self.open_target()
+        self.enter_reading()
+        self.page.locator(f'[data-related-open="{UID_B}"]').click()
+        self.wait(lambda: self.js("relatedUid") == UID_B, "Compare Images in the workspace")
+        self.page.bring_to_front()
+        self.page.locator("#reading-related-toggle").click()
+        expect(self.page.locator("#reading-related-region")).to_be_hidden()
+        list_open = "document.body.classList.contains('reading-list-open')"
+        self.page.locator("#findings").focus()
+        self.page.keyboard.press("Control+Alt+1")
+        expect(self.page.locator("#quick")).to_be_focused()
+        self.assertTrue(self.js(list_open))
+        self.page.keyboard.press("Control+Alt+3")
+        expect(self.mode()).to_be_visible()
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
+        expect(self.page.locator("#reading-related-region")).to_be_visible()
+        self.assertFalse(self.js(list_open))
+        self.page.keyboard.press("Control+Alt+1")
+        expect(self.page.locator("#quick")).to_be_focused()
+        self.page.keyboard.press("Control+Alt+4")
+        expect(self.mode()).to_be_hidden()
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.assertFalse(self.js(list_open))
 
 
 def run_mutants():

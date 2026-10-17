@@ -457,7 +457,7 @@
       target: relatedTargetCard, source: relatedSourceCard,
       insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
       freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
-      discard: relatedInsertDiscard, back: returnToReportStudy, reloadSource: loadRelatedReport,
+      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
     }) ?? null;
     // `related` (W5): the Related Report / Report Editor keys of another document (the viewer frame) and the workspace buttons.
     window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which) });
@@ -480,7 +480,8 @@
         return;
       }
       // W5: Related Report (Ctrl+Alt+3) opens the mode for the viewed Related study; Report Editor (Ctrl+Alt+4) is its Back.
-      if ((command === 'prior' || command === 'report') && relatedModeCommand(command)) {
+      // In the reading workspace its own keys run the same command through its panes (KinReportCommands.related).
+      if ((command === 'prior' || command === 'report') && !readingWorkspace.active() && relatedModeCommand(command)) {
         event.preventDefault(); event.stopImmediatePropagation(); return;
       }
       // Ctrl+Alt+T, unless the reader gave that chord to another action. A one-action map in the v1 form names the same
