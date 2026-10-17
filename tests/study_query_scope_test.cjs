@@ -19,8 +19,9 @@ test('lean bootstrap never reads study/report/draft; legacy keeps private state 
 });
 test('page query excludes private report state before loading details and notes for its selected UID',async()=>{
  const {svc,calls}=await setup();const r=await svc.listStudies(caller,{limit:'1'});assert.equal(r.studies.length,1);assert.equal(r.studies[0].state.ov.id,'override');assert.equal(r.pagination.total,2);
- // Scope discovery may read only identity and arrival ordering, never private state.
- assert.deepEqual(Object.keys(calls[0][1].select).sort(),['createdAt','institutionId','origin','teleInstitutionId','uid']);
+ // Scope discovery may read only identity, arrival ordering and the fields that decide who may read the report
+ // (WORKLIST-SPLIT-UID compares them before the details), never report text, drafts or overlays.
+ assert.deepEqual(Object.keys(calls[0][1].select).sort(),['createdAt','institutionId','origin','preDoc','preDocSub','preReviewer','preReviewerSub','rs','teleInstitutionId','uid']);
  for(const [kind,arg] of calls.filter(x=>['report','draft'].includes(x[0])))assert.deepEqual(arg.where.uid.in,['1']);
  assert.deepEqual(calls.find(x=>x[0]==='note')[1][2].values,['1']);
  assert.equal(calls.filter(x=>x[0]==='state').length,3);

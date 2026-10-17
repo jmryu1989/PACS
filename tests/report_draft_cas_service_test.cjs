@@ -190,10 +190,15 @@ async function world() {
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
+  // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
+  // here), and the full bootstrap reads the inventory only to leave out a UID answered twice (none here); any other
+  // Orthanc member is still out of bounds for this harness.
   // W5-API: a case that restricts StudyAccess by DICOM tags answers the one-study metadata lookup through w.metadata
   const orthanc = new Proxy({}, { get(_t, key) {
     if (key === 'studyAccessMetadata' && w.metadata) return w.metadata;
-    return () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); };
+    return key === 'studyIdentityResources' ? async uid => [{ '0020000D': { Value: [uid] } }]
+      : key === 'studyIdentities' ? async () => []
+      : () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); };
   } });
   const build = () => {
     const access = new StudyAccessService(recorder, orthanc, {});
@@ -1246,7 +1251,7 @@ async function r11Consumer() {
     _kinSourceDigest:'f'.repeat(64)};
   let onRemote=null,onTransaction=null,remoteReads=0;
   const orthanc={reportPreviewStudy:async()=>{remoteReads++;if(onRemote){const f=onRemote;onRemote=null;await f();}return {};},
-    connectStudyIdentity:async()=>({patientId:'SYN-R11'}),viewerReference:async()=>{
+    connectStudyIdentity:async()=>({patientId:'SYN-R11'}),studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}],viewerReference:async()=>{
       if(onRemote){const f=onRemote;onRemote=null;await f();}return structuredClone(tags);}};
   const client=new Proxy(db,{get(target,key){
     if(key==='$transaction')return async(fn,options)=>{if(onTransaction){const f=onTransaction;onTransaction=null;await f();}return target.$transaction(fn,options);};

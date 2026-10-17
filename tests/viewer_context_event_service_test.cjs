@@ -16,7 +16,10 @@ function fixture(){
  const f={rows:[],study:{uid:'1.2.3',institutionId:'hospital',teleInstitutionId:null},restriction:null};
  const db={studyState:{findUnique:async()=>f.study},$queryRaw:async()=>f.restriction?[f.restriction]:[],
   auditLog:{create:async({data})=>{f.rows.push(data);return data}}};
- const access=new StudyAccessService(db,{},{}),pacs=new PacsService(db,{}, {},access,{});
+ // WORKLIST-SPLIT-UID: the image admission observes the study's original resources for its own request; here each UID
+ // is answered by one resource, so the admission decides on institution and access as before.
+ const orthanc={studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}]};
+ const access=new StudyAccessService(db,orthanc,{}),pacs=new PacsService(db,orthanc,{},access,{});
  const service=new ViewerContextEventService(db,pacs);f.controller=new ViewerController({},pacs,service);f.db=db;
  f.caller={kind:'member',sub:uuid,actor:'reader',institution:'hospital',roles:['radiologist']};
  f.send=(body=input(),c=f.caller)=>f.controller.contextEvent('1.2.3',{...c,rawBody:Buffer.from(JSON.stringify(body))});

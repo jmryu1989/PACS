@@ -535,6 +535,11 @@ window.KinReadingWorkspace = function (app) {
       app.notice('검사·시리즈 정보를 확인할 수 없어 열지 않았습니다.'); return null;
     }
     if (!app.allowed()) { app.notice('현재 로그인과 검사 접근 상태를 확인한 뒤 영상을 여세요.'); return null; }
+    // WORKLIST-SPLIT-UID: a new launch or replacement takes only studies the current list carries. A UID the list excluded
+    // because two patient resources answer it is not one of them; the image gate refuses its sources on the server too.
+    if (!app.study(uid) || prior && prior !== uid && !app.study(prior)) {
+      app.notice('현재 목록에 없는 검사(환자 식별 불일치로 제외된 검사 포함)는 영상 작업공간에서 열지 않았습니다.'); return null;
+    }
     return { uid, prior: prior && prior !== uid ? prior : null, series, reportUid: app.current() };
   }
   function url(r) {

@@ -141,6 +141,56 @@
       });
     }
 
+    /**
+     * WORKLIST-SPLIT-UID. 같은 Study UID에 두 환자의 원본 자원이 있어 서버가 정상 목록에서 뺀 검사(마지막 완성 목록 기준).
+     * 검사마다의 잠금은 그 검사의 상태 칸(`appState[uid].identityUnresolved`)에 둔다 — 편집기·단추·저장·영상 열기가 이미 읽는
+     * 자리다. 검색·Related·비교 후보는 목록 행에서 오므로 이 UID가 없다. 서버가 같은 행위를 409·403으로 거절하므로 이 표시는
+     * 경계가 아니다. 완성된 목록만 표시를 바꾸고, 그 목록이 이 칸을 말하지 않으면(모름) 그대로 둔다.
+     * 안내(건수)와 잠금은 따로 간다: 안내는 이번 완성 목록이 말한 그대로이고, 잠금은 그 UID가 이번 완성 목록의 정상 행(원본
+     * 하나)으로 돌아왔을 때만 풀린다. 안내에서 빠진 것만으로는(범위·원격판독·접근 조건이 바뀌어 보이지 않게 됨) 풀지 않는다.
+     */
+    let studyIdentityIssues = new Set();
+    function applyIdentityIssues(issues, rows) {
+      if (!Array.isArray(issues)) return;
+      const next = new Set(issues.map(issue => issue.uid));
+      const single = new Set(Array.isArray(rows) ? rows.map(row => row?.uid) : []);
+      for (const uid of Object.keys(appState))
+        if (appState[uid]?.identityUnresolved && single.has(uid) && !next.has(uid)) delete appState[uid].identityUnresolved;
+      for (const uid of next) {
+        // Only a study this page already knew can be open, kept or launched; an unseen UID has nothing to lock.
+        if (!appState[uid]) continue;
+        appState[uid] = { ...appState[uid], identityUnresolved: true };
+        // 잠긴 검사의 확인되지 않은 글은 화면과 사본에 남는다. 원본이 정리되어 돌아와도 스스로 다시 보내지 않는다 — 사람이 고칠 때 저장한다.
+        if (reportConverge.has(uid)) reportSaveFailures.set(uid, "stop");
+      }
+      studyIdentityIssues = next;
+      renderIdentityIssues(false);
+    }
+    /**
+     * 건수와 한국어 설명만 쓴다(환자·기관 값 없음). 관측에 실패한 뒤에는 마지막 관측의 안내임을 함께 말한다.
+     * 안내 줄은 처음 필요할 때 관측 부재 안내(#not-observed) 바로 아래에 만든다 — 말할 것이 없는 동안 빈 자리를 두지 않는다.
+     */
+    function renderIdentityIssues(unobserved) {
+      const n = studyIdentityIssues.size;
+      let box = $("#identity-issues");
+      if (!box) {
+        const anchor = $("#not-observed");
+        if (!n || !anchor) return;
+        box = document.createElement("div");
+        box.id = "identity-issues";
+        box.setAttribute("role", "status");
+        box.style.cssText = "padding:2px 10px;font-size:12px";
+        const title = document.createElement("strong"), text = document.createElement("span");
+        title.textContent = "Patient Identity Conflict";
+        text.id = "identity-issues-text";
+        box.append(title, " ", text);
+        anchor.after(box);
+      }
+      box.hidden = !n;
+      $("#identity-issues-text").textContent = !n ? "" : `${n} · 환자 식별 불일치로 검사 ${n}건을 목록에서 제외했습니다. 원본 확인이 필요합니다.`
+        + (unobserved ? " · 관측 불가 · 마지막 관측 기준입니다." : "");
+    }
+
     let listLoadSequence = 0;
     // studyPriority·Quick Match·검색·기능 패널의 종료가 부르는 목록·칩·판독 단추 그리기 묶음이다. 분할된 script 사이의 입력·종료가 미정의를 만나지 않게 이 생성보다 앞에 둔다(S9-U0a-PRE).
     function savedFilterDays(value) {
@@ -477,6 +527,17 @@
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
+      // WORKLIST-SPLIT-UID: the selected UID was excluded as unresolved. Its text stays (loadReport keeps it) and is read-only;
+      // every write and the paste/clear editors are off. The server refuses the same actions on its own.
+      const unresolved = !!appState[selectedUid]?.identityUnresolved;
+      if (unresolved) {
+        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+          "#b-prelim", "#b-draft-keep", "#b-draft-load", "#b-draft-discard", "#b-report-reload", "#b-report-template", "#b-mark-cvr"]) {
+          const el = $(id);
+          if (el) { el.disabled = true; el.title = "환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다."; }
+        }
+        for (const id of ["#findings", "#conclusion", "#recommendation"]) $(id).readOnly = true;
+      }
       // Approve & Next는 Approve와 같은 확정이다(W4-PAGE-04): 같은 때, 같은 까닭으로 잠긴다 — 같은 판단을 따로 하지 않는다.
       const approveNext = $("#b-approve-next");
       if (approveNext) {
@@ -491,6 +552,7 @@
       // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
       // 녹음·요청은 여기서 끝난다 — select()에 두면 그 구역을 실행하는 다른 시험 틀이 깨진다.
       dictation.refresh();
+      if (unresolved && $("#b-dictate")) $("#b-dictate").disabled = true;
     }
     const validUserFilters = value => Array.isArray(value)
       ? value.filter(uf => uf && typeof uf === "object" && typeof uf.name === "string") : [];
@@ -672,6 +734,7 @@
         // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
           studies = r.studies.map(fromApi);
           folderLoadState = 'complete';
+          applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           studyPriority.observed(r.studies.map(s=>s.uid));
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
@@ -700,6 +763,7 @@
             folderLoadState = 'unknown';
             // A superseded or changed-list answer is not a failed observation; the last one still stands.
             if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();
+            if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') renderIdentityIssues(true);
             $("#err").textContent = "검사 목록을 불러오지 못했습니다. 현재 목록과 입력은 유지했습니다 — " + e.message;
             toast("검사 목록 실패: " + e.message, "err");
             render();

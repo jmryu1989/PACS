@@ -103,6 +103,11 @@
         if (pendingLeave) pendingLeave.target = null;
         return { status: "same", uid };
       }
+      // WORKLIST-SPLIT-UID: a stale row, link or keyboard target never selects a study the last list excluded as unresolved.
+      if (appState[uid]?.identityUnresolved) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
+        return { status: "unresolved", uid };
+      }
       // 기다리는 이동이 있으면 마지막으로 고른 검사가 그 이동의 목적지다(저장은 한 번만 기다린다).
       if (pendingLeave) { pendingLeave.target = { uid, options, revalidate }; return pendingLeave.done; }
       const pass = leaveStudyGate("select");
@@ -209,6 +214,9 @@
       if (!KinAuth.has("radiologist")) return { status: "refused", reason: "판독의 권한이 없어 저장할 수 없습니다" };
       const a = appState[uid] ?? {};
       if (a.prelimHidden) return { status: "refused", reason: "다른 판독의의 예비 판독(RS: P)입니다" };
+      // WORKLIST-SPLIT-UID: an unresolved study's kept text is never sent. It is a refused save, answered like the others
+      // (Retry/Check/Stay, no target switch, nothing written); the text stays in the editor.
+      if (a.identityUnresolved) return { status: "refused", reason: "환자 식별 불일치로 이 검사의 글을 저장할 수 없습니다. 원본 확인이 필요합니다" };
       const held = heldByOther(studies.find(s => s.uid === uid));
       if (held) return { status: "refused", reason: `${displayActor(held)} 님이 판독 중입니다` };
       return null;

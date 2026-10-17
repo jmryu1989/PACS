@@ -100,9 +100,12 @@ export class PacsClinician {
     viewerUid(uid);
     // 원본 태그 조건이 있는 접근 정책은 트랜잭션 밖에서 준비한다(reportCitations와 같은 이유).
     await this.studyAccess.prepare(c, [uid]);
+    // WORKLIST-SPLIT-UID: a direct read of a UID two patient resources answer is refused inside the scope (409).
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
     return this.prisma.$transaction(async tx => {
       const state = await this.access.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
+      this.studyAccess.assertUnsplitSource(c, uid);
       const report = await tx.report.findUnique({ where: { uid }, select: { version: true } });
       const head = report?.version > 0 ? await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: report.version } },

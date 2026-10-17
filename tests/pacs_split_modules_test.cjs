@@ -34,7 +34,7 @@ const fs = require('node:fs');
 const { randomUUID } = require('node:crypto');
 if (!fs.existsSync('/app/dist/pacs')) require('./service_test_loader.cjs');
 
-const { HttpException, NotFoundException } = require('/app/node_modules/@nestjs/common');
+const { ConflictException, HttpException, NotFoundException } = require('/app/node_modules/@nestjs/common');
 const { Prisma } = require('/app/node_modules/@prisma/client');
 const values = require('/app/dist/pacs/values');
 const accessModule = require('/app/dist/pacs/access');
@@ -265,6 +265,13 @@ function studyAccessDouble() {
     matches(_snapshot, uid) { return !sa.denied.has(uid); },
     needsMetadata() { return false; },
     async unchanged(_c, previous) { return previous; },
+    // WORKLIST-SPLIT-UID: the request's source observation. `split` names the UIDs two patient resources answer.
+    split: new Set(),
+    async prepareSourceIdentity(c, uids) { sa.calls.push(['source', uids]); },
+    assertUnsplitSource(c, uid) {
+      sa.calls.push(['source:assert', uid]);
+      if (sa.split.has(uid)) throw new ConflictException({ code: 'STUDY_IDENTITY_UNRESOLVED', message: 'synthetic split' });
+    },
   };
   return sa;
 }
@@ -882,4 +889,28 @@ test('SPLIT-23 the facade passes every refusal through unchanged: status, code, 
   await refused(() => facade.clinicianStudies(RAD_A), 403);
   await refused(() => facade.saveTechNote(s.uid, { baseVersion: 0, text: 'x', reason: '' }, RAD_A), 403);
   assert.deepEqual(w.db.writes, []);
+});
+
+// WORKLIST-SPLIT-UID TEST-WSU-08 (shared consumers): a UID two patient resources answer reaches every report entry through
+// the facade as the source contract's own 409, observed before the transaction and asserted inside the scope; the hold
+// release paths stay open; another institution still gets its 404 first, and nothing is written.
+test('SPLIT-24 a split UID is refused by every report entry with STUDY_IDENTITY_UNRESOLVED and no write; release stays open', async () => {
+  const w = world();
+  const facade = w.facade(), s = w.study({ em: 'E', holder: RAD_A.actor, heldAt: new Date() });
+  w.sa.split.add(s.uid);
+  const entries = [
+    () => facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 0, { findings: 'x' }), RAD_A, null),
+    () => facade.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${s.draftEpoch}:0` }, RAD_A, null),
+    () => facade.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null),
+    ...['save', 'approve', 'reset', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null)),
+    () => facade.readDraft(s.uid, RAD_A), () => facade.hold(s.uid, RAD_A), () => facade.dictationGate(s.uid, RAD_A),
+    () => facade.versions(s.uid, RAD_A), () => facade.reportCitations(s.uid, RAD_A), () => facade.reportStructure(s.uid, RAD_A),
+    () => facade.reportVersionCitations(s.uid, '1', RAD_A), () => facade.clinicianReportRead(s.uid, CLIN_A),
+  ];
+  for (const entry of entries) await refused(entry, 409, 'STUDY_IDENTITY_UNRESOLVED');
+  assert.deepEqual(w.db.writes, []);
+  assert.ok(w.sa.calls.some(c => c[0] === 'source' && c[1].includes(s.uid)));
+  await refused(() => facade.putReport(s.uid, draftBody(RAD_B, s.draftEpoch, 0, { findings: 'x' }), RAD_B, null), 404);
+  assert.deepEqual(await facade.release(s.uid, RAD_A), { ok: true });
+  assert.equal(w.db.rows('studyState').find(r => r.uid === s.uid).holder, null);
 });

@@ -1,5 +1,6 @@
 import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
 import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
+import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from './study-source-groups';
 
 // A lookup key is not a DICOM conformance assertion. Preserve legacy opaque
 // keys verbatim, but exclude path/query syntax and plain-object map collisions.
@@ -225,21 +226,22 @@ export class OrthancService {
    * Indexed identity/institution only; patient tags and counts belong to the chosen page.
    * `accession` (S4-U2 order reconciliation) adds the indexed AccessionNumber. An unreadable value is
    * unknown for pairing, never a failure of the whole list, so it is carried as '' (not comparable).
+   * WORKLIST-SPLIT-UID: one row per original Study resource. Two resources that share a Study UID (two
+   * patients) are both returned; a repeat is an observation for the consumer to group, never a reason to
+   * fail the whole institution's list or to keep one of them.
    */
   async studyIdentities(accessMetadata = false, accession = false): Promise<any[]> {
     const rows = await this.get('/tools/find', { Level:'Study', Query:{},
       ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName',
         ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] });
     if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
-    const seen = new Set<string>();
     return rows.map(row => {
       const uid = row?.RequestedTags?.StudyInstanceUID;
-      if (!isStudyLookupKey(uid) || seen.has(uid))
-        throw new ServiceUnavailableException('원본 검사 식별이 없거나 중복입니다');
+      if (!isStudyLookupKey(uid))
+        throw new ServiceUnavailableException('원본 검사 식별이 없거나 올바르지 않습니다');
       const institution = row?.RequestedTags?.InstitutionName;
       if (institution != null && typeof institution !== 'string')
         throw new ServiceUnavailableException('원본 기관 형식을 확인할 수 없습니다');
-      seen.add(uid);
       const source = { '0020000D': { Value:[uid] }, '00080080': { Value:[institution ?? ''] } };
       if(accessMetadata){
         const tags=row.RequestedTags;
@@ -265,6 +267,25 @@ export class OrthancService {
     return rows[0];
   }
 
+  /**
+   * WORKLIST-SPLIT-UID: every original Study resource that answers one Study UID, for a request-scoped source
+   * observation and the single-UID access preparation. A normal study is a one-element array, a UID that two
+   * patient resources share returns both, and no resource is []. A row naming another UID, or a malformed answer,
+   * is a failed read (503) — never a smaller array. studyAccessMetadata() keeps its single-row contract.
+   */
+  async studyIdentityResources(uid: string, signal?: AbortSignal): Promise<any[]> {
+    const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
+      '&includefield=00100020,00080020,00080061', undefined, signal);
+    if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || OrthancService.tag(row, '0020000D') !== uid))
+      throw new ServiceUnavailableException('원본 검사의 소속을 확인할 수 없습니다');
+    return rows;
+  }
+
+  /**
+   * One QIDO read for a page of UIDs. Every row of every requested UID is returned, grouped in the request's UID
+   * order (the order inside one UID carries no meaning); a UID that two resources share is not a changed list. The
+   * answer's UID set must equal the request's: a missing, extra or malformed row is STUDY_LIST_CHANGED.
+   */
   async studiesByUid(uids: string[]): Promise<any[]> {
     if (!Array.isArray(uids) || uids.length > 100 || new Set(uids).size !== uids.length
       || uids.some(uid => !isStudyLookupKey(uid)))
@@ -273,21 +294,25 @@ export class OrthancService {
     // QIDO UID-list matching uses commas, not DIMSE's backslash separator.
     const rows = await this.get('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uids.join(','))
       + '&includefield=00081030,00201206,00201208,00080080,00100020,00080020,00080061');
-    const byUid = new Map<string, any>();
-    if (Array.isArray(rows)) for (const row of rows) {
-      if (!row || typeof row !== 'object') break;
-      const uid = OrthancService.tag(row, '0020000D');
-      if (!uids.includes(uid) || byUid.has(uid)) break;
-      byUid.set(uid, row);
+    const changed = () => new ConflictException({ code:'STUDY_LIST_CHANGED', message:'원본 검사 목록이 바뀌었습니다. 새로고침하세요.' });
+    if (!Array.isArray(rows)) throw changed();
+    const byUid = new Map<string, any[]>(uids.map(uid => [uid, []]));
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') throw changed();
+      const group = byUid.get(OrthancService.tag(row, '0020000D'));
+      if (!group) throw changed();
+      group.push(row);
     }
-    if (!Array.isArray(rows) || rows.length !== uids.length || byUid.size !== uids.length)
-      throw new ConflictException({ code:'STUDY_LIST_CHANGED', message:'원본 검사 목록이 바뀌었습니다. 새로고침하세요.' });
-    return uids.map(uid => byUid.get(uid));
+    if (uids.some(uid => !byUid.get(uid)!.length)) throw changed();
+    return uids.flatMap(uid => byUid.get(uid)!);
   }
 
   async reportPreviewStudy(uid: string): Promise<any> {
     const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
       '&includefield=00081030,00100030,00100040');
+    // Two patient resources under one UID: printing either one's header over the report would name the wrong patient.
+    if (Array.isArray(rows) && rows.length > 1 && rows.every(row => OrthancService.tag(row, '0020000D') === uid))
+      throw new ConflictException({ code: STUDY_IDENTITY_UNRESOLVED, message: STUDY_IDENTITY_UNRESOLVED_MESSAGE });
     if (!Array.isArray(rows) || rows.length !== 1 || OrthancService.tag(rows[0], '0020000D') !== uid)
       throw new BadRequestException('출력할 원본 검사를 확인할 수 없습니다');
     return rows[0];

@@ -43,6 +43,7 @@
           if (!live() || commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
+          applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
           const arrivalNotice = arrivals?.ok && arrivals.changes.length
