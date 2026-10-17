@@ -12,8 +12,11 @@
  *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, no transaction, no request, receipt
  *       or audit write (create, change, replay);
  *   (3) the source read fails: 503, no transaction, no write (create, change, replay);
- *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService), and the
- *       compiled service names no Connect delegate or table;
+ *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService); the
+ *       compiled module resolves neither service's module at load or while serving every route (Node's own module
+ *       resolution, never a match on the compiled text), and a recording Connect store (the Transfer, TransferBasis and
+ *       ProcessingAgreement delegates and tables) sees no call over every route; a comment naming them all is the same
+ *       module, a real require or a real Connect call is refused;
  *   (5) a recording Orthanc sees only studyIdentityResources and studyIdentities(true) across create, accept, replay, read,
  *       forStudy, list and close, and nothing at all when the policy has no metadata rule.
  * Also pinned over the same stubs: every applied requestId replays its stored receipt without a write, after Closed and
@@ -25,6 +28,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { createRequire } = require('node:module');
+const { basename, dirname } = require('node:path');
+const vm = require('node:vm');
 const { ImageRequestService, IMAGE_REQUEST_AUDIT_ACTION } = require('/app/dist/image-request.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { OWNER_ONLY_AUDIT_ACTIONS } = require('/app/dist/pacs.service');
@@ -53,6 +59,9 @@ const seeded = (n, state, revision) => ({ id: id(n), studyUid: uid, institutionI
   requesterSub: clinician.sub, requesterActor: clinician.actor, requesterName: clinician.name,
   counterpartyText: 'SYNTHETIC hospital', counterpartyInstitutionId: null, reason: 'SYNTHETIC reason', state, revision,
   handlerActor: null, handlerName: null, note: null, changedBy: clinician.actor, createdAt: new Date(0), updatedAt: new Date(0) });
+// The Connect family of api/prisma/schema.prisma (contract S5-U4p section 10.2: a request is never a transfer).
+const CONNECT_DELEGATES = ['transfer', 'transferBasis', 'processingAgreement'];
+const CONNECT_TABLE = /"(?:Transfer|TransferBasis|ProcessingAgreement)"/;
 
 /**
  * One synthetic store: the study's owner, StudyAccessPolicy, requests, receipts and audit rows, with an ordered event log.
@@ -62,14 +71,19 @@ const seeded = (n, state, revision) => ({ id: id(n), studyUid: uid, institutionI
  * store per statement, as ReadCommitted does. Writes always go to the live store. `between({event: step})` runs each
  * step once, right after that statement of the NEXT transaction to start, as a commit landing between two statements.
  */
-function world(policy, { requests = [], receipts = [] } = {}) {
-  const events = [], statements = [], transactions = [], calls = [], audits = [];
+function world(policy, { requests = [], receipts = [], Service = ImageRequestService } = {}) {
+  const events = [], statements = [], transactions = [], calls = [], audits = [], connect = [];
   const writes = { request: 0, update: 0, receipt: 0, audit: 0 };
   const store = { requests: new Map(requests.map(r => [r.id, { ...r }])), receipts: new Map(receipts.map(r => [r.requestId, { ...r }])),
     study: { institutionId: institution } };
   const institutions = new Set([institution, counterparty]);
-  const w = { events, statements, transactions, calls, audits, writes, store,
+  const w = { events, statements, transactions, calls, audits, writes, store, connect,
     policyRow: policy ? { institution, revision: 1, policy, reason: '', updatedBy: null, updatedAt: null } : null };
+  // The Connect store records every call instead of failing it, so only the observation refuses a transfer call.
+  const connectDelegate = (where, name) => new Proxy({}, { get: (_target, method) => async () => {
+    connect.push(where + ':' + name + '.' + String(method)); return method === 'findMany' ? [] : null;
+  } });
+  const connectDelegates = where => Object.fromEntries(CONNECT_DELEGATES.map(name => [name, connectDelegate(where, name)]));
   let target = null, steps = new Map();
   w.between = next => { steps = new Map(Object.entries(next)); target = 'next'; };
   w.pending = () => [...steps.keys()];
@@ -87,7 +101,9 @@ function world(policy, { requests = [], receipts = [] } = {}) {
   const lockOf = sql => sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR KEY SHARE') ? ' FOR KEY SHARE'
     : sql.includes('FOR SHARE') ? ' FOR SHARE' : '';
   const query = async (where, view, index, strings, values) => {
-    const sql = strings.join('?'), k = kind(sql);
+    const sql = strings.join('?');
+    if (CONNECT_TABLE.test(sql)) { connect.push(where + ':sql ' + sql.match(CONNECT_TABLE)[0]); return []; }
+    const k = kind(sql);
     log(where + ':' + k, lockOf(sql));
     let rows;
     if (k === 'advisory') rows = [{ locked: 1 }];
@@ -103,6 +119,7 @@ function world(policy, { requests = [], receipts = [] } = {}) {
     return rows;
   };
   const client = (view, index) => ({
+    ...connectDelegates('tx'),
     $executeRaw: async () => { log('tx:execute'); return 0; },
     $queryRaw: (strings, ...values) => query('tx', view, index, strings, values),
     studyImageRequest: {
@@ -119,6 +136,7 @@ function world(policy, { requests = [], receipts = [] } = {}) {
     auditLog: { create: async ({ data }) => { log('tx:write'); writes.audit++; audits.push(data); return data; } },
   });
   const prisma = {
+    ...connectDelegates('root'),
     $queryRaw: (strings, ...values) => query('root', store, null, strings, values),
     $transaction: async (fn, options) => {
       const index = transactions.push(options) - 1;
@@ -139,7 +157,7 @@ function world(policy, { requests = [], receipts = [] } = {}) {
     return handler ? handler(...args) : null;
   } });
   w.access = new StudyAccessService(prisma, orthanc, {});
-  w.svc = new ImageRequestService(prisma, w.access);
+  w.svc = new Service(prisma, w.access);
   w.bumpPolicy = () => { w.policyRow = { ...w.policyRow, revision: w.policyRow.revision + 1 }; };
   return w;
 }
@@ -209,28 +227,98 @@ test('(3) a failed source read is 503 with no transaction and no write', async (
   }
 });
 
-test('(4) the service is constructed from PrismaService and StudyAccessService only and names no Connect delegate', () => {
+/** Create, accept, its replay, read, forStudy, the queue and close. */
+const flows = async w => {
+  await create(w, { ...clinician }, id(31));
+  await change(w, id(31), { ...technician }, id(32), 1, 'accept');
+  await change(w, id(31), { ...technician }, id(32), 1, 'accept');
+  await w.svc.read(id(31), { ...clinician });
+  await w.svc.forStudy(uid, { ...radiologist });
+  await w.svc.list({ ...technician }, { view: 'queue' });
+  await change(w, id(31), { ...admin }, id(33), 2, 'close', 'SYNTHETIC record');
+};
+/** Every route and action: the flows, then an external-image request with a counterparty declined, a cancel and mine. */
+const everyRoute = async w => {
+  await flows(w);
+  await create(w, { ...clinician }, id(34), { kind: 'external-image', counterpartyInstitutionId: counterparty });
+  await change(w, id(34), { ...admin }, id(35), 1, 'decline', 'SYNTHETIC note');
+  await create(w, { ...clinician }, id(36));
+  await change(w, id(36), { ...clinician }, id(37), 1, 'cancel', 'SYNTHETIC reason');
+  await w.svc.list({ ...clinician }, { view: 'mine' });
+};
+
+/**
+ * The resolved-import contract (D73 section 15: Node's own module resolution, no match on source text). The compiled
+ * module runs once more from the given source under a require that records the file each specifier resolves to, at load
+ * and while its class serves the routes, so a lazy require is seen too. `forbidden()` lists the resolved OrthancService
+ * and ConnectService modules among them.
+ */
+const compiledFile = require.resolve('/app/dist/image-request.service');
+const forbiddenFiles = ['/app/dist/orthanc.service', '/app/dist/connect.service'].map(name => require.resolve(name));
+function loadCompiled(source) {
+  const resolved = [];
+  const real = createRequire(compiledFile);
+  const recording = Object.assign(name => { resolved.push(real.resolve(name)); return real(name); },
+    { resolve: real.resolve, cache: real.cache });
+  const module = { exports: {} };
+  vm.compileFunction(source, ['exports', 'require', 'module', '__filename', '__dirname'], { filename: compiledFile })
+    .call(module.exports, module.exports, recording, module, compiledFile, dirname(compiledFile));
+  return { exports: module.exports, forbidden: () => resolved.filter(file => forbiddenFiles.includes(file)).map(file => basename(file)) };
+}
+/** What a class does over every route, timestamps aside, and what the recording Connect store saw. */
+const observe = async Service => {
+  const w = world(metadataPolicy(), { Service });
+  await everyRoute(w);
+  return { behaviour: JSON.stringify([w.statements, w.calls, w.writes]), connect: w.connect };
+};
+
+test('(4) the service is constructed from PrismaService and StudyAccessService only and depends on no Orthanc or Connect service and no Connect store', async () => {
   const types = Reflect.getMetadata('design:paramtypes', ImageRequestService);
   assert.deepEqual(types.map(type => type.name), ['PrismaService', 'StudyAccessService']);
   assert.equal(types.includes(OrthancService), false);
   assert.equal(types.includes(ConnectService), false);
-  const compiled = readFileSync('/app/dist/image-request.service.js', 'utf8');
-  for (const name of ['OrthancService', 'ConnectService', './orthanc.service', './connect.service',
-    '"Transfer"', '"TransferBasis"', '"ProcessingAgreement"'])
-    assert.equal(compiled.includes(name), false, name);
-  assert.equal(/\.(?:transfer|transferBasis|processingAgreement)\b/.test(compiled), false);
+  const compiled = readFileSync(compiledFile, 'utf8');
+  const names = 'OrthancService ConnectService ./orthanc.service ./connect.service "Transfer" "TransferBasis" "ProcessingAgreement"'
+    + ' prisma.transfer prisma.transferBasis prisma.processingAgreement';
+  // The contrast both ways: a comment and an unused string naming every forbidden service, delegate and table is the same
+  // module and passes; a real require of either service module, or a real Connect call, is refused.
+  const variants = {
+    compiled,
+    named: `/* ${names} */\n${compiled}\nvoid ${JSON.stringify(names)}; // ${names}\n`,
+    orthanc: `${compiled}\nrequire("./orthanc.service");\n`,
+    connect: `${compiled}\nrequire("./connect.service");\n`,
+  };
+  const expected = await observe(ImageRequestService);
+  assert.deepEqual(expected.connect, [], 'every route of the compiled service');
+  const seen = {};
+  for (const [name, source] of Object.entries(variants)) {
+    const loaded = loadCompiled(source);
+    const { behaviour, connect } = await observe(loaded.exports.ImageRequestService);
+    seen[name] = { forbidden: loaded.forbidden(), connect, same: behaviour === expected.behaviour };
+  }
+  // A real Connect call from a service that otherwise behaves the same: through the injected PrismaService, a delegate
+  // inside the write transaction and a raw read of a Connect table.
+  class Transferring extends ImageRequestService {
+    constructor(prisma, access) { super(prisma, access); this.connectStore = prisma; }
+    async create(...args) {
+      const result = await super.create(...args);
+      await this.connectStore.$transaction(tx => tx.transfer.create({ data: {} }));
+      await this.connectStore.$queryRaw`SELECT id FROM "ProcessingAgreement"`;
+      return result;
+    }
+  }
+  const transferring = await observe(Transferring);
+  seen.transferring = { connect: [...new Set(transferring.connect)] };
+  assert.deepEqual(seen, {
+    compiled: { forbidden: [], connect: [], same: true },
+    named: { forbidden: [], connect: [], same: true },
+    orthanc: { forbidden: ['orthanc.service.js'], connect: [], same: true },
+    connect: { forbidden: ['connect.service.js'], connect: [], same: true },
+    transferring: { connect: ['tx:transfer.create', 'root:sql "ProcessingAgreement"'] },
+  });
 });
 
 test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, and nothing without a metadata rule', async () => {
-  const flows = async w => {
-    await create(w, { ...clinician }, id(31));
-    await change(w, id(31), { ...technician }, id(32), 1, 'accept');
-    await change(w, id(31), { ...technician }, id(32), 1, 'accept');
-    await w.svc.read(id(31), { ...clinician });
-    await w.svc.forStudy(uid, { ...radiologist });
-    await w.svc.list({ ...technician }, { view: 'queue' });
-    await change(w, id(31), { ...admin }, id(33), 2, 'close', 'SYNTHETIC record');
-  };
   const metadata = world(metadataPolicy());
   await flows(metadata);
   assert.ok(metadata.calls.length > 0);
