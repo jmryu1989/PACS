@@ -494,6 +494,26 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual({"findings": "SYN A typed before", "conclusion": "", "recommendation": ""}, self.stored())
         self.assertIn("Draft Saved", self.page.locator("#related-mode-target").inner_text())
 
+    def test_w5_a_second_entry_while_the_first_waits_is_the_one_that_enters(self):
+        """Reentrant entry: the reader clicks B, then C, while both entries wait for what decides the Target's text (an
+        approval out); when it answers, only the later choice (C) opens — the earlier entry never takes the mode first."""
+        self.open()
+        self.open_target()
+        self.site.commit_answers = ["hold"]
+        self.page.locator("#b-approve").click()
+        self.wait(lambda: self.site.held_flow_commits, "the approval out")
+        self.related_row(UID_B).locator("td").first.click()
+        self.settle(200)
+        self.related_row(UID_C).locator("td").first.click()
+        self.settle(300)
+        expect(self.mode()).to_be_hidden()
+        self.site.finish_flow_commit()
+        expect(self.mode()).to_be_visible()
+        self.wait(lambda: self.source_text("findings") == PRIOR_C["findings"], "C's text")
+        self.settle(300)
+        self.assertEqual(UID_C, self.js("relatedUid"))
+        expect(self.page.locator("#related-mode-source")).to_contain_text("SYN MR CHEST OLDER")
+
     def test_w5_entry_refused_save_stays_with_the_notice_and_retry_enters_after_the_cause_is_gone(self):
         self.open()
         self.open_target()
@@ -537,9 +557,10 @@ class RelatedModePage(unittest.TestCase):
         cdp.send("Input.insertText", {"text": "한"})
 
     def test_w5_entry_waits_for_an_approval_in_flight_and_enters_only_after_its_answer(self):
+        """Clean but deciding: nothing unconfirmed is typed (the move gate alone would answer clear), yet an approval is out;
+        the entry waits for its answer within the same bound (D1423 R2)."""
         self.open()
         self.open_target()
-        self.page.locator("#findings").fill("SYN A approve")
         self.site.commit_answers = ["hold"]
         self.page.locator("#b-approve").click()
         self.wait(lambda: self.site.held_flow_commits, "the approval out")
@@ -570,6 +591,9 @@ class RelatedModePage(unittest.TestCase):
         self.settle()
         expect(self.page.locator("#related-mode-source")).to_contain_text("Access Restricted")
         self.assertEqual("", self.source_text("findings"), "C's late answer is not shown for B")
+        expect(self.page.locator("#prior-report-status")).to_contain_text("Access Restricted")
+        expect(self.page.locator("#prior-report-content")).to_be_hidden()
+        self.assertNotIn(PRIOR_C["findings"], self.page.locator("#prior-findings").text_content(), "nor in the Related Report pane")
         self.assertEqual(UID_B, self.js("relatedUid"))
 
     def test_w5_source_is_the_current_approved_head_only(self):
@@ -946,6 +970,8 @@ class RelatedModePage(unittest.TestCase):
         self.page.locator("#report-notice-check").click()
         self.wait(lambda: self.js("selectedUid") == UID_D, "the move continues once the insert is confirmed")
         self.assertEqual({"findings": self.whole(), "conclusion": "", "recommendation": ""}, self.stored(UID_A))
+        # It was the operation's receipt Check that confirmed it (the W4 draft read compares text only: never enough here).
+        self.assertEqual((1, "applied"), (len(self.site.checks), self.op_state(UID_A)))
 
     def test_w5_back_after_an_unknown_insert_keeps_later_typing_and_a_late_check_saves_only_the_insert(self):
         self.open()
