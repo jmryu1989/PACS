@@ -8,6 +8,13 @@ limit_req_status 429;
 # S9-U4b 원본 archive(D1489)의 접근 기록: 메서드·정규화한 경로·상태·바이트·시각뿐이다. 그 GET의 query에는 일회용
 # 다운로드 grant가 있으므로 $request·$request_uri·$args·$http_referer·Cookie·Authorization은 쓰지 않는다.
 log_format kin_original_archive '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent $request_time';
+# 그 archive의 API 연결은 응답 뒤에도 nginx가 먼저 끊지 않는다(keepalive). 끊으면 API의 writer가 마지막 byte를 넘긴 뒤 자기
+# 응답을 끝내기 전에 연결이 닫혀, 끝까지 받은 다운로드가 Incomplete로 기록된다(S9-U4b (c) r2, hosted G3 dfca33a: nginx 200 전체
+# byte, API attempt aborted·responseFinished false).
+upstream kin_api_archive {
+    server api:3000;
+    keepalive 8;
+}
 
 include /etc/nginx/snippets/default-servers.conf;
 
@@ -117,7 +124,15 @@ server {
         error_log /dev/null;
         proxy_buffering off;
         client_max_body_size 2m;
-        proxy_pass http://api:3000;
+        # Connection을 비워야 upstream keepalive가 된다. 이 location이 proxy_set_header를 두므로 서버 수준의 것을 그대로 다시 둔다.
+        proxy_set_header Connection        "";
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host  $http_host;
+        proxy_set_header X-Forwarded-Port  ${PUBLIC_PORT};
+        proxy_pass http://kin_api_archive;
     }
 
     location /api/ {
