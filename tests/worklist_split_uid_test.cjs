@@ -430,6 +430,24 @@ test('TEST-WSU-06 a source access tag that changes between the enumeration and t
     else assert.deepEqual(uidsOf(await open.pacs.listStudies(caller(), { limit: '10' })), [NORMAL]);
   }
 });
+test('TEST-WSU-06 the page details are held to the enumeration\'s raw text: a whitespace-only change of InstitutionName, PatientID or StudyDate is STUDY_LIST_CHANGED', async () => {
+  // The enumeration's raw text is the reference (spec §2.1/§3.2): a leading or trailing whitespace change of
+  // InstitutionName, PatientID or StudyDate is a change. The policy reads the source (modality rule), and both values of
+  // each tag pass it; the stored rows are untouched. A raw value that itself carries whitespace and does not change is
+  // its own unchanged control.
+  const ct = { revision: 1, policy: restricted([rule({ modalities: ['CT'] })]) };
+  const spaced = { institution: ' HALLYM', patientId: ' SYN-PID-N', date: ' 20261001' };
+  for (const field of Object.keys(spaced)) {
+    const w = await world({ resources: [resource(NORMAL, 'SYN-PID-N')], states: [stateRow(NORMAL, { institutionId: 'hallym' })], policy: ct }).start();
+    w.hooks.find = async (arg, n) => { if (n === 2) w.resources[0][field] = spaced[field]; };
+    await rejects(w.pacs.listStudies(caller(), { limit: '10' }), 409, 'STUDY_LIST_CHANGED');
+    assert.deepEqual(w.states.get(NORMAL).institutionId, 'hallym');
+  }
+  const kept = await world({ resources: [resource(NORMAL, ' SYN-PID-N ', { institution: 'HALLYM ', date: '20261001 ' })],
+    states: [stateRow(NORMAL, { institutionId: 'hallym' })], policy: ct }).start();
+  const unchanged = await kept.pacs.listStudies(caller(), { limit: '10' });
+  assert.deepEqual([uidsOf(unchanged), unchanged.studies[0].id, unchanged.studies[0].date], [[NORMAL], ' SYN-PID-N ', '20261001 ']);
+});
 
 // ── TEST-WSU-08 direct clinical entries (M-WSU-14, M-WSU-16) ──
 const owner = c => ({ institution: c.institution, sub: c.sub, author: c.actor });

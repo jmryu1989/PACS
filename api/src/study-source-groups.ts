@@ -59,10 +59,11 @@ export function identityIssueList(uids: Iterable<string>): { uid: string; code: 
  * WORKLIST-SPLIT-UID (spec §3.2): the access tags a page's detail read must still show for a UID, compared with the
  * enumeration that chose the page (the immutable reference). InstitutionName always; PatientID, StudyDate and the
  * modalities when the caller's policy reads them (the enumeration carries them only then). Values are compared as
- * read (trimmed text; modalities as an upper-case set), so an unchanged source never differs from itself.
+ * read: InstitutionName, PatientID and StudyDate as the exact raw text the enumeration saw (a whitespace change is a
+ * change, as everywhere else these values are used), the modalities as the existing upper-case set.
  */
 export function sameAccessTags(enumerated: any, detail: any, withMetadata: boolean): boolean {
-  const text = (row: any, key: string) => { const v = row?.[key]?.Value?.[0]; return typeof v === 'string' ? v.trim() : ''; };
+  const text = (row: any, key: string) => { const v = row?.[key]?.Value?.[0]; return typeof v === 'string' ? v : ''; };
   const modalities = (row: any) => {
     const v = row?.['00080061']?.Value;
     return Array.isArray(v) ? [...new Set(v.filter((x: unknown) => typeof x === 'string').map((x: string) => x.trim().toUpperCase()).filter(Boolean))].sort().join('\\') : '';
