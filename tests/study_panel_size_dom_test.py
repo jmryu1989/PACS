@@ -39,6 +39,17 @@ from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite,
 from study_panel_page_dom_test import W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
 from study_panel_page_dom_test import HIDE_W4, W4_REPORT_NODES
 
+# S9-U4b part (c) decided difference (D1486, same rule as W6_FIRST_PAINT_NODES / W4_REPORT_NODES): the DICOM Transfer
+# panel adds nodes that stay hidden until a person imports or downloads. main.html gives 4 elements (the Technician
+# toolbar's Import DICOM button, the panel's style element, the hidden #study-transfer section and the
+# study-transfer-local.js script tag); the asset's mount (KinStudyTransferLocal, called from feature-mounts.js at page
+# start) builds 24 inside the hidden section: the header (div, title, Resolve Unconfirmed, Clear Finished, Hide, Close),
+# the body and its list, the status line, the file input, and the admin's Resolve Unconfirmed form (title, four labelled
+# fields, the two basis options, Resolve and its result line). Nothing of it is painted; the requirement these counts
+# carry - the Study Panel's options exist only in the opened panel - is unchanged. Its own cases are
+# study_transfer_local_dom_test.py.
+S9U4B_TRANSFER_NODES = 4 + 24
+
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
 # The panel through its public roles: the drawer, its tabs, the shown tab's content, its Close button and edge.
@@ -255,7 +266,8 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # everything else stays round 6's.
                         # W4-LAND: + W4_REPORT_NODES (Approve & Next and the two report rows hidden at first paint); the
                         # closed Workspace Shortcuts dialog is outside both counts (module header, D1371).
-                        self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES,
+                        # S9-U4b part (c): + S9U4B_TRANSFER_NODES, the hidden DICOM Transfer panel (above).
+                        self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + S9U4B_TRANSFER_NODES,
                                          mine['first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
                         page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
@@ -284,8 +296,9 @@ class StudyPanelSizeDOM(unittest.TestCase):
                             self.assertEqual(expected, within_panel(mine[key]), key)
                             self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
                         # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
-                        # controls' row and the edge (stated in the round-7 report).
-                        self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES, mine['nodes'] - theirs['nodes'])
+                        # controls' row and the edge (stated in the round-7 report). The whole page is counted, so the
+                        # still hidden DICOM Transfer panel's nodes are in it too.
+                        self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + S9U4B_TRANSFER_NODES, mine['nodes'] - theirs['nodes'])
                         if picture:
                             regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
