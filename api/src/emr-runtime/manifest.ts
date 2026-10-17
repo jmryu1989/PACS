@@ -43,6 +43,62 @@ export class EmrRuntimeRefused extends Error {
   constructor(readonly problems: readonly string[]) { super(`EmrRuntimeRefused: ${problems.join(', ')}`); this.name = 'EmrRuntimeRefused'; }
 }
 
+const STARTUP_PHASES: Readonly<Record<string, string>> = freeze({
+  create: 'Nest 애플리케이션 구성에 실패했습니다',
+  config: '접속 원장 설정을 확인하지 못했습니다',
+  connect: '접속 원장 DB에 연결하지 못했습니다',
+  role: '접속 원장 DB 역할·저장소를 확인하지 못했습니다',
+  fence: '접속 원장 상태 디렉터리의 소유를 확인하지 못했습니다',
+  recovery: '접속 원장 seal·복구 저널을 복구하지 못했습니다',
+  compose: '접속 원장 reader를 구성하지 못했습니다',
+  init: '서비스 초기화에 실패했습니다',
+  listen: 'HTTP 수신을 시작하지 못했습니다',
+});
+const STARTUP_CODES: Readonly<Record<string, string>> = freeze({
+  EmrDatabaseUrlRequired: 'DATABASE_URL이 없거나 PostgreSQL 주소가 아닙니다',
+  EmrAppendPoolTooSmall: 'DATABASE_URL의 connection_limit가 접속 원장 검증 예비 연결보다 작습니다',
+  EmrStateDirectoryRequired: 'KIN_EMR_STATE_DIR 경로가 없거나 보호 디렉터리가 아닙니다',
+  EmrStateDirectoryExposed: 'KIN_EMR_STATE_DIR 디렉터리 권한이 다른 사용자에게 열려 있습니다',
+  EmrStartupRepeated: '접속 원장 기동이 이미 시작되었습니다',
+  EmrStartupInterrupted: '접속 원장 기동 중에 종료 요청을 받아 기동을 멈췄습니다',
+  P1000: 'DB 인증에 실패했습니다', P1001: 'DB 서버에 닿지 못했습니다', P1002: 'DB 서버 응답 시간이 초과되었습니다',
+  P1003: 'DB가 없습니다', P1008: 'DB 작업 시간이 초과되었습니다', P1010: 'DB 접근이 거부되었습니다',
+  P1011: 'DB TLS 연결을 열지 못했습니다', P1017: 'DB 서버가 연결을 닫았습니다', P2024: 'DB 연결 풀 대기 시간이 초과되었습니다',
+  EmrRuntimeRefused: '접속 원장 DB 역할·저장소 검증에 실패했습니다(최소권한 kin_runtime과 전용 저장소가 필요합니다)',
+  EmrStateOwnerBusy: '다른 API 프로세스가 같은 KIN_EMR_STATE_DIR의 원장 상태를 소유하고 있습니다',
+  SealUnavailable: '접속 원장 보호 상태에 접근할 수 없습니다',
+  SealCorrupt: '접속 원장 seal tail 검증에 실패했습니다',
+  SealMissing: '접속 원장 seal tail이 없습니다',
+  SealChainMismatch: '접속 원장 seal tail의 체인 식별자가 다릅니다',
+  LedgerBehindSeal: '접속 원장이 보존된 seal tail보다 뒤에 있습니다',
+  SealTailMismatch: '접속 원장과 보존된 seal tail이 일치하지 않습니다',
+  LedgerChainBroken: '접속 원장의 체인 연결 검증에 실패했습니다',
+  UnsealedEntryUnexplained: '접속 원장 seal tail 이후의 기록을 복구할 수 없습니다',
+  SealUpgradeRequired: '접속 원장 seal tail 형식의 검토된 갱신이 필요합니다',
+  FailureJournalUnavailable: '접속 원장 복구 저널에 접근할 수 없습니다',
+  FailureJournalFull: '접속 원장 복구 저널 용량이 가득 찼습니다',
+  FailureJournalCorrupt: '접속 원장 복구 저널 검증에 실패했습니다',
+  FailureJournalConflict: '접속 원장 복구 저널의 기록이 서로 다릅니다',
+  EmrAdaptersAlreadyComposed: '접속 원장 reader가 이미 구성되었습니다',
+  EmrAdapterRequired: '접속 원장 reader 구성에 필요한 부분이 없습니다',
+  EADDRINUSE: 'HTTP 포트가 이미 사용 중입니다', EACCES: 'HTTP 포트를 열 권한이 없습니다',
+});
+/**
+ * EMR-B2-BASE: the one line a failed API start prints (main.ts), with a closed phase and, when the thrown value is one of
+ * the explicitly mapped classes, its closed code: EmrRuntimeRefused by its class only (never its problems), the start-up,
+ * seal and journal refusals by their code, the listed provider connection codes and the two listen errors. Anything else
+ * is the phase's own line. No message, name, URL, SQL, bind value, stack or newline of the thrown value reaches it -
+ * provider errors can carry credential-bearing connection strings.
+ */
+export function startupFailureMessage(phase: 'create' | 'config' | 'connect' | 'role' | 'fence' | 'recovery' | 'compose' | 'init' | 'listen',
+  error: unknown): string {
+  const step = Object.prototype.hasOwnProperty.call(STARTUP_PHASES, phase) ? phase : 'create';
+  const value = (error !== null && typeof error === 'object' ? error : {}) as { code?: unknown; errorCode?: unknown; message?: unknown };
+  const candidates = error instanceof EmrRuntimeRefused ? ['EmrRuntimeRefused'] : [value.errorCode, value.code, value.message];
+  const code = candidates.find(item => typeof item === 'string' && Object.prototype.hasOwnProperty.call(STARTUP_CODES, item)) as string | undefined;
+  return `기동 실패(${step}${code ? '/' + code : ''}): ${code ? STARTUP_CODES[code] : STARTUP_PHASES[step]}. 기동을 중단합니다.`;
+}
+
 /**
  * The runtime connection is the least-privilege application role and the ledger is placed: refuse otherwise. Reads only
  * catalog facts the role can see; reports closed problem codes, never connection strings or secrets.

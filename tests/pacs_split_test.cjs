@@ -187,10 +187,45 @@ test('U0B-CORRESPONDENCE a receiver is read back only as recorded: exact pair an
 });
 
 // ── Nest DI and routes (order section 7 DI/routes, M23/M24) ──
+/**
+ * A unit's declared DI additions (spec.di_additions_*: its controllers, providers, their constructor tokens, routes, and a
+ * constructor change as its exact earlier and later form) taken back from the snapshot: what is taken away is exactly the
+ * declaration - nothing more, nothing less, nothing re-pinned. The same helper serves every declaring unit.
+ */
+function withoutDeclared(now, declared) {
+  const take = (list, names) => {
+    const kept = list.filter(item => !names.includes(item));
+    assert.deepEqual(list.filter(item => names.includes(item)), names, 'each declared name is present once, in order');
+    return kept;
+  };
+  const routeKey = r => JSON.stringify(r);
+  const declaredRoutes = declared.routes.map(routeKey);
+  const added = now.routes.filter(r => declaredRoutes.includes(routeKey(r)));
+  assert.deepEqual(added.map(routeKey), declaredRoutes, 'the declared routes are exactly present, in snapshot order');
+  const injectables = { ...now.injectables };
+  for (const [name, value] of Object.entries(declared.injectables)) {
+    assert.deepEqual(injectables[name], value, name);
+    delete injectables[name];
+  }
+  for (const [name, change] of Object.entries(declared.changed_injectables ?? {})) {
+    if (name === 'note') continue;
+    assert.deepEqual(injectables[name], change.after, name + ' is exactly its declared later form');
+    injectables[name] = change.before;
+  }
+  return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables,
+    routes: now.routes.filter(r => !declaredRoutes.includes(routeKey(r))) };
+}
 test('U0B-DI Nest metadata equals main before the split: tokens, constructor tokens, scopes, enhancers, middleware, 138 routes', () => {
-  const now = diSnapshot();
+  const full = diSnapshot();
+  // EMR-B2-BASE (TEST-B2SH-15): the startup owner provider, declared and taken back exactly; no constructor changes.
+  const declared = spec.di_additions_emr_b2;
+  assert.equal(declared.unit, 'EMR-B2-BASE');
+  assert.deepEqual([declared.controllers, declared.providers, declared.routes], [[], ['EmrApplicationRuntime'], []]);
+  assert.equal(declared.changed_injectables, undefined);
+  const now = withoutDeclared(full, declared);
   assert.deepEqual(now, spec.di);
   assert.equal(now.routes.length, 138);
+  assert.equal(full.routes.length, 138, 'the startup owner adds no route');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {
