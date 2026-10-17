@@ -75,6 +75,19 @@ MUTANTS = [
      "if (!saved || saved.v !== 1 || JSON.stringify(saved.owner) !== JSON.stringify(owner) || !Array.isArray(saved.operations)) {",
      "if (!saved || saved.v !== 1 || !Array.isArray(saved.operations)) {",
      "test_c07_the_same_person_resumes_after_a_new_login_another_person_never_sees_the_operation", "C-07"),
+    # D1489 DG-M10: the grant's answer clicks its link only while the context, the sequence and the person still hold.
+    ("late-grant-clicked", ASSET,
+     "    const applied = work.commit(at, () => {\n      if (!live(op) || op.gen !== gen) return;\n      op.inFlight = false;\n"
+     "      if (op.readSeq !== seq || !usable() || JSON.stringify(app.identity()) !== who) { render(); return; }",
+     "    const applied = (effect => (effect(), true))(() => {\n      if (!live(op) || op.gen !== gen) return;\n      op.inFlight = false;\n"
+     "      if (false) { render(); return; }",
+     "test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why", "C-07"),
+    # The grant lives in memory and the one link only.
+    ("grant-kept-in-storage", ASSET,
+     "      link.href = base + '?grant=' + encodeURIComponent(grant);\n      grant = null;",
+     "      link.href = base + '?grant=' + encodeURIComponent(grant);\n"
+     "      try { sessionStorage.setItem('kin-study-transfer-grant', grant); } catch (_) {}\n      grant = null;",
+     "test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation", "C-06"),
 ]
 
 

@@ -68,6 +68,7 @@ window.KinStudyTransferLocal = function (app) {
     downloadUnconfirmed: '서버가 다시 시작되는 등으로 보낸 결과를 확인하지 못했습니다. 같은 작업으로 다시 받을 수 있습니다.',
     notStarted: '내려받기가 시작되지 않았습니다. 브라우저의 다운로드 목록을 확인한 뒤 다시 시도하세요.',
     preparing: '원본 목록을 준비하는 중입니다…',
+    granting: '내려받기를 시작하는 중입니다…',
     copied: '작업 번호와 파일 번호를 복사했습니다.',
     copyFailed: (id, index) => `복사하지 못했습니다. 작업 번호 ${id} · 파일 번호 ${index}`,
     resolveInput: '작업 번호(UUID), 파일 번호(0~99), 확인 근거와 확인 시각을 적으세요.',
@@ -547,21 +548,57 @@ window.KinStudyTransferLocal = function (app) {
    * The archive, as the browser's own download of the server's stream (5.1): never read into this page (an archive may
    * approach 4 GiB). Offered for the same operation only while it is Ready, Incomplete or Unconfirmed (5.3); after Sent
    * a new operation is prepared instead. No Range, no resume.
+   *
+   * The browser's own GET cannot carry the session binding header, so one Download press first asks, as an ordinary
+   * bound request, for a one-time grant of this operation (D1489), and only then clicks one hidden link with it. The
+   * grant lives in this function's memory and the link alone, never in the page's record, its storage or on screen.
+   * Its answer is used only if the panel, the operation, this read's sequence, the work context and the signed-in person
+   * are all still the ones that asked; else no link is clicked. A refusal is a notice, and the status read tells the rest.
    */
-  function start(op) {
+  async function start(op) {
     if (!live(op) || !usable() || op.polling || op.inFlight || !RESTARTABLE.includes(op.state)) return;
-    const link = document.createElement('a');
-    link.href = app.api + '/studies/' + encodeURIComponent(op.uid) + '/original-downloads/' + encodeURIComponent(op.id) + '/archive';
-    // The download attribute keeps an answer that is not a file from replacing this page and the reading work on it.
-    link.download = '';
-    link.hidden = true;
-    root.append(link);
-    link.click();
-    link.remove();
-    op.notice = '';
-    op.startedFrom = op.state;
-    op.polls = 0;
-    poll(op);
+    const gen = op.gen, seq = ++op.readSeq, at = work.capture('document'), who = JSON.stringify(app.identity());
+    const base = app.api + '/studies/' + encodeURIComponent(op.uid) + '/original-downloads/' + encodeURIComponent(op.id) + '/archive';
+    op.inFlight = true;
+    op.notice = TEXT.granting;
+    render();
+    let answer = null, failed = false;
+    try {
+      answer = await app.transport.request(base + '/grant', { method: 'POST', json: {}, context: at });
+    } catch (_) { failed = true; }
+    let grant = !failed && answer.ok && answer.body?.operationId === op.id && typeof answer.body.grant === 'string'
+      && /^[A-Za-z0-9_-]{43}$/.test(answer.body.grant) ? answer.body.grant : null;
+    if (answer?.body && typeof answer.body === 'object') delete answer.body.grant;
+    const applied = work.commit(at, () => {
+      if (!live(op) || op.gen !== gen) return;
+      op.inFlight = false;
+      if (op.readSeq !== seq || !usable() || JSON.stringify(app.identity()) !== who) { render(); return; }
+      if (!grant) {
+        // A lost answer or a refusal starts nothing: the operation's state is read again, and Download asks anew.
+        op.notice = failed ? TEXT.lost : answer.body?.message || TEXT.httpFailure(answer.status);
+        render();
+        readDownload(op);
+        return;
+      }
+      const link = document.createElement('a');
+      link.href = base + '?grant=' + encodeURIComponent(grant);
+      grant = null;
+      // The download attribute keeps an answer that is not a file from replacing this page and the reading work on it.
+      link.download = '';
+      link.referrerPolicy = 'no-referrer';
+      link.rel = 'noreferrer';
+      link.hidden = true;
+      root.append(link);
+      link.click();
+      link.remove();
+      link.removeAttribute('href');
+      op.notice = '';
+      op.startedFrom = op.state;
+      op.polls = 0;
+      poll(op);
+    });
+    grant = null;
+    if (!applied) lostAnswer(op, null);
   }
 
   function poll(op) {
@@ -590,12 +627,15 @@ window.KinStudyTransferLocal = function (app) {
         return;
       }
       adoptDownload(op, answer.body);
-      op.notice = '';
+      // The browser's own GET answers this page nothing: a refused or expired grant is known from the status (D1489).
+      const request = answer.body.archiveRequest;
+      const unstarted = request && (request.state === 'refused' || request.state === 'expired') && RESTARTABLE.includes(op.state);
+      op.notice = unstarted && typeof request.message === 'string' ? request.message : '';
       if (polled && op.polling) {
         op.polls++;
         const waiting = op.state === op.startedFrom;
-        if (op.state === 'sending' || (waiting && op.polls < DOWNLOAD_START_POLLS)) later(() => readDownload(op, true), DOWNLOAD_POLL_MS);
-        else { op.polling = false; if (waiting) op.notice = TEXT.notStarted; }
+        if (op.state === 'sending' || (waiting && !unstarted && op.polls < DOWNLOAD_START_POLLS)) later(() => readDownload(op, true), DOWNLOAD_POLL_MS);
+        else { op.polling = false; if (waiting && !unstarted) op.notice = TEXT.notStarted; }
       } else if (op.state === 'sending' && !op.polling) {
         op.startedFrom = null;
         poll(op);

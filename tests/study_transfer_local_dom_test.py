@@ -13,21 +13,24 @@ own (S9-U4p 4.6, 5.3, 6) that the page itself writes.
 Cases drive the page through its controls (the toolbar button, the row menus, the file chooser, the panel's buttons, the
 admin form, the test clock) and read what a person sees (the panel's text, focus, dialogs) and what reached the server.
 
-Archive start (C-06): the page starts the browser's own download of the archive URL (no fetch, no Blob). Chromium's
-download manager takes an a[download] request itself, so it never reaches the context's routes: the cases read the
-download's URL, check that no script read it and that the page stayed, and then drive the states through the status
-GET. Such a request cannot carry the X-KIN-Session binding the product guard requires of every cookie request
-(auth.guard.ts requireBinding), so on the real stack it is refused 428 today: blocker B-1 of the S9-U4b part (c) round 1
-report. Nothing here claims that the real guard admits it.
+Archive start (C-06, D1489 grant): one Download press is one bound POST .../archive/grant (X-KIN-Session, X-KIN-CSRF, body
+{}) and then the browser's own download of .../archive?grant=<the answered value> (no fetch of the archive, no Blob).
+Chromium's download manager takes an a[download] request itself, so it never reaches the context's routes: the cases
+read the download's URL (the path, and a query that is exactly the grant the server answered), check that no script
+read the archive, that the value is kept nowhere (storage, panel text), that the page stayed, and then drive the states
+through the status GET. Whether the real guard admits that GET is the server suite's (S9U4-B77..B80, the product's own
+AuthGuard) and the live WorklistE2E case's; nothing here claims it.
 
 Mutants: tests/study_transfer_local_mutants.py serves one-off copies of the shipped files; nothing here edits a file.
 """
 import hashlib
 import json
 import re
+import secrets
 import sys
 import time
 import unittest
+import uuid
 from urllib.parse import unquote, urlparse
 
 import auth_logout_dom_test as h
@@ -113,6 +116,9 @@ class TransferSite(rf.FlowSite):
         self.download_reads = []        # operationId of every download status GET
         self.download_answers = {}      # operationId -> list of views answered in turn by its status GETs
         self.recoveries = []            # (operationId, index, body)
+        self.grants = []                # each archive grant POST (D1489): uid, operation, body, its binding and CSRF headers, grant
+        self.grant_answers = []         # per grant POST: (status, body) | "hold" | "abort"; none queued: a fresh grant
+        self.held_grants = []           # (route, record) answered by the case
         self.recovery_answers = []      # per recovery: (status, body)
         self.tele = {TELE_UID}
 
@@ -124,7 +130,7 @@ class TransferSite(rf.FlowSite):
 
     def api(self, route, request, method, path, query):
         if path == "/api/dicom-import" or path.startswith(("/api/dicom-import/", "/api/admin/dicom-import/")) \
-                or re.fullmatch(r"/api/studies/[^/]+/original-downloads(/[^/]+(/archive)?)?", path):
+                or re.fullmatch(r"/api/studies/[^/]+/original-downloads(/[^/]+(/archive(/grant)?)?)?", path):
             account, refused = self.authenticate(request)
             if refused:
                 return self.refuse(route, *refused)
@@ -170,6 +176,15 @@ class TransferSite(rf.FlowSite):
             view = download_view(body["operationId"], uid)
             self.download_state[body["operationId"]] = view
             return self.answer(route, 200, view)
+        found = re.fullmatch(r"/api/studies/([^/]+)/original-downloads/([^/]+)/archive/grant", path)
+        if method == "POST" and found:
+            record = {"uid": unquote(found.group(1)), "operation": found.group(2), "body": request.post_data_json,
+                      "session": request.headers.get("x-kin-session"), "csrf": request.headers.get("x-kin-csrf"), "grant": None}
+            self.grants.append(record)
+            reply = self.grant_answers.pop(0) if self.grant_answers else None
+            if reply == "hold":
+                return self.held_grants.append((route, record))
+            return self.answer_grant(route, record, reply)
         found = re.fullmatch(r"/api/studies/([^/]+)/original-downloads/([^/]+)", path)
         if method == "GET" and found:
             op = found.group(2)
@@ -191,6 +206,15 @@ class TransferSite(rf.FlowSite):
         if isinstance(reply, dict):
             self.import_state.setdefault(reply["operationId"], {})[reply["index"]] = reply
             return self.answer(route, status_of(reply), reply)
+        return self.answer(route, *reply)
+
+    def answer_grant(self, route, record, reply=None):
+        if reply == "abort":
+            return route.abort("connectionreset")
+        if reply is None:
+            record["grant"] = secrets.token_urlsafe(32)
+            reply = (200, {"operationId": record["operation"], "grantId": str(uuid.uuid4()), "grant": record["grant"],
+                           "expiresAt": "2026-10-17T00:02:00.000Z"})
         return self.answer(route, *reply)
 
     def release_import(self, reply="stored", index=0):
@@ -493,14 +517,26 @@ class TransferPanelPage(rf.ReportFlowPage):
         page_url, before = self.page.url, len(self.page.evaluate("window.__synFetches"))
         with self.page.expect_download() as started:
             box.get_by_role("button", name="Download", exact=True).click()
+        # D1489: one press = one bound grant request, then the browser's own GET with that grant and nothing else.
+        self.assertEqual(1, len(self.site.grants), "C-06 one grant request per press")
+        grant = self.site.grants[0]
+        self.assertEqual([UID_A, op, {}, "1"], [grant["uid"], grant["operation"], grant["body"], grant["csrf"]], "C-06 the closed grant request")
+        self.assertTrue(grant["session"], "C-06 the grant request is session-bound")
         # The browser's download manager takes an a[download] request itself (it never reaches the context's routes), so
         # the case reads the URL it was given.
-        path = urlparse(started.value.url).path
-        self.assertEqual(f"/api/studies/{UID_A}/original-downloads/{op}/archive", path, "C-06 nothing but the UID and the id")
-        self.assertNotIn(h.PATIENT.split()[-1], unquote(started.value.url))
-        self.assertEqual("", urlparse(started.value.url).query, "C-06 no query (no PHI, no credential in the URL)")
-        self.assertFalse(any("/archive" in url for url in self.page.evaluate("window.__synFetches")[before:]),
-                         "C-06 the archive is a browser download, never read into the page")
+        url = urlparse(started.value.url)
+        self.assertEqual(f"/api/studies/{UID_A}/original-downloads/{op}/archive", url.path, "C-06 nothing but the UID and the id")
+        self.assertEqual("grant=" + grant["grant"], url.query, "C-06 the query is exactly the answered grant")
+        self.assertNotIn(h.PATIENT.split()[-1], unquote(started.value.url), "C-06 no PHI in the URL")
+        fetched = self.page.evaluate("window.__synFetches")[before:]
+        self.assertFalse(any(urlparse(u).path.endswith("/archive") for u in fetched),
+                         "C-06 the archive GET is a browser download, never read into the page")
+        self.assertEqual([f"/api/studies/{UID_A}/original-downloads/{op}/archive/grant"],
+                         [urlparse(u).path for u in fetched if "/archive" in u], "C-06 the page's only archive-related request is the grant")
+        kept = self.page.evaluate("() => JSON.stringify([Object.entries(sessionStorage), Object.entries(localStorage)])")
+        self.assertNotIn(grant["grant"], kept, "C-06 the grant is never stored")
+        self.assertNotIn(grant["grant"], self.panel().inner_text(), "C-06 nor shown")
+        self.assertEqual(0, self.page.locator("#study-transfer a[href]").count(), "C-06 no link with the grant is left in the page")
         self.assertEqual(page_url, self.page.url, "the page stays")
         self.page.clock.run_for(3100)
         expect(box).to_contain_text("Downloading")
@@ -534,9 +570,56 @@ class TransferPanelPage(rf.ReportFlowPage):
                 with self.page.expect_download():
                     box.get_by_role("button", name="Download", exact=True).click()
                 self.wait(lambda: len(self.downloads) == 2, "the second archive download")
-                self.assertEqual(self.downloads[0], self.downloads[1], "C-06 the same operation again")
+                self.assertEqual(urlparse(self.downloads[0]).path, urlparse(self.downloads[1]).path, "C-06 the same operation again")
                 self.assertIn(op, self.downloads[1])
+                self.assertEqual(["grant=" + g["grant"] for g in self.site.grants], [urlparse(d).query for d in self.downloads],
+                                 "C-06 each press its own new grant")
+                self.assertNotEqual(self.downloads[0], self.downloads[1])
                 self.assertEqual(1, len(self.site.prepares), "C-06 no new preparation")
+
+    def test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why(self):
+        """DG-T06 (D1489): a grant answered after the context changed clicks no link; a refused grant is a notice and a
+        status read, never a logout; an expired one is known from the status summary, as the browser's own GET answers
+        the page nothing. No dialog, the draft kept."""
+        self.open_as(RAD_TECH)
+        self.open_study(h.PATIENT)
+        self.type("SYN unsaved text keeps the logout in preparation")
+        self.row_menu(h.PATIENT)
+        self.menu_item("Download Originals").click()
+        self.wait(lambda: self.site.prepares, "the preparation")
+        op = self.site.prepares[0][1]["operationId"]
+        box = self.operations().first
+        expect(box).to_contain_text("Ready")
+        self.site.grant_answers = ["hold"]
+        box.get_by_role("button", name="Download", exact=True).click()
+        self.wait(lambda: self.site.held_grants, "the grant request")
+        self.site.put_answers = [(500, {"statusCode": 500, "message": "SYN"})]
+        self.page.evaluate("() => document.querySelector('#logout').click()")
+        expect(self.page.locator("dialog.kin-logout h2")).to_have_text("Draft Not Saved")
+        route, record = self.site.held_grants.pop(0)
+        self.site.answer_grant(route, record)
+        self.settle(400)
+        self.assertEqual([], self.downloads, "C-07 a grant answered during the logout preparation clicks no link")
+        self.page.locator("dialog.kin-logout").get_by_role("button", name="Back to Editing", exact=True).click()
+        self.wait(lambda: op in self.site.download_reads, "C-07 the status read after Back to Editing")
+        self.site.grant_answers = [(409, {"code": "DOWNLOAD_IN_PROGRESS", "message": "SYN-SERVER in progress"})]
+        reads = len(self.site.download_reads)
+        box.get_by_role("button", name="Download", exact=True).click()
+        expect(box).to_contain_text("SYN-SERVER in progress")
+        self.wait(lambda: len(self.site.download_reads) > reads, "C-06 the state read again after a refusal")
+        self.assertEqual([], self.downloads, "C-06 a refused grant downloads nothing")
+        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"), "C-07 a refusal never logs out")
+        view = download_view(op, UID_A)
+        view["archiveRequest"] = {"grantId": str(uuid.uuid4()), "state": "expired", "expiresAt": "2026-10-17T00:02:00.000Z",
+                                  "attemptId": None, "code": "DOWNLOAD_GRANT_EXPIRED", "message": "SYN-SERVER grant expired"}
+        self.site.download_answers[op] = [view]
+        with self.page.expect_download():
+            box.get_by_role("button", name="Download", exact=True).click()
+        self.page.clock.run_for(3100)
+        expect(box).to_contain_text("SYN-SERVER grant expired")
+        expect(box.get_by_role("button", name="Download", exact=True)).to_be_visible()
+        self.assertEqual([], self.dialogs, "C-08 no dialog")
+        self.assertEqual("SYN unsaved text keeps the logout in preparation", self.page.locator("#findings").input_value(), "C-08 draft kept")
 
     def test_c06_the_download_item_acts_only_on_the_selection_its_menu_opened_on(self):
         self.open_as(RAD_ONLY)
