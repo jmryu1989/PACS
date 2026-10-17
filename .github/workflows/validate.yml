@@ -1513,7 +1513,7 @@ jobs:
         env:
           KIN_TEST_API_IMAGE: kin-api:ci
           KIN_EXPECTED_REVISION: ${{ github.sha }}
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/production-image --cwd . --file api/Dockerfile --file api/prisma/schema.prisma --file scripts/ops_backup.py --file tests/production_image_test.py -- python3 tests/production_image_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/production-image --cwd . --file api/Dockerfile --file api/prisma/schema.prisma --file scripts/ops_backup.py --file tests/production_image_test.py -- python3 tests/production_image_test.py || { tail -c 40000 tmp/runtime-ci/production-image/stdout.log; tail -c 40000 tmp/runtime-ci/production-image/stderr.log; exit 1; }
       - name: Disposable host adapter API replacement and database preservation
         run: sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py
       # EMR-B2-BASE: the compiled main.ts of kin-api:ci over a disposable postgres:16-alpine provisioned and migrated as
