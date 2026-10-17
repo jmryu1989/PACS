@@ -507,6 +507,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
       throw error(400, 'IMPORT_REQUEST_INVALID', TRANSFER_MESSAGES.request);
     const operationId = (body as any).operationId.toLowerCase();
     await this.storageRead(() => this.ownStudy(uid, c), downloadStorage);
+    // A preparation and its replay alike: no download of a Study UID two original resources answer (WORKLIST-SPLIT-UID).
+    await this.unsplitSource(uid, c);
     const existing = await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }), downloadStorage);
     if (existing) return this.replayPrepared(existing, owner, uid);
     const built = await this.preparedManifest(uid);
@@ -541,6 +543,17 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
       throw downloadStorage();
     }
     return 'replay' in answer ? this.replayPrepared(answer.replay, owner, uid) : answer.view;
+  }
+
+  /**
+   * WORKLIST-SPLIT-UID for the download routes: the source observed for this request, outside any lock and after the
+   * scope checks (which keep their own answers and never tell a split): 409 STUDY_IDENTITY_UNRESOLVED when two or more
+   * original resources answer the UID, 503 STUDY_SOURCE_UNAVAILABLE when it could not be observed. Nothing is prepared
+   * or sent then. The import path does not call it: its own identity gate decides (EXISTING_STUDY_IDENTITY_UNRESOLVED).
+   */
+  private async unsplitSource(uid: string, c: Caller) {
+    await this.studyAccess.prepareSourceIdentity(c, [uid]);
+    this.studyAccess.assertUnsplitSource(c, uid);
   }
 
   private replayPrepared(op: any, owner: ImportOwner, uid: string) {
@@ -757,6 +770,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     try {
       if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
       await this.downloadStudyNow(uid, c);
+      // After the scope check: an operation prepared before its Study UID became split is refused at the start too.
+      await this.unsplitSource(uid, c);
       stored = this.storedDownload(op);
       const plan = planArchive(stored.manifest);
       if (plan.ok === false) throw error(409, plan.code, plan.message);

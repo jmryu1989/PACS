@@ -551,8 +551,19 @@ async function harness(options = {}) {
   orthanc.db = s;
   await new Promise(resolve => orthanc.server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = 'http://127.0.0.1:' + orthanc.server.address().port;
-  // options.accessOrthanc: the source tags a restricted policy with metadata rules reads (StudyAccessService.prepare).
-  const access = new StudyAccessService(s.prisma, options.accessOrthanc ?? {}, {});
+  // WORKLIST-SPLIT-UID (main 848b7e5): StudyAccess reads one UID's original resources through studyIdentityResources -
+  // its per-request source observation (prepareSourceIdentity) and a restricted policy's metadata (prepare). By default
+  // the fake's own originals answer: one QIDO row per Orthanc Study resource of the UID (PatientID + StudyInstanceUID,
+  // as the fake keys its instances). Each read is recorded with the transactions open at that moment;
+  // orthanc.sourceFault makes it fail. options.accessOrthanc replaces it (a policy case's own source).
+  orthanc.sourceReads = [];
+  const studyIdentityResources = async studyUid => {
+    orthanc.sourceReads.push({ studyUid, openTransactions: s.openTransactions ?? 0 });
+    if (orthanc.sourceFault) throw new Error('synthetic source read failure');
+    const patients = [...new Set([...orthanc.instances.values()].filter(i => i.h.studyInstanceUid === studyUid).map(i => i.h.patientId ?? ''))];
+    return patients.map(patient => ({ '0020000D': { vr: 'UI', Value: [studyUid] }, '00100020': { vr: 'LO', Value: [patient] } }));
+  };
+  const access = new StudyAccessService(s.prisma, { studyIdentityResources, ...(options.accessOrthanc ?? {}) }, {});
   class TestModule {}
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
     { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access },
@@ -4545,8 +4556,9 @@ test('S9U4-B72 R6-N02 the admin recovery of a may-have-written occupancy over a 
 // ════════════════════════════════ part (c): the carried P3 of parts (a)/(b) (U4BB3-03/04/06, U4BL6-01) ════════════════════════════════
 
 /** Source tags for a restricted policy with metadata rules: every study's PatientID is its own synthetic one. */
-const metadataSource = calls => ({ studyAccessMetadata: async uid => { calls.push(uid);
-  return { '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PID-' + uid.slice(-6)] }, '00080020': { Value: ['20261015'] }, '00080061': { Value: ['CT'] } }; } });
+// Since WORKLIST-SPLIT-UID (main 848b7e5) StudyAccess.prepare reads one UID's resources through studyIdentityResources.
+const metadataSource = calls => ({ studyIdentityResources: async uid => { calls.push(uid);
+  return [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PID-' + uid.slice(-6)] }, '00080020': { Value: ['20261015'] }, '00080061': { Value: ['CT'] } }]; } });
 /** A restricted policy whose one rule needs the source metadata and matches no study of these cases. */
 const metadataPolicy = { institution: 'inst-a', policy: { version: 1, restricted: true, startsAt: null, endsAt: null,
   rules: [{ patientId: 'SYN-PID-NONE', modalities: [], dateFrom: null, dateTo: null, studyUids: [] }] } };
@@ -4883,4 +4895,97 @@ test('S9U4-B80 DG-T03/T04 refusals after admission close the grant as refused wi
   delete h.s.ops.get(id3).download.archiveGrantNote;
   h.s.ops.get(id3).download.schemaVersion = 3;
   assert.equal((await boundStatus(h, study3, id3, 'sid-r1')).body.code, 'MANIFEST_STORE_INVALID', 'an unknown version is never read as another');
+});
+
+// ════════════ WORKLIST-SPLIT-UID hand-over (main 848b7e5; spec §5 U4b rows, TEST-WSU-11; Phase B I-01/I-02) ════════════
+// A Study UID that two original resources answer (here: a second PatientID under it, which the fake keys as a second
+// Orthanc study, as Orthanc does). The download routes observe the source per request outside any transaction and refuse
+// such a UID after their scope checks; the import path never pre-checks it: its own identity gate decides.
+
+test('S9U4-B81 WSU I-01 download replay, start and preparation of a Study UID two original resources answer: 409 STUDY_IDENTITY_UNRESOLVED, ZIP byte 0, nothing written, the operation as it was (prepared before the split included); the source read outside any transaction; an unobservable source 503 STUDY_SOURCE_UNAVAILABLE; scope refusals first and never telling the split; an ordinary download unchanged', async () => {
+  const h = await harness();
+  const study = await downloadStudy(h, 2);
+  const id = randomUUID();
+  const first = await prepare(h, study, id);
+  assert.deepEqual([first.status, first.body.state], [200, 'prepared'], 'one resource: prepared as before');
+  assert.ok(h.orthanc.sourceReads.some(r => r.studyUid === study), 'the preparation observed the source');
+  // The UID becomes split after the preparation: another patient's original under the same Study UID.
+  h.orthanc.store(dicom({ study, series: study + '.9', id: 'SYN-OTHER', pixel: 80 }));
+  const before = JSON.stringify(h.s.op(id)), writes = h.s.writes, reads = h.orthanc.sourceReads.length;
+  const replay = await prepare(h, study, id);
+  assert.deepEqual([replay.status, replay.body?.code], [409, 'STUDY_IDENTITY_UNRESOLVED'], 'the replay of the prepared operation');
+  const start = await h.request('GET', archivePath(study, id), { as: RAD });
+  assert.deepEqual([start.status, start.body?.code, String(start.headers['content-type']).startsWith('application/json')],
+    [409, 'STUDY_IDENTITY_UNRESOLVED', true], 'the start of the operation prepared before the split: byte 0, never a ZIP');
+  assert.equal(JSON.stringify(h.s.op(id)), before, 'the operation as it was: prepared, no attempt');
+  assert.equal(audits(h.s, 'original.download.intent').length, 0, 'no intent');
+  const fresh = randomUUID();
+  const refused = await prepare(h, study, fresh);
+  assert.deepEqual([refused.status, refused.body?.code, h.s.ops.has(fresh)], [409, 'STUDY_IDENTITY_UNRESOLVED', false], 'no new preparation');
+  assert.equal(h.s.writes, writes, 'no refusal wrote anything');
+  assert.ok(h.orthanc.sourceReads.length >= reads + 3, 'each request observed the source itself');
+  assert.ok(h.orthanc.sourceReads.every(r => r.openTransactions === 0), 'every source read outside any transaction');
+  // Scope first: another owner's operation, another institution's member and an absent study are the 404s they were.
+  for (const [what, answer] of [
+    ['another owner', await h.request('GET', archivePath(study, id), { as: TECH2 })],
+    ['another institution', await prepare(h, study, randomUUID(), TECH_B)],
+    ['an absent study', await prepare(h, uid(), randomUUID())],
+  ]) {
+    assert.equal(answer.status, 404, what);
+    assert.ok(!JSON.stringify(answer.body ?? {}).includes('STUDY_IDENTITY_UNRESOLVED'), what + ': the split is not told');
+  }
+  // A source that cannot be observed: 503, byte 0, nothing written; the operation starts once it can be observed.
+  const other = await downloadStudy(h, 1);
+  const otherId = randomUUID();
+  assert.equal((await prepare(h, other, otherId)).status, 200);
+  h.orthanc.sourceFault = true;
+  const unobserved = await h.request('GET', archivePath(other, otherId), { as: RAD });
+  assert.deepEqual([unobserved.status, unobserved.body?.code, h.s.op(otherId).status], [503, 'STUDY_SOURCE_UNAVAILABLE', 'prepared']);
+  assert.equal((await prepare(h, other, randomUUID())).body?.code, 'STUDY_SOURCE_UNAVAILABLE');
+  h.orthanc.sourceFault = false;
+  const zip = await h.request('GET', archivePath(other, otherId), { as: RAD });
+  assert.deepEqual([zip.status, parseZipEntries(zip.bytes).length], [200, 2], 'an ordinary download of a one-resource UID is unchanged');
+  await sleep(50);
+  assert.equal(h.s.op(otherId).status, 'sent');
+});
+
+test('S9U4-B82 WSU I-01 with the archive grant: a start refused for a split Study UID closes the admitted grant as refused (STUDY_IDENTITY_UNRESOLVED), opens no attempt and sends byte 0; an unobservable source leaves the grant as it was', async () => {
+  const h = await harness({ realGuard: true });
+  sessionOf(h, 'sid-r1');
+  const study = await downloadStudy(h, 2);
+  const id = await boundPrepare(h, study, 'sid-r1');
+  const raw = (await grantRequest(h, study, id, 'sid-r1')).body.grant;
+  h.orthanc.sourceFault = true;
+  const unobserved = await nativeGet(h, study, id, raw, 'sid-r1');
+  assert.deepEqual([unobserved.status, unobserved.body?.code, h.s.op(id).download.activeArchiveGrant.state], [503, 'STUDY_SOURCE_UNAVAILABLE', 'issued'],
+    'a storage-like answer decides nothing: the grant stays issued');
+  h.orthanc.sourceFault = false;
+  h.orthanc.store(dicom({ study, series: study + '.9', id: 'SYN-OTHER', pixel: 80 }));
+  const split = await nativeGet(h, study, id, raw, 'sid-r1');
+  assert.deepEqual([split.status, split.body?.code, String(split.headers['content-type']).startsWith('application/json')], [409, 'STUDY_IDENTITY_UNRESOLVED', true]);
+  const d = h.s.op(id).download;
+  assert.deepEqual([d.activeArchiveGrant.state, d.activeArchiveGrant.refusal.code, d.attempts.length, d.archiveGrantUses.length, h.s.op(id).status],
+    ['refused', 'STUDY_IDENTITY_UNRESOLVED', 0, 0, 'prepared']);
+  assert.deepEqual(audits(h.s, 'original.download.grant').map(a => a.detail.phase), ['issued', 'refused']);
+});
+
+test('S9U4-B83 WSU I-02 the import path is not pre-checked for a split: an existing Study UID two patients answer reaches the import gate in both store orders - registered: 409 EXISTING_STUDY_IDENTITY_UNRESOLVED; unregistered: the gate\'s own ownership answer - with no source observation, zero new originals, no claim and every stored original byte for byte; StudyAccess.require refuses no split', async () => {
+  for (const registered of [true, false]) for (const order of [['SYN-X', 'SYN-Y'], ['SYN-Y', 'SYN-X']]) {
+    const h = await harness();
+    const study = uid();
+    for (const [i, patient] of order.entries()) h.orthanc.store(dicom({ study, series: study + '.' + (i + 1), id: patient }));
+    if (registered) own(h.s, study);
+    const stored = new Map([...h.orthanc.instances.values()].map(i => [i.id, sha(i.bytes)]));
+    const reads = h.orthanc.sourceReads.length, posted = posts(h.orthanc);
+    const r = await h.send(dicom({ study, series: study + '.9', id: order[0] }));
+    const label = (registered ? 'registered ' : 'unregistered ') + order.join('/');
+    if (registered) assert.deepEqual([r.status, r.body.outcome, r.body.code], [409, 'rejected', 'EXISTING_STUDY_IDENTITY_UNRESOLVED'], label);
+    else assert.deepEqual([r.status, r.body.code], [409, 'STUDY_OWNERSHIP_UNDETERMINED'], label + ': the gate decides ownership first');
+    assert.notEqual(r.body.code, 'STUDY_IDENTITY_UNRESOLVED', label + ': never the download routes\' split refusal');
+    assert.equal(h.orthanc.sourceReads.length, reads, label + ': the import observes no source of its own');
+    assert.deepEqual([posts(h.orthanc), h.orthanc.count(), h.s.claim('study:' + study)], [posted, stored.size, null], label + ': zero writes, no claim');
+    assert.deepEqual(new Map([...h.orthanc.instances.values()].map(i => [i.id, sha(i.bytes)])), stored, label + ': every original byte for byte');
+    // The shared StudyAccess requirement has no split rule: an unrestricted member is allowed this UID.
+    if (registered) await h.transfer.studyAccess.require(TECH, [study]);
+  }
 });

@@ -11,6 +11,10 @@ product tree is never written; the copies live under the --out directory and are
 DG-M09 (a raw request line back in the proxy log) needs the real nginx and is the hosted DG-T05 run's; DG-M10 (the UI's
 stale grant answer) is tests/study_transfer_local_mutants.py's "late-grant-clicked".
 
+Also the WORKLIST-SPLIT-UID hand-over mutants of S9-U4b: M-WSU-19 (the download routes' source check skipped) the same
+way against S9U4-B81, and M-WSU-17 (the identity case's registration oracle back to list visibility), a copy of
+tests/invariants_live.py first on the import path, killed only by a failing assertion of the pure S9U4RegisterTests.
+
 Usage: python -B tests/original_download_grant_mutants.py --out <new directory>   (node on PATH or NODE=...)
 """
 import argparse
@@ -53,8 +57,21 @@ MUTANTS = [
     ("DG-M08-sent-without-the-finish", SERVICE,
      "const state = t.stop === 'fenced' || !exact ? 'unconfirmed' : t.stop === 'aborted' || !finished ? 'incomplete' : 'sent';",
      "const state = t.stop === 'fenced' ? 'unconfirmed' : 'sent';", "S9U4-B79"),
+    # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
+    # the start of an operation prepared before its Study UID became split would go on.
+    ("M-WSU-19-download-source-check-skipped", SERVICE,
+     "    this.studyAccess.assertUnsplitSource(c, uid);\n", "", "S9U4-B81"),
 ]
 CASES = sorted({m[4] for m in MUTANTS})
+# The hand-over's oracle mutant (spec M-WSU-17): the identity case's registration check back to list visibility. It is a
+# test-code mutant of tests/invariants_live.py, killed by the pure S9U4RegisterTests (the list answers 409 or never shows
+# a split UID while the product's StudyState row exists); the copy is put first on the import path.
+ORACLE_MUTANTS = [
+    ("M-WSU-17-registration-oracle-is-the-list", "invariants_live.py",
+     "        if rows == expected:\n            return answers\n",
+     "        if answers[-1].status == 200 and any(s.get(\"uid\") == uid for s in (answers[-1].body or {}).get(\"studies\", [])):\n"
+     "            return answers\n", "S9U4RegisterTests"),
+]
 
 
 def run_case(node, src, cases, log):
@@ -101,7 +118,30 @@ def main():
         print(json.dumps({"mutant": label, "case": case, "exit": code, "seconds": seconds, "killed": kill}), flush=True)
         shutil.rmtree(out / label)
     print(f"DG mutants killed by their named server case: {killed}/{len(MUTANTS)} (DG-M09 hosted, DG-M10 in the UI mutants)", flush=True)
-    return 0 if killed == len(MUTANTS) else 1
+    oracle_killed = 0
+    for label, file, old, new, case in [("baseline-oracle", "invariants_live.py", "", "", "S9U4RegisterTests")] + ORACLE_MUTANTS:
+        copy = out / label / "tests"
+        copy.mkdir(parents=True)
+        source = (ROOT / "tests" / file).read_text(encoding="utf-8")
+        if old and source.count(old) != 1:
+            raise AssertionError("mutation location not unique: " + label)
+        (copy / file).write_text(source.replace(old, new, 1) if old else source, encoding="utf-8", newline="\n")
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(copy.resolve()), str(ROOT / "tests")])}
+        done = subprocess.run([sys.executable, "-B", "-m", "unittest", f"invariants_live.{case}"], cwd=ROOT, env=env,
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        text = done.stdout + done.stderr
+        (out / f"{label}.log").write_text(text, encoding="utf-8")
+        shutil.rmtree(out / label)
+        if not old:
+            if done.returncode != 0 or not re.search(r"^OK", text, re.M):
+                print("oracle baseline failed, no kill claimed", flush=True)
+                return 1
+            continue
+        kill = done.returncode != 0 and "FAIL: test_" in text and "ERROR: " not in text and "AssertionError" in text
+        oracle_killed += kill
+        print(json.dumps({"mutant": label, "case": case, "exit": done.returncode, "killed": kill}), flush=True)
+    print(f"hand-over oracle mutants killed by {ORACLE_MUTANTS[0][4]}: {oracle_killed}/{len(ORACLE_MUTANTS)}", flush=True)
+    return 0 if killed == len(MUTANTS) and oracle_killed == len(ORACLE_MUTANTS) else 1
 
 
 if __name__ == "__main__":

@@ -5377,15 +5377,21 @@ class LiveInvariantTests(unittest.TestCase):
         origin = "gateway" if writer == "cstore" and ingest == "gateway" else "dicom"
         return s9u4_registered(lambda: self.stack.request("GET", "/studies", user), psql, uid, institution="hallym", origin=origin)
 
-    def s9u4_list_healthy(self, *listed: str, user: str = "jmryu") -> None:
+    def s9u4_list_healthy(self, *listed: str, split: str | None = None, user: str = "jmryu") -> None:
         """The worklist keeps answering after a two-patient seed (U4BL-03): the full list and its first page answer 200 and
-        the full list still shows the given other studies. How the split UID itself is shown is the worklist's contract."""
+        the full list still shows the given other studies. The split UID itself follows WORKLIST-SPLIT-UID (main 848b7e5):
+        it is never a normal row, and the complete answer announces it once as STUDY_IDENTITY_UNRESOLVED (identityIssues);
+        a 409 STUDY_LIST_CHANGED belongs only to a UID that became split during one paged answer."""
         for path in ("/studies", "/studies?limit=100"):
             answer = self.stack.request("GET", path, user)
             self.assertEqual(answer.status, 200, (path, answer.text[:300]))
+            shown = {s.get("uid") for s in answer.body.get("studies", [])}
+            if split is not None:
+                self.assertNotIn(split, shown, (path, "a split UID is never a normal row"))
             if path == "/studies":
-                shown = {s.get("uid") for s in answer.body.get("studies", [])}
                 self.assertTrue(set(listed) <= shown, (path, sorted(set(listed) - shown)))
+                if split is not None:
+                    self.assertIn({"uid": split, "code": "STUDY_IDENTITY_UNRESOLVED"}, answer.body.get("identityIssues", []), path)
 
     def s9u4_set_attempt(self, op: str, index: int, **fields: Any) -> dict[str, Any]:
         """Rewrite the last attempt of one file as a stopped process would have left it (DB only, never Orthanc)."""
@@ -5532,7 +5538,12 @@ class LiveInvariantTests(unittest.TestCase):
                 self.assertEqual((r.status, r.body.get("code")), (409, "EXISTING_STUDY_IDENTITY_UNRESOLVED"), (order, r.text))
                 self.assertEqual((len(self.s9u4_study_instances(mixed)), self.s9u4_claim("study:" + mixed)), (len(seeded), None), "zero writes, no claim")
                 self.assertEqual({i: self.s9u4_sha(i) for i in seeded}, seeded, "the seeded originals byte for byte")
-                self.s9u4_list_healthy(study, legacy, cstored)
+                self.s9u4_list_healthy(study, legacy, cstored, split=mixed)
+                # WORKLIST-SPLIT-UID hand-over (I-01): no original download of that UID is prepared (409, nothing written).
+                download = str(uuid.uuid4())
+                refused = self.stack.request("POST", f"/studies/{mixed}/original-downloads", "doctor", {"operationId": download})
+                self.assertEqual((refused.status, (refused.body or {}).get("code")), (409, "STUDY_IDENTITY_UNRESOLVED"), refused.text)
+                self.assertEqual(int(psql(f"SELECT count(*) FROM \"ImportOperation\" WHERE id='{download}';")[0]), 0, "nothing prepared")
             # U4P5-01 positive controls: one SOP with another institution's issuer, the owner's id beside its alias, one SOP
             # with another name under the same PatientID (one index value), and two patient branches - in both store orders.
             # (IssuerOfPatientID cannot be set through the C-STORE writer; these seeds use Orthanc's own REST upload.)
@@ -5565,7 +5576,7 @@ class LiveInvariantTests(unittest.TestCase):
                     self.assertEqual(len(self.stack._orthanc_request("POST", "/tools/find", json.dumps({"Level": "Instance",
                         "Query": {"StudyInstanceUID": uid}}).encode()).body), count, "zero writes")
                     if two_patients:
-                        self.s9u4_list_healthy(study, legacy, cstored)
+                        self.s9u4_list_healthy(study, legacy, cstored, split=uid)
             # The bounds: exactly 4,096 consistent instances bind and store; 4,097 are refused before any header read.
             for total, expected in ((4096, (200, "stored")), (4097, (409, "EXISTING_STUDY_IDENTITY_UNRESOLVED"))):
                 uid = self.s9u4_new_study(scope)
