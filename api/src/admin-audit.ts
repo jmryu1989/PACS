@@ -55,6 +55,7 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "dicom.import.recovery.request": 'detail.institutionId',
   "dicom.import.recovery.result": 'detail.institutionId',
   "original.download.prepare": 'detail.institutionId',
+  "original.download.grant": 'detail.institutionId',
   "original.download.intent": 'detail.institutionId',
   "original.download.result": 'detail.institutionId',
 });

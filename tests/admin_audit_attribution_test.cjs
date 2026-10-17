@@ -153,6 +153,8 @@ Object.assign(CONTRACT.field_rules, {"dicom.import.intent":{"source":"detail.ins
   "original.download.prepare":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
   "original.download.intent":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
   "original.download.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING}});
+// D1489: the archive grant's issue/refusal row is attributed the same way (vectors 51-52).
+CONTRACT.field_rules["original.download.grant"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
 CONTRACT.synthetic_vectors.push(
   {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
   {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},
@@ -162,7 +164,9 @@ CONTRACT.synthetic_vectors.push(
   {"row":47,"action":"original.download.prepare","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's download preparation"},
   {"row":48,"action":"original.download.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's archive intent"},
   {"row":49,"action":"original.download.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"B member's archive result"},
-  {"row":50,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":[],"withheld_sides":{},"note":"no institutionId recorded although the actor is an A member: no_institution_recorded, nobody sees it"});
+  {"row":50,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":[],"withheld_sides":{},"note":"no institutionId recorded although the actor is an A member: no_institution_recorded, nobody sees it"},
+  {"row":51,"action":"original.download.grant","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's archive grant issued (D1489)"},
+  {"row":52,"action":"original.download.grant","rule":"field:detail.institutionId","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"B member's archive grant refused, never A's"});
 
 const json = value => JSON.parse(JSON.stringify(value));
 const WITHHELD = { withheld: 'other_institution' };
@@ -266,6 +270,10 @@ for (const r of [
   row(49, 'original.download.result', S2, downloadDetail('inst-b', { attemptId: ATT, state: 'sent', archiveSha256: 'c'.repeat(64), responseFinished: true,
     reason: null, objects: [{ sopUid: S2 + '.1.1', sha256: 'd'.repeat(64), bytesSupplied: 2048, complete: true }] }), 'syn-rad-b@members.test'),
   row(50, 'dicom.import.result', S1, (({ institutionId, ...rest }) => ({ ...rest, outcome: 'stored', code: null }))(importDetail('inst-a')), 'syn-tech-a@members.test'),
+  row(51, 'original.download.grant', S1, downloadDetail('inst-a', { phase: 'issued', studyUid: S1, grantId: ATT, grantHash: 'e'.repeat(64), sessionRef: 'ref-synthetic',
+    issuedAt: '2026-10-15T00:00:00.000Z', expiresAt: '2026-10-15T00:02:00.000Z', replacedGrantId: null, authMethod: 'session', bindingMethod: 'session-header' }), 'syn-rad-a@members.test'),
+  row(52, 'original.download.grant', S2, downloadDetail('inst-b', { phase: 'refused', studyUid: S2, grantId: ATT, grantHash: 'f'.repeat(64), sessionRef: 'ref-synthetic-b',
+    code: 'MANIFEST_CHANGED', authMethod: 'session', bindingMethod: 'archive-grant' }), 'syn-rad-b@members.test'),
 ]) ROWS.set(r.id, r);
 
 /** Sides of a member row the reader gets as {withheld:'other_institution'} (field rows withhold nothing). */
@@ -321,7 +329,8 @@ test('the module table is the card contract; allowed and hidden never overlap; t
 test('the synthetic vectors (the card\'s 30 and study.question): record-time readers and withheld sides per row', () => {
   // 31 = the card's 30, unchanged, and the study.question row added with its contract row (Astra S5-U5b-D-F02); 32-41
   // are the S7-U5 access-record rows (AT-02); 42-50 the S9-U4b import/download rows (contract S9-U4p 4.9).
-  assert.equal(CONTRACT.synthetic_vectors.length, 50);
+  // 51-52: the D1489 archive grant rows.
+  assert.equal(CONTRACT.synthetic_vectors.length, 52);
   assert.deepEqual(CONTRACT.synthetic_vectors.slice(0, 30).map(v => v.row), Array.from({ length: 30 }, (_, i) => i + 1));
   assert.deepEqual(CONTRACT.synthetic_vectors[30], { row: 31, action: 'study.question', rule: 'hidden:study_scoped_owner_only',
     record_time_visible_to: [], withheld_sides: {}, note: CONTRACT.synthetic_vectors[30].note });
@@ -347,18 +356,18 @@ test('the synthetic vectors (the card\'s 30 and study.question): record-time rea
   }
 });
 
-test('S9-U4b import/download rows: the admin finds operationId and index; a row without institutionId reaches nobody; seven more candidates', () => {
+test('S9-U4b import/download rows: the admin finds operationId and index; a row without institutionId reaches nobody; eight more candidates (D1489 the grant)', () => {
   const unconfirmed = A.projectAuditRow(ROWS.get(43), 'inst-a');
   assert.deepEqual([unconfirmed.detail.operationId, unconfirmed.detail.index, unconfirmed.detail.attemptId, unconfirmed.detail.outcome],
     [OP_A, 3, ATT, 'unconfirmed']);
   assert.equal(A.projectAuditRow(ROWS.get(43), 'inst-b'), null);
   assert.equal(A.attributeAuditRow(ROWS.get(50)).hidden, 'no_institution_recorded');
   const seven = ['dicom.import.intent', 'dicom.import.result', 'dicom.import.recovery.request', 'dicom.import.recovery.result',
-    'original.download.prepare', 'original.download.intent', 'original.download.result'];
+    'original.download.prepare', 'original.download.grant', 'original.download.intent', 'original.download.result'];
   for (const action of seven) assert.equal(A.auditRule(action), 'field:detail.institutionId', action);
   assert.deepEqual(A.AUDIT_CANDIDATE_ACTIONS.filter(action => /^(dicom\.import|original\.download)\./.test(action)).sort(), [...seven].sort());
   // Not one of them is widened by a hidden wildcard or a neighbouring name.
-  for (const near of ['dicom.import', 'dicom.import.recovery', 'original.download', 'dicom.import.result.extra']) assert.equal(A.auditRule(near), 'hidden:unknown_action', near);
+  for (const near of ['dicom.import', 'dicom.import.recovery', 'original.download', 'dicom.import.result.extra', 'original.download.grant.issued']) assert.equal(A.auditRule(near), 'hidden:unknown_action', near);
 });
 
 test('member rows: each side sees its own snapshot, the other side is withheld unnamed; email is never projected', () => {

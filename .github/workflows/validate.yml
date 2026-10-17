@@ -616,6 +616,12 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 15
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-transfer-local-mutants --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_transfer_local_mutants.py
+      # D1489 archive grant: one-off copies of api/src with one change in the guard or the service, each run against its
+      # named server case behind the product's own AuthGuard (an assertion failure only; the product tree is never written).
+      - name: S9-U4b archive grant guard and service mutants killed by their named server case
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/original-download-grant-mutants --cwd . --tree api/src --file tests/original_download_grant_mutants.py --file tests/study_transfer_local_server_test.cjs --file tests/service_test_loader.cjs -- python3 -B tests/original_download_grant_mutants.py --out tmp/workspace-ui-ci/original-download-grant-mutant-copies
       - name: Privacy article 8 KST effective-date display
         if: ${{ !cancelled() }}
         timeout-minutes: 4
@@ -1500,7 +1506,7 @@ jobs:
       - name: S9-U4b compiled whole-original archive manifest, ZIP32 plan and streaming writer
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-original-archive --cwd . --file api/src/original-archive.ts --file tests/original_archive_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/original_archive_test.cjs
       - name: S9-U4b compiled import gate, import/download routes and raw parser over a recording store and a fake Orthanc
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-transfer-server --cwd . --file api/src/dicom-import-gate.service.ts --file api/src/study-transfer-local.controller.ts --file api/src/study-transfer-local.service.ts --file api/src/study-transfer-local-parser.ts --file api/src/dicom-part10-reader.ts --file api/src/original-archive.ts --file api/src/study-access.service.ts --file api/src/study-access-policy.ts --file api/src/pacs/access.ts --file api/src/pacs/values.ts --file api/src/member-rights.ts --file api/src/clinician-policy.ts --file api/src/study-identity.ts --file api/src/order-reconciliation.ts --file api/src/prisma.service.ts --file api/src/orthanc.service.ts --file api/src/keycloak.service.ts --file api/src/viewer-source-warning.ts --file api/prisma/schema.prisma --file tests/study_transfer_local_server_test.cjs --file tests/service_test_loader.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_transfer_local_server_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-transfer-server --cwd . --file api/src/dicom-import-gate.service.ts --file api/src/study-transfer-local.controller.ts --file api/src/study-transfer-local.service.ts --file api/src/study-transfer-local-parser.ts --file api/src/dicom-part10-reader.ts --file api/src/original-archive.ts --file api/src/study-access.service.ts --file api/src/study-access-policy.ts --file api/src/pacs/access.ts --file api/src/pacs/values.ts --file api/src/member-rights.ts --file api/src/clinician-policy.ts --file api/src/study-identity.ts --file api/src/order-reconciliation.ts --file api/src/prisma.service.ts --file api/src/orthanc.service.ts --file api/src/keycloak.service.ts --file api/src/viewer-source-warning.ts --file api/prisma/schema.prisma --file api/src/auth.guard.ts --file api/src/auth.service.ts --file tests/study_transfer_local_server_test.cjs --file tests/service_test_loader.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_transfer_local_server_test.cjs
       # S5-U6b: KIN_ADMIN_METRICS_SERVER makes the compiled cases mandatory here (a missing module fails the run); the
       # page model half reads the shipped admin.html through the second read-only mount.
       - name: S5-U6b compiled admin metrics rows and route over a fake store, and the page model that reads them

@@ -144,7 +144,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 144, "public": 7, "session": 2, "business": 21, "denied": 114},
+    "counts": {"routes": 145, "public": 7, "session": 2, "business": 21, "denied": 115},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -210,7 +210,8 @@
       ],
       "original_transfer": [
         "POST dicom-import", "GET dicom-import/:operationId", "POST studies/:uid/original-downloads",
-        "GET studies/:uid/original-downloads/:operationId", "GET studies/:uid/original-downloads/:operationId/archive"
+        "GET studies/:uid/original-downloads/:operationId", "GET studies/:uid/original-downloads/:operationId/archive",
+        "POST studies/:uid/original-downloads/:operationId/archive/grant"
       ]
     },
     "post_baseline": {
@@ -253,6 +254,7 @@
       "POST studies/:uid/original-downloads": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "prepares the fixed manifest of a whole-original download (radiologist/technician/admin, owning institution and StudyAccess); a clinician takes no originals out"},
       "GET studies/:uid/original-downloads/:operationId": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the owner's own download operation state and attempts (another owner, kind or study 404)"},
       "GET studies/:uid/original-downloads/:operationId/archive": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the ZIP of the stored originals of a prepared download (audited intent before the first byte); a clinician takes no originals out"},
+      "POST studies/:uid/original-downloads/:operationId/archive/grant": {"decision": "denied", "unit": "S9-U4b", "commit": "146c4aa", "basis": "the one-time grant a bound cookie session asks for before the browser's own archive GET (D1489; radiologist/technician/admin, the owner's operation, owning institution and StudyAccess); a clinician takes no originals out"},
       "POST admin/dicom-import/:operationId/files/:index/recovery": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "own-institution admin confirmation of an unknown import attempt (admin only, Gateway refused); never a clinician action"}
     }
   },

@@ -207,6 +207,12 @@ function withoutDeclared(now, declared) {
     assert.deepEqual(injectables[name], value, name);
     delete injectables[name];
   }
+  // D1489: a declared constructor change is taken back only if the snapshot holds exactly its declared later form.
+  for (const [name, change] of Object.entries(declared.changed_injectables ?? {})) {
+    if (name === 'note') continue;
+    assert.deepEqual(injectables[name], change.after, name + ' is exactly its declared later form');
+    injectables[name] = change.before;
+  }
   return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables,
     routes: now.routes.filter(r => !declaredRoutes.includes(routeKey(r))) };
 }
@@ -215,7 +221,9 @@ test('U0B-DI Nest metadata equals main before the split: tokens, constructor tok
   const declared = spec.di_additions;
   assert.equal(declared.unit, 'S9-U4b');
   assert.deepEqual([declared.controllers, declared.providers, declared.routes.length], [['StudyTransferLocalController'],
-    ['StudyTransferLocalService', 'DicomImportGateService'], 6]);
+    ['StudyTransferLocalService', 'DicomImportGateService'], 7]);
+  assert.deepEqual(Object.keys(declared.changed_injectables).filter(k => k !== 'note'), ['AuthGuard'], 'D1489: one constructor change, the AuthGuard');
+  assert.deepEqual(declared.changed_injectables.AuthGuard.before, spec.di.injectables.AuthGuard, 'its earlier form is the unchanged snapshot');
   assert.equal(full.routes.length, 138 + declared.routes.length);
   const now = withoutDeclared(full, declared);
   assert.deepEqual(now, spec.di);

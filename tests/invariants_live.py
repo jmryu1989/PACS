@@ -259,6 +259,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/original-downloads"): Route(Kind.TENANT),
     ("GET", "studies/:uid/original-downloads/:operationId"): Route(Kind.TENANT),
     ("GET", "studies/:uid/original-downloads/:operationId/archive"): Route(Kind.TENANT),
+    # D1489: the one-time grant the browser's own archive GET carries instead of the binding header (the same owner and scope).
+    ("POST", "studies/:uid/original-downloads/:operationId/archive/grant"): Route(Kind.TENANT),
     ("POST", "admin/dicom-import/:operationId/files/:index/recovery"): Route(Kind.TENANT),
 }
 
@@ -5876,17 +5878,19 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual((present.status, present.body["outcome"], present.body["generation"]), (200, "already-present", 2))
             self.assertEqual((self.s9u4_sop_objects(present_entry["sopUid"]), self.s9u4_sha(present_object)), ([present_object], present_sha))
     def test_s9_u4_route_inventory_and_bypass(self) -> None:
-        """REQ-S9-U4-12: the six routes are declared and classified, Gateway credentials are refused on all six, the exact
-        32m location takes a body above 2 MiB while case/slash aliases stay on /api/'s 2m at nginx, and an archive writes
-        its own prepare/intent/result rows with the record-time institution."""
+        """REQ-S9-U4-12: the seven routes (D1489: + the archive grant) are declared and classified, Gateway credentials are
+        refused on all seven, the exact 32m location takes a body above 2 MiB while case/slash aliases stay on /api/'s 2m at
+        nginx, and an archive writes its own prepare/intent/result rows with the record-time institution."""
         declared = {("POST", "dicom-import"), ("GET", "dicom-import/:operationId"), ("POST", "studies/:uid/original-downloads"),
                     ("GET", "studies/:uid/original-downloads/:operationId"), ("GET", "studies/:uid/original-downloads/:operationId/archive"),
+                    ("POST", "studies/:uid/original-downloads/:operationId/archive/grant"),
                     ("POST", "admin/dicom-import/:operationId/files/:index/recovery")}
         self.assertTrue(declared <= set(ROUTES) and declared <= controller_routes())
         gateway = self.stack.service_token("gateway")
         some = str(uuid.uuid4())
         for method, path in [("POST", "/dicom-import"), ("GET", f"/dicom-import/{some}"), ("POST", "/studies/2.25.1/original-downloads"),
                              ("GET", f"/studies/2.25.1/original-downloads/{some}"), ("GET", f"/studies/2.25.1/original-downloads/{some}/archive"),
+                             ("POST", f"/studies/2.25.1/original-downloads/{some}/archive/grant"),
                              ("POST", f"/admin/dicom-import/{some}/files/0/recovery")]:
             self.assertEqual(self.stack.bearer_request(method, path, gateway, {} if method == "POST" else None).status, 403, path)
         # B-4: the import below needs a running Orthanc; a previous case that left it stopped or starting is named here,

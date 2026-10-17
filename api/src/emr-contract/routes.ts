@@ -144,8 +144,10 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST dicom-import'] },
   { kinds: ['delivery-receipt'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET dicom-import/:operationId'] },
+  // D1489: the archive grant is the user-view start of that same export (it is not the supply; the archive GET is).
   { kinds: ['image', 'download'], operation: 'export', causes: ['user-view'],
-    routes: ['POST studies/:uid/original-downloads', 'GET studies/:uid/original-downloads/:operationId/archive'] },
+    routes: ['POST studies/:uid/original-downloads', 'GET studies/:uid/original-downloads/:operationId/archive',
+      'POST studies/:uid/original-downloads/:operationId/archive/grant'] },
   { kinds: ['download'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/original-downloads/:operationId'] },
   { kinds: ['delivery-receipt', 'study-metadata'], operation: 'write', causes: ['user-view'],

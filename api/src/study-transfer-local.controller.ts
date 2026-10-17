@@ -39,9 +39,24 @@ export class StudyTransferLocalController {
     return this.transfer.downloadStatus(uid, operationId, caller(req));
   }
 
+  /**
+   * D1489: the one-time grant the browser's own archive GET carries instead of the session binding header. Issued only to
+   * a bound cookie session; the answer is never stored by the browser or sent on as a referrer.
+   */
+  @Post('studies/:uid/original-downloads/:operationId/archive/grant')
+  @HttpCode(200)
+  archiveGrant(@Param('uid') uid: string, @Param('operationId') operationId: string, @Body() body: unknown, @Req() req: any,
+    @Res({ passthrough: true }) res: any) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    return this.transfer.issueArchiveGrant(uid, operationId, body, req, caller(req));
+  }
+
   /** The archive writes its own response: headers before the first byte, and only the writer ends it. */
   @Get('studies/:uid/original-downloads/:operationId/archive')
   archive(@Param('uid') uid: string, @Param('operationId') operationId: string, @Req() req: any, @Res() res: any) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     return this.transfer.archive(uid, operationId, req, res, caller(req));
   }
 

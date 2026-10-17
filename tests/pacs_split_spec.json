@@ -8226,7 +8226,7 @@
   },
   "di_additions": {
     "unit": "S9-U4b",
-    "note": "contract S9-U4p 6: the self-institution import/download feature controller and its providers; U0B-DI compares the snapshot minus exactly these with di",
+    "note": "contract S9-U4p 6: the self-institution import/download feature controller and its providers (D1489: + the archive grant route, seven routes); U0B-DI compares the snapshot minus exactly these with di",
     "controllers": [
       "StudyTransferLocalController"
     ],
@@ -8263,6 +8263,30 @@
         "optional": []
       }
     },
+    "changed_injectables": {
+      "note": "D1489 (consult u4b-download-grant option A): the global AuthGuard gains StudyTransferLocalService, whose public grant check stands in for the session binding on the exact archive GET; di keeps the pre-split constructor and this delta is the only change",
+      "AuthGuard": {
+        "before": {
+          "params": [
+            "Reflector",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "Reflector",
+            "AuthService",
+            "StudyTransferLocalService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        }
+      }
+    },
     "routes": [
       {
         "controller": "StudyTransferLocalController",
@@ -8279,6 +8303,26 @@
         "args": [
           "0:2@2:null:0",
           "1:3@3:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"operationId\":0"
+        ]
+      },
+      {
+        "controller": "StudyTransferLocalController",
+        "handler": "archiveGrant",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/original-downloads/:operationId/archive/grant"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:3@3:null:0",
+          "1:4@4:null:0",
+          "3:2@2:null:0",
           "5:0@0:\"uid\":0",
           "5:1@1:\"operationId\":0"
         ]

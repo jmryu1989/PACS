@@ -30,6 +30,7 @@ const { Prisma } = require('/app/node_modules/@prisma/client');
 const { PrismaService } = require('/app/dist/prisma.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AuthService } = require('/app/dist/auth.service');
+const { AuthGuard } = require('/app/dist/auth.guard');
 const { readDicomPart10 } = require('/app/dist/dicom-part10-reader');
 
 process.env.KC_ISSUER = 'https://synthetic.test/auth/realms/kin';
@@ -242,6 +243,7 @@ function opRead(row) {
 function store({ institutions } = {}) {
   const s = { ops: new Map(), states: new Map(), audits: [], clock: T0, migration: true, policies: new Map(), sessions: new Set(),
     rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, onAuth: null, expiredTokens: new Set(), idpEnded: new Set(), reads: [],
+    sessionSubs: new Map(), guardCalls: [],
     institutions: institutions ?? [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }] };
   for (const c of [TECH, TECH2, RAD, ADMIN, ADMIN2, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: c.roles });
   const advisory = new Map(), rows = new Map();
@@ -499,6 +501,46 @@ function fakeAuth(s) {
   };
 }
 
+/**
+ * D1489 (archive grant): the product's AuthGuard itself in front of the routes, over AuthService's public checks as the
+ * guard calls them - a kin_sid cookie names a session of s.sessionSubs; its binding header is 'ref:<sid>' (the guard's
+ * sessionRef); a missing/other header is 428/409 with the product's codes; a session answers its stored token, whose
+ * subject's durable rights are the store's; CSRF is X-KIN-CSRF: 1. Every call is counted in s.guardCalls, so a case can
+ * show that a refusal came before authentication, refresh or the handler.
+ */
+function guardAuth(s) {
+  const base = fakeAuth(s);
+  const ref = sid => 'ref:' + sid;
+  const refusal = (status, code, message) => new common.HttpException({ code, message }, status);
+  const count = name => { s.guardCalls.push(name); };
+  return { ...base,
+    sessionId: req => /(?:^|;\s*)kin_sid=([^;]+)/.exec(String(req.headers.cookie ?? ''))?.[1] ?? null,
+    sessionRef: sid => ref(sid),
+    binding: (req, sid) => { const sent = req.headers['x-kin-session']; return sent === undefined ? 'missing' : sent === ref(sid) ? 'bound' : 'mismatch'; },
+    requireBinding(req, sid) {
+      const b = this.binding(req, sid);
+      if (b === 'missing') throw refusal(428, 'AUTH_SESSION_REQUIRED', '요청에 로그인 세션 식별값(X-KIN-Session)이 없습니다');
+      if (b === 'mismatch') throw refusal(409, 'AUTH_SESSION_MISMATCH', '이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다');
+    },
+    authenticateSession: async sid => {
+      count('authenticateSession');
+      if (!s.sessions.has(sid)) throw refusal(401, 'AUTH_SESSION_ENDED', '인증 세션이 없습니다');
+      return { sid, sub: s.sessionSubs.get(sid), accessToken: 'tok:' + s.sessionSubs.get(sid) };
+    },
+    verifyAccessToken: async raw => {
+      count('verifyAccessToken');
+      const payload = await base.verifyAccessToken(raw);
+      // A Gateway client-credentials token as Keycloak issues it (azp gw-*, the gateway role, one group).
+      if (payload.sub.startsWith('gw-')) return { ...payload, azp: 'gw-synthetic', realm_access: { roles: ['gateway'] }, groups: ['/inst-a'] };
+      const r = s.rights.get(payload.sub);
+      return { ...payload, email: payload.sub.replace(/-sub$/, '') + '@synthetic.test', realm_access: { roles: r?.roles ?? [] }, groups: r ? ['/' + r.institution] : [] };
+    },
+    sessionRights: async session => { count('sessionRights'); return s.rights.get(session.sub) ?? null; },
+    credentialsMissing: () => refusal(401, 'AUTH_CREDENTIALS_MISSING', '인증 정보가 없습니다'),
+    requireCsrf: req => { if (req.headers['x-kin-csrf'] !== '1') throw refusal(403, 'AUTH_CSRF_REQUIRED', 'CSRF 확인값이 없습니다'); },
+  };
+}
+
 const apps = [];
 after(async () => { for (const a of apps) await a.close(); });
 
@@ -513,8 +555,9 @@ async function harness(options = {}) {
   const access = new StudyAccessService(s.prisma, options.accessOrthanc ?? {}, {});
   class TestModule {}
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
-    { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access }, { provide: AuthService, useValue: fakeAuth(s) },
-    { provide: APP_GUARD, useClass: TestGuard }] })(TestModule);
+    { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access },
+    { provide: AuthService, useValue: options.realGuard ? guardAuth(s) : fakeAuth(s) },
+    { provide: APP_GUARD, useClass: options.realGuard ? AuthGuard : TestGuard }] })(TestModule);
   const mark = s.reads.length;
   const app = await NestFactory.create(TestModule, { rawBody: true, logger: false });
   app.use(studyTransferLocalParser());
@@ -4617,4 +4660,227 @@ test('S9U4-B76 U4BL6-01 the store\'s update keeps the claimKey UNIQUE (a duplica
   // The same identity values written again are no change of identity: the product's own updates keep committing.
   const updated = await db.importOperation.update({ where: { id: a.id }, data: { id: a.id, claimKey: a.claimKey, updatedAt: new Date(h.s.clock) } });
   assert.equal(updated.id, a.id);
+});
+
+// ════════════════════ D1489 the archive grant (consult u4b-download-grant option A; DG-T01..T05) ════════════════════
+// The product's AuthGuard in front (harness realGuard): a bound cookie session issues the grant; the browser's own GET
+// carries it instead of the binding header on the exact archive route only. Every case asserts the HTTP answer, the stored
+// row (format 2, active grant, uses, attempts), the audit rows and - for a refusal - that nothing ran before it.
+
+const GRANT_RE = /^[A-Za-z0-9_-]{43}$/;
+const grantDigest = raw => createHash('sha256').update('kin-original-download-grant-v1:' + raw).digest('hex');
+const sessionOf = (h, sid, who = RAD) => { h.s.sessions.add(sid); h.s.sessionSubs.set(sid, who.sub); };
+const boundHeaders = sid => ({ cookie: 'kin_sid=' + sid, 'x-kin-session': 'ref:' + sid });
+const nativeHeaders = (sid, site = 'same-origin') => ({ cookie: 'kin_sid=' + sid, ...(site === null ? {} : { 'sec-fetch-site': site }) });
+const grantRequest = (h, study, id, sid, body = {}) =>
+  h.request('POST', archivePath(study, id) + '/grant', { as: null, headers: { ...boundHeaders(sid), 'x-kin-csrf': '1' }, body });
+const nativeGet = (h, study, id, raw, sid, site, method = 'GET') =>
+  h.request(method, archivePath(study, id) + '?grant=' + raw, { as: null, headers: nativeHeaders(sid, site) });
+async function boundPrepare(h, study, sid) {
+  const id = randomUUID();
+  const r = await h.request('POST', `/api/studies/${study}/original-downloads`, { as: null, headers: { ...boundHeaders(sid), 'x-kin-csrf': '1' }, body: { operationId: id } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return id;
+}
+const boundStatus = (h, study, id, sid) => h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: null, headers: boundHeaders(sid) });
+
+test('S9U4-B77 DG-T01/T04 grant issue: a bound cookie session only (Bearer 403 DOWNLOAD_GRANT_SESSION_REQUIRED, CSRF, closed {} body, owner, role), format 1 -> 2 in that transaction, only the domain-separated hash kept, 120 s by DB time, no-store/no-referrer, re-issue replaces, status summary without secrets', async () => {
+  const h = await harness({ realGuard: true });
+  sessionOf(h, 'sid-r1');
+  const study = await downloadStudy(h, 2);
+  const id = await boundPrepare(h, study, 'sid-r1');
+  const v1 = h.s.op(id).download;
+  assert.equal(v1.schemaVersion, 1, 'a preparation stays format 1');
+  const g = await grantRequest(h, study, id, 'sid-r1');
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  assert.deepEqual(Object.keys(g.body).sort(), ['expiresAt', 'grant', 'grantId', 'operationId']);
+  assert.match(g.body.grant, GRANT_RE);
+  assert.deepEqual([g.headers['cache-control'], g.headers['referrer-policy'], g.body.operationId], ['no-store', 'no-referrer', id]);
+  const d = h.s.op(id).download;
+  assert.deepEqual([d.schemaVersion, d.manifestCanonical, d.attempts, d.archiveGrantUses], [2, v1.manifestCanonical, v1.attempts, []]);
+  const a = d.activeArchiveGrant;
+  assert.equal(a.hash, grantDigest(g.body.grant), 'the row keeps SHA-256(domain + raw) only');
+  assert.deepEqual([a.grantId, a.sessionRef, a.state, a.refusal, a.operationId, a.studyUid, a.institutionId, a.ownerSubject, a.method, a.route, a.manifestSha256],
+    [g.body.grantId, 'ref:sid-r1', 'issued', null, id, study, 'inst-a', RAD.sub, 'GET', 'original-archive', h.s.op(id).manifestSha256]);
+  assert.deepEqual([a.issuedAt, Date.parse(a.expiresAt) - Date.parse(a.issuedAt), g.body.expiresAt], [new Date(h.s.clock).toISOString(), 120000, a.expiresAt]);
+  assert.equal(h.s.op(id).status, 'prepared', 'an issued grant is not a start, nor Sent');
+  const [issued] = audits(h.s, 'original.download.grant');
+  assert.deepEqual([issued.target, issued.detail.phase, issued.detail.institutionId, issued.detail.grantId, issued.detail.grantHash, issued.detail.sessionRef,
+    issued.detail.replacedGrantId, issued.detail.expiresAt], [study, 'issued', 'inst-a', a.grantId, a.hash, 'ref:sid-r1', null, a.expiresAt]);
+  assert.ok(!JSON.stringify([...h.s.ops.values()]).includes(g.body.grant) && !JSON.stringify(h.s.audits).includes(g.body.grant), 'the raw value is stored nowhere');
+  const writes = h.s.writes;
+  const bearer = await h.request('POST', archivePath(study, id) + '/grant', { as: null, headers: { authorization: 'Bearer tok:' + RAD.sub }, body: {} });
+  assert.deepEqual([bearer.status, bearer.body.code], [403, 'DOWNLOAD_GRANT_SESSION_REQUIRED']);
+  assert.equal((await grantRequest(h, study, id, 'sid-r1', { x: 1 })).body.code, 'IMPORT_REQUEST_INVALID');
+  assert.equal((await h.request('POST', archivePath(study, id) + '/grant', { as: null, headers: boundHeaders('sid-r1'), body: {} })).status, 403, 'a cookie POST needs CSRF');
+  assert.equal((await h.request('POST', archivePath(study, id) + '/grant', { as: null, headers: { cookie: 'kin_sid=sid-r1', 'x-kin-csrf': '1' }, body: {} })).status, 428, 'and its binding');
+  sessionOf(h, 'sid-t2', TECH2);
+  assert.equal((await grantRequest(h, study, id, 'sid-t2')).status, 404, 'another owner: the same 404 as no operation');
+  sessionOf(h, 'sid-tb', TECH_B);
+  assert.equal((await grantRequest(h, study, id, 'sid-tb')).status, 404, 'another institution');
+  h.s.rights.set('clin-a-sub', { sub: 'clin-a-sub', approved: true, suspended: false, institution: 'inst-a', roles: ['clinician'] });
+  h.s.sessions.add('sid-c'); h.s.sessionSubs.set('sid-c', 'clin-a-sub');
+  assert.equal((await grantRequest(h, study, id, 'sid-c')).status, 403, 'a clinician-only member never reaches the route');
+  const gateway = await h.request('POST', archivePath(study, id) + '/grant', { as: null, headers: { authorization: 'Bearer tok:gw-sub' }, body: {} });
+  assert.ok([401, 403].includes(gateway.status), 'no Gateway grant: ' + gateway.status + ' ' + JSON.stringify(gateway.body));
+  assert.equal(h.s.writes, writes, 'no refusal wrote anything');
+  const g2 = await grantRequest(h, study, id, 'sid-r1');
+  assert.notEqual(g2.body.grantId, g.body.grantId);
+  assert.deepEqual([h.s.op(id).download.activeArchiveGrant.grantId, audits(h.s, 'original.download.grant')[1].detail.replacedGrantId], [g2.body.grantId, g.body.grantId], 'a new issue replaces the unused one');
+  const status = await boundStatus(h, study, id, 'sid-r1');
+  assert.deepEqual(status.body.archiveRequest, { grantId: g2.body.grantId, state: 'issued', expiresAt: g2.body.expiresAt, attemptId: null, code: null, message: null });
+  for (const secret of [g2.body.grant, grantDigest(g2.body.grant), 'ref:sid-r1']) assert.ok(!JSON.stringify(status.body).includes(secret), 'no raw value, hash or session reference in the status');
+  h.s.advance(120000);
+  const expired = (await boundStatus(h, study, id, 'sid-r1')).body.archiveRequest;
+  assert.deepEqual([expired.state, expired.code, typeof expired.message], ['expired', 'DOWNLOAD_GRANT_EXPIRED', 'string']);
+});
+
+test('S9U4-B78 DG-T01/T05 the guard: only the exact archive GET of a cookie session takes a grant instead of the header, from this origin, read-only before authentication; a present header is checked first; other routes, HEAD, aliases, Bearer and a missing cookie gain nothing', async () => {
+  const h = await harness({ realGuard: true });
+  sessionOf(h, 'sid-r1'); sessionOf(h, 'sid-r2');
+  const study = await downloadStudy(h, 2);
+  const id = await boundPrepare(h, study, 'sid-r1');
+  const raw = (await grantRequest(h, study, id, 'sid-r1')).body.grant;
+  const untouched = () => { const d = h.s.op(id).download; return [h.s.op(id).status, d.activeArchiveGrant.state, d.archiveGrantUses.length, d.attempts.length]; };
+  const refusedBeforeAuth = async (what, expected, run) => {
+    const calls = h.s.guardCalls.length, writes = h.s.writes;
+    const r = await run();
+    assert.deepEqual([r.status, r.body?.code], expected, what + ': ' + JSON.stringify(r.body));
+    assert.deepEqual(h.s.guardCalls.slice(calls), [], what + ': refused before authentication, refresh and the handler');
+    assert.equal(h.s.writes, writes, what + ': nothing written');
+    assert.deepEqual(untouched(), ['prepared', 'issued', 0, 0], what + ': the grant stays unused');
+  };
+  await refusedBeforeAuth('cookie without header or grant', [428, 'AUTH_SESSION_REQUIRED'], () => h.request('GET', archivePath(study, id), { as: null, headers: nativeHeaders('sid-r1') }));
+  await refusedBeforeAuth('a wrong header is never rescued by a valid grant', [409, 'AUTH_SESSION_MISMATCH'],
+    () => h.request('GET', archivePath(study, id) + '?grant=' + raw, { as: null, headers: { cookie: 'kin_sid=sid-r1', 'x-kin-session': 'ref:sid-r2' } }));
+  await refusedBeforeAuth('the same subject in another cookie session', [409, 'AUTH_SESSION_MISMATCH'], () => nativeGet(h, study, id, raw, 'sid-r2'));
+  for (const site of [null, 'same-site', 'cross-site', 'none'])
+    await refusedBeforeAuth('Sec-Fetch-Site ' + site, [403, 'DOWNLOAD_GRANT_ORIGIN_REQUIRED'], () => nativeGet(h, study, id, raw, 'sid-r1', site));
+  await refusedBeforeAuth('no cookie: a grant authenticates nobody', [401, 'AUTH_CREDENTIALS_MISSING'],
+    () => h.request('GET', archivePath(study, id) + '?grant=' + raw, { as: null, headers: { 'sec-fetch-site': 'same-origin' } }));
+  for (const query of ['grant=', 'grant=' + raw.slice(1), 'grant=' + raw + '&grant=' + raw, 'grant=' + raw + '&x=1', 'x=1', 'grant=' + raw.slice(0, 42) + '%3D', 'grant[]=' + raw])
+    await refusedBeforeAuth('query ' + query.slice(0, 12), [400, 'DOWNLOAD_GRANT_INVALID'],
+      () => h.request('GET', archivePath(study, id) + '?' + query, { as: null, headers: nativeHeaders('sid-r1') }));
+  await refusedBeforeAuth('an unknown grant', [403, 'DOWNLOAD_GRANT_INVALID'], () => nativeGet(h, study, id, 'A'.repeat(43), 'sid-r1'));
+  const other = await boundPrepare(h, study, 'sid-r1');
+  await refusedBeforeAuth('the grant on another operation', [403, 'DOWNLOAD_GRANT_INVALID'], () => nativeGet(h, study, other, raw, 'sid-r1'));
+  await refusedBeforeAuth('the grant on the status GET', [428, 'AUTH_SESSION_REQUIRED'],
+    () => h.request('GET', `/api/studies/${study}/original-downloads/${id}?grant=` + raw, { as: null, headers: nativeHeaders('sid-r1') }));
+  await refusedBeforeAuth('the grant on the grant POST', [428, 'AUTH_SESSION_REQUIRED'],
+    () => h.request('POST', archivePath(study, id) + '/grant?grant=' + raw, { as: null, headers: { ...nativeHeaders('sid-r1'), 'x-kin-csrf': '1' }, body: {} }));
+  await refusedBeforeAuth('HEAD is never admitted by a grant', [428, undefined], () => nativeGet(h, study, id, raw, 'sid-r1', 'same-origin', 'HEAD'));
+  for (const alias of [`/api/STUDIES/${study}/original-downloads/${id}/archive`, archivePath(study, id) + '/', `/api/studies/${study}/original-downloads/${id.toUpperCase()}/archive`])
+    await refusedBeforeAuth('alias ' + alias.slice(0, 16), [428, 'AUTH_SESSION_REQUIRED'], () => h.request('GET', alias + '?grant=' + raw, { as: null, headers: nativeHeaders('sid-r1') }));
+  const head = await h.request('HEAD', archivePath(study, id), { as: null, headers: boundHeaders('sid-r1') });
+  assert.equal(head.status, 405, 'a bound HEAD mapped to the GET handler supplies nothing');
+  assert.deepEqual(untouched(), ['prepared', 'issued', 0, 0]);
+  // Bearer keeps its own path: a grant in its query neither admits nor is consumed.
+  const viaBearer = await h.request('GET', archivePath(study, other) + '?grant=' + raw, { as: null, headers: { authorization: 'Bearer tok:' + RAD.sub } });
+  assert.equal(viaBearer.status, 200, 'the Bearer GET works as before');
+  await sleep(50);
+  assert.deepEqual(untouched(), ['prepared', 'issued', 0, 0], 'a Bearer GET never consumes a grant');
+  // The browser's own GET: cookie, no header, same-origin, the grant.
+  const zip = await nativeGet(h, study, id, raw, 'sid-r1');
+  assert.equal(zip.status, 200, JSON.stringify(zip.body));
+  assert.deepEqual([zip.headers['content-type'], zip.headers['content-disposition'], zip.headers['cache-control'], zip.headers['referrer-policy']],
+    ['application/zip', `attachment; filename="KIN-originals-${id.slice(0, 8)}.zip"`, 'no-store', 'no-referrer']);
+  assert.equal(parseZipEntries(zip.bytes).length, 3);
+  assert.ok(h.s.guardCalls.includes('authenticateSession') && h.s.guardCalls.includes('sessionRights'), 'the session is authenticated and its rights read as for any request');
+  await sleep(50);
+  assert.equal(h.s.op(id).status, 'sent');
+  // The header-bound GET with an explicit grant validates and consumes that grant too.
+  const third = await boundPrepare(h, study, 'sid-r1');
+  const raw3 = (await grantRequest(h, study, third, 'sid-r1')).body.grant;
+  assert.equal((await h.request('GET', archivePath(study, third) + '?grant=' + raw3, { as: null, headers: boundHeaders('sid-r1') })).status, 200);
+  await sleep(50);
+  assert.equal(h.s.op(third).download.archiveGrantUses.length, 1, 'the bound GET consumed its explicit grant');
+});
+
+test('S9U4-B79 DG-T02 one use: consumed with its attempt and intent in one transaction, two concurrent GETs one winner, the exact 120 s admission boundary by DB time, a reused grant after Incomplete 409, a replaced grant 403, kept across a restart', async () => {
+  const h = await harness({ realGuard: true });
+  sessionOf(h, 'sid-r1');
+  const study = await downloadStudy(h, 2);
+  const id = await boundPrepare(h, study, 'sid-r1');
+  const first = (await grantRequest(h, study, id, 'sid-r1')).body.grant;
+  const replacing = (await grantRequest(h, study, id, 'sid-r1')).body.grant;
+  assert.deepEqual([(await nativeGet(h, study, id, first, 'sid-r1')).status, (await nativeGet(h, study, id, first, 'sid-r1')).body.code], [403, 'DOWNLOAD_GRANT_INVALID'], 'a replaced grant is unknown');
+  h.s.advance(120000);
+  const late = await nativeGet(h, study, id, replacing, 'sid-r1');
+  assert.deepEqual([late.status, late.body.code, h.s.op(id).download.attempts.length], [410, 'DOWNLOAD_GRANT_EXPIRED', 0], 'expiresAt itself is past');
+  const fresh = (await grantRequest(h, study, id, 'sid-r1')).body.grant;
+  h.s.advance(119999);
+  // An Incomplete first use (an MD5 change of the second original), admitted 1 ms before its expiry.
+  let served = 0;
+  h.orthanc.fault = call => (call.path.endsWith('/file') && ++served === 2 ? { bytes: Buffer.alloc([...h.orthanc.instances.values()][1].bytes.length, 0x41) } : null);
+  const broken = await nativeGet(h, study, id, fresh, 'sid-r1');
+  assert.equal(broken.status, 200, 'admitted at expiresAt - 1 ms');
+  await sleep(50);
+  h.orthanc.fault = null;
+  const row = h.s.op(id);
+  assert.deepEqual([row.status, row.download.attempts.length, row.download.activeArchiveGrant, row.download.archiveGrantUses.length], ['incomplete', 1, null, 1]);
+  const [use] = row.download.archiveGrantUses;
+  assert.deepEqual([use.hash, use.attemptId, use.sessionRef, use.admittedAt], [grantDigest(fresh), row.download.attempts[0].attemptId, 'ref:sid-r1', new Date(h.s.clock).toISOString()]);
+  const [intent] = audits(h.s, 'original.download.intent');
+  assert.deepEqual([intent.detail.attemptId, intent.detail.grantId, intent.detail.bindingMethod, intent.detail.admittedAt, intent.detail.consumedAt, intent.detail.institutionId],
+    [use.attemptId, use.grantId, 'archive-grant', use.admittedAt, use.consumedAt, 'inst-a']);
+  const reused = await nativeGet(h, study, id, fresh, 'sid-r1');
+  assert.deepEqual([reused.status, reused.body.code, h.s.op(id).download.attempts.length], [409, 'DOWNLOAD_GRANT_CONSUMED', 1], 'Incomplete: the same grant again is consumed, no attempt');
+  // Two GETs of one new grant at once: exactly one consumes it and opens an attempt.
+  const shared = (await grantRequest(h, study, id, 'sid-r1')).body.grant;
+  const both = await Promise.all([nativeGet(h, study, id, shared, 'sid-r1'), nativeGet(h, study, id, shared, 'sid-r1')]);
+  await sleep(80);
+  assert.deepEqual(both.map(r => r.status).sort(), [200, 409], JSON.stringify(both.map(r => r.body)));
+  assert.equal(both.find(r => r.status === 409).body.code, 'DOWNLOAD_GRANT_CONSUMED');
+  const done = h.s.op(id);
+  assert.deepEqual([done.status, done.download.attempts.length, done.download.archiveGrantUses.length, audits(h.s, 'original.download.intent').length], ['sent', 2, 2, 2]);
+  // A second server over the same database: the uses are the database's, not a process's.
+  const restarted = await harness({ realGuard: true, store: h.s });
+  const again = await nativeGet(restarted, study, id, shared, 'sid-r1');
+  assert.deepEqual([again.status, again.body.code], [409, 'DOWNLOAD_GRANT_CONSUMED']);
+});
+
+test('S9U4-B80 DG-T03/T04 refusals after admission close the grant as refused with no attempt and byte 0 (manifest changed, rights lost, Sent); the status says so; Sent only from the server finish; format 2 read strictly (unknown key 503)', async () => {
+  const h = await harness({ realGuard: true });
+  sessionOf(h, 'sid-r1');
+  const study = await downloadStudy(h, 2);
+  const id = await boundPrepare(h, study, 'sid-r1');
+  const raw = (await grantRequest(h, study, id, 'sid-r1')).body.grant;
+  h.orthanc.store(dicom({ study, series: study + '.9', id: 'SYN-D', pixel: 90 }));
+  const changed = await nativeGet(h, study, id, raw, 'sid-r1');
+  assert.deepEqual([changed.status, changed.body?.code, String(changed.headers['content-type']).startsWith('application/json')], [409, 'MANIFEST_CHANGED', true], 'byte 0: the refusal, never a ZIP');
+  let d = h.s.op(id).download;
+  assert.deepEqual([d.activeArchiveGrant.state, d.activeArchiveGrant.refusal.code, d.attempts.length, d.archiveGrantUses.length], ['refused', 'MANIFEST_CHANGED', 0, 0]);
+  const refused = audits(h.s, 'original.download.grant').filter(a => a.detail.phase === 'refused');
+  assert.deepEqual(refused.map(a => [a.detail.code, a.detail.institutionId, a.detail.grantId]), [['MANIFEST_CHANGED', 'inst-a', d.activeArchiveGrant.grantId]]);
+  const summary = (await boundStatus(h, study, id, 'sid-r1')).body.archiveRequest;
+  assert.deepEqual([summary.state, summary.code, summary.attemptId], ['refused', 'MANIFEST_CHANGED', null]);
+  assert.equal((await nativeGet(h, study, id, raw, 'sid-r1')).body.code, 'DOWNLOAD_GRANT_INVALID', 'a refused grant is closed');
+  assert.equal(audits(h.s, 'original.download.intent').length, 0, 'no intent, no attempt');
+  // Rights lost after the issue: the guard's own rights read refuses the GET before the handler.
+  const study2 = await downloadStudy(h, 1);
+  const id2 = await boundPrepare(h, study2, 'sid-r1');
+  const raw2 = (await grantRequest(h, study2, id2, 'sid-r1')).body.grant;
+  h.s.rights.set(RAD.sub, { ...h.s.rights.get(RAD.sub), roles: ['clinician'] });
+  const lost = await nativeGet(h, study2, id2, raw2, 'sid-r1');
+  assert.equal(lost.status, 403);
+  assert.deepEqual([h.s.op(id2).download.attempts.length, h.s.op(id2).download.archiveGrantUses.length], [0, 0]);
+  h.s.rights.set(RAD.sub, { ...h.s.rights.get(RAD.sub), roles: ['radiologist'] });
+  // A logged-out session: authentication refuses it as for any request.
+  h.s.sessions.delete('sid-r1');
+  assert.equal((await nativeGet(h, study2, id2, raw2, 'sid-r1')).status, 401);
+  sessionOf(h, 'sid-r1');
+  // Issued and consumed are never Sent; Sent is the server's own finish after the last byte.
+  const ok = await nativeGet(h, study2, id2, raw2, 'sid-r1');
+  assert.equal(ok.status, 200);
+  await sleep(50);
+  assert.deepEqual([h.s.op(id2).status, audits(h.s, 'original.download.result').filter(a => a.detail.operationId === id2).map(a => a.detail.state)], ['sent', ['sent']]);
+  // Format 2 is closed: an unknown key in the stored JSON is 503 MANIFEST_STORE_INVALID on the status and the archive.
+  const study3 = await downloadStudy(h, 1);
+  const id3 = await boundPrepare(h, study3, 'sid-r1');
+  const raw3 = (await grantRequest(h, study3, id3, 'sid-r1')).body.grant;
+  h.s.ops.get(id3).download.archiveGrantNote = 'synthetic';
+  assert.deepEqual([(await boundStatus(h, study3, id3, 'sid-r1')).body.code, (await nativeGet(h, study3, id3, raw3, 'sid-r1')).body.code], ['MANIFEST_STORE_INVALID', 'MANIFEST_STORE_INVALID']);
+  delete h.s.ops.get(id3).download.archiveGrantNote;
+  h.s.ops.get(id3).download.schemaVersion = 3;
+  assert.equal((await boundStatus(h, study3, id3, 'sid-r1')).body.code, 'MANIFEST_STORE_INVALID', 'an unknown version is never read as another');
 });

@@ -9,6 +9,7 @@ import { rightsAllow } from './member-rights';
 import {
   APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,
 } from './clinician-policy';
+import { ARCHIVE_ROUTE_KEY, StudyTransferLocalService } from './study-transfer-local.service';
 
 /**
  * 이 가드의 토큰·결속 검사를 받지 않는 진입점에만 붙인다: health, 로그인·가입 개시(GET·POST), callback, 로그인 뒤 진입.
@@ -42,7 +43,7 @@ export function memberState(groups: string[], roles: string[]): MemberState {
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private reflector: Reflector, private auth: AuthService) {}
+  constructor(private reflector: Reflector, private auth: AuthService, private transfer: StudyTransferLocalService) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest();
@@ -104,7 +105,17 @@ export class AuthGuard implements CanActivate {
          * 식별값을 아직 모르는 첫 `GET me` 하나만 결속 없이 받는다(그 답이 식별값을 준다).
          */
         const bootstrap = req.method === 'GET' && path === '/api/me' && this.auth.binding(req, sid) === 'missing';
-        if (!bootstrap) this.auth.requireBinding(req, sid);
+        /**
+         * S9-U4b 원본 다운로드(D1489): 브라우저의 자체 다운로드는 결속 헤더를 실을 수 없으므로, 정확한 archive GET 하나에서만
+         * 결속된 POST가 발급한 일회용 grant가 그 헤더를 대신한다(route는 Nest 메타데이터와 정규 경로로 판정). 헤더가 있으면
+         * 먼저 그 결속을 본다 — 다른 세션의 헤더는 grant로 구제되지 않는다. 이 뒤의 세션 인증·권한·CSRF 검사는 그대로다.
+         */
+        const grant = !bootstrap && req.method === 'GET' && String(req.originalUrl ?? '').includes('?') && routeKey(
+          this.reflector.get(METHOD_METADATA, ctx.getHandler()), this.reflector.get(PATH_METADATA, ctx.getClass()),
+          this.reflector.get(PATH_METADATA, ctx.getHandler())) === ARCHIVE_ROUTE_KEY && this.transfer.archiveGrantPath(req, path);
+        const native = grant && this.auth.binding(req, sid) === 'missing';
+        if (!bootstrap && !native) this.auth.requireBinding(req, sid);
+        if (grant) req.archiveGrantAdmission = await this.transfer.admitArchiveGrant(req, this.auth.sessionRef(sid), native);
         req.sid = sid;
         req.sessionId = this.auth.sessionRef(sid);
         req.authMethod = 'session';
