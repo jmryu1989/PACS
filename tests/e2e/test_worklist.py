@@ -750,12 +750,22 @@ class WorklistE2E(unittest.TestCase):
             status = self.stack.request("GET", f"/studies/{fixture.uid}/original-downloads/{operation}", "doctor")
             self.assertEqual((status.body["state"], status.body["archiveRequest"]["state"], status.body["archiveRequest"]["attemptId"]),
                              ("sent", "consumed", attempt["attemptId"]))
+            # SRU4-1: the same grant on the non-canonical spellings never reaches the API's general log path - the proxy
+            # refuses each with 400 before any location and logs it in the archive format (no query).
+            base = f"/api/studies/{fixture.uid}/original-downloads/{operation}"
+            origin = "{0.scheme}://{0.netloc}".format(urlsplit(page.url))
+            aliases = [f"/api/studies/{fixture.uid}/original-downloads/{operation.upper()}/archive", base + "/archive/",
+                       "/API" + base[len("/api"):] + "/archive", base]
+            for path in aliases:
+                self.assertEqual(page.request.get(origin + path + "?grant=" + grant).status, 400, "a grant outside the archive path")
             logs = subprocess.run(["docker", "compose", "logs", "--no-color", "--since", since, "proxy", "api"], cwd=ROOT,
                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             self.assertEqual(logs.returncode, 0, "the proxy and API logs could be read")
             self.assertFalse(grant in logs.stdout + logs.stderr, "the raw grant is in no proxy or API log line")
             self.assertIn(f'"GET /api/studies/{fixture.uid}/original-downloads/{operation}/archive" 200 ', logs.stdout,
                           "the archive GET is logged by the archive location's format (method, path, status)")
+            for path in aliases:
+                self.assertIn(f'"GET {path}" 400 ', logs.stdout, "each refused spelling is logged by the archive format")
             expect(box.locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
             expect(box.locator(".study-transfer-reason")).to_have_text(self.SENT)
             for claim in ("저장했습니다", "저장되었습니다", "보관했습니다"):
