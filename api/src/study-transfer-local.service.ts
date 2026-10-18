@@ -782,7 +782,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     } catch (failure) { throw await refused(failure); }
     if (!op) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
     let attempt!: Awaited<ReturnType<StudyTransferLocalService['openAttempt']>>;
-    try { attempt = await this.openAttempt(op.id, owner, stored, c, admission); }
+    try { attempt = await this.openAttempt(op.id, owner, stored, c, uid, admission); }
     catch (failure) { throw await refused(failure); }
     // Everything is decided: headers, then bytes. From here no error becomes an HTTP status (5.2 step 6).
     res.status(200);
@@ -979,11 +979,11 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * 5.2 step 5: one sending attempt per operation, its intent row committed before the first byte or nothing is sent. A
    * previous attempt whose sending lease ran out is closed Unconfirmed with its result row in the same transaction.
    */
-  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, c: Caller, admission: GrantAdmission | null = null) {
+  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, c: Caller, uid: string, admission: GrantAdmission | null = null) {
     try {
       return await this.gate.write(async tx => {
         const { op, now, stored } = await this.lockDownload(tx, operationId);
-        if (!op || !this.ownsDownload(op, owner)) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
+        if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
         const download = JSON.parse(JSON.stringify(stored!.download));
         // D1489: an admitted grant is redeemed under this lock - still the operation's active one, unused, of the same
         // session and window - and consumed with the attempt and its intent row in this one transaction, so of two
@@ -1001,7 +1001,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         // refused before anything is written: no grant consumed, no attempt, no intent, byte 0.
         try {
           if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');
-          await this.ownStudyLocked(tx, op.studyUid, c);
+          await this.ownStudyLocked(tx, uid, c);
         } catch (failure) {
           if (failure instanceof NotFoundException) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
           throw failure;

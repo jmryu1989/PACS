@@ -62,7 +62,7 @@ MUTANTS = [
     # preflight still consumes the grant and opens an attempt with its intent.
     ("DG-M11-no-rights-under-the-consume-lock", SERVICE,
      "          if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');\n"
-     "          await this.ownStudyLocked(tx, op.studyUid, c);\n",
+     "          await this.ownStudyLocked(tx, uid, c);\n",
      "", "S9U4-B84"),
     # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
     # the start of an operation prepared before its Study UID became split would go on.
