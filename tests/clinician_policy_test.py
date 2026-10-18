@@ -1243,7 +1243,11 @@ def contract_names(path, code, bindings=None):
     constructor reached as a property) or reaches a loader through process or module: each would put route methods
     read under one file's prefix on an instance served under another's, or load a module unread.
     """
-    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)]
+    # EMR-B2 (d) pin (for ratification): Nest's DynamicModule is `{ module: AppModule, providers }` (api/src/app.module.ts
+    # forLaunch); the sealed word `module` as an object-literal key names no loader (module.require needs a '.'). Every
+    # other spelling of `module` stays refused.
+    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)
+             if not (match.group(0) == "module" and not is_property(code, match.start()) and code.startswith(":", skip_gap(code, match.end())))]
 
     def add(match, text):
         found.append((line_of(code, match.start()), text))

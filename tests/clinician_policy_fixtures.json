@@ -273,7 +273,8 @@
       "a string literal, or a template without substitutions, alone between '[' and ']' is read as the name it spells: x['require'] is x.require, x?.['require'] is x?.require and common['Put'] is common.Put for every name check; such a key with an escape is refused",
       "a string literal or template without substitutions whose value (escapes decoded) is one of sealed_words or sealed_strings stands only as an element of an array literal: elsewhere a reflective call (Object.getOwnPropertyDescriptor(X, 'prototype')), a quoted key ({ '__proto__': p }) or a quoted member name ('constructor'() { ... }) reads it as that name",
       "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==, or as fixed_prototype_comparison specifies; constructor only as a declaration whose own function scope holds no return (TypeScript AST excludes nested callback/class scopes); no class heading in a *.controller.ts file has extends, the heading read to the '{' of its body past type parameters and heritage clauses as class_heading lists (S5-U1c-F08)",
-      "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)"
+      "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)",
+      "EMR-B2 (d), for ratification: the sealed word module only as an object-literal key 'module:' (Nest's DynamicModule { module: AppModule, providers } that api/src/app.module.ts forLaunch returns to the launcher), which names no loader; process.on only for the launcher's SIGTERM/SIGINT handlers (api/src/emr-runtime/launcher.ts), which trip the stop latch and nothing else"
     ],
     "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "net", "node:async_hooks", "node:crypto", "node:dns", "node:fs", "node:path", "node:http", "node:https", "node:net", "node:stream", "rxjs"],
     "file_packages": {
@@ -287,7 +288,7 @@
     "loaded_packages": ["express", "node:crypto"],
     "sealed_words": ["Function", "Proxy", "__proto__", "defineProperties", "defineProperty", "eval", "global", "globalThis", "module", "setPrototypeOf"],
     "sealed_strings": ["Reflect", "constructor", "createDecorator", "decorate", "defineMetadata", "getPrototypeOf", "process", "prototype", "require"],
-    "process_members": ["env", "exit", "platform"],
+    "process_members": ["env", "exit", "on", "platform"],
     "reflect_members": ["ownKeys"],
     "prototype_owners": ["Array", "Object"],
     "outside_the_contract": [
