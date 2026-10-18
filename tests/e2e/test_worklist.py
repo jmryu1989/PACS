@@ -758,13 +758,17 @@ class WorklistE2E(unittest.TestCase):
                        "/API" + base[len("/api"):] + "/archive", base]
             for path in aliases:
                 self.assertEqual(page.request.get(origin + path + "?grant=" + grant).status, 400, "a grant outside the archive path")
+            # U4C-01: another spelling of the key (a percent-encoded letter, another case) is the same key to the API, so the
+            # proxy refuses it outside the archive path as well and logs it without the query.
+            for path, key in ((base, "%67rant="), ("/api/health", "Gr%61nt=")):
+                self.assertEqual(page.request.get(origin + path + "?" + key + grant).status, 400, "an encoded grant key outside the archive path")
             logs = subprocess.run(["docker", "compose", "logs", "--no-color", "--since", since, "proxy", "api"], cwd=ROOT,
                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             self.assertEqual(logs.returncode, 0, "the proxy and API logs could be read")
             self.assertFalse(grant in logs.stdout + logs.stderr, "the raw grant is in no proxy or API log line")
             self.assertIn(f'"GET /api/studies/{fixture.uid}/original-downloads/{operation}/archive" 200 ', logs.stdout,
                           "the archive GET is logged by the archive location's format (method, path, status)")
-            for path in aliases:
+            for path in aliases + ["/api/health"]:
                 self.assertIn(f'"GET {path}" 400 ', logs.stdout, "each refused spelling is logged by the archive format")
             expect(box.locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
             expect(box.locator(".study-transfer-reason")).to_have_text(self.SENT)

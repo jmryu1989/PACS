@@ -623,6 +623,15 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 10
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/original-download-grant-mutants --cwd . --tree api/src --file tests/original_download_grant_mutants.py --file tests/study_transfer_local_server_test.cjs --file tests/service_test_loader.cjs --file tests/invariants_live.py -- python3 -B tests/original_download_grant_mutants.py --out tmp/workspace-ui-ci/original-download-grant-mutant-copies
+      # U4C-01 (DG-T05): the runner's nginx over the repository's proxy configuration in both deployment modes - the snippets
+      # the real 15-kin-config.envsh writes, the template rendered as the image does: no access or error log line and no
+      # redirect Location carries a grant in any spelling, on any server (default 444, HTTP->HTTPS); DG-M09 is detected.
+      - name: S9-U4b proxy logs and redirects never carry an original-download grant (real nginx)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/proxy-grant-log --cwd . --file proxy/nginx.conf.template --file proxy/15-kin-config.envsh --file tests/proxy_grant_log_test.py -- python3 -B tests/proxy_grant_log_test.py
       - name: WORKLIST-SPLIT-UID Patient Identity Conflict notice, kept text and locked writes, late answers and the clinician list on the whole page DOM (TEST-WSU-07, 12)
         if: ${{ !cancelled() }}
         timeout-minutes: 5
