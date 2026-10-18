@@ -411,11 +411,17 @@ test('W9API-10 T04 A-03: the 10 s resolve deadline cancels pending reads; no sta
   await settle();
   const cut = w.calls.reads.filter(r => [h1, h2, late, q2].some(s => s.uid === r.uid));
   assert.ok(cut.length === 4 && cut.every(r => r.sawAbort && r.signal.aborted), 'every pending read must observe the deadline abort');
+  const run = track(pending);
+  await until(() => run.settled, 'the deadline answers without waiting for a late source');
   w.gates.get(late.uid)();   // the source answers after the deadline: it must not be used
+  await settle();
   const answer = await pending;
-  assert.deepEqual(codes(answer), ['ready', LF, LF, LF, 'ready', LF, LF], 'a read answered after the deadline must not become metadata');
+  // D1550: the one deadline also bounds the re-check and the receipt, so a member read in time is not provided after it.
+  assert.deepEqual([answer.scopeStatus, codes(answer)], ['rejected', [LF, LF, LF, LF, LF, LF, LF]],
+    'a read answered after the deadline must not become metadata; nothing is provided after the deadline');
+  assert.ok(!JSON.stringify(answer).includes('SYN-PID-1'), 'no member metadata after the deadline');
+  assert.deepEqual([w.port.prepared.length, w.calls.states.length], [0, 1], 'no re-check and no receipt after the deadline');
   assert.deepEqual(w.calls.reads.map(r => r.uid), ids(members.slice(0, 6)), 'a member still queued at the deadline is never read');
-  assert.deepEqual([answer.members[0].metadata.patientId, answer.members[4].metadata.patientId], ['SYN-PID-1', 'SYN-PID-1']);
 });
 
 test('W9API-11 T04 A-05: a change of a member row or of the policy during the source wait discards the whole result', async () => {
@@ -696,22 +702,28 @@ function track(promise) {
 const outcome = t => t.error ? [t.error.getStatus?.() ?? String(t.error), t.error.getResponse?.().code ?? t.error.message]
   : [t.answer.scopeStatus, codes(t.answer)];
 
-test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation read at a real source - stalled header or body', async t => {
+test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation read and the served reads at a real source - stalled header or body', async t => {
   // The real StudyAccessService prepares a source-tag policy from the real OrthancService's /tools/find; the source here
   // never sends its header, or sends the header and stalls the body. Served reads are the double's (never reached).
   let mode = 'answer';
   const calls = [];
   const server = http.createServer((req, res) => {
-    const call = { url: req.url, closed: false };
+    const call = { url: req.url, closed: false, closedAt: null };
     calls.push(call);
-    res.on('close', () => { call.closed = true; });
+    res.on('close', () => { call.closed = true; call.closedAt = Date.now(); });
     req.resume();
     if (mode === 'header') return;
+    // served-body: the policy read answers after 6 s, so the served reads (own 5 s limit) are still held at the deadline
+    if (mode === 'served-body' && req.url === '/tools/find') { setTimeout(() => answerFind(res), 6000); return; }
     res.writeHead(200, { 'content-type': 'application/json' });
-    if (mode === 'body') { res.write('['); return; }
+    if (mode === 'body' || mode === 'served-body') { res.write('['); return; }
+    answerFind(res);
+  });
+  const answerFind = res => {
+    if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(found.map(s => ({ RequestedTags: { StudyInstanceUID: s.uid, InstitutionName: 'SYN HOSPITAL A',
       PatientID: 'SYN-PID-1', StudyDate: '20261001', ModalitiesInStudy: 'CT' } }))));
-  });
+  };
   const found = [study(), study()];
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
@@ -724,26 +736,35 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
     assert.deepEqual(codes(await opens(resolveFor(wc, reader(), body(ids(found))), 'an answering source')), ['ready', 'ready'], 'an answering source');
     assert.deepEqual(calls.map(c => c.url), ['/tools/find'], 'the preparation reads the batch identity source');
     // real time, as the source and the deadline really meet (Astra AP08): about ten seconds per stall
+    // D1550: the server-side socket of every held source request is closed shortly after the deadline, not only the answer.
     const timings = [];
-    for (const stall of ['header', 'body']) {
+    for (const stall of ['header', 'body', 'served-body']) {
       mode = stall; calls.length = 0;
+      const served = stall === 'served-body';
+      // served-body: the policy read answers at 6 s, then the resolve's own served reads (two members at once, real
+      // OrthancService.viewingSetStudy) are held; their own 5 s limit has not run out when the 10 s deadline arrives
       const w = world(found, { policy: patientRule('SYN-PID-1') });
-      w.studyAccess = new StudyAccessService(w.prisma, new OrthancService(), {});
-      w.svc = new MultiStudyViewService(w.prisma, w.orthanc, w.studyAccess, w.port);
+      const real = new OrthancService();
+      w.studyAccess = new StudyAccessService(w.prisma, real, {});
+      w.svc = new MultiStudyViewService(w.prisma, served ? real : w.orthanc, w.studyAccess, w.port);
+      const heldCalls = () => served ? calls.filter(c => c.url.startsWith('/dicom-web/')) : calls;
       const start = Date.now(), run = track(resolveFor(w, reader(), body(ids(found))));
       run.done.then(() => { run.at = Date.now() - start; });
-      await until(() => calls.length === 1, stall + ': the preparation read reached the source');
+      await until(() => heldCalls().length === (served ? 2 : 1), stall + ': the held read reached the source', served ? 8000 : 5000);
       await new Promise(resolve => setTimeout(resolve, Math.max(0, 9700 - (Date.now() - start))));
       assert.equal(run.settled, false, stall + ': nothing is decided before ten seconds');
-      assert.equal(calls[0].closed, false, stall + ': the source read is open before ten seconds');
+      assert.ok(heldCalls().every(c => !c.closed), stall + ': the source read is open before ten seconds');
       await until(() => run.settled, stall + ': the deadline answers the resolve', 2500);
       assert.ok(run.at >= 9900 && run.at < 11500, stall + ': the resolve answers at its ten-second deadline (' + run.at + ' ms)');
       assert.deepEqual(outcome(run), ['rejected', [LF, LF]], stall + ': the deadline answers with the typed timeout result');
-      await until(() => calls[0].closed, stall + ': the policy source read is cancelled by the deadline', 2000);
-      assert.deepEqual([w.calls.reads.length, w.port.prepared.length, w.port.finished.length], [0, 0, 0],
-        stall + ': nothing is read for serving, provided or recorded after the deadline');
-      assert.deepEqual(calls.map(c => c.url), ['/tools/find'], stall + ': no other source read');
-      timings.push({ stall, answered_ms: run.at, source_closed: calls[0].closed });
+      await until(() => heldCalls().every(c => c.closed), stall + ': the policy source read is cancelled by the deadline', 2000);
+      const closedMs = heldCalls().map(c => c.closedAt - start);
+      assert.ok(closedMs.every(ms => ms >= 9900 && ms < 11000), stall + ': each source socket closes within a second of the deadline (' + closedMs + ')');
+      assert.deepEqual([w.port.prepared.length, w.port.finished.length], [0, 0], stall + ': nothing is provided or recorded after the deadline');
+      assert.deepEqual(calls.map(c => new URL(c.url, 'http://x').pathname),
+        served ? ['/tools/find', '/dicom-web/studies', '/dicom-web/studies'] : ['/tools/find'], stall + ': no other source read');
+      if (!served) assert.equal(w.calls.reads.length, 0, stall + ': nothing is read for serving');
+      timings.push({ stall, answered_ms: run.at, socket_closed_ms: closedMs });
     }
     t.diagnostic(JSON.stringify(timings));
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
@@ -796,6 +817,31 @@ test('W9API-22 A-03 (W9A-01): every wait from resolve entry to the answer is und
     inventory.push({ at: p.at, outcome: outcome(run), signal_aborted: p.signal ? w.held.signal.aborted : undefined });
   }
   t.diagnostic(JSON.stringify(inventory));
+});
+
+test('W9API-23 A-02/A-03 (D1550): rights per resource AND, then the policy revision, then the source identity - in that order', async () => {
+  // (1) the AND of rights per resource: one of a UID's two resources is outside the policy -> StudyAccess refuses the
+  // member; it is never read for serving and never answered as a split.
+  const normal = study({ pid: 'SYN-PID-1' }), splitUid = nextUid();
+  const split = study({ uid: splitUid, rows: [sourceRow(splitUid, { pid: 'SYN-PID-1' }), sourceRow(splitUid, { pid: 'SYN-PID-2' })] });
+  const wa = world([normal, split], { policy: patientRule('SYN-PID-1') });
+  const anded = 'a UID with one resource outside the policy is refused by StudyAccess and never read';
+  assert.deepEqual(codes(await opens(resolveFor(wa, reader(), body(ids([normal, split]))), anded)), ['ready', MU], anded);
+  assert.deepEqual(wa.calls.reads.map(r => r.uid), [normal.uid], anded);
+  // control: both resources inside the policy -> admitted, read, and only then answered as the split
+  const both = study({ uid: nextUid(), rows: [] });
+  both.rows = [sourceRow(both.uid, { pid: 'SYN-PID-1' }), sourceRow(both.uid, { pid: 'SYN-PID-1' })];
+  const wc = world([normal, both], { policy: patientRule('SYN-PID-1') });
+  assert.deepEqual(codes(await opens(resolveFor(wc, reader(), body(ids([normal, both]))), 'an admitted split')), ['ready', STUDY_IDENTITY_UNRESOLVED]);
+  // (2) the policy revision is re-checked after the rights read: a revision during StudyAccess's own source read refuses
+  // the whole resolve there, before any served read or source identity answer
+  const pair = [study({ pid: 'SYN-PID-1' }), study({ pid: 'SYN-PID-1' })];
+  const wr = world(pair, { policy: patientRule('SYN-PID-1') });
+  const read = wr.orthanc.studyIdentities;
+  wr.orthanc.studyIdentities = async (...args) => { const rows = await read(...args); wr.revision = 2; return rows; };
+  await refusedWith(resolveFor(wr, reader(), body(ids(pair))), 409, 'STUDY_ACCESS_CHANGED',
+    'a policy revision during the rights read refuses before any served read');
+  assert.deepEqual([wr.calls.reads.length, wr.port.prepared.length], [0, 0], 'a policy revision during the rights read refuses before any served read');
 });
 
 // SRW9-2 binding precondition: Module A binds a real store only when this case runs - EMR-B2 verified request facts let the

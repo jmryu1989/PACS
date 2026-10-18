@@ -188,11 +188,11 @@ export class MultiStudyViewService {
     const me = inst(c);
     const input = selection(raw);
 
-    // A-03: one deadline per resolve, and its one signal. Every wait before the served reads end is raced against it - the
-    // policy and member reads and the StudyAccess decision, whose own source read takes the signal and is cancelled with
-    // its body - and so are the re-check and the receipt while the deadline has not passed. A deadline in any of those
-    // waits answers at once: a member not refused before it is W9_LOAD_FAILED and nothing is provided. A deadline during
-    // the served reads fails only the reads still pending (readSources).
+    // A-03: one deadline per resolve, and its one signal, from here to the answer. Every wait is raced against it - the
+    // policy and member reads, the StudyAccess decision (whose own source read takes the signal and is cancelled with its
+    // body), the served reads (same), the re-check and the durable receipt. The deadline answers at once wherever it
+    // lands: a member not refused before it is W9_LOAD_FAILED and nothing is provided (in the receipt wait: 503, and a
+    // late receipt is finished as aborted).
     const deadline = new AbortController();
     const signal = deadline.signal;
     const timer = setTimeout(() => deadline.abort(), VIEWING_SET_LIMITS.deadlineMs);
@@ -211,9 +211,6 @@ export class MultiStudyViewService {
       for (const m of members) if (!m.code) m.code = W9_LOAD_FAILED;
       return answer(null);
     };
-    // After a deadline that cut the source reads, the members read in time still take their re-check and receipt (A-03:
-    // the others keep theirs). Those waits start after the abort, so they are not raced against it.
-    const closing = <T>(work: () => Promise<T>) => signal.aborted ? work() : within(work, signal);
     try {
       let policy: AccessSnapshot;
       try {
@@ -236,6 +233,9 @@ export class MultiStudyViewService {
       // A-03: only the admitted members' sources, each failure its own; then the one-resource rule before any key.
       const admitted = members.filter(m => !m.code);
       await this.readSources(admitted, signal);
+      // A deadline during the served reads ends the resolve there: a member read in time cannot take its re-check and
+      // receipt inside the deadline, so it is not provided either (the refused members keep their causes).
+      if (signal.aborted) return timedOut();
       // StudyAccess decided on the source rows its own preparation read. What is served is this later read, so a policy
       // that reads source tags must hold for every row served (the same per-resource AND); a tag that changed between the
       // two reads makes that member unavailable like any other refusal, before the split answer can name it.
@@ -260,9 +260,9 @@ export class MultiStudyViewService {
 
       // A-05: the rows and the policy the decision used must still hold after the source wait.
       try {
-        const second = await closing(() => this.states(input.studyUids));
+        const second = await within(() => this.states(input.studyUids), signal);
         if (members.some(m => !sameState(m.state, second.get(m.uid)))) throw contextChanged();
-        try { await closing(() => this.studyAccess.unchanged(c, policy)); }
+        try { await within(() => this.studyAccess.unchanged(c, policy), signal); }
         catch (error) { if (error instanceof ConflictException) throw contextChanged(); throw error; }
       } catch (error) { if (error instanceof ResolveDeadline) return timedOut(); throw error; }
 
@@ -283,7 +283,7 @@ export class MultiStudyViewService {
       };
       let receipts: ViewingSetReceipts;
       const preparing = (async () => this.access.prepare(provision))();
-      try { receipts = await closing(() => preparing); } catch (error) {
+      try { receipts = await within(() => preparing, signal); } catch (error) {
         // A receipt that arrives after the deadline answered 503 belongs to a body that never went out.
         if (error instanceof ResolveDeadline) void preparing.then(late => this.settle(late, Promise.resolve('aborted')), () => undefined);
         throw auditUnavailable();
@@ -315,7 +315,8 @@ export class MultiStudyViewService {
 
   /**
    * At most four reads at a time under the one resolve deadline. The signal reaches each fetch and its body; a read still
-   * pending at the deadline, or answering after it, is a failed read (never stale metadata), and the others keep theirs.
+   * pending at the deadline, or answering after it, is a failed read (never stale metadata), and the queue stops; the
+   * resolve then answers the deadline itself.
    */
   private async readSources(members: Member[], signal: AbortSignal) {
     const queue = [...members];

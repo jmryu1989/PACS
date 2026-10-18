@@ -42,6 +42,15 @@ MEMBER_LOOP = '        for (const m of members) {\n          m.state = first.get
 KEY = 'key: `${m.state!.institutionId}|${patientId}`'
 PREPARE = '      try { receipts = await closing(() => preparing); } catch (error) {'
 STUDY_ACCESS, ORTHANC = 'study-access.service.ts', 'orthanc.service.ts'
+# X29 moves the policy-revision check of StudyAccess before its rights read: one contiguous span of study-access.service.ts
+# (the end of prepare() through allowed()'s re-check), cut from the file as it is so the anchor stays exact.
+_SA = (API_SRC / STUDY_ACCESS).read_bytes().decode('utf-8').replace('\r\n', '\n')
+_SA_FROM, _SA_TO = '    await this.unchanged(c,scope);\n  }\n', '    const latest=tx?policy:await this.unchanged(c,policy);'
+REVISION_SPAN = _SA[_SA.index(_SA_FROM):_SA.index(_SA_TO) + len(_SA_TO)]
+REVISION_FIRST = REVISION_SPAN.replace(_SA_FROM, '  }\n', 1).replace(
+    '      if(!tx)await this.prepare(c,remaining,policy,signal);',
+    '      if(!tx)await this.unchanged(c,policy);\n      if(!tx)await this.prepare(c,remaining,policy,signal);', 1).replace(
+    _SA_TO, '    const latest=policy;', 1)
 
 MUTANTS = [
     dict(id='M01', spec=True, title='the same patient judged by the source name instead of the PatientID', file=SERVICE,
@@ -97,7 +106,7 @@ MUTANTS = [
          old='        const read = this.orthanc.viewingSetStudy(m.uid, signal).catch(() => null);',
          new='        const read = this.orthanc.viewingSetStudy(m.uid, undefined).catch(() => null);'),
     dict(id='X05-stale-after-abort', title='a source answer that arrives after the deadline is used', file=SERVICE,
-         case='W9API-10', expect='a read answered after the deadline must not become metadata',
+         case='W9API-10', expect='the deadline answers without waiting for a late source',
          old='        const rows = await Promise.race([read, expired]);\n        m.rows = signal.aborted ? null : rows;',
          new='        m.rows = await read;'),
     dict(id='X06-body-before-receipt', title='the body is answered before the durable receipt', file=SERVICE,
@@ -165,10 +174,18 @@ MUTANTS = [
          case='W9API-22', expect='member rows: the deadline answers the resolve',
          old='        const first = await within(() => this.states(input.studyUids), signal);',
          new='        const first = await this.states(input.studyUids);'),
-    dict(id='X24-recheck-unbounded', title='the re-check and the receipt are awaited without the deadline', file=SERVICE,
+    dict(id='X24-recheck-unbounded', title='the member-rows re-check is awaited without the deadline', file=SERVICE,
          case='W9API-22', expect='member rows re-check: the deadline answers the resolve',
-         old='    const closing = <T>(work: () => Promise<T>) => signal.aborted ? work() : within(work, signal);',
-         new='    const closing = <T>(work: () => Promise<T>) => work();'),
+         old='        const second = await within(() => this.states(input.studyUids), signal);',
+         new='        const second = await this.states(input.studyUids);'),
+    dict(id='X24b-policy-recheck-unbounded', title='the policy re-check after allowed() is awaited without the deadline', file=SERVICE,
+         case='W9API-22', expect='policy re-check: the deadline answers the resolve',
+         old='        try { await within(() => this.studyAccess.unchanged(c, policy), signal); }',
+         new='        try { await this.studyAccess.unchanged(c, policy); }'),
+    dict(id='X24c-receipt-unbounded', title='the durable receipt is awaited without the deadline', file=SERVICE,
+         case='W9API-22', expect='access-record receipt: the deadline answers the resolve',
+         old='      try { receipts = await within(() => preparing, signal); } catch (error) {',
+         new='      try { receipts = await preparing; } catch (error) {'),
     dict(id='X25-late-receipt-unfinished', title='a receipt arriving after the deadline answered 503 is never finished', file=SERVICE,
          case='W9API-22', expect='access-record receipt: the late receipt is finished',
          old="        if (error instanceof ResolveDeadline) void preparing.then(late => this.settle(late, Promise.resolve('aborted')), () => undefined);",
@@ -179,6 +196,19 @@ MUTANTS = [
     dict(id='X27-timeout-untyped', title='a deadline answers members it never decided as ready', file=SERVICE,
          case='W9API-22', expect='policy snapshot: the deadline answers with the typed timeout result',
          old='      for (const m of members) if (!m.code) m.code = W9_LOAD_FAILED;', new='      void W9_LOAD_FAILED;'),
+    # D1550 (3): the order - rights per resource AND, then the policy revision, then the source identity.
+    dict(id='X28-rights-or', title='StudyAccess joins the resources of one UID with OR instead of AND', file=STUDY_ACCESS,
+         case='W9API-23', expect='a UID with one resource outside the policy is refused by StudyAccess and never read',
+         old='list.every(metadata=>accessPolicyMatches(policy,uid,metadata))', new='list.some(metadata=>accessPolicyMatches(policy,uid,metadata))'),
+    dict(id='X29-revision-before-rights', title='the policy revision is checked before the rights read instead of after it', file=STUDY_ACCESS,
+         case='W9API-23', expect='a policy revision during the rights read refuses before any served read',
+         old=REVISION_SPAN, new=REVISION_FIRST),
+    dict(id='X30-identity-before-rights', title='the source identity (split) is judged before the per-row rights match', file=SERVICE,
+         case='W9API-19', expect='a served resource outside the policy refuses the member before the split answer',
+         old='        else if (sourcePolicy && !m.rows.every(row => this.studyAccess.matches(policy, m.uid, row))) m.code = W9_MEMBER_UNAVAILABLE;\n'
+             '        else if (unresolvedSource(m.rows)) m.code = STUDY_IDENTITY_UNRESOLVED;',
+         new='        else if (unresolvedSource(m.rows)) m.code = STUDY_IDENTITY_UNRESOLVED;\n'
+             '        else if (sourcePolicy && !m.rows.every(row => this.studyAccess.matches(policy, m.uid, row))) m.code = W9_MEMBER_UNAVAILABLE;'),
 ]
 NOT_APPLICABLE = {
     'M16': 'metadata/other-member reference accepted as an image display: the view-observations route is not in W9-API (D1500 D-6, Module A)',
