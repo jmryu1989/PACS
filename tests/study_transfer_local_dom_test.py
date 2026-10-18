@@ -70,15 +70,15 @@ def dicom(index, size=64):
 
 
 def file_result(op, index, outcome="stored", code=None, message=None, identity="matched", disposition=None,
-                rechecked=None, uid=UID_A):
+                rechecked=None, uid=UID_A, generation=1):
     attempts = [] if outcome == "rejected" and code and code.startswith(("DICOM_", "PATIENT_ID_", "MODALITY")) else [{
-        "attemptId": "00000000-0000-4000-8000-%012d" % index, "generation": 1, "phase": "finished", "outcome": outcome,
+        "attemptId": "00000000-0000-4000-8000-%012d" % (index + 1000 * generation), "generation": generation, "phase": "finished", "outcome": outcome,
         "code": code, "transport": None, "startedAt": "2026-10-17T00:00:00.000Z", "finishedAt": None,
         "autoRecheckedAt": rechecked, "recovery": None}]
     return {"operationId": op, "index": index, "outcome": outcome, "code": code,
             "message": message or ("SYN-SERVER " + (code or outcome)), "identity": identity, "writeDisposition": disposition,
             "studyUid": uid, "seriesUid": uid + ".1", "sopUid": uid + ".1.%d" % index, "sha256": "0" * 64, "bytes": 64,
-            "at": "2026-10-17T00:00:00.000Z", "generation": 1, "attempts": attempts}
+            "at": "2026-10-17T00:00:00.000Z", "generation": generation if attempts else 0, "attempts": attempts}
 
 
 def status_of(result):
@@ -155,7 +155,11 @@ class TransferSite(rf.FlowSite):
             self.import_reads.append(op)
             if self.status_answers:
                 reply = self.status_answers.pop(0)
-                return route.abort("connectionreset") if reply == "abort" else self.answer(route, *reply)
+                if reply == "abort":
+                    return route.abort("connectionreset")
+                if reply[0] == "raw":
+                    return route.fulfill(status=reply[1], body=reply[2], content_type=reply[3])
+                return self.answer(route, *reply)
             if op not in self.import_state:
                 return self.answer(route, 404, {"statusCode": 404, "message": "SYN-SERVER import not found"})
             files = [self.import_state[op][i] for i in sorted(self.import_state[op])]
@@ -172,7 +176,14 @@ class TransferSite(rf.FlowSite):
             uid, body = unquote(found.group(1)), request.post_data_json
             self.prepares.append((uid, body))
             if self.prepare_answers:
-                return self.answer(route, *self.prepare_answers.pop(0))
+                reply = self.prepare_answers.pop(0)
+                if reply[0] == "prepared-then":
+                    # The server prepared the operation, then the answer was replaced on the way.
+                    self.download_state[body["operationId"]] = download_view(body["operationId"], uid)
+                    reply = reply[1]
+                if reply[0] == "raw":
+                    return route.fulfill(status=reply[1], body=reply[2], content_type=reply[3])
+                return self.answer(route, *reply)
             view = download_view(body["operationId"], uid)
             self.download_state[body["operationId"]] = view
             return self.answer(route, 200, view)
@@ -194,11 +205,24 @@ class TransferSite(rf.FlowSite):
                 self.download_state[op] = queued.pop(0)
             if op not in self.download_state:
                 return self.answer(route, 404, {"statusCode": 404, "message": "SYN-SERVER download not found"})
-            return self.answer(route, 200, self.download_state[op])
+            view = json.loads(json.dumps(self.download_state[op]))
+            # "LATEST": the server's archiveRequest is about the operation's latest grant, whichever the case pressed last.
+            if isinstance(view.get("archiveRequest"), dict) and view["archiveRequest"].get("grantId") == "LATEST":
+                issued = [g["grantId"] for g in self.grants if g.get("grantId")]
+                view["archiveRequest"]["grantId"] = issued[-1] if issued else str(uuid.uuid4())
+            return self.answer(route, 200, view)
         self.violations.append(f"undeclared transfer request: {method} {path}")
         return route.fulfill(status=405, json={"code": "SYN_NO_WRITE"})
 
     def answer_import(self, route, record, reply):
+        if callable(reply):
+            reply = reply(record)
+        if isinstance(reply, tuple) and reply and reply[0] == "stored-then":
+            op, index = record["operation"], int(record["index"])
+            self.import_state.setdefault(op, {})[index] = file_result(op, index, "stored")
+            reply = reply[1](record) if callable(reply[1]) else reply[1]
+        if isinstance(reply, tuple) and reply and reply[0] == "raw":
+            return route.fulfill(status=reply[1], body=reply[2], content_type=reply[3])
         if reply == "abort":
             return route.abort("connectionreset")
         if reply == "stored":
@@ -212,8 +236,8 @@ class TransferSite(rf.FlowSite):
         if reply == "abort":
             return route.abort("connectionreset")
         if reply is None:
-            record["grant"] = secrets.token_urlsafe(32)
-            reply = (200, {"operationId": record["operation"], "grantId": str(uuid.uuid4()), "grant": record["grant"],
+            record["grant"], record["grantId"] = secrets.token_urlsafe(32), str(uuid.uuid4())
+            reply = (200, {"operationId": record["operation"], "grantId": record["grantId"], "grant": record["grant"],
                            "expiresAt": "2026-10-17T00:02:00.000Z"})
         return self.answer(route, *reply)
 
@@ -567,6 +591,7 @@ class TransferPanelPage(rf.ReportFlowPage):
                     box.get_by_role("button", name="Download", exact=True).click()
                 self.page.clock.run_for(3100)
                 expect(box.locator(".study-transfer-state")).to_have_text(state.capitalize())
+                expect(box.get_by_role("button", name="Download", exact=True), "C-06 the same operation is offered again").to_be_visible()
                 with self.page.expect_download():
                     box.get_by_role("button", name="Download", exact=True).click()
                 self.wait(lambda: len(self.downloads) == 2, "the second archive download")
@@ -612,7 +637,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual([], self.downloads, "C-06 a refused grant downloads nothing")
         self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"), "C-07 a refusal never logs out")
         view = download_view(op, UID_A)
-        view["archiveRequest"] = {"grantId": str(uuid.uuid4()), "state": "expired", "expiresAt": "2026-10-17T00:02:00.000Z",
+        view["archiveRequest"] = {"grantId": "LATEST", "state": "expired", "expiresAt": "2026-10-17T00:02:00.000Z",
                                   "attemptId": None, "code": "DOWNLOAD_GRANT_EXPIRED", "message": "SYN-SERVER grant expired"}
         self.site.download_answers[op] = [view]
         with self.page.expect_download():
@@ -639,7 +664,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         with self.page.expect_download():
             box.get_by_role("button", name="Download", exact=True).click()
         view = download_view(op, UID_A)
-        view["archiveRequest"] = {"grantId": str(uuid.uuid4()), "state": "refused", "expiresAt": "2026-10-17T00:02:00.000Z",
+        view["archiveRequest"] = {"grantId": "LATEST", "state": "refused", "expiresAt": "2026-10-17T00:02:00.000Z",
                                   "attemptId": None, "code": "MANIFEST_CHANGED", "message": "SYN-SERVER manifest changed"}
         self.site.download_answers[op] = [view]
         self.page.clock.run_for(3100)
@@ -882,6 +907,239 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.settle(300)
         self.assertEqual(2, len(self.site.imports), "C-07 nothing sent by itself")
         self.assertEqual(op, self.site.import_reads[-1])
+
+    # ── r4 (D1566): what an answer proves - the classifier's acceptance cases R4-A01..A05 ──
+    WATCH = """() => { const seen = window.__synStates = window.__synStates || {};
+      const note = () => { for (const li of document.querySelectorAll('#study-transfer li[data-index]')) {
+        const op = li.closest('section')?.dataset.operation || '', key = op + ':' + li.dataset.index;
+        const state = li.querySelector('.study-transfer-state')?.textContent || '';
+        const retry = !!li.querySelector('button') && [...li.querySelectorAll('button')].some(b => b.textContent === 'Retry');
+        (seen[key] = seen[key] || []).push(state + (retry ? '+Retry' : '')); } };
+      if (!window.__synWatching) { window.__synWatching = true; new MutationObserver(note).observe(document.body, { subtree: true, childList: true, characterData: true }); }
+      note(); }"""
+
+    def seen_states(self, op, index):
+        return self.page.evaluate("k => (window.__synStates || {})[k] || []", f"{op}:{index}")
+
+    def controls(self, op=0):
+        box = self.operations().nth(op)
+        return {name: box.get_by_role("button", name=name, exact=True).count() for name in ("Retry", "Retry All", "Choose Files Again", "Check Again")}
+
+    # Each answer comes after the server stored the file (or with a body that cannot be read): none proves a non-write.
+    A01_VARIANTS = [
+        ("nginx-style 502 HTML", ("raw", 502, "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>", "text/html")),
+        ("nginx-style 504 HTML", ("raw", 504, "<html><head><title>504 Gateway Time-out</title></head></html>", "text/html")),
+        ("200 truncated JSON", ("raw", 200, '{"operationId":', "application/json")),
+        ("200 empty body", ("raw", 200, "", "application/json")),
+        ("200 empty object", (200, {})),
+        ("503 body cut after its headers", ("raw", 503, '{"code":"IMPORT_NOT_READY","mess', "application/json")),
+        ("malformed result (outcome only)", lambda r: (200, {"operationId": r["operation"], "index": int(r["index"]), "outcome": "stored"})),
+        ("another operation's result", lambda r: (200, file_result(str(uuid.uuid4()), int(r["index"])))),
+        ("another index's result", lambda r: (200, file_result(r["operation"], int(r["index"]) + 50))),
+        ("retryable without a code", lambda r: (503, {**file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE"), "code": None})),
+        ("retryable without a disposition", lambda r: (503, {k: v for k, v in file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE").items() if k != "writeDisposition"})),
+        ("retryable + may-have-written", lambda r: (503, file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE", disposition="may-have-written"))),
+        ("an unknown outcome", lambda r: (200, {**file_result(r["operation"], int(r["index"])), "outcome": "mystery"})),
+        ("an HTTP status the code does not have", lambda r: (200, file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE"))),
+        ("an uncoded 403", (403, {"statusCode": 403, "message": "Forbidden"})),
+        ("an undeclared code", (418, {"code": "SYN_UNDECLARED", "message": "SYN-SERVER undeclared"})),
+        ("a typed operation conflict (says nothing of the stored file)", (409, {"code": "OPERATION_CONFLICT", "message": "SYN-SERVER conflict"})),
+    ]
+
+    def test_r4_a01_an_answer_that_proves_nothing_never_says_not_sent_or_offers_retry(self):
+        """R4-A01 (I11, I13, I09, I10): the file was stored, then its answer was lost or replaced. At every update the file
+        is never Not Sent and never offers Retry / Retry All / Choose Files Again; the operation is read back by GET and the
+        stored result appears without any second POST."""
+        self.open_as(TECH, "Technician")
+        self.page.evaluate(self.WATCH)
+        self.site.import_answers = [("stored-then", v) for _, v in self.A01_VARIANTS]
+        self.choose(self.files(len(self.A01_VARIANTS)))
+        self.wait(lambda: len(self.site.imports) == len(self.A01_VARIANTS), "C-07 every file sent once, none twice", timeout=30)
+        op = self.site.imports[0]["operation"]
+        self.page.evaluate(self.WATCH)
+        self.wait(lambda: all(self.state_of(i) == "Stored" for i in range(len(self.A01_VARIANTS))), "C-07 each stored result read back by GET", timeout=30)
+        self.page.clock.run_for(60000)
+        self.settle(300)
+        for i, (label, _) in enumerate(self.A01_VARIANTS):
+            seen = self.seen_states(op, i)
+            self.assertFalse(any(s.startswith("Not Sent") for s in seen), f"C-07 {label}: never Not Sent ({seen})")
+            self.assertFalse(any(s.endswith("+Retry") for s in seen), f"C-07 {label}: never a Retry ({seen})")
+        self.assertEqual(len(self.A01_VARIANTS), len(self.site.imports), "C-07 no second POST of any file")
+        self.assertGreaterEqual(len(self.site.import_reads), 1, "C-07 the operation is read back")
+        self.assertEqual({"Retry": 0, "Retry All": 0, "Choose Files Again": 0, "Check Again": 0}, self.controls())
+
+    def test_r4_a02_missing_then_404_then_503_then_stored_by_the_status_read_only(self):
+        """R4-A02 (I14, I19): after a proxy's 502 the status says nothing of the file, then 404, then 503 (also across a
+        re-login); the file stays undecided with no Retry or Choose Files Again, and the later Stored comes by GET only."""
+        self.open_as(TECH, "Technician")
+        self.page.evaluate(self.WATCH)
+        self.site.import_answers = ["hold"]
+        self.choose(self.files(1))
+        self.wait(lambda: self.site.held_imports, "the upload")
+        op = self.site.imports[0]["operation"]
+        self.site.status_answers = [(200, {"operationId": op, "status": "open", "files": []}),
+                                    (404, {"statusCode": 404, "message": "SYN-SERVER import not found"}),
+                                    (503, {"code": "IMPORT_STORAGE_UNAVAILABLE", "message": "SYN-SERVER storage unavailable"})]
+        self.site.release_import(("raw", 502, "<html>502 Bad Gateway</html>", "text/html"))
+        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 a status without the file: undecided")
+        self.assertEqual(0, self.controls()["Retry"] + self.controls()["Choose Files Again"])
+        self.operations().first.get_by_role("button", name="Check Again").click()
+        self.wait(lambda: len(self.site.import_reads) == 2 and self.state_of(0) == "Result Unknown", "C-07 a 404: undecided")
+        # A re-login of the same person: the record is read again; nothing is sent, nothing can be chosen again.
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.page.clock.run_for(3000)
+        self.page.locator("[data-tab=Technician]").click()
+        self.wait(lambda: len(self.site.import_reads) == 3 and self.operations().count() == 1 and self.state_of(0) == "Checking",
+                  "C-07 a 503 after the re-login: not known")
+        expect(self.operations().first).to_contain_text("SYN-SERVER storage unavailable")
+        self.assertEqual(0, self.controls()["Retry"] + self.controls()["Choose Files Again"], "C-07 no Retry and no Choose Files Again")
+        self.site.import_state[op] = {0: file_result(op, 0, "stored")}
+        self.operations().first.get_by_role("button", name="Check Again").click()
+        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the stored result by GET")
+        self.assertEqual(1, len(self.site.imports), "C-07 one POST in all")
+
+    def test_r4_a02_a_malformed_or_contradicting_status_row_changes_nothing(self):
+        """R4-A02 (I16, I22): the status shows a minimal row (index + retryable only) for the lost file and a retryable row
+        for a file already Stored. The lost file stays undecided with no Retry, also after a re-login (no Choose Files
+        Again); the Stored file stays Stored."""
+        self.open_as(TECH, "Technician")
+        self.site.import_answers = ["stored", "hold"]
+        self.choose(self.files(2))
+        self.wait(lambda: self.site.held_imports, "the second upload")
+        op = self.site.imports[0]["operation"]
+        rows = [file_result(op, 0, "retryable", "ORTHANC_UNAVAILABLE", generation=2), {"index": 1, "outcome": "retryable", "generation": 5}]
+        self.site.status_answers = [(200, {"operationId": op, "status": "open", "files": rows})]   # then the record: 0 Stored, 1 absent
+        self.site.release_import(("raw", 502, "<html>502 Bad Gateway</html>", "text/html"))
+        self.wait(lambda: self.state_of(1) == "Result Unknown", "C-07 a malformed row: undecided")
+        self.assertEqual("Stored", self.state_of(0), "C-07 a final result is never taken back by a later read")
+        self.assertEqual(0, self.controls()["Retry"], "C-07 no Retry from a malformed row")
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.page.clock.run_for(3000)
+        self.page.locator("[data-tab=Technician]").click()
+        self.wait(lambda: self.operations().count() == 1 and self.state_of(1) == "Result Unknown", "C-07 still undecided after the re-login")
+        self.assertEqual(0, self.controls()["Choose Files Again"] + self.controls()["Retry"], "C-07 no Choose Files Again from a malformed row")
+        self.assertEqual(2, len(self.site.imports))
+
+    def test_r4_a03_an_older_attempt_retryable_does_not_answer_a_newer_request(self):
+        """R4-A03 (I17, I20, I21): POST 1 answers retryable generation 1; Retry sends POST 2, whose answer is lost while the
+        server still shows generation 1. That old result opens neither Retry nor (after a re-login) Choose Files Again;
+        the request's own later result (generation 2, Stored) comes by GET. Two POSTs in all."""
+        self.open_as(TECH, "Technician")
+        self.page.evaluate(self.WATCH)
+        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE", generation=1)
+        self.site.import_answers = [retryable, "abort"]
+        self.choose(self.files(1))
+        self.wait(lambda: self.state_of(0) == "Retry Needed", "the first answer: retryable")
+        op = self.site.imports[0]["operation"]
+        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
+        self.wait(lambda: len(self.site.imports) == 2, "the retry")
+        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 generation 1 does not answer the second request")
+        self.assertEqual(0, self.controls()["Retry"], "C-07 no Retry from an older attempt")
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.page.clock.run_for(3000)
+        self.page.locator("[data-tab=Technician]").click()
+        self.wait(lambda: self.operations().count() == 1 and self.state_of(0) == "Result Unknown", "C-07 still undecided after the re-login")
+        self.assertEqual(0, self.controls()["Choose Files Again"] + self.controls()["Retry"], "C-07 no Choose Files Again from an older attempt")
+        self.page.clock.run_for(60000)
+        self.settle(300)
+        self.assertEqual(2, len(self.site.imports), "C-07 no third POST")
+        self.site.import_state[op] = {0: file_result(op, 0, "stored", generation=2)}
+        self.operations().first.get_by_role("button", name="Check Again").click()
+        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the newer request's own result")
+        self.assertEqual(2, len(self.site.imports))
+
+    def test_r4_a03_a_record_that_cannot_be_updated_stops_the_dispatch(self):
+        """R4-A03 storage: with an older record that would still be read back (it knows no dispatch) and a storage that
+        refuses both the write and the removal, the retry does not go out (a re-login could otherwise reopen it); it says
+        why and can be retried once the record can be written."""
+        self.open_as(TECH, "Technician")
+        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE", generation=1)
+        self.site.import_answers = [retryable, "stored"]
+        self.choose(self.files(1))
+        self.wait(lambda: self.state_of(0) == "Retry Needed", "retryable")
+        self.page.evaluate("""() => { const p = Storage.prototype; window.__synSet = p.setItem; window.__synRemove = p.removeItem;
+          p.setItem = function () { throw new Error('SYN quota'); }; p.removeItem = function () { throw new Error('SYN blocked'); }; }""")
+        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
+        self.settle(300)
+        self.assertEqual(1, len(self.site.imports), "C-07 the dispatch stops when its record cannot be updated")
+        self.assertEqual("Not Sent", self.state_of(0), "C-07 this page's own fact: not sent")
+        self.assertIn("작업 기록을 갱신하지 못해", self.reason_of(0))
+        self.page.evaluate("() => { Storage.prototype.setItem = window.__synSet; Storage.prototype.removeItem = window.__synRemove; }")
+        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
+        self.wait(lambda: self.state_of(0) == "Stored", "the retry once the record can be written")
+        self.assertEqual(2, len(self.site.imports))
+
+    def test_r4_a04_continuation_stays_possible_only_where_a_contract_allows_it(self):
+        """R4-A04 (I06-I08, I12, I18): a typed 413/400/415 refusal is Not Sent without Retry (nothing was written, but the
+        same file would be refused alike); a complete retryable answer is Retry Needed; a settled retryable restored after
+        a re-login offers Choose Files Again, and that resend is exactly one POST of the same operation, index and bytes."""
+        self.open_as(TECH, "Technician")
+        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "STUDY_WRITE_PENDING", generation=1)
+        self.site.import_answers = [(413, {"code": "DICOM_IMPORT_TOO_LARGE", "message": "SYN-SERVER too large"}),
+                                    (400, {"code": "IMPORT_REQUEST_INVALID", "message": "SYN-SERVER invalid"}),
+                                    (415, {"code": "IMPORT_CONTENT_TYPE_UNSUPPORTED", "message": "SYN-SERVER type"}),
+                                    retryable]
+        self.choose(self.files(4))
+        self.wait(lambda: len(self.site.imports) == 4 and self.state_of(3) == "Retry Needed", "C-02 four answers, one per file")
+        retries = [self.file_row(i).get_by_role("button", name="Retry", exact=True).count() for i in range(4)]
+        self.assertEqual(["Not Sent", "Not Sent", "Not Sent", "Retry Needed"], [self.state_of(i) for i in range(4)])
+        self.assertEqual([0, 0, 0, 1], retries, "C-02 no blind Retry of an unchanged 413/400/415; Retry for retryable")
+        first = dict(self.site.imports[3])
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.page.clock.run_for(3000)
+        self.page.locator("[data-tab=Technician]").click()
+        self.wait(lambda: self.operations().count() == 1 and self.state_of(3) == "Retry Needed", "the settled retryable restored")
+        self.assertEqual(1, self.controls()["Choose Files Again"], "C-02 a settled retryable can be chosen again")
+        with self.page.expect_file_chooser() as chooser:
+            self.operations().first.get_by_role("button", name="Choose Files Again", exact=True).click()
+        chooser.value.set_files(self.files(4))
+        self.wait(lambda: len(self.site.imports) == 5, "the one resend")
+        again = self.site.imports[4]
+        self.assertEqual((first["operation"], first["index"], first["sha256"]), (again["operation"], again["index"], again["sha256"]),
+                         "C-02 the same operation, index and bytes")
+        self.wait(lambda: self.state_of(3) == "Stored", "stored")
+        self.settle(300)
+        self.assertEqual(5, len(self.site.imports), "C-02 exactly one resend")
+
+    def test_r4_a05_a_download_answer_that_proves_nothing_is_not_called_a_refusal(self):
+        """R4-A05 (I23, I25, I26, I27): an opaque preparation answer is read back by its id; a 200 grant answer without a
+        grant clicks no link and says the result is not known, never "refused"; a status about another grant changes
+        nothing; a poll deadline says only that the start could not be confirmed; Download stays for Ready."""
+        self.open_as(RAD_ONLY)
+        self.site.prepare_answers = [("prepared-then", ("raw", 502, "<html>502 Bad Gateway</html>", "text/html"))]
+        self.row_menu(h.PATIENT)
+        self.menu_item("Download Originals").click()
+        self.wait(lambda: self.site.prepares, "the preparation")
+        op = self.site.prepares[0][1]["operationId"]
+        box = self.operations().first
+        self.wait(lambda: op in self.site.download_reads, "C-06 the opaque preparation is read back by its id")
+        expect(box).to_contain_text("Ready")
+        self.assertNotIn("거절", box.inner_text(), "C-06 an opaque preparation answer is not a refusal")
+        self.site.grant_answers = [(200, {"operationId": op})]
+        reads = len(self.site.download_reads)
+        box.get_by_role("button", name="Download", exact=True).click()
+        self.wait(lambda: len(self.site.download_reads) > reads, "C-06 the state read again")
+        self.settle(300)
+        self.assertEqual([], self.downloads, "C-06 no link without a grant")
+        expect(box, "C-06 the grant result is not known").to_contain_text("권한 요청의 결과를 확인하지 못했습니다")
+        self.assertNotIn("거절", box.inner_text(), "C-06 never called refused")
+        view = download_view(op, UID_A)
+        view["archiveRequest"] = {"grantId": str(uuid.uuid4()), "state": "refused", "expiresAt": "2026-10-17T00:02:00.000Z",
+                                  "attemptId": None, "code": "MANIFEST_CHANGED", "message": "SYN-SERVER other grant"}
+        self.site.download_answers[op] = [view] * 12
+        with self.page.expect_download():
+            box.get_by_role("button", name="Download", exact=True).click()
+        for _ in range(12):
+            self.page.clock.run_for(3100)
+            self.settle(60)
+        self.assertNotIn("SYN-SERVER other grant", box.inner_text(), "C-06 a status of another grant is not this press's")
+        self.assertEqual(0, box.get_by_role("button", name="Prepare Again", exact=True).count(), "C-06 another grant's MANIFEST_CHANGED changes nothing")
+        expect(box, "C-06 a poll deadline says only that the start was not confirmed").to_contain_text("시작됐는지 확인하지 못했습니다")
+        expect(box.get_by_role("button", name="Download", exact=True)).to_be_visible()
 
     # ── C-08 normal reading ──
     def test_c08_normal_reading_sends_no_transfer_request_and_shows_no_panel(self):

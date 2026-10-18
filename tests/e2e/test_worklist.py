@@ -758,8 +758,10 @@ class WorklistE2E(unittest.TestCase):
                        "/API" + base[len("/api"):] + "/archive", base]
             for path in aliases:
                 self.assertEqual(page.request.get(origin + path + "?grant=" + grant).status, 400, "a grant outside the archive path")
-            # U4C-01: another spelling of the key (a percent-encoded letter, another case) is the same key to the API, so the
-            # proxy refuses it outside the archive path as well and logs it without the query.
+            # U4C-01: the proxy's privacy filter is broader than what the API admits. The API takes a grant only as the literal
+            # whole query `grant=<43 base64url characters>` (lower-case key, no percent or case alias); the proxy treats any
+            # spelling a receiver could decode to the key (another case, a percent-encoded letter) as a grant, refuses it
+            # outside the archive path and logs it without the query, so a mistyped grant never lands in a log (U4C3-2).
             for path, key in ((base, "%67rant="), ("/api/health", "Gr%61nt=")):
                 self.assertEqual(page.request.get(origin + path + "?" + key + grant).status, 400, "an encoded grant key outside the archive path")
             logs = subprocess.run(["docker", "compose", "logs", "--no-color", "--since", since, "proxy", "api"], cwd=ROOT,
@@ -844,6 +846,7 @@ class WorklistE2E(unittest.TestCase):
         first = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id=patient)
         data = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id=patient)
         upload = ROOT / "tmp" / ("s9u4c-" + study[-8:] + ".dcm")
+        lost_file = ROOT / "tmp" / ("s9u4c-lost-" + study[-8:] + ".dcm")
         upload.parent.mkdir(parents=True, exist_ok=True)
         upload.write_bytes(data)
         try:
@@ -901,6 +904,40 @@ class WorklistE2E(unittest.TestCase):
             [entry] = json.loads(results)
             self.assertEqual((entry["index"], entry["outcome"], entry["sha256"]), (0, "stored", hashlib.sha256(data).hexdigest()),
                              "the same operation, index and bytes were resumed")
+            # D1566 (R4-A01/A02, live): another file reaches the API and is stored, but the answer the browser gets is a
+            # proxy's 502 page. The panel never says Not Sent and never offers Retry; its status read shows Stored; the
+            # server holds one result and one original for it; the same person's new login keeps it Stored, nothing resent.
+            lost = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id=patient)
+            lost_file.write_bytes(lost)
+            posted = []
+            def replaced(route):
+                posted.append(route.request.headers.get("x-kin-operation-id"))
+                route.fetch()
+                route.fulfill(status=502, content_type="text/html", body="<html><body>502 Bad Gateway</body></html>")
+            page.evaluate("""() => { const seen = window.__s9u4States = [];
+              new MutationObserver(() => { for (const n of document.querySelectorAll('#study-transfer .study-transfer-state')) seen.push(n.textContent); })
+                .observe(document.body, { subtree: true, childList: true, characterData: true }); }""")
+            page.route("**/api/dicom-import", replaced)
+            try:
+                with page.expect_file_chooser() as chooser:
+                    page.locator("#t-import").click()
+                chooser.value.set_files(str(lost_file))
+                newest = page.locator("#study-transfer section[data-operation]").first
+                expect(newest.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Stored", timeout=60000)
+            finally:
+                page.unroute("**/api/dicom-import")
+            lost_op = newest.get_attribute("data-operation")
+            operations.append(lost_op)
+            self.assertEqual(posted, [lost_op], "one POST of the lost file")
+            self.assertNotIn("Not Sent", page.evaluate("window.__s9u4States"), "never Not Sent after a replaced answer")
+            self.assertEqual(newest.get_by_role("button", name="Retry", exact=True).count(), 0, "no Retry after a replaced answer")
+            [results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{lost_op}';")
+            [kept] = json.loads(results)
+            self.assertEqual((kept["outcome"], kept["sha256"]), ("stored", hashlib.sha256(lost).hexdigest()), "one stored result, the bytes as sent")
+            self.sign_in_again(page, "tech")
+            again = page.locator(f'#study-transfer section[data-operation="{lost_op}"]')
+            expect(again.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Stored", timeout=30000)
+            self.assertEqual(again.get_by_role("button", name="Choose Files Again", exact=True).count(), 0)
             # Another person in the same tab: the kept record is dropped and the operation is never read or shown.
             self.sign_in_again(page, "jmryu")
             before = len(seen)
@@ -910,6 +947,7 @@ class WorklistE2E(unittest.TestCase):
             self.assertIsNone(page.evaluate(f"sessionStorage.getItem('{self.TRANSFER_KEY}')"))
         finally:
             upload.unlink(missing_ok=True)
+            lost_file.unlink(missing_ok=True)
             deleted = []
             failures = s9u4_cleanup(self.stack._orthanc_request, psql, studies, operations, deleted)
             if failures:
