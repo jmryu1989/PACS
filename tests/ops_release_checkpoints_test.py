@@ -489,7 +489,7 @@ def realistic(root, checkpoint_id, *, tamper=None, layer=True, descriptor=None, 
              "ledger": (stack + "/backups/audit-ledger.json", b'{"entries":[]}\n'),
              "context": (cp.CONTEXT_FILE, cp.canonical(parts["context"]) + b"\n")}
     if cp.CHECKPOINTS[checkpoint_id]["lock"]:
-        files["lock"] = (stack + "/repo/.kin-ops.lock", (parts["state"].get("lock_token") or "").encode())
+        files["lock"] = (stack + "/repo/.kin-ops.lock", ((parts["state"].get("lock_token") if type(parts["state"]) is dict else None) or "").encode())
     bindings = {}
     for name, (rel, value) in files.items():
         path = root / rel
@@ -5971,7 +5971,7 @@ class CheckpointVerifiedCaptureTests(CaptureFixture, RefusalAssertions, TempCase
 
 
 # ── r9 (D1575, Astra r8 delta CKPT8-1/2): every JSON read on the admission and restore paths is a typed refusal ──
-# Each read of a manifest, identity, context, state, plan, target, parent or segment field reached by load_bundle /
+# Each read of a manifest, identity, context, state, plan, target, parent, segment or BOUND-index field reached by load_bundle /
 # verify_bundle, bundle_inputs, restore_checkpoint, restore_boundary, the live leaf's stored-request admission (prefix-seed,
 # prefix-verify, through the real admit_resume), parent_chain and resolve_parent/leaf_request is substituted with [], {},
 # a string and an integer (hashes and the bundle name rebound, sequential, no concurrent swap) and run through the real
@@ -5988,7 +5988,7 @@ R9_MANIFEST_FIELDS = (("checkpoint",), ("schema",), ("kind",), ("lineage",), ("e
                       ("identity", "payload_manifest_sha256"), ("identity", "source_b0_manifest_sha256"), ("identity", "segment_source_map"),
                       ("identity", "tool_files_actual_raw_sha256"))
 # Fixture-tree documents (realistic's tamper parts; the plan/target identity rebound so the field itself is read).
-R9_TREE_FIELDS = (("context", "stacks"), ("context", "b0"), ("context", "copy_dir"), ("context", "images"), ("context", "stacks", "source"),
+R9_TREE_FIELDS = (("context",), ("state",), ("context", "stacks"), ("context", "b0"), ("context", "copy_dir"), ("context", "images"), ("context", "stacks", "source"),
                   ("context", "stacks", "source", "plan_document"), ("context", "stacks", "source", "target"), ("context", "stacks", "source", "root"),
                   ("context", "stacks", "source", "plan_document", "previous"), ("context", "stacks", "source", "plan_document", "release"),
                   ("context", "stacks", "source", "plan_document", "tool"), ("context", "stacks", "source", "plan_document", "backup_root"),
@@ -6020,10 +6020,10 @@ def admission_bundle(test, checkpoint_id="source-b0", *, manifest_change=None, t
 
     def coherent(parts):
         tamper(parts)
-        descriptor = _obj_or_none(_obj_or_none(parts["context"].get("stacks")).get(stack_name))
+        descriptor = _obj_or_none(_obj_or_none(_obj_or_none(parts["context"]).get("stacks")).get(stack_name))
         if type(descriptor.get("plan_document")) is dict and type(descriptor.get("target")) is dict:
             descriptor["plan_document"]["target_manifest_sha256"] = hashlib.sha256(intro.canonical(descriptor["target"])).hexdigest()
-            descriptor["plan_sha256"] = parts["state"]["plan_sha256"] = intro.plan_identity(descriptor["plan_document"])
+            descriptor["plan_sha256"] = _obj_or_none(parts["state"])["plan_sha256"] = intro.plan_identity(descriptor["plan_document"])
         tamper(parts)   # again: a rebinding never undoes the substitution itself (state.plan_sha256)
     bundle = seal(test, test.tempdir() / "bundles", checkpoint_id, tamper=coherent if tamper else None)
     manifest = json.loads((bundle / "manifest.json").read_bytes())
@@ -6035,7 +6035,7 @@ def admission_bundle(test, checkpoint_id="source-b0", *, manifest_change=None, t
     manifest["identity"]["tool_tree_sha256_at_checkpoint"] = cp.tree_manifest_from_bytes({})["sha256"]
     if tamper:
         context = json.loads(cp.tree_member_bytes(bundle / "payload" / "fixture-tree.tar", cp.CONTEXT_FILE))
-        descriptor = _obj_or_none(_obj_or_none(context.get("stacks")).get(stack_name))
+        descriptor = _obj_or_none(_obj_or_none(_obj_or_none(context).get("stacks")).get(stack_name))
         if type(descriptor.get("plan_sha256")) is str:
             manifest["identity"]["plan_sha256"] = descriptor["plan_sha256"]
             manifest["identity"]["target_manifest_sha256"] = _obj_or_none(descriptor.get("plan_document")).get("target_manifest_sha256")
