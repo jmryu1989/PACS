@@ -64,9 +64,11 @@ def receipt_rows(baseline_p95, receipts, requests=4):
     return rows
 
 
-def run_driver(only, report, receipt=None, control_failures=(), control_cases=None):
+def run_driver(only, report, receipt=None, control_failures=(), control_cases=None, raw_summary=None, error=None,
+               capture=None):
     """Run the real performance_mutants.main on a copy of the real runtime
-    sources; only the benchmark subprocess returns the given summary."""
+    sources; only the benchmark subprocess returns the given summary (or the
+    given raw summary.json text, or raises `error`)."""
     with tempfile.TemporaryDirectory(prefix='emr-perf-driver-') as folder:
         base = Path(folder)
         (base / 'api/src/emr-runtime').mkdir(parents=True)
@@ -87,16 +89,21 @@ def run_driver(only, report, receipt=None, control_failures=(), control_cases=No
             target.mkdir(parents=True)
             candidate = Path(argv[argv.index('--candidate') + 1]) / 'api/src/emr-runtime'
             mutated.update({p.name: p.read_text(encoding='utf-8') for p in candidate.iterdir()})
-            (target / 'summary.json').write_text(json.dumps(report))
+            if error is not None:
+                raise error
+            (target / 'summary.json').write_text(json.dumps(report) if raw_summary is None else raw_summary)
             if receipt is not None:
                 (target / 'receipt.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in receipt))
             return subprocess.CompletedProcess(argv, 1 if report['failures'] else 0, '', '')
 
-        out = base / 'out'
+        out, stderr = base / 'out', io.StringIO()
         with patch.object(mutants, 'ROOT', base), patch.object(mutants.subprocess, 'run', benchmark), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
             exit_code = mutants.main(['--out', str(out), '--control', str(control), '--only', only])
         verdict = json.loads((out / 'summary.json').read_text())['results'][0]
+        if capture is not None:
+            capture.update(stderr=stderr.getvalue(), log=(out / (only + '.log')).read_text(encoding='utf-8'),
+                           invalid=json.loads((out / 'summary.json').read_text())['invalid'])
         return verdict, bool(exit_code), mutated
 
 
@@ -262,6 +269,30 @@ class PerformanceVerdictTest(unittest.TestCase):
         self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'control_failed', True))
         verdict, failed_exit, _ = run_driver('MP02', measured('sustained', 100, 100), control_cases={})
         self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'control_invalid', True))
+
+    def test_benchmark_errors_and_malformed_output_are_no_verdict(self):
+        # PERF-R1-01/02: a benchmark that cannot finish, or whose summary has the
+        # wrong shape, gives killed=None/harness_error, INVALID_CONTROL, non-zero exit.
+        missing_failures = {k: v for k, v in measured('sustained', 100, 140).items() if k != 'failures'}
+        inputs = {'timeout': dict(error=subprocess.TimeoutExpired(['benchmark'], 1200, output='partial-out', stderr='partial-err')),
+                  'oserror': dict(error=FileNotFoundError(2, 'No such file', 'python')),
+                  'cases_null': dict(raw_summary=json.dumps({'failures': [], 'cases': None, 'repetitions': 10})),
+                  'array_summary': dict(raw_summary=json.dumps([{'failures': []}])),
+                  'missing_key': dict(raw_summary=json.dumps(missing_failures)),
+                  'invalid_json': dict(raw_summary='{"failures": [')}
+        for only in ('MP02', 'MP03'):
+            for name, kwargs in inputs.items():
+                with self.subTest(mutant=only, input=name):
+                    seen = {}
+                    verdict, failed_exit, _ = run_driver(only, measured('sustained', 100, 140), capture=seen, **kwargs)
+                    self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'harness_error', True))
+                    self.assertTrue(verdict['harness_cause'])
+                    self.assertEqual(seen['invalid'], {only: 'harness_error'})
+                    self.assertIn('INVALID_CONTROL ' + only, seen['stderr'])
+                    if name == 'timeout':
+                        self.assertIn('partial-out', seen['log'])
+                        self.assertIn('partial-err', seen['log'])
+                        self.assertIn('timeout', seen['log'])
 
     # REQ-D1550 -> RISK-EMR-RECEIPT-DELAY: MP02 breaks R > 1.25 AND D > 5 ms by
     # construction (baseline <= B, every receipt >= L) or it is INVALID_CONTROL.

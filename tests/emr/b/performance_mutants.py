@@ -160,9 +160,50 @@ def delay_control_validity(receipt_rows, repetitions, bound_ms=MP02_BASELINE_P95
             'mutant_receipts': len(receipts), 'mutant_receipt_min_ms': min(receipts) if receipts else None}
 
 
+def summary_shape_error(summary):
+    """None when performance.py's summary has the containers a verdict reads:
+    a mapping with a failures list and, when present, a cases mapping."""
+    if not isinstance(summary, dict):
+        return 'summary is not a JSON object' if summary is not None else 'no summary'
+    if not isinstance(summary.get('failures'), list):
+        return 'summary failures is not a list'
+    if not isinstance(summary.get('cases', {}), dict):
+        return 'summary cases is not a JSON object'
+    return None
+
+
+def load_summary(path):
+    """(summary or None, cause or None) from the benchmark's summary.json."""
+    try:
+        summary = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None, 'summary.json missing'
+    except (OSError, ValueError) as error:
+        return None, f'summary.json unreadable: {type(error).__name__}: {error}'
+    cause = summary_shape_error(summary)
+    return (None, cause) if cause else (summary, None)
+
+
+def run_benchmark(cmd, log):
+    """Exit code of the benchmark, or None when it could not run to completion;
+    the log keeps any partial output and the cause."""
+    def text(value):
+        return value.decode('utf-8', 'replace') if isinstance(value, bytes) else (value or '')
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+    except subprocess.TimeoutExpired as error:
+        log.write_text(text(error.stdout) + text(error.stderr) + f'\nHARNESS_ERROR timeout after {error.timeout} s\n', encoding='utf-8')
+        return None, f'benchmark timed out after {error.timeout} s'
+    except OSError as error:
+        log.write_text(f'HARNESS_ERROR launch failed: {type(error).__name__}: {error}\n', encoding='utf-8')
+        return None, f'benchmark launch failed: {type(error).__name__}: {error}'
+    log.write_text(text(result.stdout) + text(result.stderr), encoding='utf-8')
+    return result.returncode, None
+
+
 def mutant_result(case, exit_code, summary, matching, validity=None):
     """(killed, status). killed is True/False only for a completed, valid run."""
-    if summary is None or exit_code not in (0, 1) or not isinstance(summary.get('failures'), list):
+    if summary_shape_error(summary) or exit_code not in (0, 1):
         return None, 'harness_error'
     if case not in LATENCY_CASES:
         return exit_code == 1 and bool(matching), 'completed'
@@ -227,24 +268,22 @@ def main(argv=None):
                 cmd += ['--image', args.image]
             if args.flock_ms is not None:
                 cmd += ['--flock-ms', str(args.flock_ms)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
-            (out / (name + '.log')).write_text(result.stdout + result.stderr, encoding='utf-8')
-            try:
-                summary = json.loads((run / 'summary.json').read_text()) if (run / 'summary.json').exists() else None
-            except ValueError:
-                summary = None
-            matching = property_failures(case, summary['failures']) if summary and isinstance(summary.get('failures'), list) else []
+            exit_code, harness_cause = run_benchmark(cmd, out / (name + '.log'))
+            summary = None
+            if harness_cause is None:
+                summary, harness_cause = load_summary(run / 'summary.json')
+            matching = property_failures(case, summary['failures']) if summary else []
             validity = None
-            if name == 'MP02':
+            if name == 'MP02' and summary is not None:
                 try:
                     receipt = [json.loads(line) for line in (run / 'receipt.jsonl').read_text().splitlines()]
                 except (OSError, ValueError) as error:
                     receipt, validity = [], {'valid': False, 'reasons': ['receipt.jsonl unreadable: ' + type(error).__name__]}
                 if validity is None:
-                    repetitions = summary.get('repetitions') if summary else None
+                    repetitions = summary.get('repetitions')
                     validity = delay_control_validity(receipt, repetitions if type(repetitions) is int else -1)
-            killed, status = mutant_result(case, result.returncode, summary, matching, validity)
-            rows.append({'id': name, 'property': case, 'behaviour': behaviour, 'exit': result.returncode, 'killed': killed,
+            killed, status = mutant_result(case, exit_code, summary, matching, validity)
+            rows.append({'id': name, 'property': case, 'behaviour': behaviour, 'exit': exit_code, 'killed': killed,
                          'status': status, 'matching_assertions': matching,
                          'other_control_failures': control['failures'],
                          'source': str(file.relative_to(candidate)), 'before_sha256': hashlib.sha256(original.encode()).hexdigest(),
@@ -252,6 +291,8 @@ def main(argv=None):
                          'failures': summary and summary.get('failures')})
             if validity is not None:
                 rows[-1]['control_validity'] = validity
+            if harness_cause is not None:
+                rows[-1]['harness_cause'] = harness_cause
             if killed is None:
                 rows[-1]['diagnosis'] = DIAGNOSIS[status]
             print(json.dumps(rows[-1]), flush=True)
@@ -262,7 +303,7 @@ def main(argv=None):
     (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     for r in rows:
         if r['killed'] is None:
-            print(f"INVALID_CONTROL {r['id']}: {r['status']}: {r.get('diagnosis')}", file=sys.stderr, flush=True)
+            print(f"INVALID_CONTROL {r['id']}: {r['status']}: {r.get('harness_cause') or r.get('diagnosis')}", file=sys.stderr, flush=True)
     return bool(summary['survived'] or summary['not_run'])
 
 
