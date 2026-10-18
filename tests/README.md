@@ -651,7 +651,7 @@ API를 mock하거나 토큰을 브라우저에 주입하지 않는다. 독립 br
 | E2E-B2-01 | BFF 로그인, HttpOnly/Secure/Strict 쿠키, 토큰 저장소 부재, UI 로그아웃 후 401 |
 | E2E-B2-02 | 검사 선택과 UID별 초안/확정본 격리 |
 | E2E-B2-03~05 | 촬영중 잠금, 기사 Verify, 응급 우회와 다른 검사 잠금 유지 |
-| E2E-B2-06 | prior 소견, 더블클릭 hpCompare, 두 UID의 frame 200과 두 캔버스 실제 픽셀 표시 |
+| E2E-B2-06 | prior 소견, Compare Images hpCompare(W5: 행 더블클릭은 영상을 열지 않음), 두 UID의 frame 200과 두 캔버스 실제 픽셀 표시 |
 | E2E-B2-07~08 | 두 계정 점유, 비관리자 메뉴 부재, 관리자 강제 해제 감사와 기존 초안 보존 |
 | E2E-B2-09~10 | 보류/Reset 사유 모달·취소 무변경·서버 사유와 승인 이력 보존 |
 | E2E-B2-11 | UI 승인 후 Save/Transcribe/Approve 비활성, 재로드 지속 |
