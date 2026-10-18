@@ -106,7 +106,8 @@ R3_MUTANTS = [
     dict(id='R3-M03-locked-body-cancel', title='only response.body.cancel (fails on a locked body), releaseLock without cancel, no abort', file=ORTHANC,
          case='W9API-25', expect='A04 get H: settles promptly', old=_OWNER_BODY, new=_LOCKED_ONLY),
     dict(id='R3-M04-return-without-await', title='return consume() without await inside the owner: cleanup cancels a valid body', file=ORTHANC,
-         case='W9API-25', expect='A01 get segmented completes',
+         # premature cleanup cuts the finite lookup body that srBytes' numpy read depends on, before that read starts
+         case='W9API-25', expect='A02 srBytes 401 U: the request reached the source',
          old='      return await consume(response,', new='      return consume(response,'),
     dict(id='R3-M05-drain-error-body', title='an error body is read to its end before the refusal', file=ORTHANC,
          case='W9API-25', expect='A02 get 401 U: settles promptly',
