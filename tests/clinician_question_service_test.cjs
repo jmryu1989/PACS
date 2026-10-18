@@ -10,9 +10,14 @@
  *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, no transaction, no write;
  *   (3) the source read fails: 503, no transaction, no write;
  *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService), and the
- *       compiled module resolves neither service's module at load or while serving every route and both list views,
- *       mine and inbox (Node's own module resolution, never a match on the compiled text: a comment naming them is the
- *       same module; a real require, at load or reached only in view=mine, is not);
+ *       compiled module depends on neither service's module (Node's own module resolution, never a match on the
+ *       compiled text), by two kinds of evidence from service_boundary_observation.cjs (W4X-03 r3, Astra consult R3-2):
+ *       a STATIC check of the ordinary direct imports, every literal require(...) call in the module's TypeScript AST
+ *       resolved from its file, wherever it sits (a real require at load, in view=mine, in a cursor page or state filter
+ *       of list, in create's error path, a TS import() compiled to CommonJS, a .js specifier is refused; a comment or an
+ *       unused string naming them is the same module), and the recording require's OBSERVATION of what is loaded at
+ *       load and over every route and both list views, mine and inbox. Not claimed: createRequire or other loaders, a
+ *       require alias that does not run, the transitive graph (limits of the check, not all of them adversarial);
  *   (5) a recording Orthanc sees only studyIdentityResources (every resource of the one study; WORKLIST-SPLIT-UID) and
  *       studyIdentities(true), and nothing at all when the
  *       policy has no metadata rule.
@@ -34,6 +39,7 @@ const { StudyAccessService } = require('/app/dist/study-access.service');
 const { OWNER_ONLY_AUDIT_ACTIONS } = require('/app/dist/pacs.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
 const { ConnectService } = require('/app/dist/connect.service');
+const { staticRequires, latentRequires } = require('./service_boundary_observation.cjs');
 
 const uid = '2.25.4242';
 const institution = 'synthetic';
@@ -210,13 +216,17 @@ const flows = async w => {
 };
 
 /**
- * The resolved-import contract (D73 section 15: Node's own module resolution, no match on source text). The compiled
- * module runs once more from the given source under a require that records the file each specifier resolves to, at load
- * and while its class serves the flows, so a lazy require is seen too. `forbidden()` lists the resolved OrthancService and
- * ConnectService modules among them.
+ * The resolved-import contract (D73 section 15: Node's own module resolution, no match on source text), two ways.
+ * `staticForbidden(source)` is the static check: the resolved OrthancService and ConnectService modules among the literal
+ * require calls of the module's TypeScript AST (an unresolvable specifier is listed too). `loadCompiled(source)` runs the
+ * module once more under a require that records the file each specifier resolves to, at load and while its class serves
+ * the flows, so an executed lazy require or alias is seen too; `forbidden()` lists the same two modules among them.
  */
 const compiledFile = require.resolve('/app/dist/clinician-question.service');
 const forbiddenFiles = ['/app/dist/orthanc.service', '/app/dist/connect.service'].map(name => require.resolve(name));
+const staticForbidden = source => staticRequires(source, compiledFile)
+  .filter(file => forbiddenFiles.includes(file) || file.startsWith('unresolved:'))
+  .map(file => file.startsWith('unresolved:') ? file : basename(file));
 function loadCompiled(source) {
   const resolved = [];
   const real = createRequire(compiledFile);
@@ -246,10 +256,15 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   assert.equal(types.includes(OrthancService), false);
   assert.equal(types.includes(ConnectService), false);
   const compiled = readFileSync(compiledFile, 'utf8');
+  // The static check reads the module's own imports: the two injected services' modules are among them.
+  const imports = staticRequires(compiled, compiledFile);
+  assert.deepEqual(['/app/dist/prisma.service', '/app/dist/study-access.service'].map(name => imports.includes(require.resolve(name))),
+    [true, true]);
   const names = 'OrthancService ConnectService ./orthanc.service ./connect.service';
   // The contrast both ways: a comment and an unused string naming both services is the same module and passes; a real
-  // require of either service module, at load or only in the clinician's own list (view=mine), is refused, however the
-  // rest of the module behaves.
+  // require of either service module, at load, only in the clinician's own list (view=mine) or in a branch these flows
+  // never run (static check only), is refused, however the rest of the module behaves.
+  const latent = latentRequires('ClinicianQuestionService', 'state');
   const variants = {
     compiled,
     named: `/* ${names} */\n${compiled}\nvoid ${JSON.stringify(names)}; // ${names}\n`,
@@ -257,21 +272,30 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
     connect: `${compiled}\nrequire("./connect.service");\n`,
     mineOrthanc: compiled + requiredInMine('ClinicianQuestionService', './orthanc.service'),
     mineConnect: compiled + requiredInMine('ClinicianQuestionService', './connect.service'),
+    ...Object.fromEntries(Object.entries(latent).map(([name, code]) => [name, compiled + code])),
   };
   const expected = await behaviour(ClinicianQuestionService);
   const seen = {};
   for (const [name, source] of Object.entries(variants)) {
     const loaded = loadCompiled(source);
     const same = await behaviour(loaded.exports.ClinicianQuestionService) === expected;
-    seen[name] = { forbidden: loaded.forbidden(), same };
+    seen[name] = { static: staticForbidden(source), forbidden: loaded.forbidden(), same };
   }
+  const none = { static: [], forbidden: [], same: true };
+  const statically = file => ({ ...none, static: [file] });
+  const loadedToo = file => ({ static: [file], forbidden: [file], same: true });
   assert.deepEqual(seen, {
-    compiled: { forbidden: [], same: true },
-    named: { forbidden: [], same: true },
-    orthanc: { forbidden: ['orthanc.service.js'], same: true },
-    connect: { forbidden: ['connect.service.js'], same: true },
-    mineOrthanc: { forbidden: ['orthanc.service.js'], same: true },
-    mineConnect: { forbidden: ['connect.service.js'], same: true },
+    compiled: none,
+    named: none,
+    orthanc: loadedToo('orthanc.service.js'),
+    connect: loadedToo('connect.service.js'),
+    mineOrthanc: loadedToo('orthanc.service.js'),
+    mineConnect: loadedToo('connect.service.js'),
+    cursorConnect: statically('connect.service.js'),
+    filterOrthanc: statically('orthanc.service.js'),
+    catchConnect: statically('connect.service.js'),
+    importConnect: statically('connect.service.js'),
+    extensionOrthanc: statically('orthanc.service.js'),
   });
 });
 

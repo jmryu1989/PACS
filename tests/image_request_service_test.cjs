@@ -12,14 +12,24 @@
  *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, no transaction, no request, receipt
  *       or audit write (create, change, replay);
  *   (3) the source read fails: 503, no transaction, no write (create, change, replay);
- *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService); the
- *       compiled module resolves neither service's module at load or while serving every route (Node's own module
- *       resolution, never a match on the compiled text), and a recording Connect store sees no call over every route: no
- *       call on the transfer, transferBasis or processingAgreement delegate (root or transaction client) and no raw
- *       statement, $queryRaw or the transaction's $executeRaw, whose SQL outside comments references the "Transfer",
- *       "TransferBasis" or "ProcessingAgreement" table; a JS comment or string, or a SQL comment, naming them all behaves
- *       the same and passes; a real require (at load or reached only in view=mine), a delegate call, a raw write or a
- *       raw read of a Connect table is refused;
+ *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService), and two
+ *       kinds of evidence, both from service_boundary_observation.cjs (W4X-03 r3, Astra consult R3-2..R3-8):
+ *       - a STATIC check of the ordinary direct imports: every literal require(...) call in the compiled module's
+ *         TypeScript AST, resolved by Node from that file, names neither service's module, wherever the call sits (a
+ *         real require at load, in view=mine, in a cursor page or kind filter of list, in create's error path, a TS
+ *         import() compiled to CommonJS, a .js specifier is refused; a JS comment or an unused string passes); the
+ *         recording require still sees an executed load or alias;
+ *       - an OBSERVATION over the executed contract matrix (every route and both list views): a recording Connect store
+ *         sees no call on the transfer, transferBasis or processingAgreement delegate of the root or transaction client,
+ *         and no raw statement of either client ($queryRaw, $executeRaw, $queryRawUnsafe, $executeRawUnsafe), assembled by
+ *         the product's Prisma and parsed by PostgreSQL's parser, reads or writes the "Transfer", "TransferBasis" or
+ *         "ProcessingAgreement" table. A statement the parser refuses is recorded too, never taken as no access. SQL
+ *         comments (line, block, nested), string literals and bound values naming those tables behave the same and pass;
+ *         a delegate call, a raw read or write (also after a '--' literal, behind `-- /*`, through Prisma.raw or a nested
+ *         Prisma.Sql, by an *Unsafe method) is refused; the service's own SET LOCAL site sending a CTE with a '--'
+ *         literal before a DELETE of "Transfer" is refused and sending `SET LOCAL application_name = '"Transfer"'` passes
+ *         (D1550). Not claimed: raw statements on paths these flows do not run, SQL built by helpers elsewhere, views or
+ *         server functions, createRequire or other loaders; these are limits of the check, not all of them adversarial;
  *   (5) a recording Orthanc sees only studyIdentityResources and studyIdentities(true) across create, accept, replay, read,
  *       forStudy, list and close, and nothing at all when the policy has no metadata rule.
  * Also pinned over the same stubs: every applied requestId replays its stored receipt without a write, after Closed and
@@ -39,6 +49,7 @@ const { StudyAccessService } = require('/app/dist/study-access.service');
 const { OWNER_ONLY_AUDIT_ACTIONS } = require('/app/dist/pacs.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
 const { ConnectService } = require('/app/dist/connect.service');
+const { Prisma, staticRequires, latentRequires, withRawExecuteText, rawStatement, sqlRelations } = require('./service_boundary_observation.cjs');
 
 const uid = '2.25.4343';
 const institution = 'synthetic';
@@ -64,7 +75,10 @@ const seeded = (n, state, revision) => ({ id: id(n), studyUid: uid, institutionI
   handlerActor: null, handlerName: null, note: null, changedBy: clinician.actor, createdAt: new Date(0), updatedAt: new Date(0) });
 // The Connect family of api/prisma/schema.prisma (contract S5-U4p section 10.2: a request is never a transfer).
 const CONNECT_DELEGATES = ['transfer', 'transferBasis', 'processingAgreement'];
-const CONNECT_TABLE = /"(?:Transfer|TransferBasis|ProcessingAgreement)"/;
+const CONNECT_TABLES = ['Transfer', 'TransferBasis', 'ProcessingAgreement'];
+// The row lock of a statement, from the parser's locking clauses (a comment saying FOR UPDATE takes no lock).
+const LOCK = { LCS_FORUPDATE: ' FOR UPDATE', LCS_FORNOKEYUPDATE: ' FOR NO KEY UPDATE', LCS_FORSHARE: ' FOR SHARE',
+  LCS_FORKEYSHARE: ' FOR KEY SHARE' };
 
 /**
  * One synthetic store: the study's owner, StudyAccessPolicy, requests, receipts and audit rows, with an ordered event log.
@@ -101,22 +115,27 @@ function world(policy, { requests = [], receipts = [], Service = ImageRequestSer
     : sql.includes('FROM "StudyImageRequest" r') ? 'list' : sql.includes('FROM "StudyImageRequest" WHERE "studyUid"') ? 'active'
       : sql.includes('FROM "StudyImageRequest" WHERE id') ? 'request' : sql.includes('"Institution"') ? 'institution'
         : sql.includes('"StudyState"') ? 'study' : 'unknown';
-  const lockOf = sql => sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR KEY SHARE') ? ' FOR KEY SHARE'
-    : sql.includes('FOR SHARE') ? ' FOR SHARE' : '';
-  // Every raw statement, read or write, passes the same observation: one whose SQL text references a Connect table is
-  // recorded, not run. The text is the tagged template's literal parts (values are bound parameters, never SQL) with the
-  // SQL comments (`-- ...` to the end of a line, `/* ... */`) removed, so a comment naming a table is not a reference.
-  const statementText = strings => strings.join('?').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
-  const connectSql = (where, sql) => {
-    if (!CONNECT_TABLE.test(sql)) return false;
-    connect.push(where + ':sql ' + sql.match(CONNECT_TABLE)[0]);
-    return true;
+  // Every raw call of either client, read or write, tagged or *Unsafe, passes one observation: the statement as the
+  // product's Prisma assembles it, parsed by PostgreSQL's parser. One that reads or writes a Connect table, or that the
+  // parser refuses, is recorded, not run; the others run on the stub (kind() routes the product's own statements).
+  const raw = async (where, method, view, index, args) => {
+    const { text, values } = rawStatement(method, args);
+    const write = method.startsWith('$execute');
+    let parsed;
+    try { parsed = await sqlRelations(text); } catch (_) { connect.push(where + ':sql unparsed'); return write ? 0 : []; }
+    const named = [...new Set(parsed.relations.filter(name => CONNECT_TABLES.includes(name)))];
+    if (named.length) {
+      for (const name of named) connect.push(where + ':sql "' + name + '"');
+      return write ? 0 : [];
+    }
+    if (write) { log(where + ':execute'); return 0; }
+    return query(where, view, index, text, values, parsed.locks);
   };
-  const query = async (where, view, index, strings, values) => {
-    const sql = statementText(strings);
-    if (connectSql(where, sql)) return [];
+  const rawMethods = (where, view, index) => Object.fromEntries(['$queryRaw', '$executeRaw', '$queryRawUnsafe', '$executeRawUnsafe']
+    .map(method => [method, (...args) => raw(where, method, view, index, args)]));
+  const query = async (where, view, index, sql, values, locks) => {
     const k = kind(sql);
-    log(where + ':' + k, lockOf(sql));
+    log(where + ':' + k, locks.map(lock => LOCK[lock]).join(''));
     let rows;
     if (k === 'advisory') rows = [{ locked: 1 }];
     else if (k === 'policy') rows = w.policyRow ? [w.policyRow] : [];
@@ -132,8 +151,7 @@ function world(policy, { requests = [], receipts = [], Service = ImageRequestSer
   };
   const client = (view, index) => ({
     ...connectDelegates('tx'),
-    $executeRaw: async strings => { if (connectSql('tx', statementText(strings))) return 0; log('tx:execute'); return 0; },
-    $queryRaw: (strings, ...values) => query('tx', view, index, strings, values),
+    ...rawMethods('tx', view, index),
     studyImageRequest: {
       create: async ({ data }) => { log('tx:write'); writes.request++; store.requests.set(data.id, { ...data }); return data; },
       update: async ({ where, data }) => {
@@ -149,7 +167,7 @@ function world(policy, { requests = [], receipts = [], Service = ImageRequestSer
   });
   const prisma = {
     ...connectDelegates('root'),
-    $queryRaw: (strings, ...values) => query('root', store, null, strings, values),
+    ...rawMethods('root', store, null),
     $transaction: async (fn, options) => {
       const index = transactions.push(options) - 1;
       if (target === 'next') target = index;
@@ -260,13 +278,17 @@ const everyRoute = async w => {
 };
 
 /**
- * The resolved-import contract (D73 section 15: Node's own module resolution, no match on source text). The compiled
- * module runs once more from the given source under a require that records the file each specifier resolves to, at load
- * and while its class serves the routes, so a lazy require is seen too. `forbidden()` lists the resolved OrthancService
- * and ConnectService modules among them.
+ * The resolved-import contract (D73 section 15: Node's own module resolution, no match on source text), two ways.
+ * `staticForbidden(source)` is the static check: the resolved OrthancService and ConnectService modules among the literal
+ * require calls of the module's TypeScript AST (an unresolvable specifier is listed too). `loadCompiled(source)` runs the
+ * module once more under a require that records the file each specifier resolves to, at load and while its class serves
+ * the routes, so an executed lazy require or alias is seen too; `forbidden()` lists the same two modules among them.
  */
 const compiledFile = require.resolve('/app/dist/image-request.service');
 const forbiddenFiles = ['/app/dist/orthanc.service', '/app/dist/connect.service'].map(name => require.resolve(name));
+const staticForbidden = source => staticRequires(source, compiledFile)
+  .filter(file => forbiddenFiles.includes(file) || file.startsWith('unresolved:'))
+  .map(file => file.startsWith('unresolved:') ? file : basename(file));
 function loadCompiled(source) {
   const resolved = [];
   const real = createRequire(compiledFile);
@@ -296,11 +318,16 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   assert.equal(types.includes(OrthancService), false);
   assert.equal(types.includes(ConnectService), false);
   const compiled = readFileSync(compiledFile, 'utf8');
+  // The static check reads the module's own imports: the two injected services' modules are among them.
+  const imports = staticRequires(compiled, compiledFile);
+  assert.deepEqual(['/app/dist/prisma.service', '/app/dist/study-access.service'].map(name => imports.includes(require.resolve(name))),
+    [true, true]);
   const names = 'OrthancService ConnectService ./orthanc.service ./connect.service "Transfer" "TransferBasis" "ProcessingAgreement"'
     + ' prisma.transfer prisma.transferBasis prisma.processingAgreement';
   // The contrast both ways: a comment and an unused string naming every forbidden service, delegate and table is the same
-  // module and passes; a real require of either service module, at load or only in the clinician's own list (view=mine),
-  // or a real Connect call, is refused.
+  // module and passes; a real require of either service module, at load, only in the clinician's own list (view=mine) or
+  // in a branch these flows never run (static check only), or a real Connect call, is refused.
+  const latent = latentRequires('ImageRequestService', 'kind');
   const variants = {
     compiled,
     named: `/* ${names} */\n${compiled}\nvoid ${JSON.stringify(names)}; // ${names}\n`,
@@ -308,6 +335,13 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
     connect: `${compiled}\nrequire("./connect.service");\n`,
     mineOrthanc: compiled + requiredInMine('ImageRequestService', './orthanc.service'),
     mineConnect: compiled + requiredInMine('ImageRequestService', './connect.service'),
+    ...Object.fromEntries(Object.entries(latent).map(([name, code]) => [name, compiled + code])),
+    // D1550 (Codex audit 2026-10-18) on the service's own SET LOCAL site: a '--' inside a literal of a CTE before a real
+    // DELETE of a Connect table, the DELETE alone, and a SET whose only mention of the table is a string literal.
+    siteLiteralThenDelete: withRawExecuteText(compiled, compiledFile,
+      `WITH marker AS (SELECT '--' AS note) DELETE FROM "Transfer" WHERE false`),
+    siteDelete: withRawExecuteText(compiled, compiledFile, 'DELETE FROM "Transfer" WHERE false'),
+    siteNameLiteral: withRawExecuteText(compiled, compiledFile, `SET LOCAL application_name = '"Transfer"'`),
   };
   const expected = await observe(ImageRequestService);
   assert.deepEqual(expected.connect, [], 'every route of the compiled service');
@@ -315,7 +349,8 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   for (const [name, source] of Object.entries(variants)) {
     const loaded = loadCompiled(source);
     const { behaviour, connect } = await observe(loaded.exports.ImageRequestService);
-    seen[name] = { forbidden: loaded.forbidden(), connect, same: behaviour === expected.behaviour };
+    seen[name] = { static: staticForbidden(source), forbidden: loaded.forbidden(), connect: [...new Set(connect)],
+      same: behaviour === expected.behaviour };
   }
   // A real Connect call from a service that otherwise behaves the same: through the injected PrismaService, a delegate
   // inside the write transaction, a raw write of a Connect table in a transaction and a raw read of one.
@@ -349,15 +384,93 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   };
   const [plain, commented] = [await observe(lockTimeout(false)), await observe(lockTimeout(true))];
   seen.sqlComments = { connect: commented.connect, same: commented.behaviour === plain.behaviour };
+  // The same two extra statements (a write in a transaction, an advisory read on the root client) sent other ways that
+  // reach no Connect table: nested comments, string literals, bound values, a Prisma.raw comment, the *Unsafe methods.
+  const extra = (execute, read) => class extends ImageRequestService {
+    constructor(prisma, access) { super(prisma, access); this.store = prisma; }
+    async create(...args) {
+      const result = await super.create(...args);
+      await this.store.$transaction(execute);
+      await read(this.store);
+      return result;
+    }
+  };
+  const lockWrite = tx => tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+  const harmless = {
+    nestedComments: extra(tx => tx.$executeRaw`SET LOCAL lock_timeout = '3s' /* a /* b */ "Transfer" */`,
+      root => root.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1}) -- /* "TransferBasis"
+        `),
+    literals: extra(tx => tx.$executeRaw`SET LOCAL application_name = '"Transfer"'`,
+      root => root.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1}) WHERE 'see "ProcessingAgreement" -- /*' IS NOT NULL`),
+    boundValues: extra(lockWrite,
+      root => root.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1}) WHERE ${'"Transfer" -- /*'}::text IS NOT NULL`),
+    sqlFragment: extra(tx => tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '3s' -- "TransferBasis"`),
+      root => root.$queryRaw(Prisma.sql`SELECT 1 FROM pg_advisory_xact_lock(${1}) ${Prisma.raw('/* "Transfer" */')}`)),
+    unsafeRead: extra(lockWrite,
+      root => root.$queryRawUnsafe('SELECT 1 FROM pg_advisory_xact_lock($1) /* "ProcessingAgreement" */', 1)),
+  };
+  seen.harmlessSql = {};
+  for (const [name, Service] of Object.entries(harmless)) {
+    const { behaviour, connect } = await observe(Service);
+    seen.harmlessSql[name] = { connect, same: behaviour === plain.behaviour };
+  }
+  // Real reads and writes of a Connect table through every raw method of both clients, and SQL the parser refuses.
+  const once = run => class extends ImageRequestService {
+    constructor(prisma, access) { super(prisma, access); this.store = prisma; }
+    async create(...args) { const result = await super.create(...args); await run(this.store); return result; }
+  };
+  const inTx = run => store => store.$transaction(run);
+  const real = {
+    literalThenRead: once(root => root.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1})
+      WHERE '--' <> (SELECT count(*) FROM "Transfer")::text`),
+    lineThenBlock: once(root => root.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1}) WHERE true -- /*
+      AND NOT EXISTS (SELECT 1 FROM "TransferBasis") -- */`),
+    prismaRaw: once(root => root.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(${1})
+      WHERE NOT EXISTS (SELECT 1 FROM ${Prisma.raw('"ProcessingAgreement"')})`),
+    nestedSql: once(inTx(tx => tx.$queryRaw(Prisma.sql`SELECT 1 WHERE EXISTS
+      ${Prisma.sql`(SELECT 1 FROM public."Transfer" WHERE id = ${'SYNTHETIC'})`}`))),
+    txQueryUnsafe: once(inTx(tx => tx.$queryRawUnsafe('SELECT id FROM "TransferBasis" WHERE id = $1', 'SYNTHETIC'))),
+    txExecuteUnsafe: once(inTx(tx => tx.$executeRawUnsafe('UPDATE "ProcessingAgreement" SET id = $1 WHERE false', 'SYNTHETIC'))),
+    rootExecute: once(root => root.$executeRaw`DELETE FROM "Transfer" WHERE id = ${'SYNTHETIC'}`),
+    rootExecuteUnsafe: once(root => root.$executeRawUnsafe('INSERT INTO "TransferBasis" (id) VALUES ($1)', 'SYNTHETIC')),
+    rootQueryUnsafe: once(root => root.$queryRawUnsafe('SELECT id FROM "ProcessingAgreement"')),
+    unparsed: once(inTx(tx => tx.$executeRaw`SET LOCAL lock_timeout = '3s' /* "Transfer"`)),
+  };
+  seen.connectSql = {};
+  for (const [name, Service] of Object.entries(real)) seen.connectSql[name] = [...new Set((await observe(Service)).connect)];
+  const none = { static: [], forbidden: [], connect: [], same: true };
+  const statically = file => ({ ...none, static: [file] });
+  const loadedToo = file => ({ ...none, static: [file], forbidden: [file] });
   assert.deepEqual(seen, {
-    compiled: { forbidden: [], connect: [], same: true },
-    named: { forbidden: [], connect: [], same: true },
-    orthanc: { forbidden: ['orthanc.service.js'], connect: [], same: true },
-    connect: { forbidden: ['connect.service.js'], connect: [], same: true },
-    mineOrthanc: { forbidden: ['orthanc.service.js'], connect: [], same: true },
-    mineConnect: { forbidden: ['connect.service.js'], connect: [], same: true },
+    compiled: none,
+    named: none,
+    orthanc: loadedToo('orthanc.service.js'),
+    connect: loadedToo('connect.service.js'),
+    mineOrthanc: loadedToo('orthanc.service.js'),
+    mineConnect: loadedToo('connect.service.js'),
+    cursorConnect: statically('connect.service.js'),
+    filterOrthanc: statically('orthanc.service.js'),
+    catchConnect: statically('connect.service.js'),
+    importConnect: statically('connect.service.js'),
+    extensionOrthanc: statically('orthanc.service.js'),
+    siteLiteralThenDelete: { ...none, connect: ['tx:sql "Transfer"'], same: false },
+    siteDelete: { ...none, connect: ['tx:sql "Transfer"'], same: false },
+    siteNameLiteral: none,
     transferring: { connect: ['tx:transfer.create', 'tx:sql "Transfer"', 'root:sql "ProcessingAgreement"'] },
     sqlComments: { connect: [], same: true },
+    harmlessSql: Object.fromEntries(Object.keys(harmless).map(name => [name, { connect: [], same: true }])),
+    connectSql: {
+      literalThenRead: ['root:sql "Transfer"'],
+      lineThenBlock: ['root:sql "TransferBasis"'],
+      prismaRaw: ['root:sql "ProcessingAgreement"'],
+      nestedSql: ['tx:sql "Transfer"'],
+      txQueryUnsafe: ['tx:sql "TransferBasis"'],
+      txExecuteUnsafe: ['tx:sql "ProcessingAgreement"'],
+      rootExecute: ['root:sql "Transfer"'],
+      rootExecuteUnsafe: ['root:sql "TransferBasis"'],
+      rootQueryUnsafe: ['root:sql "ProcessingAgreement"'],
+      unparsed: ['tx:sql unparsed'],
+    },
   });
   assert.deepEqual(plain.connect, []);
 });

@@ -24,6 +24,7 @@
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",
     "@types/node": "^22.10.2",
+    "libpg-query": "16.7.3",
     "typescript": "^5.7.2"
   }
 }
