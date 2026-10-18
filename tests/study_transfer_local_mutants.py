@@ -106,6 +106,11 @@ MUTANTS = [
      "          entry.state = 'unresolved';\n          entry.message = TEXT.pending;",
      "          entry.state = 'notSent';\n          entry.message = '';",
      "test_c07_a_status_read_without_the_file_leaves_it_undecided", "C-07"),
+    # SRU4R3-4 (F4): files restored after a new login made sendable again without any server result.
+    ("restored-file-read-as-not-sent", ASSET,
+     "op.files.push(fileEntry(op, f.index, null, String(f.name ?? ''), Number(f.size) || 0, 'unknown'));",
+     "op.files.push(fileEntry(op, f.index, null, String(f.name ?? ''), Number(f.size) || 0, 'notSent'));",
+     "test_c07_a_file_restored_after_a_new_login_without_a_server_result_stays_undecided", "C-07"),
     # The grant lives in memory and the one link only.
     ("grant-kept-in-storage", ASSET,
      "      link.href = base + '?grant=' + encodeURIComponent(grant);\n      grant = null;",

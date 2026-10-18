@@ -600,9 +600,7 @@ window.KinStudyTransferLocal = function (app) {
       }
       if (!grant) {
         // A lost answer or a refusal starts nothing: the operation's state is read again, and Download asks anew.
-        op.notice = failed ? TEXT.lost : answer.body?.message || TEXT.httpFailure(answer.status);
-        if (!failed && answer.body?.code === 'MANIFEST_CHANGED') op.manifestChanged = true;
-        render();
+        op.notice = failed ? TEXT.lost : answer.body?.message || TEXT.httpFailure(answer.status);        render();
         // The notice is the answer to this press; the read that follows keeps it unless the server has its own to say.
         readDownload(op, false, true);
         return;

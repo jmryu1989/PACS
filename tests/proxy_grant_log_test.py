@@ -214,6 +214,22 @@ class Proxy:
         finally:
             connection.close()
 
+    def raw(self, port, data):
+        """Bytes as written on one connection; the answer's status code (444 = closed without an answer)."""
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(data)
+            answer = b""
+            try:
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    answer += chunk
+            except (socket.timeout, ConnectionResetError):
+                pass
+        if not answer:
+            return 444
+        return int(answer.split(b"\r\n", 1)[0].split()[1])
     def stop(self):
         try:
             subprocess.run(self.base + ["-s", "quit"], capture_output=True, timeout=15)
@@ -299,16 +315,61 @@ class GrantLogTests(unittest.TestCase):
                 self.assertEqual([], reached)
                 self.assertNothingCarries(separator + key, value, lines, error, location)
 
-    def test_http_to_https_redirect_never_carries_a_grant_and_keeps_an_ordinary_query(self):
+    def test_http_to_https_redirect_never_carries_a_grant_and_drops_every_query(self):
         for key in KEY_SPELLINGS:
             with self.subTest(key=key):
                 code, location, value, lines, error, reached = self.send(ARCHIVE, key=key, port=self.proxy.p80)
                 self.assertEqual(400, code, "DG-T05 a grant key over HTTP is refused, never redirected")
                 self.assertEqual("", location)
                 self.assertNothingCarries("http " + key, value, lines, error, location)
+        # SRU4R3-3: other positions and spellings on port 80 - refused when the request line names the word, and any other
+        # redirect carries the path only (the query is dropped), so no value reaches a Location.
+        for target in ("??grant={V}", "?%20grant={V}", "?+grant={V}", "?a[grant={V}", "?q=grant={V}", "/grant={V}", ";grant={V}",
+                       "%3Fgrant={V}", "?%25%36%37rant={V}", "?x={V}"):
+            with self.subTest(target=target):
+                type(self).count += 1
+                value = marker(type(self).count)
+                path = ARCHIVE + target.replace("{V}", value)
+                before, _ = self.proxy.logs()
+                code, location = self.proxy.get(self.proxy.p80, self.host, path)
+                time.sleep(0.1)
+                access, error = self.proxy.logs()
+                self.assertIn(code, (301, 400), target)
+                if code == 301:
+                    self.assertTrue(location.endswith(ARCHIVE) or "?" not in location, "SRU4R3-3 the redirect drops the query: " + location)
+                if target.startswith(("/", ";", "%3F")):
+                    # The value is in the path itself: refused and never redirected; an access log line records the path it
+                    # was asked for (the API never takes a grant from a path - only from the literal query `grant=`).
+                    self.assertEqual((400, ""), (code, location), "SRU4R3-3 a path naming the word is refused over HTTP")
+                    self.assertNotIn(value, error, "the error log")
+                else:
+                    self.assertNothingCarries("http80 " + target, value, access[len(before):], error, location)
         code, location = self.proxy.get(self.proxy.p80, self.host, "/api/health?q=1")
-        self.assertEqual((301, True), (code, location.endswith("/api/health?q=1")), "an ordinary redirect keeps its query")
+        self.assertEqual((301, True), (code, location.endswith("/api/health")), "an ordinary redirect keeps its path, never its query")
 
+    def test_requests_nginx_ends_while_reading_them_log_no_grant(self):
+        """SRU4R3-1/2: a request refused while its header or URI is read (bad header line, duplicate Host, header or cookie
+        over the buffers, a URI over the buffers) never reaches the rewrite phase; no access or error log line (notice)
+        may carry its grant - on the canonical archive, the status path and over HTTP."""
+        cases = [("bad header line", b"Bad Header Line\r\n", ""), ("duplicate Host", b"Host: x.test\r\n", ""),
+                 ("494 big header", b"X-Big: " + b"b" * 9000 + b"\r\n", ""), ("494 big cookie", b"Cookie: kin_sid=" + b"c" * 9000 + b"\r\n", ""),
+                 ("414 long URI", b"", "&pad=" + "a" * 9000)]
+        for path in (ARCHIVE, STATUS_PATH):
+            for port in (self.proxy.p443, self.proxy.p80):
+                for label, extra, tail in cases:
+                    with self.subTest(path=path, port=port, case=label):
+                        type(self).count += 1
+                        value = marker(type(self).count)
+                        before, error_before = self.proxy.logs()
+                        head = f"GET {path}?grant={value}{tail} HTTP/1.1\r\nHost: {self.host}\r\nConnection: close\r\n".encode()
+                        code = self.proxy.raw(port, head + extra + b"\r\n")
+                        for _ in range(40):
+                            access, error = self.proxy.logs()
+                            if len(access) > len(before):
+                                break
+                            time.sleep(0.025)
+                        self.assertIn(code, (400, 414, 494), label)
+                        self.assertNothingCarries(f"{label} {port} {path}", value, access[len(before):], error[len(error_before):], "")
     def test_ordinary_requests_keep_the_image_log_with_their_query_and_a_value_is_not_a_key(self):
         before, _ = self.proxy.logs()
         upstream_before = len(Upstream.seen)

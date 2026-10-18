@@ -5027,3 +5027,44 @@ test('S9U4-B84 U4C-05 DG-T03 a right lost between the start\'s preflight and its
     assert.equal(h.s.op(id).status, 'sent');
   }
 });
+
+test('S9U4-B85 SRU4R3-7 the archive start is the operation\'s own study only: a route Study UID other than the operation\'s is the operation\'s 404 at the preflight, and an operation row whose Study UID differs from the route\'s when the consume lock answers is refused there - no grant use, no attempt, no intent, byte 0', async () => {
+  // Bearer: the route's UID differs from the operation's from the start.
+  const h = await harness();
+  const a = await downloadStudy(h, 1), b = await downloadStudy(h, 1);
+  const id = randomUUID();
+  assert.equal((await prepare(h, a, id)).status, 200);
+  const wrong = await h.request('GET', archivePath(b, id), { as: RAD });
+  assert.deepEqual([wrong.status, String(wrong.headers['content-type']).startsWith('application/zip')], [404, false], 'another study\'s route: 404, byte 0');
+  // The row's Study UID seen differently once the lock answers (Bearer, then a grant).
+  for (const viaGrant of [false, true]) {
+    const g = viaGrant ? await harness({ realGuard: true }) : h;
+    if (viaGrant) sessionOf(g, 'sid-uid');
+    const sa = viaGrant ? await downloadStudy(g, 1) : a, sb = viaGrant ? await downloadStudy(g, 1) : b;
+    const op = viaGrant ? await boundPrepare(g, sa, 'sid-uid') : randomUUID();
+    if (!viaGrant) assert.equal((await prepare(g, sa, op)).status, 200);
+    const raw = viaGrant ? (await grantRequest(g, sa, op, 'sid-uid')).body.grant : null;
+    // A well-formed row of the same owner prepared for study B stands in for the operation's row once the lock answers
+    // (a row that is not well formed would be the store-format 503 first).
+    const other = viaGrant ? await boundPrepare(g, sb, 'sid-uid') : randomUUID();
+    if (!viaGrant) assert.equal((await prepare(g, sb, other)).status, 200);
+    const row = g.s.ops.get(op), original = JSON.parse(JSON.stringify(row));
+    let swapped = false;
+    g.s.onQuery = async (sql, values, tx) => {
+      if (!swapped && tx && sql.includes('SELECT * FROM "ImportOperation"') && values.includes(op)) {
+        swapped = true; Object.assign(row, JSON.parse(JSON.stringify(g.s.ops.get(other))), { id: op });
+      }
+    };
+    let r;
+    try { r = viaGrant ? await nativeGet(g, sa, op, raw, 'sid-uid') : await g.request('GET', archivePath(sa, op), { as: RAD }); }
+    finally { g.s.onQuery = null; for (const k of Object.keys(row)) delete row[k]; Object.assign(row, original); }
+    await sleep(80);
+    const label = viaGrant ? 'grant' : 'bearer';
+    assert.ok(swapped, label + ': the row changed when the lock answered');
+    assert.deepEqual([r.status, String(r.headers['content-type']).startsWith('application/zip')], [404, false], label + ': refused under the lock, byte 0');
+    const d = g.s.op(op).download;
+    assert.deepEqual([d.attempts.length, (d.archiveGrantUses ?? []).length, audits(g.s, 'original.download.intent').filter(x => x.detail.operationId === op).length, g.s.op(op).status],
+      [0, 0, 0, 'prepared'], label + ': nothing consumed or opened');
+  }
+  assert.equal(audits(h.s, 'original.download.intent').length, 0, 'no intent at all in the bearer harness');
+});

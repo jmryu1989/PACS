@@ -64,7 +64,20 @@ MUTANTS = [
      "          if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');\n"
      "          await this.ownStudyLocked(tx, uid, c);\n",
      "", "S9U4-B84"),
-    # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
+    # SRU4R3-7: the operation's own Study UID checked against the route's - under the consume lock (S2), and also at the
+    # preflight (S2b: both removed; a list of replacements is applied together).
+    ("S2-no-route-uid-check-under-the-lock", SERVICE,
+     "        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
+     "        if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw",
+     "        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
+     "        if (!op || !this.ownsDownload(op, owner)) throw", "S9U4-B85"),
+    ("S2b-no-route-uid-check-anywhere", SERVICE,
+     ["        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
+      "        if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw",
+      "    try {\n      if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw"],
+     ["        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
+      "        if (!op || !this.ownsDownload(op, owner)) throw",
+      "    try {\n      if (!op || !this.ownsDownload(op, owner)) throw"], "S9U4-B85"),    # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
     # the start of an operation prepared before its Study UID became split would go on.
     ("M-WSU-19-download-source-check-skipped", SERVICE,
      "    this.studyAccess.assertUnsplitSource(c, uid);\n", "", "S9U4-B81"),
@@ -115,9 +128,11 @@ def main():
         shutil.copytree(ROOT / "api/src", src)
         target = src / file
         source = target.read_text(encoding="utf-8")
-        if source.count(old) != 1:
-            raise AssertionError("mutation location not unique: " + label)
-        target.write_text(source.replace(old, new, 1), encoding="utf-8", newline="\n")
+        for one_old, one_new in zip(*((old, new) if isinstance(old, list) else ([old], [new]))):
+            if source.count(one_old) != 1:
+                raise AssertionError("mutation location not unique: " + label)
+            source = source.replace(one_old, one_new, 1)
+        target.write_text(source, encoding="utf-8", newline="\n")
         code, text, seconds = run_case(node, src, [case], out / f"{label}.log")
         failed = re.search(r"^# fail (\d+)", text, re.M)
         kill = code != 0 and failed is not None and int(failed.group(1)) >= 1 and "ERR_ASSERTION" in text and "TypeError" not in text

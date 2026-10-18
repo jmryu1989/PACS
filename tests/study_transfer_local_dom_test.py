@@ -856,6 +856,33 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual(0, self.operations().count(), "C-07 nor sees it")
         self.assertIsNone(self.page.evaluate("sessionStorage.getItem('kin-study-transfer-local')"), "its record is dropped")
 
+    def test_c07_a_file_restored_after_a_new_login_without_a_server_result_stays_undecided(self):
+        """SRU4R3-4: the same person signs in again while a file's request was still out. The restored operation is read;
+        the server shows file 0 and nothing yet for file 1. File 1 is undecided - never Not Sent, no Choose Files Again,
+        no Retry - and nothing is sent by itself."""
+        self.open_as(TECH, "Technician")
+        self.site.import_answers = ["stored", "hold"]
+        self.choose(self.files(2))
+        self.wait(lambda: self.site.held_imports, "the second upload")
+        op = self.site.held_imports[0][1]["operation"]
+        self.site.held_imports.clear()
+        reads = len(self.site.import_reads)
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.page.clock.run_for(3000)
+        self.wait(lambda: len(self.site.import_reads) > reads, "C-07 the restored operation is read")
+        self.page.locator("[data-tab=Technician]").click()
+        self.wait(lambda: self.operations().count() == 1 and self.state_of(0) == "Stored", "the restored operation")
+        self.wait(lambda: self.state_of(1) == "Result Unknown", "C-07 a restored file without a server result stays undecided")
+        box = self.operations().first
+        self.assertEqual(0, box.get_by_role("button", name="Choose Files Again").count(), "C-07 no Choose Files Again on absence")
+        self.assertEqual(0, box.get_by_role("button", name="Retry").count(), "C-07 no Retry on absence")
+        self.assertNotIn("Not Sent", box.inner_text(), "C-07 never Not Sent")
+        self.page.clock.run_for(60000)
+        self.settle(300)
+        self.assertEqual(2, len(self.site.imports), "C-07 nothing sent by itself")
+        self.assertEqual(op, self.site.import_reads[-1])
+
     # ── C-08 normal reading ──
     def test_c08_normal_reading_sends_no_transfer_request_and_shows_no_panel(self):
         self.open_as(RAD_TECH)

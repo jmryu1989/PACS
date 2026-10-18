@@ -880,14 +880,15 @@ class WorklistE2E(unittest.TestCase):
             # A network error on the retry: the session stays and the operation is read back, nothing guessed or re-sent.
             page.route("**/api/dicom-import", lambda route: route.abort("connectionreset"))
             row.get_by_role("button", name="Retry", exact=True).click()
-            expect(row.locator(".study-transfer-state")).to_have_text(re.compile("Retry Needed|Not Sent"), timeout=30000)
+            # The server record says retryable: exactly Retry Needed (r3: a lost answer is never shown Not Sent, U4C-03b).
+            expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed", timeout=30000)
             page.unroute("**/api/dicom-import")
             self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "a network error never logs out")
             # The same person signs in again in this tab: the operation is read with the new session and resumed.
             self.sign_in_again(page, "tech")
             expect(page.locator("#study-transfer section[data-operation]")).to_have_count(1, timeout=30000)
             row = page.locator('#study-transfer li[data-index="0"]')
-            expect(row.locator(".study-transfer-state")).to_have_text(re.compile("Retry Needed|Not Sent"))
+            expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed")
             # The other worker finishes: its stored result and the free claims come back exactly as they were.
             psql(f"UPDATE \"ImportOperation\" SET results = '{quote(original)}'::jsonb, status = 'settled' WHERE id='{held_op}';")
             psql("UPDATE \"ImportOperation\" SET claim = jsonb_set(claim, '{heldByAttemptId}', 'null') "
