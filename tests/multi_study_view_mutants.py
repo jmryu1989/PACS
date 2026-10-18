@@ -85,13 +85,13 @@ _CALLS = {
     'lookupInstance': "    return this.withSourceResponse('/tools/lookup', {",
 }
 _STOP_FROM = '    const stop = () => {'
-_FINALLY_TO = '      if (reader) { await reader.cancel().catch(() => {}); try { reader.releaseLock(); } catch { /* already released */ } }\n    }\n'
+_FINALLY_TO = '        try { reader.releaseLock(); } catch { /* already released */ }\n      }\n    }\n'
 _OWNER_BODY = _OR[_OR.index(_STOP_FROM):_OR.index(_FINALLY_TO) + len(_FINALLY_TO)]
 _LOCKED_ONLY = _OWNER_BODY.replace(
     '      controller.abort();\n      const cancelling = reader ? reader.cancel() : response?.body && !response.body.locked ? response.body.cancel() : undefined;\n'
     '      void cancelling?.catch(() => {});\n',
     '      void response?.body?.cancel().catch(() => {});\n', 1).replace(
-    _FINALLY_TO, '      if (reader) { try { reader.releaseLock(); } catch { /* already released */ } }\n    }\n', 1)
+    '        if (!complete) await reader.cancel().catch(() => {});\n', '', 1)
 _VJ_FROM = '    const bounds = OrthancService.readLimit(signal, () => { timedOut = true; }), bound = bounds.signal;'
 _RL_TO = "    return { signal: bound.signal, release: () => { clearTimeout(timer); signal?.removeEventListener('abort', follow); } };"
 _VJ_SPAN = _OR[_OR.index(_VJ_FROM):_OR.index(_RL_TO) + len(_RL_TO)]
@@ -102,20 +102,20 @@ R3_MUTANTS = [
            case='W9API-25', expect=f'A02 {name} 401 U: body and socket close', **_leaky_for(call)) for name, call in _CALLS.items()],
     dict(id='R3-M02-reader-only', title='reader-only cleanup: an error Response before any reader is dropped', file=ORTHANC,
          case='W9API-25', expect='A02 get 401 U: body and socket close',
-         old="      signal?.removeEventListener('abort', stop);\n      stop();\n", new="      signal?.removeEventListener('abort', stop);\n"),
+         old='      if (!complete) stop();\n', new=''),
     dict(id='R3-M03-locked-body-cancel', title='only response.body.cancel (fails on a locked body), releaseLock without cancel, no abort', file=ORTHANC,
          case='W9API-25', expect='A04 get H: settles promptly', old=_OWNER_BODY, new=_LOCKED_ONLY),
     dict(id='R3-M04-return-without-await', title='return consume() without await inside the owner: cleanup cancels a valid body', file=ORTHANC,
          case='W9API-25', expect='A01 get segmented completes',
-         old='      return await consume(owned,', new='      return consume(owned,'),
+         old='      return await consume(response,', new='      return consume(response,'),
     dict(id='R3-M05-drain-error-body', title='an error body is read to its end before the refusal', file=ORTHANC,
          case='W9API-25', expect='A02 get 401 U: settles promptly',
          old='      if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);\n      return OrthancService.jsonBody(res, read, owned);\n    }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));\n  }\n\n  /**\n   * 서버',
          new='      if (!res.ok) { await res.text(); throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`); }\n      return OrthancService.jsonBody(res, read, owned);\n    }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));\n  }\n\n  /**\n   * 서버'),
     dict(id='R3-M06-detach-at-headers', title='the caller signal is detached once the headers arrive', file=ORTHANC,
          case='W9API-25', expect='A04 get U: settles promptly',
-         old='      const owned = response;\n      controller.signal.throwIfAborted();',
-         new="      signal?.removeEventListener('abort', stop);\n      const owned = response;\n      controller.signal.throwIfAborted();"),
+         old='      controller.signal.throwIfAborted();\n      return await consume(response,',
+         new="      signal?.removeEventListener('abort', stop);\n      controller.signal.throwIfAborted();\n      return await consume(response,"),
     dict(id='R3-M07-refresh-per-chunk', title='the 5 s read limit restarts at every body chunk', file=ORTHANC,
          case='W9API-25', expect='A04 the 5 s bound ends a trickle: settles promptly', old=_VJ_SPAN, new=_VJ_REFRESH),
     dict(id='R3-M08-resolve-finally-timers-only', title='the resolve exit only clears timers and leaves its source signals active', file=SERVICE,
@@ -130,7 +130,7 @@ R3_MUTANTS = [
          new="    signal?.addEventListener('abort', stop, { once: true });\n    try {\n      try {\n"),
     dict(id='R3-M14-gc-only', title='no deterministic cleanup at all: release left to GC', file=ORTHANC,
          case='W9API-25', expect='A02 get 401 U: body and socket close',
-         old="    } finally {\n      signal?.removeEventListener('abort', stop);\n      stop();\n" + _FINALLY_TO[:_FINALLY_TO.index('\n    }\n') + 1] + '    }\n',
+         old=_OR[_OR.index("    } finally {\n      signal?.removeEventListener('abort', stop);\n"):_OR.index(_FINALLY_TO) + len(_FINALLY_TO)],
          new='    } finally { /* GC only */ }\n'),
 ]
 

@@ -661,7 +661,7 @@ test('W9API-17 A-03 Orthanc read: the named display tags, every resource row, an
     }
     const rows = { one: [sourceRow(uid)], two: [sourceRow(uid), sourceRow(uid, { pid: 'SYN-PID-2' })], none: [],
       foreign: [sourceRow(uid), sourceRow(other)], malformed: { rows: [] } }[mode];
-    res.end(JSON.stringify(rows));
+    res.setHeader('connection', 'close'); res.end(JSON.stringify(rows));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
@@ -760,14 +760,14 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
     if (mode === 'served-body' && req.url === '/tools/find') { setTimeout(() => answerFind(res), 6000); return; }
     // served-body: the first member's served read answers; the second one is held until the sub-cut cancels it
     if (mode === 'served-body' && new URL(req.url, 'http://x').searchParams.get('StudyInstanceUID') === found[0].uid) {
-      call.answered = true; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify([sourceRow(found[0].uid)])); return;
+      call.answered = true; res.writeHead(200, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify([sourceRow(found[0].uid)])); return;
     }
-    res.writeHead(200, { 'content-type': 'application/json' });
+    res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
     if (mode === 'body' || mode === 'served-body') { res.write('['); return; }
     answerFind(res);
   });
   const answerFind = res => {
-    if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+    if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
     res.end(JSON.stringify(found.map(s => ({ RequestedTags: { StudyInstanceUID: s.uid, InstitutionName: 'SYN HOSPITAL A',
       PatientID: 'SYN-PID-1', StudyDate: '20261001', ModalitiesInStudy: 'CT' } }))));
   };

@@ -10,6 +10,9 @@ function isStudyLookupKey(value: unknown): value is string {
     && !reservedStudyKeys.has(value);
 }
 
+/** What a source consumer may do with the owned body: read it. The owner keeps the reader itself. */
+type SourceReader = { read(): Promise<ReadableStreamReadResult<Uint8Array>> };
+
 // S7-U4a header reads put an Orthanc resource id into a path: only Orthanc's own id shape passes.
 const ORTHANC_RESOURCE_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
 function orthancResourceId(value: unknown): string {
@@ -57,16 +60,22 @@ export class OrthancService {
    * fetch follows its signal only weakly, and an abort alone was observed not to reach the connection
    * (tmp/w9-api/runs/r9-counterexample-signal-only). A consumer reads only through `read()` and calls
    * `signal.throwIfAborted()` after its read loop, since a cancelled reader ends like a finished body.
+   * A body read to its end (or a response without one) is complete and is not aborted afterwards: its connection may go
+   * back to the pool (D1562: returning a fully consumed connection is valid).
    */
   private async withSourceResponse<T>(path: string, init: RequestInit, signal: AbortSignal | undefined,
-      consume: (response: Response, read: () => ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) => Promise<T>,
+      consume: (response: Response, read: () => SourceReader, signal: AbortSignal) => Promise<T>,
       transport?: (error: any) => Error): Promise<T> {
     const controller = new AbortController();
-    let response: Response | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let response: Response | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined, drained = false;
     const stop = () => {
       controller.abort();
       const cancelling = reader ? reader.cancel() : response?.body && !response.body.locked ? response.body.cancel() : undefined;
       void cancelling?.catch(() => {});
+    };
+    const read = (): SourceReader => {
+      const owned = (reader = response!.body!.getReader());
+      return { read: async () => { const part = await owned.read(); if (part.done) drained = true; return part; } };
     };
     if (signal?.aborted) controller.abort();
     else signal?.addEventListener('abort', stop, { once: true });
@@ -75,18 +84,21 @@ export class OrthancService {
         controller.signal.throwIfAborted();
         response = await fetch(this.base + path, { ...init, signal: controller.signal });
       } catch (error) { throw transport ? transport(error) : error; }
-      const owned = response;
       controller.signal.throwIfAborted();
-      return await consume(owned, () => (reader = owned.body!.getReader()), controller.signal);
+      return await consume(response, read, controller.signal);
     } finally {
       signal?.removeEventListener('abort', stop);
-      stop();
-      if (reader) { await reader.cancel().catch(() => {}); try { reader.releaseLock(); } catch { /* already released */ } }
+      const complete = !controller.signal.aborted && (drained || (response !== undefined && !response.body));
+      if (!complete) stop();
+      if (reader) {
+        if (!complete) await reader.cancel().catch(() => {});
+        try { reader.releaseLock(); } catch { /* already released */ }
+      }
     }
   }
 
   /** The whole body through the owner's reader, decoded by native Response.json (the same JSON semantics as before). */
-  private static async jsonBody(response: Response, read: () => ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) {
+  private static async jsonBody(response: Response, read: () => SourceReader, signal: AbortSignal) {
     if (!response.body) return response.json();
     const reader = read(), chunks: Uint8Array[] = [];
     for (let part = await reader.read(); !part.done; part = await reader.read()) chunks.push(part.value);
