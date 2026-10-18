@@ -2129,8 +2129,10 @@ function contractSuite() {
     const diagnostics = fixtures.map(file => {
       const source = program.getSourceFile(file);
       assert(source, 'fixture in the program: ' + file);
-      return ts.getPreEmitDiagnostics(program, source).map(d => ({ code: d.code, line: source.getLineAndCharacterOfPosition(d.start).line + 1,
-        text: ts.flattenDiagnosticMessageText(d.messageText, '\n').split('\n')[0].slice(0, 120) }));
+      // The file's own syntactic and semantic diagnostics (each has a position); only code, line and a short text leave.
+      return [...program.getSyntacticDiagnostics(source), ...program.getSemanticDiagnostics(source)]
+        .map(d => ({ code: d.code, line: d.file && d.start !== undefined ? d.file.getLineAndCharacterOfPosition(d.start).line + 1 : 0,
+          text: ts.flattenDiagnosticMessageText(d.messageText, '\n').split('\n')[0].slice(0, 120) }));
     });
     const marked = fs.readFileSync(fixtures[0], 'utf8').split(/\r?\n/).map((text, index) => (/\/\/ refused$/.test(text) ? index + 1 : 0)).filter(Boolean);
     assert(marked.length >= 10, 'the forbidden fixture marks its refused lines: ' + marked.length);
