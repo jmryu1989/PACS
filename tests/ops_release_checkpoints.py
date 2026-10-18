@@ -2174,10 +2174,19 @@ def bundle_inputs(manifest, bundle_dir):
     """Before any restore: recompute the plan, target and both B0 identities from the actual bytes inside the fixture
     member and compare them with the manifest identity, the stack descriptor and the bound state (never one claimed hash
     against another). Every plan-dependent path must lie inside the absolute fixture root the bundle carries; another
-    input refuses (PLAN_INPUT_OUTSIDE). Returns the recomputed facts."""
+    input refuses (PLAN_INPUT_OUTSIDE). Returns the recomputed facts. r8 (SRCK8-1, the CKPT7-02 rule): every field read
+    here is type-checked before it is used - a source-b0 bundle has no writable layer, and the layer judgement reads no
+    B0 field, so a mistyped context or state field reaches this function from an accepted bundle - and a mistyped one is
+    BUNDLE_INPUT_MISMATCH, never a TypeError or AttributeError."""
+    def mismatch(condition, what):
+        require(condition, "BUNDLE_INPUT_MISMATCH", what)
+    mismatch(type(manifest) is dict and type(manifest.get("identity")) is dict and type(manifest.get("checkpoint")) is str
+             and manifest["checkpoint"] in CHECKPOINTS
+             and all(_binding(_obj(manifest.get("bindings")).get(name)) for name in ("context", "state")),
+             "the manifest's identity, checkpoint or context/state bindings")
     identity, checkpoint = manifest["identity"], manifest["checkpoint"]
     tree = Path(bundle_dir) / "payload" / "fixture-tree.tar"
-    root = identity["absolute_fixture_root"]
+    root = identity.get("absolute_fixture_root")
 
     def member(rel, what):
         raw = tree_member_bytes(tree, rel)
@@ -2192,52 +2201,64 @@ def bundle_inputs(manifest, bundle_dir):
 
     context = document(manifest["bindings"]["context"]["path"], "context")
     require(type(context) is dict and set(context) == CONTEXT_KEYS, "BUNDLE_INPUT_MISMATCH", "context keys")
-    descriptor = (context["stacks"] or {}).get(LINEAGE_STACK[checkpoint])
+    mismatch(type(context["stacks"]) is dict, "the context's stacks are not an object")
+    descriptor = context["stacks"].get(LINEAGE_STACK[checkpoint])
     require(type(descriptor) is dict and type(descriptor.get("plan_document")) is dict, "BUNDLE_INPUT_MISMATCH",
             "no plan for the " + LINEAGE_STACK[checkpoint] + " stack")
+    mismatch(type(descriptor.get("target")) is dict, "the " + LINEAGE_STACK[checkpoint] + " stack has no target document")
     plan, target = descriptor["plan_document"], descriptor["target"]
     plan_sha = intro.plan_identity(plan)
     state = document(manifest["bindings"]["state"]["path"], "state")
-    require(plan_sha == descriptor["plan_sha256"] == identity["plan_sha256"] == state.get("plan_sha256"), "BUNDLE_INPUT_MISMATCH",
+    mismatch(type(state) is dict, "the bound state is not an object")
+    require(plan_sha == descriptor.get("plan_sha256") == identity.get("plan_sha256") == state.get("plan_sha256"), "BUNDLE_INPUT_MISMATCH",
             "the plan bytes, the descriptor, the state and the identity name different plans")
     target_sha = sha256(intro.canonical(target))
-    require(target_sha == plan["target_manifest_sha256"] == identity["target_manifest_sha256"], "BUNDLE_INPUT_MISMATCH",
+    require(target_sha == plan.get("target_manifest_sha256") == identity.get("target_manifest_sha256"), "BUNDLE_INPUT_MISMATCH",
             "the target document differs from the plan and the identity")
-    require(plan["tool"] == identity["tool_files_actual_raw_sha256"], "BUNDLE_INPUT_MISMATCH", "the plan binds other tool files")
-    images = identity["image_ids"]
+    require(plan.get("tool") == identity.get("tool_files_actual_raw_sha256"), "BUNDLE_INPUT_MISMATCH", "the plan binds other tool files")
+    images = _obj(identity.get("image_ids"))
     require(context["images"] == {"previous": images.get("previous"), "release": images.get("release")}
-            and plan["previous"]["images"] == images.get("previous") and plan["release"]["images"] == images.get("release"),
+            and _obj(plan.get("previous")).get("images") == images.get("previous") and _obj(plan.get("release")).get("images") == images.get("release"),
             "BUNDLE_INPUT_MISMATCH", "image IDs differ between the context, the plan and the identity")
+    # The B0 records are null or objects (the product's own new_state/capture write; its rollback reads state.b0 as one),
+    # in every lineage, the source's own state included.
+    require(context["b0"] is None or type(context["b0"]) is dict, "BUNDLE_INPUT_MISMATCH", "the context's source B0 is not an object")
+    mismatch(state.get("b0") is None or type(state.get("b0")) is dict, "the bound state's B0 is not an object")
     source_b0 = None
-    if identity["source_b0_manifest_sha256"] is not None or context["b0"] is not None:
+    if identity.get("source_b0_manifest_sha256") is not None or context["b0"] is not None:
         b0 = context["b0"] or {}
         source_b0 = sha256(member(_inside(b0.get("dir"), root, "source B0") + "/manifest.json", "source B0 manifest"))
-        require(source_b0 == b0.get("manifest_sha256") == identity["source_b0_manifest_sha256"], "BUNDLE_INPUT_MISMATCH",
+        require(source_b0 == b0.get("manifest_sha256") == identity.get("source_b0_manifest_sha256"), "BUNDLE_INPUT_MISMATCH",
                 "the source B0 manifest bytes differ")
         if context["copy_dir"]:
             copied = sha256(member(_inside(context["copy_dir"], root, "seed B0 copy") + "/manifest.json", "seed B0 copy manifest"))
             require(copied == source_b0, "BUNDLE_INPUT_MISMATCH", "the seed's B0 copy differs from the source B0")
     clone_b0 = None
     state_b0 = state.get("b0") if LINEAGE_STACK[checkpoint] != "source" else None
-    if identity["clone_b0_manifest_sha256"] is not None or state_b0:
+    if identity.get("clone_b0_manifest_sha256") is not None or state_b0:
         clone_b0 = sha256(member(_inside((state_b0 or {}).get("dir"), root, "clone B0") + "/manifest.json", "clone B0 manifest"))
-        require(clone_b0 == (state_b0 or {}).get("manifest_sha256") == identity["clone_b0_manifest_sha256"], "BUNDLE_INPUT_MISMATCH",
+        require(clone_b0 == (state_b0 or {}).get("manifest_sha256") == identity.get("clone_b0_manifest_sha256"), "BUNDLE_INPUT_MISMATCH",
                 "the clone B0 manifest bytes differ")
     # Plan-dependent inputs the next phase reads: all of them must come from this bundle's own fixture tree.
-    _inside(plan["backup_root"], root, "plan backup_root")
-    if plan.get("seed"):
-        _inside(plan["seed"]["b0_dir"], root, "plan seed b0_dir")
-    _inside(descriptor["root"], root, "stack root")
-    _inside(target["repository"], root, "target repository")
-    _inside(target["ca_file"], root, "target ca_file")
-    for name in target["compose_files"]:
+    seed, files, overlays = plan.get("seed"), target.get("compose_files"), target.get("declared_overlays")
+    mismatch((seed is None or type(seed) is dict) and type(files) is list and all(type(name) is str for name in files)
+             and type(overlays) is list and all(type(item) is dict and (item.get("binds") is None or type(item["binds"]) is list)
+                                                and all(type(bind) is dict for bind in item.get("binds") or []) for item in overlays),
+             "the plan's seed or the target's compose files or declared overlays are not their JSON types")
+    _inside(plan.get("backup_root"), root, "plan backup_root")
+    if seed:
+        _inside(seed.get("b0_dir"), root, "plan seed b0_dir")
+    _inside(descriptor.get("root"), root, "stack root")
+    _inside(target.get("repository"), root, "target repository")
+    _inside(target.get("ca_file"), root, "target ca_file")
+    for name in files:
         absolute = Path(name).is_absolute() or PurePosixPath(name).is_absolute()
         # A relative compose file is read from the repository: it must stay inside it after normalisation as well.
         _inside(name if absolute else target["repository"].rstrip("/\\") + "/" + name, root, "compose file")
-    for overlay in target["declared_overlays"]:
-        _inside(overlay["file"], root, "declared overlay")
+    for overlay in overlays:
+        _inside(overlay.get("file"), root, "declared overlay")
         for bind in overlay.get("binds") or []:
-            _inside(bind["source"], root, "overlay bind")
+            _inside(bind.get("source"), root, "overlay bind")
     return {"plan_sha256": plan_sha, "target_manifest_sha256": target_sha, "source_b0_manifest_sha256": source_b0,
             "clone_b0_manifest_sha256": clone_b0, "context_sha256": manifest["bindings"]["context"]["sha256"]}
 

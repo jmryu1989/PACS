@@ -8,7 +8,7 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M44 and M46-M57 to temporary copies of tests/ops_release_checkpoints.py,
+CheckpointMutationContracts (T18) applies M01-M44 and M46-M59 to temporary copies of tests/ops_release_checkpoints.py,
 (M15-M17, M35) tests/ops_deploy_host_container_test.py and (M51, M56) tests/ops_release_checkpoints_native_test.py only, runs
 the named contract against the unmodified copies (control) and the mutant in fresh processes, and counts a kill only when
 the control passes and the mutant fails an assertion (an import, launch or fixture error is not a kill). M01-M14 are the
@@ -17,7 +17,8 @@ for CKPT2-01..06 (M30 retargeted to the new alias keep); M43, M44 and M46 by rou
 new_mutants); M47-M51 by round 6 (consult-checkpoints-r6-20261017 new_mutants M47-M49 and the optional library-bytes and
 residue-release ones); M52-M54 by round 7 (consult-checkpoints-r7-20261017 mutants: a non-object row skipped, an absence
 not corroborated, a row's image not bound); M55-M57 by round 8 (consult-checkpoints-r8-20261017 R8-06: the layer binding
-unchecked, the native evidence taking the caller's descriptor, a fact kind looked up before its type is checked).
+unchecked, the native evidence taking the caller's descriptor, a fact kind looked up before its type is checked);
+M58-M59 by the r8 self-review (D1556: bundle_inputs' B0 type unchecked, the verified descriptor shared between reads).
 
 Round 8 (consult-checkpoints-r8-20261017, CKPT7-01/02): the judgement is one call over the current bytes and the seal's
 bindings that returns what it verified (CheckpointVerifiedCaptureTests: R8-02 the bindings and the returned value, R8-03
@@ -5092,6 +5093,14 @@ R8_ACCEPTED_BY_CONTRACT = {
 R8_MALFORMED_FACTS = {"fact.type a list": lambda record: record["roles"]["api"].update(facts={"/tmp": {"type": []}}),
                       "fact.type an object": lambda record: record["roles"]["api"].update(facts={"/tmp": {"type": {}}})}
 R8_SUBSTITUTED_CHANGE = "A /tmp/kin-r8-substituted"
+# D1556 SRCK8-1: context/state fields the restore inputs read and no loader judges, mistyped (realistic's tamper).
+R8_INPUT_SHAPES = (("source-b0", "context.b0 = 'x'", lambda parts: parts["context"].update(b0="x")),
+                   ("source-b0", "context.b0 = [1]", lambda parts: parts["context"].update(b0=[1])),
+                   ("source-b0", "context.stacks = [1]", lambda parts: parts["context"].update(stacks=[1])),
+                   ("source-b0", "context.stacks = 's'", lambda parts: parts["context"].update(stacks="s")),
+                   ("source-b0", "state.b0 = 'x'", lambda parts: parts["state"].update(b0="x")),
+                   ("introduced", "state.b0 = 'x'", lambda parts: parts["state"].update(b0="x")),
+                   ("introduced", "context.b0 = 'x'", lambda parts: parts["context"].update(b0="x")))
 
 
 def _typed(action):
@@ -5342,15 +5351,34 @@ def typed_refusal_adapters(test):
     rows = {}
     for name, change in R8_MALFORMED_FACTS.items():
         final = r8_bundle(test, change)
-        rows[name + ": load_bundle"] = {"expected": "BUNDLE_INVALID", "outcome": _typed(lambda: cp.load_bundle(final))}
-        rows[name + ": restore_checkpoint"] = {"expected": "BUNDLE_INVALID", **_row(lambda: o7_restore(test, final))}
+        cause = {"cause": "LAYER_INVALID"}
+        rows[name + ": load_bundle"] = {"expected": "BUNDLE_INVALID", **cause, "outcome": _typed(lambda: cp.load_bundle(final))}
+        rows[name + ": restore_checkpoint"] = {"expected": "BUNDLE_INVALID", **cause, **_row(lambda: o7_restore(test, final))}
         index = _row(lambda: o7_index(test, change)[2])
-        rows[name + ": leaf_index"] = {"expected": "UNVERIFIED",
+        rows[name + ": leaf_index"] = {"expected": "UNVERIFIED", **cause,
                                        "outcome": index["verdict"] + ": " + json.dumps(index["reasons"]) if "verdict" in index else index["outcome"]}
         forged = _row(lambda: o7_forged_parent(test, change))
-        rows[name + ": bound_index (a stored BOUND)"] = {"expected": "PARENT_UNBOUND", "outcome": forged.get("bound_index", forged.get("outcome"))}
-        rows[name + ": leaf_request (parent issuance)"] = {"expected": "PARENT_UNBOUND", "outcome": forged.get("leaf_request", forged.get("outcome"))}
-        rows[name + ": Smoke.regenerated"] = {"expected": "BUNDLE_INVALID", **native_regenerated(test, sealed_of(final))}
+        rows[name + ": bound_index (a stored BOUND)"] = {"expected": "PARENT_UNBOUND", **cause, "outcome": forged.get("bound_index", forged.get("outcome"))}
+        rows[name + ": leaf_request (parent issuance)"] = {"expected": "PARENT_UNBOUND", **cause,
+                                                           "outcome": forged.get("leaf_request", forged.get("outcome"))}
+        rows[name + ": Smoke.regenerated"] = {"expected": "BUNDLE_INVALID", **cause, **native_regenerated(test, sealed_of(final))}
+    # D1556 SRCK8-1: the restore inputs (bundle_inputs) of bundles the loader accepts - a source-b0 bundle judges no layer,
+    # and the layer judgement reads no B0 field - with a mistyped context or state field, the hashes rebound (sealed so).
+    for checkpoint_id, unit in (("source-b0", "release-tools-checkpoints-proof-prefix-seed"), ("introduced", "release-tools-checkpoints-proof-prefix-verify")):
+        fixture = test.tempdir("kin-r8-inputs-")
+        bundle = bundle_from(test, fixture, realistic(fixture, checkpoint_id), checkpoint_id)
+        rows[checkpoint_id + " control: restore_checkpoint"] = {"expected": "ACCEPTED", **_row(lambda: o7_restore(test, bundle))}
+        rows[checkpoint_id + " control: live leaf admission"] = {"expected": "SYNTHETIC_TRANSPORT_END", **_row(lambda: live_admission(test, bundle, unit=unit))}
+    for checkpoint_id, name, tamper in R8_INPUT_SHAPES:
+        fixture = test.tempdir("kin-r8-inputs-")
+        bundle = bundle_from(test, fixture, realistic(fixture, checkpoint_id, tamper=tamper), checkpoint_id)
+        label = checkpoint_id + " " + name
+        unit = "release-tools-checkpoints-proof-prefix-seed" if checkpoint_id == "source-b0" else "release-tools-checkpoints-proof-prefix-verify"
+        rows[label + ": load_bundle (it judges no B0 field)"] = {"expected": "ACCEPTED", "outcome": _typed(lambda: cp.load_bundle(bundle))}
+        rows[label + ": restore_checkpoint"] = {"expected": "BUNDLE_INPUT_MISMATCH", **_row(lambda: o7_restore(test, bundle))}
+        rows[label + ": restore_boundary (live wrapper)"] = {"expected": "BUNDLE_INPUT_MISMATCH", **_row(lambda: restore_wrapper(test, bundle))}
+        rows[label + ": live leaf admission (" + unit.rsplit("-", 2)[-2] + "-" + unit.rsplit("-", 1)[-1] + ")"] = {
+            "expected": "BUNDLE_INPUT_MISMATCH", **_row(lambda: live_admission(test, bundle, unit=unit))}
     good = regenerated_fixture("id-" + PROJECT + "-orthanc")
     for field in R8_DESCRIPTOR_FIELDS:
         for kind, value in R8_KINDS:
@@ -5394,15 +5422,14 @@ def forged_parent(test, change):
     return root, proof
 
 
-def live_admission(test, bundle):
-    """The live leaf's real admission (ops_release_checkpoints_live_test.CheckpointSegments.segment, stage verify) of a
+def live_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-verify"):
+    """The live leaf's real admission (ops_release_checkpoints_live_test.CheckpointSegments.segment, the leaf `unit`) of a
     stored request naming `bundle` as its parent, in this test's own gate state (gate.live_run grants the permission there)
     and with the host and runtime observations answered synthetically (the executing tree's source and runtime identity,
     CheckpointDocker.runtime_facts; host_facts ends the run the first time it is reached, after the parent was admitted).
     The request, marker and parent loader are the real ones. Returns its row."""
     import ops_release_checkpoints_live_test as live
     bundle = Path(bundle)
-    unit = "release-tools-checkpoints-proof-prefix-verify"
     leaf = cp.registry_leaf(list(cp.DEFAULT_PROOF_LEAVES), unit)
     folder, state = test.tempdir("kin-r8-request-"), test.tempdir("kin-r8-gate-")
     source = {"tool": {"sha256": "1" * 64}, "source": {"sha256": "2" * 64}, "harness": {"sha256": "3" * 64}, "tool_files": {}}
@@ -5436,7 +5463,7 @@ def live_admission(test, bundle):
             patch.object(live.rehearsal.CheckpointDocker, "host_facts", staticmethod(host_facts)), \
             patch.object(cp, "load_bundle", load), patch.object(live, "restore_boundary", restore):
         with gate.live_run(unit, cp.LIVE_FILE, "a" * 64, 1):   # the gate's own API, in this test's state folder
-            outcome = _typed(lambda: live.CheckpointSegments("test_verify_checkpoint").segment("verify"))
+            outcome = _typed(lambda: live.CheckpointSegments(leaf["case"].split(".", 1)[1]).segment(leaf["stage"]))
     return {"outcome": outcome, **calls, "fixture_root_created": (bundle.parent.parent / "fixture").exists(),
             "bundle_changed": _tree_digest(bundle) != before}
 
@@ -5807,10 +5834,14 @@ class CheckpointVerifiedCaptureTests(CaptureFixture, RefusalAssertions, TempCase
                          (bindings["observation"]["path"], bindings["observation"]["sha256"], bindings["state"]["sha256"]), "CKPT8_VERIFIED_BYTES_RETURNED")
         self.assertEqual((capture.descriptor_sha256, cp.sha256(capture.descriptor_raw)), (capture.layer["descriptor_sha256"],) * 2,
                          "CKPT8_VERIFIED_DESCRIPTOR_IS_THE_RECORD_S")
-        record, copy_of_manifest = capture.layer, verified.manifest
+        record, copy_of_manifest, descriptor = capture.layer, verified.manifest, capture.descriptor
         record["roles"].clear()
         copy_of_manifest["bindings"].clear()
-        self.assertEqual((sorted(capture.layer["roles"]), verified.manifest), (sorted(intro.ROLES), manifest), "CKPT8_NO_SHARED_MUTABLE_VALUE")
+        descriptor.clear()
+        # Digests only in the assertion (no large objects): each read is a new parse of the verified bytes.
+        self.assertEqual((sorted(capture.layer["roles"]), cp.sha256(cp.canonical(verified.manifest) + b"\n"),
+                          cp.sha256(cp.canonical(capture.descriptor) + b"\n")),
+                         (sorted(intro.ROLES), final.name, capture.descriptor_sha256), "CKPT8_NO_SHARED_MUTABLE_VALUE")
         raw, arguments = _bundle_arguments(final)
         self.assertEqual(self.admitted(cp.layer_valid, raw, **arguments), capture, "CKPT8_ONE_CALL_SAME_VALUE")
         # The same record with an accepted transient change: the contract accepts it with its binding rebound, and refuses it
@@ -5889,20 +5920,27 @@ class CheckpointVerifiedCaptureTests(CaptureFixture, RefusalAssertions, TempCase
         """R8-04 through the adapters: fact.type a list or an object with the hashes rebound is BUNDLE_INVALID at load_bundle
         and before a restore (no daemon call, no fixture root), UNVERIFIED with the layer reason in the index,
         PARENT_UNBOUND with it at a stored BOUND index's consumption and parent issuance, and no native success record; a
-        mistyped descriptor field leaves a normal Orthanc start the capture's typed refusal before store.begin."""
+        mistyped descriptor field leaves a normal Orthanc start the capture's typed refusal before store.begin; and (D1556
+        SRCK8-1, M58) a mistyped context.b0, context.stacks or state.b0 of a bundle the loader accepts (source-b0,
+        introduced) is BUNDLE_INPUT_MISMATCH at restore_checkpoint, restore_boundary and the live leaf's admission, before
+        any daemon call, host observation, restore or fixture root."""
         for name, row in typed_refusal_adapters(self).items():
             with self.subTest(cell=name):
                 outcome = row.get("outcome", "")
-                if row["expected"] == "ACCEPTED":
-                    self.assertEqual(outcome, "ACCEPTED", "CKPT8_NORMAL_ACCEPTED")
+                if row["expected"] in ("ACCEPTED", "SYNTHETIC_TRANSPORT_END"):
+                    self.assertTrue(outcome.startswith(row["expected"]), "CKPT8_NORMAL_ACCEPTED: " + json.dumps(row))
                     continue
                 self.assertIn(outcome.split(":", 1)[0], row["expected"].split("|"), "CKPT8_TYPED_REFUSAL: " + outcome)
-                if row["expected"] != "WRITABLE_LAYER|LAYER_INVALID":
-                    self.assertIn("LAYER_INVALID", outcome, "CKPT8_REFUSAL_KEEPS_ITS_CAUSE: " + outcome)
-                if "daemon_calls" in row:
-                    self.assertEqual((row["daemon_calls"], row["fixture_root_created"]), (0, False), "CKPT8_REFUSED_BEFORE_RESTORE")
-                if "a05_a12_pass_rows" in row:
-                    self.assertEqual((row["a05_a12_pass_rows"], row["raw_files"]), (0, []), "CKPT8_NO_NATIVE_SUCCESS_RECORD")
+                if "cause" in row:
+                    self.assertIn(row["cause"], outcome, "CKPT8_REFUSAL_KEEPS_ITS_CAUSE: " + outcome)
+                for key in ("daemon_calls", "daemon_mutations", "host_facts", "restore_boundary", "a05_a12_pass_rows"):
+                    if key in row:
+                        self.assertEqual(row[key], 0, "CKPT8_REFUSED_BEFORE_ANY_EFFECT: " + key + ": " + json.dumps(row))
+                for key in ("fixture_root_created", "bundle_changed"):
+                    if key in row:
+                        self.assertIs(row[key], False, "CKPT8_REFUSED_BEFORE_ANY_EFFECT: " + key + ": " + json.dumps(row))
+                if "raw_files" in row:
+                    self.assertEqual(row["raw_files"], [], "CKPT8_NO_NATIVE_SUCCESS_RECORD")
 
     def test_every_consumer_entry_point_runs_against_the_verified_boundary(self):
         """R8-05: the executed consumer inventory (consumer_inventory): each row's real entry point gave its contract's
@@ -5999,7 +6037,7 @@ MUTANTS = (
     ("M23", "CheckpointLeafTests.test_raw_records_identities_and_parent_chain_survive_a_bundleless_leaf",   # CKPT-03: nothing preserved
      '    raw = preserve_records(records, evidence) if records else []', '    raw = []', "checkpoints"),
     ("M24", "CheckpointInputsTests.test_bundle_inputs_runtime_and_restored_facts_are_recomputed",   # CKPT-04: plan bytes not recomputed
-     '    require(plan_sha == descriptor["plan_sha256"] == identity["plan_sha256"] == state.get("plan_sha256"), "BUNDLE_INPUT_MISMATCH",',
+     '    require(plan_sha == descriptor.get("plan_sha256") == identity.get("plan_sha256") == state.get("plan_sha256"), "BUNDLE_INPUT_MISMATCH",',
      '    require(True, "BUNDLE_INPUT_MISMATCH",', "checkpoints"),
     ("M25", "CheckpointInputsTests.test_bundle_inputs_runtime_and_restored_facts_are_recomputed",   # CKPT-04: only containers compared
      '    differences += [key for key in sorted(recorded) if key != "containers" and recorded[key] != observed[key]]', '    differences += []',
@@ -6093,6 +6131,14 @@ MUTANTS = (
     ("M57", "CheckpointVerifiedCaptureTests.test_the_declared_fields_are_typed_refusals_at_the_judgement",   # fact kind looked up before its type
      '    if type(fact) is not dict or type(fact.get("type")) is not str or fact["type"] not in LAYER_FACT_KEYS:',
      '    if type(fact) is not dict or fact.get("type") not in LAYER_FACT_KEYS:', "checkpoints"),
+    # Round 8 self-review (D1556: SRCK8-1, B9/F3).
+    ("M58", "CheckpointVerifiedCaptureTests.test_a_malformed_fact_is_each_consumer_s_typed_refusal",   # bundle_inputs' B0 type unchecked
+     '    require(context["b0"] is None or type(context["b0"]) is dict, "BUNDLE_INPUT_MISMATCH", "the context\'s source B0 is not an object")',
+     '    pass', "checkpoints"),
+    ("M59", "CheckpointVerifiedCaptureTests.test_one_call_checks_the_current_bytes_against_the_bindings_and_returns_them",   # descriptor shared
+     '    def descriptor(self):\n        return json.loads(self.descriptor_raw)',
+     "    def descriptor(self):\n        if '_d' not in self.__dict__:\n            self.__dict__['_d'] = json.loads(self.descriptor_raw)\n"
+     "        return self.__dict__['_d']", "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -6141,7 +6187,7 @@ class CheckpointMutationContracts(TempCase):
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
         """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6, r7, r8): control PASS, then an assertion failure in the named
-        contract for each mutant (M01-M44, M46-M57)."""
+        contract for each mutant (M01-M44, M46-M59)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:
