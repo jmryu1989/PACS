@@ -2,12 +2,30 @@
 
 Known observations exercise the report and negative-control consumer, without
 timing a machine, pinning source text, or changing the live acceptance rule.
+The negative-control driver runs for real on a copy of the runtime sources; only
+its benchmark subprocess returns known summaries and raw sample rows.
 """
+import contextlib
+import hashlib
+import io
+import json
 import math
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from performance import build_report, case_result
-from performance_mutants import property_failures
+from performance import ROOT, build_report, case_result
+import performance_mutants as mutants
+from performance_mutants import (MP02_BASELINE_P95_BOUND_MS as B, MP02_DELAY_MS as L,
+                                 mutant_result, property_failures)
+
+LATENCY_KEYS = {'sustained': [('sustained', 20, 20000)], 'concurrent': [('concurrent', 24, 0), ('concurrent', 48, 0)]}
+# The audit's four attribution inputs (performance-mutant-verdict.json):
+# (name, baseline p95, candidate p95, revision with one failed request).
+ATTRIBUTION_INPUTS = [('latency_regression', 100, 140, None), ('baseline_request_failed', 100, 100, 'r3'),
+                      ('candidate_request_failed', 100, 100, 'r4d'), ('no_regression', 100, 100, None)]
 
 
 def sample(p95, **values):
@@ -18,6 +36,68 @@ def sample(p95, **values):
 def pairs(baseline=100., candidate=100., repetitions=10):
     return {'r3': [sample(baseline) for _ in range(repetitions)],
             'r4d': [sample(candidate) for _ in range(repetitions)]}
+
+
+def measured(case, baseline, candidate, failed=None):
+    """performance.py's own summary for one latency property's cases."""
+    report = {'failures': [], 'cases': {}, 'repetitions': 10}
+    for name, count, retained in LATENCY_KEYS[case]:
+        pair = pairs(baseline, candidate)
+        if failed:
+            pair[failed][0]['failures'] = 1
+        stats, failures = case_result(name, count, retained, pair)
+        report['cases'][f'{name}-{count}-{retained}'] = stats
+        report['failures'] += failures
+    return report
+
+
+def receipt_rows(baseline_p95, receipts, requests=4):
+    """Raw sustained sample rows: ten r3 blocks and ten r4d blocks whose
+    per-receipt times are `receipts(rep)` (a list per block)."""
+    rows = []
+    for rep in range(10):
+        rows.append(dict(sample(baseline_p95), label=f'sustained-{rep}-r3', version='r3', concurrency=20, prefill=20000,
+                         requests=requests, request_instruments=[{'receipt_ms': baseline_p95}] * requests))
+        times = receipts(rep)
+        rows.append(dict(sample(max(times)), label=f'sustained-{rep}-r4d', version='r4d', concurrency=20, prefill=20000,
+                         requests=len(times), request_instruments=[{'receipt_ms': t} for t in times]))
+    return rows
+
+
+def run_driver(only, report, receipt=None, control_failures=(), control_cases=None):
+    """Run the real performance_mutants.main on a copy of the real runtime
+    sources; only the benchmark subprocess returns the given summary."""
+    with tempfile.TemporaryDirectory(prefix='emr-perf-driver-') as folder:
+        base = Path(folder)
+        (base / 'api/src/emr-runtime').mkdir(parents=True)
+        sources = {}
+        for name in ('seal.ts', 'store.ts', 'external-writer.ts'):
+            raw = (ROOT / 'api/src/emr-runtime' / name).read_bytes()
+            (base / 'api/src/emr-runtime' / name).write_bytes(raw)
+            sources['api/src/emr-runtime/' + name] = hashlib.sha256(raw).hexdigest()
+        (base / 'api/tsconfig.json').write_bytes((ROOT / 'api/tsconfig.json').read_bytes())
+        healthy = {**measured('sustained', 100, 100)['cases'], **measured('concurrent', 100, 100)['cases']}
+        control = base / 'healthy.json'
+        control.write_text(json.dumps({'candidate_sources': sources, 'failures': list(control_failures),
+                                       'cases': healthy if control_cases is None else control_cases}))
+        mutated = {}
+
+        def benchmark(argv, **kwargs):
+            target = Path(argv[argv.index('--out') + 1])
+            target.mkdir(parents=True)
+            candidate = Path(argv[argv.index('--candidate') + 1]) / 'api/src/emr-runtime'
+            mutated.update({p.name: p.read_text(encoding='utf-8') for p in candidate.iterdir()})
+            (target / 'summary.json').write_text(json.dumps(report))
+            if receipt is not None:
+                (target / 'receipt.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in receipt))
+            return subprocess.CompletedProcess(argv, 1 if report['failures'] else 0, '', '')
+
+        out = base / 'out'
+        with patch.object(mutants, 'ROOT', base), patch.object(mutants.subprocess, 'run', benchmark), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            exit_code = mutants.main(['--out', str(out), '--control', str(control), '--only', only])
+        verdict = json.loads((out / 'summary.json').read_text())['results'][0]
+        return verdict, bool(exit_code), mutated
 
 
 class PerformanceVerdictTest(unittest.TestCase):
@@ -144,6 +224,83 @@ class PerformanceVerdictTest(unittest.TestCase):
                 self.assertEqual(bool(property_failures(case, failures)), fails)
                 other = 'concurrent' if case == 'sustained' else 'sustained'
                 self.assertFalse(property_failures(other, failures))
+
+    # REQ-D1550 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT: a request failure on either
+    # side is no latency verdict; only a measured gross regression kills.
+    def test_latency_kill_attribution_four_inputs(self):
+        for case in ('sustained', 'concurrent'):
+            for (name, baseline, candidate, failed), expected in zip(ATTRIBUTION_INPUTS, [True, None, None, False]):
+                with self.subTest(case=case, input=name):
+                    report = measured(case, baseline, candidate, failed)
+                    exit_code = 1 if report['failures'] else 0
+                    killed, status = mutant_result(case, exit_code, report, property_failures(case, report['failures']))
+                    self.assertIs(killed, expected)
+                    self.assertEqual(status, 'invalid_measurement' if failed else 'completed')
+
+    def test_latency_kill_attribution_on_the_real_driver(self):
+        for (name, baseline, candidate, failed), expected in zip(ATTRIBUTION_INPUTS, [True, None, None, False]):
+            with self.subTest(input=name):
+                verdict, failed_exit, _ = run_driver('MP03', measured('concurrent', baseline, candidate, failed))
+                self.assertIs(verdict['killed'], expected)
+                self.assertEqual(failed_exit, expected is not True)
+
+    def test_latency_verdict_needs_every_case_statistic(self):
+        report = measured('concurrent', 100, 140)
+        del report['cases']['concurrent-48-0']
+        self.assertEqual(mutant_result('concurrent', 1, report, property_failures('concurrent', report['failures'])),
+                         (None, 'invalid_measurement'))
+        for bad in (float('nan'), float('inf'), None):
+            report = measured('sustained', 100, 140)
+            report['cases']['sustained-20-20000']['D'] = bad
+            self.assertEqual(mutant_result('sustained', 1, report, ['x'])[0], None)
+        self.assertEqual(mutant_result('sustained', 2, measured('sustained', 100, 140), ['x']), (None, 'harness_error'))
+        self.assertEqual(mutant_result('sustained', 1, None, []), (None, 'harness_error'))
+
+    def test_healthy_control_failure_is_reported_apart_from_control_design(self):
+        verdict, failed_exit, _ = run_driver('MP02', measured('sustained', 100, 100),
+                                             control_failures=['sustained-20-20000: request failed'])
+        self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'control_failed', True))
+        verdict, failed_exit, _ = run_driver('MP02', measured('sustained', 100, 100), control_cases={})
+        self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'control_invalid', True))
+
+    # REQ-D1550 -> RISK-EMR-RECEIPT-DELAY: MP02 breaks R > 1.25 AND D > 5 ms by
+    # construction (baseline <= B, every receipt >= L) or it is INVALID_CONTROL.
+    def test_mp02_size_guarantees_both_bounds(self):
+        self.assertEqual(L, max(50, math.ceil(1.5 * B + 10)))
+        self.assertGreater(L / B, 1.25)
+        self.assertGreater(L - B, 5.)
+
+    def test_mp02_valid_control_is_killed_and_delays_every_receipt_return(self):
+        verdict, failed_exit, mutated = run_driver('MP02', measured('sustained', B, L),
+                                                   receipt_rows(B, lambda rep: [L, L + 1, L + 50, L + 2]))
+        self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (True, 'completed', False))
+        self.assertTrue(verdict['control_validity']['valid'])
+        self.assertEqual(verdict['control_validity']['mutant_receipt_min_ms'], L)
+        self.assertEqual(verdict['control_validity']['baseline_block_p95_max_ms'], B)
+        # The copy differs from the product source by one awaited L ms timer and
+        # nothing else; the product file is untouched. That the timer reaches
+        # every receipt is measured (control_validity), not read from the text.
+        original = (ROOT / 'api/src/emr-runtime/store.ts').read_text(encoding='utf-8').splitlines()
+        added = list(mutated['store.ts'].splitlines())
+        for line in original:
+            added.remove(line)
+        self.assertEqual([line.strip() for line in added], ['await new Promise(resolve => setTimeout(resolve, %d));' % L])
+
+    def test_mp02_baseline_above_bound_is_invalid_control(self):
+        rows = receipt_rows(B, lambda rep: [L] * 4)
+        rows[8]['p95'] = B + .1
+        verdict, failed_exit, _ = run_driver('MP02', measured('sustained', B, L), rows)
+        self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'invalid_control', True))
+        self.assertFalse(verdict['control_validity']['valid'])
+
+    def test_mp02_receipt_below_delay_is_invalid_control(self):
+        verdict, failed_exit, _ = run_driver('MP02', measured('sustained', 100, L),
+                                             receipt_rows(100, lambda rep: [L] * 3 + ([L - .001] if rep == 5 else [L])))
+        self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'invalid_control', True))
+        for rows in ([], receipt_rows(100, lambda rep: [L] * 4)[:-1], None):
+            with self.subTest(rows=None if rows is None else len(rows)):
+                verdict, failed_exit, _ = run_driver('MP02', measured('sustained', 100, L), rows)
+                self.assertEqual((verdict['killed'], verdict['status'], failed_exit), (None, 'invalid_control', True))
 
 
 if __name__ == '__main__':
