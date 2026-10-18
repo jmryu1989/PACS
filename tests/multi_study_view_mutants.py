@@ -102,7 +102,7 @@ MUTANTS = [
              "          if (!m.state) await this.prisma.studyState.create({ data: { uid: m.uid, institutionId: me, ss: 'Unverified' } }).catch(() => undefined);\n"
              "          if (!m.state ||"),
     dict(id='X04-signal-dropped', title='the resolve signal is not passed to the source read', file=SERVICE,
-         case='W9API-10', expect='every pending read must observe the deadline abort',
+         case='W9API-10', expect='every pending read must observe the sub-cut abort',
          old='        const read = this.orthanc.viewingSetStudy(m.uid, signal).catch(() => null);',
          new='        const read = this.orthanc.viewingSetStudy(m.uid, undefined).catch(() => null);'),
     dict(id='X05-stale-after-abort', title='a source answer that arrives after the deadline is used', file=SERVICE,
