@@ -623,6 +623,80 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual([], self.dialogs, "C-08 no dialog")
         self.assertEqual("SYN unsaved text keeps the logout in preparation", self.page.locator("#findings").input_value(), "C-08 draft kept")
 
+    def test_c06_a_changed_manifest_offers_a_new_preparation_and_keeps_the_old_operation(self):
+        """U4C-02: once the status says the archive was refused MANIFEST_CHANGED, this operation's fixed manifest can never
+        start again: Prepare Again makes a new operation (a new id, a new manifest), the old one stays shown as it was, and
+        its stale Download is not offered again. Non-modal, the draft kept."""
+        self.open_as(RAD_ONLY)
+        self.open_study(h.PATIENT)
+        self.type("SYN draft kept across a changed manifest")
+        self.row_menu(h.PATIENT)
+        self.menu_item("Download Originals").click()
+        self.wait(lambda: self.site.prepares, "the preparation")
+        op = self.site.prepares[0][1]["operationId"]
+        box = self.operations().first
+        expect(box).to_contain_text("Ready")
+        with self.page.expect_download():
+            box.get_by_role("button", name="Download", exact=True).click()
+        view = download_view(op, UID_A)
+        view["archiveRequest"] = {"grantId": str(uuid.uuid4()), "state": "refused", "expiresAt": "2026-10-17T00:02:00.000Z",
+                                  "attemptId": None, "code": "MANIFEST_CHANGED", "message": "SYN-SERVER manifest changed"}
+        self.site.download_answers[op] = [view]
+        self.page.clock.run_for(3100)
+        expect(box).to_contain_text("SYN-SERVER manifest changed")
+        self.assertEqual(0, box.get_by_role("button", name="Download", exact=True).count(),
+                         "C-06 the operation whose manifest changed is not offered for download again")
+        again = box.get_by_role("button", name="Prepare Again", exact=True)
+        self.assertEqual(1, again.count(), "C-06 MANIFEST_CHANGED offers a new preparation")
+        again.click()
+        self.wait(lambda: len(self.site.prepares) == 2, "C-06 the new preparation")
+        uid, body = self.site.prepares[1]
+        self.assertEqual(UID_A, uid, "C-06 the same study")
+        self.assertNotEqual(op, body["operationId"], "C-06 a new operation (a new manifest), never the stale one again")
+        self.wait(lambda: self.operations().count() == 2, "both operations shown")
+        old = self.panel().locator(f'section[data-operation="{op}"]')
+        expect(old).to_contain_text("Ready")
+        expect(old).to_contain_text("SYN-SERVER manifest changed")
+        new = self.panel().locator(f'section[data-operation="{body["operationId"]}"]')
+        expect(new.get_by_role("button", name="Download", exact=True)).to_be_visible()
+        self.assertEqual(1, len(self.site.grants), "C-06 no grant is asked again for the stale operation")
+        self.assertEqual([], self.dialogs, "C-08 no dialog")
+        self.assertEqual("SYN draft kept across a changed manifest", self.page.locator("#findings").input_value(), "C-08 draft kept")
+
+    def test_c06_a_grant_answered_after_the_selection_moved_starts_no_download(self):
+        """U4C-04 (DG-T06): a press made with study A selected, answered after the person moved to B - or to B and back to
+        A, which is another selection - clicks no link and says why; a press left alone downloads once."""
+        self.open_as(RAD_ONLY)
+        self.row_menu(h.PATIENT)
+        self.menu_item("Download Originals").click()
+        self.wait(lambda: self.site.prepares, "the preparation")
+        op = self.site.prepares[0][1]["operationId"]
+        box = self.operations().first
+        expect(box).to_contain_text("Ready")
+        # One loop, no subTest: the first press that downloads ends the case with that one assertion failure.
+        for moves in ((h.PATIENT_B,), (h.PATIENT_B, h.PATIENT)):
+            self.open_study(h.PATIENT)
+            self.site.grant_answers = ["hold"]
+            presses = len(self.site.grants)
+            box.get_by_role("button", name="Download", exact=True).click()
+            self.wait(lambda: len(self.site.held_grants) == 1, "the grant request")
+            for patient in moves:
+                self.open_study(patient)
+            route, record = self.site.held_grants.pop(0)
+            self.site.answer_grant(route, record)
+            self.settle(400)
+            self.assertEqual(presses + 1, len(self.site.grants), "one grant request per press")
+            self.assertEqual([], self.downloads, "C-07 a grant answered after the selection moved clicks no link")
+            expect(box).to_contain_text("다른 검사를 고르는 사이에")
+            expect(box.get_by_role("button", name="Download", exact=True)).to_be_visible()
+        self.open_study(h.PATIENT)
+        with self.page.expect_download():
+            box.get_by_role("button", name="Download", exact=True).click()
+        self.assertEqual(3, len(self.site.grants), "C-06 the unchanged press: one grant request")
+        self.assertEqual(1, len(self.downloads), "C-06 the unchanged press: one browser download")
+        self.assertEqual("grant=" + self.site.grants[-1]["grant"], urlparse(self.downloads[0]).query)
+        self.assertEqual([], self.dialogs)
+
     def test_c06_the_download_item_acts_only_on_the_selection_its_menu_opened_on(self):
         self.open_as(RAD_ONLY)
         self.open_study(h.PATIENT)
@@ -659,18 +733,97 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual(1, len(self.site.imports), "C-07 nothing re-sent by itself")
 
     def test_c07_a_network_error_keeps_the_session_and_reads_the_operation_back(self):
+        """A lost upload answer is read back. A 404 of that read (no operation, or one this person cannot see now) leaves
+        the file undecided and unsent, with no Retry (U4C-03/03b); Check Again later shows what the server holds."""
         self.open_as(TECH, "Technician")
         self.site.import_answers = ["abort"]
         self.choose(self.files(1))
         self.wait(lambda: self.site.imports, "the upload")
         op = self.site.imports[0]["operation"]
         self.wait(lambda: op in self.site.import_reads, "C-07 the operation read back after a lost answer")
-        self.wait(lambda: self.state_of(0) == "Not Sent", "the server has no result: not sent")
+        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 a 404 read leaves the file undecided")
         self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"), "C-07 a network error never logs out")
         expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
-        self.wait(lambda: len(self.site.imports) == 2, "the retry")
-        self.assertEqual((op, "0"), (self.site.imports[1]["operation"], self.site.imports[1]["index"]))
+        self.assertEqual(0, self.file_row(0).get_by_role("button", name="Retry").count(), "C-07 a 404 offers no Retry")
+        self.assertNotIn("닿지 않았습니다", self.reason_of(0), "C-07 a 404 never says the file did not reach the server")
+        # The server's record shows the file stored (the lost request had reached it): Check Again shows it, nothing resent.
+        self.site.import_state[op] = {0: file_result(op, 0, "stored")}
+        self.operations().first.get_by_role("button", name="Check Again").click()
+        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the stored result once the server shows it")
+        self.assertEqual(1, len(self.site.imports), "C-07 one upload: nothing was sent again")
+
+    def test_c07_a_status_read_without_the_file_leaves_it_undecided(self):
+        """U4C-03b: a 200 status of the operation without this file is no proof either - the request can still be inside
+        the server, before its result row, and be stored after the read. Undecided, no Retry; Check Again shows Stored."""
+        self.open_as(TECH, "Technician")
+        self.site.import_answers = ["stored", "hold"]
+        self.choose(self.files(2))
+        self.wait(lambda: self.site.held_imports, "the second upload")
+        route, record = self.site.held_imports.pop(0)
+        op = record["operation"]
+        self.assertEqual([0], sorted(self.site.import_state[op]), "the server's record holds file 0 only")
+        route.abort("connectionreset")
+        self.wait(lambda: self.state_of(1) == "Result Unknown", "C-07 a status without the file leaves it undecided")
+        self.assertEqual(0, self.file_row(1).get_by_role("button", name="Retry").count(), "C-07 absence from a status offers no Retry")
+        self.assertNotIn("닿지 않았습니다", self.reason_of(1), "C-07 absence never says the file did not reach the server")
+        self.assertIn("저장 중일 수 있어", self.reason_of(1), "C-07 the panel says it may still be stored")
+        self.page.clock.run_for(60000)
+        self.settle(300)
+        self.assertEqual(2, len(self.site.imports), "C-07 nothing is sent again")
+        # The held request finishes inside the server: its result appears in the record.
+        self.site.import_state[op][1] = file_result(op, 1, "stored")
+        self.operations().first.get_by_role("button", name="Check Again").click()
+        self.wait(lambda: self.state_of(1) == "Stored", "C-07 the stored result once the server records it")
+        self.assertEqual(2, len(self.site.imports), "C-07 still two uploads: no duplicate")
+
+    def test_c07_retry_only_for_a_file_never_sent_or_answered_retryable(self):
+        """U4C-03b: a status read the server cannot answer (503) leaves a lost file undecided with no Retry; Retry is
+        offered for a file the browser never sent (the loop stopped before it), a request the server refused, and a
+        file the server answered retryable."""
+        self.open_as(TECH, "Technician")
+        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE")
+        self.site.import_answers = ["abort", "hold", (503, {"code": "IMPORT_NOT_READY", "message": "SYN-SERVER not ready"})]
+        self.site.status_answers = [(503, {"code": "IMPORT_STORAGE_UNAVAILABLE", "message": "SYN-SERVER storage unavailable"})]
+        self.choose(self.files(4))
+        self.wait(lambda: self.site.held_imports, "the second upload")
+        self.site.release_import(retryable)
+        self.wait(lambda: len(self.site.imports) == 3 and self.state_of(3) == "Not Sent", "the loop stopped")
+        self.settle(300)
+        self.assertEqual("Checking", self.state_of(0), "C-07 a 503 status read decides nothing")
+        expect(self.operations().first).to_contain_text("SYN-SERVER storage unavailable")
+        retries = [self.file_row(i).get_by_role("button", name="Retry", exact=True).count() for i in range(4)]
+        self.assertEqual("Retry Needed", self.state_of(1))
+        self.assertEqual(["Not Sent", "Not Sent"], [self.state_of(2), self.state_of(3)])
+        self.assertEqual([0, 1, 1, 1], retries, "C-07 Retry only for the retryable answer, the refused request and the unsent file")
+        self.assertEqual(3, len(self.site.imports), "C-07 the fourth file was never sent")
+
+    def test_c07_a_lost_answer_of_a_stored_file_and_a_scoped_404_is_never_not_sent(self):
+        """U4C-03: the original was stored, the browser lost that answer, and the status read is 404 because the study is
+        out of this person's scope now. The panel must not say Not Sent / "did not reach" nor offer Retry; nothing is sent
+        again; once the scope is back, Check Again shows Stored."""
+        self.open_as(TECH, "Technician")
+        self.site.import_answers = ["hold"]
+        self.choose(self.files(1))
+        self.wait(lambda: self.site.held_imports, "the upload")
+        route, record = self.site.held_imports.pop(0)
+        op = record["operation"]
+        self.site.import_state[op] = {0: file_result(op, 0, "stored")}
+        self.site.status_answers = [(404, {"statusCode": 404, "message": "SYN-SERVER import not found"})]
+        route.abort("connectionreset")
+        self.wait(lambda: self.site.import_reads, "the status read")
+        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 the file stays undecided")
+        self.assertNotEqual("Not Sent", self.state_of(0), "C-07 a scoped 404 is not proof that the file was not sent")
+        self.assertNotIn("닿지 않았습니다", self.reason_of(0), "C-07 nor that it did not reach the server")
+        self.assertIn("저장됐을 수 있어", self.reason_of(0), "C-07 the panel says it may have been stored")
+        self.assertEqual(0, self.file_row(0).get_by_role("button", name="Retry").count(), "C-07 no Retry on a 404")
+        self.page.clock.run_for(60000)
+        self.settle(300)
+        self.assertEqual(1, len(self.site.imports), "C-07 nothing is sent again")
+        # The scope is back: the status read answers the stored result.
+        self.operations().first.get_by_role("button", name="Check Again").click()
+        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the stored result once the server shows it")
+        self.assertEqual(1, len(self.site.imports), "C-07 still one upload: no duplicate")
+        self.assertEqual([], self.dialogs)
 
     def test_c07_the_same_person_resumes_after_a_new_login_another_person_never_sees_the_operation(self):
         self.open_as(TECH, "Technician")

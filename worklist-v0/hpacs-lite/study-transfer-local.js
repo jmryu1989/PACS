@@ -55,7 +55,12 @@ window.KinStudyTransferLocal = function (app) {
     mayHaveWritten: '저장된 원본과 충돌하여 완료를 확인할 수 없습니다.',
     askAdmin: (id, index) => `저장 결과를 확인하지 못했습니다. 관리자에게 작업 번호 ${id.slice(0, 8)}·파일 번호 ${index}의 확인을 요청하세요.`,
     lost: '서버의 답을 받지 못했습니다. 이 작업의 상태를 다시 읽어 확인합니다.',
-    notReached: '이 파일은 서버에 닿지 않았습니다. Retry로 같은 파일을 다시 보낼 수 있습니다.',
+    // Neither a 404 of the status read (also the answer for an operation whose study this account cannot see now,
+    // contract 3) nor a status without this file proves that the file did not arrive, so nothing is offered to send
+    // again on them (U4C-03, U4C-03b). Not Sent + Retry is only for a file the browser never sent or the server refused
+    // as retryable.
+    pending: '서버가 아직 이 파일의 결과를 기록하지 않았습니다. 저장 중일 수 있어 다시 보내지 않았습니다. 잠시 뒤 Check Again으로 다시 확인하세요.',
+    unresolved: '서버가 이 작업의 결과를 보여 주지 않습니다. 저장됐을 수 있어 다시 보내지 않았습니다. 잠시 뒤 Check Again으로 다시 확인하고, 계속 같으면 관리자에게 작업 번호를 알려 주세요.',
     unread: '작업 상태를 읽지 못했습니다. Check Again으로 다시 확인하세요.',
     paused: '지금은 요청을 보낼 수 없어 이 파일을 보내지 않았습니다. Retry로 이어서 보낼 수 있습니다.',
     offline: '서버에 연결된 계정에서만 반입·원본 다운로드를 쓸 수 있습니다.',
@@ -67,6 +72,7 @@ window.KinStudyTransferLocal = function (app) {
     incomplete: '내려받기가 끝까지 이어지지 않았습니다. 같은 작업으로 다시 받을 수 있습니다.',
     downloadUnconfirmed: '서버가 다시 시작되는 등으로 보낸 결과를 확인하지 못했습니다. 같은 작업으로 다시 받을 수 있습니다.',
     notStarted: '내려받기가 시작되지 않았습니다. 브라우저의 다운로드 목록을 확인한 뒤 다시 시도하세요.',
+    selectionMoved: '다른 검사를 고르는 사이에 온 답이라 내려받기를 시작하지 않았습니다. 이 검사의 원본이 필요하면 Download를 다시 누르세요.',
     preparing: '원본 목록을 준비하는 중입니다…',
     granting: '내려받기를 시작하는 중입니다…',
     copied: '작업 번호와 파일 번호를 복사했습니다.',
@@ -249,7 +255,7 @@ window.KinStudyTransferLocal = function (app) {
   }
   function finished(op) {
     if (op.inFlight || op.polling) return false;
-    if (op.kind === 'download') return ['sent', 'incomplete', 'unconfirmed'].includes(op.state) || (!op.state && !!op.notice);
+    if (op.kind === 'download') return ['sent', 'incomplete', 'unconfirmed'].includes(op.state) || op.manifestChanged || (!op.state && !!op.notice);
     return op.files.every(f => f.final);
   }
 
@@ -442,7 +448,7 @@ window.KinStudyTransferLocal = function (app) {
     if (!live(op) || op.readSeq !== seq) return;
     if (!usable()) { op.lost = true; return; }
     const gen = op.gen, at = work.capture('document');
-    for (const entry of op.files) if (entry.state === 'unknown') entry.state = 'checking';
+    for (const entry of op.files) if (entry.state === 'unknown' || entry.state === 'unresolved') entry.state = 'checking';
     op.inFlight = true;
     render();
     let answer = null, failed = false;
@@ -452,10 +458,18 @@ window.KinStudyTransferLocal = function (app) {
     const applied = work.commit(at, () => {
       if (!live(op) || op.gen !== gen) return;
       op.inFlight = false;
-      // 404 is the server's answer for an operation it does not hold for this person (none of its files reached it);
-      // anything else that is not a status leaves the panel's knowledge as it was.
-      const files = !failed && answer.ok && answer.body?.operationId === op.id && Array.isArray(answer.body.files) ? answer.body.files
-        : !failed && answer.status === 404 ? [] : null;
+      const files = !failed && answer.ok && answer.body?.operationId === op.id && Array.isArray(answer.body.files) ? answer.body.files : null;
+      if (!files && !failed && answer.status === 404) {
+        // 404 is the answer both for an operation the server does not hold and for one whose study this person cannot see
+        // now (contract 3: the same 404, so nothing of that study shows). It does not tell that a file never arrived: a
+        // file whose answer was lost stays undecided, is never offered to be sent again on it, and a later read (Check
+        // Again, the scope restored) shows what the server holds.
+        op.notice = '';
+        for (const entry of op.files) if (entry.state === 'checking') { entry.state = 'unresolved'; entry.message = TEXT.unresolved; }
+        store();
+        render();
+        return;
+      }
       if (!files) {
         op.notice = !failed && !answer.ok && answer.body?.message ? answer.body.message : TEXT.unread;
         for (const entry of op.files) if (entry.state === 'checking') entry.state = 'unknown';
@@ -473,9 +487,11 @@ window.KinStudyTransferLocal = function (app) {
           if (recheck) entry.rechecked = true;
           else scheduleRecheck(op);
         } else if (entry.state === 'checking') {
-          // The server has no result for it: that request never reached the server, so the same file may go again.
-          entry.state = 'notSent';
-          entry.message = TEXT.notReached;
+          // The server shows this operation without a result for this index. That is not proof either: a request of it
+          // can still be inside the server, before its result is recorded, and be stored afterwards (U4C-03b). The file
+          // stays undecided and is never sent again on that; a later read shows what the server then holds.
+          entry.state = 'unresolved';
+          entry.message = TEXT.pending;
         }
       }
       store();
@@ -502,7 +518,7 @@ window.KinStudyTransferLocal = function (app) {
   // ── Download Originals (5.2, 5.3, 6) ──
   function downloadOperation(id, uid) {
     return { kind: 'download', id, uid, state: null, objects: 0, bytes: 0, done: 0, notice: '', gen: generation, readSeq: 0,
-      inFlight: false, lost: false, polling: false, polls: 0, startedFrom: null, label: studyLabel(uid) };
+      inFlight: false, lost: false, polling: false, polls: 0, startedFrom: null, manifestChanged: false, label: studyLabel(uid) };
   }
 
   /** The row's Download Originals: a new operation is prepared for that study's fixed manifest (5.2 steps 1-2). */
@@ -556,8 +572,11 @@ window.KinStudyTransferLocal = function (app) {
    * are all still the ones that asked; else no link is clicked. A refusal is a notice, and the status read tells the rest.
    */
   async function start(op) {
-    if (!live(op) || !usable() || op.polling || op.inFlight || !RESTARTABLE.includes(op.state)) return;
+    if (!live(op) || !usable() || op.polling || op.inFlight || !RESTARTABLE.includes(op.state) || op.manifestChanged) return;
     const gen = op.gen, seq = ++op.readSeq, at = work.capture('document'), who = JSON.stringify(app.identity());
+    // The press was made with one study selected; once the person has moved to another one (A→B, and A→B→A is not the
+    // same selection either, AGENTS 1) its late grant starts no download in the middle of other work (DG-T06, U4C-04).
+    const pressed = work.capture('study');
     const base = app.api + '/studies/' + encodeURIComponent(op.uid) + '/original-downloads/' + encodeURIComponent(op.id) + '/archive';
     op.inFlight = true;
     op.notice = TEXT.granting;
@@ -573,9 +592,16 @@ window.KinStudyTransferLocal = function (app) {
       if (!live(op) || op.gen !== gen) return;
       op.inFlight = false;
       if (op.readSeq !== seq || !usable() || JSON.stringify(app.identity()) !== who) { render(); return; }
+      if (grant && !work.admits(pressed)) {
+        // The grant is not used: it stays unused until it runs out (120 s) or the next press replaces it.
+        op.notice = TEXT.selectionMoved;
+        render();
+        return;
+      }
       if (!grant) {
         // A lost answer or a refusal starts nothing: the operation's state is read again, and Download asks anew.
         op.notice = failed ? TEXT.lost : answer.body?.message || TEXT.httpFailure(answer.status);
+        if (!failed && answer.body?.code === 'MANIFEST_CHANGED') op.manifestChanged = true;
         render();
         // The notice is the answer to this press; the read that follows keeps it unless the server has its own to say.
         readDownload(op, false, true);
@@ -631,6 +657,9 @@ window.KinStudyTransferLocal = function (app) {
       // The browser's own GET answers this page nothing: a refused or expired grant is known from the status (D1489).
       const request = answer.body.archiveRequest;
       const unstarted = request && (request.state === 'refused' || request.state === 'expired') && RESTARTABLE.includes(op.state);
+      // The study's originals are no longer the ones this operation's fixed manifest names (5.2 step 3): no grant of this
+      // operation can ever start, so the panel offers a new preparation instead of asking for this one again (U4C-02).
+      if (unstarted && request.code === 'MANIFEST_CHANGED') op.manifestChanged = true;
       op.notice = unstarted && typeof request.message === 'string' ? request.message : keepNotice ? op.notice : '';
       if (polled && op.polling) {
         op.polls++;
@@ -723,7 +752,7 @@ window.KinStudyTransferLocal = function (app) {
     head.append(node('b', null, 'Import DICOM'), node('span', null, ' · ' + op.id.slice(0, 8) + (op.label ? ' · ' + op.label : '')));
     if (op.files.some(f => !f.file && sendable(f))) head.append(button('Choose Files Again', () => chooseAgain(op)));
     if (op.files.filter(f => f.file && sendable(f)).length > 1) head.append(button('Retry All', () => op.files.forEach(retry)));
-    if (op.files.some(f => f.state === 'unknown' || (f.state === 'result' && f.outcome === 'unconfirmed')))
+    if (op.files.some(f => f.state === 'unknown' || f.state === 'unresolved' || (f.state === 'result' && f.outcome === 'unconfirmed')))
       head.append(button('Check Again', () => readImport(op, op.files.some(f => f.outcome === 'unconfirmed'))));
     box.append(head);
     if (op.notice) box.append(node('p', 'study-transfer-note', op.notice));
@@ -744,7 +773,8 @@ window.KinStudyTransferLocal = function (app) {
   }
   function stateName(f) {
     if (f.state === 'result') return OUTCOME_NAMES[f.outcome];
-    return { waiting: 'Waiting', sending: 'Sending', checking: 'Checking', unknown: 'Checking', notSent: 'Not Sent', refused: 'Not Sent' }[f.state] || '';
+    return { waiting: 'Waiting', sending: 'Sending', checking: 'Checking', unknown: 'Checking', unresolved: 'Result Unknown',
+      notSent: 'Not Sent', refused: 'Not Sent' }[f.state] || '';
   }
   function describe(f) {
     if (f.state !== 'result') return f.message;
@@ -765,8 +795,11 @@ window.KinStudyTransferLocal = function (app) {
       box.append(line);
     }
     if (op.notice) box.append(node('p', 'study-transfer-note', op.notice));
-    if (RESTARTABLE.includes(op.state) && !op.polling && !op.inFlight) box.append(button('Download', () => start(op)));
-    if (op.state === 'sent' && !op.inFlight) box.append(button('Prepare Again', () => download(op.uid)));
+    if (RESTARTABLE.includes(op.state) && !op.manifestChanged && !op.polling && !op.inFlight) box.append(button('Download', () => start(op)));
+    // After Sent, or once its manifest no longer matches the study: a new operation with a new manifest (5.3); this one
+    // and its attempts stay in the panel as they were.
+    if ((op.state === 'sent' || (op.manifestChanged && RESTARTABLE.includes(op.state))) && !op.inFlight && !op.polling)
+      box.append(button('Prepare Again', () => download(op.uid)));
     return box;
   }
   function downloadText(op) {

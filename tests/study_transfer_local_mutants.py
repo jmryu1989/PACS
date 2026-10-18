@@ -85,6 +85,27 @@ MUTANTS = [
     # A refused or lost grant is a notice; the status read that follows it must not wipe it (hosted G3/CI on b64abb4).
     ("refusal-notice-wiped-by-its-read", ASSET, "        readDownload(op, false, true);", "        readDownload(op);",
      "test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why", "C-06"),
+    # U4C-04: the press belongs to the study selection it was made in; a grant answered after A->B or A->B->A clicks nothing.
+    ("late-grant-after-the-selection-moved-clicked", ASSET, "      if (grant && !work.admits(pressed)) {", "      if (false) {",
+     "test_c06_a_grant_answered_after_the_selection_moved_starts_no_download", "C-07"),
+    # ... and A->B->A is another selection: a check of the UID alone would click after coming back to A.
+    ("late-grant-checked-by-the-uid-only", ASSET, "      if (grant && !work.admits(pressed)) {",
+     "      if (grant && pressed.uid !== work.selection().uid) {",
+     "test_c06_a_grant_answered_after_the_selection_moved_starts_no_download", "C-07"),
+    # U4C-02: a refused MANIFEST_CHANGED operation is replaced by a new preparation, never offered for download again.
+    ("manifest-change-keeps-the-stale-download", ASSET,
+     "      if (unstarted && request.code === 'MANIFEST_CHANGED') op.manifestChanged = true;\n", "",
+     "test_c06_a_changed_manifest_offers_a_new_preparation_and_keeps_the_old_operation", "C-06"),
+    # U4C-03: the 404 of a status read back as "none of its files reached the server" (the r2 reading).
+    ("scoped-404-read-as-not-sent", ASSET,
+     "&& Array.isArray(answer.body.files) ? answer.body.files : null;",
+     "&& Array.isArray(answer.body.files) ? answer.body.files : !failed && answer.status === 404 ? [] : null;",
+     "test_c07_a_lost_answer_of_a_stored_file_and_a_scoped_404_is_never_not_sent", "C-07"),
+    # U4C-03b: a 200 status without the file read back as "it never reached the server" (the r2 reading).
+    ("status-absence-read-as-not-sent", ASSET,
+     "          entry.state = 'unresolved';\n          entry.message = TEXT.pending;",
+     "          entry.state = 'notSent';\n          entry.message = '';",
+     "test_c07_a_status_read_without_the_file_leaves_it_undecided", "C-07"),
     # The grant lives in memory and the one link only.
     ("grant-kept-in-storage", ASSET,
      "      link.href = base + '?grant=' + encodeURIComponent(grant);\n      grant = null;",
