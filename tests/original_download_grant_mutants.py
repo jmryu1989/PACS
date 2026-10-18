@@ -8,8 +8,9 @@ realGuard). A mutant is killed only when that case fails on an assertion (ERR_AS
 within the bound; anything else is NOT PROVEN. The unchanged copy (baseline) must pass every named case first. The
 product tree is never written; the copies live under the --out directory and are removed after each run.
 
-DG-M09 (a raw request line back in the proxy log) needs the real nginx and is the hosted DG-T05 run's; DG-M10 (the UI's
-stale grant answer) is tests/study_transfer_local_mutants.py's "late-grant-clicked".
+DG-M09 (a raw request line back in the proxy log) needs the real nginx: tests/proxy_grant_log_test.py runs it as its
+DetectorSelfCheck (and the hosted DG-T05 run checks the logs); DG-M10 (the UI's stale grant answer) is
+tests/study_transfer_local_mutants.py's "late-grant-clicked". DG-M11 (U4C-05) is this file's.
 
 Also the WORKLIST-SPLIT-UID hand-over mutants of S9-U4b: M-WSU-19 (the download routes' source check skipped) the same
 way against S9U4-B81, and M-WSU-17 (the identity case's registration oracle back to list visibility), a copy of
@@ -57,6 +58,12 @@ MUTANTS = [
     ("DG-M08-sent-without-the-finish", SERVICE,
      "const state = t.stop === 'fenced' || !exact ? 'unconfirmed' : t.stop === 'aborted' || !finished ? 'incomplete' : 'sent';",
      "const state = t.stop === 'fenced' ? 'unconfirmed' : 'sent';", "S9U4-B79"),
+    # U4C-05: the rights read again inside the consume transaction, under its lock - without it a right lost after the
+    # preflight still consumes the grant and opens an attempt with its intent.
+    ("DG-M11-no-rights-under-the-consume-lock", SERVICE,
+     "          if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');\n"
+     "          await this.ownStudyLocked(tx, op.studyUid, c);\n",
+     "", "S9U4-B84"),
     # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
     # the start of an operation prepared before its Study UID became split would go on.
     ("M-WSU-19-download-source-check-skipped", SERVICE,
@@ -117,7 +124,7 @@ def main():
         killed += kill
         print(json.dumps({"mutant": label, "case": case, "exit": code, "seconds": seconds, "killed": kill}), flush=True)
         shutil.rmtree(out / label)
-    print(f"DG mutants killed by their named server case: {killed}/{len(MUTANTS)} (DG-M09 hosted, DG-M10 in the UI mutants)", flush=True)
+    print(f"DG mutants killed by their named server case: {killed}/{len(MUTANTS)} (DG-M09 in proxy_grant_log_test, DG-M10 in the UI mutants)", flush=True)
     oracle_killed = 0
     for label, file, old, new, case in [("baseline-oracle", "invariants_live.py", "", "", "S9U4RegisterTests")] + ORACLE_MUTANTS:
         copy = out / label / "tests"

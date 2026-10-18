@@ -782,7 +782,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     } catch (failure) { throw await refused(failure); }
     if (!op) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
     let attempt!: Awaited<ReturnType<StudyTransferLocalService['openAttempt']>>;
-    try { attempt = await this.openAttempt(op.id, owner, stored, admission); }
+    try { attempt = await this.openAttempt(op.id, owner, stored, c, admission); }
     catch (failure) { throw await refused(failure); }
     // Everything is decided: headers, then bytes. From here no error becomes an HTTP status (5.2 step 6).
     res.status(200);
@@ -979,7 +979,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * 5.2 step 5: one sending attempt per operation, its intent row committed before the first byte or nothing is sent. A
    * previous attempt whose sending lease ran out is closed Unconfirmed with its result row in the same transaction.
    */
-  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, admission: GrantAdmission | null = null) {
+  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, c: Caller, admission: GrantAdmission | null = null) {
     try {
       return await this.gate.write(async tx => {
         const { op, now, stored } = await this.lockDownload(tx, operationId);
@@ -994,6 +994,17 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
             throw error(409, 'DOWNLOAD_GRANT_CONSUMED', TRANSFER_MESSAGES.grantConsumed);
           if (!active || active.grantId !== admission.grantId || active.hash !== admission.hash || active.sessionRef !== admission.sessionRef
               || active.expiresAt !== admission.expiresAt || active.state !== 'issued') throw error(403, 'DOWNLOAD_GRANT_INVALID', TRANSFER_MESSAGES.grantInvalid);
+        }
+        // The rights now, in this transaction under its lock (U4C-05): what the preflight read may have changed before the
+        // lock was taken, so the member rights and the study (still the institution's own, inside StudyAccess - its metadata
+        // prepared by the preflight, outside the lock) are read again here, as each supply approval does. A change is
+        // refused before anything is written: no grant consumed, no attempt, no intent, byte 0.
+        try {
+          if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');
+          await this.ownStudyLocked(tx, op.studyUid, c);
+        } catch (failure) {
+          if (failure instanceof NotFoundException) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
+          throw failure;
         }
         if (stored!.manifestCanonical !== expected.manifestCanonical || stored!.manifestSha256 !== expected.manifestSha256)
           throw error(409, 'MANIFEST_CHANGED', TRANSFER_MESSAGES.changed);

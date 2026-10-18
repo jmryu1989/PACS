@@ -4989,3 +4989,41 @@ test('S9U4-B83 WSU I-02 the import path is not pre-checked for a split: an exist
     if (registered) await h.transfer.studyAccess.require(TECH, [study]);
   }
 });
+
+test('S9U4-B84 U4C-05 DG-T03 a right lost between the start\'s preflight and its operation lock is refused inside the consume transaction - a role lost, the member\'s institution changed, the study moved out of the institution: no grant use, no attempt, no intent, byte 0, the grant closed as refused and the operation still prepared; the same start with the rights unchanged still opens and finishes', async () => {
+  for (const change of ['role', 'institution', 'study']) {
+    const h = await harness({ realGuard: true });
+    sessionOf(h, 'sid-race');
+    const study = await downloadStudy(h, 1);
+    const id = await boundPrepare(h, study, 'sid-race');
+    const raw = (await grantRequest(h, study, id, 'sid-race')).body.grant;
+    const rights = h.s.rights.get(RAD.sub), state = h.s.states.get(study);
+    let changed = false;
+    // The change lands after the preflight's reads and before the consume transaction's lock answers (its first read).
+    h.s.onQuery = async (sql, values, tx) => {
+      if (!changed && tx && sql.includes('SELECT * FROM "ImportOperation"') && values.includes(id)) {
+        changed = true;
+        if (change === 'role') h.s.rights.set(RAD.sub, { ...rights, roles: ['clinician'] });
+        else if (change === 'institution') h.s.rights.set(RAD.sub, { ...rights, institution: 'inst-b' });
+        else h.s.states.set(study, { ...state, institutionId: 'inst-b' });
+      }
+    };
+    let r;
+    try { r = await nativeGet(h, study, id, raw, 'sid-race'); } finally { h.s.onQuery = null; }
+    await sleep(80);
+    assert.ok(changed, change + ': the change reached the lock');
+    assert.ok([403, 404].includes(r.status), change + ': refused, ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.ok(String(r.headers['content-type']).startsWith('application/json'), change + ': byte 0, never a ZIP');
+    const d = h.s.op(id).download;
+    assert.deepEqual([d.archiveGrantUses.length, d.attempts.length, audits(h.s, 'original.download.intent').length, h.s.op(id).status],
+      [0, 0, 0, 'prepared'], change + ': nothing consumed or opened');
+    assert.deepEqual([d.activeArchiveGrant.state, d.activeArchiveGrant.refusal.code === null], ['refused', false], change + ': the grant closed as refused');
+    h.s.rights.set(RAD.sub, rights);
+    h.s.states.set(study, state);
+    const again = (await grantRequest(h, study, id, 'sid-race')).body.grant;
+    const zip = await nativeGet(h, study, id, again, 'sid-race');
+    assert.deepEqual([zip.status, parseZipEntries(zip.bytes).length], [200, 2], change + ': unchanged rights open the start (the manifest and the one original)');
+    await sleep(50);
+    assert.equal(h.s.op(id).status, 'sent');
+  }
+});
