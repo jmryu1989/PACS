@@ -206,6 +206,27 @@ function fixedPrototypeComparison(node, file) {
   return codePoint(file, node.expression.name.getStart(file));
 }
 
+function moduleKey(node, file) {
+  // EMR-B2 (d): `module` as the name of an object-literal property assignment ({ module: AppModule, providers }, Nest's
+  // DynamicModule) names no loader. A shorthand `{ module }`, a label, a declaration, a parameter or a member access is
+  // not this form and stays a sealed word. Use the TS AST, not another source-text parser (D73).
+  if (!ts.isIdentifier(node) || node.text !== 'module' || !node.parent || !ts.isPropertyAssignment(node.parent) ||
+      node.parent.name !== node || !ts.isObjectLiteralExpression(node.parent.parent)) return null;
+  return codePoint(file, node.getStart(file));
+}
+
+function processListener(node, file) {
+  // EMR-B2 (d): process.on('<event>', handler) - the bare process identifier, the member on, a string-literal event and
+  // one handler argument - as the launcher registers its stop-latch handlers. process['on'], a computed event, another
+  // member or another argument count is not this form; which files and events it may name is the fixture's
+  // signal_handlers. [offset of `process`, event].
+  if (!ts.isCallExpression(node) || node.questionDotToken || node.arguments.length !== 2 ||
+      !ts.isPropertyAccessExpression(node.expression) || node.expression.questionDotToken ||
+      !ts.isIdentifier(node.expression.expression) || node.expression.expression.text !== 'process' ||
+      node.expression.name.text !== 'on' || !ts.isStringLiteral(node.arguments[0])) return null;
+  return [codePoint(file, node.expression.expression.getStart(file)), node.arguments[0].text];
+}
+
 function constructorWithoutReturn(node, file) {
   if (!ts.isConstructorDeclaration(node) || !node.body) return null;
   let returns = false;
@@ -271,7 +292,7 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [], constructors = [];
+    const loads = [], comparisons = [], constructors = [], moduleKeys = [], listeners = [];
     const visit = node => {
       if (!broken) {
         const constructor = constructorWithoutReturn(node, file);
@@ -280,6 +301,10 @@ function answer(request) {
         if (load) loads.push(load);
         const comparison = fixedPrototypeComparison(node, file);
         if (comparison !== null) comparisons.push(comparison);
+        const key = moduleKey(node, file);
+        if (key !== null) moduleKeys.push(key);
+        const listener = processListener(node, file);
+        if (listener) listeners.push(listener);
       }
       if (ts.isIdentifier(node) && names.has(node.text)) {
         const start = node.getStart(file);
@@ -291,7 +316,8 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
-    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors };
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors,
+      module_keys: moduleKeys, process_listeners: listeners };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {

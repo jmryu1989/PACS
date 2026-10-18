@@ -274,7 +274,7 @@
       "a string literal or template without substitutions whose value (escapes decoded) is one of sealed_words or sealed_strings stands only as an element of an array literal: elsewhere a reflective call (Object.getOwnPropertyDescriptor(X, 'prototype')), a quoted key ({ '__proto__': p }) or a quoted member name ('constructor'() { ... }) reads it as that name",
       "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==, or as fixed_prototype_comparison specifies; constructor only as a declaration whose own function scope holds no return (TypeScript AST excludes nested callback/class scopes); no class heading in a *.controller.ts file has extends, the heading read to the '{' of its body past type parameters and heritage clauses as class_heading lists (S5-U1c-F08)",
       "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)",
-      "EMR-B2 (d), for ratification: the sealed word module only as an object-literal key 'module:' (Nest's DynamicModule { module: AppModule, providers } that api/src/app.module.ts forLaunch returns to the launcher), which names no loader; process.on only for the launcher's SIGTERM/SIGINT handlers (api/src/emr-runtime/launcher.ts), which trip the stop latch and nothing else"
+      "EMR-B2 (d), D1550: the sealed word module only as the name of an object-literal property assignment ('{ module: AppModule, providers }', Nest's DynamicModule that api/src/app.module.ts forLaunch returns to the launcher), as the TypeScript AST reads it (tests/route_inventory_ts.js moduleKey): a shorthand '{ module }', a label, a declaration, a parameter, a quoted key and a member access stay refused; process.on only in the files signal_handlers names, as process.on('<event>', handler) with one string-literal event that file's list holds and one handler (processListener): process['on'], a computed or unlisted event, process.on in another file, process.once, process.removeListener and process.on handed on stay refused, as does every process member outside process_members"
     ],
     "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "net", "node:async_hooks", "node:crypto", "node:dns", "node:fs", "node:path", "node:http", "node:https", "node:net", "node:stream", "rxjs"],
     "file_packages": {
@@ -288,7 +288,9 @@
     "loaded_packages": ["express", "node:crypto"],
     "sealed_words": ["Function", "Proxy", "__proto__", "defineProperties", "defineProperty", "eval", "global", "globalThis", "module", "setPrototypeOf"],
     "sealed_strings": ["Reflect", "constructor", "createDecorator", "decorate", "defineMetadata", "getPrototypeOf", "process", "prototype", "require"],
-    "process_members": ["env", "exit", "on", "platform"],
+    "process_members": ["env", "exit", "platform"],
+    "signal_handlers": {"emr-runtime/launcher.ts": ["SIGINT", "SIGTERM"]},
+    "signal_handlers_reason": "EMR-B2 (d), D1545/D1547/D1550: the launcher alone owns the process start and stop; its SIGTERM and SIGINT handlers only trip the permanent stop latch (an AbortController) and stay until exit. Nest's enableShutdownHooks is not used, so this is the one place a signal reaches code; the handlers load nothing and write no metadata.",
     "reflect_members": ["ownKeys"],
     "prototype_owners": ["Array", "Object"],
     "outside_the_contract": [
@@ -327,6 +329,16 @@
       "process.mainModule": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process.mainModule')"]],
       "process.mainModule by a literal key": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process.mainModule')"]],
       "process handed on": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process')"]],
+      "process.on outside the signal-handler files": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process.on')"]],
+      "process.on of an event the signal-handler file does not list": [["launcher.ts: a sealed name or a form the source contract does not list", "'process.on')"]],
+      "process.on of a computed event in the signal-handler file": [["launcher.ts: a sealed name or a form the source contract does not list", "'process.on')"]],
+      "process.on by a literal key in the signal-handler file": [["launcher.ts: a sealed name or a form the source contract does not list", "'process.on')"]],
+      "process.once and process.removeListener": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process.once')", "'process.removeListener')"]],
+      "process.on handed on": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process.on')"]],
+      "a shorthand module property": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'module')"]],
+      "module as a label": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'module')"]],
+      "a quoted module key": [["unlisted-routes.ts: a string literal that spells a handle source_contract seals, outside an array literal", "'module')"]],
+      "module as a member": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'module')"]],
       "Proxy": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'Proxy')"]],
       "a constructor as a property": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'constructor as a property')"]],
       "a constructor by a literal key": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'constructor as a property')"]],
@@ -377,6 +389,8 @@
       "handle names as elements of an array literal",
       "one-literal keys that name nothing sealed",
       "process.env and process.exit",
+      "process.on of SIGTERM and SIGINT in the signal-handler file",
+      "an object-literal key named module (Nest's DynamicModule)",
       "this.require and this.<field>.require of a method named require"
     ],
     "regex_or_division": {

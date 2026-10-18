@@ -40,8 +40,7 @@ export interface LaunchInput {
 
 const DRAIN_GRACE_MS = 10000;
 const FATAL_CLEANUP_MS = 5000;
-const SIGNALS = ['SIGTERM', 'SIGINT'] as const;
-type StopSignal = typeof SIGNALS[number];
+type StopSignal = 'SIGTERM' | 'SIGINT';
 type StopCause = Readonly<{ kind: 'signal'; signal: StopSignal } | { kind: 'failure' }>;
 type ResourceName = 'ledger' | 'app' | 'listener';
 interface Resource { readonly name: ResourceName; readonly release: () => Promise<void>; released?: Promise<void> }
@@ -104,7 +103,8 @@ export async function launchApi(input: LaunchInput): Promise<void> {
   // The latch: tripped by a signal or a start failure, once; the handlers stay until the process ends and do nothing
   // else. The stop sequence begins at the trip, in the same turn, before anything else can run.
   const trip = (cause: StopCause) => { if (!latch.signal.aborted) latch.abort(cause); };
-  for (const signal of SIGNALS) process.on(signal, () => trip({ kind: 'signal', signal }));
+  process.on('SIGTERM', () => trip({ kind: 'signal', signal: 'SIGTERM' }));
+  process.on('SIGINT', () => trip({ kind: 'signal', signal: 'SIGINT' }));
   latch.signal.addEventListener('abort', () => { void stop(); }, { once: true });
 
   const reserve = (name: ResourceName, release: () => Promise<void>) => { resources.push({ name, release }); };

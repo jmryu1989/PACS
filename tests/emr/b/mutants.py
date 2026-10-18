@@ -190,9 +190,9 @@ MUTANTS = {
     "M55": ("B2B-01: a cold close does not lock the start; a start after it creates and connects a client", [
         ("api/src/emr-runtime/application.ts", "    if (this.state === 'cold' || this.state === 'starting' || this.state === 'ready') this.state = 'stopping';\n",
          "    if (this.state === 'starting' || this.state === 'ready') this.state = 'stopping';\n")]),
-    "M56": ("B2R-02: the signal handler drops the latch (the stop never begins on SIGTERM/SIGINT)", [
-        ("api/src/emr-runtime/launcher.ts", "  for (const signal of SIGNALS) process.on(signal, () => trip({ kind: 'signal', signal }));\n",
-         "  for (const signal of SIGNALS) process.on(signal, () => void signal);\n")]),
+    "M56": ("B2R-02: the signal handlers drop the latch (the stop never begins on SIGTERM/SIGINT)", [
+        ("api/src/emr-runtime/launcher.ts", "  process.on('SIGTERM', () => trip({ kind: 'signal', signal: 'SIGTERM' }));\n  process.on('SIGINT', () => trip({ kind: 'signal', signal: 'SIGINT' }));\n",
+         "  process.on('SIGTERM', () => undefined);\n  process.on('SIGINT', () => undefined);\n")]),
     "M57": ("B2R-02: the latch trips a turn late (a step that returns in the same turn as the signal goes on)", [
         ("api/src/emr-runtime/launcher.ts", "  const trip = (cause: StopCause) => { if (!latch.signal.aborted) latch.abort(cause); };\n",
          "  const trip = (cause: StopCause) => { setImmediate(() => { if (!latch.signal.aborted) latch.abort(cause); }); };\n")]),

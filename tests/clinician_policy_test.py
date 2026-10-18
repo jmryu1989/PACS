@@ -185,6 +185,8 @@ FILE_PACKAGES = {name: frozenset(packages) for name, packages in CONTRACT.get("f
 LOADED_PACKAGES = frozenset(CONTRACT["loaded_packages"])
 REFLECT_MEMBERS = frozenset(CONTRACT["reflect_members"])
 PROCESS_MEMBERS = frozenset(CONTRACT["process_members"])
+# EMR-B2 (d): the files that may register process.on('<event>', handler), by their api/src-relative name, and the events
+SIGNAL_HANDLERS = {name: frozenset(events) for name, events in CONTRACT.get("signal_handlers", {}).items()}
 PROTOTYPE_OWNERS = frozenset(CONTRACT["prototype_owners"])
 SEALED_WORD = re.compile(rf"(?:{'|'.join(sorted(map(re.escape, CONTRACT['sealed_words'])))})(?![\w$])")
 OWNER_NAME = re.compile(rf"(?:{'|'.join(sorted(PROTOTYPE_OWNERS))})(?![\w$])")
@@ -799,7 +801,9 @@ class Compiler:
                 self.answers[key].setdefault(API / name, {}).update(
                     relative_loads=dict(contract["relative_loads"]),
                     prototype_comparisons=set(contract["prototype_comparisons"]),
-                    constructors_without_return=set(contract["constructors_without_return"]))
+                    constructors_without_return=set(contract["constructors_without_return"]),
+                    module_keys=set(contract.get("module_keys", ())),
+                    process_listeners={offset: event for offset, event in contract.get("process_listeners", ())})
         return self.answers[key]
 
     def request(self, request):
@@ -1243,11 +1247,19 @@ def contract_names(path, code, bindings=None):
     constructor reached as a property) or reaches a loader through process or module: each would put route methods
     read under one file's prefix on an instance served under another's, or load a module unread.
     """
-    # EMR-B2 (d) pin (for ratification): Nest's DynamicModule is `{ module: AppModule, providers }` (api/src/app.module.ts
-    # forLaunch); the sealed word `module` as an object-literal key names no loader (module.require needs a '.'). Every
-    # other spelling of `module` stays refused.
+    # EMR-B2 (d), D1550: Nest's DynamicModule is `{ module: AppModule, providers }` (api/src/app.module.ts forLaunch); the
+    # sealed word `module` as the name of an object-literal property assignment - the TypeScript AST's reading
+    # (tests/route_inventory_ts.js moduleKey), not a text rule - names no loader. A shorthand `{ module }`, a label, a
+    # declaration, a parameter and a member access stay refused.
+    module_keys = (bindings or {}).get("module_keys", ())
     found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)
-             if not (match.group(0) == "module" and not is_property(code, match.start()) and code.startswith(":", skip_gap(code, match.end())))]
+             if not (match.group(0) == "module" and match.start() in module_keys)]
+    # EMR-B2 (d), D1550: process.on('<event>', handler) only in the files source_contract.signal_handlers names and only
+    # for the events it lists there (the launcher's SIGTERM/SIGINT stop-latch handlers), read by the TypeScript AST
+    # (processListener: the bare process, the member on, a string-literal event, one handler); process['on'], a computed
+    # event, another event, another file and every other process member outside process_members stay refused.
+    listeners = (bindings or {}).get("process_listeners", {})
+    events = SIGNAL_HANDLERS.get(path.relative_to(API).as_posix() if API in path.parents else "", frozenset())
 
     def add(match, text):
         found.append((line_of(code, match.start()), text))
@@ -1262,7 +1274,9 @@ def contract_names(path, code, bindings=None):
     for match in words(PROCESS_NAME, code):
         dot = skip_gap(code, match.end())
         member = IDENTIFIER.match(code, skip_gap(code, dot + 1)) if code.startswith(".", dot) else None
-        if not is_property(code, match.start()) and (member is None or member.group(0) not in PROCESS_MEMBERS):
+        listed = member is not None and member.group(0) in PROCESS_MEMBERS
+        handler = member is not None and member.group(0) == "on" and listeners.get(match.start()) in events
+        if not is_property(code, match.start()) and not (listed or handler):
             add(match, "process" + ("." + member.group(0) if member else ""))
     for match in words(PROTOTYPE_NAME, code):
         base = owner(code, match.start())
@@ -2894,6 +2908,9 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         tags, outside, helpers, app = (API / "study-tags.controller.ts", API / "unlisted-routes.ts",
                                        API / "route-helpers.ts", API / "app.module.ts")
+        launcher = API / "emr-runtime" / "launcher.ts"
+        self.assertEqual(sorted(SIGNAL_HANDLERS), [launcher.relative_to(API).as_posix()], "signal_handlers names the launcher alone")
+        self.assertIn(launcher, sources)
         member, registered = "  @Get() read(", "StudyAccessController],"
         heading, constructor = "export class StudyTagsController {", "constructor(private service:StudyTagsService){}"
         for text in (member, heading, constructor):
@@ -2989,6 +3006,19 @@ class ClinicianPolicySpec(unittest.TestCase):
             "process.mainModule": service("export const main = process.mainModule;\n"),
             "process.mainModule by a literal key": service("export const main = process['mainModule'];\n"),
             "process handed on": service("export const proc = process;\n"),
+            # EMR-B2 (d), D1550: process.on only as the launcher's stop-latch handlers, `module` only as an object key
+            "process.on outside the signal-handler files": service("process.on('SIGTERM', () => {});\n"),
+            "process.on of an event the signal-handler file does not list": {launcher: sources[launcher] + "process.on('exit', () => {});\n"},
+            "process.on of a computed event in the signal-handler file": {
+                launcher: sources[launcher] + "const late = 'SIGTERM';\nprocess.on(late, () => {});\n"},
+            "process.on by a literal key in the signal-handler file": {launcher: sources[launcher] + "process['on']('SIGINT', () => {});\n"},
+            "process.once and process.removeListener": service(
+                "const stop = () => {};\nprocess.once('SIGTERM', stop);\nprocess.removeListener('SIGTERM', stop);\n"),
+            "process.on handed on": service("export const register = process.on;\n"),
+            "a shorthand module property": service("export const box = (module: any) => ({ module });\n"),
+            "module as a label": service("export function run() {\n  module: for (;;) {\n    break module;\n  }\n}\n"),
+            "a quoted module key": service("export const dynamic = { 'module': Helper };\n"),
+            "module as a member": service("export const own = (holder: any) => holder.module;\n"),
             "Proxy": service("export const wrap = (target: any) => new Proxy(target, {});\n"),
             "a constructor as a property": service("export const make = (value: any) => value.constructor.constructor;\n"),
             "a constructor by a literal key": service("export const make = (value: any) => value['constructor'];\n"),
@@ -3082,6 +3112,11 @@ class ClinicianPolicySpec(unittest.TestCase):
                 "export const list = (value: any): Array<number> => Array.isArray(value) && Object.getPrototypeOf(value) "
                 "!== Array.prototype ? new Array(value.length) : Object.keys(value).map(Number);\n"),
             "process.env and process.exit": service("export const port = () => process.env.PORT ?? process.exit(1);\n"),
+            # EMR-B2 (d), D1550: the launcher's two stop-latch handlers, and Nest's DynamicModule key
+            "process.on of SIGTERM and SIGINT in the signal-handler file": {
+                launcher: "export const stop = () => undefined;\nprocess.on('SIGTERM', stop);\nprocess.on('SIGINT', stop);\n"},
+            "an object-literal key named module (Nest's DynamicModule)": service(
+                "export const dynamic = { module: Helper, providers: [Helper] };\n"),
             "Reflect.ownKeys and a namespace of a listed package": service(
                 "export const keys = (v: object) => Reflect.ownKeys(v).length + nodeCrypto.randomBytes(1).length;\n",
                 "import * as nodeCrypto from 'node:crypto';\n"),
