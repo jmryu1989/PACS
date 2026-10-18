@@ -5737,6 +5737,29 @@ def consumer_inventory(test):
             "the late-resume and fresh-control BOUND indexes (no bundle sealed by either)", "t16_pass false and exit 1 on a refused consumption", case,
             "t16_pass=%s exit %d" % (result["t16_pass"], code), "t16_pass=True exit 0" if case == normal_case else "t16_pass=False exit 1", {})
 
+    # 9a. No layer is required where none exists (R8-02; D1550 (d)): a source-b0 bundle (no volumes, no writable layer)
+    # verifies with no capture and restores; a leaf sealing source-b0 indexes BOUND; leaves that seal nothing (the
+    # late-resume fork, which consumes a volume checkpoint through its restore observation, and the fresh control) stay
+    # BOUND at every consumption.
+    no_layer = "no writable layer exists here (no new requirement)"
+    fixture = test.tempdir("kin-r8-source-")
+    source_bundle = bundle_from(test, fixture, realistic(fixture, "source-b0"), "source-b0")
+    row("verify_bundle (tar adapter)", "ops_release_checkpoints.verify_bundle", "a source-b0 bundle (no volume checkpoint)", "accepted, capture None",
+        no_layer + ": source-b0", _typed(lambda: cp.require(cp.verify_bundle(source_bundle).capture is None and "layer" not in
+                                                            json.loads((source_bundle / "manifest.json").read_bytes())["bindings"],
+                                                            "ORACLE", "a layer appeared")), "ACCEPTED", {})
+    result = o7_restore(test, source_bundle)
+    row("restore_checkpoint", "ops_release_checkpoints.restore_checkpoint", "a source-b0 bundle (no volume checkpoint)", "accepted", no_layer + ": source-b0",
+        result["outcome"], "ACCEPTED", {"daemon_calls": result["daemon_calls"], "fixture_root_created": int(result["fixture_root_created"])})
+    proof, run_dir, index = o7_index(test, unit="release-tools-checkpoints-proof-prefix-source")
+    row("leaf_index (raw-records adapter)", "ops_release_checkpoints.leaf_index", "the prefix-source leaf's raw records (it seals source-b0)",
+        "BOUND without a layer", no_layer + ": a leaf sealing source-b0", index["verdict"] + ": " + json.dumps(index["reasons"]), "BOUND", {})
+    pair_root, pair = records.bound_pair()
+    for leaf in pair:
+        row("bound_index (a stored BOUND index)", "ops_release_checkpoints.bound_index", "a BOUND index of a leaf that seals no bundle",
+            "accepted at every consumption", no_layer + ": " + leaf.unit, _typed(lambda leaf=leaf: cp.bound_index(pair_root, leaf.unit)),
+            "ACCEPTED", {})
+
     # 9. Diagnostics and generation inputs (never an admission or a BOUND by themselves).
     diagnostic = next(iter(malformed_bundles.values()))
     manifest = json.loads((diagnostic / "manifest.json").read_bytes())
@@ -5883,8 +5906,9 @@ class CheckpointVerifiedCaptureTests(CaptureFixture, RefusalAssertions, TempCase
 
     def test_every_consumer_entry_point_runs_against_the_verified_boundary(self):
         """R8-05: the executed consumer inventory (consumer_inventory): each row's real entry point gave its contract's
-        result for its case, a refusal left the side effects it names at 0, and every raw adapter ran its normal, stale,
-        rebound-contradiction and malformed-fact cases."""
+        result for its case, a refusal left the side effects it names at 0, every raw adapter ran its normal, stale,
+        rebound-contradiction and malformed-fact cases, and no layer is required of a source-b0 bundle or of a leaf that
+        seals none (no new false refusal)."""
         rows = consumer_inventory(self)
         for item in rows:
             with self.subTest(consumer=item["consumer"], case=item["case"]):
@@ -5896,6 +5920,9 @@ class CheckpointVerifiedCaptureTests(CaptureFixture, RefusalAssertions, TempCase
             self.assertTrue(len(cases) >= 4 and "normal" in cases and any("hash not updated" in case for case in cases)
                             and any("contradiction" in case for case in cases) and any("malformed" in case for case in cases),
                             "CKPT8_RAW_ADAPTER_CASES: " + adapter + ": " + json.dumps(cases))
+        no_layer = [item for item in rows if item["case"].startswith("no writable layer exists here")]
+        self.assertEqual((len(no_layer), sorted({item["result"].split(":", 1)[0] for item in no_layer})), (5, ["ACCEPTED", "BOUND"]),
+                         "CKPT8_NO_NEW_LAYER_REQUIREMENT: " + json.dumps(no_layer))
 
 # The harness file each mutant edits (a temporary copy; the product scripts are never copied or changed).
 MUTANT_TARGETS = {"checkpoints": "ops_release_checkpoints.py", "rehearsal": "ops_deploy_host_container_test.py",
