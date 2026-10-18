@@ -8,15 +8,21 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M44 and M46-M54 to temporary copies of tests/ops_release_checkpoints.py,
-(M15-M17, M35) tests/ops_deploy_host_container_test.py and (M51) tests/ops_release_checkpoints_native_test.py only, runs
+CheckpointMutationContracts (T18) applies M01-M44 and M46-M57 to temporary copies of tests/ops_release_checkpoints.py,
+(M15-M17, M35) tests/ops_deploy_host_container_test.py and (M51, M56) tests/ops_release_checkpoints_native_test.py only, runs
 the named contract against the unmodified copies (control) and the mutant in fresh processes, and counts a kill only when
 the control passes and the mutant fails an assertion (an import, launch or fixture error is not a kill). M01-M14 are the
 spec's contracts; M15-M30 were added by hardening round 1 for CKPT-01..09 (one or more per finding); M31-M42 by round 3
 for CKPT2-01..06 (M30 retargeted to the new alias keep); M43, M44 and M46 by round 5 (consult-checkpoints-r5-20261016
 new_mutants); M47-M51 by round 6 (consult-checkpoints-r6-20261017 new_mutants M47-M49 and the optional library-bytes and
 residue-release ones); M52-M54 by round 7 (consult-checkpoints-r7-20261017 mutants: a non-object row skipped, an absence
-not corroborated, a row's image not bound).
+not corroborated, a row's image not bound); M55-M57 by round 8 (consult-checkpoints-r8-20261017 R8-06: the layer binding
+unchecked, the native evidence taking the caller's descriptor, a fact kind looked up before its type is checked).
+
+Round 8 (consult-checkpoints-r8-20261017, CKPT7-01/02): the judgement is one call over the current bytes and the seal's
+bindings that returns what it verified (CheckpointVerifiedCaptureTests: R8-02 the bindings and the returned value, R8-03
+the real native Smoke.regenerated contrast, R8-04 the finite typed-refusal table and the adapters, R8-05 the executed
+consumer inventory). Its oracle helpers use only entry points de02468 has as well, so they ran red there and green here.
 
 Round 7 (consult-checkpoints-r7-20261017, CKPT6-01): the writable-layer record is a closed five-role map judged against
 the capture it describes (CheckpointLayerContractTests, oracles O7-*) at its generation, load_bundle, the index, every
@@ -1071,7 +1077,7 @@ class CheckpointClaimTests(unittest.TestCase):
 
 
 class CaptureFixture:
-    def captured(self, checkpoint_id, backend=None, *, running=None, descriptor=None, fixture=None, store_root=None):
+    def captured(self, checkpoint_id, backend=None, *, running=None, descriptor=None, fixture=None, store_root=None, before=None):
         target = target_fixture()
         names = {role: target["containers"][role] for role in intro.ROLES}
         volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
@@ -1086,6 +1092,8 @@ class CaptureFixture:
                 backend.containers[name]["image"] = pins[role]
         boundary = {**cp.boundary_publishable(checkpoint_id, state=made.state, result=made.result, result_raw=made.raw),
                     "facts": backend.boundary_facts()}
+        if before is not None:   # r8: a fixture file changed after its binding was taken (the hash not updated)
+            before(fixture, made)
         store = cp.BundleStore(store_root or self.tempdir() / "bundles", forbidden=[fixture])
         final = cp.capture_checkpoint(checkpoint_id=checkpoint_id, store=store, backend=backend, boundary=boundary, names=names,
                                       volumes=volumes, fixture_root=fixture, bindings=made.bindings, identity=made.identity,
@@ -4251,7 +4259,9 @@ class CheckpointRegeneratedTests(CaptureFixture, RefusalAssertions, TempCase):
                  "a missing record": (None, {})}
         for name, (data, changes) in cases.items():
             with self.subTest(refused=name):
-                self.assertRefused("LAYER_INVALID", cp.layer_valid, data, **{**arguments, **changes})
+                # r8: an edited record has its layer binding rebound, so the refusal is the contract's, not the hash's.
+                bound = {"layer_binding": {**arguments["layer_binding"], "sha256": cp.sha256(data)}} if data is not None else {}
+                self.assertRefused("LAYER_INVALID", cp.layer_valid, data, **{**arguments, **bound, **changes})
         # load_bundle: the binding missing, beside another observation, or the record substituted with its binding.
         self.assertRefused("BUNDLE_INVALID", seal, self, self.tempdir() / "bundles", "introduced", drop=("layer",))
         fixture = self.tempdir()
@@ -4741,7 +4751,7 @@ def layer_oracles(test):
 def rebound(arguments, raw, *, record=None, snapshot=None, boundary=None):
     """layer_valid's arguments and record with `snapshot(value)`, `boundary(value)` or `record(value)` applied and every hash
     naming the changed bytes rebound (snapshot.json -> observation.json's file list -> the seal's observation binding ->
-    the record's observation SHA-256)."""
+    the record's observation SHA-256; r8: the record's bytes -> the seal's layer binding)."""
     arguments, document = copy.deepcopy(arguments), json.loads(raw)
     if snapshot is not None:
         files = dict(arguments["observation_files"])
@@ -4758,7 +4768,10 @@ def rebound(arguments, raw, *, record=None, snapshot=None, boundary=None):
         boundary(arguments["boundary"])
     if record is not None:
         record(document)
-    return cp.canonical(document) + b"\n", arguments
+    data = cp.canonical(document) + b"\n"
+    if "layer_binding" in arguments:   # the r8 judgement checks the record's own binding (0535bc8/de02468 have none)
+        arguments["layer_binding"] = {**arguments["layer_binding"], "sha256": cp.sha256(data)}
+    return data, arguments
 
 
 class CheckpointLayerContractTests(CaptureFixture, RefusalAssertions, TempCase):
@@ -4795,7 +4808,7 @@ class CheckpointLayerContractTests(CaptureFixture, RefusalAssertions, TempCase):
             with self.subTest(control=name):
                 raw, arguments, final = self.context(**kwargs)
                 self.admitted(cp.layer_valid, raw, **arguments)
-                self.assertEqual(self.admitted(cp.bundle_layer, cp.load_bundle(final)[0], final)["outcome"], "ACCEPTED")
+                self.assertEqual(self.admitted(cp.verify_bundle, final).capture.layer["outcome"], "ACCEPTED")
         # Rebound row substitutions at load_bundle (the reviewer's probe and its extensions): never sealed and loadable.
         for name, change in {**O7_ROW_CHANGES, **O7_REFUSED_BEFORE}.items():
             with self.subTest(bundle=name):
@@ -5032,7 +5045,857 @@ class CheckpointLayerContractTests(CaptureFixture, RefusalAssertions, TempCase):
                           if path.is_file()}, before, "CKPT7_ORIGINAL_OBSERVATION_UNCHANGED")
 
 
-# ── T18: mutants of the checkpoint logic (temporary copies of the harness files only) ──
+# ── r8 (consult-checkpoints-r8-20261017, CKPT7-01/02): one verified-return judgement at every consumer ──
+# The oracle helpers (native_contrast, typed_refusal_table, typed_refusal_adapters) use only entry points de02468 has as
+# well (Smoke.regenerated, capture_checkpoint, load_bundle, layer_context/layer_valid, restore_checkpoint, leaf_index,
+# bound_index, leaf_request), so the same oracle ran red on de02468 and green on r8 (evidence native-contrast-on-*.json,
+# typed-refusals-on-*.json). A consumer that raises anything but a typed refusal is recorded as an EXCEPTION row, which
+# the r8 assertions count as a failure: never a pass, never skipped.
+R8_MISSING, R8_NORMAL = object(), object()
+R8_KINDS = (("normal", R8_NORMAL), ("missing", R8_MISSING), ("null", None), ("true", True), ("false", False), ("integer", 7), ("number", 1.5),
+            ("string", "x"), ("array", ["x"]), ("object", {"x": 1}), ("empty string", ""), ("empty array", []), ("empty object", {}))
+# The closed layer schema's declared fields (consult-checkpoints-r7-20261017 layer_valid_contract) as paths into the record
+# of an Orthanc-start capture (its api row: transient changes, no facts; its orthanc row: typed facts and regenerated
+# verdicts), and the absent row of a capture that observed Orthanc ABSENT.
+R8_RECORD_FIELDS = (("schema",), ("kind",), ("checkpoint",), ("observation",), ("observation", "path"), ("observation", "sha256"),
+                    ("observation", "request_sha256"), ("descriptor_sha256",), ("roles",), ("outcome",), ("refused",), ("judged_utc",),
+                    ("roles", "api"), *(("roles", "api", key) for key in ("absent", "container_id", "container_name", "image", "mounts", "changes",
+                                                                          "facts", "layer_observable", "verdicts")),
+                    ("roles", "api", "changes", 0), ("roles", "api", "verdicts", 0), ("roles", "api", "verdicts", 0, "change"),
+                    ("roles", "api", "verdicts", 0, "verdict"), ("roles", "orthanc", "facts"), ("roles", "orthanc", "layer_observable"),
+                    ("roles", "orthanc", "verdicts"), ("roles", "orthanc", "facts", "/etc/hostid"),
+                    *(("roles", "orthanc", "facts", "/etc/hostid", key) for key in ("type", "mode", "uid", "gid", "size", "sha256", "text")),
+                    *(("roles", "orthanc", "facts", "/etc", key) for key in ("type", "mode", "uid", "gid")))
+R8_ABSENT_FIELDS = (("roles", "orthanc"), ("roles", "orthanc", "absent"), ("roles", "orthanc", "container_name"))
+# The context and binding boundary the judgement reads: its arguments and the fields it reads in them (a missing argument
+# is None, what an adapter passes for an input it could not read).
+R8_ARGUMENT_FIELDS = (("layer_binding",), ("layer_binding", "path"), ("layer_binding", "sha256"), ("state_binding",), ("state_binding", "path"),
+                      ("state_binding", "sha256"), ("checkpoint_id",), ("observation",), ("observation", "path"), ("observation", "sha256"),
+                      ("observation_files",), ("identity",), ("identity", "plan_sha256"), ("identity", "image_ids"),
+                      ("identity", "image_ids", "release"), ("boundary",), ("boundary", "facts"), ("boundary", "facts", "containers"),
+                      ("boundary", "facts", "containers", "api"), ("boundary", "facts", "containers", "api", "id"),
+                      ("boundary", "facts", "containers", "api", "mounts"), ("owned",), ("owned", "projects"), ("owned", "stack"),
+                      ("owned", "stack", "containers"), ("owned", "stack", "containers", "api"), ("plan",), ("plan", "release"),
+                      ("plan", "release", "images"), ("plan", "release", "images", "api"), ("state_raw",), ("target_names",),
+                      ("target_names", "api"))
+# The bound capture snapshot rows the judgement cross-checks (their hashes rebound up to the seal's observation binding).
+R8_SNAPSHOT_FIELDS = (("facts", "containers", "value", "api"), ("facts", "containers", "value", "api", "value", "image"))
+# The descriptor fields the judgement reads (regenerated_applicable, regenerated_entry, layer_verdicts), mistyped in the
+# descriptor a capture whose Orthanc role starts normally is judged against: the typed entries are refused, typed.
+R8_DESCRIPTOR_FIELDS = ("applicable", "hostid_regenerated", "container_id", "actual_image", "pinned_image", "image", "generated")
+# Kinds the contract accepts besides the normal value itself, with the reason.
+R8_ACCEPTED_BY_CONTRACT = {
+    ("judged_utc",): {"string", "empty string"},                          # a string: no time format is part of the record contract
+    ("roles", "api", "layer_observable"): {"false"},                      # no facts and no regenerated verdict depend on it
+    ("roles", "orthanc", "facts", "/etc/hostid", "size"): {"integer"},    # the hostid entry is judged by its content class only
+}
+R8_MALFORMED_FACTS = {"fact.type a list": lambda record: record["roles"]["api"].update(facts={"/tmp": {"type": []}}),
+                      "fact.type an object": lambda record: record["roles"]["api"].update(facts={"/tmp": {"type": {}}})}
+R8_SUBSTITUTED_CHANGE = "A /tmp/kin-r8-substituted"
+
+
+def _typed(action):
+    """'ACCEPTED', '<CODE>: <reason>' for a typed refusal, or 'EXCEPTION <type>: <message>'."""
+    try:
+        action()
+        return "ACCEPTED"
+    except cp.Refused as error:
+        return error.code + ": " + str(error)
+    except Exception as error:  # an oracle records what the consumer did; the r8 assertions count this row as a failure
+        return "EXCEPTION " + type(error).__name__ + ": " + str(error)[:300]
+
+
+def _row(action):
+    """action()'s row, or {"outcome": "EXCEPTION ..."} (as _typed) when it raised."""
+    try:
+        return action()
+    except Exception as error:  # as _typed: a red row, never a pass
+        return {"outcome": "EXCEPTION " + type(error).__name__ + ": " + str(error)[:300]}
+
+
+def _get(document, path):
+    for key in path:
+        document = document[key]
+    return document
+
+
+def _put(document, path, value):
+    """The value at `path` replaced in place (R8_MISSING removes it, R8_NORMAL keeps it)."""
+    node = _get(document, path[:-1])
+    if value is R8_MISSING:
+        del node[path[-1]]
+    elif value is not R8_NORMAL:
+        node[path[-1]] = copy.deepcopy(value)
+
+
+def _normal(document, path, value):
+    """Whether the cell's value is the document's own (its normal value, or a kind equal to it with its JSON type)."""
+    return value is R8_NORMAL or (value is not R8_MISSING and _strict(_get(document, path), value))
+
+
+def _strict(a, b):
+    """JSON equality with types (True is not 1)."""
+    if type(a) is not type(b):
+        return False
+    if type(a) is dict:
+        return a.keys() == b.keys() and all(_strict(a[key], b[key]) for key in a)
+    if type(a) is list:
+        return len(a) == len(b) and all(_strict(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def r8_bundle(test, change=None, *, checkpoint_id="introduced", absent=()):
+    """o7_bundle's sealed bundle (one coherent capture, `change(record)` applied with the record's binding rebound before the
+    seal), without loading it. Returns the bundle folder."""
+    fixture = test.tempdir("kin-r8-")
+    made = realistic(fixture, checkpoint_id, absent=absent)
+    if change is not None:
+        path = fixture / made.bindings["layer"]["path"]
+        record = json.loads(path.read_bytes())
+        change(record)
+        path.write_bytes(cp.canonical(record) + b"\n")
+        made.bindings["layer"] = {**made.bindings["layer"], "sha256": cp.sha256(path.read_bytes())}
+    return bundle_from(test, fixture, made, checkpoint_id)
+
+
+def orthanc_capture(test, *, api_change=False, judged=None):
+    """A capture at INTRODUCED sealed by the real capture_checkpoint over FakeBackend, its Orthanc role started normally on
+    its pinned image (the five typed regenerated entries); `api_change` adds a transient change to the API role, `judged`
+    is another descriptor the capture is judged against. Returns (bundle folder, descriptor)."""
+    target = target_fixture()
+    names = {role: target["containers"][role] for role in intro.ROLES}
+    descriptor = regenerated_fixture("id-" + names["orthanc"])
+    backend = FakeBackend(names, {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"})
+    backend.diffs[names["orthanc"]] = list(ORTHANC_START)
+    backend.layers[names["orthanc"]] = start_facts(descriptor)
+    if api_change:
+        backend.diffs[names["api"]] = [R8_SUBSTITUTED_CHANGE]
+    final = CaptureFixture.captured(test, "introduced", backend, descriptor=judged or descriptor)[0]
+    return Path(final), descriptor
+
+
+def substitute_api_change(record):
+    """An allowed transient change written into the API row (a record the contract accepts, apart from its binding)."""
+    record["roles"]["api"].update(changes=[R8_SUBSTITUTED_CHANGE], verdicts=[{"change": R8_SUBSTITUTED_CHANGE, "verdict": "transient-or-mount"}])
+
+
+def swap_member(bundle, rel, data):
+    """One member of a sealed bundle's fixture-tree.tar replaced and nothing rebound (the manifest, its member hash and the
+    layer binding keep the old values): a raw changed after a normal load."""
+    tree = Path(bundle) / "payload" / "fixture-tree.tar"
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(tree.read_bytes()), mode="r:") as source, \
+            tarfile.open(fileobj=buffer, mode="w:", format=tarfile.PAX_FORMAT) as target:
+        for member in source.getmembers():
+            content = source.extractfile(member).read() if member.isfile() else None
+            if member.isfile() and (member.name[2:] if member.name.startswith("./") else member.name) == rel:
+                content, member.size = data, len(data)
+            target.addfile(member, io.BytesIO(content) if content is not None else None)
+    tree.write_bytes(buffer.getvalue())
+
+
+def swapped_layer(bundle):
+    """The bundle's layer record replaced by substitute_api_change's, its hash not updated. Returns (bound, current SHA)."""
+    manifest = json.loads((Path(bundle) / "manifest.json").read_bytes())
+    binding = manifest["bindings"]["layer"]
+    record = json.loads(cp.tree_member_bytes(Path(bundle) / "payload" / "fixture-tree.tar", binding["path"]))
+    substitute_api_change(record)
+    data = cp.canonical(record) + b"\n"
+    swap_member(bundle, binding["path"], data)
+    return binding["sha256"], cp.sha256(data)
+
+
+def rebound_archive(bundle):
+    """A copy of a bundle whose changed fixture-tree.tar is re-hashed in its manifest (member, payload manifest, the bundle
+    name) while the writable-layer binding keeps the sealed record's SHA-256. Returns the new bundle folder."""
+    bundle = Path(bundle)
+    manifest = json.loads((bundle / "manifest.json").read_bytes())
+    tree = bundle / "payload" / "fixture-tree.tar"
+    for member in manifest["members"]:
+        if member["name"] == "fixture-tree.tar":
+            member.update(sha256=cp.sha256(tree.read_bytes()), bytes=tree.stat().st_size)
+    manifest["identity"]["payload_manifest_sha256"] = cp.sha256(cp.canonical(sorted(manifest["members"], key=lambda m: m["name"])))
+    raw = cp.canonical(manifest) + b"\n"
+    folder = bundle.parent / cp.sha256(raw)
+    shutil.copytree(bundle / "payload", folder / "payload")
+    (folder / "manifest.json").write_bytes(raw)
+    return folder
+
+
+def sealed_of(bundle, descriptor=None):
+    """What the native smoke holds after a capture: the bundle, the manifest of a normal load (read here from its own bytes,
+    so it also exists for a bundle no loader accepts) and the observation's descriptor."""
+    bundle = Path(bundle)
+    manifest = json.loads((bundle / "manifest.json").read_bytes())
+    if descriptor is None:
+        folder = manifest["bindings"]["observation"]["path"].rsplit("/", 1)[0]
+        descriptor = json.loads(cp.tree_member_bytes(bundle / "payload" / "fixture-tree.tar", folder + "/" + cp.REGENERATED_FILE))
+    return {"bundle": bundle, "manifest": manifest, "observation": {"regenerated": copy.deepcopy(descriptor)}}
+
+
+def native_regenerated(test, sealed, checkpoint_id="introduced"):
+    """The real native Smoke.regenerated method on a pure Smoke object (its own evidence folder; the method makes no Docker
+    call): its outcome, the A05/A12 PASS rows it recorded, the raw files it wrote and the digests of what it emitted."""
+    import ops_release_checkpoints_native_test as native
+    evidence = test.tempdir("kin-r8-native-")
+    smoke = native.Smoke(evidence)
+    outcome = _typed(lambda: smoke.regenerated(checkpoint_id, sealed))
+    log = evidence / "smoke-log.jsonl"
+    rows = [json.loads(line) for line in log.read_bytes().splitlines()] if log.exists() else []
+    out = {"outcome": outcome, "a05_a12_pass_rows": sum(1 for row in rows if row["outcome"] == "PASS" and {"A05", "A12"} & set(row["ids"])),
+           "check_rows": len(rows), "raw_files": sorted(path.name for path in evidence.iterdir() if path.name.startswith("regenerated-"))}
+    emitted = evidence / ("regenerated-" + checkpoint_id + ".json")
+    if emitted.exists():
+        document = json.loads(emitted.read_bytes())
+        out.update(emitted_descriptor_sha256=cp.sha256(cp.canonical(document["descriptor"]) + b"\n"),
+                   record_descriptor_sha256=document["layer"]["descriptor_sha256"],
+                   emitted_layer_sha256=cp.sha256(cp.canonical(document["layer"]) + b"\n"))
+    return out
+
+
+def native_contrast(test):
+    """R8-03 (consult-checkpoints-r8-20261017): the real Smoke.regenerated over a normal capture; the same with a stale
+    descriptor argument; a raw swap after a normal load with no hash updated; a legal new seal of the same change; and
+    bundles sealed with their hashes rebound over a semantic contradiction or a malformed fact. Returns {case: row}."""
+    rows = {}
+    final, descriptor = orthanc_capture(test)
+    bound = json.loads((final / "manifest.json").read_bytes())["bindings"]["layer"]["sha256"]
+    rows["control"] = {**native_regenerated(test, sealed_of(final, descriptor)), "bound_layer_sha256": bound}
+    stale = sealed_of(final, descriptor)
+    stale["observation"]["regenerated"]["generated"] = {}
+    rows["a stale descriptor argument"] = {**native_regenerated(test, stale), "bound_layer_sha256": bound,
+                                           "argument_descriptor_sha256": cp.sha256(cp.canonical(stale["observation"]["regenerated"]) + b"\n")}
+    final, descriptor = orthanc_capture(test)
+    loaded = sealed_of(final, descriptor)   # the manifest of a normal load, before the raw changes
+    bound, current = swapped_layer(final)
+    rows["a raw swap after a normal load (no hash updated)"] = {**native_regenerated(test, loaded), "bound_layer_sha256": bound,
+                                                                "current_layer_sha256": current}
+    resealed = rebound_archive(final)
+    rows["a raw swap with the archive re-hashed, the layer binding not updated"] = {
+        **native_regenerated(test, sealed_of(resealed, descriptor)), "bound_layer_sha256": bound, "current_layer_sha256": current}
+    final, descriptor = orthanc_capture(test, api_change=True)
+    rows["a legal new seal of the same change"] = {**native_regenerated(test, sealed_of(final, descriptor)),
+                                                   "bound_layer_sha256": json.loads((final / "manifest.json").read_bytes())["bindings"]["layer"]["sha256"]}
+    for name, change in (("a semantic contradiction, hashes rebound (api image substituted)", O7_ROW_CHANGES["api image substituted"]),
+                         *(("a malformed fact, hashes rebound (" + key + ")", value) for key, value in R8_MALFORMED_FACTS.items())):
+        rows[name] = native_regenerated(test, sealed_of(r8_bundle(test, change)))
+    return rows
+
+
+def _bundle_arguments(bundle):
+    """The record bytes and layer_valid's arguments of a sealed bundle, read from its fixture member (layer_context)."""
+    manifest = json.loads((Path(bundle) / "manifest.json").read_bytes())
+    tree = Path(bundle) / "payload" / "fixture-tree.tar"
+    return (cp.tree_member_bytes(tree, manifest["bindings"]["layer"]["path"]),
+            cp.layer_context(manifest, lambda rel: cp.tree_member_bytes(tree, rel), lambda rel: cp.tree_folder(tree, rel)))
+
+
+def typed_refusal_table(test):
+    """R8-04 at the judgement itself: every declared field of the closed layer schema (the record, the absent row), every
+    field of the context and binding boundary it reads (its arguments) and the bound snapshot rows it cross-checks, each as
+    missing/null/bool/number/string/array/object/empty and as its normal value, every other hash rebound so a refusal is
+    the contract's. Returns {cell: {"expected", "outcome"}}: ACCEPTED for the normal value and the R8_ACCEPTED_BY_CONTRACT
+    kinds, LAYER_INVALID for every other cell."""
+    rows = {}
+    final, _ = orthanc_capture(test)
+    raw, arguments = _bundle_arguments(final)
+    absent_raw, absent_arguments = _bundle_arguments(r8_bundle(test, absent=("orthanc",)))
+    for label, base_raw, base_arguments, fields in (("record", raw, arguments, R8_RECORD_FIELDS),
+                                                    ("absent row", absent_raw, absent_arguments, R8_ABSENT_FIELDS)):
+        original = json.loads(base_raw)
+        for path in fields:
+            for kind, value in R8_KINDS:
+                data, changed = rebound(base_arguments, base_raw, record=lambda document, path=path, value=value: _put(document, path, value))
+                normal = _normal(original, path, value)
+                rows[label + " " + " > ".join(map(str, path)) + " = " + kind] = {
+                    "expected": "ACCEPTED" if normal or kind in R8_ACCEPTED_BY_CONTRACT.get(path, ()) else "LAYER_INVALID",
+                    "outcome": _typed(lambda: cp.layer_valid(data, **changed))}
+    for path in R8_ARGUMENT_FIELDS:
+        for kind, value in R8_KINDS:
+            cell = "argument " + " > ".join(map(str, path)) + " = " + kind
+            if path[0] not in arguments:
+                rows[cell] = {"expected": "NOT APPLICABLE", "outcome": "NOT APPLICABLE: this tree's judgement has no " + path[0]}
+                continue
+            changed = copy.deepcopy(arguments)
+            if value is R8_MISSING and len(path) == 1:
+                changed[path[0]] = None
+            else:
+                _put(changed, path, value)
+            normal = _normal(arguments, path, value)
+            rows[cell] = {"expected": "ACCEPTED" if normal else "LAYER_INVALID", "outcome": _typed(lambda: cp.layer_valid(raw, **changed))}
+    snapshot = json.loads(arguments["observation_files"]["snapshot.json"])
+    for path in R8_SNAPSHOT_FIELDS:
+        for kind, value in R8_KINDS:
+            data, changed = rebound(arguments, raw, snapshot=lambda document, path=path, value=value: _put(document, path, value))
+            normal = _normal(snapshot, path, value)
+            rows["snapshot " + " > ".join(map(str, path)) + " = " + kind] = {"expected": "ACCEPTED" if normal else "LAYER_INVALID",
+                                                                            "outcome": _typed(lambda: cp.layer_valid(data, **changed))}
+    return rows
+
+
+def typed_refusal_adapters(test):
+    """R8-04 through the adapters: a malformed fact (fact.type a list, an object) sealed with its hashes rebound is
+    BUNDLE_INVALID at load_bundle and before a restore, UNVERIFIED with its reason in the index, PARENT_UNBOUND at a stored
+    BOUND index's consumption and parent issuance, and leaves no native success evidence; and every descriptor field the
+    judgement reads, mistyped in the descriptor of a capture whose Orthanc role starts normally, is the capture's typed
+    refusal before store.begin. Returns {cell: {"expected", ...observed}}."""
+    rows = {}
+    for name, change in R8_MALFORMED_FACTS.items():
+        final = r8_bundle(test, change)
+        rows[name + ": load_bundle"] = {"expected": "BUNDLE_INVALID", "outcome": _typed(lambda: cp.load_bundle(final))}
+        rows[name + ": restore_checkpoint"] = {"expected": "BUNDLE_INVALID", **_row(lambda: o7_restore(test, final))}
+        index = _row(lambda: o7_index(test, change)[2])
+        rows[name + ": leaf_index"] = {"expected": "UNVERIFIED",
+                                       "outcome": index["verdict"] + ": " + json.dumps(index["reasons"]) if "verdict" in index else index["outcome"]}
+        forged = _row(lambda: o7_forged_parent(test, change))
+        rows[name + ": bound_index (a stored BOUND)"] = {"expected": "PARENT_UNBOUND", "outcome": forged.get("bound_index", forged.get("outcome"))}
+        rows[name + ": leaf_request (parent issuance)"] = {"expected": "PARENT_UNBOUND", "outcome": forged.get("leaf_request", forged.get("outcome"))}
+        rows[name + ": Smoke.regenerated"] = {"expected": "BUNDLE_INVALID", **native_regenerated(test, sealed_of(final))}
+    good = regenerated_fixture("id-" + PROJECT + "-orthanc")
+    for field in R8_DESCRIPTOR_FIELDS:
+        for kind, value in R8_KINDS:
+            judged = copy.deepcopy(good)
+            _put(judged, (field,), value)
+            normal = _normal(good, (field,), value)
+            rows["capture with descriptor " + field + " = " + kind] = {
+                "expected": "ACCEPTED" if normal else "WRITABLE_LAYER|LAYER_INVALID",
+                "outcome": _typed(lambda: orthanc_capture(test, judged=judged))}
+    return rows
+
+
+def _tree_digest(folder):
+    """{relative path: SHA-256} of every file under a folder (a consumer's write to a bundle or an evidence root)."""
+    folder = Path(folder)
+    return {path.relative_to(folder).as_posix(): cp.sha256(path.read_bytes()) for path in sorted(folder.rglob("*")) if path.is_file()} \
+        if folder.exists() else {}
+
+
+def _layer_digests(bundle):
+    """(current layer bytes' SHA-256 in the fixture member, the seal's layer binding SHA-256) of a sealed bundle."""
+    manifest = json.loads((Path(bundle) / "manifest.json").read_bytes())
+    data = cp.tree_member_bytes(Path(bundle) / "payload" / "fixture-tree.tar", manifest["bindings"]["layer"]["path"])
+    return (cp.sha256(data) if data is not None else None), manifest["bindings"]["layer"]["sha256"]
+
+
+def _raw_layer_digests(proof):
+    """(the raw layer record's SHA-256 in a leaf's evidence, the sealed manifest's layer binding SHA-256)."""
+    found = sorted(proof.evidence.rglob(cp.LAYER_FILE))
+    manifest = json.loads((Path(proof.results["checkpoint"]["path"]) / "manifest.json").read_bytes()) if proof.results.get("checkpoint") else {}
+    return (cp.sha256(found[0].read_bytes()) if found else None), ((manifest.get("bindings") or {}).get("layer") or {}).get("sha256")
+
+
+def forged_parent(test, change):
+    """o7_forged_parent's proof root (the parent leaf prefix-introduce recorded over a rebound record, its index written BOUND
+    as 0535bc8 wrote one over such evidence, the late-resume source manifest in place). Returns (root, proof)."""
+    root = test.tempdir("kin-proof-")
+    proof, _, index = o7_index(test, change, unit="release-tools-checkpoints-proof-prefix-introduce", root=root)
+    cp.write_index(root, {**index, "verdict": "BOUND", "reasons": []})
+    (root / "b.source-manifest.json").write_bytes(cp.canonical({"root": str(root / "b")}) + b"\n")
+    return root, proof
+
+
+def live_admission(test, bundle):
+    """The live leaf's real admission (ops_release_checkpoints_live_test.CheckpointSegments.segment, stage verify) of a
+    stored request naming `bundle` as its parent, in this test's own gate state (gate.live_run grants the permission there)
+    and with the host and runtime observations answered synthetically (the executing tree's source and runtime identity,
+    CheckpointDocker.runtime_facts; host_facts ends the run the first time it is reached, after the parent was admitted).
+    The request, marker and parent loader are the real ones. Returns its row."""
+    import ops_release_checkpoints_live_test as live
+    bundle = Path(bundle)
+    unit = "release-tools-checkpoints-proof-prefix-verify"
+    leaf = cp.registry_leaf(list(cp.DEFAULT_PROOF_LEAVES), unit)
+    folder, state = test.tempdir("kin-r8-request-"), test.tempdir("kin-r8-gate-")
+    source = {"tool": {"sha256": "1" * 64}, "source": {"sha256": "2" * 64}, "harness": {"sha256": "3" * 64}, "tool_files": {}}
+    source_path = folder / "source-manifest.json"
+    source_path.write_bytes(cp.canonical(source) + b"\n")
+    request = {"schema": 1, "unit": unit, "case": leaf["case"], "scenario": leaf["scenario"], "stage": leaf["stage"],
+               "execution_kind": leaf["execution_kind"], "parent_manifest": {"path": str(bundle / "manifest.json"), "sha256": bundle.name},
+               "source_manifest": {"path": str(source_path), "sha256": cp.sha256(source_path.read_bytes())},
+               "output_root": str(bundle.parent.parent), "evidence_root": str(folder / "evidence")}
+    request_path = folder / "request.json"
+    request_path.write_bytes(cp.canonical(request) + b"\n")
+    calls = {"load_bundle": 0, "host_facts": 0, "restore_boundary": 0}
+    real_load = cp.load_bundle
+
+    def load(directory):
+        calls["load_bundle"] += 1
+        return real_load(directory)
+
+    def host_facts(fixture_root, owned_ids=()):
+        calls["host_facts"] += 1
+        raise cp.Refused("SYNTHETIC_TRANSPORT_END", "the parent was admitted; this test observes no host")
+
+    def restore(*args, **kwargs):
+        calls["restore_boundary"] += 1
+        raise AssertionError("a restore after a refused admission")
+    before = _tree_digest(bundle)
+    with patch.object(gate, "STATE", state), patch.dict(os.environ, {cp.REQUEST_ENV: str(request_path)}), \
+            patch.object(cp, "source_identity", lambda root, helpers=(): copy.deepcopy(source)), \
+            patch.object(cp, "runtime_identity", lambda facts, modules, root: {"synthetic": True}), \
+            patch.object(live.rehearsal.CheckpointDocker, "runtime_facts", staticmethod(lambda: {})), \
+            patch.object(live.rehearsal.CheckpointDocker, "host_facts", staticmethod(host_facts)), \
+            patch.object(cp, "load_bundle", load), patch.object(live, "restore_boundary", restore):
+        with gate.live_run(unit, cp.LIVE_FILE, "a" * 64, 1):   # the gate's own API, in this test's state folder
+            outcome = _typed(lambda: live.CheckpointSegments("test_verify_checkpoint").segment("verify"))
+    return {"outcome": outcome, **calls, "fixture_root_created": (bundle.parent.parent / "fixture").exists(),
+            "bundle_changed": _tree_digest(bundle) != before}
+
+
+def restore_wrapper(test, bundle):
+    """ops_release_checkpoints_live_test.restore_boundary over a bundle with a synthetic transport in place of
+    CheckpointDocker (FakeBackend's daemon; the restore observation and the restored boundary facts answered from the
+    bundle's own facts with new container IDs): its outcome, the daemon mutations and whether a fixture root exists."""
+    import ops_release_checkpoints_live_test as live
+    bundle = Path(bundle)
+    manifest = json.loads((bundle / "manifest.json").read_bytes())
+    facts = (manifest.get("boundary") or {}).get("facts") or {}
+    made = []
+
+    class Synthetic(FakeBackend):
+        def __init__(self, stack, helper):
+            super().__init__({role: stack.target["containers"][role] for role in intro.ROLES} if stack is not None else {}, {})
+            self.containers.clear()
+            made.append(self)
+
+        def image_present(self, image_id):
+            self.calls.append(("image_present", image_id))
+            return True
+
+        def observe(self, checkpoint_id, **kwargs):
+            self.calls.append(("observe", checkpoint_id))
+            return {"synthetic_observation": checkpoint_id}
+
+        def boundary_facts(self):
+            self.calls.append(("boundary_facts",))
+            return {**facts, "containers": {role: {**fact, "id": "restored-" + role} for role, fact in (facts.get("containers") or {}).items()}}
+    stack = SimpleNamespace(records=SimpleNamespace(lease=contextlib.nullcontext),
+                            target={"containers": ((manifest.get("owned") or {}).get("stack") or {}).get("containers") or {}})
+    root = test.tempdir("kin-r8-restore-") / "restored"
+    with patch.object(live.rehearsal, "CheckpointDocker", Synthetic):
+        outcome = _typed(lambda: live.restore_boundary(manifest, bundle, fixture_root=root, helper=image("3"), load=lambda path: stack))
+    return {"outcome": outcome, "daemon_mutations": sum(len(item.mutations()) for item in made), "fixture_root_created": root.exists()}
+
+
+def consumer_inventory(test):
+    """R8-05 (consult-checkpoints-r8-20261017 consumer_inventory_rule): every real entry point that reads a writable-layer
+    record, descriptor, manifest or BOUND index, or writes success evidence from one, run (never its judgement stubbed)
+    with a normal input and refused ones: per raw adapter (fixture, tar, raw records) a normal one, a raw changed with its
+    hash not updated, a semantic contradiction and a malformed fact with their hashes rebound; per wrapper a normal and a
+    refused one through its real judgement. Transport only is synthetic (FakeBackend, a synthetic CheckpointDocker, the
+    live leaf's host/runtime observation); the live gate is its own API in a test state folder. Each row: consumer, entry
+    point, raw source, contract, case, raw and binding SHA-256, result, expected prefix, side effects (`zero`: those that
+    must be 0). Diagnostic helpers are rows of their own (classification "diagnostic"), never an admission."""
+    import ops_release_checkpoints_native_test as native
+    rows = []
+
+    def row(consumer, entry, source, contract, case, result, expected, side_effects, *, zero=(), raw=None, binding=None,
+            classification="consumer", note=None):
+        rows.append({"consumer": consumer, "entry_point": entry, "raw_source": source, "contract": contract, "case": case,
+                     "raw_sha256": raw, "binding_sha256": binding, "result": result, "expected": expected, "side_effects": side_effects,
+                     "zero": list(zero), "classification": classification, **({"note": note} if note else {})})
+    normal_case, stale_case = "normal", "raw changed, hash not updated"
+    rebound_case = "semantic contradiction, hashes rebound (api image substituted)"
+    contradiction = O7_ROW_CHANGES["api image substituted"]
+    malformed = {"malformed fact, hashes rebound (" + key + ")": value for key, value in R8_MALFORMED_FACTS.items()}
+    target = target_fixture()
+    names = {role: target["containers"][role] for role in intro.ROLES}
+
+    # 1. The fixture adapter: capture_checkpoint -> judge_layer -> write_layer -> fixture_layer -> layer_valid, before store.begin.
+    def capture(case, expected, prepare=None, before=None):
+        descriptor = regenerated_fixture("id-" + names["orthanc"])
+        backend = FakeBackend(names, {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"})
+        backend.diffs[names["orthanc"]] = list(ORTHANC_START)
+        backend.layers[names["orthanc"]] = start_facts(descriptor)
+        if prepare:
+            prepare(backend)
+        fixture, store_root = test.tempdir(), test.tempdir() / "bundles"
+        outcome = _typed(lambda: CaptureFixture.captured(test, "introduced", backend, descriptor=descriptor, fixture=fixture,
+                                                         store_root=store_root, before=before))
+        layers = sorted(fixture.glob("*/records/" + cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE))
+        bundles = sorted(path.name for path in store_root.iterdir()) if store_root.exists() else []
+        binding = None
+        if bundles:
+            binding = json.loads((store_root / bundles[0] / "manifest.json").read_bytes())["bindings"]["layer"]["sha256"]
+        row("capture_checkpoint (fixture adapter)", "ops_release_checkpoints.capture_checkpoint", "the fixture root before the seal",
+            "WRITABLE_LAYER / LAYER_INVALID before store.begin; the judged record kept", case, outcome, expected,
+            {"bundles_sealed": len(bundles), "volume_exports": sum(1 for call in backend.calls if call[0] == "export"), "layer_records_kept": len(layers)},
+            zero=() if expected == "ACCEPTED" else ("bundles_sealed", "volume_exports"), raw=cp.sha256(layers[0].read_bytes()) if layers else None,
+            binding=binding)
+    capture(normal_case, "ACCEPTED")
+    capture("the state S changed after its binding, hash not updated", "LAYER_INVALID",
+            before=lambda fixture, made: (fixture / made.bindings["state"]["path"]).write_bytes((fixture / made.bindings["state"]["path"]).read_bytes() + b" "))
+    capture("semantic contradiction: the daemon reports another API image than the capture observed", "LAYER_INVALID",
+            prepare=lambda backend: backend.containers[names["api"]].update(image=image("8")))
+    capture("malformed fact from the daemon (the hostid fact's type a list)", "WRITABLE_LAYER",
+            prepare=lambda backend: backend.layers[names["orthanc"]].update({cp.HOSTID: {**backend.layers[names["orthanc"]][cp.HOSTID], "type": []}}))
+
+    # 2. The tar adapter: verify_bundle (and load_bundle, BundleStore.load over it).
+    def tar(consumer, entry, bundle, case, expected, action):
+        before = _tree_digest(bundle)
+        current, binding = _layer_digests(bundle)
+        outcome = _typed(action)
+        row(consumer, entry, "the sealed bundle's fixture-tree.tar", "BUNDLE_INVALID (writable layer: LAYER_INVALID ...)", case, outcome,
+            expected, {"bundle_bytes_changed": int(_tree_digest(bundle) != before)}, zero=("bundle_bytes_changed",), raw=current, binding=binding)
+    def verified_bound(bundle):
+        verified = cp.verify_bundle(bundle)
+        current, binding = _layer_digests(bundle)
+        cp.require(verified.capture.layer_sha256 == binding == current == cp.sha256(verified.capture.layer_raw), "ORACLE",
+                   "the verified record is not the bound bytes")
+    normal_bundle, _ = orthanc_capture(test)
+    tar("verify_bundle (tar adapter)", "ops_release_checkpoints.verify_bundle", normal_bundle, normal_case, "ACCEPTED",
+        lambda: verified_bound(normal_bundle))
+    stale_bundle, _ = orthanc_capture(test)
+    swapped_layer(stale_bundle)
+    tar("verify_bundle (tar adapter)", "ops_release_checkpoints.verify_bundle", stale_bundle, stale_case, "BUNDLE_INVALID",
+        lambda: cp.verify_bundle(stale_bundle))
+    resealed = rebound_archive(stale_bundle)
+    tar("verify_bundle (tar adapter)", "ops_release_checkpoints.verify_bundle", resealed,
+        "raw changed, the archive's member hash rebound and the layer binding not updated", "BUNDLE_INVALID", lambda: cp.verify_bundle(resealed))
+    contradicted = r8_bundle(test, contradiction)
+    tar("verify_bundle (tar adapter)", "ops_release_checkpoints.verify_bundle", contradicted, rebound_case, "BUNDLE_INVALID",
+        lambda: cp.verify_bundle(contradicted))
+    malformed_bundles = {case: r8_bundle(test, change) for case, change in malformed.items()}
+    for case, bundle in malformed_bundles.items():
+        tar("verify_bundle (tar adapter)", "ops_release_checkpoints.verify_bundle", bundle, case, "BUNDLE_INVALID",
+            lambda bundle=bundle: cp.verify_bundle(bundle))
+    any_malformed = next(iter(malformed_bundles.values()))
+    for consumer, entry, action in (("load_bundle", "ops_release_checkpoints.load_bundle", cp.load_bundle),
+                                    ("BundleStore.load", "ops_release_checkpoints.BundleStore.load",
+                                     lambda bundle: cp.BundleStore(Path(bundle).parent).load(Path(bundle).name))):
+        tar(consumer, entry, normal_bundle, normal_case, "ACCEPTED", lambda action=action: action(normal_bundle))
+        tar(consumer, entry, any_malformed, next(iter(malformed)), "BUNDLE_INVALID", lambda action=action: action(any_malformed))
+
+    # 3. The raw-records adapter: leaf_index -> evidence_index -> raw_contract -> observation_reasons -> layer_valid, and its CLI.
+    def index_row(consumer, entry, proof, case, expected, result, side):
+        current, binding = _raw_layer_digests(proof)
+        row(consumer, entry, "the leaf's raw records (evidence root) and its sealed manifest", "UNVERIFIED with a non-empty reason, never BOUND",
+            case, result, expected, side, zero=("bound_index_written",) if expected != "BOUND" else (), raw=current, binding=binding)
+
+    def cli_index(proof, run_dir, case, expected):
+        """The index CLI over the same attempt: its exit (0 BOUND, 1 UNVERIFIED; a traceback is an EXCEPTION row)."""
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            outcome = _typed(lambda: exits.append(cp.main(["index", "--registry", str(proof.root / "registry.json"), "--unit", proof.unit,
+                                                           "--proof-root", str(proof.root), "--run-dir", str(run_dir)])))
+        result = {0: "BOUND: exit 0", 1: "UNVERIFIED: exit 1"}.get(exits[-1], "exit %s" % exits[-1]) if outcome == "ACCEPTED" else outcome
+        index_row("index CLI", "tests/ops_release_checkpoints.py index", proof, case, expected, result,
+                  {"bound_index_written": int((proof.root / "index" / (proof.unit + ".json")).exists())})
+    exits = []
+    proof, run_dir, index = o7_index(test)
+    index_row("leaf_index (raw-records adapter)", "ops_release_checkpoints.leaf_index", proof, normal_case, "BOUND",
+              index["verdict"] + ": " + json.dumps(index["reasons"]), {"bound_index_written": 0})
+    cli_index(proof, run_dir, normal_case, "BOUND")
+    found = next(proof.evidence.rglob(cp.LAYER_FILE))
+    found.write_bytes(found.read_bytes().replace(b'"absent":false', b'"absent":true', 1))
+    stale = cp.leaf_index(proof.leaves, proof.unit, proof.root, run_dir)
+    index_row("leaf_index (raw-records adapter)", "ops_release_checkpoints.leaf_index", proof, stale_case, "UNVERIFIED",
+              stale["verdict"] + ": " + json.dumps(stale["reasons"]), {"bound_index_written": 0})
+    for case, change in ((rebound_case, contradiction), *malformed.items()):
+        proof, run_dir, index = o7_index(test, change)
+        index_row("leaf_index (raw-records adapter)", "ops_release_checkpoints.leaf_index", proof, case, "UNVERIFIED",
+                  index["verdict"] + ": " + json.dumps(index["reasons"]), {"bound_index_written": 0})
+        cli_index(proof, run_dir, case, "UNVERIFIED")
+
+    # 4. A stored BOUND index at every consumption (bound_index -> rejudged_reasons), parent issuance and the request CLI.
+    root = test.tempdir("kin-proof-")
+    unit, child = "release-tools-checkpoints-proof-prefix-introduce", "release-tools-checkpoints-proof-late-resume"
+    proof, run_dir, index = o7_index(test, unit=unit, root=root)
+    cp.write_index(root, index)
+    (root / "b.source-manifest.json").write_bytes(cp.canonical({"root": str(root / "b")}) + b"\n")
+    for attempt in (1, 2):
+        row("bound_index (a stored BOUND index)", "ops_release_checkpoints.bound_index", "the index, its raw records and sealed manifest",
+            "PARENT_UNBOUND re-judged from the current bytes", normal_case + " (consumption %d)" % attempt, _typed(lambda: cp.bound_index(root, unit)),
+            "ACCEPTED", {}, raw=_raw_layer_digests(proof)[0], binding=_raw_layer_digests(proof)[1])
+    request_path = cp.attempt_paths(root, child, 1)["request"]
+    row("resolve_parent / leaf_request", "ops_release_checkpoints.leaf_request", "the parent leaf's BOUND index and bundle",
+        "PARENT_UNBOUND, no request", normal_case, _typed(lambda: cp.require(cp.leaf_request(proof.leaves, child, root)["parent_manifest"] is not None,
+                                                                             "ORACLE", "no parent")), "ACCEPTED", {})
+    with contextlib.redirect_stdout(io.StringIO()):
+        code = cp.main(["request", "--registry", str(root / "registry.json"), "--unit", child, "--proof-root", str(root), "--out", str(request_path)])
+    row("request CLI", "tests/ops_release_checkpoints.py request", "the parent leaf's BOUND index and bundle", "exit 2 CHECKPOINT_REFUSED, no request file",
+        normal_case, "ACCEPTED: exit %d" % code if code == 0 else "exit %d" % code, "ACCEPTED", {"request_files": int(request_path.exists())})
+    found = next(proof.evidence.rglob(cp.LAYER_FILE))
+    kept = found.read_bytes()
+    found.write_bytes(kept.replace(b'"absent":false', b'"absent":true', 1))
+    row("bound_index (a stored BOUND index)", "ops_release_checkpoints.bound_index", "the index, its raw records and sealed manifest",
+        "PARENT_UNBOUND re-judged from the current bytes", stale_case, _typed(lambda: cp.bound_index(root, unit)), "PARENT_UNBOUND", {},
+        raw=_raw_layer_digests(proof)[0], binding=_raw_layer_digests(proof)[1])
+    found.write_bytes(kept)
+    tree = Path(proof.results["checkpoint"]["path"]) / "payload" / "fixture-tree.tar"
+    tree_bytes = tree.read_bytes()
+    tree.write_bytes(tree_bytes[:-1] + bytes([tree_bytes[-1] ^ 1]))
+    row("resolve_parent / leaf_request", "ops_release_checkpoints.resolve_parent", "the parent leaf's BOUND index and bundle",
+        "PARENT_UNBOUND, no request", "the parent bundle damaged after its index", _typed(lambda: cp.resolve_parent(proof.leaves, child, root)),
+        "PARENT_UNBOUND", {})
+    tree.write_bytes(tree_bytes)
+    for case, change in ((rebound_case, contradiction), *malformed.items()):
+        forged_root, forged = forged_parent(test, change)
+        digests = _raw_layer_digests(forged)
+        row("bound_index (a stored BOUND index)", "ops_release_checkpoints.bound_index", "a BOUND index 0535bc8 wrote over this evidence",
+            "PARENT_UNBOUND re-judged from the current bytes", case, _typed(lambda: cp.bound_index(forged_root, forged.unit)), "PARENT_UNBOUND", {},
+            raw=digests[0], binding=digests[1])
+        row("resolve_parent / leaf_request", "ops_release_checkpoints.leaf_request", "a BOUND index 0535bc8 wrote over this evidence",
+            "PARENT_UNBOUND, no request", case, _typed(lambda: cp.leaf_request(forged.leaves, child, forged_root)), "PARENT_UNBOUND", {},
+            raw=digests[0], binding=digests[1])
+        out = cp.attempt_paths(forged_root, child, 1)["request"]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = cp.main(["request", "--registry", str(forged_root / "registry.json"), "--unit", child, "--proof-root", str(forged_root),
+                            "--out", str(out)])
+        row("request CLI", "tests/ops_release_checkpoints.py request", "a BOUND index 0535bc8 wrote over this evidence",
+            "exit 2 CHECKPOINT_REFUSED, no request file", case, "PARENT_UNBOUND: exit %d" % code if code == 2 else "exit %d" % code,
+            "PARENT_UNBOUND", {"request_files": int(out.exists())}, zero=("request_files",), raw=digests[0], binding=digests[1])
+
+    # 5. The live leaf's admission of a stored request (live_test.py segment: load_request, bind_marker, cp.load_bundle at the
+    # parent, then bundle_inputs and parent_chain before the first host observation).
+    admission_bundles = {normal_case: orthanc_capture(test)[0]}
+    admission_bundles[stale_case] = orthanc_capture(test)[0]
+    swapped_layer(admission_bundles[stale_case])
+    admission_bundles[rebound_case] = r8_bundle(test, contradiction)
+    admission_bundles.update({case: r8_bundle(test, change) for case, change in malformed.items()})
+    for case, bundle in admission_bundles.items():
+        result = live_admission(test, bundle)
+        current, binding = _layer_digests(bundle)
+        row("live leaf admission (CheckpointSegments.segment)", "tests/ops_release_checkpoints_live_test.py CheckpointSegments.segment",
+            "the stored request's parent bundle", "BUNDLE_INVALID before any host observation, restore, create or product phase", case,
+            result["outcome"], "SYNTHETIC_TRANSPORT_END" if case == normal_case else "BUNDLE_INVALID",
+            {key: int(result[key]) for key in ("load_bundle", "host_facts", "restore_boundary", "fixture_root_created", "bundle_changed")},
+            zero=("restore_boundary", "fixture_root_created", "bundle_changed") + (("host_facts",) if case != normal_case else ()),
+            raw=current, binding=binding, note="host and runtime observations synthetic; the parent loader, request and marker real")
+
+    # 6. The restore entries: restore_checkpoint (FakeBackend) and the live wrapper restore_boundary (synthetic transport).
+    restore_bundles = {normal_case: orthanc_capture(test)[0]}
+    restore_bundles[stale_case] = orthanc_capture(test)[0]
+    swapped_layer(restore_bundles[stale_case])
+    restore_bundles[rebound_case] = r8_bundle(test, contradiction)
+    restore_bundles.update({case: r8_bundle(test, change) for case, change in malformed.items()})
+    for case, bundle in restore_bundles.items():
+        current, binding = _layer_digests(bundle)
+        result = o7_restore(test, bundle)
+        row("restore_checkpoint", "ops_release_checkpoints.restore_checkpoint", "the bundle's current bytes (verify_bundle)",
+            "BUNDLE_INVALID before any image, daemon, fixture or product call", case, result["outcome"],
+            "ACCEPTED" if case == normal_case else "BUNDLE_INVALID",
+            {"daemon_calls": result["daemon_calls"], "fixture_root_created": int(result["fixture_root_created"])},
+            zero=() if case == normal_case else ("daemon_calls", "fixture_root_created"), raw=current, binding=binding)
+    for case in (normal_case, next(iter(malformed))):
+        bundle = restore_bundles[case] if case == normal_case else r8_bundle(test, malformed[case])
+        current, binding = _layer_digests(bundle)
+        result = restore_wrapper(test, bundle)
+        row("restore_boundary (live wrapper)", "tests/ops_release_checkpoints_live_test.py restore_boundary", "the bundle's current bytes",
+            "BUNDLE_INVALID before any daemon call", case, result["outcome"], "ACCEPTED" if case == normal_case else "BUNDLE_INVALID",
+            {"daemon_mutations": result["daemon_mutations"], "fixture_root_created": int(result["fixture_root_created"])},
+            zero=() if case == normal_case else ("daemon_mutations", "fixture_root_created"), raw=current, binding=binding,
+            note="CheckpointDocker replaced by a synthetic transport; restore_checkpoint and verify_bundle real")
+
+    # 7. The native success evidence: Smoke.regenerated (A05/A12) and the roundtrip's rows (A08/A03/A01).
+    for case, result in native_contrast(test).items():
+        refused = not case.startswith(("control", "a stale descriptor", "a legal new seal"))
+        row("Smoke.regenerated (native A05/A12)", "tests/ops_release_checkpoints_native_test.py Smoke.regenerated",
+            "the bundle, verified at the start of the call", "BUNDLE_INVALID before any A05/A12 row; only the verified record and descriptor recorded",
+            case, result["outcome"], "BUNDLE_INVALID" if refused else "ACCEPTED",
+            {"a05_a12_pass_rows": result["a05_a12_pass_rows"], "raw_files": len(result["raw_files"])},
+            zero=("a05_a12_pass_rows", "raw_files") if refused else (), raw=result.get("current_layer_sha256") or result.get("emitted_layer_sha256"),
+            binding=result.get("bound_layer_sha256"),
+            note=None if refused else "emitted descriptor %s / the record's %s" % (result.get("emitted_descriptor_sha256"), result.get("record_descriptor_sha256")))
+    marker_bundle, _ = orthanc_capture(test)
+    smoke = native.Smoke(test.tempdir("kin-r8-native-"))
+    smoke.private = test.tempdir("kin-r8-private-")
+    row("Smoke.sealed_markers (native A03/A01)", "tests/ops_release_checkpoints_native_test.py Smoke.sealed_markers",
+        "the bundle's volume exports, verified", "BUNDLE_INVALID before a listing", normal_case,
+        _typed(lambda: smoke.sealed_markers(cp.verify_bundle(marker_bundle))), "ACCEPTED", {})
+    checked = cp.verify_bundle(marker_bundle)
+    volume = checked.manifest["owned"]["volumes"]["pg"]["member"]
+    (marker_bundle / "payload" / volume).write_bytes(volume_tar("pg", extra=[("./kin-r8-extra", tarfile.REGTYPE, b"x\n")]))
+    row("Smoke.sealed_markers (native A03/A01)", "tests/ops_release_checkpoints_native_test.py Smoke.sealed_markers",
+        "the bundle's volume exports, verified", "BUNDLE_INVALID before a listing", "a volume export changed after its verification",
+        _typed(lambda: smoke.sealed_markers(checked)), "BUNDLE_INVALID", {})
+    for case in (stale_case, "the manifest argument not the bundle's (a stale copy)"):
+        stale_bundle, descriptor = orthanc_capture(test)
+        held = sealed_of(stale_bundle, descriptor)
+        if case == stale_case:
+            swapped_layer(stale_bundle)
+        else:
+            held["manifest"]["owned"].update(networks=[{"name": "kin-r8-stale"}])
+        evidence = test.tempdir("kin-r8-native-")
+        roundtrip = native.Smoke(evidence)
+        outcome = _typed(lambda: roundtrip.roundtrip(None, "introduced", held, all_running=True))
+        log = evidence / "smoke-log.jsonl"
+        row("Smoke.roundtrip (native A08/A03/A11/N05/A04/A12)", "tests/ops_release_checkpoints_native_test.py Smoke.roundtrip",
+            "the bundle, verified at the start of the call", "BUNDLE_INVALID before any row", case, outcome, "BUNDLE_INVALID",
+            {"check_rows": len(log.read_bytes().splitlines()) if log.exists() else 0}, zero=("check_rows",),
+            note="the normal roundtrip runs on real Docker in the CI native smoke only")
+
+    # 8. The T16 comparison over BOUND indexes (bundle-less leaves) and its CLI.
+    records = CheckpointRecordTests(methodName="test_existing_record_run_binds_exact_inputs_outputs_and_exit")
+    records.tempdir = test.tempdir
+    compare_root, (fork, fresh) = records.bound_pair()
+    for case in (normal_case, stale_case):
+        if case == stale_case:
+            next(fork.evidence.rglob("journal.jsonl")).write_bytes(b"{}\n")
+        result = cp.t16_comparison(fork.leaves, compare_root)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = cp.main(["compare", "--registry", str(compare_root / "registry.json"), "--proof-root", str(compare_root)])
+        row("t16_comparison / compare CLI", "ops_release_checkpoints.t16_comparison; tests/ops_release_checkpoints.py compare",
+            "the late-resume and fresh-control BOUND indexes (no bundle sealed by either)", "t16_pass false and exit 1 on a refused consumption", case,
+            "t16_pass=%s exit %d" % (result["t16_pass"], code), "t16_pass=True exit 0" if case == normal_case else "t16_pass=False exit 1", {})
+
+    # 9. Diagnostics and generation inputs (never an admission or a BOUND by themselves).
+    diagnostic = next(iter(malformed_bundles.values()))
+    manifest = json.loads((diagnostic / "manifest.json").read_bytes())
+    row("parent_chain", "ops_release_checkpoints.parent_chain", "manifests by name", "lineage listing only", "over a malformed bundle",
+        _typed(lambda: cp.parent_chain(diagnostic.parent, diagnostic.name)), "ACCEPTED", {}, classification="diagnostic",
+        note="the live leaf calls it after cp.load_bundle admitted the parent (row 5)")
+    row("bundle_inputs", "ops_release_checkpoints.bundle_inputs", "the fixture member's plan/target/B0 bytes", "input recomputation only",
+        "over a malformed bundle", _typed(lambda: cp.bundle_inputs(manifest, diagnostic)), "ACCEPTED", {}, classification="diagnostic",
+        note="its callers verify the bundle as well: the live leaf before it, restore_checkpoint before any daemon call (rows 5, 6)")
+    request_file = test.tempdir("kin-r8-parent-") / "request.json"
+    request_file.write_bytes(cp.canonical({"parent_manifest": {"path": str(diagnostic / "manifest.json"), "sha256": diagnostic.name}}) + b"\n")
+    with contextlib.redirect_stdout(io.StringIO()) as printed:
+        code = cp.main(["parent-manifest", "--request", str(request_file)])
+    row("parent-manifest CLI", "tests/ops_release_checkpoints.py parent-manifest", "a request file", "the parent's path only", "over a malformed bundle",
+        "ACCEPTED" if code == 0 and printed.getvalue().strip() == str(diagnostic / "manifest.json") else "exit %d" % code, "ACCEPTED", {},
+        classification="diagnostic", note="proof.sh passes this path to the leaf, whose admission loads it (row 5)")
+    for name, entry, note in (("Smoke.negative (native N05/A05)", "tests/ops_release_checkpoints_native_test.py Smoke.negative",
+                               "keeps a REFUSED record's raw (CI native smoke only); no ACCEPTED judgement"),
+                              ("bound_descriptor (capture generation input)", "ops_release_checkpoints.bound_descriptor",
+                               "the descriptor a capture judges against, before its record exists; that record is judged by fixture_layer (row 1)"),
+                              ("Smoke.observed / Smoke.tampered (native A06/A07/N04)", "tests/ops_release_checkpoints_native_test.py",
+                               "live observation folders judged by observation_valid itself; no bundle, layer or BOUND read")):
+        row(name, entry, "-", "-", "classification", "NOT A SUCCESS CONSUMER", "NOT A SUCCESS CONSUMER", {}, classification="diagnostic", note=note)
+    return rows
+
+
+class CheckpointVerifiedCaptureTests(CaptureFixture, RefusalAssertions, TempCase):
+    """r8 CKPT7-01/02 (consult-checkpoints-r8-20261017 r8_acceptance R8-02..R8-05): the writable-layer judgement is one call
+    over the current bytes and the seal's bindings that returns what it verified (VerifiedCapture, VerifiedBundle); the
+    native smoke records nothing else; a malformed field is each consumer's typed refusal; every real consumer runs
+    against it. Assertions name the requirement (CKPT8_*); no message text is pinned."""
+
+    def test_one_call_checks_the_current_bytes_against_the_bindings_and_returns_them(self):
+        """R8-02 (M55): the judgement checks the record's bytes against the seal's layer binding and the state S against its
+        binding in the same call and judges exactly those bytes; a record the contract accepts but whose binding names
+        other bytes is refused; the returned value carries the bytes, identifiers and digests and shares nothing with a
+        caller; the fixture adapter refuses before store.begin."""
+        final, _ = orthanc_capture(self)
+        manifest = json.loads((final / "manifest.json").read_bytes())
+        verified = self.admitted(cp.verify_bundle, final)
+        capture, bindings = verified.capture, manifest["bindings"]
+        self.assertEqual((capture.checkpoint, capture.layer_path, capture.layer_sha256, cp.sha256(capture.layer_raw)),
+                         ("introduced", bindings["layer"]["path"], bindings["layer"]["sha256"], bindings["layer"]["sha256"]), "CKPT8_VERIFIED_BYTES_RETURNED")
+        self.assertEqual((capture.observation_path, capture.observation_sha256, capture.state_sha256),
+                         (bindings["observation"]["path"], bindings["observation"]["sha256"], bindings["state"]["sha256"]), "CKPT8_VERIFIED_BYTES_RETURNED")
+        self.assertEqual((capture.descriptor_sha256, cp.sha256(capture.descriptor_raw)), (capture.layer["descriptor_sha256"],) * 2,
+                         "CKPT8_VERIFIED_DESCRIPTOR_IS_THE_RECORD_S")
+        record, copy_of_manifest = capture.layer, verified.manifest
+        record["roles"].clear()
+        copy_of_manifest["bindings"].clear()
+        self.assertEqual((sorted(capture.layer["roles"]), verified.manifest), (sorted(intro.ROLES), manifest), "CKPT8_NO_SHARED_MUTABLE_VALUE")
+        raw, arguments = _bundle_arguments(final)
+        self.assertEqual(self.admitted(cp.layer_valid, raw, **arguments), capture, "CKPT8_ONE_CALL_SAME_VALUE")
+        # The same record with an accepted transient change: the contract accepts it with its binding rebound, and refuses it
+        # while the binding still names the sealed bytes (CKPT7-01's record, judged directly).
+        document = json.loads(raw)
+        substitute_api_change(document)
+        changed = cp.canonical(document) + b"\n"
+        self.admitted(cp.layer_valid, changed, **{**arguments, "layer_binding": {**arguments["layer_binding"], "sha256": cp.sha256(changed)}})
+        error = self.assertRefused("LAYER_INVALID", cp.layer_valid, changed, **arguments)
+        self.assertIn("layer binding", str(error), "CKPT8_LAYER_BINDING_CHECKED_IN_THE_SAME_CALL")
+        error = self.assertRefused("LAYER_INVALID", cp.layer_valid, raw, **{**arguments, "state_raw": arguments["state_raw"] + b" "})
+        self.assertIn("state binding", str(error), "CKPT8_STATE_BINDING_CHECKED_IN_THE_SAME_CALL")
+        for name, binding in (("a binding not beside the capture observation",
+                               {**arguments["layer_binding"], "path": arguments["layer_binding"]["path"].replace(capture.request_sha256[:16], "0" * 16)}),
+                              ("no layer binding", None)):
+            with self.subTest(binding=name):
+                self.assertRefused("LAYER_INVALID", cp.layer_valid, raw, **{**arguments, "layer_binding": binding})
+        self.assertRefused("LAYER_INVALID", cp.layer_valid, raw, **{**arguments, "state_binding": {**arguments["state_binding"],
+                                                                                                  "path": "other/records/state.json"}})
+        # The fixture adapter: S changed after its binding was taken refuses the capture before store.begin, its record kept.
+        target = target_fixture()
+        names = {role: target["containers"][role] for role in intro.ROLES}
+        descriptor = regenerated_fixture("id-" + names["orthanc"])
+        backend = FakeBackend(names, {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"})
+        backend.diffs[names["orthanc"]] = list(ORTHANC_START)
+        backend.layers[names["orthanc"]] = start_facts(descriptor)
+        fixture, store_root = self.tempdir(), self.tempdir() / "bundles"
+
+        def touch_state(root, made):
+            path = root / made.bindings["state"]["path"]
+            path.write_bytes(path.read_bytes() + b" ")
+        error = self.assertRefused("LAYER_INVALID", self.captured, "introduced", backend, descriptor=descriptor, fixture=fixture,
+                                   store_root=store_root, before=touch_state)
+        self.assertIn("state binding", str(error), "CKPT8_FIXTURE_ADAPTER_BINDS")
+        self.assertEqual((sorted(path.name for path in store_root.iterdir()), [call for call in backend.calls if call[0] == "export"]), ([], []),
+                         "CKPT8_REFUSED_BEFORE_STORE_BEGIN")
+
+    def test_the_native_regenerated_evidence_comes_only_from_the_verified_bundle(self):
+        """R8-03 (M56): the real Smoke.regenerated accepts a normal capture and a legal new seal, records only the verified
+        record and descriptor (a stale descriptor argument never reaches the evidence; the emitted descriptor is the one
+        the record's binding names), and refuses a raw changed after a normal load with no hash updated, and rebound
+        contradiction or malformed bundles, before any A05/A12 row."""
+        rows = native_contrast(self)
+        for name, result in rows.items():
+            with self.subTest(case=name):
+                if name in ("control", "a stale descriptor argument", "a legal new seal of the same change"):
+                    self.assertEqual((result["outcome"], result["a05_a12_pass_rows"]), ("ACCEPTED", 1), "CKPT8_NATIVE_CONTROL_ACCEPTED: " + json.dumps(result))
+                    self.assertEqual(result["emitted_descriptor_sha256"], result["record_descriptor_sha256"],
+                                     "CKPT8_NATIVE_DESCRIPTOR_IS_THE_VERIFIED_ONE: " + json.dumps(result))
+                    self.assertEqual(result["emitted_layer_sha256"], result["bound_layer_sha256"], "CKPT8_NATIVE_RECORD_IS_THE_BOUND_ONE")
+                else:
+                    self.assertTrue(result["outcome"].startswith("BUNDLE_INVALID: "), "CKPT8_NATIVE_REFUSED_TYPED: " + json.dumps(result))
+                    self.assertEqual((result["a05_a12_pass_rows"], result["check_rows"], result["raw_files"]), (0, 0, []),
+                                     "CKPT8_NO_NATIVE_SUCCESS_RECORD: " + json.dumps(result))
+        swap = rows["a raw swap after a normal load (no hash updated)"]
+        self.assertNotEqual(swap["bound_layer_sha256"], swap["current_layer_sha256"], "the contrast changed the raw")
+        stale = rows["a stale descriptor argument"]
+        self.assertNotEqual(stale["argument_descriptor_sha256"], stale["emitted_descriptor_sha256"], "CKPT8_STALE_ARGUMENT_NOT_EMITTED")
+
+    def test_the_declared_fields_are_typed_refusals_at_the_judgement(self):
+        """R8-04 (M57): every declared field of the closed layer schema, every field of the context and binding boundary
+        the judgement reads and the bound snapshot rows, as missing/null/bool/number/string/array/object/empty and as their
+        normal value (every other hash rebound): the normal values and the contract's own alternatives are accepted, every
+        other cell is LAYER_INVALID - never a TypeError or another exception (fact.type a list or an object included)."""
+        rows = typed_refusal_table(self)
+        self.assertGreater(len(rows), 800, "the finite table")
+        for name, row in rows.items():
+            with self.subTest(cell=name):
+                self.assertEqual(row["outcome"] if row["outcome"] == "ACCEPTED" else row["outcome"].split(":", 1)[0], row["expected"],
+                                 "CKPT8_TYPED_REFUSAL: " + row["outcome"])
+        for kind in ("array", "object"):
+            self.assertEqual(rows["record roles > orthanc > facts > /etc/hostid > type = " + kind]["outcome"].split(":", 1)[0], "LAYER_INVALID",
+                             "CKPT8_FACT_TYPE_TYPED (CKPT7-02)")
+
+    def test_a_malformed_fact_is_each_consumer_s_typed_refusal(self):
+        """R8-04 through the adapters: fact.type a list or an object with the hashes rebound is BUNDLE_INVALID at load_bundle
+        and before a restore (no daemon call, no fixture root), UNVERIFIED with the layer reason in the index,
+        PARENT_UNBOUND with it at a stored BOUND index's consumption and parent issuance, and no native success record; a
+        mistyped descriptor field leaves a normal Orthanc start the capture's typed refusal before store.begin."""
+        for name, row in typed_refusal_adapters(self).items():
+            with self.subTest(cell=name):
+                outcome = row.get("outcome", "")
+                if row["expected"] == "ACCEPTED":
+                    self.assertEqual(outcome, "ACCEPTED", "CKPT8_NORMAL_ACCEPTED")
+                    continue
+                self.assertIn(outcome.split(":", 1)[0], row["expected"].split("|"), "CKPT8_TYPED_REFUSAL: " + outcome)
+                if row["expected"] != "WRITABLE_LAYER|LAYER_INVALID":
+                    self.assertIn("LAYER_INVALID", outcome, "CKPT8_REFUSAL_KEEPS_ITS_CAUSE: " + outcome)
+                if "daemon_calls" in row:
+                    self.assertEqual((row["daemon_calls"], row["fixture_root_created"]), (0, False), "CKPT8_REFUSED_BEFORE_RESTORE")
+                if "a05_a12_pass_rows" in row:
+                    self.assertEqual((row["a05_a12_pass_rows"], row["raw_files"]), (0, []), "CKPT8_NO_NATIVE_SUCCESS_RECORD")
+
+    def test_every_consumer_entry_point_runs_against_the_verified_boundary(self):
+        """R8-05: the executed consumer inventory (consumer_inventory): each row's real entry point gave its contract's
+        result for its case, a refusal left the side effects it names at 0, and every raw adapter ran its normal, stale,
+        rebound-contradiction and malformed-fact cases."""
+        rows = consumer_inventory(self)
+        for item in rows:
+            with self.subTest(consumer=item["consumer"], case=item["case"]):
+                self.assertTrue(item["result"].startswith(item["expected"]), "CKPT8_CONSUMER_RESULT: " + json.dumps(item))
+                self.assertEqual({key: item["side_effects"].get(key) for key in item["zero"]}, {key: 0 for key in item["zero"]},
+                                 "CKPT8_NO_SIDE_EFFECT_ON_REFUSAL: " + json.dumps(item))
+        for adapter in ("capture_checkpoint (fixture adapter)", "verify_bundle (tar adapter)", "leaf_index (raw-records adapter)"):
+            cases = [item["case"] for item in rows if item["consumer"] == adapter]
+            self.assertTrue(len(cases) >= 4 and "normal" in cases and any("hash not updated" in case for case in cases)
+                            and any("contradiction" in case for case in cases) and any("malformed" in case for case in cases),
+                            "CKPT8_RAW_ADAPTER_CASES: " + adapter + ": " + json.dumps(cases))
 
 # The harness file each mutant edits (a temporary copy; the product scripts are never copied or changed).
 MUTANT_TARGETS = {"checkpoints": "ops_release_checkpoints.py", "rehearsal": "ops_deploy_host_container_test.py",
@@ -5193,6 +6056,16 @@ MUTANTS = (
      "checkpoints"),
     ("M54", "CheckpointLayerContractTests.test_a_closed_role_row_is_judged_against_its_bound_capture",   # a row's image not bound
      '        if row["image"] != present[role]["image"] or row["image"] != pins[role]:', '        if False:', "checkpoints"),
+    # Round 8 (consult-checkpoints-r8-20261017 R8-06: a binding bypass, the native source mixing and a typed-refusal omission).
+    ("M55", "CheckpointVerifiedCaptureTests.test_one_call_checks_the_current_bytes_against_the_bindings_and_returns_them",   # layer binding unchecked
+     '    if type(raw) is not bytes or not _binding(layer_binding) or sha256(raw) != layer_binding["sha256"]:',
+     '    if type(raw) is not bytes or not _binding(layer_binding):', "checkpoints"),
+    ("M56", "CheckpointVerifiedCaptureTests.test_the_native_regenerated_evidence_comes_only_from_the_verified_bundle",   # caller's descriptor recorded
+     '        record, descriptor = capture.layer, capture.descriptor', '        record, descriptor = capture.layer, sealed["observation"]["regenerated"]',
+     "native"),
+    ("M57", "CheckpointVerifiedCaptureTests.test_the_declared_fields_are_typed_refusals_at_the_judgement",   # fact kind looked up before its type
+     '    if type(fact) is not dict or type(fact.get("type")) is not str or fact["type"] not in LAYER_FACT_KEYS:',
+     '    if type(fact) is not dict or fact.get("type") not in LAYER_FACT_KEYS:', "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -5240,8 +6113,8 @@ class CheckpointMutationContracts(TempCase):
         return tests
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
-        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6, r7): control PASS, then an assertion failure in the named
-        contract for each mutant (M01-M44, M46-M54)."""
+        """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6, r7, r8): control PASS, then an assertion failure in the named
+        contract for each mutant (M01-M44, M46-M57)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:

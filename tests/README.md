@@ -2080,6 +2080,7 @@ contracts above, the native negatives and deadline diagnostics below, then T16/T
   or descriptor substituted: `layer_valid` re-judges every recorded row with the same contract. File names are a
   placement; the tests assert the required raw, its identity and its consumption.
   Every consumption checks a closed present/absent role row against the bound capture snapshot, boundary mount facts and that role’s pinned plan image; a contradictory or incomplete row refuses, including when its hashes were rebound.
+  r8 (CKPT7-01/02): that check is one call (`layer_valid`) over the current bytes and the seal's `layer` and `state` bindings that returns what it verified (`VerifiedCapture`; `verify_bundle` returns a `VerifiedBundle`); the fixture, tar and raw-records adapters, the native A05/A12 evidence and the roundtrip's rows use only that value, and a mistyped field is each consumer's typed refusal. Verified here by the pure contrasts and the executed consumer inventory (synthetic transport) and the CI native smoke; failure-held/DB-or-role-absent native cases and concurrent same-account tampering are not covered.
 - The upstream sources that justify the entries (orthanc-builder 24.12.0; the pinned image ID's own bytes are what the
   descriptor reads): [docker-entrypoint.sh](https://github.com/orthanc-server/orthanc-builder/blob/24.12.0/docker/orthanc/docker-entrypoint.sh#L15)
   writes a random `printf '%x'` of 268435456..4294967295 (8 hex digits) with LF over a missing or `not-generated`

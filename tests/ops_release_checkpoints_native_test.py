@@ -33,6 +33,10 @@ runs a deliberate deadline failure instead of the smoke: a harmless real `docker
 left of the body or the cleanup; it never passes. The Orthanc image's regenerated artifacts are judged by the typed,
 image-bound contract (A05/A12) and refused natively for a non-plugin file, an unlisted library, an enabled library with
 other bytes, the same image ID under another role and the database role (A05/N05).
+
+Round 8 (consult-checkpoints-r8-20261017, CKPT7-01): every row that reads a sealed bundle (the A05/A12 regenerated
+evidence, the roundtrip's boundary facts and sealed volume exports) reads only what ops_release_checkpoints.verify_bundle
+verified at the start of that call, never the manifest or descriptor of an earlier load.
 """
 import argparse
 import copy
@@ -617,13 +621,23 @@ class Smoke:
         volumes = {**stack.target["volumes"], "proxy_certs": stack.project + "_proxy-certs", "extra": stack.project + "_kc-extra"}
         return self.found({category: self.members(stack, volumes[category], None if category == "extra" else category) for category in MARKERS})
 
-    def sealed_markers(self, sealed):
-        """The markers as the sealed bundle's own volume archives (the captured readonly exports) carry them."""
-        payload = Path(sealed["bundle"]) / "payload"
+    def sealed_markers(self, verified):
+        """The markers as the sealed bundle's own volume archives (the captured readonly exports) carry them. r8 (the
+        consumer inventory's rule for every reader of a bundle): `verified` is the bundle cp.verify_bundle has just
+        verified, and each archive is read once, checked against its member SHA-256 and listed from those bytes."""
+        payload, manifest = verified.directory / "payload", verified.manifest
+        hashes = {member["name"]: member["sha256"] for member in manifest["members"]}
         listings = {}
-        for category, volume in sealed["manifest"]["owned"]["volumes"].items():
+        for category, volume in manifest["owned"]["volumes"].items():
             key = "extra" if category.startswith("extra:") else category
-            listings[key] = self.listing(payload / volume["member"], None if key == "extra" else key)
+            data = (payload / volume["member"]).read_bytes()
+            cp.require(cp.sha256(data) == hashes.get(volume["member"]), "BUNDLE_INVALID", "member hash " + volume["member"])
+            copy_path = self.private / ("sealed-" + uuid.uuid4().hex + ".tar")
+            copy_path.write_bytes(data)
+            try:
+                listings[key] = self.listing(copy_path, None if key == "extra" else key)
+            finally:
+                copy_path.unlink(missing_ok=True)
         return self.found(listings)
 
     def expected_markers(self):
@@ -765,15 +779,21 @@ class Smoke:
     def regenerated(self, checkpoint_id, sealed):
         """A05/A12 (r6, CKPT5-01): the sealed capture's writable-layer record, re-read from the bundle's fixture member:
         the Orthanc role on its pinned image, judged against the image's own regeneration (the hostid over its
-        placeholder, the startup cache, the enabled plugin libraries and exactly their folders); its raw is kept. r7: the
-        record read here is the one judged again in its bound context (cp.bundle_layer), never bytes trusted from the
-        earlier load_bundle."""
-        manifest = sealed["manifest"]
-        record = cp.bundle_layer(manifest, sealed["bundle"])
-        descriptor = sealed["observation"]["regenerated"]
+        placeholder, the startup cache, the enabled plugin libraries and exactly their folders); its raw is kept. r8
+        (CKPT7-01): this call verifies the current bundle first (cp.verify_bundle: the manifest by its name, every member,
+        the bindings, the record judged against its layer binding and its bound capture in one call) and judges and
+        records only the record and descriptor that verification returned; the manifest of an earlier load and the
+        observation's descriptor argument in `sealed` are never read here, so a record changed after a normal load is
+        refused (BUNDLE_INVALID) before any A05/A12 row and a stale descriptor argument never reaches the evidence."""
+        verified = cp.verify_bundle(sealed["bundle"])
+        capture = verified.capture
+        cp.require(capture is not None and capture.checkpoint == checkpoint_id, "BUNDLE_INVALID",
+                   "the bundle is not a verified " + checkpoint_id + " capture")
+        record, descriptor = capture.layer, capture.descriptor
         row = record["roles"][cp.REGENERATED_ROLE]
         kinds = sorted({item["verdict"] for item in row["verdicts"] if item["verdict"].startswith("regenerated:")})
-        self.raw("regenerated-" + checkpoint_id + ".json", {"descriptor": descriptor, "layer": record})
+        self.raw("regenerated-" + checkpoint_id + ".json", {"descriptor": descriptor, "layer": record, "bundle": verified.directory.name,
+                                                            "layer_sha256": capture.layer_sha256, "descriptor_sha256": capture.descriptor_sha256})
         self.check(["A05", "A12"], checkpoint_id + ": the Orthanc start's hostid, startup cache, enabled plugins and their folders are accepted as the "
                    "pinned image's own regeneration, typed and bound in the sealed layer record",
                    descriptor["applicable"] is True and descriptor["hostid_regenerated"] is True and row["image"] == descriptor["pinned_image"]
@@ -812,8 +832,12 @@ class Smoke:
 
     def roundtrip(self, stack, checkpoint_id, sealed, *, all_running):
         """A11/A12/A03/A04/A08/N05: cleanup by exact ownership, refusals before a restore creates anything, the cold restore
-        into new resources, the restore observation, the product facts and the volume bytes again."""
-        manifest, bundle = sealed["manifest"], sealed["bundle"]
+        into new resources, the restore observation, the product facts and the volume bytes again. r8: the bundle is
+        verified again first and must be the one the capture loaded; every row below reads that verified manifest."""
+        bundle = sealed["bundle"]
+        verified = cp.verify_bundle(bundle)
+        manifest = verified.manifest
+        cp.require(manifest == sealed["manifest"], "BUNDLE_INVALID", "the manifest given is not the bundle's")
         facts = manifest["boundary"]["facts"]
         self.check(["A08"], checkpoint_id + ": the boundary facts read the real database (migrations, legacy grants, realm, study, roles)",
                    [row[:2] for row in facts["migrations"]] == MIGRATIONS_BEFORE and facts["legacy"]["schema_owner"] == "kin_legacy_group"
@@ -826,7 +850,7 @@ class Smoke:
             self.check(["A08"], checkpoint_id + ": Orthanc stopped: no frame is read, the stopped roles are facts",
                        "frame" not in facts and not facts["containers"]["orthanc"]["running"] and facts["containers"]["db"]["running"],
                        {role: value["running"] for role, value in facts["containers"].items()})
-        markers = self.sealed_markers(sealed)
+        markers = self.sealed_markers(verified)
         self.check(["A03", "A01"], checkpoint_id + ": the readonly exports the bundle sealed carry each volume's marker (bytes, owner, mode) and the "
                    "tablespace link", {k: markers.get(k) for k in MARKERS} == self.expected_markers()
                    and len(markers["pg_tablespace_links"]) == 1 and markers["pg_tablespace_links"][0][1] == intro.TABLESPACE, markers)
