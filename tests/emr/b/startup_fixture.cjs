@@ -370,13 +370,15 @@ function child(scenario) {
     return result;
   };
   if (scenario.holdConfirm) {
-    // The seal's receipt advance held (pg): the append's confirm is in flight when the stop arrives.
+    // The seal's receipt advance of that one event held (pg): its confirm is in flight when the stop arrives.
     const advance = sealModule.AccessSeal.prototype.advanceReceipt;
-    sealModule.AccessSeal.prototype.advanceReceipt = async function (...args) {
-      send('confirm-held');
-      await released;
-      send('confirm-released');
-      return advance.apply(this, args);
+    sealModule.AccessSeal.prototype.advanceReceipt = async function (stream, attemptId, eventId, ...rest) {
+      if (eventId === scenario.holdConfirm) {
+        send('confirm-held', { eventId });
+        await released;
+        send('confirm-released', { eventId });
+      }
+      return advance.call(this, stream, attemptId, eventId, ...rest);
     };
   }
   const compose = composition.composeEmrAdapters;
@@ -407,6 +409,13 @@ function child(scenario) {
   Owner.prototype.interrupt = function () { send('owner-interrupt'); return interrupt.call(this); };
   const authInit = auth.AuthService.prototype.onModuleInit;
   auth.AuthService.prototype.onModuleInit = function () { send('auth-init'); return authInit.call(this); };
+  if (scenario.db !== 'memory') {
+    // The real providers' hooks observed (pg): the same `destroy` / `prisma-shutdown` marks the memory doubles send.
+    const authDestroy = auth.AuthService.prototype.onModuleDestroy;
+    auth.AuthService.prototype.onModuleDestroy = function () { send('destroy'); const result = authDestroy.call(this); send('destroy-done'); return result; };
+    const prismaShutdown = prismaModule.PrismaService.prototype.onApplicationShutdown;
+    prismaModule.PrismaService.prototype.onApplicationShutdown = function (...args) { send('prisma-shutdown'); return prismaShutdown.apply(this, args); };
+  }
 
   // ── Nest and the HTTP server ──
   let port = null;

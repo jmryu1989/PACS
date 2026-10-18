@@ -119,7 +119,7 @@ test('P05 real recording work through the port: a standalone fact, a business tr
   const dir = startup.stateDirectory('pg-work');
   const standalone = randomUUID(), business = randomUUID(), failing = randomUUID(), held = randomUUID();
   const seen = {};
-  const result = await startup.run({ db: 'pg', holdConfirm: true, slowDestroy: 300 }, { env: env(dir), timeoutMs: 180000, onEvent: async (event, child) => {
+  const result = await startup.run({ db: 'pg', holdConfirm: held }, { env: env(dir), timeoutMs: 180000, onEvent: async (event, child) => {
     if (event.what === 'listening') child.send({ cmd: 'record-work', eventId: standalone });
     if (event.what === 'append-done' && event.eventId === standalone) { seen.standalone = event; child.send({ cmd: 'record-transaction', eventId: business }); }
     if (event.what === 'transaction-done') { seen.business = event; child.send({ cmd: 'record-transaction', eventId: failing, fail: true }); }
@@ -140,9 +140,14 @@ test('P05 real recording work through the port: a standalone fact, a business tr
   assert(!seen.second.names.includes('recovery'), 'no recovery beside the draining owner');
   const begin = result.events.find(e => e.what === 'begin');
   assert.deepEqual([begin.ok, begin.code], [false, 'EmrRecordPortClosed']);
-  inOrder(result.names, ['confirm-held', 'owner-interrupt', 'confirm-released', 'append-done', 'work-ended', 'destroy', 'prisma-shutdown', 'owner-close', 'disconnect', 'exit']);
-  const late = result.events.filter(e => e.what === 'append-done').find(e => e.eventId === held);
-  assert.equal(late.same, true, 'the receipt of the work the stop found in flight is genuine');
+  // The work the stop found in flight ends after the stop, before the hooks and the release; its receipt is genuine.
+  const at = what => result.names.indexOf(what);
+  const lateDone = result.events.findIndex(e => e.what === 'append-done' && e.eventId === held);
+  assert(lateDone >= 0 && result.events[lateDone].same === true, 'the receipt of the work the stop found in flight is genuine');
+  const lastEnded = result.names.lastIndexOf('work-ended');
+  assert(at('confirm-held') < at('owner-interrupt') && at('owner-interrupt') < at('confirm-released') && at('confirm-released') < lateDone
+    && lateDone < lastEnded && lastEnded < at('destroy') && at('destroy') < at('prisma-shutdown') && at('prisma-shutdown') < at('owner-close')
+    && at('owner-close') < at('disconnect') && at('disconnect') < at('exit'), JSON.stringify(result.names));
   assert.deepEqual([count(result.names, 'work-ended'), count(result.names, 'disconnect')], [4, 1]);
   // The restart: every fact was committed and sealed; nothing to recover, nothing not committed.
   let recovered = null;
