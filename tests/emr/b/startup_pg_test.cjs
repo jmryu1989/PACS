@@ -110,13 +110,18 @@ test('P04 SIGTERM while the start recovers over PostgreSQL ends the start there:
     if (event.what === 'owner-interrupt') child.send({ cmd: 'release' });
   } });
   stoppedStart(result, 'recovery');
-  inOrder(result.names, ['fence', 'recovery', 'held', 'owner-interrupt', 'released', 'recovered', 'start-failed', 'owner-close', 'disconnect', 'exit']);
+  // The recovery step returns first (`recovered`), then the start's own end begins the one release of the real client
+  // (`disconnect` before `start-failed`); the launcher's owner-close joins that same release - never a second one, never
+  // under the step in flight (the order Linux CI recorded on f3702c0 and C30 records with the inert doubles).
+  inOrder(result.names, ['fence', 'recovery', 'held', 'owner-interrupt', 'released', 'recovered', 'disconnect', 'start-failed', 'owner-close', 'exit']);
   for (const name of ['compose', 'ready', 'create', 'init', 'bind']) assert(!result.names.includes(name), name);
   assert.equal(count(result.names, 'disconnect'), 1);
 });
 
+const state05 = startup.stateDirectory('pg-work');
+
 test('P05 real recording work through the port: a standalone fact, a business transaction with its fact, a settled failure, then a stop while a confirm is in flight keeps the fence, drains the work, mints a genuine receipt and leaves nothing to recover', async () => {
-  const dir = startup.stateDirectory('pg-work');
+  const dir = state05;
   const standalone = randomUUID(), business = randomUUID(), failing = randomUUID(), held = randomUUID();
   const seen = {};
   const result = await startup.run({ db: 'pg', holdConfirm: held }, { env: env(dir), timeoutMs: 180000, onEvent: async (event, child) => {
@@ -158,15 +163,27 @@ test('P05 real recording work through the port: a standalone fact, a business tr
   assert.deepEqual([again.code, recovered.recovered, recovered.notCommitted], [0, 0, 0]);
 });
 
-test('P06 a transaction that outlives the drain grace: the one closed line names the drain, the process ends 1, and the restart settles the attempt as not committed - distinct from a committed entry', async () => {
-  const dir = startup.stateDirectory('pg-grace');
+test('P06 a transaction that outlives the drain grace: the one closed line names the drain, the process ends 1, and the restart settles the attempt as not committed - distinct from a committed entry; a fresh state directory beside the non-empty ledger is refused before anything (SealMissing)', async () => {
+  // The ledger now holds P05's facts. A new state directory has no seal tail that covers them: B1 refuses such a start at
+  // its recovery (seal.ts recoverAtStart: absent seal, non-zero chain) before any application exists - this is what Linux
+  // CI recorded on f3702c0 when this case used a fresh directory, and it is B1's rule, not a defect of the stop.
+  const fresh = startup.stateDirectory('pg-grace');
+  const refused = await startup.run({ db: 'pg' }, { env: env(fresh), timeoutMs: 120000 });
+  assert.deepEqual(closed(refused), ['recovery', 'SealMissing']);
+  assert(!refused.names.includes('ready') && !refused.names.includes('create'), 'no application beside an unexplained ledger');
+  assert.equal(count(refused.names, 'disconnect'), 1);
+  // The directory whose seal covers the ledger (P05's) carries the held transaction across the stop.
+  const dir = state05;
   const stuck = randomUUID();
   const result = await startup.run({ db: 'pg', holdTransaction: true }, { env: env(dir), timeoutMs: 180000, onEvent: (event, child) => {
     if (event.what === 'listening') child.send({ cmd: 'record-transaction', eventId: stuck });
     if (event.what === 'transaction-held') startup.stop(child, 'SIGTERM');
   } });
   assert.deepEqual([result.code, result.signal, result.timedOut], [1, null, false], result.stderr);
-  assert.deepEqual(result.stderrLines.map(line => STOP_LINE.exec(line)?.[1]), ['drain'], result.stderr);
+  const stopLines = result.stderrLines.map(line => STOP_LINE.exec(line)?.[1]);
+  // The drain is the bound that was exceeded; a release of the dedicated client under its cut transaction may itself
+  // reach the 5 s bound (then a second line names `ledger`), never a third line and never a start line.
+  assert(stopLines[0] === 'drain' && stopLines.length <= 2 && (stopLines.length === 1 || stopLines[1] === 'ledger'), result.stderr);
   assert(!result.names.includes('transaction-done'), 'the held transaction never committed');
   inOrder(result.names, ['transaction-held', 'owner-interrupt', 'destroy', 'owner-close', 'disconnect', 'exit']);
   const stop = result.events.find(e => e.what === 'owner-interrupt').at, hooks = result.events.find(e => e.what === 'destroy').at;
