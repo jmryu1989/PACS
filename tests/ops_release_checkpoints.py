@@ -1571,7 +1571,8 @@ def identity_valid(identity, *, at_resume=False):
     for side, value in images.items():
         flat = value.values() if type(value) is dict else [value]
         require(all(type(item) is str and IMAGE_ID.fullmatch(item) for item in flat), "IDENTITY_INVALID", "image_ids." + side)
-    require(identity["phase_reached"] in CHECKPOINTS, "IDENTITY_INVALID", "phase_reached")
+    # r9 (CKPT8-1): a string before the membership test (a list or object phase is IDENTITY_INVALID, never a TypeError).
+    require(type(identity["phase_reached"]) is str and identity["phase_reached"] in CHECKPOINTS, "IDENTITY_INVALID", "phase_reached")
     utc(identity["created_utc"])
     require(type(identity["daemon_identity"]) is str and identity["daemon_identity"], "IDENTITY_INVALID", "daemon_identity")
     root = identity["absolute_fixture_root"]
@@ -1945,7 +1946,41 @@ def manifest_complete(manifest):
                 and type(bindings[name].get("path")) is str, "BUNDLE_INVALID", "binding " + name + " missing")
     if not spec["lock"]:
         require("lock" not in bindings, "BUNDLE_INVALID", "a lock at a boundary that released it")
+    manifest_envelope(manifest, spec)
     return manifest
+
+
+def _texts(value):
+    return type(value) is list and all(type(item) is str for item in value)
+
+
+def manifest_envelope(manifest, spec):
+    """r9 (CKPT8-2 and its class): the JSON types of the manifest fields its consumers read after the loader - the live
+    admission (parent_lineage, time_admission, the resume decision, parent_chain), restore_checkpoint/restore_boundary
+    (owned volumes, networks, stack and token) - checked at the seal and at every load, so a mistyped one is BUNDLE_INVALID
+    there and never a TypeError downstream. The parent reference is null (a lineage root) or an object naming its parent
+    bundle; a malformed one is never read as a root."""
+    parent, owned = manifest.get("parent"), manifest.get("owned")
+    require(type(manifest.get("schema")) is int and manifest["schema"] == SCHEMA and manifest.get("kind") == "release-tools-checkpoint"
+            and manifest.get("lineage") == spec["lineage"] and type(manifest.get("execution_kind")) is str
+            and manifest["execution_kind"] in EXECUTION_KINDS
+            and all(type(manifest.get(key)) is bool for key in ("fresh_e2e", "release_gate_eligible", "derived"))
+            and type(manifest.get("boundary")) is dict
+            and all(type(manifest["boundary"][key]) is str for key in ("window_end", "tls_not_after") if key in manifest["boundary"]),
+            "BUNDLE_INVALID", "the manifest's schema, kind, lineage, kinds, flags or boundary")
+    require(parent is None or (type(parent) is dict and type(parent.get("manifest_sha256")) is str and HASH.fullmatch(parent["manifest_sha256"])
+                               and all(type(parent.get(key)) is str for key in ("checkpoint", "lineage") if key in parent)),
+            "BUNDLE_INVALID", "the parent reference is neither null (a root) nor a reference to a parent bundle")
+    stack = owned.get("stack") if type(owned) is dict else None
+    require(type(owned) is dict and type(owned.get("token")) is str and _texts(owned.get("projects"))
+            and type(owned.get("volumes", {})) is dict and type(owned.get("networks", [])) is list
+            and all(type(item) is dict and type(item.get("name")) is str and type(item.get("labels", {})) is dict and type(item.get("member")) is str
+                    for item in owned.get("volumes", {}).values())
+            and all(type(item) is dict and type(item.get("name")) is str and type(item.get("labels") or {}) is dict
+                    for item in owned.get("networks", []))
+            and type(stack) is dict and type(stack.get("root")) is str and type(stack.get("containers")) is dict
+            and set(stack["containers"]) == set(intro.ROLES) and all(type(name) is str for name in stack["containers"].values()), "BUNDLE_INVALID",
+            "the owned token, projects, volumes, networks or stack")
 
 
 @dataclass(frozen=True)
@@ -1981,6 +2016,11 @@ def verify_bundle(directory):
         raise Refused("BUNDLE_INVALID", "manifest JSON") from None
     require(raw == canonical(manifest) + b"\n", "BUNDLE_INVALID", "manifest is not canonical")
     manifest_complete(manifest)
+    # r9 (CKPT8-1 class): the identity every consumer reads after the loader (time, host and resume admission) is typed here.
+    try:
+        identity_valid(manifest["identity"])
+    except Refused as error:
+        raise Refused("BUNDLE_INVALID", "identity: " + str(error)) from None
     payload = directory / "payload"
     listed = {member["name"]: member for member in manifest["members"]}
     require(len(listed) == len(manifest["members"]), "BUNDLE_INVALID", "duplicate member")
@@ -2223,6 +2263,7 @@ def bundle_inputs(manifest, bundle_dir):
     # The B0 records are null or objects (the product's own new_state/capture write; its rollback reads state.b0 as one),
     # in every lineage, the source's own state included.
     require(context["b0"] is None or type(context["b0"]) is dict, "BUNDLE_INPUT_MISMATCH", "the context's source B0 is not an object")
+    mismatch(context["copy_dir"] is None or type(context["copy_dir"]) is str, "the context's seed B0 copy is not a path")
     mismatch(state.get("b0") is None or type(state.get("b0")) is dict, "the bound state's B0 is not an object")
     source_b0 = None
     if identity.get("source_b0_manifest_sha256") is not None or context["b0"] is not None:
@@ -2437,6 +2478,9 @@ def restore_checkpoint(manifest, bundle_dir, *, backend, fixture_root, names, im
     recreated from the pinned ComposeEntry with the same image IDs, the database alone for HELD; no seed, provision or
     migration runs; the product's boundary contract is observed at the end. Returns the action log. The plan, target and
     B0 bytes are recomputed from the bundle (bundle_inputs) before the first daemon call or file is created."""
+    # r9: the caller's checkpoint name is a known checkpoint before it is looked up (else BUNDLE_INVALID, never KeyError).
+    require(type(manifest) is dict and type(manifest.get("checkpoint")) is str and manifest["checkpoint"] in CHECKPOINTS, "BUNDLE_INVALID",
+            "the manifest names no checkpoint")
     spec = CHECKPOINTS[manifest["checkpoint"]]
     actions = [("inputs", bundle_inputs(manifest, bundle_dir))]
     # r7 (CKPT6-01): a manifest loaded earlier is not trusted; the bundle's current bytes are judged again (load_bundle,
@@ -3006,10 +3050,20 @@ def parent_chain(store_root, digest, *, limit=16):
         except OSError:
             raise Refused("CHAIN_BROKEN", "missing bundle " + current) from None
         require(sha256(raw) == current, "CHAIN_BROKEN", "manifest hash " + current)
-        manifest = json.loads(raw)
+        try:
+            manifest = json.loads(raw)
+        except ValueError:
+            raise Refused("CHAIN_BROKEN", "manifest JSON " + current) from None
+        # r9 (CKPT8-2): each link's fields are type-checked before they are read; a parent that is neither null (the root)
+        # nor a reference object is a broken chain, never an empty root.
+        parent = manifest.get("parent") if type(manifest) is dict else None
+        require(type(manifest) is dict and type(manifest.get("checkpoint")) is str and type(manifest.get("execution_kind")) is str
+                and type(manifest.get("identity")) is dict and type(manifest["identity"].get("payload_manifest_sha256")) is str
+                and (parent is None or (type(parent) is dict and type(parent.get("manifest_sha256")) is str)),
+                "CHAIN_BROKEN", "the manifest of " + current + " is not a checkpoint manifest with a parent reference")
         chain.append({"manifest_sha256": current, "checkpoint": manifest["checkpoint"], "execution_kind": manifest["execution_kind"],
                       "payload_manifest_sha256": manifest["identity"]["payload_manifest_sha256"]})
-        current = (manifest.get("parent") or {}).get("manifest_sha256")
+        current = parent["manifest_sha256"] if parent is not None else None
     return chain
 
 
@@ -3691,8 +3745,12 @@ def resolve_parent(leaves, unit, proof_root):
     if leaf["parent"] is None:
         return None
     _, segment, _ = bound_index(proof_root, leaf["parent"])
-    checkpoint = (segment.get("results") or {}).get("checkpoint") or {}
-    path = Path(str(checkpoint.get("path"))) / "manifest.json"
+    # r9: the segment's results are type-checked before they are read (a mistyped one is PARENT_UNBOUND).
+    results = segment.get("results")
+    checkpoint = results.get("checkpoint") if type(results) is dict else None
+    require(type(checkpoint) is dict and type(checkpoint.get("path")) is str and type(checkpoint.get("manifest_sha256")) is str,
+            "PARENT_UNBOUND", leaf["parent"] + " names no sealed checkpoint in its segment")
+    path = Path(checkpoint["path"]) / "manifest.json"
     try:
         raw = path.read_bytes()
         manifest = json.loads(raw)

@@ -8,8 +8,9 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M44 and M46-M59 to temporary copies of tests/ops_release_checkpoints.py,
-(M15-M17, M35) tests/ops_deploy_host_container_test.py and (M51, M56) tests/ops_release_checkpoints_native_test.py only, runs
+CheckpointMutationContracts (T18) applies M01-M44 and M46-M66 to temporary copies of tests/ops_release_checkpoints.py,
+(M15-M17, M35) tests/ops_deploy_host_container_test.py, (M51, M56) tests/ops_release_checkpoints_native_test.py and (M64)
+tests/ops_release_checkpoints_live_test.py only, runs
 the named contract against the unmodified copies (control) and the mutant in fresh processes, and counts a kill only when
 the control passes and the mutant fails an assertion (an import, launch or fixture error is not a kill). M01-M14 are the
 spec's contracts; M15-M30 were added by hardening round 1 for CKPT-01..09 (one or more per finding); M31-M42 by round 3
@@ -18,7 +19,9 @@ new_mutants); M47-M51 by round 6 (consult-checkpoints-r6-20261017 new_mutants M4
 residue-release ones); M52-M54 by round 7 (consult-checkpoints-r7-20261017 mutants: a non-object row skipped, an absence
 not corroborated, a row's image not bound); M55-M57 by round 8 (consult-checkpoints-r8-20261017 R8-06: the layer binding
 unchecked, the native evidence taking the caller's descriptor, a fact kind looked up before its type is checked);
-M58-M59 by the r8 self-review (D1556: bundle_inputs' B0 type unchecked, the verified descriptor shared between reads).
+M58-M59 by the r8 self-review (D1556: bundle_inputs' B0 type unchecked, the verified descriptor shared between reads);
+M60-M66 by round 9 (D1575 CKPT8-1/CKPT8-2 and the typed-read inventory: the loader's parent, phase_reached, identity and
+owned guards, parent_chain's link type, resolve_parent's checkpoint type, restore_boundary's stack type).
 
 Round 8 (consult-checkpoints-r8-20261017, CKPT7-01/02): the judgement is one call over the current bytes and the seal's
 bindings that returns what it verified (CheckpointVerifiedCaptureTests: R8-02 the bindings and the returned value, R8-03
@@ -5475,12 +5478,13 @@ def restore_wrapper(test, bundle):
     import ops_release_checkpoints_live_test as live
     bundle = Path(bundle)
     manifest = json.loads((bundle / "manifest.json").read_bytes())
-    facts = (manifest.get("boundary") or {}).get("facts") or {}
+    facts = _obj_or_none(_obj_or_none(manifest.get("boundary")).get("facts"))
     made = []
 
     class Synthetic(FakeBackend):
         def __init__(self, stack, helper):
-            super().__init__({role: stack.target["containers"][role] for role in intro.ROLES} if stack is not None else {}, {})
+            known = _obj_or_none(stack.target.get("containers")) if stack is not None else {}
+            super().__init__({role: known[role] for role in intro.ROLES if type(known.get(role)) is str}, {})
             self.containers.clear()
             made.append(self)
 
@@ -5494,9 +5498,12 @@ def restore_wrapper(test, bundle):
 
         def boundary_facts(self):
             self.calls.append(("boundary_facts",))
-            return {**facts, "containers": {role: {**fact, "id": "restored-" + role} for role, fact in (facts.get("containers") or {}).items()}}
+            return {**facts, "containers": {role: {**fact, "id": "restored-" + role} for role, fact in _obj_or_none(facts.get("containers")).items() if type(fact) is dict}}
+    # The synthetic stack's names, read with type checks (this helper must not raise where the harness would refuse).
+    owned = manifest.get("owned") if type(manifest.get("owned")) is dict else {}
+    stack_value = owned.get("stack") if type(owned.get("stack")) is dict else {}
     stack = SimpleNamespace(records=SimpleNamespace(lease=contextlib.nullcontext),
-                            target={"containers": ((manifest.get("owned") or {}).get("stack") or {}).get("containers") or {}})
+                            target={"containers": stack_value.get("containers") if type(stack_value.get("containers")) is dict else {}})
     root = test.tempdir("kin-r8-restore-") / "restored"
     with patch.object(live.rehearsal, "CheckpointDocker", Synthetic):
         outcome = _typed(lambda: live.restore_boundary(manifest, bundle, fixture_root=root, helper=image("3"), load=lambda path: stack))
@@ -5962,9 +5969,322 @@ class CheckpointVerifiedCaptureTests(CaptureFixture, RefusalAssertions, TempCase
         self.assertEqual((len(no_layer), sorted({item["result"].split(":", 1)[0] for item in no_layer})), (5, ["ACCEPTED", "BOUND"]),
                          "CKPT8_NO_NEW_LAYER_REQUIREMENT: " + json.dumps(no_layer))
 
+
+# ── r9 (D1575, Astra r8 delta CKPT8-1/2): every JSON read on the admission and restore paths is a typed refusal ──
+# Each read of a manifest, identity, context, state, plan, target, parent or segment field reached by load_bundle /
+# verify_bundle, bundle_inputs, restore_checkpoint, restore_boundary, the live leaf's stored-request admission (prefix-seed,
+# prefix-verify, through the real admit_resume), parent_chain and resolve_parent/leaf_request is substituted with [], {},
+# a string and an integer (hashes and the bundle name rebound, sequential, no concurrent swap) and run through the real
+# caller: a substitution of another JSON type than the field's is each caller's typed refusal with no effect, and no
+# substitution raises. The helpers use only entry points a9f9b69 has as well (its red run is kept apart).
+R9_SUBSTITUTIONS = (("[]", []), ("{}", {}), ("str", "x"), ("int", 7))
+R9_MANIFEST_FIELDS = (("checkpoint",), ("schema",), ("kind",), ("lineage",), ("execution_kind",), ("fresh_e2e",), ("release_gate_eligible",),
+                      ("derived",), ("parent",), ("members",), ("absent",), ("bindings",), ("bindings", "context"), ("bindings", "state"),
+                      ("boundary",), ("boundary", "window_end"), ("boundary", "tls_not_after"), ("owned",), ("owned", "token"),
+                      ("owned", "projects"), ("owned", "volumes"), ("owned", "networks"), ("owned", "stack"), ("owned", "stack", "root"),
+                      ("owned", "stack", "containers"), ("identity",), ("identity", "phase_reached"), ("identity", "image_ids"),
+                      ("identity", "created_utc"), ("identity", "runtime_identity"), ("identity", "absolute_fixture_root"),
+                      ("identity", "host_key_sha256"), ("identity", "daemon_identity"), ("identity", "tool_tree_sha256_at_checkpoint"),
+                      ("identity", "payload_manifest_sha256"), ("identity", "source_b0_manifest_sha256"), ("identity", "segment_source_map"),
+                      ("identity", "tool_files_actual_raw_sha256"))
+# Fixture-tree documents (realistic's tamper parts; the plan/target identity rebound so the field itself is read).
+R9_TREE_FIELDS = (("context", "stacks"), ("context", "b0"), ("context", "copy_dir"), ("context", "images"), ("context", "stacks", "source"),
+                  ("context", "stacks", "source", "plan_document"), ("context", "stacks", "source", "target"), ("context", "stacks", "source", "root"),
+                  ("context", "stacks", "source", "plan_document", "previous"), ("context", "stacks", "source", "plan_document", "release"),
+                  ("context", "stacks", "source", "plan_document", "tool"), ("context", "stacks", "source", "plan_document", "backup_root"),
+                  ("context", "stacks", "source", "plan_document", "seed"), ("context", "stacks", "source", "target", "repository"),
+                  ("context", "stacks", "source", "target", "ca_file"), ("context", "stacks", "source", "target", "compose_files"),
+                  ("context", "stacks", "source", "target", "declared_overlays"), ("state", "b0"), ("state", "plan_sha256"), ("state", "status"))
+R9_SEGMENT_FIELDS = (("results",), ("results", "checkpoint"), ("results", "checkpoint", "path"), ("results", "checkpoint", "manifest_sha256"))
+# The parent leaf's BOUND index (bound_index and rejudged_reasons read these before the segment is trusted).
+R9_INDEX_FIELDS = ((), ("run_dir",), ("logs",), ("raw",), ("raw", "evidence"), ("raw", "files"), ("raw", "admission"), ("raw", "checkpoint"),
+                   ("segment",), ("segment_sha256",))
+# What parent_chain (a lineage listing) reads of each link; it reads nothing else.
+R9_CHAIN_READS = (("checkpoint",), ("execution_kind",), ("identity",), ("identity", "payload_manifest_sha256"), ("parent",))
+R9_EFFECTS = ("admission_success", "restore_boundary", "daemon_calls", "daemon_mutations")
+
+
+def _json_type(value):
+    return {dict: "object", list: "array", str: "string", int: "integer", bool: "boolean", type(None): "null", float: "number"}[type(value)]
+
+
+def _obj_or_none(value):
+    return value if type(value) is dict else {}
+
+
+def admission_bundle(test, checkpoint_id="source-b0", *, manifest_change=None, tamper=None):
+    """A sealed bundle the live leaf can resume from (the seal fixture, a tool-tree member, its time window), with
+    `tamper(parts)` applied to its fixture documents (the plan/target identity rebound) and `manifest_change(manifest)` to
+    its manifest, the manifest's hashes and the bundle's name rebound. Returns the bundle folder."""
+    stack_name = cp.LINEAGE_STACK[checkpoint_id]
+
+    def coherent(parts):
+        tamper(parts)
+        descriptor = _obj_or_none(_obj_or_none(parts["context"].get("stacks")).get(stack_name))
+        if type(descriptor.get("plan_document")) is dict and type(descriptor.get("target")) is dict:
+            descriptor["plan_document"]["target_manifest_sha256"] = hashlib.sha256(intro.canonical(descriptor["target"])).hexdigest()
+            descriptor["plan_sha256"] = parts["state"]["plan_sha256"] = intro.plan_identity(descriptor["plan_document"])
+        tamper(parts)   # again: a rebinding never undoes the substitution itself (state.plan_sha256)
+    bundle = seal(test, test.tempdir() / "bundles", checkpoint_id, tamper=coherent if tamper else None)
+    manifest = json.loads((bundle / "manifest.json").read_bytes())
+    tool = raw_tar([])
+    (bundle / "payload" / "tool-tree.tar").write_bytes(tool)
+    manifest["members"] = sorted(manifest["members"] + [{"name": "tool-tree.tar", "category": "tool-tree", "sha256": cp.sha256(tool),
+                                                         "bytes": len(tool)}], key=lambda member: member["name"])
+    manifest["identity"]["payload_manifest_sha256"] = cp.sha256(cp.canonical(manifest["members"]))
+    manifest["identity"]["tool_tree_sha256_at_checkpoint"] = cp.tree_manifest_from_bytes({})["sha256"]
+    if tamper:
+        context = json.loads(cp.tree_member_bytes(bundle / "payload" / "fixture-tree.tar", cp.CONTEXT_FILE))
+        descriptor = _obj_or_none(_obj_or_none(context.get("stacks")).get(stack_name))
+        if type(descriptor.get("plan_sha256")) is str:
+            manifest["identity"]["plan_sha256"] = descriptor["plan_sha256"]
+            manifest["identity"]["target_manifest_sha256"] = _obj_or_none(descriptor.get("plan_document")).get("target_manifest_sha256")
+    now = datetime.now(timezone.utc)
+    manifest["boundary"].update(window_end=(now + timedelta(days=1)).isoformat(), tls_not_after=(now + timedelta(days=2)).isoformat())
+    if manifest_change is not None:
+        manifest_change(manifest)
+    raw = cp.canonical(manifest) + b"\n"
+    renamed = bundle.parent / cp.sha256(raw)
+    bundle.rename(renamed)
+    (renamed / "manifest.json").write_bytes(raw)
+    return renamed
+
+
+def deep_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-seed"):
+    """The live leaf's stored-request admission (CheckpointSegments.segment) of `bundle` past the host observation and
+    through the real admit_resume (a call-through spy that ends the run once it has returned, before any restore): the
+    gate permission from gate.live_run in this test's own state folder; host, runtime, source, tool-tree (the bundle's
+    empty tool tree, no Git listing of the running copy) and image observations answered synthetically from the recorded
+    identity (they match it). Returns the outcome and the effect counters."""
+    import ops_release_checkpoints_live_test as live
+    bundle = Path(bundle)
+    manifest = json.loads((bundle / "manifest.json").read_bytes())
+    recorded = _obj_or_none(manifest.get("identity"))
+    runtime, images = _obj_or_none(recorded.get("runtime_identity")), _obj_or_none(recorded.get("image_ids"))
+    source = {"tool": {"sha256": recorded.get("tool_tree_sha256_at_checkpoint")}, "source": {"sha256": recorded.get("source_tree_sha256")},
+              "harness": {"sha256": recorded.get("harness_tree_sha256")}, "tool_files": recorded.get("tool_files_actual_raw_sha256")}
+    leaf = cp.registry_leaf(list(cp.DEFAULT_PROOF_LEAVES), unit)
+    folder, state = test.tempdir("kin-r9-request-"), test.tempdir("kin-r9-gate-")
+    source_path = folder / "source.json"
+    source_path.write_bytes(cp.canonical(source) + b"\n")
+    request = {"schema": 1, **{key: leaf[key] for key in ("unit", "case", "scenario", "stage", "execution_kind")},
+               "parent_manifest": {"path": str(bundle / "manifest.json"), "sha256": bundle.name},
+               "source_manifest": {"path": str(source_path), "sha256": cp.sha256(source_path.read_bytes())},
+               "output_root": str(bundle.parent.parent), "evidence_root": str(folder / "evidence")}
+    request_path = folder / "request.json"
+    request_path.write_bytes(cp.canonical(request) + b"\n")
+    calls = {"host_reads": 0, "admit_resume": 0, "admission_success": 0, "restore_boundary": 0}
+    facts = {"os": "linux", "docker_os": "Ubuntu 24.04 LTS", "daemon_ok": True, "daemon_identity": recorded.get("daemon_identity"),
+             "available_ram_bytes": 12 * 1024 ** 3, "available_disk_bytes": 50 * 1024 ** 3, "required_disk_bytes": 20 * 1024 ** 3,
+             "foreign_containers": [], "host_key_sha256": recorded.get("host_key_sha256"), "architecture": runtime.get("arch"),
+             "absolute_fixture_root": recorded.get("absolute_fixture_root"), "docker_endpoint": "unix:///var/run/docker.sock",
+             "endpoint_selectors": [], "gate_state": str(state)}
+
+    def host(*args, **kwargs):
+        calls["host_reads"] += 1
+        return dict(facts)
+    real_admit = cp.admit_resume
+
+    def admit(*args, **kwargs):
+        calls["admit_resume"] += 1
+        real_admit(*args, **kwargs)
+        calls["admission_success"] += 1
+        raise cp.Refused("SYNTHETIC_ADMISSION_END", "the real resume admission accepted; the run ends before any restore")
+
+    def restore(*args, **kwargs):
+        calls["restore_boundary"] += 1
+        raise AssertionError("a restore")
+
+    def docker_text(argv, *args, **kwargs):
+        if list(argv[:3]) == ["docker", "context", "inspect"]:
+            return "unix:///var/run/docker.sock"
+        raise AssertionError("an unplanned transport call")
+    before = _tree_digest(bundle)
+    with patch.object(gate, "STATE", state), patch.dict(os.environ, {cp.REQUEST_ENV: str(request_path), "DOCKER_HOST": ""}), \
+            patch.object(cp, "source_identity", lambda *args, **kwargs: copy.deepcopy(source)), \
+            patch.object(cp, "runtime_identity", lambda *args, **kwargs: copy.deepcopy(runtime)), \
+            patch.object(live, "tool_tree_files", lambda root: {}), \
+            patch.object(live.rehearsal.CheckpointDocker, "runtime_facts", staticmethod(lambda: {})), \
+            patch.object(live.rehearsal.CheckpointDocker, "host_facts", staticmethod(host)), \
+            patch.object(live.rehearsal.ops, "text", docker_text), \
+            patch.object(live.CheckpointSegments, "image_id", lambda self, reference: images.get("helper")), \
+            patch.object(live.CheckpointSegments, "rehearsal_images",
+                         lambda self: {side: copy.deepcopy(images.get(side)) for side in ("previous", "release")}), \
+            patch.object(cp, "admit_resume", admit), patch.object(live, "restore_boundary", restore):
+        with gate.live_run(unit, cp.LIVE_FILE, "a" * 64, 1):   # the gate's own API, in this test's state folder
+            outcome = _typed(lambda: live.CheckpointSegments(leaf["case"].split(".", 1)[1]).segment(leaf["stage"]))
+    return {"outcome": outcome, **calls, "fixture_root_created": (bundle.parent.parent / "fixture").exists(),
+            "bundle_changed": _tree_digest(bundle) != before}
+
+
+def _r9_cell(path, value, normal, caller, result, *, read=True):
+    """One substitution through one caller: its outcome, effects and verdict (a refusal of a mistyped value with no effect,
+    never an exception; a value of the field's own JSON type may be accepted; `read=False`: the caller does not read the
+    field - the loader binds a non-volume checkpoint's fixture documents by SHA-256 only - so it may accept it)."""
+    outcome = result.get("outcome", "") if type(result) is dict else result
+    effects = {key: result[key] for key in (*R9_EFFECTS, "fixture_root_created") if type(result) is dict and key in result}
+    mistyped = _json_type(value) != _json_type(normal) or (path == ("parent",) and value is not None)
+    refused = not outcome.startswith(("ACCEPTED", "SYNTHETIC_ADMISSION_END", "EXCEPTION"))
+    if outcome.startswith("EXCEPTION"):
+        verdict = "FAIL: exception"
+    elif mistyped and not refused and not read:
+        verdict = "PASS (not read by this caller)"
+    elif mistyped and not refused:
+        verdict = "FAIL: a mistyped value accepted"
+    elif refused and any(effects.values()):
+        verdict = "FAIL: effects after a refusal"
+    else:
+        verdict = "PASS"
+    return {"field": ".".join(map(str, path)), "substitution": _json_type(value), "normal": _json_type(normal), "caller": caller,
+            "outcome": outcome[:220], "effects": effects, "verdict": verdict}
+
+
+def typed_reads_matrix(test, *, fields=None, include_tree=True, include_segment=True):
+    """The r9 substitution matrix (see the section comment): manifest fields through load_bundle, restore_checkpoint,
+    restore_boundary, the live leaf's admission (prefix-seed over source-b0; prefix-verify over introduced for the two
+    named fields) and parent_chain (the fields it reads); fixture-tree documents through the same callers; the parent
+    leaf's segment and BOUND-index fields through resolve_parent and leaf_request. Returns the cell rows."""
+    rows = []
+    base = json.loads((admission_bundle(test) / "manifest.json").read_bytes())
+    for path in R9_MANIFEST_FIELDS if fields is None else fields:
+        normal = _get(base, path)
+        for name, value in R9_SUBSTITUTIONS:
+            bundle = admission_bundle(test, manifest_change=lambda manifest, path=path, value=value: _put(manifest, path, value))
+            rows.append(_r9_cell(path, value, normal, "load_bundle", _typed(lambda: cp.load_bundle(bundle))))
+            rows.append(_r9_cell(path, value, normal, "restore_checkpoint", _row(lambda: o7_restore(test, bundle))))
+            rows.append(_r9_cell(path, value, normal, "restore_boundary", _row(lambda: restore_wrapper(test, bundle))))
+            rows.append(_r9_cell(path, value, normal, "live admission (prefix-seed)", _row(lambda: deep_admission(test, bundle))))
+            if path in R9_CHAIN_READS:
+                rows.append(_r9_cell(path, value, normal, "parent_chain", _typed(lambda: cp.parent_chain(bundle.parent, bundle.name))))
+    if fields is None:
+        introduced = json.loads((admission_bundle(test, "introduced") / "manifest.json").read_bytes())
+        for path in (("identity", "phase_reached"), ("parent",)):
+            for name, value in (*R9_SUBSTITUTIONS, ("[1]", [1])):
+                bundle = admission_bundle(test, "introduced", manifest_change=lambda manifest, path=path, value=value: _put(manifest, path, value))
+                rows.append(_r9_cell(path, value, _get(introduced, path), "live admission (prefix-verify, introduced)",
+                                     _row(lambda: deep_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-verify"))))
+    if include_tree:
+        parts_base = {}
+        realistic(test.tempdir("kin-r9-parts-"), "source-b0", tamper=lambda parts: parts_base.update(copy.deepcopy(parts)))
+        for path in R9_TREE_FIELDS:
+            normal = _get(parts_base, path)
+            for name, value in R9_SUBSTITUTIONS:
+                bundle = _row(lambda: admission_bundle(test, tamper=lambda parts, path=path, value=value: _put(parts, path, value)))
+                if type(bundle) is dict:   # the fixture itself cannot be written with this value: recorded, never a caller row
+                    rows.append({"field": ".".join(map(str, path)), "substitution": _json_type(value), "normal": _json_type(normal),
+                                 "caller": "fixture", "outcome": bundle["outcome"], "effects": {}, "verdict": "NOT RUN (fixture)"})
+                    continue
+                rows.append(_r9_cell(path, value, normal, "load_bundle", _typed(lambda: cp.load_bundle(bundle)), read=False))
+                rows.append(_r9_cell(path, value, normal, "restore_checkpoint", _row(lambda: o7_restore(test, bundle))))
+                rows.append(_r9_cell(path, value, normal, "restore_boundary", _row(lambda: restore_wrapper(test, bundle))))
+                rows.append(_r9_cell(path, value, normal, "live admission (prefix-seed)", _row(lambda: deep_admission(test, bundle))))
+    if include_segment:
+        child, unit = "release-tools-checkpoints-proof-late-resume", "release-tools-checkpoints-proof-prefix-introduce"
+        for document, path in [("segment", path) for path in R9_SEGMENT_FIELDS] + [("index", path) for path in R9_INDEX_FIELDS]:
+            for name, value in R9_SUBSTITUTIONS:
+                root = test.tempdir("kin-proof-")
+                proof, _, index = o7_index(test, unit=unit, root=root)
+                cp.write_index(root, index)
+                (root / "b.source-manifest.json").write_bytes(cp.canonical({"root": str(root / "b")}) + b"\n")
+                index_path = root / "index" / (unit + ".json")
+                if document == "index":   # the parent leaf's BOUND index itself (bound_index, rejudged_reasons)
+                    bound = json.loads(index_path.read_bytes())
+                    normal = bound if not path else _get(bound, path)
+                    if not path:
+                        bound = value
+                    else:
+                        _put(bound, path, value)
+                    index_path.write_bytes(cp.canonical(bound) + b"\n")
+                else:
+                    segment_path = Path(index["segment"])
+                    segment = json.loads(segment_path.read_bytes())
+                    normal = _get(segment, path)
+                    _put(segment, path, value)
+                    segment_raw = (json.dumps(segment, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                    segment_path.write_bytes(segment_raw)
+                    index_path.write_bytes(cp.canonical({**json.loads(index_path.read_bytes()), "segment_sha256": cp.sha256(segment_raw)}) + b"\n")
+                field = ("index",) + path if document == "index" else path
+                rows.append(_r9_cell(field, value, normal, "resolve_parent", _typed(lambda: cp.resolve_parent(proof.leaves, child, root))))
+                rows.append(_r9_cell(field, value, normal, "leaf_request", _typed(lambda: cp.leaf_request(proof.leaves, child, root))))
+    return rows
+
+
+def named_admission_contrasts(test):
+    """CKPT8-1 and CKPT8-2 through the real stored-request admission: phase_reached normal/[]/{} past the host observation
+    into admit_resume (prefix-seed over source-b0); the parent reference null/a valid reference/[1] through the same
+    admission and parent_chain. Returns {case: row}."""
+    rows = {}
+    for name, value in (("normal", R8_NORMAL), ("[]", []), ("{}", {})):
+        bundle = admission_bundle(test, manifest_change=None if value is R8_NORMAL else
+                                  lambda manifest, value=value: manifest["identity"].update(phase_reached=value))
+        rows["CKPT8-1 phase_reached " + name] = deep_admission(test, bundle)
+    root = admission_bundle(test)
+    reference = cp.parent_reference(json.loads((root / "manifest.json").read_bytes()), root)
+    for name, value in (("null (a root)", None), ("a valid parent reference", reference), ("[1]", [1])):
+        bundle = admission_bundle(test, manifest_change=lambda manifest, value=value: manifest.update(parent=copy.deepcopy(value)))
+        if value is reference:   # the referenced parent lives in the same store, as a real chain does
+            shutil.copytree(root, bundle.parent / root.name)
+        row = deep_admission(test, bundle)
+        row["parent_chain"] = _typed(lambda: cp.parent_chain(bundle.parent, bundle.name))
+        rows["CKPT8-2 parent " + name] = row
+    return rows
+
+
+class CheckpointTypedReadTests(RefusalAssertions, TempCase):
+    """r9 (D1575, Astra r8 delta CKPT8-1/2 and their class): every JSON read on the loader, restore and live-admission
+    paths is a typed refusal before any effect. Assertions name the requirement (CKPT9_*); no message text is pinned."""
+
+    def test_the_named_admission_contrasts_refuse_typed_after_the_host_observation(self):
+        """CKPT8-1 (M61) and CKPT8-2 (M60, M62): phase_reached normal reaches the real admit_resume and is admitted; []/{}
+        are refused typed (the loader now types the identity) with no admission, restore or fixture root; the parent null
+        and a valid reference are admitted (the chain listed); [1] is refused typed, never read as a root, and parent_chain
+        itself refuses it CHAIN_BROKEN (M62)."""
+        rows = named_admission_contrasts(self)
+        for name in ("CKPT8-1 phase_reached normal", "CKPT8-2 parent null (a root)", "CKPT8-2 parent a valid parent reference"):
+            with self.subTest(case=name):
+                row = rows[name]
+                self.assertTrue(row["outcome"].startswith("SYNTHETIC_ADMISSION_END") and row["admission_success"] == 1 and row["host_reads"] >= 1,
+                                "CKPT9_NORMAL_ADMITTED_AFTER_HOST: " + json.dumps(row))
+        self.assertEqual(rows["CKPT8-2 parent a valid parent reference"]["parent_chain"], "ACCEPTED", "CKPT9_VALID_CHAIN_LISTED")
+        for name in ("CKPT8-1 phase_reached []", "CKPT8-1 phase_reached {}", "CKPT8-2 parent [1]"):
+            with self.subTest(case=name):
+                row = rows[name]
+                self.assertEqual((row["outcome"].split(":", 1)[0], row["admission_success"], row["restore_boundary"], row["fixture_root_created"],
+                                  row["bundle_changed"]), ("BUNDLE_INVALID", 0, 0, False, False), "CKPT9_TYPED_BEFORE_ANY_EFFECT: " + json.dumps(row))
+        self.assertTrue(rows["CKPT8-2 parent [1]"]["parent_chain"].startswith("CHAIN_BROKEN"), "CKPT9_MALFORMED_PARENT_IS_NO_ROOT")
+        identity = identity_fixture(phase_reached=[])
+        self.assertRefused("IDENTITY_INVALID", cp.identity_valid, identity)
+
+    def test_one_mistyped_read_per_guard_is_its_caller_s_typed_refusal(self):
+        """The guard families (M63-M65): resolve_parent's segment results; restore_boundary's owned stack; the loader's
+        manifest envelope and owned shapes - one substitution each through its real caller, refused typed with no effect."""
+        rows = typed_reads_matrix(self, fields=(("owned", "stack"), ("derived",)), include_tree=False, include_segment=False)
+        rows += [row for row in typed_reads_matrix(self, fields=(), include_tree=False) if row["field"] == "results"]
+        manifest = json.loads((admission_bundle(self) / "manifest.json").read_bytes())
+        manifest["owned"]["stack"] = []
+        root = self.tempdir("kin-r9-restore-") / "restored"
+        rows.append(_r9_cell(("owned", "stack"), [], {}, "restore_boundary (a caller's mistyped manifest)",
+                             _typed(lambda: __import__("ops_release_checkpoints_live_test").restore_boundary(
+                                 manifest, Path("."), fixture_root=root, helper=image("3"), load=lambda path: None))))
+        for row in rows:
+            with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
+                self.assertEqual(row["verdict"], "PASS", "CKPT9_TYPED_READ: " + json.dumps(row))
+
+    def test_every_json_read_on_the_admission_paths_is_a_typed_refusal(self):
+        """The executed matrix (typed_reads_matrix) over every manifest, fixture-tree and segment field the listed callers
+        read: no exception, every mistyped substitution refused typed, no effect after a refusal."""
+        rows = typed_reads_matrix(self)
+        self.assertGreater(len(rows), 700, "the finite matrix")
+        for row in rows:
+            with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
+                self.assertIn(row["verdict"], ("PASS", "PASS (not read by this caller)", "NOT RUN (fixture)"), "CKPT9_TYPED_READ: " + json.dumps(row))
+
+
+# ── T18: mutants of the checkpoint logic (temporary copies of the harness files only) ──
+
 # The harness file each mutant edits (a temporary copy; the product scripts are never copied or changed).
 MUTANT_TARGETS = {"checkpoints": "ops_release_checkpoints.py", "rehearsal": "ops_deploy_host_container_test.py",
-                  "native": "ops_release_checkpoints_native_test.py"}
+                  "native": "ops_release_checkpoints_native_test.py", "live": "ops_release_checkpoints_live_test.py"}
 MUTANTS = (
     ("M01", "CheckpointBoundaryTests.test_only_completed_quiet_pre_ponr_boundaries_publish",
      'require(state.get("status") == spec["status"] and state.get("running") is None and state.get("unknown_hold") is None,',
@@ -6139,6 +6459,28 @@ MUTANTS = (
      '    def descriptor(self):\n        return json.loads(self.descriptor_raw)',
      "    def descriptor(self):\n        if '_d' not in self.__dict__:\n            self.__dict__['_d'] = json.loads(self.descriptor_raw)\n"
      "        return self.__dict__['_d']", "checkpoints"),
+    # Round 9 (D1575: CKPT8-1, CKPT8-2 and one per new guard family).
+    ("M60", "CheckpointTypedReadTests.test_the_named_admission_contrasts_refuse_typed_after_the_host_observation",   # loader: parent untyped
+     '    require(parent is None or (type(parent) is dict and type(parent.get("manifest_sha256")) is str',
+     '    require(True or parent is None or (type(parent) is dict and type(parent.get("manifest_sha256")) is str', "checkpoints"),
+    ("M61", "CheckpointTypedReadTests.test_the_named_admission_contrasts_refuse_typed_after_the_host_observation",   # CKPT8-1 phase membership
+     '    require(type(identity["phase_reached"]) is str and identity["phase_reached"] in CHECKPOINTS, "IDENTITY_INVALID", "phase_reached")',
+     '    require(identity["phase_reached"] in CHECKPOINTS, "IDENTITY_INVALID", "phase_reached")', "checkpoints"),
+    ("M62", "CheckpointTypedReadTests.test_the_named_admission_contrasts_refuse_typed_after_the_host_observation",   # CKPT8-2 parent_chain
+     '                and (parent is None or (type(parent) is dict and type(parent.get("manifest_sha256")) is str)),',
+     '                and True,', "checkpoints"),
+    ("M63", "CheckpointTypedReadTests.test_one_mistyped_read_per_guard_is_its_caller_s_typed_refusal",   # resolve_parent segment untyped
+     '    require(type(checkpoint) is dict and type(checkpoint.get("path")) is str and type(checkpoint.get("manifest_sha256")) is str,',
+     '    require(True,', "checkpoints"),
+    ("M64", "CheckpointTypedReadTests.test_one_mistyped_read_per_guard_is_its_caller_s_typed_refusal",   # restore_boundary owned untyped
+     '    cp.require(type(stack) is dict and type(stack.get("root")) is str and type(stack.get("containers")) is dict and type(owned.get("token")) is str,',
+     '    cp.require(True,', "live"),
+    ("M65", "CheckpointTypedReadTests.test_the_named_admission_contrasts_refuse_typed_after_the_host_observation",   # loader: identity untyped
+     '        identity_valid(manifest["identity"])\n    except Refused as error:\n        raise Refused("BUNDLE_INVALID", "identity: "',
+     '        pass\n    except Refused as error:\n        raise Refused("BUNDLE_INVALID", "identity: "', "checkpoints"),
+    ("M66", "CheckpointTypedReadTests.test_one_mistyped_read_per_guard_is_its_caller_s_typed_refusal",   # loader: owned untyped
+     '    require(type(owned) is dict and type(owned.get("token")) is str and _texts(owned.get("projects"))',
+     '    require(True or type(owned) is dict and type(owned.get("token")) is str and _texts(owned.get("projects"))', "checkpoints"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -6148,12 +6490,13 @@ RUN_ONE = textwrap.dedent("""\
     import ops_release_checkpoints
     import ops_deploy_host_container_test
     import ops_release_checkpoints_native_test
+    import ops_release_checkpoints_live_test
     import ops_release_checkpoints_test as contracts
     suite = unittest.defaultTestLoader.loadTestsFromName(sys.argv[4], contracts)
     result = unittest.TestResult()
     suite.run(result)
     print("MUTANT_RESULT " + json.dumps({"origins": [ops_release_checkpoints.__file__, ops_deploy_host_container_test.__file__,
-                                                     ops_release_checkpoints_native_test.__file__],
+                                                     ops_release_checkpoints_native_test.__file__, ops_release_checkpoints_live_test.__file__],
           "run": result.testsRun, "skipped": len(result.skipped),
           "failures": [text.strip().splitlines()[-1][:300] for _, text in result.failures],
           "errors": [text.strip().splitlines()[-1][:300] for _, text in result.errors]}))
@@ -6187,7 +6530,7 @@ class CheckpointMutationContracts(TempCase):
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
         """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6, r7, r8): control PASS, then an assertion failure in the named
-        contract for each mutant (M01-M44, M46-M59)."""
+        contract for each mutant (M01-M44, M46-M66)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:

@@ -150,10 +150,13 @@ class CheckpointSegments(rehearsal.RehearsalStages, unittest.TestCase):
         try:
             if manifest is not None:
                 inherited = cp.leaf_phases(leaf)[1]
-                cp.time_admission(created_utc=manifest["identity"]["created_utc"], window_end=manifest["boundary"]["window_end"],
-                                  tls_not_after=manifest["boundary"]["tls_not_after"], suffix_seconds=SUFFIX_SECONDS,
+                # r9: an absent or mistyped time is TIME_INVALID (cp.utc), never a KeyError (the loader typed the boundary).
+                cp.time_admission(created_utc=manifest["identity"]["created_utc"], window_end=manifest["boundary"].get("window_end"),
+                                  tls_not_after=manifest["boundary"].get("tls_not_after"), suffix_seconds=SUFFIX_SECONDS,
                                   teardown_seconds=TEARDOWN_SECONDS)
                 observed = self.observed_identity(manifest, actual, facts, helper, runtime, bundle_facts)
+                cp.require(any(member["name"] == "tool-tree.tar" for member in manifest["members"]), "BUNDLE_INVALID",
+                           "the parent bundle carries no tool tree")
                 old_tool = tool_tree_from_archive(parent_dir / "payload" / "tool-tree.tar")
                 cp.require(cp.tree_manifest_from_bytes(old_tool)["sha256"] == manifest["identity"]["tool_tree_sha256_at_checkpoint"],
                            "BUNDLE_INVALID", "the parent's tool bytes differ from its identity")
@@ -460,8 +463,12 @@ def restore_boundary(manifest, parent_dir, *, fixture_root, helper, load, leaf=N
     the observation-only context (purpose restore, naming the parent bundle; the parent bundle is never written), then the
     boundary's product facts observed again (cp.restored_mapping). `load(fixture_root)` returns the restored lineage
     stack. Returns (stack, restore observation or None, mapping or None). Shared by CheckpointSegments and the native
-    smoke."""
-    owned = manifest["owned"]
+    smoke. r9: the owned stack and token are type-checked before they are read (a caller's mistyped manifest is
+    BUNDLE_INVALID before any adapter exists; restore_checkpoint then verifies the bundle itself)."""
+    owned = manifest.get("owned") if type(manifest) is dict else None
+    stack = owned.get("stack") if type(owned) is dict else None
+    cp.require(type(stack) is dict and type(stack.get("root")) is str and type(stack.get("containers")) is dict and type(owned.get("token")) is str,
+               "BUNDLE_INVALID", "the manifest names no owned stack and token")
     target = SimpleNamespace(root=Path(owned["stack"]["root"]), repo=Path(owned["stack"]["root"]) / "repo", token=owned["token"],
                              target={"containers": owned["stack"]["containers"]})
     docker = rehearsal.CheckpointDocker(target, helper)
