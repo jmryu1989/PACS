@@ -31,6 +31,7 @@ import sys
 import time
 import unittest
 import uuid
+from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import auth_logout_dom_test as h
@@ -69,9 +70,18 @@ def dicom(index, size=64):
     return (head + b"x" * size)[:max(size, len(head))]
 
 
+# Results the import gate answers before any attempt of the request (a held Study, an undetermined owner, the bytes'
+# own refusals): no attempt, generation 0, no identity - as the real service answers them (S9U4-B86).
+BEFORE_ATTEMPT = ("STUDY_WRITE_PENDING", "STUDY_OWNERSHIP_UNDETERMINED")
+ENVELOPE = json.loads((Path(__file__).resolve().parent / "fixtures" / "s9u4-import-envelope.json").read_text(encoding="utf-8"))
+
+
 def file_result(op, index, outcome="stored", code=None, message=None, identity="matched", disposition=None,
                 rechecked=None, uid=UID_A, generation=1):
-    attempts = [] if outcome == "rejected" and code and code.startswith(("DICOM_", "PATIENT_ID_", "MODALITY")) else [{
+    before = code in BEFORE_ATTEMPT or (outcome == "rejected" and code and code.startswith(("DICOM_", "PATIENT_ID_", "MODALITY")))
+    if before and identity == "matched":
+        identity = None
+    attempts = [] if before else [{
         "attemptId": "00000000-0000-4000-8000-%012d" % (index + 1000 * generation), "generation": generation, "phase": "finished", "outcome": outcome,
         "code": code, "transport": None, "startedAt": "2026-10-17T00:00:00.000Z", "finishedAt": None,
         "autoRecheckedAt": rechecked, "recovery": None}]
@@ -1022,6 +1032,24 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual(0, self.controls()["Choose Files Again"] + self.controls()["Retry"], "C-07 no Choose Files Again from a malformed row")
         self.assertEqual(2, len(self.site.imports))
 
+    def test_r4_a03_a_lost_retry_of_a_pre_attempt_retryable_stays_undecided(self):
+        """D1574 (the hosted REQ-S9-U4-10 run): POST 1 is the real service's STUDY_WRITE_PENDING (409, generation 0, no
+        attempt) - Retry Needed with Retry; the retry's answer is lost and the server's row stays generation 0, which
+        cannot speak for the later request: the file stays undecided (no Retry, no third POST), also after Check Again."""
+        self.open_as(TECH, "Technician")
+        pending = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "STUDY_WRITE_PENDING")
+        self.site.import_answers = [pending, "abort"]
+        self.choose(self.files(1))
+        self.wait(lambda: self.state_of(0) == "Retry Needed", "C-07 the real retryable answer is read as such")
+        self.assertEqual(1, self.controls()["Retry"], "C-07 Retry for a complete retryable answer")
+        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
+        self.wait(lambda: len(self.site.imports) == 2 and self.state_of(0) == "Result Unknown", "C-07 the lost retry stays undecided")
+        self.assertEqual(0, self.controls()["Retry"], "C-07 generation 0 does not answer the retry")
+        self.operations().first.get_by_role("button", name="Check Again", exact=True).click()
+        self.settle(300)
+        self.assertEqual("Result Unknown", self.state_of(0), "C-07 still undecided")
+        self.assertEqual(2, len(self.site.imports), "C-07 no third POST")
+
     def test_r4_a03_an_older_attempt_retryable_does_not_answer_a_newer_request(self):
         """R4-A03 (I17, I20, I21): POST 1 answers retryable generation 1; Retry sends POST 2, whose answer is lost while the
         server still shows generation 1. That old result opens neither Retry nor (after a re-login) Choose Files Again;
@@ -1155,20 +1183,44 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual([], self.dialogs)
 
 
+class EnvelopeContractTests(unittest.TestCase):
+    """D1574: the page fixture answers exactly the real service's import shapes (tests/fixtures/s9u4-import-envelope.json,
+    pinned against the real service by S9U4-B86): no fixture-only field, none missing."""
+
+    def test_the_fixture_answers_the_real_import_shapes(self):
+        op = str(uuid.uuid4())
+        for outcome, code in (("stored", None), ("retryable", "ORTHANC_UNAVAILABLE"), ("retryable", "STUDY_WRITE_PENDING"),
+                              ("rejected", "PATIENT_ID_MISSING"), ("rejected", "SOP_CONTENT_CONFLICT"), ("unconfirmed", "IMPORT_UNCONFIRMED")):
+            row = file_result(op, 0, outcome, code)
+            self.assertEqual(ENVELOPE["post_file"], sorted(row), f"{outcome} {code}: the POST answer")
+            self.assertEqual(ENVELOPE["status_file"], sorted(k for k in row if k != "operationId"), f"{outcome} {code}: a status row")
+            for attempt in row["attempts"]:
+                self.assertEqual(ENVELOPE["attempt"], sorted(attempt))
+        pending = file_result(op, 0, "retryable", "STUDY_WRITE_PENDING")
+        self.assertEqual((pending["generation"], pending["attempts"], pending["identity"]), (0, [], None), "a pre-attempt result")
+        self.assertEqual(ENVELOPE["status_envelope"], sorted({"operationId": op, "status": "open", "files": []}))
+        self.assertEqual(ENVELOPE["request_refusal"], sorted({"code": "IMPORT_NOT_READY", "message": "m"}))
+
+
 def own_cases():
     """This file's cases only: the W4 flow cases it inherits its harness from run in report_flow_dom_test.py."""
     return [name for name in unittest.defaultTestLoader.getTestCaseNames(TransferPanelPage) if name in TransferPanelPage.__dict__]
 
 
 def load_tests(loader, tests, pattern):
-    return unittest.TestSuite(TransferPanelPage(name) for name in own_cases())
+    suite = unittest.TestSuite(TransferPanelPage(name) for name in own_cases())
+    suite.addTests(loader.loadTestsFromTestCase(EnvelopeContractTests))
+    return suite
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     names = sys.argv[1:] or own_cases()
-    result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(TransferPanelPage(n) for n in names))
+    suite = unittest.TestSuite(TransferPanelPage(n) for n in names)
+    if not sys.argv[1:]:
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(EnvelopeContractTests))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() and not result.skipped else 1
 
 

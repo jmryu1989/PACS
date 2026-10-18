@@ -1,0 +1,8 @@
+{
+  "about": "S9-U4b import answer shapes of the real API (api/src/study-transfer-local.service.ts importFile/importStatus, api/src/dicom-import-gate.service.ts publicFile). Pinned by study_transfer_local_server_test.cjs S9U4-B86 (the real service) and by the DOM suite's fixture check (EnvelopeContractTests): the page fixture answers exactly these shapes.",
+  "post_file": ["at", "attempts", "bytes", "code", "generation", "identity", "index", "message", "operationId", "outcome", "seriesUid", "sha256", "sopUid", "studyUid", "writeDisposition"],
+  "status_envelope": ["files", "operationId", "status"],
+  "status_file": ["at", "attempts", "bytes", "code", "generation", "identity", "index", "message", "outcome", "seriesUid", "sha256", "sopUid", "studyUid", "writeDisposition"],
+  "attempt": ["attemptId", "autoRecheckedAt", "code", "finishedAt", "generation", "outcome", "phase", "recovery", "startedAt", "transport"],
+  "request_refusal": ["code", "message"]
+}

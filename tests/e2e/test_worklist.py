@@ -880,13 +880,12 @@ class WorklistE2E(unittest.TestCase):
             self.assertEqual(posts, ["/api/dicom-import"])
             operation = page.locator("#study-transfer section[data-operation]").first.get_attribute("data-operation")
             operations.append(operation)
-            # A network error on the retry: the session stays and the operation is read back, nothing guessed or re-sent.
-            page.route("**/api/dicom-import", lambda route: route.abort("connectionreset"))
-            row.get_by_role("button", name="Retry", exact=True).click()
-            # The server record says retryable: exactly Retry Needed (r3: a lost answer is never shown Not Sent, U4C-03b).
-            expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed", timeout=30000)
-            page.unroute("**/api/dicom-import")
-            self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "a network error never logs out")
+            # D1566: a lost answer of a RETRY of this pre-attempt refusal cannot be resolved by the server's row (it stays
+            # generation 0, which cannot speak for the later request), so it would leave the file undecided for good; the
+            # resume below needs the settled Retry Needed. The lost-answer cases are the replaced-answer oracle further down
+            # (a 502 after the server stored the file: never Not Sent, the session kept) and the DOM suite's
+            # test_r4_a03_a_lost_retry_of_a_pre_attempt_retryable_stays_undecided.
+            self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "the session is live")
             # The same person signs in again in this tab: the operation is read with the new session and resumed.
             self.sign_in_again(page, "tech")
             expect(page.locator("#study-transfer section[data-operation]")).to_have_count(1, timeout=30000)
@@ -931,6 +930,7 @@ class WorklistE2E(unittest.TestCase):
             self.assertEqual(posted, [lost_op], "one POST of the lost file")
             self.assertNotIn("Not Sent", page.evaluate("window.__s9u4States"), "never Not Sent after a replaced answer")
             self.assertEqual(newest.get_by_role("button", name="Retry", exact=True).count(), 0, "no Retry after a replaced answer")
+            self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "a lost or replaced answer never logs out")
             [results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{lost_op}';")
             [kept] = json.loads(results)
             self.assertEqual((kept["outcome"], kept["sha256"]), ("stored", hashlib.sha256(lost).hexdigest()), "one stored result, the bytes as sent")
