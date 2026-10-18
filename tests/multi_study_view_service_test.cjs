@@ -25,6 +25,9 @@ require('./service_test_loader.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+// The server's periodic header/request timeout sweep is off: these sources hold requests on purpose, and the sweep
+// (Node 22) can race a socket that the client just cancelled into an uncaught internal TypeError after a test ends.
+const HELD_SOURCE = { connectionsCheckingInterval: 2147483647, requestTimeout: 0, headersTimeout: 0 };
 const { MultiStudyViewService, ViewingSetAccess, ViewingSetAccessUnbound, VIEWING_SET_SURFACE } = require('/app/dist/multi-study-view.service');
 const { MultiStudyViewController } = require('/app/dist/multi-study-view.controller');
 const { StudyAccessService } = require('/app/dist/study-access.service');
@@ -650,7 +653,7 @@ test('W9API-16 T10/T18 HTTP: 200 is the resolve body and ends the transfer; a po
 test('W9API-17 A-03 Orthanc read: the named display tags, every resource row, and the caller\'s abort cancels the body', async () => {
   let mode = 'one', stallClosed = false;
   const seen = [], uid = '2.25.4242', other = '2.25.4343';
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(HELD_SOURCE, (req, res) => {
     seen.push(req.url);
     if (mode === 'stall') {
       res.on('close', () => { stallClosed = true; });
@@ -747,7 +750,7 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
   // never sends its header, or sends the header and stalls the body. Served reads are the double's (never reached).
   let mode = 'answer';
   const calls = [];
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(HELD_SOURCE, (req, res) => {
     const call = { url: req.url, closed: false, closedAt: null };
     calls.push(call);
     res.on('close', () => { call.closed = true; call.closedAt = Date.now(); });
@@ -901,7 +904,7 @@ const SOP = '2.25.909090', IID = 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee';
 async function loopback() {
   const calls = [], retained = [], nativeFetch = globalThis.fetch;
   let route = () => ['F', 200, '[]'];
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(HELD_SOURCE, (req, res) => {
     const call = { url: req.url, path: new URL(req.url, 'http://x').pathname, method: req.method, start: Date.now(), resClosed: null, sockClosed: null };
     calls.push(call);
     res.on('close', () => { call.resClosed = Date.now(); });
@@ -964,6 +967,7 @@ test('W9API-25 R3-A01..A06 (W9A2-1): every raw source request of OrthancService 
       lb.calls.length = 0; w.route(lb, () => [mode, status, '{"error":']);
       const label = `A02 ${name} ${status} ${mode}`;
       const { error, at } = await rejection(w.call(lb.orthanc()), label);
+      assert.ok(held(lb, w), label + ': the request reached the source');
       assert.equal(error?.getStatus?.(), 503, label + ': the refusal keeps its 503 contract');
       assert.ok(at - held(lb, w).start < 1000, label + ': the refusal is prompt, not a read to EOF');
       await closedBy(held(lb, w), at, label);
@@ -1017,7 +1021,7 @@ test('W9API-25 R3-A01..A06 (W9A2-1): every raw source request of OrthancService 
       assert.ok(error && at - trigger < 500, label + ': the abort ends the call');
       await closedBy(held(lb, w), trigger, label);
       const dead = new AbortController(); dead.abort(); lb.calls.length = 0;
-      assert.ok((await rejection(w.call(lb.orthanc(), dead.signal))).error, `A04 ${name}: an aborted signal refuses`);
+      assert.ok((await rejection(w.call(lb.orthanc(), dead.signal), `A04 ${name}: an aborted signal dispatches zero requests`)).error, `A04 ${name}: an aborted signal refuses`);
       assert.equal(lb.calls.filter(w.target).length, 0, `A04 ${name}: an aborted signal dispatches zero requests`);
     }
     // R3-A04 / M07: the existing 5 s read bound ends a trickled viewer body; progress never renews it

@@ -107,7 +107,7 @@ export class OrthancService {
       return await this.withSourceResponse(path, {
         method: body === undefined ? 'GET' : 'POST', redirect: 'error',
         headers: { Authorization: this.auth, 'Content-Type': 'text/plain' }, body,
-      }, bound, async (response, read) => {
+      }, bound, async (response, read, owned) => {
         if (!response.ok || !response.body) {
           failure = !response.ok ? response.status === 401 ? 'http_401' : response.status === 404 ? 'http_404' : 'http_other' : 'missing_body';
           throw new Error('response');
@@ -120,7 +120,7 @@ export class OrthancService {
           if (total > limit) { failure = 'size_limit'; throw new Error('limit'); }
           chunks.push(value);
         }
-        bound.throwIfAborted();
+        owned.throwIfAborted();
         failure = 'decode';
         const decoded = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
         failure = 'parse';
@@ -176,11 +176,11 @@ export class OrthancService {
     try {
       return await this.withSourceResponse(path, { method: body ? 'POST' : 'GET', redirect: 'error',
         headers: { Authorization: this.auth, Accept: accept, 'Content-Type': 'application/dicom' }, body: body ? new Uint8Array(body).buffer : undefined },
-      bound, async (res, read) => {
+      bound, async (res, read, owned) => {
         if (!res.ok || !res.body) throw new Error('response');
         const reader = read(); const chunks: Uint8Array[] = []; let bytes = 0;
         while (true) { const part = await reader.read(); if (part.done) break; bytes += part.value.length; if (bytes > limit) throw new Error('limit'); chunks.push(part.value); }
-        bound.throwIfAborted(); return Buffer.concat(chunks);
+        owned.throwIfAborted(); return Buffer.concat(chunks);
       });
     } catch { throw new ServiceUnavailableException('SR 원본 조회 또는 저장을 확인할 수 없습니다. 같은 요청으로 다시 시도하세요'); }
     finally { bounds.release(); }
