@@ -203,7 +203,8 @@ export class MultiStudyViewService {
     // The fixed 1000 ms reserve is for the A-05 re-check and the durable receipt of the members read in time.
     const servedCut = new AbortController();
     const cutTimer = setTimeout(() => servedCut.abort(), VIEWING_SET_LIMITS.servedReadCutMs);
-    signal.addEventListener('abort', () => servedCut.abort(), { once: true });
+    const relay = () => servedCut.abort();
+    signal.addEventListener('abort', relay, { once: true });
     const members: Member[] = input.studyUids.map((uid, ordinal) => ({ uid, ordinal, state: null, code: null }));
     const answer = (accessRefs: ReadonlyMap<string, string> | null) => {
       const ready = members.filter(m => !m.code);
@@ -305,7 +306,13 @@ export class MultiStudyViewService {
       }
       this.settle(receipts, transfer);
       return answer(refs);
-    } finally { clearTimeout(timer); clearTimeout(cutTimer); }
+    } finally {
+      // The resolve is the owner of its source reads: whatever ends it (answer, refusal, throw, deadline), nothing it
+      // started stays active. The transfer/receipt settlement is separate and is not cancelled here.
+      deadline.abort(); servedCut.abort();
+      signal.removeEventListener('abort', relay);
+      clearTimeout(timer); clearTimeout(cutTimer);
+    }
   }
 
   /**

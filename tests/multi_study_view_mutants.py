@@ -52,6 +52,88 @@ REVISION_FIRST = REVISION_SPAN.replace(_SA_FROM, '  }\n', 1).replace(
     '      if(!tx)await this.unchanged(c,policy);\n      if(!tx)await this.prepare(c,remaining,policy,signal);', 1).replace(
     _SA_TO, '    const latest=policy;', 1)
 
+# W9-API r3 (D1562/D1564, R3-M01..M14): faults of the source-response owner in orthanc.service.ts, cut from the live file
+# so every anchor is exact. A leaky twin of the owner (fetch with the caller's signal, no cleanup at all) replaces the
+# owner for one wrapper at a time (R3-M01).
+_OR = (API_SRC / ORTHANC).read_bytes().decode('utf-8').replace('\r\n', '\n')
+_OWNER = '  private async withSourceResponse<T>('
+_LEAKY = ('  private async leakySourceResponse<T>(path: string, init: RequestInit, signal: AbortSignal | undefined, consume: any,\n'
+          '      transport?: any): Promise<T> {\n'
+          '    let response: Response;\n'
+          '    try { response = await fetch(this.base + path, { ...init, signal }); } catch (error) { throw transport ? transport(error) : error; }\n'
+          '    const owned = response;\n'
+          '    return await consume(owned, () => owned.body!.getReader(), signal ?? new AbortController().signal);\n'
+          '  }\n\n')
+
+
+def _owner_span(call):
+    """From the owner's definition to one wrapper's call of it (both in the live file, the owner first)."""
+    start = _OR.index(_OWNER)
+    end = _OR.index(call, start) + len(call)
+    return _OR[start:end]
+
+
+def _leaky_for(call):
+    span = _owner_span(call)
+    return dict(old=span, new=_LEAKY + span[:-len(call)] + call.replace('this.withSourceResponse(', 'this.leakySourceResponse(', 1))
+
+
+_CALLS = {
+    'get': '    return this.withSourceResponse(path, { method: body === undefined',
+    'viewerJson': '      return await this.withSourceResponse(path, {\n        method: body === undefined',
+    'srBytes': '      return await this.withSourceResponse(path, { method: body ?',
+    'lookupInstance': "    return this.withSourceResponse('/tools/lookup', {",
+}
+_STOP_FROM = '    const stop = () => {'
+_FINALLY_TO = '      if (reader) { await reader.cancel().catch(() => {}); try { reader.releaseLock(); } catch { /* already released */ } }\n    }\n'
+_OWNER_BODY = _OR[_OR.index(_STOP_FROM):_OR.index(_FINALLY_TO) + len(_FINALLY_TO)]
+_LOCKED_ONLY = _OWNER_BODY.replace(
+    '      controller.abort();\n      const cancelling = reader ? reader.cancel() : response?.body && !response.body.locked ? response.body.cancel() : undefined;\n'
+    '      void cancelling?.catch(() => {});\n',
+    '      void response?.body?.cancel().catch(() => {});\n', 1).replace(
+    _FINALLY_TO, '      if (reader) { try { reader.releaseLock(); } catch { /* already released */ } }\n    }\n', 1)
+_VJ_FROM = '    const bounds = OrthancService.readLimit(signal, () => { timedOut = true; }), bound = bounds.signal;'
+_RL_TO = "    return { signal: bound.signal, release: () => { clearTimeout(timer); signal?.removeEventListener('abort', follow); } };"
+_VJ_SPAN = _OR[_OR.index(_VJ_FROM):_OR.index(_RL_TO) + len(_RL_TO)]
+_VJ_REFRESH = _VJ_SPAN.replace('          chunks.push(value);\n', '          chunks.push(value); (bounds as any).timer.refresh();\n', 1).replace(
+    _RL_TO, "    return { timer, signal: bound.signal, release: () => { clearTimeout(timer); signal?.removeEventListener('abort', follow); } };", 1)
+R3_MUTANTS = [
+    *[dict(id=f'R3-M01-{name}', title=f'terminal cleanup absent in {name} only (the other wrappers fixed)', file=ORTHANC,
+           case='W9API-25', expect=f'A02 {name} 401 U: body and socket close', **_leaky_for(call)) for name, call in _CALLS.items()],
+    dict(id='R3-M02-reader-only', title='reader-only cleanup: an error Response before any reader is dropped', file=ORTHANC,
+         case='W9API-25', expect='A02 get 401 U: body and socket close',
+         old="      signal?.removeEventListener('abort', stop);\n      stop();\n", new="      signal?.removeEventListener('abort', stop);\n"),
+    dict(id='R3-M03-locked-body-cancel', title='only response.body.cancel (fails on a locked body), releaseLock without cancel, no abort', file=ORTHANC,
+         case='W9API-25', expect='A04 get H: settles promptly', old=_OWNER_BODY, new=_LOCKED_ONLY),
+    dict(id='R3-M04-return-without-await', title='return consume() without await inside the owner: cleanup cancels a valid body', file=ORTHANC,
+         case='W9API-25', expect='A01 get segmented completes',
+         old='      return await consume(owned,', new='      return consume(owned,'),
+    dict(id='R3-M05-drain-error-body', title='an error body is read to its end before the refusal', file=ORTHANC,
+         case='W9API-25', expect='A02 get 401 U: settles promptly',
+         old='      if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);\n      return OrthancService.jsonBody(res, read, owned);\n    }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));\n  }\n\n  /**\n   * 서버',
+         new='      if (!res.ok) { await res.text(); throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`); }\n      return OrthancService.jsonBody(res, read, owned);\n    }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));\n  }\n\n  /**\n   * 서버'),
+    dict(id='R3-M06-detach-at-headers', title='the caller signal is detached once the headers arrive', file=ORTHANC,
+         case='W9API-25', expect='A04 get U: settles promptly',
+         old='      const owned = response;\n      controller.signal.throwIfAborted();',
+         new="      signal?.removeEventListener('abort', stop);\n      const owned = response;\n      controller.signal.throwIfAborted();"),
+    dict(id='R3-M07-refresh-per-chunk', title='the 5 s read limit restarts at every body chunk', file=ORTHANC,
+         case='W9API-25', expect='A04 the 5 s bound ends a trickle: settles promptly', old=_VJ_SPAN, new=_VJ_REFRESH),
+    dict(id='R3-M08-resolve-finally-timers-only', title='the resolve exit only clears timers and leaves its source signals active', file=SERVICE,
+         case='W9API-26', expect='A07 answer: every source signal the resolve owned is ended',
+         old='      deadline.abort(); servedCut.abort();\n', new=''),
+    dict(id='R3-M09-late-result-cached', title='a preparation answer after the abort is cached as a permission fact', file=STUDY_ACCESS,
+         case='W9API-26', expect='a late preparation answer is never a cached permission fact',
+         old='      signal?.throwIfAborted();\n', new=''),
+    dict(id='R3-M10-dispatch-after-abort', title='an already-aborted caller signal is ignored and the request is dispatched', file=ORTHANC,
+         case='W9API-25', expect='A04 get: an aborted signal dispatches zero requests',
+         old="    if (signal?.aborted) controller.abort();\n    else signal?.addEventListener('abort', stop, { once: true });\n    try {\n      try {\n        controller.signal.throwIfAborted();\n",
+         new="    signal?.addEventListener('abort', stop, { once: true });\n    try {\n      try {\n"),
+    dict(id='R3-M14-gc-only', title='no deterministic cleanup at all: release left to GC', file=ORTHANC,
+         case='W9API-25', expect='A02 get 401 U: body and socket close',
+         old="    } finally {\n      signal?.removeEventListener('abort', stop);\n      stop();\n" + _FINALLY_TO[:_FINALLY_TO.index('\n    }\n') + 1] + '    }\n',
+         new='    } finally { /* GC only */ }\n'),
+]
+
 MUTANTS = [
     dict(id='M01', spec=True, title='the same patient judged by the source name instead of the PatientID', file=SERVICE,
          case='W9API-06', expect='two normal studies with one PatientID must open as one set',
@@ -175,8 +257,8 @@ MUTANTS = [
          old='      if(!tx)await this.prepare(c,remaining,policy,signal);', new='      if(!tx)await this.prepare(c,remaining,policy);'),
     dict(id='X20-find-ignores-signal', title='the batch identity read ignores the signal (fault: a read that ignores the abort)', file=ORTHANC,
          case='W9API-21', expect='the policy source read is cancelled by the deadline',
-         old='        body: body === undefined ? undefined : JSON.stringify(body), signal });',
-         new='        body: body === undefined ? undefined : JSON.stringify(body) });'),
+         old='      body: body === undefined ? undefined : JSON.stringify(body) }, signal, async (res, read, owned) => {',
+         new='      body: body === undefined ? undefined : JSON.stringify(body) }, undefined, async (res, read, owned) => {'),
     dict(id='X21-allowed-unbounded', title='the StudyAccess decision is awaited without the deadline', file=SERVICE,
          case='W9API-22', expect='StudyAccess.allowed snapshot: the deadline answers the resolve',
          old='          ? await within(() => this.studyAccess.allowed(c, candidates.map(m => m.uid), undefined, signal), signal) : new Set<string>();',
@@ -223,6 +305,7 @@ MUTANTS = [
              '        else if (unresolvedSource(m.rows)) m.code = STUDY_IDENTITY_UNRESOLVED;',
          new='        else if (unresolvedSource(m.rows)) m.code = STUDY_IDENTITY_UNRESOLVED;\n'
              '        else if (sourcePolicy && !m.rows.every(row => this.studyAccess.matches(policy, m.uid, row))) m.code = W9_MEMBER_UNAVAILABLE;'),
+    *R3_MUTANTS,
 ]
 NOT_APPLICABLE = {
     'M16': 'metadata/other-member reference accepted as an image display: the view-observations route is not in W9-API (D1500 D-6, Module A)',

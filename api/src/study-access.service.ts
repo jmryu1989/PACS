@@ -84,6 +84,8 @@ export class StudyAccessService {
       // One UID reads all of its resources; the batch keeps every enumeration row, so one UID's two resources
       // never make another UID's preparation fail.
       const rows=requested?.length===1?await this.orthanc.studyIdentityResources(requested[0],signal):await this.orthanc.studyIdentities(true,false,signal);
+      // A read that answers after its caller's signal ended is not a permission fact: never cache it (W9A2-1).
+      signal?.throwIfAborted();
       const fresh=new Map<string,StudyAccessMetadata[]>();
       for(const row of rows){const uid=OrthancService.tag(row,'0020000D');if(validAccessUid(uid))fresh.set(uid,[...fresh.get(uid)??[],this.metadata(row)]);}
       for(const [uid,list] of fresh)cache.metadata.set(uid,list);

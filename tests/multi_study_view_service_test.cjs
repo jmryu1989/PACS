@@ -892,6 +892,294 @@ test('W9API-23 A-02/A-03 (D1550): rights per resource AND, then the policy revis
   assert.deepEqual([wr.calls.reads.length, wr.port.prepared.length], [0, 0], 'a policy revision during the rights read refuses before any served read');
 });
 
+/* W9A2-1 / D1562 R3-A00: a real 127.0.0.1 source. Every request records its start, the close of its ServerResponse and of
+ * its exact socket; the source holds a request (H), sends headers and a prefix and never ends (U), keeps trickling a byte
+ * every 40 ms (T) or ends a finite, Connection: close body (F, optionally in delayed segments). Native Responses are kept
+ * strongly referenced by a transparent fetch observer, so GC can never stand in for cleanup, and nothing is torn down
+ * before a close is asserted. A close must follow its trigger within 500 ms (an observation window, not a product wait). */
+const SOP = '2.25.909090', IID = 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee';
+async function loopback() {
+  const calls = [], retained = [], nativeFetch = globalThis.fetch;
+  let route = () => ['F', 200, '[]'];
+  const server = http.createServer((req, res) => {
+    const call = { url: req.url, path: new URL(req.url, 'http://x').pathname, method: req.method, start: Date.now(), resClosed: null, sockClosed: null };
+    calls.push(call);
+    res.on('close', () => { call.resClosed = Date.now(); });
+    req.socket.once('close', () => { call.sockClosed = Date.now(); });
+    const parts = []; req.on('data', d => parts.push(d));
+    req.on('end', () => {
+      call.body = Buffer.concat(parts).toString('latin1');
+      const [mode, status = 200, payload = '', type = 'application/json'] = route(call);
+      if (mode === 'H') return;
+      if (mode === 'F' || mode === 'S') {
+        res.writeHead(status, { 'content-type': type, connection: 'close' });
+        if (mode === 'F') return res.end(payload);
+        const segments = Array.isArray(payload) ? payload : [payload.slice(0, 3), payload.slice(3, 9), payload.slice(9)];
+        let i = 0; const next = () => { if (i < segments.length - 1) { res.write(segments[i++]); setTimeout(next, 30); } else res.end(segments[i]); };
+        return next();
+      }
+      if (mode === 'X') { res.writeHead(status, { 'content-type': type }); res.write(payload); return setTimeout(() => req.socket.destroy(), 20); }
+      res.writeHead(status, { 'content-type': type }); res.write(payload || '[');
+      if (mode === 'T') { const tick = setInterval(() => res.write(' '), 40); res.on('close', () => clearInterval(tick)); }
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
+  process.env.ORTHANC_USER = 'synthetic'; process.env.ORTHANC_PASS = 'synthetic';
+  globalThis.fetch = async (...args) => { const response = await nativeFetch(...args); retained.push(response); return response; };
+  return { calls, retained, route: fn => { route = fn; }, orthanc: () => new OrthancService(),
+    close: async () => { globalThis.fetch = nativeFetch; server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
+}
+/** The request's ServerResponse and its socket both closed within `ms` of `trigger`. */
+async function closedBy(call, trigger, label, ms = 500) {
+  await until(() => call && call.resClosed !== null && call.sockClosed !== null, label + ': body and socket close', ms + 2500);
+  assert.ok(call.resClosed - trigger <= ms && call.sockClosed - trigger <= ms,
+    `${label}: body and socket close within ${ms} ms of the trigger (${call.resClosed - trigger}/${call.sockClosed - trigger} ms)`);
+}
+/** How a source call settles - {value | error, at} - or an assertion failure when it does not settle within `ms`. */
+async function rejection(promise, label = 'a source call', ms = 3000) {
+  let timer;
+  const settled = promise.then(value => ({ value, error: null, at: Date.now() }), error => ({ error, at: Date.now() }));
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new assert.AssertionError({ message: label + ': settles promptly' })), ms); });
+  try { return await Promise.race([settled, late]); } finally { clearTimeout(timer); }
+}
+const pixelsFor = (lb, numpy) => lb.route(c => c.path === '/tools/lookup' ? ['F', 200, JSON.stringify([{ Type: 'Instance', ID: IID }])] : numpy(c));
+// The four raw-fetch wrappers, each through a public entry point; `target` names the request whose lifetime is judged.
+const WRAPPERS = {
+  get: { call: (o, s) => s ? o.studyIdentities(true, false, s) : o.statistics(), target: c => c.path === '/tools/find' || c.path === '/statistics',
+    route: (lb, fn) => lb.route(fn) },
+  viewerJson: { call: (o, s) => o.studyIdentityResources('2.25.4242', s), target: c => c.path === '/dicom-web/studies', route: (lb, fn) => lb.route(fn) },
+  srBytes: { call: (o, s) => o.manualSrPixels(SOP, s), target: c => c.path.endsWith('/numpy'), route: (lb, fn) => pixelsFor(lb, fn) },
+  lookupInstance: { call: (o, s) => o.lookupInstance(SOP, s), target: c => c.path === '/tools/lookup', route: (lb, fn) => lb.route(fn) },
+};
+const held = (lb, w) => lb.calls.find(w.target);
+
+test('W9API-25 R3-A01..A06 (W9A2-1): every raw source request of OrthancService is owned to its end - refusal, abort, size, parse, early return, throw', async () => {
+  const lb = await loopback();
+  let unhandled = 0; const onUnhandled = () => { unhandled++; }; process.on('unhandledRejection', onUnhandled);
+  try {
+    // R3-A02: a terminal non-2xx refuses promptly and closes the unfinished or trickled body and its socket, with or
+    // without a caller signal; never read to its end.
+    for (const [name, w] of Object.entries(WRAPPERS)) for (const status of [401, 404, 503]) for (const mode of ['U', 'T']) {
+      lb.calls.length = 0; w.route(lb, () => [mode, status, '{"error":']);
+      const label = `A02 ${name} ${status} ${mode}`;
+      const { error, at } = await rejection(w.call(lb.orthanc()), label);
+      assert.equal(error?.getStatus?.(), 503, label + ': the refusal keeps its 503 contract');
+      assert.ok(at - held(lb, w).start < 1000, label + ': the refusal is prompt, not a read to EOF');
+      await closedBy(held(lb, w), at, label);
+    }
+    // R3-A02 F: finite error, 304 and 204 keep their semantics
+    for (const [name, w] of Object.entries(WRAPPERS)) {
+      w.route(lb, () => ['F', 503, '{"error":"busy"}']);
+      assert.equal((await rejection(w.call(lb.orthanc()))).error?.getStatus?.(), 503, `A02 ${name} finite 503`);
+      w.route(lb, () => ['F', 304, '']);
+      assert.ok((await rejection(w.call(lb.orthanc()))).error, `A02 ${name} 304 is a refusal`);
+    }
+    WRAPPERS.viewerJson.route(lb, () => ['F', 204, '']);
+    assert.equal((await rejection(WRAPPERS.viewerJson.call(lb.orthanc()))).error?.getStatus?.(), 503, 'A02 viewerJson 204 has no body: refused');
+    WRAPPERS.get.route(lb, () => ['F', 204, '']);
+    assert.equal((await rejection(WRAPPERS.get.call(lb.orthanc()))).error?.name, 'SyntaxError', 'A02 get 204 keeps native JSON semantics');
+    // R3-A01 F: a deliberately segmented finite answer completes unchanged (no premature cleanup)
+    const rows = JSON.stringify([{ RequestedTags: { StudyInstanceUID: '2.25.1', InstitutionName: 'SYN', PatientID: 'SYN-PID-1', StudyDate: '20261001', ModalitiesInStudy: 'CT' } }]);
+    lb.route(() => ['S', 200, rows]);
+    const segGet = await rejection(lb.orthanc().studyIdentities(true, false, new AbortController().signal), 'A01 get segmented');
+    assert.equal(segGet.error, null, 'A01 get segmented completes');
+    assert.deepEqual(segGet.value.map(r => r['00100020'].Value[0]), ['SYN-PID-1'], 'A01 get segmented');
+    lb.route(() => ['S', 200, JSON.stringify([sourceRow('2.25.4242')])]);
+    const segView = await rejection(lb.orthanc().studyIdentityResources('2.25.4242'), 'A01 viewerJson segmented');
+    assert.equal(segView.error, null, 'A01 viewerJson segmented completes');
+    assert.equal(segView.value.length, 1, 'A01 viewerJson segmented');
+    const pixels = Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 251));
+    pixelsFor(lb, () => ['S', 200, [pixels.subarray(0, 100), pixels.subarray(100, 2000), pixels.subarray(2000)], 'application/octet-stream']);
+    const segPix = await rejection(lb.orthanc().manualSrPixels(SOP), 'A01 srBytes segmented');
+    assert.equal(segPix.error, null, 'A01 srBytes segmented completes');
+    assert.ok(segPix.value.equals(pixels), 'A01 srBytes segmented binary is exact');
+    lb.route(() => ['S', 200, JSON.stringify([{ Type: 'Instance', ID: IID }])]);
+    const segLook = await rejection(lb.orthanc().lookupInstance(SOP), 'A01 lookupInstance segmented');
+    assert.equal(segLook.error, null, 'A01 lookupInstance segmented completes');
+    assert.deepEqual(segLook.value, [{ Type: 'Instance', ID: IID }], 'A01 lookupInstance segmented');
+    let stored = false;
+    lb.route(c => c.path === '/instances' ? (stored = true, ['S', 200, JSON.stringify({ Status: 'Success', ID: IID })])
+      : c.path === '/tools/lookup' ? ['F', 200, JSON.stringify(stored ? [{ Type: 'Instance', ID: IID }] : [])]
+      : ['F', 200, JSON.stringify({ UncompressedMD5: require('node:crypto').createHash('md5').update(Buffer.from('SYN-SR')).digest('hex') })]);
+    const segStore = await rejection(lb.orthanc().storeManualSr(SOP, Buffer.from('SYN-SR')), 'A01 storeManualSr segmented');
+    assert.equal(segStore.error, null, 'A01 storeManualSr segmented completes');
+    assert.equal(segStore.value, IID, 'A01 storeManualSr segmented store result');
+    // R3-A04: abort while headers, body or a trickle is pending closes the request; an aborted signal dispatches nothing
+    for (const [name, w] of Object.entries(WRAPPERS)) for (const mode of ['H', 'U', 'T']) {
+      lb.calls.length = 0; w.route(lb, () => [mode, 200, '[']);
+      const label = `A04 ${name} ${mode}`, parent = new AbortController();
+      const pending = rejection(w.call(lb.orthanc(), parent.signal), label, 2500);
+      await until(() => !!held(lb, w), label + ': the request reached the source');
+      await new Promise(resolve => setTimeout(resolve, 150));
+      const trigger = Date.now(); parent.abort();
+      const { error, at } = await pending;
+      assert.ok(error && at - trigger < 500, label + ': the abort ends the call');
+      await closedBy(held(lb, w), trigger, label);
+      const dead = new AbortController(); dead.abort(); lb.calls.length = 0;
+      assert.ok((await rejection(w.call(lb.orthanc(), dead.signal))).error, `A04 ${name}: an aborted signal refuses`);
+      assert.equal(lb.calls.filter(w.target).length, 0, `A04 ${name}: an aborted signal dispatches zero requests`);
+    }
+    // R3-A04 / M07: the existing 5 s read bound ends a trickled viewer body; progress never renews it
+    lb.calls.length = 0; lb.route(() => ['T', 200, '[']);
+    const started = Date.now(), bounded = await rejection(lb.orthanc().studyIdentityResources('2.25.4242'), 'A04 the 5 s bound ends a trickle', 8000);
+    assert.ok(bounded.error && bounded.at - started >= 4900 && bounded.at - started < 5600, 'A04 the 5 s bound ends a trickle (' + (bounded.at - started) + ' ms)');
+    await closedBy(lb.calls[0], started + 5000, 'A04 the 5 s bound');
+    // R3-A03: over the cap without EOF, malformed and truncated bodies; each keeps its error class
+    for (const mode of ['U', 'T']) {
+      lb.calls.length = 0; lb.route(() => [mode, 200, '['.padEnd(262200, ' ')]);
+      const over = await rejection(lb.orthanc().studyIdentityResources('2.25.4242'));
+      assert.equal(over.error?.getStatus?.(), 503, 'A03 viewerJson over the 256 KiB cap ' + mode);
+      await closedBy(lb.calls[0], over.at, 'A03 viewerJson over the cap ' + mode);
+      lb.calls.length = 0; lb.route(c => c.path === '/tools/lookup' ? ['F', 200, '[]'] : [mode, 200, '{'.padEnd(5000, ' ')]);
+      const store = await rejection(lb.orthanc().storeManualSr(SOP, Buffer.from('SYN-SR')));
+      assert.equal(store.error?.getStatus?.(), 503, 'A03 srBytes over the 4096-byte store cap ' + mode);
+      await closedBy(lb.calls.find(c => c.path === '/instances'), store.at, 'A03 srBytes over the cap ' + mode);
+    }
+    lb.route(() => ['F', 200, '{']);
+    assert.equal((await rejection(lb.orthanc().statistics())).error?.name, 'SyntaxError', 'A03 get invalid JSON stays a parse error');
+    assert.equal((await rejection(lb.orthanc().lookupInstance(SOP))).error?.name, 'SyntaxError', 'A03 lookupInstance invalid JSON stays a parse error');
+    assert.equal((await rejection(lb.orthanc().studyIdentityResources('2.25.4242'))).error?.getStatus?.(), 503, 'A03 viewerJson invalid JSON');
+    lb.route(() => ['F', 200, Buffer.from([0x5b, 0xff, 0x5d])]);
+    assert.equal((await rejection(lb.orthanc().studyIdentityResources('2.25.4242'))).error?.getStatus?.(), 503, 'A03 viewerJson invalid UTF-8');
+    lb.route(c => c.path === '/tools/lookup' ? ['F', 200, '[]'] : ['F', 200, '{"Status"']);
+    assert.equal((await rejection(lb.orthanc().storeManualSr(SOP, Buffer.from('SYN-SR')))).error?.name, 'SyntaxError', 'A03 malformed finite SR store result');
+    lb.calls.length = 0; lb.route(() => ['X', 200, '[{"a":']);
+    assert.ok((await rejection(lb.orthanc().statistics())).error, 'A03 a peer-truncated body is a failed read (peer-initiated close)');
+    // R3-A05/A06 at the owner itself (helper seam, not a W9 business path): early return or throw, before or after
+    // taking a reader, while the body is unfinished or trickling - the request closes and the primary outcome stays
+    const owner = lb.orthanc();
+    for (const mode of ['U', 'T']) for (const exit of ['return-before-reader', 'return-after-chunk', 'throw-before-reader', 'throw-after-chunk']) {
+      lb.calls.length = 0; lb.retained.length = 0; lb.route(() => [mode, 200, '[1,']);
+      const label = `A05/A06 owner ${mode} ${exit}`;
+      const run = rejection(owner.withSourceResponse('/statistics', { method: 'GET' }, undefined, async (_response, read) => {
+        if (exit.endsWith('chunk')) await read().read();
+        if (exit.startsWith('throw')) throw new Error('SYN primary');
+        return 'SYN early';
+      }));
+      const { error, at } = await run;
+      assert.equal(error?.message ?? null, exit.startsWith('throw') ? 'SYN primary' : null, label + ': the primary outcome stays');
+      await closedBy(lb.calls[0], at, label);
+      assert.equal(lb.retained[0].body.locked, false, label + ': the reader lock is released');
+    }
+    // R3-A06 H: a refused connection rejects with the existing transport contract
+    const refused = new OrthancService(); refused.base = 'http://127.0.0.1:9';
+    assert.match((await rejection(refused.statistics())).error?.message ?? '', /Orthanc/, 'A06 a refused connection is the transport 503');
+    // R3-A05 F public early return: no hit -> null after one consumed lookup
+    lb.calls.length = 0; lb.route(() => ['F', 200, '[]']);
+    assert.equal(await lb.orthanc().manualSrLocation(SOP, Buffer.from('SYN-SR')), null, 'A05 manualSrLocation no hit');
+    assert.deepEqual(lb.calls.map(c => c.path), ['/tools/lookup'], 'A05 no further source request');
+    await settle(); await settle();
+    assert.equal(unhandled, 0, 'no unhandled rejection from cleanup');
+  } finally { process.off('unhandledRejection', onUnhandled); await lb.close(); }
+});
+
+test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refused preparation provides nothing; a late answer is never cached', async t => {
+  const lb = await loopback();
+  try {
+    const found = [study(), study()];
+    const viaReal = (members, policy, served) => {
+      const w = world(members, { policy });
+      const real = lb.orthanc();
+      w.studyAccess = new StudyAccessService(w.prisma, real, {});
+      w.svc = new MultiStudyViewService(w.prisma, served ? real : w.orthanc, w.studyAccess, w.port);
+      return w;
+    };
+    // (1) the W9A2-1 reproduction: tools/find answers 503 and never ends its body (U) or trickles (T)
+    for (const mode of ['U', 'T']) {
+      lb.calls.length = 0; lb.route(() => [mode, 503, '{"error":']);
+      const w = viaReal(found, patientRule('SYN-PID-1'), false), start = Date.now();
+      const { error, at } = await rejection(resolveFor(w, reader(), body(ids(found))));
+      const label = `A07 tools/find 503 ${mode}`;
+      assert.equal(error?.getStatus?.(), 503, label + ': the preparation refusal is the resolve answer');
+      assert.ok(at - start < 1000, label + ': promptly');
+      await closedBy(lb.calls[0], at, label);
+      assert.deepEqual([w.calls.reads.length, w.port.prepared.length, w.port.finished.length], [0, 0, 0], label + ': nothing is read for serving or provided');
+      if (mode === 'U') {   // the r2 review watched this socket stay open through 10.5 s
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, 10500 - (Date.now() - start))));
+        assert.deepEqual([lb.calls.length, lb.calls[0].sockClosed !== null], [1, true], label + ': closed and no further request through 10.5 s');
+      }
+    }
+    // (2) the one-UID preparation (QIDO) refuses 503 with an unfinished body
+    lb.calls.length = 0; lb.route(() => ['U', 503, '{"e":']);
+    const one = [study({ state: { teleInstitutionId: B, ts: 'sent' } }), study()];
+    const w1 = viaReal(one, patientRule('SYN-PID-1'), false);
+    const r1 = await rejection(resolveFor(w1, reader(), body(ids(one))));
+    assert.equal(r1.error?.getStatus?.(), 503, 'A07 one-UID preparation 503');
+    await closedBy(lb.calls.find(c => c.path === '/dicom-web/studies'), r1.at, 'A07 one-UID preparation 503');
+    assert.deepEqual([w1.calls.reads.length, w1.port.prepared.length], [0, 0], 'A07 one-UID: nothing served or provided');
+    // (3) a served read refuses 503 with an unfinished body: that member fails, the other is provided
+    lb.calls.length = 0;
+    lb.route(c => new URL(c.url, 'http://x').searchParams.get('StudyInstanceUID') === found[1].uid ? ['U', 503, '{'] : ['F', 200, JSON.stringify([sourceRow(found[0].uid)])]);
+    const w3 = viaReal(found, null, true);
+    const r3 = await rejection(resolveFor(w3, reader(), body(ids(found))));
+    assert.equal(r3.error, null, 'A07 a served refusal is a member failure');
+    await closedBy(lb.calls.find(c => c.url.includes(found[1].uid)), r3.at, 'A07 served read 503');
+    assert.deepEqual(w3.port.prepared.map(p => p.targets.map(x => x.uid)), [[found[0].uid]], 'A07 only the member read is provided');
+    // (4) every resolve exit ends the source signals it owned: answer, mismatch, re-check refusal, receipt refusal, no ready
+    const exits = {
+      answer: w => {}, mismatch: (w, m) => { w.byUid.get(m[1].uid).rows = [sourceRow(m[1].uid, { pid: 'SYN-PID-2' })]; },
+      'recheck refusal': (w, m) => { w.onRead = uid => { if (uid === m[1].uid) w.byUid.get(uid).state.institutionId = B; }; },
+      'receipt refusal': w => { w.port.mode = 'fail'; }, 'no ready': (w, m) => { for (const s of m) w.byUid.get(s.uid).read = 'fail'; },
+    };
+    for (const [exit, arrange] of Object.entries(exits)) {
+      const members = [study(), study()], w = world(members, { policy: patientRule('SYN-PID-1', 'SYN-PID-2') });
+      arrange(w, members);
+      await rejection(resolveFor(w, reader(), body(ids(members))));
+      const owned = [...w.calls.reads.map(r => r.signal), ...w.calls.identitySignals];
+      assert.ok(owned.length >= 3 && owned.every(s => s instanceof AbortSignal && s.aborted), `A07 ${exit}: every source signal the resolve owned is ended`);
+    }
+    // (5) a preparation read answering after the deadline is not cached for the same Caller: the next resolve reads again
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const pair = [study(), study()], wl = world(pair, { policy: patientRule('SYN-PID-1') }), caller = reader();
+    wl.stalls.identity = 1;
+    const late = track(resolveFor(wl, caller, body(ids(pair))));
+    await until(() => !!wl.held, 'the preparation read is held');
+    t.mock.timers.tick(10000);
+    await until(() => late.settled, 'the deadline answers');
+    wl.held.release(); await settle(); await settle();
+    const again = await opens(resolveFor(wl, caller, body(ids(pair))), 'the next resolve');
+    assert.equal(wl.calls.identity.length, 2, 'a late preparation answer is never a cached permission fact');
+    assert.deepEqual(codes(again), ['ready', 'ready']);
+  } finally { await lb.close(); }
+});
+
+test('W9API-27 R3-A08 (D1558): eight targets at a real source - one finite ready, split, no PatientID, held and trickled - cut at 9 s', async () => {
+  const lb = await loopback();
+  try {
+    const splitUid = nextUid();
+    const m = [study(), study({ uid: splitUid }), study({ pid: undefined }), ...Array.from({ length: 5 }, () => study())];
+    const rows = { [m[0].uid]: [sourceRow(m[0].uid)], [splitUid]: [sourceRow(splitUid), sourceRow(splitUid, { pid: 'SYN-PID-9' })],
+      [m[2].uid]: [sourceRow(m[2].uid, { pid: undefined })] };
+    let open = 0, maxOpen = 0;
+    lb.route(c => {
+      const uid = new URL(c.url, 'http://x').searchParams.get('StudyInstanceUID');
+      if (rows[uid]) return ['F', 200, JSON.stringify(rows[uid])];
+      open++; maxOpen = Math.max(maxOpen, open); c.counted = true;
+      return [m.findIndex(s => s.uid === uid) % 2 ? 'T' : 'U', 200, '['];
+    });
+    const w = world(m), real = lb.orthanc();
+    w.svc = new MultiStudyViewService(w.prisma, real, w.studyAccess, w.port);
+    // a controlled 6 s before any source read, so a fresh 5 s per-read timer cannot stand in for the 9 s cut
+    w.stalls.policy = 1;
+    const start = Date.now(), run = track(resolveFor(w, reader(), body(ids(m)), Promise.resolve('ended')));
+    await until(() => !!w.held, 'the snapshot is held');
+    setTimeout(() => w.held.release(), 6000);
+    await until(() => run.settled, 'the resolve answers', 12000);
+    const answeredAt = Date.now() - start;
+    assert.ok(answeredAt >= 8900 && answeredAt < 10000, 'A08 answered at the 9 s cut, inside 10 s (' + answeredAt + ' ms)');
+    assert.deepEqual(outcome(run), ['partial', ['ready', STUDY_IDENTITY_UNRESOLVED, IU, LF, LF, LF, LF, LF]], 'A08 each cause kept; only held reads fail');
+    const heldCalls = lb.calls.filter(c => c.counted);
+    for (const c of heldCalls) await closedBy(c, start + 9000, 'A08 held served read');
+    assert.ok(maxOpen <= 4, 'A08 at most four reads in flight');
+    assert.ok(heldCalls.every(c => c.start - start < 9000), 'A08 no read starts at or after the cut');
+    assert.ok(!lb.calls.some(c => c.url.includes(m[7].uid)), 'A08 a member still queued at the cut is never read');
+    assert.deepEqual(w.port.prepared.map(p => p.targets.map(x => x.uid)), [[m[0].uid]], 'A08 exactly the ready target is receipted');
+    await until(() => w.port.finished.length === 1, 'A08 the transfer outcome');
+    assert.deepEqual(w.port.finished.map(f => f.outcome), ['ended'], 'A08 a normal receipt follows the actual transfer, not the source cleanup');
+  } finally { await lb.close(); }
+});
+
 // SRW9-2 binding precondition: Module A binds a real store only when this case runs - EMR-B2 verified request facts let the
 // resolve re-check the caller's membership and session between the source wait and prepare() (A-05 remainder).
 test.todo('W9API-20 a membership or session change during the source wait refuses the resolve before prepare (pending: EMR-B2 request facts)');
