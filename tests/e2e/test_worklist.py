@@ -874,29 +874,49 @@ class WorklistE2E(unittest.TestCase):
             with page.expect_file_chooser() as chooser:
                 page.locator("#t-import").click()
             chooser.value.set_files(str(upload))
-            row = page.locator('#study-transfer li[data-index="0"]')
+            first_box = page.locator("#study-transfer section[data-operation]").first
+            row = first_box.locator('li[data-index="0"]')
             expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed", timeout=30000)
             posts = [path for method, path in seen if method == "POST"]
             self.assertEqual(posts, ["/api/dicom-import"])
-            operation = page.locator("#study-transfer section[data-operation]").first.get_attribute("data-operation")
+            lost_retry = first_box.get_attribute("data-operation")
+            operations.append(lost_retry)
+            # D1566/D1591 (accepted liveness limit): the Retry's answer is lost. The server's row of this before-attempt
+            # refusal stays generation 0, which cannot speak for that later request, so the file stays undecided - Result
+            # Unknown, no Retry, no Choose Files Again, nothing sent again - and the session stays live. Such a file must
+            # be imported again.
+            page.route("**/api/dicom-import", lambda route: route.abort("connectionreset"))
+            row.get_by_role("button", name="Retry", exact=True).click()
+            expect(row.locator(".study-transfer-state")).to_have_text("Result Unknown", timeout=30000)
+            page.unroute("**/api/dicom-import")
+            page.wait_for_timeout(5000)
+            self.assertEqual([path for method, path in seen if method == "POST"], ["/api/dicom-import"] * 2, "no import POST after the lost retry")
+            self.assertEqual((first_box.get_by_role("button", name="Retry", exact=True).count(),
+                              first_box.get_by_role("button", name="Choose Files Again", exact=True).count()), (0, 0), "no Retry, no Choose Files Again")
+            self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "a lost answer never logs out")
+            # The file is imported again (a new operation) while the study is still held: a fresh Retry Needed.
+            with page.expect_file_chooser() as chooser:
+                page.locator("#t-import").click()
+            chooser.value.set_files(str(upload))
+            box = page.locator("#study-transfer section[data-operation]").first
+            expect(box.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Retry Needed", timeout=30000)
+            operation = box.get_attribute("data-operation")
+            self.assertNotEqual(operation, lost_retry, "a new operation")
             operations.append(operation)
-            # D1566: a lost answer of a RETRY of this pre-attempt refusal cannot be resolved by the server's row (it stays
-            # generation 0, which cannot speak for the later request), so it would leave the file undecided for good; the
-            # resume below needs the settled Retry Needed. The lost-answer cases are the replaced-answer oracle further down
-            # (a 502 after the server stored the file: never Not Sent, the session kept) and the DOM suite's
-            # test_r4_a03_a_lost_retry_of_a_pre_attempt_retryable_stays_undecided.
-            self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "the session is live")
-            # The same person signs in again in this tab: the operation is read with the new session and resumed.
+            # The same person signs in again in this tab: both operations are read with the new session; the new one resumes.
             self.sign_in_again(page, "tech")
-            expect(page.locator("#study-transfer section[data-operation]")).to_have_count(1, timeout=30000)
-            row = page.locator('#study-transfer li[data-index="0"]')
+            expect(page.locator("#study-transfer section[data-operation]")).to_have_count(2, timeout=30000)
+            row = page.locator(f'#study-transfer section[data-operation="{operation}"] li[data-index="0"]')
             expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed")
+            undecided = page.locator(f'#study-transfer section[data-operation="{lost_retry}"]')
+            expect(undecided.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Result Unknown")
+            self.assertEqual(undecided.get_by_role("button", name="Choose Files Again", exact=True).count(), 0, "the undecided file is not reopened by the login")
             # The other worker finishes: its stored result and the free claims come back exactly as they were.
             psql(f"UPDATE \"ImportOperation\" SET results = '{quote(original)}'::jsonb, status = 'settled' WHERE id='{held_op}';")
             psql("UPDATE \"ImportOperation\" SET claim = jsonb_set(claim, '{heldByAttemptId}', 'null') "
                  f"WHERE \"claimKey\" IN ('{keys[0]}', '{keys[1]}');")
             with page.expect_file_chooser() as chooser:
-                page.locator("#study-transfer").get_by_role("button", name="Choose Files Again").click()
+                page.locator(f'#study-transfer section[data-operation="{operation}"]').get_by_role("button", name="Choose Files Again").click()
             chooser.value.set_files(str(upload))
             expect(row.locator(".study-transfer-state")).to_have_text("Stored", timeout=60000)
             [results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{operation}';")
