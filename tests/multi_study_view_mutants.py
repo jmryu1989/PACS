@@ -40,7 +40,7 @@ SERVICE, CONTROLLER = 'multi-study-view.service.ts', 'multi-study-view.controlle
 ROLE = "    try { need(c.roles, 'radiologist', '여러 검사 열기'); } catch { throw viewForbidden(); }\n"
 MEMBER_LOOP = '        for (const m of members) {\n          m.state = first.get(m.uid) ?? null;\n          if (!m.state ||'
 KEY = 'key: `${m.state!.institutionId}|${patientId}`'
-PREPARE = '      try { receipts = await closing(() => preparing); } catch (error) {'
+PREPARE = '      try { receipts = await within(() => preparing, signal); } catch (error) {'
 STUDY_ACCESS, ORTHANC = 'study-access.service.ts', 'orthanc.service.ts'
 # X29 moves the policy-revision check of StudyAccess before its rights read: one contiguous span of study-access.service.ts
 # (the end of prepare() through allowed()'s re-check), cut from the file as it is so the anchor stays exact.
@@ -81,10 +81,10 @@ MUTANTS = [
          new='        if (members.some(m => false && !sameState(m.state, second.get(m.uid)))) throw contextChanged();'),
     dict(id='M06-policy', spec=True, title='the StudyAccess policy is not re-checked after the source wait', file=SERVICE,
          case='W9API-11', expect='policy changed must be re-checked after the source wait',
-         old='        try { await closing(() => this.studyAccess.unchanged(c, policy)); }', new='        try { void policy; }'),
+         old='        try { await within(() => this.studyAccess.unchanged(c, policy), signal); }', new='        try { void policy; }'),
     dict(id='M15', spec=True, title='a failed durable provide is ignored and the body returned', file=SERVICE,
          case='W9API-13', expect='fail: a provision without every receipt must not answer',
-         old=PREPARE, new="      try { receipts = await closing(() => preparing); } catch (error) { receipts = { accessRefs: new Map(ready.map(m => [m.uid, 'unrecorded:' + m.uid])) }; } if (false) {"),
+         old=PREPARE, new="      try { receipts = await within(() => preparing, signal); } catch (error) { receipts = { accessRefs: new Map(ready.map(m => [m.uid, 'unrecorded:' + m.uid])) }; } if (false) {"),
     dict(id='M17', spec=True, title='one composition-wide record instead of one per provided member', file=SERVICE,
          case='W9API-12', expect='every provided member must have its own target, and only those',
          old='        targets: ready.map(m => ({', new='        targets: ready.slice(0, 1).map(m => ({'),
