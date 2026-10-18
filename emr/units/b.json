@@ -113,8 +113,12 @@
     ],
     "B2-base": [
       "api/src/emr-runtime/application.ts",
+      "api/src/emr-runtime/launcher.ts",
+      "api/src/emr-runtime/record-port.ts",
       "tests/emr/b/startup_fixture.cjs",
-      "tests/emr/b/startup_pg_test.cjs"
+      "tests/emr/b/startup_pg_test.cjs",
+      "tests/emr/b/record_port_typecheck/forbidden.ts",
+      "tests/emr/b/record_port_typecheck/allowed.ts"
     ]
   },
   "models": {
@@ -454,13 +458,15 @@
         "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
         "C22 bounded lanes keep two verification connections free across small pools and shared stores",
         "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
-        "C24 base start-up order: the owner starts once after the module graph and before every init hook and the listener; A is composed once with B readers",
-        "C25 a close during the start (I13): the start stops at the wait it is in - nothing further is fenced, recovered or composed - releases its client once, and the close ends only after it",
-        "C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery",
-        "C27 shutdown keeps the HTTP drain and then disconnects once; a stop signal during the start ends it at the wait it is in; a failed start releases only what it created, within 5 s, and deletes no state",
+        "C24 base start-up order: the launcher starts the owner before it creates Nest, A is composed once with B readers, Nest receives the record port by value, the listener opens under the latch and the success log follows it",
+        "C25 the owner library (TEST-B2R-01): a stop requested in any state - cold, during each wait, ready - ends or refuses the start before anything further is created, fenced, recovered or composed; what was created is released exactly once, by whichever of the start and the close comes last",
+        "C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery; nothing else creates them",
+        "C27 a stop while serving (TEST-B2R-04): new admission is refused at once, the requests in flight and the recording work they begin - also after their response finished - drain before the hooks run and the client is released once; exceeding the 10 s drain grace or the 5 s cleanup bound ends the process nonzero with one closed line",
         "C28 every start-up phase that fails ends the process with one closed line and no listener, timer, buffered log or secret",
-        "C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-shutdown start is refused and nothing is composed or recovered twice",
-        "C30 a stop signal during the start ends it although a co-provider destroy hook still awaits: nothing is fenced, recovered, composed, initialized or listened after it, and the client is released once",
+        "C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-stop start of the owner and a second launch of the process are refused; nothing is composed or recovered twice",
+        "C30 one stop latch for every start wait (TEST-B2R-02): SIGTERM, SIGINT, a repeated signal, a step that fails after the stop and a release in the same turn as the signal, crossed with connect, role, recovery, the owner's ready, create, init and listen while a co-provider destroy hook awaits - no phase follows the stop, a late application is closed once, the client is released once, the process ends by itself",
+        "C31 the listener is acquired with the latch (TEST-B2R-03): a stop while the bind is pending leaves no listener, no success log and no answered request, the start promise settles, the error listener is removed and the cleanup runs; the same delay without a stop serves",
+        "C32 the record port (TEST-B2R-06/07): a typed consumer cannot reach the store, client, seal, journal, coordinator, recovery, start or close - the compiler refuses it and the runtime objects have no such property; its operations are the one store's own; new work is refused once closed and after its end; the begun work drains",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
@@ -492,9 +498,9 @@
     }
   },
   "expected": {
-    "contract": 28,
+    "contract": 30,
     "live": 13,
-    "mutants": 53,
+    "mutants": 62,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -792,7 +798,7 @@
       "kill": [
         "C24"
       ],
-      "behaviour": "MUT-B2SH-01: init hooks run before the awaited EMR start"
+      "behaviour": "MUT-B2SH-01: Nest is created and initialised before the awaited EMR start"
     },
     {
       "id": "M44",
@@ -813,7 +819,7 @@
       "kill": [
         "C27"
       ],
-      "behaviour": "MUT-B2SH-06: the dedicated client is released before the HTTP server drained"
+      "behaviour": "MUT-B2SH-06: the dedicated client is released at the stop, before the drain and the hooks"
     },
     {
       "id": "M47",
@@ -876,14 +882,77 @@
       "kill": [
         "C25"
       ],
-      "behaviour": "ready refused before the start completed: resources handed out while closing"
+      "behaviour": "B2B-01: a cold close does not lock the start; a start after it creates and connects a client"
     },
     {
       "id": "M56",
       "kill": [
         "C30"
       ],
-      "behaviour": "I13: a stop signal during the start reaches the owner only in Nest's last shutdown stage"
+      "behaviour": "B2R-02: the signal handler drops the latch"
+    },
+    {
+      "id": "M57",
+      "kill": [
+        "C30"
+      ],
+      "behaviour": "B2R-02: the latch trips a turn late"
+    },
+    {
+      "id": "M58",
+      "kill": [
+        "C30"
+      ],
+      "behaviour": "B2R-01: the application's cleanup entry is registered after its acquisition"
+    },
+    {
+      "id": "M59",
+      "kill": [
+        "C31"
+      ],
+      "behaviour": "B2R-03: the listener is acquired without the latch signal"
+    },
+    {
+      "id": "M60",
+      "kill": [
+        "C27"
+      ],
+      "behaviour": "B2R-04: the record port is not latched"
+    },
+    {
+      "id": "M61",
+      "kill": [
+        "C27"
+      ],
+      "behaviour": "B2B-02: Nest's own signal cleanup restored beside the launcher's"
+    },
+    {
+      "id": "M62",
+      "kill": [
+        "C24"
+      ],
+      "behaviour": "R4-09: A is composed a second time in the owner's start"
+    },
+    {
+      "id": "M63",
+      "kill": [
+        "C32"
+      ],
+      "behaviour": "B2R-06: the record facade hands the seal's recovery on"
+    },
+    {
+      "id": "M64",
+      "kill": [
+        "C27"
+      ],
+      "behaviour": "B2R-04: the stop does not wait for the begun recording work"
+    },
+    {
+      "id": "M65",
+      "kill": [
+        "C30"
+      ],
+      "behaviour": "B2R-02: the latch is not checked after the owner's start returned"
     }
   ],
   "candidate_cases": [

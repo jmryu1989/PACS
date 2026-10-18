@@ -13,7 +13,7 @@ import { CriticalResultController } from './critical-result.controller';
 import { CriticalResultService } from './critical-result.service';
 import { ReaderAssignmentController } from './reader-assignment.controller';
 import { ReaderAssignmentService } from './reader-assignment.service';
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { DynamicModule, MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PrismaService } from './prisma.service';
 import { PacsController } from './pacs.controller';
@@ -23,7 +23,7 @@ import { KeycloakService } from './keycloak.service';
 import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
-import { EmrApplicationRuntime } from './emr-runtime/application';
+import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 import { ViewerController } from './viewer.controller';
@@ -53,7 +53,6 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 @Module({
   controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController],
   providers: [
-    EmrApplicationRuntime,
     ViewerContextEventService,
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     { provide: APP_GUARD, useClass: AuthGuard },
@@ -61,6 +60,11 @@ function adminNoStore(_req: any, res: any, next: () => void) {
   ],
 })
 export class AppModule implements NestModule {
+  /** EMR-B2 (d): the module as the launcher creates it - the record port it prepared, by value under its token. Nothing
+   * else of the EMR lifetime is a provider, so no consumer can start, close, recover or compose. */
+  static forLaunch(port: EmrRecordPort): DynamicModule {
+    return { module: AppModule, providers: [{ provide: EMR_RECORD_PORT, useValue: port }] };
+  }
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
     consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);

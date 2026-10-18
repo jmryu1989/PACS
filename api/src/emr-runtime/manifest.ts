@@ -84,7 +84,7 @@ const STARTUP_CODES: Readonly<Record<string, string>> = freeze({
   EADDRINUSE: 'HTTP 포트가 이미 사용 중입니다', EACCES: 'HTTP 포트를 열 권한이 없습니다',
 });
 /**
- * EMR-B2-BASE: the one line a failed API start prints (main.ts), with a closed phase and, when the thrown value is one of
+ * EMR-B2: the one line a failed API start prints (launcher.ts), with a closed phase and, when the thrown value is one of
  * the explicitly mapped classes, its closed code: EmrRuntimeRefused by its class only (never its problems), the start-up,
  * seal and journal refusals by their code, the listed provider connection codes and the two listen errors. Anything else
  * is the phase's own line. No message, name, URL, SQL, bind value, stack or newline of the thrown value reaches it -
@@ -97,6 +97,22 @@ export function startupFailureMessage(phase: 'create' | 'config' | 'connect' | '
   const candidates = error instanceof EmrRuntimeRefused ? ['EmrRuntimeRefused'] : [value.errorCode, value.code, value.message];
   const code = candidates.find(item => typeof item === 'string' && Object.prototype.hasOwnProperty.call(STARTUP_CODES, item)) as string | undefined;
   return `기동 실패(${step}${code ? '/' + code : ''}): ${code ? STARTUP_CODES[code] : STARTUP_PHASES[step]}. 기동을 중단합니다.`;
+}
+
+/** The closed phases of a stop that did not end within its bound (launcher.ts): the step the start was still in, the
+ * drain of admitted requests and recording work (10 s), the service's own close hooks and the ledger release (5 s). */
+export type EmrStopPhase = 'start' | 'drain' | 'app' | 'ledger';
+const STOP_PHASES: Readonly<Record<EmrStopPhase, string>> = freeze({
+  start: '기동 중이던 단계가 5초 안에 끝나지 않았습니다',
+  drain: '진행 중인 요청과 접속 원장 기록 작업이 10초 안에 끝나지 않았습니다',
+  app: '서비스 종료 훅이 5초 안에 끝나지 않았습니다',
+  ledger: '접속 원장 연결 정리가 5초 안에 끝나지 않았습니다',
+});
+/** EMR-B2 (d): the one line a stop prints when a bound was exceeded; the process then ends nonzero. Nothing of the
+ * work that did not end (requests, errors, provider text) reaches it. */
+export function stopFailureMessage(phase: EmrStopPhase): string {
+  const step: EmrStopPhase = Object.prototype.hasOwnProperty.call(STOP_PHASES, phase) ? phase : 'ledger';
+  return `종료 실패(${step}): ${STOP_PHASES[step]}. 프로세스를 끝냅니다.`;
 }
 
 /**

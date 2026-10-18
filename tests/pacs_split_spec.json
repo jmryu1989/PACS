@@ -8226,20 +8226,16 @@
   },
   "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee",
   "di_additions_emr_b2": {
-    "unit": "EMR-B2-BASE",
-    "note": "TEST-B2SH-15: the EMR startup owner is one more singleton provider with no constructor token. No existing constructor, controller, route, middleware or scope changes (D1507: authentication does not hold the owner).",
+    "unit": "EMR-B2 (d)",
+    "note": "TEST-B2R-06: nothing of the EMR lifetime is a provider of the static module graph. The record port is a value provider the launcher adds at create time (AppModule.forLaunch(port): one `useValue` under the symbol token EMR_RECORD_PORT); no existing constructor, controller, route, middleware or scope changes.",
     "controllers": [],
-    "providers": [
-      "EmrApplicationRuntime"
-    ],
+    "providers": [],
     "routes": [],
-    "injectables": {
-      "EmrApplicationRuntime": {
-        "params": [],
-        "scope": null,
-        "declared": [],
-        "optional": []
-      }
+    "injectables": {},
+    "launch": {
+      "module": "AppModule.forLaunch",
+      "token": "Symbol(EmrRecordPort)",
+      "kind": "value"
     }
   }
 }

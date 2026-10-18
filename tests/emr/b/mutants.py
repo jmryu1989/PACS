@@ -1,4 +1,4 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2-BASE M43-M56 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2 (d) M43-M65 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
@@ -148,11 +148,12 @@ MUTANTS = {
         ("api/src/emr-runtime/seal.ts", "      if (!intent) this.addIntent", "      if (false) this.addIntent")]),
     "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
         ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
-    # ── EMR-B2-BASE (D1507 narrowed): the owner's MUT-B2SH classes, the start-time shutdown (I13), consult M13, G-4 and two
-    # ops boundaries. The request-fact classes (MUT-B2SH-09..16, consult M05/M06) move with request-context to the next unit.
-    "M43": ("MUT-B2SH-01: init hooks run before the awaited EMR start", [
-        ("api/src/main.ts", "    await runtime.start();\n    ownerStarting = false;\n    if (stopRequested) return;\n    startup.phase = 'init';\n    await app.init();\n",
-         "    startup.phase = 'init';\n    await app.init();\n    await runtime.start();\n    ownerStarting = false;\n")]),
+    # ── EMR-B2 (d): the owner library (B2R-01), the launcher's single latch, pre-registered cleanup, cancellable listen and
+    # single stop sequence (B2R-02/03/04), the record facade (B2R-06), consult M13, G-4 and two ops boundaries (B2R-09).
+    # The request-fact classes (MUT-B2SH-09..16, consult M05/M06) move with request-context to the next unit.
+    "M43": ("MUT-B2SH-01: Nest is created and initialised before the awaited EMR start", [
+        ("api/src/emr-runtime/launcher.ts", "      check('connect');\n      await ledger.start();\n      phase = 'create';\n      check(phase);\n      const records = createRecordPort(ledger.store());\n",
+         "      check('connect');\n      const startedLate = ledger.start();\n      phase = 'create';\n      check(phase);\n      await new Promise(resolve => setTimeout(resolve, 50));\n      const records = createRecordPort(await startedLate.then(() => ledger.store()));\n")]),
     "M44": ("MUT-B2SH-03: a concurrent, failed or closed start may start again", [
         ("api/src/emr-runtime/application.ts", "    if (this.state !== 'cold') refuse('EmrStartupRepeated');\n",
          "    if (this.state === 'ready') refuse('EmrStartupRepeated');\n")]),
@@ -160,19 +161,18 @@ MUTANTS = {
         ("api/src/emr-runtime/application.ts", "      const ledger = new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n",
          "      new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n"
          "      const ledger = new AccessLedgerStore(db, sql, seal, journal, db.emrAppendPoolSize);\n")]),
-    "M46": ("MUT-B2SH-06: the dedicated client is released before the HTTP server drained", [
-        ("api/src/emr-runtime/application.ts", "  onApplicationShutdown(): Promise<void> { return this.owner.close(); }\n",
-         "  onApplicationShutdown(): Promise<void> { return this.owner.close(); }\n"
-         "  beforeApplicationShutdown(): Promise<void> { return this.owner.close(); }\n")]),
+    "M46": ("MUT-B2SH-06: the dedicated client is released at the stop, before the drain and the hooks", [
+        ("api/src/emr-runtime/launcher.ts", "    control?.close();\n    owner?.interrupt();\n", "    control?.close();\n    void owner?.close();\n")]),
     "M47": ("MUT-B2SH-07: the fatal handler prints the raw error beside its closed line", [
-        ("api/src/main.ts", "failure ? failure.failure : error));\n", "failure ? failure.failure : error), error);\n")]),
+        ("api/src/emr-runtime/launcher.ts", "      console.error('[KIN API] ' + startupFailureMessage(failure.phase, failure.failure));\n",
+         "      console.error('[KIN API] ' + startupFailureMessage(failure.phase, failure.failure), failure.failure);\n")]),
     "M48": ("consult M13: a wrong runtime role still reaches the listener", [
         ("api/src/emr-runtime/application.ts",
          "      if (this.config.verifyRole) {\n        await verifyRuntimeConnection(db);\n        this.proceed();\n      }\n", "")]),
-    "M49": ("I13: a close during the start is looked at only at its end (late steps fence, recover and compose)", [
+    "M49": ("I13: a stop during the start is looked at only at its end (late steps fence, recover and compose)", [
         ("api/src/emr-runtime/application.ts", "    if (this.state !== 'starting') refuse('EmrStartupInterrupted');\n  }\n", "    void 0;\n  }\n"),
-        ("api/src/emr-runtime/application.ts", "      this.state = 'ready';\n",
-         "      if (this.state !== 'starting') refuse('EmrStartupInterrupted');\n      this.state = 'ready';\n")]),
+        ("api/src/emr-runtime/application.ts", "      this.ledger = ledger;\n      this.state = 'ready';\n",
+         "      if (this.state !== 'starting') refuse('EmrStartupInterrupted');\n      this.ledger = ledger;\n      this.state = 'ready';\n")]),
     "M50": ("I13: the close releases the client under the step in flight instead of waiting for it", [
         ("api/src/emr-runtime/application.ts", "      try { await this.starting; } catch { /* the start reports its own end */ }\n", "")]),
     "M51": ("I13: a late-returned client is released by both the start and the close (no single release)", [
@@ -187,13 +187,38 @@ MUTANTS = {
          "    if run([\"docker\", \"ps\", \"-q\", \"--filter\", \"volume=\" + state_volume]).stdout.decode(\"utf-8\").split():\n"
          "        raise RuntimeError(\"EMR recovery refused: the state volume is mounted by a running container\")\n",
          "    return\n")]),
-    "M55": ("ready refused before the start completed: the resources are handed out once they exist, also while closing", [
-        ("api/src/emr-runtime/application.ts", "    if (this.state !== 'ready' || !this.resources) refuse('EmrRuntimeNotReady');\n",
-         "    if (!this.resources) refuse('EmrRuntimeNotReady');\n")]),
-    "M56": ("I13: a stop signal during the start reaches the owner only in Nest's last shutdown stage, after every destroy hook", [
-        ("api/src/main.ts", "    if (ownerStarting) void runtime.close();\n", "    void ownerStarting;\n")]),
+    "M55": ("B2B-01: a cold close does not lock the start; a start after it creates and connects a client", [
+        ("api/src/emr-runtime/application.ts", "    if (this.state === 'cold' || this.state === 'starting' || this.state === 'ready') this.state = 'stopping';\n",
+         "    if (this.state === 'starting' || this.state === 'ready') this.state = 'stopping';\n")]),
+    "M56": ("B2R-02: the signal handler drops the latch (the stop never begins on SIGTERM/SIGINT)", [
+        ("api/src/emr-runtime/launcher.ts", "  for (const signal of SIGNALS) process.on(signal, () => trip({ kind: 'signal', signal }));\n",
+         "  for (const signal of SIGNALS) process.on(signal, () => void signal);\n")]),
+    "M57": ("B2R-02: the latch trips a turn late (a step that returns in the same turn as the signal goes on)", [
+        ("api/src/emr-runtime/launcher.ts", "  const trip = (cause: StopCause) => { if (!latch.signal.aborted) latch.abort(cause); };\n",
+         "  const trip = (cause: StopCause) => { setImmediate(() => { if (!latch.signal.aborted) latch.abort(cause); }); };\n")]),
+    "M58": ("B2R-01: the application's cleanup entry is registered after its acquisition (a late create is never closed)", [
+        ("api/src/emr-runtime/launcher.ts", "      reserve('app', () => (app ? app.close() : Promise.resolve()));\n      const created = await NestFactory.create(",
+         "      const created = await NestFactory.create("),
+        ("api/src/emr-runtime/launcher.ts", "      app = created;\n      check(phase);\n", "      app = created;\n      check(phase);\n      reserve('app', () => (app ? app.close() : Promise.resolve()));\n")]),
+    "M59": ("B2R-03: the listener is acquired without the latch signal (a late bind opens, logs and answers)", [
+        ("api/src/emr-runtime/launcher.ts", "    server.listen({ port: 3000, host: '0.0.0.0', signal });\n", "    server.listen({ port: 3000, host: '0.0.0.0' });\n"),
+        ("api/src/emr-runtime/launcher.ts", "    const onAbort = () => { detach(); reject(interrupted(phase)); };\n", "    const onAbort = () => { void phase; };\n")]),
+    "M60": ("B2R-04: the record port is not latched (new work admitted after the stop)", [
+        ("api/src/emr-runtime/record-port.ts", "      if (closed) refuse('EmrRecordPortClosed');\n", "      void closed;\n")]),
+    "M61": ("B2B-02: Nest's own signal cleanup is restored beside the launcher's (two commands of the stop)", [
+        ("api/src/emr-runtime/launcher.ts", "      app = created;\n      check(phase);\n      input.configure(created);\n",
+         "      app = created;\n      check(phase);\n      created.enableShutdownHooks();\n      input.configure(created);\n")]),
+    "M62": ("R4-09: A is composed a second time in the owner's start", [
+        ("api/src/emr-runtime/application.ts", "      composeEmrAdapters(runtimeAdapters);\n", "      composeEmrAdapters(runtimeAdapters);\n      composeEmrAdapters(runtimeAdapters);\n")]),
+    "M63": ("B2R-06: the record facade hands the seal's recovery on (a consumer can run a second recovery)", [
+        ("api/src/emr-runtime/record-port.ts", "        resolveIdentity(tx, issuer, subject) { alive(); return store.resolveIdentity(tx, issuer, subject); },\n",
+         "        resolveIdentity(tx, issuer, subject) { alive(); return store.resolveIdentity(tx, issuer, subject); },\n"
+         "        recoverAtStart() { alive(); return store.seal.recoverAtStart(); },\n")]),
+    "M64": ("B2R-04: the stop does not wait for the begun recording work (the client is released under a post-finish record)", [
+        ("api/src/emr-runtime/launcher.ts", "  }).then(() => control?.drained());\n", "  });\n")]),
+    "M65": ("B2R-02: the latch is not checked after the owner's start returned (a late ready goes on to create)", [
+        ("api/src/emr-runtime/launcher.ts", "      phase = 'create';\n      check(phase);\n      const records", "      phase = 'create';\n      const records")]),
 }
-
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()

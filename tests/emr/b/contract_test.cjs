@@ -1452,40 +1452,57 @@ function contractSuite() {
     } finally { w.cleanup(); }
   });
 
-  // ═══════════════════ EMR-B2-BASE: the startup owner, its lifetime and the fatal line (C24-C29) ═══════════════════
-  // C24 and C26-C29 run the real main.ts in child processes (tests/emr/b/startup_fixture.cjs): the database clients are
-  // the fixture's (no PostgreSQL here; tests/emr/b/startup_pg_test.cjs runs the same starts over a disposable database),
-  // the writer fence, failure journal, seal and recovery are the product's (Linux). C25 runs the owner itself over inert
-  // doubles, every interleaving deterministic. Assertions read exit codes and signals, the stderr line's closed phase and
-  // code, the order of observed product calls and HTTP answers - never product text beyond that, never a large object.
+  // ═══════════════════ EMR-B2 (d): the launcher, the owner library and the record port (C24-C32) ═══════════════════
+  // C24, C26-C31 run the real main.ts - its launcher, the real Nest and HTTP server - in child processes
+  // (tests/emr/b/startup_fixture.cjs): the database clients are the fixture's (no PostgreSQL here;
+  // tests/emr/b/startup_pg_test.cjs runs the same starts over a disposable database); the writer fence, failure journal,
+  // seal and recovery are the product's own on Linux and inert doubles on a host without flock (the fixture says which).
+  // A stop signal is the OS signal on Linux and the child's own process.emit elsewhere (result.signalMode): the OS-signal
+  // evidence is the Linux run. C25 runs the owner library over inert doubles, every interleaving deterministic; C32 the
+  // record port over the real store of this suite's memory model and the installed TypeScript. Assertions read exit
+  // codes, the stderr lines' closed phase and code, the order of observed product calls and HTTP answers - never product
+  // text beyond that, never a large object.
   const startup = require('./startup_fixture.cjs');
   const http = require('node:http');
   const request = (port, pathname) => new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port, path: pathname }, res => {
+    http.get({ host: '127.0.0.1', port, path: pathname, agent: false }, res => {
       let body = ''; res.setEncoding('utf8');
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
     }).on('error', reject);
   });
   const LINE = /^\[KIN API\] 기동 실패\(([a-z]+)(?:\/([A-Za-z0-9]+))?\): [^\n]+\. 기동을 중단합니다\.$/;
+  const STOP_LINE = /^\[KIN API\] 종료 실패\(([a-z]+)\): [^\n]+\. 프로세스를 끝냅니다\.$/;
   const SECRETS = ['Leaked', 'Secret', 'SELECT', 'postgresql://', 'synthetic-', 'not-the-runtime-role', 'rolsuper', '[Nest]', '    at '];
+  const linuxFence = process.platform === 'linux';
+  /** The fence, journal and seal for this host: the product's on Linux, inert doubles elsewhere (said in the result). */
+  const hostState = linuxFence ? {} : { state: 'inert' };
+  const noSecret = result => { for (const secret of SECRETS) assert(!(result.stdout + result.stderr).includes(secret), secret); };
+  /** The same for a process that served (its Nest start-up logs were flushed, as they must be). */
+  const noLeak = result => { for (const secret of SECRETS.filter(item => item !== '[Nest]')) assert(!(result.stdout + result.stderr).includes(secret), secret); };
   /** The one closed line of a stopped start: its phase and mapped code (or none), and no secret anywhere in the output. */
   function closedLine(result, phase, code = null) {
     assert.equal(result.stderrLines.length, 1, result.stderr.slice(0, 2000));
     const match = LINE.exec(result.stderrLines[0]);
     assert(match, result.stderrLines[0]);
     assert.deepEqual([match[1], match[2] ?? null], [phase, code]);
-    for (const secret of SECRETS) assert(!(result.stdout + result.stderr).includes(secret), secret);
+    noSecret(result);
     assert(!result.stdout.includes('Nest application successfully started'), 'buffered logs stay unflushed');
     assert.equal(result.overflow, 0);
   }
-  /** A refused start: nonzero exit, one closed line, no secret, no listener or init hook unless asked. */
+  /** A refused start: exit 1, one closed line, no secret, no listener or init hook unless asked. */
   function refused(result, phase, code = null, { listened = false, initialized = false } = {}) {
     assert.equal(result.timedOut, false, 'the process ended by itself');
     assert.deepEqual([result.code, result.signal], [1, null], result.stderr.slice(0, 2000));
     closedLine(result, phase, code);
     assert.equal(result.names.includes('bind'), listened, 'listener');
     assert.equal(result.names.includes('auth-init'), initialized, 'init hooks and their timers');
+  }
+  /** A start a stop signal ended: exit 0 by the launcher, one closed line naming the phase it stopped in. */
+  function stoppedStart(result, phase, code = 'EmrStartupInterrupted') {
+    assert.equal(result.timedOut, false, 'the process ended by itself');
+    assert.deepEqual([result.code, result.signal], [0, null], result.stderr.slice(0, 2000));
+    closedLine(result, phase, code);
   }
   /** The first index of each name, all present and in this order. */
   function inOrder(names, expected) {
@@ -1494,50 +1511,78 @@ function contractSuite() {
     assert.deepEqual([...at].sort((a, b) => a - b), at, JSON.stringify(names));
   }
   const count = (names, name) => names.filter(item => item === name).length;
+  const after = (names, marker) => names.slice(names.indexOf(marker) + 1);
   const env = (state, overrides) => startup.environment(state, overrides);
+  const memory = (extra = {}) => ({ db: 'memory', ...hostState, ...extra });
   let productProgram;
-  /** The product's TypeScript program (api/src) with its checker, built once for the static part of C26. */
-  function product() {
+  /** The product's TypeScript program (api/src) with its checker, built once for the static parts of C26 and C32. */
+  function product(extraFiles = []) {
     if (!productProgram) productProgram = ts.createProgram(parsed.fileNames, parsed.options);
-    const checker = productProgram.getTypeChecker();
+    const program = extraFiles.length ? ts.createProgram([...parsed.fileNames, ...extraFiles], parsed.options, undefined, productProgram) : productProgram;
+    const checker = program.getTypeChecker();
     const resolve = symbol => (symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
     const rel = file => path.relative(root, file.fileName).replaceAll('\\', '/');
-    const sources = productProgram.getSourceFiles().filter(file => parsed.fileNames.includes(file.fileName));
+    const sources = program.getSourceFiles().filter(file => parsed.fileNames.includes(file.fileName) || extraFiles.includes(file.fileName));
     const exported = (suffix, name) => resolve(checker.getExportsOfModule(checker.getSymbolAtLocation(sources.find(file => rel(file) === suffix)))
       .find(symbol => symbol.name === name));
-    const ownerOf = node => {
-      let at = node.parent;
-      while (at && !ts.isFunctionLike(at)) at = at.parent;
-      if (!at) return 'module scope';
-      const owner = at.parent && ts.isClassLike(at.parent) && at.parent.name ? at.parent.name.text + '.' : '';
-      return owner + (ts.isConstructorDeclaration(at) ? 'constructor' : at.name && ts.isIdentifier(at.name) ? at.name.text : 'a function expression');
-    };
-    return { checker, resolve, rel, sources, exported, ownerOf };
+    return { program, checker, resolve, rel, sources, exported };
   }
-  /** Where product code outside B1's own modules creates the ledger's parts or runs start-up recovery (names only). */
+  /**
+   * The methods of a class reached from one of its public methods by `this.<method>` calls (names are not part of the
+   * answer): a private helper may be renamed or split; what counts is that the start reaches it (D73, B2B-03).
+   */
+  function reachedFrom(checker, resolve, classNode, from) {
+    const methods = new Map(classNode.members.filter(m => ts.isMethodDeclaration(m) && m.name && ts.isIdentifier(m.name)).map(m => [m.name.text, m]));
+    const reached = new Set(), queue = [from];
+    while (queue.length) {
+      const name = queue.shift();
+      if (reached.has(name) || !methods.has(name)) continue;
+      reached.add(name);
+      const visit = node => {
+        if (ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword) {
+          const symbol = resolve(checker.getSymbolAtLocation(node.name));
+          const declaration = symbol?.declarations?.[0];
+          if (declaration && ts.isMethodDeclaration(declaration) && declaration.parent === classNode) queue.push(node.name.text);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(methods.get(name));
+    }
+    return reached;
+  }
+  const enclosingMethod = node => { let at = node.parent; while (at && !ts.isMethodDeclaration(at) && !ts.isConstructorDeclaration(at)) at = at.parent; return at; };
+  /** Where product code creates the ledger's parts or runs start-up recovery: by file, and - inside the owner - whether
+   * the place is a method its public `start` reaches (its private name is not pinned). */
   function productConstructions() {
-    const { checker, resolve, rel, sources, exported, ownerOf } = product();
+    const { checker, resolve, rel, sources, exported } = product();
     const classes = new Map([['EmrLedgerClient', 'client.ts'], ['StateCoordinator', 'coordinator.ts'], ['FailureJournal', 'failure-journal.ts'],
       ['AccessSeal', 'seal.ts'], ['PrismaLedgerSql', 'store.ts'], ['AccessLedgerStore', 'store.ts'], ['EmrRuntimeOwner', 'application.ts']]
       .map(([name, file]) => [exported('api/src/emr-runtime/' + file, name), name]));
     const recover = checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(exported('api/src/emr-runtime/seal.ts', 'AccessSeal')), 'recoverAtStart');
+    const owner = exported('api/src/emr-runtime/application.ts', 'EmrRuntimeOwner').declarations.find(ts.isClassDeclaration);
+    const fromStart = reachedFrom(checker, resolve, owner, 'start');
+    const place = node => {
+      const method = enclosingMethod(node);
+      if (method && method.parent === owner) return ts.isMethodDeclaration(method) && fromStart.has(method.name.text) ? 'EmrRuntimeOwner.start+' : 'EmrRuntimeOwner elsewhere';
+      return 'outside the owner';
+    };
     const found = [];
-    for (const file of sources.filter(file => !rel(file).startsWith('api/src/emr-runtime/') || rel(file).endsWith('/application.ts'))) {
+    for (const file of sources.filter(file => !rel(file).startsWith('api/src/emr-runtime/') || /\/(application|launcher|record-port)\.ts$/.test(rel(file)))) {
       const visit = node => {
         if (ts.isNewExpression(node)) {
           const name = classes.get(resolve(checker.getSymbolAtLocation(node.expression)));
-          if (name) found.push(`${name} ${rel(file)} ${ownerOf(node)}`);
+          if (name) found.push(`${name} ${rel(file)} ${place(node)}`);
         }
-        if (ts.isPropertyAccessExpression(node) && resolve(checker.getSymbolAtLocation(node.name)) === recover) found.push(`recoverAtStart ${rel(file)} ${ownerOf(node)}`);
+        if (ts.isPropertyAccessExpression(node) && resolve(checker.getSymbolAtLocation(node.name)) === recover) found.push(`recoverAtStart ${rel(file)} ${place(node)}`);
         ts.forEachChild(node, visit);
       };
       visit(file);
     }
     return found.sort();
   }
-  /** A start that reaches its listener: `after(event, child)` acts on the events; the case ends the process. */
-  const listening = (scenario, environment, after) => startup.run(scenario, { env: environment, timeoutMs: 60000,
-    onEvent: async (event, child, events) => { if (await after(event, child, events)) child.kill('SIGTERM'); } });
+  /** A start that reaches its listener: `act(event, child)` acts on the events; the case ends the process. */
+  const listening = (scenario, environment, act, timeoutMs = 60000) => startup.run(scenario, { env: environment, timeoutMs,
+    onEvent: async (event, child, events) => { if (await act(event, child, events)) startup.stop(child, 'SIGTERM'); } });
 
   /**
    * The owner (api/src/emr-runtime/application.ts, unchanged text) compiled in this process with inert doubles for its B1
@@ -1567,8 +1612,8 @@ function contractSuite() {
       }
       async $disconnect() { events.push('disconnect'); if (disconnect === 'throw') throw new Error('Leaked'); }
     }
+    const store = { marker: 'the-store' };
     const doubles = {
-      '@nestjs/common': { Injectable: () => target => target },
       '../emr-contract/composition': { composeEmrAdapters: given => { events.push(given === adapters ? 'compose' : 'compose-other'); } },
       '../emr-contract/validation': load('emr-contract/validation.ts'),
       './admission': load('emr-runtime/admission.ts'),
@@ -1578,7 +1623,7 @@ function contractSuite() {
       './failure-journal': { FailureJournal: class { constructor() { events.push('journal'); } } },
       './manifest': { verifyRuntimeConnection: async () => { events.push('role'); await wait('role'); } },
       './seal': { AccessSeal: class { async recoverAtStart() { events.push('recover'); await wait('recovery'); } } },
-      './store': { AccessLedgerStore: class { constructor() { events.push('store'); } }, PrismaLedgerSql: class {} },
+      './store': { AccessLedgerStore: class { constructor() { events.push('store'); return store; } }, PrismaLedgerSql: class {} },
     };
     const file = path.join(api, 'src/emr-runtime/application.ts');
     const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: parsed.options, fileName: file }).outputText;
@@ -1591,120 +1636,155 @@ function contractSuite() {
     const values = { DATABASE_URL: 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin',
       KIN_EMR_STATE_DIR: path.join(os.tmpdir(), 'emr-b2-inert-state-never-created'), DEPLOYMENT_MODE: 'production', ...overrides };
     const owner = new mod.exports.EmrRuntimeOwner(values);
-    return { owner, events, arrived, open, adapters, exports: mod.exports };
+    return { owner, events, arrived, open, adapters, store, exports: mod.exports };
   }
   /** Lets every queued promise reaction run, so "not yet settled" is an observation, not a race. */
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); };
+  const outcome = promise => promise.then(() => 'ready', error => error);
 
-  test('C24 base start-up order: the owner starts once after the module graph and before every init hook and the listener; A is composed once with B readers', async () => {
+  test('C24 base start-up order: the launcher starts the owner before it creates Nest, A is composed once with B readers, Nest receives the record port by value, the listener opens under the latch and the success log follows it', async () => {
     const state = startup.stateDirectory('c24');
     const seen = {};
-    const result = await listening({ db: 'memory' }, env(state), async (event, child) => {
+    const result = await listening(memory(), env(state), async (event, child) => {
       if (event.what === 'listening') {
         seen.health = await request(event.port, '/api/health');
         seen.me = await request(event.port, '/api/me');
-        child.send('modules');
+        child.send('port-facts');
       }
+      if (event.what === 'port-facts') { seen.port = event; child.send('modules'); }
       if (event.what === 'modules') { seen.modules = event.clinical; return true; }
       return false;
     });
     try {
-      inOrder(result.names, ['created', 'start', 'client', 'connect', 'connected', 'role', 'fence', 'ledger', 'recovery', 'recovered', 'compose',
-        'ready', 'init', 'auth-init', 'initialized', 'bind', 'listening']);
-      for (const name of ['start', 'client', 'connect', 'role', 'fence', 'recovery', 'compose', 'ready', 'init', 'bind']) assert.equal(count(result.names, name), 1, name);
+      inOrder(result.names, ['start', 'client', 'connect', 'connected', 'role', 'fence', 'ledger', 'recovery', 'recovered', 'compose', 'ready',
+        'create', 'created', 'init', 'auth-init', 'initialized', 'bind', 'listening', 'flush', 'owner-interrupt', 'server-close', 'server-closed',
+        'destroy', 'destroy-done', 'prisma-shutdown', 'owner-close', 'disconnect', 'exit']);
+      for (const name of ['start', 'client', 'connect', 'role', 'fence', 'recovery', 'compose', 'ready', 'create', 'init', 'bind', 'flush', 'owner-close', 'disconnect'])
+        assert.equal(count(result.names, name), 1, name);
       assert.equal(result.events.find(e => e.what === 'compose').base, true, 'A binds B readers');
+      const bind = result.events.find(e => e.what === 'bind');
+      assert.deepEqual([bind.host, bind.signal], ['0.0.0.0', true], 'the listener is acquired with the latch signal');
+      assert.equal(result.events.find(e => e.what === 'listening').errorListeners, 0, 'the launcher removed its listen error listener');
+      const { at: _, what: __, ...port } = seen.port;
+      assert.deepEqual(port, { same: true, keys: ['begin'], prototypeNull: true, frozen: true, present: [],
+        workKeys: ['append', 'appendInTransaction', 'confirm', 'end', 'resolveIdentity', 'settle', 'settleTransaction', 'snapshot', 'transaction'],
+        workPrototypeNull: true, workPresent: [], clients: 1, stores: 1, ordinarySeparate: true });
       assert.deepEqual(seen.modules, [], 'the start loads no clinical or signature module');
       assert.equal(result.events.find(e => e.what === 'fence').owner, true);
       assert.equal(seen.health.status, 200);
       assert.equal(JSON.parse(seen.health.body).ok, true);
       assert.equal(seen.me.status, 401);
       for (const answer of [seen.health, seen.me]) assert.equal(answer.headers['cache-control'], 'no-store', 'the API no-store default stays');
-      // Nest's buffered start-up logs appear only once the server listens.
+      // Nest's buffered start-up logs and main's own line appear only once the server listens.
       assert(result.stdout.includes('Nest application successfully started'));
-      assert.deepEqual([result.signal, result.timedOut, result.overflow], ['SIGTERM', false, 0]);
+      assert(result.stdout.includes('[KIN API] http://localhost:3000/api'));
+      assert.deepEqual([result.code, result.signal, result.timedOut, result.overflow, result.stderrLines], [0, null, false, 0, []]);
+      assert.equal(result.events.find(e => e.what === 'exit').code, 0);
     } finally { fs.rmSync(state, { recursive: true, force: true }); }
   });
 
-  test('C25 a close during the start (I13): the start stops at the wait it is in - nothing further is fenced, recovered or composed - releases its client once, and the close ends only after it', async () => {
-    const after = (events, marker) => events.slice(events.indexOf(marker) + 1);
-    for (const point of ['connect', 'role', 'recovery']) {
+  test('C25 the owner library (TEST-B2R-01): a stop requested in any state - cold, during each wait, ready - ends or refuses the start before anything further is created, fenced, recovered or composed; what was created is released exactly once, by whichever of the start and the close comes last', async () => {
+    // Cold: a close and a start in the same turn, in both orders, and an interrupt alone.
+    const cold = ownerWorld();
+    const closing = cold.owner.close(), starting = outcome(cold.owner.start());
+    await closing;
+    assert.equal((await starting).code, 'EmrStartupRepeated', 'a start after a cold close is refused before it creates anything');
+    assert.deepEqual(cold.events, []);
+    code(() => cold.owner.store(), 'EmrRuntimeNotReady');
+    const coldInterrupted = ownerWorld();
+    coldInterrupted.owner.interrupt();
+    assert.equal((await outcome(coldInterrupted.owner.start())).code, 'EmrStartupRepeated');
+    assert.deepEqual(coldInterrupted.events, []);
+    await coldInterrupted.owner.close();
+    assert.deepEqual(coldInterrupted.events, [], 'nothing to release');
+    // Start then close in the same turn: the connect in flight returns, the start ends there, one release.
+    const sameTurn = ownerWorld({ hold: 'connect' });
+    const sameStart = outcome(sameTurn.owner.start()), sameClose = sameTurn.owner.close();
+    await sameTurn.arrived;
+    sameTurn.open('resolve');
+    const sameFailure = await sameStart;
+    await sameClose;
+    assert.deepEqual([sameFailure.phase, sameFailure.interrupted, sameFailure.failure?.code], ['connect', true, 'EmrStartupInterrupted']);
+    assert.deepEqual(sameTurn.events, ['client', 'connect', 'held:connect', 'resumed:connect', 'disconnect']);
+    // During each wait: a close, then the step returns - with success or with its own failure.
+    for (const point of ['connect', 'role', 'recovery']) for (const late of ['resolve', 'reject']) {
       const w = ownerWorld({ hold: point });
-      const started = w.owner.start().then(() => 'ready', error => error);
+      const started = outcome(w.owner.start());
       await w.arrived;
       let closed = false;
       const closing = w.owner.close().then(() => { closed = true; });
+      assert.equal(w.owner.close(), w.owner.close(), point + ': one close promise');
       await settle();
       assert.equal(closed, false, point + ': the close waits for the step in flight');
       assert.equal(count(w.events, 'disconnect'), 0, point + ': nothing is released under the step in flight');
+      code(() => w.owner.store(), 'EmrRuntimeNotReady');
+      assert.equal((await outcome(w.owner.start())).code, 'EmrStartupRepeated', point + ': no second start while stopping');
       w.events.push('closing');
-      w.open('resolve');
+      w.open(late);
       const failure = await started;
       await closing;
       assert(failure instanceof w.exports.EmrStartupFailure, point);
-      assert.deepEqual([failure.phase, failure.interrupted, failure.failure?.code], [point, true, 'EmrStartupInterrupted'], point);
-      assert.deepEqual(after(w.events, 'closing'), ['resumed:' + point, 'disconnect'], point + ': the late step ends the start');
+      assert.deepEqual([failure.phase, failure.interrupted, failure.failure?.code], [point, true, late === 'reject' ? 'P1001' : 'EmrStartupInterrupted'], point + ' ' + late);
+      assert.deepEqual(after(w.events, 'closing'), ['resumed:' + point, 'disconnect'], point + ' ' + late + ': the late step ends the start, then one release');
       for (const later of ['fence', 'recover', 'compose', 'compose-other', 'store']) {
-        assert.equal(after(w.events, 'held:' + point).includes(later), false, `${point}: no ${later} after the shutdown began`);
+        assert.equal(after(w.events, 'held:' + point).includes(later), false, `${point}: no ${later} after the stop was requested`);
       }
-      code(() => w.owner.requireResources(), 'EmrRuntimeNotReady');
-      await rejects(w.owner.start(), 'EmrStartupRepeated');
+      code(() => w.owner.store(), 'EmrRuntimeNotReady');
       await w.owner.close();
       assert.equal(count(w.events, 'disconnect'), 1, point + ': released exactly once');
     }
-    // A step that fails while the close waits reports its own failure (still marked interrupted) and is released once.
-    const failing = ownerWorld({ hold: 'connect' });
-    const failed = failing.owner.start().then(() => 'ready', error => error);
-    await failing.arrived;
-    const closing = failing.owner.close();
-    failing.open('reject');
-    const failure = await failed;
-    await closing;
-    assert.deepEqual([failure.phase, failure.interrupted, failure.failure?.code], ['connect', true, 'P1001']);
-    assert.deepEqual(failing.events, ['client', 'connect', 'held:connect', 'resumed:connect', 'disconnect']);
-    // Ready, then closed: the bundle is the same frozen object until the close, refused after it; the close is one release.
+    // An interrupt during the wait, the close only later: the start ends at the step, the release waits for the close.
+    const interruptedLate = ownerWorld({ hold: 'role' });
+    const lateStart = outcome(interruptedLate.owner.start());
+    await interruptedLate.arrived;
+    interruptedLate.owner.interrupt();
+    interruptedLate.open('resolve');
+    const lateFailure = await lateStart;
+    assert.deepEqual([lateFailure.phase, lateFailure.interrupted], ['role', true]);
+    await settle();
+    assert.equal(count(interruptedLate.events, 'disconnect'), 1, 'an interrupted start releases its own client once');
+    await interruptedLate.owner.close();
+    assert.equal(count(interruptedLate.events, 'disconnect'), 1, 'the later close adds no second release');
+    // Ready, then closed: the store is the same object until the stop, refused after it; the close is one release.
     const ready = ownerWorld();
     await ready.owner.start();
-    const first = ready.owner.requireResources();
-    assert.deepEqual([first === ready.owner.requireResources(), Object.isFrozen(first), first.adapters === ready.adapters, Object.keys(first).sort().join()],
-      [true, true, true, 'adapters,db,ledger']);
+    const first = ready.owner.store();
+    assert.deepEqual([first === ready.owner.store(), first === ready.store], [true, true]);
     assert.deepEqual(ready.events, ['client', 'connect', 'role', 'fence', 'journal', 'store', 'recover', 'compose']);
+    ready.owner.interrupt();
+    code(() => ready.owner.store(), 'EmrRuntimeNotReady');
+    assert.equal(count(ready.events, 'disconnect'), 0, 'an interrupt releases nothing by itself');
     await Promise.all([ready.owner.close(), ready.owner.close()]);
     await ready.owner.close();
-    code(() => ready.owner.requireResources(), 'EmrRuntimeNotReady');
+    assert.equal((await outcome(ready.owner.start())).code, 'EmrStartupRepeated');
     assert.equal(count(ready.events, 'disconnect'), 1);
-    // Closed before any start: nothing is created, and no start follows.
-    const cold = ownerWorld();
-    await cold.owner.close();
-    await rejects(cold.owner.start(), 'EmrStartupRepeated');
-    assert.deepEqual(cold.events, []);
     // A start that fails by itself: released once, not interrupted; a later close adds nothing; a release error is silent.
     const broken = ownerWorld({ connect: 'reject', disconnect: 'throw' });
-    const own = await broken.owner.start().then(() => 'ready', error => error);
+    const own = await outcome(broken.owner.start());
     assert.deepEqual([own.phase, own.interrupted, own.failure?.code], ['connect', false, 'P1001']);
     await broken.owner.close();
     assert.deepEqual(broken.events, ['client', 'connect', 'disconnect']);
+    assert.equal((await outcome(broken.owner.start())).code, 'EmrStartupRepeated');
     // Outside production the role check is not run (as before this unit) and the start has two waits.
     const development = ownerWorld({ env: { DEPLOYMENT_MODE: 'development' } });
     await development.owner.start();
     assert.equal(development.events.includes('role'), false);
   });
 
-  test('C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery', async () => {
+  test('C26 one dedicated client, journal, seal, store and recovery per process with the store pool equal to the client pool; a second process on the same state is refused before any recovery; nothing else creates them', async () => {
     const state = startup.stateDirectory('c26');
-    let resources = null, second = null;
+    let second = null;
     const first = await listening({ db: 'memory' }, env(state, { DATABASE_URL: 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin?connection_limit=7' }),
       async (event, child) => {
         if (event.what === 'listening') {
           second = await startup.run({ db: 'memory' }, { env: env(state), timeoutMs: 60000 });
-          child.send('resources');
+          child.send('port-facts');
         }
-        if (event.what === 'resources') { resources = event; return true; }
-        return false;
+        return event.what === 'port-facts';
       });
     try {
-      const { at: _, what: __, ...facts } = resources;
-      assert.deepEqual(facts, { same: true, frozen: true, keys: ['adapters', 'db', 'ledger'], client: true, clients: 1, ledger: true, stores: 1,
-        base: true, ordinarySeparate: true, poolSize: 7 });
+      const facts = first.events.find(e => e.what === 'port-facts');
+      assert.deepEqual([facts.clients, facts.stores, facts.ordinarySeparate], [1, 1, true]);
       const client = first.events.find(e => e.what === 'client'), ledger = first.events.find(e => e.what === 'ledger');
       assert.deepEqual([client.poolSize, client.connectionLimit, ledger.poolSize, ledger.sameClient], [7, 7, 7, true]);
       for (const name of ['client', 'fence', 'ledger', 'recovery']) assert.equal(count(first.names, name), 1, name);
@@ -1721,71 +1801,83 @@ function contractSuite() {
       const client = result.events.find(e => e.what === 'client'), ledger = result.events.find(e => e.what === 'ledger');
       assert.deepEqual([client.poolSize, client.connectionLimit, ledger.poolSize], [6, 6, 6]);
     } finally { fs.rmSync(plain, { recursive: true, force: true }); }
-    // No other product code creates the owner, a client, fence, journal, seal or store, or runs recovery (TypeScript checker).
+    // No other product code creates the owner, a client, fence, journal, seal or store, or runs recovery (TypeScript
+    // checker): the parts are created in the owner, in a method its public start reaches; the owner in the launcher.
     assert.deepEqual(productConstructions(), [
       ...['AccessLedgerStore', 'AccessSeal', 'EmrLedgerClient', 'FailureJournal', 'PrismaLedgerSql', 'StateCoordinator']
-        .map(name => `${name} api/src/emr-runtime/application.ts EmrRuntimeOwner.run`),
-      'EmrRuntimeOwner api/src/emr-runtime/application.ts EmrApplicationRuntime.constructor',
-      'recoverAtStart api/src/emr-runtime/application.ts EmrRuntimeOwner.run',
+        .map(name => `${name} api/src/emr-runtime/application.ts EmrRuntimeOwner.start+`),
+      'EmrRuntimeOwner api/src/emr-runtime/launcher.ts outside the owner',
+      'recoverAtStart api/src/emr-runtime/application.ts EmrRuntimeOwner.start+',
     ].sort());
   });
 
-  test('C27 shutdown keeps the HTTP drain and then disconnects once; a stop signal during the start ends it at the wait it is in; a failed start releases only what it created, within 5 s, and deletes no state', async () => {
+  test('C27 a stop while serving (TEST-B2R-04): new admission is refused at once, the requests in flight and the recording work they begin - also after their response finished - drain before the hooks run and the client is released once; exceeding the 10 s drain grace or the 5 s cleanup bound ends the process nonzero with one closed line', async () => {
     const state = startup.stateDirectory('c27');
-    let slow = null;
-    const result = await startup.run({ db: 'memory', slowMillis: 1500 }, { env: env(state), timeoutMs: 60000, onEvent: (event, child) => {
-      if (event.what === 'listening') slow = request(event.port, '/syn-slow');
-      if (event.what === 'slow-begin') child.kill('SIGTERM');
-    } });
+    const seen = { refused: null, slow: null, record: null };
     try {
-      const answer = await slow;
-      assert.deepEqual([answer.status, answer.body], [200, 'slow-ok'], 'the in-flight request finished');
-      inOrder(result.names, ['slow-begin', 'server-close', 'slow-done', 'server-closed', 'runtime-onApplicationShutdown', 'owner-close', 'disconnect']);
-      assert.equal(count(result.names, 'disconnect'), 1);
-      assert(result.names.indexOf('prisma-shutdown') > result.names.indexOf('server-closed'));
-      assert.deepEqual([result.signal, result.timedOut], ['SIGTERM', false], 'SIGTERM ends it without SIGKILL');
-      for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(state, kept)), kept + ' stays');
-    } finally { fs.rmSync(state, { recursive: true, force: true }); }
-    // SIGTERM while the start waits (I13 in the real main): main asks the owner to stop when the signal arrives, the step in
-    // flight returns and the start ends there; the process ends by the signal with the one closed line and its client
-    // released once (C30: the same with a destroy hook that awaits).
-    for (const point of ['connect', 'role', 'recovery']) {
-      const dir = startup.stateDirectory('c27-' + point);
-      try {
-        const held = await startup.run({ db: 'memory', hold: point }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
-          if (event.what === 'held') child.kill('SIGTERM');
-          if (event.what === 'runtime-onApplicationShutdown') child.send('release');
+      const result = await startup.run(memory({ slowMillis: 1500, recordMillis: 300, appendMillis: 700, slowDestroy: 300 }), { env: env(state), timeoutMs: 60000,
+        onEvent: async (event, child, events) => {
+          if (event.what === 'listening') { seen.port = event.port; seen.slow = request(event.port, '/syn-slow'); seen.record = request(event.port, '/syn-record'); }
+          if (['slow-begin', 'work-begun'].includes(event.what) && events.some(e => e.what === 'slow-begin') && events.some(e => e.what === 'work-begun')) {
+            if (!seen.stopped) { seen.stopped = startup.stop(child, 'SIGTERM'); }
+          }
+          if (event.what === 'owner-interrupt') {
+            child.send('begin');
+            seen.refused = await request(seen.port, '/api/health').then(answer => 'answered ' + answer.status, error => error.code);
+          }
         } });
-        assert.deepEqual([held.code, held.signal, held.timedOut], [null, 'SIGTERM', false], point + ': ' + held.stderr.slice(0, 2000));
-        closedLine(held, point, 'EmrStartupInterrupted');
-        const late = held.names.slice(held.names.indexOf('runtime-onApplicationShutdown') + 1);
-        for (const name of ['fence', 'ledger', 'recovery', 'compose', 'ready', 'init', 'auth-init', 'bind']) {
-          assert.equal(late.includes(name), false, `${point}: no ${name} after the shutdown began`);
-        }
-        inOrder(held.names, ['held', 'owner-close', 'runtime-onApplicationShutdown', 'released', 'disconnect', 'start-failed']);
-        assert.equal(count(held.names, 'disconnect'), 1, point);
-        const failed = held.events.find(e => e.what === 'start-failed');
-        assert.deepEqual([failed.phase, failed.interrupted, failed.code], [point, true, 'EmrStartupInterrupted']);
-        assert.equal(held.names.includes('compose'), false, point + ': A is never composed by an interrupted start');
-      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-    }
-    // A failed recovery: the client created and connected is disconnected once; the fence and journal stay on disk.
-    const failedState = startup.stateDirectory('c27-failed');
+      const slow = await seen.slow, record = await seen.record;
+      assert.deepEqual([slow.status, slow.body, record.status, record.body], [200, 'slow-ok', 200, 'recorded'], 'the requests in flight were answered');
+      assert.deepEqual([result.code, result.signal, result.timedOut, result.stderrLines], [0, null, false, []], result.stderr.slice(0, 2000));
+      inOrder(result.names, ['listening', 'slow-begin', 'work-begun', 'owner-interrupt', 'server-close', 'post-finish-append', 'append-begin',
+        'append-end', 'append-done', 'work-ended', 'destroy', 'destroy-done', 'prisma-shutdown', 'owner-close', 'disconnect', 'exit']);
+      inOrder(result.names, ['owner-interrupt', 'slow-done', 'server-closed', 'destroy']);
+      assert(result.names.indexOf('post-finish-append') > result.names.indexOf('owner-interrupt'), 'the transfer record begins after the stop');
+      assert.equal(result.events.find(e => e.what === 'append-done').same, true);
+      for (const name of ['owner-interrupt', 'owner-close', 'disconnect', 'destroy', 'begin-refused']) assert.equal(count(result.names, name), name === 'begin-refused' ? 0 : 1, name);
+      const begin = result.events.find(e => e.what === 'begin');
+      assert.deepEqual([begin.ok, begin.code], [false, 'EmrRecordPortClosed'], 'the cached port refuses new work at once');
+      assert(['ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes(seen.refused), 'no new request is admitted: ' + seen.refused);
+      assert.equal(result.events.find(e => e.what === 'exit').code, 0);
+      assert.equal(result.stderrLines.length, 0, 'no line for a stop within its bounds');
+      for (const kept of linuxFence ? ['writer.lock', 'seal', 'owners'] : []) assert(fs.existsSync(path.join(state, kept)), kept + ' stays');
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    // A request that does not end within the drain grace: the one closed line names the drain, the connections are cut,
+    // the hooks and the release still run, and the process ends 1.
+    const slowState = startup.stateDirectory('c27-grace');
     try {
-      const failed = await startup.run({ db: 'memory', recovery: 'refuse' }, { env: env(failedState), timeoutMs: 60000 });
-      refused(failed, 'recovery', 'SealCorrupt');
-      inOrder(failed.names, ['recovery', 'disconnect']);
-      assert.equal(count(failed.names, 'disconnect'), 1, 'released once although the start, app.close and main all end the owner');
-      for (const kept of ['writer.lock', 'seal', 'owners']) assert(fs.existsSync(path.join(failedState, kept)), kept + ' stays');
-    } finally { fs.rmSync(failedState, { recursive: true, force: true }); }
-    // A release that never ends is cut at 5 s; one that throws is silent: neither adds a line or hides the first one.
+      let answer = null;
+      const result = await startup.run(memory({ slowMillis: 30000 }), { env: env(slowState), timeoutMs: 60000, onEvent: (event, child) => {
+        if (event.what === 'listening') answer = request(event.port, '/syn-slow').then(a => 'answered ' + a.status, error => error.code);
+        if (event.what === 'slow-begin') startup.stop(child, 'SIGTERM');
+      } });
+      assert.deepEqual([result.code, result.signal, result.timedOut], [1, null, false], result.stderr.slice(0, 2000));
+      assert.equal(result.stderrLines.length, 1, result.stderr.slice(0, 2000));
+      assert.equal(STOP_LINE.exec(result.stderrLines[0])?.[1], 'drain', result.stderrLines[0]);
+      noLeak(result);
+      assert(['ECONNRESET', 'ECONNREFUSED', 'EPIPE'].includes(await answer), 'the request past the grace is cut, never answered');
+      const stop = result.events.find(e => e.what === 'owner-interrupt').at, line = result.events.find(e => e.what === 'destroy').at;
+      assert(line - stop >= 9500 && line - stop < 16000, `the hooks ran after the 10 s grace: ${line - stop}`);
+      inOrder(result.names, ['slow-begin', 'owner-interrupt', 'destroy', 'owner-close', 'disconnect', 'exit']);
+      assert.equal(count(result.names, 'disconnect'), 1);
+    } finally { fs.rmSync(slowState, { recursive: true, force: true }); }
+    // The 5 s cleanup bound of a failed start: a release that never ends is cut, named in a second closed line, exit 1;
+    // one that throws is silent and the process ends at once with the start's line alone.
     for (const disconnect of ['hang', 'throw']) {
       const dir = startup.stateDirectory('c27-' + disconnect);
       try {
-        const cut = await startup.run({ db: 'memory', connect: 'refuse', disconnect }, { env: env(dir), timeoutMs: 60000 });
-        refused(cut, 'connect', 'P1001');
-        if (disconnect === 'hang') assert(cut.millisAfterStderr >= 4500 && cut.millisAfterStderr < 8000, String(cut.millisAfterStderr));
-        else assert(cut.millisAfterStderr < 4500, String(cut.millisAfterStderr));
+        const cut = await startup.run(memory({ connect: 'refuse', disconnect }), { env: env(dir), timeoutMs: 60000 });
+        assert.deepEqual([cut.code, cut.signal, cut.timedOut], [1, null, false], cut.stderr.slice(0, 2000));
+        const [first, ...rest] = cut.stderrLines;
+        assert.deepEqual(LINE.exec(first)?.slice(1, 3), ['connect', 'P1001'], first);
+        noSecret(cut);
+        if (disconnect === 'hang') {
+          assert.deepEqual(rest.map(line => STOP_LINE.exec(line)?.[1]), ['ledger'], cut.stderr.slice(0, 2000));
+          assert(cut.millisAfterStderr >= 4500 && cut.millisAfterStderr < 8000, String(cut.millisAfterStderr));
+        } else {
+          assert.deepEqual(rest, []);
+          assert(cut.millisAfterStderr < 4500, String(cut.millisAfterStderr));
+        }
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }
   });
@@ -1817,8 +1909,11 @@ function contractSuite() {
         try {
           const result = await startup.run(scenario, { env: env(dir, overrides), timeoutMs: 60000 });
           try { refused(result, phase, code, extra); } catch (error) { error.message = `${name}: ${error.message}`; throw error; }
-          if (['config', 'create'].includes(phase)) assert(!result.names.includes('client'), name + ': nothing connects');
-          if (!['config', 'create'].includes(phase) && scenario.db === 'memory') assert.equal(count(result.names, 'disconnect'), 1, name);
+          if (phase === 'config') assert(!result.names.includes('client'), name + ': nothing connects');
+          else if (scenario.db === 'memory') assert.equal(count(result.names, 'disconnect'), 1, name + ': the client is released once');
+          // A failed create hands no application on; a failed init or listen leaves one the launcher closes once.
+          assert.equal(count(result.names, 'destroy'), ['init', 'listen'].includes(phase) ? 1 : 0, name + ': the created application is closed once');
+          assert(!result.names.includes('flush') && !result.names.includes('listening'), name + ': no success log, no listener');
         } finally { fs.rmSync(dir, { recursive: true, force: true }); }
       }
     } finally {
@@ -1827,12 +1922,12 @@ function contractSuite() {
     }
   });
 
-  test('C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-shutdown start is refused and nothing is composed or recovered twice', async () => {
+  test('C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-stop start of the owner and a second launch of the process are refused; nothing is composed or recovered twice', async () => {
     // The owner over inert doubles: a second start while the first waits, after its failure and after a close.
     const w = ownerWorld({ hold: 'connect', connect: 'reject' });
     let settled = false;
     // The first start's outcome is held at once, so its failure is an observed value, never an unhandled rejection.
-    const first = w.owner.start().then(() => 'started', error => error).finally(() => { settled = true; });
+    const first = outcome(w.owner.start()).finally(() => { settled = true; });
     await w.arrived;
     // Judged after a settle, never awaited: a second start that is wrongly let through would wait at the same gate.
     let second = 'pending';
@@ -1843,49 +1938,198 @@ function contractSuite() {
     w.open('resolve');
     const failure = await first;
     assert.deepEqual([failure.phase, failure.interrupted, failure.failure?.code], ['connect', false, 'P1001']);
-    await rejects(w.owner.start(), 'EmrStartupRepeated');
-    code(() => w.owner.requireResources(), 'EmrRuntimeNotReady');
+    assert.equal((await outcome(w.owner.start())).code, 'EmrStartupRepeated');
+    code(() => w.owner.store(), 'EmrRuntimeNotReady');
     await w.owner.close();
-    await rejects(w.owner.start(), 'EmrStartupRepeated');
+    assert.equal((await outcome(w.owner.start())).code, 'EmrStartupRepeated');
     assert.deepEqual([count(w.events, 'client'), count(w.events, 'connect'), count(w.events, 'disconnect')], [1, 1, 1]);
-    // After ready and after shutdown in the real process: refused, the same resources, one composition and one recovery.
+    // In the real process: a second launch is refused while the first serves; one composition, one recovery, one client.
     const dir = startup.stateDirectory('c29');
-    let ready = null, stopped = null;
     try {
-      const result = await startup.run({ db: 'memory' }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
-        if (event.what === 'listening') child.send('reenter');
-        if (event.what === 'reenter-ready') ready = event;
-        if (event.what === 'reenter-stopped') stopped = event;
-      } });
-      assert.deepEqual([ready.again, ready.same], ['EmrStartupRepeated', true]);
-      assert.deepEqual([stopped.resources, stopped.again], ['EmrRuntimeNotReady', 'EmrStartupRepeated']);
-      for (const name of ['compose', 'recovery', 'client', 'disconnect']) assert.equal(count(result.names, name), 1, name);
-      assert.equal(result.code, 0);
+      const result = await listening(memory(), env(dir), async (event, child) => {
+        if (event.what === 'listening') child.send('launch-again');
+        return event.what === 'launch-again';
+      });
+      assert.equal(result.events.find(e => e.what === 'launch-again').again, 'EmrLaunchRepeated');
+      for (const name of ['compose', 'recovery', 'client', 'disconnect', 'create']) assert.equal(count(result.names, name), 1, name);
+      assert.deepEqual([result.code, result.stderrLines], [0, []]);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
-  test('C30 a stop signal during the start ends it although a co-provider destroy hook still awaits: nothing is fenced, recovered, composed, initialized or listened after it, and the client is released once', async () => {
-    // Nest runs every destroy hook before its shutdown hooks; the co-provider's hook here awaits 1.5 s, and the held step
-    // returns as soon as that hook began, i.e. long before Nest's own shutdown stage.
-    for (const point of ['connect', 'role', 'recovery']) {
-      const dir = startup.stateDirectory('c30-' + point);
+  test('C30 one stop latch for every start wait (TEST-B2R-02): SIGTERM, SIGINT, a repeated signal, a step that fails after the stop and a release in the same turn as the signal, crossed with connect, role, recovery, the owner\'s ready, create, init and listen while a co-provider destroy hook awaits - no phase follows the stop, a late application is closed once, the client is released once, the process ends by itself', async () => {
+    // Per wait: the phases that must not follow the stop, the phase the one line names, the code a late failure maps to
+    // (none for an unmapped synthetic error), and whether the owner's own start is the one that ends.
+    const points = {
+      connect: { late: ['role', 'fence', 'ledger', 'recovery', 'compose', 'ready', 'create', 'init', 'auth-init', 'bind', 'listening', 'flush'], phase: 'connect', code: 'P1001', owner: true },
+      role: { late: ['fence', 'ledger', 'recovery', 'compose', 'ready', 'create', 'init', 'auth-init', 'bind', 'listening', 'flush'], phase: 'role', code: null, owner: true },
+      recovery: { late: ['compose', 'ready', 'create', 'init', 'auth-init', 'bind', 'listening', 'flush'], phase: 'recovery', code: 'SealCorrupt', owner: true },
+      ready: { late: ['create', 'init', 'auth-init', 'bind', 'listening', 'flush'], phase: 'create', code: null, owner: false },
+      create: { late: ['init', 'auth-init', 'initialized', 'bind', 'listening', 'flush'], phase: 'create', code: null, owner: false },
+      init: { late: ['bind', 'listening', 'flush'], phase: 'init', code: null, owner: false },
+      listen: { late: ['listening', 'flush'], phase: 'listen', code: null, owner: false },
+    };
+    const causes = ['SIGTERM', 'SIGINT', 'repeated', 'late-failure', 'same-turn'];
+    const rows = [];
+    for (const [point, expected] of Object.entries(points)) for (const cause of causes) {
+      if (cause === 'late-failure' && ['ready', 'listen'].includes(point)) continue;   // a listen that fails is C28's EADDRINUSE; the owner's resolved start cannot fail
+      const label = `${point} x ${cause}`;
+      const dir = startup.stateDirectory('c30');
       try {
-        const held = await startup.run({ db: 'memory', hold: point, slowDestroy: 1500 }, { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
-          if (event.what === 'held') child.kill('SIGTERM');
-          if (event.what === 'slow-destroy') child.send('release');
+        const result = await startup.run(memory({ hold: point, slowDestroy: 600 }), { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+          if (event.what === 'held') {
+            if (cause === 'same-turn') child.send({ cmd: 'release-then-signal', signal: 'SIGTERM', outcome: 'resolve' });
+            else startup.stop(child, cause === 'SIGINT' ? 'SIGINT' : 'SIGTERM');
+          }
+          if (event.what === 'owner-interrupt' && cause !== 'same-turn') {
+            if (cause === 'repeated') startup.stop(child, 'SIGINT');
+            child.send({ cmd: 'release', outcome: cause === 'late-failure' ? 'reject' : 'resolve' });
+          }
         } });
-        assert.deepEqual([held.code, held.signal, held.timedOut], [null, 'SIGTERM', false], point + ': ' + held.stderr.slice(0, 2000));
-        closedLine(held, point, 'EmrStartupInterrupted');
-        const late = held.names.slice(held.names.indexOf('held') + 1);
-        for (const name of ['fence', 'ledger', 'recovery', 'compose', 'ready', 'init', 'auth-init', 'bind']) {
-          assert.equal(late.includes(name), false, `${point}: no ${name} after the stop signal`);
-        }
-        inOrder(held.names, ['held', 'owner-close', 'released', 'disconnect', 'start-failed', 'slow-destroy-done', 'runtime-onApplicationShutdown']);
-        assert.equal(count(held.names, 'disconnect'), 1, point);
-        const failed = held.events.find(e => e.what === 'start-failed');
-        assert.deepEqual([failed.phase, failed.interrupted, failed.code], [point, true, 'EmrStartupInterrupted'], point);
+        try {
+          stoppedStart(result, expected.phase, cause === 'late-failure' ? expected.code : 'EmrStartupInterrupted');
+          const late = after(result.names, 'owner-interrupt');
+          for (const name of expected.late) assert.equal(late.includes(name), false, `no ${name} after the stop`);
+          assert.equal(late.includes('held'), false, 'the held step returned after the stop, nothing new was held');
+          assert.deepEqual([count(result.names, 'owner-interrupt'), count(result.names, 'owner-close'), count(result.names, 'disconnect')], [1, 1, 1]);
+          const failed = result.events.find(e => e.what === 'start-failed');
+          if (expected.owner) assert.deepEqual([failed?.phase, failed?.interrupted, count(result.names, 'ready')], [point, true, 0], 'the owner ends at its step');
+          else assert.deepEqual([failed, count(result.names, 'ready')], [undefined, 1], 'the owner itself completed');
+          // A create that fails after the stop hands no application on (nothing to close); a late application is closed once.
+          if (['create', 'init', 'listen'].includes(point) && !(point === 'create' && cause === 'late-failure')) {
+            inOrder(result.names, ['created', 'owner-interrupt', 'destroy', 'destroy-done', 'prisma-shutdown', 'owner-close', 'disconnect', 'exit']);
+            assert.equal(count(result.names, 'destroy'), 1, 'the late application is closed exactly once');
+          } else if (point !== 'create') {
+            assert.equal(result.names.includes('create'), false, 'no application after the stop');
+            inOrder(result.names, ['held', 'owner-interrupt', 'released', 'disconnect', 'exit']);
+          }
+          if (point === 'listen') assert(result.names.includes('listen-dns-returned') && !result.names.includes('listening'), 'the late bind does not open a listener');
+          assert.equal(result.events.find(e => e.what === 'exit').code, 0);
+          rows.push(`${label}: ok (${result.signalMode})`);
+        } catch (error) { error.message = `${label}: ${error.message}\n${JSON.stringify(result.names)}`; throw error; }
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }
+    assert.equal(rows.length, Object.keys(points).length * causes.length - 2);
+  });
+
+  test('C31 the listener is acquired with the latch (TEST-B2R-03): a stop while the bind is pending leaves no listener, no success log and no answered request, the start promise settles, the error listener is removed and the cleanup runs; the same delay without a stop serves', async () => {
+    const dir = startup.stateDirectory('c31');
+    try {
+      const result = await startup.run(memory({ hold: 'listen', slowDestroy: 600 }), { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+        if (event.what === 'held') startup.stop(child, 'SIGTERM');
+        if (event.what === 'owner-interrupt') child.send({ cmd: 'release' });
+      } });
+      stoppedStart(result, 'listen');
+      // The start promise settled at the abort (the cleanup began before the pending bind returned); the late bind
+      // returned while the hooks still ran and opened nothing.
+      inOrder(result.names, ['bind', 'listen-dns', 'held', 'owner-interrupt', 'destroy', 'destroy-done', 'owner-close', 'disconnect', 'exit']);
+      inOrder(result.names, ['owner-interrupt', 'released', 'listen-dns-returned', 'exit']);
+      for (const name of ['listening', 'flush', 'request']) assert.equal(result.names.includes(name), false, 'no ' + name);
+      assert(!result.stdout.includes('[KIN API] http://localhost:3000/api') && !result.stdout.includes('successfully started'), 'no success log');
+      assert.deepEqual([count(result.names, 'destroy'), count(result.names, 'disconnect')], [1, 1]);
+      assert.equal(result.events.find(e => e.what === 'exit').serverErrorListeners, 0, 'the listen error listener was removed');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    // The same delayed bind with no stop: the listener opens, answers, and a later stop ends the process 0.
+    const control = startup.stateDirectory('c31-control');
+    try {
+      let health = null;
+      const result = await listening(memory({ delayListen: 400 }), env(control), async event => {
+        if (event.what === 'listening') { health = await request(event.port, '/api/health'); return true; }
+        return false;
+      });
+      assert.deepEqual([health.status, result.code, result.stderrLines], [200, 0, []]);
+      inOrder(result.names, ['bind', 'listen-dns', 'listen-dns-returned', 'listening', 'flush', 'owner-interrupt', 'exit']);
+      assert.equal(result.events.find(e => e.what === 'listening').errorListeners, 0);
+    } finally { fs.rmSync(control, { recursive: true, force: true }); }
+  });
+
+  test('C32 the record port (TEST-B2R-06/07): a typed consumer cannot reach the store, client, seal, journal, coordinator, recovery, start or close - the compiler refuses it and the runtime objects have no such property; its operations are the one store\'s own; new work is refused once closed and after its end; the begun work drains', async () => {
+    const RP = load('emr-runtime/record-port.ts');
+    // Runtime: the port over this suite's real store (memory model, real seal and journal).
+    const w = await world();
+    try {
+      const { port, control } = RP.createRecordPort(w.store);
+      const forbidden = ['seal', 'journal', 'coordinator', 'db', 'sql', 'store', 'ledger', 'client', 'recoverAtStart', 'recover', 'start', 'close',
+        'interrupt', 'compose', 'requireResources', 'withWriterFence', 'constructor', '__proto__', 'then'];
+      assert.deepEqual([Object.keys(port), Object.getPrototypeOf(port), Object.isFrozen(port), forbidden.filter(key => key in port)], [['begin'], null, true, []]);
+      const work = port.begin();
+      assert.deepEqual([Object.keys(work).sort(), Object.getPrototypeOf(work), Object.isFrozen(work), forbidden.filter(key => key in work)],
+        [['append', 'appendInTransaction', 'confirm', 'end', 'resolveIdentity', 'settle', 'settleTransaction', 'snapshot', 'transaction'], null, true, []]);
+      assert.equal(control.live(), 1);
+      // The operations are the store's own: the same receipt object, the same transaction object, the same store.
+      const calls = [];
+      for (const name of ['append', 'withAppendTransaction', 'appendInTransaction', 'confirm', 'settleTransaction', 'settle', 'snapshot', 'resolveIdentity']) {
+        const original = w.store[name];
+        w.store[name] = function (...args) { calls.push([name, this === w.store, args]); return original.apply(this, args); };
+      }
+      const event = provideEvent(A);
+      const receipt = await work.append(event);
+      assert.deepEqual([calls[0][0], calls[0][1], calls[0][2][0] === event], ['append', true, true]);
+      assert.equal(w.ledger.entries.filter(e => e.eventId === event.eventId).length, 1, 'the fact is in the ledger');
+      assert.deepEqual(await w.store.append(structuredClone(event)), receipt, 'the store replays the same receipt');
+      let seenTx = null;
+      const business = changeEvent();
+      const appended = await work.transaction(async tx => { seenTx = tx; return work.appendInTransaction(tx, business); });
+      assert.deepEqual(calls.filter(c => c[0] === 'withAppendTransaction').length, 1);
+      assert.deepEqual([calls.find(c => c[0] === 'appendInTransaction')[2][0] === seenTx, calls.find(c => c[0] === 'appendInTransaction')[2][1] === business], [true, true]);
+      const confirmed = await work.confirm(appended);
+      assert.equal(calls.find(c => c[0] === 'confirm')[2][0], appended);
+      assert.equal(confirmed.eventId, business.eventId);
+      assert.deepEqual(w.ledger.streams.history.entries.map(e => e.eventId), [business.eventId], 'the change is in both streams');
+      const failing = changeEvent();
+      let failedTx = null;
+      await rejects(work.transaction(async tx => { failedTx = tx; await work.appendInTransaction(tx, failing); throw new Error('synthetic-business-failure'); }), 'synthetic-business-failure');
+      await work.settleTransaction(failedTx, failing, new Error('synthetic-business-failure'), true);
+      assert.equal(calls.find(c => c[0] === 'settleTransaction')[2][0], failedTx);
+      assert.equal(w.ledger.entries.some(e => e.eventId === failing.eventId), false, 'a rolled-back fact is not in the ledger');
+      assert(w.journal.all().some(r => r.kind === 'append-rolled-back'), 'the rollback is journaled');
+      const snapshot = await work.transaction(tx => work.snapshot(tx, CTX.transactionScope(), { accessEventIds: [event.eventId] }));
+      assert.equal(snapshot.accessEvents.get(event.eventId).eventId, event.eventId);
+      await work.settle(provideEvent(A), new Error('synthetic'), undefined);
+      assert.equal(calls.filter(c => c[0] === 'settle').length, 1);
+      // Admission: closed -> begin refused; the begun work continues and drains; ended -> every operation refused.
+      let drained = false;
+      control.drained().then(() => { drained = true; });
+      control.close();
+      code(() => port.begin(), 'EmrRecordPortClosed');
+      await settle();
+      assert.deepEqual([drained, control.live()], [false, 1], 'the begun work is still live after the close');
+      const another = provideEvent(A);
+      await work.append(another);
+      assert.equal(w.ledger.entries.some(e => e.eventId === another.eventId), true, 'begun work records after the close');
+      work.end(); work.end();
+      await settle();
+      assert.deepEqual([drained, control.live()], [true, 0]);
+      const callsBefore = calls.length;
+      for (const [name, args] of [['append', [provideEvent(A)]], ['transaction', [async () => {}]], ['appendInTransaction', [{}, provideEvent(A)]], ['confirm', [appended]],
+        ['settleTransaction', [{}, event, new Error('x'), true]], ['settle', [event, new Error('x')]], ['snapshot', [{}, {}, {}]], ['resolveIdentity', [{}, 'iss', 'sub']]])
+        code(() => work[name](...args), 'EmrRecordWorkEnded');
+      assert.equal(calls.length, callsBefore, 'nothing reached the store after the end');
+      // Two works: the drain waits for the last one.
+      const { port: port2, control: control2 } = RP.createRecordPort(w.store);
+      const first = port2.begin(), second = port2.begin();
+      let drained2 = false;
+      control2.drained().then(() => { drained2 = true; });
+      first.end(); await settle();
+      assert.deepEqual([drained2, control2.live()], [false, 1]);
+      second.end(); await settle();
+      assert.deepEqual([drained2, control2.live()], [true, 0]);
+      assert.equal(RP.EMR_RECORD_PORT.toString(), 'Symbol(EmrRecordPort)');
+    } finally { w.cleanup(); }
+    // The compiler: a typed consumer of the port that reaches a forbidden member is refused on each such line; one that
+    // uses the port's members compiles clean (tests/emr/b/record_port_typecheck/*.ts, outside the product tree).
+    const fixtures = ['forbidden.ts', 'allowed.ts'].map(name => path.join(__dirname, 'record_port_typecheck', name).replaceAll('\\', '/'));
+    const { program } = product(fixtures);
+    const diagnostics = fixtures.map(file => {
+      const source = program.getSourceFile(file);
+      assert(source, 'fixture in the program: ' + file);
+      return ts.getPreEmitDiagnostics(program, source).map(d => ({ code: d.code, line: source.getLineAndCharacterOfPosition(d.start).line + 1,
+        text: ts.flattenDiagnosticMessageText(d.messageText, '\n').split('\n')[0].slice(0, 120) }));
+    });
+    const marked = fs.readFileSync(fixtures[0], 'utf8').split(/\r?\n/).map((text, index) => (/\/\/ refused$/.test(text) ? index + 1 : 0)).filter(Boolean);
+    assert(marked.length >= 10, 'the forbidden fixture marks its refused lines: ' + marked.length);
+    assert.deepEqual(diagnostics[0].map(d => d.line), marked, JSON.stringify(diagnostics[0]));
+    assert(diagnostics[0].every(d => d.code === 2339 || d.code === 2551), JSON.stringify(diagnostics[0]));
+    assert.deepEqual(diagnostics[1], [], 'the allowed consumer compiles');
   });
 
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {

@@ -1,24 +1,27 @@
 'use strict';
-/* EMR-B2-BASE test helper (TEST-B2SH-01, 04-07): the real API start in its own child process.
+/* EMR-B2 (d) test helper (TEST-B2R-02/03/04/05): the real API start in its own child process.
  *
  * Parent side: `run(scenario, options)` starts `node startup_fixture.cjs <scenario>` with the scenario's environment. The
  * child's stdout, stderr and the events it reports over the IPC channel (never over stdout/stderr, whose bytes are part of
  * what the cases judge) are streamed to files in a run directory; the parent keeps only a bounded summary: exit code or
  * signal, the first 64 KiB of each stream and its byte count, and at most 400 events (an overflow is reported, never
- * dropped silently). Each child is a separate process, so A's one-time composition, the writer fence and Nest's logger
- * never cross cases or the contract suite's own process.
+ * dropped silently). Each child is a separate process, so the launcher's one-per-process latch, A's one-time composition,
+ * the writer fence and Nest's logger never cross cases or the contract suite's own process. `stop(child, signal)` sends
+ * SIGTERM/SIGINT: the OS signal on Linux, else the child's own `process.emit` (Windows has no OS signal delivery to a
+ * handler; the parent reports which it used - the OS-signal evidence is the Linux run).
  *
  * Child side: it loads the real compiled modules - /app/dist in the API image, else api/src through
  * tests/service_test_loader.cjs - observes the product calls by wrapping exports of the loaded modules, applies the
- * scenario's test-side substitutions, and then requires the real main.ts, whose bootstrap runs unchanged. Substitutions
- * are test-side only and named by the scenario: `db: 'memory'` replaces the two database clients (the dedicated
- * EmrLedgerClient by a fake answering the runtime-role catalog, PrismaLedgerSql by the in-memory empty-ledger model the B
- * contract cases use, the ordinary PrismaService by a fake whose reads are empty) so the start runs without PostgreSQL;
- * `db: 'pg'` keeps every product class (tests/emr/b/startup_pg_test.cjs over a disposable database). The fence, the
- * failure journal, the seal and their recovery are always the product's own (Linux: /usr/bin/flock). `hold: 'connect' |
- * 'role' | 'recovery'` pauses the start inside that wait until the parent sends 'release' (a shutdown during the start).
- * A listener on port 3000 is moved to 127.0.0.1 and the scenario's port (0 = any). There is no product reset, binding or
- * test switch.
+ * scenario's test-side substitutions, and then requires the real main.ts, whose bootstrap and launcher run unchanged.
+ * Substitutions are test-side only and named by the scenario: `db: 'memory'` replaces the two database clients (the
+ * dedicated EmrLedgerClient by a fake answering the runtime-role catalog, PrismaLedgerSql by the in-memory empty-ledger
+ * model the B contract cases use, the ordinary PrismaService by a fake whose reads are empty, the store's standalone
+ * append by a timed fake receipt) so the start runs without PostgreSQL; `db: 'pg'` keeps every product class
+ * (tests/emr/b/startup_pg_test.cjs over a disposable database). `state: 'inert'` replaces the writer fence, the failure
+ * journal and the seal by inert doubles (a host without flock); otherwise they are the product's own (Linux:
+ * /usr/bin/flock). `hold: 'connect' | 'role' | 'recovery' | 'create' | 'init' | 'listen'` pauses the start inside that
+ * wait until the parent sends `release` (with `outcome: 'reject'` the held step then fails). A listener on port 3000 is
+ * moved to 127.0.0.1 and the scenario's port (0 = any). There is no product reset, binding or test switch.
  */
 const fs = require('node:fs');
 const os = require('node:os');
@@ -27,6 +30,8 @@ const { spawn } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 
 const HEAD_BYTES = 64 * 1024, MAX_EVENTS = 400;
+/** How a stop signal reaches the child on this host: the OS signal, or the child's own process.emit over IPC. */
+const SIGNAL_MODE = process.platform === 'linux' ? 'kill' : 'emit';
 
 /** A fresh protected state directory (0700) as the deployment's volume would be. */
 function stateDirectory(label = 'state') {
@@ -63,6 +68,27 @@ function head(file) {
     const read = fs.readSync(fd, buffer, 0, buffer.length, 0);
     return { text: buffer.subarray(0, read).toString('utf8'), bytes: size };
   } finally { fs.closeSync(fd); }
+}
+
+/** A stop signal to the child (see SIGNAL_MODE); returns the mode used. */
+function stop(child, signal = 'SIGTERM') {
+  if (SIGNAL_MODE === 'kill') child.kill(signal);
+  else if (child.connected) child.send({ cmd: 'signal', signal });
+  return SIGNAL_MODE;
+}
+
+/** The synthetic service-job event the probe appends (scripts/ops_emr_probe.py probe_event): an in-process system
+ * surface whose route contract admits a service job, no patient target. */
+function serviceEvent(eventId) {
+  const notApplicable = { status: 'not-applicable', reason: 'non-record-target' };
+  return { formatVersion: 1, surface: 'GET health', eventId,
+    userId: { status: 'known', value: { id: '7c1f3a52-0000-4000-8000-00000000000a', issuer: 'urn:kin:release-probe', subject: 'startup-fixture' } },
+    rolesAtTime: { status: 'known', value: ['release-probe'] }, actingInstitution: { status: 'known', value: 'synthetic-institution' },
+    managingInstitution: { status: 'known', value: 'synthetic-institution' }, occurredAt: new Date().toISOString(),
+    trustedProxyIp: { status: 'not-applicable', reason: 'in-process-service' }, cause: 'service-job',
+    context: { basis: 'service-job', studyId: 'SYNTHETIC-startup-fixture', relatedStudyId: null, reason: null }, executor: 'service',
+    targets: [{ kind: 'system-operation', patientLinkSnapshot: notApplicable, studyId: notApplicable, recordId: notApplicable, versionId: notApplicable }],
+    action: 'provide-prepared', result: 'prepared', requestId: 'startup-fixture-' + eventId, auditLinkId: 'audit:' + require('node:crypto').randomUUID(), relatedEventId: null };
 }
 
 /**
@@ -106,7 +132,7 @@ function run(scenario, options = {}) {
         const out = head(path.join(dir, 'stdout.log')), err = head(path.join(dir, 'stderr.log'));
         if (!process.env.KIN_EMR_B2_KEEP_RUNS) fs.rmSync(dir, { recursive: true, force: true });
         resolve({ code, signal, timedOut, dir, stdout: out.text, stdoutBytes: out.bytes, stderr: err.text, stderrBytes: err.bytes,
-          events, names: events.map(event => event.what), overflow,
+          events, names: events.map(event => event.what), overflow, signalMode: SIGNAL_MODE,
           stderrLines: err.text.split(/\r?\n/).filter(line => line !== ''),
           millisAfterStderr: stderrAt === null ? null : exitedAt - stderrAt, millis: exitedAt - started });
       };
@@ -120,16 +146,22 @@ function run(scenario, options = {}) {
 function child(scenario) {
   const http = require('node:http');
   const send = (what, extra = {}) => { if (process.send && process.connected) process.send({ what, at: performance.now(), ...extra }); };
-  // Every event reaches the parent before the process ends: main's process.exit and Nest's re-raised signal wait for the
-  // IPC channel to take a last message (bounded, so a broken channel never keeps the process alive).
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  let app = null;
+  // Every event reaches the parent before the process ends: the launcher's process.exit waits for the IPC channel to
+  // take a last message (bounded, so a broken channel never keeps the process alive).
   const finish = end => {
     if (!process.send || !process.connected) return end();
     const fallback = setTimeout(end, 1000);
     process.send({ what: 'ending', at: performance.now() }, () => { clearTimeout(fallback); end(); });
   };
-  const exit = process.exit.bind(process), kill = process.kill.bind(process);
-  process.exit = code => finish(() => exit(code));
-  process.kill = (pid, signal) => (pid === process.pid ? finish(() => kill(pid, signal)) : kill(pid, signal));
+  const exit = process.exit.bind(process);
+  process.exit = code => {
+    let serverErrorListeners = null;
+    try { serverErrorListeners = app ? app.getHttpServer().listenerCount('error') : null; } catch { serverErrorListeners = 'unreadable'; }
+    send('exit', { code: code ?? process.exitCode ?? 0, serverErrorListeners });
+    finish(() => exit(code));
+  };
   if (!fs.existsSync('/app/dist/app.module.js')) {
     const loader = path.join(__dirname, '..', '..', 'service_test_loader.cjs');
     require(loader);
@@ -160,14 +192,16 @@ function child(scenario) {
     { name: 'Leaked\nName', code, errorCode: code, stack: 'Leaked stack\n  at secret (postgresql://kin:Leaked-Secret-0003@db/kin)' });
   const failure = what => (scenario.leakCode ? leak(scenario.leakCode) : what);
   const clients = [];
-  // A start that waits at `scenario.hold` until the parent releases it (a stop signal arrives meanwhile).
+  // A start that waits at `scenario.hold` until the parent releases it (a stop signal arrives meanwhile); the release
+  // may make the held step fail instead.
   let release = null;
   const released = new Promise(resolve => { release = resolve; });
-  const hold = async point => {
+  const hold = async (point, reject) => {
     if (scenario.hold !== point) return;
     send('held', { point });
-    await released;
-    send('released', { point });
+    const outcome = await released;
+    send('released', { point, outcome });
+    if (outcome === 'reject') throw reject();
   };
 
   // The two substituted providers are replaced before any module that names them loads (their constructor tokens are
@@ -189,10 +223,9 @@ function child(scenario) {
       async onModuleInit() { send('prisma-init'); if (scenario.init === 'fail') throw failure(leak('P1001')); }
       // `slowDestroy: ms`: a co-provider whose destroy hook awaits (Nest runs every destroy hook before the shutdown hooks).
       async onModuleDestroy() {
-        if (!scenario.slowDestroy) return;
-        send('slow-destroy');
-        await new Promise(resolve => setTimeout(resolve, scenario.slowDestroy));
-        send('slow-destroy-done');
+        send('destroy');
+        if (scenario.slowDestroy) await sleep(scenario.slowDestroy);
+        send('destroy-done');
       }
       async onApplicationShutdown() { send('prisma-shutdown'); }
       async $connect() {}
@@ -215,10 +248,33 @@ function child(scenario) {
   const admission = load('emr-runtime/admission');
   const clientModule = load('emr-runtime/client');
   const coordinatorModule = load('emr-runtime/coordinator');
+  const journalModule = load('emr-runtime/failure-journal');
   const sealModule = load('emr-runtime/seal');
   const storeModule = load('emr-runtime/store');
   const manifest = load('emr-runtime/manifest');
+
+  // ── the writer fence, the failure journal and the seal (inert): a host without flock runs the launcher's order ──
+  if (scenario.state === 'inert') {
+    coordinatorModule.StateCoordinator = class InertCoordinator {
+      constructor(directory) { this.directory = directory; this.ownerId = 'inert-owner'; this.role = 'api'; }
+      get holdsWriterFence() { return true; }
+      ownerAlive() { return true; }
+      call() { return undefined; }
+    };
+    journalModule.FailureJournal = class InertJournal {
+      constructor(directory, coordinator) { this.coordinator = coordinator; this.tornBytes = 0; }
+      record(id, kind, body) { return Object.freeze({ id, kind, body }); }
+      all() { return []; }
+      find() { return undefined; }
+    };
+    sealModule.AccessSeal = class InertSeal {
+      async recoverAtStart() { return { seal: null, recovered: 0, notCommitted: 0, streams: {} }; }
+      read() { return 'absent'; }
+    };
+  }
   const application = load('emr-runtime/application');
+  const recordPort = load('emr-runtime/record-port');
+  const launcher = load('emr-runtime/launcher');
   const auth = load('auth.service');
 
   // ── the dedicated ledger client: observed (pg) or a fake answering the runtime-role catalog (memory) ──
@@ -256,7 +312,7 @@ function child(scenario) {
     }
     async $connect() {
       send('connect');
-      await hold('connect');
+      await hold('connect', () => failure(leak('P1001')));
       await super.$connect();
       send('connected');
     }
@@ -264,7 +320,7 @@ function child(scenario) {
   }
   clientModule.EmrLedgerClient = ObservedLedgerClient;
   const verify = manifest.verifyRuntimeConnection;
-  manifest.verifyRuntimeConnection = async db => { send('role'); await hold('role'); return verify(db); };
+  manifest.verifyRuntimeConnection = async db => { send('role'); await hold('role', () => failure(leak('SYN_ROLE'))); return verify(db); };
 
   // ── the ledger SQL (memory): two empty chains of fixed identity, as a new database holds them ──
   if (scenario.db === 'memory') {
@@ -291,6 +347,15 @@ function child(scenario) {
       send('ledger', { sameClient: db === clients[clients.length - 1], poolSize });
     }
   };
+  if (scenario.db === 'memory') {
+    // A standalone append without SQL: a timed fake receipt, so the drain of begun recording work is observable.
+    storeModule.AccessLedgerStore.prototype.append = async function (input) {
+      send('append-begin', { eventId: input.eventId });
+      await sleep(scenario.appendMillis ?? 300);
+      send('append-end', { eventId: input.eventId });
+      return Object.freeze({ eventId: input.eventId, durableAt: new Date().toISOString() });
+    };
+  }
   const RealCoordinator = coordinatorModule.StateCoordinator;
   coordinatorModule.StateCoordinator = class ObservedCoordinator extends RealCoordinator {
     constructor(...args) { super(...args); send('fence', { owner: this.holdsWriterFence }); }
@@ -300,10 +365,20 @@ function child(scenario) {
     send('recovery');
     if (scenario.recovery === 'refuse') throw new sealModule.SealRefused('SealCorrupt', 'postgresql://kin_runtime:Leaked-Secret-0004@db/kin');
     const result = await recover.call(this);
-    await hold('recovery');
+    await hold('recovery', () => new sealModule.SealRefused('SealCorrupt', 'postgresql://kin_runtime:Leaked-Secret-0004@db/kin'));
     send('recovered', { recovered: result.recovered, notCommitted: result.notCommitted });
     return result;
   };
+  if (scenario.holdConfirm) {
+    // The seal's receipt advance held (pg): the append's confirm is in flight when the stop arrives.
+    const advance = sealModule.AccessSeal.prototype.advanceReceipt;
+    sealModule.AccessSeal.prototype.advanceReceipt = async function (...args) {
+      send('confirm-held');
+      await released;
+      send('confirm-released');
+      return advance.apply(this, args);
+    };
+  }
   const compose = composition.composeEmrAdapters;
   if (scenario.precompose) compose(context.runtimeAdapters);
   composition.composeEmrAdapters = adapters => {
@@ -311,15 +386,16 @@ function child(scenario) {
     return compose(adapters);
   };
 
-  // ── the owner and its Nest holder ──
-  const Owner = application.EmrRuntimeOwner, Holder = application.EmrApplicationRuntime;
-  let runtime = null;
+  // ── the owner ──
+  const Owner = application.EmrRuntimeOwner;
   const start = Owner.prototype.start;
   Owner.prototype.start = async function () {
     send('start');
     try {
       await start.call(this);
       send('ready');
+      // `hold: 'ready'`: the owner is ready, its start has resolved, and the launcher's turn has not come yet.
+      await hold('ready', () => leak('SYN_READY'));
     } catch (error) {
       send('start-failed', { phase: error?.phase ?? null, interrupted: error?.interrupted ?? null, code: error?.failure?.code ?? error?.code ?? null });
       throw error;
@@ -327,39 +403,78 @@ function child(scenario) {
   };
   const close = Owner.prototype.close;
   Owner.prototype.close = function () { send('owner-close'); return close.call(this); };
-  const holderStart = Holder.prototype.start;
-  Holder.prototype.start = function () { runtime = this; return holderStart.call(this); };
-  const shutdown = Holder.prototype.onApplicationShutdown;
-  Holder.prototype.onApplicationShutdown = function () { send('runtime-onApplicationShutdown'); return shutdown.call(this); };
+  const interrupt = Owner.prototype.interrupt;
+  Owner.prototype.interrupt = function () { send('owner-interrupt'); return interrupt.call(this); };
   const authInit = auth.AuthService.prototype.onModuleInit;
   auth.AuthService.prototype.onModuleInit = function () { send('auth-init'); return authInit.call(this); };
 
   // ── Nest and the HTTP server ──
-  let app = null;
+  let port = null;
+  const portOf = () => port ?? (port = app.get(recordPort.EMR_RECORD_PORT));
   const create = core.NestFactory.create.bind(core.NestFactory);
   core.NestFactory.create = async (...args) => {
-    app = await create(...args);
+    send('create');
+    const created = await create(...args);
+    app = created;
     send('created');
-    // A synthetic request that is still running when SIGTERM arrives (test-side, before main's own middleware).
-    if (scenario.slowMillis) app.use('/syn-slow', (req, res) => {
+    // Synthetic requests (test-side, before main's own middleware): one that is still running when a stop arrives, and
+    // one that begins recording work at its start and writes a record after its response finished.
+    if (scenario.slowMillis) created.use('/syn-slow', (req, res) => {
       send('slow-begin');
       res.on('finish', () => send('slow-done'));
       setTimeout(() => res.end('slow-ok'), scenario.slowMillis);
     });
-    return app;
+    created.use('/syn-record', (req, res) => {
+      let work;
+      try { work = portOf().begin(); } catch (error) { send('begin-refused', { code: error?.code ?? 'Error' }); res.statusCode = 503; return res.end('refused'); }
+      send('work-begun');
+      res.on('finish', () => {
+        send('post-finish-append');
+        const eventId = require('node:crypto').randomUUID();
+        work.append(serviceEvent(eventId)).then(receipt => send('append-done', { eventId: receipt.eventId, same: receipt.eventId === eventId }),
+          error => send('append-failed', { code: error?.code ?? error?.name ?? 'Error' }))
+          .finally(() => { work.end(); send('work-ended'); });
+      });
+      setTimeout(() => res.end('recorded'), scenario.recordMillis ?? 0);
+    });
+    // A create that fails after the stop: Nest hands no application on, so the one built here is closed here (as a
+    // failed NestFactory.create leaves none behind); the launcher sees only the rejection.
+    try { await hold('create', () => leak('SYN_CREATE')); }
+    catch (error) { app = null; await created.close().catch(() => {}); throw error; }
+    return created;
   };
   const init = NestApplication.prototype.init;
-  NestApplication.prototype.init = async function () { send('init'); const result = await init.call(this); send('initialized'); return result; };
+  NestApplication.prototype.init = async function () {
+    send('init');
+    const result = await init.call(this);
+    send('initialized');
+    await hold('init', () => leak('SYN_INIT'));
+    return result;
+  };
+  const flush = NestApplication.prototype.flushLogs;
+  NestApplication.prototype.flushLogs = function () { send('flush'); return flush.call(this); };
   const listen = http.Server.prototype.listen;
   http.Server.prototype.listen = function (...args) {
-    if (args[0] === 3000) {
-      send('bind', { port: 3000 });
-      args[0] = scenario.port ?? 0;
-      if (typeof args[1] === 'string') args[1] = '127.0.0.1';
-      this.once('listening', () => send('listening', { port: this.address().port }));
+    const options = args[0];
+    if (options && typeof options === 'object' && options.port === 3000) {
+      send('bind', { port: 3000, host: options.host, signal: options.signal instanceof AbortSignal });
+      args[0] = { ...options, port: scenario.port ?? 0, host: '127.0.0.1' };
+      this.once('listening', () => send('listening', { port: this.address().port, errorListeners: this.listenerCount('error') }));
     }
     return listen.apply(this, args);
   };
+  if (scenario.hold === 'listen' || scenario.delayListen) {
+    // The bind's address lookup (also for an IP literal) returns later: the stop arrives while the listen is pending.
+    const dns = require('node:dns'), lookup = dns.lookup;
+    let delayed = false;
+    dns.lookup = function (host, ...rest) {
+      if (host !== '127.0.0.1' || delayed) return lookup.call(this, host, ...rest);
+      delayed = true;
+      send('listen-dns');
+      const wait = scenario.hold === 'listen' ? hold('listen', () => leak('SYN_LISTEN')) : sleep(scenario.delayListen);
+      wait.then(() => { send('listen-dns-returned'); lookup.call(this, host, ...rest); }, () => send('listen-dns-rejected'));
+    };
+  }
   const serverClose = http.Server.prototype.close;
   http.Server.prototype.close = function (callback) {
     if (!this.listening) return serverClose.call(this, callback);
@@ -369,30 +484,69 @@ function child(scenario) {
 
   // ── what the scenario checks or asks once the server listens (or while the start is held) ──
   process.on('message', async command => {
+    const cmd = typeof command === 'string' ? command : command?.cmd;
     try {
-      if (command === 'release') release();
-      else if (command === 'resources') {
-        const first = runtime.requireResources(), second = runtime.requireResources();
-        send('resources', { same: first === second, frozen: Object.isFrozen(first), keys: Object.keys(first).sort(),
-          client: first.db === clients[0], clients: clients.length, ledger: first.ledger === stores[0], stores: stores.length,
-          base: first.adapters === context.runtimeAdapters, ordinarySeparate: app.get(prismaModule.PrismaService) !== first.db,
-          poolSize: first.db.emrAppendPoolSize });
-      } else if (command === 'modules') {
+      if (cmd === 'release') release(command?.outcome ?? 'resolve');
+      else if (cmd === 'signal') process.emit(command.signal, command.signal);
+      else if (cmd === 'release-then-signal') { release(command.outcome ?? 'resolve'); process.emit(command.signal, command.signal); }
+      else if (cmd === 'begin') {
+        try { const work = portOf().begin(); send('begin', { ok: true, keys: Object.keys(work).sort() }); work.end(); }
+        catch (error) { send('begin', { ok: false, code: error?.code ?? 'Error' }); }
+      } else if (cmd === 'port-facts') {
+        const forbidden = ['seal', 'journal', 'coordinator', 'db', 'sql', 'store', 'ledger', 'client', 'recoverAtStart', 'recover', 'start',
+          'close', 'interrupt', 'compose', 'requireResources', 'withWriterFence', 'constructor', '__proto__'];
+        const given = portOf();
+        const work = given.begin();
+        send('port-facts', { same: app.get(recordPort.EMR_RECORD_PORT) === given, keys: Object.keys(given), prototypeNull: Object.getPrototypeOf(given) === null,
+          frozen: Object.isFrozen(given), present: forbidden.filter(key => key in given), workKeys: Object.keys(work).sort(),
+          workPrototypeNull: Object.getPrototypeOf(work) === null, workPresent: forbidden.filter(key => key in work),
+          clients: clients.length, stores: stores.length, ordinarySeparate: app.get(prismaModule.PrismaService) !== clients[0] });
+        work.end();
+      } else if (cmd === 'launch-again') {
+        const again = await launcher.launchApi({ env: process.env, root: () => class {}, configure: () => {} }).then(() => 'started', error => error?.code ?? 'Error');
+        send('launch-again', { again });
+      } else if (cmd === 'modules') {
         send('modules', { clinical: Object.keys(require.cache).map(name => name.replaceAll('\\', '/'))
           .filter(name => /\/(emr-clinical|emr-signature)\//.test(name)) });
-      } else if (command === 'reenter') {
-        const code = async work => { try { await work(); return 'accepted'; } catch (error) { return error?.code ?? error?.name ?? 'Error'; } };
-        const resources = runtime.requireResources();
-        send('reenter-ready', { again: await code(() => runtime.start()), same: runtime.requireResources() === resources });
-        await app.close();
-        send('reenter-stopped', { resources: await code(() => runtime.requireResources()), again: await code(() => runtime.start()) });
-        process.exit(0);
+      } else if (cmd === 'record-work') {
+        // Real ledger work through the port (pg): one standalone fact, then the stop may arrive while it confirms.
+        const work = portOf().begin();
+        const eventId = command.eventId ?? require('node:crypto').randomUUID();
+        send('work-begun', { eventId });
+        work.append(serviceEvent(eventId)).then(receipt => send('append-done', { eventId: receipt.eventId, same: receipt.eventId === eventId }),
+          error => send('append-failed', { code: error?.code ?? error?.name ?? 'Error' }))
+          .finally(() => { work.end(); send('work-ended'); });
+      } else if (cmd === 'record-transaction') {
+        // Real business transaction through the port (pg): a business statement and the fact in one transaction, the
+        // receipt after the commit; with `fail`, the callback throws after the append and the attempt is settled.
+        const work = portOf().begin();
+        const eventId = command.eventId ?? require('node:crypto').randomUUID();
+        let transaction = null, callbackFailed = false;
+        const event = serviceEvent(eventId);
+        try {
+          const appended = await work.transaction(async tx => {
+            transaction = tx;
+            await tx.$queryRaw`SELECT 1 AS business_statement`;
+            try {
+              const provisional = await work.appendInTransaction(tx, event);
+              if (command.fail) throw new Error('synthetic-business-failure');
+              // `holdTransaction`: the transaction stays open (its fact reserved, not committed) until the parent releases it.
+              if (scenario.holdTransaction) { send('transaction-held', { eventId }); await released; send('transaction-released'); }
+              return provisional;
+            } catch (error) { callbackFailed = true; throw error; }
+          });
+          const receipt = await work.confirm(appended);
+          send('transaction-done', { eventId: receipt.eventId, same: receipt.eventId === eventId, entries: appended.entries.length });
+        } catch (error) {
+          await work.settleTransaction(transaction, event, error, callbackFailed);
+          send('transaction-settled', { callbackFailed, code: error?.code ?? error?.message ?? 'Error' });
+        } finally { work.end(); send('work-ended'); }
       }
-    } catch (error) { send('command-error', { code: error?.code ?? error?.name ?? 'Error' }); }
+    } catch (error) { send('command-error', { cmd, code: error?.code ?? error?.name ?? 'Error', message: String(error?.message ?? '').slice(0, 200) }); }
   });
   load('main');
 }
 
 if (require.main === module) child(JSON.parse(process.argv[2] || '{}'));
 
-module.exports = { run, environment, stateDirectory };
+module.exports = { run, environment, stateDirectory, stop, serviceEvent, SIGNAL_MODE };

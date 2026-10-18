@@ -217,15 +217,28 @@ function withoutDeclared(now, declared) {
 }
 test('U0B-DI Nest metadata equals main before the split: tokens, constructor tokens, scopes, enhancers, middleware, 138 routes', () => {
   const full = diSnapshot();
-  // EMR-B2-BASE (TEST-B2SH-15): the startup owner provider, declared and taken back exactly; no constructor changes.
+  // EMR-B2 (d) (TEST-B2R-06): the static module graph carries nothing of the EMR lifetime; the record port is a value
+  // provider the launcher adds at create time (AppModule.forLaunch), declared here and checked below as exactly that.
   const declared = spec.di_additions_emr_b2;
-  assert.equal(declared.unit, 'EMR-B2-BASE');
-  assert.deepEqual([declared.controllers, declared.providers, declared.routes], [[], ['EmrApplicationRuntime'], []]);
+  assert.equal(declared.unit, 'EMR-B2 (d)');
+  assert.deepEqual([declared.controllers, declared.providers, declared.routes, declared.injectables], [[], [], [], {}]);
   assert.equal(declared.changed_injectables, undefined);
   const now = withoutDeclared(full, declared);
   assert.deepEqual(now, spec.di);
   assert.equal(now.routes.length, 138);
-  assert.equal(full.routes.length, 138, 'the startup owner adds no route');
+  assert.equal(full.routes.length, 138, 'the launcher adds no route');
+  {
+    const { AppModule } = require('/app/dist/app.module');
+    const { EMR_RECORD_PORT } = require('/app/dist/emr-runtime/record-port');
+    const port = Object.freeze({ begin() { throw new Error('never called here'); } });
+    const launched = AppModule.forLaunch(port);
+    assert.equal(launched.module, AppModule);
+    assert.deepEqual(Object.keys(launched).sort(), ['module', 'providers']);
+    assert.deepEqual(launched.providers.map(p => [typeof p.provide === 'symbol' ? p.provide.toString() : p.provide, 'useValue' in p ? 'value' : 'other', p.useValue === port]),
+      [[declared.launch.token, declared.launch.kind, true]]);
+    assert.equal(launched.providers[0].provide, EMR_RECORD_PORT);
+    assert.equal(declared.launch.module, 'AppModule.forLaunch');
+  }
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {

@@ -8,18 +8,22 @@ const path = require('node:path');
 const os = require('node:os');
 
 /**
- * EMR-B2-BASE (TEST-B2SH-03, R4-09): the installed TypeScript checker over api/src (plus `overrides`, path -> text, for the
- * refusal fixtures) - every reference to A's composeEmrAdapters, to EmrApplicationRuntime.start (Nest's holder) and to
- * EmrRuntimeOwner.start (the owner), aliases and namespace imports resolved. Only names, owners and lines leave this
- * function: no AST, symbol or checker object reaches an assertion (an AST-object diff grew past 20 GB on 2026-10-17).
+ * EMR-B2 (d) (TEST-B2R-08, R4-09): the installed TypeScript checker over api/src (plus `overrides`, path -> text, for
+ * the refusal fixtures) - every reference to A's composeEmrAdapters, to EmrRuntimeOwner.start, to the launcher's
+ * launchApi, to NestFactory.create and to Nest's enableShutdownHooks, aliases and namespace imports resolved. The owner's
+ * private helpers are not named: the compose call must sit in a method the owner's public `start` reaches by
+ * `this.<method>` calls, whatever that method is called. Only names and lines leave this function: no AST, symbol or
+ * checker object reaches an assertion (an AST-object diff grew past 20 GB on 2026-10-17).
  */
-const STARTUP_BOUNDARY = Object.freeze({ problems: [], calls: ['api/src/emr-runtime/application.ts EmrRuntimeOwner.run'],
-  starts: ['api/src/main.ts bootstrap awaited'], delegations: ['api/src/emr-runtime/application.ts EmrApplicationRuntime.start'] });
+const STARTUP_BOUNDARY = Object.freeze({ problems: [], composes: ['api/src/emr-runtime/application.ts EmrRuntimeOwner.start+'],
+  ownerStarts: ['api/src/emr-runtime/launcher.ts awaited'], launches: ['api/src/main.ts awaited'], creates: ['api/src/emr-runtime/launcher.ts'] });
 /**
- * The R4-09 refusal controls, built from the TypeScript AST of the product files (D73: no product text is spliced or
- * required): a second statement of the located compose call after it, a public member added to the owner, a holder
- * member that repeats the located compose call, and main's await of the holder's start turned into `void`. Each place
- * must be found exactly once; only counts and texts leave this function.
+ * The R4-09 controls, built from the TypeScript AST of the product files (D73: no product text is spliced or required).
+ * Refusals: a second statement of the located compose call after it, a public member added to the owner, an owner
+ * method that repeats the compose call but is not reached from start, the launcher's await of the owner's start turned
+ * into `void`, main's await of the launcher turned into `void`. Acceptance: the owner's private method that holds the
+ * compose call renamed together with its `this.` call sites (a rename must pass, B2B-03), and launcher.ts re-indented.
+ * Each place must be found exactly once; only counts and texts leave this function.
  */
 function startupControls(ts, root) {
   const read = file => fs.readFileSync(path.join(root, file), 'utf8');
@@ -27,20 +31,38 @@ function startupControls(ts, root) {
   const find = (sf, match) => { const out = []; const visit = node => { if (match(node)) out.push(node); ts.forEachChild(node, visit); }; visit(sf); return out; };
   const once = (found, what) => { if (found.length !== 1) throw new Error(`${what}: ${found.length} places, not one`); return found[0]; };
   const insert = (text, at, added) => text.slice(0, at) + added + text.slice(at);
-  const applicationFile = 'api/src/emr-runtime/application.ts', mainFile = 'api/src/main.ts';
-  const application = read(applicationFile), main = read(mainFile);
-  const app = parse(applicationFile, application), entry = parse(mainFile, main);
+  const applicationFile = 'api/src/emr-runtime/application.ts', launcherFile = 'api/src/emr-runtime/launcher.ts', mainFile = 'api/src/main.ts';
+  const application = read(applicationFile), launcher = read(launcherFile), main = read(mainFile);
+  const app = parse(applicationFile, application), entry = parse(mainFile, main), launch = parse(launcherFile, launcher);
   const composeCall = once(find(app, node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
     && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'composeEmrAdapters'), 'compose call statement');
-  const classNamed = name => once(find(app, node => ts.isClassDeclaration(node) && node.name?.text === name), name);
+  const owner = once(find(app, node => ts.isClassDeclaration(node) && node.name?.text === 'EmrRuntimeOwner'), 'EmrRuntimeOwner');
   const call = composeCall.getText(app), newline = application.includes('\r\n') ? '\r\n' : '\n';
-  const holderStart = once(find(entry, node => ts.isAwaitExpression(node) && ts.isCallExpression(node.expression)
-    && ts.isPropertyAccessExpression(node.expression.expression) && node.expression.expression.name.text === 'start'), 'awaited start in main');
+  const ownerStart = once(find(launch, node => ts.isAwaitExpression(node) && ts.isCallExpression(node.expression)
+    && ts.isPropertyAccessExpression(node.expression.expression) && node.expression.expression.name.text === 'start'), 'awaited owner start in the launcher');
+  const launchCall = once(find(entry, node => ts.isAwaitExpression(node) && ts.isCallExpression(node.expression)
+    && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'launchApi'), 'awaited launchApi in main');
+  // The private method holding the compose call and every `this.<it>` reference: renamed from the end so offsets hold.
+  let holder = composeCall.parent;
+  while (holder && !(ts.isMethodDeclaration(holder) && holder.parent === owner)) holder = holder.parent;
+  if (!holder) throw new Error('the compose call is not in a method of EmrRuntimeOwner');
+  const name = holder.name.text;
+  const references = find(app, node => (ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword && node.name.text === name) ? node.name
+    : (node === holder.name ? node : null)).map(node => (ts.isPropertyAccessExpression(node) ? node.name : node));
+  if (references.length < 2) throw new Error(`the compose-holding method is referenced ${references.length} times, not at least twice`);
+  let renamed = application;
+  for (const reference of [...references].sort((a, b) => b.getStart(app) - a.getStart(app)))
+    renamed = renamed.slice(0, reference.getStart(app)) + 'performStart' + renamed.slice(reference.getEnd());
+  const unawait = (text, sf, node) => text.slice(0, node.getStart(sf)) + 'void ' + text.slice(node.expression.getStart(sf));
   return {
     twice: insert(application, composeCall.end, newline + call),
-    rebind: insert(application, classNamed('EmrRuntimeOwner').members.end, `${newline}  rebind(): void {}`),
-    holderComposes: insert(application, classNamed('EmrApplicationRuntime').members.end, `${newline}  reopen(): void { ${call} }`),
-    unawaited: main.slice(0, holderStart.getStart(entry)) + 'void ' + main.slice(holderStart.expression.getStart(entry)),
+    rebind: insert(application, owner.members.end, `${newline}  rebind(): void {}`),
+    unreachedComposes: insert(application, owner.members.end, `${newline}  private again(): void { ${call} }`),
+    unawaitedOwnerStart: unawait(launcher, launch, ownerStart),
+    unawaitedLaunch: unawait(main, entry, launchCall),
+    renamed,
+    reindented: launcher.split(/\r?\n/).map(line => (line.trim() ? '  ' + line : line)).join(newline),
+    holderName: name,
   };
 }
 let boundaryProgram;
@@ -64,24 +86,41 @@ function startupBoundary({ ts, parsed, root }, overrides = {}) {
   const rel = file => path.relative(root, file.fileName).replaceAll('\\', '/');
   const exportsOf = suffix => checker.getExportsOfModule(checker.getSymbolAtLocation(sources.find(file => rel(file) === suffix)));
   const compose = exportsOf('api/src/emr-contract/composition.ts').find(symbol => symbol.name === 'composeEmrAdapters');
-  const applicationExports = exportsOf('api/src/emr-runtime/application.ts');
-  const classOf = name => {
-    const symbol = resolve(applicationExports.find(item => item.name === name));
-    return { symbol, node: symbol?.declarations?.find(ts.isClassDeclaration),
-      start: symbol && checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(symbol), 'start') };
-  };
-  const holder = classOf('EmrApplicationRuntime'), owner = classOf('EmrRuntimeOwner');
-  const problems = [], calls = [], starts = [], delegations = [];
-  const ownerOf = node => { let at = node.parent; while (at && !ts.isFunctionLike(at)) at = at.parent; return at; };
-  const ownerName = at => !at ? 'module scope' : ts.isConstructorDeclaration(at) ? 'constructor'
-    : at.name && ts.isIdentifier(at.name) ? at.name.text : 'a function expression';
+  const applicationExports = exportsOf('api/src/emr-runtime/application.ts'), launcherExports = exportsOf('api/src/emr-runtime/launcher.ts');
+  const ownerSymbol = resolve(applicationExports.find(item => item.name === 'EmrRuntimeOwner'));
+  const ownerNode = ownerSymbol?.declarations?.find(ts.isClassDeclaration);
+  const ownerStart = ownerSymbol && checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(ownerSymbol), 'start');
+  const launchApi = resolve(launcherExports.find(item => item.name === 'launchApi'));
+  const nestCore = program.getSourceFiles().find(file => /\/@nestjs\/core\/index\.d\.ts$/.test(file.fileName.replaceAll('\\', '/')));
+  const factory = nestCore && resolve(checker.getExportsOfModule(checker.getSymbolAtLocation(nestCore)).find(symbol => symbol.name === 'NestFactory'));
+  const nestCreate = factory && checker.getPropertyOfType(checker.getTypeOfSymbolAtLocation(factory, nestCore), 'create');
+  const problems = [], composes = [], ownerStarts = [], launches = [], creates = [];
+  if (!ownerNode || !ownerStart || !launchApi || !nestCreate) problems.push(`symbols missing: ${[!ownerNode && 'EmrRuntimeOwner', !ownerStart && 'start', !launchApi && 'launchApi', !nestCreate && 'NestFactory.create'].filter(Boolean).join(', ')}`);
+  // The owner's methods reached from its public start by `this.<method>` calls (their names are not part of the contract).
+  const reached = new Set();
+  if (ownerNode) {
+    const methods = new Map(ownerNode.members.filter(m => ts.isMethodDeclaration(m) && m.name && ts.isIdentifier(m.name)).map(m => [m.name.text, m]));
+    const queue = ['start'];
+    while (queue.length) {
+      const name = queue.shift();
+      if (reached.has(name) || !methods.has(name)) continue;
+      reached.add(name);
+      const visit = node => {
+        if (ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword) {
+          const declaration = resolve(checker.getSymbolAtLocation(node.name))?.declarations?.[0];
+          if (declaration && ts.isMethodDeclaration(declaration) && declaration.parent === ownerNode) queue.push(node.name.text);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(methods.get(name));
+    }
+  }
+  const enclosingMethod = node => { let at = node.parent; while (at && !ts.isMethodDeclaration(at) && !ts.isConstructorDeclaration(at)) at = at.parent; return at; };
   const where = (file, node) => `${rel(file)}:${file.getLineAndCharacterOfPosition(node.getStart()).line + 1}`;
-  const methodOf = (file, at, cls, name) => rel(file) === 'api/src/emr-runtime/application.ts' && at && ts.isMethodDeclaration(at)
-    && at.parent === cls.node && ownerName(at) === name;
   for (const file of sources) {
     // Only names that can denote a target are resolved: their own names and the local names an import renames them to
     // (a value alias, a re-export or a namespace member spells the own name and is judged there).
-    const names = new Set(['composeEmrAdapters', 'start']);
+    const names = new Set(['composeEmrAdapters', 'start', 'launchApi', 'create', 'enableShutdownHooks']);
     const imports = node => {
       if (ts.isImportSpecifier(node) && node.propertyName && names.has(node.propertyName.text)) names.add(node.name.text);
       ts.forEachChild(node, imports);
@@ -90,45 +129,50 @@ function startupBoundary({ ts, parsed, root }, overrides = {}) {
     const visit = node => {
       if (ts.isIdentifier(node) && names.has(node.text)) {
         const symbol = resolve(checker.getSymbolAtLocation(node));
-        const target = symbol === compose ? 'composeEmrAdapters' : holder.start && symbol === holder.start ? 'EmrApplicationRuntime.start'
-          : owner.start && symbol === owner.start ? 'EmrRuntimeOwner.start' : null;
+        const target = symbol === compose ? 'composeEmrAdapters' : ownerStart && symbol === ownerStart ? 'EmrRuntimeOwner.start'
+          : launchApi && symbol === launchApi ? 'launchApi' : nestCreate && symbol === nestCreate ? 'NestFactory.create'
+          : node.text === 'enableShutdownHooks' && symbol ? 'enableShutdownHooks' : null;
         const parent = node.parent;
         const declaration = parent && (ts.isFunctionDeclaration(parent) || ts.isMethodDeclaration(parent)) && parent.name === node;
         if (target && !declaration && !ts.isImportSpecifier(parent)) {
           const callee = ts.isPropertyAccessExpression(parent) && parent.name === node ? parent : node;
           const call = ts.isCallExpression(callee.parent) && callee.parent.expression === callee ? callee.parent : null;
-          const at = ownerOf(node);
-          if (!call) problems.push(`${target} referenced as a value at ${where(file, node)}`);
+          const method = enclosingMethod(node);
+          if (target === 'enableShutdownHooks') problems.push(`enableShutdownHooks referenced at ${where(file, node)}`);
+          else if (!call) problems.push(`${target} referenced as a value at ${where(file, node)}`);
           else if (target === 'composeEmrAdapters') {
-            if (methodOf(file, at, owner, 'run')) calls.push(`${rel(file)} EmrRuntimeOwner.run`);
-            else problems.push(`composeEmrAdapters called outside EmrRuntimeOwner.run: ${where(file, node)} (${ownerName(at)})`);
+            if (method && method.parent === ownerNode && ts.isMethodDeclaration(method) && reached.has(method.name.text)) composes.push(`${rel(file)} EmrRuntimeOwner.start+`);
+            else problems.push(`composeEmrAdapters called outside the owner's start path: ${where(file, node)}`);
           } else if (target === 'EmrRuntimeOwner.start') {
-            if (methodOf(file, at, holder, 'start')) delegations.push(`${rel(file)} EmrApplicationRuntime.start`);
-            else problems.push(`EmrRuntimeOwner.start called outside EmrApplicationRuntime.start: ${where(file, node)} (${ownerName(at)})`);
-          } else if (rel(file) === 'api/src/main.ts' && ts.isAwaitExpression(call.parent)) starts.push(`${rel(file)} ${ownerName(at)} awaited`);
-          else problems.push(`EmrApplicationRuntime.start called other than awaited by main.ts: ${where(file, node)} (${ownerName(at)})`);
+            if (rel(file) === 'api/src/emr-runtime/launcher.ts' && ts.isAwaitExpression(call.parent)) ownerStarts.push(`${rel(file)} awaited`);
+            else problems.push(`EmrRuntimeOwner.start called other than awaited in launcher.ts: ${where(file, node)}`);
+          } else if (target === 'launchApi') {
+            if (rel(file) === 'api/src/main.ts' && ts.isAwaitExpression(call.parent)) launches.push(`${rel(file)} awaited`);
+            else problems.push(`launchApi called other than awaited in main.ts: ${where(file, node)}`);
+          } else if (rel(file) === 'api/src/emr-runtime/launcher.ts') creates.push(rel(file));
+          else problems.push(`NestFactory.create called outside launcher.ts: ${where(file, node)}`);
         }
       }
       ts.forEachChild(node, visit);
     };
     visit(file);
   }
-  if (calls.length !== 1) problems.push(`composeEmrAdapters has ${calls.length} startup calls, not one`);
-  if (starts.length !== 1) problems.push(`main.ts awaits EmrApplicationRuntime.start ${starts.length} times, not once`);
-  if (delegations.length !== 1) problems.push(`EmrApplicationRuntime.start reaches the owner ${delegations.length} times, not once`);
-  // The startup contract is these exports and these public members: no reset, rebind or second-start surface.
-  const exported = applicationExports.map(symbol => symbol.name).sort();
-  const contract = ['EmrApplicationRuntime', 'EmrRuntimeOwner', 'EmrStartupFailure', 'EmrStartupPhase', 'EmrStartupResources'];
-  if (JSON.stringify(exported) !== JSON.stringify(contract)) problems.push(`application.ts exports ${exported.join(', ')}`);
-  for (const [name, cls, surface] of [['EmrApplicationRuntime', holder, ['close', 'onApplicationShutdown', 'requireResources', 'start']],
-    ['EmrRuntimeOwner', owner, ['close', 'requireResources', 'start']]]) {
-    const members = (cls.node?.members ?? []).filter(member => member.name && ts.isIdentifier(member.name)
-      && !(ts.getCombinedModifierFlags(member) & (ts.ModifierFlags.Private | ts.ModifierFlags.Static))).map(member => member.name.text).sort();
-    if (JSON.stringify(members) !== JSON.stringify(surface)) problems.push(`${name} exposes ${members.join(', ')}`);
+  if (composes.length !== 1) problems.push(`composeEmrAdapters has ${composes.length} startup calls, not one`);
+  if (ownerStarts.length !== 1) problems.push(`the launcher awaits EmrRuntimeOwner.start ${ownerStarts.length} times, not once`);
+  if (launches.length !== 1) problems.push(`main.ts awaits launchApi ${launches.length} times, not once`);
+  if (creates.length !== 1) problems.push(`NestFactory.create is called ${creates.length} times, not once`);
+  // The startup contract is these exports and these public members: no reset, rebind, resources or second-start surface.
+  for (const [suffix, symbols, contract] of [['application.ts', applicationExports, ['EmrRuntimeOwner', 'EmrStartupFailure', 'EmrStartupPhase']],
+    ['launcher.ts', launcherExports, ['LaunchInput', 'launchApi']],
+    ['record-port.ts', exportsOf('api/src/emr-runtime/record-port.ts'), ['EMR_RECORD_PORT', 'EmrRecordPort', 'EmrRecordPortControl', 'EmrRecordTransaction', 'EmrRecordWork', 'createRecordPort']]]) {
+    const exported = symbols.map(symbol => symbol.name).sort();
+    if (JSON.stringify(exported) !== JSON.stringify(contract)) problems.push(`${suffix} exports ${exported.join(', ')}`);
   }
-  return { problems, calls, starts, delegations };
+  const members = (ownerNode?.members ?? []).filter(member => member.name && ts.isIdentifier(member.name)
+    && !(ts.getCombinedModifierFlags(member) & (ts.ModifierFlags.Private | ts.ModifierFlags.Static))).map(member => member.name.text).sort();
+  if (JSON.stringify(members) !== JSON.stringify(['close', 'interrupt', 'start', 'store'])) problems.push(`EmrRuntimeOwner exposes ${members.join(', ')}`);
+  return { problems, composes, ownerStarts, launches, creates };
 }
-
 // Prisma invokes this file as a generator to supply freshly parsed DMMF, without generating a client.
 if (process.argv.includes('--emr-inventory-generator')) {
   require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
@@ -1865,10 +1909,11 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const result = spawnSync(process.execPath, ['-e', script], { cwd: root, encoding: 'utf8', timeout: 30000 });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
   });
-  test('TEST-EMR-01/19-A R4-09: TypeScript symbols restrict adapter composition to the startup owner that main.ts awaits once', () => {
-    // EMR-B2-BASE re-binds this check (TEST-B2SH-03): composition.ts alone was the allowed caller while nothing composed;
-    // the sole product call is now the startup owner's run (EmrRuntimeOwner, started only through its Nest holder, which
-    // main.ts awaits once). The order in time (start before init and listen) is case C24 of tests/emr/b/contract_test.cjs.
+  test('TEST-EMR-01/19-A R4-09: TypeScript symbols restrict adapter composition to the owner that the launcher starts and main.ts awaits once; a private rename, an import alias and a re-indentation pass', () => {
+    // EMR-B2 (d) re-binds this check (TEST-B2R-08): the sole product compose call is in the owner, in a method its public
+    // start reaches (the method's name is not pinned); the owner is started once, awaited, by the launcher; the launcher is
+    // awaited once by main.ts; NestFactory.create is the launcher's alone; Nest's enableShutdownHooks is used nowhere.
+    // The order in time (start before create, init and listen) is case C24 of tests/emr/b/contract_test.cjs.
     const context = { ts, parsed, root };
     assert.deepEqual(startupBoundary(context), STARTUP_BOUNDARY);
     // Refusal fixtures: each added file is its own place (one program holds them all); each changed product file is its own.
@@ -1885,38 +1930,58 @@ if (process.argv.includes('--emr-inventory-generator')) {
       [fixture('namespace')]: "import * as composition from './emr-contract/composition';\nimport { runtimeAdapters } from './emr-runtime/context';\n" +
         'export function synNamespace() { return composition.composeEmrAdapters(runtimeAdapters); }\n',
       [fixture('value')]: head + 'const again = composeEmrAdapters;\nexport function synValue() { return again(runtimeAdapters); }\n',
-      [fixture('restart')]: "import { EmrApplicationRuntime } from './emr-runtime/application';\n" +
-        'export class SynRestart { constructor(private readonly runtime: EmrApplicationRuntime) {} again() { return this.runtime.start(); } }\n',
+      [fixture('restart')]: "import { launchApi } from './emr-runtime/launcher';\n" +
+        'export class SynRestart { again() { return launchApi({ env: process.env, root: () => SynRestart, configure: () => {} }); } }\n',
       [fixture('second-owner')]: "import { EmrRuntimeOwner } from './emr-runtime/application';\n" +
         'export function synSecondOwner() { return new EmrRuntimeOwner(process.env).start(); }\n',
+      [fixture('second-create')]: "import { NestFactory } from '@nestjs/core';\n" +
+        'export function synSecondCreate() { return NestFactory.create(class {}); }\n',
+      [fixture('hooks')]: "import type { INestApplication } from '@nestjs/common';\n" +
+        'export function synHooks(app: INestApplication) { app.enableShutdownHooks(); }\n',
     };
     const fixtures = startupBoundary(context, added).problems;
     for (const expected of [
-      'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/syn-startup-constructor.ts:3 (constructor)',
-      'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/syn-startup-handler.ts:4 (read)',
-      'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/syn-startup-guard.ts:3 (canActivate)',
-      'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/syn-startup-init.ts:3 (onModuleInit)',
-      'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/syn-startup-alias.ts:3 (synAlias)',
-      'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/syn-startup-namespace.ts:3 (synNamespace)',
+      "composeEmrAdapters called outside the owner's start path: api/src/syn-startup-constructor.ts:3",
+      "composeEmrAdapters called outside the owner's start path: api/src/syn-startup-handler.ts:4",
+      "composeEmrAdapters called outside the owner's start path: api/src/syn-startup-guard.ts:3",
+      "composeEmrAdapters called outside the owner's start path: api/src/syn-startup-init.ts:3",
+      "composeEmrAdapters called outside the owner's start path: api/src/syn-startup-alias.ts:3",
+      "composeEmrAdapters called outside the owner's start path: api/src/syn-startup-namespace.ts:3",
       'composeEmrAdapters referenced as a value at api/src/syn-startup-value.ts:3',
-      'EmrApplicationRuntime.start called other than awaited by main.ts: api/src/syn-startup-restart.ts:2 (again)',
-      'EmrRuntimeOwner.start called outside EmrApplicationRuntime.start: api/src/syn-startup-second-owner.ts:2 (synSecondOwner)',
+      'launchApi called other than awaited in main.ts: api/src/syn-startup-restart.ts:2',
+      'EmrRuntimeOwner.start called other than awaited in launcher.ts: api/src/syn-startup-second-owner.ts:2',
+      'NestFactory.create called outside launcher.ts: api/src/syn-startup-second-create.ts:2',
+      'enableShutdownHooks referenced at api/src/syn-startup-hooks.ts:2',
     ]) assert(fixtures.includes(expected), `${expected}: ${JSON.stringify(fixtures)}`);
     const application = fs.readFileSync(path.join(api, 'src/emr-runtime/application.ts'), 'utf8');
     const controls = startupControls(ts, root);
     for (const [name, overrides, expected] of [
       ['a second call in the start', { 'api/src/emr-runtime/application.ts': controls.twice }, 'composeEmrAdapters has 2 startup calls, not one'],
       ['a reset export', { 'api/src/emr-runtime/application.ts': application + '\nexport function resetEmrRuntime(): void {}\n' },
-        'application.ts exports EmrApplicationRuntime, EmrRuntimeOwner, EmrStartupFailure, EmrStartupPhase, EmrStartupResources, resetEmrRuntime'],
-      ['a rebind member', { 'api/src/emr-runtime/application.ts': controls.rebind }, 'EmrRuntimeOwner exposes close, rebind, requireResources, start'],
-      ['a holder that composes', { 'api/src/emr-runtime/application.ts': controls.holderComposes },
-        'composeEmrAdapters called outside EmrRuntimeOwner.run: api/src/emr-runtime/application.ts'],
-      ['a start main does not await', { 'api/src/main.ts': controls.unawaited },
-        'EmrApplicationRuntime.start called other than awaited by main.ts: api/src/main.ts'],
+        'application.ts exports EmrRuntimeOwner, EmrStartupFailure, EmrStartupPhase, resetEmrRuntime'],
+      ['a rebind member', { 'api/src/emr-runtime/application.ts': controls.rebind }, 'EmrRuntimeOwner exposes close, interrupt, rebind, start, store'],
+      ['an owner method the start does not reach', { 'api/src/emr-runtime/application.ts': controls.unreachedComposes },
+        "composeEmrAdapters called outside the owner's start path: api/src/emr-runtime/application.ts"],
+      ['an owner start the launcher does not await', { 'api/src/emr-runtime/launcher.ts': controls.unawaitedOwnerStart },
+        'EmrRuntimeOwner.start called other than awaited in launcher.ts: api/src/emr-runtime/launcher.ts'],
+      ['a launch main does not await', { 'api/src/main.ts': controls.unawaitedLaunch }, 'launchApi called other than awaited in main.ts: api/src/main.ts'],
     ]) {
       const { problems } = startupBoundary(context, overrides);
       assert(problems.some(problem => problem.includes(expected)), `${name}: ${JSON.stringify(problems)}`);
     }
+    // Acceptance controls (B2B-03): the compose-holding private method renamed with its call sites, the launcher
+    // re-indented, and the owner imported under another local name all pass unchanged.
+    assert.notEqual(controls.holderName, 'performStart');
+    const launcher = fs.readFileSync(path.join(api, 'src/emr-runtime/launcher.ts'), 'utf8');
+    const aliased = launcher.replace("import { EmrRuntimeOwner, EmrStartupFailure, EmrStartupPhase } from './application';",
+      "import { EmrRuntimeOwner as Owner, EmrStartupFailure, EmrStartupPhase } from './application';").replaceAll('new EmrRuntimeOwner(', 'new Owner(')
+      .replaceAll('let owner: EmrRuntimeOwner', 'let owner: Owner');
+    assert.notEqual(aliased, launcher, 'the alias control changed the import');
+    for (const [name, overrides] of [
+      ['the private start method renamed', { 'api/src/emr-runtime/application.ts': controls.renamed }],
+      ['the launcher re-indented', { 'api/src/emr-runtime/launcher.ts': controls.reindented }],
+      ['the owner imported under an alias', { 'api/src/emr-runtime/launcher.ts': aliased }],
+    ]) assert.deepEqual(startupBoundary(context, overrides), STARTUP_BOUNDARY, name);
   });
   test('TEST-EMR-01/19-A R4-09: a failing boundary check reports a few lines in a capped process (negative control of the AST-object diff)', () => {
     // The earlier form of this check passed two TypeScript SourceFile objects to assert.equal; once a legal start-up call

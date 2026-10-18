@@ -1,7 +1,5 @@
-import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import * as path from 'node:path';
 import { composeEmrAdapters } from '../emr-contract/composition';
-import type { EmrAdapters } from '../emr-contract/composition';
 import { refuse } from '../emr-contract/validation';
 import { appendPoolConfiguration } from './admission';
 import { EmrLedgerClient } from './client';
@@ -13,28 +11,21 @@ import { AccessSeal } from './seal';
 import { AccessLedgerStore, PrismaLedgerSql } from './store';
 
 /**
- * EMR-B2-BASE: the one process-lifetime owner of the EMR ledger resources, a library object that main.ts starts and ends
- * explicitly; Nest only holds it (EmrApplicationRuntime below) and forwards its own shutdown. The start builds one
- * dedicated EmrLedgerClient (its pool is the store's admission capacity), checks the runtime role (production, as before),
- * takes the lifetime writer fence of the state directory (refused while another process owns it, before any recovery),
- * recovers the seal and failure journal once, and composes A once with B's readers. Later consumers receive the started
- * resources through `requireResources()` only - no consumer creates a client, fence, journal or seal, recovers, or
- * composes A. Authentication does not own any of it. A failed start is terminal for the process: there is no reset,
- * rebind or fallback, and a supervisor restart is a new process whose own recovery settles what this one left open.
+ * EMR-B2: the one process-lifetime owner of the EMR ledger resources - a library object the launcher (launcher.ts)
+ * drives; it is not a Nest provider and no consumer holds it. The start builds one dedicated EmrLedgerClient (its pool
+ * is the store's admission capacity), checks the runtime role (production, as before), takes the lifetime writer fence
+ * of the state directory (refused while another process owns it, before any recovery), recovers the seal and failure
+ * journal once, and composes A once with B's readers. The launcher wraps the started store into the record port Nest
+ * receives (record-port.ts); nothing else of the owner is handed on. A failed start is terminal for the process: there
+ * is no reset, rebind or fallback, and a supervisor restart is a new process whose own recovery settles what this one
+ * left open.
  */
-export interface EmrStartupResources {
-  readonly db: EmrLedgerClient;
-  readonly ledger: AccessLedgerStore;
-  /** B's readers as A was composed with them. Not a reset or rebind capability. */
-  readonly adapters: Readonly<EmrAdapters>;
-}
-
-/** The closed start-up phases main.ts reports (manifest.ts startupFailureMessage). */
+/** The closed start-up phases the launcher reports (manifest.ts startupFailureMessage). */
 export type EmrStartupPhase = 'create' | 'config' | 'connect' | 'role' | 'fence' | 'recovery' | 'compose' | 'init' | 'listen';
 
 /** A start that did not complete: the phase it stopped in and what stopped it. Never printed as is - provider errors can
- * carry credential-bearing connection strings; main.ts prints only the closed line of startupFailureMessage.
- * `interrupted`: a close was requested while the start ran (a stop signal), so the launcher is already ending. */
+ * carry credential-bearing connection strings; the launcher prints only the closed line of startupFailureMessage.
+ * `interrupted`: a stop was requested while the start ran (a stop signal), so the launcher is already ending. */
 export class EmrStartupFailure extends Error {
   constructor(readonly phase: EmrStartupPhase, readonly failure: unknown, readonly interrupted = false) {
     super('EmrStartupFailure');
@@ -57,16 +48,17 @@ function configuration(env: Readonly<Record<string, string | undefined>>): Confi
 }
 
 /**
- * States: cold -> starting -> ready -> stopping -> closed, or starting -> failed. Every transition happens without an
- * await in between, so a close that arrives while the start waits (connect, role check, recovery) is seen by the start
- * right after that wait: nothing further is created, fenced, recovered or composed, the start begins the one release of
- * what it created and rejects, and the close finishes only after that release. The close never releases under a step in
- * flight, so a client whose connect returns late is released exactly once.
+ * States: cold -> starting -> ready -> stopping -> closed, or starting -> failed, or cold -> stopping -> closed. Every
+ * transition happens without an await in between. A stop requested in any state - before the start too - is recorded
+ * before the next step: a start asked for after it is refused before it creates anything, and a start whose wait
+ * (connect, role check, recovery) returns after it ends right there: nothing further is created, fenced, recovered or
+ * composed. The release of what the start created is one memoized promise, taken after the step in flight returned, so
+ * a client whose connect returns late is released exactly once - by the start's own end or by the close, never both.
  */
 export class EmrRuntimeOwner {
   private readonly config: Configuration;
   private state: State = 'cold';
-  private resources: Readonly<EmrStartupResources> | undefined;
+  private ledger: AccessLedgerStore | undefined;
   private db: EmrLedgerClient | undefined;
   private starting: Promise<void> | undefined;
   private closing: Promise<void> | undefined;
@@ -79,7 +71,7 @@ export class EmrRuntimeOwner {
   }
 
   /** The single start: locked before its first await, so any later call - during the start, after ready, after a
-   * failure or after a close - is refused. Ready only after the whole sequence. */
+   * failure, after a stop was requested or after a close - is refused. Ready only after the whole sequence. */
   async start(): Promise<void> {
     if (this.state !== 'cold') refuse('EmrStartupRepeated');
     this.state = 'starting';
@@ -87,21 +79,32 @@ export class EmrRuntimeOwner {
     return this.starting;
   }
 
-  /** The started resources, the same frozen bundle every time; refused before a completed start and once closing. */
-  requireResources(): Readonly<EmrStartupResources> {
-    if (this.state !== 'ready' || !this.resources) refuse('EmrRuntimeNotReady');
-    return this.resources;
+  /** The started store, for the launcher's record port only; refused before a completed start and once stopping. */
+  store(): AccessLedgerStore {
+    if (this.state !== 'ready' || !this.ledger) refuse('EmrRuntimeNotReady');
+    return this.ledger;
   }
 
   /**
-   * The explicit end, once (main.ts's failure path and Nest's shutdown both reach this one promise). During a start: the
-   * stop is requested and the start is awaited, which ends at its next step, then its client's release. After ready: the
-   * client is released - Nest calls this after the HTTP server drained its requests. The writer fence is held for the
-   * process lifetime and ends with it: no lock file, state or journal is removed or closed here. A release error is not
+   * A stop is requested, without releasing anything: recorded at once in every state. A start in flight ends at the
+   * step it waits in; a start asked for afterwards is refused; the store is no longer handed out. The release itself
+   * is `close()`, which the launcher reaches in its release order after the HTTP drain.
+   */
+  interrupt(): void { this.requestStop(); }
+
+  /**
+   * The explicit end, once: the stop is requested (as `interrupt()` does), the start in flight - if any - is awaited,
+   * which ends at its next step, then the client created so far is released. The writer fence is held for the process
+   * lifetime and ends with it: no lock file, state or journal is removed or closed here. A release error is not
    * reported: it must not mask the failure that ended the process or print provider text.
    */
   close(): Promise<void> {
+    this.requestStop();
     return this.closing ??= this.stop();
+  }
+
+  private requestStop(): void {
+    if (this.state === 'cold' || this.state === 'starting' || this.state === 'ready') this.state = 'stopping';
   }
 
   private async run(): Promise<void> {
@@ -127,29 +130,26 @@ export class EmrRuntimeOwner {
       this.proceed();
       phase = 'compose';
       composeEmrAdapters(runtimeAdapters);
-      this.resources = Object.freeze({ db, ledger, adapters: runtimeAdapters });
+      this.ledger = ledger;
       this.state = 'ready';
     } catch (error) {
       const interrupted = this.state === 'stopping';
       if (!interrupted) this.state = 'failed';
       // The release begins here, once; the start does not wait for it (a disconnect that never ends must not keep the
-      // failure from main.ts's line and its bounded exit). close() waits for this same release.
+      // failure from the launcher's line and its bounded exit). close() waits for this same release.
       void this.release();
       throw new EmrStartupFailure(phase, error, interrupted);
     }
   }
 
-  /** After every wait of the start: a close requested meanwhile ends the start here. */
+  /** After every wait of the start: a stop requested meanwhile ends the start here. */
   private proceed(): void {
     if (this.state !== 'starting') refuse('EmrStartupInterrupted');
   }
 
   private async stop(): Promise<void> {
-    if (this.state === 'starting') {
-      this.state = 'stopping';
+    if (this.starting) {
       try { await this.starting; } catch { /* the start reports its own end */ }
-    } else if (this.state === 'ready') {
-      this.state = 'stopping';
     }
     await this.release();
     if (this.state !== 'failed') this.state = 'closed';
@@ -162,19 +162,4 @@ export class EmrRuntimeOwner {
       try { await db.$disconnect(); } catch { /* see close() */ }
     })();
   }
-}
-
-/**
- * Nest's view of the owner: one per application, created with the module graph (environment checks only), started by
- * main.ts before any init hook or listener, and closed by Nest's shutdown after the HTTP server drained (or by main.ts's
- * failure path). It adds no behaviour of its own.
- */
-@Injectable()
-export class EmrApplicationRuntime implements OnApplicationShutdown {
-  private readonly owner: EmrRuntimeOwner;
-  constructor() { this.owner = new EmrRuntimeOwner(process.env); }
-  start(): Promise<void> { return this.owner.start(); }
-  requireResources(): Readonly<EmrStartupResources> { return this.owner.requireResources(); }
-  close(): Promise<void> { return this.owner.close(); }
-  onApplicationShutdown(): Promise<void> { return this.owner.close(); }
 }

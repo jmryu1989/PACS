@@ -149,7 +149,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-b-declaration --cwd . --file emr/units/b.json --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml --file tests/measurement_ci.py --file tests/candidate_ci.py --file tests/emr/b/live.py --file tests/production_image_test.py --file tests/ops_product_transfer_fixture.py --file api/prisma/migrations/20261008120000_emr_b/migration.sql --file api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql --file api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql --file api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql -- python3 -B scripts/emr-compose.py check
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-b-contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs --file tests/emr/b/seal_checker.cjs --file tests/emr/b/live_benchmark.cjs --file tests/emr/b/throughput.cjs --file tests/emr/b/verification_plan.cjs --file tests/emr/b/startup_fixture.cjs --file tests/service_test_loader.cjs -- env KIN_EMR_PYTHON=python3 node --test --test-reporter=tap tests/emr/b/contract_test.cjs
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-b-contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs --file tests/emr/b/seal_checker.cjs --file tests/emr/b/live_benchmark.cjs --file tests/emr/b/throughput.cjs --file tests/emr/b/verification_plan.cjs --file tests/emr/b/startup_fixture.cjs --tree tests/emr/b/record_port_typecheck --file tests/service_test_loader.cjs -- env KIN_EMR_PYTHON=python3 node --test --test-reporter=tap tests/emr/b/contract_test.cjs
           python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/workspace-ui-ci/emr-b-contract
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         if: ${{ !cancelled() }}
@@ -1516,11 +1516,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/production-image --cwd . --file api/Dockerfile --file api/prisma/schema.prisma --file scripts/ops_backup.py --file tests/production_image_test.py -- python3 tests/production_image_test.py
       - name: Disposable host adapter API replacement and database preservation
         run: sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py
-      # EMR-B2-BASE: the compiled main.ts of kin-api:ci over a disposable postgres:16-alpine provisioned and migrated as
-      # production is (installer for the migration only): start order to the listener, one client and pool, restart
-      # recovery, a second owner refused before recovery, the installer role refused, SIGTERM order with a request in flight,
-      # and SIGTERM during the start's recovery ending the start there.
-      - name: EMR-B2 base startup owner, fatal exit, stop during the start and drain over a disposable database (TEST-B2SH-01,04-07,16)
+      # EMR-B2 (d): the compiled main.ts of kin-api:ci - its launcher, Nest, the real fence, journal, seal and client -
+      # over a disposable postgres:16-alpine provisioned and migrated as production is (installer for the migration only):
+      # start order to the listener with the record port by value, one client and pool, a second owner refused before
+      # recovery (also while the first drains), the installer role refused, SIGTERM with a request in flight, SIGTERM
+      # during recovery, real recording work through the port across a stop (receipt, settled failure, restart recovers
+      # nothing) and a transaction that outlives the drain grace (exit 1, restart settles it as not committed).
+      - name: EMR-B2 (d) launcher over a disposable database - start order, second owner, stop during the start, drain with recording work, restart recovery (TEST-B2R-02,04,05,07)
         run: |
           db="$(docker run -d --network none --tmpfs /var/lib/postgresql/data -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=kin postgres:16-alpine)"
           trap 'docker rm -f "$db" > /dev/null' EXIT
@@ -1530,8 +1532,8 @@ jobs:
           done
           python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
           docker run --rm --network "container:$db" -e DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin kin-api:ci sh /app/start-production.sh migrate
-          python3 scripts/record-run.py --run-dir tmp/runtime-ci/emr-b2-base-startup --cwd . --tree api/src --file api/prisma/schema.prisma --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/ops_product_transfer_fixture.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_EMR_B2_RUNTIME_URL=postgresql://kin_runtime@127.0.0.1:5432/kin -e KIN_EMR_B2_INSTALLER_URL=postgresql://postgres@127.0.0.1:5432/kin -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test --test-reporter=tap /tests/emr/b/startup_pg_test.cjs \
-            || { tail -c 30000 tmp/runtime-ci/emr-b2-base-startup/stdout.log; tail -c 5000 tmp/runtime-ci/emr-b2-base-startup/stderr.log; exit 1; }
+          python3 scripts/record-run.py --run-dir tmp/runtime-ci/emr-b2-d-launcher --cwd . --tree api/src --file api/prisma/schema.prisma --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/ops_product_transfer_fixture.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_EMR_B2_RUNTIME_URL=postgresql://kin_runtime@127.0.0.1:5432/kin -e KIN_EMR_B2_INSTALLER_URL=postgresql://postgres@127.0.0.1:5432/kin -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test --test-concurrency=1 --test-reporter=tap /tests/emr/b/startup_pg_test.cjs \
+            || { tail -c 30000 tmp/runtime-ci/emr-b2-d-launcher/stdout.log; tail -c 5000 tmp/runtime-ci/emr-b2-d-launcher/stderr.log; exit 1; }
       - name: Record exact image identity
         env:
           CODE_SHA: ${{ github.sha }}
