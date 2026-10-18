@@ -90,7 +90,57 @@ def property_failures(case, failures):
 
 
 def _finite(value):
-    return type(value) in (int, float) and math.isfinite(value)
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def require_number(value, field):
+    if not _finite(value):
+        raise ValueError(field + ' must be a finite real number')
+
+
+def require_count(value, field):
+    if type(value) is not int or value < 0:
+        raise ValueError(field + ' must be a non-negative integer')
+
+
+def validate_summary(summary):
+    """Validate only the containers and statistics consumed by this driver."""
+    if not isinstance(summary, dict):
+        raise ValueError('summary must be an object')
+    failures = summary.get('failures')
+    if not isinstance(failures, list) or any(not isinstance(f, str) for f in failures):
+        raise ValueError('summary failures must be a list of strings')
+    if not isinstance(summary.get('cases'), dict):
+        raise ValueError('summary cases must be an object')
+    for key, row in summary['cases'].items():
+        if not isinstance(row, dict):
+            raise ValueError(key + ' must be an object')
+        if key not in {k for keys in LATENCY_CASES.values() for k in keys}:
+            continue
+        for field in ('R', 'D', 'gate_ratio_limit', 'gate_delta_floor_ms'):
+            require_number(row.get(field), key + '.' + field)
+        require_count(row.get('failures'), key + '.failures')
+        if type(row.get('gate_passed')) is not bool:
+            raise ValueError(key + '.gate_passed must be a boolean')
+        validate_consistency(key, row, failures)
+
+
+def validate_consistency(key, row, failures):
+    regression = row['R'] > GROSS_REGRESSION_RATIO and row['D'] > GROSS_DELTA_FLOOR_MS
+    request_failed = row['failures'] > 0
+    listed = [f for f in failures if f.startswith(key + ':')]
+    # performance.py emits one assertion per failed condition. Check both
+    # reasons, including when both fail, without depending on numeric formatting.
+    requests = sum(f == key + ': request failed' for f in listed)
+    regressions = sum(f.startswith(key + ': candidate p95 exceeds same-run r3 gross-regression bounds (')
+                      for f in listed)
+    if (row['gate_passed'] != (not (regression or request_failed))
+            or requests != int(request_failed) or regressions != int(regression)
+            or len(listed) != requests + regressions):
+        raise ValueError(key + ': gate_passed or listed failures disagree with measured R/D/request failures')
 
 
 def valid_latency_row(row):
@@ -118,6 +168,26 @@ def delay_control_validity(receipt_rows, repetitions, bound_ms=MP02_BASELINE_P95
                            case=MP02_CASE):
     """Check the MP02 guarantee from the raw sample rows of the same run: every
     baseline block p95 <= B, every mutant receipt >= L, zero request failures."""
+    require_count(repetitions, 'repetitions')
+    for row in receipt_rows:
+        if not isinstance(row, dict):
+            raise ValueError('receipt row must be an object')
+        for field in ('label', 'version'):
+            if not isinstance(row.get(field), str):
+                raise ValueError('receipt ' + field + ' must be a string')
+        for field in ('concurrency', 'prefill', 'failures', 'requests'):
+            require_count(row.get(field), 'receipt ' + field)
+        if row['version'] == 'r3':
+            require_number(row.get('p95'), 'receipt p95')
+        else:
+            if not isinstance(row.get('request_instruments'), list):
+                raise ValueError('request_instruments must be a list')
+            for item in row['request_instruments']:
+                if not isinstance(item, dict):
+                    raise ValueError('request instrument must be an object')
+                require_number(item.get('receipt_ms'), 'receipt_ms')
+                if 'error' in item and not isinstance(item['error'], str):
+                    raise ValueError('receipt error must be a string when present')
     name, count, retained = case
     selected = [r for r in receipt_rows if isinstance(r, dict) and str(r.get('label', '')).startswith(name + '-')
                 and r.get('concurrency') == count and r.get('prefill') == retained]
@@ -173,32 +243,22 @@ def summary_shape_error(summary):
 
 
 def load_summary(path):
-    """(summary or None, cause or None) from the benchmark's summary.json."""
-    try:
-        summary = json.loads(path.read_text())
-    except FileNotFoundError:
-        return None, 'summary.json missing'
-    except (OSError, ValueError) as error:
-        return None, f'summary.json unreadable: {type(error).__name__}: {error}'
-    cause = summary_shape_error(summary)
-    return (None, cause) if cause else (summary, None)
+    summary = json.loads(path.read_text(encoding='utf-8'))
+    validate_summary(summary)
+    return summary
 
 
 def run_benchmark(cmd, log):
-    """Exit code of the benchmark, or None when it could not run to completion;
-    the log keeps any partial output and the cause."""
     def text(value):
         return value.decode('utf-8', 'replace') if isinstance(value, bytes) else (value or '')
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200,
+                                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
     except subprocess.TimeoutExpired as error:
-        log.write_text(text(error.stdout) + text(error.stderr) + f'\nHARNESS_ERROR timeout after {error.timeout} s\n', encoding='utf-8')
-        return None, f'benchmark timed out after {error.timeout} s'
-    except OSError as error:
-        log.write_text(f'HARNESS_ERROR launch failed: {type(error).__name__}: {error}\n', encoding='utf-8')
-        return None, f'benchmark launch failed: {type(error).__name__}: {error}'
+        log.write_text(text(error.stdout) + text(error.stderr) + '\nHARNESS_ERROR timeout\n', encoding='utf-8')
+        raise
     log.write_text(text(result.stdout) + text(result.stderr), encoding='utf-8')
-    return result.returncode, None
+    return result.returncode
 
 
 def mutant_result(case, exit_code, summary, matching, validity=None):
@@ -220,6 +280,86 @@ def mutant_result(case, exit_code, summary, matching, validity=None):
     return regression, 'completed'
 
 
+def error_cause(error):
+    return type(error).__name__ + ': ' + str(error)[:500]
+
+
+def evaluate_run(identity, evaluate):
+    """Commit exactly one result after evaluation and cleanup have finished.
+
+    SystemExit is an evaluation failure too (including code 0/None), while
+    KeyboardInterrupt remains an operator interrupt. Never retain a provisional
+    kill when a later step in this run raises.
+    """
+    try:
+        row = {**identity, **evaluate()}
+        print(json.dumps({k: v for k, v in row.items() if k != 'summary'}), flush=True)
+        return row
+    except (Exception, SystemExit) as error:
+        return {**identity, 'killed': None, 'status': 'harness_error',
+                'diagnosis': DIAGNOSIS['harness_error'], 'harness_cause': error_cause(error)}
+
+
+def evaluate_control(path, chosen):
+    control = load_summary(path)
+    sources = control.get('candidate_sources')
+    if sources is not None and not isinstance(sources, dict):
+        raise ValueError('candidate_sources must be an object')
+    if not sources:
+        return {'killed': None, 'status': 'control_invalid'}
+    for name, expected in sources.items():
+        if not isinstance(expected, str):
+            raise ValueError('candidate source hash must be a string')
+        if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
+            raise ValueError('healthy control source differs: ' + name)
+    statuses = [control_status(MUTANTS[name][0], control) for name in chosen]
+    status = ('control_invalid' if 'control_invalid' in statuses else
+              'control_failed' if 'control_failed' in statuses else 'completed')
+    return {'killed': None, 'status': status, 'summary': control}
+
+
+def evaluate_mutant(name, args, out, control):
+    case, filename, before, after, behaviour = MUTANTS[name]
+    if name == 'MP02' and MP02_DELAY_MS > MP02_MAX_DELAY_MS:
+        return {'killed': None, 'status': 'no_valid_control',
+                'delay_ms': MP02_DELAY_MS, 'max_delay_ms': MP02_MAX_DELAY_MS}
+    with tempfile.TemporaryDirectory(prefix='emr-perf-mutant-') as folder:
+        candidate = Path(folder)
+        shutil.copytree(ROOT / 'api/src', candidate / 'api/src')
+        shutil.copyfile(ROOT / 'api/tsconfig.json', candidate / 'api/tsconfig.json')
+        file = candidate / 'api/src/emr-runtime' / filename
+        original = file.read_text(encoding='utf-8')
+        if original.count(before) != 1:
+            raise RuntimeError(name + ': mutation location is ambiguous')
+        mutated = original.replace(before, after)
+        file.write_text(mutated, encoding='utf-8', newline='\n')
+        run = out / name
+        cmd = [sys.executable, str(ROOT / 'tests/emr/b/performance.py'), '--out', str(run),
+               '--candidate', str(candidate), '--cases', case]
+        if args.image:
+            cmd += ['--image', args.image]
+        if args.flock_ms is not None:
+            cmd += ['--flock-ms', str(args.flock_ms)]
+        exit_code = run_benchmark(cmd, out / (name + '.log'))
+        summary = load_summary(run / 'summary.json')
+        matching = property_failures(case, summary['failures'])
+        validity = None
+        if name == 'MP02':
+            receipt = [json.loads(line) for line in (run / 'receipt.jsonl').read_text(encoding='utf-8').splitlines()]
+            validity = delay_control_validity(receipt, summary.get('repetitions'))
+        killed, status = mutant_result(case, exit_code, summary, matching, validity)
+        row = {'behaviour': behaviour, 'exit': exit_code, 'killed': killed, 'status': status,
+               'matching_assertions': matching, 'other_control_failures': control['failures'],
+               'source': str(file.relative_to(candidate)),
+               'before_sha256': hashlib.sha256(original.encode()).hexdigest(),
+               'mutant_sha256': hashlib.sha256(mutated.encode()).hexdigest(), 'failures': summary['failures']}
+        if validity is not None:
+            row['control_validity'] = validity
+        if killed is None:
+            row['diagnosis'] = DIAGNOSIS[status]
+    return row
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
@@ -228,83 +368,48 @@ def main(argv=None):
     parser.add_argument('--flock-ms', type=float)
     parser.add_argument('--only')
     args = parser.parse_args(argv)
-    control = json.loads(args.control.read_text())
-    for name, expected in control['candidate_sources'].items():
-        if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
-            raise RuntimeError('healthy control source differs: ' + name)
+    chosen = list(MUTANTS) if args.only is None else args.only.split(',')
+    selection_error = not chosen or any(name not in MUTANTS for name in chosen)
+    if selection_error:
+        chosen = []
     out = args.out.resolve()
-    out.mkdir(parents=True, exist_ok=False)
     rows = []
-    for name, (case, filename, before, after, behaviour) in MUTANTS.items():
-        if args.only and name not in args.only.split(','):
-            continue
-        unhealthy = control_status(case, control)
-        if unhealthy:
-            rows.append({'id': name, 'property': case, 'killed': None, 'status': unhealthy,
-                         'diagnosis': DIAGNOSIS[unhealthy],
-                         'control_failures': property_failures(case, control.get('failures') or []),
-                         'reason': 'No valid mutant verdict: its healthy property control is not valid.'})
-            print(json.dumps(rows[-1]), flush=True)
-            continue
-        if name == 'MP02' and MP02_DELAY_MS > MP02_MAX_DELAY_MS:
-            rows.append({'id': name, 'property': case, 'killed': None, 'status': 'no_valid_control',
-                         'diagnosis': DIAGNOSIS['no_valid_control'], 'delay_ms': MP02_DELAY_MS,
-                         'max_delay_ms': MP02_MAX_DELAY_MS})
-            print(json.dumps(rows[-1]), flush=True)
-            continue
-        with tempfile.TemporaryDirectory(prefix='emr-perf-mutant-') as folder:
-            candidate = Path(folder)
-            shutil.copytree(ROOT / 'api/src', candidate / 'api/src')
-            shutil.copyfile(ROOT / 'api/tsconfig.json', candidate / 'api/tsconfig.json')
-            file = candidate / 'api/src/emr-runtime' / filename
-            original = file.read_text(encoding='utf-8')
-            if original.count(before) != 1:
-                raise RuntimeError(name + ': mutation location is ambiguous')
-            mutated = original.replace(before, after)
-            file.write_text(mutated, encoding='utf-8', newline='\n')
-            run = out / name
-            cmd = [sys.executable, str(ROOT / 'tests/emr/b/performance.py'), '--out', str(run), '--candidate', str(candidate), '--cases', case]
-            if args.image:
-                cmd += ['--image', args.image]
-            if args.flock_ms is not None:
-                cmd += ['--flock-ms', str(args.flock_ms)]
-            exit_code, harness_cause = run_benchmark(cmd, out / (name + '.log'))
-            summary = None
-            if harness_cause is None:
-                summary, harness_cause = load_summary(run / 'summary.json')
-            matching = property_failures(case, summary['failures']) if summary else []
-            validity = None
-            if name == 'MP02' and summary is not None:
-                try:
-                    receipt = [json.loads(line) for line in (run / 'receipt.jsonl').read_text().splitlines()]
-                except (OSError, ValueError) as error:
-                    receipt, validity = [], {'valid': False, 'reasons': ['receipt.jsonl unreadable: ' + type(error).__name__]}
-                if validity is None:
-                    repetitions = summary.get('repetitions')
-                    validity = delay_control_validity(receipt, repetitions if type(repetitions) is int else -1)
-            killed, status = mutant_result(case, exit_code, summary, matching, validity)
-            rows.append({'id': name, 'property': case, 'behaviour': behaviour, 'exit': exit_code, 'killed': killed,
-                         'status': status, 'matching_assertions': matching,
-                         'other_control_failures': control['failures'],
-                         'source': str(file.relative_to(candidate)), 'before_sha256': hashlib.sha256(original.encode()).hexdigest(),
-                         'mutant_sha256': hashlib.sha256(mutated.encode()).hexdigest(),
-                         'failures': summary and summary.get('failures')})
-            if validity is not None:
-                rows[-1]['control_validity'] = validity
-            if harness_cause is not None:
-                rows[-1]['harness_cause'] = harness_cause
-            if killed is None:
-                rows[-1]['diagnosis'] = DIAGNOSIS[status]
-            print(json.dumps(rows[-1]), flush=True)
-    summary = {'total': len(rows), 'killed': sum(r['killed'] is True for r in rows),
-               'survived': [r['id'] for r in rows if r['killed'] is False],
-               'not_run': [r['id'] for r in rows if r['killed'] is None],
-               'invalid': {r['id']: r['status'] for r in rows if r['killed'] is None}, 'results': rows}
-    (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-    for r in rows:
-        if r['killed'] is None:
-            print(f"INVALID_CONTROL {r['id']}: {r['status']}: {r.get('harness_cause') or r.get('diagnosis')}", file=sys.stderr, flush=True)
-    return bool(summary['survived'] or summary['not_run'])
+    healthy = None
+    try:
+        out.mkdir(parents=True, exist_ok=False)
+        if not selection_error:
+            healthy = evaluate_run({'id': 'healthy'}, lambda: evaluate_control(args.control, chosen))
+            for name in dict.fromkeys(chosen):
+                identity = {'id': name, 'property': MUTANTS[name][0]}
+                if healthy['status'] != 'completed':
+                    row = {**identity, 'killed': None, 'status': healthy['status'],
+                           'diagnosis': DIAGNOSIS[healthy['status']]}
+                    if 'harness_cause' in healthy:
+                        row['harness_cause'] = healthy['harness_cause']
+                else:
+                    row = evaluate_run(identity, lambda: evaluate_mutant(name, args, out, healthy['summary']))
+                rows.append(row)
+        summary = {'total': len(rows), 'killed': sum(r['killed'] is True for r in rows),
+                   'survived': [r['id'] for r in rows if r['killed'] is False],
+                   'not_run': [r['id'] for r in rows if r['killed'] is None],
+                   'invalid': {r['id']: r['status'] for r in rows if r['killed'] is None}, 'results': rows,
+                   'control': {k: v for k, v in healthy.items() if k != 'summary'} if healthy else None,
+                   'selection_error': selection_error}
+        (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8', newline='\n')
+        if selection_error:
+            print('INVALID_SELECTION: --only requires known, non-empty mutant IDs; zero verdicts', file=sys.stderr)
+        for r in rows:
+            if r['killed'] is None:
+                print(f"INVALID_CONTROL {r['id']}: {r['status']}: {r.get('harness_cause') or r.get('diagnosis')}",
+                      file=sys.stderr, flush=True)
+        return int(selection_error or bool(summary['survived'] or summary['not_run']))
+    except (Exception, SystemExit) as error:
+        # Publication can fail. Report best effort, without promising an artifact.
+        try:
+            print('HARNESS_ERROR output/publication: ' + error_cause(error), file=sys.stderr, flush=True)
+        except (Exception, SystemExit):
+            pass
+        return 1
 
 
 if __name__ == '__main__':
