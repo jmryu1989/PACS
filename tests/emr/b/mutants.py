@@ -151,9 +151,9 @@ MUTANTS = {
     # ── EMR-B2 (d): the owner library (B2R-01), the launcher's single latch, pre-registered cleanup, cancellable listen and
     # single stop sequence (B2R-02/03/04), the record facade (B2R-06), consult M13, G-4 and two ops boundaries (B2R-09).
     # The request-fact classes (MUT-B2SH-09..16, consult M05/M06) move with request-context to the next unit.
-    "M43": ("MUT-B2SH-01: Nest is created and initialised before the awaited EMR start", [
-        ("api/src/emr-runtime/launcher.ts", "      check('connect');\n      await ledger.start();\n      phase = 'create';\n      check(phase);\n      const records = createRecordPort(ledger.store());\n",
-         "      check('connect');\n      const startedLate = ledger.start();\n      phase = 'create';\n      check(phase);\n      await new Promise(resolve => setTimeout(resolve, 50));\n      const records = createRecordPort(await startedLate.then(() => ledger.store()));\n")]),
+    "M43": ("MUT-B2SH-01: the launcher goes on to create Nest without awaiting the EMR start", [
+        ("api/src/emr-runtime/launcher.ts", "      check('connect');\n      await ledger.start();\n",
+         "      check('connect');\n      void ledger.start();\n      await new Promise(resolve => setTimeout(resolve, 0));\n")]),
     "M44": ("MUT-B2SH-03: a concurrent, failed or closed start may start again", [
         ("api/src/emr-runtime/application.ts", "    if (this.state !== 'cold') refuse('EmrStartupRepeated');\n",
          "    if (this.state === 'ready') refuse('EmrStartupRepeated');\n")]),

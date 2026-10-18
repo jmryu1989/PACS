@@ -1645,7 +1645,8 @@ function contractSuite() {
   test('C24 base start-up order: the launcher starts the owner before it creates Nest, A is composed once with B readers, Nest receives the record port by value, the listener opens under the latch and the success log follows it', async () => {
     const state = startup.stateDirectory('c24');
     const seen = {};
-    const result = await listening(memory(), env(state), async (event, child) => {
+    // The connect takes 200 ms, as a real one does: a launcher that did not await the owner would reach create first.
+    const result = await listening(memory({ connectMillis: 200 }), env(state), async (event, child) => {
       if (event.what === 'listening') {
         seen.health = await request(event.port, '/api/health');
         seen.me = await request(event.port, '/api/me');
@@ -1815,7 +1816,9 @@ function contractSuite() {
     const state = startup.stateDirectory('c27');
     const seen = { refused: null, slow: null, record: null };
     try {
-      const result = await startup.run(memory({ slowMillis: 1500, recordMillis: 300, appendMillis: 700, slowDestroy: 300 }), { env: env(state), timeoutMs: 60000,
+      // The post-finish record (300 ms + 2.5 s) outlives the slow request (1.5 s): the drain must wait for the work, not
+      // only for the connections.
+      const result = await startup.run(memory({ slowMillis: 1500, recordMillis: 300, appendMillis: 2500, slowDestroy: 300 }), { env: env(state), timeoutMs: 60000,
         onEvent: async (event, child, events) => {
           if (event.what === 'listening') { seen.port = event.port; seen.slow = request(event.port, '/syn-slow'); seen.record = request(event.port, '/syn-record'); }
           if (['slow-begin', 'work-begun'].includes(event.what) && events.some(e => e.what === 'slow-begin') && events.some(e => e.what === 'work-begun')) {

@@ -285,7 +285,11 @@ function child(scenario) {
       this.emrAppendPoolSize = pool.poolSize;
       this.connectionLimit = Number(new URL(pool.url).searchParams.get('connection_limit'));
     }
-    async $connect() { if (scenario.connect === 'refuse') throw failure(leak('P1001')); }
+    async $connect() {
+      // `connectMillis`: a connect that takes time, as a real one does (a start that is not awaited is then visible).
+      if (scenario.connectMillis) await sleep(scenario.connectMillis);
+      if (scenario.connect === 'refuse') throw failure(leak('P1001'));
+    }
     async $disconnect() {
       if (scenario.disconnect === 'hang') return new Promise(() => {});
       if (scenario.disconnect === 'throw') throw leak('P1017');
