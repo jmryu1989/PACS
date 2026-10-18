@@ -404,24 +404,64 @@ test('W9API-10 T04 A-03: the 10 s resolve deadline cancels pending reads; no sta
   await until(() => w.calls.reads.length === 6, 'the freed slot took the next members');
   await settle();
   assert.equal(w.calls.reads.length, 6, 'the seventh member waits for a slot');
-  t.mock.timers.tick(9999);
+  t.mock.timers.tick(8999);
   await settle();
-  assert.ok(!w.calls.reads.some(r => r.sawAbort), 'nothing is cancelled before ten seconds');
+  assert.ok(!w.calls.reads.some(r => r.sawAbort), 'nothing is cancelled before the nine-second sub-cut');
   t.mock.timers.tick(1);
   await settle();
   const cut = w.calls.reads.filter(r => [h1, h2, late, q2].some(s => s.uid === r.uid));
-  assert.ok(cut.length === 4 && cut.every(r => r.sawAbort && r.signal.aborted), 'every pending read must observe the deadline abort');
+  assert.ok(cut.length === 4 && cut.every(r => r.sawAbort && r.signal.aborted), 'every pending read must observe the sub-cut abort');
+  // D1558: the members read in time take their re-check and receipt inside the reserve - no further time passes here
   const run = track(pending);
   await until(() => run.settled, 'the deadline answers without waiting for a late source');
-  w.gates.get(late.uid)();   // the source answers after the deadline: it must not be used
+  w.gates.get(late.uid)();   // the source answers after the cut: it must not be used
   await settle();
   const answer = await pending;
-  // D1550: the one deadline also bounds the re-check and the receipt, so a member read in time is not provided after it.
-  assert.deepEqual([answer.scopeStatus, codes(answer)], ['rejected', [LF, LF, LF, LF, LF, LF, LF]],
-    'a read answered after the deadline must not become metadata; nothing is provided after the deadline');
-  assert.ok(!JSON.stringify(answer).includes('SYN-PID-1'), 'no member metadata after the deadline');
-  assert.deepEqual([w.port.prepared.length, w.calls.states.length], [0, 1], 'no re-check and no receipt after the deadline');
+  assert.deepEqual(codes(answer), ['ready', LF, LF, LF, 'ready', LF, LF], 'a read answered after the deadline must not become metadata');
+  assert.deepEqual(w.port.prepared[0].targets.map(t => t.uid), [early.uid, q1.uid], 'the members read in time are recorded and provided');
   assert.deepEqual(w.calls.reads.map(r => r.uid), ids(members.slice(0, 6)), 'a member still queued at the deadline is never read');
+});
+
+test('W9API-24 A-03 (D1558, SRW9R2-1): the served-read sub-cut keeps each member\'s own cause and the receipt inside 10 s', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const splitUid = nextUid();
+  const four = () => [study({ uid: splitUid, rows: [sourceRow(splitUid), sourceRow(splitUid, { pid: 'SYN-PID-9' })] }),
+    study({ pid: undefined }), study(), study({ read: 'hang' })];
+  // (1) the cause probe: split / no PatientID / normal / hung at the sub-cut
+  const members = four(), w = world(members);
+  const run = track(resolveFor(w, reader(), body(ids(members))));
+  await until(() => w.calls.reads.length === 4, 'the four reads started');
+  t.mock.timers.tick(8999); await settle();
+  assert.equal(run.settled, false, 'nothing is decided before the sub-cut');
+  t.mock.timers.tick(1);
+  await until(() => run.settled, 'the sub-cut answers inside 10 s');
+  const causes = 'each member keeps its own cause; only the hung read is a load failure';
+  assert.deepEqual(outcome(run), ['partial', [STUDY_IDENTITY_UNRESOLVED, IU, 'ready', LF]], causes);
+  assert.deepEqual(w.port.prepared.map(p => p.targets.map(t => t.uid)), [[members[2].uid]], 'the ready member\'s receipt is written');
+  assert.ok(w.calls.reads[3].signal.aborted, 'the hung read is cancelled at the sub-cut');
+  // (2) the re-check passes the 10 s deadline: causes stay, the would-be ready member and the hung one are load failures
+  const m2 = four(), w2 = world(m2);
+  w2.stalls.states = 2;
+  const run2 = track(resolveFor(w2, reader(), body(ids(m2))));
+  await until(() => w2.calls.reads.length === 4, 'the four reads started');
+  t.mock.timers.tick(9000);
+  await until(() => !!w2.held, 'the re-check is held');
+  t.mock.timers.tick(1000);
+  await until(() => run2.settled, 'the deadline answers the held re-check');
+  assert.deepEqual(outcome(run2), ['rejected', [STUDY_IDENTITY_UNRESOLVED, IU, LF, LF]], 'a deadline keeps the causes already found');
+  assert.equal(w2.port.prepared.length, 0, 'nothing is provided after the deadline');
+  // (3) the receipt is held past 10 s: 503, and the late receipt is finished as aborted
+  const m3 = four(), w3 = world(m3);
+  let release; w3.port.during = () => new Promise(resolve => { release = resolve; });
+  const run3 = track(resolveFor(w3, reader(), body(ids(m3))));
+  await until(() => w3.calls.reads.length === 4, 'the four reads started');
+  t.mock.timers.tick(9000);
+  await until(() => !!release, 'the receipt is asked after the sub-cut');
+  t.mock.timers.tick(1000);
+  await until(() => run3.settled, 'the deadline answers the held receipt');
+  assert.deepEqual(outcome(run3), [503, 'W9_AUDIT_UNAVAILABLE'], 'a receipt held past 10 s answers 503');
+  release(); await until(() => w3.port.finished.length === 1, 'the late receipt is finished');
+  assert.deepEqual(w3.port.finished.map(f => f.outcome), ['aborted'], 'a late receipt is recorded as an aborted transfer');
 });
 
 test('W9API-11 T04 A-05: a change of a member row or of the policy during the source wait discards the whole result', async () => {
@@ -715,6 +755,10 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
     if (mode === 'header') return;
     // served-body: the policy read answers after 6 s, so the served reads (own 5 s limit) are still held at the deadline
     if (mode === 'served-body' && req.url === '/tools/find') { setTimeout(() => answerFind(res), 6000); return; }
+    // served-body: the first member's served read answers; the second one is held until the sub-cut cancels it
+    if (mode === 'served-body' && new URL(req.url, 'http://x').searchParams.get('StudyInstanceUID') === found[0].uid) {
+      call.answered = true; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify([sourceRow(found[0].uid)])); return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     if (mode === 'body' || mode === 'served-body') { res.write('['); return; }
     answerFind(res);
@@ -747,20 +791,24 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
       const real = new OrthancService();
       w.studyAccess = new StudyAccessService(w.prisma, real, {});
       w.svc = new MultiStudyViewService(w.prisma, served ? real : w.orthanc, w.studyAccess, w.port);
-      const heldCalls = () => served ? calls.filter(c => c.url.startsWith('/dicom-web/')) : calls;
+      // served-body (D1558): the held served read is cut at 9 s; the other member is re-checked and recorded inside 10 s
+      const heldCalls = () => served ? calls.filter(c => c.url.startsWith('/dicom-web/') && !c.answered) : calls;
+      const cutAt = served ? 9000 : 10000;
       const start = Date.now(), run = track(resolveFor(w, reader(), body(ids(found))));
       run.done.then(() => { run.at = Date.now() - start; });
-      await until(() => heldCalls().length === (served ? 2 : 1), stall + ': the held read reached the source', served ? 8000 : 5000);
-      await new Promise(resolve => setTimeout(resolve, Math.max(0, 9700 - (Date.now() - start))));
-      assert.equal(run.settled, false, stall + ': nothing is decided before ten seconds');
-      assert.ok(heldCalls().every(c => !c.closed), stall + ': the source read is open before ten seconds');
+      await until(() => heldCalls().length === 1, stall + ': the held read reached the source', served ? 8000 : 5000);
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, cutAt - 300 - (Date.now() - start))));
+      assert.equal(run.settled, false, stall + ': nothing is decided before the cut');
+      assert.ok(heldCalls().every(c => !c.closed), stall + ': the source read is open before the cut');
       await until(() => run.settled, stall + ': the deadline answers the resolve', 2500);
-      assert.ok(run.at >= 9900 && run.at < 11500, stall + ': the resolve answers at its ten-second deadline (' + run.at + ' ms)');
-      assert.deepEqual(outcome(run), ['rejected', [LF, LF]], stall + ': the deadline answers with the typed timeout result');
+      assert.ok(run.at >= cutAt - 100 && run.at < (served ? 10000 : 11500), stall + ': the resolve answers at its cut (' + run.at + ' ms)');
+      assert.deepEqual(outcome(run), served ? ['partial', ['ready', LF]] : ['rejected', [LF, LF]],
+        stall + ': the deadline answers with the typed timeout result');
       await until(() => heldCalls().every(c => c.closed), stall + ': the policy source read is cancelled by the deadline', 2000);
       const closedMs = heldCalls().map(c => c.closedAt - start);
-      assert.ok(closedMs.every(ms => ms >= 9900 && ms < 11000), stall + ': each source socket closes within a second of the deadline (' + closedMs + ')');
-      assert.deepEqual([w.port.prepared.length, w.port.finished.length], [0, 0], stall + ': nothing is provided or recorded after the deadline');
+      assert.ok(closedMs.every(ms => ms >= cutAt - 100 && ms < cutAt + 1000), stall + ': each source socket closes within a second of the cut (' + closedMs + ')');
+      assert.deepEqual(w.port.prepared.map(p => p.targets.map(t => t.uid)), served ? [[found[0].uid]] : [],
+        stall + ': only a member read in time is provided');
       assert.deepEqual(calls.map(c => new URL(c.url, 'http://x').pathname),
         served ? ['/tools/find', '/dicom-web/studies', '/dicom-web/studies'] : ['/tools/find'], stall + ': no other source read');
       if (!served) assert.equal(w.calls.reads.length, 0, stall + ': nothing is read for serving');
@@ -782,7 +830,7 @@ test('W9API-22 A-03 (W9A-01): every wait from resolve entry to the answer is und
     { at: 'StudyAccess.prepare source read (one UID)', stall: ['identity', 1], policy: restricted, one: true, expect: ['rejected', [SX, LF]], signal: true },
     { at: 'StudyAccess.prepare re-check', stall: ['policy', 3], policy: restricted, expect: ['rejected', [LF, LF]] },
     { at: 'StudyAccess.allowed re-check', stall: ['policy', 4], policy: restricted, expect: ['rejected', [LF, LF]] },
-    { at: 'served source reads', read: 'hang', policy: null, expect: ['rejected', [LF, LF]] },
+    { at: 'served source reads', read: 'hang', cutAt: 9000, policy: null, expect: ['rejected', [LF, LF]] },
     { at: 'member rows re-check', stall: ['states', 2], policy: null, expect: ['rejected', [LF, LF]] },
     { at: 'policy re-check', stall: ['policy', 5], policy: restricted, expect: ['rejected', [LF, LF]] },
     { at: 'access-record receipt', receipt: true, policy: null, expect: [503, 'W9_AUDIT_UNAVAILABLE'] },
@@ -796,7 +844,7 @@ test('W9API-22 A-03 (W9A-01): every wait from resolve entry to the answer is und
     if (p.receipt) w.port.during = () => new Promise(resolve => { release = resolve; });
     const run = track(resolveFor(w, reader(), body(ids(members))));
     await until(() => (p.receipt ? !!release : p.read ? w.calls.reads.length === 2 : !!w.held), p.at + ': the wait is reached');
-    t.mock.timers.tick(9999);
+    t.mock.timers.tick((p.cutAt ?? 10000) - 1);   // the served reads are cut at 9 s (D1558), every other wait at 10 s
     await settle(); await settle();
     assert.equal(run.settled, false, p.at + ': nothing is decided before ten seconds');
     t.mock.timers.tick(1);

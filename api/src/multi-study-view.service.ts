@@ -39,7 +39,10 @@ export const W9_LOAD_FAILED = 'W9_LOAD_FAILED';
 
 /** The route this service answers, as the EMR route classification and an access event's surface name it. */
 export const VIEWING_SET_SURFACE = 'POST studies/viewing-set/resolve';
-export const VIEWING_SET_LIMITS = Object.freeze({ minMembers: 2, maxMembers: 20, concurrentReads: 4, deadlineMs: 10000 });
+// deadlineMs: the one resolve deadline (spec §3). servedReadCutMs: the served reads stop there, keeping a fixed
+// 1000 ms reserve of the same 10 s for the re-check and the durable receipt (9000/1000 split, D1558).
+export const VIEWING_SET_LIMITS = Object.freeze({ minMembers: 2, maxMembers: 20, concurrentReads: 4, deadlineMs: 10000,
+  servedReadCutMs: 9000 });
 // A member opens with the owner's own images only: no tele channel in either direction, and a tele state that is closed.
 const LOCAL_TELE_STATES = ['none', 'cancelled', 'fail'];
 const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -190,12 +193,17 @@ export class MultiStudyViewService {
 
     // A-03: one deadline per resolve, and its one signal, from here to the answer. Every wait is raced against it - the
     // policy and member reads, the StudyAccess decision (whose own source read takes the signal and is cancelled with its
-    // body), the served reads (same), the re-check and the durable receipt. The deadline answers at once wherever it
-    // lands: a member not refused before it is W9_LOAD_FAILED and nothing is provided (in the receipt wait: 503, and a
-    // late receipt is finished as aborted).
+    // body), the served reads (same, and cut earlier at servedReadCutMs), the re-check and the durable receipt. The
+    // deadline answers at once wherever it lands: a member without its own cause is W9_LOAD_FAILED and nothing is
+    // provided (in the receipt wait: 503, and a late receipt is finished as aborted).
     const deadline = new AbortController();
     const signal = deadline.signal;
     const timer = setTimeout(() => deadline.abort(), VIEWING_SET_LIMITS.deadlineMs);
+    // D1558: the served reads run under a child of the one deadline that is cut at servedReadCutMs (9000 of 10000 ms).
+    // The fixed 1000 ms reserve is for the A-05 re-check and the durable receipt of the members read in time.
+    const servedCut = new AbortController();
+    const cutTimer = setTimeout(() => servedCut.abort(), VIEWING_SET_LIMITS.servedReadCutMs);
+    signal.addEventListener('abort', () => servedCut.abort(), { once: true });
     const members: Member[] = input.studyUids.map((uid, ordinal) => ({ uid, ordinal, state: null, code: null }));
     const answer = (accessRefs: ReadonlyMap<string, string> | null) => {
       const ready = members.filter(m => !m.code);
@@ -232,10 +240,9 @@ export class MultiStudyViewService {
 
       // A-03: only the admitted members' sources, each failure its own; then the one-resource rule before any key.
       const admitted = members.filter(m => !m.code);
-      await this.readSources(admitted, signal);
-      // A deadline during the served reads ends the resolve there: a member read in time cannot take its re-check and
-      // receipt inside the deadline, so it is not provided either (the refused members keep their causes).
-      if (signal.aborted) return timedOut();
+      // The served reads end at the sub-cut (9 s), so the members read in time keep 1 s of the same deadline for their
+      // re-check and receipt; a read still pending at the sub-cut is W9_LOAD_FAILED and its fetch and body are cancelled.
+      await this.readSources(admitted, servedCut.signal);
       // StudyAccess decided on the source rows its own preparation read. What is served is this later read, so a policy
       // that reads source tags must hold for every row served (the same per-resource AND); a tag that changed between the
       // two reads makes that member unavailable like any other refusal, before the split answer can name it.
@@ -253,6 +260,8 @@ export class MultiStudyViewService {
         }
       }
 
+      // SRW9R2-1: the rows are classified first, so a member with its own cause keeps it under a deadline (spec §3).
+      if (signal.aborted) return timedOut();
       // A-04: one source patient key across every ready member, and the admitted set's own key when it has one.
       const ready = members.filter(m => !m.code);
       const keys = new Set(ready.map(m => m.key!));
@@ -296,7 +305,7 @@ export class MultiStudyViewService {
       }
       this.settle(receipts, transfer);
       return answer(refs);
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); clearTimeout(cutTimer); }
   }
 
   /**
