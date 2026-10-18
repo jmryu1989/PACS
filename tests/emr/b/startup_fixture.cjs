@@ -225,6 +225,8 @@ function child(scenario) {
       async onModuleDestroy() {
         send('destroy');
         if (scenario.slowDestroy) await sleep(scenario.slowDestroy);
+        // `destroyThrow`: a destroy hook that fails during the stop (Nest ends its own sequence there).
+        if (scenario.destroyThrow) { send('destroy-throw'); throw leak('SYN_DESTROY'); }
         send('destroy-done');
       }
       async onApplicationShutdown() { send('prisma-shutdown'); }
@@ -459,6 +461,15 @@ function child(scenario) {
   const init = NestApplication.prototype.init;
   NestApplication.prototype.init = async function () {
     send('init');
+    if (scenario.initWork) {
+      // Recording work an init-time job begins (as a provider's onModuleInit/onApplicationBootstrap could), before any
+      // listener exists; the self-review probe-init-work (D1577).
+      const work = this.get(recordPort.EMR_RECORD_PORT).begin();
+      send('init-work-begun');
+      work.append(serviceEvent(require('node:crypto').randomUUID()))
+        .then(() => send('init-work-appended'), error => send('init-work-failed', { code: error?.code ?? 'Error' }))
+        .finally(() => { work.end(); send('init-work-ended'); });
+    }
     const result = await init.call(this);
     send('initialized');
     await hold('init', () => leak('SYN_INIT'));

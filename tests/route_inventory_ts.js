@@ -215,16 +215,34 @@ function moduleKey(node, file) {
   return codePoint(file, node.getStart(file));
 }
 
-function processListener(node, file) {
-  // EMR-B2 (d): process.on('<event>', handler) - the bare process identifier, the member on, a string-literal event and
-  // one handler argument - as the launcher registers its stop-latch handlers. process['on'], a computed event, another
-  // member or another argument count is not this form; which files and events it may name is the fixture's
-  // signal_handlers. [offset of `process`, event].
+function processListener(node, file, checker) {
+  // EMR-B2 (d), D1577: process.on(<event>, handler) as an expression statement whose result is unused - the bare
+  // process identifier, the member on, one handler - with the event either a string literal or the variable of a
+  // `for (const x of TUPLE)` over a const `as const` array literal of string literals (the launcher's SIGNALS); the
+  // answer is every event the call can name. A call whose value is kept (const h = process.on(...)), a chained call
+  // (process.on(...).on(...)/.once(...)), process['on'], a computed event, another member or another argument count is
+  // not this form; which files and events it may name is the fixture's signal_handlers. [offset of `process`, events].
   if (!ts.isCallExpression(node) || node.questionDotToken || node.arguments.length !== 2 ||
       !ts.isPropertyAccessExpression(node.expression) || node.expression.questionDotToken ||
       !ts.isIdentifier(node.expression.expression) || node.expression.expression.text !== 'process' ||
-      node.expression.name.text !== 'on' || !ts.isStringLiteral(node.arguments[0])) return null;
-  return [codePoint(file, node.expression.expression.getStart(file)), node.arguments[0].text];
+      node.expression.name.text !== 'on' || !node.parent || !ts.isExpressionStatement(node.parent)) return null;
+  const offset = codePoint(file, node.expression.expression.getStart(file));
+  const event = node.arguments[0];
+  if (ts.isStringLiteral(event)) return [offset, [event.text]];
+  if (!ts.isIdentifier(event)) return null;
+  const variable = checker.getSymbolAtLocation(event);
+  const declaration = variable && variable.valueDeclaration;
+  if (!declaration || !ts.isVariableDeclaration(declaration) || !ts.isVariableDeclarationList(declaration.parent) ||
+      !(declaration.parent.flags & ts.NodeFlags.Const) || !ts.isForOfStatement(declaration.parent.parent) ||
+      declaration.parent.parent.initializer !== declaration.parent || !ts.isIdentifier(declaration.parent.parent.expression)) return null;
+  const tuple = checker.getSymbolAtLocation(declaration.parent.parent.expression);
+  const source = tuple && tuple.valueDeclaration;
+  if (!source || !ts.isVariableDeclaration(source) || !source.initializer || !ts.isVariableDeclarationList(source.parent) ||
+      !(source.parent.flags & ts.NodeFlags.Const) || !ts.isAsExpression(source.initializer) ||
+      !ts.isTypeReferenceNode(source.initializer.type) || !ts.isIdentifier(source.initializer.type.typeName) ||
+      source.initializer.type.typeName.text !== 'const' || !ts.isArrayLiteralExpression(source.initializer.expression) ||
+      !source.initializer.expression.elements.length || !source.initializer.expression.elements.every(ts.isStringLiteral)) return null;
+  return [offset, source.initializer.expression.elements.map(element => element.text)];
 }
 
 function constructorWithoutReturn(node, file) {
@@ -303,7 +321,7 @@ function answer(request) {
         if (comparison !== null) comparisons.push(comparison);
         const key = moduleKey(node, file);
         if (key !== null) moduleKeys.push(key);
-        const listener = processListener(node, file);
+        const listener = processListener(node, file, checker);
         if (listener) listeners.push(listener);
       }
       if (ts.isIdentifier(node) && names.has(node.text)) {

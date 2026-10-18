@@ -180,10 +180,8 @@ test('P06 a transaction that outlives the drain grace: the one closed line names
     if (event.what === 'transaction-held') startup.stop(child, 'SIGTERM');
   } });
   assert.deepEqual([result.code, result.signal, result.timedOut], [1, null, false], result.stderr);
-  const stopLines = result.stderrLines.map(line => STOP_LINE.exec(line)?.[1]);
-  // The drain is the bound that was exceeded; a release of the dedicated client under its cut transaction may itself
-  // reach the 5 s bound (then a second line names `ledger`), never a third line and never a start line.
-  assert(stopLines[0] === 'drain' && stopLines.length <= 2 && (stopLines.length === 1 || stopLines[1] === 'ledger'), result.stderr);
+  // The product prints one stop line (the first exceeded bound); the drain is it.
+  assert.deepEqual(result.stderrLines.map(line => STOP_LINE.exec(line)?.[1]), ['drain'], result.stderr);
   assert(!result.names.includes('transaction-done'), 'the held transaction never committed');
   inOrder(result.names, ['transaction-held', 'owner-interrupt', 'destroy', 'owner-close', 'disconnect', 'exit']);
   const stop = result.events.find(e => e.what === 'owner-interrupt').at, hooks = result.events.find(e => e.what === 'destroy').at;

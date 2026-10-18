@@ -1464,8 +1464,8 @@ function contractSuite() {
   // text beyond that, never a large object.
   const startup = require('./startup_fixture.cjs');
   const http = require('node:http');
-  const request = (port, pathname) => new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port, path: pathname, agent: false }, res => {
+  const request = (port, pathname, agent = false) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: pathname, agent }, res => {
       let body = ''; res.setEncoding('utf8');
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
@@ -1864,6 +1864,44 @@ function contractSuite() {
       inOrder(result.names, ['slow-begin', 'owner-interrupt', 'destroy', 'owner-close', 'disconnect', 'exit']);
       assert.equal(count(result.names, 'disconnect'), 1);
     } finally { fs.rmSync(slowState, { recursive: true, force: true }); }
+    // Begun recording work drains on every stop path (SRB2D-1): work an init-time job began before any listener exists,
+    // a stop during init - the work ends before the hooks and the release.
+    const initState = startup.stateDirectory('c27-init-work');
+    try {
+      const result = await startup.run(memory({ hold: 'init', initWork: true, appendMillis: 2500, slowDestroy: 100 }), { env: env(initState), timeoutMs: 60000, onEvent: (event, child) => {
+        if (event.what === 'held') startup.stop(child, 'SIGTERM');
+        if (event.what === 'owner-interrupt') child.send({ cmd: 'release' });
+      } });
+      stoppedStart(result, 'init');
+      inOrder(result.names, ['init-work-begun', 'held', 'owner-interrupt', 'released', 'append-end', 'init-work-appended', 'init-work-ended', 'destroy', 'destroy-done', 'owner-close', 'disconnect', 'exit']);
+      assert.deepEqual([count(result.names, 'init-work-failed'), count(result.names, 'disconnect'), count(result.names, 'destroy')], [0, 1, 1]);
+    } finally { fs.rmSync(initState, { recursive: true, force: true }); }
+    // A keep-alive request in flight at the stop (SRB2D-3): its socket is idle once answered and is swept, so the stop
+    // ends in about a second, never after the socket's own keep-alive timeout.
+    const keepState = startup.stateDirectory('c27-keepalive');
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    try {
+      let answered = null;
+      const result = await startup.run(memory({ slowMillis: 1000 }), { env: env(keepState), timeoutMs: 60000, onEvent: (event, child) => {
+        if (event.what === 'listening') answered = request(event.port, '/syn-slow', agent);
+        if (event.what === 'slow-begin') startup.stop(child, 'SIGTERM');
+      } });
+      const answer = await answered;
+      assert.deepEqual([answer.status, result.code, result.stderrLines], [200, 0, []]);
+      const stopToExit = result.events.find(e => e.what === 'exit').at - result.events.find(e => e.what === 'owner-interrupt').at;
+      assert(stopToExit < 3500, `the drain swept the idle keep-alive socket: ${stopToExit} ms`);
+    } finally { agent.destroy(); fs.rmSync(keepState, { recursive: true, force: true }); }
+    // A destroy hook that throws during the stop: one closed line naming the app phase, exit 1, Nest's remaining
+    // shutdown stage still ran, the ledger released once.
+    const throwState = startup.stateDirectory('c27-destroy-throw');
+    try {
+      const result = await listening(memory({ destroyThrow: true }), env(throwState), async event => event.what === 'listening');
+      assert.deepEqual([result.code, result.signal, result.timedOut], [1, null, false], result.stderr.slice(0, 2000));
+      assert.deepEqual(result.stderrLines.map(line => STOP_LINE.exec(line)?.[1]), ['app'], result.stderr);
+      noLeak(result);
+      inOrder(result.names, ['owner-interrupt', 'destroy', 'destroy-throw', 'prisma-shutdown', 'owner-close', 'disconnect', 'exit']);
+      assert.deepEqual([count(result.names, 'destroy-done'), count(result.names, 'disconnect'), count(result.names, 'prisma-shutdown')], [0, 1, 1]);
+    } finally { fs.rmSync(throwState, { recursive: true, force: true }); }
     // The 5 s cleanup bound of a failed start: a release that never ends is cut, named in a second closed line, exit 1;
     // one that throws is silent and the process ends at once with the start's line alone.
     for (const disconnect of ['hang', 'throw']) {
@@ -1959,7 +1997,7 @@ function contractSuite() {
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
-  test('C30 one stop latch for every start wait (TEST-B2R-02): SIGTERM, SIGINT, a repeated signal, a step that fails after the stop and a release in the same turn as the signal, crossed with connect, role, recovery, the owner\'s ready, create, init and listen while a co-provider destroy hook awaits - no phase follows the stop, a late application is closed once, the client is released once, the process ends by itself', async () => {
+  test('C30 one stop latch for every start wait (TEST-B2R-02): SIGTERM, SIGINT, a repeated signal, a step that fails after the stop and a release in the same turn as the signal, crossed with connect, role, recovery, the owner\'s ready, create, init (with begun recording work) and listen while a co-provider destroy hook awaits - no phase follows the stop, begun work is drained before the close, a late application is closed once, the client is released once, the process ends by itself', async () => {
     // Per wait: the phases that must not follow the stop, the phase the one line names, the code a late failure maps to
     // (none for an unmapped synthetic error), and whether the owner's own start is the one that ends.
     const points = {
@@ -1978,7 +2016,8 @@ function contractSuite() {
       const label = `${point} x ${cause}`;
       const dir = startup.stateDirectory('c30');
       try {
-        const result = await startup.run(memory({ hold: point, slowDestroy: 600 }), { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
+        // The init wait carries recording work begun by an init-time job (probe-init-work, D1577): every stop path drains it before the close.
+        const result = await startup.run(memory({ hold: point, slowDestroy: 600, ...(point === 'init' ? { initWork: true, appendMillis: 1500 } : {}) }), { env: env(dir), timeoutMs: 60000, onEvent: (event, child) => {
           if (event.what === 'held') {
             if (cause === 'same-turn') child.send({ cmd: 'release-then-signal', signal: 'SIGTERM', outcome: 'resolve' });
             else startup.stop(child, cause === 'SIGINT' ? 'SIGINT' : 'SIGTERM');
@@ -2001,7 +2040,12 @@ function contractSuite() {
           if (['create', 'init', 'listen'].includes(point) && !(point === 'create' && cause === 'late-failure')) {
             inOrder(result.names, ['created', 'owner-interrupt', 'destroy', 'destroy-done', 'prisma-shutdown', 'owner-close', 'disconnect', 'exit']);
             assert.equal(count(result.names, 'destroy'), 1, 'the late application is closed exactly once');
-          } else if (point !== 'create') {
+          }
+          if (point === 'init') {
+            inOrder(result.names, ['init-work-begun', 'held', 'owner-interrupt', 'append-end', 'init-work-appended', 'init-work-ended', 'destroy']);
+            assert.equal(count(result.names, 'init-work-failed'), 0, 'the begun init-time record is drained, not failed, before the close');
+          }
+          if (!['create', 'init', 'listen'].includes(point)) {
             assert.equal(result.names.includes('create'), false, 'no application after the stop');
             inOrder(result.names, ['held', 'owner-interrupt', 'released', 'disconnect', 'exit']);
           }

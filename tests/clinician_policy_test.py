@@ -803,7 +803,7 @@ class Compiler:
                     prototype_comparisons=set(contract["prototype_comparisons"]),
                     constructors_without_return=set(contract["constructors_without_return"]),
                     module_keys=set(contract.get("module_keys", ())),
-                    process_listeners={offset: event for offset, event in contract.get("process_listeners", ())})
+                    process_listeners={offset: frozenset(events) for offset, events in contract.get("process_listeners", ())})
         return self.answers[key]
 
     def request(self, request):
@@ -1254,10 +1254,12 @@ def contract_names(path, code, bindings=None):
     module_keys = (bindings or {}).get("module_keys", ())
     found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)
              if not (match.group(0) == "module" and match.start() in module_keys)]
-    # EMR-B2 (d), D1550: process.on('<event>', handler) only in the files source_contract.signal_handlers names and only
-    # for the events it lists there (the launcher's SIGTERM/SIGINT stop-latch handlers), read by the TypeScript AST
-    # (processListener: the bare process, the member on, a string-literal event, one handler); process['on'], a computed
-    # event, another event, another file and every other process member outside process_members stay refused.
+    # EMR-B2 (d), D1550/D1577: process.on(<event>, handler) only in the files source_contract.signal_handlers names and
+    # only for the events it lists there (the launcher's SIGTERM/SIGINT stop-latch handlers), read by the TypeScript AST
+    # (processListener: an expression statement whose result is unused, the bare process, the member on, one handler,
+    # the event a string literal or the variable of a for-of over a const `as const` tuple of string literals - every
+    # event the call can name must be listed); the call's value kept, a chained call, process['on'], a computed or
+    # unlisted event, another file and every other process member outside process_members stay refused.
     listeners = (bindings or {}).get("process_listeners", {})
     events = SIGNAL_HANDLERS.get(path.relative_to(API).as_posix() if API in path.parents else "", frozenset())
 
@@ -1275,7 +1277,8 @@ def contract_names(path, code, bindings=None):
         dot = skip_gap(code, match.end())
         member = IDENTIFIER.match(code, skip_gap(code, dot + 1)) if code.startswith(".", dot) else None
         listed = member is not None and member.group(0) in PROCESS_MEMBERS
-        handler = member is not None and member.group(0) == "on" and listeners.get(match.start()) in events
+        named = listeners.get(match.start(), frozenset())
+        handler = member is not None and member.group(0) == "on" and bool(named) and named <= events
         if not is_property(code, match.start()) and not (listed or handler):
             add(match, "process" + ("." + member.group(0) if member else ""))
     for match in words(PROTOTYPE_NAME, code):
@@ -3012,6 +3015,17 @@ class ClinicianPolicySpec(unittest.TestCase):
             "process.on of a computed event in the signal-handler file": {
                 launcher: sources[launcher] + "const late = 'SIGTERM';\nprocess.on(late, () => {});\n"},
             "process.on by a literal key in the signal-handler file": {launcher: sources[launcher] + "process['on']('SIGINT', () => {});\n"},
+            # D1577 SRB2D-4/5: only a statement whose result is unused, over a literal or a const `as const` tuple
+            "process.on whose value is kept in the signal-handler file": {
+                launcher: sources[launcher] + "const held = process.on('SIGTERM', () => undefined);\nexport const leaked = held;\n"},
+            "process.on chained with on in the signal-handler file": {
+                launcher: sources[launcher] + "process.on('SIGTERM', () => undefined).on('exit', () => undefined);\n"},
+            "process.on chained with once in the signal-handler file": {
+                launcher: sources[launcher] + "process.on('SIGTERM', () => undefined).once('beforeExit', () => undefined);\n"},
+            "process.on over a tuple that is not as const in the signal-handler file": {
+                launcher: sources[launcher] + "const names = ['SIGTERM'];\nfor (const name of names) process.on(name, () => undefined);\n"},
+            "process.on over an as-const tuple with an unlisted event in the signal-handler file": {
+                launcher: sources[launcher] + "const more = ['SIGTERM', 'exit'] as const;\nfor (const name of more) process.on(name, () => undefined);\n"},
             "process.once and process.removeListener": service(
                 "const stop = () => {};\nprocess.once('SIGTERM', stop);\nprocess.removeListener('SIGTERM', stop);\n"),
             "process.on handed on": service("export const register = process.on;\n"),
@@ -3114,7 +3128,8 @@ class ClinicianPolicySpec(unittest.TestCase):
             "process.env and process.exit": service("export const port = () => process.env.PORT ?? process.exit(1);\n"),
             # EMR-B2 (d), D1550: the launcher's two stop-latch handlers, and Nest's DynamicModule key
             "process.on of SIGTERM and SIGINT in the signal-handler file": {
-                launcher: "export const stop = () => undefined;\nprocess.on('SIGTERM', stop);\nprocess.on('SIGINT', stop);\n"},
+                launcher: "const SIGNALS = ['SIGTERM', 'SIGINT'] as const;\nexport const stop = () => undefined;\n"
+                          "for (const signal of SIGNALS) process.on(signal, stop);\nprocess.on('SIGINT', stop);\n"},
             "an object-literal key named module (Nest's DynamicModule)": service(
                 "export const dynamic = { module: Helper, providers: [Helper] };\n"),
             "Reflect.ownKeys and a namespace of a listed package": service(

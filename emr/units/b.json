@@ -500,7 +500,7 @@
   "expected": {
     "contract": 30,
     "live": 13,
-    "mutants": 62,
+    "mutants": 64,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -953,6 +953,20 @@
         "C30"
       ],
       "behaviour": "B2R-02: the latch is not checked after the owner's start returned"
+    },
+    {
+      "id": "M66",
+      "kill": [
+        "C27"
+      ],
+      "behaviour": "SRB2D-3: the drain does not sweep connections that become idle after the close"
+    },
+    {
+      "id": "M67",
+      "kill": [
+        "C27"
+      ],
+      "behaviour": "SRB2D-1: begun recording work drains only while serving"
     }
   ],
   "candidate_cases": [

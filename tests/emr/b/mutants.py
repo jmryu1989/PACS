@@ -1,4 +1,4 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2 (d) M43-M65 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M42 and EMR-B2 (d) M43-M67 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
@@ -191,15 +191,15 @@ MUTANTS = {
         ("api/src/emr-runtime/application.ts", "    if (this.state === 'cold' || this.state === 'starting' || this.state === 'ready') this.state = 'stopping';\n",
          "    if (this.state === 'starting' || this.state === 'ready') this.state = 'stopping';\n")]),
     "M56": ("B2R-02: the signal handlers drop the latch (the stop never begins on SIGTERM/SIGINT)", [
-        ("api/src/emr-runtime/launcher.ts", "  process.on('SIGTERM', () => trip({ kind: 'signal', signal: 'SIGTERM' }));\n  process.on('SIGINT', () => trip({ kind: 'signal', signal: 'SIGINT' }));\n",
-         "  process.on('SIGTERM', () => undefined);\n  process.on('SIGINT', () => undefined);\n")]),
+        ("api/src/emr-runtime/launcher.ts", "  for (const signal of SIGNALS) process.on(signal, () => trip({ kind: 'signal', signal }));\n",
+         "  for (const signal of SIGNALS) process.on(signal, () => void signal);\n")]),
     "M57": ("B2R-02: the latch trips a turn late (a step that returns in the same turn as the signal goes on)", [
         ("api/src/emr-runtime/launcher.ts", "  const trip = (cause: StopCause) => { if (!latch.signal.aborted) latch.abort(cause); };\n",
          "  const trip = (cause: StopCause) => { setImmediate(() => { if (!latch.signal.aborted) latch.abort(cause); }); };\n")]),
     "M58": ("B2R-01: the application's cleanup entry is registered after its acquisition (a late create is never closed)", [
-        ("api/src/emr-runtime/launcher.ts", "      reserve('app', () => (app ? app.close() : Promise.resolve()));\n      const created = await NestFactory.create(",
+        ("api/src/emr-runtime/launcher.ts", "      reserve('app', () => (app ? closeApp(app) : Promise.resolve()));\n      const created = await NestFactory.create(",
          "      const created = await NestFactory.create("),
-        ("api/src/emr-runtime/launcher.ts", "      app = created;\n      check(phase);\n", "      app = created;\n      check(phase);\n      reserve('app', () => (app ? app.close() : Promise.resolve()));\n")]),
+        ("api/src/emr-runtime/launcher.ts", "      app = created;\n      check(phase);\n", "      app = created;\n      check(phase);\n      reserve('app', () => (app ? closeApp(app) : Promise.resolve()));\n")]),
     "M59": ("B2R-03: the listener is acquired without the latch signal (a late bind opens, logs and answers)", [
         ("api/src/emr-runtime/launcher.ts", "    server.listen({ port: 3000, host: '0.0.0.0', signal });\n", "    server.listen({ port: 3000, host: '0.0.0.0' });\n"),
         ("api/src/emr-runtime/launcher.ts", "    const onAbort = () => { detach(); reject(interrupted(phase)); };\n", "    const onAbort = () => { void phase; };\n")]),
@@ -215,9 +215,16 @@ MUTANTS = {
          "        resolveIdentity(tx, issuer, subject) { alive(); return store.resolveIdentity(tx, issuer, subject); },\n"
          "        recoverAtStart() { alive(); return store.seal.recoverAtStart(); },\n")]),
     "M64": ("B2R-04: the stop does not wait for the begun recording work (the client is released under a post-finish record)", [
-        ("api/src/emr-runtime/launcher.ts", "  }).then(() => control?.drained());\n", "  });\n")]),
+        ("api/src/emr-runtime/launcher.ts", "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => control?.drained());\n",
+         "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => undefined);\n")]),
     "M65": ("B2R-02: the latch is not checked after the owner's start returned (a late ready goes on to create)", [
         ("api/src/emr-runtime/launcher.ts", "      phase = 'create';\n      check(phase);\n      const records", "      phase = 'create';\n      const records")]),
+    "M66": ("SRB2D-3: the drain does not sweep connections that become idle after the close (a keep-alive socket holds it)", [
+        ("api/src/emr-runtime/launcher.ts", "    const sweep = setInterval(() => listener.closeIdleConnections(), 100);\n    listener.close(() => { clearInterval(sweep); resolve(); });\n    listener.closeIdleConnections();\n",
+         "    const sweep = setInterval(() => undefined, 100);\n    listener.close(() => { clearInterval(sweep); resolve(); });\n")]),
+    "M67": ("SRB2D-1: begun recording work drains only while serving (a stop before the listener releases the ledger under it)", [
+        ("api/src/emr-runtime/launcher.ts", "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => control?.drained());\n",
+         "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => (serving ? control?.drained() : undefined));\n")]),
 }
 
 def sha256(path):

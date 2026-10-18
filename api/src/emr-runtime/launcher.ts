@@ -21,13 +21,15 @@ import { createRecordPort, EmrRecordPort, EmrRecordPortControl } from './record-
  * an abort while the bind is pending leaves no listener, no success log and no answered request behind.
  *
  * Stop (one memoized sequence): admission ends at once - no new recording work (the record port refuses), no new
- * connection (the listener closes on the signal), a start in flight ends at its step - then, when the process served,
- * the admitted requests and the begun recording work (also a record that a response's finish started) drain within
- * 10 s; then the Nest application closes (its destroy and shutdown hooks) and the ledger client is released, within 5 s
- * - the same 5 s that bound the cleanup of a failed or interrupted start. A bound exceeded prints one closed line naming
- * the unfinished phase and the process ends nonzero; otherwise it ends 0 after a signal (also when the step in flight
- * failed after the signal) and 1 after a start that failed on its own. The writer fence is held for the process
- * lifetime and ends with it.
+ * connection (the listener closes on the signal), a start in flight ends at its step - then, on every path, the
+ * admitted requests and the begun recording work (also a record that a response's finish started, also work an
+ * init-time job began before any listener existed) drain: within 10 s while serving, else within the cleanup bound;
+ * then the Nest application closes (its destroy and shutdown hooks) and the ledger client is released, within 5 s -
+ * the same 5 s that bound the cleanup of a failed or interrupted start. A bound exceeded, or an application close
+ * that fails (a destroy hook that throws; the remaining Nest stages still run), prints one closed line naming the
+ * phase and the process ends nonzero; otherwise it ends 0 after a signal (also when the step in flight failed after
+ * the signal) and 1 after a start that failed on its own. The writer fence is held for the process lifetime and ends
+ * with it.
  */
 export interface LaunchInput {
   /** The process environment, read for the owner's configuration. */
@@ -40,10 +42,11 @@ export interface LaunchInput {
 
 const DRAIN_GRACE_MS = 10000;
 const FATAL_CLEANUP_MS = 5000;
-type StopSignal = 'SIGTERM' | 'SIGINT';
+const SIGNALS = ['SIGTERM', 'SIGINT'] as const;
+type StopSignal = typeof SIGNALS[number];
 type StopCause = Readonly<{ kind: 'signal'; signal: StopSignal } | { kind: 'failure' }>;
 type ResourceName = 'ledger' | 'app' | 'listener';
-interface Resource { readonly name: ResourceName; readonly release: () => Promise<void>; released?: Promise<void> }
+interface Resource { readonly name: ResourceName; readonly release: () => Promise<void>; released?: Promise<'done' | 'failed'> }
 
 /** A wall-clock budget shared by consecutive waits: each race resolves 'done' or 'timeout', never rejects. */
 function budget(ms: number) {
@@ -103,8 +106,7 @@ export async function launchApi(input: LaunchInput): Promise<void> {
   // The latch: tripped by a signal or a start failure, once; the handlers stay until the process ends and do nothing
   // else. The stop sequence begins at the trip, in the same turn, before anything else can run.
   const trip = (cause: StopCause) => { if (!latch.signal.aborted) latch.abort(cause); };
-  process.on('SIGTERM', () => trip({ kind: 'signal', signal: 'SIGTERM' }));
-  process.on('SIGINT', () => trip({ kind: 'signal', signal: 'SIGINT' }));
+  for (const signal of SIGNALS) process.on(signal, () => trip({ kind: 'signal', signal }));
   latch.signal.addEventListener('abort', () => { void stop(); }, { once: true });
 
   const reserve = (name: ResourceName, release: () => Promise<void>) => { resources.push({ name, release }); };
@@ -122,7 +124,7 @@ export async function launchApi(input: LaunchInput): Promise<void> {
       check(phase);
       const records = createRecordPort(ledger.store());
       control = records.control;
-      reserve('app', () => (app ? app.close() : Promise.resolve()));
+      reserve('app', () => (app ? closeApp(app) : Promise.resolve()));
       const created = await NestFactory.create(input.root(records.port), { rawBody: true, abortOnError: false, bufferLogs: true, autoFlushLogs: false });
       app = created;
       check(phase);
@@ -133,7 +135,7 @@ export async function launchApi(input: LaunchInput): Promise<void> {
       check(phase);
       phase = 'listen';
       const listener = server = created.getHttpServer();
-      reserve('listener', () => drain(listener));
+      reserve('listener', () => closeListener(listener));
       await listen(listener, latch.signal, phase);
       check(phase);
       created.flushLogs();
@@ -148,16 +150,27 @@ export async function launchApi(input: LaunchInput): Promise<void> {
     }
   };
 
-  /** The listener's release: no new connection, idle connections closed as they become idle, every admitted request
-   * answered and every begun recording work ended. */
-  const drain = (listener: Server) => new Promise<void>(resolve => {
+  /** The listener's release: no new connection, idle connections closed as they become idle (a keep-alive socket must
+   * not hold the drain for its own timeout), every admitted request answered. */
+  const closeListener = (listener: Server) => new Promise<void>(resolve => {
     const sweep = setInterval(() => listener.closeIdleConnections(), 100);
     listener.close(() => { clearInterval(sweep); resolve(); });
     listener.closeIdleConnections();
-  }).then(() => control?.drained());
-
-  /** Each entry's release runs once; what it throws or rejects with never masks the line that ended the process. */
-  const release = (entry: Resource) => entry.released ??= new Promise<void>(resolve => resolve(entry.release())).catch(() => undefined);
+  });
+  /** The application's release. Nest ends its own sequence at a destroy hook that throws; the remaining stages still get
+   * their turn here, and the failure is reported as the app phase of the stop. */
+  const closeApp = async (created: INestApplication) => {
+    try { await created.close(); } catch (error) {
+      const stages = created as unknown as Record<'callBeforeShutdownHook' | 'dispose' | 'callShutdownHook', (() => Promise<void>) | undefined>;
+      for (const stage of ['callBeforeShutdownHook', 'dispose', 'callShutdownHook'] as const) {
+        try { await stages[stage]?.call(created); } catch { /* the first failure is the one reported */ }
+      }
+      throw error;
+    }
+  };
+  /** Each entry's release runs once; it resolves 'failed' instead of rejecting, so no release masks the line that ended
+   * the process and a failed application close is reported as its phase. */
+  const release = (entry: Resource) => entry.released ??= new Promise<void>(resolve => resolve(entry.release())).then(() => 'done' as const, () => 'failed' as const);
 
   let stopping: Promise<void> | undefined;
   const stop = (): Promise<void> => stopping ??= (async () => {
@@ -166,12 +179,19 @@ export async function launchApi(input: LaunchInput): Promise<void> {
     let unfinished: EmrStopPhase | undefined, fatal: ReturnType<typeof budget> | undefined;
     // The 5 s cleanup bound runs from the stop when the start is still in flight, else from the end of the drain.
     if (!serving && await (fatal = budget(FATAL_CLEANUP_MS)).race(outcome ?? Promise.resolve()) === 'timeout') unfinished = 'start';
+    // The drain, on every path: the listener's connections when one was reserved, then every begun recording work -
+    // also work an init-time job began before any listener existed - under the 10 s grace while serving, else under
+    // the cleanup bound. Only then do the application and the ledger go.
+    const listener = resources.find(entry => entry.name === 'listener');
+    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => control?.drained());
+    if (await (serving ? budget(DRAIN_GRACE_MS) : (fatal ??= budget(FATAL_CLEANUP_MS))).race(drained) === 'timeout') {
+      unfinished ??= 'drain';
+      server?.closeAllConnections();
+    }
     for (const entry of [...resources].reverse()) {
-      const bound = entry.name === 'listener' && serving ? budget(DRAIN_GRACE_MS) : (fatal ??= budget(FATAL_CLEANUP_MS));
-      if (await bound.race(release(entry)) === 'timeout') {
-        unfinished ??= entry.name === 'listener' ? 'drain' : entry.name;
-        if (entry.name === 'listener') server?.closeAllConnections();
-      }
+      if (entry.name === 'listener') continue;
+      const waited = await (fatal ??= budget(FATAL_CLEANUP_MS)).race(release(entry));
+      if (waited === 'timeout' || (await release(entry)) === 'failed') unfinished ??= entry.name;
     }
     if (unfinished) {
       console.error('[KIN API] ' + stopFailureMessage(unfinished));
