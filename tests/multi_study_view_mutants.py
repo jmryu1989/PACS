@@ -38,9 +38,10 @@ API_SRC = ROOT / 'api' / 'src'
 TEST = ROOT / 'tests' / 'multi_study_view_service_test.cjs'
 SERVICE, CONTROLLER = 'multi-study-view.service.ts', 'multi-study-view.controller.ts'
 ROLE = "    try { need(c.roles, 'radiologist', '여러 검사 열기'); } catch { throw viewForbidden(); }\n"
-MEMBER_LOOP = '      for (const m of members) {\n        if (!m.state ||'
+MEMBER_LOOP = '        for (const m of members) {\n          m.state = first.get(m.uid) ?? null;\n          if (!m.state ||'
 KEY = 'key: `${m.state!.institutionId}|${patientId}`'
-PREPARE = '      try { receipts = await this.access.prepare(provision); } catch { throw auditUnavailable(); }'
+PREPARE = '      try { receipts = await closing(() => preparing); } catch (error) {'
+STUDY_ACCESS, ORTHANC = 'study-access.service.ts', 'orthanc.service.ts'
 
 MUTANTS = [
     dict(id='M01', spec=True, title='the same patient judged by the source name instead of the PatientID', file=SERVICE,
@@ -48,32 +49,33 @@ MUTANTS = [
          old=KEY, new="key: `${m.state!.institutionId}|${OrthancService.tag(m.rows[0], '00100010')}`"),
     dict(id='M04-scope', spec=True, title='the last member skips the visibility, own-institution and tele checks', file=SERVICE,
          case='W9API-03', expect='must be judged on its own',
-         old=MEMBER_LOOP, new='      for (const m of members.slice(0, -1)) {\n        if (!m.state ||'),
+         old=MEMBER_LOOP, new='        for (const m of members) {\n          m.state = first.get(m.uid) ?? null;\n'
+                              '          if (m === members[members.length - 1]) continue;\n          if (!m.state ||'),
     # The post-read source-tag match (SRW9-1) still refuses this member, so the kill is the pre-read rule: a member StudyAccess
     # refuses is never read at all.
     dict(id='M04-access', spec=True, title='the last member skips the StudyAccess decision', file=SERVICE,
          case='W9API-04', expect='only allowed members are read by the resolve',
-         old='      for (const m of candidates) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;',
-         new='      for (const m of candidates.slice(0, -1)) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;'),
+         old='        for (const m of candidates) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;',
+         new='        for (const m of candidates.slice(0, -1)) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;'),
     dict(id='M05-admin', spec=True, title='admin gets an other-institution exception', file=SERVICE,
          case='W9API-03', expect='admin has no institution or tele exception',
-         old='        if (!m.state || !this.pacsAccess.visible(m.state, me)) m.code = W9_MEMBER_UNAVAILABLE;\n'
-             '        else if (m.state.institutionId !== me ||',
-         new="        if (!m.state || !this.pacsAccess.visible(m.state, me) && !c.roles.includes('admin')) m.code = W9_MEMBER_UNAVAILABLE;\n"
-             "        else if (m.state.institutionId !== me && !c.roles.includes('admin') ||"),
+         old='          if (!m.state || !this.pacsAccess.visible(m.state, me)) m.code = W9_MEMBER_UNAVAILABLE;\n'
+             '          else if (m.state.institutionId !== me ||',
+         new="          if (!m.state || !this.pacsAccess.visible(m.state, me) && !c.roles.includes('admin')) m.code = W9_MEMBER_UNAVAILABLE;\n"
+             "          else if (m.state.institutionId !== me && !c.roles.includes('admin') ||"),
     dict(id='M05-technician', spec=True, title='a technician is admitted to the viewing set', file=SERVICE,
          case='W9API-02', expect='technician must not resolve a viewing set',
          old=ROLE, new="    if (!c.roles.some(role => ['radiologist', 'admin', 'technician'].includes(role))) throw viewForbidden();\n"),
     dict(id='M06-rows', spec=True, title='the member rows are not re-checked after the source wait', file=SERVICE,
          case='W9API-11', expect='must be re-checked after the source wait',
-         old='      if (members.some(m => !sameState(m.state, second.get(m.uid)))) throw contextChanged();',
-         new='      if (members.some(m => false && !sameState(m.state, second.get(m.uid)))) throw contextChanged();'),
+         old='        if (members.some(m => !sameState(m.state, second.get(m.uid)))) throw contextChanged();',
+         new='        if (members.some(m => false && !sameState(m.state, second.get(m.uid)))) throw contextChanged();'),
     dict(id='M06-policy', spec=True, title='the StudyAccess policy is not re-checked after the source wait', file=SERVICE,
          case='W9API-11', expect='policy changed must be re-checked after the source wait',
-         old='      try { await this.studyAccess.unchanged(c, policy); }', new='      try { void policy; }'),
+         old='        try { await closing(() => this.studyAccess.unchanged(c, policy)); }', new='        try { void policy; }'),
     dict(id='M15', spec=True, title='a failed durable provide is ignored and the body returned', file=SERVICE,
          case='W9API-13', expect='fail: a provision without every receipt must not answer',
-         old=PREPARE, new="      try { receipts = await this.access.prepare(provision); } catch { receipts = { accessRefs: new Map(ready.map(m => [m.uid, 'unrecorded:' + m.uid])) }; }"),
+         old=PREPARE, new="      try { receipts = await closing(() => preparing); } catch (error) { receipts = { accessRefs: new Map(ready.map(m => [m.uid, 'unrecorded:' + m.uid])) }; } if (false) {"),
     dict(id='M17', spec=True, title='one composition-wide record instead of one per provided member', file=SERVICE,
          case='W9API-12', expect='every provided member must have its own target, and only those',
          old='        targets: ready.map(m => ({', new='        targets: ready.slice(0, 1).map(m => ({'),
@@ -87,7 +89,9 @@ MUTANTS = [
     dict(id='X03-lazy-row', title='an unregistered study gets a lazy StudyState row', file=SERVICE,
          case='W9API-15', expect='a resolve writes nothing and registers no StudyState',
          old=MEMBER_LOOP,
-         new="      for (const m of members) {\n        if (!m.state) await this.prisma.studyState.create({ data: { uid: m.uid, institutionId: me, ss: 'Unverified' } }).catch(() => undefined);\n        if (!m.state ||"),
+         new="        for (const m of members) {\n          m.state = first.get(m.uid) ?? null;\n"
+             "          if (!m.state) await this.prisma.studyState.create({ data: { uid: m.uid, institutionId: me, ss: 'Unverified' } }).catch(() => undefined);\n"
+             "          if (!m.state ||"),
     dict(id='X04-signal-dropped', title='the resolve signal is not passed to the source read', file=SERVICE,
          case='W9API-10', expect='every pending read must observe the deadline abort',
          old='        const read = this.orthanc.viewingSetStudy(m.uid, signal).catch(() => null);',
@@ -99,7 +103,7 @@ MUTANTS = [
     dict(id='X06-body-before-receipt', title='the body is answered before the durable receipt', file=SERVICE,
          case='W9API-13', expect='no body before the durable receipt',
          old=PREPARE,
-         new="      receipts = { accessRefs: new Map(ready.map(m => [m.uid, 'pending:' + m.uid])) }; void this.access.prepare(provision).catch(() => undefined);"),
+         new="      receipts = { accessRefs: new Map(ready.map(m => [m.uid, 'pending:' + m.uid])) }; void preparing.catch(() => undefined); if (false) {"),
     dict(id='X07-finish-any-status', title='any finished response is recorded as an ended transfer', file=CONTROLLER,
          case='W9API-16', expect='a refused reply must never be recorded as a finished transfer',
          old="    res.once('finish', () => settle(res.statusCode === 200 ? 'ended' : 'aborted'));",
@@ -142,6 +146,39 @@ MUTANTS = [
          case='W9API-19', expect='a row the policy refuses must never be served',
          old='        else if (sourcePolicy && !m.rows.every(row => this.studyAccess.matches(policy, m.uid, row))) m.code = W9_MEMBER_UNAVAILABLE;',
          new='        else if (false) m.code = W9_MEMBER_UNAVAILABLE;'),
+    # W9A-01 (round 2): the StudyAccess preparation read and every wait before the answer are under the one resolve deadline.
+    dict(id='X19-prep-signal-dropped', title='StudyAccess.allowed does not hand the resolve signal to its preparation read', file=STUDY_ACCESS,
+         case='W9API-21', expect='the policy source read is cancelled by the deadline',
+         old='      if(!tx)await this.prepare(c,remaining,policy,signal);', new='      if(!tx)await this.prepare(c,remaining,policy);'),
+    dict(id='X20-find-ignores-signal', title='the batch identity read ignores the signal (fault: a read that ignores the abort)', file=ORTHANC,
+         case='W9API-21', expect='the policy source read is cancelled by the deadline',
+         old='        body: body === undefined ? undefined : JSON.stringify(body), signal });',
+         new='        body: body === undefined ? undefined : JSON.stringify(body) });'),
+    dict(id='X21-allowed-unbounded', title='the StudyAccess decision is awaited without the deadline', file=SERVICE,
+         case='W9API-22', expect='StudyAccess.allowed snapshot: the deadline answers the resolve',
+         old='          ? await within(() => this.studyAccess.allowed(c, candidates.map(m => m.uid), undefined, signal), signal) : new Set<string>();',
+         new='          ? await this.studyAccess.allowed(c, candidates.map(m => m.uid), undefined, signal) : new Set<string>();'),
+    dict(id='X22-snapshot-unbounded', title='the policy snapshot is awaited without the deadline', file=SERVICE,
+         case='W9API-22', expect='policy snapshot: the deadline answers the resolve',
+         old='        policy = await within(() => this.studyAccess.snapshot(c), signal);', new='        policy = await this.studyAccess.snapshot(c);'),
+    dict(id='X23-states-unbounded', title='the member rows are awaited without the deadline', file=SERVICE,
+         case='W9API-22', expect='member rows: the deadline answers the resolve',
+         old='        const first = await within(() => this.states(input.studyUids), signal);',
+         new='        const first = await this.states(input.studyUids);'),
+    dict(id='X24-recheck-unbounded', title='the re-check and the receipt are awaited without the deadline', file=SERVICE,
+         case='W9API-22', expect='member rows re-check: the deadline answers the resolve',
+         old='    const closing = <T>(work: () => Promise<T>) => signal.aborted ? work() : within(work, signal);',
+         new='    const closing = <T>(work: () => Promise<T>) => work();'),
+    dict(id='X25-late-receipt-unfinished', title='a receipt arriving after the deadline answered 503 is never finished', file=SERVICE,
+         case='W9API-22', expect='access-record receipt: the late receipt is finished',
+         old="        if (error instanceof ResolveDeadline) void preparing.then(late => this.settle(late, Promise.resolve('aborted')), () => undefined);",
+         new='        void ResolveDeadline;'),
+    dict(id='X26-one-uid-signal-dropped', title='the one-UID preparation read does not get the signal', file=STUDY_ACCESS,
+         case='W9API-22', expect='StudyAccess.prepare source read (one UID): the resolve signal reaches the read and aborts',
+         old='this.orthanc.studyIdentityResources(requested[0],signal)', new='this.orthanc.studyIdentityResources(requested[0])'),
+    dict(id='X27-timeout-untyped', title='a deadline answers members it never decided as ready', file=SERVICE,
+         case='W9API-22', expect='policy snapshot: the deadline answers with the typed timeout result',
+         old='      for (const m of members) if (!m.code) m.code = W9_LOAD_FAILED;', new='      void W9_LOAD_FAILED;'),
 ]
 NOT_APPLICABLE = {
     'M16': 'metadata/other-member reference accepted as an image display: the view-observations route is not in W9-API (D1500 D-6, Module A)',

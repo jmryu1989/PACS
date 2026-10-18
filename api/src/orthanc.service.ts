@@ -185,12 +185,13 @@ export class OrthancService {
     return { patientId };
   }
 
-  private async get(path: string, body?: unknown) {
+  /** `signal` (optional) is the caller's deadline: it cancels the fetch and, after the headers, the body read. */
+  private async get(path: string, body?: unknown, signal?: AbortSignal) {
     let res: Response;
     try {
       res = await fetch(this.base + path, { method: body === undefined ? 'GET' : 'POST',
         headers: { Authorization: this.auth, 'Content-Type':'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body) });
+        body: body === undefined ? undefined : JSON.stringify(body), signal });
     } catch (e: any) {
       throw new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e.message}`);
     }
@@ -229,11 +230,12 @@ export class OrthancService {
    * WORKLIST-SPLIT-UID: one row per original Study resource. Two resources that share a Study UID (two
    * patients) are both returned; a repeat is an observation for the consumer to group, never a reason to
    * fail the whole institution's list or to keep one of them.
+   * `signal`: a caller with a deadline (the W9 viewing-set resolve's StudyAccess preparation) cancels the find and its body.
    */
-  async studyIdentities(accessMetadata = false, accession = false): Promise<any[]> {
+  async studyIdentities(accessMetadata = false, accession = false, signal?: AbortSignal): Promise<any[]> {
     const rows = await this.get('/tools/find', { Level:'Study', Query:{},
       ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName',
-        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] });
+        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] }, signal);
     if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
     return rows.map(row => {
       const uid = row?.RequestedTags?.StudyInstanceUID;

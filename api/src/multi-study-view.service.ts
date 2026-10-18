@@ -5,7 +5,8 @@
  * 기관 경계 PacsAccess.visible()·StudyAccess.allowed()/unchanged()·split 판정 unresolvedSource(). 판정을 여기 다시 만들면
  * 한쪽만 고쳐지는 날이 온다.
  *
- * 순서가 계약이다(spec §3): 역할 → 기관 → 입력 전체 → member마다 StudyState·visible → 자기 기관·tele 제외 → StudyAccess →
+ * 순서가 계약이다(spec §3): 역할 → 기관 → 입력 전체 → member마다 StudyState·visible → 자기 기관·tele 제외 → StudyAccess(그
+ * 준비용 원본 읽기도 같은 resolve 신호로 취소) →
  * 허용된 member만 원본 읽기(동시 4, 전체 10초, fetch·본문 취소) → 원본 자원 수(split) → 원본 PatientID → 같은 환자 키 →
  * 기관·tele·정책 재확인 → 열람 기록의 영속 영수증 → 본문. 권한 없는 UID의 원본은 읽지 않고, 그 UID의 존재·기관·split 여부도
  * 답하지 않는다.
@@ -19,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { StudyAccessService } from './study-access.service';
+import type { AccessSnapshot } from './study-access.service';
 import { PacsAccess, need, inst } from './pacs/access';
 import type { Caller } from './pacs/access';
 import type { WorkContext } from './emr-contract/access-event';
@@ -143,6 +145,26 @@ function metadataOf(row: any): ViewingSetMetadata {
 const sameState = (a: StateRow | null, b: StateRow | null | undefined) => (a === null ? b == null : !!b
   && a.institutionId === b.institutionId && a.teleInstitutionId === b.teleInstitutionId && a.ts === b.ts);
 
+/** The resolve deadline reached a wait: the typed timeout outcome, never a source or database answer. */
+class ResolveDeadline extends Error {}
+/**
+ * One wait under the resolve deadline. The deadline settles it at once; what the wait answers afterwards is discarded,
+ * and its late failure is consumed here (no unhandled rejection). A wait the deadline already passed is not started.
+ * Cancelling the work itself is the signal's job where the work takes it (the source reads); a database query is left
+ * to finish on its own and its answer is dropped.
+ */
+function within<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new ResolveDeadline());
+  return new Promise<T>((resolve, reject) => {
+    const expire = () => reject(new ResolveDeadline());
+    signal.addEventListener('abort', expire, { once: true });
+    const done = () => signal.removeEventListener('abort', expire);
+    Promise.resolve().then(work).then(
+      value => { done(); if (signal.aborted) reject(new ResolveDeadline()); else resolve(value); },
+      error => { done(); reject(signal.aborted ? new ResolveDeadline() : error); });
+  });
+}
+
 @Injectable()
 export class MultiStudyViewService {
   private readonly pacsAccess: PacsAccess;
@@ -166,25 +188,54 @@ export class MultiStudyViewService {
     const me = inst(c);
     const input = selection(raw);
 
+    // A-03: one deadline per resolve, and its one signal. Every wait before the served reads end is raced against it - the
+    // policy and member reads and the StudyAccess decision, whose own source read takes the signal and is cancelled with
+    // its body - and so are the re-check and the receipt while the deadline has not passed. A deadline in any of those
+    // waits answers at once: a member not refused before it is W9_LOAD_FAILED and nothing is provided. A deadline during
+    // the served reads fails only the reads still pending (readSources).
     const deadline = new AbortController();
+    const signal = deadline.signal;
     const timer = setTimeout(() => deadline.abort(), VIEWING_SET_LIMITS.deadlineMs);
+    const members: Member[] = input.studyUids.map((uid, ordinal) => ({ uid, ordinal, state: null, code: null }));
+    const answer = (accessRefs: ReadonlyMap<string, string> | null) => {
+      const ready = members.filter(m => !m.code);
+      return {
+        compositionId: input.compositionId, generation: input.generation, requestId: input.requestId,
+        sourcePatientKey: ready.length ? ready[0].key! : null,
+        scopeStatus: ready.length === members.length ? 'ready' : ready.length ? 'partial' : 'rejected',
+        members: members.map(m => m.code ? { uid: m.uid, ordinal: m.ordinal, status: 'error', code: m.code }
+          : { uid: m.uid, ordinal: m.ordinal, status: 'ready', metadata: m.metadata!, accessRef: accessRefs!.get(m.uid)! }),
+      };
+    };
+    const timedOut = () => {
+      for (const m of members) if (!m.code) m.code = W9_LOAD_FAILED;
+      return answer(null);
+    };
+    // After a deadline that cut the source reads, the members read in time still take their re-check and receipt (A-03:
+    // the others keep theirs). Those waits start after the abort, so they are not raced against it.
+    const closing = <T>(work: () => Promise<T>) => signal.aborted ? work() : within(work, signal);
     try {
-      // A-02: one read of the members' rows (no transaction, no lazy registration), then each member on its own.
-      const policy = await this.studyAccess.snapshot(c);
-      const first = await this.states(input.studyUids);
-      const members: Member[] = input.studyUids.map((uid, ordinal) => ({ uid, ordinal, state: first.get(uid) ?? null, code: null }));
-      for (const m of members) {
-        if (!m.state || !this.pacsAccess.visible(m.state, me)) m.code = W9_MEMBER_UNAVAILABLE;
-        else if (m.state.institutionId !== me || m.state.teleInstitutionId !== null || !LOCAL_TELE_STATES.includes(m.state.ts))
-          m.code = W9_SCOPE_EXCLUDED;
-      }
-      const candidates = members.filter(m => !m.code);
-      const allowed = candidates.length ? await this.studyAccess.allowed(c, candidates.map(m => m.uid)) : new Set<string>();
-      for (const m of candidates) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;
+      let policy: AccessSnapshot;
+      try {
+        // A-02: one read of the members' rows (no transaction, no lazy registration), then each member on its own.
+        policy = await within(() => this.studyAccess.snapshot(c), signal);
+        const first = await within(() => this.states(input.studyUids), signal);
+        for (const m of members) {
+          m.state = first.get(m.uid) ?? null;
+          if (!m.state || !this.pacsAccess.visible(m.state, me)) m.code = W9_MEMBER_UNAVAILABLE;
+          else if (m.state.institutionId !== me || m.state.teleInstitutionId !== null || !LOCAL_TELE_STATES.includes(m.state.ts))
+            m.code = W9_SCOPE_EXCLUDED;
+        }
+        const candidates = members.filter(m => !m.code);
+        // The signal reaches StudyAccess's own source read (its preparation), so the deadline also cancels that read.
+        const allowed = candidates.length
+          ? await within(() => this.studyAccess.allowed(c, candidates.map(m => m.uid), undefined, signal), signal) : new Set<string>();
+        for (const m of candidates) if (!allowed.has(m.uid)) m.code = W9_MEMBER_UNAVAILABLE;
+      } catch (error) { if (error instanceof ResolveDeadline) return timedOut(); throw error; }
 
       // A-03: only the admitted members' sources, each failure its own; then the one-resource rule before any key.
       const admitted = members.filter(m => !m.code);
-      await this.readSources(admitted, deadline.signal);
+      await this.readSources(admitted, signal);
       // StudyAccess decided on the source rows its own preparation read. What is served is this later read, so a policy
       // that reads source tags must hold for every row served (the same per-resource AND); a tag that changed between the
       // two reads makes that member unavailable like any other refusal, before the split answer can name it.
@@ -208,18 +259,13 @@ export class MultiStudyViewService {
       if (keys.size > 1 || (input.expected !== null && ready.length && !keys.has(input.expected))) throw patientMismatch();
 
       // A-05: the rows and the policy the decision used must still hold after the source wait.
-      const second = await this.states(input.studyUids);
-      if (members.some(m => !sameState(m.state, second.get(m.uid)))) throw contextChanged();
-      try { await this.studyAccess.unchanged(c, policy); }
-      catch (error) { if (error instanceof ConflictException) throw contextChanged(); throw error; }
+      try {
+        const second = await closing(() => this.states(input.studyUids));
+        if (members.some(m => !sameState(m.state, second.get(m.uid)))) throw contextChanged();
+        try { await closing(() => this.studyAccess.unchanged(c, policy)); }
+        catch (error) { if (error instanceof ConflictException) throw contextChanged(); throw error; }
+      } catch (error) { if (error instanceof ResolveDeadline) return timedOut(); throw error; }
 
-      const answer = (accessRefs: ReadonlyMap<string, string> | null) => ({
-        compositionId: input.compositionId, generation: input.generation, requestId: input.requestId,
-        sourcePatientKey: ready.length ? ready[0].key! : null,
-        scopeStatus: ready.length === members.length ? 'ready' : ready.length ? 'partial' : 'rejected',
-        members: members.map(m => m.code ? { uid: m.uid, ordinal: m.ordinal, status: 'error', code: m.code }
-          : { uid: m.uid, ordinal: m.ordinal, status: 'ready', metadata: m.metadata!, accessRef: accessRefs!.get(m.uid)! }),
-      });
       // Nothing is provided when no member is ready: the answer carries the selected UIDs and their codes only.
       if (!ready.length) return answer(null);
 
@@ -236,7 +282,12 @@ export class MultiStudyViewService {
           patientId: m.patientId!, metadata: m.metadata!, context: context(m) })),
       };
       let receipts: ViewingSetReceipts;
-      try { receipts = await this.access.prepare(provision); } catch { throw auditUnavailable(); }
+      const preparing = (async () => this.access.prepare(provision))();
+      try { receipts = await closing(() => preparing); } catch (error) {
+        // A receipt that arrives after the deadline answered 503 belongs to a body that never went out.
+        if (error instanceof ResolveDeadline) void preparing.then(late => this.settle(late, Promise.resolve('aborted')), () => undefined);
+        throw auditUnavailable();
+      }
       const refs = receipts?.accessRefs;
       if (!(refs instanceof Map) || refs.size !== ready.length || new Set(refs.values()).size !== ready.length
           || ready.some(m => typeof refs.get(m.uid) !== 'string' || !refs.get(m.uid))) {

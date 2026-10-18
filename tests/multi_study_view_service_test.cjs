@@ -15,7 +15,9 @@
  * deadline); studyIdentityResources/studyIdentities answer the real StudyAccessService's preparation. The port double
  * records the provision and answers receipts, an append failure or an incomplete receipt set; it builds no AccessEvent and
  * never stands for the ledger: this unit binds no ledger (D1500 D-2/D-6), the production binding is
- * ViewingSetAccessUnbound and W9API-13/16 run it. The Orthanc read itself runs against a local HTTP server (W9API-17).
+ * ViewingSetAccessUnbound and W9API-13/16 run it. The Orthanc read itself runs against a local HTTP server (W9API-17), and
+ * so does StudyAccess's own preparation read under the resolve deadline (W9API-21, W9A-01); W9API-22 holds each wait of
+ * the resolve in turn (the doubles' `stalls`) to show every one of them ends at the deadline.
  * D73: assertions are on answers, HTTP statuses/codes, recorded calls and the real Nest metadata; none reads source text.
  * Synthetic SYN-* values only; no database, no Docker, no network beyond 127.0.0.1.
  */
@@ -91,14 +93,23 @@ class RecordingAccess extends ViewingSetAccess {
 
 function world(studies, { policy = null } = {}) {
   const w = { byUid: new Map(studies.map(s => [s.uid, structuredClone(s)])), policy, revision: 1, gates: new Map(), active: 0,
-    maxActive: 0, calls: { states: [], reads: [], writes: [], foreign: [], identity: [] }, onRead: null };
+    maxActive: 0, calls: { states: [], reads: [], writes: [], foreign: [], identity: [], identitySignals: [] }, onRead: null,
+    counts: {}, stalls: {}, held: null };
+  // W9API-22: the n-th call of one wait (`w.stalls[name] = n`) does not answer until the test releases it. The held call
+  // keeps the signal it was given, if any; a release answers what the call would have answered (a late answer).
+  const stalled = (name, signal, answer) => {
+    w.counts[name] = (w.counts[name] ?? 0) + 1;
+    if (w.stalls[name] !== w.counts[name]) return null;
+    return new Promise((resolve, reject) => { w.held = { name, signal, release: () => answer().then(resolve, reject) }; });
+  };
   const project = (row, select) => Object.fromEntries(Object.keys(select).filter(k => select[k] === true).map(k => [k, row[k]]));
   const studyState = {
     async findMany(args) {
       w.calls.states.push(JSON.parse(JSON.stringify(args)));
       const wanted = args?.where?.uid?.in;
       assert.ok(Array.isArray(wanted) && args.select, 'the members are read by their UIDs with a select');
-      return wanted.map(uid => w.byUid.get(uid)?.state).filter(Boolean).map(row => project(row, args.select));
+      const rows = async () => wanted.map(uid => w.byUid.get(uid)?.state).filter(Boolean).map(row => project(row, args.select));
+      return stalled('states', undefined, rows) ?? rows();
     },
   };
   for (const method of WRITES) studyState[method] = async () => { w.calls.writes.push('studyState.' + method); throw new Error('SYN write refused'); };
@@ -107,8 +118,9 @@ function world(studies, { policy = null } = {}) {
     // The real StudyAccessService reads the caller's policy row by subject; a lock statement only inside a transaction.
     async $queryRaw(strings, ...values) {
       if (strings.join('?').includes('pg_advisory')) { w.calls.writes.push('advisory-lock'); return [{ locked: 1 }]; }
-      if (!w.policy) return [];
-      return [{ institution: values[1], revision: w.revision, policy: w.policy, reason: 'SYN policy', updatedBy: 'syn-admin', updatedAt: new Date(0) }];
+      const rows = async () => !w.policy ? []
+        : [{ institution: values[1], revision: w.revision, policy: w.policy, reason: 'SYN policy', updatedBy: 'syn-admin', updatedAt: new Date(0) }];
+      return stalled('policy', undefined, rows) ?? rows();
     },
   };
   for (const method of ['$executeRaw', '$transaction']) root[method] = async () => { w.calls.writes.push(method); throw new Error('SYN write refused'); };
@@ -134,8 +146,16 @@ function world(studies, { policy = null } = {}) {
         else if (s.read === 'gate' || s.read === 'late') w.gates.set(uid, answer);
       });
     },
-    async studyIdentityResources(uid) { w.calls.identity.push(uid); return structuredClone(w.byUid.get(uid)?.rows ?? []); },
-    async studyIdentities() { w.calls.identity.push('*'); return [...w.byUid.values()].flatMap(s => structuredClone(s.rows)); },
+    async studyIdentityResources(uid, signal) {
+      w.calls.identity.push(uid); w.calls.identitySignals.push(signal);
+      const rows = async () => structuredClone(w.byUid.get(uid)?.rows ?? []);
+      return stalled('identity', signal, rows) ?? rows();
+    },
+    async studyIdentities(_metadata, _accession, signal) {
+      w.calls.identity.push('*'); w.calls.identitySignals.push(signal);
+      const rows = async () => [...w.byUid.values()].flatMap(s => structuredClone(s.rows));
+      return stalled('identity', signal, rows) ?? rows();
+    },
   };
   w.studyAccess = new StudyAccessService(w.prisma, w.orthanc, {});
   w.port = new RecordingAccess();
@@ -665,6 +685,117 @@ test('W9API-19 T03 A-02/A-03 (SRW9-1): a source-tag policy holds for every row t
   const wu = world(both);
   moved(wu, ids(both));
   assert.deepEqual(codes(await opens(resolveFor(wu, reader(), body(ids(both))), 'an unrestricted caller')), ['ready', 'ready']);
+});
+
+/** Follows one resolve: whether it settled and with what, without awaiting it (the deadline cases tick mocked time). */
+function track(promise) {
+  const t = { settled: false, answer: null, error: null };
+  t.done = promise.then(answer => { t.settled = true; t.answer = answer; }, error => { t.settled = true; t.error = error; });
+  return t;
+}
+const outcome = t => t.error ? [t.error.getStatus?.() ?? String(t.error), t.error.getResponse?.().code ?? t.error.message]
+  : [t.answer.scopeStatus, codes(t.answer)];
+
+test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation read at a real source - stalled header or body', async t => {
+  // The real StudyAccessService prepares a source-tag policy from the real OrthancService's /tools/find; the source here
+  // never sends its header, or sends the header and stalls the body. Served reads are the double's (never reached).
+  let mode = 'answer';
+  const calls = [];
+  const server = http.createServer((req, res) => {
+    const call = { url: req.url, closed: false };
+    calls.push(call);
+    res.on('close', () => { call.closed = true; });
+    req.resume();
+    if (mode === 'header') return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (mode === 'body') { res.write('['); return; }
+    res.end(JSON.stringify(found.map(s => ({ RequestedTags: { StudyInstanceUID: s.uid, InstitutionName: 'SYN HOSPITAL A',
+      PatientID: 'SYN-PID-1', StudyDate: '20261001', ModalitiesInStudy: 'CT' } }))));
+  });
+  const found = [study(), study()];
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
+  process.env.ORTHANC_USER = 'synthetic'; process.env.ORTHANC_PASS = 'synthetic';
+  try {
+    // control: an answering source decides as before, and the policy read is /tools/find
+    const wc = world(found, { policy: patientRule('SYN-PID-1') });
+    wc.studyAccess = new StudyAccessService(wc.prisma, new OrthancService(), {});
+    wc.svc = new MultiStudyViewService(wc.prisma, wc.orthanc, wc.studyAccess, wc.port);
+    assert.deepEqual(codes(await opens(resolveFor(wc, reader(), body(ids(found))), 'an answering source')), ['ready', 'ready'], 'an answering source');
+    assert.deepEqual(calls.map(c => c.url), ['/tools/find'], 'the preparation reads the batch identity source');
+    // real time, as the source and the deadline really meet (Astra AP08): about ten seconds per stall
+    const timings = [];
+    for (const stall of ['header', 'body']) {
+      mode = stall; calls.length = 0;
+      const w = world(found, { policy: patientRule('SYN-PID-1') });
+      w.studyAccess = new StudyAccessService(w.prisma, new OrthancService(), {});
+      w.svc = new MultiStudyViewService(w.prisma, w.orthanc, w.studyAccess, w.port);
+      const start = Date.now(), run = track(resolveFor(w, reader(), body(ids(found))));
+      run.done.then(() => { run.at = Date.now() - start; });
+      await until(() => calls.length === 1, stall + ': the preparation read reached the source');
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, 9700 - (Date.now() - start))));
+      assert.equal(run.settled, false, stall + ': nothing is decided before ten seconds');
+      assert.equal(calls[0].closed, false, stall + ': the source read is open before ten seconds');
+      await until(() => run.settled, stall + ': the deadline answers the resolve', 2500);
+      assert.ok(run.at >= 9900 && run.at < 11500, stall + ': the resolve answers at its ten-second deadline (' + run.at + ' ms)');
+      assert.deepEqual(outcome(run), ['rejected', [LF, LF]], stall + ': the deadline answers with the typed timeout result');
+      await until(() => calls[0].closed, stall + ': the policy source read is cancelled by the deadline', 2000);
+      assert.deepEqual([w.calls.reads.length, w.port.prepared.length, w.port.finished.length], [0, 0, 0],
+        stall + ': nothing is read for serving, provided or recorded after the deadline');
+      assert.deepEqual(calls.map(c => c.url), ['/tools/find'], stall + ': no other source read');
+      timings.push({ stall, answered_ms: run.at, source_closed: calls[0].closed });
+    }
+    t.diagnostic(JSON.stringify(timings));
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
+test('W9API-22 A-03 (W9A-01): every wait from resolve entry to the answer is under the one deadline (executed inventory)', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const restricted = patientRule('SYN-PID-1');
+  // Each point: the wait held at its n-th call, the policy that reaches it, and what the deadline must answer.
+  const points = [
+    { at: 'policy snapshot', stall: ['policy', 1], policy: null, expect: ['rejected', [LF, LF]] },
+    { at: 'member rows', stall: ['states', 1], policy: null, expect: ['rejected', [LF, LF]] },
+    { at: 'StudyAccess.allowed snapshot', stall: ['policy', 2], policy: restricted, expect: ['rejected', [LF, LF]] },
+    { at: 'StudyAccess.prepare source read (batch)', stall: ['identity', 1], policy: restricted, expect: ['rejected', [LF, LF]], signal: true },
+    { at: 'StudyAccess.prepare source read (one UID)', stall: ['identity', 1], policy: restricted, one: true, expect: ['rejected', [SX, LF]], signal: true },
+    { at: 'StudyAccess.prepare re-check', stall: ['policy', 3], policy: restricted, expect: ['rejected', [LF, LF]] },
+    { at: 'StudyAccess.allowed re-check', stall: ['policy', 4], policy: restricted, expect: ['rejected', [LF, LF]] },
+    { at: 'served source reads', read: 'hang', policy: null, expect: ['rejected', [LF, LF]] },
+    { at: 'member rows re-check', stall: ['states', 2], policy: null, expect: ['rejected', [LF, LF]] },
+    { at: 'policy re-check', stall: ['policy', 5], policy: restricted, expect: ['rejected', [LF, LF]] },
+    { at: 'access-record receipt', receipt: true, policy: null, expect: [503, 'W9_AUDIT_UNAVAILABLE'] },
+  ];
+  const inventory = [];
+  for (const p of points) {
+    const members = p.one ? [study({ state: { teleInstitutionId: B, ts: 'sent' } }), study()] : [study({ read: p.read }), study({ read: p.read })];
+    const w = world(members, { policy: p.policy });
+    if (p.stall) w.stalls[p.stall[0]] = p.stall[1];
+    let release = null;
+    if (p.receipt) w.port.during = () => new Promise(resolve => { release = resolve; });
+    const run = track(resolveFor(w, reader(), body(ids(members))));
+    await until(() => (p.receipt ? !!release : p.read ? w.calls.reads.length === 2 : !!w.held), p.at + ': the wait is reached');
+    t.mock.timers.tick(9999);
+    await settle(); await settle();
+    assert.equal(run.settled, false, p.at + ': nothing is decided before ten seconds');
+    t.mock.timers.tick(1);
+    await until(() => run.settled, p.at + ': the deadline answers the resolve');
+    assert.deepEqual(outcome(run), p.expect, p.at + ': the deadline answers with the typed timeout result');
+    if (p.signal) assert.ok(w.held.signal instanceof AbortSignal && w.held.signal.aborted, p.at + ': the resolve signal reaches the read and aborts');
+    // the held wait answers late: nothing changes, nothing is provided, and a late receipt learns its body never went out
+    const before = JSON.stringify(outcome(run));
+    if (w.held) w.held.release();
+    if (release) release();
+    await settle(); await settle(); await settle();
+    assert.equal(JSON.stringify(outcome(run)), before, p.at + ': a late answer is discarded');
+    if (p.receipt) {
+      await until(() => w.port.finished.length === 1, p.at + ': the late receipt is finished');
+      assert.deepEqual(w.port.finished.map(f => f.outcome), ['aborted'], p.at + ': a late receipt is recorded as an aborted transfer');
+    } else assert.deepEqual([w.port.prepared.length, w.port.finished.length], [0, 0], p.at + ': nothing is provided after the deadline');
+    noWrites(w);
+    inventory.push({ at: p.at, outcome: outcome(run), signal_aborted: p.signal ? w.held.signal.aborted : undefined });
+  }
+  t.diagnostic(JSON.stringify(inventory));
 });
 
 // SRW9-2 binding precondition: Module A binds a real store only when this case runs - EMR-B2 verified request facts let the
