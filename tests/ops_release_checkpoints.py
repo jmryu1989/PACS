@@ -1371,10 +1371,21 @@ def layer_valid(raw, *, layer_binding, checkpoint_id, observation, observation_f
         fail("the record judges another capture observation")
     if record["descriptor_sha256"] != sha256(descriptor_raw) or type(descriptor) is not dict:
         fail("the record judges with another descriptor")
+    # Every successful adapter returns this descriptor. Its diagnostic probe is opaque, but consumed fields must
+    # have their declared shapes even when the layer has no regenerated changes that would otherwise read them.
+    orthanc = present.get(REGENERATED_ROLE)
+    if not (all(_texts(descriptor.get(key)) for key in ("reasons", "hostid_reasons"))
+            and all(type(descriptor.get(key)) is bool for key in ("applicable", "hostid_regenerated"))
+            and all(type(descriptor.get(key)) is str for key in ("container_name", "pinned_image"))
+            and all(key in descriptor and (descriptor[key] is None if orthanc is None else type(descriptor[key]) is str)
+                    for key in ("container_id", "actual_image"))
+            and all(key in descriptor and (type(descriptor[key]) is dict
+                                           or (descriptor["applicable"] is False and descriptor[key] is None))
+                    for key in ("image", "generated"))):
+        fail("the regenerated-artifact descriptor has missing or mistyped fields")
     # The Orthanc descriptor describes this capture's Orthanc container on the side's pin (consultation C6).
     if descriptor.get("container_name") != names[REGENERATED_ROLE] or descriptor.get("pinned_image") != pins[REGENERATED_ROLE]:
         fail("orthanc: the descriptor names another container or another pinned image")
-    orthanc = present.get(REGENERATED_ROLE)
     claimed = (descriptor.get("container_id"), descriptor.get("actual_image"))
     if orthanc is None and (claimed != (None, None) or descriptor.get("applicable") is not False):
         fail("orthanc: the descriptor claims a container the capture observed ABSENT")
@@ -1973,14 +1984,19 @@ def manifest_envelope(manifest, spec):
             "BUNDLE_INVALID", "the parent reference is neither null (a root) nor a reference to a parent bundle")
     stack = owned.get("stack") if type(owned) is dict else None
     require(type(owned) is dict and type(owned.get("token")) is str and _texts(owned.get("projects"))
-            and type(owned.get("volumes", {})) is dict and type(owned.get("networks", [])) is list
-            and all(type(item) is dict and type(item.get("name")) is str and type(item.get("labels", {})) is dict and type(item.get("member")) is str
+            and type(owned.get("volumes", None if spec["volumes"] else {})) is dict and type(owned.get("networks", [])) is list
+            and all(type(item) is dict and type(item.get("name")) is str and type(item.get("labels")) is dict
+                    and all(type(key) is str and type(value) is str for key, value in item["labels"].items()) and type(item.get("member")) is str
                     for item in owned.get("volumes", {}).values())
-            and all(type(item) is dict and type(item.get("name")) is str and type(item.get("labels") or {}) is dict
+            and all(type(item) is dict and type(item.get("name")) is str and (item.get("labels") is None or type(item.get("labels")) is dict)
+                    and all(type(key) is str and type(value) is str for key, value in (item.get("labels") or {}).items())
                     for item in owned.get("networks", []))
             and type(stack) is dict and type(stack.get("root")) is str and type(stack.get("containers")) is dict
             and set(stack["containers"]) == set(intro.ROLES) and all(type(name) is str for name in stack["containers"].values()), "BUNDLE_INVALID",
             "the owned token, projects, volumes, networks or stack")
+    # Restore opens these members after creating the resources. Resolve them while the envelope is still effect-free.
+    require(all(any(member["name"] == volume["member"] and member["category"] == "volume:" + category for member in manifest["members"])
+                for category, volume in owned.get("volumes", {}).items()), "BUNDLE_INVALID", "an owned volume has no captured member")
 
 
 @dataclass(frozen=True)
@@ -2250,6 +2266,13 @@ def bundle_inputs(manifest, bundle_dir):
     plan_sha = intro.plan_identity(plan)
     state = document(manifest["bindings"]["state"]["path"], "state")
     mismatch(type(state) is dict, "the bound state is not an object")
+    # Authenticate the preflight's state and lock bytes before interpreting a damaged member as a lock mismatch.
+    check_bindings(tree, manifest["bindings"], required=("state", "lock") if CHECKPOINTS[checkpoint]["lock"] else ("state",))
+    require(state.get("status") == CHECKPOINTS[checkpoint]["status"], "LOCK_MISMATCH", "the bound state has no checkpoint status")
+    if CHECKPOINTS[checkpoint]["lock"]:
+        lock = _obj(manifest["bindings"].get("lock"))
+        require(_binding(lock) and type(state.get("lock_token")) is str
+                and member(lock["path"], "lock") == state["lock_token"].encode(), "LOCK_MISMATCH", "the bound state has no matching lock token")
     require(plan_sha == descriptor.get("plan_sha256") == identity.get("plan_sha256") == state.get("plan_sha256"), "BUNDLE_INPUT_MISMATCH",
             "the plan bytes, the descriptor, the state and the identity name different plans")
     target_sha = sha256(intro.canonical(target))

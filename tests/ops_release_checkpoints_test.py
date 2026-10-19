@@ -5198,11 +5198,19 @@ def swap_member(bundle, rel, data):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=io.BytesIO(tree.read_bytes()), mode="r:") as source, \
             tarfile.open(fileobj=buffer, mode="w:", format=tarfile.PAX_FORMAT) as target:
+        found = False
         for member in source.getmembers():
             content = source.extractfile(member).read() if member.isfile() else None
             if member.isfile() and (member.name[2:] if member.name.startswith("./") else member.name) == rel:
+                found = True
+                if data is None:
+                    continue
                 content, member.size = data, len(data)
             target.addfile(member, io.BytesIO(content) if content is not None else None)
+        if not found and data is not None:
+            member = tarfile.TarInfo(rel)
+            member.size = len(data)
+            target.addfile(member, io.BytesIO(data))
     tree.write_bytes(buffer.getvalue())
 
 
@@ -6005,6 +6013,8 @@ R9_EFFECTS = ("admission_success", "restore_boundary", "daemon_calls", "daemon_m
 
 
 def _json_type(value):
+    if value is R8_MISSING:
+        return "MISSING-KEY"
     return {dict: "object", list: "array", str: "string", int: "integer", bool: "boolean", type(None): "null", float: "number"}[type(value)]
 
 
@@ -6050,7 +6060,7 @@ def admission_bundle(test, checkpoint_id="source-b0", *, manifest_change=None, t
     return renamed
 
 
-def deep_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-seed"):
+def deep_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-seed", *, request_change=None):
     """The live leaf's stored-request admission (CheckpointSegments.segment) of `bundle` past the host observation and
     through the real admit_resume (a call-through spy that ends the run once it has returned, before any restore): the
     gate permission from gate.live_run in this test's own state folder; host, runtime, source, tool-tree (the bundle's
@@ -6061,6 +6071,7 @@ def deep_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-se
     manifest = json.loads((bundle / "manifest.json").read_bytes())
     recorded = _obj_or_none(manifest.get("identity"))
     runtime, images = _obj_or_none(recorded.get("runtime_identity")), _obj_or_none(recorded.get("image_ids"))
+    observed_runtime = {**runtime, "arch": identity_fixture()["runtime_identity"]["arch"]}
     source = {"tool": {"sha256": recorded.get("tool_tree_sha256_at_checkpoint")}, "source": {"sha256": recorded.get("source_tree_sha256")},
               "harness": {"sha256": recorded.get("harness_tree_sha256")}, "tool_files": recorded.get("tool_files_actual_raw_sha256")}
     leaf = cp.registry_leaf(list(cp.DEFAULT_PROOF_LEAVES), unit)
@@ -6072,11 +6083,13 @@ def deep_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-se
                "source_manifest": {"path": str(source_path), "sha256": cp.sha256(source_path.read_bytes())},
                "output_root": str(bundle.parent.parent), "evidence_root": str(folder / "evidence")}
     request_path = folder / "request.json"
+    if request_change is not None:
+        request_change(request)
     request_path.write_bytes(cp.canonical(request) + b"\n")
     calls = {"host_reads": 0, "admit_resume": 0, "admission_success": 0, "restore_boundary": 0}
     facts = {"os": "linux", "docker_os": "Ubuntu 24.04 LTS", "daemon_ok": True, "daemon_identity": recorded.get("daemon_identity"),
              "available_ram_bytes": 12 * 1024 ** 3, "available_disk_bytes": 50 * 1024 ** 3, "required_disk_bytes": 20 * 1024 ** 3,
-             "foreign_containers": [], "host_key_sha256": recorded.get("host_key_sha256"), "architecture": runtime.get("arch"),
+             "foreign_containers": [], "host_key_sha256": recorded.get("host_key_sha256"), "architecture": observed_runtime["arch"],
              "absolute_fixture_root": recorded.get("absolute_fixture_root"), "docker_endpoint": "unix:///var/run/docker.sock",
              "endpoint_selectors": [], "gate_state": str(state)}
 
@@ -6102,7 +6115,7 @@ def deep_admission(test, bundle, unit="release-tools-checkpoints-proof-prefix-se
     before = _tree_digest(bundle)
     with patch.object(gate, "STATE", state), patch.dict(os.environ, {cp.REQUEST_ENV: str(request_path), "DOCKER_HOST": ""}), \
             patch.object(cp, "source_identity", lambda *args, **kwargs: copy.deepcopy(source)), \
-            patch.object(cp, "runtime_identity", lambda *args, **kwargs: copy.deepcopy(runtime)), \
+            patch.object(cp, "runtime_identity", lambda *args, **kwargs: copy.deepcopy(observed_runtime)), \
             patch.object(live, "tool_tree_files", lambda root: {}), \
             patch.object(live.rehearsal.CheckpointDocker, "runtime_facts", staticmethod(lambda: {})), \
             patch.object(live.rehearsal.CheckpointDocker, "host_facts", staticmethod(host)), \
@@ -6123,6 +6136,8 @@ def _r9_cell(path, value, normal, caller, result, *, read=True):
     field - the loader binds a non-volume checkpoint's fixture documents by SHA-256 only - so it may accept it)."""
     outcome = result.get("outcome", "") if type(result) is dict else result
     effects = {key: result[key] for key in (*R9_EFFECTS, "fixture_root_created") if type(result) is dict and key in result}
+    if type(result) is dict:
+        effects.update(result.get("effects", {}))
     mistyped = _json_type(value) != _json_type(normal) or (path == ("parent",) and value is not None)
     refused = not outcome.startswith(("ACCEPTED", "SYNTHETIC_ADMISSION_END", "EXCEPTION"))
     if outcome.startswith("EXCEPTION"):
@@ -6194,7 +6209,10 @@ def typed_reads_matrix(test, *, fields=None, include_tree=True, include_segment=
                         bound = value
                     else:
                         _put(bound, path, value)
-                    index_path.write_bytes(cp.canonical(bound) + b"\n")
+                    if bound is R8_MISSING:
+                        index_path.unlink()
+                    else:
+                        index_path.write_bytes(cp.canonical(bound) + b"\n")
                 else:
                     segment_path = Path(index["segment"])
                     segment = json.loads(segment_path.read_bytes())
@@ -6204,8 +6222,8 @@ def typed_reads_matrix(test, *, fields=None, include_tree=True, include_segment=
                     segment_path.write_bytes(segment_raw)
                     index_path.write_bytes(cp.canonical({**json.loads(index_path.read_bytes()), "segment_sha256": cp.sha256(segment_raw)}) + b"\n")
                 field = ("index",) + path if document == "index" else path
-                rows.append(_r9_cell(field, value, normal, "resolve_parent", _typed(lambda: cp.resolve_parent(proof.leaves, child, root))))
-                rows.append(_r9_cell(field, value, normal, "leaf_request", _typed(lambda: cp.leaf_request(proof.leaves, child, root))))
+                rows.append(_r9_cell(field, value, normal, "resolve_parent", r10_effects(lambda: cp.resolve_parent(proof.leaves, child, root))))
+                rows.append(_r9_cell(field, value, normal, "leaf_request", r10_effects(lambda: cp.leaf_request(proof.leaves, child, root))))
     return rows
 
 
@@ -6278,6 +6296,509 @@ class CheckpointTypedReadTests(RefusalAssertions, TempCase):
         for row in rows:
             with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
                 self.assertIn(row["verdict"], ("PASS", "PASS (not read by this caller)", "NOT RUN (fixture)"), "CKPT9_TYPED_READ: " + json.dumps(row))
+
+
+# ── r10 (D1600, CKPT8-3/4): missing keys, populated volume restores and native A08 ──
+R10_SUBSTITUTIONS = (("MISSING-KEY", R8_MISSING), *R9_SUBSTITUTIONS)
+R10_STACK = ("context", "stacks", "source")
+R10_NESTED_TREE_FIELDS = (("context", "b0", "dir"), ("context", "b0", "manifest_sha256"), R10_STACK + ("plan_sha256",),
+                          R10_STACK + ("plan_document", "seed", "b0_dir"), R10_STACK + ("plan_document", "target_manifest_sha256"),
+                          R10_STACK + ("target", "compose_files", 0), R10_STACK + ("target", "declared_overlays", 0),
+                          R10_STACK + ("target", "declared_overlays", 0, "file"), R10_STACK + ("target", "declared_overlays", 0, "binds"),
+                          R10_STACK + ("target", "declared_overlays", 0, "binds", 0),
+                          R10_STACK + ("target", "declared_overlays", 0, "binds", 0, "source"))
+R10_INDEX_FIELDS = (*R9_INDEX_FIELDS, ("verdict",), ("unit",), ("run_json_sha256",), ("logs", "stdout.log"), ("logs", "stderr.log"),
+                    *(("raw", key, field) for key in ("checkpoint",) for field in ("path", "sha256")))
+R10_LAYER_READ_FIELDS = (("roles",), ("roles", "orthanc"), ("descriptor_sha256",), ("outcome",),
+                         *(("roles", "orthanc", key) for key in ("container_id", "image", "changes", "verdicts")),
+                         ("roles", "orthanc", "changes", 0), ("roles", "orthanc", "verdicts", 0),
+                         ("roles", "orthanc", "verdicts", 0, "verdict"))
+
+
+def r10_rebind(bundle, manifest):
+    """A finite malformed-input fixture: rebind its manifest name without replacing any judgement."""
+    raw = cp.canonical(manifest) + b"\n"
+    destination = bundle.parent / cp.sha256(raw)
+    if destination != bundle:
+        bundle.rename(destination)
+    (destination / "manifest.json").write_bytes(raw)
+    return destination
+
+
+def r10_copy(test, bundle):
+    destination = test.tempdir("kin-r10-bundle-") / "bundles" / bundle.name
+    shutil.copytree(bundle, destination)
+    return destination
+
+
+def r10_bound_member(bundle, manifest, binding, data):
+    """Rebind one fixture member's bytes, its binding, the archive and the payload inventory for finite negative cases."""
+    swap_member(bundle, manifest["bindings"][binding]["path"], data)
+    manifest["bindings"][binding]["sha256"] = cp.sha256(data)
+    tree = bundle / "payload/fixture-tree.tar"
+    for member in manifest["members"]:
+        if member["name"] == "fixture-tree.tar":
+            member.update(sha256=cp.sha256(tree.read_bytes()), bytes=tree.stat().st_size)
+    manifest["identity"]["payload_manifest_sha256"] = cp.sha256(cp.canonical(manifest["members"]))
+    return r10_rebind(bundle, manifest)
+
+
+def r10_volume_bundle(test):
+    """The real capture/seal over populated synthetic volumes, with the native database facts and a tool-tree member."""
+    import ops_release_checkpoints_native_test as native
+    real_seal = cp.PendingBundle.seal
+
+    def seal_with_facts(pending, **kwargs):
+        boundary = copy.deepcopy(kwargs["boundary"])
+        boundary["facts"].update(migrations=copy.deepcopy(native.MIGRATIONS_BEFORE), legacy={"schema_owner": "kin_legacy_group"},
+                                 realm={"realm_members": 2, "disabled": 1, "service_accounts": 1},
+                                 data={"study": [{"uid": native.rehearsal.SYNTHETIC_STUDY}]},
+                                 frame={"instances": 1, "frame_sha256": native.rehearsal.SYNTHETIC_FRAME["sha256"]})
+        now = datetime.now(timezone.utc)
+        boundary.update(window_end=(now + timedelta(days=1)).isoformat(), tls_not_after=(now + timedelta(days=2)).isoformat())
+        tool = raw_tar([])
+        pending.add("tool-tree.tar", "tool-tree", tool)
+        identity = {**kwargs["identity"], "tool_tree_sha256_at_checkpoint": cp.tree_manifest_from_bytes({})["sha256"]}
+        return real_seal(pending, **{**kwargs, "boundary": boundary, "identity": identity})
+    with patch.object(cp.PendingBundle, "seal", seal_with_facts):
+        bundle, _ = orthanc_capture(test)
+    return bundle
+
+
+def r10_native_roundtrip(test, bundle):
+    """Real verify_bundle, A08 predicates and Smoke.check/log; stop after both A08 checks, before any Docker access."""
+    import ops_release_checkpoints_native_test as native
+    smoke = native.Smoke(test.tempdir("kin-r10-native-"))
+    manifest = json.loads((bundle / "manifest.json").read_bytes())
+    checks, docker_calls = [], []
+    real_check = smoke.check
+
+    def check(*args, **kwargs):
+        result = real_check(*args, **kwargs)
+        checks.append(args[1])
+        if len(checks) == 2:
+            raise cp.Refused("SYNTHETIC_A08_END", "both actual A08 predicates and their log writes completed")
+        return result
+
+    def docker(*args, **kwargs):
+        docker_calls.append(1)
+        raise AssertionError("unexpected Docker access")
+    with patch.object(smoke, "check", check), patch.object(smoke, "docker", docker):
+        try:
+            smoke.roundtrip(None, manifest.get("checkpoint"), {"bundle": bundle, "manifest": manifest}, all_running=True)
+            outcome = "ACCEPTED"
+        except native.SmokeFailure as error:
+            outcome = "A08_PREDICATE_FAILED: " + str(error)
+        except cp.Refused as error:
+            outcome = error.code + ": " + str(error)
+        except Exception as error:
+            outcome = "EXCEPTION " + type(error).__name__ + ": " + str(error)
+    log = smoke.evidence / "smoke-log.jsonl"
+    rows = [json.loads(line) for line in log.read_bytes().splitlines()] if log.exists() else []
+    return {"outcome": outcome, "a08_rows": sum("A08" in row["ids"] for row in rows),
+            "a08_pass_rows": sum("A08" in row["ids"] and row["outcome"] == "PASS" for row in rows),
+            "docker_calls": len(docker_calls), "native_log": str(log)}
+
+
+def r10_effects(action):
+    """Call-through counters around the actual extraction/network operations; exceptions keep their effect counts."""
+    effects = {"extraction": 0, "create_network": 0, "a08_rows": 0, "native_temp_archives": 0}
+    extract, network, write = cp.extract_tree, FakeBackend.create_network, Path.write_bytes
+
+    def extracting(*args, **kwargs):
+        effects["extraction"] += 1
+        return extract(*args, **kwargs)
+
+    def networking(*args, **kwargs):
+        effects["create_network"] += 1
+        return network(*args, **kwargs)
+
+    def writing(path, data):
+        if path.name.startswith("sealed-") and path.suffix == ".tar":
+            effects["native_temp_archives"] += 1
+        return write(path, data)
+    with patch.object(cp, "extract_tree", extracting), patch.object(FakeBackend, "create_network", networking), patch.object(Path, "write_bytes", writing), \
+            contextlib.redirect_stdout(io.StringIO()):
+        try:
+            result = action()
+            result = result if type(result) is dict and "outcome" in result else {"outcome": "ACCEPTED"}
+        except cp.Refused as error:
+            result = {"outcome": error.code + ": " + str(error)}
+        except Exception as error:
+            result = {"outcome": "EXCEPTION " + type(error).__name__ + ": " + str(error)}
+    return {**result, "effects": {**effects, **{key: result[key] for key in ("a08_rows", "docker_calls", "check_rows") if key in result},
+                                 **({"native_raw_files": len(result["raw_files"])} if "raw_files" in result else {})}}
+
+
+def r10_sealed_markers(test, bundle):
+    import ops_release_checkpoints_native_test as native
+    smoke = native.Smoke(test.tempdir("kin-r10-markers-"))
+    smoke.private = smoke.evidence
+    return smoke.sealed_markers(cp.verify_bundle(bundle))
+
+
+def r10_callers(test, bundle, *, native=False, chain=False):
+    callers = {
+        "load_bundle": lambda: cp.load_bundle(bundle),
+        "restore_checkpoint": lambda: o7_restore(test, bundle),
+        "restore_boundary": lambda: restore_wrapper(test, bundle),
+        "live admission": lambda: deep_admission(test, bundle, "release-tools-checkpoints-proof-prefix-verify" if native
+                                                   else "release-tools-checkpoints-proof-prefix-seed"),
+    }
+    if chain:
+        callers["parent_chain"] = lambda: cp.parent_chain(bundle.parent, bundle.name)
+    if native:
+        callers["native roundtrip"] = lambda: r10_native_roundtrip(test, bundle)
+        callers["native sealed_markers"] = lambda: r10_sealed_markers(test, bundle)
+        callers["native regenerated"] = lambda: native_regenerated(test, sealed_of(bundle, {}))
+    results = {}
+    for name, action in callers.items():
+        before = _tree_digest(bundle)
+        results[name] = {**r10_effects(action), "bundle": str(bundle), "input_sha256": cp.sha256(cp.canonical(before)),
+                         "inputs_unchanged": before == _tree_digest(bundle)}
+    return results
+
+
+def r10_cell(path, label, value, normal, caller, result, *, optional=False, read=True, native_facts=False):
+    outcome = result["outcome"]
+    accepted = outcome.startswith(("ACCEPTED", "SYNTHETIC_ADMISSION_END", "SYNTHETIC_A08_END"))
+    malformed = (value is R8_MISSING and not optional) or (value is not R8_MISSING and type(value) is not type(normal))
+    effects = result["effects"]
+    # Generic capture/restore compares these facts opaquely; only the native predicate indexes their inner shape.
+    if native_facts and path[2:3] in (("migrations",), ("legacy",), ("data",), ("realm",), ("frame",)) and caller != "native roundtrip":
+        read = False
+    if path in (("state", "status"), ("state", "lock_token")) and caller == "live admission":
+        read = False  # this call-through admission sentinel stops before restore/bundle_inputs
+    if path in (("identity", "image_ids", "previous"), ("identity", "image_ids", "release")) and caller not in ("restore_checkpoint", "restore_boundary", "live admission"):
+        read = False  # bundle_inputs is the consumer requiring these image groups
+    if path == ("identity", "runtime_identity", "arch") and caller != "live admission":
+        read = False  # the generic identity permits runtime keys; admission reads the architecture
+    if path == ("identity", "image_ids", "helper") and caller != "native roundtrip":
+        read = False  # generic identity image groups are maps or scalar IDs; only native requires this scalar key
+    if label == "normal" and not accepted:
+        verdict = "FAIL: normal control refused"
+    elif label == "normal" and caller == "native roundtrip" and result.get("a08_pass_rows") != 2:
+        verdict = "FAIL: normal A08 predicates did not both pass"
+    elif result.get("inputs_unchanged") is False:
+        verdict = "FAIL: bundle inputs changed"
+    elif outcome.startswith("EXCEPTION"):
+        verdict = "FAIL: exception"
+    elif outcome.startswith("A08_PREDICATE_FAILED"):
+        verdict = "FAIL: malformed input reached A08" if malformed else "PASS: normal-type predicate rejection"
+    elif accepted and malformed and read:
+        verdict = "FAIL: malformed input accepted"
+    elif not accepted and any(effects.values()):
+        verdict = "FAIL: effects before refusal"
+    elif not read:
+        verdict = "NOT_READ"
+    else:
+        verdict = "PASS"
+    return {"field": ".".join(map(str, path)), "substitution": label, "normal": _json_type(normal), "caller": caller,
+            "outcome": outcome, "effects": effects, "verdict": verdict, "optional": optional,
+            **{key: result[key] for key in ("a08_pass_rows", "native_log", "bundle", "input_sha256", "inputs_unchanged") if key in result}}
+
+
+def r10_volume_fields(manifest):
+    paths = list(R9_MANIFEST_FIELDS)
+    paths += [("identity", key) for key in cp.IDENTITY_FIELDS]
+    paths += [("identity", "image_ids", key) for key in ("helper", "previous", "release")]
+    paths += [("identity", "runtime_identity", "arch")]
+    paths += [("members", 0), *(("members", 0, key) for key in ("name", "category", "sha256"))]
+    for name in manifest["bindings"]:
+        paths += [("bindings", name), ("bindings", name, "path"), ("bindings", name, "sha256")]
+    for category in manifest["owned"]["volumes"]:
+        paths += [("owned", "volumes", category), *(("owned", "volumes", category, key) for key in ("name", "labels", "member"))]
+    paths += [("owned", "networks", 0), ("owned", "networks", 0, "name"), ("owned", "networks", 0, "labels")]
+    paths += [("owned", "stack", "containers", role) for role in intro.ROLES]
+    facts = ("boundary", "facts")
+    paths += [facts, facts + ("migrations",), facts + ("migrations", 0), facts + ("legacy",), facts + ("legacy", "schema_owner"),
+              facts + ("data",), facts + ("data", "study"), facts + ("data", "study", 0), facts + ("data", "study", 0, "uid"),
+              facts + ("realm",), facts + ("frame",), facts + ("containers",)]
+    paths += [facts + ("realm", key) for key in ("realm_members", "disabled", "service_accounts")]
+    paths += [facts + ("frame", key) for key in ("instances", "frame_sha256")]
+    paths += [facts + ("containers", role) for role in intro.ROLES]
+    paths += [facts + ("containers", role, key) for role in intro.ROLES for key in ("id", "image", "running", "project", "mounts")]
+    return list(dict.fromkeys(paths))
+
+
+def r10_matrix(test, *, volume_only=False, fields=None, source_fields=None, tree_fields=None, include_parents=True, include_request=True):
+    """Finite actual-caller table. A normal control precedes each family; optional/not-read cells are explicit.
+
+    The source-b0 fixture documents are changed after an ordinary seal, so even a missing state/status reaches the
+    real readers (the former eight NOT RUN fixture cells). All current bytes/bindings are rebound; no validator is mocked.
+    """
+    rows = test.r10_rows = []
+    volume = r10_volume_bundle(test)
+    volume_manifest = json.loads((volume / "manifest.json").read_bytes())
+    for caller, result in r10_callers(test, volume, native=True, chain=True).items():
+        rows.append(r10_cell(("control", "populated-volume"), "normal", {}, {}, caller, result))
+    paths = r10_volume_fields(volume_manifest) if fields is None else fields
+    for path in paths:
+        normal = _get(volume_manifest, path)
+        for label, value in R10_SUBSTITUTIONS:
+            bundle = r10_copy(test, volume)
+            manifest = copy.deepcopy(volume_manifest)
+            _put(manifest, path, value)
+            bundle = r10_rebind(bundle, manifest)
+            # A missing sequence element is a smaller sequence, not a missing object key.
+            optional = isinstance(path[-1], int) or path in (("parent",), ("boundary", "window_end"), ("boundary", "tls_not_after"),
+                                                          ("owned", "networks"), ("owned", "networks", 0, "labels"))
+            for caller, result in r10_callers(test, bundle, native=True, chain=path in R9_CHAIN_READS).items():
+                collection_entry = len(path) == 3 and path[:2] == ("owned", "volumes")
+                required_native_pg = caller in ("native roundtrip", "native sealed_markers") and path == ("owned", "volumes", "pg")
+                rows.append(r10_cell(path, label, value, normal, caller, result, optional=optional or (collection_entry and not required_native_pg),
+                                     native_facts=path[:2] == ("boundary", "facts")))
+    if volume_only:
+        return rows
+    # Preserve r9's source-b0 and fixture-tree coverage; missing is now a first-class substitution.
+    def populated(parts):
+        stack = parts["context"]["stacks"]["source"]
+        stack["plan_document"]["seed"] = {"b0_dir": parts["context"]["b0"]["dir"]}
+        stack["target"]["declared_overlays"] = [{"file": stack["root"] + "/overlay.yml", "binds": [{"source": stack["root"] + "/inputs"}]}]
+    source = admission_bundle(test, tamper=populated)
+    source_manifest = json.loads((source / "manifest.json").read_bytes())
+    for caller, result in r10_callers(test, source, chain=True).items():
+        rows.append(r10_cell(("control", "source-b0"), "normal", {}, {}, caller, result))
+    for path in R9_MANIFEST_FIELDS if source_fields is None else source_fields:
+        for label, value in R10_SUBSTITUTIONS:
+            bundle = r10_copy(test, source)
+            manifest = copy.deepcopy(source_manifest)
+            _put(manifest, path, value)
+            bundle = r10_rebind(bundle, manifest)
+            optional = path in (("parent",), ("boundary", "window_end"), ("boundary", "tls_not_after"), ("owned", "volumes"), ("owned", "networks"))
+            for caller, result in r10_callers(test, bundle, chain=path in R9_CHAIN_READS).items():
+                rows.append(r10_cell(path, label, value, _get(source_manifest, path), caller, result, optional=optional))
+    documents = {name: json.loads(cp.tree_member_bytes(source / "payload/fixture-tree.tar", source_manifest["bindings"][name]["path"]))
+                 for name in ("context", "state")}
+    for path in (*R9_TREE_FIELDS, ("state", "lock_token"), *R10_NESTED_TREE_FIELDS) if tree_fields is None else tree_fields:
+        normal = _get(documents, path)
+        for label, value in R10_SUBSTITUTIONS:
+            bundle = r10_copy(test, source)
+            manifest, parts = copy.deepcopy(source_manifest), copy.deepcopy(documents)
+            # A whole document cannot lose its root key; missing means the bound archive member is absent.
+            if len(path) == 1 and value is R8_MISSING:
+                raw = None
+            else:
+                _put(parts, path, value)
+                descriptor = _obj_or_none(_obj_or_none(_obj_or_none(parts.get("context")).get("stacks")).get("source"))
+                if type(descriptor.get("plan_document")) is dict and type(descriptor.get("target")) is dict:
+                    descriptor["plan_document"]["target_manifest_sha256"] = cp.sha256(intro.canonical(descriptor["target"]))
+                    descriptor["plan_sha256"] = intro.plan_identity(descriptor["plan_document"])
+                    if type(parts.get("state")) is dict:
+                        parts["state"]["plan_sha256"] = descriptor["plan_sha256"]
+                    manifest["identity"].update(plan_sha256=descriptor["plan_sha256"],
+                                                 target_manifest_sha256=descriptor["plan_document"]["target_manifest_sha256"])
+                if value is R8_MISSING:
+                    node = _get(parts, path[:-1])
+                    if type(node) is dict:
+                        node.pop(path[-1], None)
+                    # A list element was already deleted by the first substitution above.
+                else:
+                    _put(parts, path, value)
+                raw = cp.canonical(parts[path[0]]) + b"\n"
+            for name in ("context", "state"):
+                data = raw if name == path[0] else cp.canonical(parts[name]) + b"\n"
+                swap_member(bundle, manifest["bindings"][name]["path"], data)
+                if data is not None:
+                    manifest["bindings"][name]["sha256"] = cp.sha256(data)
+            tree = bundle / "payload/fixture-tree.tar"
+            for member in manifest["members"]:
+                if member["name"] == "fixture-tree.tar":
+                    member.update(sha256=cp.sha256(tree.read_bytes()), bytes=tree.stat().st_size)
+            manifest["identity"]["payload_manifest_sha256"] = cp.sha256(cp.canonical(manifest["members"]))
+            bundle = r10_rebind(bundle, manifest)
+            optional = isinstance(path[-1], int) or path[-1] in ("binds", "b0_dir") or path in (("context", "stacks", "source", "plan_document", "seed"), ("state", "b0"))
+            for caller, result in r10_callers(test, bundle).items():
+                rows.append(r10_cell(path, label, value, normal, caller, result, optional=optional, read=caller != "load_bundle"))
+    # The existing actual BOUND parent reader/request cases, extended with missing keys (whole-index missing is no file).
+    if include_parents:
+        reference = cp.parent_reference(source_manifest, source)
+        for key in reference:
+            for label, value in (("normal", R8_NORMAL), *R10_SUBSTITUTIONS):
+                bundle = r10_copy(test, source)
+                parent = bundle.parent / source.name
+                manifest = copy.deepcopy(source_manifest)
+                manifest["parent"] = copy.deepcopy(reference)
+                _put(manifest["parent"], (key,), value)
+                bundle = r10_rebind(bundle, manifest)
+                shutil.copytree(source, parent)
+                for caller, result in r10_callers(test, bundle, chain=True).items():
+                    rows.append(r10_cell(("parent", key), label, reference[key] if value is R8_NORMAL else value, reference[key],
+                                         caller, result, optional=key != "manifest_sha256",
+                                         read=key != "payload_manifest_sha256" and (caller != "parent_chain" or key == "manifest_sha256")))
+        with patch.dict(globals(), {"R9_SUBSTITUTIONS": R10_SUBSTITUTIONS, "R9_INDEX_FIELDS": R10_INDEX_FIELDS}):
+            rows.extend(typed_reads_matrix(test, fields=(), include_tree=False))
+    if include_request:
+        paths = [(key,) for key in cp.REQUEST_KEYS]
+        paths += [(key, part) for key in ("parent_manifest", "source_manifest") for part in ("path", "sha256")]
+        for path in paths:
+            for label, value in R10_SUBSTITUTIONS:
+                original = []
+
+                def change(request):
+                    original.append(copy.deepcopy(_get(request, path)))
+                    _put(request, path, value)
+                result = r10_effects(lambda: deep_admission(test, source, request_change=change))
+                rows.append(r10_cell(("request",) + path, label, value, original[0], "live admission", result))
+    if fields is None:
+        state = json.loads(cp.tree_member_bytes(volume / "payload/fixture-tree.tar", volume_manifest["bindings"]["state"]["path"]))
+        for key in ("dir", "manifest_sha256"):
+            for label, value in R10_SUBSTITUTIONS:
+                changed = copy.deepcopy(state)
+                _put(changed, ("b0", key), value)
+                bundle = r10_bound_member(r10_copy(test, volume), copy.deepcopy(volume_manifest), "state", cp.canonical(changed) + b"\n")
+                for caller, result in r10_callers(test, bundle, native=True).items():
+                    rows.append(r10_cell(("state", "b0", key), label, value, state["b0"][key], caller, result))
+        layer = json.loads(cp.tree_member_bytes(volume / "payload/fixture-tree.tar", volume_manifest["bindings"]["layer"]["path"]))
+        for path in R10_LAYER_READ_FIELDS:
+            for label, value in R10_SUBSTITUTIONS:
+                record = copy.deepcopy(layer)
+                _put(record, path, value)
+                bundle = r10_bound_member(r10_copy(test, volume), copy.deepcopy(volume_manifest), "layer", cp.canonical(record) + b"\n")
+                for caller, result in r10_callers(test, bundle, native=True).items():
+                    rows.append(r10_cell(("layer",) + path, label, value, _get(layer, path), caller, result, optional=isinstance(path[-1], int)))
+        rows.extend(r10_native_details(test))
+        rows.extend(r10_conditional_reads(test, volume, volume_manifest))
+    return rows
+
+
+def r10_conditional_reads(test, volume=None, volume_manifest=None):
+    """Inputs that exist only on a volume capture or diagnostic-fork index use those actual consumer paths."""
+    rows = []
+    volume = volume or r10_volume_bundle(test)
+    volume_manifest = volume_manifest or json.loads((volume / "manifest.json").read_bytes())
+    context = json.loads(cp.tree_member_bytes(volume / "payload/fixture-tree.tar", volume_manifest["bindings"]["context"]["path"]))
+    path = ("stacks", cp.LINEAGE_STACK[volume_manifest["checkpoint"]], "target", "containers")
+    for label, value in R10_SUBSTITUTIONS:
+        changed = copy.deepcopy(context)
+        _put(changed, path, value)
+        bundle = r10_bound_member(r10_copy(test, volume), copy.deepcopy(volume_manifest), "context", cp.canonical(changed) + b"\n")
+        for caller, result in r10_callers(test, bundle, native=True).items():
+            rows.append(r10_cell(("context",) + path, label, value, _get(context, path), caller, result))
+    unit = "release-tools-checkpoints-proof-late-resume"
+    for key in ("path", "sha256"):
+        for label, value in (("normal", R8_NORMAL), *R10_SUBSTITUTIONS):
+            proof, _, index = o7_index(test, unit=unit)
+            normal = index["raw"]["admission"][key]
+            _put(index, ("raw", "admission", key), value)
+            cp.write_index(proof.root, index)
+            result = r10_effects(lambda: cp.bound_index(proof.root, unit))
+            rows.append(r10_cell(("index", "raw", "admission", key), label, normal if value is R8_NORMAL else value, normal,
+                                 "bound_index (diagnostic-fork)", result))
+    return rows
+
+
+def r10_native_details(test, *, check_shared=False):
+    rows = []
+    original, descriptor = orthanc_capture(test)
+    original_manifest = json.loads((original / "manifest.json").read_bytes())
+    observation = original_manifest["bindings"]["observation"]["path"].rsplit("/", 1)[0]
+    files = cp.tree_folder(original / "payload/fixture-tree.tar", observation)
+    for key in ("reasons", "hostid_reasons", "applicable", "hostid_regenerated", "pinned_image", "container_id", "image", "generated", "probe"):
+        for label, value in (("normal", R8_NORMAL), *R10_SUBSTITUTIONS):
+            changed = copy.deepcopy(descriptor)
+            _put(changed, (key,), value)
+            bundle = r10_copy(test, original)
+            manifest, current = copy.deepcopy(original_manifest), dict(files)
+            current[cp.REGENERATED_FILE] = cp.canonical(changed) + b"\n"
+            request = json.loads(current["request.json"])
+            request["regenerated_sha256"] = cp.sha256(current[cp.REGENERATED_FILE])
+            current["request.json"] = cp.canonical(request) + b"\n"
+            digest = cp.sha256(cp.canonical(request))
+            summary = json.loads(current[cp.OBSERVATION_RESULT])
+            old_commands = "commands-" + cp.OBSERVATION_PHASE + "-" + summary["request_sha256"][:16] + ".jsonl"
+            new_commands = "commands-" + cp.OBSERVATION_PHASE + "-" + digest[:16] + ".jsonl"
+            current[new_commands] = current.pop(old_commands)
+            state = json.loads(current["state.json"])
+            for worker in state["workers"].values():
+                worker["request_sha256"] = digest
+            current["state.json"] = cp.canonical(state) + b"\n"
+            summary["request_sha256"] = digest
+            summary["files"] = {name: cp.sha256(data) for name, data in current.items() if name != cp.OBSERVATION_RESULT}
+            current[cp.OBSERVATION_RESULT] = cp.canonical(summary) + b"\n"
+            for name in files.keys() | current.keys():
+                swap_member(bundle, observation + "/" + name, current.get(name))
+            manifest["bindings"]["observation"]["sha256"] = cp.sha256(current[cp.OBSERVATION_RESULT])
+            layer = json.loads(cp.tree_member_bytes(bundle / "payload/fixture-tree.tar", manifest["bindings"]["layer"]["path"]))
+            layer["observation"]["sha256"] = manifest["bindings"]["observation"]["sha256"]
+            layer["observation"]["request_sha256"] = digest
+            layer["descriptor_sha256"] = request["regenerated_sha256"]
+            # The layer path binds the observation request too; keep that binding coherent so the substituted
+            # descriptor reaches its actual consumer instead of failing at an unrelated stale request path.
+            old_layer = manifest["bindings"]["layer"]["path"]
+            manifest["bindings"]["layer"]["path"] = old_layer.rsplit("/", 2)[0] + "/layer-" + digest[:16] + "/" + cp.LAYER_FILE
+            if manifest["bindings"]["layer"]["path"] != old_layer:
+                swap_member(bundle, old_layer, None)
+            bundle = r10_bound_member(bundle, manifest, "layer", cp.canonical(layer) + b"\n")
+            if check_shared:
+                raw, arguments = _bundle_arguments(bundle)
+                direct = _typed(lambda: cp.layer_valid(raw, **arguments))
+                loaded = _typed(lambda: cp.verify_bundle(bundle))
+                malformed = key != "probe" and (value is R8_MISSING or
+                            (value is not R8_NORMAL and type(value) is not type(descriptor[key])))
+                if malformed:
+                    test.assertTrue(direct.startswith("LAYER_INVALID"), "CKPT10_SHARED_DESCRIPTOR: " + direct)
+                    test.assertTrue(loaded.startswith("BUNDLE_INVALID"), "CKPT10_SHARED_BUNDLE: " + loaded)
+                elif value is R8_NORMAL or key == "probe" or key in ("reasons", "hostid_reasons"):
+                    test.assertEqual(direct, "ACCEPTED", "CKPT10_SHARED_NORMAL: " + direct)
+                    test.assertEqual(loaded, "ACCEPTED", "CKPT10_SHARED_NORMAL_BUNDLE: " + loaded)
+            result = r10_effects(lambda: native_regenerated(test, sealed_of(bundle, changed)))
+            # probe is diagnostic metadata returned unchanged: no native predicate or typed read depends on its shape.
+            rows.append(r10_cell(("descriptor", key), label, descriptor[key] if value is R8_NORMAL else value, descriptor[key],
+                                 "native regenerated", result, optional=key == "probe", read=key != "probe"))
+    return rows
+
+
+class CheckpointMissingReadTests(RefusalAssertions, TempCase):
+    def test_volume_fields_refuse_before_extraction_or_network_creation(self):
+        fields = (("owned", "volumes"), ("owned", "volumes", "pg", "labels"))
+        rows = r10_matrix(self, volume_only=True, fields=fields)
+        for row in rows:
+            with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
+                self.assertEqual(row["verdict"], "PASS", "CKPT10_VOLUME_BEFORE_EFFECT: " + json.dumps(row))
+
+    def test_native_boundary_fact_shapes_refuse_before_any_a08_output(self):
+        fields = (("boundary", "facts", "migrations", 0), ("boundary", "facts", "legacy"), ("boundary", "facts", "data", "study", 0))
+        rows = r10_matrix(self, volume_only=True, fields=fields)
+        for row in rows:
+            with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
+                self.assertIn(row["verdict"], ("PASS", "NOT_READ", "PASS: normal-type predicate rejection"), "CKPT10_NATIVE_BEFORE_A08: " + json.dumps(row))
+
+    def test_restore_members_and_state_are_checked_before_effects(self):
+        rows = r10_matrix(self, fields=(("owned", "volumes", "pg", "member"),), source_fields=(),
+                          tree_fields=(("state", "status"), ("state", "lock_token")), include_parents=False, include_request=False)
+        for row in rows:
+            with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
+                self.assertIn(row["verdict"], ("PASS", "NOT_READ"), "CKPT10_RESTORE_PREFLIGHT: " + json.dumps(row))
+
+    def test_native_realm_frame_and_resources_are_checked_before_a08(self):
+        fields = (("boundary", "facts", "realm"), ("boundary", "facts", "frame"), ("owned", "volumes", "pg"), ("identity", "image_ids", "helper"))
+        for row in r10_matrix(self, volume_only=True, fields=fields):
+            with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
+                self.assertIn(row["verdict"], ("PASS", "NOT_READ", "PASS: normal-type predicate rejection"),
+                              "CKPT10_NATIVE_REQUIRED_READS: " + json.dumps(row))
+
+    def test_regenerated_detail_fields_are_checked_before_output(self):
+        for row in r10_native_details(self, check_shared=True):
+            self.assertIn(row["verdict"], ("PASS", "NOT_READ"), "CKPT10_NATIVE_DETAIL_TYPED: " + json.dumps(row))
+        descriptor = regenerated_fixture("id-" + target_fixture()["containers"]["orthanc"])
+        descriptor["reasons"] = {}
+        # Observe the ordinary capture path, before archive export or seal; do not construct a malformed verified value.
+        with patch.object(cp.PendingBundle, "seal", autospec=True, side_effect=cp.PendingBundle.seal) as seal_call, \
+                patch.object(FakeBackend, "export_volume", autospec=True, side_effect=FakeBackend.export_volume) as export_call, \
+                patch.object(cp, "write_tree_archive", wraps=cp.write_tree_archive) as tree_call:
+            result = _typed(lambda: orthanc_capture(self, judged=descriptor))
+        self.assertTrue(result.startswith("LAYER_INVALID"), "CKPT10_CAPTURE_DESCRIPTOR: " + result)
+        self.assertEqual((seal_call.call_count, export_call.call_count, tree_call.call_count), (0, 0, 0),
+                         "CKPT10_CAPTURE_BEFORE_EXPORT")
+
+    def test_missing_and_mistyped_fields_through_every_real_caller(self):
+        rows = r10_matrix(self)
+        print("R10_MATRIX " + json.dumps(rows, separators=(",", ":")), flush=True)
+        for row in rows:
+            with self.subTest(field=row["field"], substitution=row["substitution"], caller=row["caller"]):
+                self.assertIn(row["verdict"], ("PASS", "NOT_READ", "PASS: normal-type predicate rejection"),
+                              "CKPT10_TYPED_READ: " + json.dumps(row))
 
 
 # ── T18: mutants of the checkpoint logic (temporary copies of the harness files only) ──
@@ -6481,6 +7002,37 @@ MUTANTS = (
     ("M66", "CheckpointTypedReadTests.test_one_mistyped_read_per_guard_is_its_caller_s_typed_refusal",   # loader: owned untyped
      '    require(type(owned) is dict and type(owned.get("token")) is str and _texts(owned.get("projects"))',
      '    require(True or type(owned) is dict and type(owned.get("token")) is str and _texts(owned.get("projects"))', "checkpoints"),
+    # r10 (D1600): omission/type guards at the restore and verified native boundaries, each killed by a behavioral assertion.
+    ("M67", "CheckpointMissingReadTests.test_volume_fields_refuse_before_extraction_or_network_creation",
+     'owned.get("volumes", None if spec["volumes"] else {})', 'owned.get("volumes", {})', "checkpoints"),
+    ("M68", "CheckpointMissingReadTests.test_volume_fields_refuse_before_extraction_or_network_creation",
+     'type(item.get("labels")) is dict\n                    and all', 'type(item.get("labels", {})) is dict\n                    and all', "checkpoints"),
+    ("M69", "CheckpointMissingReadTests.test_restore_members_and_state_are_checked_before_effects",
+     '    require(all(any(member["name"] == volume["member"]', '    require(True or all(any(member["name"] == volume["member"]', "checkpoints"),
+    ("M70", "CheckpointMissingReadTests.test_restore_members_and_state_are_checked_before_effects",
+     '    require(state.get("status") == CHECKPOINTS[checkpoint]["status"], "LOCK_MISMATCH"',
+     '    require(True, "LOCK_MISMATCH"', "checkpoints"),
+    ("M71", "CheckpointMissingReadTests.test_restore_members_and_state_are_checked_before_effects",
+     '        require(_binding(lock) and type(state.get("lock_token")) is str',
+     '        require(True or _binding(lock) and type(state.get("lock_token")) is str', "checkpoints"),
+    ("M72", "CheckpointMissingReadTests.test_native_boundary_fact_shapes_refuse_before_any_a08_output",
+     '        cp.require(type(facts.get("migrations")) is list', '        cp.require(True or type(facts.get("migrations")) is list', "native"),
+    ("M73", "CheckpointMissingReadTests.test_native_boundary_fact_shapes_refuse_before_any_a08_output",
+     '        cp.require(type(facts.get("legacy")) is dict', '        cp.require(True or type(facts.get("legacy")) is dict', "native"),
+    ("M74", "CheckpointMissingReadTests.test_native_boundary_fact_shapes_refuse_before_any_a08_output",
+     '        cp.require(type(facts.get("data")) is dict', '        cp.require(True or type(facts.get("data")) is dict', "native"),
+    ("M75", "CheckpointMissingReadTests.test_native_realm_frame_and_resources_are_checked_before_a08",
+     '        cp.require(type(facts.get("realm")) is dict', '        cp.require(True or type(facts.get("realm")) is dict', "native"),
+    ("M76", "CheckpointMissingReadTests.test_native_realm_frame_and_resources_are_checked_before_a08",
+     '        cp.require((type(facts.get("frame")) is dict', '        cp.require(True or (type(facts.get("frame")) is dict', "native"),
+    ("M77", "CheckpointMissingReadTests.test_native_realm_frame_and_resources_are_checked_before_a08",
+     '        cp.require(type(manifest["owned"]["volumes"].get("pg")) is dict and',
+     '        cp.require(True or type(manifest["owned"]["volumes"].get("pg")) is dict and', "native"),
+    ("M78", "CheckpointMissingReadTests.test_regenerated_detail_fields_are_checked_before_output",
+     '    if not (all(_texts(descriptor.get(key))', '    if False and not (all(_texts(descriptor.get(key))', "checkpoints"),
+    ("M79", "CheckpointMissingReadTests.test_native_realm_frame_and_resources_are_checked_before_a08",
+     '        cp.require(type(manifest["owned"]["volumes"].get("pg")) is dict, "BUNDLE_INVALID", "native markers require the database volume")',
+     '        pass', "native"),
 )
 RUN_ONE = textwrap.dedent("""\
     import json, sys, unittest
@@ -6530,7 +7082,7 @@ class CheckpointMutationContracts(TempCase):
 
     def test_m01_to_m30_each_killed_by_its_contract(self):
         """T18 (RQC-01..09, 11, CKPT-01..09, CKPT2-01..06, r5, r6, r7, r8): control PASS, then an assertion failure in the named
-        contract for each mutant (M01-M44, M46-M66)."""
+        contract for each mutant (M01-M44, M46-M79)."""
         sources = {name: (TESTS / filename).read_text(encoding="utf-8") for name, filename in MUTANT_TARGETS.items()}
         outcomes = []
         for identifier, case, old, new, target in MUTANTS:

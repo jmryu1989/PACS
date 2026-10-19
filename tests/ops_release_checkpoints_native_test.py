@@ -626,6 +626,7 @@ class Smoke:
         consumer inventory's rule for every reader of a bundle): `verified` is the bundle cp.verify_bundle has just
         verified, and each archive is read once, checked against its member SHA-256 and listed from those bytes."""
         payload, manifest = verified.directory / "payload", verified.manifest
+        cp.require(type(manifest["owned"]["volumes"].get("pg")) is dict, "BUNDLE_INVALID", "native markers require the database volume")
         hashes = {member["name"]: member["sha256"] for member in manifest["members"]}
         listings = {}
         for category, volume in manifest["owned"]["volumes"].items():
@@ -839,6 +840,26 @@ class Smoke:
         manifest = verified.manifest
         cp.require(manifest == sealed["manifest"], "BUNDLE_INVALID", "the manifest given is not the bundle's")
         facts = manifest["boundary"]["facts"]
+        cp.require(type(manifest["owned"]["volumes"].get("pg")) is dict and type(manifest["identity"]["image_ids"].get("helper")) is str
+                   and all(type(facts["containers"].get(role)) is dict and type(facts["containers"][role].get("running")) is bool
+                           for role in ("db", "orthanc")),
+                   "BUNDLE_INVALID", "native roundtrip requires a database volume and the helper image")
+        # This native consumer requires database facts that a generic capture (including an absent DB) need not carry.
+        # Check the verified values before the first evidence row; the A08 predicate below still judges their meaning.
+        cp.require(type(facts.get("migrations")) is list
+                   and all(type(row) is list and len(row) >= 2 and all(type(value) is str for value in row[:2])
+                           for row in facts["migrations"]), "BUNDLE_INVALID", "native migrations are not rows of name/checksum")
+        cp.require(type(facts.get("legacy")) is dict and type(facts["legacy"].get("schema_owner")) is str,
+                   "BUNDLE_INVALID", "native legacy facts have no schema owner")
+        cp.require(type(facts.get("data")) is dict and type(facts["data"].get("study")) is list
+                   and all(type(row) is dict and type(row.get("uid")) is str for row in facts["data"]["study"]),
+                   "BUNDLE_INVALID", "native study facts are not UID rows")
+        cp.require(type(facts.get("realm")) is dict
+                   and all(type(facts["realm"].get(key)) is int for key in ("realm_members", "disabled", "service_accounts")),
+                   "BUNDLE_INVALID", "native realm facts are not integer counts")
+        cp.require((type(facts.get("frame")) is dict and type(facts["frame"].get("instances")) is int
+                    and type(facts["frame"].get("frame_sha256")) is str) if all_running else "frame" not in facts,
+                   "BUNDLE_INVALID", "native frame facts disagree with the running boundary")
         self.check(["A08"], checkpoint_id + ": the boundary facts read the real database (migrations, legacy grants, realm, study, roles)",
                    [row[:2] for row in facts["migrations"]] == MIGRATIONS_BEFORE and facts["legacy"]["schema_owner"] == "kin_legacy_group"
                    and facts["realm"] == {"realm_members": 2, "disabled": 1, "service_accounts": 1}

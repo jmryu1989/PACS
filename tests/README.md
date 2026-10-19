@@ -1824,7 +1824,7 @@ the `commands` smoke precondition (`CheckpointSmokeTests`), the r6 regenerated-a
 (`CheckpointRegeneratedTests`: the role × image × kind/type/content/ancestor/mount matrix, the required layer raw at
 load_bundle/index/BOUND consumers, the descriptor from a pristine probe) and real deadlines (`CheckpointDeadlineTests`:
 local Python children on the bounded path under a 5 s scenario watchdog, the cleanup's own end, the kept residue), and
-T18 (M01–M44 and M46–M51, each killed only by an assertion after its control passed). Root on Linux for the ComposeEntry
+T18 (M01–M44 and M46–M79, 78 mutants, each killed only by an assertion after its control passed). Root on Linux for the ComposeEntry
 fork contract and the root-owned `commands` path (CI uses sudo). These are pure controls (no Docker daemon is queried;
 the real entrypoint's host observation is answered by its bootstrap); the adapter's own commands run only in the
 native smoke below.
