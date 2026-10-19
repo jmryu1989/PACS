@@ -723,12 +723,55 @@ class WorklistE2E(unittest.TestCase):
         that grant, then Sent with the note that saving is checked in the browser. The saved file is checked as a whole
         ZIP against the prepared manifest; the row and the audit link prepare, grant, intent and result; the raw grant is
         in no stored row, audit row, proxy or API log. A client that drops the stream leaves Incomplete; an attempt a
-        stopped server left sending is Unconfirmed; both are downloaded again for the same operation with a new grant;
-        Sent only by a new preparation; no Range/resume, no text saying the file was saved."""
+        stopped server left sending is Unconfirmed. D1606 supersedes the same-operation restart: restored operations
+        are read-only, Check Again reads status, and Prepare Again creates a new UUID while preserving old attempts.
+        No Range/resume, no text saying the file was saved."""
         fixture = self.fixture()
         operations = []
         try:
             page = self.login("doctor")
+            seen = self.transfer_requests(page)
+
+            def prepare_again(old):
+                with page.expect_response(lambda r: r.request.method == "POST"
+                                          and r.url.endswith(f"/studies/{fixture.uid}/original-downloads")) as prepared:
+                    self.transfer_box(page, old).get_by_role("button", name="Prepare Again", exact=True).click()
+                self.assertEqual(prepared.value.status, 200)
+                new = prepared.value.json()["operationId"]
+                operations.append(new)
+                self.assertNotIn(new, operations[:-1], "D1606: explicit preparation has a fresh UUID")
+                expect(self.transfer_box(page, new).locator(".study-transfer-state")).to_have_text("Ready")
+                expect(self.transfer_box(page, old)).to_have_count(1)
+                return new
+
+            def read_only_then_new(old, state):
+                self.select(page, fixture)
+                old_box = self.transfer_box(page, old)
+                expect(old_box.locator(".study-transfer-state")).to_have_text(state)
+                self.assertEqual(old_box.get_by_role("button", name="Download", exact=True).count(), 0,
+                                 "D1606: restored operation cannot request another grant")
+                history = psql(f"SELECT download::text FROM \"ImportOperation\" WHERE id='{old}';")
+                audit = self.download_audit(old)
+                before = len(seen)
+                with page.expect_response(lambda r: r.request.method == "GET"
+                                          and r.url.endswith(f"/original-downloads/{old}")):
+                    old_box.get_by_role("button", name="Check Again", exact=True).click()
+                expect(old_box.locator(".study-transfer-state")).to_have_text(state)
+                self.assertEqual([item for item in seen[before:] if item[0] != "GET"], [], "Check Again is read-only")
+                clear = page.locator("#study-transfer").get_by_role("button", name="Clear Finished", exact=True)
+                if clear.is_enabled():
+                    clear.click()
+                expect(old_box).to_have_count(1)
+                new = prepare_again(old)
+                downloaded, _ = self.native_download(page, fixture, new)
+                self.archive_supplied(downloaded.path(), new, 1)
+                expect(self.transfer_box(page, new).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
+                self.assertEqual(self.download_row(new), "sent|1")
+                self.assertEqual(psql(f"SELECT download::text FROM \"ImportOperation\" WHERE id='{old}';"), history,
+                                 "D1606: new preparation preserves every old attempt and grant fact")
+                self.assertEqual(self.download_audit(old), audit, "old operation audit history unchanged")
+                expect(old_box).to_have_count(1)
+
             self.select(page, fixture)
             operation = self.download_operation(page, fixture, operations)
             box = self.transfer_box(page, operation)
@@ -787,7 +830,7 @@ class WorklistE2E(unittest.TestCase):
             operations.append(fresh.value.json()["operationId"])
             self.assertNotEqual(operations[-1], operation, "after Sent a new operation is prepared")
 
-            # Incomplete (5.2 step 6): a client that takes the headers and drops the stream. Offered again, same operation.
+            # Incomplete (5.2 step 6): retain the interrupted attempt, then explicitly prepare a different operation.
             dropped = self.download_operation(page, fixture, operations)
             insecure = ssl.create_default_context()
             insecure.check_hostname, insecure.verify_mode = False, ssl.CERT_NONE
@@ -802,12 +845,8 @@ class WorklistE2E(unittest.TestCase):
             page.reload()
             expect(page.locator("#dbstat")).to_contain_text("DB Connected")
             expect(self.transfer_box(page, dropped).locator(".study-transfer-state")).to_have_text("Incomplete", timeout=30000)
-            expect(self.transfer_box(page, dropped).get_by_role("button", name="Download", exact=True)).to_be_visible()
-            # The same operation again, with a new grant: a second attempt, Sent.
-            again, _ = self.native_download(page, fixture, dropped)
-            self.archive_supplied(again.path(), dropped, 2)
-            expect(self.transfer_box(page, dropped).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
-            self.assertEqual(self.download_row(dropped), "sent|2")
+            read_only_then_new(dropped, "Incomplete")
+            self.assertEqual(self.download_row(dropped), "incomplete|1")
 
             # Unconfirmed (5.2 step 7): an attempt a stopped server left sending, its lease run out; the status read closes it.
             stopped = self.download_operation(page, fixture, operations)
@@ -822,14 +861,95 @@ class WorklistE2E(unittest.TestCase):
                                      "responseFinished": False})
             psql(f"UPDATE \"ImportOperation\" SET download = '{json.dumps(body).replace(chr(39), chr(39) * 2)}'::jsonb, "
                  f"status = 'sending' WHERE id='{stopped}';")
-            page.reload()
-            expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+            self.sign_in_again(page, "doctor")
             expect(self.transfer_box(page, stopped).locator(".study-transfer-state")).to_have_text("Unconfirmed", timeout=30000)
-            expect(self.transfer_box(page, stopped).get_by_role("button", name="Download", exact=True)).to_be_visible()
-            again, _ = self.native_download(page, fixture, stopped)
-            self.archive_supplied(again.path(), stopped, 2)
-            expect(self.transfer_box(page, stopped).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
-            self.assertEqual(self.download_row(stopped), "sent|2")
+            read_only_then_new(stopped, "Unconfirmed")
+            self.assertEqual(self.download_row(stopped), "unconfirmed|1")
+
+            # Commit at the real service before replacing either answer. A prepared GET cannot replenish a lost grant.
+            self.select(page, fixture)
+            prepare_path = f"/api/studies/{fixture.uid}/original-downloads"
+            committed = []
+            native_events = []
+            page.on("download", lambda _: native_events.append(True))
+
+            def lost_preparation(route):
+                response = route.fetch()
+                self.assertEqual(response.status, 200, "real preparation committed before answer replacement")
+                old = response.json()["operationId"]
+                operations.append(old)
+                committed.append(old)
+                self.assertEqual(self.download_row(old), "prepared|0")
+                route.fulfill(status=502, content_type="text/html", body="<html>SYN lost preparation reply</html>")
+
+            page.route("**" + prepare_path, lost_preparation)
+            try:
+                page.locator(f'#rows tr[data-uid="{fixture.uid}"]').click(button="right")
+                with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(prepare_path)):
+                    page.locator("#ctx").get_by_text("Download Originals", exact=True).click()
+            finally:
+                page.unroute("**" + prepare_path, lost_preparation)
+            self.assertEqual(len(committed), 1)
+            old = committed[0]
+            old_box = self.transfer_box(page, old)
+            expect(old_box.locator(".study-transfer-state")).to_have_text("Ready", timeout=30000)
+            grant_path = prepare_path + f"/{old}/archive/grant"
+            issued = []
+
+            def lost_grant(route):
+                response = route.fetch()
+                self.assertEqual(response.status, 200, "real grant issued before answer replacement")
+                issued.append(response.json()["grantId"])
+                route.fulfill(status=502, content_type="text/html", body="<html>SYN lost grant reply</html>")
+
+            page.route("**" + grant_path, lost_grant)
+            try:
+                with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(grant_path)):
+                    old_box.get_by_role("button", name="Download", exact=True).click()
+                expect(old_box.get_by_role("button", name="Check Again", exact=True)).to_be_visible()
+            finally:
+                page.unroute("**" + grant_path, lost_grant)
+            self.assertEqual(len(issued), 1)
+            self.assertEqual(psql(f"SELECT download->'activeArchiveGrant'->>'grantId' FROM \"ImportOperation\" WHERE id='{old}';"), issued)
+            self.assertEqual(self.download_row(old), "prepared|0", "issuance did not start an archive")
+            self.assertEqual(native_events, [], "lost grant answer cannot start native download")
+            self.assertEqual(old_box.get_by_role("button", name="Download", exact=True).count(), 0)
+
+            status_path = prepare_path + "/" + old
+            def malformed_archive_status(route):
+                response = route.fetch()
+                self.assertEqual(response.status, 200)
+                view = response.json()
+                self.assertEqual(view["state"], "prepared")
+                view["archiveRequest"] = {"grantId": issued[0], "state": "refused", "attemptId": str(uuid.uuid4()),
+                                          "expiresAt": 17, "code": "SYN_UNDECLARED", "message": "not started"}
+                route.fulfill(status=200, json=view)
+
+            for malformed in (False, True, False):
+                if malformed:
+                    page.route("**" + status_path, malformed_archive_status)
+                try:
+                    with page.expect_response(lambda r: r.request.method == "GET" and r.url.endswith(status_path)):
+                        old_box.get_by_role("button", name="Check Again", exact=True).click()
+                    expect(old_box.get_by_role("button", name="Check Again", exact=True)).to_be_visible()
+                    self.assertEqual(old_box.get_by_role("button", name="Download", exact=True).count(), 0,
+                                     "prepared or malformed GET cannot reopen a spent grant")
+                    self.assertNotIn("not started", old_box.inner_text(), "no raw non-start certificate")
+                    self.assertEqual(native_events, [])
+                finally:
+                    if malformed:
+                        page.unroute("**" + status_path, malformed_archive_status)
+            clear = page.locator("#study-transfer").get_by_role("button", name="Clear Finished", exact=True)
+            if clear.is_enabled():
+                clear.click()
+            expect(old_box).to_have_count(1)
+            new = prepare_again(old)
+            downloaded, _ = self.native_download(page, fixture, new)
+            self.archive_supplied(downloaded.path(), new, 1)
+            self.assertEqual(native_events, [True], "only the new operation starts a download")
+            self.assertEqual(seen.count(("POST", grant_path)), 1, "one old-operation grant across all reads and new preparation")
+            self.assertEqual(self.download_row(old), "prepared|0")
+            expect(old_box).to_have_count(1)
         finally:
             # The download rows of this case; the fixture's own cleanup removes its study, originals and audit rows.
             ids = [op for op in operations if re.fullmatch(r"[0-9a-f-]{36}", op)]
@@ -837,9 +957,12 @@ class WorklistE2E(unittest.TestCase):
                 psql("DELETE FROM \"ImportOperation\" WHERE kind='download' AND id IN (" + ",".join(f"'{op}'" for op in ids) + ");")
 
     def test_s9_u4_import_retry_and_account_change(self):
-        """REQ-S9-U4-10: a file left Retry Needed (another attempt holds its study) is resumed by the same person after a new
-        login - fresh authorisation, the same operation, index and bytes - and stored once the holder is gone. A network
-        error never logs out. Another person signing in in the same tab never reads, sees or resumes that operation."""
+        """D1606 REQ-S9-U4-05/10: restored history is read-only; explicit new selection uses a new UUID.
+        A stored upload with a replaced answer traverses missing-index -> scoped 404 -> 503 -> real Stored,
+        including same-owner restoration, without another POST. Server retry/recovery APIs remain unchanged.
+        D1566's second browser Retry/generation-overlap action is superseded by D1606; legacy/copied in-flight
+        overlap is a separate browser oracle, never a product resend path created for this test.
+        """
         study = s9u4_uid()
         studies, operations = [study], []
         patient = "S9U4C-" + study[-6:]
@@ -876,66 +999,91 @@ class WorklistE2E(unittest.TestCase):
             chooser.value.set_files(str(upload))
             first_box = page.locator("#study-transfer section[data-operation]").first
             row = first_box.locator('li[data-index="0"]')
-            expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed", timeout=30000)
+            expect(row.locator(".study-transfer-state")).to_have_text("Not confirmed", timeout=30000)
             posts = [path for method, path in seen if method == "POST"]
             self.assertEqual(posts, ["/api/dicom-import"])
             lost_retry = first_box.get_attribute("data-operation")
             operations.append(lost_retry)
-            # D1566/D1591 (accepted liveness limit): the Retry's answer is lost. The server's row of this before-attempt
-            # refusal stays generation 0, which cannot speak for that later request, so the file stays undecided - Result
-            # Unknown, no Retry, no Choose Files Again, nothing sent again - and the session stays live. Such a file must
-            # be imported again.
-            page.route("**/api/dicom-import", lambda route: route.abort("connectionreset"))
-            row.get_by_role("button", name="Retry", exact=True).click()
-            expect(row.locator(".study-transfer-state")).to_have_text("Result Unknown", timeout=30000)
-            page.unroute("**/api/dicom-import")
-            page.wait_for_timeout(5000)
-            self.assertEqual([path for method, path in seen if method == "POST"], ["/api/dicom-import"] * 2, "no import POST after the lost retry")
             self.assertEqual((first_box.get_by_role("button", name="Retry", exact=True).count(),
-                              first_box.get_by_role("button", name="Choose Files Again", exact=True).count()), (0, 0), "no Retry, no Choose Files Again")
-            self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "a lost answer never logs out")
-            # The file is imported again (a new operation) while the study is still held: a fresh Retry Needed.
-            with page.expect_file_chooser() as chooser:
-                page.locator("#t-import").click()
-            chooser.value.set_files(str(upload))
-            box = page.locator("#study-transfer section[data-operation]").first
-            expect(box.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Retry Needed", timeout=30000)
-            operation = box.get_attribute("data-operation")
-            self.assertNotEqual(operation, lost_retry, "a new operation")
-            operations.append(operation)
-            # The same person signs in again in this tab: both operations are read with the new session; the new one resumes.
+                              first_box.get_by_role("button", name="Choose Files Again", exact=True).count()), (0, 0),
+                             "D1606: received STUDY_WRITE_PENDING never restores dispatch authority")
+            [refused_row] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{lost_retry}';")
+            [refused_file] = json.loads(refused_row)
+            self.assertEqual((refused_file["outcome"], refused_file["code"]), ("retryable", "STUDY_WRITE_PENDING"),
+                             "server outcome retained separately from browser policy")
             self.sign_in_again(page, "tech")
-            expect(page.locator("#study-transfer section[data-operation]")).to_have_count(2, timeout=30000)
-            row = page.locator(f'#study-transfer section[data-operation="{operation}"] li[data-index="0"]')
-            expect(row.locator(".study-transfer-state")).to_have_text("Retry Needed")
-            undecided = page.locator(f'#study-transfer section[data-operation="{lost_retry}"]')
-            expect(undecided.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Result Unknown")
-            self.assertEqual(undecided.get_by_role("button", name="Choose Files Again", exact=True).count(), 0, "the undecided file is not reopened by the login")
+            expect(page.locator("#study-transfer section[data-operation]")).to_have_count(1, timeout=30000)
+            restored = page.locator(f'#study-transfer section[data-operation="{lost_retry}"]')
+            expect(restored.locator('.study-transfer-state')).to_have_text("Not confirmed")
+            self.assertEqual(restored.get_by_role("button", name="Choose Files Again", exact=True).count(), 0,
+                             "same owner restoration is status-only")
             # The other worker finishes: its stored result and the free claims come back exactly as they were.
             psql(f"UPDATE \"ImportOperation\" SET results = '{quote(original)}'::jsonb, status = 'settled' WHERE id='{held_op}';")
             psql("UPDATE \"ImportOperation\" SET claim = jsonb_set(claim, '{heldByAttemptId}', 'null') "
                  f"WHERE \"claimKey\" IN ('{keys[0]}', '{keys[1]}');")
+            page.locator("[data-tab=Technician]").click()
             with page.expect_file_chooser() as chooser:
-                page.locator(f'#study-transfer section[data-operation="{operation}"]').get_by_role("button", name="Choose Files Again").click()
+                page.locator("#t-import").click()
             chooser.value.set_files(str(upload))
-            expect(row.locator(".study-transfer-state")).to_have_text("Stored", timeout=60000)
+            box = page.locator("#study-transfer section[data-operation]").first
+            expect(box.locator('.study-transfer-state')).to_have_text("Stored", timeout=60000)
+            operation = box.get_attribute("data-operation")
+            operations.append(operation)
+            self.assertNotEqual(operation, lost_retry, "D1606 new operation after re-login")
             [results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{operation}';")
             [entry] = json.loads(results)
-            self.assertEqual((entry["index"], entry["outcome"], entry["sha256"]), (0, "stored", hashlib.sha256(data).hexdigest()),
-                             "the same operation, index and bytes were resumed")
+            self.assertEqual((entry["index"], entry["outcome"], entry["sha256"]), (0, "stored", hashlib.sha256(data).hexdigest()))
+            with page.expect_file_chooser() as chooser:
+                page.locator("#t-import").click()
+            chooser.value.set_files(str(upload))
+            duplicate = page.locator("#study-transfer section[data-operation]").first
+            expect(duplicate.locator('.study-transfer-state')).to_have_text("Already Present", timeout=60000)
+            duplicate_id = duplicate.get_attribute("data-operation")
+            operations.append(duplicate_id)
+            self.assertNotIn(duplicate_id, (lost_retry, operation), "dedup is a separate explicit operation")
+            [duplicate_results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{duplicate_id}';")
+            [duplicate_entry] = json.loads(duplicate_results)
+            self.assertEqual((duplicate_entry['sha256'], duplicate_entry['bytes']), (hashlib.sha256(data).hexdigest(),len(data)))
+            originals = self.stack._orthanc_request("POST", "/tools/find", json.dumps({"Level":"Instance", "Query":{"StudyInstanceUID":study}}).encode())
+            self.assertEqual(originals.status, 200)
+            self.assertEqual(len(originals.body), 2, "identical content under a new UUID adds no original")
+            self.assertEqual({hashlib.sha256(self.stack.orthanc_bytes('/instances/' + oid + '/file')).hexdigest() for oid in originals.body},
+                             {hashlib.sha256(first).hexdigest(), hashlib.sha256(data).hexdigest()}, "original bytes preserved")
             # D1566 (R4-A01/A02, live): another file reaches the API and is stored, but the answer the browser gets is a
-            # proxy's 502 page. The panel never says Not Sent and never offers Retry; its status read shows Stored; the
+            # proxy's 502 page. The ordered status chain stays uncertain until real Stored; there is no old-key Retry.
             # server holds one result and one original for it; the same person's new login keeps it Stored, nothing resent.
             lost = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id=patient)
             lost_file.write_bytes(lost)
-            posted = []
+            posted, real_answers, status_steps = [], [], []
+            status_mode = ["missing"]
             def replaced(route):
                 posted.append(route.request.headers.get("x-kin-operation-id"))
-                route.fetch()
+                response = route.fetch()
+                self.assertEqual(response.status, 200, "real API accepted and stored before answer replacement")
+                positive = response.json()
+                self.assertEqual((positive["outcome"], positive["sha256"]), ("stored", hashlib.sha256(lost).hexdigest()))
+                real_answers.append(positive)
                 route.fulfill(status=502, content_type="text/html", body="<html><body>502 Bad Gateway</body></html>")
-            page.evaluate("""() => { const seen = window.__s9u4States = [];
-              new MutationObserver(() => { for (const n of document.querySelectorAll('#study-transfer .study-transfer-state')) seen.push(n.textContent); })
-                .observe(document.body, { subtree: true, childList: true, characterData: true }); }""")
+            def staged_status(route):
+                if route.request.method != "GET" or not posted or not route.request.url.endswith("/" + posted[-1]):
+                    return route.continue_()
+                status_steps.append(status_mode[0])
+                if status_mode[0] == "missing":
+                    return route.fulfill(status=200, json={"operationId":posted[-1],"status":"open","files":[]})
+                if status_mode[0] == "404":
+                    return route.fulfill(status=404, json={"message":"SYN scoped operation not found"})
+                if status_mode[0] == "503":
+                    return route.fulfill(status=503, json={"message":"SYN unreadable operation"})
+                return route.continue_()
+            page.route("**/api/dicom-import/*", staged_status)
+            live_states = []
+            page.expose_function('synRecordTransferStates', lambda states: live_states.extend(states))
+            observe_states = """() => {
+              new MutationObserver(() => window.synRecordTransferStates(
+                [...document.querySelectorAll('#study-transfer .study-transfer-state')].map(n => n.textContent)))
+                .observe(document, { subtree: true, childList: true, characterData: true }); }"""
+            page.add_init_script('(' + observe_states + ')()')
+            page.evaluate(observe_states)
             page.route("**/api/dicom-import", replaced)
             try:
                 # After the re-login the page opens in its default mode; Import DICOM lives in the Technician toolbar
@@ -945,13 +1093,28 @@ class WorklistE2E(unittest.TestCase):
                     page.locator("#t-import").click()
                 chooser.value.set_files(str(lost_file))
                 newest = page.locator("#study-transfer section[data-operation]").first
-                expect(newest.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Stored", timeout=60000)
+                expect(newest.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Not confirmed", timeout=60000)
+                self.assertEqual(status_steps, ["missing"], "lost answer begins with missing index")
+                self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "replaced answer preserves session before explicit re-login")
+                self.sign_in_again(page, "tech")
+                expect(page.locator("#study-transfer section[data-operation]").first.locator('.study-transfer-state')).to_have_text("Not confirmed", timeout=30000)
+                newest = page.locator(f'#study-transfer section[data-operation="{posted[0]}"]')
+                for mode in ("404", "503", "real"):
+                    status_mode[0] = mode
+                    with page.expect_response(lambda response: response.request.method == "GET" and response.url.endswith("/api/dicom-import/" + posted[0])):
+                        newest.get_by_role("button", name="Check Again", exact=True).click()
+                    expect(newest.locator('.study-transfer-state')).to_have_text("Stored" if mode == "real" else "Not confirmed", timeout=30000)
+                    self.assertEqual(newest.get_by_role("button",name="Retry",exact=True).count(),0,"GET never restores old-file permission")
+                self.assertEqual(status_steps[-3:], ["404","503","real"], "ordered scoped/unreadable/real recovery")
             finally:
                 page.unroute("**/api/dicom-import")
+                page.unroute("**/api/dicom-import/*", staged_status)
             lost_op = newest.get_attribute("data-operation")
             operations.append(lost_op)
             self.assertEqual(posted, [lost_op], "one POST of the lost file")
-            self.assertNotIn("Not Sent", page.evaluate("window.__s9u4States"), "never Not Sent after a replaced answer")
+            self.assertTrue(real_answers, "received/storage milestone retained across restoration")
+            self.assertTrue(live_states, "transient observations retained across reload")
+            self.assertFalse({"Not Sent", "Retry Needed"}.intersection(live_states), "no transient non-write or resend claim after dispatch")
             self.assertEqual(newest.get_by_role("button", name="Retry", exact=True).count(), 0, "no Retry after a replaced answer")
             self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "a lost or replaced answer never logs out")
             [results] = psql(f"SELECT results::text FROM \"ImportOperation\" WHERE id='{lost_op}';")
@@ -961,13 +1124,18 @@ class WorklistE2E(unittest.TestCase):
             again = page.locator(f'#study-transfer section[data-operation="{lost_op}"]')
             expect(again.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Stored", timeout=30000)
             self.assertEqual(again.get_by_role("button", name="Choose Files Again", exact=True).count(), 0)
-            # Another person in the same tab: the kept record is dropped and the operation is never read or shown.
-            self.sign_in_again(page, "jmryu")
+            originals = self.stack._orthanc_request("POST", "/tools/find", json.dumps({"Level":"Instance", "Query":{"StudyInstanceUID":study}}).encode())
+            self.assertEqual(originals.status, 200)
+            self.assertEqual(len(originals.body), 3, "lost-answer recovery adds no extra original")
+            self.assertEqual({hashlib.sha256(self.stack.orthanc_bytes("/instances/" + oid + "/file")).hexdigest() for oid in originals.body},
+                             {hashlib.sha256(b).hexdigest() for b in (first, data, lost)}, "all originals unchanged after ordered recovery")
+            # Another person in the same tab cannot read or display the previous owner's history.
             before = len(seen)
+            self.sign_in_again(page, "jmryu")
             page.wait_for_timeout(5000)
             self.assertEqual([r for r in seen[before:] if operation in r[1]], [], "another person never queries the operation")
             self.assertEqual(page.locator("#study-transfer section[data-operation]").count(), 0)
-            self.assertIsNone(page.evaluate(f"sessionStorage.getItem('{self.TRANSFER_KEY}')"))
+            self.assertEqual(0, len([r for r in seen[before:] if lost_op in r[1]]), "different owner never queries stored history")
         finally:
             upload.unlink(missing_ok=True)
             lost_file.unlink(missing_ok=True)

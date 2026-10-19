@@ -1,10 +1,9 @@
 /*
  * S9-U4b part (c): Import DICOM, Download Originals and Resolve Unconfirmed (contract S9-U4p 4.4, 4.6, 4.8, 5.3, 6).
  *
- * One non-modal panel for the person's own transfers. The server decides every result: this file never parses DICOM,
- * never re-decides an HTTP status, an outcome or whether a result is final, and shows the server's Korean message for
- * each code. What it decides is only the sending: one object per request, one import request in flight, the same
- * operation id, index and bytes for a retry, and never a resend of a file whose result is final or unconfirmed.
+ * D1606: only Files selected into a new operation in this live document can be dispatched, once. Responses change
+ * observation, never send authority. Restored history is read-only. Downloads likewise have one first-grant opportunity.
+ * Complete matching positive wire results confirm storage or supply; every other dispatched result stays unconfirmed.
  *
  * Every answer is applied through the work-context gate (work.commit) with the context its request left with, and only
  * while the panel still holds that operation in the same generation: a logout, an account change, a cancelled logout
@@ -42,24 +41,23 @@ window.KinStudyTransferLocal = function (app) {
     retryable: 'Retry Needed', unconfirmed: 'Unconfirmed' });
   const DOWNLOAD_NAMES = Object.freeze({ prepared: 'Ready', sending: 'Downloading', sent: 'Sent', incomplete: 'Incomplete',
     unconfirmed: 'Unconfirmed' });
-  const FINAL = new Set(['stored', 'already-present', 'rejected']);
-  const RESTARTABLE = ['prepared', 'incomplete', 'unconfirmed'];
+  const POSITIVE = new Set(['stored', 'already-present']);
   const BASES = Object.freeze([
     ['orthanc-restarted', '이 시도 뒤 Orthanc가 다시 시작된 것을 확인했습니다'],
     ['orthanc-log-checked', 'Orthanc 기록에서 이 시도가 저장되지 않은 것을 확인했습니다'],
   ]);
   const TEXT = Object.freeze({
     tooMany: n => `한 번에 100개 파일까지 반입할 수 있습니다. 고른 ${n}개 파일은 보내지 않았습니다. 나눠서 다시 고르세요.`,
-    tooLarge: '한 파일은 24 MiB(25,165,824 bytes)까지 반입할 수 있습니다. 이 파일은 저장되지 않았습니다.',
+    tooLarge: '한 파일은 24 MiB(25,165,824 bytes)까지 반입할 수 있습니다. 선택한 파일을 보내지 않았습니다.',
     // 4.6: a write that may have happened is never described as not stored, after an admin recovery too.
     mayHaveWritten: '저장된 원본과 충돌하여 완료를 확인할 수 없습니다.',
     askAdmin: (id, index) => `저장 결과를 확인하지 못했습니다. 관리자에게 작업 번호 ${id.slice(0, 8)}·파일 번호 ${index}의 확인을 요청하세요.`,
     lost: '서버의 답을 받지 못했습니다. 이 작업의 상태를 다시 읽어 확인합니다.',
     // Neither a 404 of the status read (also the answer for an operation whose study this account cannot see now,
     // contract 3) nor a status without this file proves that the file did not arrive, so nothing is offered to send
-    // again on them (U4C-03, U4C-03b). Not Sent + Retry is only for a file the browser never sent or the server refused
-    // as retryable.
-    pending: '서버가 아직 이 파일의 결과를 기록하지 않았습니다. 저장 중일 수 있어 다시 보내지 않았습니다. 잠시 뒤 Check Again으로 다시 확인하세요.',
+    // again on them (U4C-03, U4C-03b). D1606 limits Not Sent + Retry to the live document
+    // holding a genuine never-dispatched File; no server result restores that opportunity.
+    pending: '이번 조회에서 이 파일의 저장 결과를 확인하지 못했습니다. Check Again으로 다시 확인하세요.',
     unresolved: '서버가 이 작업의 결과를 보여 주지 않습니다. 저장됐을 수 있어 다시 보내지 않았습니다. 잠시 뒤 Check Again으로 다시 확인하고, 계속 같으면 관리자에게 작업 번호를 알려 주세요.',
     unread: '작업 상태를 읽지 못했습니다. Check Again으로 다시 확인하세요.',
     paused: '지금은 요청을 보낼 수 없어 이 파일을 보내지 않았습니다. Retry로 이어서 보낼 수 있습니다.',
@@ -69,11 +67,11 @@ window.KinStudyTransferLocal = function (app) {
     sent: '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.',
     ready: (n, size) => `검사 원본 ${n}개(${size})를 내려받을 준비가 되었습니다.`,
     downloading: (done, n) => `서버가 원본을 보내는 중입니다 (${done}/${n}).`,
-    incomplete: '내려받기가 끝까지 이어지지 않았습니다. 같은 작업으로 다시 받을 수 있습니다.',
-    downloadUnconfirmed: '서버가 다시 시작되는 등으로 보낸 결과를 확인하지 못했습니다. 같은 작업으로 다시 받을 수 있습니다.',
+    incomplete: '서버 기록에서 전송 완료를 확인하지 못했습니다. Check Again으로 확인하거나 Prepare Again으로 새 원본 목록을 준비하세요.',
+    downloadUnconfirmed: '서버의 전송 결과를 확인하지 못했습니다. Check Again으로 확인하거나 Prepare Again으로 새로 준비하세요.',
     // A poll deadline does not prove that the browser's own GET will not start: only that it was not seen to start.
     notStarted: '내려받기가 시작됐는지 확인하지 못했습니다. 브라우저의 다운로드 목록을 확인한 뒤, 필요하면 다시 시도하세요.',
-    selectionMoved: '다른 검사를 고르는 사이에 온 답이라 내려받기를 시작하지 않았습니다. 이 검사의 원본이 필요하면 Download를 다시 누르세요.',
+    selectionMoved: '검사 선택이 바뀌어 이 답을 적용하지 않았습니다. 상태를 확인하거나 Prepare Again으로 새로 준비하세요.',
     preparing: '원본 목록을 준비하는 중입니다…',
     granting: '내려받기를 시작하는 중입니다…',
     copied: '작업 번호와 파일 번호를 복사했습니다.',
@@ -83,9 +81,10 @@ window.KinStudyTransferLocal = function (app) {
     // An answer this page cannot read as a typed result or refusal: what it did is not known (D1566), never called refused.
     httpFailure: status => `서버의 답을 확인하지 못했습니다 (HTTP ${status}).`,
     unknownAnswer: '서버의 답을 확인하지 못했습니다(형식이 다르거나 중간에서 바뀐 답). 처리됐을 수 있어 다시 보내지 않았습니다. Check Again으로 상태를 확인하세요.',
-    storeBlocked: '이 탭의 작업 기록을 갱신하지 못해 이 파일을 보내지 않았습니다. Retry로 다시 보낼 수 있습니다.',
+    storeFailed: '이 탭의 작업 기록을 보존하지 못했습니다. 새로고침·재로그인 뒤 일부 이력이 보이지 않을 수 있습니다. 필요한 작업 번호를 Copy ID로 보관하세요.',
     prepareUnknown: '원본 준비 요청의 결과를 확인하지 못했습니다. 같은 작업의 상태를 다시 읽습니다.',
-    grantUnknown: '내려받기 권한 요청의 결과를 확인하지 못했습니다. 이번 누름으로는 내려받기를 시작하지 않았습니다. Download를 다시 누를 수 있습니다.',
+    grantUnknown: '내려받기 권한 요청의 결과를 확인하지 못했습니다. Check Again으로 확인하거나 Prepare Again으로 새로 준비하세요.',
+    lifetimeEnded: '이 작업의 다운로드 시작 기회가 종료되어 늦게 도착한 답을 적용하지 않았습니다. Check Again으로 상태를 확인하거나 Prepare Again으로 새로 준비하세요.',
   });
 
   // ── panel state ──
@@ -95,6 +94,12 @@ window.KinStudyTransferLocal = function (app) {
   let onlineWaits = 0;
   let owner = null;            // [institution, sub] of the identity whose operations the panel holds
   const operations = [];       // import and download operations, newest first
+  // These capabilities never enter storage. Neither a response nor a descriptor can create one.
+  const unsent = new WeakSet();
+  const firstDownloads = new WeakSet();
+  const pendingClicks = new WeakSet();
+  const clearedHistory = new Map();
+  let persistenceFailed = false;
   const queue = [];            // import file entries waiting to be sent, in order
   let running = false;         // the one upload loop
   // Every import request (an upload or a status read) runs in this one lane, so exactly one is in flight (4).
@@ -105,7 +110,12 @@ window.KinStudyTransferLocal = function (app) {
   const header = node('div', 'study-transfer-head');
   const resolveOpen = button('Resolve Unconfirmed', () => toggleResolve());
   const clear = button('Clear Finished', () => clearFinished());
-  const hide = button('Hide', () => { body.hidden = !body.hidden; hide.textContent = body.hidden ? 'Show' : 'Hide'; });
+  const hide = button('Hide', () => {
+    if (!body.hidden) endDownloads();
+    body.hidden = !body.hidden;
+    hide.textContent = body.hidden ? 'Show' : 'Hide';
+    render();
+  });
   const close = button('Close', () => closePanel());
   header.append(node('b', null, 'DICOM Transfer'), resolveOpen, clear, hide, close);
   const body = node('div', 'study-transfer-body');
@@ -115,13 +125,15 @@ window.KinStudyTransferLocal = function (app) {
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
   status.lang = 'ko';
-  body.append(resolveForm, list);
+  const persistence = node('p', 'study-transfer-note');
+  persistence.lang = 'ko';
+  body.append(persistence, resolveForm, list);
   const picker = document.createElement('input');
   picker.type = 'file';
   picker.multiple = true;
   picker.hidden = true;
   if (root) root.append(header, body, status, picker);
-  let pickFor = null;          // what the next file choice is for: { expect } or { operation } (Choose Files Again)
+  let pickFor = null;          // expected study for a new operation only
   buildResolveForm();
 
   function node(tag, cls, text) {
@@ -169,6 +181,7 @@ window.KinStudyTransferLocal = function (app) {
 
   /** The session ended, the account changed or the page is leaving: nothing of the panel survives into another one. */
   function end() {
+    endDownloads();
     ended = true;
     generation++;
     queue.length = 0;
@@ -184,6 +197,7 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   work.onInvalidate(event => {
+    if (event.reason === 'prepare') { endDownloads(); render(); }
     if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) { end(); return; }
     if (event.reason === 'lifecycle') { sync(); return; }
     // Back from a logout preparation: an answer that left before it is no longer applied (a new work epoch), so what
@@ -193,7 +207,20 @@ window.KinStudyTransferLocal = function (app) {
       if (!running && queue.length) pump();
     }
   });
-  window.addEventListener('pagehide', () => { ended = true; generation++; });
+  window.addEventListener('pagehide', end);
+  window.addEventListener('beforeunload', endDownloads);
+
+  // Ending the visible lifetime revokes both an unrequested grant and an outstanding answer's native-click budget.
+  // This is synchronous: reopening the panel, cancelling logout or a later status read cannot revive either one.
+  function endDownload(op) {
+    const active = firstDownloads.has(op) || pendingClicks.has(op);
+    firstDownloads.delete(op);
+    pendingClicks.delete(op);
+    if (active && op.state !== 'sent') op.notice = TEXT.lifetimeEnded;
+  }
+  function endDownloads() {
+    for (const op of operations) if (op.kind === 'download') endDownload(op);
+  }
 
   /**
    * An answer that came back when its context no longer admitted it (a logout preparation or its cancellation): its
@@ -202,224 +229,228 @@ window.KinStudyTransferLocal = function (app) {
   function lostAnswer(op, entry) {
     op.inFlight = false;
     if (!live(op)) return;
-    if (entry && entry.state === 'sending') applyImportDecision(entry, classifyTransferEvidence({ source: 'post', failure: { sent: true } }));
+    if (entry && entry.state === 'sending') uncertain(entry, TEXT.lost);
     if (usable()) { if (op.kind === 'import') readImport(op); else readDownload(op); } else op.lost = true;
   }
 
-  // ── what an answer proves: the one decision boundary of every transition and control (D1566) ──
-  /*
-   * An import may say Not Sent only on (1) this page's own evidence that this dispatch never left the browser, or (2) a
-   * complete, typed server answer that this very request or attempt wrote nothing. Retry needs, besides, a contract that
-   * lets the same input go again: "nothing written" and "may be sent again" are different facts (a typed 413 is the first
-   * without the second). Everything else - a missing, malformed, proxy-made (502/504 HTML), unreadable, scoped-away (404)
-   * or older-attempt answer - is "not known": the file keeps its operation and index, is never sent again by itself and is
-   * read back; Check Again reads it again. The tables are the server's own finite contracts (4.8; IMPORT_RESULT_CODES and
-   * the request refusals of the import route); membership decides, never an HTTP status alone or the outcome name alone.
-   */
-  const RETRYABLE_HTTP = Object.freeze({ ORTHANC_UNAVAILABLE: [503], IMPORT_PERMISSION_REVOKED: [403, 404], IMPORT_ATTEMPT_EXPIRED: [200],
-    STUDY_WRITE_PENDING: [409], SOP_WRITE_PENDING: [409], STUDY_OWNERSHIP_UNDETERMINED: [409], RECOVERED_NO_OBJECT: [200] });
-  const REJECTED_HTTP = Object.freeze({ DICOM_NOT_PART10: 400, DICOM_FILE_META_MISSING: 400, DICOM_TRANSFER_SYNTAX_UNSUPPORTED: 400,
-    DICOM_MALFORMED: 400, PATIENT_ID_UNREADABLE: 400, PATIENT_ID_MISSING: 400, MODALITY_NOT_IMPORTABLE: 400, PATIENT_ISSUER_CONFLICT: 409,
-    PATIENT_ID_CONFLICT: 409, PATIENT_IDENTITY_CONFLICT: 409, STUDY_OWNERSHIP_CONFLICT: 409, STUDY_UID_MISMATCH: 409,
-    EXISTING_STUDY_IDENTITY_UNRESOLVED: 409, SOP_UID_AMBIGUOUS: 409, SOP_CONTENT_CONFLICT: 409 });
-  // Request-level refusals of POST /api/dicom-import, all made before any write: 'again' - the same file may go again
-  // unchanged; 'changed' - nothing was written but the same request would be refused alike (another file or request is
-  // needed); 'conflict' - this request wrote nothing, but it says nothing of what the operation already holds.
-  const REQUEST_REFUSALS = Object.freeze({ '503 IMPORT_NOT_READY': 'again', '503 IMPORT_STORAGE_UNAVAILABLE': 'again',
-    '503 IMPORT_ISSUER_UNCONFIGURED': 'again', '403 STUDY_ACCESS_RESTRICTED_IMPORT': 'again', '403 IMPORT_SUBJECT_MISSING': 'again',
-    '400 IMPORT_REQUEST_INVALID': 'changed', '415 IMPORT_CONTENT_TYPE_UNSUPPORTED': 'changed', '413 DICOM_IMPORT_TOO_LARGE': 'changed',
-    '409 OPERATION_CONFLICT': 'conflict', '409 OPERATION_CONTENT_CONFLICT': 'conflict' });
-  const DISPOSITIONS = [null, 'pre-write', 'may-have-written'];
-  const GRANT_STATES = ['issued', 'expired', 'refused', 'consumed'];
-  const owns = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  // Positive wire contracts only. Negative bodies are diagnostics, never non-write or retry certificates (D1606).
   const isObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
+  const hash = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
+  const uid = v => typeof v === 'string' && v.length <= 64 && /^[0-9]+(?:\.[0-9]+)*$/.test(v);
+  const time = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v) && Number.isFinite(Date.parse(v));
+  const nullableTime = v => v === null || time(v);
+  const count = (v, max) => Number.isSafeInteger(v) && v >= 0 && v <= max;
+  const code = v => v === null || (typeof v === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(v));
+  const complete = a => !!a && a.ok && a.status === 200 && !a.incomplete && !a.auth && isObject(a.body);
 
-  /**
-   * A file result as the routes answer it (gate publicFile; on POST also its operationId and an HTTP status that belongs to
-   * its code), or null. Wire types and the outcome/code/disposition pairing only - the server's state machine is not redone.
-   */
-  function validateImportResult(r, operationId, index, http) {
-    if (!isObject(r) || (http !== null && r.operationId !== operationId) || r.index !== index || typeof r.message !== 'string') return null;
-    if (!owns(r, 'code') || !owns(r, 'writeDisposition') || !owns(r, 'identity') || !DISPOSITIONS.includes(r.writeDisposition)) return null;
-    if ((r.identity !== null && typeof r.identity !== 'string') || !Number.isInteger(r.generation) || r.generation < 0 || !Array.isArray(r.attempts)) return null;
-    const o = r.outcome, c = r.code, written = r.writeDisposition === 'may-have-written';
-    let statuses;
-    if (o === 'stored' || o === 'already-present') { if (c !== null || written) return null; statuses = [200]; }
-    else if (o === 'retryable') { if (typeof c !== 'string' || !owns(RETRYABLE_HTTP, c) || written) return null; statuses = RETRYABLE_HTTP[c]; }
-    else if (o === 'rejected') { if (typeof c !== 'string' || !owns(REJECTED_HTTP, c)) return null; statuses = [REJECTED_HTTP[c]]; }
-    else if (o === 'unconfirmed') { if (c !== 'IMPORT_UNCONFIRMED' || written) return null; statuses = [202]; }
-    else return null;
-    return http === null || statuses.includes(http) ? r : null;
+  function importPositive(r, entry) {
+    if (!isObject(r) || r.index !== entry.index || !POSITIVE.has(r.outcome) || r.code !== null || r.writeDisposition !== null
+        || typeof r.message !== 'string' || !['new-study', 'matched', 'not_comparable'].includes(r.identity)
+        || !uid(r.studyUid) || !uid(r.seriesUid) || !uid(r.sopUid) || !hash(r.sha256)
+        || !count(r.bytes, MAX_BYTES) || r.bytes === 0 || r.bytes !== entry.size || !time(r.at)
+        || (entry.op.expect && r.studyUid !== entry.op.expect) || (entry.sha256 && r.sha256 !== entry.sha256)
+        || !Number.isSafeInteger(r.generation) || r.generation < 1 || !Array.isArray(r.attempts) || !r.attempts.length) return null;
+    const ids = new Set();
+    for (let i = 0; i < r.attempts.length; i++) {
+      const a = r.attempts[i];
+      if (!isObject(a) || typeof a.attemptId !== 'string' || !UUID.test(a.attemptId) || ids.has(a.attemptId)
+          || a.generation !== i + 1 || !['prepared', 'dispatching', 'finished', 'unknown'].includes(a.phase)
+          || !Object.prototype.hasOwnProperty.call(OUTCOME_NAMES, a.outcome) || !code(a.code)
+          || ![null, 'certain-no-write', 'unknown'].includes(a.transport) || !time(a.startedAt)
+          || !nullableTime(a.finishedAt) || !nullableTime(a.autoRecheckedAt)
+          || (a.finishedAt !== null && Date.parse(a.finishedAt) < Date.parse(a.startedAt))) return null;
+      if (a.recovery !== null && (!isObject(a.recovery) || !BASES.some(b => b[0] === a.recovery.basis)
+          || !time(a.recovery.checkedAt) || !time(a.recovery.requestedAt) || !nullableTime(a.recovery.resolvedAt))) return null;
+      ids.add(a.attemptId);
+    }
+    const last = r.attempts[r.attempts.length - 1];
+    return last.generation === r.generation && last.phase === 'finished' && last.outcome === r.outcome
+      && last.code === null && time(last.finishedAt) ? r : null;
   }
 
-  /**
-   * Evidence -> decision { kind, proof, canRetry, notice, readNeeded, stop, result, generation }. Unknown is the default.
-   * Sources: local-oversize / local-unsent (this page's own non-dispatch), post (the answer of THIS dispatch), status (a
-   * bound GET envelope), status-file (one file row of it, against the latest dispatch), prepare / grant (download
-   * requests: issuance unknown is not a refusal) and archive-status (a status' archiveRequest, for this operation's grant).
-   */
-  function classifyTransferEvidence(input) {
-    const unknown = (notice, readNeeded = false, stop = false) => ({ kind: 'unknown', proof: null, canRetry: false, notice, readNeeded, stop });
-    switch (input.source) {
-      case 'local-oversize': return { kind: 'refused', proof: 'local', canRetry: false, final: true, notice: TEXT.tooLarge };
-      case 'local-unsent': return { kind: 'not-sent', proof: 'local', canRetry: true, notice: input.notice || TEXT.paused };
-      case 'post': {
-        const { failure, answer, entry } = input;
-        if (failure) return failure.sent === false ? { kind: 'not-sent', proof: 'local', canRetry: true, notice: TEXT.paused, stop: true }
-          : unknown(TEXT.lost, true);
-        // The server ended this session before the handler: this request wrote nothing, and nothing more goes out.
-        if (answer.auth) return { kind: 'not-sent', proof: 'auth', canRetry: false, notice: '', stop: true };
-        if (answer.incomplete) return unknown(TEXT.unknownAnswer, true);
-        const result = validateImportResult(answer.body, entry.op.id, entry.index, answer.status);
-        if (result) return { kind: 'result', proof: 'post', result, canRetry: result.outcome === 'retryable', generation: result.generation };
-        const b = answer.body;
-        const refusal = !answer.ok && isObject(b) && typeof b.code === 'string' && typeof b.message === 'string' && b.message
-          ? REQUEST_REFUSALS[answer.status + ' ' + b.code] : undefined;
-        if (refusal === 'again' || refusal === 'changed')
-          // An 'again' refusal (import not ready, storage, the account's access) would refuse the next files alike: the loop
-          // stops. A 'changed' one is this file's own (too large, its request or type): the others still go.
-          return { kind: 'refused', proof: 'request', canRetry: refusal === 'again', notice: b.message, code: b.code, stop: refusal === 'again' };
-        if (refusal === 'conflict') return unknown(b.message, true, true);
-        return unknown(TEXT.unknownAnswer, true);
-      }
-      case 'status': {
-        const { failed, answer, op } = input;
-        if (failed || answer.incomplete) return { kind: 'unreadable', notice: TEXT.unread };
-        if (answer.ok && isObject(answer.body) && answer.body.operationId === op.id && Array.isArray(answer.body.files)) {
-          const rows = new Map();
-          for (const f of answer.body.files) if (isObject(f) && Number.isInteger(f.index)) rows.set(f.index, rows.has(f.index) ? null : f);
-          return { kind: 'shown', rows };
-        }
-        // 404 is also the answer for an operation whose study this person cannot see now (contract 3).
-        if (answer.status === 404) return { kind: 'not-shown' };
-        return { kind: 'unreadable', notice: isObject(answer.body) && typeof answer.body.message === 'string' && answer.body.message
-          ? answer.body.message : TEXT.unread };
-      }
-      case 'status-file': {
-        const { entry, row } = input;
-        if (row === undefined) return unknown(TEXT.pending);
-        const result = validateImportResult(row, entry.op.id, entry.index, null);
-        if (!result) return unknown(TEXT.unknownAnswer);
-        // A final result is final whenever it was made. Any other row must be newer than the latest dispatch left
-        // undecided: an older attempt's retryable is not this request's answer (the request may still store later).
-        if (!FINAL.has(result.outcome) && entry.pending !== null && !(result.generation > entry.pending)) return unknown(TEXT.pending);
-        return { kind: 'result', proof: 'status', result, canRetry: result.outcome === 'retryable', generation: result.generation };
-      }
-      case 'prepare': {
-        const { failed, answer, op } = input;
-        if (!failed && !answer.incomplete && answer.ok && isObject(answer.body) && answer.body.operationId === op.id && DOWNLOAD_NAMES[answer.body.state])
-          return { kind: 'prepared', view: answer.body };
-        if (!failed && !answer.incomplete && !answer.ok && isObject(answer.body) && typeof answer.body.code === 'string'
-            && typeof answer.body.message === 'string' && answer.body.message) return { kind: 'refused', notice: answer.body.message };
-        return { kind: 'unknown', notice: TEXT.prepareUnknown, readNeeded: true };
-      }
-      case 'grant': {
-        const { failed, answer, op } = input;
-        const b = !failed && !answer.incomplete ? answer.body : null;
-        if (answer?.ok && isObject(b) && b.operationId === op.id && typeof b.grantId === 'string' && typeof b.grant === 'string'
-            && /^[A-Za-z0-9_-]{43}$/.test(b.grant)) return { kind: 'grant', grant: b.grant, grantId: b.grantId };
-        // A refusal the route typed: no grant was issued for this press. Anything else: issuance is not known.
-        if (b && !answer.ok && isObject(b) && typeof b.code === 'string' && typeof b.message === 'string' && b.message)
-          return { kind: 'refused', notice: b.message };
-        return { kind: 'unknown', notice: TEXT.grantUnknown };
-      }
-      case 'archive-status': {
-        const { request, op } = input;
-        if (!isObject(request) || typeof request.grantId !== 'string' || !GRANT_STATES.includes(request.state)) return { kind: 'none' };
-        // Only the grant this panel asked for (when it knows it) - a status of another grant tells nothing of this press.
-        if (op.grantId && request.grantId !== op.grantId) return { kind: 'none' };
-        if ((request.state === 'refused' || request.state === 'expired') && typeof request.code === 'string'
-            && typeof request.message === 'string' && request.message)
-          return { kind: request.state === 'refused' && request.code === 'MANIFEST_CHANGED' ? 'manifest-changed' : 'unstarted', notice: request.message };
-        return { kind: 'none' };
-      }
-      default: return unknown(TEXT.unknownAnswer);
+  function importRows(answer, op) {
+    if (!complete(answer) || answer.body.operationId !== op.id || !['open', 'settled'].includes(answer.body.status)
+        || !Array.isArray(answer.body.files)) return null;
+    const rows = new Map();
+    for (const row of answer.body.files) {
+      if (!isObject(row) || !count(row.index, MAX_FILES - 1) || rows.has(row.index)) return null;
+      rows.set(row.index, row);
     }
+    return rows;
   }
 
-  /** A decision applied to one file: the only place a file's state, its retry permission and its dispatch marker change. */
-  function applyImportDecision(entry, d) {
-    entry.canRetry = false;
-    if (d.kind === 'result') {
-      const r = d.result;
-      entry.state = 'result';
-      entry.outcome = r.outcome;
-      entry.code = r.code;
-      entry.identity = r.identity;
-      entry.writeDisposition = r.writeDisposition;
-      entry.message = r.message;
-      entry.generation = r.generation;
-      entry.pending = null;
-      entry.autoRechecked = !!r.attempts.length && !!r.attempts[r.attempts.length - 1]?.autoRecheckedAt;
-      entry.final = FINAL.has(r.outcome);
-      entry.canRetry = d.canRetry === true && !entry.final;
-    } else if (d.kind === 'not-sent' || d.kind === 'refused') {
-      entry.state = d.kind === 'refused' ? 'refused' : 'notSent';
-      entry.message = d.notice;
-      entry.code = d.code ?? null;
-      entry.pending = null;
-      if (d.final) { entry.final = true; entry.file = null; }
-      entry.canRetry = d.canRetry === true && !entry.final;
-    } else {
-      // Not known: nothing is claimed and nothing may go again. A final result already shown is never taken back.
-      if (entry.final) return;
-      entry.state = entry.state === 'result' ? 'result' : (d.readNeeded ? 'unknown' : 'unresolved');
-      if (entry.state !== 'result') entry.message = d.notice;
+  function downloadPositive(answer, op) {
+    if (!complete(answer)) return null;
+    const v = answer.body;
+    if (v.operationId !== op.id || v.studyUid !== op.uid || !hash(v.manifestSha256) || !time(v.preparedAt)
+        || !count(v.objects, 65533) || v.objects === 0 || !count(v.bytes, 4294967294) || v.bytes === 0
+        || !(v.note === null || typeof v.note === 'string') || !Object.prototype.hasOwnProperty.call(DOWNLOAD_NAMES, v.state)
+        || !Array.isArray(v.attempts) || (op.manifestSha256 && (op.manifestSha256 !== v.manifestSha256
+          || op.preparedAt !== v.preparedAt || op.objects !== v.objects || op.bytes !== v.bytes))) return null;
+    const ids = new Set();
+    for (let i = 0; i < v.attempts.length; i++) {
+      const a = v.attempts[i], last = i === v.attempts.length - 1;
+      if (!isObject(a) || typeof a.attemptId !== 'string' || !UUID.test(a.attemptId) || ids.has(a.attemptId)
+          || a.number !== i + 1 || !['sending', 'sent', 'incomplete', 'unconfirmed'].includes(a.state)
+          || !time(a.startedAt) || !nullableTime(a.endedAt) || (a.state === 'sending') !== (a.endedAt === null)
+          || (a.endedAt !== null && Date.parse(a.endedAt) < Date.parse(a.startedAt))
+          || !count(a.objectsComplete, v.objects) || !count(a.bytesSupplied, v.bytes)
+          || typeof a.responseFinished !== 'boolean' || ((a.state === 'sending' || a.state === 'sent') && !last)) return null;
+      if (a.state === 'sent' ? !(hash(a.archiveSha256) && a.responseFinished && a.objectsComplete === v.objects && a.bytesSupplied === v.bytes)
+        : !(a.archiveSha256 === null && a.responseFinished === false)) return null;
+      ids.add(a.attemptId);
     }
+    const last = v.attempts[v.attempts.length - 1];
+    if (v.state !== (last ? last.state : 'prepared')) return null;
+    if (v.archiveRequest !== null) {
+      const a = v.archiveRequest;
+      if (!isObject(a) || typeof a.grantId !== 'string' || !UUID.test(a.grantId) || !time(a.expiresAt)
+          || !['issued', 'expired', 'refused', 'consumed'].includes(a.state) || !code(a.code)
+          || !(a.message === null || typeof a.message === 'string') || (op.grantId && a.grantId !== op.grantId)) return null;
+      if (a.state === 'consumed' ? !(last && a.attemptId === last.attemptId && a.code === null && a.message === null)
+        : a.attemptId !== null) return null;
+      if (a.state === 'issued' && (a.code !== null || a.message !== null)) return null;
+      if (['expired', 'refused'].includes(a.state) && (a.code === null || typeof a.message !== 'string')) return null;
+    }
+    return v;
+  }
+
+  function grantPositive(answer, op) {
+    const b = complete(answer) ? answer.body : null;
+    return b && b.operationId === op.id && typeof b.grantId === 'string' && UUID.test(b.grantId)
+      && typeof b.grant === 'string' && /^[A-Za-z0-9_-]{43}$/.test(b.grant) && time(b.expiresAt) ? b : null;
+  }
+
+  function diagnostic(value, fallback = TEXT.unknownAnswer) {
+    const c = isObject(value) && typeof value.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : null;
+    if (!c) return fallback;
+    let guidance = '상태를 다시 확인하고, 새 반입이 필요하면 원본 파일을 다시 선택하세요.';
+    if (/PENDING$/.test(c)) guidance = '다른 작업의 결과 확인을 기다리고 있습니다. Check Again으로 확인하고 관리자에게 작업 번호를 알려 주세요.';
+    else if (/PERMISSION|ACCESS|SUBJECT|AUTH/.test(c)) guidance = '현재 계정의 권한을 확인하세요. 기존 작업은 상태 조회만 가능합니다.';
+    else if (/DICOM_|PATIENT_|SOP_|STUDY_UID|IDENTITY/.test(c)) guidance = '파일 형식과 환자·검사 식별 정보를 확인하세요. 관리자에게 작업 번호를 알려 주세요.';
+    else if (/ORTHANC|STORAGE|NOT_READY/.test(c)) guidance = '서버 연결과 저장소 상태를 관리자에게 확인하세요.';
+    return `${c} · 결과를 확인하지 못했습니다. ${guidance}`;
+  }
+
+  function uncertain(entry, message) {
+    if (entry.final) return;
+    entry.state = 'unresolved';
+    entry.message = message;
+  }
+  function localUnsent(entry) {
+    if (!unsent.has(entry)) return;
+    entry.state = 'notSent';
+    entry.message = TEXT.paused;
+  }
+  function adoptImport(entry, result) {
+    entry.state = 'result';
+    entry.outcome = result.outcome;
+    entry.identity = result.identity;
+    entry.message = result.outcome === 'stored' ? '원본 저장을 확인했습니다.' : '같은 원본이 이미 저장되어 있음을 확인했습니다.';
+    entry.sha256 = result.sha256;
+    entry.final = true;
+    unsent.delete(entry);
+    entry.file = null;
   }
 
   // ── what is kept for this tab (4.6: the bytes never are; a re-login of the same person reads its operations again) ──
-  /**
-   * The record of this tab: descriptors only (index, name, size), the last generation seen and the marker of a dispatch
-   * whose answer is not known yet - never bytes, grants or credentials. Returns false only when a write failed AND an
-   * older record may still be read back (one that does not know the dispatch about to start).
-   */
-  function store() {
-    try {
-      if (!owner) return true;
-      const kept = operations.slice(0, STORE_OPERATIONS).map(op => op.kind === 'import'
-        ? { kind: 'import', id: op.id, expect: op.expect, files: op.files.map(f => ({ index: f.index, name: f.name, size: f.size,
-          generation: Number.isInteger(f.generation) ? f.generation : null, pending: f.pending })) }
-        : { kind: 'download', id: op.id, uid: op.uid });
-      sessionStorage.setItem(STORE_KEY, JSON.stringify({ v: 2, owner, operations: kept }));
-      return true;
-    } catch (_) {
-      try { sessionStorage.removeItem(STORE_KEY); } catch (_) {}
-      // A storage that cannot be read back restores nothing; one that still reads the old record would mislead a re-login.
-      try { return sessionStorage.getItem(STORE_KEY) === null; } catch (_) { return true; }
+  function descriptor(op) {
+    return op.kind === 'import'
+      ? { kind: 'import', id: op.id, expect: op.expect, files: op.files.map(f => ({ index: f.index, name: f.name, size: f.size, sha256: f.sha256 })) }
+      : { kind: 'download', id: op.id, uid: op.uid, manifestSha256: op.manifestSha256, preparedAt: op.preparedAt, objects: op.objects, bytes: op.bytes };
+  }
+
+  function readHistory() {
+    const raw = sessionStorage.getItem(STORE_KEY);
+    if (raw === null) return [];
+    const saved = JSON.parse(raw);
+    // A partial/unknown snapshot (including another owner's) is not an empty history we may replace.
+    if (!isObject(saved) || ![1, 2, 3].includes(saved.v) || JSON.stringify(saved.owner) !== JSON.stringify(owner)
+        || !Array.isArray(saved.operations)) throw new Error('Unverified history');
+    const ids = new Set();
+    for (const kept of saved.operations) {
+      if (!isObject(kept) || typeof kept.id !== 'string' || !UUID.test(kept.id) || ids.has(kept.id)) throw new Error('Unverified operation');
+      ids.add(kept.id);
+      if (kept.kind === 'import') {
+        if (!(kept.expect == null || uid(kept.expect)) || !Array.isArray(kept.files)
+            || !kept.files.length || kept.files.length > MAX_FILES) throw new Error('Unverified import history');
+        const indexes = new Set();
+        for (const f of kept.files) {
+          if (!isObject(f) || !count(f.index, MAX_FILES - 1) || indexes.has(f.index) || typeof f.name !== 'string'
+              || !count(f.size, Number.MAX_SAFE_INTEGER) || !(f.sha256 == null || hash(f.sha256))) throw new Error('Unverified file history');
+          indexes.add(f.index);
+        }
+      } else if (kept.kind === 'download') {
+        if (!uid(kept.uid) || !(kept.manifestSha256 == null || hash(kept.manifestSha256))
+            || !(kept.preparedAt == null || time(kept.preparedAt)) || !(kept.objects == null || count(kept.objects, 65533))
+            || !(kept.bytes == null || count(kept.bytes, 4294967294))) throw new Error('Unverified download history');
+      } else throw new Error('Unknown history kind');
+      const op = operations.find(o => o.id === kept.id) || clearedHistory.get(kept.id);
+      if (!op) continue;
+      if (op.kind !== kept.kind || (op.kind === 'download' ? op.uid !== kept.uid : op.expect !== (kept.expect ?? null)))
+        throw new Error('Conflicting history');
+      if (op.kind === 'import') for (const f of kept.files) {
+        const entry = op.files.find(e => e.index === f.index);
+        if ((!entry && clearedHistory.has(op.id)) || (entry && (entry.size !== f.size || entry.name !== f.name
+            || (entry.sha256 && f.sha256 && entry.sha256 !== f.sha256)))) throw new Error('Conflicting file history');
+      }
+      if (op.kind === 'download' && op.manifestSha256 && kept.manifestSha256
+          && (op.manifestSha256 !== kept.manifestSha256 || op.preparedAt !== kept.preparedAt
+            || op.objects !== kept.objects || op.bytes !== kept.bytes)) throw new Error('Conflicting manifest history');
     }
+    return saved.operations;
+  }
+
+  function store() {
+    if (!owner) return;
+    let added = [];
+    try {
+      // Read and merge in the same turn as the write. A failed restore never licenses replacing unseen history.
+      added = mergeHistory(readHistory());
+      let confirmed = 0;
+      const kept = operations.filter(op => !finished(op) || confirmed++ < STORE_OPERATIONS).map(descriptor);
+      sessionStorage.setItem(STORE_KEY, JSON.stringify({ v: 3, observationOnly: true, owner, operations: kept }));
+      persistenceFailed = false;
+    } catch (_) { persistenceFailed = true; }
+    observeHistory(added);
   }
   function restore() {
-    let saved = null;
-    try { saved = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null'); } catch (_) { saved = null; }
-    // Another person's operations are never read, shown or resumed, whatever their display name (REQ-S9-U4-10).
-    if (!saved || (saved.v !== 1 && saved.v !== 2) || JSON.stringify(saved.owner) !== JSON.stringify(owner) || !Array.isArray(saved.operations)) {
-      try { sessionStorage.removeItem(STORE_KEY); } catch (_) {}
-      return;
-    }
-    for (const kept of saved.operations.slice(0, STORE_OPERATIONS).reverse()) {
-      if (!kept || !UUID.test(String(kept.id))) continue;
-      if (kept.kind === 'import' && Array.isArray(kept.files)) {
-        const op = importOperation(String(kept.id), typeof kept.expect === 'string' ? kept.expect : null);
-        for (const f of kept.files.slice(0, MAX_FILES))
-          if (Number.isInteger(f?.index) && f.index >= 0 && f.index < MAX_FILES) {
-            const entry = fileEntry(op, f.index, null, String(f.name ?? ''), Number(f.size) || 0, 'unknown');
-            // A record without the dispatch marker (format 1, or a damaged one) cannot tell a settled file from one whose
-            // last request is still unknown: no non-final row of the server may then open it again.
-            entry.generation = saved.v === 2 && Number.isInteger(f.generation) ? f.generation : null;
-            entry.pending = saved.v === 2 && (f.pending === null || Number.isInteger(f.pending)) ? f.pending : Number.MAX_SAFE_INTEGER;
-            entry.message = TEXT.lost;
-            op.files.push(entry);
-          }
-        operations.unshift(op);
-      } else if (kept.kind === 'download' && typeof kept.uid === 'string') {
-        operations.unshift(downloadOperation(String(kept.id), kept.uid));
-      }
-    }
+    let added = [];
+    try { added = mergeHistory(readHistory()); }
+    catch (_) { persistenceFailed = true; openPanel(); render(); return; }
     if (!operations.length) return;
     openPanel();
-    for (const op of operations) if (op.kind === 'import') readImport(op); else readDownload(op);
+    observeHistory(added);
     render();
+  }
+  function mergeHistory(saved) {
+    const added = [];
+    for (const kept of saved) {
+      if (clearedHistory.has(kept.id)) continue;
+      let op = operations.find(o => o.id === kept.id);
+      const existing = !!op;
+      if (kept.kind === 'import') {
+        op = op || importOperation(kept.id, kept.expect ?? null);
+        for (const f of kept.files) {
+          const entryBefore = op.files.find(e => e.index === f.index);
+          if (entryBefore) { entryBefore.sha256 = entryBefore.sha256 || f.sha256 || null; continue; }
+          const entry = fileEntry(op, f.index, null, String(f.name ?? ''), f.size, 'unresolved');
+          entry.sha256 = hash(f.sha256) ? f.sha256 : null;
+          entry.message = TEXT.unread;
+          op.files.push(entry);
+          if (existing && !added.includes(op)) added.push(op);
+        }
+      } else {
+        op = op || downloadOperation(kept.id, kept.uid);
+        if (!op.manifestSha256 && hash(kept.manifestSha256) && time(kept.preparedAt) && count(kept.objects, 65533) && count(kept.bytes, 4294967294))
+          Object.assign(op, { manifestSha256: kept.manifestSha256, preparedAt: kept.preparedAt, objects: kept.objects, bytes: kept.bytes });
+      }
+      if (!existing) { operations.push(op); added.push(op); }
+    }
+    return added;
+  }
+  function observeHistory(added) {
+    for (const op of added) if (op.kind === 'import') readImport(op); else readDownload(op);
   }
 
   // ── the panel ──
@@ -430,18 +461,26 @@ window.KinStudyTransferLocal = function (app) {
     hide.textContent = 'Hide';
   }
   function closePanel() {
+    endDownloads();
+    render();
     // While files are still going out the panel only folds: its results must stay reachable.
     if (running || operations.some(op => op.inFlight)) { body.hidden = true; hide.textContent = 'Show'; return; }
     if (root) root.hidden = true;
   }
   function clearFinished() {
-    for (let i = operations.length - 1; i >= 0; i--) if (finished(operations[i])) { operations[i].gen = -1; operations.splice(i, 1); }
+    endDownloads();
+    for (let i = operations.length - 1; i >= 0; i--) if (finished(operations[i])) {
+      endDownload(operations[i]);
+      clearedHistory.set(operations[i].id, operations[i]);
+      operations[i].gen = -1;
+      operations.splice(i, 1);
+    }
     store();
     render();
   }
   function finished(op) {
     if (op.inFlight || op.polling) return false;
-    if (op.kind === 'download') return ['sent', 'incomplete', 'unconfirmed'].includes(op.state) || op.manifestChanged || (!op.state && op.prepareRefused);
+    if (op.kind === 'download') return op.state === 'sent';
     return op.files.every(f => f.final);
   }
 
@@ -451,10 +490,7 @@ window.KinStudyTransferLocal = function (app) {
       recheckPending: false, label: studyLabel(expect) };
   }
   function fileEntry(op, index, file, name, size, state) {
-    // generation: the last attempt generation the server showed; pending: the lower bound of a dispatch whose answer is
-    // not known yet (null: none) - a status row must be newer than it to speak for that dispatch.
-    return { op, index, file, name, size, state, final: false, outcome: null, code: null, message: '', identity: null,
-      writeDisposition: null, rechecked: false, autoRechecked: false, canRetry: false, generation: null, pending: null };
+    return { op, index, file, name, size, state, final: false, outcome: null, message: '', identity: null, sha256: null };
   }
   function studyLabel(uid) {
     if (!uid) return null;
@@ -472,12 +508,6 @@ window.KinStudyTransferLocal = function (app) {
     picker.value = '';
     picker.click();
   }
-  function chooseAgain(op) {
-    if (!canImport() || !usable() || !live(op)) return;
-    pickFor = { operation: op };
-    picker.value = '';
-    picker.click();
-  }
   picker.addEventListener('change', () => {
     const files = [...(picker.files || [])], target = pickFor;
     pickFor = null;
@@ -485,13 +515,12 @@ window.KinStudyTransferLocal = function (app) {
     if (!files.length || !target || !usable()) return;
     // 4: more than 100 files is refused before any request; nothing of the selection is sent.
     if (files.length > MAX_FILES) { status.textContent = TEXT.tooMany(files.length); return; }
-    if (target.operation) { reattach(target.operation, files); return; }
-    // One operation id per selection; each file keeps its index for every retry (4.4).
+    // A new selection alone creates dispatch authority; an existing operation can never receive new Files.
     const op = importOperation(crypto.randomUUID(), target.expect ?? null);
     files.forEach((file, index) => {
       const entry = fileEntry(op, index, file, file.name, file.size, 'waiting');
-      entry.fresh = true;
-      if (file.size > MAX_BYTES) applyImportDecision(entry, classifyTransferEvidence({ source: 'local-oversize' }));
+      if (file.size > MAX_BYTES) { entry.state = 'refused'; entry.final = true; entry.file = null; entry.message = TEXT.tooLarge; }
+      else unsent.add(entry);
       op.files.push(entry);
     });
     operations.unshift(op);
@@ -501,28 +530,11 @@ window.KinStudyTransferLocal = function (app) {
     pump();
   });
 
-  /** Choose Files Again for an operation read back after a re-login: the same index and operation id (by name and size). */
-  function reattach(op, files) {
-    if (!live(op)) return;
-    for (const entry of op.files) {
-      // Name and size only find the file again; whether it may go is the classified permission (sendable).
-      if (entry.file || !sendable(entry)) continue;
-      const match = files.find(f => f.name === entry.name && f.size === entry.size);
-      if (match) { entry.file = match; entry.state = 'waiting'; queue.push(entry); }
-    }
-    render();
-    pump();
-  }
-
-  /**
-   * A file may go again only on a classified permission for what is known of it now (canRetry): never after a final
-   * result, never while Unconfirmed or not known (only reads change that, 4.4), never twice at once.
-   */
   function sendable(entry) {
-    return !entry.final && entry.canRetry === true && !queue.includes(entry) && entry.state !== 'sending' && entry.state !== 'waiting';
+    return !!entry.file && unsent.has(entry) && !entry.final && !queue.includes(entry) && entry.state !== 'sending' && entry.state !== 'waiting';
   }
   function retry(entry) {
-    if (!live(entry.op) || !entry.file || !sendable(entry)) return;
+    if (!live(entry.op) || !usable() || !sendable(entry)) return;
     entry.state = 'waiting';
     queue.push(entry);
     render();
@@ -537,58 +549,59 @@ window.KinStudyTransferLocal = function (app) {
     try {
       while (queue.length && usable()) {
         const entry = queue.shift();
-        if (!live(entry.op) || !entry.file || entry.state !== 'waiting' || entry.final || !(entry.fresh || entry.canRetry)) continue;
+        if (!live(entry.op) || !entry.file || entry.state !== 'waiting' || entry.final || !unsent.has(entry)) continue;
         if (await inLane(() => send(entry)) === 'stop') break;
       }
     } finally {
       running = false;
       // Files a stop left waiting were never sent: they go back to the person (Retry), never out by themselves.
       for (const entry of queue.splice(0))
-        if (entry.state === 'waiting') applyImportDecision(entry, classifyTransferEvidence({ source: 'local-unsent' }));
+        if (entry.state === 'waiting') localUnsent(entry);
       summarise();
       render();
     }
   }
 
-  /** One file: POST /api/dicom-import with its operation id, its index and (from a row) the expected study. */
+  /** Consume the live File's opportunity before any asynchronous work or transport invocation. */
   async function send(entry) {
     const op = entry.op;
-    if (!live(op) || !usable()) return 'stop';
+    if (!live(op) || !usable() || !entry.file || !unsent.has(entry) || entry.final) return 'stop';
     const gen = op.gen, at = work.capture('document');
-    // Before it leaves: no earlier permission survives, and the record knows a dispatch is out (a re-login then reads
-    // the server and never takes an older attempt's retryable as this request's answer).
-    entry.canRetry = false;
-    entry.fresh = false;
-    entry.pending = Number.isInteger(entry.generation) ? entry.generation : -1;
-    if (!store()) {
-      applyImportDecision(entry, classifyTransferEvidence({ source: 'local-unsent', notice: TEXT.storeBlocked }));
-      render();
-      return 'stop';
-    }
+    unsent.delete(entry);
     entry.state = 'sending';
     op.inFlight = true;
     render();
     const headers = { 'Content-Type': 'application/dicom', 'X-KIN-Operation-Id': op.id, 'X-KIN-File-Index': String(entry.index) };
     if (op.expect) headers['X-KIN-Expect-Study'] = op.expect;
-    let answer = null, failure = null;
+    let answer = null, failure = null, invoked = false;
     try {
+      const digest = await crypto.subtle.digest('SHA-256', await entry.file.arrayBuffer());
+      entry.sha256 = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+      if (!live(op) || !usable() || !work.admits(at)) { lostAnswer(op, entry); return 'stop'; }
+      invoked = true;
       answer = await app.transport.request(app.api + '/dicom-import', { method: 'POST', body: entry.file, headers, context: at,
         deadlineMs: IMPORT_DEADLINE_MS });
     } catch (error) { failure = error; }
-    let go = 'next';
+    let go = 'stop';
     const applied = work.commit(at, () => {
-      if (!live(op) || op.gen !== gen) { go = 'stop'; return; }
+      if (!live(op) || op.gen !== gen) return;
       op.inFlight = false;
-      const d = classifyTransferEvidence({ source: 'post', failure, answer, entry });
-      applyImportDecision(entry, d);
-      if (d.kind === 'result' && entry.outcome === 'unconfirmed') scheduleRecheck(op);
-      // An answer that proves nothing gets one bound read of this operation - never a send.
-      if (d.readNeeded) readImport(op);
-      if (d.stop) go = 'stop';
+      if (failure && (!invoked || failure.sent === false)) {
+        unsent.add(entry);
+        localUnsent(entry);
+      } else {
+        const result = complete(answer) && answer.body.operationId === op.id ? importPositive(answer.body, entry) : null;
+        if (result) { adoptImport(entry, result); go = 'next'; }
+        else {
+          uncertain(entry, diagnostic(answer?.body, failure ? TEXT.lost : TEXT.unknownAnswer));
+          readImport(op);
+          if (answer?.body?.code === 'IMPORT_UNCONFIRMED') scheduleRecheck(op);
+        }
+      }
       store();
       render();
     });
-    if (!applied) { lostAnswer(op, entry); return 'stop'; }
+    if (!applied) lostAnswer(op, entry);
     return go;
   }
 
@@ -608,34 +621,20 @@ window.KinStudyTransferLocal = function (app) {
     if (!live(op) || op.readSeq !== seq) return;
     if (!usable()) { op.lost = true; return; }
     const gen = op.gen, at = work.capture('document');
-    for (const entry of op.files) if (entry.state === 'unknown' || entry.state === 'unresolved') entry.state = 'checking';
     op.inFlight = true;
     render();
-    let answer = null, failed = false;
-    try {
-      answer = await app.transport.request(app.api + '/dicom-import/' + encodeURIComponent(op.id), { context: at });
-    } catch (_) { failed = true; }
+    let answer = null;
+    try { answer = await app.transport.request(app.api + '/dicom-import/' + encodeURIComponent(op.id), { context: at }); }
+    catch (_) {}
     const applied = work.commit(at, () => {
-      if (!live(op) || op.gen !== gen) return;
+      if (!live(op) || op.gen !== gen || op.readSeq !== seq) return;
       op.inFlight = false;
-      const view = classifyTransferEvidence({ source: 'status', failed, answer, op });
-      op.notice = view.kind === 'unreadable' ? view.notice : '';
+      const rows = importRows(answer, op);
       for (const entry of op.files) {
-        if (entry.state === 'sending' || entry.state === 'waiting' || entry.final) continue;
-        if (view.kind !== 'shown') {
-          if (entry.state === 'checking')
-            applyImportDecision(entry, view.kind === 'not-shown' ? { kind: 'unknown', notice: TEXT.unresolved } : { kind: 'unknown', notice: TEXT.unread, readNeeded: true });
-          continue;
-        }
-        const row = view.rows.has(entry.index) ? view.rows.get(entry.index) : undefined;
-        const d = classifyTransferEvidence({ source: 'status-file', entry, row });
-        // Only an entry this read was asked about, or a result row, changes: an uncertain read never undoes what is known.
-        if (d.kind !== 'result' && entry.state !== 'checking') continue;
-        applyImportDecision(entry, d);
-        if (d.kind === 'result' && entry.outcome === 'unconfirmed') {
-          if (recheck) entry.rechecked = true;
-          else scheduleRecheck(op);
-        }
+        if (entry.final || unsent.has(entry) || entry.state === 'sending') continue;
+        const row = rows?.get(entry.index), result = importPositive(row, entry);
+        if (result) adoptImport(entry, result);
+        else uncertain(entry, diagnostic(row, !rows ? TEXT.unread : TEXT.pending));
       }
       store();
       render();
@@ -644,7 +643,7 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   function copyId(entry) {
-    const text = `${entry.op.id} ${entry.index}`, at = work.capture('document');
+    const text = entry.index === undefined ? entry.op.id : `${entry.op.id} ${entry.index}`, at = work.capture('document');
     const done = ok => work.commit(at, () => { status.textContent = ok ? TEXT.copied : TEXT.copyFailed(entry.op.id, entry.index); });
     try { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); } catch (_) { done(false); }
   }
@@ -661,7 +660,7 @@ window.KinStudyTransferLocal = function (app) {
   // ── Download Originals (5.2, 5.3, 6) ──
   function downloadOperation(id, uid) {
     return { kind: 'download', id, uid, state: null, objects: 0, bytes: 0, done: 0, notice: '', gen: generation, readSeq: 0,
-      inFlight: false, lost: false, polling: false, polls: 0, startedFrom: null, manifestChanged: false, prepareRefused: false, grantId: null, label: studyLabel(uid) };
+      inFlight: false, lost: false, polling: false, polls: 0, grantId: null, manifestSha256: null, preparedAt: null, label: studyLabel(uid) };
   }
 
   /** The row's Download Originals: a new operation is prepared for that study's fixed manifest (5.2 steps 1-2). */
@@ -671,6 +670,7 @@ window.KinStudyTransferLocal = function (app) {
     openPanel();
     if (!usable()) { status.textContent = TEXT.offline; return; }
     const op = downloadOperation(crypto.randomUUID(), uid);
+    firstDownloads.add(op);
     operations.unshift(op);
     store();
     const gen = op.gen, at = work.capture('document');
@@ -685,12 +685,9 @@ window.KinStudyTransferLocal = function (app) {
     const applied = work.commit(at, () => {
       if (!live(op) || op.gen !== gen) return;
       op.inFlight = false;
-      // The same id may be prepared again safely (it replays): an answer that proves nothing is read back by its id, never
-      // prepared anew, and is not called a refusal (a lost or proxy-made answer may follow a committed preparation).
-      const d = classifyTransferEvidence({ source: 'prepare', failed, answer, op });
-      if (d.kind === 'prepared') { adoptDownload(op, d.view); op.notice = ''; }
-      else if (d.kind === 'refused') { op.notice = d.notice; op.prepareRefused = true; }
-      else { op.notice = d.notice; readDownload(op, false, true); }
+      const view = downloadPositive(answer, op);
+      if (view) { adoptDownload(op, view); op.notice = ''; }
+      else { op.notice = TEXT.prepareUnknown; readDownload(op, false, true); }
       store();
       render();
     });
@@ -698,26 +695,21 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   function adoptDownload(op, view) {
+    // An uncertain observation can never erase a previously validated supply result.
+    if (op.state === 'sent') return;
     op.state = view.state;
-    op.objects = Number(view.objects) || 0;
-    op.bytes = Number(view.bytes) || 0;
-    const attempts = Array.isArray(view.attempts) ? view.attempts : [];
-    op.done = attempts.length ? Number(attempts[attempts.length - 1].objectsComplete) || 0 : 0;
+    op.manifestSha256 = view.manifestSha256;
+    op.preparedAt = view.preparedAt;
+    op.objects = view.objects;
+    op.bytes = view.bytes;
+    op.done = view.attempts.length ? view.attempts[view.attempts.length - 1].objectsComplete : 0;
   }
 
-  /**
-   * The archive, as the browser's own download of the server's stream (5.1): never read into this page (an archive may
-   * approach 4 GiB). Offered for the same operation only while it is Ready, Incomplete or Unconfirmed (5.3); after Sent
-   * a new operation is prepared instead. No Range, no resume.
-   *
-   * The browser's own GET cannot carry the session binding header, so one Download press first asks, as an ordinary
-   * bound request, for a one-time grant of this operation (D1489), and only then clicks one hidden link with it. The
-   * grant lives in this function's memory and the link alone, never in the page's record, its storage or on screen.
-   * Its answer is used only if the panel, the operation, this read's sequence, the work context and the signed-in person
-   * are all still the ones that asked; else no link is clicked. A refusal is a notice, and the status read tells the rest.
-   */
+  // One grant request and one native click, only in the creating document's still-current context.
   async function start(op) {
-    if (!live(op) || !usable() || op.polling || op.inFlight || !RESTARTABLE.includes(op.state) || op.manifestChanged) return;
+    if (!live(op) || !usable() || op.polling || op.inFlight || op.state !== 'prepared' || !firstDownloads.has(op)) return;
+    firstDownloads.delete(op);
+    pendingClicks.add(op);
     const gen = op.gen, seq = ++op.readSeq, at = work.capture('document'), who = JSON.stringify(app.identity());
     // The press was made with one study selected; once the person has moved to another one (A→B, and A→B→A is not the
     // same selection either, AGENTS 1) its late grant starts no download in the middle of other work (DG-T06, U4C-04).
@@ -730,26 +722,21 @@ window.KinStudyTransferLocal = function (app) {
     try {
       answer = await app.transport.request(base + '/grant', { method: 'POST', json: {}, context: at });
     } catch (_) { failed = true; }
-    const decision = classifyTransferEvidence({ source: 'grant', failed, answer, op });
-    let grant = decision.kind === 'grant' ? decision.grant : null;
-    delete decision.grant;
+    const decision = grantPositive(answer, op);
+    let grant = decision ? decision.grant : null;
     if (answer?.body && typeof answer.body === 'object') delete answer.body.grant;
     const applied = work.commit(at, () => {
       if (!live(op) || op.gen !== gen) return;
       op.inFlight = false;
-      if (op.readSeq !== seq || !usable() || JSON.stringify(app.identity()) !== who) { render(); return; }
-      if (grant && !work.admits(pressed)) {
-        // The grant is not used: it stays unused until it runs out (120 s) or the next press replaces it.
-        op.notice = TEXT.selectionMoved;
+      if (!pendingClicks.has(op)) {
+        op.notice = TEXT.lifetimeEnded;
         render();
         return;
       }
       if (!grant) {
-        // This press clicks no link (that much is this page's own fact). Whether a grant was issued is the route's typed
-        // refusal or not known - never a refusal by guess; the operation's state is read again, and Download asks anew.
-        op.notice = decision.notice;
+        pendingClicks.delete(op);
+        op.notice = TEXT.grantUnknown;
         render();
-        // The notice is the answer to this press; the read that follows keeps it unless the server has its own to say.
         readDownload(op, false, true);
         return;
       }
@@ -764,16 +751,24 @@ window.KinStudyTransferLocal = function (app) {
       link.rel = 'noreferrer';
       link.hidden = true;
       root.append(link);
-      link.click();
+      let started = false;
+      work.commit(pressed, () => {
+        if (!live(op) || op.gen !== gen || op.readSeq !== seq || !usable()
+            || JSON.stringify(app.identity()) !== who || !pendingClicks.has(op)) return;
+        pendingClicks.delete(op);
+        link.click();
+        started = true;
+      });
       link.remove();
       link.removeAttribute('href');
+      pendingClicks.delete(op);
+      if (!started) { op.notice = TEXT.selectionMoved; render(); return; }
       op.notice = '';
-      op.startedFrom = op.state;
       op.polls = 0;
       poll(op);
     });
     grant = null;
-    if (!applied) lostAnswer(op, null);
+    if (!applied) { pendingClicks.delete(op); lostAnswer(op, null); }
   }
 
   function poll(op) {
@@ -795,29 +790,14 @@ window.KinStudyTransferLocal = function (app) {
     } catch (_) { failed = true; }
     const applied = work.commit(at, () => {
       if (!live(op) || op.gen !== gen || op.readSeq !== seq) return;
-      if (failed || !answer.ok || answer.body?.operationId !== op.id || !DOWNLOAD_NAMES[answer.body.state]) {
-        op.notice = !failed && !answer.ok && answer.body?.message ? answer.body.message : TEXT.unread;
-        op.polling = false;
-        render();
-        return;
-      }
-      adoptDownload(op, answer.body);
-      // The browser's own GET answers this page nothing: a refused or expired grant is known from the status (D1489).
-      const said = classifyTransferEvidence({ source: 'archive-status', request: answer.body.archiveRequest, op });
-      const unstarted = said.kind !== 'none' && RESTARTABLE.includes(op.state);
-      // The study's originals are no longer the ones this operation's fixed manifest names (5.2 step 3): no grant of this
-      // operation can ever start, so the panel offers a new preparation instead of asking for this one again (U4C-02).
-      if (unstarted && said.kind === 'manifest-changed') op.manifestChanged = true;
-      op.notice = unstarted ? said.notice : keepNotice ? op.notice : '';
+      const view = downloadPositive(answer, op);
+      if (view) adoptDownload(op, view);
+      op.notice = view ? (keepNotice ? op.notice : '') : TEXT.unread;
       if (polled && op.polling) {
         op.polls++;
-        const waiting = op.state === op.startedFrom;
-        if (op.state === 'sending' || (waiting && !unstarted && op.polls < DOWNLOAD_START_POLLS)) later(() => readDownload(op, true), DOWNLOAD_POLL_MS);
-        else { op.polling = false; if (waiting && !unstarted) op.notice = TEXT.notStarted; }
-      } else if (op.state === 'sending' && !op.polling) {
-        op.startedFrom = null;
-        poll(op);
-      }
+        if (op.state !== 'sent' && op.polls < DOWNLOAD_START_POLLS) later(() => readDownload(op, true), DOWNLOAD_POLL_MS);
+        else { op.polling = false; if (op.state !== 'sent') op.notice = TEXT.notStarted; }
+      } else if (op.state === 'sending' && !op.polling) { op.polls = 0; poll(op); }
       store();
       render();
     });
@@ -865,12 +845,10 @@ window.KinStudyTransferLocal = function (app) {
         submit.disabled = false;
         if (ended || gen !== generation) return;
         if (failed) { result.textContent = TEXT.lost; return; }
-        const value = answer.body;
-        if (answer.ok && value && OUTCOME_NAMES[value.outcome]) {
-          result.textContent = OUTCOME_NAMES[value.outcome] + ' — ' + (value.message || '');
-          const op = operations.find(o => o.kind === 'import' && o.id === value.operationId);
-          if (op) readImport(op);
-        } else result.textContent = !answer.ok && typeof value?.code === 'string' && value?.message ? value.message : TEXT.httpFailure(answer.status);
+        // Recovery is an explicit server action; its reply does not authorize another payload send or certify a file.
+        result.textContent = diagnostic(answer.body, '관리자 확인 요청 뒤 이 작업의 상태를 다시 확인하세요.');
+        const op = operations.find(o => o.kind === 'import' && o.id === id);
+        if (op) readImport(op);
       });
       if (!applied) { busy = false; submit.disabled = false; }
     });
@@ -884,6 +862,7 @@ window.KinStudyTransferLocal = function (app) {
   // ── drawing (textContent only: file names, messages and study labels are data) ──
   function render() {
     if (!root || ended) return;
+    persistence.textContent = persistenceFailed ? TEXT.storeFailed : '';
     resolveOpen.hidden = !isAdmin();
     clear.disabled = !operations.some(finished);
     list.replaceChildren(...operations.map(op => op.kind === 'import' ? drawImport(op) : drawDownload(op)));
@@ -898,10 +877,9 @@ window.KinStudyTransferLocal = function (app) {
     box.dataset.operation = op.id;
     const head = node('div', 'study-transfer-op-head');
     head.append(node('b', null, 'Import DICOM'), node('span', null, ' · ' + op.id.slice(0, 8) + (op.label ? ' · ' + op.label : '')));
-    if (op.files.some(f => !f.file && sendable(f))) head.append(button('Choose Files Again', () => chooseAgain(op)));
+    if (op.files.some(f => !f.final && !unsent.has(f))) head.append(button('Import Again', () => choose(op.expect)));
     if (op.files.filter(f => f.file && sendable(f)).length > 1) head.append(button('Retry All', () => op.files.forEach(retry)));
-    if (op.files.some(f => f.state === 'unknown' || f.state === 'unresolved' || (f.state === 'result' && f.outcome === 'unconfirmed')))
-      head.append(button('Check Again', () => readImport(op, op.files.some(f => f.outcome === 'unconfirmed'))));
+    if (op.files.some(f => !f.final && !unsent.has(f))) head.append(button('Check Again', () => readImport(op)));
     box.append(head);
     if (op.notice) box.append(node('p', 'study-transfer-note', op.notice));
     const rows = node('ol', 'study-transfer-files');
@@ -912,7 +890,7 @@ window.KinStudyTransferLocal = function (app) {
       if (f.state === 'result' && f.identity === 'not_comparable') li.append(node('span', 'study-transfer-mark', 'Unverified'));
       const text = describe(f);
       if (text) li.append(node('span', 'study-transfer-reason', text));
-      if (f.state === 'result' && f.outcome === 'unconfirmed' && (f.rechecked || f.autoRechecked)) li.append(button('Copy ID', () => copyId(f)));
+      li.append(button('Copy ID', () => copyId(f)));
       if (f.file && sendable(f)) li.append(button('Retry', () => retry(f)));
       rows.append(li);
     }
@@ -921,15 +899,9 @@ window.KinStudyTransferLocal = function (app) {
   }
   function stateName(f) {
     if (f.state === 'result') return OUTCOME_NAMES[f.outcome];
-    return { waiting: 'Waiting', sending: 'Sending', checking: 'Checking', unknown: 'Checking', unresolved: 'Result Unknown',
-      notSent: 'Not Sent', refused: 'Not Sent' }[f.state] || '';
+    return { waiting: 'Waiting', sending: 'Sending', unresolved: 'Not confirmed', notSent: 'Not Sent', refused: 'Not Sent' }[f.state] || 'Not confirmed';
   }
-  function describe(f) {
-    if (f.state !== 'result') return f.message;
-    if (f.outcome === 'rejected' && f.writeDisposition === 'may-have-written') return TEXT.mayHaveWritten;
-    if (f.outcome === 'unconfirmed' && (f.rechecked || f.autoRechecked)) return TEXT.askAdmin(f.op.id, f.index);
-    return f.message;
-  }
+  function describe(f) { return f.message; }
 
   function drawDownload(op) {
     const box = node('section', 'study-transfer-op');
@@ -937,21 +909,22 @@ window.KinStudyTransferLocal = function (app) {
     const head = node('div', 'study-transfer-op-head');
     head.append(node('b', null, 'Download Originals'), node('span', null, ' · ' + op.id.slice(0, 8) + (op.label ? ' · ' + op.label : '')));
     box.append(head);
-    if (op.state) {
-      const line = node('p', 'study-transfer-download');
-      line.append(node('span', 'study-transfer-state', DOWNLOAD_NAMES[op.state]), node('span', 'study-transfer-reason', downloadText(op)));
-      box.append(line);
-    }
+    const line = node('p', 'study-transfer-download');
+    const ready = op.state === 'prepared' && firstDownloads.has(op);
+    line.append(node('span', 'study-transfer-state', ready ? 'Ready' : op.state && op.state !== 'prepared' ? DOWNLOAD_NAMES[op.state] : 'Not confirmed'),
+      node('span', 'study-transfer-reason', downloadText(op)));
+    box.append(line);
     if (op.notice) box.append(node('p', 'study-transfer-note', op.notice));
-    if (RESTARTABLE.includes(op.state) && !op.manifestChanged && !op.polling && !op.inFlight) box.append(button('Download', () => start(op)));
-    // After Sent, or once its manifest no longer matches the study: a new operation with a new manifest (5.3); this one
-    // and its attempts stay in the panel as they were.
-    if ((op.state === 'sent' || (op.manifestChanged && RESTARTABLE.includes(op.state))) && !op.inFlight && !op.polling)
+    if (ready && !op.polling && !op.inFlight) box.append(button('Download', () => start(op)));
+    box.append(button('Copy ID', () => copyId({ op })));
+    if (!op.inFlight) {
+      box.append(button('Check Again', () => readDownload(op)));
       box.append(button('Prepare Again', () => download(op.uid)));
+    }
     return box;
   }
   function downloadText(op) {
-    if (op.state === 'prepared') return TEXT.ready(op.objects, size(op.bytes));
+    if (op.state === 'prepared' && firstDownloads.has(op)) return TEXT.ready(op.objects, size(op.bytes));
     if (op.state === 'sending') return TEXT.downloading(op.done, op.objects);
     if (op.state === 'sent') return TEXT.sent;
     if (op.state === 'incomplete') return TEXT.incomplete;

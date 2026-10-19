@@ -1,233 +1,417 @@
 # coding: utf-8
-"""S9-U4b part (c) CT-2: page mutants of the transfer panel, each killed by a named C-row assertion.
+"""D1606 R5-M01..M18 and retained transfer/context/privacy mutants.
 
-Each mutant is a one-off copy of one shipped file, served in place of the real one for one case of
-tests/study_transfer_local_dom_test.py (a bundle source is served inside a rebuilt bundle, study-transfer-local.js at
-its own URL, as the W4 flow mutants do); no file in the tree is written. A mutant counts as killed only when its case
-fails - not errors - and the failure names the C-row it was written for (the assertion messages carry "C-0n"): a
-startup error, a timeout without that row's assertion or a skip is NOT PROVEN. The baseline (every named case, on the
-shipped files) must pass first, or no kill is claimed.
-
-Run with scripts/record-run.py --tree worklist-v0/hpacs-lite --tree tests: the hashes before and after show the shipped
-files were not changed by the run.
+Only the exception's own named behavior assertion can kill a mutant. A test name, setup/precondition timeout,
+compile/import error or skip cannot. D1606_SUPERSESSION accounts for every r4 mutant; server/grant mutants remain
+separate unchanged suites. Mutants are served as one-off copies, never written over product assets (D73).
 """
+import argparse
 import io
 import json
 import sys
 import unittest
 from pathlib import Path
-
 import study_transfer_local_dom_test as t
-
 ROOT = Path(__file__).resolve().parents[1]
-LITE = ROOT / "worklist-v0/hpacs-lite"
-ASSET = "study-transfer-local.js"
+LITE = ROOT / 'worklist-v0/hpacs-lite'
 
-# (label, file, old, new, case, row)
-MUTANTS = [
-    ("import-shown-to-a-radiologist", ASSET, "const canImport = () => !app.demo() && app.can('technician');",
-     "const canImport = () => !app.demo() && (app.can('technician') || app.can('radiologist'));",
-     "test_c01_import_entry_shows_only_for_technician_or_admin_and_the_row_item_names_its_study", "C-01"),
-    ("row-import-drops-expect-study", ASSET, "if (op.expect) headers['X-KIN-Expect-Study'] = op.expect;", "",
-     "test_c01_import_entry_shows_only_for_technician_or_admin_and_the_row_item_names_its_study", "C-01"),
-    ("two-uploads-in-flight", ASSET, "if (await inLane(() => send(entry)) === 'stop') break;", "void send(entry);",
-     "test_c02_one_request_in_flight_one_operation_its_indexes_and_the_bytes_as_chosen", "C-02"),
-    ("more-than-100-files-sent", ASSET, "if (files.length > MAX_FILES) {", "if (files.length > 1000) {",
-     "test_c02_more_than_100_files_are_refused_before_any_request", "C-02"),
-    ("unconfirmed-sent-again", ASSET, "      if (d.kind === 'result' && entry.outcome === 'unconfirmed') scheduleRecheck(op);",
-     "      if (d.kind === 'result' && entry.outcome === 'unconfirmed') { entry.state = 'notSent'; entry.canRetry = true; retry(entry); }",
-     "test_c02_an_unconfirmed_file_is_never_sent_again_and_the_panel_reads_the_operation", "C-02"),
-    ("retry-with-a-new-operation-id", ASSET, "    entry.state = 'waiting';\n    queue.push(entry);\n    render();\n    pump();\n  }\n\n  /** The one",
-     "    entry.state = 'waiting';\n    entry.op.id = crypto.randomUUID();\n    queue.push(entry);\n    render();\n    pump();\n  }\n\n  /** The one",
-     "test_c02_a_retryable_file_goes_again_with_the_same_operation_index_and_bytes_and_a_final_one_never", "C-02"),
-    ("may-have-written-says-not-stored", ASSET,
-     "if (f.outcome === 'rejected' && f.writeDisposition === 'may-have-written') return TEXT.mayHaveWritten;", "",
-     "test_c03_display_names_server_messages_unverified_and_may_have_written", "C-03"),
-    ("panel-takes-focus", ASSET, "    root.hidden = false;\n    body.hidden = false;\n    hide.textContent = 'Hide';",
-     "    root.hidden = false;\n    body.hidden = false;\n    hide.textContent = 'Hide';\n    close.focus();",
-     "test_c03_c08_the_panel_never_takes_focus_opens_a_dialog_or_loses_the_draft", "C-03"),
-    ("copy-id-copies-the-prefix", ASSET, "const text = `${entry.op.id} ${entry.index}`",
-     "const text = `${entry.op.id.slice(0, 8)} ${entry.index}`",
-     "test_c04_still_unconfirmed_after_the_recheck_names_the_operation_and_copy_id_copies_it_whole", "C-04"),
-    ("resolve-shown-to-a-technician", ASSET, "const isAdmin = () => !app.demo() && app.can('admin');",
-     "const isAdmin = () => !app.demo() && app.can('technician');",
-     "test_c05_resolve_unconfirmed_is_admin_only_sends_the_closed_body_and_shows_the_answer", "C-05"),
-    ("sent-claims-the-file-was-saved", ASSET,
-     "sent: '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.',",
-     "sent: '서버가 이 검사의 모든 원본을 보냈고 내 컴퓨터에 저장했습니다.',",
-     "test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation", "C-06"),
-    ("sent-downloaded-again", ASSET, "const RESTARTABLE = ['prepared', 'incomplete', 'unconfirmed'];",
-     "const RESTARTABLE = ['prepared', 'incomplete', 'unconfirmed', 'sent'];",
-     "test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation", "C-06"),
-    ("download-enabled-on-a-tele-row", "context-menu.js",
-     '[{ sep: 1 }, { label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }]',
-     '[{ sep: 1 }, { label: "Download Originals", dis: false, act: () => studyTransfer.download(opened.uid) }]',
-     "test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation", "C-06"),
-    # The row menu's item runs on the selection its menu was opened on (W4 MENU-TARGET), also for Download Originals.
-    ("menu-item-acts-on-the-previous-selection", "context-menu.js",
-     "if (target && (target.uid !== selectedUid || target.seq !== selectionSeq || target.oid !== selectedOid)) {",
-     "if (false) {", "test_c06_the_download_item_acts_only_on_the_selection_its_menu_opened_on", "C-06"),
-    ("late-answer-written-after-the-context-changed", ASSET,
-     "    let go = 'next';\n    const applied = work.commit(at, () => {",
-     "    let go = 'next';\n    const applied = (effect => (effect(), true))(() => {",
-     "test_c07_an_answer_from_before_a_cancelled_logout_preparation_is_not_shown_the_server_is_read_instead", "C-07"),
-    ("another-person-resumes", ASSET,
-     "if (!saved || (saved.v !== 1 && saved.v !== 2) || JSON.stringify(saved.owner) !== JSON.stringify(owner) || !Array.isArray(saved.operations)) {",
-     "if (!saved || (saved.v !== 1 && saved.v !== 2) || !Array.isArray(saved.operations)) {",
-     "test_c07_the_same_person_resumes_after_a_new_login_another_person_never_sees_the_operation", "C-07"),
-    # D1489 DG-M10: the grant's answer clicks its link only while the context, the sequence and the person still hold.
-    ("late-grant-clicked", ASSET,
-     "    const applied = work.commit(at, () => {\n      if (!live(op) || op.gen !== gen) return;\n      op.inFlight = false;\n"
-     "      if (op.readSeq !== seq || !usable() || JSON.stringify(app.identity()) !== who) { render(); return; }",
-     "    const applied = (effect => (effect(), true))(() => {\n      if (!live(op) || op.gen !== gen) return;\n      op.inFlight = false;\n"
-     "      if (false) { render(); return; }",
-     "test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why", "C-07"),
-    # A refused or lost grant is a notice; the status read that follows it must not wipe it (hosted G3/CI on b64abb4).
-    ("refusal-notice-wiped-by-its-read", ASSET, "        readDownload(op, false, true);", "        readDownload(op);",
-     "test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why", "C-06"),
-    # U4C-04: the press belongs to the study selection it was made in; a grant answered after A->B or A->B->A clicks nothing.
-    ("late-grant-after-the-selection-moved-clicked", ASSET, "      if (grant && !work.admits(pressed)) {", "      if (false) {",
-     "test_c06_a_grant_answered_after_the_selection_moved_starts_no_download", "C-07"),
-    # ... and A->B->A is another selection: a check of the UID alone would click after coming back to A.
-    ("late-grant-checked-by-the-uid-only", ASSET, "      if (grant && !work.admits(pressed)) {",
-     "      if (grant && pressed.uid !== work.selection().uid) {",
-     "test_c06_a_grant_answered_after_the_selection_moved_starts_no_download", "C-07"),
-    # U4C-02: a refused MANIFEST_CHANGED operation is replaced by a new preparation, never offered for download again.
-    ("manifest-change-keeps-the-stale-download", ASSET,
-     "      if (unstarted && said.kind === 'manifest-changed') op.manifestChanged = true;\n", "",
-     "test_c06_a_changed_manifest_offers_a_new_preparation_and_keeps_the_old_operation", "C-06"),
-    # U4C-03: the 404 of a status read back as "none of its files reached the server" (the r2 reading).
-    ("scoped-404-read-as-not-sent", ASSET,
-     "view.kind === 'not-shown' ? { kind: 'unknown', notice: TEXT.unresolved }",
-     "view.kind === 'not-shown' ? { kind: 'not-sent', canRetry: true, notice: '' }",
-     "test_c07_a_lost_answer_of_a_stored_file_and_a_scoped_404_is_never_not_sent", "C-07"),
-    # U4C-03b: a 200 status without the file read back as "it never reached the server" (the r2 reading).
-    ("status-absence-read-as-not-sent", ASSET,
-     "        if (row === undefined) return unknown(TEXT.pending);",
-     "        if (row === undefined) return { kind: 'not-sent', proof: 'absence', canRetry: true, notice: '' };",
-     "test_c07_a_status_read_without_the_file_leaves_it_undecided", "C-07"),
-    # SRU4R3-4 (F4): files restored after a new login made sendable again without any server result.
-    ("restored-file-read-as-not-sent", ASSET,
-     "const entry = fileEntry(op, f.index, null, String(f.name ?? ''), Number(f.size) || 0, 'unknown');",
-     "const entry = fileEntry(op, f.index, null, String(f.name ?? ''), Number(f.size) || 0, 'notSent');",
-     "test_c07_a_file_restored_after_a_new_login_without_a_server_result_stays_undecided", "C-07"),
-    # D1566 R4-M01..M16: each the inversion of one classifier decision, killed by its acceptance case's assertion.
-    ("R4-M01-broad-post-fallback-refused", ASSET,
-     "        return unknown(TEXT.unknownAnswer, true);\n      }\n      case 'status': {",
-     "        return { kind: 'refused', proof: 'fallback', canRetry: true, notice: TEXT.httpFailure(answer.status), stop: true };\n      }\n      case 'status': {",
-     "test_r4_a01_an_answer_that_proves_nothing_never_says_not_sent_or_offers_retry", "C-07"),
-    ("R4-M02-non-write-from-a-status-whitelist", ASSET,
-     "        const refusal = !answer.ok && isObject(b) && typeof b.code === 'string' && typeof b.message === 'string' && b.message\n          ? REQUEST_REFUSALS[answer.status + ' ' + b.code] : undefined;",
-     "        const refusal = !answer.ok && [400, 403, 404, 409, 413, 415, 418, 503].includes(answer.status) ? 'again' : undefined;",
-     "test_r4_a01_an_answer_that_proves_nothing_never_says_not_sent_or_offers_retry", "C-07"),
-    ("R4-M03-retryable-from-the-outcome-name", ASSET,
-     "    else if (o === 'retryable') { if (typeof c !== 'string' || !owns(RETRYABLE_HTTP, c) || written) return null; statuses = RETRYABLE_HTTP[c]; }",
-     "    else if (o === 'retryable') { return r; }",
-     "test_r4_a01_an_answer_that_proves_nothing_never_says_not_sent_or_offers_retry", "C-07"),
-    ("R4-M04-status-rows-bypass-the-validator", ASSET,
-     "        const result = validateImportResult(row, entry.op.id, entry.index, null);",
-     "        const result = row;",
-     "test_r4_a02_a_malformed_or_contradicting_status_row_changes_nothing", "C-07"),
-    ("R4-M05-scoped-404-read-as-not-sent", ASSET,
-     "view.kind === 'not-shown' ? { kind: 'unknown', notice: TEXT.unresolved }",
-     "view.kind === 'not-shown' ? { kind: 'not-sent', canRetry: true, notice: '' }",
-     "test_r4_a02_missing_then_404_then_503_then_stored_by_the_status_read_only", "C-07"),
-    ("R4-M06-absence-read-as-not-sent", ASSET,
-     "        if (row === undefined) return unknown(TEXT.pending);",
-     "        if (row === undefined) return { kind: 'not-sent', proof: 'absence', canRetry: true, notice: '' };",
-     "test_r4_a02_missing_then_404_then_503_then_stored_by_the_status_read_only", "C-07"),
-    ("R4-M07-old-retry-permission-kept", ASSET,
-     ["    entry.canRetry = false;\n    entry.fresh = false;", "  function applyImportDecision(entry, d) {\n    entry.canRetry = false;\n"],
-     ["    entry.fresh = false;", "  function applyImportDecision(entry, d) {\n"],
-     "test_r4_a03_an_older_attempt_retryable_does_not_answer_a_newer_request", "C-07"),
-    ("R4-M08-generation-freshness-ignored", ASSET,
-     "        if (!FINAL.has(result.outcome) && entry.pending !== null && !(result.generation > entry.pending)) return unknown(TEXT.pending);\n",
-     "", "test_r4_a03_an_older_attempt_retryable_does_not_answer_a_newer_request", "C-07"),
-    ("R4-M09-dispatch-marker-not-kept", ASSET,
-     "generation: Number.isInteger(f.generation) ? f.generation : null, pending: f.pending }))",
-     "generation: Number.isInteger(f.generation) ? f.generation : null, pending: null }))",
-     "test_r4_a03_an_older_attempt_retryable_does_not_answer_a_newer_request", "C-07"),
-    ("R4-M09b-failed-record-write-taken-as-done", ASSET,
-     "      try { return sessionStorage.getItem(STORE_KEY) === null; } catch (_) { return true; }",
-     "      return true;", "test_r4_a03_a_record_that_cannot_be_updated_stops_the_dispatch", "C-07"),
-    ("R4-M10-controls-from-state-strings", ASSET,
-     "    return !entry.final && entry.canRetry === true && !queue.includes(entry) && entry.state !== 'sending' && entry.state !== 'waiting';",
-     "    return !entry.final && !queue.includes(entry) && (entry.state === 'notSent' || entry.state === 'refused' || (entry.state === 'result' && entry.outcome === 'retryable'));",
-     "test_r4_a04_continuation_stays_possible_only_where_a_contract_allows_it", "C-02"),
-    ("R4-M11-unknown-resent-by-itself", ASSET,
-     "      if (d.readNeeded) readImport(op);",
-     "      if (d.readNeeded) { entry.state = 'waiting'; entry.canRetry = true; queue.push(entry); }",
-     "test_r4_a01_an_answer_that_proves_nothing_never_says_not_sent_or_offers_retry", "C-07"),
-    ("R4-M12-retry-never-enabled", ASSET,
-     "      entry.canRetry = d.canRetry === true && !entry.final;\n    } else if (d.kind === 'not-sent'",
-     "      entry.canRetry = false;\n    } else if (d.kind === 'not-sent'",
-     "test_r4_a04_continuation_stays_possible_only_where_a_contract_allows_it", "C-02"),
-    ("R4-M13-final-result-taken-back-by-a-read", ASSET,
-     "        if (entry.state === 'sending' || entry.state === 'waiting' || entry.final) continue;",
-     "        if (entry.state === 'sending' || entry.state === 'waiting') continue;",
-     "test_r4_a02_a_malformed_or_contradicting_status_row_changes_nothing", "C-07"),
-    ("R4-M14-typed-413-retried-unchanged", ASSET,
-     "'413 DICOM_IMPORT_TOO_LARGE': 'changed'", "'413 DICOM_IMPORT_TOO_LARGE': 'again'", "test_r4_a04_continuation_stays_possible_only_where_a_contract_allows_it", "C-02"),
-    ("R4-M15-grant-ambiguity-called-a-refusal", ASSET,
-     "        return { kind: 'unknown', notice: TEXT.grantUnknown };",
-     "        return { kind: 'refused', notice: TEXT.httpFailure(answer?.status) };", "test_r4_a05_a_download_answer_that_proves_nothing_is_not_called_a_refusal", "C-06"),
-    ("R4-M15b-poll-deadline-as-not-started", ASSET,
-     "    notStarted: '내려받기가 시작됐는지 확인하지 못했습니다. 브라우저의 다운로드 목록을 확인한 뒤, 필요하면 다시 시도하세요.',",
-     "    notStarted: '내려받기가 시작되지 않았습니다. 브라우저의 다운로드 목록을 확인한 뒤 다시 시도하세요.',", "test_r4_a05_a_download_answer_that_proves_nothing_is_not_called_a_refusal", "C-06"),
-    ("R4-M16-incomplete-re-download-disabled", ASSET,
-     "const RESTARTABLE = ['prepared', 'incomplete', 'unconfirmed'];", "const RESTARTABLE = ['prepared', 'unconfirmed'];",
-     "test_c06_incomplete_and_unconfirmed_are_offered_again_for_the_same_operation", "C-06"),
-    ("R4-M16b-unconfirmed-re-download-disabled", ASSET,
-     "const RESTARTABLE = ['prepared', 'incomplete', 'unconfirmed'];", "const RESTARTABLE = ['prepared', 'incomplete'];",
-     "test_c06_incomplete_and_unconfirmed_are_offered_again_for_the_same_operation", "C-06"),
-    # The grant lives in memory and the one link only.
-    ("grant-kept-in-storage", ASSET,
-     "      link.href = base + '?grant=' + encodeURIComponent(grant);\n      grant = null;",
-     "      link.href = base + '?grant=' + encodeURIComponent(grant);\n"
-     "      try { sessionStorage.setItem('kin-study-transfer-grant', grant); } catch (_) {}\n      grant = null;",
-     "test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation", "C-06"),
+D1606_SUPERSESSION = {'import-shown-to-a-radiologist': 'retained unchanged',
+ 'row-import-drops-expect-study': 'retained unchanged',
+ 'two-uploads-in-flight': 'retained unchanged',
+ 'more-than-100-files-sent': 'retained unchanged',
+ 'unconfirmed-sent-again': 'R5-M01/M01-get and M07: spent result cannot regain permission or auto-enqueue.',
+ 'retry-with-a-new-operation-id': 'superseded by D1606: dispatched same-id retry removed; M11 import new UUID and '
+                                  'A01 sibling original operation retained.',
+ 'may-have-written-says-not-stored': 'R5-M02: dispatched negatives stay unconfirmed; A02 includes '
+                                     'may-have-written and raw non-write messages.',
+ 'panel-takes-focus': 'retained unchanged',
+ 'copy-id-copies-the-prefix': 'retained: exact complete ID assertion in R5-A07-GET',
+ 'resolve-shown-to-a-technician': 'retained unchanged',
+ 'sent-claims-the-file-was-saved': 'retained unchanged',
+ 'sent-downloaded-again': 'R5-M13/M14 and M15-native-sent: one-shot budget and truthful server Sent; A09 retains '
+                          'no old-op Download.',
+ 'download-enabled-on-a-tele-row': 'retained unchanged',
+ 'menu-item-acts-on-the-previous-selection': 'retained unchanged',
+ 'late-answer-written-after-the-context-changed': 'R5-M17-context: real logout preparation rejects late import; '
+                                                  'later GET only.',
+ 'another-person-resumes': 'R5-M17-owner: other sub cannot restore/query/display old operation.',
+ 'late-grant-clicked': 'R5-M17-document and M17-sequence: context ended or newer read prevents native click.',
+ 'refusal-notice-wiped-by-its-read': 'superseded by D1606: refusal certificate removed; M13 and M13-poll preserve '
+                                     'spent budget after GET and polling.',
+ 'late-grant-after-the-selection-moved-clicked': 'R5-M17-selection: A-B zero native click.',
+ 'late-grant-checked-by-the-uid-only': 'R5-M17-selection: A-B-A zero native click, selection sequence remains '
+                                       'binding.',
+ 'manifest-change-keeps-the-stale-download': 'R5-M13-poll: no status/poll restart; A11-valid explicitly includes '
+                                             'MANIFEST_CHANGED and A10 new manifest/UUID.',
+ 'scoped-404-read-as-not-sent': 'R5-M03: ordered A03 scoped 404 cannot restore capability.',
+ 'status-absence-read-as-not-sent': 'R5-M03: ordered A03 missing index cannot restore capability.',
+ 'restored-file-read-as-not-sent': 'R5-M05: copied/legacy restore is observation-only.',
+ 'R4-M01-broad-post-fallback-refused': 'R5-M02: no received-answer Not Sent, including opaque/replaced/partial '
+                                       'bodies.',
+ 'R4-M02-non-write-from-a-status-whitelist': 'R5-M02: no received-answer Not Sent, including typed 413, auth '
+                                             'lifecycle and HTTP/body mismatch.',
+ 'R4-M03-retryable-from-the-outcome-name': 'R5-M01/M01-get: even complete retryable never returns send authority '
+                                           '(D1606).',
+ 'R4-M04-status-rows-bypass-the-validator': 'R5-M10 + A07-GET: status positives require full contract; R5-M01-get '
+                                            'blocks negative-derived capability.',
+ 'R4-M05-scoped-404-read-as-not-sent': 'R5-M03 ordered 404; no old-key permission.',
+ 'R4-M06-absence-read-as-not-sent': 'R5-M03 missing row and R5-M05 restored descriptors.',
+ 'R4-M07-old-retry-permission-kept': 'R5-M04/M07: atomic consume and spent-file queue exclusion.',
+ 'R4-M08-generation-freshness-ignored': 'superseded by D1606: attempt freshness no longer authorizes retry; '
+                                        'R5-M01-get/M05 deny old generation in copied/legacy operations.',
+ 'R4-M09-dispatch-marker-not-kept': 'superseded by D1606: no serialized dispatch capability; R5-M05/M06 '
+                                    'restore/storage faults.',
+ 'R4-M09b-failed-record-write-taken-as-done': 'R5-M06: storage failure cannot restore capability; A05 '
+                                              'unavailable-history disclosure and recovery.',
+ 'R4-M10-controls-from-state-strings': 'R5-M01/M05/M07: rendering/enqueue depend on local capability, not result '
+                                       'state.',
+ 'R4-M11-unknown-resent-by-itself': 'R5-M07: no auto-enqueue of dispatched unknown; A03 timers/reload only read.',
+ 'R4-M12-retry-never-enabled': 'superseded by D1606 for dispatched retry: R5-M08 positive genuine local '
+                               'sent=false; A01 resident siblings still send once.',
+ 'R4-M13-final-result-taken-back-by-a-read': 'R5-M17-final: validated prior Stored survives missing/unknown '
+                                             'status.',
+ 'R4-M14-typed-413-retried-unchanged': 'R5-M01/M02 A02 typed 413 plus A01 oversized selection; no old-file retry.',
+ 'R4-M15-grant-ambiguity-called-a-refusal': 'R5-M12/M15: unknown preparation not clearable; invalid grant cannot '
+                                            'start native download.',
+ 'R4-M15b-poll-deadline-as-not-started': 'R5-M13-poll: deadline never restores Download; A11 neutral notice/no '
+                                         'non-start certificate.',
+ 'R4-M16-incomplete-re-download-disabled': 'superseded by D1606: R5-M18-first/M18-new require first native '
+                                           'download and explicit new preparation; old incomplete history '
+                                           'retained.',
+ 'R4-M16b-unconfirmed-re-download-disabled': 'superseded by D1606: R5-M18-first/M18-new positive controls; '
+                                             'R5-M16-clear retains uncertain history.',
+ 'grant-kept-in-storage': 'retained unchanged'}
+
+MUTANTS = [('import-shown-to-a-radiologist',
+  'study-transfer-local.js',
+  "const canImport = () => !app.demo() && app.can('technician');",
+  "const canImport = () => !app.demo() && (app.can('technician') || app.can('radiologist'));",
+  'test_c01_import_entry_shows_only_for_technician_or_admin_and_the_row_item_names_its_study',
+  'C-01 toolbar Import DICOM by role'),
+ ('row-import-drops-expect-study',
+  'study-transfer-local.js',
+  "if (op.expect) headers['X-KIN-Expect-Study'] = op.expect;",
+  '',
+  'test_c01_import_entry_shows_only_for_technician_or_admin_and_the_row_item_names_its_study',
+  'C-01 X-KIN-Expect-Study from the row only'),
+ ('two-uploads-in-flight',
+  'study-transfer-local.js',
+  "if (await inLane(() => send(entry)) === 'stop') break;",
+  'void send(entry);',
+  'test_c02_one_request_in_flight_one_operation_its_indexes_and_the_bytes_as_chosen',
+  'C-02 exactly one upload in flight'),
+ ('more-than-100-files-sent',
+  'study-transfer-local.js',
+  'if (files.length > MAX_FILES) {',
+  'if (files.length > 1000) {',
+  'test_c02_more_than_100_files_are_refused_before_any_request',
+  'C-02 nothing of a 101-file selection is sent'),
+ ('panel-takes-focus',
+  'study-transfer-local.js',
+  "    root.hidden = false;\n    body.hidden = false;\n    hide.textContent = 'Hide';",
+  "    root.hidden = false;\n    body.hidden = false;\n    hide.textContent = 'Hide';\n    close.focus();",
+  'test_c03_c08_the_panel_never_takes_focus_opens_a_dialog_or_loses_the_draft',
+  'C-03 focus stays in the report editor'),
+ ('resolve-shown-to-a-technician',
+  'study-transfer-local.js',
+  "const isAdmin = () => !app.demo() && app.can('admin');",
+  "const isAdmin = () => !app.demo() && app.can('technician');",
+  'test_c05_resolve_unconfirmed_is_admin_only_sends_the_closed_body_and_shows_the_answer',
+  'C-05 hidden from a non-admin'),
+ ('sent-claims-the-file-was-saved',
+  'study-transfer-local.js',
+  "sent: '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.',",
+  "sent: '서버가 이 검사의 모든 원본을 보냈고 내 컴퓨터에 저장했습니다.',",
+  'test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation',
+  'C-06 the Sent sentence'),
+ ('download-enabled-on-a-tele-row',
+  'context-menu.js',
+  '[{ sep: 1 }, { label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }]',
+  '[{ sep: 1 }, { label: "Download Originals", dis: false, act: () => studyTransfer.download(opened.uid) }]',
+  'test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation',
+  'C-06 disabled on a tele row'),
+ ('menu-item-acts-on-the-previous-selection',
+  'context-menu.js',
+  'if (target && (target.uid !== selectedUid || target.seq !== selectionSeq || target.oid !== selectedOid)) {',
+  'if (false) {',
+  'test_c06_the_download_item_acts_only_on_the_selection_its_menu_opened_on',
+  'C-06 nothing for the old or the new selection'),
+ ('grant-kept-in-storage',
+  'study-transfer-local.js',
+  "      link.href = base + '?grant=' + encodeURIComponent(grant);\n      grant = null;",
+  "      link.href = base + '?grant=' + encodeURIComponent(grant);\n"
+  "      try { sessionStorage.setItem('kin-study-transfer-grant', grant); } catch (_) {}\n"
+  '      grant = null;',
+  'test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation',
+  'C-06 the grant is never stored'),
+ ('R5-M01',
+  'study-transfer-local.js',
+  '          uncertain(entry, diagnostic(answer?.body, failure ? TEXT.lost : TEXT.unknownAnswer));',
+  '          uncertain(entry, diagnostic(answer?.body, failure ? TEXT.lost : TEXT.unknownAnswer)); '
+  'unsent.add(entry);',
+  'test_r5_a02_all_received_negatives_are_observation_only',
+  'R5-A02: no spent retry'),
+ ('R5-M02',
+  'study-transfer-local.js',
+  "    entry.state = 'unresolved';",
+  "    entry.state = 'notSent';",
+  'test_r5_a02_all_received_negatives_are_observation_only',
+  'R5-A02: unconfirmed state'),
+ ('R5-M03',
+  'study-transfer-local.js',
+  '      const rows = importRows(answer, op);',
+  '      const rows = importRows(answer, op); if (!rows || !rows.size) for (const e of op.files) unsent.add(e);',
+  'test_r5_a03_lost_answer_ordered_status_chain_then_exact_stored',
+  'R5-A03: no spent retry'),
+ ('R5-M04',
+  'study-transfer-local.js',
+  ["    unsent.delete(entry);\n    entry.state = 'sending';",
+   '    op.inFlight = true;\n    render();\n    const headers ='],
+  ["    entry.state = 'sending';",
+   '    op.inFlight = true;\n'
+   '    if (!entry.reentered) { entry.reentered = true; void send(entry); }\n'
+   '    render();\n'
+   '    const headers ='],
+  'test_r5_a01_spent_file_pauses_two_unsent_siblings_and_atomic_retry_all',
+  'R5-A01: pause unsent siblings'),
+ ('R5-M05',
+  'study-transfer-local.js',
+  '          entry.sha256 = hash(f.sha256) ? f.sha256 : null;',
+  '          entry.file = new File([new Uint8Array(f.size)], entry.name); unsent.add(entry);\n'
+  '          entry.sha256 = hash(f.sha256) ? f.sha256 : null;',
+  'test_r5_a04_real_copied_tabs_and_legacy_snapshots_are_read_only',
+  'R5-A04: copied unsent descriptor has no capability'),
+ ('R5-M06',
+  'study-transfer-local.js',
+  '    } catch (_) { persistenceFailed = true; }',
+  "    } catch (_) { persistenceFailed = true; for (const op of operations) if (op.kind === 'import') for (const "
+  'f of op.files) if (f.file) unsent.add(f); }',
+  'test_r5_a05_storage_faults_cap_pressure_and_clear_preserve_uncertainty',
+  'R5-A05: no spent retry'),
+ ('R5-M07',
+  'study-transfer-local.js',
+  '          uncertain(entry, diagnostic(answer?.body, failure ? TEXT.lost : TEXT.unknownAnswer));',
+  '          uncertain(entry, diagnostic(answer?.body, failure ? TEXT.lost : TEXT.unknownAnswer)); '
+  "unsent.add(entry); retry(entry); go = 'next';",
+  'test_r5_a01_spent_file_pauses_two_unsent_siblings_and_atomic_retry_all',
+  'R5-A01: pause unsent siblings'),
+ ('R5-M08',
+  'study-transfer-local.js',
+  '        unsent.add(entry);\n        localUnsent(entry);',
+  '        localUnsent(entry);',
+  'test_r5_a01_real_transport_sent_false_can_make_its_first_dispatch',
+  'R5-A01-local: local continuation available'),
+ ('R5-M09',
+  'study-transfer-local.js',
+  '  function importPositive(r, entry) {',
+  '  function importPositive(r, entry) { return null;',
+  'test_r5_a07_complete_positive_and_dedup_are_accepted',
+  'R5-A07: complete immutable positive accepted'),
+ ('R5-M10',
+  'study-transfer-local.js',
+  '  function importPositive(r, entry) {',
+  '  function importPositive(r, entry) { if (isObject(r) && POSITIVE.has(r.outcome)) return r;',
+  'test_r5_a07_each_import_positive_field_and_final_attempt_are_required',
+  'R5-A07: unconfirmed state'),
+ ('R5-M11',
+  'study-transfer-local.js',
+  'const op = importOperation(crypto.randomUUID(), target.expect ?? null);',
+  "const op = importOperation(operations.find(o => o.kind === 'import')?.id || crypto.randomUUID(), target.expect "
+  '?? null);',
+  'test_r5_a08_explicit_reimport_keeps_old_operation',
+  'R5-A08: new UUID'),
+ ('R5-M12',
+  'study-transfer-local.js',
+  'else { op.notice = TEXT.prepareUnknown; readDownload(op, false, true); }',
+  "else { op.notice = TEXT.prepareUnknown; op.state = 'sent'; }",
+  'test_r5_a10_lost_prepare_or_grant_never_rearms_or_clears',
+  'R5-A10: uncertain preparation cannot be discarded'),
+ ('R5-M13',
+  'study-transfer-local.js',
+  '    op.state = view.state;',
+  '    op.state = view.state; firstDownloads.add(op);',
+  'test_r5_a10_lost_prepare_or_grant_never_rearms_or_clears',
+  'R5-A10: prepared GET cannot reset grant budget'),
+ ('R5-M14',
+  'study-transfer-local.js',
+  '        op = op || downloadOperation(kept.id, kept.uid);',
+  '        op = op || downloadOperation(kept.id, kept.uid); firstDownloads.add(op);',
+  'test_r5_a11_restored_ready_is_read_only',
+  'R5-A11: restored Ready read-only'),
+ ('R5-M15',
+  'study-transfer-local.js',
+  '  function grantPositive(answer, op) {',
+  '  function grantPositive(answer, op) { if (answer?.body?.grant) return answer.body;',
+  'test_r5_a10_every_partial_or_mismatched_grant_has_zero_native_click',
+  'R5-A10-grant: malformed grant zero native clicks'),
+ ('R5-M16-cap',
+  'study-transfer-local.js',
+  'operations.filter(op => !finished(op) || confirmed++ < STORE_OPERATIONS)',
+  'operations.slice(0, STORE_OPERATIONS)',
+  'test_r5_a05_storage_faults_cap_pressure_and_clear_preserve_uncertainty',
+  'R5-A05: pending descriptors never pruned'),
+ ('R5-M16-clear',
+  'study-transfer-local.js',
+  "if (op.kind === 'download') return op.state === 'sent';",
+  "if (op.kind === 'download') return !!op.state;",
+  'test_r5_a10_lost_prepare_or_grant_never_rearms_or_clears',
+  'R5-A10: uncertain preparation cannot be discarded'),
+ ('R5-M17-owner',
+  'study-transfer-local.js',
+  'JSON.stringify(saved.owner) !== JSON.stringify(owner)',
+  'false',
+  'test_r5_a06_same_owner_changed_actor_reads_different_owner_never_queries',
+  'R5-A06: other owner no query'),
+ ('R5-M17-context',
+  'study-transfer-local.js',
+  '    const applied = work.commit(at, () => {\n'
+  '      if (!live(op) || op.gen !== gen) return;\n'
+  '      op.inFlight = false;\n'
+  '      if (failure',
+  '    const applied = ((at, fn) => { fn(); return true; })(at, () => {\n'
+  '      if (!live(op) || op.gen !== gen) return;\n'
+  '      op.inFlight = false;\n'
+  '      if (failure',
+  'test_r5_a06_cancelled_logout_discards_late_import_and_preserves_draft',
+  'R5-A06-context: no late import during logout preparation'),
+ ('R5-M17-sequence',
+  'study-transfer-local.js',
+  'if (!live(op) || op.gen !== gen || op.readSeq !== seq || !usable()',
+  'if (!live(op) || op.gen !== gen || !usable()',
+  'test_r5_a12_read_sequence_and_pagehide_discard_valid_grant',
+  'R5-A12-sequence: superseded read sequence zero native clicks'),
+ ('R5-M17-document',
+  'study-transfer-local.js',
+  "  window.addEventListener('pagehide', end);",
+  '',
+  'test_r5_a12_read_sequence_and_pagehide_discard_valid_grant',
+  'R5-A12-document: suspended document zero native clicks'),
+ ('R5-M17-selection',
+  'study-transfer-local.js',
+  '      work.commit(pressed, () => {',
+  '      work.commit(at, () => {',
+  'test_r5_a12_complete_sent_required_and_late_A_B_A_grant_zero',
+  'R5-A12: stale selection zero native clicks'),
+ ('R5-M17-lifetime',
+  'study-transfer-local.js',
+  '    firstDownloads.delete(op);\n    pendingClicks.delete(op);',
+  '    firstDownloads.delete(op);',
+  'test_r5_a12_close_during_grant_does_not_start_a_late_download',
+  'R5-A12-close: closed panel cannot start a late native download'),
+ ('R5-M17-immediate',
+  'study-transfer-local.js',
+  '            || JSON.stringify(app.identity()) !== who || !pendingClicks.has(op)) return;',
+  '            || JSON.stringify(app.identity()) !== who) return;',
+  'test_r5_a12_close_in_native_link_insertion_is_checked_before_click',
+  'R5-A12-immediate: lifetime checked immediately before native click'),
+ ('R5-M18-first',
+  'study-transfer-local.js',
+  '    firstDownloads.add(op);',
+  '',
+  'test_r5_a10_lost_prepare_or_grant_never_rearms_or_clears',
+  'R5-A10: first preparation recovered by GET'),
+ ('R5-M18-new',
+  'study-transfer-local.js',
+  "button('Prepare Again', () => download(op.uid))",
+  "button('Prepare Again', () => {})",
+  'test_r5_a10_lost_prepare_or_grant_never_rearms_or_clears',
+  'R5-A10: explicit new preparation works'),
+ ('copy-id-copies-the-prefix',
+  'study-transfer-local.js',
+  '`${entry.op.id} ${entry.index}`',
+  '`${entry.op.id.slice(0, 8)} ${entry.index}`',
+  'test_r5_a07_status_positive_fields_and_preserved_final',
+  'R5-A07-GET: Copy ID keeps full operation/index')]
+
+# Separate mutations retain the GET/final-result/poll/native-event detectors from the r4 contract.
+MUTANTS += [
+ ('R5-M06-history', 'study-transfer-local.js',
+  '      added = mergeHistory(readHistory());',
+  '',
+  'test_r5_a05_failed_restore_read_then_new_operation_preserves_surviving_history',
+  'R5-A05-new: failed or unverified read/write never replaces the surviving snapshot'),
+ ('R5-M01-get', 'study-transfer-local.js',
+  '        else uncertain(entry, diagnostic(row, !rows ? TEXT.unread : TEXT.pending));',
+  "        else { uncertain(entry, diagnostic(row, !rows ? TEXT.unread : TEXT.pending)); if (row?.outcome === 'retryable') unsent.add(entry); }",
+  'test_r5_a02_all_received_negatives_are_observation_only', 'R5-A02: no spent retry'),
+ ('R5-M13-poll', 'study-transfer-local.js',
+  "else { op.polling = false; if (op.state !== 'sent') op.notice = TEXT.notStarted; }",
+  "else { op.polling = false; firstDownloads.add(op); if (op.state !== 'sent') op.notice = TEXT.notStarted; }",
+  'test_r5_a11_archive_uncertainty_and_restored_ready_never_rearm', 'R5-A11: malformed status or poll deadline no rearm'),
+ ('R5-M15-native-sent', 'study-transfer-local.js',
+  "      op.notice = '';\n      op.polls = 0;",
+  "      op.notice = '';\n      op.state = 'sent';\n      op.polls = 0;",
+  'test_c06_download_items_tele_disabled_ready_browser_download_sent_and_a_new_preparation', 'C-06 native start is not Sent'),
+ ('R5-M11-download', 'study-transfer-local.js',
+  'const op = downloadOperation(crypto.randomUUID(), uid);',
+  "const op = downloadOperation(operations.find(o => o.kind === 'download')?.id || crypto.randomUUID(), uid);",
+  'test_r5_a10_lost_prepare_or_grant_never_rearms_or_clears', 'R5-A10: new preparation UUID'),
+ ('R5-M17-final', 'study-transfer-local.js',
+  ['    if (entry.final) return;', "        if (entry.final || unsent.has(entry) || entry.state === 'sending') continue;"],
+  ['', "        if (unsent.has(entry) || entry.state === 'sending') continue;"],
+  'test_r5_a07_status_positive_fields_and_preserved_final', 'R5-A07-GET: uncertainty never downgrades final'),
 ]
 
+class Attribution(unittest.TextTestResult):
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self.behaviors=[]
+    def addFailure(self,test,err):
+        self.behaviors.append((issubclass(err[0],AssertionError),str(err[1])))
+        super().addFailure(test,err)
+    def addSubTest(self,test,subtest,err):
+        if err is not None:self.behaviors.append((issubclass(err[0],AssertionError),str(err[1])))
+        super().addSubTest(test,subtest,err)
 
-def run():
-    case = t.TransferPanelPage
-    names = sorted({row[4] for row in MUTANTS})
-    baseline = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
-    if not baseline.wasSuccessful() or baseline.skipped or baseline.testsRun != len(names):
-        print("S9-U4B-C MUTANT BASELINE FAILED; no kills claimed")
+def run(selected=None):
+    selected = MUTANTS if selected is None else selected
+    case=t.TransferPanelPage
+    names=sorted({row[4] for row in selected})
+    baseline=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
+    if not baseline.wasSuccessful() or baseline.skipped or baseline.testsRun!=len(names):
+        print('BASELINE FAILED; no kills claimed',flush=True)
         return 1
-    order = json.loads((ROOT / "scripts/main-split-order.json").read_text(encoding="utf-8"))["sources"]
-    originals = {row["file"]: (LITE / row["file"]).read_text(encoding="utf-8") for row in order}
-    killed = []
-    for label, file, old, new, name, row in MUTANTS:
-        source = originals[file] if file in originals else (LITE / file).read_text(encoding="utf-8")
-        changed = source
-        for one_old, one_new in zip(*((old, new) if isinstance(old, list) else ([old], [new]))):
-            if changed.count(one_old) != 1:
-                raise AssertionError("mutation location not unique: " + label)
-            changed = changed.replace(one_old, one_new, 1)
-        case.bundle_source = "".join(changed if r["file"] == file else originals[r["file"]] for r in order) if file in originals else None
-        case.asset_source = (file, changed) if file not in originals else None
-        output = io.StringIO()
-        result = unittest.TextTestRunner(stream=output, verbosity=2).run(unittest.TestSuite([case(name)]))
-        text = output.getvalue()
-        named = any(row in failure for _, failure in result.failures)
-        caught = result.testsRun == 1 and len(result.failures) == 1 and not result.errors and not result.skipped and named
-        print(label, file, row, "KILLED" if caught else "NOT PROVEN", flush=True)
-        print(text, end="")
-        if caught:
-            killed.append(label)
-    case.bundle_source = None
-    case.asset_source = None
-    print("S9-U4B-C page mutants killed by their named C-row: %d/%d" % (len(killed), len(MUTANTS)))
-    return 0 if len(killed) == len(MUTANTS) else 1
-
+    order=json.loads((ROOT/'scripts/main-split-order.json').read_text(encoding='utf-8'))['sources']
+    originals={row['file']:(LITE/row['file']).read_text(encoding='utf-8') for row in order}
+    results=[]
+    try:
+        for label,file,old,new,name,assertion in selected:
+            source=originals[file] if file in originals else (LITE/file).read_text(encoding='utf-8')
+            changed=source
+            for before,after in zip(old if isinstance(old,list) else [old],new if isinstance(new,list) else [new]):
+                if changed.count(before)!=1:
+                    print(json.dumps({'mutant':label,'status':'INVALID','reason':'mutation location not unique'}),flush=True)
+                    return 1
+                changed=changed.replace(before,after,1)
+            case.bundle_source=''.join(changed if r['file']==file else originals[r['file']] for r in order) if file in originals else None
+            case.asset_source=(file,changed) if file not in originals else None
+            output=io.StringIO()
+            result=unittest.TextTestRunner(stream=output,verbosity=2,resultclass=Attribution).run(unittest.TestSuite([case(name)]))
+            failures=result.behaviors
+            caught=bool(failures) and result.testsRun==1 and not result.errors and not result.skipped and all(
+                is_assert and assertion in message and not any(word in message for word in ('not observed','Timeout','timed out','page errors'))
+                for is_assert,message in failures)
+            row={'mutant':label,'case':name,'named_assertion':assertion,'status':'KILLED' if caught else 'NOT PROVEN',
+                 'behavior_failures':[message for _,message in failures],
+                 'errors':[trace for _,trace in result.errors], 'skips':[reason for _,reason in result.skipped]}
+            if not caught:
+                row['reason'] = ('survived its behavioral oracle' if result.wasSuccessful() and not result.skipped
+                                 else 'errors, skips or failures not attributable exclusively to the named assertion')
+            results.append(row); print(json.dumps(row,ensure_ascii=False),flush=True); print(output.getvalue(),end='')
+            # D1620: attribution failures stay NOT PROVEN while remaining variants run. A survivor still stops.
+            if result.wasSuccessful() and not result.skipped:return 1
+    finally:
+        case.bundle_source=None; case.asset_source=None
+    killed=sum(row['status']=='KILLED' for row in results)
+    print(json.dumps({'killed':killed,'selected':len(selected),'inventory':len(MUTANTS)}),flush=True)
+    return 0 if killed==len(selected) else 1
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    return run()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.stdout.reconfigure(encoding='utf-8',errors='replace'); sys.stderr.reconfigure(encoding='utf-8',errors='replace')
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--from-mutant', choices=[row[0] for row in MUTANTS],
+                        help='Resume the ordered inventory at this variant; earlier evidence is not rerun or inferred.')
+    args=parser.parse_args()
+    start=next((i for i,row in enumerate(MUTANTS) if row[0]==args.from_mutant),0)
+    return run(MUTANTS[start:])
+if __name__=='__main__':raise SystemExit(main())

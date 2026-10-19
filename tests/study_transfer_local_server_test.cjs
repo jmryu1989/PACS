@@ -5080,22 +5080,35 @@ test('S9U4-B86 D1574 the import answer shapes the page reads, as the real servic
   assert.deepEqual(keys(stored.body.attempts[0]), shape.attempt, 'an attempt');
   // A Study held by a live attempt: the second file is STUDY_WRITE_PENDING before any attempt (the live REQ-S9-U4-10 case).
   const busy = uid(), busySop = uid();
-  let release;
+  let release, held;
   const gate = new Promise(resolve => { release = resolve; });
-  h.orthanc.fault = async call => { if (call.path === '/tools/lookup' && call.body.toString() === busySop) await gate; return null; };
+  const ready = new Promise(resolve => { held = resolve; });
+  h.orthanc.fault = async call => {
+    if (call.path === '/tools/lookup' && call.body.toString() === busySop) { held(); await gate; }
+    return null;
+  };
   const slow = h.send(dicom({ study: busy, series: busy + '.1', sop: busySop, id: 'SYN-ENV2' }));
-  await new Promise(resolve => setTimeout(resolve, 100));
-  const pending = await h.send(dicom({ study: busy, series: busy + '.1', id: 'SYN-ENV2' }), { as: TECH2 });
-  assert.deepEqual([pending.status, pending.body.outcome, pending.body.code, pending.body.generation, pending.body.attempts, pending.body.writeDisposition, pending.body.identity],
-    [409, 'retryable', 'STUDY_WRITE_PENDING', 0, [], null, null], 'a pre-attempt retryable: generation 0, no attempt');
-  assert.deepEqual(keys(pending.body), shape.post_file, 'the retryable POST answer has every key');
-  const status = await h.request('GET', '/api/dicom-import/' + pending.id, { as: TECH2 });
-  assert.equal(status.status, 200);
-  assert.deepEqual(keys(status.body), shape.status_envelope, 'the status envelope');
-  assert.deepEqual(keys(status.body.files[0]), shape.status_file, 'a status row');
-  assert.deepEqual([status.body.files[0].generation, status.body.files[0].outcome], [0, 'retryable'], 'the row of a pre-attempt retryable');
-  release();
-  await slow;
+  let readyTimer;
+  try {
+    await Promise.race([ready, new Promise((_, reject) => {
+      readyTimer = setTimeout(() => reject(new Error('B86 held lookup did not arrive')), 5000);
+    })]);
+    clearTimeout(readyTimer);
+    const pending = await h.send(dicom({ study: busy, series: busy + '.1', id: 'SYN-ENV2' }), { as: TECH2 });
+    assert.deepEqual([pending.status, pending.body.outcome, pending.body.code, pending.body.generation, pending.body.attempts, pending.body.writeDisposition, pending.body.identity],
+      [409, 'retryable', 'STUDY_WRITE_PENDING', 0, [], null, null], 'a pre-attempt retryable: generation 0, no attempt');
+    assert.deepEqual(keys(pending.body), shape.post_file, 'the retryable POST answer has every key');
+    const status = await h.request('GET', '/api/dicom-import/' + pending.id, { as: TECH2 });
+    assert.equal(status.status, 200);
+    assert.deepEqual(keys(status.body), shape.status_envelope, 'the status envelope');
+    assert.deepEqual(keys(status.body.files[0]), shape.status_file, 'a status row');
+    assert.deepEqual([status.body.files[0].generation, status.body.files[0].outcome], [0, 'retryable'], 'the row of a pre-attempt retryable');
+  } finally {
+    clearTimeout(readyTimer);
+    release();
+    await slow;
+    h.orthanc.fault = null;
+  }
   const refused = await h.request('POST', '/api/dicom-import', { as: TECH, headers: { 'Content-Type': 'application/dicom', 'X-KIN-Operation-Id': 'bad', 'X-KIN-File-Index': '0' }, body: Buffer.from('x') });
   assert.deepEqual([refused.status, keys(refused.body)], [400, shape.request_refusal], 'a request-level refusal');
 });

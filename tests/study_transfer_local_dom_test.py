@@ -6,8 +6,8 @@ suite's synthetic origin (report_flow_dom_test.FlowSite, itself the logout suite
 file is modified. TransferSite adds the six S9-U4b routes with the answer shapes of the part (b) server (0d115a1:
 study-transfer-local.service.ts / dicom-import-gate.service.ts publicFile, downloadView, recover): a file result carries
 operationId, index, outcome, code, message, identity, writeDisposition and attempts; a request-level refusal is the
-Nest error body {code?, message}. The server's wording is synthetic (SYN-...) on purpose: the panel must show whatever
-message the server sends, so no case pins a Korean sentence of the server. The sentences pinned here are the contract's
+Nest error body {code?, message}. D1606 supersedes raw negative messages and result-derived retry. Negative results have neutral guidance;
+only complete matching positive envelopes confirm storage or supply. The sentences pinned here are the contract's
 own (S9-U4p 4.6, 5.3, 6) that the page itself writes.
 
 Cases drive the page through its controls (the toolbar button, the row menus, the file chooser, the panel's buttons, the
@@ -83,11 +83,11 @@ def file_result(op, index, outcome="stored", code=None, message=None, identity="
         identity = None
     attempts = [] if before else [{
         "attemptId": "00000000-0000-4000-8000-%012d" % (index + 1000 * generation), "generation": generation, "phase": "finished", "outcome": outcome,
-        "code": code, "transport": None, "startedAt": "2026-10-17T00:00:00.000Z", "finishedAt": None,
+        "code": code, "transport": None, "startedAt": "2026-10-17T00:00:00.000Z", "finishedAt": "2026-10-17T00:01:00.000Z",
         "autoRecheckedAt": rechecked, "recovery": None}]
     return {"operationId": op, "index": index, "outcome": outcome, "code": code,
             "message": message or ("SYN-SERVER " + (code or outcome)), "identity": identity, "writeDisposition": disposition,
-            "studyUid": uid, "seriesUid": uid + ".1", "sopUid": uid + ".1.%d" % index, "sha256": "0" * 64, "bytes": 64,
+            "studyUid": uid, "seriesUid": uid + ".1", "sopUid": uid + ".1.%d" % index, "sha256": hashlib.sha256(dicom(index)).hexdigest(), "bytes": 64,
             "at": "2026-10-17T00:00:00.000Z", "generation": generation if attempts else 0, "attempts": attempts}
 
 
@@ -103,10 +103,138 @@ def download_view(op, uid, state="prepared", objects=3, size=3 * 1048576, comple
     attempts = [] if state == "prepared" else [{"attemptId": "00000000-0000-4000-9000-000000000001", "number": 1,
         "state": state, "startedAt": "2026-10-17T00:00:00.000Z", "endedAt": None if state == "sending" else "2026-10-17T00:01:00.000Z",
         "archiveSha256": "1" * 64 if state == "sent" else None, "responseFinished": state == "sent",
-        "objectsComplete": complete, "bytesSupplied": 0}]
+        "objectsComplete": complete, "bytesSupplied": size if state == "sent" else 0}]
     return {"operationId": op, "studyUid": uid, "state": state, "manifestSha256": "2" * 64,
             "preparedAt": "2026-10-17T00:00:00.000Z", "objects": objects, "bytes": size,
-            "note": SENT if state == "sent" else None, "attempts": attempts}
+            "note": SENT if state == "sent" else None, "attempts": attempts, "archiveRequest": None}
+
+
+D1606_SUPERSESSION = {'test_c02_a_retryable_file_goes_again_with_the_same_operation_index_and_bytes_and_a_final_one_never': 'R5-A01 '
+                                                                                                       'mixed '
+                                                                                                       'queue + '
+                                                                                                       'A02 '
+                                                                                                       'received '
+                                                                                                       'negatives: '
+                                                                                                       'same-operation '
+                                                                                                       'dispatched '
+                                                                                                       'retry '
+                                                                                                       'superseded '
+                                                                                                       'by D1606; '
+                                                                                                       'original '
+                                                                                                       'bytes/index/lane '
+                                                                                                       'retained.',
+ 'test_c02_an_unconfirmed_file_is_never_sent_again_and_the_panel_reads_the_operation': 'R5-A03 ordered '
+                                                                                       'missing/404/503/Stored '
+                                                                                       'and A07 GET-only '
+                                                                                       'reconciliation retain '
+                                                                                       'no-unconfirmed-resend.',
+ 'test_c03_display_names_server_messages_unverified_and_may_have_written': 'R5-A02 neutral diagnostics/no raw '
+                                                                           'negative messages replaces display of '
+                                                                           'raw server refusals; A07 retains '
+                                                                           'Already Present/Unverified.',
+ 'test_c03_request_level_refusals_are_shown_once_per_request_never_as_outcomes': 'R5-A02 typed/uncoded refusals: '
+                                                                                 'superseded by D1606, every '
+                                                                                 'dispatched nonpositive stays '
+                                                                                 'unconfirmed; A01 pauses '
+                                                                                 'untouched siblings.',
+ 'test_c04_still_unconfirmed_after_the_recheck_names_the_operation_and_copy_id_copies_it_whole': 'R5-A07-GET '
+                                                                                                 'exact Copy ID '
+                                                                                                 'and A03 '
+                                                                                                 'read-only '
+                                                                                                 'recovery retain '
+                                                                                                 'identifiers; '
+                                                                                                 'server recovery '
+                                                                                                 'tests retained.',
+ 'test_c06_a_changed_manifest_offers_a_new_preparation_and_keeps_the_old_operation': 'R5-A11-valid '
+                                                                                     'MANIFEST_CHANGED + A10 '
+                                                                                     'distinct Prepare Again '
+                                                                                     'UUID/history; old same-op '
+                                                                                     'restart superseded by '
+                                                                                     'D1606.',
+ 'test_c06_a_grant_answered_after_the_selection_moved_starts_no_download': 'R5-A12 A-B and A-B-A late-grant zero '
+                                                                           'preserve selection guard '
+                                                                           'independently.',
+ 'test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why': 'R5-A10 partial grant + A11 '
+                                                                            'issued/expired/refused status + A12 '
+                                                                            'session: neutral late/unknown '
+                                                                            'handling; same-op restart superseded '
+                                                                            'by D1606.',
+ 'test_c06_incomplete_and_unconfirmed_are_offered_again_for_the_same_operation': 'R5-A11 incomplete/unconfirmed '
+                                                                                 'retention + A10 new '
+                                                                                 'preparation; same-operation '
+                                                                                 'redownload superseded by D1606.',
+ 'test_c07_a_file_restored_after_a_new_login_without_a_server_result_stays_undecided': 'R5-A03 reload after '
+                                                                                       'missing/404/503 and A04 '
+                                                                                       'legacy restore retain no '
+                                                                                       'absence-derived '
+                                                                                       'permission.',
+ 'test_c07_a_lost_answer_of_a_stored_file_and_a_scoped_404_is_never_not_sent': 'R5-A03 lost stored answer '
+                                                                               'traverses scoped 404/503 then '
+                                                                               'Stored, one POST and unchanged '
+                                                                               'original.',
+ 'test_c07_a_network_error_keeps_the_session_and_reads_the_operation_back': 'R5-A03 network loss retains session '
+                                                                            'and recovers Stored; A06 retains '
+                                                                            'draft on context cancellation.',
+ 'test_c07_a_status_read_without_the_file_leaves_it_undecided': 'R5-A03 missing index is uncertainty, never new '
+                                                                'send authority.',
+ 'test_c07_an_answer_from_before_a_cancelled_logout_preparation_is_not_shown_the_server_is_read_instead': 'R5-A06-context '
+                                                                                                          'real '
+                                                                                                          'logout '
+                                                                                                          'preparation/cancel: '
+                                                                                                          'late '
+                                                                                                          'import '
+                                                                                                          'not '
+                                                                                                          'written, '
+                                                                                                          'later '
+                                                                                                          'GET '
+                                                                                                          'only, '
+                                                                                                          'draft '
+                                                                                                          'preserved.',
+ 'test_c07_retry_only_for_a_file_never_sent_or_answered_retryable': 'R5-A01 true local sent=false and resident '
+                                                                    'siblings remain continuable; server-answer '
+                                                                    'retry superseded by D1606 A02.',
+ 'test_c07_the_same_person_resumes_after_a_new_login_another_person_never_sees_the_operation': 'R5-A06 same '
+                                                                                               'issuer/sub '
+                                                                                               'changed actor '
+                                                                                               'reads; different '
+                                                                                               'sub no '
+                                                                                               'read/display/send. '
+                                                                                               'Old reselection '
+                                                                                               'superseded by '
+                                                                                               'D1606 A04.',
+ 'test_r4_a01_an_answer_that_proves_nothing_never_says_not_sent_or_offers_retry': 'R5-A02 complete negative '
+                                                                                  'matrix + A03 native fault '
+                                                                                  'chain retain no false '
+                                                                                  'non-write or automatic resend.',
+ 'test_r4_a02_a_malformed_or_contradicting_status_row_changes_nothing': 'R5-A07-GET each missing public field + '
+                                                                        'A07 each POST field/final attempt; '
+                                                                        'malformed row cannot confirm storage.',
+ 'test_r4_a02_missing_then_404_then_503_then_stored_by_the_status_read_only': 'R5-A03 exact ordered '
+                                                                              'missing/404/503/Stored, including '
+                                                                              'reload, one POST.',
+ 'test_r4_a03_a_lost_retry_of_a_pre_attempt_retryable_stays_undecided': 'R5-A02 generation-0 refusal never '
+                                                                        'restores authority; A03 later positive '
+                                                                        'GET resolves. Old second Retry action '
+                                                                        'superseded by D1606.',
+ 'test_r4_a03_a_record_that_cannot_be_updated_stops_the_dispatch': 'R5-A05 independent get/remove/set faults + '
+                                                                   'surviving legacy snapshot; '
+                                                                   'storage-as-dispatch-authorization superseded '
+                                                                   'by D1606.',
+ 'test_r4_a03_an_older_attempt_retryable_does_not_answer_a_newer_request': 'R5-A04 copied/in-flight and legacy '
+                                                                           'retryable snapshots have no '
+                                                                           'capability. Old browser request-2 '
+                                                                           'overlap superseded by D1606; server '
+                                                                           'concurrency cases retained.',
+ 'test_r4_a04_continuation_stays_possible_only_where_a_contract_allows_it': 'R5-A01 local first-send positive + '
+                                                                            'A02 no dispatched retry + A04 no '
+                                                                            'restored retry; superseded by D1606 '
+                                                                            'for received/refused/reattached '
+                                                                            'continuation.',
+ 'test_r4_a05_a_download_answer_that_proves_nothing_is_not_called_a_refusal': 'R5-A10 committed '
+                                                                              'preparation/replaced answer + '
+                                                                              'malformed grant; A11 poll/status '
+                                                                              'uncertainty retains history; no '
+                                                                              'refusal certificate.'}
 
 
 class TransferSite(rf.FlowSite):
@@ -172,7 +300,7 @@ class TransferSite(rf.FlowSite):
                 return self.answer(route, *reply)
             if op not in self.import_state:
                 return self.answer(route, 404, {"statusCode": 404, "message": "SYN-SERVER import not found"})
-            files = [self.import_state[op][i] for i in sorted(self.import_state[op])]
+            files = [{k: v for k, v in self.import_state[op][i].items() if k != "operationId"} for i in sorted(self.import_state[op])]
             return self.answer(route, 200, {"operationId": op, "status": "open", "files": files})
         found = re.fullmatch(r"/api/admin/dicom-import/([^/]+)/files/([^/]+)/recovery", path)
         if method == "POST" and found:
@@ -236,7 +364,7 @@ class TransferSite(rf.FlowSite):
         if reply == "abort":
             return route.abort("connectionreset")
         if reply == "stored":
-            reply = file_result(record["operation"], int(record["index"]))
+            reply = {**file_result(record["operation"], int(record["index"]), uid=record["expect"] or UID_A), "sha256": record["sha256"], "bytes": record["bytes"]}
         if isinstance(reply, dict):
             self.import_state.setdefault(reply["operationId"], {})[reply["index"]] = reply
             return self.answer(route, status_of(reply), reply)
@@ -369,90 +497,9 @@ class TransferPanelPage(rf.ReportFlowPage):
                          "C-02 the bytes go as chosen, never parsed or changed")
         self.assertTrue(all(r["session"] for r in self.site.imports), "every upload names its session")
 
-    def test_c02_a_retryable_file_goes_again_with_the_same_operation_index_and_bytes_and_a_final_one_never(self):
-        self.open_as(TECH, "Technician")
-        retryable =lambda r: file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE")
-        self.site.import_answers = ["hold", "stored"]
-        self.choose(self.files(2))
-        self.wait(lambda: self.site.held_imports, "the first upload")
-        self.site.release_import(retryable)
-        self.wait(lambda: self.state_of(1) == "Stored", "both answers")
-        self.assertEqual("Retry Needed", self.state_of(0))
-        self.assertEqual(0, self.file_row(1).get_by_role("button", name="Retry").count(), "C-02 a final result offers no retry")
-        first = dict(self.site.imports[0])
-        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
-        self.wait(lambda: len(self.site.imports) == 3, "the retry")
-        again = self.site.imports[2]
-        self.assertEqual((first["operation"], first["index"], first["sha256"]), (again["operation"], again["index"], again["sha256"]),
-                         "C-02 the retry is the same operation id, index and bytes")
-        self.wait(lambda: self.state_of(0) == "Stored", "the retry's result")
-        self.settle(200)
-        self.assertEqual(3, len(self.site.imports), "C-02 nothing else is sent")
-
-    def test_c02_an_unconfirmed_file_is_never_sent_again_and_the_panel_reads_the_operation(self):
-        self.open_as(TECH, "Technician")
-        unconfirmed = lambda r: file_result(r["operation"], int(r["index"]), "unconfirmed", "IMPORT_UNCONFIRMED")
-        self.site.import_answers = ["hold"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.site.held_imports, "the upload")
-        record = self.site.release_import(unconfirmed)
-        self.settle(300)
-        self.assertEqual(1, len(self.site.imports), "C-02 an Unconfirmed file is never POSTed again")
-        self.wait(lambda: self.state_of(0) == "Unconfirmed", "the Unconfirmed answer")
-        self.assertEqual(0, self.file_row(0).get_by_role("button", name="Retry").count(), "C-02 no retry for Unconfirmed")
-        self.page.clock.run_for(36000)
-        self.wait(lambda: record["operation"] in self.site.import_reads, "C-02 the status read after the lease")
-        self.page.clock.run_for(120000)
-        self.settle(300)
-        self.assertEqual(1, len(self.site.imports), "C-02 an Unconfirmed file is never POSTed again")
 
     # ── C-03 the result panel ──
-    def test_c03_display_names_server_messages_unverified_and_may_have_written(self):
-        self.open_as(TECH, "Technician")
-        made = [
-            lambda r: file_result(r["operation"], 0, "stored"),
-            lambda r: file_result(r["operation"], 1, "already-present"),
-            lambda r: file_result(r["operation"], 2, "rejected", "PATIENT_ID_MISSING", disposition=None),
-            lambda r: file_result(r["operation"], 3, "retryable", "STUDY_WRITE_PENDING"),
-            lambda r: file_result(r["operation"], 4, "unconfirmed", "IMPORT_UNCONFIRMED"),
-            lambda r: file_result(r["operation"], 5, "stored", identity="not_comparable"),
-            # The server's message for this code says "not stored"; with may-have-written the panel must not say so.
-            lambda r: file_result(r["operation"], 6, "rejected", "SOP_CONTENT_CONFLICT", disposition="may-have-written",
-                                  message="SYN-SERVER 파일은 저장되지 않았습니다."),
-        ]
-        self.site.import_answers = ["hold"] * len(made)
-        self.choose(self.files(len(made)))
-        for make in made:
-            self.wait(lambda: self.site.held_imports, "an upload")
-            self.site.release_import(make)
-        self.wait(lambda: self.state_of(6) == "Rejected", "every answer")
-        names = [self.state_of(i) for i in range(7)]
-        self.assertEqual(["Stored", "Already Present", "Rejected", "Retry Needed", "Unconfirmed", "Stored", "Rejected"], names,
-                         "C-03 the display name of each API token")
-        self.assertEqual("SYN-SERVER PATIENT_ID_MISSING", self.reason_of(2), "C-03 the server's message for a refusal")
-        self.assertEqual("SYN-SERVER STUDY_WRITE_PENDING", self.reason_of(3))
-        self.assertEqual(1, self.file_row(5).locator(".study-transfer-mark", has_text="Unverified").count(), "C-03 Unverified mark")
-        self.assertEqual(0, self.file_row(0).locator(".study-transfer-mark").count())
-        self.assertEqual(MAY_HAVE_WRITTEN, self.reason_of(6), "C-03 may-have-written text")
-        self.assertNotIn("저장되지 않았습니다", self.file_row(6).inner_text(), "C-03 may-have-written never says not stored")
-        self.assertEqual([], self.dialogs, "C-03 no dialog")
 
-    def test_c03_request_level_refusals_are_shown_once_per_request_never_as_outcomes(self):
-        self.open_as(TECH, "Technician")
-        self.site.import_answers = [(413, {"code": "DICOM_IMPORT_TOO_LARGE", "message": "SYN-SERVER too large"}),
-                                    (415, {"code": "IMPORT_CONTENT_TYPE_UNSUPPORTED", "message": "SYN-SERVER content type"}),
-                                    (503, {"code": "IMPORT_NOT_READY", "message": "SYN-SERVER not ready"})]
-        self.choose(self.files(4))
-        self.wait(lambda: len(self.site.imports) == 3, "three uploads")
-        expect(self.file_row(2)).to_contain_text("SYN-SERVER not ready")
-        self.settle(300)
-        self.assertEqual(3, len(self.site.imports), "C-03 a request-level 503 stops the loop: the rest would be refused alike")
-        for index, message in ((0, "SYN-SERVER too large"), (1, "SYN-SERVER content type"), (2, "SYN-SERVER not ready")):
-            self.assertEqual("Not Sent", self.state_of(index), "C-03 a request refusal is not a file outcome")
-            self.assertEqual(1, self.file_row(index).inner_text().count(message), "C-03 shown once per request")
-        self.assertEqual("Not Sent", self.state_of(3), "the remaining file waits for Retry")
-        for name in ("Stored", "Already Present", "Rejected", "Retry Needed", "Unconfirmed"):
-            self.assertEqual(0, self.panel().locator(".study-transfer-state", has_text=re.compile("^" + name + "$")).count())
 
     def test_c03_c08_the_panel_never_takes_focus_opens_a_dialog_or_loses_the_draft(self):
         self.open_as(RAD_TECH)
@@ -471,27 +518,6 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertTrue(self.panel().is_visible())
 
     # ── C-04 Unconfirmed after the re-check, Copy ID ──
-    def test_c04_still_unconfirmed_after_the_recheck_names_the_operation_and_copy_id_copies_it_whole(self):
-        self.open_as(TECH, "Technician")
-        unconfirmed = lambda r: file_result(r["operation"], int(r["index"]), "unconfirmed", "IMPORT_UNCONFIRMED")
-        self.site.import_answers = ["stored", "hold"]
-        self.choose(self.files(2))
-        self.wait(lambda: self.site.held_imports, "the second upload")
-        record = self.site.release_import(unconfirmed)
-        self.wait(lambda: self.state_of(1) == "Unconfirmed", "Unconfirmed")
-        self.assertEqual(0, self.file_row(1).get_by_role("button", name="Copy ID").count(), "C-04 Copy ID only after the re-check")
-        self.assertEqual("SYN-SERVER IMPORT_UNCONFIRMED", self.reason_of(1), "the server's message before the re-check")
-        self.page.clock.run_for(36000)
-        self.wait(lambda: record["operation"] in self.site.import_reads, "the re-check")
-        op = record["operation"]
-        wanted = f"저장 결과를 확인하지 못했습니다. 관리자에게 작업 번호 {op[:8]}·파일 번호 1의 확인을 요청하세요."
-        self.wait(lambda: self.reason_of(1) == wanted, "C-04 the after-re-check sentence")
-        self.file_row(1).get_by_role("button", name="Copy ID").click()
-        self.wait(lambda: self.page.evaluate("window.__synClipboard.length") == 1, "the copy")
-        copied = self.page.evaluate("window.__synClipboard[0]")
-        self.assertIn(op, copied, "C-04 Copy ID copies the whole operation id")
-        self.assertNotEqual(op[:8], copied.split()[0], "C-04 not only the 8-character prefix")
-        self.assertTrue(copied.split()[-1] == "1", "C-04 and the file number")
 
     # ── C-05 Resolve Unconfirmed (admin only) ──
     def test_c05_resolve_unconfirmed_is_admin_only_sends_the_closed_body_and_shows_the_answer(self):
@@ -520,10 +546,10 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual(["basis", "checkedAt"], sorted(body), "C-05 exactly the closed keys")
         self.assertEqual("orthanc-log-checked", body["basis"])
         self.assertEqual("2026-10-17T00:30:00.000Z", body["checkedAt"], "C-05 the local time as its UTC instant")
-        expect(form).to_contain_text("SYN-SERVER recovered stored")
+        expect(form).to_contain_text("상태를 다시 확인")
         self.site.recovery_answers = [(409, {"code": "RECOVERY_NOT_APPLICABLE", "message": "SYN-SERVER not applicable"})]
         form.get_by_role("button", name="Resolve", exact=True).click()
-        expect(form).to_contain_text("SYN-SERVER not applicable")
+        expect(form).to_contain_text("RECOVERY_NOT_APPLICABLE")
         self.assertEqual([], self.dialogs, "C-05 no confirmation dialog")
 
     # ── C-06 Download Originals ──
@@ -572,6 +598,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertNotIn(grant["grant"], self.panel().inner_text(), "C-06 nor shown")
         self.assertEqual(0, self.page.locator("#study-transfer a[href]").count(), "C-06 no link with the grant is left in the page")
         self.assertEqual(page_url, self.page.url, "the page stays")
+        self.assertNotEqual('Sent', box.locator('.study-transfer-state').inner_text(), 'C-06 native start is not Sent')
         self.page.clock.run_for(3100)
         expect(box).to_contain_text("Downloading")
         self.page.clock.run_for(3100)
@@ -583,154 +610,6 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertNotEqual(op, self.site.prepares[1][1]["operationId"], "C-06 after Sent a new operation")
         self.assertEqual(1, len(self.downloads), "one archive download")
 
-    def test_c06_incomplete_and_unconfirmed_are_offered_again_for_the_same_operation(self):
-        for state in ("incomplete", "unconfirmed"):
-            with self.subTest(state=state):
-                if state == "unconfirmed":
-                    self.tearDown()
-                    self.setUp()
-                self.open_as(TECH, "Technician")
-                self.row_menu(h.PATIENT)
-                self.menu_item("Download Originals").click()
-                self.wait(lambda: self.site.prepares, "the preparation")
-                op = self.site.prepares[0][1]["operationId"]
-                box = self.operations().first
-                expect(box).to_contain_text("Ready")
-                self.site.download_answers[op] = [download_view(op, UID_A, state)]
-                with self.page.expect_download():
-                    box.get_by_role("button", name="Download", exact=True).click()
-                self.page.clock.run_for(3100)
-                expect(box.locator(".study-transfer-state")).to_have_text(state.capitalize())
-                expect(box.get_by_role("button", name="Download", exact=True), "C-06 the same operation is offered again").to_be_visible()
-                with self.page.expect_download():
-                    box.get_by_role("button", name="Download", exact=True).click()
-                self.wait(lambda: len(self.downloads) == 2, "the second archive download")
-                self.assertEqual(urlparse(self.downloads[0]).path, urlparse(self.downloads[1]).path, "C-06 the same operation again")
-                self.assertIn(op, self.downloads[1])
-                self.assertEqual(["grant=" + g["grant"] for g in self.site.grants], [urlparse(d).query for d in self.downloads],
-                                 "C-06 each press its own new grant")
-                self.assertNotEqual(self.downloads[0], self.downloads[1])
-                self.assertEqual(1, len(self.site.prepares), "C-06 no new preparation")
-
-    def test_c06_a_late_or_refused_grant_starts_nothing_and_the_status_says_why(self):
-        """DG-T06 (D1489): a grant answered after the context changed clicks no link; a refused grant is a notice and a
-        status read, never a logout; an expired one is known from the status summary, as the browser's own GET answers
-        the page nothing. No dialog, the draft kept."""
-        self.open_as(RAD_TECH)
-        self.open_study(h.PATIENT)
-        self.type("SYN unsaved text keeps the logout in preparation")
-        self.row_menu(h.PATIENT)
-        self.menu_item("Download Originals").click()
-        self.wait(lambda: self.site.prepares, "the preparation")
-        op = self.site.prepares[0][1]["operationId"]
-        box = self.operations().first
-        expect(box).to_contain_text("Ready")
-        self.site.grant_answers = ["hold"]
-        box.get_by_role("button", name="Download", exact=True).click()
-        self.wait(lambda: self.site.held_grants, "the grant request")
-        self.site.put_answers = [(500, {"statusCode": 500, "message": "SYN"})]
-        self.page.evaluate("() => document.querySelector('#logout').click()")
-        expect(self.page.locator("dialog.kin-logout h2")).to_have_text("Draft Not Saved")
-        route, record = self.site.held_grants.pop(0)
-        self.site.answer_grant(route, record)
-        self.settle(400)
-        self.assertEqual([], self.downloads, "C-07 a grant answered during the logout preparation clicks no link")
-        self.page.locator("dialog.kin-logout").get_by_role("button", name="Back to Editing", exact=True).click()
-        self.wait(lambda: op in self.site.download_reads, "C-07 the status read after Back to Editing")
-        self.site.grant_answers = [(409, {"code": "DOWNLOAD_IN_PROGRESS", "message": "SYN-SERVER in progress"})]
-        reads = len(self.site.download_reads)
-        box.get_by_role("button", name="Download", exact=True).click()
-        self.wait(lambda: len(self.site.download_reads) > reads, "C-06 the state read again after a refusal")
-        self.settle(200)
-        # The refusal is the answer to the press: the status read that follows (no archiveRequest of its own) keeps it.
-        expect(box, "C-06 a refused grant stays a notice after its status read").to_contain_text("SYN-SERVER in progress")
-        self.assertEqual([], self.downloads, "C-06 a refused grant downloads nothing")
-        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"), "C-07 a refusal never logs out")
-        view = download_view(op, UID_A)
-        view["archiveRequest"] = {"grantId": "LATEST", "state": "expired", "expiresAt": "2026-10-17T00:02:00.000Z",
-                                  "attemptId": None, "code": "DOWNLOAD_GRANT_EXPIRED", "message": "SYN-SERVER grant expired"}
-        self.site.download_answers[op] = [view]
-        with self.page.expect_download():
-            box.get_by_role("button", name="Download", exact=True).click()
-        self.page.clock.run_for(3100)
-        expect(box).to_contain_text("SYN-SERVER grant expired")
-        expect(box.get_by_role("button", name="Download", exact=True)).to_be_visible()
-        self.assertEqual([], self.dialogs, "C-08 no dialog")
-        self.assertEqual("SYN unsaved text keeps the logout in preparation", self.page.locator("#findings").input_value(), "C-08 draft kept")
-
-    def test_c06_a_changed_manifest_offers_a_new_preparation_and_keeps_the_old_operation(self):
-        """U4C-02: once the status says the archive was refused MANIFEST_CHANGED, this operation's fixed manifest can never
-        start again: Prepare Again makes a new operation (a new id, a new manifest), the old one stays shown as it was, and
-        its stale Download is not offered again. Non-modal, the draft kept."""
-        self.open_as(RAD_ONLY)
-        self.open_study(h.PATIENT)
-        self.type("SYN draft kept across a changed manifest")
-        self.row_menu(h.PATIENT)
-        self.menu_item("Download Originals").click()
-        self.wait(lambda: self.site.prepares, "the preparation")
-        op = self.site.prepares[0][1]["operationId"]
-        box = self.operations().first
-        expect(box).to_contain_text("Ready")
-        with self.page.expect_download():
-            box.get_by_role("button", name="Download", exact=True).click()
-        view = download_view(op, UID_A)
-        view["archiveRequest"] = {"grantId": "LATEST", "state": "refused", "expiresAt": "2026-10-17T00:02:00.000Z",
-                                  "attemptId": None, "code": "MANIFEST_CHANGED", "message": "SYN-SERVER manifest changed"}
-        self.site.download_answers[op] = [view]
-        self.page.clock.run_for(3100)
-        expect(box).to_contain_text("SYN-SERVER manifest changed")
-        self.assertEqual(0, box.get_by_role("button", name="Download", exact=True).count(),
-                         "C-06 the operation whose manifest changed is not offered for download again")
-        again = box.get_by_role("button", name="Prepare Again", exact=True)
-        self.assertEqual(1, again.count(), "C-06 MANIFEST_CHANGED offers a new preparation")
-        again.click()
-        self.wait(lambda: len(self.site.prepares) == 2, "C-06 the new preparation")
-        uid, body = self.site.prepares[1]
-        self.assertEqual(UID_A, uid, "C-06 the same study")
-        self.assertNotEqual(op, body["operationId"], "C-06 a new operation (a new manifest), never the stale one again")
-        self.wait(lambda: self.operations().count() == 2, "both operations shown")
-        old = self.panel().locator(f'section[data-operation="{op}"]')
-        expect(old).to_contain_text("Ready")
-        expect(old).to_contain_text("SYN-SERVER manifest changed")
-        new = self.panel().locator(f'section[data-operation="{body["operationId"]}"]')
-        expect(new.get_by_role("button", name="Download", exact=True)).to_be_visible()
-        self.assertEqual(1, len(self.site.grants), "C-06 no grant is asked again for the stale operation")
-        self.assertEqual([], self.dialogs, "C-08 no dialog")
-        self.assertEqual("SYN draft kept across a changed manifest", self.page.locator("#findings").input_value(), "C-08 draft kept")
-
-    def test_c06_a_grant_answered_after_the_selection_moved_starts_no_download(self):
-        """U4C-04 (DG-T06): a press made with study A selected, answered after the person moved to B - or to B and back to
-        A, which is another selection - clicks no link and says why; a press left alone downloads once."""
-        self.open_as(RAD_ONLY)
-        self.row_menu(h.PATIENT)
-        self.menu_item("Download Originals").click()
-        self.wait(lambda: self.site.prepares, "the preparation")
-        op = self.site.prepares[0][1]["operationId"]
-        box = self.operations().first
-        expect(box).to_contain_text("Ready")
-        # One loop, no subTest: the first press that downloads ends the case with that one assertion failure.
-        for moves in ((h.PATIENT_B,), (h.PATIENT_B, h.PATIENT)):
-            self.open_study(h.PATIENT)
-            self.site.grant_answers = ["hold"]
-            presses = len(self.site.grants)
-            box.get_by_role("button", name="Download", exact=True).click()
-            self.wait(lambda: len(self.site.held_grants) == 1, "the grant request")
-            for patient in moves:
-                self.open_study(patient)
-            route, record = self.site.held_grants.pop(0)
-            self.site.answer_grant(route, record)
-            self.settle(400)
-            self.assertEqual(presses + 1, len(self.site.grants), "one grant request per press")
-            self.assertEqual([], self.downloads, "C-07 a grant answered after the selection moved clicks no link")
-            expect(box).to_contain_text("다른 검사를 고르는 사이에")
-            expect(box.get_by_role("button", name="Download", exact=True)).to_be_visible()
-        self.open_study(h.PATIENT)
-        with self.page.expect_download():
-            box.get_by_role("button", name="Download", exact=True).click()
-        self.assertEqual(3, len(self.site.grants), "C-06 the unchanged press: one grant request")
-        self.assertEqual(1, len(self.downloads), "C-06 the unchanged press: one browser download")
-        self.assertEqual("grant=" + self.site.grants[-1]["grant"], urlparse(self.downloads[0]).query)
-        self.assertEqual([], self.dialogs)
 
     def test_c06_the_download_item_acts_only_on_the_selection_its_menu_opened_on(self):
         self.open_as(RAD_ONLY)
@@ -744,179 +623,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         expect(self.page.locator("#toast")).to_contain_text(self.MENU_CANCELLED)
 
     # ── C-07 late answers and account boundaries ──
-    def test_c07_an_answer_from_before_a_cancelled_logout_preparation_is_not_shown_the_server_is_read_instead(self):
-        self.open_as(RAD_TECH)
-        self.open_study(h.PATIENT)
-        self.type("SYN unsaved text keeps the logout in preparation")
-        self.page.locator("[data-tab=Technician]").click()
-        self.site.import_answers = ["hold"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.site.held_imports, "the upload")
-        self.site.put_answers = [(500, {"statusCode": 500, "message": "SYN"})]
-        self.page.evaluate("() => document.querySelector('#logout').click()")
-        expect(self.page.locator("dialog.kin-logout h2")).to_have_text("Draft Not Saved")
-        op = self.site.imports[0]["operation"]
-        # The late answer says Stored; the server's record (what the status read answers) says Retry Needed.
-        self.site.import_state[op] = {0: file_result(op, 0, "retryable", "IMPORT_ATTEMPT_EXPIRED")}
-        route, record = self.site.held_imports.pop(0)
-        self.site.answer(route, 200, file_result(op, 0, "stored"))
-        self.settle(300)
-        self.assertNotEqual("Stored", self.state_of(0), "C-07 nothing applies during the preparation")
-        self.page.locator("dialog.kin-logout").get_by_role("button", name="Back to Editing", exact=True).click()
-        self.wait(lambda: op in self.site.import_reads, "C-07 the status read after Back to Editing")
-        self.wait(lambda: self.state_of(0) == "Retry Needed", "the server's state")
-        self.assertEqual(1, len(self.site.imports), "C-07 nothing re-sent by itself")
 
-    def test_c07_a_network_error_keeps_the_session_and_reads_the_operation_back(self):
-        """A lost upload answer is read back. A 404 of that read (no operation, or one this person cannot see now) leaves
-        the file undecided and unsent, with no Retry (U4C-03/03b); Check Again later shows what the server holds."""
-        self.open_as(TECH, "Technician")
-        self.site.import_answers = ["abort"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.site.imports, "the upload")
-        op = self.site.imports[0]["operation"]
-        self.wait(lambda: op in self.site.import_reads, "C-07 the operation read back after a lost answer")
-        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 a 404 read leaves the file undecided")
-        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"), "C-07 a network error never logs out")
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.assertEqual(0, self.file_row(0).get_by_role("button", name="Retry").count(), "C-07 a 404 offers no Retry")
-        self.assertNotIn("닿지 않았습니다", self.reason_of(0), "C-07 a 404 never says the file did not reach the server")
-        # The server's record shows the file stored (the lost request had reached it): Check Again shows it, nothing resent.
-        self.site.import_state[op] = {0: file_result(op, 0, "stored")}
-        self.operations().first.get_by_role("button", name="Check Again").click()
-        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the stored result once the server shows it")
-        self.assertEqual(1, len(self.site.imports), "C-07 one upload: nothing was sent again")
-
-    def test_c07_a_status_read_without_the_file_leaves_it_undecided(self):
-        """U4C-03b: a 200 status of the operation without this file is no proof either - the request can still be inside
-        the server, before its result row, and be stored after the read. Undecided, no Retry; Check Again shows Stored."""
-        self.open_as(TECH, "Technician")
-        self.site.import_answers = ["stored", "hold"]
-        self.choose(self.files(2))
-        self.wait(lambda: self.site.held_imports, "the second upload")
-        route, record = self.site.held_imports.pop(0)
-        op = record["operation"]
-        self.assertEqual([0], sorted(self.site.import_state[op]), "the server's record holds file 0 only")
-        route.abort("connectionreset")
-        self.wait(lambda: self.state_of(1) == "Result Unknown", "C-07 a status without the file leaves it undecided")
-        self.assertEqual(0, self.file_row(1).get_by_role("button", name="Retry").count(), "C-07 absence from a status offers no Retry")
-        self.assertNotIn("닿지 않았습니다", self.reason_of(1), "C-07 absence never says the file did not reach the server")
-        self.assertIn("저장 중일 수 있어", self.reason_of(1), "C-07 the panel says it may still be stored")
-        self.page.clock.run_for(60000)
-        self.settle(300)
-        self.assertEqual(2, len(self.site.imports), "C-07 nothing is sent again")
-        # The held request finishes inside the server: its result appears in the record.
-        self.site.import_state[op][1] = file_result(op, 1, "stored")
-        self.operations().first.get_by_role("button", name="Check Again").click()
-        self.wait(lambda: self.state_of(1) == "Stored", "C-07 the stored result once the server records it")
-        self.assertEqual(2, len(self.site.imports), "C-07 still two uploads: no duplicate")
-
-    def test_c07_retry_only_for_a_file_never_sent_or_answered_retryable(self):
-        """U4C-03b: a status read the server cannot answer (503) leaves a lost file undecided with no Retry; Retry is
-        offered for a file the browser never sent (the loop stopped before it), a request the server refused, and a
-        file the server answered retryable."""
-        self.open_as(TECH, "Technician")
-        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE")
-        self.site.import_answers = ["abort", "hold", (503, {"code": "IMPORT_NOT_READY", "message": "SYN-SERVER not ready"})]
-        self.site.status_answers = [(503, {"code": "IMPORT_STORAGE_UNAVAILABLE", "message": "SYN-SERVER storage unavailable"})]
-        self.choose(self.files(4))
-        self.wait(lambda: self.site.held_imports, "the second upload")
-        self.site.release_import(retryable)
-        self.wait(lambda: len(self.site.imports) == 3 and self.state_of(3) == "Not Sent", "the loop stopped")
-        self.settle(300)
-        self.assertEqual("Checking", self.state_of(0), "C-07 a 503 status read decides nothing")
-        expect(self.operations().first).to_contain_text("SYN-SERVER storage unavailable")
-        retries = [self.file_row(i).get_by_role("button", name="Retry", exact=True).count() for i in range(4)]
-        self.assertEqual("Retry Needed", self.state_of(1))
-        self.assertEqual(["Not Sent", "Not Sent"], [self.state_of(2), self.state_of(3)])
-        self.assertEqual([0, 1, 1, 1], retries, "C-07 Retry only for the retryable answer, the refused request and the unsent file")
-        self.assertEqual(3, len(self.site.imports), "C-07 the fourth file was never sent")
-
-    def test_c07_a_lost_answer_of_a_stored_file_and_a_scoped_404_is_never_not_sent(self):
-        """U4C-03: the original was stored, the browser lost that answer, and the status read is 404 because the study is
-        out of this person's scope now. The panel must not say Not Sent / "did not reach" nor offer Retry; nothing is sent
-        again; once the scope is back, Check Again shows Stored."""
-        self.open_as(TECH, "Technician")
-        self.site.import_answers = ["hold"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.site.held_imports, "the upload")
-        route, record = self.site.held_imports.pop(0)
-        op = record["operation"]
-        self.site.import_state[op] = {0: file_result(op, 0, "stored")}
-        self.site.status_answers = [(404, {"statusCode": 404, "message": "SYN-SERVER import not found"})]
-        route.abort("connectionreset")
-        self.wait(lambda: self.site.import_reads, "the status read")
-        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 the file stays undecided")
-        self.assertNotEqual("Not Sent", self.state_of(0), "C-07 a scoped 404 is not proof that the file was not sent")
-        self.assertNotIn("닿지 않았습니다", self.reason_of(0), "C-07 nor that it did not reach the server")
-        self.assertIn("저장됐을 수 있어", self.reason_of(0), "C-07 the panel says it may have been stored")
-        self.assertEqual(0, self.file_row(0).get_by_role("button", name="Retry").count(), "C-07 no Retry on a 404")
-        self.page.clock.run_for(60000)
-        self.settle(300)
-        self.assertEqual(1, len(self.site.imports), "C-07 nothing is sent again")
-        # The scope is back: the status read answers the stored result.
-        self.operations().first.get_by_role("button", name="Check Again").click()
-        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the stored result once the server shows it")
-        self.assertEqual(1, len(self.site.imports), "C-07 still one upload: no duplicate")
-        self.assertEqual([], self.dialogs)
-
-    def test_c07_the_same_person_resumes_after_a_new_login_another_person_never_sees_the_operation(self):
-        self.open_as(TECH, "Technician")
-        unconfirmed = lambda r: file_result(r["operation"], int(r["index"]), "unconfirmed", "IMPORT_UNCONFIRMED")
-        self.site.import_answers = ["hold"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.site.held_imports, "the upload")
-        record = self.site.release_import(unconfirmed)
-        op = record["operation"]
-        self.wait(lambda: self.state_of(0) == "Unconfirmed", "Unconfirmed")
-        # The same immutable sub signs in again (a new session; the display name changed meanwhile).
-        self.site.account = {**TECH, "displayName": "SYN Tech Choi (renamed)"}
-        reads = len(self.site.import_reads)
-        self.page.reload()
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.page.clock.run_for(3000)
-        self.wait(lambda: len(self.site.import_reads) > reads, "C-07 the same person's operation read with the new session")
-        self.assertEqual(op, self.site.import_reads[-1])
-        self.page.locator("[data-tab=Technician]").click()
-        self.wait(lambda: self.operations().count() == 1 and self.state_of(0) == "Unconfirmed", "the resumed operation")
-        # Another sub with the same display name in the same tab: nothing is read, shown or resumed.
-        self.site.account = TECH_OTHER
-        reads = len(self.site.import_reads)
-        self.page.reload()
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.page.clock.run_for(5000)
-        self.settle(300)
-        self.assertEqual(reads, len(self.site.import_reads), "C-07 another person never queries the prior operation")
-        self.page.locator("[data-tab=Technician]").click()
-        self.assertEqual(0, self.operations().count(), "C-07 nor sees it")
-        self.assertIsNone(self.page.evaluate("sessionStorage.getItem('kin-study-transfer-local')"), "its record is dropped")
-
-    def test_c07_a_file_restored_after_a_new_login_without_a_server_result_stays_undecided(self):
-        """SRU4R3-4: the same person signs in again while a file's request was still out. The restored operation is read;
-        the server shows file 0 and nothing yet for file 1. File 1 is undecided - never Not Sent, no Choose Files Again,
-        no Retry - and nothing is sent by itself."""
-        self.open_as(TECH, "Technician")
-        self.site.import_answers = ["stored", "hold"]
-        self.choose(self.files(2))
-        self.wait(lambda: self.site.held_imports, "the second upload")
-        op = self.site.held_imports[0][1]["operation"]
-        self.site.held_imports.clear()
-        reads = len(self.site.import_reads)
-        self.page.reload()
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.page.clock.run_for(3000)
-        self.wait(lambda: len(self.site.import_reads) > reads, "C-07 the restored operation is read")
-        self.page.locator("[data-tab=Technician]").click()
-        self.wait(lambda: self.operations().count() == 1 and self.state_of(0) == "Stored", "the restored operation")
-        self.wait(lambda: self.state_of(1) == "Result Unknown", "C-07 a restored file without a server result stays undecided")
-        box = self.operations().first
-        self.assertEqual(0, box.get_by_role("button", name="Choose Files Again").count(), "C-07 no Choose Files Again on absence")
-        self.assertEqual(0, box.get_by_role("button", name="Retry").count(), "C-07 no Retry on absence")
-        self.assertNotIn("Not Sent", box.inner_text(), "C-07 never Not Sent")
-        self.page.clock.run_for(60000)
-        self.settle(300)
-        self.assertEqual(2, len(self.site.imports), "C-07 nothing sent by itself")
-        self.assertEqual(op, self.site.import_reads[-1])
 
     # ── r4 (D1566): what an answer proves - the classifier's acceptance cases R4-A01..A05 ──
     WATCH = """() => { const seen = window.__synStates = window.__synStates || {};
@@ -956,218 +663,6 @@ class TransferPanelPage(rf.ReportFlowPage):
         ("a typed operation conflict (says nothing of the stored file)", (409, {"code": "OPERATION_CONFLICT", "message": "SYN-SERVER conflict"})),
     ]
 
-    def test_r4_a01_an_answer_that_proves_nothing_never_says_not_sent_or_offers_retry(self):
-        """R4-A01 (I11, I13, I09, I10): the file was stored, then its answer was lost or replaced. At every update the file
-        is never Not Sent and never offers Retry / Retry All / Choose Files Again; the operation is read back by GET and the
-        stored result appears without any second POST."""
-        self.open_as(TECH, "Technician")
-        self.page.evaluate(self.WATCH)
-        self.site.import_answers = [("stored-then", v) for _, v in self.A01_VARIANTS]
-        self.choose(self.files(len(self.A01_VARIANTS)))
-        self.wait(lambda: len(self.site.imports) == len(self.A01_VARIANTS), "C-07 every file sent once, none twice", timeout=30)
-        op = self.site.imports[0]["operation"]
-        self.page.evaluate(self.WATCH)
-        self.wait(lambda: all(self.state_of(i) == "Stored" for i in range(len(self.A01_VARIANTS))), "C-07 each stored result read back by GET", timeout=30)
-        self.page.clock.run_for(60000)
-        self.settle(300)
-        for i, (label, _) in enumerate(self.A01_VARIANTS):
-            seen = self.seen_states(op, i)
-            self.assertFalse(any(s.startswith("Not Sent") for s in seen), f"C-07 {label}: never Not Sent ({seen})")
-            self.assertFalse(any(s.endswith("+Retry") for s in seen), f"C-07 {label}: never a Retry ({seen})")
-        self.assertEqual(len(self.A01_VARIANTS), len(self.site.imports), "C-07 no second POST of any file")
-        self.assertGreaterEqual(len(self.site.import_reads), 1, "C-07 the operation is read back")
-        self.assertEqual({"Retry": 0, "Retry All": 0, "Choose Files Again": 0, "Check Again": 0}, self.controls())
-
-    def test_r4_a02_missing_then_404_then_503_then_stored_by_the_status_read_only(self):
-        """R4-A02 (I14, I19): after a proxy's 502 the status says nothing of the file, then 404, then 503 (also across a
-        re-login); the file stays undecided with no Retry or Choose Files Again, and the later Stored comes by GET only."""
-        self.open_as(TECH, "Technician")
-        self.page.evaluate(self.WATCH)
-        self.site.import_answers = ["hold"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.site.held_imports, "the upload")
-        op = self.site.imports[0]["operation"]
-        self.site.status_answers = [(200, {"operationId": op, "status": "open", "files": []}),
-                                    (404, {"statusCode": 404, "message": "SYN-SERVER import not found"}),
-                                    (503, {"code": "IMPORT_STORAGE_UNAVAILABLE", "message": "SYN-SERVER storage unavailable"})]
-        self.site.release_import(("raw", 502, "<html>502 Bad Gateway</html>", "text/html"))
-        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 a status without the file: undecided")
-        self.assertEqual(0, self.controls()["Retry"] + self.controls()["Choose Files Again"])
-        self.operations().first.get_by_role("button", name="Check Again").click()
-        self.wait(lambda: len(self.site.import_reads) == 2 and self.state_of(0) == "Result Unknown", "C-07 a 404: undecided")
-        # A re-login of the same person: the record is read again; nothing is sent, nothing can be chosen again.
-        self.page.reload()
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.page.clock.run_for(3000)
-        self.page.locator("[data-tab=Technician]").click()
-        self.wait(lambda: len(self.site.import_reads) == 3 and self.operations().count() == 1 and self.state_of(0) == "Checking",
-                  "C-07 a 503 after the re-login: not known")
-        expect(self.operations().first).to_contain_text("SYN-SERVER storage unavailable")
-        self.assertEqual(0, self.controls()["Retry"] + self.controls()["Choose Files Again"], "C-07 no Retry and no Choose Files Again")
-        self.site.import_state[op] = {0: file_result(op, 0, "stored")}
-        self.operations().first.get_by_role("button", name="Check Again").click()
-        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the stored result by GET")
-        self.assertEqual(1, len(self.site.imports), "C-07 one POST in all")
-
-    def test_r4_a02_a_malformed_or_contradicting_status_row_changes_nothing(self):
-        """R4-A02 (I16, I22): the status shows a minimal row (index + retryable only) for the lost file and a retryable row
-        for a file already Stored. The lost file stays undecided with no Retry, also after a re-login (no Choose Files
-        Again); the Stored file stays Stored."""
-        self.open_as(TECH, "Technician")
-        self.site.import_answers = ["stored", "hold"]
-        self.choose(self.files(2))
-        self.wait(lambda: self.site.held_imports, "the second upload")
-        op = self.site.imports[0]["operation"]
-        rows = [file_result(op, 0, "retryable", "ORTHANC_UNAVAILABLE", generation=2), {"index": 1, "outcome": "retryable", "generation": 5}]
-        self.site.status_answers = [(200, {"operationId": op, "status": "open", "files": rows})]   # then the record: 0 Stored, 1 absent
-        self.site.release_import(("raw", 502, "<html>502 Bad Gateway</html>", "text/html"))
-        self.wait(lambda: self.state_of(1) == "Result Unknown", "C-07 a malformed row: undecided")
-        self.assertEqual("Stored", self.state_of(0), "C-07 a final result is never taken back by a later read")
-        self.assertEqual(0, self.controls()["Retry"], "C-07 no Retry from a malformed row")
-        self.page.reload()
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.page.clock.run_for(3000)
-        self.page.locator("[data-tab=Technician]").click()
-        self.wait(lambda: self.operations().count() == 1 and self.state_of(1) == "Result Unknown", "C-07 still undecided after the re-login")
-        self.assertEqual(0, self.controls()["Choose Files Again"] + self.controls()["Retry"], "C-07 no Choose Files Again from a malformed row")
-        self.assertEqual(2, len(self.site.imports))
-
-    def test_r4_a03_a_lost_retry_of_a_pre_attempt_retryable_stays_undecided(self):
-        """D1574 (the hosted REQ-S9-U4-10 run): POST 1 is the real service's STUDY_WRITE_PENDING (409, generation 0, no
-        attempt) - Retry Needed with Retry; the retry's answer is lost and the server's row stays generation 0, which
-        cannot speak for the later request: the file stays undecided (no Retry, no third POST), also after Check Again."""
-        self.open_as(TECH, "Technician")
-        pending = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "STUDY_WRITE_PENDING")
-        self.site.import_answers = [pending, "abort"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.state_of(0) == "Retry Needed", "C-07 the real retryable answer is read as such")
-        self.assertEqual(1, self.controls()["Retry"], "C-07 Retry for a complete retryable answer")
-        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
-        self.wait(lambda: len(self.site.imports) == 2 and self.state_of(0) == "Result Unknown", "C-07 the lost retry stays undecided")
-        self.assertEqual(0, self.controls()["Retry"], "C-07 generation 0 does not answer the retry")
-        self.operations().first.get_by_role("button", name="Check Again", exact=True).click()
-        self.settle(300)
-        self.assertEqual("Result Unknown", self.state_of(0), "C-07 still undecided")
-        self.assertEqual(2, len(self.site.imports), "C-07 no third POST")
-
-    def test_r4_a03_an_older_attempt_retryable_does_not_answer_a_newer_request(self):
-        """R4-A03 (I17, I20, I21): POST 1 answers retryable generation 1; Retry sends POST 2, whose answer is lost while the
-        server still shows generation 1. That old result opens neither Retry nor (after a re-login) Choose Files Again;
-        the request's own later result (generation 2, Stored) comes by GET. Two POSTs in all."""
-        self.open_as(TECH, "Technician")
-        self.page.evaluate(self.WATCH)
-        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE", generation=1)
-        self.site.import_answers = [retryable, "abort"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.state_of(0) == "Retry Needed", "the first answer: retryable")
-        op = self.site.imports[0]["operation"]
-        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
-        self.wait(lambda: len(self.site.imports) == 2, "the retry")
-        self.wait(lambda: self.state_of(0) == "Result Unknown", "C-07 generation 1 does not answer the second request")
-        self.assertEqual(0, self.controls()["Retry"], "C-07 no Retry from an older attempt")
-        self.page.reload()
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.page.clock.run_for(3000)
-        self.page.locator("[data-tab=Technician]").click()
-        self.wait(lambda: self.operations().count() == 1 and self.state_of(0) == "Result Unknown", "C-07 still undecided after the re-login")
-        self.assertEqual(0, self.controls()["Choose Files Again"] + self.controls()["Retry"], "C-07 no Choose Files Again from an older attempt")
-        self.page.clock.run_for(60000)
-        self.settle(300)
-        self.assertEqual(2, len(self.site.imports), "C-07 no third POST")
-        self.site.import_state[op] = {0: file_result(op, 0, "stored", generation=2)}
-        self.operations().first.get_by_role("button", name="Check Again").click()
-        self.wait(lambda: self.state_of(0) == "Stored", "C-07 the newer request's own result")
-        self.assertEqual(2, len(self.site.imports))
-
-    def test_r4_a03_a_record_that_cannot_be_updated_stops_the_dispatch(self):
-        """R4-A03 storage: with an older record that would still be read back (it knows no dispatch) and a storage that
-        refuses both the write and the removal, the retry does not go out (a re-login could otherwise reopen it); it says
-        why and can be retried once the record can be written."""
-        self.open_as(TECH, "Technician")
-        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "ORTHANC_UNAVAILABLE", generation=1)
-        self.site.import_answers = [retryable, "stored"]
-        self.choose(self.files(1))
-        self.wait(lambda: self.state_of(0) == "Retry Needed", "retryable")
-        self.page.evaluate("""() => { const p = Storage.prototype; window.__synSet = p.setItem; window.__synRemove = p.removeItem;
-          p.setItem = function () { throw new Error('SYN quota'); }; p.removeItem = function () { throw new Error('SYN blocked'); }; }""")
-        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
-        self.settle(300)
-        self.assertEqual(1, len(self.site.imports), "C-07 the dispatch stops when its record cannot be updated")
-        self.assertEqual("Not Sent", self.state_of(0), "C-07 this page's own fact: not sent")
-        self.assertIn("작업 기록을 갱신하지 못해", self.reason_of(0))
-        self.page.evaluate("() => { Storage.prototype.setItem = window.__synSet; Storage.prototype.removeItem = window.__synRemove; }")
-        self.file_row(0).get_by_role("button", name="Retry", exact=True).click()
-        self.wait(lambda: self.state_of(0) == "Stored", "the retry once the record can be written")
-        self.assertEqual(2, len(self.site.imports))
-
-    def test_r4_a04_continuation_stays_possible_only_where_a_contract_allows_it(self):
-        """R4-A04 (I06-I08, I12, I18): a typed 413/400/415 refusal is Not Sent without Retry (nothing was written, but the
-        same file would be refused alike); a complete retryable answer is Retry Needed; a settled retryable restored after
-        a re-login offers Choose Files Again, and that resend is exactly one POST of the same operation, index and bytes."""
-        self.open_as(TECH, "Technician")
-        retryable = lambda r: file_result(r["operation"], int(r["index"]), "retryable", "STUDY_WRITE_PENDING", generation=1)
-        self.site.import_answers = [(413, {"code": "DICOM_IMPORT_TOO_LARGE", "message": "SYN-SERVER too large"}),
-                                    (400, {"code": "IMPORT_REQUEST_INVALID", "message": "SYN-SERVER invalid"}),
-                                    (415, {"code": "IMPORT_CONTENT_TYPE_UNSUPPORTED", "message": "SYN-SERVER type"}),
-                                    retryable]
-        self.choose(self.files(4))
-        self.wait(lambda: len(self.site.imports) == 4 and self.state_of(3) == "Retry Needed", "C-02 four answers, one per file")
-        retries = [self.file_row(i).get_by_role("button", name="Retry", exact=True).count() for i in range(4)]
-        self.assertEqual(["Not Sent", "Not Sent", "Not Sent", "Retry Needed"], [self.state_of(i) for i in range(4)])
-        self.assertEqual([0, 0, 0, 1], retries, "C-02 no blind Retry of an unchanged 413/400/415; Retry for retryable")
-        first = dict(self.site.imports[3])
-        self.page.reload()
-        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.page.clock.run_for(3000)
-        self.page.locator("[data-tab=Technician]").click()
-        self.wait(lambda: self.operations().count() == 1 and self.state_of(3) == "Retry Needed", "the settled retryable restored")
-        self.assertEqual(1, self.controls()["Choose Files Again"], "C-02 a settled retryable can be chosen again")
-        with self.page.expect_file_chooser() as chooser:
-            self.operations().first.get_by_role("button", name="Choose Files Again", exact=True).click()
-        chooser.value.set_files(self.files(4))
-        self.wait(lambda: len(self.site.imports) == 5, "the one resend")
-        again = self.site.imports[4]
-        self.assertEqual((first["operation"], first["index"], first["sha256"]), (again["operation"], again["index"], again["sha256"]),
-                         "C-02 the same operation, index and bytes")
-        self.wait(lambda: self.state_of(3) == "Stored", "stored")
-        self.settle(300)
-        self.assertEqual(5, len(self.site.imports), "C-02 exactly one resend")
-
-    def test_r4_a05_a_download_answer_that_proves_nothing_is_not_called_a_refusal(self):
-        """R4-A05 (I23, I25, I26, I27): an opaque preparation answer is read back by its id; a 200 grant answer without a
-        grant clicks no link and says the result is not known, never "refused"; a status about another grant changes
-        nothing; a poll deadline says only that the start could not be confirmed; Download stays for Ready."""
-        self.open_as(RAD_ONLY)
-        self.site.prepare_answers = [("prepared-then", ("raw", 502, "<html>502 Bad Gateway</html>", "text/html"))]
-        self.row_menu(h.PATIENT)
-        self.menu_item("Download Originals").click()
-        self.wait(lambda: self.site.prepares, "the preparation")
-        op = self.site.prepares[0][1]["operationId"]
-        box = self.operations().first
-        self.wait(lambda: op in self.site.download_reads, "C-06 the opaque preparation is read back by its id")
-        expect(box).to_contain_text("Ready")
-        self.assertNotIn("거절", box.inner_text(), "C-06 an opaque preparation answer is not a refusal")
-        self.site.grant_answers = [(200, {"operationId": op})]
-        reads = len(self.site.download_reads)
-        box.get_by_role("button", name="Download", exact=True).click()
-        self.wait(lambda: len(self.site.download_reads) > reads, "C-06 the state read again")
-        self.settle(300)
-        self.assertEqual([], self.downloads, "C-06 no link without a grant")
-        expect(box, "C-06 the grant result is not known").to_contain_text("권한 요청의 결과를 확인하지 못했습니다")
-        self.assertNotIn("거절", box.inner_text(), "C-06 never called refused")
-        view = download_view(op, UID_A)
-        view["archiveRequest"] = {"grantId": str(uuid.uuid4()), "state": "refused", "expiresAt": "2026-10-17T00:02:00.000Z",
-                                  "attemptId": None, "code": "MANIFEST_CHANGED", "message": "SYN-SERVER other grant"}
-        self.site.download_answers[op] = [view] * 12
-        with self.page.expect_download():
-            box.get_by_role("button", name="Download", exact=True).click()
-        for _ in range(12):
-            self.page.clock.run_for(3100)
-            self.settle(60)
-        self.assertNotIn("SYN-SERVER other grant", box.inner_text(), "C-06 a status of another grant is not this press's")
-        self.assertEqual(0, box.get_by_role("button", name="Prepare Again", exact=True).count(), "C-06 another grant's MANIFEST_CHANGED changes nothing")
-        expect(box, "C-06 a poll deadline says only that the start was not confirmed").to_contain_text("시작됐는지 확인하지 못했습니다")
-        expect(box.get_by_role("button", name="Download", exact=True)).to_be_visible()
 
     # ── C-08 normal reading ──
     def test_c08_normal_reading_sends_no_transfer_request_and_shows_no_panel(self):
@@ -1182,24 +677,784 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertFalse(self.panel().is_visible(), "C-08 no panel")
         self.assertEqual([], self.dialogs)
 
+    # D1606 supersedes the r4 response-derived Retry and same-operation archive restart controls.
+    # Preconditions carry no assertion ID. Only direct behavior assertions below are mutant kill evidence.
+    def observed(self, predicate, what="response received"):
+        self.wait(predicate, what)
+        self.settle(250)
 
-class EnvelopeContractTests(unittest.TestCase):
-    """D1574: the page fixture answers exactly the real service's import shapes (tests/fixtures/s9u4-import-envelope.json,
-    pinned against the real service by S9U4-B86): no fixture-only field, none missing."""
+    def assert_policy(self, op=0, index=0, row="R5-A02"):
+        box = self.operations().nth(op)
+        self.assertEqual(0, self.file_row(index, op).get_by_role("button", name="Retry", exact=True).count(), row + ": no spent retry")
+        self.assertEqual(0, box.get_by_role("button", name="Choose Files Again", exact=True).count(), row + ": no reattachment")
+        self.assertNotIn("저장되지 않았습니다", self.file_row(index, op).inner_text(), row + ": no non-write certificate")
+        self.assertEqual("Not confirmed", self.state_of(index, op), row + ": unconfirmed state")
+        self.assertEqual(1, box.get_by_role("button", name="Check Again", exact=True).count(), row + ": read available")
 
-    def test_the_fixture_answers_the_real_import_shapes(self):
-        op = str(uuid.uuid4())
-        for outcome, code in (("stored", None), ("retryable", "ORTHANC_UNAVAILABLE"), ("retryable", "STUDY_WRITE_PENDING"),
-                              ("rejected", "PATIENT_ID_MISSING"), ("rejected", "SOP_CONTENT_CONFLICT"), ("unconfirmed", "IMPORT_UNCONFIRMED")):
-            row = file_result(op, 0, outcome, code)
-            self.assertEqual(ENVELOPE["post_file"], sorted(row), f"{outcome} {code}: the POST answer")
-            self.assertEqual(ENVELOPE["status_file"], sorted(k for k in row if k != "operationId"), f"{outcome} {code}: a status row")
-            for attempt in row["attempts"]:
-                self.assertEqual(ENVELOPE["attempt"], sorted(attempt))
-        pending = file_result(op, 0, "retryable", "STUDY_WRITE_PENDING")
-        self.assertEqual((pending["generation"], pending["attempts"], pending["identity"]), (0, [], None), "a pre-attempt result")
-        self.assertEqual(ENVELOPE["status_envelope"], sorted({"operationId": op, "status": "open", "files": []}))
-        self.assertEqual(ENVELOPE["request_refusal"], sorted({"code": "IMPORT_NOT_READY", "message": "m"}))
+    def reload_transfers(self):
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.page.clock.run_for(3000)
+        self.page.locator("[data-tab=Technician]").click()
+        self.settle(250)
+
+    def prepare(self):
+        before = len(self.site.prepares)
+        self.row_menu(h.PATIENT)
+        self.menu_item("Download Originals").click()
+        self.observed(lambda: len(self.site.prepares) > before, "preparation received")
+        return self.site.prepares[-1][1]["operationId"]
+
+    def test_r5_a01_spent_file_pauses_two_unsent_siblings_and_atomic_retry_all(self):
+        self.open_as(TECH, "Technician")
+        self.site.import_answers = [(503, {"code": "IMPORT_NOT_READY", "message": "파일은 저장되지 않았습니다."})]
+        self.choose(self.files(3))
+        self.observed(lambda: self.site.imports)
+        self.assertEqual(1, len(self.site.imports), "R5-A01: pause unsent siblings")
+        self.assert_policy(row="R5-A01")
+        self.assertEqual(["Not Sent", "Not Sent"], [self.state_of(i) for i in (1, 2)], "R5-A01: resident siblings remain unsent")
+        self.site.import_answers = ["hold", "stored"]
+        self.operations().first.get_by_role("button", name="Retry All", exact=True).evaluate("b => { b.click(); b.click(); }")
+        self.observed(lambda: self.site.held_imports, "sibling received")
+        self.assertEqual(["0", "1"], [r["index"] for r in self.site.imports], "R5-A01: atomic enqueue and one lane")
+        self.site.release_import()
+        self.observed(lambda: len(self.site.imports) == 3, "last sibling received")
+        self.assertEqual(["Not confirmed", "Stored", "Stored"], [self.state_of(i) for i in range(3)], "R5-A01: eligible first sends succeed")
+        self.assertEqual(1, len({r["operation"] for r in self.site.imports}), "R5-A01: sibling operation unchanged")
+
+    def test_r5_a01_local_oversize_never_dispatches(self):
+        self.open_as(TECH, "Technician")
+        self.choose(self.files(1, 25165825))
+        self.settle(300)
+        self.assertEqual([], self.site.imports, "R5-A01: oversized selection zero POST")
+        self.assertEqual("Not Sent", self.state_of(0), "R5-A01: local rejection")
+        self.assertEqual(0, self.controls()["Retry"], "R5-A01: oversized no retry")
+
+    def test_r5_a01_real_transport_sent_false_can_make_its_first_dispatch(self):
+        # Public module host + real session transport. session:null fails before fetch; no rewritten product method.
+        context=self.browser.new_context(); page=context.new_page()
+        try:
+            context.route('**/*',lambda r:r.fulfill(content_type='text/html',body='<button id="t-import">Import DICOM</button><div id="study-transfer"></div>'))
+            page.goto('http://localhost/fixture')
+            for name in ('work-context.js','session-transport.js','study-transfer-local.js'):
+                source=(Path(__file__).resolve().parents[1]/'worklist-v0/hpacs-lite'/name).read_text(encoding='utf-8')
+                if self.asset_source and self.asset_source[0]==name: source=self.asset_source[1]
+                page.add_script_tag(content=source)
+            page.evaluate('''result=>{
+              const gate=KinWorkContext.create(); gate.follow({onLifecycle(fn){fn({state:'active',session:'SYN-SESSION'});}});
+              window.KinWorkContext=gate; window.synBound=false; window.synRequests=[];
+              const transport=KinSessionTransport.create({gate,authFailure:()=>{},fetch:async(url,init)=>{
+                const headers=new Headers(init.headers); synRequests.push([headers.get('X-KIN-Operation-Id'),headers.get('X-KIN-File-Index')]);
+                return new Response(JSON.stringify({...result,operationId:synRequests.at(-1)[0]}),{status:200,headers:{'Content-Type':'application/json'}});
+              }});
+              KinStudyTransferLocal({api:'/api',transport:{request:(url,init)=>transport.request(url,{...init,...(synBound?{}:{session:null})})},
+                allowed:()=>true,identity:()=>['SYN-INST','SYN-SUB'],can:()=>true,demo:()=>false,study:()=>null});
+            }''',file_result(str(uuid.uuid4()),0))
+            with page.expect_file_chooser() as choice:page.locator('#t-import').click()
+            choice.value.set_files(self.files(1)); page.wait_for_timeout(250)
+            self.assertEqual([],page.evaluate('synRequests'),'R5-A01-local: true sent=false zero fetch')
+            self.assertEqual(1,page.get_by_role('button',name='Retry',exact=True).count(),'R5-A01-local: local continuation available')
+            page.evaluate('synBound=true')
+            page.get_by_role('button',name='Retry',exact=True).evaluate('b=>{b.click();b.click();}')
+            page.wait_for_timeout(300)
+            self.assertEqual(1,len(page.evaluate('synRequests')),'R5-A01-local: exactly one first dispatch')
+            self.assertEqual('Stored',page.locator('.study-transfer-state').inner_text(),'R5-A01-local: complete first-send positive')
+        finally:context.close()
+
+    def test_r5_a02_auth_lifecycle_ends_without_a_nonwrite_claim(self):
+        self.open_as(TECH,'Technician'); self.page.evaluate(self.WATCH)
+        self.site.import_answers=[(401,{'code':'AUTH_SESSION_ENDED','message':'SYN ended'})]
+        self.choose(self.files(1)); self.observed(lambda:self.site.imports)
+        self.assertEqual(0,self.operations().count(),'R5-A02-auth: session end clears private panel')
+        self.assertFalse(any('Not Sent' in s or '+Retry' in s for s in self.seen_states(self.site.imports[0]['operation'],0)),
+                         'R5-A02-auth: authentication answer never certifies nonwrite')
+
+    def test_r5_a02_all_received_negatives_are_observation_only(self):
+        self.open_as(TECH, "Technician")
+        self.page.evaluate(self.WATCH)
+        codes = ["ORTHANC_UNAVAILABLE", "IMPORT_PERMISSION_REVOKED", "IMPORT_ATTEMPT_EXPIRED", "STUDY_WRITE_PENDING",
+                 "SOP_WRITE_PENDING", "STUDY_OWNERSHIP_UNDETERMINED", "RECOVERED_NO_OBJECT"]
+        variants = list(self.A01_VARIANTS) + [(c, lambda r, c=c: file_result(r["operation"], 0, "retryable", c)) for c in codes]
+        variants += [(c, (status, {"code": c, "message": "파일은 저장되지 않았습니다. 같은 요청으로 다시 보내세요."}))
+                     for status,c in [(413,"DICOM_IMPORT_TOO_LARGE"),(400,"IMPORT_REQUEST_INVALID"),(415,"IMPORT_CONTENT_TYPE_UNSUPPORTED"),
+                                      (503,"IMPORT_NOT_READY"),(503,"IMPORT_STORAGE_UNAVAILABLE"),(503,"IMPORT_ISSUER_UNCONFIGURED"),
+                                      (403,"STUDY_ACCESS_RESTRICTED_IMPORT"),(403,"IMPORT_SUBJECT_MISSING")]]
+        variants += [("rejected", lambda r: file_result(r["operation"],0,"rejected","SOP_CONTENT_CONFLICT",disposition="may-have-written")),
+                     ("incomplete retryable", lambda r:(503,{"operationId":r["operation"],"index":0,"outcome":"retryable","code":"ORTHANC_UNAVAILABLE", "message":"x", "identity":None,"writeDisposition":None,"generation":1,"attempts":[]}))]
+        for name, reply in variants:
+            with self.subTest(variant=name):
+                before=len(self.site.imports); reads=len(self.site.import_reads)
+                self.site.import_answers=[reply]
+                self.choose(self.files(1))
+                self.observed(lambda:len(self.site.imports)>before)
+                # Even a mutant which omits reconciliation reaches the received-answer milestone.
+                self.assert_policy(row="R5-A02")
+                op=self.site.imports[-1]["operation"]
+                self.assertEqual(before+1,len(self.site.imports),"R5-A02: no extra old-key POST")
+                self.assertGreater(len(self.site.import_reads),reads,"R5-A02: bound status read")
+                self.assertFalse(any("Not Sent" in v or "Retry Needed" in v or "+Retry" in v for v in self.seen_states(op,0)),"R5-A02: no transient non-write or retry")
+
+    def test_r5_a03_lost_answer_ordered_status_chain_then_exact_stored(self):
+        self.open_as(TECH,"Technician")
+        for name,reply in self.A01_VARIANTS[:6] + [("network loss","abort")]:
+            with self.subTest(variant=name):
+                self.site.import_answers=["hold"]; self.choose(self.files(1))
+                self.observed(lambda:self.site.held_imports)
+                route,record=self.site.held_imports.pop(0); op=record["operation"]
+                original=record["sha256"]
+                self.site.import_state[op]={0:file_result(op,0)}
+                self.site.status_answers=[(200,{"operationId":op,"status":"open","files":[]})]
+                before=len(self.site.imports); reads=len(self.site.import_reads)
+                self.site.answer_import(route,record,("stored-then",reply))
+                self.observed(lambda:len(self.site.import_reads)>reads)
+                self.assert_policy(row="R5-A03")
+                for status in (404,503):
+                    self.site.status_answers=[(status,{"message":"synthetic unreadable"})]
+                    reads=len(self.site.import_reads)
+                    self.operations().first.get_by_role("button",name="Check Again",exact=True).click()
+                    self.observed(lambda:len(self.site.import_reads)>reads)
+                    self.assert_policy(row="R5-A03")
+                self.reload_transfers()
+                self.assertEqual("Stored",self.state_of(0),"R5-A03: later positive GET restores Stored")
+                self.assertEqual(before,len(self.site.imports),"R5-A03: GET-only recovery")
+                self.assertEqual(original,self.site.import_state[op][0]["sha256"],"R5-A03: original SHA retained")
+                self.assertEqual(1,len(self.site.import_state[op]),"R5-A03: one original row")
+
+    def test_r5_a04_real_copied_tabs_and_legacy_snapshots_are_read_only(self):
+        self.open_as(TECH,"Technician")
+        self.site.import_answers=["hold"]
+        self.choose(self.files(2))
+        self.observed(lambda:self.site.held_imports)
+        op=self.site.imports[0]["operation"]
+        # Ordinary window.open copies the unmodified sessionStorage before the queued sibling dispatches.
+        with self.page.expect_popup() as opened:
+            self.page.evaluate("url => window.open(url, '_blank')",h.MAIN_URL)
+        other=opened.value
+        try:
+            expect(other.locator("#rows")).to_contain_text(h.PATIENT)
+            other.locator("[data-tab=Technician]").click(); self.settle(300)
+            box=other.locator('#study-transfer section[data-operation]').first
+            self.assertEqual(0,box.get_by_role("button",name="Retry",exact=True).count(),"R5-A04: copied unsent descriptor has no capability")
+            self.assertEqual(0,box.get_by_role("button",name="Choose Files Again",exact=True).count(),"R5-A04: copied operation cannot reattach")
+            self.site.release_import(lambda r:file_result(op,0,"retryable","ORTHANC_UNAVAILABLE"))
+            self.settle(300)
+            self.assertEqual(1, len(self.site.imports), 'R5-A04: received negative pauses resident sibling')
+            self.file_row(1).get_by_role("button",name="Retry",exact=True).click()
+            self.observed(lambda:len(self.site.imports)==2)
+            self.assertEqual(["0","1"],[r["index"] for r in self.site.imports],"R5-A04: original sibling sends once")
+            with other.expect_file_chooser() as choice: other.locator('#t-import').click()
+            choice.value.set_files(self.files(1)); self.observed(lambda:len(self.site.imports)>2)
+            self.assertNotEqual(op,self.site.imports[-1]["operation"],"R5-A04: copied tab new selection has new UUID")
+        finally: other.close()
+        saved=self.page.evaluate("JSON.parse(sessionStorage.getItem('kin-study-transfer-local'))")
+        for v in (1,2,3):
+            saved['v']=v
+            for f in saved['operations'][0]['files']: f.update(sent=False,canRetry=True,pending=None)
+            self.page.evaluate("s=>sessionStorage.setItem('kin-study-transfer-local',JSON.stringify(s))",saved)
+            before=len(self.site.imports); self.reload_transfers()
+            self.assertEqual(0,self.controls()["Retry"],"R5-A04: legacy snapshot read-only")
+            self.assertEqual(0,self.controls()["Choose Files Again"],"R5-A04: legacy no reattach")
+            self.assertEqual(before,len(self.site.imports),"R5-A04: legacy zero dispatch")
+
+    def test_r5_a05_storage_faults_cap_pressure_and_clear_preserve_uncertainty(self):
+        self.open_as(TECH,"Technician")
+        self.site.import_answers=["abort"]; self.choose(self.files(1))
+        self.observed(lambda:self.site.import_reads)
+        for methods in (["setItem"],["removeItem"],["getItem"],["setItem","removeItem","getItem"]):
+            self.page.evaluate("""methods=>{ window.synStorage={}; for(const m of methods){
+              const original=Storage.prototype[m]; window.synStorage[m]=original;
+              Storage.prototype[m]=function(k,...rest){if(k==='kin-study-transfer-local')throw new Error('synthetic storage'); return original.call(this,k,...rest);};}}""",methods)
+            before=len(self.site.imports); self.site.import_answers=["abort"]; self.choose(self.files(1))
+            self.settle(250)
+            self.assertEqual(before + 1, len(self.site.imports), 'R5-A05: storage never governs fresh dispatch authority')
+            self.assert_policy(row="R5-A05")
+            if "setItem" in methods: self.assertIn("보존하지 못했습니다",self.panel().inner_text(),"R5-A05: persistence failure disclosed")
+            self.page.evaluate("() => {for(const [m,f] of Object.entries(window.synStorage)) Storage.prototype[m]=f;}")
+            self.reload_transfers()
+            self.assertEqual(0,self.controls()["Retry"],"R5-A05: old surviving snapshot read-only")
+        for i in range(22):
+            before=len(self.site.imports); self.site.import_answers=["abort"]; self.choose(self.files(1))
+            self.observed(lambda:len(self.site.imports)>before)
+        ids=self.operations().evaluate_all("nodes=>nodes.map(n=>n.dataset.operation)")
+        self.assertGreater(len(ids),20,"R5-A05: more than 20 unconfirmed rows")
+        stored=self.page.evaluate("JSON.parse(sessionStorage.getItem('kin-study-transfer-local')).operations.map(o=>o.id)")
+        self.assertEqual(set(ids),set(stored),"R5-A05: pending descriptors never pruned")
+        self.assertTrue(self.panel().get_by_role("button",name="Clear Finished",exact=True).is_disabled(),"R5-A05: uncertainty not clearable")
+        self.reload_transfers()
+        self.assertEqual(set(ids),set(self.operations().evaluate_all("nodes=>nodes.map(n=>n.dataset.operation)")),"R5-A05: pending history restores")
+
+    def test_r5_a06_same_owner_changed_actor_reads_different_owner_never_queries(self):
+        self.open_as(TECH,"Technician")
+        self.site.import_answers=[lambda r:file_result(r['operation'],0,'retryable','STUDY_WRITE_PENDING')]
+        self.choose(self.files(1)); self.observed(lambda:self.site.imports)
+        op=self.site.imports[0]['operation']
+        self.site.account={**TECH,'actor':'renamed@synthetic.test','displayName':'renamed'}
+        self.reload_transfers(); self.assert_policy(row="R5-A06")
+        self.site.import_state[op]={0:file_result(op,0)}
+        reads=len(self.site.import_reads); self.operations().first.get_by_role('button',name='Check Again',exact=True).click()
+        self.observed(lambda:len(self.site.import_reads)>reads)
+        self.assertEqual('Stored',self.state_of(0),'R5-A06: same owner status-only recovery')
+        self.site.account={**TECH_OTHER,'actor':TECH['actor']}; reads=len(self.site.import_reads)
+        self.reload_transfers()
+        self.assertEqual(reads,len(self.site.import_reads),'R5-A06: other owner no query')
+        self.assertEqual(0,self.operations().count(),'R5-A06: other owner no display')
+        self.assertEqual(1,len(self.site.imports),'R5-A06: no restored POST')
+
+    def test_r5_a06_cancelled_logout_discards_late_import_and_preserves_draft(self):
+        self.open_as(RAD_TECH); self.open_study(h.PATIENT)
+        self.type('SYN unsaved findings remain')
+        self.page.locator('[data-tab=Technician]').click()
+        self.site.import_answers=['hold']; self.choose(self.files(1)); self.observed(lambda:self.site.held_imports)
+        op=self.site.imports[-1]['operation']
+        self.site.put_answers=[(500,{'message':'synthetic save failure'})]
+        self.page.evaluate("() => document.querySelector('#logout').click()")
+        expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Draft Not Saved')
+        self.site.import_state[op]={0:file_result(op,0,'retryable','IMPORT_ATTEMPT_EXPIRED')}
+        route,record=self.site.held_imports.pop(0); self.site.answer(route,200,file_result(op,0)); self.settle(250)
+        self.assertNotEqual('Stored',self.state_of(0),'R5-A06-context: no late import during logout preparation')
+        self.page.locator('dialog.kin-logout').get_by_role('button',name='Back to Editing',exact=True).click()
+        self.observed(lambda:self.site.import_reads)
+        self.assert_policy(row='R5-A06-context')
+        self.assertEqual('SYN unsaved findings remain',self.page.locator('#findings').input_value(),'R5-A06-context: draft preserved')
+        self.assertEqual(1,len(self.site.imports),'R5-A06-context: no old-file resend')
+
+    def test_r5_a07_status_positive_fields_and_preserved_final(self):
+        self.open_as(TECH,'Technician'); self.site.import_answers=['stored','abort']; self.choose(self.files(2))
+        self.observed(lambda:len(self.site.imports)==2)
+        op=self.site.imports[-1]['operation']
+        self.assertEqual('Stored',self.state_of(0),'R5-A07-GET: genuine prior positive')
+        good=file_result(op,1); good.pop('operationId')
+        for field in ENVELOPE['status_file']:
+            bad={**good}; bad.pop(field)
+            self.site.status_answers=[(200,{'operationId':op,'status':'open','files':[bad]})]
+            self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
+            self.assertEqual('Stored',self.state_of(0),'R5-A07-GET: uncertainty never downgrades final')
+            self.assert_policy(index=1,row='R5-A07-GET')
+        self.file_row(1).get_by_role('button',name='Copy ID',exact=True).click(); self.settle(100)
+        self.assertEqual(op+' 1',self.page.evaluate('window.__synClipboard[0]'),'R5-A07-GET: Copy ID keeps full operation/index')
+        self.site.import_state[op][1]=file_result(op,1)
+        self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
+        self.assertEqual('Stored',self.state_of(1),'R5-A07-GET: exact later positive accepted')
+
+    def test_r5_a07_each_import_positive_field_and_final_attempt_are_required(self):
+        self.open_as(TECH,'Technician')
+        mutations=[('missing '+k,lambda r,k=k:r.pop(k)) for k in ENVELOPE['post_file']]
+        mutations += [('wrong '+k,lambda r,k=k:r.__setitem__(k,False)) for k in ENVELOPE['post_file']]
+        mutations += [('attempt missing '+k,lambda r,k=k:r['attempts'][-1].pop(k)) for k in ENVELOPE['attempt']]
+        mutations += [('wrong SHA',lambda r:r.update(sha256='f'*64)),('wrong size',lambda r:r.update(bytes=65)),
+                      ('contradiction',lambda r:r['attempts'][-1].update(outcome='retryable',code='ORTHANC_UNAVAILABLE'))]
+        for label,mutate in mutations:
+            with self.subTest(field=label):
+                self.site.import_answers=['hold']; self.choose(self.files(1)); self.observed(lambda:self.site.held_imports)
+                route,record=self.site.held_imports.pop(0); op=record['operation']; bad=file_result(op,0); mutate(bad)
+                self.site.answer(route,200,bad)
+                self.observed(lambda:self.state_of(0) not in ('Waiting','Sending'), 'import answer settled')
+                # Assert this response before looking for controls that a false positive can remove.
+                self.assertEqual('Not confirmed',self.state_of(0),'R5-A07: unconfirmed state')
+                self.assert_policy(row='R5-A07')
+                clear=self.panel().get_by_role('button',name='Clear Finished',exact=True)
+                if clear.is_enabled(): clear.click()
+                self.assertEqual(1,self.panel().locator(f'section[data-operation="{op}"]').count(),
+                                 'R5-A07: malformed positive not clearable')
+
+    def test_r5_a07_duplicate_positive_indexes_remain_unconfirmed(self):
+        self.open_as(TECH,'Technician'); self.site.import_answers=['abort']; self.choose(self.files(1))
+        self.observed(lambda:self.site.import_reads)
+        op=self.site.imports[-1]['operation']; good=file_result(op,0); good.pop('operationId')
+        for n in (2,3):
+            self.site.status_answers=[(200,{'operationId':op,'status':'open','files':[good]*n})]
+            reads=len(self.site.import_reads); self.operations().first.get_by_role('button',name='Check Again',exact=True).click()
+            self.observed(lambda:len(self.site.import_reads)>reads); self.assert_policy(row='R5-A07')
+
+    def test_r5_a07_complete_positive_and_dedup_are_accepted(self):
+        self.open_as(TECH,'Technician'); self.site.import_answers=['abort']; self.choose(self.files(1))
+        self.observed(lambda:self.site.import_reads)
+        op=self.site.imports[-1]['operation']
+        self.site.import_state[op]={0:file_result(op,0)}
+        self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
+        self.assertEqual('Stored',self.state_of(0),'R5-A07: complete immutable positive accepted')
+        self.site.import_answers=[lambda r:file_result(r['operation'],0,'already-present',identity='not_comparable')]
+        self.choose(self.files(1)); self.settle(300)
+        self.assertEqual('Already Present',self.state_of(0),'R5-A07: truthful dedup label')
+        self.assertEqual('Unverified',self.file_row(0).locator('.study-transfer-mark').inner_text(),'R5-A07: identity label')
+
+    def test_r5_a08_explicit_reimport_keeps_old_operation(self):
+        self.open_as(TECH,'Technician'); self.site.import_answers=['abort']
+        self.choose(self.files(1)); self.observed(lambda:self.site.import_reads)
+        old=self.site.imports[0]['operation']
+        self.assertEqual(1, self.operations().first.get_by_role('button', name='Import Again', exact=True).count(),
+                         'R5-A08: explicit new selection action available')
+        with self.page.expect_file_chooser() as choice: self.operations().first.get_by_role('button',name='Import Again',exact=True).click()
+        choice.value.set_files(self.files(1)); self.observed(lambda:len(self.site.imports)==2)
+        self.assertNotEqual(old,self.site.imports[1]['operation'],'R5-A08: new UUID')
+        self.assertEqual(self.site.imports[0]['sha256'],self.site.imports[1]['sha256'],'R5-A08: unchanged bytes')
+        self.assertEqual(old,self.operations().nth(1).get_attribute('data-operation'),'R5-A08: old operation retained')
+        self.assert_policy(op=1,row='R5-A08')
+
+    def test_r5_a10_lost_prepare_or_grant_never_rearms_or_clears(self):
+        self.open_as(RAD_ONLY)
+        self.site.prepare_answers=[('prepared-then',(502,{'code':'SYN_PROXY_REPLACED','message':'not started'}))]
+        op=self.prepare()
+        self.assertFalse(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_enabled(),
+                         'R5-A10: uncertain preparation cannot be discarded')
+        self.assertEqual('Ready',self.operations().first.locator('.study-transfer-state').inner_text(),'R5-A10: first preparation recovered by GET')
+        self.site.grant_answers=[(200,{'operationId':op})]
+        self.operations().first.get_by_role('button',name='Download',exact=True).click()
+        self.observed(lambda:self.site.grants)
+        self.assertEqual([],self.downloads,'R5-A10: invalid grant zero native click')
+        self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A10: prepared GET cannot reset grant budget')
+        for i in range(2):
+            self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(200)
+        self.assertEqual(1,len(self.site.grants),'R5-A10: Check Again is GET only')
+        self.assertTrue(self.panel().get_by_role('button',name='Clear Finished',exact=True).is_disabled(),'R5-A10: uncertain operation retained')
+        self.operations().first.get_by_role('button',name='Prepare Again',exact=True).click(); self.settle(250)
+        self.assertEqual(2,len(self.site.prepares),'R5-A10: explicit new preparation works')
+        self.assertNotEqual(op,self.site.prepares[1][1]['operationId'],'R5-A10: new preparation UUID')
+        self.assertEqual(op,self.operations().nth(1).get_attribute('data-operation'),'R5-A10: old operation not replaced')
+        with self.page.expect_download(): self.operations().first.get_by_role('button',name='Download',exact=True).click()
+        self.assertEqual(1,len(self.downloads),'R5-A10: fresh operation downloads once')
+
+    def test_r5_a10_every_partial_or_mismatched_grant_has_zero_native_click(self):
+        self.open_as(RAD_ONLY)
+        for field in ('operationId','grantId','grant','expiresAt'):
+            for mode in ('missing','wrong-type'):
+                op=self.prepare(); token=secrets.token_urlsafe(32)
+                reply={'operationId':op,'grantId':str(uuid.uuid4()),'grant':token,'expiresAt':'2026-10-17T00:02:00.000Z'}
+                if mode=='missing':reply.pop(field)
+                else:reply[field]=17
+                self.site.grant_answers=[(200,reply)]
+                before=len(self.site.grants); self.operations().first.get_by_role('button',name='Download',exact=True).click()
+                self.observed(lambda:len(self.site.grants)>before)
+                self.assertEqual([],self.downloads,'R5-A10-grant: malformed grant zero native clicks')
+                self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A10-grant: malformed grant cannot rearm')
+
+    def test_r5_a12_read_sequence_and_pagehide_discard_valid_grant(self):
+        self.open_as(RAD_ONLY); op=self.prepare()
+        self.page.evaluate("window.synReadButton=[...document.querySelectorAll('#study-transfer button')].find(b=>b.textContent==='Check Again')")
+        self.site.grant_answers=['hold']; self.operations().first.get_by_role('button',name='Download',exact=True).click()
+        self.observed(lambda:self.site.held_grants)
+        self.page.evaluate('synReadButton.click()'); self.observed(lambda:self.site.download_reads)
+        route,record=self.site.held_grants.pop(0); self.site.answer_grant(route,record); self.settle(250)
+        self.assertEqual([],self.downloads,'R5-A12-sequence: superseded read sequence zero native clicks')
+        self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A12-sequence: stale grant remains spent')
+        self.prepare(); self.site.grant_answers=['hold']; self.operations().first.get_by_role('button',name='Download',exact=True).click()
+        self.observed(lambda:self.site.held_grants)
+        self.page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true}))")
+        route,record=self.site.held_grants.pop(0); self.site.answer_grant(route,record); self.settle(250)
+        self.page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
+        self.assertEqual([],self.downloads,'R5-A12-document: suspended document zero native clicks')
+
+    def test_r5_a11_archive_uncertainty_and_restored_ready_never_rearm(self):
+        self.open_as(RAD_ONLY)
+        for state in ('prepared','incomplete','unconfirmed'):
+            op=self.prepare()
+            with self.page.expect_download(): self.operations().first.get_by_role('button',name='Download',exact=True).click()
+            view=download_view(op,UID_A,state)
+            view['archiveRequest']={'grantId':self.site.grants[-1]['grantId'],'state':'refused','attemptId':str(uuid.uuid4()),
+                                    'expiresAt':17,'code':'SYN_UNDECLARED','message':'not started'}
+            self.site.download_state[op]=view
+            for i in range(10): self.page.clock.run_for(3100); self.settle(50)
+            self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A11: malformed status or poll deadline no rearm')
+            self.assertNotIn('not started',self.operations().first.inner_text(),'R5-A11: no raw nonstart certificate')
+            self.assertTrue(self.panel().get_by_role('button',name='Clear Finished',exact=True).is_disabled(),'R5-A11: unconfirmed history not clearable')
+
+    def test_r5_a11_restored_ready_is_read_only(self):
+        self.open_as(RAD_ONLY)
+        op=self.prepare(); before=len(self.site.grants); self.reload_transfers()
+        self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A11: restored Ready read-only')
+        self.assertEqual(before,len(self.site.grants),'R5-A11: restore no grant')
+
+    def test_r5_a12_complete_sent_required_and_late_A_B_A_grant_zero(self):
+        self.open_as(RAD_ONLY)
+        for moves in ((h.PATIENT_B,),(h.PATIENT_B,h.PATIENT)):
+            op=self.prepare(); self.open_study(h.PATIENT); self.site.grant_answers=['hold']
+            self.operations().first.get_by_role('button',name='Download',exact=True).click()
+            self.observed(lambda:self.site.held_grants)
+            for patient in moves:self.open_study(patient)
+            route,record=self.site.held_grants.pop(0); self.site.answer_grant(route,record); self.settle(300)
+            self.assertEqual([],self.downloads,'R5-A12: stale selection zero native clicks')
+            self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A12: discarded budget stays spent')
+        op=self.prepare()
+        for field in ('archiveSha256','responseFinished','objectsComplete','bytesSupplied','attemptId','number','endedAt'):
+            view=download_view(op,UID_A,'sent',complete=3); del view['attempts'][0][field]
+            self.site.download_state[op]=view
+            reads=len(self.site.download_reads); self.operations().first.get_by_role('button',name='Check Again',exact=True).click()
+            self.observed(lambda:len(self.site.download_reads)>reads)
+            self.assertNotEqual('Sent',self.operations().first.locator('.study-transfer-state').inner_text(),'R5-A12: incomplete supply summary not Sent')
+            self.assertTrue(self.panel().get_by_role('button',name='Clear Finished',exact=True).is_disabled(),'R5-A12: false Sent not clearable')
+
+    def test_r5_a12_close_during_grant_does_not_start_a_late_download(self):
+        self.open_as(RAD_ONLY); self.prepare(); self.site.grant_answers=['hold']
+        self.operations().first.get_by_role('button',name='Download',exact=True).click()
+        self.observed(lambda:self.site.held_grants)
+        self.panel().get_by_role('button',name='Close',exact=True).click()
+        route,record=self.site.held_grants.pop(0); self.site.answer_grant(route,record); self.settle(250)
+        self.assertEqual([],self.downloads,'R5-A12-close: closed panel cannot start a late native download')
+
+    def test_r5_a12_panel_lifetime_ends_revoke_ready_and_pending_capabilities(self):
+        self.open_as(RAD_ONLY)
+        for action in ('Close', 'Hide', 'Clear Finished'):
+            for phase in ('ready', 'grant-pending'):
+                with self.subTest(action=action, phase=phase):
+                    # Clear removes a confirmed sibling, while the pending operation must remain as history.
+                    confirmed = self.prepare()
+                    self.site.download_state[confirmed] = download_view(confirmed, UID_A, 'sent', complete=3)
+                    with self.page.expect_download():
+                        self.operations().first.get_by_role('button', name='Download', exact=True).click()
+                    self.page.clock.run_for(3100)
+                    self.observed(lambda: confirmed in self.site.download_reads)
+                    op = self.prepare()
+                    native_before = len(self.downloads)
+                    if phase == 'grant-pending':
+                        self.site.grant_answers = ['hold']
+                        self.operations().first.get_by_role('button', name='Download', exact=True).click()
+                        self.observed(lambda: self.site.held_grants)
+                    grants = len(self.site.grants)
+                    self.panel().get_by_role('button', name=action, exact=True).click()
+                    if phase == 'grant-pending':
+                        route, record = self.site.held_grants.pop(0)
+                        self.site.answer_grant(route, record)
+                        self.settle(250)
+                    self.assertEqual(native_before, len(self.downloads), 'R5-A12-lifetime: ended operation zero native clicks')
+                    # Reopen through the ordinary row command; a fresh operation is distinct from the old row.
+                    self.prepare()
+                    old = self.panel().locator(f'section[data-operation="{op}"]')
+                    self.assertEqual(1, old.count(), 'R5-A12-lifetime: unconfirmed history retained')
+                    self.assertEqual(0, old.get_by_role('button', name='Download', exact=True).count(),
+                                     'R5-A12-lifetime: reopening cannot restore capability')
+                    self.assertIn('시작 기회가 종료', old.inner_text(), 'R5-A12-lifetime: neutral ended notice')
+                    self.assertEqual(0, old.get_by_role('button', name='Choose Files Again', exact=True).count(),
+                                     'R5-A12-lifetime: no reselection')
+                    self.assertEqual(grants, len(self.site.grants), 'R5-A12-lifetime: no extra grant')
+                    if action == 'Clear Finished':
+                        self.assertEqual(0, self.panel().locator(f'section[data-operation="{confirmed}"]').count(),
+                                         'R5-A12-lifetime: confirmed sibling actually removed')
+
+    def test_r5_a12_removed_operation_rejects_its_queued_download_action(self):
+        self.open_as(RAD_ONLY)
+        op = self.prepare()
+        self.operations().first.get_by_role('button', name='Download', exact=True).evaluate('b => window.synRemovedDownload = b')
+        self.site.download_state[op] = download_view(op, UID_A, 'sent', complete=3)
+        with self.page.expect_download():
+            self.operations().first.get_by_role('button', name='Download', exact=True).click()
+        self.page.clock.run_for(3100)
+        self.observed(lambda: self.site.download_reads)
+        self.panel().get_by_role('button', name='Clear Finished', exact=True).click()
+        self.assertEqual(0, self.operations().count(), 'R5-A12-removal: confirmed operation actually removed')
+        self.page.evaluate('synRemovedDownload.click()')
+        self.settle(250)
+        self.assertEqual(1, len(self.site.grants), 'R5-A12-removal: removed operation zero extra grants')
+        self.assertEqual(1, len(self.downloads), 'R5-A12-removal: removed operation zero extra native clicks')
+
+    def test_r5_a12_close_in_native_link_insertion_is_checked_before_click(self):
+        self.open_as(RAD_ONLY)
+        self.prepare()
+        # Synchronous DOM reentrancy at the native side effect boundary, without a product hook.
+        self.page.evaluate('''() => { const append = Element.prototype.append;
+          Element.prototype.append = function(...nodes) {
+            const result = append.apply(this, nodes);
+            if (nodes.some(n => n instanceof HTMLAnchorElement && n.hasAttribute('download')))
+              [...document.querySelectorAll('#study-transfer button')].find(b => b.textContent === 'Close').click();
+            return result;
+          }; }''')
+        self.operations().first.get_by_role('button', name='Download', exact=True).click()
+        self.observed(lambda: self.site.grants)
+        self.assertEqual([], self.downloads, 'R5-A12-immediate: lifetime checked immediately before native click')
+        self.assertEqual(1, len(self.site.grants), 'R5-A12-immediate: one grant only')
+
+    def test_r5_a12_logout_removes_operation_before_late_grant(self):
+        self.open_as(RAD_ONLY)
+        self.prepare()
+        self.site.grant_answers = ['hold']
+        self.operations().first.get_by_role('button', name='Download', exact=True).click()
+        self.observed(lambda: self.site.held_grants)
+        self.page.evaluate("document.querySelector('#logout').click()")
+        self.observed(lambda: self.page.evaluate("KinWorkContext.state() !== 'active'"), 'logout lifecycle ended')
+        route, record = self.site.held_grants.pop(0)
+        self.site.answer_grant(route, record)
+        self.settle(250)
+        self.assertEqual([], self.downloads, 'R5-A12-logout: ended session zero native clicks')
+        self.assertEqual(0, self.operations().count(), 'R5-A12-logout: private operations removed')
+
+    def test_r5_a12_account_switch_and_document_unload_end_capability_in_same_turn(self):
+        # Exercise public mount/lifecycle contracts with real work-context and session transport.
+        # The host can switch identity synchronously; the full page instead closes through auth lifecycle.
+        for boundary in ('account-switch', 'pagehide', 'beforeunload'):
+            with self.subTest(boundary=boundary):
+                context = self.browser.new_context()
+                page = context.new_page()
+                try:
+                    context.route('**/*', lambda r: r.fulfill(content_type='text/html', body='<button id="t-import">Import DICOM</button><div id="study-transfer"></div>'))
+                    page.goto('http://localhost/fixture')
+                    for name in ('work-context.js', 'session-transport.js', 'study-transfer-local.js'):
+                        source = (Path(__file__).resolve().parents[1]/'worklist-v0/hpacs-lite'/name).read_text(encoding='utf-8')
+                        if self.asset_source and self.asset_source[0] == name: source = self.asset_source[1]
+                        page.add_script_tag(content=source)
+                    page.evaluate('''view => {
+                      const gate = KinWorkContext.create(); gate.follow({onLifecycle(fn){fn({state:'active',session:'SYN-SESSION'});}});
+                      window.KinWorkContext = gate; window.synOwner = ['SYN-INST','SYN-SUB']; window.synClicks = 0;
+                      HTMLAnchorElement.prototype.click = function(){synClicks++;};
+                      const transport = KinSessionTransport.create({gate, authFailure:()=>{}, fetch:async(url,init)=>{
+                        if (url.endsWith('/grant')) return new Promise(resolve=>{window.synGrantRelease=()=>resolve(new Response(JSON.stringify({
+                          operationId:window.synOperation,grantId:'00000000-0000-4000-8000-000000000001',grant:'x'.repeat(43),expiresAt:'2026-10-17T00:02:00.000Z'
+                        }),{status:200,headers:{'Content-Type':'application/json'}}));});
+                        window.synOperation=JSON.parse(init.body).operationId;
+                        return new Response(JSON.stringify({...view,operationId:synOperation}),{status:200,headers:{'Content-Type':'application/json'}});
+                      }});
+                      window.synTransfer=KinStudyTransferLocal({api:'/api',transport,allowed:()=>true,identity:()=>synOwner,can:()=>true,demo:()=>false,study:()=>null});
+                    }''', download_view(str(uuid.uuid4()), UID_A))
+                    page.evaluate('uid=>synTransfer.download(uid)', UID_A)
+                    page.get_by_role('button', name='Download', exact=True).click()
+                    page.wait_for_function('!!window.synGrantRelease')
+                    page.evaluate('''boundary=>{
+                      if(boundary==='account-switch'){synOwner=['SYN-INST','SYN-OTHER'];synTransfer.sync();}
+                      else window.dispatchEvent(new Event(boundary));
+                      synGrantRelease();
+                    }''', boundary)
+                    page.wait_for_timeout(250)
+                    self.assertEqual(0, page.evaluate('synClicks'), 'R5-A12-end: same-turn lifetime end zero native clicks')
+                    self.assertEqual(0, page.get_by_role('button', name='Download', exact=True).count(),
+                                     'R5-A12-end: ended capability never restored')
+                finally:
+                    context.close()
+
+    def test_r5_a12_session_change_during_grant_keeps_budget_spent(self):
+        self.open_as(RAD_TECH); self.open_study(h.PATIENT); self.type('SYN draft during grant')
+        self.prepare(); self.site.grant_answers=['hold']
+        self.operations().first.get_by_role('button',name='Download',exact=True).click()
+        self.observed(lambda:self.site.held_grants)
+        self.site.put_answers=[(500,{'message':'SYN save failure'})]
+        self.page.evaluate("document.querySelector('#logout').click()")
+        expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Draft Not Saved')
+        route,record=self.site.held_grants.pop(0); self.site.answer_grant(route,record); self.settle(250)
+        self.assertEqual([],self.downloads,'R5-A12-session: invalidated grant zero native clicks')
+        self.page.locator('dialog.kin-logout').get_by_role('button',name='Back to Editing',exact=True).click()
+        self.observed(lambda:self.site.download_reads)
+        self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A12-session: cancelled grant remains spent')
+        self.assertEqual('SYN draft during grant',self.page.locator('#findings').input_value(),'R5-A12-session: draft retained')
+
+    def test_r5_a13_actual_fixture_response_matches_public_file_contract(self):
+        self.open_as(TECH,'Technician')
+        received=[]
+        self.page.on('response',lambda r:received.append((r.request.method,r.json())) if '/api/dicom-import' in r.url else None)
+        self.choose(self.files(1)); self.observed(lambda:received)
+        post=next(v for method,v in received if method=='POST'); op=post['operationId']
+        self.assertEqual(ENVELOPE['post_file'],sorted(post),'R5-A13: actual POST keys')
+        self.assertEqual(hashlib.sha256(dicom(0)).hexdigest(),post['sha256'],'R5-A13: original SHA value')
+        self.reload_transfers()
+        get=next(v for method,v in received if method=='GET')
+        self.assertEqual(ENVELOPE['status_envelope'],sorted(get),'R5-A13: actual GET keys')
+        row=get['files'][0]
+        self.assertEqual(ENVELOPE['status_file'],sorted(row),'R5-A13: emitted GET row has no POST-only operationId')
+        self.assertEqual(ENVELOPE['attempt'],sorted(row['attempts'][0]),'R5-A13: emitted attempt keys')
+        self.assertEqual((op,64,1,'finished',None),(get['operationId'],row['bytes'],row['generation'],row['attempts'][0]['phase'],row['code']),'R5-A13: wire values and types')
+
+
+    def test_r5_a04_copy_before_dispatch_and_after_each_result(self):
+        self.open_as(TECH, 'Technician')
+        # Hold the real browser request before network dispatch; both the base and current page use this boundary.
+        self.page.evaluate("""() => { const send=window.fetch;
+          window.fetch=function(url,init){
+            if(String(url).endsWith('/dicom-import') && init?.method==='POST')
+              return new Promise(resolve=>{window.synImportRelease=()=>resolve(send.call(this,url,init));});
+            return send.apply(this,arguments);
+          }; }""")
+        self.site.import_answers=['hold']; self.choose(self.files(1))
+        self.wait(lambda:self.page.evaluate('!!window.synImportRelease'),'browser request held before network dispatch')
+        self.assertEqual([],self.site.imports,'R5-A04-copy: no dispatch before release')
+        old=self.operations().first.get_attribute('data-operation')
+        for phase in ('before-dispatch','retryable','positive'):
+            with self.page.expect_popup() as opened:self.page.evaluate('u=>window.open(u,"_blank")',h.MAIN_URL)
+            copied=opened.value
+            try:
+                expect(copied.locator('#rows')).to_contain_text(h.PATIENT)
+                box=copied.locator('#study-transfer section[data-operation]').first
+                expect(box).to_be_visible(); self.settle(250)
+                self.assertEqual(old,box.get_attribute('data-operation'),'R5-A04-copy: same copied operation')
+                self.assertEqual(0,box.get_by_role('button',name='Retry',exact=True).count(),'R5-A04-copy: copied old operation never sends')
+                self.assertEqual(0,box.get_by_role('button',name='Choose Files Again',exact=True).count(),'R5-A04-copy: copied old operation never reattaches')
+            finally:copied.close()
+            if phase=='before-dispatch':
+                self.page.evaluate('window.synImportRelease()'); self.observed(lambda:self.site.held_imports)
+                self.site.release_import(lambda r:file_result(old,0,'retryable','ORTHANC_UNAVAILABLE')); self.settle(250)
+            elif phase=='retryable':
+                self.site.import_state[old]={0:file_result(old,0)}
+                self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
+        self.assertEqual(1,len(self.site.imports),'R5-A04-copy: original old key dispatched once across all copies')
+
+    def test_r5_a05_failed_read_then_storage_recovery_has_no_capability(self):
+        self.open_as(TECH,'Technician'); self.site.import_answers=['abort']; self.choose(self.files(1))
+        self.observed(lambda:self.site.import_reads)
+        original=self.site.imports[0]['operation']
+        self.page.evaluate("""() => { const s=JSON.parse(sessionStorage.getItem('kin-study-transfer-local'));
+          s.v=2; s.operations[0].files[0].sent=false; s.operations[0].files[0].canRetry=true;
+          s.operations[0].files[0].pending=null; sessionStorage.setItem('kin-study-transfer-local',JSON.stringify(s)); }""")
+        self.context.add_init_script("""(() => { const raw=Storage.prototype.getItem;
+          const mode=raw.call(localStorage,'syn-transfer-storage-fault'); window.synStorageFaultCalls=[];
+          if(mode) for(const method of JSON.parse(mode)){const original=Storage.prototype[method];
+            Storage.prototype[method]=function(key,...args){if(key==='kin-study-transfer-local'){
+              window.synStorageFaultCalls.push(method);throw new Error('synthetic storage failure');}
+              return original.call(this,key,...args);};}})();""")
+        for methods in (['getItem'],['getItem','setItem','removeItem']):
+            self.page.evaluate("m=>localStorage.setItem('syn-transfer-storage-fault',JSON.stringify(m))",methods)
+            self.reload_transfers()
+            self.assertIn('getItem',self.page.evaluate('window.synStorageFaultCalls'),'R5-A05-read: actual failed storage read observed')
+            self.assertEqual(0,self.operations().count(),'R5-A05-read: unreadable history not fabricated')
+            self.assertIn('보존하지 못했습니다',self.panel().inner_text(),'R5-A05-read: unavailable history disclosed')
+            self.page.evaluate("localStorage.removeItem('syn-transfer-storage-fault')")
+            self.reload_transfers()
+            self.assertEqual(original,self.operations().first.get_attribute('data-operation'),'R5-A05-read: surviving snapshot recovered')
+            self.assert_policy(row='R5-A05-read')
+            self.assertEqual(1,len(self.site.imports),'R5-A05-read: recovered legacy descriptor never sends')
+
+    def test_r5_a07_expected_study_and_legacy_positive_history(self):
+        self.open_as(TECH,'Technician'); self.site.import_answers=['hold']
+        self.choose(self.files(1),via=h.PATIENT); self.observed(lambda:self.site.held_imports)
+        route,record=self.site.held_imports.pop(0); op=record['operation']
+        self.site.answer(route,200,file_result(op,0,uid=UID_B)); self.settle(250)
+        self.assert_policy(row='R5-A07-study')
+        prior=file_result(op,0,'retryable','ORTHANC_UNAVAILABLE')['attempts'][0]
+        positive=file_result(op,0,generation=2); positive['attempts'].insert(0,prior)
+        self.site.import_state[op]={0:positive}
+        self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
+        self.assertEqual('Stored',self.state_of(0),'R5-A07-study: genuine legacy positive accepted without new dispatch')
+        self.reload_transfers()
+        self.assertEqual('Stored',self.state_of(0),'R5-A07-study: immutable legacy positive accepted again')
+        self.assertEqual(1,len(self.site.imports),'R5-A07-study: old positive history GET only')
+
+    def storage_failure_then_new_operation(self, fault):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = [('stored-then', 'abort')]
+        self.site.status_answers = [(503, {'message': 'SYN status temporarily unavailable'})] * 30
+        self.choose(self.files(1))
+        self.observed(lambda: self.site.import_reads)
+        original = self.site.imports[0]['operation']
+        snapshot = self.page.evaluate("sessionStorage.getItem('kin-study-transfer-local')")
+        self.context.add_init_script('''(() => {
+          const get = Storage.prototype.getItem, set = Storage.prototype.setItem;
+          const mode = get.call(localStorage, 'syn-transfer-fault');
+          window.synTransferFaultCalls = [];
+          window.synSavedTransfer = () => get.call(sessionStorage, 'kin-study-transfer-local');
+          window.synRecoverStorage = original => {
+            Storage.prototype.getItem = get; Storage.prototype.setItem = set;
+            if (mode === 'corrupt' || mode === 'unverified') set.call(sessionStorage, 'kin-study-transfer-local', original);
+            localStorage.removeItem('syn-transfer-fault');
+          };
+          for (const method of ['getItem', 'setItem']) {
+            const fn = Storage.prototype[method];
+            Storage.prototype[method] = function(key, ...args) {
+              if (key === 'kin-study-transfer-local' && (mode === method || mode === 'unavailable')) {
+                synTransferFaultCalls.push(method); throw new Error('SYN storage unavailable');
+              }
+              return fn.call(this, key, ...args);
+            };
+          }
+        })();''')
+        self.page.evaluate("m => localStorage.setItem('syn-transfer-fault', m)", fault)
+        if fault in ('corrupt', 'unverified'):
+            # Simulate an unreadable persisted value, retaining its exact bytes until the fixture repairs it.
+            damaged = snapshot + '!' if fault == 'corrupt' else json.dumps({**json.loads(snapshot), 'v': 999})
+            self.page.evaluate("s => sessionStorage.setItem('kin-study-transfer-local', s)", damaged)
+        self.reload_transfers()
+        before_selection = self.page.evaluate('synSavedTransfer()')
+        self.assertEqual(damaged if fault in ('corrupt', 'unverified') else snapshot, before_selection,
+                         'R5-A05-new: failed restore leaves the exact unread history intact')
+        self.site.import_answers = ['abort']
+        self.choose(self.files(1))
+        self.observed(lambda: len(self.site.imports) == 2)
+        self.settle(250)
+        fresh = self.site.imports[-1]['operation']
+        self.assertNotEqual(original, fresh, 'R5-A05-new: explicit new operation is distinct')
+        self.assertEqual(before_selection, self.page.evaluate('synSavedTransfer()'),
+                         'R5-A05-new: failed or unverified read/write never replaces the surviving snapshot')
+        if fault in ('getItem', 'setItem', 'unavailable'):
+            self.assertIn('setItem' if fault == 'setItem' else 'getItem', self.page.evaluate('synTransferFaultCalls'),
+                          'R5-A05-new: storage failure actually observed')
+        self.assertIn('보존하지 못했습니다', self.panel().inner_text(), 'R5-A05-new: history persistence failure disclosed')
+        box = self.operations().filter(has=self.page.locator(f'li[data-index="0"]')).first
+        box.get_by_role('button', name='Copy ID', exact=True).click()
+        self.assertIn(fresh, self.page.evaluate('window.__synClipboard').pop(), 'R5-A05-new: Copy ID remains usable')
+        # Recovery while this page is alive must merge its memory-only operation with the previously unread history.
+        self.page.evaluate('s => synRecoverStorage(s)', snapshot)
+        box.get_by_role('button', name='Check Again', exact=True).click()
+        self.settle(350)
+        persisted = json.loads(self.page.evaluate('synSavedTransfer()'))
+        self.assertEqual({original, fresh}, {op['id'] for op in persisted['operations']},
+                         'R5-A05-new: verified recovery merges old and memory-only operations')
+        self.reload_transfers()
+        restored = self.operations().evaluate_all('nodes => nodes.map(n => n.dataset.operation)')
+        print('R5-A05_NEW_HISTORY ' + json.dumps({'fault': fault, 'original': original, 'fresh': fresh,
+              'restored': restored, 'received_posts': self.import_writes(),
+              'server_original_sha256': self.site.import_state[original][0]['sha256']}, ensure_ascii=False), flush=True)
+        self.assertEqual({original, fresh}, set(restored), 'R5-A05-new: all recoverable history survives reload')
+        self.assertEqual(self.site.imports[0]['sha256'], self.site.import_state[original][0]['sha256'],
+                         'R5-A05-new: original bytes remain on the synthetic server')
+        for index in range(2):
+            self.assert_policy(op=index, row='R5-A05-new')
+        self.assertEqual(2, len(self.site.imports), 'R5-A05-new: recovery and restoration create no send capability')
+
+    def test_r5_a05_failed_restore_read_then_new_operation_preserves_surviving_history(self):
+        self.storage_failure_then_new_operation('getItem')
+
+    def test_r5_a05_failed_write_then_new_operation_and_reload_preserve_history(self):
+        self.storage_failure_then_new_operation('setItem')
+
+    def test_r5_a05_corrupt_json_then_new_operation_and_reload_preserve_history(self):
+        self.storage_failure_then_new_operation('corrupt')
+
+    def test_r5_a05_unavailable_storage_recovers_merges_new_operation_before_reload(self):
+        self.storage_failure_then_new_operation('unavailable')
+
+    def test_r5_a05_unverified_snapshot_then_new_operation_and_reload_preserve_history(self):
+        self.storage_failure_then_new_operation('unverified')
+
+    def test_r5_a11_valid_archive_statuses_and_copied_download_are_read_only(self):
+        self.open_as(RAD_ONLY)
+        for state,code in (('issued',None),('expired','DOWNLOAD_GRANT_EXPIRED'),('refused','MANIFEST_CHANGED'),('refused','SYN_UNKNOWN')):
+            op=self.prepare()
+            with self.page.expect_download():self.operations().first.get_by_role('button',name='Download',exact=True).click()
+            view=download_view(op,UID_A)
+            view['archiveRequest']={'grantId':self.site.grants[-1]['grantId'],'state':state,'code':code,
+                'expiresAt':'2026-10-17T00:02:00.000Z','attemptId':None,'message':None if code is None else 'not started'}
+            self.site.download_state[op]=view
+            for i in range(10):self.page.clock.run_for(3100); self.settle(50)
+            self.assertEqual(0,self.operations().first.get_by_role('button',name='Download',exact=True).count(),'R5-A11-valid: no status restores grant')
+            self.assertNotIn('not started',self.operations().first.inner_text(),'R5-A11-valid: no nonstart certificate')
+            self.assertTrue(self.panel().get_by_role('button',name='Clear Finished',exact=True).is_disabled(),'R5-A11-valid: old history kept')
+        ready=self.prepare(); before=len(self.site.grants)
+        with self.page.expect_popup() as opened:self.page.evaluate('u=>window.open(u,"_blank")',h.MAIN_URL)
+        copied=opened.value
+        try:
+            expect(copied.locator('#rows')).to_contain_text(h.PATIENT); self.settle(250)
+            box=copied.locator('#study-transfer section[data-operation]').first
+            self.assertEqual(ready,box.get_attribute('data-operation'),'R5-A11-copy: original Ready copied')
+            self.assertEqual(0,box.get_by_role('button',name='Download',exact=True).count(),'R5-A11-copy: copied Ready read-only')
+            self.assertEqual(before,len(self.site.grants),'R5-A11-copy: no copied grant')
+        finally:copied.close()
+
+    def test_r5_a12_each_download_view_field_and_attempt_binding_required(self):
+        self.open_as(RAD_ONLY); op=str(uuid.uuid4())
+        good=download_view(op,UID_A,'sent',complete=3)
+        mutations=[('missing '+k,lambda v,k=k:v.pop(k)) for k in good]
+        mutations += [('wrong '+k,lambda v,k=k:v.__setitem__(k,False)) for k in good]
+        mutations += [('attempt missing '+k,lambda v,k=k:v['attempts'][0].pop(k)) for k in good['attempts'][0]]
+        mutations += [('attempt wrong '+k,lambda v,k=k:v['attempts'][0].__setitem__(k,'wrong')) for k in good['attempts'][0]]
+        mutations += [('wrong consumed binding',lambda v:v.update(archiveRequest={'grantId':str(uuid.uuid4()),'state':'consumed',
+            'code':None,'message':None,'expiresAt':'2026-10-17T00:02:00.000Z','attemptId':str(uuid.uuid4())})),
+            ('duplicate attempt',lambda v:v['attempts'].append(v['attempts'][0].copy()))]
+        for label,mutate in mutations:
+            with self.subTest(field=label):
+                op=self.prepare()
+                bad=json.loads(json.dumps(good)); bad['operationId']=op; mutate(bad); self.site.download_state[op]=bad
+                reads=len(self.site.download_reads)
+                with self.page.expect_download(): self.operations().first.get_by_role('button',name='Download',exact=True).click()
+                self.page.clock.run_for(3100)
+                self.observed(lambda:len(self.site.download_reads)>reads)
+                self.assertNotEqual('Sent',self.operations().first.locator('.study-transfer-state').inner_text(),'R5-A12-view: malformed positive is not Sent')
+                self.assertTrue(self.panel().get_by_role('button',name='Clear Finished',exact=True).is_disabled(),'R5-A12-view: malformed positive not clearable')
+        good['operationId']=op; self.site.download_state[op]=good
+        self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
+        self.assertEqual('Sent',self.operations().first.locator('.study-transfer-state').inner_text(),'R5-A12-view: complete matching supply accepted')
 
 
 def own_cases():
@@ -1209,7 +1464,6 @@ def own_cases():
 
 def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite(TransferPanelPage(name) for name in own_cases())
-    suite.addTests(loader.loadTestsFromTestCase(EnvelopeContractTests))
     return suite
 
 
@@ -1218,9 +1472,7 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     names = sys.argv[1:] or own_cases()
     suite = unittest.TestSuite(TransferPanelPage(n) for n in names)
-    if not sys.argv[1:]:
-        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(EnvelopeContractTests))
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
     return 0 if result.wasSuccessful() and not result.skipped else 1
 
 
