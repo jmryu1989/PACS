@@ -4,6 +4,8 @@ import type { ResolvedRecord } from '../emr-contract/classification';
 import { refuse } from '../emr-contract/validation';
 import type { EmrSnapshot, SnapshotRequest } from './context';
 import type { AccessLedgerStore, ProvisionalAppend } from './store';
+import { createTransactionProjection, EmrRecordTransaction } from './transaction-port';
+export type { EmrRecordTransaction } from './transaction-port';
 
 /**
  * EMR-B2 (d): what a Nest consumer receives of the access ledger - a record port, provided by value under this token
@@ -19,7 +21,7 @@ export const EMR_RECORD_PORT: unique symbol = Symbol('EmrRecordPort');
 /** The business transaction of one record: the dedicated ledger client's interactive transaction, entered through the
  * store's append admission. Business rows and the ledger fact commit together in it; it cannot connect, disconnect or
  * open another transaction. */
-export type EmrRecordTransaction = Prisma.TransactionClient;
+// The token's raw transaction binding is private to its admitted work.
 
 /**
  * One admitted unit of recording work, a request's recording lifetime as a rule: begun while the process serves, ended
@@ -73,22 +75,106 @@ export function createRecordPort(store: AccessLedgerStore): { port: EmrRecordPor
     begin(): EmrRecordWork {
       if (closed) refuse('EmrRecordPortClosed');
       let ended = false;
+      let leases = 0, retired = false;
       live++;
       const alive = () => { if (ended) refuse('EmrRecordWorkEnded'); };
+      const retire = () => {
+        if (ended && leases === 0 && !retired) { retired = true; live--; settle(); }
+      };
+      // Reserve before the first wait. Revocation is not cancellation of a durable operation.
+      const run = <T>(operation: () => PromiseLike<T>): Promise<T> => {
+        alive();
+        leases++;
+        const result = (async () => {
+          try { const value = await operation(); alive(); return value; }
+          finally { leases--; retire(); }
+        })();
+        // The work owns unawaited failures too; callers still observe the original rejection.
+        void result.catch(() => undefined);
+        return result;
+      };
+      type Binding = { raw: Prisma.TransactionClient; open: boolean; callbackFailed: boolean;
+        pending: Promise<unknown>[] };
+      const bindings = new WeakMap<object, Binding>();
+      const binding = (tx: EmrRecordTransaction, query = true): Binding => {
+        alive();
+        const found = tx && bindings.get(tx);
+        if (!found || (query && !found.open)) refuse('EmrRecordTransactionRefused');
+        return found;
+      };
+      const query = <T>(entry: Binding, operation: () => PromiseLike<T>): Promise<T> => {
+        alive();
+        if (!entry.open) refuse('EmrRecordTransactionRefused');
+        const result = run(async () => {
+          const value = await operation();
+          if (!entry.open) refuse('EmrRecordTransactionRefused');
+          return value;
+        });
+        entry.pending.push(result);
+        return result;
+      };
       const work: EmrRecordWork = {
-        append(input, served) { alive(); return store.append(input, served); },
-        transaction(work) { alive(); return store.withAppendTransaction(work); },
-        appendInTransaction(tx, input, served) { alive(); return store.appendInTransaction(tx, input, served); },
-        confirm(appended) { alive(); return store.confirm(appended); },
-        settleTransaction(tx, input, error, callbackFailed, served) { alive(); return store.settleTransaction(tx, input, error, callbackFailed, served); },
-        settle(input, error, served) { alive(); return store.settle(input, error, served); },
-        snapshot(tx, scope, request) { alive(); return store.snapshot(tx, scope, request); },
-        resolveIdentity(tx, issuer, subject) { alive(); return store.resolveIdentity(tx, issuer, subject); },
+        append(input, served) {
+          return run(async () => {
+            let raw: Prisma.TransactionClient, callbackFailed = false, appended: ProvisionalAppend;
+            try {
+              appended = await store.withAppendTransaction(async tx => {
+                raw = tx;
+                try { alive(); return await store.appendInTransaction(tx, input, served); }
+                catch (error) { callbackFailed = true; throw error; }
+              });
+            } catch (error) {
+              // Settlement preserves the real outcome even when the work was revoked during the operation.
+              await store.settleTransaction(raw, input, error, callbackFailed, served);
+              throw error;
+            }
+            alive();
+            return store.confirm(appended);
+          });
+        },
+        transaction<T>(callback: (tx: EmrRecordTransaction) => Promise<T>): Promise<T> {
+          return run(() => store.withAppendTransaction(async raw => {
+            alive(); // The B1 admission queue may have waited past end().
+            const entry: Binding = { raw, open: true, callbackFailed: false, pending: [] };
+            const token = createTransactionProjection(raw, operation => query(entry, operation));
+            bindings.set(token, entry);
+            let value: T, failure: unknown, failed = false;
+            try { value = await callback(token); }
+            catch (error) { failed = true; failure = error; }
+            entry.open = false;
+            const results = await Promise.allSettled(entry.pending);
+            const rejected = results.find(result => result.status === 'rejected');
+            try {
+              if (failed) throw failure;
+              if (rejected?.status === 'rejected') throw rejected.reason;
+              alive();
+              return value;
+            } catch (error) { entry.callbackFailed = true; throw error; }
+          }));
+        },
+        appendInTransaction(tx, input, served) {
+          const entry = binding(tx);
+          return query(entry, () => store.appendInTransaction(entry.raw, input, served));
+        },
+        confirm(appended) { return run(() => store.confirm(appended)); },
+        settleTransaction(tx, input, error, _callbackFailed, served) {
+          const entry = binding(tx, false);
+          if (entry.open) refuse('EmrRecordTransactionRefused');
+          return run(() => store.settleTransaction(entry.raw, input, error, entry.callbackFailed, served));
+        },
+        settle(input, error, served) { return run(() => store.settle(input, error, served)); },
+        snapshot(tx, scope, request) {
+          const entry = binding(tx);
+          return query(entry, () => store.snapshot(entry.raw, scope, request));
+        },
+        resolveIdentity(tx, issuer, subject) {
+          const entry = binding(tx);
+          return query(entry, () => store.resolveIdentity(entry.raw, issuer, subject));
+        },
         end() {
           if (ended) return;
           ended = true;
-          live--;
-          settle();
+          retire();
         },
       };
       return Object.freeze(Object.assign(Object.create(null), work));

@@ -17,9 +17,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
+const path = require('node:path');
 const { test } = require('node:test');
 const startup = require('./startup_fixture.cjs');
+const { PrismaClient } = require('/app/node_modules/@prisma/client');
 
 const RUNTIME = process.env.KIN_EMR_B2_RUNTIME_URL, INSTALLER = process.env.KIN_EMR_B2_INSTALLER_URL;
 const env = (state, overrides = {}) => startup.environment(state, { DATABASE_URL: RUNTIME, ...overrides });
@@ -193,4 +195,119 @@ test('P06 a transaction that outlives the drain grace: the one closed line names
     if (event.what === 'listening') startup.stop(child, 'SIGTERM');
   } });
   assert.deepEqual([again.code, recovered.recovered, recovered.notCommitted], [0, 0, 1]);
+});
+
+// REQ-B2R-05/07 -> RISK-B2R-DUAL-WRITER/LEDGER-REGRESSION -> TEST-B2D-06-P07..P12.
+// The observer never supplies SQL outcomes to the API. P10 kills only the PID reported by the request's own transaction.
+async function persisted(db, eventId) {
+  return {
+    business: await db.institution.findMany({ where: { id: 'r2-' + eventId }, select: { id: true, name: true } }),
+    entries: await db.$queryRaw`SELECT stream, event_id, sequence::text, hash, payload::text FROM emr_access.access_entry WHERE event_id=${eventId} ORDER BY stream`,
+    businessTransactions: await db.$queryRaw`SELECT xmin::text AS transaction_id FROM "Institution" WHERE id=${'r2-' + eventId}`,
+    markers: await db.$queryRaw`SELECT stream, event_id, attempt_id, bundle_id, transaction_id::text, sequence::text, hash FROM emr_access.commit_marker WHERE event_id=${eventId} ORDER BY stream`,
+  };
+}
+function observeRequest(port) {
+  const result = { bytes: '', status: null, error: null };
+  result.done = new Promise(resolve => {
+    const request = http.get({ host: '127.0.0.1', port, path: '/syn-atomic', agent: false }, response => {
+      result.status = response.statusCode;
+      response.on('data', chunk => { result.bytes += chunk.toString(); });
+      response.on('end', resolve); response.on('error', error => { result.error = error.code; resolve(); });
+    });
+    request.on('error', error => { result.error = error.code; resolve(); });
+  });
+  return result;
+}
+
+for (const [cell, cutpoint, committed, recovered] of [
+  ['P07', 'reserve-complete', false, { viewing: 0, history: 0 }],
+  ['P08', 'commit-complete', true, { viewing: 1, history: 1 }],
+  ['P09', 'crash-settled', true, { viewing: 1, history: 1 }],
+  ['P10', 'crash-settled', false, { viewing: 0, history: 0 }],
+  ['P11', 'viewing-sealed', true, { viewing: 0, history: 1 }],
+  ['P12', 'receipt-complete', true, { viewing: 0, history: 0 }],
+]) test(cell + ' whole launcher crash preserves atomic business and both ledger streams and resolves the observed outcome under exclusive recovery', { timeout: 240000 }, async () => {
+  const event = startup.changeEvent(randomUUID()), observer = new PrismaClient({ datasources: { db: { url: INSTALLER } } });
+  const seen = {};
+  try {
+    const result = await startup.run({ db: 'pg', crashCut: cell, crashEvent: event }, {
+      env: env(state05), timeoutMs: 60000, onEvent: async (notice, child) => {
+        if (notice.what === 'listening') seen.http = observeRequest(notice.port);
+        if (notice.what === 'crash-cut' && notice.point === 'commit-entry') {
+          assert.equal(cell, 'P10'); assert(Number.isInteger(notice.backendPid) && notice.backendPid > 0);
+          const [terminated] = await observer.$queryRaw`SELECT pg_terminate_backend(${notice.backendPid}::integer) AS terminated`;
+          assert.equal(terminated.terminated, true); seen.terminatedPid = notice.backendPid;
+          child.send({ cmd: 'release' });
+        }
+        if ((notice.what === 'crash-cut' && notice.point === cutpoint) || (notice.what === cutpoint)) {
+          seen.cut = notice;
+          seen.beforeKill = await persisted(observer, event.eventId);
+          child.kill('SIGKILL');
+        }
+      },
+    });
+    assert.equal(result.timedOut, false, JSON.stringify({ cell, names: result.names, raw: result.dir }));
+    assert.equal(result.signal, 'SIGKILL');
+    assert(!result.names.includes('parent-error'), 'observed cutpoint must execute without harness error');
+    assert(seen.cut, cell + ': required cut observed');
+    await seen.http.done;
+    assert.equal(seen.http.bytes, '', 'no success receipt/body escaped');
+    assert.equal(seen.http.status, null);
+    if (cell === 'P09' || cell === 'P10') {
+      assert.equal(seen.cut.callbackFailed, false, 'COMMIT failure is not a callback rollback');
+      assert(seen.cut.journal.some(row => row.body?.eventId === event.eventId && row.body.cause === 'commit-unknown'));
+      assert.equal(Object.values(seen.cut.state.intents).filter(intent => intent.eventId === event.eventId).length, 2);
+    }
+    if (cell === 'P09') assert(result.names.includes('pg-commit-complete'), 'genuinely successful PG commit preceded lost acknowledgement');
+    if (cell === 'P10') assert(seen.terminatedPid && !result.names.includes('pg-commit-complete'));
+    const before = await persisted(observer, event.eventId);
+    assert.equal(before.business.length, committed ? 1 : 0);
+    assert.deepEqual(before.entries.map(row => row.stream).sort(), committed ? ['history', 'viewing'] : []);
+    assert.deepEqual(before.markers.map(row => row.stream).sort(), committed ? ['history', 'viewing'] : []);
+    for (const row of before.entries) assert.equal(JSON.parse(row.payload).eventId, event.eventId);
+    if (committed) {
+      assert.equal(new Set(before.markers.map(row => row.bundle_id)).size, 1);
+      assert.equal(new Set(before.markers.map(row => row.attempt_id)).size, 1);
+      assert.deepEqual([...new Set(before.markers.map(row => row.transaction_id))], before.businessTransactions.map(row => row.transaction_id), 'business and both ledger markers share the real PG transaction');
+    }
+    if (cell === 'P10') {
+      const protectedHashes = () => fs.readdirSync(state05).sort().filter(name => fs.lstatSync(path.join(state05, name)).isFile()).map(name => [name, createHash('sha256').update(fs.readFileSync(path.join(state05, name))).digest('hex')]);
+      const beforeUnavailable = protectedHashes();
+      const unavailable = new URL(RUNTIME); unavailable.port = '1'; unavailable.searchParams.set('connect_timeout', '1');
+      const refused = await startup.run({ db: 'pg' }, { env: env(state05, { DATABASE_URL: unavailable.toString() }), timeoutMs: 30000 });
+      assert.equal(refused.code, 1); assert(!refused.names.includes('ready') && !refused.names.includes('listening'));
+      assert(!refused.names.includes('recovered'), 'unreadable PG cannot prove negative settlement');
+      assert.deepEqual(protectedHashes(), beforeUnavailable, 'unavailable verification preserves intents and journal');
+      assert.deepEqual(await persisted(observer, event.eventId), before);
+    }
+    let recovery;
+    const restarted = await startup.run({ db: 'pg' }, { env: env(state05), timeoutMs: 60000, onEvent(notice, child) {
+      if (notice.what === 'recovered') recovery = notice;
+      if (notice.what === 'listening') startup.stop(child);
+    } });
+    assert.equal(restarted.code, 0, restarted.stderr);
+    // Each expected stream contributes independently; two-stream work is never counted as a one-entry event.
+    assert.equal(recovery.recovered, Object.values(recovered).reduce((a, b) => a + b, 0));
+    assert.equal(recovery.notCommitted, committed ? 0 : Object.keys(recovered).length);
+    for (const stream of Object.keys(recovered)) assert.deepEqual(recovery.streams[stream], { recovered: recovered[stream], notCommitted: committed ? 0 : 1 });
+    assert.deepEqual(await persisted(observer, event.eventId), before, 'recovery does not rewrite business/original rows');
+    // Replay the exact event through the same real HTTP API, then restart once more and replay again.
+    let replayState;
+    for (let pass = 0; pass < 2; pass++) {
+      let request, replayRecovery;
+      const replay = await startup.run({ db: 'pg', crashEvent: event }, { env: env(state05), timeoutMs: 60000, onEvent: async (notice, child) => {
+        if (notice.what === 'recovered') replayRecovery = notice;
+        if (notice.what === 'listening') { request = observeRequest(notice.port); await request.done; startup.stop(child); }
+      } });
+      assert.equal(replay.code, 0, replay.stderr); assert.equal(request.status, 200); assert.equal(JSON.parse(request.bytes).eventId, event.eventId);
+      assert.deepEqual([replayRecovery.recovered, replayRecovery.notCommitted], [0, 0]);
+      const after = await persisted(observer, event.eventId);
+      assert.equal(after.business.length, 1); assert.deepEqual(after.entries.map(row => row.stream).sort(), ['history', 'viewing']);
+      if (replayState) assert.deepEqual(after, replayState, 'second restart/replay duplicates zero');
+      replayState = after;
+    }
+    console.log('B2D_CRASH_EVIDENCE ' + JSON.stringify({ cell, event, signal: result.signal, raw: result.dir, cut: seen.cut,
+      before, recovery, replay: replayState, http: { status: seen.http.status, bytes: seen.http.bytes, error: seen.http.error } }));
+  } finally { await observer.$disconnect(); }
 });

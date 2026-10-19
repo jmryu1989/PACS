@@ -43,8 +43,8 @@ function stateDirectory(label = 'state') {
 /** The API's environment for a scenario: production-shaped, synthetic, nothing reachable. */
 function environment(state, overrides = {}) {
   const base = {
-    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP, HOME: process.env.HOME,
-    NODE_OPTIONS: '--max-old-space-size=1024',
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR, HOME: process.env.HOME,
+    NODE_OPTIONS: '--max-old-space-size=3072',
     DEPLOYMENT_MODE: 'production', AUTH_REQUIRED: 'true',
     DATABASE_URL: 'postgresql://kin_runtime:Synthetic-Fixture-Secret-0001@127.0.0.1:1/kin?connect_timeout=2',
     KIN_EMR_STATE_DIR: state,
@@ -89,6 +89,16 @@ function serviceEvent(eventId) {
     context: { basis: 'service-job', studyId: 'SYNTHETIC-startup-fixture', relatedStudyId: null, reason: null }, executor: 'service',
     targets: [{ kind: 'system-operation', patientLinkSnapshot: notApplicable, studyId: notApplicable, recordId: notApplicable, versionId: notApplicable }],
     action: 'provide-prepared', result: 'prepared', requestId: 'startup-fixture-' + eventId, auditLinkId: 'audit:' + require('node:crypto').randomUUID(), relatedEventId: null };
+}
+
+function changeEvent(eventId) {
+  const known = value => ({ status: 'known', value });
+  return { ...serviceEvent(eventId), surface: 'POST studies/:uid/report/commit', rolesAtTime: known(['radiologist']),
+    trustedProxyIp: known({ address: '192.0.2.10', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
+    context: { basis: 'assigned-reading', studyId: 'SYNTHETIC-' + eventId, relatedStudyId: null, reason: null },
+    targets: [{ kind: 'report-version', patientLinkSnapshot: known({ linkId: 'synthetic-link', patientId: 'SYNTHETIC', assigningAuthority: 'synthetic-institution' }),
+      studyId: known('SYNTHETIC-' + eventId), recordId: known('synthetic-record-' + eventId), versionId: known('synthetic-version-' + eventId) }],
+    action: 'approve-sign', result: 'succeeded' };
 }
 
 /**
@@ -346,21 +356,62 @@ function child(scenario) {
   }
   const RealStore = storeModule.AccessLedgerStore;
   const stores = [];
+  let crashRequest = null, backendPid = null;
+  const snapshotCrash = () => {
+    const store = stores[0], state = store.journal.coordinator.call('read');
+    return { state, journal: store.journal.all(), eventId: crashRequest?.event.eventId, businessKey: crashRequest?.businessKey };
+  };
+  const cut = async point => { send('crash-cut', { point, backendPid, ...snapshotCrash() }); await released; };
   storeModule.AccessLedgerStore = class ObservedLedgerStore extends RealStore {
     constructor(db, sql, seal, journal, poolSize) {
       super(db, sql, seal, journal, poolSize);
       stores.push(this);
       send('ledger', { sameClient: db === clients[clients.length - 1], poolSize });
+      if (scenario.crashCut) {
+        const transaction = db._engine.transaction.bind(db._engine);
+        db._engine.transaction = async (action, ...args) => {
+          if (action === 'commit' && crashRequest && scenario.crashCut === 'P10') await cut('commit-entry');
+          const value = await transaction(action, ...args);
+          if (action === 'commit' && crashRequest) {
+            send('pg-commit-complete', { eventId: crashRequest.event.eventId });
+            if (scenario.crashCut === 'P08') await cut('commit-complete');
+            if (scenario.crashCut === 'P09') throw Object.assign(Error('successful COMMIT acknowledgement withheld'), { code: 'P1017' });
+          }
+          return value;
+        };
+      }
+    }
+    withAppendTransaction(callback) {
+      return super.withAppendTransaction(async tx => {
+        if (crashRequest) { const [row] = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`; backendPid = row.pid; }
+        return callback(tx);
+      });
+    }
+    async appendInTransaction(...args) {
+      const result = await super.appendInTransaction(...args);
+      if (crashRequest) send('append-reserved', { entries: result.entries });
+      if (crashRequest && scenario.crashCut === 'P07') await cut('reserve-complete');
+      return result;
     }
   };
+  if (scenario.crashCut === 'P11') {
+    const advance = sealModule.AccessSeal.prototype.advanceReceipt;
+    sealModule.AccessSeal.prototype.advanceReceipt = async function (stream, ...args) {
+      if (crashRequest && stream === 'history') await released;
+      const value = await advance.call(this, stream, ...args);
+      if (crashRequest && stream === 'viewing') await cut('viewing-sealed');
+      return value;
+    };
+  }
   if (scenario.db === 'memory') {
     // A standalone append without SQL: a timed fake receipt, so the drain of begun recording work is observable.
-    storeModule.AccessLedgerStore.prototype.append = async function (input) {
+    storeModule.AccessLedgerStore.prototype.appendInTransaction = async function (_tx, input) {
       send('append-begin', { eventId: input.eventId });
       await sleep(scenario.appendMillis ?? 300);
       send('append-end', { eventId: input.eventId });
       return Object.freeze({ eventId: input.eventId, durableAt: new Date().toISOString() });
     };
+    storeModule.AccessLedgerStore.prototype.confirm = async function (appended) { return appended; };
   }
   const RealCoordinator = coordinatorModule.StateCoordinator;
   coordinatorModule.StateCoordinator = class ObservedCoordinator extends RealCoordinator {
@@ -372,7 +423,7 @@ function child(scenario) {
     if (scenario.recovery === 'refuse') throw new sealModule.SealRefused('SealCorrupt', 'postgresql://kin_runtime:Leaked-Secret-0004@db/kin');
     const result = await recover.call(this);
     await hold('recovery', () => new sealModule.SealRefused('SealCorrupt', 'postgresql://kin_runtime:Leaked-Secret-0004@db/kin'));
-    send('recovered', { recovered: result.recovered, notCommitted: result.notCommitted });
+    send('recovered', { recovered: result.recovered, notCommitted: result.notCommitted, streams: result.streams });
     return result;
   };
   if (scenario.holdConfirm) {
@@ -429,9 +480,51 @@ function child(scenario) {
   const create = core.NestFactory.create.bind(core.NestFactory);
   core.NestFactory.create = async (...args) => {
     send('create');
+    if (scenario.lifecycleStage) {
+      const hooks = ['onModuleInit', 'onApplicationBootstrap', 'onModuleDestroy', 'beforeApplicationShutdown', 'onApplicationShutdown'];
+      const slow = Object.fromEntries(hooks.map(hook => [hook, async () => {
+        send('peer-start', { hook });
+        if (hook === scenario.lifecycleStage && scenario.hungHook) await new Promise(() => {});
+        await sleep(80);
+        send('peer-end', { hook });
+      }]));
+      const fast = Object.fromEntries(hooks.map(hook => [hook, () => {
+        send('peer-fast', { hook });
+        if (hook === scenario.lifecycleStage && !scenario.hungHook) throw Error('synthetic hook rejection');
+      }]));
+      args[0].providers.push({ provide: 'r2-slow', useValue: slow }, { provide: 'r2-fast', useValue: fast });
+    }
     const created = await create(...args);
     app = created;
     send('created');
+    if (scenario.observeAdmission) created.use((req, _res, next) => { send('http-entry', { url: req.url }); next(); });
+    if (scenario.crashEvent) created.use('/syn-atomic', async (_req, res) => {
+      const event = scenario.crashEvent, businessKey = 'r2-' + event.eventId;
+      crashRequest = { event, businessKey };
+      const work = portOf().begin();
+      let token, callbackFailed = false;
+      send('work-begun', { eventId: event.eventId });
+      try {
+        const provisional = await work.transaction(async tx => {
+          token = tx;
+          try {
+            await tx.institution.upsert({ where: { id: businessKey }, create: { id: businessKey, name: 'Synthetic EMR B2' }, update: {} });
+            return await work.appendInTransaction(tx, event);
+          } catch (error) { callbackFailed = true; throw error; }
+        });
+        const receipt = await work.confirm(provisional);
+        send('receipt-ready', { eventId: receipt.eventId, ...snapshotCrash() });
+        if (scenario.crashCut === 'P12') await cut('receipt-complete');
+        res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(receipt));
+      } catch (error) {
+        if (token) await work.settleTransaction(token, event, error, callbackFailed);
+        else await work.settle(event, error);
+        send('crash-settled', { callbackFailed, ...snapshotCrash() });
+        // These ambiguous responses are deliberately withheld; the parent kills only after persisted settlement.
+        if (scenario.crashCut === 'P09' || scenario.crashCut === 'P10') await released.then(() => new Promise(() => {}));
+        res.statusCode = 503; res.end('unknown');
+      } finally { work.end(); send('work-ended'); }
+    });
     // Synthetic requests (test-side, before main's own middleware): one that is still running when a stop arrives, and
     // one that begins recording work at its start and writes a record after its response finished.
     if (scenario.slowMillis) created.use('/syn-slow', (req, res) => {
@@ -550,7 +643,7 @@ function child(scenario) {
         try {
           const appended = await work.transaction(async tx => {
             transaction = tx;
-            await tx.$queryRaw`SELECT 1 AS business_statement`;
+            await tx.institution.findMany({ take: 1, select: { id: true } });
             try {
               const provisional = await work.appendInTransaction(tx, event);
               if (command.fail) throw new Error('synthetic-business-failure');
@@ -573,4 +666,4 @@ function child(scenario) {
 
 if (require.main === module) child(JSON.parse(process.argv[2] || '{}'));
 
-module.exports = { run, environment, stateDirectory, stop, serviceEvent, SIGNAL_MODE };
+module.exports = { run, environment, stateDirectory, stop, serviceEvent, changeEvent, SIGNAL_MODE };

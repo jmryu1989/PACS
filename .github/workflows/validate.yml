@@ -1516,6 +1516,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/production-image --cwd . --file api/Dockerfile --file api/prisma/schema.prisma --file scripts/ops_backup.py --file tests/production_image_test.py -- python3 tests/production_image_test.py
       - name: Disposable host adapter API replacement and database preservation
         run: sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py
+      - name: EMR-B2 image-bound API probe handover and restored-copy mount boundary (TEST-B2D-07)
+        run: |
+          image="$(docker image inspect kin-api:ci --format '{{.Id}}')"
+          test -n "$image"
+          mkdir -p tmp/runtime-ci
+          python3 -c 'import json,subprocess,sys; from pathlib import Path; Path("tmp/runtime-ci/emr-b2-image.json").write_text(json.dumps({"image":sys.argv[1],"sha":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"tree":subprocess.check_output(["git","rev-parse","HEAD^{tree}"],text=True).strip()}))' "$image"
+          KIN_TEST_API_IMAGE="$image" python3 scripts/record-run.py --run-dir tmp/runtime-ci/emr-b2-handover --cwd . --file tmp/runtime-ci/emr-b2-image.json --file tests/ops_emr_probe_test.py --file scripts/ops_emr_probe.py --file scripts/ops_backup.py --file tests/ops_product_transfer_fixture.py -- python3 -B tests/ops_emr_probe_test.py --require-image-handover
       # EMR-B2 (d): the compiled main.ts of kin-api:ci - its launcher, Nest, the real fence, journal, seal and client -
       # over a disposable postgres:16-alpine provisioned and migrated as production is (installer for the migration only):
       # start order to the listener with the record port by value, one client and pool, a second owner refused before
@@ -1532,8 +1539,18 @@ jobs:
           done
           python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
           docker run --rm --network "container:$db" -e DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin kin-api:ci sh /app/start-production.sh migrate
-          python3 scripts/record-run.py --run-dir tmp/runtime-ci/emr-b2-d-launcher --cwd . --tree api/src --file api/prisma/schema.prisma --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/ops_product_transfer_fixture.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_EMR_B2_RUNTIME_URL=postgresql://kin_runtime@127.0.0.1:5432/kin -e KIN_EMR_B2_INSTALLER_URL=postgresql://postgres@127.0.0.1:5432/kin -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test --test-concurrency=1 --test-reporter=tap /tests/emr/b/startup_pg_test.cjs \
-            || { tail -c 30000 tmp/runtime-ci/emr-b2-d-launcher/stdout.log; tail -c 5000 tmp/runtime-ci/emr-b2-d-launcher/stderr.log; exit 1; }
+          image="$(docker image inspect kin-api:ci --format '{{.Id}}')"
+          mkdir -p tmp/runtime-ci/emr-b2-children
+          chmod 0777 tmp/runtime-ci/emr-b2-children
+          python3 scripts/record-run.py --run-dir tmp/runtime-ci/emr-b2-d-launcher --cwd . --tree api/src --file tmp/runtime-ci/emr-b2-image.json --file api/prisma/schema.prisma --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/emr/b/mutants.py --file emr/units/b.json --file tests/ops_product_transfer_fixture.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_EMR_B2_RUNTIME_URL=postgresql://kin_runtime@127.0.0.1:5432/kin -e KIN_EMR_B2_INSTALLER_URL=postgresql://postgres@127.0.0.1:5432/kin -e KIN_EMR_B2_KEEP_RUNS=1 -e TMPDIR=/evidence -v "$PWD/tmp/runtime-ci/emr-b2-children:/evidence" -v "$PWD/tests:/tests:ro" --entrypoint node "$image" --max-old-space-size=3072 --test --test-concurrency=1 --test-reporter=tap /tests/emr/b/startup_pg_test.cjs \
+            || status=$?
+            sudo chown -R -- "$(id -u):$(id -g)" tmp/runtime-ci/emr-b2-children
+            if [ "$status" -ne 0 ]; then
+              tail -c 30000 tmp/runtime-ci/emr-b2-d-launcher/stdout.log
+              tail -c 5000 tmp/runtime-ci/emr-b2-d-launcher/stderr.log
+              exit "$status"
+            fi
+            python3 -c 'import importlib.util,json; from pathlib import Path; s=importlib.util.spec_from_file_location("b2mutants","tests/emr/b/mutants.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.loads(Path("emr/units/b.json").read_text()); names=[c.split()[0] for c in d["cases"]["launcher"]["B1"]]; assert m.pg_passes(Path("tmp/runtime-ci/emr-b2-d-launcher/stdout.log").read_text(),names,0), "launcher matrix incomplete or skipped"'
       - name: Record exact image identity
         env:
           CODE_SHA: ${{ github.sha }}
@@ -1541,6 +1558,17 @@ jobs:
           echo "Code SHA: $CODE_SHA" >> "$GITHUB_STEP_SUMMARY"
           docker image inspect kin-api:ci --format 'Image ID: {{.Id}}' >> "$GITHUB_STEP_SUMMARY"
           echo 'CI checks runtime packaging and disposable-DB startup. The 69 live invariants, 14 browser tests and independent review remain separate release gates. No deployment is performed.' >> "$GITHUB_STEP_SUMMARY"
+      - name: EMR-B2 raw handover and launcher crash evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-b2-r2-runtime-evidence
+          path: |
+            tmp/runtime-ci/emr-b2-image.json
+            tmp/runtime-ci/emr-b2-handover/
+            tmp/runtime-ci/emr-b2-d-launcher/
+            tmp/runtime-ci/emr-b2-children/
+          if-no-files-found: error
       - name: Synthetic runtime print identity evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

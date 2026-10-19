@@ -60,6 +60,10 @@ function adminNoStore(_req: any, res: any, next: () => void) {
   ],
 })
 export class AppModule implements NestModule {
+  // Construction closure (imports, field initializers, factories including async/useValue, constructors and configure)
+  // must remain resource-free. No connection, file handle, timer, worker, process listener or detached acquisition here.
+  // Acquire only in awaited init/bootstrap hooks, retaining a cleanup handle before waiting. The launcher registers
+  // the lifecycle adapter first, and its settlement barrier joins peer acquisitions even when one hook rejects.
   /** EMR-B2 (d): the module as the launcher creates it - the record port it prepared, by value under its token. Nothing
    * else of the EMR lifetime is a provider, so no consumer can start, close, recover or compose. */
   static forLaunch(port: EmrRecordPort): DynamicModule {

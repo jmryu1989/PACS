@@ -196,24 +196,20 @@ MUTANTS = {
     "M57": ("B2R-02: the latch trips a turn late (a step that returns in the same turn as the signal goes on)", [
         ("api/src/emr-runtime/launcher.ts", "  const trip = (cause: StopCause) => { if (!latch.signal.aborted) latch.abort(cause); };\n",
          "  const trip = (cause: StopCause) => { setImmediate(() => { if (!latch.signal.aborted) latch.abort(cause); }); };\n")]),
-    "M58": ("B2R-01: the application's cleanup entry is registered after its acquisition (a late create is never closed)", [
-        ("api/src/emr-runtime/launcher.ts", "      reserve('app', () => (app ? closeApp(app) : Promise.resolve()));\n      const created = await NestFactory.create(",
-         "      const created = await NestFactory.create("),
-        ("api/src/emr-runtime/launcher.ts", "      app = created;\n      check(phase);\n", "      app = created;\n      check(phase);\n      reserve('app', () => (app ? closeApp(app) : Promise.resolve()));\n")]),
+    "M58": ("B2R-01: cleanup registered after create and the post-create stop check", [
+        ("api/src/emr-runtime/launcher.ts", "      reserve('app', () => lifecycle?.close(latch.signal.reason?.signal) ?? Promise.resolve());\n", ""),
+        ("api/src/emr-runtime/launcher.ts", "      input.configure(created);\n", "      reserve('app', () => lifecycle?.close(latch.signal.reason?.signal) ?? Promise.resolve());\n      input.configure(created);\n")]),
     "M59": ("B2R-03: the listener is acquired without the latch signal (a late bind opens, logs and answers)", [
         ("api/src/emr-runtime/launcher.ts", "    server.listen({ port: 3000, host: '0.0.0.0', signal });\n", "    server.listen({ port: 3000, host: '0.0.0.0' });\n"),
         ("api/src/emr-runtime/launcher.ts", "    const onAbort = () => { detach(); reject(interrupted(phase)); };\n", "    const onAbort = () => { void phase; };\n")]),
     "M60": ("B2R-04: the record port is not latched (new work admitted after the stop)", [
         ("api/src/emr-runtime/record-port.ts", "      if (closed) refuse('EmrRecordPortClosed');\n", "      void closed;\n")]),
-    "M61": ("B2B-02: Nest's own signal cleanup is restored beside the launcher's (two commands of the stop)", [
-        ("api/src/emr-runtime/launcher.ts", "      app = created;\n      check(phase);\n      input.configure(created);\n",
-         "      app = created;\n      check(phase);\n      created.enableShutdownHooks();\n      input.configure(created);\n")]),
+    "M61": ("B2B-02: two signal cleanup owners", [
+        ("api/src/emr-runtime/launcher.ts", "      input.configure(created);\n", "      created.enableShutdownHooks();\n      input.configure(created);\n")]),
     "M62": ("R4-09: A is composed a second time in the owner's start", [
         ("api/src/emr-runtime/application.ts", "      composeEmrAdapters(runtimeAdapters);\n", "      composeEmrAdapters(runtimeAdapters);\n      composeEmrAdapters(runtimeAdapters);\n")]),
-    "M63": ("B2R-06: the record facade hands the seal's recovery on (a consumer can run a second recovery)", [
-        ("api/src/emr-runtime/record-port.ts", "        resolveIdentity(tx, issuer, subject) { alive(); return store.resolveIdentity(tx, issuer, subject); },\n",
-         "        resolveIdentity(tx, issuer, subject) { alive(); return store.resolveIdentity(tx, issuer, subject); },\n"
-         "        recoverAtStart() { alive(); return store.seal.recoverAtStart(); },\n")]),
+    "M63": ("B2R-06: record work exposes recovery", [
+        ("api/src/emr-runtime/record-port.ts", "        end() {\n", "        recoverAtStart() { return store.seal.recoverAtStart(); },\n        end() {\n")]),
     "M64": ("B2R-04: the stop does not wait for the begun recording work (the client is released under a post-finish record)", [
         ("api/src/emr-runtime/launcher.ts", "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => control?.drained());\n",
          "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => undefined);\n")]),
@@ -226,6 +222,199 @@ MUTANTS = {
         ("api/src/emr-runtime/launcher.ts", "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => control?.drained());\n",
          "    const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => (serving ? control?.drained() : undefined));\n")]),
 }
+
+# Frozen r2 boundary mutants. Intentional negative controls are not candidate repair rounds.
+MUTANTS.update({'R2-M01': ('late request enters downstream without a per-request stop check',
+            [('api/src/emr-runtime/http-admission.ts',
+              '  function dispatch(request: IncomingMessage, response: ServerResponse) {\n'
+              '    if (stopSignal.aborted) { rejectStopped(response); return; }',
+              '  function dispatch(request: IncomingMessage, response: ServerResponse) {')]),
+ 'R2-M02': ('an observer gate does not cancel the downstream listener',
+            [('api/src/emr-runtime/http-admission.ts',
+              "  server.removeListener('request', downstream);",
+              '  // mutant retains downstream'),
+             ('api/src/emr-runtime/http-admission.ts',
+              '        if (listeners.length !== 1 || listeners[0] !== handler)',
+              "        if (event !== 'request' && (listeners.length !== 1 || listeners[0] !== handler))")]),
+ 'R2-M03': ('immediate destruction cuts an admitted response before grace',
+            [('api/src/emr-runtime/launcher.ts',
+              'latch.abort(cause); };',
+              '{ latch.abort(cause); admission?.destroyAll(); } };')]),
+ 'R2-M03-force': ('missing force-close leaves sockets until provider cleanup/process exit',
+                  [('api/src/emr-runtime/launcher.ts',
+                    '      admission?.destroyAll();',
+                    '      // mutant: no force-close')]),
+ 'R2-M03-expect': ('100 Continue sent before the permanent stop check',
+                   [('api/src/emr-runtime/http-admission.ts',
+                     '  function checkContinue(request: IncomingMessage, response: ServerResponse) {\n'
+                     '    if (stopSignal.aborted)',
+                     '  function checkContinue(request: IncomingMessage, response: ServerResponse) {\n'
+                     '    response.writeContinue();\n'
+                     '    if (stopSignal.aborted)')]),
+ 'R2-M04': ('raw transaction escapes the projection',
+            [('api/src/emr-runtime/transaction-port.ts',
+              '  const projection = Object.create(null);',
+              '  return raw as unknown as EmrRecordTransaction;\n  const projection = Object.create(null);')]),
+ 'R2-M05': ('delegate exposes parent client',
+            [('api/src/emr-runtime/transaction-port.ts',
+              '    projection[key] = Object.freeze(delegate);',
+              '    projection[key] = rawDelegate;')]),
+ 'R2-M05-promise': ('lazy PrismaPromise escapes eager revocation',
+                    [('api/src/emr-runtime/transaction-port.ts',
+                      'delegate[operation] = (args: unknown) => runModelOperation(() => rawDelegate[operation](args));',
+                      'delegate[operation] = (args: unknown) => rawDelegate[operation](args);')]),
+ 'R2-M06': ('saved method remains active after callback return',
+            [('api/src/emr-runtime/record-port.ts',
+              '            entry.open = false;',
+              '            // mutant: callback stays open')]),
+ 'R2-M07': ('end retires an outstanding operation',
+            [('api/src/emr-runtime/record-port.ts',
+              'if (ended && leases === 0 && !retired)',
+              'if (ended && !retired)')]),
+ 'R2-M07-foreign': ('another work can use a transaction token',
+                    [('api/src/emr-runtime/record-port.ts',
+                      '      const bindings = new WeakMap<object, Binding>();',
+                      '      const bindings: WeakMap<object, Binding> = (store as any).__r2Bindings ??= new '
+                      'WeakMap();')]),
+ 'R2-M07-flag': ('caller forges known rollback for unknown commit',
+                 [('api/src/emr-runtime/record-port.ts',
+                   'entry.raw, input, error, entry.callbackFailed, served',
+                   'entry.raw, input, error, _callbackFailed, served')]),
+ 'R2-M08': ('fail-fast stage advances under unsettled peer',
+            [('api/src/emr-runtime/nest-lifecycle.ts',
+              "catch (error) { account.status = 'rejected'; account.error = error; }",
+              "catch (error) { account.status = 'rejected'; account.error = error; throw error; }"),
+             ('api/src/emr-runtime/nest-lifecycle.ts',
+              'await Promise.allSettled(group.map',
+              'await Promise.all(group.map')]),
+ 'R2-M09': ('initialization lacks per-provider settlement barrier',
+            [('api/src/emr-runtime/nest-lifecycle.ts',
+              '  installInitializationBarrier();',
+              '  // mutant: Nest fail-fast initialization')]),
+ 'R2-M10': ('each resource renews fatal cleanup budget',
+            [('api/src/emr-runtime/launcher.ts',
+              'const waited = await (fatal ??= budget(FATAL_CLEANUP_MS)).race(release(entry));',
+              'const waited = await budget(FATAL_CLEANUP_MS).race(release(entry));')]),
+ 'R2-M11': ('old app.close plus fallback repeats hooks',
+            [('api/src/emr-runtime/nest-lifecycle.ts',
+              '        const failures: unknown[] = [];',
+              '        await app.close(signal).catch(() => undefined);\n        const failures: unknown[] = [];')]),
+ 'R2-M12': ('provider aliases are called twice',
+            [('api/src/emr-runtime/nest-lifecycle.ts',
+              '    const previous = runs.get(stage);\n    if (previous) return previous;',
+              '    const previous = runs.get(stage);\n    void previous;')]),
+ 'R2-M13': ('a rejected stage skips remaining teardown stages',
+            [('api/src/emr-runtime/nest-lifecycle.ts',
+              "failures.push(...result.providers.filter(provider => provider.status === 'rejected').map(provider => "
+              'provider.error));',
+              "failures.push(...result.providers.filter(provider => provider.status === 'rejected').map(provider => "
+              'provider.error));\n'
+              '            if (failures.length) break;')]),
+ 'R2-M14': ('factory starts timer during construction',
+            [('api/src/app.module.ts',
+              'providers: [{ provide: EMR_RECORD_PORT, useValue: port }]',
+              'providers: [{ provide: EMR_RECORD_PORT, useFactory: () => { setInterval(() => {}, 1000); return port; } '
+              '}]')]),
+ 'R2-M15': ('field initializer starts timer during construction',
+            [('api/src/app.module.ts',
+              'export class AppModule implements NestModule {',
+              'export class AppModule implements NestModule {\n  private r2Timer = setInterval(() => {}, 1000);')]),
+ 'R2-M15-import': ('import-time resource acquisition',
+                   [('api/src/app.module.ts',
+                     'function adminNoStore(',
+                     'setInterval(() => {}, 1000);\n\nfunction adminNoStore(')]),
+ 'R2-M15-deferred': ('construction queues a detached acquisition',
+                     [('api/src/app.module.ts',
+                       'providers: [{ provide: EMR_RECORD_PORT, useValue: port }]',
+                       'providers: [{ provide: EMR_RECORD_PORT, useFactory: async () => { await Promise.resolve(); '
+                       'setTimeout(() => {}, 1000); return port; } }]')]),
+ 'R2-M16': ('late init acquisition escapes cleanup without the init barrier',
+            [('api/src/emr-runtime/nest-lifecycle.ts',
+              '  installInitializationBarrier();',
+              '  // mutant: omitted initialization barrier')])})
+
+
+MUTANTS.update({'R2-M17': ('business operation escapes the admitted ledger transaction',
+            [('api/src/emr-runtime/transaction-port.ts',
+              'import { Prisma, type PrismaClient }',
+              'import { Prisma, PrismaClient }'),
+             ('api/src/emr-runtime/transaction-port.ts',
+              'const rawDelegate = raw[key];',
+              "const rawDelegate = key === 'institution' ? new PrismaClient()[key] : raw[key];")]),
+ 'R2-M17-append': ('business commit has no original append or reserve',
+                   [('api/src/emr-runtime/store.ts',
+                     '    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];',
+                     '    return Object.freeze({provisional: true, eventId: input.eventId, entries: []});\n'
+                     '    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];')]),
+ 'R2-M18': ('unknown COMMIT is falsely settled as callback rollback',
+            [('api/src/emr-runtime/record-port.ts',
+              'entry.raw, input, error, entry.callbackFailed, served',
+              'entry.raw, input, error, true, served')]),
+ 'R2-M19': ('receipt acknowledges viewing only while history remains unsealed',
+            [('api/src/emr-runtime/store.ts',
+              'appended.entries.map(async provisional => {',
+              "appended.entries.filter(p => p.stream === 'viewing').map(async provisional => {"),
+             ('api/src/emr-runtime/store.ts',
+              'appended.entries.map(p => this.seal.acknowledge',
+              "appended.entries.filter(p => p.stream === 'viewing').map(p => this.seal.acknowledge")]),
+ 'R2-M20': ('incomplete or skipped launcher matrix can be reported green',
+            [('tests/emr/b/mutants.py',
+              'return code == 0 and len(passed) == len(selected) and set(passed) == set(selected) and not '
+              're.search(r"^not ok |# (?:SKIP|TODO)", text, re.M)',
+              'return code == 0')]),
+ 'R2-M21': ('missing image becomes a successful empty required handover',
+            [('tests/ops_emr_probe_test.py',
+              'raise SystemExit("Mandatory handover requires an inspected immutable KIN_TEST_API_IMAGE")',
+              'raise SystemExit(0)')]),
+ 'R2-M21-skip': ('missing or skipped required handover becomes a pass',
+                 [('tests/ops_emr_probe_test.py',
+                   'return 0 if result.wasSuccessful() and result.testsRun == 2 and not result.skipped else 1',
+                   'return 0 if result.wasSuccessful() else 1')]),
+ 'R2-M22': ('probe tries recovery beside the running API owner',
+            [('scripts/ops_emr_probe.py',
+              "  if(operation==='append'&&!coordinator.holdsWriterFence)throw Object.assign(new "
+              "Error('EmrStateOwnerBusy'),{code:'EmrStateOwnerBusy'});\n",
+              '')]),
+ 'R2-M22-observe': ('observation promotes to owner when API is absent',
+                    [('scripts/ops_emr_probe.py',
+                      "new StateCoordinator(state,undefined,'retention')",
+                      'new StateCoordinator(state)')]),
+ 'R2-M23': ('recovery accepts a state volume mounted by running source API',
+            [('scripts/ops_backup.py',
+              '    if run(["docker", "ps", "-q", "--filter", "volume=" + '
+              'state_volume]).stdout.decode("utf-8").split():\n'
+              '        raise RuntimeError("EMR recovery refused: the state volume is mounted by a running '
+              'container")\n',
+              '    return\n')]),
+ 'R2-M24': ('probe fabricates the observed stored hash',
+            [('scripts/ops_emr_probe.py',
+              'hash:stored.hash,kind:stored.kind,eventId:stored.eventId',
+              "hash:'0'.repeat(64),kind:stored.kind,eventId:stored.eventId")]),
+ 'R2-M15-db': ('construction acquisition through db',
+               [('api/src/app.module.ts',
+                 'providers: [{ provide: EMR_RECORD_PORT, useValue: port }]',
+                 'providers: [{ provide: EMR_RECORD_PORT, useFactory: () => { new PrismaService().$connect(); return '
+                 'port; } }]')]),
+ 'R2-M15-socket': ('construction acquisition through socket',
+                   [('api/src/app.module.ts',
+                     'providers: [{ provide: EMR_RECORD_PORT, useValue: port }]',
+                     "providers: [{ provide: EMR_RECORD_PORT, useFactory: () => { require('node:net').connect(1, "
+                     "'127.0.0.1'); return port; } }]")]),
+ 'R2-M15-file': ('construction acquisition through file',
+                 [('api/src/app.module.ts',
+                   'providers: [{ provide: EMR_RECORD_PORT, useValue: port }]',
+                   'providers: [{ provide: EMR_RECORD_PORT, useFactory: () => { '
+                   "require('node:fs').openSync('r2-construction-forbidden', 'w'); return port; } }]")]),
+ 'R2-M15-worker': ('construction acquisition through worker',
+                   [('api/src/app.module.ts',
+                     'providers: [{ provide: EMR_RECORD_PORT, useValue: port }]',
+                     'providers: [{ provide: EMR_RECORD_PORT, useFactory: () => { new '
+                     "(require('node:worker_threads').Worker)('', { eval: true }); return port; } }]")]),
+ 'R2-M15-microtask': ('construction acquisition through microtask',
+                      [('api/src/app.module.ts',
+                        'providers: [{ provide: EMR_RECORD_PORT, useValue: port }]',
+                        'providers: [{ provide: EMR_RECORD_PORT, useFactory: () => { queueMicrotask(() => { '
+                        'setTimeout(() => {}, 1000); }); return port; } }]')])})
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -322,7 +511,7 @@ def restore(copy, applied):
 
 
 def contract_verdict(text, cases, code):
-    blocks = re.findall(r"^not ok \d+ - (C\d+) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S)
+    blocks = re.findall(r"^not ok \d+ - ([CP]\d+) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S)
     failed = {case for case, details in blocks if case in cases and re.search(r"code: ['\"]?ERR_ASSERTION\b", details)}
     harness = any(case in cases and not re.search(r"code: ['\"]?ERR_ASSERTION\b", details) for case, details in blocks)
     passed = {case for case in cases if re.search(r"^ok \d+ - " + case + r" ", text, re.M)}
@@ -364,11 +553,86 @@ def contract_kills(copy, cases, out, name, env):
     """Run the copy's contract file for these case IDs; each must be reported `not ok`."""
     pattern = "^(" + "|".join(cases) + ") "
     log = out / (name + "-contract.log")
-    code, seconds = run(["node", "--test", "--test-reporter=tap", "--test-name-pattern=" + pattern, "tests/emr/b/contract_test.cjs"],
+    code, seconds = run(["node", "--max-old-space-size=3072", "--test", "--test-concurrency=1", "--test-reporter=tap", "--test-name-pattern=" + pattern, "tests/emr/b/contract_test.cjs"],
                         cwd=copy, env=env, timeout=900, log=log)
     text = log.read_text(encoding="utf-8", errors="replace")
     return {"kind": "contract", "cases": cases, "exit": code, "seconds": seconds, "log": str(log),
             **contract_verdict(text, cases, code)}
+
+
+def pg_passes(text, selected, code):
+    passed = re.findall(r"^ok \d+ - (P\d+) [^\n]*$", text, re.M)
+    return code == 0 and len(passed) == len(selected) and set(passed) == set(selected) and not re.search(r"^not ok |# (?:SKIP|TODO)", text, re.M)
+
+
+def image_kills(copy, pg_cases, python_cases, out, name, head, env):
+    """Real immutable candidate image; fresh fixture DB/state per call. No LiveStack or original daemon resources."""
+    token = secrets.token_hex(8)
+    image_tag, db = 'kin-emrb-r2-' + token, 'kin-emrb-r2-' + token + '-db'
+    label = 'kin.emrb.r2=' + token
+    logs = out / (name + '-image')
+    logs.mkdir()
+    rows = []
+    def command(args, phase, timeout=600):
+        log = logs / (phase + '.log')
+        code, seconds = run(args, cwd=copy, env=env, timeout=timeout, log=log)
+        rows.append(dict(phase=phase, exit=code, seconds=seconds, log=str(log)))
+        if code:
+            raise RuntimeError('image fixture ' + phase + ' failed; never a behavioural mutant kill')
+        return log.read_text(encoding='utf-8', errors='replace').strip()
+    try:
+        command(['docker', 'build', '--target', 'production', '--build-arg', 'VCS_REF=' + head, '-t', image_tag, 'api'], 'build', 900)
+        image = command(['docker', 'image', 'inspect', image_tag, '--format', '{{.Id}}'], 'identity')
+        if not image.startswith('sha256:'):
+            raise RuntimeError('no immutable image identity')
+        result = dict(kind='image', image=image, head_sha=head, cases=pg_cases + python_cases, setup=rows, killed=False)
+        verdicts = []
+        if pg_cases:
+            command(['docker', 'run', '-d', '--name', db, '--label', label, '--network', 'none', '--tmpfs', '/var/lib/postgresql/data',
+                     '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_DB=kin', 'postgres:16-alpine'], 'pg-start')
+            ready = False
+            for attempt in range(90):
+                checked = subprocess.run(['docker', 'exec', db, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres'], capture_output=True, timeout=15)
+                if checked.returncode == 0:
+                    ready = True
+                    break
+                time.sleep(1)
+            if not ready:
+                raise RuntimeError('isolated PG did not start')
+            command([sys.executable, '-c', 'import sys;sys.path.insert(0,"tests");from ops_product_transfer_fixture import provision;provision(sys.argv[1])', db], 'provision')
+            command(['docker', 'run', '--rm', '--network', 'container:' + db, '-e', 'DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin', image,
+                     'sh', '/app/start-production.sh', 'migrate'], 'migrate')
+            children = logs / 'children'
+            children.mkdir(mode=0o777)
+            children.chmod(0o777)
+            # P05 and P06 share prior state; an explicit complete baseline remains independent of mutation selection.
+            selected = [case.split(':', 1)[1] for case in pg_cases]
+            pattern = '^(' + '|'.join(['P00', *selected]) + ') '
+            log = logs / 'launcher.log'
+            code, seconds = run(['docker', 'run', '--rm', '--label', label, '--network', 'container:' + db, '--read-only', '--tmpfs', '/tmp:rw,size=64m',
+                '-e', 'KIN_EMR_B2_RUNTIME_URL=postgresql://kin_runtime@127.0.0.1:5432/kin', '-e', 'KIN_EMR_B2_INSTALLER_URL=postgresql://postgres@127.0.0.1:5432/kin',
+                '-e', 'KIN_EMR_B2_KEEP_RUNS=1', '-e', 'TMPDIR=/evidence', '--mount', 'type=bind,source=' + str(children) + ',target=/evidence',
+                '--mount', 'type=bind,source=' + str(copy / 'tests') + ',target=/tests,readonly', '--entrypoint', 'node', image,
+                '--max-old-space-size=3072', '--test', '--test-concurrency=1', '--test-reporter=tap', '--test-name-pattern=' + pattern,
+                '/tests/emr/b/startup_pg_test.cjs'], cwd=copy, env=env, timeout=900, log=log)
+            # Exact synthetic artifact directory created above, never a source/product volume.
+            command(['docker', 'run', '--rm', '--user', '0', '--network', 'none', '--mount', 'type=bind,source=' + str(children) + ',target=/evidence',
+                     '--entrypoint', 'chown', image, '-R', str(os.getuid()) + ':' + str(os.getgid()), '/evidence'], 'artifact-owner')
+            text = log.read_text(encoding='utf-8', errors='replace')
+            verdict = contract_verdict(text, selected, code)
+            verdicts.append(dict(kind='pg', exit=code, seconds=seconds, log=str(log), complete=pg_passes(text, ['P00', *selected], code), **verdict))
+        if python_cases:
+            verdicts.append(unittest_kills(copy, python_cases, logs, name, {**env, 'KIN_TEST_API_IMAGE': image}))
+        result['runs'] = verdicts
+        result['killed'] = bool(verdicts) and all(row['killed'] for row in verdicts)
+        result['baseline_passed'] = bool(verdicts) and all(row['exit'] == 0 and row.get('complete', True) for row in verdicts)
+        return result
+    finally:
+        # Names and labels are generated for this call; never enumerate/delete other fixtures.
+        found = subprocess.run(['docker', 'inspect', '--format', '{{index .Config.Labels "kin.emrb.r2"}}', db], capture_output=True, text=True)
+        if found.returncode == 0 and found.stdout.strip() == token:
+            subprocess.run(['docker', 'rm', '-f', db], capture_output=True)
+        subprocess.run(['docker', 'image', 'rm', image_tag], capture_output=True)
 
 
 def invariant_witness(copy, out, name, env):
@@ -587,6 +851,7 @@ def main(argv=None):
     parser.add_argument("--only", help="comma-separated mutant IDs")
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--source-manifest", type=Path, help="hash-bound LF source inventory for an isolated Linux copy")
+    parser.add_argument("--baseline-cases", help="explicit local contract baseline IDs; requires --contract-only and --only; default remains complete")
     parser.add_argument("--contract-only", action="store_true", help="run contract kill cases only (live ones are reported not_run)")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -597,6 +862,11 @@ def main(argv=None):
     if set(declared) != set(MUTANTS):
         raise SystemExit("declared mutants differ from this driver: %s" % sorted(set(declared) ^ set(MUTANTS)))
     chosen = [m for m in declared if not args.only or m in args.only.split(",")]
+    if args.baseline_cases and (not args.contract_only or not args.only):
+        parser.error("a partial local baseline requires --contract-only and --only")
+    baseline_cases = set(args.baseline_cases.split(",")) if args.baseline_cases else None
+    if baseline_cases and any(case.startswith("C") and case not in baseline_cases for name in chosen for case in declared[name]["kill"]):
+        parser.error("every selected contract kill case must be in the explicit baseline")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "KIN_EMR_PYTHON": os.environ.get("KIN_EMR_PYTHON", sys.executable), "PYTHONIOENCODING": "utf-8"}
@@ -609,15 +879,23 @@ def main(argv=None):
             shutil.copyfile(copy / "mutant-inputs.json", out / "mutant-inputs.json")
         try:
             baseline_log = out / "baseline-contract.log"
-            baseline_code, baseline_seconds = run(["node", "--test", "--test-reporter=tap", "tests/emr/b/contract_test.cjs"],
+            baseline_code, baseline_seconds = run(["node", "--max-old-space-size=3072", "--test", "--test-concurrency=1", "--test-reporter=tap", *(["--test-name-pattern=^("+"|".join(sorted(baseline_cases))+") "] if baseline_cases else []), "tests/emr/b/contract_test.cjs"],
                 cwd=copy, env=env, timeout=900, log=baseline_log)
             expected_cases = json.loads(DECLARATION.read_text(encoding="utf-8"))["cases"]["contract"]["B1"]
-            expected_ids = {case.split()[0] for case in expected_cases}
+            expected_ids = baseline_cases or {case.split()[0] for case in expected_cases}
             passed = re.findall(r"^ok \d+ - (C\d+) ", baseline_log.read_text(encoding="utf-8", errors="replace"), re.M)
-            baseline = dict(exit=baseline_code, seconds=baseline_seconds, passed=passed, expected=sorted(expected_ids))
+            baseline = dict(selection="explicit local subset" if baseline_cases else "complete", exit=baseline_code, seconds=baseline_seconds, passed=passed, expected=sorted(expected_ids))
             (out / "baseline.json").write_text(json.dumps(baseline, indent=2), encoding="utf-8")
             if baseline_code or len(passed) != len(expected_ids) or set(passed) != expected_ids:
                 raise RuntimeError("unmutated copy did not pass its complete contract selection; no mutant verdict is valid")
+            image_cases = [case for name in chosen for case in declared[name]['kill'] if case.startswith('G:') or ':ProbeContainerTests.' in case]
+            if image_cases and not args.contract_only:
+                pg = ['G:P' + str(n).zfill(2) for n in range(1, 13)] if any(case.startswith('G:') for case in image_cases) else []
+                py = sorted({case for case in image_cases if case.startswith('P:')})
+                baseline_image = image_kills(copy, pg, py, out, 'baseline', head, env)
+                (out / 'baseline-image.json').write_text(json.dumps(baseline_image, indent=2), encoding='utf-8')
+                if not baseline_image['baseline_passed']:
+                    raise RuntimeError('unmutated image did not pass; no image mutant verdict is valid')
             for name in chosen:
                 expected, changes = MUTANTS[name]
                 kill = declared[name]["kill"]
@@ -629,6 +907,16 @@ def main(argv=None):
                     contract = [case for case in kill if case.startswith("C")]
                     live = [case for case in kill if case.startswith("L")]
                     python = [case for case in kill if case.startswith("P:")]
+                    pg = [case for case in kill if case.startswith("G:")]
+                    image_python = [case for case in python if ':ProbeContainerTests.' in case]
+                    python = [case for case in python if case not in image_python]
+                    if len(contract) + len(live) + len(python) + len(pg) + len(image_python) != len(kill):
+                        raise RuntimeError('unknown mutant kill selection')
+                    if pg or image_python:
+                        if args.contract_only:
+                            runs.append(dict(kind='image', cases=pg + image_python, killed=None, status='not_run', reason='--contract-only'))
+                        else:
+                            runs.append(image_kills(copy, pg, image_python, out, name, head, env))
                     if contract:
                         runs.append(contract_kills(copy, contract, out, name, env))
                     if python:
@@ -643,7 +931,7 @@ def main(argv=None):
                 finally:
                     restore(copy, applied)
                 row["files"] = applied
-                row["killed"] = all(r["killed"] for r in row["runs"]) if all(r["killed"] is not None for r in row["runs"]) else None
+                row["killed"] = bool(row["runs"]) and all(r["killed"] for r in row["runs"]) if all(r["killed"] is not None for r in row["runs"]) else None
                 rows.append(row)
                 (out / "mutants.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
                 print("MUTANT %s killed=%s %s" % (name, row["killed"], json.dumps([(r["kind"], r.get("exit"), r.get("failed")) for r in row["runs"]])), flush=True)

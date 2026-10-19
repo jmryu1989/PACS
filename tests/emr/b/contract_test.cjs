@@ -23,6 +23,7 @@ if (process.argv.includes('--emr-b-live')) {
   liveDriver().then(send, error => send({ error: errorCode(error), name: error?.name ?? null, problems: error?.problems ?? null }));
 } else {
   contractSuite();
+  boundarySuite();
 }
 
 function seedIntents(journal, values) {
@@ -2110,7 +2111,8 @@ function contractSuite() {
       }
       const event = provideEvent(A);
       const receipt = await work.append(event);
-      assert.deepEqual([calls[0][0], calls[0][1], calls[0][2][0] === event], ['append', true, true]);
+      assert.equal(calls[0][0], 'withAppendTransaction');
+      assert.equal(calls.find(c => c[0] === 'appendInTransaction')[2][1], event);
       assert.equal(w.ledger.entries.filter(e => e.eventId === event.eventId).length, 1, 'the fact is in the ledger');
       assert.deepEqual(await w.store.append(structuredClone(event)), receipt, 'the store replays the same receipt');
       // (the store's own append also goes through withAppendTransaction: only the calls the port makes are judged below)
@@ -2120,9 +2122,9 @@ function contractSuite() {
       const before = calls.length;
       const appended = await work.transaction(run);
       const made = calls.slice(before);
-      assert.deepEqual(made.filter(c => c[0] === 'withAppendTransaction').map(c => [c[1], c[2][0] === run]), [[true, true]], 'the port passes the caller\'s callback to the one store');
+      assert.equal(made.filter(c => c[0] === 'withAppendTransaction').length, 1, 'one admitted business transaction');
       const inner = made.find(c => c[0] === 'appendInTransaction');
-      assert.deepEqual([inner[1], inner[2][0] === seenTx, inner[2][1] === business], [true, true, true]);
+      assert.deepEqual([inner[1], inner[2][0] !== seenTx, inner[2][1] === business], [true, true, true], 'the consumer token is never the raw store transaction');
       const confirmed = await work.confirm(appended);
       assert.equal(calls.slice(before).find(c => c[0] === 'confirm')[2][0], appended);
       assert.equal(confirmed.eventId, business.eventId);
@@ -2132,7 +2134,7 @@ function contractSuite() {
       await rejects(work.transaction(async tx => { failedTx = tx; await work.appendInTransaction(tx, failing); throw new Error('synthetic-business-failure'); }), 'synthetic-business-failure');
       const beforeSettle = calls.length;
       await work.settleTransaction(failedTx, failing, new Error('synthetic-business-failure'), true);
-      assert.equal(calls.slice(beforeSettle).find(c => c[0] === 'settleTransaction')[2][0], failedTx);
+      assert.equal(calls.slice(beforeSettle).find(c => c[0] === 'settleTransaction')[2][0], calls.filter(c => c[0] === 'appendInTransaction').at(-1)[2][0], 'settle uses the same underlying transaction as append');
       assert.equal(w.ledger.entries.some(e => e.eventId === failing.eventId), false, 'a rolled-back fact is not in the ledger');
       assert(w.journal.all().some(r => r.kind === 'append-rolled-back'), 'the rollback is journaled');
       const snapshot = await work.transaction(tx => work.snapshot(tx, CTX.transactionScope(), { accessEventIds: [event.eventId] }));
@@ -2294,4 +2296,405 @@ function contractSuite() {
       assert(judge(evidence('twice', 0, tap([...ids, ids[0]]))).problems.some(p => p.startsWith('case-not-passed-once')));
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   });
+}
+
+function boundarySuite() {
+'use strict';
+// REQ-B2R-01..07 -> RISK-B2R-LATE-RESOURCE/EARLY-DISPOSE/CAPABILITY-LEAK -> TEST-B2D-01..05.
+// Boundary oracles observe wire bytes, downstream entry, actual provider calls and transaction identity/lifetime.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const net = require('node:net');
+const { test } = require('node:test');
+if (!fs.existsSync('/app/dist/app.module.js')) require('../../service_test_loader.cjs');
+const load = name => require('/app/dist/' + name);
+const { createRecordPort } = load('emr-runtime/record-port');
+const { createNestLifecycle } = load('emr-runtime/nest-lifecycle');
+const { PrismaClient, Prisma } = require('/app/node_modules/@prisma/client');
+const { AccessLedgerStore } = load('emr-runtime/store');
+const startup = require('./startup_fixture.cjs');
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+const refused = (fn, code) => assert.throws(fn, error => error.code === code);
+const gone = ['_originalClient', '_engine', '$parent', '_appliedParent', '$connect', '$disconnect', '$transaction', '$extends', '$use', '$queryRaw', '$executeRaw', '$queryRawUnsafe', '$executeRawUnsafe', 'requestTransaction', 'recover', 'close'];
+
+test('C33 request admission rejects stopped pipelines before Nest while admitted responses drain in HTTP order', { timeout: 260000 }, async () => {
+  for (const mode of ['late', 'health', 'parser', 'partial', 'expect', 'both-before']) {
+    let socket, wire = '', sent = false, first = false;
+    const state = startup.stateDirectory('r2-admission');
+    const second = mode === 'health' ? 'GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n'
+      : mode === 'parser' ? 'POST /api/auth/callback HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n{'
+      : mode === 'expect' ? 'POST /syn-slow HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n'
+      : 'GET /syn-slow HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const result = await startup.run({ db: 'memory', state: 'inert', slowMillis: 350, observeAdmission: true }, {
+      env: startup.environment(state), timeoutMs: 40000, onEvent(event, child, events) {
+        if (event.what === 'listening') {
+          socket = net.connect(event.port, '127.0.0.1', () => socket.write('GET /syn-slow HTTP/1.1\r\nHost: localhost\r\n\r\n' + (mode === 'both-before' ? second : '')));
+          socket.on('data', data => { wire += data.toString(); }); socket.on('error', () => {});
+        }
+        if (event.what === 'slow-begin' && !first) {
+          first = true;
+          if (mode === 'partial') socket.write(second.slice(0, -2));
+          if (mode !== 'both-before') startup.stop(child);
+        }
+        if (mode === 'both-before' && events.filter(e => e.what === 'slow-begin').length === 2 && !sent) { sent = true; startup.stop(child); }
+        if (event.what === 'owner-interrupt' && mode !== 'both-before') { sent = true; socket.write(mode === 'partial' ? '\r\n' : second); }
+      },
+    });
+    socket?.destroy();
+    assert.equal(result.timedOut, false, JSON.stringify({ mode, dir: result.dir, names: result.names }));
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(sent, true, mode);
+    const statuses = [...wire.matchAll(/HTTP\/1\.1 (\d+)/g)].map(match => Number(match[1]));
+    assert.deepEqual(statuses, mode === 'both-before' ? [200, 200] : [200, 503], mode + ': ' + wire);
+    const after = result.events.slice(result.names.indexOf('owner-interrupt') + 1);
+    assert.equal(after.filter(e => e.what === 'http-entry' || e.what === 'work-begun').length, 0, mode + ': no downstream entry');
+    if (mode !== 'both-before') { assert.match(wire, /Connection: close/i); assert.match(wire, /Cache-Control: no-store/i); }
+    console.log('B2D_ADMISSION_EVIDENCE ' + JSON.stringify({ mode, wire, raw: result.dir, signalMode: result.signalMode }));
+  }
+});
+
+test('C34 generated transaction projection hides real Prisma client delegate and promise capabilities', async () => {
+  const db = new PrismaClient({ datasources: { db: { url: 'postgresql://synthetic:synthetic@127.0.0.1:1/synthetic' } } });
+  const events = [];
+  db._engine.transaction = async action => { events.push(action); return { id: 'r2-synthetic', payload: {} }; };
+  db._engine.stop = async () => { events.push('disconnect'); };
+  db._executeRequest = async params => { events.push(params.model + ':' + params.action); return [{ id: 'synthetic' }]; };
+  const store = new AccessLedgerStore(db, {}, {}, {}, 6);
+  const { port, control } = createRecordPort(store), work = port.begin();
+  let token, saved;
+  await work.transaction(async tx => {
+    token = tx;
+    assert.equal(Object.getPrototypeOf(tx), null);
+    assert.equal(Object.isFrozen(tx), true);
+    assert.equal(Reflect.ownKeys(tx).length, Object.values(Prisma.ModelName).length);
+    assert.deepEqual(gone.filter(key => key in tx), []);
+    for (const delegate of Object.values(tx)) {
+      assert.equal(Object.getPrototypeOf(delegate), null); assert.equal(Object.isFrozen(delegate), true);
+      assert.deepEqual(gone.filter(key => key in delegate), []);
+      assert.equal(Reflect.ownKeys(delegate).some(key => typeof key === 'symbol'), false);
+    }
+    saved = tx.institution.findMany;
+    const query = saved({ select: { id: true } });
+    assert.equal(Object.getPrototypeOf(query), Promise.prototype);
+    assert.deepEqual(gone.filter(key => key in query), []);
+    assert.deepEqual(await query, [{ id: 'synthetic' }]);
+  });
+  refused(() => saved(), 'EmrRecordTransactionRefused');
+  refused(() => work.snapshot(token, {}, {}), 'EmrRecordTransactionRefused');
+  work.end(); control.close();
+  refused(() => saved(), 'EmrRecordWorkEnded');
+  assert.deepEqual(events, ['start', 'Institution:findMany', 'commit']);
+  assert.equal(control.live(), 0);
+});
+
+test('C35 operation leases retain drain through revocation queue waits and callback settlement', async () => {
+  const admitted = deferred(), queried = deferred();
+  let sql = 0, callbacks = 0, rawSeen, failedFlag;
+  const raw = { institution: { findMany: async () => { sql++; return queried.promise; } } };
+  const store = {
+    async withAppendTransaction(callback) { await admitted.promise; callbacks++; return callback(raw); },
+    async snapshot(tx) { rawSeen = tx; return {}; },
+    async settleTransaction(tx, _event, _error, flag) { rawSeen = tx; failedFlag = flag; },
+  };
+  const first = createRecordPort(store), work = first.port.begin();
+  const waiting = work.transaction(async tx => tx.institution.findMany());
+  work.end(); work.end(); first.control.close();
+  let drained = false; first.control.drained().then(() => { drained = true; });
+  await tick(); assert.equal(drained, false); assert.equal(first.control.live(), 1);
+  admitted.resolve(); await assert.rejects(waiting, { code: 'EmrRecordWorkEnded' });
+  await tick(); assert.equal(drained, true); assert.equal(sql, 0); assert.equal(callbacks, 1);
+
+  const second = createRecordPort(store), alive = second.port.begin(), other = second.port.begin();
+  let token, saved;
+  const started = deferred();
+  const transaction = alive.transaction(async tx => { token = tx; saved = tx.institution.findMany; const p = saved(); started.resolve(); return p; });
+  await started.promise;
+  refused(() => other.snapshot(token, {}, {}), 'EmrRecordTransactionRefused');
+  refused(() => first.port.begin(), 'EmrRecordPortClosed');
+  refused(() => alive.snapshot(raw, {}, {}), 'EmrRecordTransactionRefused');
+  refused(() => alive.snapshot({}, {}, {}), 'EmrRecordTransactionRefused');
+  other.end(); alive.end();
+  assert.equal(second.control.live(), 1);
+  queried.resolve([{ id: 'late' }]);
+  await assert.rejects(transaction, { code: 'EmrRecordWorkEnded' });
+  assert.equal(second.control.live(), 0);
+  refused(() => saved(), 'EmrRecordWorkEnded');
+
+  const third = createRecordPort(store), settlement = third.port.begin();
+  await settlement.transaction(async tx => { token = tx; await settlement.snapshot(tx, {}, {}); });
+  assert.equal(rawSeen, raw, 'named operations use the admitted raw transaction');
+  await settlement.settleTransaction(token, {}, Error('unknown commit'), true);
+  assert.equal(failedFlag, false, 'caller cannot claim a callback rollback');
+  await assert.rejects(settlement.transaction(async tx => { token = tx; throw Error('callback'); }), /callback/);
+  await settlement.settleTransaction(token, {}, Error('callback'), false);
+  assert.equal(failedFlag, true);
+  settlement.end();
+});
+
+test('C36 every Nest lifecycle stage joins rejecting and slow peers and invokes actual identities once', { timeout: 15000 }, async () => {
+  const { NestFactory } = require('/app/node_modules/@nestjs/core');
+  const { Module } = require('/app/node_modules/@nestjs/common');
+  const hooks = ['onModuleInit', 'onApplicationBootstrap', 'onModuleDestroy', 'beforeApplicationShutdown', 'onApplicationShutdown'];
+  for (const failure of [...hooks, 'dispose']) {
+    const trace = [], latch = new AbortController();
+    const shared = Object.fromEntries(hooks.map(hook => [hook, () => { trace.push('shared:' + hook); }]));
+    const slow = Object.fromEntries(hooks.map(hook => [hook, async () => {
+      trace.push('slow-start:' + hook); await new Promise(resolve => setTimeout(resolve, 15)); trace.push('slow-end:' + hook);
+      if (hook === failure) throw Error('slow rejection');
+    }]));
+    const fast = Object.fromEntries(hooks.map(hook => [hook, () => { trace.push('fast:' + hook); if (hook === failure) throw Error('fast rejection'); }]));
+    class Child {} Module({ providers: [{ provide: 'shared-child', useValue: shared }] })(Child);
+    class Root {} Module({ imports: [Child], providers: [{ provide: 'shared-a', useValue: shared }, { provide: 'shared-b', useValue: shared },
+      { provide: 'slow', useValue: slow }, { provide: 'fast', useValue: fast }] })(Root);
+    const app = await NestFactory.create(Root, { logger: false, abortOnError: false });
+    const lifecycle = createNestLifecycle(app, latch.signal);
+    const close = app.getHttpAdapter().close.bind(app.getHttpAdapter());
+    app.getHttpAdapter().close = async () => { trace.push('dispose'); await close(); if (failure === 'dispose') throw Error('dispose'); };
+    if (failure === 'onModuleInit' || failure === 'onApplicationBootstrap') {
+      await assert.rejects(app.init());
+      assert(trace.includes('slow-end:' + failure), 'rejected initialization has joined the slow acquisition');
+    }
+    else await app.init();
+    const promise = lifecycle.close('SIGTERM');
+    assert.equal(lifecycle.close('SIGINT'), promise);
+    if (failure === 'onModuleInit' || failure === 'onApplicationBootstrap') await promise;
+    else await assert.rejects(promise);
+    const expected = failure === 'onModuleInit' ? hooks.filter(hook => hook !== 'onApplicationBootstrap') : hooks;
+    for (const hook of expected) {
+      assert.equal(trace.filter(value => value === 'shared:' + hook).length, 1, failure + ':' + hook);
+      assert.equal(trace.filter(value => value === 'slow-end:' + hook).length, 1);
+    }
+    for (const [left, right] of [['onModuleDestroy', 'beforeApplicationShutdown'], ['beforeApplicationShutdown', 'onApplicationShutdown']]) {
+      assert(trace.indexOf('slow-end:' + left) < trace.indexOf('shared:' + right), failure + ': peer settlement before next stage');
+    }
+    assert.equal(trace.filter(value => value === 'dispose').length, 1);
+    assert.equal(lifecycle.accounting().some(stage => stage.status === 'running'), false);
+  }
+});
+
+test('C37 actual root construction acquires no provider resources on success or genuine dependent factory rejection', { timeout: 20000 }, async () => {
+  const { NestFactory } = require('/app/node_modules/@nestjs/core');
+  const { Module } = require('/app/node_modules/@nestjs/common');
+  Object.assign(process.env, startup.environment(startup.stateDirectory('construction')));
+  const { PrismaService } = load('prisma.service');
+  const restore = [], attempts = [];
+  function sentinel(object, key) {
+    const original = object[key];
+    if (typeof original !== 'function') return;
+    object[key] = function () { attempts.push(key); throw Error('ConstructionAcquisitionRefused:' + key); };
+    restore.push(() => { object[key] = original; });
+  }
+  // Import-time and delegated calls are additionally inventoried with the installed TS parser; sentinels run over
+  // actual constructors/factories, including queued microtasks. Module source reads themselves are not acquisitions.
+  sentinel(PrismaService.prototype, '$connect');
+  for (const key of ['connect', 'createConnection']) sentinel(net, key);
+  for (const key of ['setInterval', 'setTimeout', 'fetch']) sentinel(globalThis, key);
+  for (const key of ['open', 'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'createWriteStream']) sentinel(fs, key);
+  const open = fs.openSync;
+  fs.openSync = function (file, flags, ...args) {
+    // Source loading is part of the test transpiler, not a provider-owned handle. The AST audit separately covers imports.
+    if (flags === 'r' && /\.(?:ts|js|json|cjs)$/.test(String(file))) return open.call(this, file, flags, ...args);
+    attempts.push('openSync'); throw Error('ConstructionAcquisitionRefused:openSync');
+  };
+  restore.push(() => { fs.openSync = open; });
+  for (const key of ['open', 'writeFile', 'appendFile']) sentinel(fs.promises, key);
+  for (const key of ['spawn', 'exec', 'execFile', 'fork']) sentinel(require('node:child_process'), key);
+  sentinel(require('node:worker_threads'), 'Worker');
+  for (const key of ['on', 'once', 'addListener']) sentinel(process, key);
+  let successful, constructionFailure;
+  try {
+    const { AppModule } = load('app.module');
+    const { AuthService } = load('auth.service');
+    const { PacsService } = load('pacs.service');
+    const { OrthancService } = load('orthanc.service');
+    const { ManualSrService } = load('manual-sr.service');
+    const port = Object.freeze({ begin() { throw Error('not admitted during construction'); } });
+    successful = await NestFactory.create(AppModule.forLaunch(port), { logger: false, abortOnError: false });
+    const root = AppModule.forLaunch(port);
+    root.providers.push({ provide: 'construction-failure', inject: [PrismaService, AuthService, PacsService, OrthancService, ManualSrService],
+      useFactory: (...providers) => { assert.equal(providers.length, 5); throw Error('dependent factory rejected'); } });
+    await assert.rejects(NestFactory.create(root, { logger: false, abortOnError: false }), /dependent factory rejected/);
+    await tick(); await tick();
+    assert.deepEqual(attempts, []);
+    // Executed negative controls attempt acquisition without actually leaving a resource behind.
+    for (const acquire of [() => setInterval(() => {}, 1), () => new PrismaService().$connect(), () => net.connect(1),
+      () => fs.openSync('synthetic', 'w'), () => new (require('node:worker_threads').Worker)('synthetic'),
+      () => process.on('synthetic', () => {})]) assert.throws(acquire, /ConstructionAcquisitionRefused/);
+    await assert.rejects(Promise.resolve().then(() => setTimeout(() => {}, 1)), /ConstructionAcquisitionRefused/);
+  } catch (error) { constructionFailure = error; }
+  finally { for (const undo of restore.reverse()) undo(); }
+  assert.equal(constructionFailure?.message, undefined, 'actual construction closure must be resource-free');
+  // No initialization occurred, but the successfully returned app is owned and can be disposed by the adapter.
+  await createNestLifecycle(successful, new AbortController().signal).close();
+});
+
+test('C38 launcher joins lifecycle peers before ledger release and bounds a hung stage once', { timeout: 240000 }, async () => {
+  for (const hook of ['onModuleInit', 'onApplicationBootstrap', 'onModuleDestroy', 'beforeApplicationShutdown', 'onApplicationShutdown']) {
+    const result = await startup.run({ db: 'memory', state: 'inert', lifecycleStage: hook }, {
+      env: startup.environment(startup.stateDirectory('lifecycle')), timeoutMs: 40000,
+      onEvent(event, child) { if (event.what === 'listening') startup.stop(child); },
+    });
+    assert.equal(result.code, 1, result.stderr);
+    assert.equal(result.timedOut, false);
+    const completed = result.events.findIndex(event => event.what === 'peer-end' && event.hook === hook);
+    assert(completed >= 0 && completed < result.names.indexOf('disconnect'), hook + ': ledger after peer');
+    assert.equal(result.names.filter(name => name === 'disconnect').length, 1);
+    assert.equal(result.names.filter(name => name === 'prisma-shutdown').length, 1);
+    if (hook === 'onModuleInit' || hook === 'onApplicationBootstrap') assert(!result.names.includes('bind'));
+  }
+  const result = await startup.run({ db: 'memory', state: 'inert', lifecycleStage: 'onModuleDestroy', hungHook: true, disconnect: 'hang' }, {
+    env: startup.environment(startup.stateDirectory('hung')), timeoutMs: 40000,
+    onEvent(event, child) { if (event.what === 'listening') { startup.stop(child); startup.stop(child, 'SIGINT'); } },
+  });
+  assert.equal(result.code, 1);
+  assert.equal(result.stderrLines.length, 1, result.stderr);
+  assert.match(result.stderr, /종료 실패\(app\)/);
+  const stopped = result.events.find(event => event.what === 'owner-interrupt').at;
+  const disconnect = result.events.find(event => event.what === 'disconnect').at;
+  assert(disconnect - stopped >= 4900 && disconnect - stopped < 6500, 'one shared fatal cleanup deadline');
+  assert(result.events.find(event => event.what === 'exit').at - stopped < 6500, 'ledger wait cannot renew the expired fatal budget');
+  assert.equal(result.names.filter(name => name === 'disconnect').length, 1);
+  const accounting = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('[KIN API] lifecycle accounting: ')).slice('[KIN API] lifecycle accounting: '.length));
+  assert.equal(accounting.find(stage => stage.stage === 'onModuleDestroy').status, 'running');
+  for (const stage of ['beforeApplicationShutdown', 'dispose', 'onApplicationShutdown']) assert.equal(accounting.find(row => row.stage === stage).status, 'not-started');
+});
+
+test('C39 Nest scope eligibility includes static transients module hooks and initialized middleware and excludes request trees', async () => {
+  const { Module, Injectable, Inject, Scope } = require('/app/node_modules/@nestjs/common');
+  const { NestFactory } = require('/app/node_modules/@nestjs/core');
+  const events = [];
+  let identity = 0;
+  class Transient { constructor() { this.id = ++identity; } onModuleDestroy() { events.push('transient-' + this.id); } }
+  Injectable({ scope: Scope.TRANSIENT })(Transient);
+  class Request { onModuleDestroy() { events.push('request'); } }
+  Injectable({ scope: Scope.REQUEST })(Request);
+  class A { constructor(dependency) { this.dependency = dependency; } onModuleDestroy() { events.push('a'); } }
+  Inject(Transient)(A, undefined, 0); Injectable()(A);
+  class B { constructor(dependency) { this.dependency = dependency; } onModuleDestroy() { events.push('b'); } }
+  Inject(Transient)(B, undefined, 0); Injectable()(B);
+  class Scoped { constructor(dependency) { this.dependency = dependency; } onModuleDestroy() { events.push('request-tree'); } }
+  Inject(Request)(Scoped, undefined, 0); Injectable()(Scoped);
+  class Middleware { use(_req, _res, next) { next(); } onModuleDestroy() { events.push('middleware'); } }
+  Injectable()(Middleware);
+  class Root {
+    configure(consumer) { consumer.apply(Middleware).forRoutes('*'); }
+    onModuleDestroy() { events.push('module'); }
+  }
+  Module({ providers: [Transient, Request, A, B, Scoped] })(Root);
+  const app = await NestFactory.create(Root, { logger: false, abortOnError: false });
+  const lifecycle = createNestLifecycle(app, new AbortController().signal);
+  await app.init(); await app.resolve(Scoped);
+  const transientIds = [app.get(A).dependency.id, app.get(B).dependency.id];
+  assert.equal(new Set(transientIds).size, 2);
+  await lifecycle.close();
+  assert.deepEqual(events.filter(value => value.startsWith('transient-')).sort(), transientIds.map(id => 'transient-' + id).sort());
+  assert.equal(events.filter(value => value === 'middleware').length, 1);
+  assert.equal(events.filter(value => value === 'module').length, 1);
+  assert(!events.includes('request') && !events.includes('request-tree'));
+  assert.equal(events.at(-1), 'module', 'module runs after its eligible provider batches');
+});
+
+test('C40 incomplete headers and an admitted response beyond grace are force closed without late Nest entry', { timeout: 50000 }, async () => {
+  const sockets = [], state = startup.stateDirectory('http-deadline');
+  let second, wire = '', finished = 0, stoppedAt, lastClosed;
+  const closedSocket = () => { finished++; lastClosed = Date.now(); };
+  const result = await startup.run({ db: 'memory', state: 'inert', observeAdmission: true, slowMillis: 20000, slowDestroy: 2000 }, {
+    env: startup.environment(state), timeoutMs: 40000,
+    onEvent(event, child) {
+      if (event.what === 'listening') {
+        const incomplete = net.connect(event.port, '127.0.0.1', () => incomplete.write('GET /never HTTP/1.1\r\nHost:'));
+        incomplete.on('close', closedSocket); incomplete.on('error', () => {}); sockets.push(incomplete);
+        second = net.connect(event.port, '127.0.0.1', () => second.write('GET /syn-slow HTTP/1.1\r\nHost: localhost\r\n\r\n'));
+        second.on('data', bytes => { wire += bytes; }); second.on('close', closedSocket); second.on('error', () => {}); sockets.push(second);
+      }
+      if (event.what === 'slow-begin') startup.stop(child);
+      if (event.what === 'owner-interrupt') { stoppedAt = Date.now(); second.write('GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n'); }
+    },
+  });
+  await tick(); for (const socket of sockets) socket.destroy();
+  assert.equal(result.code, 1, result.stderr); assert.equal(result.timedOut, false);
+  assert.equal(result.stderrLines.length, 1); assert.match(result.stderr, /종료 실패\(drain\)/);
+  assert.equal(finished, 2, 'all sockets including incomplete headers close at the bound');
+  assert(lastClosed - stoppedAt < 11500, 'socket deadline does not wait for provider cleanup or process exit');
+  assert.equal(wire, '', 'blocked pipeline cannot promise a delivered 503');
+  assert.equal(result.events.slice(result.names.indexOf('owner-interrupt') + 1).filter(event => event.what === 'http-entry').length, 0);
+});
+
+test('C41 every started operation retains its lease and callback settlement joins unawaited queries', async () => {
+  for (const operation of ['append', 'confirm', 'appendInTransaction']) {
+    const started = deferred(), completed = deferred();
+    let confirmed = 0;
+    const raw = {};
+    const store = {
+      async withAppendTransaction(callback) { return callback(raw); },
+      async appendInTransaction(tx) { assert.equal(tx, raw); started.resolve(); return completed.promise; },
+      async confirm() { confirmed++; started.resolve(); return completed.promise; },
+      async settleTransaction() {},
+    };
+    const { port, control } = createRecordPort(store), work = port.begin();
+    const pending = operation === 'appendInTransaction'
+      ? work.transaction(tx => work.appendInTransaction(tx, {})) : work[operation]({});
+    await started.promise; work.end(); work.end(); control.close();
+    let drained = false; control.drained().then(() => { drained = true; });
+    await tick(); assert.equal(drained, false, operation); assert.equal(control.live(), 1);
+    completed.resolve({ eventId: 'synthetic' });
+    await assert.rejects(pending, { code: 'EmrRecordWorkEnded' });
+    await control.drained(); assert.equal(control.live(), 0);
+    if (operation === 'append') assert.equal(confirmed, 0, 'revoked standalone append cannot start confirmation');
+  }
+  for (const fails of [false, true]) {
+    const queryDone = deferred(), started = deferred();
+    let rawReturned = false, token;
+    const raw = { institution: { findMany: async () => { started.resolve(); return queryDone.promise; } } };
+    const store = { async withAppendTransaction(callback) { try { return await callback(raw); } finally { rawReturned = true; } } };
+    const { port, control } = createRecordPort(store), work = port.begin();
+    const transaction = work.transaction(async tx => { token = tx; void tx.institution.findMany(); if (fails) throw Error('callback refused'); });
+    await started.promise; await tick();
+    assert.equal(rawReturned, false, 'callback cannot leave a started unawaited query behind');
+    refused(() => token.institution.findMany(), 'EmrRecordTransactionRefused');
+    work.end(); assert.equal(control.live(), 1);
+    queryDone.resolve([]);
+    await assert.rejects(transaction);
+    assert.equal(rawReturned, true); assert.equal(control.live(), 0);
+  }
+});
+
+test('C42 raw admission owns expectation and unsupported transports and rejects a preconnected request after stop', async () => {
+  const http = require('node:http'), { once } = require('node:events');
+  const { installHttpAdmission } = load('emr-runtime/http-admission');
+  const latch = new AbortController(), entries = [];
+  const server = http.createServer((request, response) => { entries.push(request.url); response.setHeader('Connection', 'close'); response.end('admitted'); });
+  const admission = installHttpAdmission(server, latch.signal);
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const exchange = async (bytes, connected) => {
+    const socket = net.connect(server.address().port, '127.0.0.1'); let wire = '';
+    socket.on('data', chunk => { wire += chunk.toString(); });
+    socket.on('error', () => {});
+    const closed = new Promise(resolve => socket.once('close', resolve));
+    await once(socket, 'connect');
+    if (connected) connected();
+    socket.end(bytes); await closed; return wire;
+  };
+  try {
+    admission.verifyOwnership();
+    const continued = await exchange('POST /continue HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\nx');
+    assert.deepEqual([...continued.matchAll(/HTTP\/1\.1 (\d+)/g)].map(m => Number(m[1])), [100, 200]);
+    assert.deepEqual(entries, ['/continue']);
+    assert.match(await exchange('POST /expect HTTP/1.1\r\nHost: localhost\r\nExpect: unsupported\r\nContent-Length: 0\r\n\r\n'), /HTTP\/1\.1 417/);
+    assert.equal(await exchange('GET /upgrade HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: synthetic\r\n\r\n'), '');
+    assert.equal(await exchange('CONNECT localhost:1234 HTTP/1.1\r\nHost: localhost\r\n\r\n'), '');
+    const stopped = await exchange('GET /fresh HTTP/1.1\r\nHost: localhost\r\n\r\n', () => latch.abort());
+    assert.match(stopped, /HTTP\/1\.1 503/); assert.match(stopped, /Connection: close/i); assert.match(stopped, /Cache-Control: no-store/i);
+    assert.deepEqual(entries, ['/continue']);
+    for (const event of ['request', 'checkContinue', 'checkExpectation', 'upgrade', 'connect']) {
+      const foreign = () => {}; server.on(event, foreign);
+      refused(() => admission.verifyOwnership(), 'EmrHttpOwnershipRefused'); server.removeListener(event, foreign);
+    }
+    const duplicate = http.createServer(() => {}); duplicate.on('request', () => {});
+    refused(() => installHttpAdmission(duplicate, latch.signal), 'EmrHttpOwnershipRefused');
+  } finally { admission.destroyAll(); await new Promise(resolve => server.close(resolve)); }
+});
+
 }

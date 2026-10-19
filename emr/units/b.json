@@ -118,7 +118,11 @@
       "tests/emr/b/startup_fixture.cjs",
       "tests/emr/b/startup_pg_test.cjs",
       "tests/emr/b/record_port_typecheck/forbidden.ts",
-      "tests/emr/b/record_port_typecheck/allowed.ts"
+      "tests/emr/b/record_port_typecheck/allowed.ts",
+      "api/src/emr-runtime/http-admission.ts",
+      "api/src/emr-runtime/transaction-port.ts",
+      "api/src/emr-runtime/nest-lifecycle.ts",
+      "tests/emr/b/construction_inventory.cjs"
     ]
   },
   "models": {
@@ -432,6 +436,36 @@
       "req": "REQ-D1006",
       "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/RECEIPT-DELAY/HOST-OFFSET",
       "test": "noninferiority_test performance_test: latency FAIL iff R>1.25 AND D>5ms, D=median of signed paired candidate_p95-baseline_p95 differences; live R=geometric mean of paired block-p95 ratios, modeled R=ratio of block-p95 medians; equality, 9->14ms accepted blind spot, mixed signed pairs, invalid pairs, request failures, JIT-class controls, MP02/MP03 consumer; L03 L03b L03c M36 PLAN-02 PLAN-03 and structural blockers retained; D961/D970 live acceptance binding, hosted fixed cost offset cause undetermined, 5ms chosen gross-only tolerance not verified noise bound"
+    },
+    {
+      "req": "REQ-B2R-03/04",
+      "risk": "RISK-B2R-LATE-LISTEN/EARLY-DISPOSE",
+      "test": "TEST-B2D-01: C27 C31 C33 C40; R2-M01..03; raw HTTP listener admission and all-socket deadline; C42 expectation/unsupported transport/ownership/preconnected latch controls"
+    },
+    {
+      "req": "REQ-B2R-06/07",
+      "risk": "RISK-B2R-CAPABILITY-LEAK/LEDGER-REGRESSION",
+      "test": "TEST-B2D-02: C32 C34 C35 C41 P07..P12; R2-M04..07; generated model projection, native promises, per-work leases and tokens"
+    },
+    {
+      "req": "REQ-B2R-01/02/04",
+      "risk": "RISK-B2R-LATE-RESOURCE/SPLIT-OWNER/EARLY-DISPOSE",
+      "test": "TEST-B2D-03/04: C30 C36 C38 C39; R2-M08..13/16; allSettled Nest 10.4.22 stages, actual-instance once and shared 5-second cleanup"
+    },
+    {
+      "req": "REQ-B2R-01/02",
+      "risk": "RISK-B2R-LATE-RESOURCE",
+      "test": "TEST-B2D-05: C37, construction_inventory.cjs and delegated-callee audit; R2-M14/15 variants; actual root success/reject construction closure"
+    },
+    {
+      "req": "REQ-B2R-05/07/11",
+      "risk": "RISK-B2R-DUAL-WRITER/LEDGER-REGRESSION/UNBOUND-EVIDENCE",
+      "test": "TEST-B2D-06: declared launcher P00..P12; R2-M17..20; final-image Linux/PG NOT COMPLETED until hosted runtime and mutant artifacts"
+    },
+    {
+      "req": "REQ-B2R-09/11",
+      "risk": "RISK-B2R-OPS-HANDOVER/UNBOUND-EVIDENCE",
+      "test": "TEST-B2D-07: declared handover cases 05/06 and ProbeSelectionTests; R2-M21..24; immutable-image handover and mounted-source/restored-copy proof NOT COMPLETED until hosted runtime; production OPS_INTRO excluded"
     }
   ],
   "cases": {
@@ -464,10 +498,20 @@
         "C27 a stop while serving (TEST-B2R-04): new admission is refused at once, the requests in flight and the recording work they begin - also after their response finished - drain before the hooks run and the client is released once; exceeding the 10 s drain grace or the 5 s cleanup bound ends the process nonzero with one closed line",
         "C28 every start-up phase that fails ends the process with one closed line and no listener, timer, buffered log or secret",
         "C29 the start is locked before its first await: a concurrent, repeated, post-failure or post-stop start of the owner and a second launch of the process are refused; nothing is composed or recovered twice",
-        "C30 one stop latch for every start wait (TEST-B2R-02): SIGTERM, SIGINT, a repeated signal, a step that fails after the stop and a release in the same turn as the signal, crossed with connect, role, recovery, the owner's ready, create, init and listen while a co-provider destroy hook awaits - no phase follows the stop, a late application is closed once, the client is released once, the process ends by itself",
+        "C30 one stop latch for every start wait (TEST-B2R-02): SIGTERM, SIGINT, a repeated signal, a step that fails after the stop and a release in the same turn as the signal, crossed with connect, role, recovery, the owner's ready, create, init (with begun recording work) and listen while a co-provider destroy hook awaits - no phase follows the stop, begun work is drained before the close, a late application is closed once, the client is released once, the process ends by itself",
         "C31 the listener is acquired with the latch (TEST-B2R-03): a stop while the bind is pending leaves no listener, no success log and no answered request, the start promise settles, the error listener is removed and the cleanup runs; the same delay without a stop serves",
         "C32 the record port (TEST-B2R-06/07): a typed consumer cannot reach the store, client, seal, journal, coordinator, recovery, start or close - the compiler refuses it and the runtime objects have no such property; its operations are the one store's own; new work is refused once closed and after its end; the begun work drains",
-        "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
+        "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused",
+        "C33 request admission rejects stopped pipelines before Nest while admitted responses drain in HTTP order",
+        "C34 generated transaction projection hides real Prisma client delegate and promise capabilities",
+        "C35 operation leases retain drain through revocation queue waits and callback settlement",
+        "C36 every Nest lifecycle stage joins rejecting and slow peers and invokes actual identities once",
+        "C37 actual root construction acquires no provider resources on success or genuine dependent factory rejection",
+        "C38 launcher joins lifecycle peers before ledger release and bounds a hung stage once",
+        "C39 Nest scope eligibility includes static transients module hooks and initialized middleware and excludes request trees",
+        "C40 incomplete headers and an admitted response beyond grace are force closed without late Nest entry",
+        "C41 every started operation retains its lease and callback settlement joins unawaited queries",
+        "C42 raw admission owns expectation and unsupported transports and rejects a preconnected request after stop"
       ]
     },
     "live": {
@@ -495,12 +539,37 @@
         "test_b18_external_expiry_proof_and_torn_journal_restarts",
         "test_b19_backup_rehearsal_preserves_database_and_external_state"
       ]
+    },
+    "launcher": {
+      "file": "tests/emr/b/startup_pg_test.cjs",
+      "B1": [
+        "P00 required Linux runtime and installer URLs",
+        "P01 start serve second-owner refusal and drain",
+        "P02 same-state API restart",
+        "P03 installer-role refusal",
+        "P04 stop during recovery",
+        "P05 real recording work drain and fence",
+        "P06 drain deadline and uncommitted recovery",
+        "P07 reserve before COMMIT kill",
+        "P08 actual COMMIT before seal kill",
+        "P09 successful COMMIT lost acknowledgement",
+        "P10 backend terminated at COMMIT and unavailable verification",
+        "P11 viewing sealed history outstanding",
+        "P12 receipt complete HTTP acknowledgement withheld"
+      ]
+    },
+    "handover": {
+      "file": "tests/ops_emr_probe_test.py",
+      "B1": [
+        "ProbeContainerTests.test_05_probe_appends_as_sole_owner_and_observes_after_the_api_owner_restart",
+        "ProbeContainerTests.test_06_restore_guard_refuses_running_source_and_recovers_only_paired_copy"
+      ]
     }
   },
   "expected": {
-    "contract": 30,
+    "contract": 40,
     "live": 13,
-    "mutants": 64,
+    "mutants": 103,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -967,6 +1036,280 @@
         "C27"
       ],
       "behaviour": "SRB2D-1: begun recording work drains only while serving"
+    },
+    {
+      "id": "R2-M01",
+      "kill": [
+        "C33"
+      ],
+      "behaviour": "late request enters downstream without a per-request stop check"
+    },
+    {
+      "id": "R2-M02",
+      "kill": [
+        "C33"
+      ],
+      "behaviour": "an observer gate does not cancel the downstream listener"
+    },
+    {
+      "id": "R2-M03",
+      "kill": [
+        "C33"
+      ],
+      "behaviour": "immediate destruction cuts an admitted response before grace"
+    },
+    {
+      "id": "R2-M03-force",
+      "kill": [
+        "C40"
+      ],
+      "behaviour": "missing force-close leaves sockets until provider cleanup/process exit"
+    },
+    {
+      "id": "R2-M03-expect",
+      "kill": [
+        "C33"
+      ],
+      "behaviour": "100 Continue sent before the permanent stop check"
+    },
+    {
+      "id": "R2-M04",
+      "kill": [
+        "C34"
+      ],
+      "behaviour": "raw transaction escapes the projection"
+    },
+    {
+      "id": "R2-M05",
+      "kill": [
+        "C34"
+      ],
+      "behaviour": "delegate exposes parent client"
+    },
+    {
+      "id": "R2-M05-promise",
+      "kill": [
+        "C34"
+      ],
+      "behaviour": "lazy PrismaPromise escapes eager revocation"
+    },
+    {
+      "id": "R2-M06",
+      "kill": [
+        "C34"
+      ],
+      "behaviour": "saved method remains active after callback return"
+    },
+    {
+      "id": "R2-M07",
+      "kill": [
+        "C35"
+      ],
+      "behaviour": "end retires an outstanding operation"
+    },
+    {
+      "id": "R2-M07-foreign",
+      "kill": [
+        "C35"
+      ],
+      "behaviour": "another work can use a transaction token"
+    },
+    {
+      "id": "R2-M07-flag",
+      "kill": [
+        "C35"
+      ],
+      "behaviour": "caller forges known rollback for unknown commit"
+    },
+    {
+      "id": "R2-M08",
+      "kill": [
+        "C36"
+      ],
+      "behaviour": "fail-fast stage advances under unsettled peer"
+    },
+    {
+      "id": "R2-M09",
+      "kill": [
+        "C36"
+      ],
+      "behaviour": "initialization lacks per-provider settlement barrier"
+    },
+    {
+      "id": "R2-M10",
+      "kill": [
+        "C38"
+      ],
+      "behaviour": "each resource renews fatal cleanup budget"
+    },
+    {
+      "id": "R2-M11",
+      "kill": [
+        "C36"
+      ],
+      "behaviour": "old app.close plus fallback repeats hooks"
+    },
+    {
+      "id": "R2-M12",
+      "kill": [
+        "C36"
+      ],
+      "behaviour": "provider aliases are called twice"
+    },
+    {
+      "id": "R2-M13",
+      "kill": [
+        "C36"
+      ],
+      "behaviour": "a rejected stage skips remaining teardown stages"
+    },
+    {
+      "id": "R2-M14",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "factory starts timer during construction"
+    },
+    {
+      "id": "R2-M15",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "field initializer starts timer during construction"
+    },
+    {
+      "id": "R2-M15-import",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "import-time resource acquisition"
+    },
+    {
+      "id": "R2-M15-deferred",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "construction queues a detached acquisition"
+    },
+    {
+      "id": "R2-M16",
+      "kill": [
+        "C36"
+      ],
+      "behaviour": "late init acquisition escapes cleanup without the init barrier"
+    },
+    {
+      "id": "R2-M17",
+      "kill": [
+        "G:P07"
+      ],
+      "behaviour": "business operation escapes the admitted ledger transaction"
+    },
+    {
+      "id": "R2-M17-append",
+      "kill": [
+        "G:P07"
+      ],
+      "behaviour": "business commit has no original append or reserve"
+    },
+    {
+      "id": "R2-M18",
+      "kill": [
+        "G:P09",
+        "G:P10"
+      ],
+      "behaviour": "unknown COMMIT is falsely settled as callback rollback"
+    },
+    {
+      "id": "R2-M19",
+      "kill": [
+        "G:P12"
+      ],
+      "behaviour": "receipt acknowledges viewing only while history remains unsealed"
+    },
+    {
+      "id": "R2-M20",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeSelectionTests.test_launcher_matrix_requires_every_case_once_and_no_skip"
+      ],
+      "behaviour": "incomplete or skipped launcher matrix can be reported green"
+    },
+    {
+      "id": "R2-M21",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeSelectionTests.test_missing_image_is_not_a_successful_empty_handover"
+      ],
+      "behaviour": "missing image becomes a successful empty required handover"
+    },
+    {
+      "id": "R2-M21-skip",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeSelectionTests.test_missing_or_skipped_handover_case_fails_the_required_selection"
+      ],
+      "behaviour": "missing or skipped required handover becomes a pass"
+    },
+    {
+      "id": "R2-M22",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeContainerTests.test_05_probe_appends_as_sole_owner_and_observes_after_the_api_owner_restart"
+      ],
+      "behaviour": "probe tries recovery beside the running API owner"
+    },
+    {
+      "id": "R2-M22-observe",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeContainerTests.test_05_probe_appends_as_sole_owner_and_observes_after_the_api_owner_restart"
+      ],
+      "behaviour": "observation promotes to owner when API is absent"
+    },
+    {
+      "id": "R2-M23",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeContainerTests.test_06_restore_guard_refuses_running_source_and_recovers_only_paired_copy"
+      ],
+      "behaviour": "recovery accepts a state volume mounted by running source API"
+    },
+    {
+      "id": "R2-M24",
+      "kill": [
+        "P:tests/ops_emr_probe_test.py:ProbeContainerTests.test_05_probe_appends_as_sole_owner_and_observes_after_the_api_owner_restart"
+      ],
+      "behaviour": "probe fabricates the observed stored hash"
+    },
+    {
+      "id": "R2-M15-db",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "construction acquisition through db"
+    },
+    {
+      "id": "R2-M15-socket",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "construction acquisition through socket"
+    },
+    {
+      "id": "R2-M15-file",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "construction acquisition through file"
+    },
+    {
+      "id": "R2-M15-worker",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "construction acquisition through worker"
+    },
+    {
+      "id": "R2-M15-microtask",
+      "kill": [
+        "C37"
+      ],
+      "behaviour": "construction acquisition through microtask"
     }
   ],
   "candidate_cases": [

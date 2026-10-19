@@ -5,6 +5,8 @@ import { ContractError, refuse } from '../emr-contract/validation';
 import { EmrRuntimeOwner, EmrStartupFailure, EmrStartupPhase } from './application';
 import { EmrStopPhase, startupFailureMessage, stopFailureMessage } from './manifest';
 import { createRecordPort, EmrRecordPort, EmrRecordPortControl } from './record-port';
+import { installHttpAdmission } from './http-admission';
+import { createNestLifecycle } from './nest-lifecycle';
 
 /**
  * EMR-B2 (d): the one launcher of the API process. It alone starts and stops the process: the EMR ledger owner, the Nest
@@ -101,6 +103,8 @@ export async function launchApi(input: LaunchInput): Promise<void> {
   const resources: Resource[] = [];
   let owner: EmrRuntimeOwner | undefined, app: INestApplication | undefined, server: Server | undefined;
   let control: EmrRecordPortControl | undefined, outcome: Promise<void> | undefined;
+  let admission: ReturnType<typeof installHttpAdmission> | undefined;
+  let lifecycle: ReturnType<typeof createNestLifecycle> | undefined;
   let serving = false, exitCode = 0;
 
   // The latch: tripped by a signal or a start failure, once; the handlers stay until the process ends and do nothing
@@ -124,18 +128,22 @@ export async function launchApi(input: LaunchInput): Promise<void> {
       check(phase);
       const records = createRecordPort(ledger.store());
       control = records.control;
-      reserve('app', () => (app ? closeApp(app) : Promise.resolve()));
+      reserve('app', () => lifecycle?.close(latch.signal.reason?.signal) ?? Promise.resolve());
       const created = await NestFactory.create(input.root(records.port), { rawBody: true, abortOnError: false, bufferLogs: true, autoFlushLogs: false });
       app = created;
+      lifecycle = createNestLifecycle(created, latch.signal);
+      const listener = server = created.getHttpServer();
+      reserve('listener', () => closeListener(listener));
+      admission = installHttpAdmission(listener, latch.signal);
       check(phase);
       input.configure(created);
       phase = 'init';
       check(phase);
       await created.init();
       check(phase);
+      admission.verifyOwnership();
+      lifecycle.verifyOwnership();
       phase = 'listen';
-      const listener = server = created.getHttpServer();
-      reserve('listener', () => closeListener(listener));
       await listen(listener, latch.signal, phase);
       check(phase);
       created.flushLogs();
@@ -157,17 +165,6 @@ export async function launchApi(input: LaunchInput): Promise<void> {
     listener.close(() => { clearInterval(sweep); resolve(); });
     listener.closeIdleConnections();
   });
-  /** The application's release. Nest ends its own sequence at a destroy hook that throws; the remaining stages still get
-   * their turn here, and the failure is reported as the app phase of the stop. */
-  const closeApp = async (created: INestApplication) => {
-    try { await created.close(); } catch (error) {
-      const stages = created as unknown as Record<'callBeforeShutdownHook' | 'dispose' | 'callShutdownHook', (() => Promise<void>) | undefined>;
-      for (const stage of ['callBeforeShutdownHook', 'dispose', 'callShutdownHook'] as const) {
-        try { await stages[stage]?.call(created); } catch { /* the first failure is the one reported */ }
-      }
-      throw error;
-    }
-  };
   /** Each entry's release runs once; it resolves 'failed' instead of rejecting, so no release masks the line that ended
    * the process and a failed application close is reported as its phase. */
   const release = (entry: Resource) => entry.released ??= new Promise<void>(resolve => resolve(entry.release())).then(() => 'done' as const, () => 'failed' as const);
@@ -178,7 +175,10 @@ export async function launchApi(input: LaunchInput): Promise<void> {
     owner?.interrupt();
     let unfinished: EmrStopPhase | undefined, fatal: ReturnType<typeof budget> | undefined;
     // The 5 s cleanup bound runs from the stop when the start is still in flight, else from the end of the drain.
-    if (!serving && await (fatal = budget(FATAL_CLEANUP_MS)).race(outcome ?? Promise.resolve()) === 'timeout') unfinished = 'start';
+    if (!serving && await (fatal = budget(FATAL_CLEANUP_MS)).race(outcome ?? Promise.resolve()) === 'timeout') {
+      unfinished = 'start';
+      lifecycle?.expire();
+    }
     // The drain, on every path: the listener's connections when one was reserved, then every begun recording work -
     // also work an init-time job began before any listener existed - under the 10 s grace while serving, else under
     // the cleanup bound. Only then do the application and the ledger go.
@@ -186,14 +186,18 @@ export async function launchApi(input: LaunchInput): Promise<void> {
     const drained = (listener ? release(listener) : Promise.resolve('done' as const)).then(() => control?.drained());
     if (await (serving ? budget(DRAIN_GRACE_MS) : (fatal ??= budget(FATAL_CLEANUP_MS))).race(drained) === 'timeout') {
       unfinished ??= 'drain';
-      server?.closeAllConnections();
+      admission?.destroyAll();
     }
     for (const entry of [...resources].reverse()) {
       if (entry.name === 'listener') continue;
       const waited = await (fatal ??= budget(FATAL_CLEANUP_MS)).race(release(entry));
-      if (waited === 'timeout' || (await release(entry)) === 'failed') unfinished ??= entry.name;
+      if (waited === 'timeout') {
+        unfinished ??= entry.name;
+        lifecycle?.expire();
+      } else if (await release(entry) === 'failed') unfinished ??= entry.name;
     }
     if (unfinished) {
+      if (lifecycle) console.log('[KIN API] lifecycle accounting: ' + JSON.stringify(lifecycle.accounting()));
       console.error('[KIN API] ' + stopFailureMessage(unfinished));
       exitCode = 1;
     }

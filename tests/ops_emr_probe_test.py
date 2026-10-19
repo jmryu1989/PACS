@@ -148,6 +148,38 @@ class ProbeVerdictTests(unittest.TestCase):
         self.assertEqual((result["added"], result["replay_duplicates"], result["restart"]), (1, 0, "same chain and seal"))
 
 
+def required_handover_status(result):
+    return 0 if result.wasSuccessful() and result.testsRun == 2 and not result.skipped else 1
+
+
+class ProbeSelectionTests(unittest.TestCase):
+    def test_missing_image_is_not_a_successful_empty_handover(self):
+        env = dict(os.environ)
+        env.pop("KIN_TEST_API_IMAGE", None)
+        result = subprocess.run([sys.executable, "-B", __file__, "--require-image-handover"], env=env, capture_output=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_missing_or_skipped_handover_case_fails_the_required_selection(self):
+        for count, skipped in [(0, []), (1, []), (2, [("required", "unavailable")])]:
+            result = unittest.TestResult()
+            result.testsRun, result.skipped = count, skipped
+            self.assertEqual(required_handover_status(result), 1)
+        result = unittest.TestResult()
+        result.testsRun = 2
+        self.assertEqual(required_handover_status(result), 0)
+
+    def test_launcher_matrix_requires_every_case_once_and_no_skip(self):
+        spec = importlib.util.spec_from_file_location("b2_mutants", ROOT / "tests" / "emr" / "b" / "mutants.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cases = ["P" + str(n).zfill(2) for n in range(13)]
+        lines = ["ok " + str(n + 1) + " - " + name + " synthetic case" for n, name in enumerate(cases)]
+        self.assertTrue(module.pg_passes("\n".join(lines), cases, 0))
+        for text in ["\n".join(lines[:-1]), "\n".join(lines + [lines[0]]), "\n".join(lines) + " # SKIP"]:
+            self.assertFalse(module.pg_passes(text, cases, 0))
+        self.assertFalse(module.pg_passes("\n".join(lines), cases, 1))
+
+
 @unittest.skipUnless(sys.platform == "linux" and shutil.which("node") and (ROOT / "api" / "node_modules" / "typescript").is_dir(),
                      "the kernel fence (flock) and the installed TypeScript loader: Linux with api/node_modules")
 class ProbeOwnerTests(unittest.TestCase):
@@ -230,7 +262,9 @@ class ProbeContainerTests(unittest.TestCase):
         result = subprocess.run(["docker", "run", "--rm", "--network", "container:" + self.db, "--label", "kin.ops.run=" + self.token,
                                  "-e", "DATABASE_URL=postgresql://kin_runtime@127.0.0.1:5432/kin", "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
                                  "--mount", "type=volume,source=" + self.state + ",target=" + ops.EMR_STATE, "--entrypoint", "node",
-                                 self.image, "-e", probe.PROBE_SCRIPT, operation, json.dumps(value)], capture_output=True, timeout=180)
+                                 self.image, "--max-old-space-size=3072", "-e", probe.PROBE_SCRIPT, operation, json.dumps(value)], capture_output=True, timeout=180)
+        print(json.dumps({"probe_process": operation, "exit": result.returncode,
+                          "stdout": result.stdout.decode(errors="replace"), "stderr": result.stderr.decode(errors="replace")}), flush=True)
         self.assertEqual(result.returncode, expected, result.stdout.decode(errors="replace")[-2000:] + result.stderr.decode(errors="replace")[-2000:])
         return intro.result_line(result.stdout)
 
@@ -238,6 +272,7 @@ class ProbeContainerTests(unittest.TestCase):
         """The real API service on the probe's state volume: its own start owns the fence and recovers the state."""
         name = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + uuid.uuid4().hex[:16] + "-probe-api"
         env = {"DATABASE_URL": "postgresql://kin_runtime@127.0.0.1:5432/kin", "KIN_EMR_STATE_DIR": ops.EMR_STATE,
+               "NODE_OPTIONS": "--max-old-space-size=3072",
                "DEPLOYMENT_MODE": "production", "AUTH_REQUIRED": "true", "KC_ISSUER": "http://127.0.0.1:1/auth/realms/kin",
                "KC_JWKS_URL": "http://127.0.0.1:1/certs", "KC_AUDIENCE": "kin-api", "KC_WEB_SECRET": uuid.uuid4().hex,
                "KIN_COOKIE_SECRET": uuid.uuid4().hex, "PUBLIC_ORIGIN": "http://127.0.0.1:3000", "ORTHANC_USER": "synthetic-probe",
@@ -259,31 +294,129 @@ class ProbeContainerTests(unittest.TestCase):
 
     def stop_api(self, name):
         ops.run(["docker", "stop", "--time", "30", name])
-        self.assertNotEqual(json.loads(ops.text(["docker", "inspect", name]))[0]["State"]["ExitCode"], 137, "SIGTERM, never SIGKILL")
+        state = json.loads(ops.text(["docker", "inspect", name]))[0]["State"]
+        self.assertFalse(state["Running"], "confirmed API exit precedes another owner")
+        self.assertEqual(state["ExitCode"], 0, "clean SIGTERM exit")
+        logs = ops.run(["docker", "logs", name], check=False)
+        print(json.dumps({"api": name, "exit": state["ExitCode"], "stdout": logs.stdout.decode(errors="replace"),
+                          "stderr": logs.stderr.decode(errors="replace")}), flush=True)
+
+    def stored_event(self, event):
+        # Observe storage and calculate retention through the shipped rule while the real API owns state.
+        script = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
+const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
+const {accessDeadline,recordTargets}=require('/app/dist/emr-runtime/contract');
+const db=new PrismaClient();
+(async()=>{const row=await new PrismaLedgerSql(db).entryForEvent('viewing',process.argv[1]);
+if(!row)throw Error('missing event'); const payload=JSON.parse(row.payload);
+console.log(JSON.stringify({payload,retention:accessDeadline('viewing',{occurredAt:payload.occurredAt,targets:recordTargets(payload)})}));
+})().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>db.$disconnect());"""
+        result = ops.run(["docker", "run", "--rm", "--network", "container:" + self.db, "--label", "kin.ops.run=" + self.token,
+                          "-e", "DATABASE_URL=postgresql://kin_runtime@127.0.0.1:5432/kin", "--entrypoint", "node",
+                          self.image, "--max-old-space-size=3072", "-e", script, event["eventId"]])
+        value = json.loads(result.stdout)
+        self.assertEqual(value["payload"], event)
+        self.assertEqual(value["retention"], "2028-10-11T15:00:00.000Z", "two calendar years, at the KST civil-day boundary")
+        return value
 
     def test_05_probe_appends_as_sole_owner_and_observes_after_the_api_owner_restart(self):
-        event = probe.probe_event({**PROBE, "event_id": str(uuid.uuid4())})
+        event = probe.probe_event({**PROBE, "event_id": str(uuid.uuid4())}, datetime(2026, 10, 12, tzinfo=timezone.utc))
+        original_api = self.start_api()
+        self.stop_api(original_api)
         first = self.process("append", {"event": event})                  # no API runs: the probe is the sole owner
         api = self.start_api()                                             # the API owner's own start-up recovery
         refused = self.process("append", {"event": event}, expected=1)     # beside the live owner: refused, no recovery
         self.assertEqual(refused, {"operation": "append", "error": "EmrStateOwnerBusy"})
         second = self.process("observe", {"eventId": event["eventId"]})    # a client of the live owner, read only
-        evidence = probe.verify(first, second, event["eventId"])
+        try:
+            evidence = probe.verify(first, second, event["eventId"])
+        except intro.Stop as error:
+            self.fail(str(error))
+        stored = self.stored_event(event)
         self.assertEqual((evidence["added"], evidence["replay_duplicates"]), (1, 0))
         self.stop_api(api)
         # The same probe again (a re-run of the phase) is a replay: still one entry for the event.
         again = self.process("append", {"event": event})
         api = self.start_api()
         third = self.process("observe", {"eventId": event["eventId"]})
-        evidence = probe.verify(again, third, event["eventId"])
+        try:
+            evidence = probe.verify(again, third, event["eventId"])
+        except intro.Stop as error:
+            self.fail(str(error))
         self.assertEqual(evidence["added"], 0)
         self.assertEqual(again["stored"], first["stored"])
+        self.assertEqual(self.stored_event(event), stored)
         self.stop_api(api)
         # No API owner: an observation stays a client and fails instead of taking the fence.
         alone = self.process("observe", {"eventId": event["eventId"]}, expected=1)
         self.assertNotIn("owner", alone)
-        print(json.dumps({"probe_container": True, "entry": evidence["entry"], "image": self.image}), flush=True)
+        print(json.dumps({"probe_container": True, "entry": evidence["entry"], "image": self.image,
+                          "database": self.db, "state_volume": self.state, "stored": stored}), flush=True)
+
+    def test_06_restore_guard_refuses_running_source_and_recovers_only_paired_copy(self):
+        """TEST-B2D-07-RESTORE: actual mount identities and product recovery, with labelled disposable resources."""
+        from ops_product_transfer_fixture import provision
+        event = probe.probe_event({**PROBE, "event_id": str(uuid.uuid4())}, datetime(2026, 10, 12, tzinfo=timezone.utc))
+        self.process("append", {"event": event})
+        target_db = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + uuid.uuid4().hex[:16] + "-copy-db"
+        target_state = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + uuid.uuid4().hex[:16] + "-copy-state"
+        for kind, name in [("container", target_db), ("volume", target_state)]:
+            self.addCleanup(ops.remove_owned_if_present, kind, name, self.token)
+        ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + self.token, target_state])
+        ops.run(["docker", "run", "-d", "--name", target_db, "--label", "kin.ops.run=" + self.token, "--network", "none",
+                 "--tmpfs", "/var/lib/postgresql/data", "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+                 "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
+        deadline = time.monotonic() + 60
+        while ops.run(["docker", "exec", target_db, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], check=False).returncode:
+            if time.monotonic() > deadline:
+                self.fail("Disposable restore database did not start")
+            time.sleep(0.5)
+        provision(target_db)
+        with tempfile.TemporaryFile() as dump:
+            ops.run(["docker", "exec", self.db, "pg_dump", "-U", "postgres", "-Fc", "kin"], output=dump)
+            dump.seek(0)
+            ops.run(["docker", "exec", "-i", target_db, "pg_restore", "-U", "postgres", "-d", "kin", "--exit-on-error"], input_file=dump)
+        # No API is running during this paired copy. Source is mounted read-only by the short-lived copy process.
+        ops.run(["docker", "run", "--rm", "--network", "none", "--label", "kin.ops.run=" + self.token,
+                 "--mount", "type=volume,source=" + self.state + ",target=/source,readonly",
+                 "--mount", "type=volume,source=" + target_state + ",target=" + ops.EMR_STATE, "--entrypoint", "sh", self.image,
+                 "-c", "set -eu; tar -C /source -cf - . | tar -C /var/lib/kin-emr -xf -"])
+        api = self.start_api()
+        before = self.stored_event(event)
+        digest_script = """const fs=require('fs'),crypto=require('crypto'),path=require('path');const rows=[];
+function scan(dir){for(const name of fs.readdirSync(dir).sort()){const file=path.join(dir,name),s=fs.lstatSync(file);
+if(s.isDirectory())scan(file);else if(s.isFile())rows.push([file,crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')]);}}
+scan('/source');console.log(JSON.stringify(rows));"""
+        def source_hashes():
+            return json.loads(ops.text(["docker", "run", "--rm", "--network", "none", "--label", "kin.ops.run=" + self.token,
+                                      "--mount", "type=volume,source=" + self.state + ",target=/source,readonly",
+                                      "--entrypoint", "node", self.image, "--max-old-space-size=3072", "-e", digest_script]))
+        hashes = source_hashes()
+        with self.assertRaisesRegex(RuntimeError, "mounted by a running container"):
+            ops.restore_copy_only(self.state)
+        ops.restore_copy_only(target_state)
+        verified = ops.text(["docker", "run", "--rm", "--network", "container:" + target_db, "--label", "kin.ops.run=" + self.token,
+                             "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
+                             "--mount", "type=volume,source=" + target_state + ",target=" + ops.EMR_STATE,
+                             "--entrypoint", "node", self.image, "--max-old-space-size=3072", "-e", ops.EMR_RECOVERY_SCRIPT])
+        self.assertEqual(verified, "EMR_RESTORE_VERIFIED")
+        self.assertEqual(source_hashes(), hashes, "restore must not change any source state file")
+        self.assertEqual(self.stored_event(event), before, "live source event/content/retention unchanged")
+        self.assertNotEqual(target_state, self.state)
+        self.assertNotEqual(target_db, self.db)
+        print(json.dumps({"restore": verified, "source_db": self.db, "target_db": target_db,
+                          "source_state": self.state, "target_state": target_state, "source_hashes": hashes}), flush=True)
+        self.stop_api(api)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    if "--require-image-handover" in sys.argv:
+        if not os.environ.get("KIN_TEST_API_IMAGE", "").startswith("sha256:"):
+            raise SystemExit("Mandatory handover requires an inspected immutable KIN_TEST_API_IMAGE")
+        suite = unittest.defaultTestLoader.loadTestsFromNames([
+            "ProbeContainerTests.test_05_probe_appends_as_sole_owner_and_observes_after_the_api_owner_restart",
+            "ProbeContainerTests.test_06_restore_guard_refuses_running_source_and_recovers_only_paired_copy"], sys.modules[__name__])
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        raise SystemExit(required_handover_status(result))
+    else:
+        unittest.main(verbosity=2)

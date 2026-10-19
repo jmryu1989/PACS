@@ -15,6 +15,10 @@ export async function record(port: EmrRecordPort, provision: AccessEvent, change
     try {
       const appended = await work.transaction(async tx => {
         transaction = tx;
+        const institutions: { id: string }[] = await tx.institution.findMany({ select: { id: true } });
+        const find = tx.institution.findUnique;
+        const row: { id: string } | null = await find({ where: { id: 'synthetic' }, select: { id: true } });
+        void institutions; void row;
         await business(tx);
         try { return await work.appendInTransaction(tx, change); }
         catch (error) { callbackFailed = true; throw error; }

@@ -3,7 +3,7 @@
 // those lines. A cast to `any` or a bracket access is not a typed consumer and is not covered here: the runtime objects
 // have no such property either (the case's runtime part). This file is outside the product tree and never compiled
 // into it.
-import type { EmrRecordPort, EmrRecordWork } from '../../../../api/src/emr-runtime/record-port';
+import type { EmrRecordPort, EmrRecordWork, EmrRecordTransaction } from '../../../../api/src/emr-runtime/record-port';
 
 export async function reach(port: EmrRecordPort, work: EmrRecordWork): Promise<void> {
   await port.seal.recoverAtStart(); // refused
@@ -35,4 +35,18 @@ export async function reach(port: EmrRecordPort, work: EmrRecordWork): Promise<v
   work.bindCommit; // refused
   work.appendRow; // refused
   port.begin().coordinator; // refused
+}
+
+export async function transactionReach(tx: EmrRecordTransaction): Promise<void> {
+  tx._originalClient; // refused
+  tx._engine; // refused
+  tx.$queryRaw; // refused
+  tx.$executeRaw; // refused
+  tx.$transaction; // refused
+  tx.$connect; // refused
+  tx.$disconnect; // refused
+  tx.$extends; // refused
+  tx.$use; // refused
+  tx.institution.$parent; // refused
+  tx.institution.findMany().requestTransaction; // refused
 }
