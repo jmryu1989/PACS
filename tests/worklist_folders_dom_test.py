@@ -773,6 +773,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.assertEqual(0,self.page.evaluate('window.statusChanges'))
 
     def test_held_session_end_discards_tree_and_account_search_data(self):
+        self.page.clock.install(time='2026-10-03T00:00:00Z')
         # The retained document is required for Recover Draft; navigation cannot hide stale account data.
         self.site.shortcuts=[dict(id='s',name='Private shortcut',searchId='shared:9')]
         self.site.filters=[dict(id=1,name='SYN private saved search',mode='Radiology',days=-1,quick='',cols={})]
@@ -807,6 +808,8 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(self.page.locator('#chips')).to_contain_text('SYN private saved search')
+        # Keep autosave/polling from consuming the recovery draft during fixture setup.
+        self.page.clock.pause_at('2026-10-03T01:00:00Z')
         self.page.locator('#rows tr[data-uid]').click()
         expect(self.page.locator('#findings')).to_be_editable()
         self.page.locator('#findings').fill('SYN unsaved recovery text')
@@ -837,7 +840,9 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#sfm-close').click()
         expect(self.page.locator('#sfm-name')).to_have_value('Unsaved search draft')
         self.site.ended.add(self.site.cookie)
-        self.page.locator('#refresh').click()
+        # A background 401 legitimately closes the page before Refresh can be clicked.
+        # Advance that schedule explicitly, then check the retained document's cleanup.
+        self.page.clock.fast_forward(60000)
         expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Session Ended')
         expect(self.page).to_have_url(auth.MAIN_URL)
         # W2L4-01 / REQ-WS3 -> RISK-WS3: hiding the manager must not retain an
