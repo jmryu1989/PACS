@@ -938,6 +938,9 @@ class WorklistE2E(unittest.TestCase):
                 .observe(document.body, { subtree: true, childList: true, characterData: true }); }""")
             page.route("**/api/dicom-import", replaced)
             try:
+                # After the re-login the page opens in its default mode; Import DICOM lives in the Technician toolbar
+                # (main.html #ctxbar, "Technician 모드에서만"), so the technician opens that tab first, as at the start.
+                page.locator("[data-tab=Technician]").click()
                 with page.expect_file_chooser() as chooser:
                     page.locator("#t-import").click()
                 chooser.value.set_files(str(lost_file))
