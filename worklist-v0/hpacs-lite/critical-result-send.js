@@ -343,6 +343,8 @@
       const controller = new AbortController(), stop = setTimeout(() => controller.abort(), TIMEOUT_MS);
       inflight.add(controller);
       try {
+        const waiting = method === 'POST' && blocked();
+        if (waiting) throw Object.assign(new Error(waiting), { kin: true, status: 0, code: null, json: false, body: null });
         const response = await transport.request(apiBase + path, { context, deadlineMs: TIMEOUT_MS, method, signal: controller.signal,
           headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
         const data = response.incomplete ? undefined : response.body;
@@ -611,6 +613,8 @@
     // ── 쓰기 답의 판별(§8.1) ──
 
     function transmit(attempt, retry) {
+      const waiting = blocked();
+      if (waiting) { attempt.state = 'unknown'; attempt.detail = waiting; paintAttempt(attempt); return; }
       attempt.state = retry ? 'checking' : 'sending';
       paintAttempt(attempt);
       call('POST', attempt.path, attempt.body).then(guarded(result => settle(attempt, retry, result, null)), guarded(error => settle(attempt, retry, null, error)));
@@ -743,6 +747,8 @@
 
     function check(attempt) {
       if (ended || lock !== null || attempts.get(attempt.requestId) !== attempt || attempt.state !== 'unknown') return;
+      const waiting = blocked();
+      if (waiting) { attempt.detail = waiting; paintAttempt(attempt); return; }
       if (!live(attempt.sent)) return;
       transmit(attempt, true);
     }

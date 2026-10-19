@@ -53,7 +53,57 @@ PENDING_REASON = "Related Report에서 넣은 글의 저장 결과를 아직 확
 
 
 def sha(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    # JSON.stringify's compact UTF-8 serialization of the frozen canonical tuples (02c8a87).
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    text = "".join(f"\\u{ord(c):04x}" if 0xD800 <= ord(c) <= 0xDFFF else c for c in text)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def utf16_slice(text, start, end=None):
+    raw = text.encode("utf-16-le", errors="surrogatepass")
+    return raw[start * 2:None if end is None else end * 2].decode("utf-16-le", errors="surrogatepass")
+
+
+def insertion_text(version, parts, seed):
+    blocks = []
+    for part in parts:
+        text = re.sub(r"\r\n?", "\n", version[part["field"]])
+        units = text.encode("utf-16-le", errors="surrogatepass")
+        size = len(units) // 2
+        def splits(at):
+            return (0 < at < size and 0xD800 <= int.from_bytes(units[(at-1)*2:at*2], "little") <= 0xDBFF
+                    and 0xDC00 <= int.from_bytes(units[at*2:(at+1)*2], "little") <= 0xDFFF)
+        if part["end"] > size or splits(part["start"]) or splits(part["end"]):
+            return None
+        blocks.append(utf16_slice(text, part["start"], part["end"]))
+    return ("" if not seed or seed.endswith("\n") else "\n") + "\n\n".join(blocks)
+
+
+def proposal_tuple(body):
+    return ["related-insert-proposal-v1", *(body[k] for k in FIELDS), body["baseVersion"],
+            sorted(body["citationIds"]), sorted(body["structureIds"])]
+
+
+def request_hash(body):
+    r, owner = body["relatedInsert"], body["expectedOwner"]
+    epoch, revision = body["expectedRevision"].split(":")
+    s = r["source"]
+    return sha(["related-insert-v1", r["insertRequestId"], owner["institution"], owner["sub"], owner["author"], r["targetUid"],
+                epoch, int(revision), s["uid"], s["version"], s["action"], [[p["field"], p["start"], p["end"]] for p in s["parts"]],
+                r["targetBaseVersion"], r["seedKind"], r["section"], r["position"], r["offset"], r["text"],
+                r["selectionSeq"], r["contentRevision"], r["sourceGeneration"], proposal_tuple(body)])
+
+
+def wire_request(text="😀", end=2, seed=""):
+    return {"expectedOwner": h.owner_of(h.RAD), "expectedRevision": W5Site().revision_of(UID_A),
+            "findings": seed + text, "conclusion": "", "recommendation": "", "baseVersion": 0,
+            "citationIds": [], "structureIds": [], "relatedInsert": {
+                "intent": "apply", "insertRequestId": "12345678-0000-4000-8000-123456789012",
+                "source": {"uid": UID_B, "version": 1, "action": "approve",
+                           "parts": [{"field": "findings", "start": 0, "end": end}]},
+                "targetUid": UID_A, "targetBaseVersion": 0, "section": "findings", "position": "end",
+                "offset": len(seed.encode("utf-16-le")) // 2, "text": text,
+                "selectionSeq": 1, "contentRevision": 1, "sourceGeneration": 1, "seedKind": "report-head" if seed else "empty"}}
 
 
 def compose_page(text=None):
@@ -135,8 +185,9 @@ class W5Site(rf.FlowSite):
                 "citations": list(body["citationIds"]), "structured": list(body["structureIds"])}
 
     def matches(self, uid, rec):
-        return (rec["state"] == "applied" and self.revision_of(uid) == rec["appliedRevision"]
-                and self.store[uid]["row"] == rec["row"])
+        row = self.store[uid]["row"]
+        return (rec["state"] == "applied" and self.revision_of(uid) == rec["appliedRevision"] and row is not None
+                and sha(proposal_tuple({**row, "citationIds": row["citations"], "structureIds": row["structured"]})) == rec["proposalHash"])
 
     def receipt_view(self, uid, rec, rid=None):
         if rec is None:
@@ -171,12 +222,24 @@ class W5Site(rf.FlowSite):
         if ri.get("targetBaseVersion") != body.get("baseVersion"):
             return self.invalid("targetBaseVersion")
         text, section, offset = ri.get("text"), ri.get("section"), ri.get("offset")
-        if not isinstance(text, str) or "\r" in text or not text.strip("\n") or not isinstance(offset, int):
+        if not isinstance(text, str) or "\r" in text or not text.strip() or type(offset) is not int or offset < 0:
             return self.invalid("text")
-        if body[section][offset:] != text:
+        if utf16_slice(body[section], offset) != text:
             return self.invalid("offset")
-        if ri["intent"] == "discard" and not isinstance(ri.get("expectedReceiptRevision"), int):
+        if ri["intent"] == "discard" and (type(ri.get("expectedReceiptRevision")) is not int or ri["expectedReceiptRevision"] < 1):
             return self.invalid("expectedReceiptRevision")
+        parts = ri["source"].get("parts")
+        previous = -1
+        if not isinstance(parts, list) or not 1 <= len(parts) <= 3:
+            return self.invalid("source.parts")
+        for p in parts:
+            if (not isinstance(p, dict) or set(p) != {"field", "start", "end"} or p["field"] not in FIELDS
+                    or FIELDS.index(p["field"]) <= previous or type(p["start"]) is not int or type(p["end"]) is not int
+                    or not 0 <= p["start"] < p["end"] <= 2147483647):
+                return self.invalid("source.parts")
+            previous = FIELDS.index(p["field"])
+        if uid in self.identity_issues:
+            return 409, {"code": "STUDY_IDENTITY_UNRESOLVED"}
         binding = self.binding_of(uid, body, account)
         rec = self.receipts.get(rid)
         if rec is not None and rec["binding"] != binding:
@@ -205,11 +268,13 @@ class W5Site(rf.FlowSite):
             return 409, {"code": "RELATED_INSERT_DISCARDED", "message": "SYN discarded", **env(),
                          "relatedInsert": self.receipt_view(uid, rec)}
         reason = self.refuse_reason
+        if ri["source"]["uid"] in self.identity_issues:
+            return 409, {"code": "STUDY_IDENTITY_UNRESOLVED"}
         if reason is None and body["expectedRevision"] != self.revision_of(uid):
             reason = "DRAFT_CONFLICT"
         if reason is None:
             row = self.store[uid]["row"]
-            seed = {**{k: body[k] for k in FIELDS}, section: body[section][:offset]}
+            seed = {**{k: body[k] for k in FIELDS}, section: utf16_slice(body[section], 0, offset)}
             if row is not None:
                 same = (ri["seedKind"] == "private-draft" and all(row[k] == seed[k] for k in FIELDS)
                         and row["baseVersion"] == body["baseVersion"] and sorted(row["citations"]) == sorted(body["citationIds"])
@@ -228,14 +293,11 @@ class W5Site(rf.FlowSite):
             if not head or head["version"] != src.get("version") or head["action"] != src.get("action"):
                 reason = "SOURCE_CHANGED"
             else:
-                parts = src.get("parts") or []
-                blocks = [head[p["field"]].replace("\r\n", "\n")[p["start"]:p["end"]] for p in parts]
-                prefix = "" if offset == 0 or body[section][:offset].endswith("\n") else "\n"
-                if prefix + "\n\n".join(blocks) != text:
+                if insertion_text(head, parts, utf16_slice(body[section], 0, offset)) != text:
                     return self.invalid("text")
         if reason is not None:
             if rec is None:
-                rec = {"id": rid, "binding": binding, "requestHash": sha(binding), "proposalHash": sha(self.proposal_row(body)),
+                rec = {"id": rid, "binding": binding, "requestHash": request_hash(body), "proposalHash": sha(proposal_tuple(body)),
                        "expectedRevision": body["expectedRevision"], "appliedRevision": None, "state": "refused",
                        "receiptRevision": 1, "reason": reason, "row": None}
                 self.receipts[rid] = rec
@@ -246,16 +308,20 @@ class W5Site(rf.FlowSite):
         st = self.store[uid]
         st["revs"] += 1
         st["row"] = self.proposal_row(body)
-        rec = rec or {"id": rid, "binding": binding, "requestHash": sha(binding), "proposalHash": sha(self.proposal_row(body)),
+        if rec is not None:
+            rec["receiptRevision"] += 1
+        rec = rec or {"id": rid, "binding": binding, "requestHash": request_hash(body), "proposalHash": sha(proposal_tuple(body)),
                       "expectedRevision": body["expectedRevision"], "receiptRevision": 1}
         rec.update(state="applied", reason=None, appliedRevision=self.revision_of(uid), row=dict(st["row"]))
         self.receipts[rid] = rec
         return 200, {**env(), "relatedInsert": self.receipt_view(uid, rec)}
 
     def related_check(self, uid, rid, account):
+        if uid in self.identity_issues:
+            return 409, {"code": "STUDY_IDENTITY_UNRESOLVED"}
         rec = self.receipts.get(rid)
-        if rec is not None and rec["binding"]["owner"] != h.owner_of(account):
-            view = {**self.receipt_view(uid, None, rid), "reason": "ID_REUSED"}
+        if rec is not None and (rec["binding"]["owner"] != h.owner_of(account) or rec["binding"]["uid"] != uid):
+            view = {**self.receipt_view(uid, None, rid), "result": "refused", "reason": "ID_REUSED"}
         else:
             view = self.receipt_view(uid, rec, rid)
         return 200, {**self.envelope_of(uid, account), "relatedInsert": view}
@@ -472,7 +538,7 @@ class RelatedModePage(unittest.TestCase):
         source = self.page.locator("#related-mode-source")
         expect(source).to_have_attribute("aria-label", "Related Report (read only)")
         for value in (ALPHA, "SYN-P-001", "SYN Hospital A", "2026-09-01", "SYN CT CHEST PRIOR", "SYNACCB002", "v1 · Approved",
-                      "READ ONLY"):
+                      "READ ONLY", "syn-rad2@synthetic.test", "2026-09-01 10:00"):
             self.assertIn(value, source.inner_text())
         self.assertEqual((PRIOR_B["findings"], PRIOR_B["conclusion"], PRIOR_B["recommendation"]),
                          tuple(self.source_text(f) for f in ("findings", "conclusion", "recommendation")))
@@ -1271,6 +1337,344 @@ class RelatedModePage(unittest.TestCase):
         expect(self.mode()).to_be_hidden()
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertFalse(self.js(list_open))
+
+
+    def test_w5r2_source_card_includes_signer_and_time(self):
+        self.open();self.open_target();self.enter()
+        text=self.page.locator('#related-mode-source').inner_text()
+        print('SOURCE_CARD '+json.dumps(text),flush=True)
+        self.assertIn('syn-rad2@synthetic.test',text,'PAGE_03: Source signer must be visible')
+        self.assertIn('2026-09-01 10:00',text,'PAGE_03: Source signing time must be visible')
+        self.open_insert()
+        confirmation = self.page.locator('#related-insert-dialog').inner_text()
+        for value in ('v1', 'Approved', 'syn-rad2@synthetic.test', '2026-09-01 10:00'):
+            self.assertIn(value, confirmation, 'PAGE_03: confirmation provenance')
+
+    def prepare_refused_source_issue(self):
+        self.open();self.open_target();self.enter()
+        self.site.refuse_reason='TARGET_HELD';self.insert()
+        self.wait(lambda:self.op_state()=='refused','refused insertion')
+        self.site.identity_issues=[UID_B]
+        self.page.locator('#refresh').click()
+        self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'source flagged unresolved')
+        self.site.refuse_reason=None
+        for name in ('#report-notice-retry', '#report-notice-discard'):
+            button = self.page.locator(name)
+            self.assertTrue(not button.is_visible() or not button.is_enabled(), 'W5A-03: unresolved Source disables writing controls')
+        return len(self.site.related_puts)
+
+    def test_w5r2_retry_keeps_operation_when_frozen_source_unresolved(self):
+        count=self.prepare_refused_source_issue()
+        button=self.page.locator('#report-notice-retry')
+        if button.is_visible() and button.is_enabled(): button.click()
+        self.settle(300)
+        self.assertEqual(count,len(self.site.related_puts),'PH1_5: Retry must not write while original Source is unresolved')
+        self.assertEqual('refused',self.op_state(),'pending operation stays until identity resolution')
+
+    def test_w5r2_discard_keeps_operation_when_frozen_source_unresolved(self):
+        count=self.prepare_refused_source_issue()
+        button=self.page.locator('#report-notice-discard')
+        if button.is_visible() and button.is_enabled(): button.click()
+        self.settle(300)
+        self.assertEqual(count,len(self.site.related_puts),'PH1_5: Discard must not write while original Source is unresolved')
+        self.assertEqual('refused',self.op_state(),'pending operation stays until identity resolution')
+
+    def test_w5r2_queued_retry_rechecks_source_before_send(self):
+        self.open();self.open_target();self.enter()
+        self.site.related_answers=['abort'];self.insert()
+        self.wait(lambda:self.op_state()=='unknown','unknown insertion')
+        # Public list refresh has flagged the original Source by the time the user retries.
+        self.site.identity_issues=[UID_B];self.page.locator('#refresh').click()
+        self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'source unresolved')
+        before=len(self.site.related_puts)
+        retry=self.page.locator('#report-notice-retry')
+        if retry.is_visible() and retry.is_enabled(): retry.click()
+        self.settle(300)
+        self.assertEqual(before,len(self.site.related_puts),'PH1_5: unresolved Source blocks unknown Retry too')
+
+    def test_w5r2_first_receipt_hash_must_match_frozen_request(self):
+        self.open();self.open_target();self.enter()
+        original=self.site.receipt_view
+        def wrong_hash(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if result['state']=='applied':
+                result={**result,'requestHash':'0'*64,'proposalHash':'f'*64}
+            return result
+        self.site.receipt_view=wrong_hash
+        self.insert();self.settle(400)
+        print('FIRST_HASH_OUTCOME '+str(self.op_state()),flush=True)
+        self.assertEqual('unknown',self.op_state(),'D1473: first receipt hashes must match the locally frozen request/proposal')
+
+    def test_w5r2_incomplete_applied_receipt_must_stay_unknown(self):
+        self.open();self.open_target();self.enter()
+        original=self.site.receipt_view
+        def incomplete(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if result['state']=='applied':
+                result={**result,'expectedRevision':None,'receiptRevision':None}
+            return result
+        self.site.receipt_view=incomplete
+        self.insert();self.settle(400)
+        print('INCOMPLETE_RECEIPT_OUTCOME '+str(self.op_state()),flush=True)
+        self.assertEqual('unknown',self.op_state(),'D1473: incomplete applied receipt must not retire the operation')
+
+    def test_w5r2_cvr_unknown_retry_is_blocked_in_related_mode(self):
+        self.site.store[UID_A]['report']={'version':1,'rs':'T','findings':'SYN Target report','conclusion':'','recommendation':''}
+        owner=[h.INSTITUTION,h.RAD['sub']];posts=[]
+        def route_cvr(route,request):
+            url=request.url
+            if request.method=='POST' and url.endswith('/critical-results'):
+                posts.append(request.post_data_json);route.abort('connectionreset');return
+            if '/critical-result-recipients' in url:
+                route.fulfill(json={'owner':owner,'uid':UID_A,'sendable':True,'reason':None,
+                    'source':{'version':1,'action':'save','author':h.RAD['actor'],'at':'2026-09-01T10:00:00.000Z','final':False},
+                    'recipients':[{'sub':'12345678-0000-4000-8000-123456789012','actor':'syn-cvr@synthetic.test','name':'SYN Recipient','role':'clinician'}]});return
+            if '/critical-results?' in url:
+                route.fulfill(json={'owner':owner,'view':'sent','items':[],'nextCursor':None,'pending':0});return
+            route.fulfill(status=404,json={'code':'SYN_NOT_FOUND','message':'Synthetic result absent'})
+        self.context.route(re.compile(r'.*/api/(?:studies/[^/]+/critical-result(?:-recipients|s)|critical-results)(?:[/?].*)?$'),route_cvr)
+        self.open();self.open_target()
+        self.page.locator('#report-more').click()
+        self.page.locator('#b-mark-cvr').click()
+        self.page.locator('#cvr-send-recipient').select_option('12345678-0000-4000-8000-123456789012')
+        self.page.locator('#cvr-send-message').fill('SYN review message')
+        self.page.locator('#cvr-send-submit').click()
+        self.wait(lambda:len(posts)==1,'original CVR POST')
+        expect(self.page.locator('#cvr-send-check')).to_be_visible()
+        self.page.locator('#cvr-send-close').click()
+        self.enter()
+        retry=self.page.locator('#cvr-sent-attempts').get_by_role('button',name='Check Again')
+        expect(retry).to_be_visible()
+        if retry.is_enabled(): retry.click()
+        self.settle(300)
+        print('CVR_POSTS_IN_MODE '+str(len(posts)),flush=True)
+        self.assertEqual(1,len(posts),'PAGE_08: CVR Check Again must not send while Related Report mode is active')
+        self.back()
+        retry.click()
+        self.wait(lambda: len(posts) == 2, 'retry after Back')
+        self.assertEqual(posts[0], posts[1], 'the original unknown attempt survives mode admission')
+
+    def r2_refused(self):
+        self.open();self.open_target();self.enter();self.site.refuse_reason='TARGET_HELD';self.insert()
+        self.wait(lambda:self.op_state()=='refused','refused receipt');self.site.refuse_reason=None
+        return self.value()
+
+    def test_w5r2_incomplete_tombstone_cannot_inverse_the_native_insert(self):
+        text=self.r2_refused();original=self.site.receipt_view
+        def missing(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if result['state']=='discarded':result={**result,'requestHash':None,'proposalHash':None,'expectedRevision':None,'receiptRevision':None}
+            return result
+        self.site.receipt_view=missing
+        self.page.locator('#report-notice-discard').click();self.settle(300)
+        print('INCOMPLETE_TOMBSTONE '+json.dumps({'state':self.op_state(),'insert_text_preserved':self.value()==text}),flush=True)
+        self.assertEqual('discard-unknown',self.op_state(),'D1473: incomplete tombstone is not authority to retire and inverse the insertion')
+        self.assertTrue(self.value()==text,'The native inserted text must remain for Check')
+
+    def test_w5r2_source_identity_is_rechecked_when_discard_reply_arrives(self):
+        text=self.r2_refused();self.site.related_answers=['hold']
+        self.page.locator('#report-notice-discard').click()
+        self.wait(lambda:len(self.site.held_related)==1,'discard request held')
+        self.site.identity_issues=[UID_B];self.page.locator('#refresh').click()
+        self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'Source is now unresolved')
+        self.site.finish_related();self.settle(300)
+        print('LATE_DISCARD_UNRESOLVED_SOURCE '+json.dumps({'state':self.op_state(),'insert_text_preserved':self.value()==text}),flush=True)
+        self.assertTrue(self.value()==text,'PH1.5: no inverse native edit after the original Source became unresolved')
+        self.assertEqual('discard-unknown',self.op_state(),'Retain the pending operation until a complete list resolves Source identity')
+
+
+    def test_w5r2_check_and_retry_compare_both_frozen_hashes(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.related_answers = ['lost']; self.insert()
+        self.wait(lambda: self.op_state() == 'unknown', 'lost apply')
+        frozen = self.site.related_puts[0][1]
+        original = self.site.receipt_view
+        for control in ('#report-notice-check', '#report-notice-retry'):
+            for field in ('requestHash', 'proposalHash'):
+                with self.subTest(control=control, field=field):
+                    self.site.receipt_view = lambda *a, **kw: {**original(*a, **kw), field: '0' * 64}
+                    self.page.locator(control).click(); self.settle(200)
+                    self.assertEqual('unknown', self.op_state(), 'W5A-01: every reply binds both local canonical digests')
+                    self.assertEqual(self.whole(), self.value())
+        self.assertTrue(all(body == frozen for _, body in self.site.related_puts), 'Retry retains the frozen body')
+        self.site.receipt_view = original
+        _, complete = self.site.related_check(UID_A, self.site.related_puts[0][1]['relatedInsert']['insertRequestId'], h.RAD)
+        self.site.check_answers = [(503, complete)]
+        self.page.locator('#report-notice-check').click(); self.settle(200)
+        self.assertEqual('unknown', self.op_state(), 'a 503 with receipt-shaped data is not application proof')
+        self.page.locator('#report-notice-check').click()
+        self.wait(lambda: self.op_state() == 'applied', 'complete matching proof')
+
+    def test_w5r2_applied_proof_fields_are_required_individually(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.related_answers = ['lost']; self.insert()
+        self.wait(lambda: self.op_state() == 'unknown', 'lost apply')
+        original = self.site.receipt_view
+        for field, value in [('expectedRevision', None), ('expectedRevision', 0), ('expectedRevision', 'OTHER:0'),
+                             ('receiptRevision', None), ('receiptRevision', 0), ('receiptRevision', 1.5),
+                             ('receiptRevision', '1'), ('appliedRevision', None), ('appliedRevision', 'SYNEPOCH1:99')]:
+            with self.subTest(field=field, value=value):
+                self.site.receipt_view = lambda *a, **kw: {**original(*a, **kw), field: value}
+                self.page.locator('#report-notice-check').click(); self.settle(200)
+                self.assertEqual('unknown', self.op_state(), 'W5A-02: incomplete or mismatched proof stays unknown')
+                self.assertEqual(self.whole(), self.value())
+        self.site.receipt_view = original
+        self.page.locator('#report-notice-check').click()
+        self.wait(lambda: self.op_state() == 'applied', 'complete receipt resolves')
+
+    def test_w5r2_tombstone_proof_fields_are_required_individually(self):
+        text = self.r2_refused()
+        original = self.site.receipt_view
+        for field, value in [('expectedRevision', None), ('receiptRevision', None), ('requestHash', None),
+                             ('proposalHash', None), ('reason', None), ('discardable', True), ('result', 'unknown')]:
+            with self.subTest(field=field):
+                self.site.receipt_view = lambda *a, **kw: {**original(*a, **kw), field: value}
+                self.page.locator('#report-notice-discard').click(); self.settle(200)
+                self.assertEqual('discard-unknown', self.op_state(), 'W5A-02: complete tombstone required')
+                self.assertEqual(text, self.value(), 'no native inverse without proof')
+        self.site.receipt_view = original
+        self.page.locator('#report-notice-check').click()
+        self.wait(lambda: self.op_state() == 'discarded', 'complete tombstone resolves')
+        self.assertEqual('', self.value())
+
+    def test_w5r2_incomplete_refusal_never_enables_discard(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.refuse_reason = 'TARGET_HELD'
+        original = self.site.receipt_view
+        self.site.receipt_view = lambda *a, **kw: {**original(*a, **kw), 'expectedRevision': None}
+        self.insert(); self.wait(lambda: self.op_state() == 'unknown', 'incomplete refusal')
+        for field in ('requestHash', 'proposalHash', 'receiptRevision', 'reason'):
+            with self.subTest(field=field):
+                self.site.receipt_view = lambda *a, **kw: {**original(*a, **kw), field: None}
+                self.page.locator('#report-notice-retry').click(); self.settle(200)
+                self.assertEqual('unknown', self.op_state(), 'W5A-02: incomplete refused receipt is not discard authority')
+                self.assertFalse(self.page.locator('#report-notice-discard').is_visible())
+                self.assertEqual(self.whole(), self.value())
+        self.site.receipt_view = original
+        self.page.locator('#report-notice-retry').click()
+        self.wait(lambda: self.op_state() == 'refused', 'complete refused proof')
+        expect(self.page.locator('#report-notice-discard')).to_be_enabled()
+
+    def test_w5r2_source_identity_on_inverse_focus_after_back_keeps_operation(self):
+        text = self.r2_refused(); self.back()
+        self.js('''uid => document.querySelector('#findings').addEventListener('focus', () => {
+          appState[uid] = {...appState[uid], identityUnresolved: true};
+        }, {once: true})''', UID_B)
+        self.page.locator('#report-notice-discard').click(); self.settle(200)
+        self.assertTrue(self.js('uid => Boolean(appState[uid]?.identityUnresolved)', UID_B), 'focus listener ran')
+        self.assertEqual(text, self.value(), 'W5A-03: final frame admission keeps native text')
+        self.assertEqual('discard-unknown', self.op_state(), 'W5A-03: identity changed during native admission; keep operation')
+        self.page.locator('#refresh').click()
+        self.wait(lambda: not self.js('uid => Boolean(appState[uid]?.identityUnresolved)', UID_B), 'complete list resolves Source')
+        self.page.locator('#report-notice-check').click()
+        self.wait(lambda: self.op_state() == 'discarded', 'same tombstone resolves')
+        self.assertEqual('', self.value())
+
+    def test_w5r2_unresolved_source_blocks_direct_check_and_send_then_recovers_same_id(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.related_answers = ['abort']; self.insert()
+        self.wait(lambda: self.op_state() == 'unknown', 'unknown apply')
+        frozen = self.site.related_puts[0][1]
+        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved')
+        self.js('() => { const op = relatedInserts.get(selectedUid); relatedInsertRetry(op); relatedInsertCheck(op); relatedInsertSend(op, "apply"); }')
+        self.settle(200)
+        self.assertEqual((1, 0), (len(self.site.related_puts), len(self.site.checks)), 'W5A-03: entry points block unresolved identities')
+        self.assertEqual('unknown', self.op_state())
+        self.site.identity_issues = []; self.page.locator('#refresh').click()
+        self.wait(lambda: not self.js('Boolean(appState[relatedUid]?.identityUnresolved)'), 'complete list resolves Source')
+        self.page.locator('#report-notice-retry').click()
+        self.wait(lambda: self.op_state() == 'applied', 'same operation resumes')
+        self.assertEqual(frozen, self.site.related_puts[-1][1])
+
+    def test_w5r2_identity_is_rechecked_after_digest_await_before_transport(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.related_answers = ['abort']; self.insert()
+        self.wait(lambda: self.op_state() == 'unknown', 'unknown apply')
+        self.js('''() => {
+          const original = crypto.subtle.digest.bind(crypto.subtle);
+          window.digestReleases = [];
+          crypto.subtle.digest = (...args) => new Promise(resolve => digestReleases.push(() => resolve(original(...args))));
+          window.restoreDigest = () => { crypto.subtle.digest = original; digestReleases.forEach(release => release()); };
+        }''')
+        self.page.locator('#report-notice-retry').click()
+        self.wait(lambda: self.js('digestReleases.length') == 2, 'digest computation held')
+        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved during queued write')
+        self.js('restoreDigest()'); self.settle(200)
+        self.assertEqual(1, len(self.site.related_puts), 'W5A-03: final admission after hashing')
+        self.assertEqual('unknown', self.op_state())
+        self.assertEqual(self.whole(), self.value())
+
+    def test_w5r2_late_applied_receipt_waits_for_frozen_source_resolution(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.related_answers = ['hold']; self.insert()
+        self.wait(lambda: bool(self.site.held_related), 'apply held')
+        _, uid, body, account = self.site.held_related[0]
+        self.assertEqual(200, self.site.related_put(uid, body, account)[0], 'server applied before identity update')
+        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved')
+        self.site.finish_related(); self.settle(200)
+        self.assertEqual('unknown', self.op_state(), 'W5A-03: late reply cannot retire while Source unresolved')
+        self.assertEqual(self.whole(), self.value())
+        self.site.identity_issues = []; self.page.locator('#refresh').click()
+        self.wait(lambda: not self.js('Boolean(appState[relatedUid]?.identityUnresolved)'), 'complete list resolves Source')
+        self.page.locator('#report-notice-check').click()
+        self.wait(lambda: self.op_state() == 'applied', 'same receipt resolves after identity')
+
+    def test_w5r2_wire_unicode_and_canonical_digest_vectors(self):
+        # These digest values are outputs of the exported 02c8a87 server helpers, not product source pins.
+        vectors = [
+            ('😀X', '😀', 2, '', '743ee4f5d052aa8f7dceb63f7f3e415a41025bc9b20664cfa15b227923f36ef2',
+             'd4eadb61a17f325ccb848db261cbd380e8e791b3ccbda6c0a9987d426bb9e99c'),
+            ('A\rB', 'A\nB', 3, '', 'c36f5f310cd4013b1b8553bd12a27a4607fe98f5ebfeaf4537ea4b0e4a687965',
+             '5633c859b7f67c720d2aabcbee934dbb6ca584097b02153e1214921ca1621a84'),
+            ('😀X', '\n😀', 2, 'Seed 😀', '2b4ae2d1e8e2b0168f624bdb915cdfe27263f29d0894ea2dfb907cf8b1d4f061',
+             'abd774a3196fcd8154ec26b4602b5fa9256965c3b4096487c757d05bc9999952'),
+        ]
+        for source, text, end, seed, request_digest, proposal_digest in vectors:
+            with self.subTest(source=source, seed=seed):
+                site = W5Site(); body = wire_request(text, end, seed)
+                site.versions[UID_B][0]['findings'] = source
+                if seed: site.store[UID_A]['report']['findings'] = seed
+                status, answer = site.related_put(UID_A, body, h.RAD)
+                self.assertEqual(200, status, 'W5A-06: same UTF-16/CR contract as frozen server')
+                self.assertEqual(request_digest, answer['relatedInsert']['requestHash'], 'W5A-06: canonical request tuple')
+                self.assertEqual(proposal_digest, answer['relatedInsert']['proposalHash'], 'W5A-06: canonical proposal tuple')
+        body = wire_request(); body['citationIds'] = ['z', 'a']; body['structureIds'] = ['s2', 's1']
+        body['recommendation'] = 'Keep "quote"\u2028e\u0301'
+        self.assertEqual('77beb36e118b577e4a8e3ccae928f161dff0981427ae880e504f52027c537414', request_hash(body))
+        self.assertEqual('f0d9feb28a583fdae40b35b95983bbde5fc78f2eff6b7782920503936559795c', sha(proposal_tuple(body)))
+        body['relatedInsert'].update(intent='discard', expectedReceiptRevision=4)
+        body['citationIds'].reverse(); body['structureIds'].reverse()
+        self.assertEqual('77beb36e118b577e4a8e3ccae928f161dff0981427ae880e504f52027c537414', request_hash(body))
+        version = {'findings': '😀X\r\nY', 'conclusion': 'A\rB', 'recommendation': 'R'}
+        self.assertEqual('\n😀X\nY\n\nA\nB\n\nR', insertion_text(version,
+            [{'field': 'findings', 'start': 0, 'end': 5}, {'field': 'conclusion', 'start': 0, 'end': 3},
+             {'field': 'recommendation', 'start': 0, 'end': 1}], 'seed'))
+        for start, end in [(0, 1), (1, 2), (0, 99)]:
+            self.assertIsNone(insertion_text(version, [{'field': 'findings', 'start': start, 'end': end}], ''),
+                              'split surrogate and out-of-range selections are refused')
+
+    def test_w5r2_runtime_assets_are_current_phase_a_sources(self):
+        # D73/B6: byte identity itself is the provenance requirement here, not a constraint on product behavior.
+        # Hash the HTTP bodies actually served, rather than treating the recorder HEAD as the runtime subject.
+        self.open()
+        names = ['main.html', 'main-split.bundle.js', 'report-draft-client.js', 'critical-result-send.js', 'related-report-mode.js']
+        observed = self.js('''async names => {
+          const result = {};
+          for (const name of names) {
+            const bytes = await (await fetch(name)).arrayBuffer();
+            result[name] = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+              b => b.toString(16).padStart(2, '0')).join('');
+          }
+          return result;
+        }''', names)
+        for name in names:
+            expected = compose_page().encode('utf-8') if name == 'main.html' else (LITE / name).read_bytes()
+            self.assertEqual(hashlib.sha256(expected).hexdigest(), observed[name], 'W5A-07: current runtime source ' + name)
+        print('W5-UI-RUNTIME-SOURCES ' + json.dumps({'subject': 'current Phase A working sources with declared markup injection',
+                                                  'served_sha256': observed}), flush=True)
 
 
 def run_mutants():

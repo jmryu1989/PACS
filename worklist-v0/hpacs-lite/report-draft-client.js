@@ -412,14 +412,27 @@
      * intent 'discard' and expectedReceiptRevision (both outside the request hash); the Check reads the envelope and the
      * receipt. None of them takes the ordinary settle/deliver/rebase path. No answer becomes this line's baseline unless it
      * proves the applied proposal: result and state applied, currentMatches, the envelope at appliedRevision (expectedRevision
-     * + 1 in the same epoch) holding exactly the frozen proposal, and the same receipt hashes as every earlier answer for the
-     * id. HTTP 200 alone proves nothing (a discard and a foreign Check answer 200 too); 401/403/404, STUDY_* refusals, 5xx and
+     * + 1 in the same epoch) holding exactly the frozen proposal, and both canonical hashes computed from that request.
+     * HTTP 200 alone proves nothing (a discard and a foreign Check answer 200 too); 401/403/404, STUDY_* refusals, 5xx and
      * a lost or unreadable answer never prove that the operation did not apply.
      * While an operation is held, this line refuses every ordinary write, preservation, unload write, discard and commit of
      * the study: each would carry the inserted text without its receipt. The page retires the hold when the operation ends.
      */
     const HASH = /^[0-9a-f]{64}$/;
-    const insertPins = new Map();
+    // W5-API 02c8a87: the ordered tuples are the wire contract, including the nested proposal tuple.
+    async function insertHashes(request) {
+      const r = request.relatedInsert, owner = request.expectedOwner, expected = REVISION.exec(request.expectedRevision);
+      const proposal = ['related-insert-proposal-v1', request.findings, request.conclusion, request.recommendation,
+        request.baseVersion, [...request.citationIds].sort(), [...request.structureIds].sort()];
+      const tuple = ['related-insert-v1', r.insertRequestId, owner.institution, owner.sub, owner.author, r.targetUid,
+        expected[1], Number(expected[2]), r.source.uid, r.source.version, r.source.action,
+        r.source.parts.map(p => [p.field, p.start, p.end]), r.targetBaseVersion, r.seedKind, r.section, r.position,
+        r.offset, r.text, r.selectionSeq, r.contentRevision, r.sourceGeneration, proposal];
+      const digest = async value => Array.from(new Uint8Array(await root.crypto.subtle.digest('SHA-256',
+        new TextEncoder().encode(JSON.stringify(value)))), byte => byte.toString(16).padStart(2, '0')).join('');
+      const [requestHash, proposalHash] = await Promise.all([digest(tuple), digest(proposal)]);
+      return { requestHash, proposalHash };
+    }
     const heldInsert = () => ({ outcome: 'refused', code: 'KIN_RELATED_INSERT_PENDING',
       message: 'Related Report 삽입의 저장 결과를 아직 확인하지 못해 이 쓰기를 보내지 않았습니다.' });
     const proposalOf = request => ({ findings: request.findings, conclusion: request.conclusion, recommendation: request.recommendation,
@@ -438,15 +451,21 @@
         || !(r.receiptRevision === null || (Number.isSafeInteger(r.receiptRevision) && r.receiptRevision >= 1))
         || typeof r.currentMatches !== 'boolean' || typeof r.discardable !== 'boolean'
         || !(r.reason === null || typeof r.reason === 'string')) return null;
+      // Only absent/foreign receipts may omit stored proof. All durable states carry the original CAS and receipt fence.
+      if (r.state !== null && (r.requestHash === null || r.proposalHash === null || r.expectedRevision === null
+          || r.receiptRevision === null)) return null;
+      if (r.state === 'applied' && (r.appliedRevision === null || r.discardable
+          || !((r.result === 'applied' && r.currentMatches && r.reason === null)
+            || (r.result === 'unknown' && !r.currentMatches && r.reason === 'SUPERSEDED')))) return null;
+      if (['refused', 'discarded'].includes(r.state) && (r.result !== 'refused' || r.appliedRevision !== null || r.currentMatches
+          || r.discardable !== (r.state === 'refused') || (r.state === 'discarded' && r.reason !== 'INSERT_DISCARDED'))) return null;
+      if (r.state === 'refused' && !['DRAFT_CONFLICT', 'TARGET_UNVERIFIED', 'TARGET_HELD', 'SOURCE_UNAVAILABLE',
+          'SOURCE_CHANGED', 'SEED_CHANGED'].includes(r.reason)) return null;
       return r;
     }
-    /** Every answer that names hashes for an id names the same pair: another pair is not this operation's receipt. */
-    function pinned(id, receipt) {
-      if (receipt.requestHash === null && receipt.proposalHash === null) return true;
-      if (receipt.requestHash === null || receipt.proposalHash === null) return false;
-      const known = insertPins.get(id);
-      if (!known) { insertPins.set(id, { requestHash: receipt.requestHash, proposalHash: receipt.proposalHash }); return true; }
-      return known.requestHash === receipt.requestHash && known.proposalHash === receipt.proposalHash;
+    function matchesInsertHashes(receipt, hashes) {
+      if (receipt.state === null && receipt.requestHash === null && receipt.proposalHash === null) return true;
+      return receipt.requestHash === hashes.requestHash && receipt.proposalHash === hashes.proposalHash;
     }
     /**
      * What an answer proves about the operation: applied (above), refused (a durable refused receipt; its receiptRevision is
@@ -454,26 +473,29 @@
      * once, the draft has moved on since: never applied again), absent (no receipt), id-reused, invalid (the request's shape was
      * refused before anything was read), or unknown.
      */
-    function insertOutcome(uid, request, answer) {
+    function insertOutcome(uid, request, answer, hashes) {
       const id = request.relatedInsert.insertRequestId;
       const body = answer.incomplete ? null : answer.body;
       const code = body && typeof body.code === 'string' ? body.code : answer.code || null;
       if (answer.auth) return { outcome: 'unknown', answer, code };
       if (!answer.ok && answer.status === 400) return { outcome: 'invalid', answer, code };
+      if (!answer.ok && answer.status !== 409) return { outcome: 'unknown', answer, code };
       if (!answer.ok && code === 'ID_REUSED') return { outcome: 'id-reused', answer, code };
       const envelope = body ? envelopeOf(body) : null;
       const ours = envelope && envelope.uid === uid && sameOwner(envelope.owner, request.expectedOwner) ? envelope : null;
       const receipt = receiptOf(body, id);
-      if (!ours || !receipt || !pinned(id, receipt)) return { outcome: 'unknown', answer, code };
+      if (!ours || !receipt || !matchesInsertHashes(receipt, hashes)) return { outcome: 'unknown', answer, code };
       if (receipt.reason === 'ID_REUSED') return { outcome: 'id-reused', answer, code };
       if (receipt.expectedRevision !== null && receipt.expectedRevision !== request.expectedRevision)
+        return { outcome: 'unknown', answer, code };
+      if (receipt.state === 'applied' && receipt.appliedRevision !== nextRevision(request.expectedRevision))
         return { outcome: 'unknown', answer, code };
       const proves = receipt.result === 'applied' && receipt.state === 'applied' && receipt.currentMatches === true
         && receipt.requestHash !== null && receipt.appliedRevision !== null
         && receipt.appliedRevision === nextRevision(request.expectedRevision) && ours.revision === receipt.appliedRevision
         && ours.present && sameSnapshot(ours.snapshot, proposalOf(request));
       if (proves) return { outcome: 'applied', envelope: ours, receipt, answer };
-      if (receipt.state === 'applied') return { outcome: 'superseded', envelope: ours, receipt, answer, code };
+      if (receipt.state === 'applied') return { outcome: receipt.reason === 'SUPERSEDED' ? 'superseded' : 'unknown', envelope: ours, receipt, answer, code };
       if (receipt.state === 'discarded') return { outcome: 'discarded', envelope: ours, receipt, answer, code };
       if (receipt.state === 'refused' && receipt.receiptRevision !== null)
         return { outcome: code === 'RELATED_INSERT_RECEIPT_CHANGED' ? 'receipt-changed' : 'refused', envelope: ours, receipt,
@@ -481,15 +503,18 @@
       if (receipt.state === null && receipt.reason === 'RECEIPT_ABSENT') return { outcome: 'absent', envelope: ours, receipt, answer, code };
       return { outcome: 'unknown', answer, code };
     }
-    async function sendInsert(uid, own, request, method, body, { context, session } = {}) {
+    async function sendInsert(uid, own, request, method, body, { context, session, admit = () => true } = {}) {
       const id = request.relatedInsert.insertRequestId;
       const url = method === 'GET' ? path(uid, 'draft') + '?insertRequestId=' + encodeURIComponent(id) : path(uid, 'report');
-      let answer;
+      let answer, hashes;
       try {
+        hashes = await insertHashes(request);
+        if (!admit()) return { outcome: 'unsent' };
         answer = await transport.request(url, { method, ...(body ? { json: body } : {}), context, session, kind: 'draft',
           ...(method === 'GET' ? { abortWhenStale: false } : {}) });
       } catch (error) { return failed(error); }
-      const got = insertOutcome(uid, request, answer);
+      if (!admit()) return { outcome: 'unknown', answer };
+      const got = insertOutcome(uid, request, answer, hashes);
       // Only a proven applied proposal moves this line's baseline: the next ordinary write then stands on appliedRevision.
       if (got.outcome === 'applied') adopt(own, got.envelope);
       return got;
@@ -698,21 +723,21 @@
        * W5: send one explicit Insert's frozen request (its first send or a same-ID Retry). Holding starts here, before the
        * request leaves; it ends only by retireInsert. The answer is an outcome of insertOutcome above.
        */
-      relatedInsert(uid, request, { context, session } = {}) {
+      relatedInsert(uid, request, { context, session, admit } = {}) {
         const own = line(uid);
         own.insert = { id: request.relatedInsert.insertRequestId };
-        return queue(uid, () => sendInsert(uid, own, request, 'PUT', request, { context, session }));
+        return queue(uid, () => sendInsert(uid, own, request, 'PUT', request, { context, session, admit }));
       },
       /** W5 Discard Insert: the same body with intent 'discard' and the refused receipt's revision; it writes no draft. */
-      discardInsert(uid, request, receiptRevision, { context, session } = {}) {
+      discardInsert(uid, request, receiptRevision, { context, session, admit } = {}) {
         const own = line(uid);
         const body = { ...request, relatedInsert: { ...request.relatedInsert, intent: 'discard', expectedReceiptRevision: receiptRevision } };
-        return queue(uid, () => sendInsert(uid, own, request, 'PUT', body, { context, session }));
+        return queue(uid, () => sendInsert(uid, own, request, 'PUT', body, { context, session, admit }));
       },
       /** W5 Check: GET draft?insertRequestId — the current envelope and the receipt, after this line's earlier commands. */
-      checkInsert(uid, request, { context, session } = {}) {
+      checkInsert(uid, request, { context, session, admit } = {}) {
         const own = line(uid);
-        return queue(uid, () => sendInsert(uid, own, request, 'GET', null, { context, session }), false);
+        return queue(uid, () => sendInsert(uid, own, request, 'GET', null, { context, session, admit }), false);
       },
       /**
        * W5: the operation has ended (applied, discarded) or is handed to an explicit choice. `conflict` (an envelope or null)

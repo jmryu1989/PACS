@@ -4693,7 +4693,7 @@
     }
     function renderRelatedInsertNotice(n) {
       const op = n.action.op, s = op.state, busy = ["editing", "sending", "checking", "discarding"].includes(s);
-      const unresolved = !!appState[op.uid]?.identityUnresolved;
+      const unresolved = !relatedInsertIdentityResolved(op);
       const toward = n.target ? ` ${studyLabel(n.target.uid)}(으)로 가려던 이동은 이 삽입이 확인된 뒤에 이어 갑니다.` : "";
       const review = "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고르세요.";
       const text = busy ? "Related Report에서 넣은 글의 서버 저장을 확인하는 중입니다 — 입력한 내용은 그대로 있습니다."
@@ -4711,8 +4711,8 @@
       $("#report-notice-msg").replaceChildren(strong, " — " + text);
       $("#report-notice-retry").style.display = ["unknown", "refused"].includes(s) && !unresolved ? "" : "none";
       $("#report-notice-check").style.display = ["unknown", "discard-unknown"].includes(s) || (busy && s === "checking") ? "" : "none";
-      $("#report-notice-check").disabled = busy;
-      $("#report-notice-retry").disabled = busy;
+      $("#report-notice-check").disabled = busy || unresolved;
+      $("#report-notice-retry").disabled = busy || unresolved;
       relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
         ? op : null, busy);
     }
@@ -5398,8 +5398,13 @@
     }
     /** reportWriteBlock's W5 part outside the mode: a pending operation blocks writes, except its own admitted native edit. */
     function relatedInsertWriteBlock(uid, admission) {
-      const op = relatedInsertPending(uid);
+      const op = admission?.op ?? relatedInsertPending(uid);
+      if (op && !relatedInsertIdentityResolved(op)) return RELATED_IDENTITY;
       return op && !(admission && admission.op === op) ? RELATED_PENDING_REASON : null;
+    }
+    // The pending Source can differ from the Source now being viewed. A complete list alone clears these flags.
+    function relatedInsertIdentityResolved(op) {
+      return !appState[op.uid]?.identityUnresolved && !appState[op.source.uid]?.identityUnresolved;
     }
     function relatedInsertLabel(op) {
       return op.state === "applied" ? "Draft Saved" + (draftTime(op.at) ? " " + draftTime(op.at) : "")
@@ -5536,15 +5541,21 @@
       relatedInsertSend(op, "apply");
     }
     async function relatedInsertSend(op, kind, context = work.capture("document"), session = undefined) {
+      const admit = () => relatedInserts.get(op.uid) === op && relatedInsertIdentityResolved(op);
+      if (!admit()) {
+        if (op.state === "editing") op.state = "unknown";
+        relatedInsertShow(op);
+        return { outcome: "unsent" };
+      }
       const before = op.state, writes = kind !== "check";
       op.state = kind === "check" ? "checking" : kind === "discard" ? "discarding" : "sending";
       relatedInsertShow(op);
       if (writes) relatedInsertsOut += 1;
       let got;
       try {
-        got = kind === "check" ? await draftClient.checkInsert(op.uid, op.request, { context, session })
-          : kind === "discard" ? await draftClient.discardInsert(op.uid, op.request, op.receiptRevision, { context, session })
-          : await draftClient.relatedInsert(op.uid, op.request, { context, session });
+        got = kind === "check" ? await draftClient.checkInsert(op.uid, op.request, { context, session, admit })
+          : kind === "discard" ? await draftClient.discardInsert(op.uid, op.request, op.receiptRevision, { context, session, admit })
+          : await draftClient.relatedInsert(op.uid, op.request, { context, session, admit });
       } catch (error) { got = { outcome: "unknown", error }; }
       finally {
         if (writes) { relatedInsertsOut -= 1; wakeIdle(); }
@@ -5559,6 +5570,11 @@
      */
     function relatedInsertSettle(op, got, kind, before) {
       if (relatedInserts.get(op.uid) !== op) return;
+      if (!relatedInsertIdentityResolved(op)) {
+        op.state = kind === "discard" || before === "discard-unknown" ? "discard-unknown" : "unknown";
+        relatedInsertShow(op);
+        return;
+      }
       switch (got?.outcome) {
         case "applied": relatedInsertApplied(op, got.envelope); break;
         case "refused": case "receipt-changed":
@@ -5592,7 +5608,7 @@
      */
     function relatedInsertReverted(op, envelope = null) {
       const uid = op.uid;
-      op.state = "discarded";
+      op.state = "discarding";
       const exact = uid === selectedUid && reportOpening?.uid === uid && reportOpening?.selectionSeq === op.selectionSeq
         && selectionSeq === op.selectionSeq && !!reportFrame && reportFrame.read(op.field) === op.after
         && !reportEditedSince(uid, op.turn ?? 0) && work.state() === "active";
@@ -5603,6 +5619,8 @@
         const removed = relatedMode ? relatedMode.admit({ field: op.field, at, text: "", op }, edit) : edit(null);
         reverted = !!removed && reportFrame.read(op.field) === op.before;
       }
+      if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }
+      op.state = "discarded";
       draftClient.retireInsert(uid, op.id, reverted ? undefined : { conflict: envelope ?? null });
       if (reverted) {
         op.reverted = true;
@@ -5631,7 +5649,7 @@
     }
     function relatedInsertRetry(op) {
       if (relatedInserts.get(op.uid) !== op || !["unknown", "refused"].includes(op.state)) return;
-      if (appState[op.uid]?.identityUnresolved) { toast(RELATED_IDENTITY, "err"); return; }
+      if (!relatedInsertIdentityResolved(op)) { toast(RELATED_IDENTITY, "err"); return; }
       relatedInsertSend(op, "apply");
     }
     function relatedInsertCheck(op, context = undefined, session = undefined) {
@@ -5640,7 +5658,7 @@
     }
     function relatedInsertDiscard(op) {
       if (relatedInserts.get(op.uid) !== op || !["refused", "discard-unknown"].includes(op.state) || !Number.isSafeInteger(op.receiptRevision)) return;
-      if (appState[op.uid]?.identityUnresolved) { toast(RELATED_IDENTITY, "err"); return; }
+      if (!relatedInsertIdentityResolved(op)) { toast(RELATED_IDENTITY, "err"); return; }
       relatedInsertSend(op, "discard");
     }
     /** The one Notice speaks for an operation that needs the reader (its own action: Retry/Check/Discard Insert); the rest follows. */

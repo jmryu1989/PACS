@@ -350,7 +350,7 @@
     }
     function renderRelatedInsertNotice(n) {
       const op = n.action.op, s = op.state, busy = ["editing", "sending", "checking", "discarding"].includes(s);
-      const unresolved = !!appState[op.uid]?.identityUnresolved;
+      const unresolved = !relatedInsertIdentityResolved(op);
       const toward = n.target ? ` ${studyLabel(n.target.uid)}(으)로 가려던 이동은 이 삽입이 확인된 뒤에 이어 갑니다.` : "";
       const review = "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고르세요.";
       const text = busy ? "Related Report에서 넣은 글의 서버 저장을 확인하는 중입니다 — 입력한 내용은 그대로 있습니다."
@@ -368,8 +368,8 @@
       $("#report-notice-msg").replaceChildren(strong, " — " + text);
       $("#report-notice-retry").style.display = ["unknown", "refused"].includes(s) && !unresolved ? "" : "none";
       $("#report-notice-check").style.display = ["unknown", "discard-unknown"].includes(s) || (busy && s === "checking") ? "" : "none";
-      $("#report-notice-check").disabled = busy;
-      $("#report-notice-retry").disabled = busy;
+      $("#report-notice-check").disabled = busy || unresolved;
+      $("#report-notice-retry").disabled = busy || unresolved;
       relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
         ? op : null, busy);
     }

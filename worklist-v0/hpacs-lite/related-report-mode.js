@@ -146,7 +146,7 @@
       if (extra) nodes.push(...extra);
       card.replaceChildren(...nodes);
     }
-    const pair = (a, b) => [a, b].filter(value => value !== null && value !== undefined && value !== '').join(' · ') || null;
+    const pair = (...values) => values.filter(value => value !== null && value !== undefined && value !== '').join(' · ') || null;
 
     function renderTarget() {
       const t = app.target();
@@ -279,7 +279,7 @@
       const seed = app.seed();
       const section = chosenSection();
       dialogSource.textContent = 'Source: ' + (pair(open.source.version === null ? null : 'v' + open.source.version,
-        ACTION[open.source.action] || open.source.action, open.source.author) || UNKNOWN) + ' · '
+        ACTION[open.source.action] || open.source.action, open.source.author, open.source.at) || UNKNOWN) + ' · '
         + open.parts.map(part => LABEL[part.field] + (part.start === 0 && part.end === open.source.texts[part.field].length ? '' : ' (선택한 부분)')).join(', ');
       if (!seed || seed.reason) {
         dialogTarget.textContent = 'Target: ' + (seed?.label || UNKNOWN);
@@ -388,7 +388,7 @@
 
     /** One native edit of the page under a one-shot admission while the mode holds the editor (the inverse of a discarded Insert). */
     function admit({ field, at, text, op }, run) {
-      if (!state) return run(null);
+      // A late Discard after Back still needs the operation's identity admission at the frame's final edit check.
       const token = Object.seal({ op, field, at, text, state: 'prepared' }), gen = generation;
       admission = token;
       try { return withEditor(() => run(token)); }

@@ -16,6 +16,7 @@ reentrant editor write in that span (test_w5_reentrant_... proves the combined b
 """
 import io
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -27,6 +28,39 @@ LITE = ROOT / "worklist-v0/hpacs-lite"
 
 # (label, file, old, new, the behavior case that must catch it)
 MUTANTS = [
+    ("W5A-01-first-pair-trusted", "report-draft-client.js",
+     "return receipt.requestHash === hashes.requestHash && receipt.proposalHash === hashes.proposalHash;",
+     "return true;", "test_w5r2_first_receipt_hash_must_match_frozen_request"),
+    ("W5A-02-incomplete-applied-proof", "report-draft-client.js",
+     "if (r.state !== null && (r.requestHash === null || r.proposalHash === null || r.expectedRevision === null\n          || r.receiptRevision === null)) return null;",
+     "", "test_w5r2_incomplete_applied_receipt_must_stay_unknown"),
+    ("W5A-02-incomplete-tombstone-proof", "report-draft-client.js",
+     "const receipt = receiptOf(body, id);", "const receipt = body?.relatedInsert;",
+     "test_w5r2_tombstone_proof_fields_are_required_individually"),
+    ("W5A-03-frozen-source-ignored", "report-draft-sync.js",
+     "return !appState[op.uid]?.identityUnresolved && !appState[op.source.uid]?.identityUnresolved;",
+     "return !appState[op.uid]?.identityUnresolved;",
+     "test_w5r2_source_identity_is_rechecked_when_discard_reply_arrives"),
+    ("W5A-03-transport-admission-removed", "report-draft-client.js",
+     "        if (!admit()) return { outcome: 'unsent' };", "",
+     "test_w5r2_identity_is_rechecked_after_digest_await_before_transport"),
+    ("W5A-03-inverse-focus-retires-unresolved", "report-draft-sync.js",
+     '      if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }', "",
+     "test_w5r2_source_identity_on_inverse_focus_after_back_keeps_operation"),
+    ("W5A-04-cvr-mode-admission-removed", "critical-result-mounts.js",
+     "blocked: () => relatedMode?.active() ? relatedMode.reason() : null", "blocked: () => null",
+     "test_w5r2_cvr_unknown_retry_is_blocked_in_related_mode"),
+    ("W5A-05-source-provenance-dropped", "related-report-mode.js",
+     "const pair = (...values) => values.filter", "const pair = (a, b) => [a, b].filter",
+     "test_w5r2_source_card_includes_signer_and_time"),
+    ("W5A-06-codepoints-as-utf16", "related_report_mode_dom_test.py",
+     'return raw[start * 2:None if end is None else end * 2].decode("utf-16-le", errors="surrogatepass")',
+     "return text[start:end]", "test_w5r2_wire_unicode_and_canonical_digest_vectors"),
+    ("W5A-06-object-digest", "related_report_mode_dom_test.py",
+     'return sha(["related-insert-v1", r["insertRequestId"],',
+     'return sha(["wrong-object-contract", r["insertRequestId"],', "test_w5r2_wire_unicode_and_canonical_digest_vectors"),
+    ("W5A-07-historical-runtime-as-current", "report-draft-client.js", None,
+     "c8e4f1b485ec05ccbb97589c74a573b3f48b70ce", "test_w5r2_runtime_assets_are_current_phase_a_sources"),
     # PAGE-01: only clear/saved enters; an unknown save is not an entry permission.
     ("entry-on-unknown-save", "related-report.js",
      'if (pass.status !== "clear" && pass.status !== "saved") { refuse(pass.status, pass.reason); return; }',
@@ -106,18 +140,18 @@ MUTANTS = [
      "test_w5_native_edit_refusal_restores_hidden_inert_and_focus_and_sends_nothing"),
     # R1: a Retry with a new ID / the same ID with a different payload (rebased on the current revision).
     ("retry-with-a-new-id", "report-draft-sync.js",
-     ": await draftClient.relatedInsert(op.uid, op.request, { context, session });",
-     ": await draftClient.relatedInsert(op.uid, { ...op.request, relatedInsert: { ...op.request.relatedInsert, insertRequestId: crypto.randomUUID() } }, { context, session });",
+     ": await draftClient.relatedInsert(op.uid, op.request, { context, session, admit });",
+     ": await draftClient.relatedInsert(op.uid, { ...op.request, relatedInsert: { ...op.request.relatedInsert, insertRequestId: crypto.randomUUID() } }, { context, session, admit });",
      "test_w5_unknown_retry_resends_the_same_id_and_body_and_inserts_once"),
     ("retry-rebased-on-the-current-revision", "report-draft-sync.js",
-     ": await draftClient.relatedInsert(op.uid, op.request, { context, session });",
-     ": await draftClient.relatedInsert(op.uid, { ...op.request, expectedRevision: (await draftClient.read(op.uid, { context }))?.read?.revision ?? op.request.expectedRevision }, { context, session });",
+     ": await draftClient.relatedInsert(op.uid, op.request, { context, session, admit });",
+     ": await draftClient.relatedInsert(op.uid, { ...op.request, expectedRevision: (await draftClient.read(op.uid, { context }))?.read?.revision ?? op.request.expectedRevision }, { context, session, admit });",
      "test_w5_lost_then_retry_replays_the_applied_receipt_without_a_second_insertion"),
     # Text-only / receipt-only promotion to Draft Saved.
     ("text-only-promotion", "report-draft-client.js",
-     "      if (!ours || !receipt || !pinned(id, receipt)) return { outcome: 'unknown', answer, code };",
+     "      if (!ours || !receipt || !matchesInsertHashes(receipt, hashes)) return { outcome: 'unknown', answer, code };",
      "      if (ours && ours.present && sameSnapshot(ours.snapshot, proposalOf(request))) { adopt(line(uid), ours); return { outcome: 'applied', envelope: ours, receipt, answer }; }\n"
-     "      if (!ours || !receipt || !pinned(id, receipt)) return { outcome: 'unknown', answer, code };",
+     "      if (!ours || !receipt || !matchesInsertHashes(receipt, hashes)) return { outcome: 'unknown', answer, code };",
      "test_w5_same_text_without_a_receipt_is_never_saved"),
     ("receipt-only-promotion", "report-draft-client.js",
      "const proves = receipt.result === 'applied' && receipt.state === 'applied' && receipt.currentMatches === true",
@@ -125,8 +159,8 @@ MUTANTS = [
      "test_w5_superseded_insert_goes_to_the_explicit_conflict_review_never_reapplied"),
     # R1: Discard Insert removes the text before the tombstone is confirmed.
     ("inverse-edit-before-the-tombstone", "report-draft-sync.js",
-     '      if (appState[op.uid]?.identityUnresolved) { toast(RELATED_IDENTITY, "err"); return; }\n      relatedInsertSend(op, "discard");',
-     '      if (appState[op.uid]?.identityUnresolved) { toast(RELATED_IDENTITY, "err"); return; }\n      relatedInsertReverted(op);\n      relatedInsertSend(op, "discard");',
+     '      if (!relatedInsertIdentityResolved(op)) { toast(RELATED_IDENTITY, "err"); return; }\n      relatedInsertSend(op, "discard");',
+     '      if (!relatedInsertIdentityResolved(op)) { toast(RELATED_IDENTITY, "err"); return; }\n      relatedInsertReverted(op);\n      relatedInsertSend(op, "discard");',
      "test_w5_discard_insert_tombstone_first_then_exactly_the_inserted_span_is_removed"),
     # Discard offered for an unknown operation (unknown is never proof of no insert).
     ("discard-offered-for-unknown", "report-editor.js",
@@ -167,17 +201,23 @@ def run():
     originals = {row["file"]: (LITE / row["file"]).read_text(encoding="utf-8") for row in order}
     killed, results = 0, []
     for label, file, old, new, name in MUTANTS:
-        source = originals[file] if file in originals else (LITE / file).read_text(encoding="utf-8")
-        if source.count(old) != 1:
+        case = w5.RelatedModePage
+        source = originals[file] if file in originals else ((ROOT / "tests" if file.endswith('.py') else LITE) / file).read_text(encoding="utf-8")
+        if old is not None and source.count(old) != 1:
             raise AssertionError("mutation location not unique: " + label)
-        changed = source.replace(old, new, 1)
-        if file in originals:
+        changed = source.replace(old, new, 1) if old is not None else subprocess.check_output(
+            ['git', 'show', new + ':worklist-v0/hpacs-lite/' + file], cwd=ROOT).decode('utf-8')
+        if file.endswith('.py'):
+            namespace = {'__name__': 'w5_wire_mutant', '__file__': str(ROOT / 'tests' / file)}
+            exec(compile(changed, namespace['__file__'], 'exec'), namespace)
+            case = namespace['RelatedModePage']
+        elif file in originals:
             case.bundle_source = "".join(changed if row["file"] == file else originals[row["file"]] for row in order)
         else:
             case.asset_source = (file, changed)
         output = io.StringIO()
         try:
-            result = unittest.TextTestRunner(stream=output, verbosity=2).run(unittest.TestSuite([case(name)]))
+            result = unittest.TextTestRunner(stream=output, verbosity=2, failfast=True).run(unittest.TestSuite([case(name)]))
         finally:
             case.bundle_source = None
             case.asset_source = None
