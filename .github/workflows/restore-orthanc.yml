@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   produce:
+    name: restore-orthanc / produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -44,6 +45,7 @@ jobs:
           include-hidden-files: false
           overwrite: false
   consume:
+    name: restore-orthanc / consume
     needs: produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10

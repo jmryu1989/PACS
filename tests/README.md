@@ -84,6 +84,29 @@ REQ-D01-APPEARANCE → RISK-PREFERENCE-LOSS/READABILITY/TARGET → TEST-D01-APPE
 
 REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-COLUMNS: `node --test tests/worklist_columns_test.cjs`와 `python tests/e2e/test_worklist_columns.py`는 열 표시/순서·ID/Name 필수 유지, 숨긴 열 조건/정렬과 판독 입력 보존, 판독/촬영별 설정, 같은 브라우저의 계정별 복원/재로그인, 다른 창 충돌·저장 실패·손상 값 복구·취소/키보드/작은 창을 검사한다. 열 설정은 기관+불변 subject별 브라우저 저장소에 표시 항목만 보관한다. 서버 동기화·다른 컴퓨터 복원은 포함하지 않으며 UI에 범위를 표시한다. API/DB/판독·원본 저장 경로는 변경하지 않는다.
 
+## Restore required-check names
+
+REQ-RESTORE-JOB-NAMES → RISK-RESTORE-FAILURE-MASKED →
+`ci_workflow_consumers_test.py::WorkflowConsumerTests::test_restore_required_check_names_are_unique_and_workflow_qualified`:
+각 restore workflow의 공개 check 이름은 아래와 같으며 전체 workflow에서 중복되지 않아야 한다.
+
+| Workflow | Produce check | Consume check |
+|---|---|---|
+| `restore-combined.yml` | `restore-combined / produce` | `restore-combined / consume` |
+| `restore-database.yml` | `restore-database / produce` | `restore-database / consume` |
+| `restore-image.yml` | `restore-image / produce` | `restore-image / consume` |
+| `restore-orthanc.yml` | `restore-orthanc / produce` | `restore-orthanc / consume` |
+| `restore-product.yml` | `restore-product / produce` | `restore-product / consume` |
+
+job id `produce`·`consume`, `needs: produce`와 `needs.produce.outputs.*`는 그대로다.
+`ci_workflows.py`의 경로+job id 식별, `run-tests.py`, `execution_selection`,
+`candidate_ci`, `measurement_ci`의 시험 선택과 `candidate.yml`은 표시 이름을 선택 키로 쓰지 않는다.
+기존 10개 job은 두 공개 이름 `produce`·`consume`을 공유했다. 보호 API에서 삭제할 항목 수는
+실제 저장된 context/app 조합으로 확인하며 10개의 서로 다른 옛 context가 있다고 가정하지 않는다.
+사용자/지휘자는 새 10개 context를 기존 요구사항에 추가·재조회하고, main의 같은 SHA에서
+다섯 workflow의 최신 실행에 속한 새 10개 check가 모두 성공한 뒤에만 옛 항목을 제거한다.
+그 전에는 workflow별 지휘자 관문을 유지한다. 이름 변경 자체는 보호 설정 전환이나 병합 허가가 아니다.
+
 ## 공통 실행 증거 기록
 
 REQ-D-CINE-RANGE/YOYO → RISK-D-CINE-WRONG-FRAME/STALE/LOSS/UNBOUNDED → TEST-CINE-RANGE/YOYO: `cine_playback_test.cjs`와 `cine_lifecycle_test.cjs`는 선택 구간의 양 끝·왕복·중단, 범위 검증·원본/평면 기하 교체와 기존 비동기 소유권을 검사한다. `e2e/test_cine.py`와 `e2e/test_volume_cine.py`의 각 클래스에 직접 정의된 시험은 기존 `measurements` 프로필에서 함께 실행하며, 실제 multiframe/재구성 평면·화소·세션/선택/숨김/지연 중단·판독/원본 보존을 확인한다. `execution_selection_test.py`는 새 범위/중단 시험의 실제 선택과 상속 시험 제외를 대조한다. 로컬 원본 fixture는 실행하지 않으며 등록 사실은 hosted 실행 성공을 뜻하지 않는다.
