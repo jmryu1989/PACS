@@ -808,7 +808,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(self.page.locator('#chips')).to_contain_text('SYN private saved search')
-        # Keep autosave/polling from consuming the recovery draft during fixture setup.
+        # Freeze background timers so the session ends only at the explicit fast_forward below (not mid-setup).
         self.page.clock.pause_at('2026-10-03T01:00:00Z')
         self.page.locator('#rows tr[data-uid]').click()
         expect(self.page.locator('#findings')).to_be_editable()
