@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 
-from performance import ROOT, GROSS_REGRESSION_RATIO, GROSS_DELTA_FLOOR_MS
+from performance import ROOT, GROSS_REGRESSION_RATIO, GROSS_DELTA_FLOOR_MS, build_report
 
 # MP02 receipt-delay control (D1550). The delay must break the gate's real
 # condition (R > 1.25 AND paired median D > 5 ms) by construction, not by luck:
@@ -248,6 +248,95 @@ def load_summary(path):
     return summary
 
 
+def validated_io_failures(case, summary, directory):
+    """The summary omits IO counts. Reconcile it with the existing raw samples
+    before using a prefix-read or journal assertion as evidence of a kill.
+    Use the producer's predicates so this consumer cannot invent a new gate.
+    """
+    repetitions = summary.get('repetitions')
+    require_count(repetitions, 'repetitions')
+    if not repetitions:
+        raise ValueError('IO measurement needs at least one repetition')
+    ledger = case == 'ledger'
+    sizes = (0, 20000, 100000) if ledger else (0, 10000, 150000)
+    if ledger:
+        raw = [json.loads(line) for line in (directory / 'receipt.jsonl').read_text(encoding='utf-8').splitlines()]
+    else:
+        raw = json.loads((directory / 'journal.json').read_text(encoding='utf-8'))
+    if not isinstance(raw, list):
+        raise ValueError(case + ': raw samples must be a list')
+    rows = []
+    for row in raw:
+        if not isinstance(row, dict):
+            raise ValueError(case + ': sample must be an object')
+        if ledger:
+            if not isinstance(row.get('label'), str):
+                raise ValueError('receipt label must be a string')
+            # A healthy report also contains sustained/concurrent samples.
+            if not row['label'].startswith('ledger-'):
+                continue
+            require_count(row.get('concurrency'), 'concurrency')
+            if row['concurrency'] != 1:
+                raise ValueError('ledger sample must have concurrency 1')
+            require_count(row.get('failures'), 'failures')
+        size = row.get('prefill' if ledger else 'records')
+        require_count(size, 'retained size')
+        if size not in sizes or row.get('version') not in ('r3', 'r4d'):
+            raise ValueError(case + ': unexpected sample group')
+        require_count(row.get('read_rows' if ledger else 'read_bytes'), 'IO count')
+        for field in ('p50', 'p95', 'p99'):
+            require_number(row.get(field), field)
+            if row[field] < 0 or (field == 'p95' and row[field] == 0):
+                raise ValueError(case + ': invalid latency')
+        rows.append(row)
+    for size in sizes:
+        for version in ('r3', 'r4d'):
+            group = [row for row in rows if row['version'] == version
+                     and row['prefill' if ledger else 'records'] == size]
+            if len(group) != repetitions:
+                raise ValueError(case + ': missing or duplicated sample blocks')
+    configs = [('ledger', 1, size) for size in sizes] if ledger else []
+    measured = build_report(rows if ledger else [], configs, [case], repetitions, {},
+                            journal_rows=[] if ledger else rows)
+    listed = [failure for failure in summary['failures'] if failure.startswith(case + '-')]
+    if sorted(listed) != sorted(measured['failures']):
+        raise ValueError(case + ': listed failures disagree with measured rows')
+    if ledger:
+        for key, expected in measured['cases'].items():
+            row = summary['cases'].get(key)
+            if not isinstance(row, dict):
+                raise ValueError(key + ': missing case row')
+            for field in ('R', 'D', 'gate_ratio_limit', 'gate_delta_floor_ms'):
+                require_number(row.get(field), key + '.' + field)
+            require_count(row.get('failures'), key + '.failures')
+            if type(row.get('gate_passed')) is not bool:
+                raise ValueError(key + ': gate_passed must be boolean')
+            if any(row[field] != expected[field] for field in
+                   ('R', 'D', 'gate_ratio_limit', 'gate_delta_floor_ms', 'failures', 'gate_passed')):
+                raise ValueError(key + ': summary disagrees with measured rows')
+    section = 'ledger_size' if ledger else 'journal'
+    recorded = summary.get(section)
+    if not isinstance(recorded, dict):
+        raise ValueError(section + ': expected measured rows')
+    for size in measured[section]:
+        row = recorded.get(size)
+        if not isinstance(row, dict):
+            raise ValueError(section + ': missing size row')
+        for field in ('permutation_p', 'ratio' if ledger else 'size_permutation_p'):
+            require_number(row.get(field), section + '.' + field)
+        if not ledger:
+            for version in ('r3', 'r4d'):
+                if not isinstance(row.get(version), dict):
+                    raise ValueError('journal: missing revision statistics')
+                for field in ('p50', 'p95', 'p99'):
+                    require_number(row[version].get(field), 'journal.' + field)
+    # These recorded size/latency rows are the complete inputs to the size-effect
+    # predicates; equality also refuses missing rows and nonfinite statistics.
+    if recorded != measured[section]:
+        raise ValueError(section + ': summary disagrees with measured rows')
+    return property_failures(case, measured['failures'])
+
+
 def run_benchmark(cmd, log):
     def text(value):
         return value.decode('utf-8', 'replace') if isinstance(value, bytes) else (value or '')
@@ -261,12 +350,19 @@ def run_benchmark(cmd, log):
     return result.returncode
 
 
-def mutant_result(case, exit_code, summary, matching, validity=None):
+def mutant_result(case, exit_code, summary, matching, validity=None, io_failures=None):
     """(killed, status). killed is True/False only for a completed, valid run."""
     if summary_shape_error(summary) or exit_code not in (0, 1):
         return None, 'harness_error'
     if case not in LATENCY_CASES:
-        return exit_code == 1 and bool(matching), 'completed'
+        if io_failures is None:
+            return None, 'harness_error'
+        regression = bool(io_failures)
+        if (regression != (exit_code == 1) or matching != io_failures
+                or (case == 'ledger' and any(row['failures'] for key, row in summary['cases'].items()
+                                            if key.startswith('ledger-')))):
+            return None, 'harness_error'
+        return regression, 'completed'
     rows = [summary.get('cases', {}).get(key) for key in LATENCY_CASES[case]]
     if not all(valid_latency_row(row) for row in rows):
         return None, 'invalid_measurement'
@@ -312,6 +408,8 @@ def evaluate_control(path, chosen):
             raise ValueError('candidate source hash must be a string')
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
             raise ValueError('healthy control source differs: ' + name)
+    for case in {MUTANTS[name][0] for name in chosen} - LATENCY_CASES.keys():
+        validated_io_failures(case, control, path.parent)
     statuses = [control_status(MUTANTS[name][0], control) for name in chosen]
     status = ('control_invalid' if 'control_invalid' in statuses else
               'control_failed' if 'control_failed' in statuses else 'completed')
@@ -343,11 +441,12 @@ def evaluate_mutant(name, args, out, control):
         exit_code = run_benchmark(cmd, out / (name + '.log'))
         summary = load_summary(run / 'summary.json')
         matching = property_failures(case, summary['failures'])
+        io_failures = validated_io_failures(case, summary, run) if case not in LATENCY_CASES else None
         validity = None
         if name == 'MP02':
             receipt = [json.loads(line) for line in (run / 'receipt.jsonl').read_text(encoding='utf-8').splitlines()]
             validity = delay_control_validity(receipt, summary.get('repetitions'))
-        killed, status = mutant_result(case, exit_code, summary, matching, validity)
+        killed, status = mutant_result(case, exit_code, summary, matching, validity, io_failures)
         row = {'behaviour': behaviour, 'exit': exit_code, 'killed': killed, 'status': status,
                'matching_assertions': matching, 'other_control_failures': control['failures'],
                'source': str(file.relative_to(candidate)),
