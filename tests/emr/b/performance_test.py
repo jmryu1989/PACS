@@ -68,8 +68,23 @@ def receipt_rows(baseline_p95, receipts, requests=4):
     return rows
 
 
+def io_measurement(case, failing=False):
+    """Use the report producer with measured prefix/journal IO, not failure text."""
+    sizes = (0, 20000, 100000) if case == 'ledger' else (0, 10000, 150000)
+    rows = [sample(100., version=v, label=f'{case}-{rep}-{v}', concurrency=1,
+                   prefill=n, records=n, rep=rep,
+                   read_rows=5 if failing and v == 'r4d' and n else 0,
+                   read_bytes=1 if failing and v == 'r4d' and n else 0)
+            for n in sizes for v in ('r3', 'r4d') for rep in range(10)]
+    configs = [('ledger', 1, n) for n in sizes] if case == 'ledger' else []
+    report = build_report(rows if configs else [], configs, [case], 10, {},
+                          journal_rows=rows if not configs else [])
+    return report, rows
+
+
 def observe_driver(only='MP03', report=None, receipt=None, control_update=None, raw_summary=None,
-                   error=None, fault=None, entry=False, control_raw=None):
+                   error=None, fault=None, entry=False, control_raw=None, journal=None,
+                   healthy_rows_update=None, benchmark_exit=None):
     """Real driver, disposable real runtime copy; only benchmark IO is replaced.
 
     Faults model one ordinary failure at a time. Escaped exceptions are captured
@@ -88,6 +103,15 @@ def observe_driver(only='MP03', report=None, receipt=None, control_update=None, 
         (base / 'api/tsconfig.json').write_bytes((ROOT / 'api/tsconfig.json').read_bytes())
         healthy = {'candidate_sources': sources, 'failures': [],
                    'cases': {**measured('sustained', 100, 100)['cases'], **measured('concurrent', 100, 100)['cases']}}
+        if only in ('MP01', 'MP04'):
+            healthy, healthy_rows = io_measurement('ledger' if only == 'MP01' else 'journal')
+            healthy['candidate_sources'] = sources
+            if healthy_rows_update:
+                healthy_rows_update(healthy_rows)
+            if only == 'MP01':
+                (base / 'receipt.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in healthy_rows), encoding='utf-8')
+            else:
+                (base / 'journal.json').write_text(json.dumps(healthy_rows), encoding='utf-8')
         if control_update:
             control_update(healthy)
         control = base / 'healthy.json'
@@ -106,9 +130,11 @@ def observe_driver(only='MP03', report=None, receipt=None, control_update=None, 
             (target / 'summary.json').write_text(json.dumps(report) if raw_summary is None else raw_summary, encoding='utf-8')
             if receipt is not None:
                 (target / 'receipt.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in receipt), encoding='utf-8')
+            if journal is not None:
+                (target / 'journal.json').write_text(json.dumps(journal), encoding='utf-8')
             if fault == 'publish':
                 (out / 'summary.json').mkdir()
-            return subprocess.CompletedProcess(argv, 1 if report['failures'] else 0, '', '')
+            return subprocess.CompletedProcess(argv, int(bool(report['failures'])) if benchmark_exit is None else benchmark_exit, '', '')
 
         if fault == 'out':
             out.write_text('ordinary file blocks creation of output directory', encoding='utf-8')
@@ -454,11 +480,14 @@ for only in ('MP02', 'MP03'):
     for kind in ('regression', 'request'):
         driver_case(f'{only}_healthy_failure_{kind}', target=only, healthy_failure=kind, expected='control_failed')
     driver_case(f'{only}_valid', target=only, expected='completed')
+    driver_case(f'{only}_unrelated_failure_without_regression', target=only,
+                unrelated_failure=True, expected='harness_error')
 
 for name, extra in {
         'healthy_false_pass': {'false_pass': True},
         'healthy_sources_empty': {'sources': 'empty', 'expected': 'control_invalid'},
         'healthy_sources_missing': {'sources': 'missing', 'expected': 'control_invalid'},
+        'healthy_source_hash_changed': {'sources': 'changed'},
         'healthy_system_exit': {'fault': 'healthy_read'},
         'second_concurrent_row': {'second_row': True},
         'selected_control_invalid': {'selected_control_invalid': True, 'expected': 'control_invalid'},
@@ -512,6 +541,8 @@ class DriverBoundaryTest(unittest.TestCase):
             if 'sources' in spec:
                 if spec['sources'] == 'missing':
                     del control['candidate_sources']
+                elif spec['sources'] == 'changed':
+                    control['candidate_sources'][next(iter(control['candidate_sources']))] = '0' * 64
                 else:
                     control['candidate_sources'] = {}
             if spec.get('healthy_failure'):
@@ -543,6 +574,9 @@ class DriverBoundaryTest(unittest.TestCase):
                 report['cases'][key][field] = {'R': 1, 'D': 0, 'gate_passed': True}[field]
         if spec.get('second_row'):
             report['cases']['concurrent-48-0']['gate_passed'] = True
+        if spec.get('unrelated_failure'):
+            report = measured(case, B, B)
+            report['failures'].append('unrelated: benchmark setup failed')
         seen = observe_driver(only, report, receipt, control_update,
                               raw_summary=(json.dumps(spec['root_value']) if target != 'healthy' and 'root_value' in spec
                                            else spec.get('raw_summary')), error=spec.get('error'),
@@ -573,7 +607,10 @@ class DriverBoundaryTest(unittest.TestCase):
             self.assertEqual(row['status'], expected)
             self.assertIs(row['killed'], True if expected == 'completed' else None)
             if expected == 'harness_error':
-                self.assertRegex(row['harness_cause'], r'^\w+: .{0,500}$')
+                if spec.get('unrelated_failure'):
+                    self.assertTrue(row['diagnosis'])
+                else:
+                    self.assertRegex(row['harness_cause'], r'^\w+: .{0,500}$')
                 self.assertIn(row['id'], summary['invalid'])
         if (target == 'healthy' or 'sources' in spec or spec.get('false_pass')
                 or spec.get('healthy_failure') or spec.get('selected_control_invalid')
@@ -605,7 +642,126 @@ for name, spec in DRIVER_CASES.items():
     setattr(DriverBoundaryTest, 'test_R3B_' + name, test)
 
 
+# REQ-D1629 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT -> P3_IO_*:
+# a summary assertion without consistent measured IO cannot kill MP01/MP04.
+class IORowBoundaryTest(unittest.TestCase):
+    def check_io_case(self, only, scenario):
+        case = 'ledger' if only == 'MP01' else 'journal'
+        report, rows = io_measurement(case, failing=True)
+        kwargs = {}
+        def replace_healthy(healthy):
+            healthy.update({key: value for key, value in report.items() if key != 'candidate_sources'})
+        expected, killed = 'harness_error', None
+        if scenario == 'valid_kill':
+            expected, killed = 'completed', True
+        elif scenario == 'valid_survival':
+            report, rows = io_measurement(case)
+            expected, killed = 'completed', False
+        elif scenario == 'forged_failure':
+            _, rows = io_measurement(case)
+        elif scenario == 'unlisted_failure':
+            report, _ = io_measurement(case)
+        elif scenario == 'missing_rows':
+            rows = None
+        elif scenario == 'missing_block':
+            rows.pop()
+        elif scenario == 'duplicate_block':
+            rows.append(copy.deepcopy(rows[-1]))
+        elif scenario == 'missing_summary_row':
+            if case == 'ledger':
+                del report['cases']['ledger-1-100000']
+            else:
+                del report['journal']['150000']
+        elif scenario == 'summary_disagrees':
+            if case == 'ledger':
+                report['cases']['ledger-1-100000']['gate_passed'] = True
+            else:
+                report['journal']['150000']['r4d']['p95'] = 200.
+        elif scenario == 'summary_boolean_statistic':
+            report['ledger_size' if case == 'ledger' else 'journal']['20000' if case == 'ledger' else '150000']['permutation_p'] = True
+        elif scenario == 'unrelated_failure':
+            report, rows = io_measurement(case)
+            report['failures'] = ['unrelated: setup failed']
+        elif scenario == 'exit_disagrees':
+            kwargs['benchmark_exit'] = 0
+        elif scenario.startswith('bad_count_'):
+            rows[-1]['read_rows' if case == 'ledger' else 'read_bytes'] = {
+                'bool': True, 'negative': -1, 'missing': None, 'nan': float('nan'),
+            }[scenario.removeprefix('bad_count_')]
+        elif scenario == 'invalid_p95':
+            rows[-1]['p95'] = float('nan')
+        elif scenario == 'healthy_forged_failure':
+            kwargs['control_update'] = replace_healthy
+        elif scenario == 'healthy_unlisted_failure':
+            def corrupt(healthy_rows):
+                healthy_rows[-1]['read_rows' if case == 'ledger' else 'read_bytes'] = 10
+            kwargs['healthy_rows_update'] = corrupt
+        elif scenario == 'healthy_valid_failure':
+            kwargs['control_update'] = replace_healthy
+            kwargs['healthy_rows_update'] = lambda healthy_rows: healthy_rows.__setitem__(slice(None), rows)
+            expected = 'control_failed'
+        else:
+            self.fail('unknown IO scenario ' + scenario)
+        kwargs['receipt' if case == 'ledger' else 'journal'] = rows
+        seen = observe_driver(only, report, **kwargs)
+        self.assertIsNone(seen['escaped'])
+        self.assertIsNotNone(seen['summary'])
+        verdicts = seen['summary']['results']
+        self.assertEqual(len(verdicts), 1)
+        self.assertEqual(verdicts[0]['status'], expected)
+        self.assertIs(verdicts[0]['killed'], killed)
+        self.assertEqual(seen['summary']['killed'], int(killed is True))
+        self.assertEqual(seen['summary']['survived'], [only] if killed is False else [])
+        self.assertEqual(seen['exit'], 0 if killed is True else 1)
+        if scenario.startswith('healthy_'):
+            self.assertEqual(seen['launches'], [])
+
+
+for only in ('MP01', 'MP04'):
+    for scenario in ('valid_kill', 'valid_survival', 'forged_failure', 'unlisted_failure',
+                     'missing_rows', 'missing_block', 'duplicate_block', 'missing_summary_row',
+                     'summary_disagrees', 'unrelated_failure', 'exit_disagrees',
+                     'summary_boolean_statistic',
+                     'bad_count_bool', 'bad_count_negative', 'bad_count_missing', 'bad_count_nan',
+                     'invalid_p95', 'healthy_forged_failure', 'healthy_unlisted_failure', 'healthy_valid_failure'):
+        def test(self, only=only, scenario=scenario):
+            self.check_io_case(only, scenario)
+        setattr(IORowBoundaryTest, f'test_P3_IO_{only}_{scenario}', test)
+
+
 class BoundaryMutationTest(unittest.TestCase):
+    def test_p3_faults_are_killed_by_driver_assertions(self):
+        # Mutate this development tool only; witnesses assert observed verdicts.
+        source = Path(mutants.__file__).read_text(encoding='utf-8')
+        faults = {
+            'G09_exit_vs_regression_check_dropped': (
+                'if regression != (exit_code == 1) or regression != bool(matching):',
+                'if regression != bool(matching):', DriverBoundaryTest,
+                ['test_R3B_MP02_unrelated_failure_without_regression',
+                 'test_R3B_MP03_unrelated_failure_without_regression']),
+            'G10_source_hash_unchecked': (
+                'hexdigest() != expected:', 'hexdigest() != expected and False:', DriverBoundaryTest,
+                ['test_R3B_healthy_source_hash_changed']),
+            'P3_IO_trust_failure_text': (
+                "    repetitions = summary.get('repetitions')",
+                "    return property_failures(case, summary['failures'])\n    repetitions = summary.get('repetitions')",
+                IORowBoundaryTest, ['test_P3_IO_MP01_forged_failure', 'test_P3_IO_MP04_forged_failure']),
+        }
+        for name, (before, after, suite, witnesses) in faults.items():
+            self.assertEqual(source.count(before), 1, name)
+            module = types.ModuleType('performance_mutants_fault')
+            module.__file__ = mutants.__file__
+            exec(compile(source.replace(before, after), module.__file__, 'exec'), module.__dict__)
+            for witness in witnesses:
+                with self.subTest(fault=name, witness=witness):
+                    result = unittest.TestResult()
+                    with patch.dict(globals(), mutants=module):
+                        suite(witness).run(result)
+                    self.assertEqual(result.testsRun, 1)
+                    self.assertEqual(result.errors, [], name)
+                    self.assertEqual(len(result.failures), 1, name + ' survived')
+                    print('BOUNDARY_MUTANT ' + name + ' KILLED by ' + witness)
+
     def test_six_faults_are_killed_by_assertions(self):
         # These are mutations of this development tool, not implementation-text
         # assertions on product code. Each altered copy runs a real driver test.
@@ -645,7 +801,7 @@ class BoundaryMutationTest(unittest.TestCase):
                 print('BOUNDARY_MUTANT ' + name + ' KILLED by test_R3B_' + witness)
 
 
-class PerformanceVerdictTest(_PerformanceReportTest, DriverBoundaryTest, BoundaryMutationTest):
+class PerformanceVerdictTest(_PerformanceReportTest, DriverBoundaryTest, IORowBoundaryTest, BoundaryMutationTest):
     """The existing noninferiority_test.py CI import includes every driver test."""
 
 
