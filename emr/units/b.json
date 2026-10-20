@@ -276,7 +276,7 @@
     ],
     "access_retention": {
       "source": "commander D727/D731 (legal register 2026-10-09 final, Astra cross-check 0 disagreements): deltas D-1 revised, D-19, D-21; delta map D-3, D-18",
-      "streams": "two chains: viewing (every event; its own floor from the event's day, longer only under a hold or legal basis; prefix expiry with checkpoint and external seal) and history (succeeded 기재·추가기재·수정 about a record; kept with the changed record; destroyed with its destruction set by unit H; no deletion path in B1)",
+      "streams": "two chains: viewing (every event; its own floor from the event's day, longer only under a hold or legal basis; prefix expiry with checkpoint and external seal) and history (succeeded \uae30\uc7ac\u00b7\ucd94\uac00\uae30\uc7ac\u00b7\uc218\uc815 about a record; kept with the changed record; destroyed with its destruction set by unit H; no deletion path in B1)",
       "stored": "no deadline on any entry; statutory_act (A's mapping) and each record target (kind, record/version IDs) bound per entry in emr_access.access_target from the chained payload",
       "rule": "api/src/emr-runtime/contract.ts accessDeadline(stream, entry, recordEnd) with ACCESS_RETENTION from A's RECORD_CLASSIFICATION['access-audit'], accessRetentionFloor, recordTargets",
       "database_floor": "emr_access.access_retention_floor(timestamptz), the migration's only civil period; expire_prefix (viewing only) refuses an entry before it (EB004) or held (EB005)",
@@ -836,7 +836,15 @@
           "C-P05",
           "C-P06",
           "C-P07",
-          "C-P08"
+          "C-P08",
+          "D1650-T01",
+          "D1650-D17",
+          "D1650-D17-V1",
+          "D1650-T03",
+          "D1650-D17-V2",
+          "D1650-D17-V3",
+          "D1650-T08",
+          "D1650-T08A"
         ]
       },
       {
@@ -895,7 +903,15 @@
       "D1641-T06",
       "D1641-T06F",
       "D1641-T08",
-      "D1641-T09"
+      "D1641-T09",
+      "D1650-T01",
+      "D1650-D17",
+      "D1650-D17-V1",
+      "D1650-T03",
+      "D1650-D17-V2",
+      "D1650-D17-V3",
+      "D1650-T08",
+      "D1650-T08A"
     ],
     "terminal_mutants": [
       {
@@ -967,6 +983,138 @@
         ],
         "assertions": {
           "D1641-T02": "fresh valid reserve must succeed"
+        }
+      }
+    ],
+    "identity_mutants": [
+      {
+        "id": "D1650-M01",
+        "kill": [
+          "D1650-D17",
+          "D1650-D17-V1"
+        ],
+        "assertions": {
+          "D1650-D17": "conflict must preserve every protected byte",
+          "D1650-D17-V1": "conflict must preserve every protected byte"
+        }
+      },
+      {
+        "id": "D1650-M02",
+        "kill": [
+          "D1650-T03"
+        ],
+        "assertions": {
+          "D1650-T03": "ordinary conflict must stay typed"
+        }
+      },
+      {
+        "id": "D1650-M03",
+        "kill": [
+          "D1650-D17-V2"
+        ],
+        "assertions": {
+          "D1650-D17-V2": "conflicting or foreign-origin reserve must refuse"
+        }
+      },
+      {
+        "id": "D1650-M03-LATEST",
+        "kill": [
+          "D1650-D17-V2"
+        ],
+        "assertions": {
+          "D1650-D17-V2": "original expiry proof survives newer scope prefix"
+        }
+      },
+      {
+        "id": "D1650-M04",
+        "kill": [
+          "D1650-D17",
+          "D1650-D17-V1"
+        ],
+        "assertions": {
+          "D1650-D17": "conflict must preserve every protected byte",
+          "D1650-D17-V1": "conflict must preserve every protected byte"
+        }
+      },
+      {
+        "id": "D1650-M05",
+        "kill": [
+          "D1650-D17-V3"
+        ],
+        "assertions": {
+          "D1650-D17-V3": "conflicting or foreign-origin reserve must refuse"
+        }
+      },
+      {
+        "id": "D1650-M06",
+        "kill": [
+          "D1641-T01"
+        ],
+        "assertions": {
+          "D1641-T01": "terminal replay must not mutate durable state"
+        }
+      },
+      {
+        "id": "D1650-M07",
+        "kill": [
+          "D1650-T08"
+        ],
+        "assertions": {
+          "D1650-T08": "contradictory attempt state must refuse readiness"
+        }
+      },
+      {
+        "id": "D1650-M07-ALIAS",
+        "kill": [
+          "D1650-T08A"
+        ],
+        "assertions": {
+          "D1650-T08A": "byte-identical terminal expiry alias remains valid"
+        }
+      },
+      {
+        "id": "D1650-M08",
+        "kill": [
+          "D1641-T05"
+        ],
+        "assertions": {
+          "D1641-T05": "committed-and-sealed"
+        }
+      },
+      {
+        "id": "D1650-M11-FLUSH",
+        "kill": [
+          "D1641-T06F"
+        ],
+        "assertions": {
+          "D1641-T06F": "a failed terminal publication flush must never return durable success"
+        }
+      },
+      {
+        "id": "D1650-M12",
+        "kill": [
+          "D1650-T01"
+        ],
+        "assertions": {
+          "D1650-T01": "fresh valid reserve must succeed"
+        }
+      },
+      {
+        "id": "D1650-M12-STREAM",
+        "kill": [
+          "D1650-T01"
+        ],
+        "assertions": {
+          "D1650-T01": "fresh valid reserve must succeed"
+        }
+      },
+      {
+        "id": "D1650-M12-ERROR",
+        "kill": [
+          "D1650-T03"
+        ],
+        "assertions": {
+          "D1650-T03": "ordinary conflict must stay typed"
         }
       }
     ]

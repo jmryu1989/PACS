@@ -310,8 +310,10 @@ export class ProtectedStateService {
     const { seal, journal } = this.resources;
     switch (request.operation) {
       case 'reserve':
-        if (request.value.prefix && !same(scope.expiryPrefix, request.value.prefix)) refuse('CONFLICT', 'conflict');
-        return seal.reserve(request.value.binding, request.value.prefix ?? undefined, session.client);
+        if (!session.live || scope.ending || this.phase === 'closed' || this.phase === 'failed') refuse('SCOPE');
+        return seal.reserve(request.value.binding, request.value.prefix ?? undefined, session.client, {
+          origin: scope, issuedPrefix: scope.expiryPrefix,
+        });
       case 'journal-record': return journal.record(request.value.id, request.value.kind, request.value.body);
       case 'journal-find': return journal.find(request.value.id) ?? null;
       case 'confirm-bundle': return this.confirmBundle(request.value);

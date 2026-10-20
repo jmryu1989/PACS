@@ -281,7 +281,7 @@ def restore(copy, applied):
 
 
 def contract_verdict(text, cases, code):
-    blocks = re.findall(r"^not ok \d+ - (C\d+|D1641-T\d+[A-Z]?) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S)
+    blocks = re.findall(r"^not ok \d+ - ([\w.-]+) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S)
     failed = {case for case, details in blocks if case in cases and re.search(r"code: ['\"]?ERR_ASSERTION\b", details)}
     harness = any(case in cases and not re.search(r"code: ['\"]?ERR_ASSERTION\b", details) for case, details in blocks)
     passed = {case for case in cases if re.search(r"^ok \d+ - " + case + r" ", text, re.M)}
@@ -289,11 +289,52 @@ def contract_verdict(text, cases, code):
             "killed": code != 0 and failed == set(cases) and not harness}
 
 
+IDENTITY_MUTANTS = {
+    "D1650-M01": ("requested-slot lookup accepts a moved pending attempt", [
+        ("api/src/emr-runtime/seal.ts", "this.attempts(state).get(id)",
+         "(this.attempts(state), state.slots[position]?.attemptId === binding.attemptId ? state.slots[position] : undefined)")]),
+    "D1650-M02": ("omitting entry hash accepts a changed body", [
+        ("api/src/emr-runtime/seal.ts", "bindingFields.every(field => a[field] === b[field])",
+         "bindingFields.filter(field => field !== 'hash').every(field => a[field] === b[field])")]),
+    "D1650-M03": ("stored expiry prefix is ignored", [
+        ("api/src/emr-runtime/seal.ts", " || !samePrefix(state.proofs[id], prefix)", "")]),
+    "D1650-M03-LATEST": ("latest issued prefix wrongly replaces original replay authority", [
+        ("api/src/emr-runtime/seal.ts", "if (pending) {\n", "if (pending) {\n        if (prefix && admission && !samePrefix(admission.issuedPrefix, prefix)) refuse('AccessEventIdConflict');\n")]),
+    "D1650-M04": ("persisting before conflict violates write-free refusal", [
+        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n",
+         "    if (this.load().intents[key(binding.stream, binding.attemptId)]) this.change(state => { ++state.generation; });\n    let superseded = false;\n")]),
+    "D1650-M05": ("client identity alone adopts another live work", [
+        ("api/src/emr-runtime/seal.ts", " || !this.origins.get(origin)?.has(id)", "")]),
+    "D1650-M06": ("ack erases permanent identity", [
+        ("api/src/emr-runtime/seal.ts", "    return Promise.resolve();\n",
+         "    this.change(state => { delete state.terminal[key(_stream, _attemptId)]; });\n    return Promise.resolve();\n")]),
+    "D1650-M07": ("startup normalizes contradictory attempt state", [
+        ("api/src/emr-runtime/seal.ts", "      this.attempts(this.load());\n", "")]),
+    "D1650-M07-ALIAS": ("valid historical expiry alias is rejected", [
+        ("api/src/emr-runtime/seal.ts", "      if (terminal) {\n", "      if (terminal) {\n        corrupt();\n")]),
+    "D1650-M08": ("a committed tombstone is misclassified as fenced negative", [
+        ("api/src/emr-runtime/state-service.ts", "terminal?.phase === 'aborted' && exactBinding(b, terminal.binding)",
+         "terminal && exactBinding(b, terminal.binding)")]),
+    "D1650-M11-FLUSH": ("WAL reply omits durable flush", [
+        ("api/src/emr-runtime/external-writer.ts", "fs.writeFileSync(context.log.fd, line); fs.fdatasyncSync(context.log.fd);",
+         "fs.writeFileSync(context.log.fd, line);")]),
+    "D1650-M12": ("rejecting all reserves breaks valid traffic", [
+        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n", "    refuse('AccessEventIdConflict');\n    let superseded = false;\n")]),
+    "D1650-M12-STREAM": ("global attempt identity rejects the legitimate second stream", [
+        ("api/src/emr-runtime/seal.ts", "this.attempts(state).get(id)",
+         "[...this.attempts(state).values()].find(q => q.attemptId === binding.attemptId)")]),
+    "D1650-M12-ERROR": ("ordinary conflicts stop the service", [
+        ("api/src/emr-runtime/seal.ts", "refuse('AccessEventIdConflict');\n        return { binding: pending, state };",
+         "throw new SealRefused('SealUnavailable');\n        return { binding: pending, state };")]),
+}
+
+
 def terminal_main(args):
     """A clean passing source copy is mandatory before any terminal mutant verdict."""
     declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))["b2c"]
-    declared = {item["id"]: item for item in declaration["terminal_mutants"]}
-    if set(declared) != set(TERMINAL_MUTANTS):
+    mutations = IDENTITY_MUTANTS if args.identity else TERMINAL_MUTANTS
+    declared = {item["id"]: item for item in declaration["identity_mutants" if args.identity else "terminal_mutants"]}
+    if set(declared) != set(mutations):
         raise RuntimeError("terminal mutant declaration differs from driver")
     chosen = [name for name in declared if not args.only or name in args.only.split(",")]
     if args.only and set(chosen) != set(args.only.split(",")):
@@ -346,7 +387,7 @@ def terminal_main(args):
             if code or passed != baseline_cases or control["before_sha256"] != control["restored_sha256"]:
                 raise RuntimeError("rename/alias/format control failed; no terminal mutant verdict")
             for name in chosen:
-                expected, changes = TERMINAL_MUTANTS[name]
+                expected, changes = mutations[name]
                 kill = declared[name]["kill"]
                 applied = apply(copy, changes)
                 log = out / (name + ".log")
@@ -356,7 +397,7 @@ def terminal_main(args):
                     text = log.read_text(encoding="utf-8", errors="replace")
                     verdict = contract_verdict(text, kill, code)
                     # An unrelated assertion (including child startup) is not the intended kill.
-                    failures = dict(re.findall(r"^not ok \d+ - (D1641-T\d+[A-Z]?) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)",
+                    failures = dict(re.findall(r"^not ok \d+ - ([\w.-]+) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)",
                                                text, re.M | re.S))
                     intended = set(declared[name]["assertions"]) == set(kill) and all(
                         message in failures.get(case, "") for case, message in declared[name]["assertions"].items())
@@ -601,6 +642,7 @@ def main(argv=None):
     parser.add_argument("--out", type=Path)
     parser.add_argument("--self-test", action="store_true", help="verify verdicts and baseline source without Docker")
     parser.add_argument("--terminal", action="store_true", help="run declared D1641 terminal component mutants in an isolated copy")
+    parser.add_argument("--identity", action="store_true", help="run declared D1650 identity component mutants in an isolated copy")
     parser.add_argument("--only", help="comma-separated mutant IDs")
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--source-manifest", type=Path, help="hash-bound LF source inventory for an isolated Linux copy")
@@ -610,7 +652,7 @@ def main(argv=None):
         return self_test()
     if args.out is None:
         parser.error("--out is required unless --self-test is selected")
-    if args.terminal:
+    if args.terminal or args.identity:
         return terminal_main(args)
     declared = {m["id"]: m for m in json.loads(DECLARATION.read_text(encoding="utf-8"))["mutants"]}
     if set(declared) != set(MUTANTS):

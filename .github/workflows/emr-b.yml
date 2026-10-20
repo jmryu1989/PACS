@@ -53,6 +53,10 @@ jobs:
       - name: D1641 terminal identity component mutants and rename-alias-format oracle control
         timeout-minutes: 45
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/terminal-mutants-run --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --terminal --worktree --out tmp/emr-b-ci/terminal-mutants
+      - name: D1650 attempt identity component mutants and oracle controls
+        timeout-minutes: 15
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/identity-mutants-run --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --identity --worktree --out tmp/emr-b-ci/identity-mutants
       - name: D961 pool, JIT guard and estimator controls (NI is commander-only)
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/pool-plan --cwd . --tree api/src/emr-runtime --file api/src/prisma.service.ts --tree tests/emr/b -- node --test tests/emr/b/client_pool_test.cjs

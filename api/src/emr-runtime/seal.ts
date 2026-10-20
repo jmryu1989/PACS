@@ -26,6 +26,21 @@ const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(va
 const slot = (stream: AccessStream, sequence: number) => `${stream}:${sequence}`;
 const key = (stream: AccessStream, attempt: string) => `${stream}:${attempt}`;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const bindingFields = ['stream', 'chainId', 'attemptId', 'bundleId', 'kind', 'eventId', 'sequence',
+  'previousHash', 'hash', 'contentSha256'] as const;
+const sameBinding = (a: CommitBinding | Omit<CommitBinding, 'generation' | 'proofDigest'>,
+  b: CommitBinding | Omit<CommitBinding, 'generation' | 'proofDigest'>) =>
+  a && b && bindingFields.every(field => a[field] === b[field]);
+const samePrefix = (a: { seal: StreamSeal; anchor: ChainPosition; count: number } | undefined,
+  b: { seal: StreamSeal; anchor: ChainPosition; count: number } | undefined) =>
+  !a || !b ? a === b : a.seal.chainId === b.seal.chainId && a.seal.sequence === b.seal.sequence &&
+    a.seal.hash === b.seal.hash && a.anchor.sequence === b.anchor.sequence && a.anchor.hash === b.anchor.hash && a.count === b.count;
+
+export interface ReservationAdmission {
+  /** A service-owned scope object, never a token supplied directly by a caller. */
+  origin: object;
+  issuedPrefix?: { seal: StreamSeal; anchor: ChainPosition; count: number };
+}
 
 /** DB finality is trusted for response-unknown recovery, never described as independent proof.
  * The protected settlement frontier authorizes exact reservations and detects tail-only rollback.
@@ -33,6 +48,54 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
  */
 export class AccessSeal {
   constructor(_directory: string | undefined, private readonly sql: PrismaLedgerSql, private readonly journal: FailureJournal) {}
+  // Weak ownership lets ended scopes disappear without forgetting durable identity.
+  // A different scope cannot adopt an existing reservation, even for the same client.
+  private origins = new WeakMap<object, Set<string>>();
+  private attempts(state: ExternalState): Map<string, CommitBinding> {
+    const pending = new Map<string, CommitBinding>();
+    const seen = new Set<string>();
+    const corrupt = (): never => { throw new SealRefused('UnsealedEntryUnexplained', 'attempt-identity'); };
+    const validBinding = (id: string, q: CommitBinding): boolean => q && ACCESS_STREAMS.includes(q.stream) &&
+      id === key(q.stream, q.attemptId) && q.chainId === state.tail?.streams[q.stream]?.chainId &&
+      Number.isSafeInteger(q.generation) && q.generation > 0 && q.generation <= state.generation;
+    for (const [position, q] of Object.entries(state.slots) as [string, CommitBinding][]) {
+      const id = key(q.stream, q.attemptId), terminal = state.terminal[id], intent = state.intents[id];
+      if (!validBinding(id, q) || position !== slot(q.stream, q.sequence) || seen.has(id)) corrupt();
+      seen.add(id);
+      if (terminal) {
+        // A retained expiry checkpoint aliases its committed record. This is not
+        // another live attempt and cannot authorize reserve after recovery.
+        if (terminal.phase !== 'committed' || q.kind !== 'expiry' || intent ||
+          !sameBinding(q, terminal.binding) || q.generation !== terminal.binding.generation ||
+          q.proofDigest !== terminal.binding.proofDigest || q.sequence > state.tail.streams[q.stream].sequence) corrupt();
+      } else {
+        if (!intent || intent.stream !== q.stream || intent.attemptId !== q.attemptId || intent.bundleId !== q.bundleId ||
+          intent.eventId !== q.eventId || intent.contentSha256 !== q.contentSha256 || typeof intent.owner !== 'string' ||
+          q.sequence <= state.tail.streams[q.stream].sequence) corrupt();
+        pending.set(id, q);
+      }
+      const core: ExpiryCore | undefined = state.proofs[id];
+      if (q.kind === 'expiry') {
+        if (!core || core.format !== 1 || !sameBinding(core.binding, q) || core.binding.generation !== q.generation ||
+          q.proofDigest !== digest(core) || core.seal.chainId !== q.chainId || core.seal.sequence + 1 !== q.sequence ||
+          core.seal.hash !== q.previousHash || core.anchor.sequence > core.seal.sequence ||
+          !Number.isSafeInteger(core.count) || core.count < 1 || core.count > core.anchor.sequence) corrupt();
+      } else if (core || q.proofDigest !== null) corrupt();
+    }
+    for (const [id, intent] of Object.entries(state.intents)) {
+      if (id !== key(intent.stream, intent.attemptId) || !pending.has(id) || state.terminal[id]) corrupt();
+    }
+    for (const id of Object.keys(state.proofs)) {
+      if (!seen.has(id)) corrupt();
+    }
+    for (const [id, terminal] of Object.entries(state.terminal)) {
+      const q: CommitBinding = terminal.binding;
+      if (!validBinding(id, q) || terminal.generation !== q.generation ||
+        !['committed', 'aborted', 'superseded'].includes(terminal.phase) ||
+        terminal.phase === 'committed' && q.sequence > state.tail.streams[q.stream].sequence) corrupt();
+    }
+    return pending;
+  }
   private load(): ExternalState {
     try { return this.journal.coordinator.call('read'); }
     catch (error: any) { throw new SealRefused(/^Seal|^Ledger|^Unsealed/.test(error.code || '') ? error.code : 'SealUnavailable', error.detail); }
@@ -59,24 +122,24 @@ export class AccessSeal {
    */
   private reservationState: ExternalState | undefined;
   reserve(binding: Omit<CommitBinding, 'generation' | 'proofDigest'>, prefix?: { seal: StreamSeal; anchor: ChainPosition; count: number },
-    owner: string = this.journal.coordinator.ownerId): CommitBinding {
+    owner: string = this.journal.coordinator.ownerId, admission?: ReservationAdmission): CommitBinding {
     let superseded = false;
+    const origin = admission?.origin ?? this;
     const result = this.change(state => {
       const id = key(binding.stream, binding.attemptId), position = slot(binding.stream, binding.sequence);
       if (state.terminal[id]) refuse('AttemptAlreadySettled');
-      const intent = state.intents[id];
-      if (intent && (intent.owner !== owner || intent.stream !== binding.stream || intent.attemptId !== binding.attemptId ||
-          intent.bundleId !== binding.bundleId || intent.eventId !== binding.eventId ||
-          intent.contentSha256 !== null && intent.contentSha256 !== binding.contentSha256))
-        throw new SealRefused('UnsealedEntryUnexplained', 'intent-binding');
+      const pending = this.attempts(state).get(id), intent = state.intents[id];
+      if (pending) {
+        if (intent.owner !== owner || !this.origins.get(origin)?.has(id) ||
+          !sameBinding(pending, binding) || !samePrefix(state.proofs[id], prefix)) refuse('AccessEventIdConflict');
+        return { binding: pending, state };
+      }
+      // A live replay uses its original durable proof; only an unseen identity
+      // must match the scope's most recently issued expiry prefix.
+      if (admission && prefix && !samePrefix(admission.issuedPrefix, prefix)) refuse('AccessEventIdConflict');
       if (!intent) this.addIntent(state, { stream: binding.stream, attemptId: binding.attemptId,
         eventId: binding.eventId, contentSha256: binding.contentSha256, bundleId: binding.bundleId }, owner);
       const prior = state.slots[position];
-      if (prior?.attemptId === binding.attemptId) {
-        const { generation: _, proofDigest: __, ...identity } = prior;
-        if (!same(identity, binding)) throw new SealRefused('UnsealedEntryUnexplained', 'reservation-binding');
-        return { binding: prior, state };
-      }
       if (prior) {
         superseded = true;
         const old = key(prior.stream, prior.attemptId);
@@ -94,6 +157,8 @@ export class AccessSeal {
       state.slots[position] = next;
       return { binding: next, state };
     }, 'reserve');
+    const admitted = this.origins.get(origin) ?? new Set<string>();
+    admitted.add(key(binding.stream, binding.attemptId)); this.origins.set(origin, admitted);
     this.reservationState = result.state;
     if (superseded) this.flushNotFound();
     return result.binding;
@@ -450,8 +515,12 @@ export class AccessSeal {
    * Every append/expiry must take its shared transaction fence before publishing an intent.
    */
   recoverAtStart(): Promise<{ seal: SealState; recovered: number; notCommitted: number; streams: Record<AccessStream, RecoveryCount> }> {
+    this.origins = new WeakMap();
     return this.sql.withWriterFence(async sql => {
       try { this.read(); } catch(error:any) { if(error.code!=='SealUpgradeRequired')throw error; await this.upgradeAtStart(sql); }
+      // Refuse contradictory identities before journal settlement, publication
+      // or compaction can normalize away the evidence.
+      this.attempts(this.load());
       const tails = {} as Record<AccessStream, ChainTail>;
       for (const stream of ACCESS_STREAMS) tails[stream] = await sql.tail(stream);
       if (this.read() === 'absent') {

@@ -187,7 +187,7 @@ def check(root, declaration_path):
     if not isinstance(declaration, dict) or set(declaration) != DECLARATION_KEYS:
         return ["declaration-keys: " + ",".join(sorted(set(declaration) ^ DECLARATION_KEYS if isinstance(declaration, dict) else DECLARATION_KEYS))]
     wire = declaration["b2c"]
-    wire_keys = {"status", "option", "protocol", "local_wire_cases", "local_wire_file", "local_service_cases", "local_service_file", "acceptance_note", "requirements", "terminal_mutants"}
+    wire_keys = {"status", "option", "protocol", "local_wire_cases", "local_wire_file", "local_service_cases", "local_service_file", "acceptance_note", "requirements", "terminal_mutants", "identity_mutants"}
     if not isinstance(wire, dict) or set(wire) != wire_keys or wire.get("option") != "c":
         return ["b2c-declaration-invalid"]
     cases = wire["local_wire_cases"]
@@ -198,7 +198,7 @@ def check(root, declaration_path):
         problem(problems, "b2c-wire-test-missing")
     service_cases = wire["local_service_cases"]
     if not isinstance(service_cases, list) or not service_cases or any(
-            not isinstance(case, str) or re.fullmatch(r"(?:C-S0[2345]\.D[0-9]{2}|D1641-T[0-9]{2}[A-Z]?)", case) is None
+            not isinstance(case, str) or re.fullmatch(r"(?:C-S0[2345]\.D[0-9]{2}|D1641-T[0-9]{2}[A-Z]?|D1650-(?:T[0-9]{2}[A-Z]?|D17(?:-V[123])?))", case) is None
             for case in service_cases) or len(service_cases) != len(set(service_cases)):
         problem(problems, "b2c-service-cases-invalid")
     if wire["local_service_file"] != "tests/emr/b/state_service_test.cjs" or not (root / wire["local_service_file"]).is_file():

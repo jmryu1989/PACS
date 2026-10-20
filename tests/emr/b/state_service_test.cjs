@@ -76,9 +76,8 @@ async function fixture(t, options = {}) {
   const peers = [];
   t.after(async () => { service.close(); for (const socket of peers) socket.destroy(); await service.drained(); coordinator.close(); });
   if (!options.cold) await service.start();
-  const hello = async (role = 'api') => {
+  const hello = async (role = 'api', clientInstanceId = randomUUID()) => {
     const socket = new net.Socket(); peers.push(socket);
-    const clientInstanceId = randomUUID();
     const request = { v: 1, requestId: randomUUID(), serviceEpoch: null, session: null, workId: null,
       operation: 'hello', value: { protocol: 1, clientInstanceId } };
     const reply = await service.dispatch(role, request, socket);
@@ -153,8 +152,49 @@ function assertExcluded(observation) {
 async function terminalChild(input) {
   const cleanup = [], t = { after: fn => cleanup.push(fn) };
   try {
-    const f = await fixture(t, input.phase === 'seed' ? {} : { directory: input.directory, model: model(input.database) });
+    if (input.phase === 'inspect' || input.phase === 'integrity') {
+      const f = await fixture(t, { directory: input.directory, model: model(input.database), cold: true });
+      const before = directoryHashes(f.directory), state = f.coordinator.call('read');
+      let error = null;
+      if (input.phase === 'integrity') try { await f.service.start(); } catch (failure) { error = failure.code; }
+      return { pid: process.pid, before, after: directoryHashes(f.directory), state, error, phase: f.service.state };
+    }
+    const f = await fixture(t, ['seed', 'historical-seed'].includes(input.phase) ? {} :
+      { directory: input.directory, model: model(input.database) });
     const peer = await f.hello(), work = await peer.work();
+    // Explicit diagnostic child modes preserve the open historical-proof evidence.
+    // These are not selected passing acceptance cases and do not run a real SQL expiry.
+    if (input.phase === 'historical-seed') {
+      const original = await f.reserve(work, event(input.twoStreams)); original.commit();
+      const proof = await work.call('confirm-bundle', original.bundle);
+      assert.equal(proof.ok, true, 'original complete proof exists before expiry');
+      if (input.acknowledge) assert.equal((await work.call('acknowledge',
+        { proof: proof.result, bindings: original.bundle.bindings })).ok, true);
+      const retention = await (await f.hello('retention')).work();
+      const prefix = (await retention.call('expiry-prefix', { through: 1 })).result;
+      const payload = C.checkpointPayload('2036-10-19T00:00:00.000Z', 1, 1, prefix.anchor.hash);
+      const binding = { stream: 'viewing', chainId: prefix.seal.chainId, attemptId: randomUUID(), bundleId: randomUUID(),
+        kind: 'expiry', eventId: null, sequence: 2, previousHash: prefix.seal.hash,
+        hash: C.entryHash(2, prefix.seal.hash, payload), contentSha256: sha256(payload) };
+      const reserved = await retention.call('reserve', { binding, prefix });
+      assert.equal(reserved.ok, true, 'issued prefix reserves before synthetic expiry commit');
+      f.database.streams.viewing.rows = [{ sequence: 2, previousHash: binding.previousHash, hash: binding.hash,
+        kind: 'expiry', statutoryAct: null, eventId: null, payload, contentSha256: binding.contentSha256,
+        storedAt: '2036-10-19T00:00:00.000Z' }];
+      f.database.streams.viewing.markers = [reserved.result];
+      const expiry = await retention.call('confirm-bundle', { eventId: null, requiredStreams: ['viewing'], bindings: [reserved.result] });
+      assert.equal(expiry.ok, true, 'valid retained-prefix checkpoint publishes');
+      return { pid: process.pid, directory: f.directory, database: f.database.streams, bundle: original.bundle,
+        originalProof: proof.result, expiryProof: expiry.result, state: f.coordinator.call('read'), files: directoryHashes(f.directory) };
+    }
+    if (input.phase === 'historical-reopen') {
+      const before = directoryHashes(f.directory);
+      const lookups = [];
+      for (let i = 0; i < 2; i++) lookups.push(await work.call('lookup-outcome', input.bundle));
+      const confirmation = await work.call('confirm-bundle', input.bundle);
+      return { pid: process.pid, phase: f.service.state, lookups, confirmation,
+        state: f.coordinator.call('read'), before, after: directoryHashes(f.directory) };
+    }
     if (input.phase === 'seed') {
       const original = await complete(f, work, true);
       await complete(f, work);
@@ -175,7 +215,8 @@ async function terminalChild(input) {
 }
 function childPhase(directory, phase, input = {}) {
   const config = path.join(directory, phase + '-input.json'), output = path.join(directory, phase + '-output.json');
-  fs.writeFileSync(config, JSON.stringify({ ...input, phase: phase === 'seed' ? 'seed' : 'replay', output }));
+  fs.writeFileSync(config, JSON.stringify({ ...input,
+    phase: ['seed', 'inspect', 'integrity'].includes(phase) ? phase : 'replay', output }));
   const child = spawnSync(process.execPath, ['--max-old-space-size=3072', __filename, '--terminal-child', config],
     { env: process.env, encoding: 'utf8', timeout: 60000 });
   fs.writeFileSync(path.join(directory, phase + '-stdout.log'), child.stdout ?? '');
@@ -558,5 +599,150 @@ test('D1641-T09 acknowledged identity accumulation survives capacity refusal and
   f.service.close(); await f.service.drained(); f.coordinator.close();
   const restored = await fixture(t, { directory: f.directory, model: f.database }), rw = await (await restored.hello()).work();
   for (const item of originals) for (const b of item.bundle.bindings) assertExcluded(await replayObservation(restored, rw, b));
+});
+
+// D1650: phase/origin/body/destination/persistence equivalence classes. Existing
+// D1641 cases retain ack, terminal phases, compaction, copy and durability coverage.
+// SQL facts here are synthetic; concurrency means dispatched promises, not PG locks.
+async function unchangedReserve(f, work, binding, prefix = null, expected = 'CONFLICT') {
+  const before = directoryHashes(f.directory), state = stateObservation(f);
+  let reply;
+  try { reply = await work.call('reserve', { binding, prefix }); }
+  catch (error) { reply = { ok: false, error: { code: error.code } }; }
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'conflict must preserve every protected byte');
+  assert.equal(stateObservation(f).stateSha256, state.stateSha256, 'conflict must preserve reservation state');
+  assert.equal(reply.ok, false, 'conflicting or foreign-origin reserve must refuse');
+  assert.equal(reply.error.code, expected, 'ordinary conflict must stay typed');
+  assert.equal(f.service.state, 'ready', 'ordinary conflict must leave service usable');
+  return reply;
+}
+async function expiryFixture(t) {
+  const f = await fixture(t), work = await (await f.hello()).work();
+  for (let i = 0; i < 2; i++) {
+    const item = await f.reserve(work, event(false)); item.commit();
+    assert.equal((await work.call('confirm-bundle', item.bundle)).ok, true);
+  }
+  const retention = await (await f.hello('retention')).work();
+  const prefix = (await retention.call('expiry-prefix', { through: 1 })).result;
+  const tail = await f.database.sql.tail('viewing');
+  const payload = C.checkpointPayload('2036-10-19T00:00:00.000Z', prefix.anchor.sequence, prefix.count, prefix.anchor.hash);
+  const binding = { stream: 'viewing', chainId: tail.chainId, attemptId: randomUUID(), bundleId: randomUUID(),
+    kind: 'expiry', eventId: null, sequence: tail.sequence + 1, previousHash: tail.hash,
+    hash: C.entryHash(tail.sequence + 1, tail.hash, payload), contentSha256: sha256(payload) };
+  const reply = await retention.call('reserve', { binding, prefix });
+  assert.equal(reply.ok, true, 'fresh expiry with issued prefix succeeds');
+  return { f, retention, prefix, binding, reserved: reply.result, payload };
+}
+test('D1650-T01 exact pending replay ignores JSON ordering and transport ID with no DB or file change', async t => {
+  const f = await fixture(t), work = await (await f.hello()).work(), item = await f.reserve(work);
+  const before = directoryHashes(f.directory);
+  for (const method of Object.keys(f.database.sql)) f.database.sql[method] = async () => { throw new Error('reserve queried DB'); };
+  for (const binding of item.bundle.bindings) {
+    const reordered = Object.fromEntries(Object.entries(reservation(binding)).reverse());
+    const replies = await Promise.all(Array.from({ length: 4 }, () => work.call('reserve', { binding: reordered, prefix: null })));
+    for (const reply of replies) assert.equal(JSON.stringify(reply.result), JSON.stringify(binding), 'exact replay returns original outputs');
+  }
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'exact replay is write-free');
+  assert.notEqual(item.bundle.bindings[0].generation, item.bundle.bindings[1].generation, 'same attempt permits independent stream generations');
+  assert.notEqual(item.bundle.bindings[0].contentSha256, item.bundle.bindings[1].contentSha256, 'stream content is independent');
+});
+for (const occupied of [false, true]) test(`${occupied ? 'D1650-D17-V1' : 'D1650-D17'} moved pending identity refuses before destination mutation`, async t => {
+  const f = await fixture(t), work = await (await f.hello()).work(), item = await f.reserve(work, event(false));
+  const original = item.bundle.bindings[0], binding = { ...reservation(original), sequence: 2, previousHash: original.hash };
+  binding.hash = C.entryHash(2, binding.previousHash, item.rows[0].payload);
+  if (occupied) {
+    const victim = { ...binding, attemptId: randomUUID(), bundleId: randomUUID() };
+    assert.equal((await work.call('reserve', { binding: victim, prefix: null })).ok, true);
+  }
+  await unchangedReserve(f, work, binding);
+  const evidence = fs.mkdtempSync(path.join(path.dirname(f.directory), 'identity-reopen-'));
+  const disk = childPhase(evidence, 'inspect', { directory: f.directory, database: f.database.streams });
+  assert.notEqual(disk.pid, process.pid);
+  assert.equal(Object.values(disk.state.slots).filter(b => b.attemptId === original.attemptId).length, 1, 'one durable binding per stream attempt');
+  assert.equal(JSON.stringify(disk.before), JSON.stringify(disk.after), 'disk inspection preserves bytes');
+});
+test('D1650-T03 every immutable body field and malformed stream role combination refuses write-free', async t => {
+  const f = await fixture(t), work = await (await f.hello()).work(), item = await f.reserve(work, event(false));
+  const original = reservation(item.bundle.bindings[0]);
+  const variations = [
+    ['bundleId', randomUUID(), 'CONFLICT'], ['eventId', randomUUID(), 'CONFLICT'],
+    ['sequence', 2, 'CONFLICT'], ['previousHash', 'a'.repeat(64), 'CONFLICT'],
+    ['hash', 'b'.repeat(64), 'CONFLICT'], ['contentSha256', 'c'.repeat(64), 'CONFLICT'],
+    ['chainId', randomUUID(), 'PROTOCOL'], ['kind', 'history', 'PROTOCOL'],
+    ['eventId', null, 'PROTOCOL'], ['stream', 'history', 'PROTOCOL'],
+  ];
+  for (const [field, value, code] of variations) await unchangedReserve(f, work, { ...original, [field]: value }, null, code);
+  await unchangedReserve(f, work, { ...original, kind: 'expiry', eventId: null }, null, 'FORBIDDEN');
+  const retry = await work.call('reserve', { binding: original, prefix: null });
+  assert.equal(retry.ok, true, 'valid work remains usable after all conflicts');
+  item.commit(); assert.equal((await work.call('confirm-bundle', item.bundle)).ok, true);
+  await complete(f, work);
+});
+test('D1650-D17-V2 expiry original prefix remains replayable while changed prefix refuses', async t => {
+  const { f, retention, prefix, binding, reserved } = await expiryFixture(t);
+  const newer = (await retention.call('expiry-prefix', { through: 2 })).result;
+  await unchangedReserve(f, retention, binding, newer);
+  for (const changed of [
+    { ...prefix, seal: { ...prefix.seal, chainId: randomUUID() } },
+    { ...prefix, seal: { ...prefix.seal, sequence: 3 } },
+    { ...prefix, seal: { ...prefix.seal, hash: 'a'.repeat(64) } },
+    { ...prefix, anchor: { ...prefix.anchor, hash: 'b'.repeat(64) } },
+    { ...prefix, count: 0 },
+  ]) await unchangedReserve(f, retention, binding, changed);
+  await unchangedReserve(f, retention, binding, null, 'PROTOCOL');
+  const before = directoryHashes(f.directory);
+  const replay = await retention.call('reserve', { binding, prefix });
+  assert.equal(JSON.stringify(replay.result), JSON.stringify(reserved), 'original expiry proof survives newer scope prefix');
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'exact expiry replay is write-free');
+  await unchangedReserve(f, retention, { ...binding, attemptId: randomUUID() }, prefix);
+});
+test('D1650-D17-V3 pending replay is pinned to original live work session and epoch', async t => {
+  for (const mode of ['new-work', 'ended-work', 'new-session', 'lost-control', 'foreign-client', 'old-epoch']) {
+    const f = await fixture(t), peer = await f.hello(), work = await peer.work(), item = await f.reserve(work, event(false));
+    let other;
+    if (mode === 'ended-work') await work.call('end');
+    if (mode === 'lost-control') peer.socket.emit('end');
+    if (['new-work', 'ended-work'].includes(mode)) other = await peer.work();
+    else if (mode === 'old-epoch') other = { call: (op, value) => f.service.dispatch('api',
+      { ...work.req(op, value), serviceEpoch: randomUUID() }, peer.socket) };
+    else other = await (await f.hello('api', mode === 'foreign-client' ? randomUUID() : peer.identity.clientInstanceId)).work();
+    for (const conflict of [false, true]) {
+      const binding = reservation(item.bundle.bindings[0]);
+      if (conflict) { binding.sequence++; binding.hash = 'b'.repeat(64); }
+      await unchangedReserve(f, other, binding, null, mode === 'old-epoch' ? 'EPOCH' : 'CONFLICT');
+    }
+  }
+});
+test('D1650-T08 contradictory identity records refuse startup before recovery writes', async t => {
+  for (const mode of ['duplicate-slot', 'orphan-intent', 'orphan-slot', 'wrong-intent', 'wrong-proof', 'terminal-conflict']) {
+    const { f, binding } = await expiryFixture(t);
+    const id = 'viewing:' + binding.attemptId;
+    f.coordinator.call('update', state => {
+      if (mode === 'duplicate-slot') state.slots['viewing:4'] = { ...state.slots['viewing:3'], sequence: 4, generation: ++state.generation };
+      if (mode === 'orphan-intent') delete state.slots['viewing:3'];
+      if (mode === 'orphan-slot') delete state.intents[id];
+      if (mode === 'wrong-intent') state.intents[id].contentSha256 = 'e'.repeat(64);
+      if (mode === 'wrong-proof') state.proofs[id].count = 0;
+      if (mode === 'terminal-conflict') state.terminal[id] = { phase: 'aborted', generation: state.generation, binding: state.slots['viewing:3'] };
+    });
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    const evidence = fs.mkdtempSync(path.join(path.dirname(f.directory), 'integrity-'));
+    const disk = childPhase(evidence, 'integrity', { directory: f.directory, database: f.database.streams });
+    assert.equal(disk.phase, 'failed', 'contradictory attempt state must refuse readiness');
+    assert.equal(JSON.stringify(disk.after), JSON.stringify(disk.before), 'integrity refusal preserves original evidence');
+  }
+});
+test('D1650-T08A retained sealed expiry alias loads and remains terminal', async t => {
+  const { f, retention, reserved, payload } = await expiryFixture(t);
+  const s = f.database.streams.viewing;
+  s.rows.push({ sequence: reserved.sequence, previousHash: reserved.previousHash, hash: reserved.hash, kind: 'expiry',
+    statutoryAct: null, eventId: null, payload, contentSha256: reserved.contentSha256, storedAt: '2026-10-19T00:00:00.000Z' });
+  s.markers.push(reserved);
+  const bundle = { eventId: null, requiredStreams: ['viewing'], bindings: [reserved] };
+  assert.equal((await retention.call('confirm-bundle', bundle)).ok, true, 'expiry publication succeeds');
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const restarted = await fixture(t, { directory: f.directory, model: f.database, cold: true });
+  try { await restarted.service.start(); } catch { /* The observed readiness is the acceptance result. */ }
+  assert.equal(restarted.service.state, 'ready', 'byte-identical terminal expiry alias remains valid');
 });
 }
