@@ -150,6 +150,41 @@ MUTANTS = {
 
 }
 
+# D1641 uses the same isolated-copy/apply/restore and behavioral-verdict machinery.
+# Mutation strings locate the intentional changes; no acceptance assertion inspects
+# a private product name or source spelling. M08 awaits the legacy compatibility gate.
+TERMINAL_MUTANTS = {
+    "D1641-M01": ("acknowledgement deletes the durable terminal identity", [
+        ("api/src/emr-runtime/seal.ts", "  acknowledge(_stream: AccessStream, _attemptId: string): Promise<void> {\n",
+         "  acknowledge(_stream: AccessStream, _attemptId: string): Promise<void> {\n"
+         "    this.change(state => { delete state.terminal[key(_stream, _attemptId)]; });\n")]),
+    "D1641-M02": ("a new client instance bypasses another client's terminal exclusion", [
+        ("api/src/emr-runtime/seal.ts", "\n    if (state.terminal[id]) refuse('AttemptAlreadySettled');",
+         "\n    if (state.terminal[id]?.owner === owner) refuse('AttemptAlreadySettled');"),
+        ("api/src/emr-runtime/seal.ts", "\n      if (state.terminal[id]) refuse('AttemptAlreadySettled');",
+         "\n      if (state.terminal[id]?.owner === owner) refuse('AttemptAlreadySettled');"),
+    ]),
+    "D1641-M03": ("changed mutable binding fields evade the terminal identity check", [
+        ("api/src/emr-runtime/seal.ts", "\n    if (state.terminal[id]) refuse('AttemptAlreadySettled');",
+         "\n    if (state.terminal[id]?.binding?.bundleId === value.bundleId) refuse('AttemptAlreadySettled');"),
+        ("api/src/emr-runtime/seal.ts", "      if (state.terminal[id]) refuse('AttemptAlreadySettled');",
+         "      if (state.terminal[id] && same(state.terminal[id].binding, { ...binding, generation: state.terminal[id].generation, proofDigest: null })) refuse('AttemptAlreadySettled');"),
+    ]),
+    "D1641-M04": ("reserve persists a generation before refusing the terminal", [
+        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n",
+         "    if (this.load().terminal[key(binding.stream, binding.attemptId)]) this.change(state => { ++state.generation; });\n"
+         "    let superseded = false;\n")]),
+    "D1641-M05": ("checkpoint compaction drops terminal identities", [
+        ("api/src/emr-runtime/external-writer.ts", "    if (cached.offset < 4 * 1024 * 1024) return;\n",
+         "    if (cached.offset < 4 * 1024 * 1024) return;\n    envelope.state.terminal = {};\n")]),
+    "D1641-M06": ("terminal WAL success is returned without its flush barrier", [
+        ("api/src/emr-runtime/external-writer.ts", "fs.writeFileSync(context.log.fd, line); fs.fdatasyncSync(context.log.fd);",
+         "fs.writeFileSync(context.log.fd, line);")]),
+    "D1641-M07": ("all valid new reservations are refused", [
+        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n",
+         "    refuse('AttemptAlreadySettled');\n    let superseded = false;\n")]),
+}
+
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -246,12 +281,97 @@ def restore(copy, applied):
 
 
 def contract_verdict(text, cases, code):
-    blocks = re.findall(r"^not ok \d+ - (C\d+) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S)
+    blocks = re.findall(r"^not ok \d+ - (C\d+|D1641-T\d+[A-Z]?) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S)
     failed = {case for case, details in blocks if case in cases and re.search(r"code: ['\"]?ERR_ASSERTION\b", details)}
     harness = any(case in cases and not re.search(r"code: ['\"]?ERR_ASSERTION\b", details) for case, details in blocks)
     passed = {case for case in cases if re.search(r"^ok \d+ - " + case + r" ", text, re.M)}
     return {"failed": sorted(failed), "passed": sorted(passed), "harness_errors": harness,
             "killed": code != 0 and failed == set(cases) and not harness}
+
+
+def terminal_main(args):
+    """A clean passing source copy is mandatory before any terminal mutant verdict."""
+    declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))["b2c"]
+    declared = {item["id"]: item for item in declaration["terminal_mutants"]}
+    if set(declared) != set(TERMINAL_MUTANTS):
+        raise RuntimeError("terminal mutant declaration differs from driver")
+    chosen = [name for name in declared if not args.only or name in args.only.split(",")]
+    if args.only and set(chosen) != set(args.only.split(",")):
+        raise RuntimeError("unknown terminal mutant selection")
+    out = args.out.resolve()
+    out.mkdir(parents=True, exist_ok=False)
+    env = {**os.environ, "NODE_OPTIONS": "--max-old-space-size=3072"}
+    # A caller's baseline source override must not bypass the isolated mutated copy.
+    env.pop("EMR_B2C_SOURCE_ROOT", None)
+    env.pop("EMR_SERVICE_CASES", None)
+    rows = []
+    baseline_cases = [case for case in declaration["local_service_cases"]
+                      if any(case in declared[name]["kill"] for name in chosen)]
+    env["EMR_SERVICE_CASES"] = ",".join(baseline_cases)
+    with tempfile.TemporaryDirectory(prefix="kin-emrb-terminal-") as folder:
+        copy = Path(folder) / "checkout"
+        copy.mkdir()
+        head, link = make_copy(copy, args.worktree, args.source_manifest)
+        try:
+            inputs = copy / "mutant-inputs.json"
+            if inputs.exists():
+                shutil.copyfile(inputs, out / "mutant-inputs.json")
+            command = ["node", "--max-old-space-size=3072", "--test", "--test-concurrency=1",
+                       "--test-reporter=tap", "tests/emr/b/state_service_test.cjs"]
+            baseline_log = out / "baseline.log"
+            code, seconds = run(command, cwd=copy, env=env, timeout=900, log=baseline_log)
+            text = baseline_log.read_text(encoding="utf-8", errors="replace")
+            passed = re.findall(r"^ok \d+ - ([\w.-]+) ", text, re.M)
+            (out / "baseline.json").write_text(json.dumps({"head": head, "exit": code, "seconds": seconds,
+                "passed": passed, "expected": baseline_cases}, indent=2) + "\n", encoding="utf-8")
+            if code or passed != baseline_cases:
+                raise RuntimeError("unmutated terminal copy did not pass exact selection; no mutant verdict")
+            control_file = copy / "api/src/emr-runtime/seal.ts"
+            original = control_file.read_bytes()
+            # These semantics-preserving edits deliberately alter private names,
+            # the imported symbol name and layout used by the exercised paths.
+            renamed = original.decode("utf-8").replace("reservationState", "reservedSnapshot").replace(
+                "import { createHash }", "import { createHash as hashFactory }").replace("createHash(", "hashFactory(")
+            control_file.write_bytes(renamed.replace("  private load()", "\n  private load()").encode("utf-8"))
+            control_sha = sha256(control_file)
+            try:
+                control_log = out / "rename-alias-format.log"
+                code, seconds = run(command, cwd=copy, env=env, timeout=900, log=control_log)
+                passed = re.findall(r"^ok \d+ - ([\w.-]+) ", control_log.read_text(encoding="utf-8", errors="replace"), re.M)
+            finally:
+                control_file.write_bytes(original)
+            control = {"exit": code, "seconds": seconds, "passed": passed, "before_sha256": hashlib.sha256(original).hexdigest(),
+                       "control_sha256": control_sha, "restored_sha256": sha256(control_file)}
+            (out / "oracle-control.json").write_text(json.dumps(control, indent=2) + "\n", encoding="utf-8")
+            if code or passed != baseline_cases or control["before_sha256"] != control["restored_sha256"]:
+                raise RuntimeError("rename/alias/format control failed; no terminal mutant verdict")
+            for name in chosen:
+                expected, changes = TERMINAL_MUTANTS[name]
+                kill = declared[name]["kill"]
+                applied = apply(copy, changes)
+                log = out / (name + ".log")
+                try:
+                    code, seconds = run(command, cwd=copy, env={**env, "EMR_SERVICE_CASES": ",".join(kill)},
+                                        timeout=900, log=log)
+                    text = log.read_text(encoding="utf-8", errors="replace")
+                    verdict = contract_verdict(text, kill, code)
+                    # An unrelated assertion (including child startup) is not the intended kill.
+                    failures = dict(re.findall(r"^not ok \d+ - (D1641-T\d+[A-Z]?) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)",
+                                               text, re.M | re.S))
+                    intended = set(declared[name]["assertions"]) == set(kill) and all(
+                        message in failures.get(case, "") for case, message in declared[name]["assertions"].items())
+                    row = {"id": name, "head": head, "expected_failure": expected, "kill": kill,
+                           "exit": code, "seconds": seconds, "log": str(log), **verdict,
+                           "intended_assertions": intended, "killed": verdict["killed"] and intended}
+                finally:
+                    restore(copy, applied)
+                row["files"] = applied
+                rows.append(row)
+                (out / "mutants.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+                print("TERMINAL_MUTANT " + json.dumps({"id": name, "killed": row["killed"]}), flush=True)
+        finally:
+            unlink_modules(link)
+    return 0 if rows and all(row["killed"] for row in rows) else 1
 
 
 def live_verdict(text, cases, code):
@@ -467,6 +587,11 @@ def self_test():
         def test_missing_case_and_wrong_case_are_not_kills(self):
             self.assertFalse(contract_verdict("not ok 1 - test file\n", ["C13"], 1)["killed"])
             self.assertFalse(live_verdict("FAIL: test_b04_chain_tail_and_crash_recovery (live.EmrBLedgerLive)\n", ["L05"], 1)["killed"])
+
+        def test_terminal_setup_error_is_not_a_behavioral_kill(self):
+            prefix = "not ok 1 - D1641-T01 terminal replay\n  ---\n  code: "
+            self.assertTrue(contract_verdict(prefix + "'ERR_ASSERTION'\n  ...\n1..1\n", ["D1641-T01"], 1)["killed"])
+            self.assertFalse(contract_verdict(prefix + "'PROTOCOL'\n  ...\n1..1\n", ["D1641-T01"], 1)["killed"])
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(VerdictTest)
     return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
 
@@ -475,6 +600,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--self-test", action="store_true", help="verify verdicts and baseline source without Docker")
+    parser.add_argument("--terminal", action="store_true", help="run declared D1641 terminal component mutants in an isolated copy")
     parser.add_argument("--only", help="comma-separated mutant IDs")
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--source-manifest", type=Path, help="hash-bound LF source inventory for an isolated Linux copy")
@@ -484,6 +610,8 @@ def main(argv=None):
         return self_test()
     if args.out is None:
         parser.error("--out is required unless --self-test is selected")
+    if args.terminal:
+        return terminal_main(args)
     declared = {m["id"]: m for m in json.loads(DECLARATION.read_text(encoding="utf-8"))["mutants"]}
     if set(declared) != set(MUTANTS):
         raise SystemExit("declared mutants differ from this driver: %s" % sorted(set(declared) ^ set(MUTANTS)))

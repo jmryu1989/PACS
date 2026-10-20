@@ -42,6 +42,12 @@ jobs:
           python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/emr-b-ci/contract
       - name: D931 explicit transaction budgets from one constants module
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/transaction-options --cwd . --tree api/src/emr-runtime --file tests/emr/b/transaction_options_test.cjs -- node --test tests/emr/b/transaction_options_test.cjs
+      - name: EMR-B2c closed wire and asynchronous client over Unix sockets (C-S04 client subset)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/state-wire --cwd . --tree api/src/emr-runtime --file api/src/emr-contract/validation.ts --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_protocol_test.cjs -- node --max-old-space-size=3072 --test --test-concurrency=1 tests/emr/b/state_protocol_test.cjs
+      - name: EMR-B2c service capability, scopes and protected storage components
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/state-service --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs -- node --max-old-space-size=3072 --test --test-concurrency=1 tests/emr/b/state_service_test.cjs
       - name: D961 pool, JIT guard and estimator controls (NI is commander-only)
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/pool-plan --cwd . --tree api/src/emr-runtime --file api/src/prisma.service.ts --tree tests/emr/b -- node --test tests/emr/b/client_pool_test.cjs

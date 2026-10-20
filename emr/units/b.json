@@ -109,7 +109,12 @@
       "tests/emr/b/noninferiority.py",
       "tests/emr/b/noninferiority_test.py",
       "tests/emr/b/verification_plan.cjs",
-      "tests/emr/b/power_design.py"
+      "tests/emr/b/power_design.py",
+      "api/src/emr-runtime/state-protocol.ts",
+      "api/src/emr-runtime/state-service.ts",
+      "api/src/emr-runtime/state-service-main.ts",
+      "tests/emr/b/state_protocol_test.cjs",
+      "tests/emr/b/state_service_test.cjs"
     ]
   },
   "models": {
@@ -781,5 +786,189 @@
       "file": "tests/emr/b/live.py",
       "case": "EmrBLedgerLive.test_b01_ledger_roles_and_restart"
     }
-  ]
+  ],
+  "b2c": {
+    "status": "IN_PROGRESS_NOT_A_CANDIDATE",
+    "option": "c",
+    "protocol": {
+      "version": 1,
+      "max_frame_bytes_including_lf": 65536,
+      "operation_timeout_ms": 2000,
+      "max_sessions": 16,
+      "max_live_scopes": 128,
+      "max_active_operations": 64,
+      "verification_concurrency": 2,
+      "drain_timeout_ms": 10000,
+      "cleanup_timeout_ms": 5000
+    },
+    "local_wire_cases": [
+      "C-S04.W01",
+      "C-S04.W02",
+      "C-S04.W03",
+      "C-S04.W04",
+      "C-S04.W05",
+      "C-S04.W06",
+      "C-S04.W07",
+      "C-S04.W08",
+      "C-S04.W09",
+      "C-S04.W10",
+      "C-S04.W11",
+      "C-S04.W12",
+      "C-S04.W13"
+    ],
+    "local_wire_file": "tests/emr/b/state_protocol_test.cjs",
+    "acceptance_note": "Client/wire and service dispatcher/storage component subsets. Linux ACL/flock, executable lifecycle, PG, expiry replay, API, ops and full acceptance remain unverified or unfinished. Windows socket case uses loopback; Linux uses Unix sockets. D1641 local cases cover dispatcher/storage behavior only; Linux crash cuts, actual PG loss/expiry, legacy identity compatibility, isolated ops restore and unchanged performance gates remain required.",
+    "requirements": [
+      {
+        "requirement": "REQ-B2C-03",
+        "risk": "RISK-B2C-CAPABILITY-LEAK",
+        "tests": [
+          "C-S02",
+          "C-S04",
+          "C-A03"
+        ]
+      },
+      {
+        "requirement": "REQ-B2C-06",
+        "risk": "RISK-B2C-FALSE-ROLLBACK-OR-DUPLICATE",
+        "tests": [
+          "C-S05",
+          "C-P05",
+          "C-P06",
+          "C-P07",
+          "C-P08"
+        ]
+      },
+      {
+        "requirement": "REQ-B2C-08",
+        "risk": "RISK-B2C-STALE-EPOCH-DEADLOCK",
+        "tests": [
+          "C-P01",
+          "C-P02",
+          "C-P03",
+          "C-P05",
+          "C-P06"
+        ]
+      },
+      {
+        "requirement": "REQ-B2C-09",
+        "risk": "RISK-B2C-PREMATURE-RETIREMENT",
+        "tests": [
+          "C-S05",
+          "C-P08",
+          "C-P10",
+          "D1641-T01",
+          "D1641-T02",
+          "D1641-T03",
+          "D1641-T04",
+          "D1641-T05",
+          "D1641-T06",
+          "D1641-T07",
+          "D1641-T08",
+          "D1641-T09",
+          "D1641-T10"
+        ]
+      }
+    ],
+    "local_service_file": "tests/emr/b/state_service_test.cjs",
+    "local_service_cases": [
+      "C-S02.D01",
+      "C-S03.D02",
+      "C-S04.D03",
+      "C-S05.D04",
+      "C-S04.D05",
+      "C-S05.D06",
+      "C-S04.D07",
+      "C-S04.D08",
+      "C-S04.D09",
+      "C-S03.D10",
+      "C-S05.D11",
+      "C-S04.D12",
+      "C-S05.D13",
+      "C-S05.D14",
+      "C-S04.D15",
+      "D1641-T01",
+      "D1641-T02",
+      "D1641-T03",
+      "D1641-T04",
+      "D1641-T05",
+      "D1641-T06",
+      "D1641-T06F",
+      "D1641-T08",
+      "D1641-T09"
+    ],
+    "terminal_mutants": [
+      {
+        "id": "D1641-M01",
+        "kill": [
+          "D1641-T01",
+          "D1641-T05"
+        ],
+        "assertions": {
+          "D1641-T01": "terminal replay must not mutate durable state",
+          "D1641-T05": "terminal replay must not mutate durable state"
+        }
+      },
+      {
+        "id": "D1641-M02",
+        "kill": [
+          "D1641-T01",
+          "D1641-T02"
+        ],
+        "assertions": {
+          "D1641-T01": "terminal replay must not mutate durable state",
+          "D1641-T02": "terminal replay must not mutate durable state"
+        }
+      },
+      {
+        "id": "D1641-M03",
+        "kill": [
+          "D1641-T02"
+        ],
+        "assertions": {
+          "D1641-T02": "terminal replay must not mutate durable state"
+        }
+      },
+      {
+        "id": "D1641-M04",
+        "kill": [
+          "D1641-T01",
+          "D1641-T02",
+          "D1641-T03"
+        ],
+        "assertions": {
+          "D1641-T01": "terminal replay must not mutate durable state",
+          "D1641-T02": "terminal replay must not mutate durable state",
+          "D1641-T03": "terminal replay must not mutate durable state"
+        }
+      },
+      {
+        "id": "D1641-M05",
+        "kill": [
+          "D1641-T06"
+        ],
+        "assertions": {
+          "D1641-T06": "terminal replay must not mutate durable state"
+        }
+      },
+      {
+        "id": "D1641-M06",
+        "kill": [
+          "D1641-T06F"
+        ],
+        "assertions": {
+          "D1641-T06F": "a failed terminal publication flush must never return durable success"
+        }
+      },
+      {
+        "id": "D1641-M07",
+        "kill": [
+          "D1641-T02"
+        ],
+        "assertions": {
+          "D1641-T02": "fresh valid reserve must succeed"
+        }
+      }
+    ]
+  }
 }

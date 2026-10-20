@@ -8,6 +8,14 @@ export const EMR_TX_MAX_WAIT_MS = 10000;
 export const EMR_TX_TIMEOUT_MS = 15000;
 export const EMR_RECOVERY_TIMEOUT_MS = 30000;
 export const EMR_STATE_IPC_TIMEOUT_MS = 2000;
+/** Includes the terminating LF. These are admission bounds, never queue sizes. */
+export const EMR_STATE_FRAME_MAX_BYTES = 64 * 1024;
+export const EMR_STATE_MAX_SESSIONS = 16;
+export const EMR_STATE_MAX_SCOPES = 128;
+export const EMR_STATE_MAX_OPERATIONS = 64;
+export const EMR_STATE_VERIFY_CONCURRENCY = 2;
+export const EMR_DRAIN_TIMEOUT_MS = 10000;
+export const EMR_CLEANUP_TIMEOUT_MS = 5000;
 export const EMR_OWNER_RETRIES = 3;
 export const EMR_OWNER_RETRY_MS = 25;
 

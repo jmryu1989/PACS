@@ -45,9 +45,9 @@ export class AccessSeal {
     }
   }
   read(): SealState | 'absent' { return this.load().tail ?? 'absent'; }
-  private addIntent(state: ExternalState, value: { stream: AccessStream; attemptId: string; eventId: string | null; contentSha256: string | null; bundleId: string }): void {
+  private addIntent(state: ExternalState, value: { stream: AccessStream; attemptId: string; eventId: string | null; contentSha256: string | null; bundleId: string }, owner: string): void {
     const id = key(value.stream, value.attemptId);
-    const owned = { ...value, owner: this.journal.coordinator.ownerId };
+    const owned = { ...value, owner };
     if (state.intents[id] && !same(state.intents[id], owned)) refuse('AccessEventIdConflict');
     if (state.terminal[id]) refuse('AttemptAlreadySettled');
     state.intents[id] = owned;
@@ -58,17 +58,19 @@ export class AccessSeal {
    * a slot proves that its old transaction ended without committing.
    */
   private reservationState: ExternalState | undefined;
-  reserve(binding: Omit<CommitBinding, 'generation' | 'proofDigest'>, prefix?: { seal: StreamSeal; anchor: ChainPosition; count: number }): CommitBinding {
+  reserve(binding: Omit<CommitBinding, 'generation' | 'proofDigest'>, prefix?: { seal: StreamSeal; anchor: ChainPosition; count: number },
+    owner: string = this.journal.coordinator.ownerId): CommitBinding {
     let superseded = false;
     const result = this.change(state => {
       const id = key(binding.stream, binding.attemptId), position = slot(binding.stream, binding.sequence);
+      if (state.terminal[id]) refuse('AttemptAlreadySettled');
       const intent = state.intents[id];
-      if (intent && (intent.stream !== binding.stream || intent.attemptId !== binding.attemptId ||
+      if (intent && (intent.owner !== owner || intent.stream !== binding.stream || intent.attemptId !== binding.attemptId ||
           intent.bundleId !== binding.bundleId || intent.eventId !== binding.eventId ||
           intent.contentSha256 !== null && intent.contentSha256 !== binding.contentSha256))
         throw new SealRefused('UnsealedEntryUnexplained', 'intent-binding');
       if (!intent) this.addIntent(state, { stream: binding.stream, attemptId: binding.attemptId,
-        eventId: binding.eventId, contentSha256: binding.contentSha256, bundleId: binding.bundleId });
+        eventId: binding.eventId, contentSha256: binding.contentSha256, bundleId: binding.bundleId }, owner);
       const prior = state.slots[position];
       if (prior?.attemptId === binding.attemptId) {
         const { generation: _, proofDigest: __, ...identity } = prior;
@@ -78,7 +80,7 @@ export class AccessSeal {
       if (prior) {
         superseded = true;
         const old = key(prior.stream, prior.attemptId);
-        state.terminal[old] = { phase: 'superseded', generation: prior.generation,
+        state.terminal[old] = { phase: 'superseded', generation: prior.generation, binding: prior,
           notFound: { eventId: prior.eventId ?? `expiry:${prior.attemptId}`, contentSha256: prior.contentSha256 } };
         delete state.proofs[old]; delete state.intents[old];
       }
@@ -107,7 +109,8 @@ export class AccessSeal {
       const id = key(stream, attemptId), reservation = Object.values(state.slots).find(q => key(q.stream, q.attemptId) === id);
       if (state.terminal[id]?.phase === 'committed') throw new SealRefused('SealTailMismatch', 'abort-committed');
       if (!reservation && !state.intents[id] && !state.terminal[id]) return;
-      state.terminal[id] = { phase: 'aborted', generation: reservation?.generation ?? state.generation };
+      state.terminal[id] = { phase: 'aborted', generation: reservation?.generation ?? state.generation,
+        ...(reservation ? { binding: reservation } : {}) };
       if (reservation) delete state.slots[slot(stream, reservation.sequence)];
       delete state.proofs[id]; delete state.intents[id];
     });
@@ -273,7 +276,8 @@ export class AccessSeal {
       if (!result.unsealed.length) { this.reservationState = state; return state; }
       if (recovering) this.journal.record(`seal-recovered:${stream}:${result.current.sequence}-${result.end.sequence}`, 'seal-recovered',
         { chainId: result.current.chainId, fromSequence: result.current.sequence, toSequence: result.end.sequence, toHash: result.end.hash });
-      // The sealed frontier replaces terminal per-event authority. Keep only retained checkpoint lineage and unresolved slots.
+      // Settled slots can retire behind the frontier; their terminal identities must
+      // remain durable so a delayed reserve cannot allocate the same attempt again.
       const retained = new Set(Object.values(state.slots).filter(q => q.stream === stream && q.kind === 'expiry' &&
         q.sequence >= this.retainedStarts.get(stream)).map(q => q.sequence));
       // Reservations/intents in other requests can change the global revision during
@@ -298,7 +302,7 @@ export class AccessSeal {
           delete latest.slots[position]; delete latest.proofs[key(stream, q.attemptId)];
           latest.retired[stream] = Math.max(latest.retired[stream], q.generation);
         }
-        for (const [id, t] of Object.entries(latest.terminal)) if (id.startsWith(stream + ':') && t.phase !== 'committed' && !t.notFound && t.generation <= latest.retired[stream]) delete latest.terminal[id];
+        // Negative attempts also remain terminal. Forgetting one would permit an old RPC to reserve it anew.
         return latest;
       });
       if (installed) { this.reservationState = installed; return installed; }
@@ -320,10 +324,8 @@ export class AccessSeal {
         const group = this.publications; this.publications = null;
         try {
           const result = this.change(state => {
-            this.forgetAcknowledged(state);
             return { accepted: group.map(entry => Boolean(entry.install(state))), state };
           });
-          this.acknowledgements.clear();
           for (let i = 0; i < group.length; i++) group[i].resolve(result.accepted[i] ? result.state : null);
         } catch (error) { for (const entry of group) entry.reject(error); }
       });
@@ -354,9 +356,9 @@ export class AccessSeal {
     });
   }
 
-  /** A helper may seal and expire a row while its COMMIT response is in flight. This temporary
-   * metadata contains no payload and survives until that attempt acknowledges. Another process's
-   * startup fences DB transactions, not responses already in flight, so it must retain these bindings.
+  /** A helper may seal and expire a row while its COMMIT response is in flight.
+   * These bindings retain receipt evidence and permanently exclude reuse of a terminal
+   * attempt. Neither acknowledgement nor a new process makes that identity available again.
    */
   committedReceipt(stream: AccessStream, attemptId: string, eventId: string, entry: StoredEntry): SealState | null {
     return this.receiptFrom(this.load(), stream, attemptId, eventId, entry);
@@ -383,18 +385,11 @@ export class AccessSeal {
         q.chainId !== state.tail.streams[stream].chainId || q.sequence > state.tail.streams[stream].sequence) return null;
     return state.tail;
   }
-  private readonly acknowledgements = new Set<string>();
-  /** Cleanup is not receipt authority. Fold acknowledged bindings into the next
-   * receipt publication; a crash before that is swept by the fenced startup once
-   * this process's ownership lock has closed. At most the last receipt group waits. */
-  acknowledge(stream: AccessStream, attemptId: string): Promise<void> {
-    this.acknowledgements.add(key(stream, attemptId));
+  /** The caller verifies the full proof before acknowledging delivery. There is no
+   * durable cleanup here: the existing terminal record is also reserve's permanent
+   * exclusion authority, including after WAL compaction and service replacement. */
+  acknowledge(_stream: AccessStream, _attemptId: string): Promise<void> {
     return Promise.resolve();
-  }
-  private forgetAcknowledged(state: ExternalState): void {
-    for (const id of this.acknowledgements) {
-      if (state.terminal[id]?.phase === 'committed') delete state.terminal[id];
-    }
   }
 
   /** Called in the deleting transaction, with its head lock held, before staging deletion. */
@@ -478,12 +473,14 @@ export class AccessSeal {
         }
         counts[stream] = { recovered: tails[stream].sequence - before, notCommitted };
       }
-      const retired = Object.entries(this.load().terminal).filter(([, t]) => t.phase === 'committed' &&
-        (!t.owner || !this.journal.coordinator.ownerAlive(t.owner))).map(([id]) => id);
-      if (retired.length) this.change(state => { for (const id of retired) {
-        const t = state.terminal[id];
-        if (t?.phase === 'committed' && t.binding.sequence <= state.tail.streams[t.binding.stream].sequence) delete state.terminal[id];
-      } });
+      // The exclusive PG fence proves transaction finality, not receipt delivery.
+      // Preserve every terminal identity even after exact acknowledgement.
+      for (const terminal of Object.values(this.load().terminal)) {
+        if (terminal.phase !== 'aborted' || !terminal.binding) continue;
+        const binding: CommitBinding = terminal.binding;
+        if (await sql.markerForAttempt(binding.stream, binding.attemptId))
+          throw new SealRefused('UnsealedEntryUnexplained', 'aborted-marker');
+      }
       // Startup holds the writer fence, never a stream head lock.
       this.journal.coordinator.call('compact');
       return { seal: this.read() as SealState, streams: counts, recovered: ACCESS_STREAMS.reduce((n, s) => n + counts[s].recovered, 0),

@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { SQL_STORAGE_CLASSIFICATION } from '../emr-contract/classification';
 import { freeze } from '../emr-contract/validation';
+import type { DatabaseIdentity } from './state-protocol';
 
 /**
  * EMR-B deployment manifest: what the runtime verifies of the database before it may write a ledger fact. The unit
@@ -81,6 +82,64 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
   const placement = await db.$queryRaw<{ relation: string; relkind: string; tablespace: string }[]>`SELECT relation, relkind, tablespace FROM emr_access.storage_placement()`;
   const tables = placement.filter(p => p.relkind === 'r').map(p => p.relation).sort();
   if (JSON.stringify(tables) !== JSON.stringify([...EMR_STORAGE.tables].sort())) problems.push('ledger-relations-differ');
+  if (placement.some(p => p.tablespace !== EMR_STORAGE.tablespace)) problems.push('ledger-placement');
+  if (problems.length) throw new EmrRuntimeRefused(problems);
+  return { role: role.name, relations: placement.length };
+}
+
+/** Fixed deployment identities; Compose/image/preflight consumers must use the same values.
+ * The existing protected volume keeps the node UID. Client groups can connect but cannot replace sockets. */
+export const EMR_STATE_IDENTITIES = freeze({ serviceUid: 1000, apiUid: 1001, apiGroup: 2001, retentionGroup: 2002 });
+
+export async function databaseIdentity(db: RawQuery): Promise<DatabaseIdentity> {
+  const [row] = await db.$queryRaw<any[]>`SELECT current_database()::text AS database, d.oid::int AS oid,
+    inet_server_addr()::text AS address, inet_server_port() AS port
+    FROM pg_catalog.pg_database d WHERE d.datname = current_database()`;
+  if (!row || typeof row.database !== 'string' || !Number.isSafeInteger(row.oid) || row.oid < 1 ||
+    !(row.address === null || typeof row.address === 'string') ||
+    !(row.port === null || Number.isInteger(row.port) && row.port > 0 && row.port <= 65535))
+    throw new EmrRuntimeRefused(['database-identity-unreadable']);
+  return { database: row.database, oid: row.oid, address: row.address, port: row.port };
+}
+
+/** Independently verify the service's reader credential. It must not inherit application,
+ * deletion or installer authority, even if the required read functions happen to succeed. */
+export async function verifyStateServiceConnection(db: RawQuery): Promise<{ role: string; relations: number }> {
+  const problems: string[] = [];
+  const [role] = await db.$queryRaw<any[]>`SELECT current_user::text AS name, r.rolsuper, r.rolcreaterole,
+    r.rolcreatedb, r.rolreplication, r.rolbypassrls, r.rolcanlogin,
+    (SELECT count(*)::int FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid) AS memberships,
+    (SELECT count(*)::int FROM pg_catalog.pg_class c WHERE c.relowner = r.oid) AS owned,
+    (SELECT count(*)::int FROM pg_catalog.pg_namespace n WHERE n.nspowner = r.oid) AS owned_schemas
+    FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
+  if (!role) throw new EmrRuntimeRefused(['role-unreadable']);
+  if (role.name !== EMR_STORAGE.roles.reader) problems.push('not-the-state-reader-role');
+  for (const key of ['rolsuper', 'rolcreaterole', 'rolcreatedb', 'rolreplication', 'rolbypassrls'])
+    if (role[key] !== false) problems.push(key);
+  if (role.rolcanlogin !== true) problems.push('reader-login-required');
+  if (role.memberships !== 0) problems.push('role-membership');
+  if (role.owned !== 0 || role.owned_schemas !== 0) problems.push('owns-objects');
+  const [privileges] = await db.$queryRaw<any[]>`SELECT
+    EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname IN ('public', 'emr_access') AND c.relkind IN ('r','p','v','m','f') AND
+      pg_catalog.has_table_privilege(c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS direct_write,
+    EXISTS(SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname IN ('public', 'emr_access') AND
+      pg_catalog.has_schema_privilege(n.oid, 'CREATE')) AS create_schema,
+    pg_catalog.has_database_privilege(current_database(), 'CREATE') AS create_database,
+    EXISTS(SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname IN ('kin_emr_owner','kin_runtime','kin_emr_retention') AND
+      pg_catalog.pg_has_role(current_user, r.oid, 'USAGE')) AS owner_reachable`;
+  for (const key of ['direct_write', 'create_schema', 'create_database', 'owner_reachable'])
+    if (privileges?.[key] !== false) problems.push(key);
+  const functions = await db.$queryRaw<{ signature: string; executable: boolean }[]>`SELECT
+    p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' AS signature,
+    pg_catalog.has_function_privilege(p.oid, 'EXECUTE') AS executable
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'emr_access'`;
+  const allowed = new Set<string>(EMR_STORAGE.readerFunctions);
+  const granted = new Set(functions.filter(f => f.executable).map(f => f.signature.replace(/, /g, ',').replace(/timestamp with time zone/g, 'timestamptz')));
+  if (granted.size !== allowed.size || [...allowed].some(f => !granted.has(f))) problems.push('reader-functions-differ');
+  const placement = await db.$queryRaw<{ relation: string; relkind: string; tablespace: string }[]>`SELECT relation, relkind, tablespace FROM emr_access.storage_placement()`;
+  if (JSON.stringify(placement.filter(p => p.relkind === 'r').map(p => p.relation).sort()) !==
+    JSON.stringify([...EMR_STORAGE.tables].sort())) problems.push('ledger-relations-differ');
   if (placement.some(p => p.tablespace !== EMR_STORAGE.tablespace)) problems.push('ledger-placement');
   if (problems.length) throw new EmrRuntimeRefused(problems);
   return { role: role.name, relations: placement.length };

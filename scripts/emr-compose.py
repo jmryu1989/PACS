@@ -112,7 +112,7 @@ def load_yaml(path):
 
 
 DECLARATION_KEYS = {"unit", "round", "base_sha", "dependencies", "owned_paths", "models", "routes", "records", "migrations",
-                    "deployment", "restore", "req_risk_test", "cases", "expected", "mutants", "candidate_cases"}
+                    "deployment", "restore", "req_risk_test", "cases", "expected", "mutants", "candidate_cases", "b2c"}
 
 
 def declared_cases(root, declaration, kind):
@@ -186,6 +186,30 @@ def check(root, declaration_path):
         return ["declaration-unreadable: " + type(error).__name__]
     if not isinstance(declaration, dict) or set(declaration) != DECLARATION_KEYS:
         return ["declaration-keys: " + ",".join(sorted(set(declaration) ^ DECLARATION_KEYS if isinstance(declaration, dict) else DECLARATION_KEYS))]
+    wire = declaration["b2c"]
+    wire_keys = {"status", "option", "protocol", "local_wire_cases", "local_wire_file", "local_service_cases", "local_service_file", "acceptance_note", "requirements", "terminal_mutants"}
+    if not isinstance(wire, dict) or set(wire) != wire_keys or wire.get("option") != "c":
+        return ["b2c-declaration-invalid"]
+    cases = wire["local_wire_cases"]
+    if not isinstance(cases, list) or not cases or any(
+            not isinstance(case, str) or re.fullmatch(r"C-S04\.W[0-9]{2}", case) is None for case in cases) or len(cases) != len(set(cases)):
+        problem(problems, "b2c-wire-cases-invalid")
+    if wire["local_wire_file"] != "tests/emr/b/state_protocol_test.cjs" or not (root / wire["local_wire_file"]).is_file():
+        problem(problems, "b2c-wire-test-missing")
+    service_cases = wire["local_service_cases"]
+    if not isinstance(service_cases, list) or not service_cases or any(
+            not isinstance(case, str) or re.fullmatch(r"(?:C-S0[2345]\.D[0-9]{2}|D1641-T[0-9]{2}[A-Z]?)", case) is None
+            for case in service_cases) or len(service_cases) != len(set(service_cases)):
+        problem(problems, "b2c-service-cases-invalid")
+    if wire["local_service_file"] != "tests/emr/b/state_service_test.cjs" or not (root / wire["local_service_file"]).is_file():
+        problem(problems, "b2c-service-test-missing")
+    # The executed wire suite compares these deployment limits to the imported
+    # product constants and the exact cases it actually runs (no source parser).
+    settings = wire["protocol"]
+    setting_keys = {"version", "max_frame_bytes_including_lf", "operation_timeout_ms", "max_sessions", "max_live_scopes",
+                    "max_active_operations", "verification_concurrency", "drain_timeout_ms", "cleanup_timeout_ms"}
+    if not isinstance(settings, dict) or set(settings) != setting_keys or any(type(v) is not int or v <= 0 for v in settings.values()):
+        problem(problems, "b2c-wire-limits-invalid")
     owned = declaration["owned_paths"]
     paths = [path for group in owned.values() for path in group]
     if len(paths) != len(set(paths)):
