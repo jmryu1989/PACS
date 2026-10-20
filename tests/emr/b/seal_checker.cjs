@@ -414,10 +414,17 @@ async function named(){
   await run('R4c-dead-owner-after-seal-before-ack',['A:start','A:commit:ok'],async w=>{
     await w.seal.advance('viewing',w.head);
     await w.seal.recoverAtStart();
-    assert(Object.values(w.coordinator.call('read').terminal).some(t=>t.phase==='committed'),'live response owner is retained');
     const restart=create(w.snapshot(),true,true);await restart.seal.recoverAtStart();
-    assert.equal(Object.values(restart.coordinator.call('read').terminal).filter(t=>t.phase==='committed').length,0);
-    return {abandonedBindings:0};
+    // D1641: process death cannot prove receipt delivery or free an old attempt.
+    const {generation:_,proofDigest:__,...binding}=w.actors.A.marker;
+    for(const current of [w,restart]){
+      const before=sha(JSON.stringify(current.coordinator.call('read')));
+      assert.throws(()=>current.seal.reserve(binding),error=>error.code==='AttemptAlreadySettled');
+      assert.equal(sha(JSON.stringify(current.coordinator.call('read'))),before,'terminal refusal performs no durable write');
+      const receipt=current.seal.committedReceipt('viewing',binding.attemptId,binding.eventId,w.actors.A.staged.row);
+      assert(receipt&&receipt.streams.viewing.sequence>=binding.sequence,'original delayed receipt remains provable');
+    }
+    return {oldAttemptRefused:true,delayedReceiptRetained:true};
   });
   await run('R4c-superseded-unknown-final-journal',['A:start','A:commit:unknown0','A:deliver','B:start','B:commit:ok','B:deliver'],async w=>{
     const records=w.journal.all().filter(r=>r.kind==='commit-not-found'&&r.body.eventId===eventId('A'));
