@@ -773,8 +773,23 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.assertEqual(0,self.page.evaluate('window.statusChanges'))
 
     def test_held_session_end_discards_tree_and_account_search_data(self):
-        self.page.clock.install(time='2026-10-03T00:00:00Z')
         # The retained document is required for Recover Draft; navigation cannot hide stale account data.
+        # The doctor's Refresh meets the ended session first; the background answers arrive after it.
+        old_button = self.held_account_document()
+        self.end_held_session(background_first=False)
+        self.assert_held_session_end_discarded(old_button)
+
+    def test_held_session_end_reached_by_a_background_answer_before_refresh(self):
+        # W4X-05: a background read meets the ended session before the doctor presses anything. The page is
+        # already Session Ended, the legitimate order: there is no Refresh to press and the same data must go.
+        old_button = self.held_account_document()
+        self.end_held_session(background_first=True)
+        self.assert_held_session_end_discarded(old_button)
+
+    def held_account_document(self):
+        """One account's document with report text, Folders shortcut drafts and an open saved-search manager draft.
+        The received/sent critical-result reads the page sends on its own stay unanswered (background reads)."""
+        self.site.held_gets['/api/critical-results'] = []
         self.site.shortcuts=[dict(id='s',name='Private shortcut',searchId='shared:9')]
         self.site.filters=[dict(id=1,name='SYN private saved search',mode='Radiology',days=-1,quick='',cols={})]
         self.site.modalities=['CT']
@@ -808,8 +823,6 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(self.page.locator('#chips')).to_contain_text('SYN private saved search')
-        # Freeze background timers so the session ends only at the explicit fast_forward below (not mid-setup).
-        self.page.clock.pause_at('2026-10-03T01:00:00Z')
         self.page.locator('#rows tr[data-uid]').click()
         expect(self.page.locator('#findings')).to_be_editable()
         self.page.locator('#findings').fill('SYN unsaved recovery text')
@@ -839,11 +852,52 @@ class WorklistFoldersDOM(unittest.TestCase):
             self.page.locator('#sfs-' + field).fill('SYN private ' + field)
         self.page.locator('#sfm-close').click()
         expect(self.page.locator('#sfm-name')).to_have_value('Unsaved search draft')
+        return old_button
+
+    def end_held_session(self, background_first):
+        """The server ends the session while the background reads still wait. Every API request from here on also waits
+        at the server, so which answer tells the page first is the case's choice, not the scheduler's: the background
+        reads (background_first) or the list read of the doctor's Refresh. Every other request is then answered by the
+        ended server in the order it came."""
+        background = self.site.held_gets.pop('/api/critical-results')
+        self.assertNotEqual([], background, 'background reads are waiting for their answers')
+        waiting = []
+        def hold(route, request):
+            waiting.append((route, request))
+        self.context.route('**/api/**', hold)
         self.site.ended.add(self.site.cookie)
-        # A background 401 legitimately closes the page before Refresh can be clicked.
-        # Advance that schedule explicitly, then check the retained document's cleanup.
-        self.page.clock.fast_forward(60000)
+        ended = lambda routes: [self.site.refuse(route, 401, 'AUTH_SESSION_ENDED') for route in routes]
+        if background_first:
+            ended(background)
+        else:
+            expect(self.page.locator('#refresh')).to_be_visible()   # no answer has told the page yet
+            self.page.locator('#refresh').click()
+            first = self.waiting_request(waiting, lambda request: request.method == 'GET'
+                                         and request.url.startswith(auth.ORIGIN + '/api/studies?') and 'limit=100' in request.url)
+            waiting.remove(first)
+            self.site.handle(*first)
+        self.context.unroute('**/api/**', hold)
+        while waiting:
+            self.site.handle(*waiting.pop(0))
         expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Session Ended')
+        if background_first:
+            expect(self.page.locator('#refresh')).not_to_be_visible()
+        else:
+            ended(background)
+            # Drain the late answers and their promise callbacks without reopening the document.
+            self.page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+            expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Session Ended')
+
+    def waiting_request(self, waiting, matches):
+        """The first held request that matches, once the page has sent it (bounded: 5 s)."""
+        for _ in range(500):
+            found = next((entry for entry in waiting if matches(entry[1])), None)
+            if found:
+                return found
+            self.page.wait_for_timeout(10)
+        self.fail('the request never reached the server: ' + repr([request.url for _, request in waiting]))
+
+    def assert_held_session_end_discarded(self, old_button):
         expect(self.page).to_have_url(auth.MAIN_URL)
         # W2L4-01 / REQ-WS3 -> RISK-WS3: hiding the manager must not retain an
         # account's drafts while Recover Draft keeps this document alive.
