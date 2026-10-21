@@ -23,6 +23,11 @@ M58-M59 by the r8 self-review (D1556: bundle_inputs' B0 type unchecked, the veri
 M60-M66 by round 9 (D1575 CKPT8-1/CKPT8-2 and the typed-read inventory: the loader's parent, phase_reached, identity and
 owned guards, parent_chain's link type, resolve_parent's checkpoint type, restore_boundary's stack type).
 
+Round 11 (consult-checkpoints-t16-host-20261021 option b, D1666/D1669): CheckpointLayerStorageTests runs the real
+CheckpointDocker.layer_facts over a fake process table (docker info/inspect, containerd's ctr) and a real upper folder:
+overlay2 and containerd-snapshotter fact parity, every unestablished mapping without facts, and the live judgement's seal
+or WRITABLE_LAYER refusal (TEST-CKPT-STORAGE-01/02).
+
 Round 8 (consult-checkpoints-r8-20261017, CKPT7-01/02): the judgement is one call over the current bytes and the seal's
 bindings that returns what it verified (CheckpointVerifiedCaptureTests: R8-02 the bindings and the returned value, R8-03
 the real native Smoke.regenerated contrast, R8-04 the finite typed-refusal table and the adapters, R8-05 the executed
@@ -4476,6 +4481,346 @@ DEADLINE_SCENARIO = textwrap.dedent("""\
         out.update(elapsed=time.monotonic() - start, given=given, events=deadline.events)
     print("DEADLINE_SCENARIO " + json.dumps(out, default=str))
     """)
+
+
+# ── r11 (consult-checkpoints-t16-host-20261021 option b, D1666/D1669): the stopped writable layer on the daemon's own
+# storage backend. REQ-CKPT-STORAGE-01 (observe the deployment backend's stopped writable layer) -> RISK-CKPT-STORAGE-01
+# (a wrong or unobserved layer accepted as regenerated) -> TEST-CKPT-STORAGE-01 (overlay2/containerd fact parity), -02
+# (a missing, malformed or wrong-identity mapping gives no facts and the capture refuses with no bundle byte); -03 (the
+# native seeded/held regeneration and cold restore) is the smoke and T16 on the containerd VM, not a pure test. ──
+STORAGE_CONTAINER_ID = "4" * 64
+STORAGE_INFO = {
+    "overlay2": {"ID": "DAEMON:OVERLAY2", "ServerVersion": "28.5.1", "Driver": "overlay2",
+                 "DriverStatus": [["Backing Filesystem", "extfs"], ["Supports d_type", "true"], ["Using metacopy", "false"],
+                                  ["Native Overlay Diff", "true"], ["userxattr", "false"]],
+                 "Containerd": {"Address": "/run/containerd/containerd.sock", "Namespaces": {"Containers": "moby", "Plugins": "plugins.moby"}}},
+    # As the T16 VM (Docker 29.1.3) and production (2026-10-12 observation) report the containerd image store.
+    "containerd": {"ID": "DAEMON:CONTAINERD", "ServerVersion": "29.1.3", "Driver": "overlayfs",
+                   "DriverStatus": [["driver-type", "io.containerd.snapshotter.v1"]],
+                   "Containerd": {"Address": "/run/containerd/containerd.sock", "Namespaces": {"Containers": "moby", "Plugins": "plugins.moby"}}},
+}
+
+
+class StorageDaemon:
+    """A fake process table for CheckpointDocker's storage reads: `docker info`, `docker container inspect` and
+    containerd's client (`ctr ... snapshots info|mounts`). An answer is (exit, stdout bytes), an exception to raise, or a
+    callable of the call's ordinal for its kind (0 = the resolution before the read, 1 = after). Every call is recorded;
+    any other command fails the test (the adapter may only read)."""
+
+    def __init__(self, answers):
+        self.answers, self.calls, self.seen = answers, [], {}
+
+    @staticmethod
+    def kind(args):
+        if args[:2] == ["docker", "info"]:
+            return "info"
+        if args[:3] == ["docker", "container", "inspect"]:
+            return "inspect"
+        if args[:1] == ["ctr"] and "snapshots" in args and args[-2:-1] == ["info"]:
+            return "snapshot"
+        if args[:1] == ["ctr"] and "snapshots" in args and args[-3:-2] == ["mounts"]:
+            return "mounts"
+        raise AssertionError("not a storage read: " + " ".join(args[:4]))
+
+    def run(self, args, **kwargs):
+        kind = self.kind(list(args))
+        ordinal = self.seen.get(kind, 0)
+        self.seen[kind] = ordinal + 1
+        self.calls.append((kind, list(args), sorted(kwargs.get("env") or {})))
+        answer = self.answers[kind]
+        answer = answer(ordinal) if callable(answer) else answer
+        if isinstance(answer, BaseException):
+            raise answer
+        return subprocess.CompletedProcess(args, answer[0], answer[1], b"")
+
+
+class LayerAdapterBackend(FakeBackend):
+    """FakeBackend whose layer_facts is the real CheckpointDocker.layer_facts over a StorageDaemon and a real folder."""
+    adapter = None
+
+    def layer_facts(self, name, paths):
+        self.calls.append(("layer_facts", name))
+        return self.adapter(name, paths)
+
+
+class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
+    """r11 (D1666/D1669, TEST-CKPT-STORAGE-01/02): CheckpointDocker.layer_facts reads a stopped container's upper folder on
+    overlay2 (GraphDriver.Data.UpperDir) and on the containerd overlayfs snapshotter (the daemon's containerd endpoint
+    and namespace, the active snapshot keyed by the container ID, the upper folder containerd names), with the same
+    facts; every other backend, and any mapping that is missing, malformed, ambiguous, of another container or changed
+    during the read, gives no facts, and the live judgement then refuses before store.begin."""
+
+    NAME = PROJECT + "-orthanc"
+
+    def tree(self):
+        """A writable upper folder of a normal Orthanc start inside a snapshotter-shaped root (snapshots/<n>/fs and
+        work), with two lower layers and a second snapshot folder; real files and folders, and a real symlink and
+        whiteout (a 0/0 character device) where the platform lets this process make them (else their lstat is given)."""
+        root = self.tempdir("kin-layer-")
+        for number in ("2", "3", "17", "18"):
+            (root / "snapshots" / number / "fs").mkdir(parents=True)
+            (root / "snapshots" / number / "work").mkdir()
+        upper = root / "snapshots" / "17" / "fs"
+        files = {cp.HOSTID: b"1a2b3c4d\n", "/etc/kin-placeholder": b"not-generated\n",
+                 cp.PYCACHE + "/configurator.cpython-311.pyc": b"\x00pyc-configurator" * 40, cp.PYCACHE + "/helpers.cpython-311.pyc": b"\x00pyc-helpers" * 30,
+                 cp.PLUGINS + "/libOrthancDicomWeb.so": b"\x7fELF-dicomweb" * 100, cp.PLUGINS + "/libOrthancGdcm.so": b"\x7fELF-gdcm" * 90}
+        for path, data in files.items():
+            (upper / path.lstrip("/")).parent.mkdir(parents=True, exist_ok=True)
+            (upper / path.lstrip("/")).write_bytes(data)
+        (upper / "tmp").mkdir()
+        given = {}
+        try:
+            os.symlink("hostid", str(upper / "etc" / "kin-link"))
+        except (OSError, NotImplementedError):
+            given[str(upper / "etc" / "kin-link")] = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, 0, 0, 6, 0, 0, 0))
+        try:
+            os.mknod(str(upper / "etc" / "kin-whiteout"), stat.S_IFCHR | 0o000, os.makedev(0, 0))
+        except (AttributeError, OSError):
+            given[str(upper / "etc" / "kin-whiteout")] = os.stat_result((stat.S_IFCHR, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        return SimpleNamespace(root=root, upper=upper, work=root / "snapshots" / "17" / "work", files=files, given=given)
+
+    @staticmethod
+    def mount_line(tree, number="17", **options):
+        snapshot = tree.root / "snapshots" / number
+        values = {"index": "off", "workdir": (snapshot / "work").as_posix(), "upperdir": (snapshot / "fs").as_posix(),
+                  "lowerdir": (tree.root / "snapshots" / "3" / "fs").as_posix() + ":" + (tree.root / "snapshots" / "2" / "fs").as_posix()}
+        values.update(options)
+        text = ",".join(key + "=" + value if value is not True else key for key, value in values.items() if value is not None)
+        return ("mount -t overlay overlay /kin-ckpt-not-mounted -o " + text + "\n").encode()
+
+    def answers(self, backend, tree, *, name=None, edit=None, raw=None):
+        """The daemon's normal answers for one stopped container of `backend`, each edited (`edit`: kind -> function of
+        a deep copy) or replaced (`raw`: kind -> answer)."""
+        name = name or self.NAME
+        container = {"Id": STORAGE_CONTAINER_ID, "Name": "/" + name, "Image": ORTHANC_IMAGE,
+                     "State": {"Status": "exited", "Running": False, "Paused": False, "Restarting": False, "ExitCode": 0}}
+        if backend == "overlay2":
+            container["GraphDriver"] = {"Name": "overlay2", "Data": {"LowerDir": str(tree.root / "lower"), "MergedDir": str(tree.root / "merged"),
+                                                                      "UpperDir": str(tree.upper), "WorkDir": str(tree.work)}}
+        else:
+            container.update(GraphDriver=None, Storage={"RootFS": {"Snapshot": {"Name": "overlayfs"}}})
+        documents = {"info": copy.deepcopy(STORAGE_INFO[backend]), "inspect": [container],
+                     "snapshot": {"Kind": "Active", "Name": STORAGE_CONTAINER_ID, "Parent": "sha256:" + "6" * 64,
+                                  "Labels": {"containerd.io/gc.root": "2026-10-21T10:17:30Z"}, "Created": "2026-10-21T10:17:20Z"}}
+        for kind, change in (edit or {}).items():
+            documents[kind] = change(copy.deepcopy(documents[kind]))
+        answers = {kind: (0, json.dumps(document).encode()) for kind, document in documents.items()}
+        answers["mounts"] = (0, self.mount_line(tree))
+        answers.update(raw or {})
+        return answers
+
+    def adapter(self, backend, tree, **changes):
+        """(layer_facts callable, the StorageDaemon, the observations it records) of the real adapter."""
+        import ops_deploy_host_container_test as rehearsal
+        daemon = StorageDaemon(self.answers(backend, tree, **{key: changes[key] for key in ("name", "edit", "raw") if key in changes}))
+        given = {**tree.given, **changes.get("given", {})}
+        real = Path.lstat
+        start = len(rehearsal.LAYER_RESOLUTIONS)
+
+        def lstat(path, *args, **kwargs):
+            fact = given.get(str(path))
+            if isinstance(fact, BaseException):
+                raise fact
+            return fact if fact is not None else real(path, *args, **kwargs)
+
+        def facts(name, paths):
+            clean = {key: value for key, value in os.environ.items() if not key.startswith(("DOCKER_", "COMPOSE_"))}
+            with patch.object(rehearsal, "subprocess", SimpleNamespace(run=daemon.run, PIPE=subprocess.PIPE)), \
+                    patch.object(Path, "lstat", lstat), patch.dict(os.environ, {**clean, "DOCKER_HOST": "tcp://elsewhere:2376"}, clear=True):
+                return rehearsal.CheckpointDocker(None, None).layer_facts(name, paths)
+        return facts, daemon, lambda: rehearsal.LAYER_RESOLUTIONS[start:]
+
+    PATHS = sorted([*cp.REGENERATED_ANCESTORS, cp.HOSTID, cp.PYCACHE, *(cp.PYCACHE + "/" + name for name in PYC),
+                    *(cp.PLUGINS + "/" + name for name in ENABLED), "/etc/kin-placeholder", "/etc/kin-link", "/etc/kin-whiteout",
+                    "/etc/kin-absent", "/tmp"])
+
+    def test_overlay2_and_containerd_give_the_same_facts_through_their_own_metadata(self):
+        """TEST-CKPT-STORAGE-01: the same upper folder read through either backend gives the same lstat facts (type, mode,
+        uid/gid, size/SHA-256, the hostid content class, links, whiteouts, absences); each resolves twice (before and after
+        the read) only from its owner's metadata, with read-only calls, no DOCKER_* selection, and records the mapping."""
+        tree = self.tree()
+        observed = {}
+        for backend in ("overlay2", "containerd"):
+            facts, daemon, records = self.adapter(backend, tree)
+            observed[backend] = facts(self.NAME, self.PATHS)
+            with self.subTest(backend=backend):
+                self.assertEqual(sorted(observed[backend] or {}), self.PATHS)
+                kinds = [call[0] for call in daemon.calls]
+                expected = ["info", "inspect"] + (["snapshot", "mounts"] if backend == "containerd" else [])
+                self.assertEqual(kinds, expected * 2, "one resolution before and one after the read, reads only")
+                self.assertTrue(all(not key.startswith(("DOCKER_", "COMPOSE_")) for call in daemon.calls for key in call[2]))
+                for kind, args, _ in daemon.calls:
+                    if args[0] == "ctr":
+                        self.assertEqual(args[1:8], ["--address", "/run/containerd/containerd.sock", "--namespace", "moby", "snapshots",
+                                                     "--snapshotter", "overlayfs"], "the daemon's own containerd endpoint and namespace")
+                        self.assertEqual(args[-1], STORAGE_CONTAINER_ID, "the snapshot keyed by the inspected container ID")
+                record = records()[-1]
+                self.assertEqual((record["outcome"], record["before"], record["after"]["upper"]), ("observed", record["after"], str(tree.upper)))
+                self.assertEqual((record["before"]["container_id"], record["before"]["backend"]), (STORAGE_CONTAINER_ID, backend))
+        self.assertEqual(observed["overlay2"], observed["containerd"], "TEST-CKPT-STORAGE-01: fact parity")
+        facts = observed["containerd"]
+        data = tree.files[cp.HOSTID]
+        self.assertEqual({key: facts[cp.HOSTID][key] for key in ("type", "size", "sha256", "text")},
+                         {"type": "file", "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "text": "hex8-lf"})
+        self.assertEqual(facts["/etc/kin-placeholder"]["text"], "placeholder")
+        for path in (cp.PYCACHE + "/helpers.cpython-311.pyc", cp.PLUGINS + "/libOrthancGdcm.so"):
+            self.assertEqual((facts[path]["size"], facts[path]["sha256"], facts[path]["text"]),
+                             (len(tree.files[path]), hashlib.sha256(tree.files[path]).hexdigest(), "other"))
+            self.assertEqual(facts[path]["mode"], stat.S_IMODE(os.lstat(str(tree.upper / path.lstrip("/"))).st_mode))
+        self.assertEqual({facts[path]["type"] for path in (*cp.REGENERATED_ANCESTORS, cp.PYCACHE, "/tmp")}, {"dir"})
+        self.assertEqual((facts["/etc/kin-link"]["type"], facts["/etc/kin-whiteout"]["type"], facts["/etc/kin-absent"]),
+                         ("link", "whiteout", {"type": "absent"}))
+        self.assertTrue(all(set(fact) == cp.LAYER_FACT_KEYS[fact["type"]] for fact in facts.values()), "the record's closed fact shapes")
+
+    def unestablished(self, tree):
+        """name -> (backend, changes): every mapping the adapter must not read through."""
+        other = "7" * 64
+
+        def inspect(**fields):
+            return lambda items: [{**items[0], **fields}]
+
+        def info(**fields):
+            return lambda document: {**document, **fields}
+        line = self.mount_line
+        swap = lambda first, second: (lambda ordinal: first if ordinal == 0 else second)  # noqa: E731
+        normal_inspect = self.answers("containerd", tree)["inspect"]
+        return {
+            # the daemon's storage facts
+            "the daemon does not answer": ("containerd", {"raw": {"info": (1, b"")}}),
+            "the daemon's answer is not JSON": ("containerd", {"raw": {"info": (0, b"{not json")}}),
+            "a malformed DriverStatus": ("containerd", {"edit": {"info": info(DriverStatus="driver-type")}}),
+            "a DriverStatus row that is not a pair": ("containerd", {"edit": {"info": info(DriverStatus=[["driver-type"]])}}),
+            "two driver types (ambiguous)": ("containerd", {"edit": {"info": info(DriverStatus=[["driver-type", "io.containerd.snapshotter.v1"]] * 2)}}),
+            "the containerd native snapshotter": ("containerd", {"edit": {"info": info(Driver="native")}}),
+            "a containerd stargz snapshotter": ("containerd", {"edit": {"info": info(Driver="stargz")}}),
+            "a btrfs graph driver": ("overlay2", {"edit": {"info": info(Driver="btrfs", DriverStatus=[["Build Version", "Btrfs v6.6"]])}}),
+            "a vfs graph driver": ("overlay2", {"edit": {"info": info(Driver="vfs", DriverStatus=[])}}),
+            "a fuse-overlayfs graph driver": ("overlay2", {"edit": {"info": info(Driver="fuse-overlayfs", DriverStatus=[])}}),
+            "overlay2 named with a containerd driver type": ("overlay2", {"edit": {"info": info(DriverStatus=[["driver-type", "io.containerd.snapshotter.v1"]])}}),
+            "no containerd endpoint": ("containerd", {"edit": {"info": lambda document: {k: v for k, v in document.items() if k != "Containerd"}}}),
+            "a remote containerd endpoint": ("containerd", {"edit": {"info": info(Containerd={"Address": "tcp://10.0.0.5:1234", "Namespaces": {"Containers": "moby"}})}}),
+            "no containerd namespace": ("containerd", {"edit": {"info": info(Containerd={"Address": "/run/containerd/containerd.sock", "Namespaces": {}})}}),
+            "a namespace that is an option": ("containerd", {"edit": {"info": info(Containerd={"Address": "/run/containerd/containerd.sock", "Namespaces": {"Containers": "--all"}})}}),
+            # the container
+            "the inspection fails": ("containerd", {"raw": {"inspect": (1, b"")}}),
+            "two inspections": ("containerd", {"edit": {"inspect": lambda items: items * 2}}),
+            "an inspection that is not a list": ("containerd", {"edit": {"inspect": lambda items: items[0]}}),
+            "another container's inspection": ("containerd", {"edit": {"inspect": inspect(Name="/kin-other-orthanc-1")}}),
+            "a short container ID": ("containerd", {"edit": {"inspect": inspect(Id="4" * 12)}}),
+            "a running container": ("containerd", {"edit": {"inspect": inspect(State={"Running": True, "Restarting": False})}}),
+            "a restarting container": ("containerd", {"edit": {"inspect": inspect(State={"Running": False, "Restarting": True})}}),
+            "no state": ("containerd", {"edit": {"inspect": inspect(State=None)}}),
+            "an overlay2 upper folder under the containerd daemon": ("containerd", {"edit": {"inspect": inspect(GraphDriver={"Name": "overlay2", "Data": {"UpperDir": str(tree.upper)}})}}),
+            "another snapshotter declared by the container": ("containerd", {"edit": {"inspect": inspect(Storage={"RootFS": {"Snapshot": {"Name": "native"}}})}}),
+            "a malformed GraphDriver": ("containerd", {"edit": {"inspect": inspect(GraphDriver=["overlayfs"])}}),
+            # containerd's own metadata
+            "no containerd client on the host": ("containerd", {"raw": {"snapshot": FileNotFoundError(2, "ctr")}}),
+            "containerd has no snapshot of that key": ("containerd", {"raw": {"snapshot": (1, b"")}}),
+            "the snapshot answer is not JSON": ("containerd", {"raw": {"snapshot": (0, b"Active")}}),
+            "a snapshot keyed by another ID": ("containerd", {"edit": {"snapshot": lambda document: {**document, "Name": other}}}),
+            "a committed (image) snapshot": ("containerd", {"edit": {"snapshot": lambda document: {**document, "Kind": "Committed"}}}),
+            "no mounts": ("containerd", {"raw": {"mounts": (1, b"")}}),
+            "two mounts": ("containerd", {"raw": {"mounts": (0, line(tree) + line(tree, "18"))}}),
+            "a bind mount (a layer without a parent)": ("containerd", {"raw": {"mounts": (0, ("mount -t bind " + tree.upper.as_posix()
+                                                                                             + " /kin-ckpt-not-mounted -o rbind,rw\n").encode())}}),
+            "a mount without upperdir": ("containerd", {"raw": {"mounts": (0, line(tree, upperdir=None))}}),
+            "a mount with two upperdirs": ("containerd", {"raw": {"mounts": (0, line(tree).replace(b",lowerdir=", b",upperdir="
+                                                                                                    + (tree.root / "snapshots" / "18" / "fs").as_posix().encode() + b",lowerdir="))}}),
+            "a read-only mount without workdir": ("containerd", {"raw": {"mounts": (0, line(tree, workdir=None, upperdir=None))}}),
+            "an upper folder outside the snapshotter's folders": ("containerd", {"raw": {"mounts": (0, line(tree, upperdir=(tree.root / "fs").as_posix()))}}),
+            "an upper folder that is a lower layer": ("containerd", {"raw": {"mounts": (0, line(tree, "3"))}}),
+            "a work folder of another snapshot": ("containerd", {"raw": {"mounts": (0, line(tree, workdir=(tree.root / "snapshots" / "18" / "work").as_posix()))}}),
+            "an upper folder that does not exist": ("containerd", {"raw": {"mounts": (0, line(tree, "19"))}}),
+            "an upper folder that is a file": ("containerd", {"given": {str(tree.upper): os.stat_result((stat.S_IFREG | 0o644, 0, 0, 1, 0, 0, 1, 0, 0, 0))}}),
+            "an unreadable upper folder": ("containerd", {"given": {str(tree.upper): PermissionError(13, "denied")}}),
+            # the read itself and the mapping after it
+            "a changed path that cannot be read": ("containerd", {"given": {str(tree.upper / "etc" / "hostid"): PermissionError(13, "denied")}}),
+            "the snapshot's upper folder changes during the read": ("containerd", {"raw": {"mounts": swap((0, line(tree)), (0, line(tree, "18")))}}),
+            "the container is replaced during the read": ("containerd", {"raw": {"inspect": swap(normal_inspect, (0, json.dumps(
+                [{**json.loads(normal_inspect[1])[0], "Id": other}]).encode()))}}),
+            "the container is started during the read": ("containerd", {"raw": {"inspect": swap(normal_inspect, (0, json.dumps(
+                [{**json.loads(normal_inspect[1])[0], "State": {"Running": True}}]).encode()))}}),
+            "the daemon is another one after the read": ("containerd", {"raw": {"info": swap((0, json.dumps(STORAGE_INFO["containerd"]).encode()), (0, json.dumps(
+                {**STORAGE_INFO["containerd"], "ID": "DAEMON:OTHER"}).encode()))}}),
+            # overlay2
+            "overlay2 without an upper folder": ("overlay2", {"edit": {"inspect": inspect(GraphDriver={"Name": "overlay2", "Data": {}})}}),
+            "overlay2 with a null GraphDriver": ("overlay2", {"edit": {"inspect": inspect(GraphDriver=None)}}),
+            "another driver's GraphDriver on an overlay2 daemon": ("overlay2", {"edit": {"inspect": inspect(GraphDriver={"Name": "devicemapper", "Data": {"UpperDir": str(tree.upper)}})}}),
+            "a running overlay2 container": ("overlay2", {"edit": {"inspect": inspect(State={"Running": True})}}),
+            "an overlay2 upper folder that does not exist": ("overlay2", {"edit": {"inspect": inspect(GraphDriver={"Name": "overlay2", "Data": {"UpperDir": str(tree.root / "absent")}})}}),
+            "a relative overlay2 upper folder": ("overlay2", {"edit": {"inspect": inspect(GraphDriver={"Name": "overlay2", "Data": {"UpperDir": "snapshots/17/fs"}})}}),
+        }
+
+    def test_a_mapping_that_is_not_established_gives_no_facts(self):
+        """TEST-CKPT-STORAGE-02 (adapter): every unsupported backend and every missing, malformed, ambiguous, wrong-identity,
+        unreadable or changed mapping gives no facts (None, never a partial map or an exception), keeps its reason in the
+        recorded observation and reads nothing but storage metadata."""
+        tree = self.tree()
+        for name, (backend, changes) in self.unestablished(tree).items():
+            with self.subTest(refused=name):
+                facts, daemon, records = self.adapter(backend, tree, **changes)
+                self.assertIsNone(facts(self.NAME, self.PATHS))
+                record = records()[-1]
+                reason = record.get("reason") or (record.get("before") or {}).get("reason")
+                self.assertEqual(record["outcome"], "unobservable")
+                self.assertTrue(type(reason) is str and reason, record)
+                self.assertTrue(daemon.calls and all(kind in ("info", "inspect", "snapshot", "mounts") for kind, _, _ in daemon.calls))
+
+    def judged(self, backend, tree, descriptor, **changes):
+        """capture_checkpoint at INTRODUCED with the Orthanc role's normal start, its writable layer read by the real
+        adapter over `backend`. Returns (code, layer record, store listing)."""
+        target = target_fixture()
+        names = {item: target["containers"][item] for item in intro.ROLES}
+        volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
+        layered = LayerAdapterBackend(names, volumes, images=cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}))
+        layered.adapter = self.adapter(backend, tree, name=names["orthanc"], **changes)[0]
+        layered.diffs[names["orthanc"]] = list(ORTHANC_START)
+        fixture, store_root = self.tempdir(), self.tempdir() / "bundles"
+        try:
+            self.captured("introduced", layered, descriptor=descriptor, fixture=fixture, store_root=store_root)
+            code = "SEALED"
+        except cp.Refused as error:
+            code = error.code
+        layers = sorted(fixture.glob("*/records/" + cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE))
+        record = json.loads(layers[-1].read_bytes()) if len(layers) == 1 else None
+        return code, record, sorted(path.name for path in store_root.iterdir()) if store_root.exists() else []
+
+    def test_the_live_judgement_seals_only_an_established_layer(self):
+        """TEST-CKPT-STORAGE-01/02 through the live judgement: a normal Orthanc start read on the containerd snapshotter
+        or on overlay2 is accepted as the pinned image's regeneration and sealed; the same start whose mapping is not
+        established is refused WRITABLE_LAYER before store.begin (no bundle, no partial), its record kept unobservable."""
+        tree = self.tree()
+        paths = cp.regenerated_candidates(ORTHANC_START)
+        read = self.adapter("overlay2", tree, name=PROJECT + "-orthanc")[0](PROJECT + "-orthanc", paths)
+        names = {item: target_fixture()["containers"][item] for item in intro.ROLES}
+        descriptor = regenerated_fixture("id-" + names["orthanc"])
+        meta = {key: read[cp.HOSTID][key] for key in ("type", "mode", "uid", "gid")}
+        descriptor["image"]["hostid"] = {**meta, "size": 14, "sha256": hashlib.sha256(b"not-generated\n").hexdigest(), "text": "placeholder"}
+        descriptor["image"]["ancestors"] = {path: dict(read[path]) for path in cp.REGENERATED_ANCESTORS}
+        generated = descriptor["generated"]
+        generated.update(hostid=dict(read[cp.HOSTID]), pycache_dir=dict(read[cp.PYCACHE]),
+                         pycache={name: dict(read[cp.PYCACHE + "/" + name]) for name in PYC})
+        for name in ENABLED:
+            generated["plugins"][name] = {**read[cp.PLUGINS + "/" + name], "link": "hard link"}
+            descriptor["image"]["available"][name] = dict(read[cp.PLUGINS + "/" + name])
+        for backend in ("containerd", "overlay2"):
+            with self.subTest(sealed=backend):
+                code, record, stored = self.judged(backend, tree, descriptor)
+                row = record["roles"]["orthanc"]
+                self.assertEqual((code, record["outcome"], row["layer_observable"], len(stored)), ("SEALED", "ACCEPTED", True, 1))
+                self.assertEqual(row["facts"], read)
+                self.assertEqual({item["verdict"] for item in row["verdicts"]} - {"transient-or-mount"},
+                                 {"regenerated:hostid", "regenerated:pycache", "regenerated:pyc", "regenerated:plugin", "regenerated:ancestor"})
+        start = [change for change in ORTHANC_START if not cp.writable_layer_allowed(change)]
+        for name in ("a snapshot keyed by another ID", "the containerd native snapshotter", "no containerd client on the host",
+                     "the snapshot's upper folder changes during the read", "a changed path that cannot be read", "a btrfs graph driver"):
+            backend, changes = self.unestablished(tree)[name]
+            with self.subTest(refused=name):
+                code, record, stored = self.judged(backend, tree, descriptor, **changes)
+                self.assertEqual((code, stored), ("WRITABLE_LAYER", []), "refused before store.begin: no bundle, no partial")
+                row = record["roles"]["orthanc"]
+                self.assertEqual((record["outcome"], row["layer_observable"], row["facts"]), ("REFUSED", False, {}))
+                self.assertEqual(record["refused"], sorted("orthanc: " + change for change in start))
 
 
 class CheckpointDeadlineTests(RefusalAssertions, TempCase):

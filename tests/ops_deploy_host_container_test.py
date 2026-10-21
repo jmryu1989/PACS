@@ -240,6 +240,7 @@ import copy  # noqa: E402
 import hashlib  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
+import shlex  # noqa: E402
 import shutil  # noqa: E402
 import socket  # noqa: E402
 import stat  # noqa: E402
@@ -862,6 +863,12 @@ class SyntheticStack:
         return stack
 
 
+# r11 (consult-checkpoints-t16-host-20261021, D1666/D1669): every writable-layer observation of this process, observed or
+# not, with the storage facts and the container-to-folder mapping it used before and after the read (paths and IDs
+# only, never file content). The native smoke drains it into its raw evidence; nothing judges from it.
+LAYER_RESOLUTIONS = []
+
+
 class CheckpointDocker:
     """RELEASE-TOOLS-CHECKPOINTS backend: the one place that builds Docker/Compose commands for a checkpoint of one
     synthetic stack. tests/ops_release_checkpoints.py decides ownership, order and admission; this adapter only runs
@@ -1098,28 +1105,181 @@ class CheckpointDocker:
                 "probe_exit": started.returncode,
                 "helper": {"name": name, "id": ident, "labels": {"kin.ops.run": token, "kin.ckpt.probe": "regenerated"}, "removed": gone}}
 
+    # ── r11 (consult-checkpoints-t16-host-20261021 option b, D1666/D1669): the stopped writable layer on the daemon's own
+    # storage backend. The rehearsal VM and production run Docker 29 with the containerd image store (Driver overlayfs,
+    # driver-type io.containerd.snapshotter.v1): GraphDriver is null and there is no overlay2 folder, so r10 refused every
+    # regenerated entry there (WRITABLE_LAYER, T16 smoke 2026-10-21). Two backends are read, each only through the
+    # metadata of its owner: overlay2 by the daemon's GraphDriver.Data.UpperDir; the containerd overlayfs snapshotter by
+    # the containerd endpoint and namespace the daemon reports (docker info .Containerd) and the active snapshot the
+    # daemon keys by the container's ID (its rw layer), whose upper folder containerd itself names (`ctr snapshots
+    # mounts` prints the mount and mounts nothing). No folder number is guessed, no image (lower) or merged tree is read
+    # and the stopped container is never started. Anything else - another driver or snapshotter, missing, malformed or
+    # ambiguous metadata, another container, a running one, a folder that is not the snapshotter's, a mapping that
+    # changed while it was read - gives no facts (None), and the typed exception then refuses before any bundle byte.
+    CONTAINERD_DRIVER_TYPE = "io.containerd.snapshotter.v1"
+    CONTAINERD_SNAPSHOTTERS = ("overlayfs",)
+    MOUNTS_TARGET = "/kin-ckpt-not-mounted"
+
+    @staticmethod
+    def metadata(result):
+        """The JSON document a read-only metadata call answered, or None (a failed call, no answer, not JSON)."""
+        if result.returncode:
+            return None
+        try:
+            return json.loads(result.stdout)
+        except ValueError:
+            return None
+
+    def storage_backend(self):
+        """The daemon's container storage as `docker info` reports it: {"backend": "overlay2" | "containerd" | None, the
+        driver facts, for containerd the snapshotter, endpoint and namespace, and for None the reason}."""
+        info = self.metadata(self.run(["docker", "info", "--format", "{{json .}}"], check=False, timeout=60))
+        if type(info) is not dict:
+            return {"backend": None, "reason": "the daemon answered no storage facts"}
+        driver, status = info.get("Driver"), info.get("DriverStatus")
+        facts = {"driver": driver, "daemon_identity": info.get("ID"), "server": info.get("ServerVersion")}
+        if type(driver) is not str or type(status) is not list or not all(
+                type(row) is list and len(row) == 2 and all(type(item) is str for item in row) for row in status):
+            return {**facts, "backend": None, "reason": "the daemon's storage driver facts are malformed"}
+        types = [row[1] for row in status if row[0] == "driver-type"]
+        facts["driver_type"] = types
+        if not types and driver == "overlay2":
+            return {**facts, "backend": "overlay2"}
+        if types == [self.CONTAINERD_DRIVER_TYPE] and driver in self.CONTAINERD_SNAPSHOTTERS:
+            containerd = info.get("Containerd") if type(info.get("Containerd")) is dict else {}
+            namespaces = containerd.get("Namespaces") if type(containerd.get("Namespaces")) is dict else {}
+            address, namespace = containerd.get("Address"), namespaces.get("Containers")
+            if (type(address) is not str or not address.startswith(("/", "unix:///")) or type(namespace) is not str
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", namespace) is None):
+                return {**facts, "backend": None, "reason": "the daemon names no local containerd endpoint and namespace"}
+            return {**facts, "backend": "containerd", "snapshotter": driver, "address": address, "namespace": namespace}
+        return {**facts, "backend": None, "reason": "an unsupported storage driver: " + driver + "".join(" " + item for item in types)}
+
+    def overlay_upper(self, mounted):
+        """The upper folder of the one overlay mount `ctr snapshots mounts` printed, or (None, why)."""
+        if mounted.returncode:
+            return None, "containerd gave no mounts of the snapshot"
+        lines = [line for line in mounted.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+        if len(lines) != 1:
+            return None, "containerd gave %d mounts of the snapshot, not one" % len(lines)
+        try:
+            words = shlex.split(lines[0])
+        except ValueError:
+            return None, "the snapshot's mount is malformed"
+        if len(words) != 7 or words[:4] != ["mount", "-t", "overlay", "overlay"] or words[4:6] != [self.MOUNTS_TARGET, "-o"]:
+            return None, "the snapshot's mount is not one overlay mount"
+        options = words[6].split(",")
+        found = {key: [item[len(key) + 1:] for item in options if item.startswith(key + "=")] for key in ("upperdir", "workdir", "lowerdir")}
+        if any(len(values) != 1 or not values[0] for values in found.values()):
+            return None, "the snapshot's mount names no single upperdir, workdir and lowerdir"
+        upper, work = Path(found["upperdir"][0]), Path(found["workdir"][0])
+        if (not upper.is_absolute() or upper.name != "fs" or work.name != "work" or upper.parent != work.parent
+                or not upper.parent.name.isdigit() or upper.parent.parent.name != "snapshots"
+                or ":" + found["upperdir"][0] + ":" in ":" + found["lowerdir"][0] + ":"):
+            return None, "the upper folder is not the snapshotter's own folder of this snapshot"
+        return str(upper), None
+
+    def writable_upper(self, name, storage):
+        """(upper folder, resolution) of one stopped container on `storage` (storage_backend); (None, resolution with its
+        reason) when the backend's own metadata do not name exactly one readable upper folder of exactly this container."""
+        resolution = {"container_name": name, "backend": storage.get("backend")}
+
+        def refuse(reason):
+            return None, {**resolution, "reason": reason}
+        if storage.get("backend") not in ("overlay2", "containerd"):
+            return refuse(storage.get("reason") or "an unsupported storage backend")
+        items = self.metadata(self.run(["docker", "container", "inspect", name], check=False, timeout=60))
+        if type(items) is not list or len(items) != 1 or type(items[0]) is not dict:
+            return refuse("the daemon gave no single inspection of the container")
+        item = items[0]
+        ident, state, graph = item.get("Id"), item.get("State"), item.get("GraphDriver")
+        if type(ident) is not str or re.fullmatch(r"[0-9a-f]{64}", ident) is None or type(item.get("Name")) is not str \
+                or item["Name"].lstrip("/") != name:
+            return refuse("the inspection is not of this exact container")
+        resolution["container_id"] = ident
+        if type(state) is not dict or state.get("Running") is not False or state.get("Restarting") is True:
+            return refuse("the container is not stopped")
+        if graph is not None and (type(graph) is not dict or (graph.get("Data") is not None and type(graph.get("Data")) is not dict)):
+            return refuse("the container's storage driver facts are malformed")
+        graph = graph or {}
+        upper_dir = (graph.get("Data") or {}).get("UpperDir")
+        if storage["backend"] == "overlay2":
+            if graph.get("Name") != "overlay2" or type(upper_dir) is not str:
+                return refuse("the daemon reports no overlay2 upper folder of the container")
+            upper, resolution["source"] = upper_dir, "GraphDriver.Data.UpperDir"
+        else:
+            snapshotter = storage["snapshotter"]
+            declared = item.get("Storage")
+            for key in ("RootFS", "Snapshot", "Name"):
+                declared = declared.get(key) if type(declared) is dict else None
+            if upper_dir is not None or graph.get("Name") not in (None, snapshotter) or declared not in (None, snapshotter):
+                return refuse("the container reports another storage than the daemon's snapshotter")
+            resolution.update(snapshotter=snapshotter, address=storage["address"], namespace=storage["namespace"], snapshot_key=ident,
+                              declared_snapshotter=declared, source="containerd snapshot mounts")
+            base = ["ctr", "--address", storage["address"], "--namespace", storage["namespace"], "snapshots", "--snapshotter", snapshotter]
+            try:
+                snapshot = self.metadata(self.run(base + ["info", ident], check=False, timeout=60))
+                mounted = self.run(base + ["mounts", self.MOUNTS_TARGET, ident], check=False, timeout=60)
+            except OSError as error:
+                return refuse("containerd's client could not be run: " + type(error).__name__)
+            if type(snapshot) is not dict or snapshot.get("Name") != ident or snapshot.get("Kind") != "Active":
+                return refuse("containerd has no active snapshot keyed by the container's ID")
+            resolution["snapshot_parent"] = snapshot.get("Parent") if type(snapshot.get("Parent")) is str else None
+            upper, reason = self.overlay_upper(mounted)
+            if upper is None:
+                return refuse(reason)
+        try:
+            folder = Path(upper).lstat()
+        except OSError as error:
+            return refuse("the upper folder cannot be read: " + type(error).__name__)
+        if not Path(upper).is_absolute() or not stat.S_ISDIR(folder.st_mode):
+            return refuse("the upper folder is not a folder")
+        return upper, {**resolution, "upper": upper}
+
     def layer_facts(self, name, paths):
         """lstat facts (and SHA-256 of regular files) of changed paths in one stopped container's writable layer, read
-        from the overlay2 upper directory the daemon reports; None when the storage driver gives no such directory (the
-        typed exception then refuses). /etc/hostid's content class is recorded, never its value."""
-        graph = (self.container_config(name) or {}).get("graph") or {}
-        upper = graph.get("upper")
-        if graph.get("driver") != "overlay2" or not upper or not Path(upper).is_dir():
-            return None
+        from the upper folder the daemon's storage backend maps to it (writable_upper: overlay2 or the containerd
+        overlayfs snapshotter); None when no such folder is established, the read fails or the mapping is not the same
+        after the read (the typed exception then refuses). /etc/hostid's content class is recorded, never its value."""
+        storage = self.storage_backend()
+        upper, before = self.writable_upper(name, storage)
+        record = {"container_name": name, "paths": len(paths), "storage": storage, "before": before}
+        out = None
+        if upper is not None:
+            out = self.read_layer(Path(upper), paths)
+            storage_after = self.storage_backend()
+            _, after = self.writable_upper(name, storage_after)
+            record.update(storage_after=storage_after, after=after)
+            if out is None:
+                record["reason"] = "a changed path could not be read"
+            elif (storage_after, after) != (storage, before):
+                out, record["reason"] = None, "the storage or the container's mapping changed during the read"
+        record["outcome"] = "observed" if out is not None else "unobservable"
+        LAYER_RESOLUTIONS.append(record)
+        return out
+
+    @staticmethod
+    def read_layer(upper, paths):
+        """The facts of `paths` under one upper folder; None when one cannot be read (never a partial map)."""
         out = {}
         for path in paths:
-            target = Path(upper) / path.lstrip("/")
+            target = upper / path.lstrip("/")
             try:
                 info = target.lstat()
             except FileNotFoundError:
                 out[path] = {"type": "absent"}
                 continue
+            except OSError:
+                return None
             mode = info.st_mode
             kind = ("dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "link" if stat.S_ISLNK(mode)
                     else "whiteout" if stat.S_ISCHR(mode) else "other")
             fact = {"type": kind, "mode": stat.S_IMODE(mode), "uid": info.st_uid, "gid": info.st_gid}
             if kind == "file":
-                data = target.read_bytes()
+                try:
+                    data = target.read_bytes()
+                except OSError:
+                    return None
                 text = "other"
                 if len(data) <= 64:
                     text = "placeholder" if data == b"not-generated\n" else "hex8-lf" if re.fullmatch(rb"[0-9a-f]{8}\n", data) else "other"

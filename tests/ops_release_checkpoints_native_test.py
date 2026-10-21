@@ -363,6 +363,7 @@ class Smoke:
         cp.require(diagnostic in (None, *DIAGNOSTICS), "SMOKE_INVALID", "diagnostic " + str(diagnostic))
         self.body_seconds, self.cleanup_seconds = min(BODY_SECONDS, body_seconds), min(CLEANUP_SECONDS, cleanup_seconds)
         self.diagnostic, self.diagnostic_facts, self.tracked, self.pending, self.negatives = diagnostic, {}, [], None, []
+        self.layer_storage = []
         # The body's one end, fixed with the token, before the host is observed (consultation ckpt5_02 design).
         self.body = cp.Deadline(self.body_seconds, label="body", journal=self.evidence / "deadline-calls.jsonl")
         self.cleanup_deadline = None
@@ -412,6 +413,15 @@ class Smoke:
         path.write_bytes(cp.canonical(value) + b"\n")
         return name
 
+    def storage_evidence(self, capture):
+        """r11 (D1669): the writable-layer observations of one capture through the live consumer - the storage backend, the
+        container-to-upper-folder mapping before and after each read and its outcome - kept in layer-storage.json
+        (cumulative, rewritten after every capture, refused ones included)."""
+        drained = list(rehearsal.LAYER_RESOLUTIONS)
+        del rehearsal.LAYER_RESOLUTIONS[:len(drained)]
+        self.layer_storage.extend({"capture": capture, **row} for row in drained)
+        self.raw("layer-storage.json", self.layer_storage)
+
     def budget(self, stage):
         """A stage boundary: its time is recorded, and once the body's end has passed nothing more starts (the calls
         inside a stage are bounded by the same end themselves)."""
@@ -449,7 +459,7 @@ class Smoke:
             t16 = {"admitted": False, "code": error.code, "detail": str(error)[:200]}
         self.raw("host-facts.json", {"host_facts": self.facts, "runtime": runtime, "smoke_needs": {"ram": SMOKE_RAM, "disk": SMOKE_DISK},
                                      "t16_needs": {"ram": cp.MIN_HOST_RAM, "disk": self.facts.get("required_disk_bytes")},
-                                     "t16_admission_here": t16})
+                                     "t16_admission_here": t16, "storage": docker.storage_backend()})
         self.runtime = runtime
         self.check(["A10"], "host facts observed now (daemon, endpoint, RAM, disk, labelled containers)",
                    self.facts["daemon_ok"] is True and self.facts["docker_endpoint"].startswith("unix:///") and self.facts["available_ram_bytes"] > 0,
@@ -752,11 +762,14 @@ class Smoke:
         records_before = cp.original_records(stack.records.directory, entry_root=stack.root / "compose-entries",
                                              lock_path=intro.lock_path(stack.repo))
         state_raw = (stack.records.directory / "state.json").read_bytes()
-        bundle, observation = live.seal_boundary(checkpoint_id, stack, store=self.store, fixture_root=self.fixture_root, helper=self.helper,
-                                                 identity=self.identity(stack, checkpoint_id), owned=owned, execution_kind="fresh",
-                                                 tls_not_after=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
-                                                 before_seal=self.write_context, leaf={"unit": "native-smoke", "attempt": 1},
-                                                 source={"smoke": self.token}, probe=probe)
+        try:
+            bundle, observation = live.seal_boundary(checkpoint_id, stack, store=self.store, fixture_root=self.fixture_root, helper=self.helper,
+                                                     identity=self.identity(stack, checkpoint_id), owned=owned, execution_kind="fresh",
+                                                     tls_not_after=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+                                                     before_seal=self.write_context, leaf={"unit": "native-smoke", "attempt": 1},
+                                                     source={"smoke": self.token}, probe=probe)
+        finally:
+            self.storage_evidence(checkpoint_id)
         self.observed(stack, checkpoint_id, observation, "capture")
         records_after = cp.original_records(stack.records.directory, entry_root=stack.root / "compose-entries",
                                             lock_path=intro.lock_path(stack.repo))
@@ -1088,6 +1101,8 @@ class Smoke:
             outcome = "sealed"
         except cp.Refused as error:
             outcome = error.code + ": " + str(error)
+        finally:
+            self.storage_evidence("failure-held")
         self.check(["A05", "N05"], "a persistent writable-layer file refuses the capture (WRITABLE_LAYER), the transient one is allowed",
                    outcome.startswith("WRITABLE_LAYER") and "/etc/kin-smoke-persistent" in outcome and "kin-smoke-transient" not in outcome, outcome)
         self.check(["A05"], "the refused capture wrote no bundle", sorted(path.name for path in self.store.root.iterdir()) == stored)
@@ -1167,6 +1182,8 @@ class Smoke:
             code = "SEALED"
         except cp.Refused as error:
             code = error.code
+        finally:
+            self.storage_evidence(checkpoint_id + ": " + label)
         new = sorted(set(folder.glob("layer-*/" + cp.LAYER_FILE)) - layers)
         record = json.loads(new[0].read_bytes()) if len(new) == 1 else {}
         refused = record.get("refused") or []

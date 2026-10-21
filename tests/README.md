@@ -2065,9 +2065,10 @@ contracts above, the native negatives and deadline diagnostics below, then T16/T
   smoke's residue ledger before it exists; the owner's cleanup also removes it by label). The startup-input SHA-256 covers
   image, entrypoint, command, user, the full environment (only names and that hash are recorded, never a value) and the
   configurator inputs' content; the cache is per (image ID, startup-input hash) and the image inventory per image ID.
-  The writable-layer facts of a stopped container are lstat facts and SHA-256 of the changed paths in its overlay2 upper
-  folder (the daemon's `GraphDriver.Data.UpperDir`; another storage driver gives none and the exception refuses);
-  `/etc/hostid` is recorded as its content class only.
+  The writable-layer facts of a stopped container are lstat facts and SHA-256 of the changed paths in its upper folder:
+  on overlay2 the daemon's `GraphDriver.Data.UpperDir`, and since round 11 (below) on the containerd image store's
+  overlayfs snapshotter the upper folder containerd names for the container's own snapshot; any other storage driver
+  gives none and the exception refuses. `/etc/hostid` is recorded as its content class only.
 - Records and consumption: the capture observation keeps `regenerated-artifacts.json` (the descriptor, its probe
   reference) and its request names its SHA-256 (`regenerated_sha256`), so `observation.files` binds it before
   observation.json is written; a restore observation has none. The post-stop judgement is
@@ -2150,9 +2151,55 @@ contracts above, the native negatives and deadline diagnostics below, then T16/T
   tree ended, the shared end, nothing started after it, the product Runner's UNKNOWN, the cleanup's own end and UNKNOWN
   residue, the kept residue and SMOKE_RESIDUE (P8/P9, M49/M51); native - the normal smoke within 300/60 and the two
   diagnostics above; T16 - the normal `commands` smoke within 300/60 with an observed complete cleanup and no pending
-  left. Not verified here: a non-overlay2 storage driver (the exception refuses), FORCE_HOST_ID or other startup inputs
+  left. Not verified here: a storage driver other than overlay2 and the containerd overlayfs snapshotter (the exception
+  refuses; round 11), FORCE_HOST_ID or other startup inputs
   (refused, not supported), daemon-side completion of a cut call, an OS-level uninterruptible I/O, and anything of
   T16/T17.
+
+### Round 11: the containerd image store's writable layer (consult-checkpoints-t16-host-20261021 option b, D1666/D1669)
+
+The T16 smoke of 1bc2606 on the rehearsal VM refused WRITABLE_LAYER before any bundle byte (2026-10-21): the VM runs
+Docker 29.1.3 with the containerd image store (`Driver` overlayfs, `DriverStatus` driver-type
+`io.containerd.snapshotter.v1`, `GraphDriver` null, no `/var/lib/docker/overlay2`), the adapter read only an overlay2
+`UpperDir`, so the Orthanc start's regenerated entries had no facts. Production 61.109.239.207 recorded the same backend
+(2026-10-12), so this is a release requirement. REQ-CKPT-STORAGE-01 (observe the deployment backend's stopped writable
+layer) → RISK-CKPT-STORAGE-01 (a wrong or unobserved layer accepted as regenerated) → TEST-CKPT-STORAGE-01 (overlay2 and
+containerd fact parity), -02 (a missing, malformed or wrong-identity mapping gives no facts; the capture refuses with no
+bundle byte), -03 (native: the smoke's seeded/held regeneration and cold restore, then T16/T17 on the containerd VM).
+
+- Supported backends (`CheckpointDocker.storage_backend`, from `docker info`): overlay2 (`Driver` overlay2, no
+  driver-type) and the containerd overlayfs snapshotter (`Driver` overlayfs, exactly one driver-type
+  `io.containerd.snapshotter.v1`, a local `Containerd.Address` and a `Containerd.Namespaces.Containers` name). Every
+  other driver or snapshotter (btrfs, vfs, fuse-overlayfs, containerd's native/stargz, ...) gives no facts.
+- The mapping (`writable_upper`), read-only and from the owners' metadata only: the exact stopped container (one
+  inspection of that name, a 64-hex ID, `Running` false, not restarting); on overlay2 its `GraphDriver.Data.UpperDir`;
+  on containerd no overlay2 upper and no other declared snapshotter (`GraphDriver.Name`, `Storage.RootFS.Snapshot.Name`),
+  then `ctr --address <Containerd.Address> --namespace <Containers> snapshots --snapshotter overlayfs info <container ID>`
+  (an `Active` snapshot named by the container ID: the daemon keys a container's rw layer by its ID) and `... mounts
+  /kin-ckpt-not-mounted <container ID>` (containerd prints the one overlay mount it would make and mounts nothing): exactly
+  one `upperdir`, `workdir` and `lowerdir`, the upper `snapshots/<n>/fs` beside its `snapshots/<n>/work` and not a lower
+  layer, an existing folder. No folder number is guessed, no image or merged tree is read, the stopped container is never
+  started, and `ctr` (containerd's own client, shipped with the containerd the daemon uses) is the only addition; a host
+  without it gives no facts.
+- The read (`layer_facts`): the same lstat facts as before (type, mode, uid/gid, size/SHA-256, the hostid content
+  class, links, whiteouts as 0/0 character devices, absences); a path that cannot be read gives no facts (never a partial
+  map); the storage facts and the mapping are resolved again after the read and must be identical (same daemon, same
+  container ID, same snapshot and upper folder), else no facts. No facts = `layer_observable` false = the regenerated
+  entries refused = WRITABLE_LAYER before `store.begin`, as before; the shared judgement, record schema and
+  `layer_valid` are unchanged.
+- Evidence: every observation (storage facts, mapping before and after, outcome and reason; paths and IDs only) is
+  kept in `ops_deploy_host_container_test.LAYER_RESOLUTIONS`; the native smoke writes it per capture (the seeded and
+  held captures, the failure-held refusal and each regenerated negative) to `layer-storage.json` and the daemon's storage
+  facts to `host-facts.json` (`storage`), so a run shows which backend it actually exercised.
+- Pure (`CheckpointLayerStorageTests`): the same real folder read through both backends gives equal facts with read-only
+  calls only and two identical resolutions; 54 unestablished mappings (unsupported drivers and snapshotters, malformed or
+  ambiguous daemon facts, missing or remote containerd endpoint, another or a running container, another snapshot key, a
+  committed snapshot, zero or two mounts, a bind mount, missing or doubled upperdir, an upper outside the snapshotter's
+  folders or a lower layer, a missing or unreadable folder, an unreadable path, a mapping, container or daemon that
+  changes during the read, the overlay2 equivalents) each give no facts with a recorded reason; through the live
+  judgement a normal Orthanc start is sealed ACCEPTED on both backends and refused WRITABLE_LAYER with no bundle when the
+  mapping is not established. Native: CI's runner exercises its own backend (recorded in `host-facts.json`); the
+  containerd path runs natively only on the VM's normal smoke and T16/T17 after admission of the new SHA.
 
 # 뷰어 반전 정밀도
 
