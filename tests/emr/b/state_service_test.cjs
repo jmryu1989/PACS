@@ -1221,6 +1221,39 @@ test('D1656-T04 a changed physical root cannot reuse a prior coordinator admissi
   assert.equal(JSON.stringify(directoryHashes(moved)), JSON.stringify(original));
 });
 
+test('D1684-T01 a compact whole-state v3 checkpoint with history is admitted, read identically and compacted navigably', async t => {
+  // The same v3 envelope written as one JSON.stringify (what initialization, older writers and inspectors produce):
+  // the line-separated navigable layout is only whitespace, so an owner must admit the compact layout with its terminals
+  // and bundles, serve the same proofs and exclusions, and write the navigable layout at its next compaction.
+  const f = await fixture(t), work = await (await f.hello()).work();
+  const acked = await complete(f, work, true), published = await complete(f, work), pending = await f.reserve(work);
+  f.coordinator.call('compact', { force: true });
+  const before = f.coordinator.call('read');
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const file = path.join(f.directory, 'seal/settlement.json'), envelope = JSON.parse(fs.readFileSync(file));
+  assert.ok(fs.readFileSync(file, 'utf8').includes('\n'), 'the compaction wrote the navigable layout');
+  fs.writeFileSync(file, JSON.stringify(envelope));
+  assert.equal(fs.readFileSync(file, 'utf8').includes('\n'), false, 'the compact layout under test has no member lines');
+  const inspector = load('emr-runtime/external-writer').inspectExternal;
+  assert.equal(JSON.stringify(inspector(f.directory).state), JSON.stringify(before), 'the compact layout reads identically');
+  const g = await fixture(t, { directory: f.directory, model: f.database });
+  assert.equal(g.service.state, 'ready', 'the compact layout is admitted');
+  const gw = await (await g.hello()).work();
+  assert.equal(JSON.stringify((await gw.call('confirm-bundle', acked.bundle)).result), JSON.stringify(acked.proof), 'acknowledged proof lookup over the compact layout');
+  assert.equal((await gw.call('acknowledge', { proof: acked.proof, bindings: acked.bundle.bindings })).result.status, 'already-acknowledged');
+  assert.equal(JSON.stringify((await gw.call('confirm-bundle', published.bundle)).result), JSON.stringify(published.proof), 'published proof lookup over the compact layout');
+  for (const b of [...acked.bundle.bindings, ...published.bundle.bindings]) assertExcluded(await replayObservation(g, gw, b));
+  // The never-committed reservation was settled negative by the restart's recovery (its intent had no marker): the
+  // compact layout carried the pending identity into that settlement, which now excludes the attempt.
+  for (const b of pending.bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+  assert.equal(g.coordinator.call('get', { map: 'terminal', id: pending.bundle.bindings[0].stream + ':' + pending.bundle.bindings[0].attemptId })?.phase, 'aborted');
+  const current = g.coordinator.call('read');
+  g.coordinator.call('compact', { force: true });
+  assert.ok(fs.readFileSync(file, 'utf8').includes('\n'), 'the next compaction writes the navigable layout again');
+  assert.equal(JSON.stringify(g.coordinator.call('read')), JSON.stringify(current), 'the rewritten checkpoint holds the same history');
+  assert.equal(JSON.stringify(inspector(f.directory).state), JSON.stringify(current), 'a fresh admission of the navigable rewrite reads the same history');
+});
+
 test('D1656-T02 closed shell dispatch rejects unchanged legacy scripts before Node', async t => {
   const shell = process.env.KIN_EMR_SHELL || 'sh';
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-entry-mode-'));

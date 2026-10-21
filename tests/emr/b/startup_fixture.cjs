@@ -745,7 +745,7 @@ function serviceChild(scenario) {
     await hold('recovered');
     return result;
   };
-  let faultArmed = false;
+  let faultArmed = false, compacted = false;
   const advance = sealModule.AccessSeal.prototype.advanceReceipt;
   sealModule.AccessSeal.prototype.advanceReceipt = async function (stream, attemptId, eventId, entry) {
     if (scenario.storage && eventId === scenario.storage.eventId) faultArmed = true;
@@ -756,6 +756,13 @@ function serviceChild(scenario) {
       await new Promise(() => {});
     }
     const value = await advance.call(this, stream, attemptId, eventId, entry);
+    // The checkpoint is rewritten only by the amortized compaction (never per publication): the rename cut forces that
+    // compaction here, where the product itself compacts when its WAL threshold is due - after the publication's
+    // durable record and before the receipt is returned - so the cut observes a rename failure at the real point.
+    if (scenario.storage && scenario.storage.cut === 'checkpoint-rename' && faultArmed && eventId === scenario.storage.eventId && !compacted) {
+      compacted = true;
+      this.journal.coordinator.call('compact', { force: true });
+    }
     send('advanced', { stream, eventId });
     if (scenario.cut === 'viewing-sealed' && stream === 'viewing' && eventId === scenario.cutEvent) send('viewing-sealed', { eventId });
     return value;

@@ -68,6 +68,11 @@ TG02_EXCLUDED = {
                                           'its own temporary checkout only: `config` renders (--project-directory, -f) '
                                           'and a docker(*args) wrapper for its own labelled volumes and networkless '
                                           'containers, no Compose',
+    'tests/production_image_test.py': 'A03 launch-boundary cells (LegacyImageTests.compose_create): its own disposable '
+                                      'project (--project-directory, -f, --project-name) that only `create`s - never '
+                                      'starts - the emr-state launch shape over its own token-labelled volumes and '
+                                      'internal network, so the launch consumers can judge the real two-token '
+                                      'entrypoint; every other docker call is its own labelled container/volume',
 }
 Violation = namedtuple('Violation', 'rule file line detail')
 OPAQUE = object()

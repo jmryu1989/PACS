@@ -924,8 +924,15 @@ export function scanCheckpoint(file: string, options: ScanOptions = {}): ScanRes
     const state = { version: 3 as const, revision: top.revision, generation: top.generation, tail: top.tail, lineage: top.lineage, retired: top.retired,
       intents: top.intents, slots: top.slots, proofs: top.proofs };
     // The identity closure of the small maps against the (large) terminal map: the same rules as validateAttemptIdentities.
+    // A navigable region is searched in place; a compact or unsorted region (a whole-state JSON.stringify, as the
+    // initialization and older writers produce - sized to the memory that wrote it) is read once into memory.
     const terminalIndex = new RegionIndex(fd, regions.terminal);
-    const lookup = (id: string): any => { const raw = terminalIndex.find(id); return raw ? parseRaw(raw) : undefined; };
+    const terminalMemory = regions.terminal.navigable || !regions.terminal.count ? null : new Map<string, any>();
+    if (terminalMemory) forEachMember(fd, regions.terminal, (key, value) => { terminalMemory.set(key, value); });
+    const lookup = (id: string): any => {
+      if (terminalMemory) return terminalMemory.get(id);
+      const raw = terminalIndex.find(id); return raw ? parseRaw(raw) : undefined;
+    };
     if (!state.lineage) {
       if (state.tail || state.revision || state.generation || counts.terminal || counts.bundles ||
         Object.keys(state.intents).length || Object.keys(state.slots).length || Object.keys(state.proofs).length) fail('SealCorrupt');

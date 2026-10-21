@@ -607,8 +607,14 @@ class LegacyImageTests(unittest.TestCase):
         cls.tags = {cls.image_id: os.environ["KIN_TEST_API_IMAGE"], cls.legacy["Id"]: os.environ["KIN_TEST_LEGACY_B1_IMAGE"]}
         if pre:
             cls.tags[cls.pre_emr["Id"]] = pre
+        # The launch shape binds a named (Compose) network, never a host/none/container namespace: the disposable
+        # database joins a private labelled network under the alias `db` that docker-compose.yml's DATABASE_URL names.
+        network_token = uuid.uuid4().hex
+        cls.network = "kin-rehearsal-" + network_token[:16] + "-net"
+        cls.addClassCleanup(ops.run, ["docker", "network", "rm", cls.network], check=False)
+        ops.run(["docker", "network", "create", "--internal", "--label", "kin.ops.run=" + network_token, cls.network])
         cls.db = cls.container("db", [
-            "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
+            "--network", cls.network, "--network-alias", "db", "--tmpfs", "/var/lib/postgresql/data",
             "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
             "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
         deadline = time.monotonic() + 60
@@ -730,16 +736,15 @@ class LegacyImageTests(unittest.TestCase):
         project = "kinrehearsal" + token[:12]
         folder = Path(tempfile.mkdtemp(prefix="kin-legacy-shape-"))
         self.addCleanup(shutil.rmtree, folder, True)
-        self.addCleanup(ops.run, ["docker", "network", "rm", project + "_default"], check=False)
         self.addCleanup(ops.remove_owned_if_present, "container", name, token)
         service = {"image": self.tags.get(image_id, image_id), "container_name": name, "user": "1000:1000", "group_add": ["2001", "2002"],
                    "entrypoint": ["sh", "/app/start-production.sh"], "command": list(command), "restart": restart,
-                   "stop_grace_period": "20s", "network_mode": "container:" + self.db, "labels": {"kin.ops.run": token},
-                   "environment": {"DATABASE_URL": READER_URL, "KIN_EMR_STATE_DIR": ops.EMR_STATE, "KIN_EMR_INSTANCE_ID": self.INSTANCE,
+                   "stop_grace_period": "20s", "networks": [self.network], "labels": {"kin.ops.run": token},
+                   "environment": {"DATABASE_URL": "postgresql://kin_emr_reader@db:5432/kin", "KIN_EMR_STATE_DIR": ops.EMR_STATE, "KIN_EMR_INSTANCE_ID": self.INSTANCE,
                                    "KIN_EMR_API_SOCKET": API_IPC + "/writer.sock", "KIN_EMR_RETENTION_SOCKET": RETENTION_IPC + "/writer.sock"},
                    "volumes": [state_volume + ":" + ops.EMR_STATE, self.volumes["api-ipc"] + ":" + API_IPC,
                                self.volumes["retention-ipc"] + ":" + RETENTION_IPC]}
-        spec = {"services": {"emr-state": service},
+        spec = {"services": {"emr-state": service}, "networks": {self.network: {"external": True}},
                 "volumes": {state_volume: {"external": True}, self.volumes["api-ipc"]: {"external": True}, self.volumes["retention-ipc"]: {"external": True}}}
         (folder / "compose.yaml").write_text(json.dumps(spec), encoding="utf-8")
         ops.run(["docker", "compose", "--project-directory", str(folder), "--project-name", project, "-f", str(folder / "compose.yaml"),
@@ -757,7 +762,7 @@ class LegacyImageTests(unittest.TestCase):
         state_volume = next(m["Name"] for m in container["Mounts"] if m.get("Destination") == ops.EMR_STATE)
         preflight.check_state_service(container, release=release, image=reviewed, state_volume=state_volume,
                                       api_ipc_volume=self.volumes["api-ipc"], retention_ipc_volume=self.volumes["retention-ipc"],
-                                      instance_id=self.INSTANCE, database_host="127.0.0.1")
+                                      instance_id=self.INSTANCE, database_host="db")
         names = ops.text(["docker", "container", "ls", "--all", "--filter", "volume=" + state_volume, "--format", "{{.Names}}"]).splitlines()
         owners = [json.loads(ops.text(["docker", "inspect", item]))[0] for item in names if item]
         preflight.check_state_owners(owners, state_volume, name if existing else "")
