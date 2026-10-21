@@ -689,7 +689,7 @@ class LegacyImageTests(unittest.TestCase):
         ops.run(["docker", "run", "--rm", "--network", "none", "--user", "0:0",
                  "--mount", "type=volume,source=" + source + ",target=/source,readonly",
                  "--mount", "type=volume,source=" + target + ",target=/clone",
-                 "--entrypoint", "sh", self.image_id, "-c", "rm -rf /clone/* /clone/.[!.]* 2>/dev/null; cp -a /source/. /clone/ && chown -R 1000:1000 /clone"])
+                 "--entrypoint", "sh", self.image_id, "-c", "rm -rf /clone/* /clone/.[!.]* 2>/dev/null; cp -a /source/. /clone/ && chown -R 1000:1000 /clone && chmod 700 /clone"])
         return target
 
     def legacy_run(self, image, suffix, arguments, timeout=120):
@@ -829,7 +829,10 @@ class LegacyImageTests(unittest.TestCase):
         self.never_started(name)
         self.assertEqual(self.inventory(clone), before, "admission itself changes nothing")
         ops.run(["docker", "start", name])
-        ops.wait_state_service(name, 0, timeout=120)
+        try:
+            ops.wait_state_service(name, 0, timeout=120)
+        except RuntimeError as failure:
+            self.fail(str(failure) + "; service log tail: " + ops.service_logs(name)[-1500:])
         ops.run(["docker", "stop", "--time", "20", name], timeout=120)
         ops.state_service_closed(name)
         after = self.inventory(clone)
