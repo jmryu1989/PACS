@@ -26,7 +26,7 @@ import zipfile
 from playwright.sync_api import expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from invariants_live import LiveStack, ROOT, psql, s9u4_cleanup, s9u4_dicom, s9u4_uid  # noqa: E402
+from invariants_live import LiveStack, ROOT, past_audit_guard, psql, s9u4_cleanup, s9u4_dicom, s9u4_uid  # noqa: E402
 from document_session import document_request
 
 
@@ -639,14 +639,57 @@ class WorklistE2E(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         return rows[0]
 
-    def sign_in_again(self, page, actor):
+    def provider_session_of(self, page):
+        """The provider session (AuthSession.idpSid) this page's own BFF session was born in. The row is found by the page's
+        session reference (X-KIN-Session = base64url(sha256('kin-session-id:' + sid))[:32], computed in the database), so
+        no cookie value, code or token leaves the database or reaches a log."""
+        ref, sub = page.evaluate("[KinWorkContext.session(), KinAuth.session()?.sub]")
+        if not (isinstance(ref, str) and re.fullmatch(r"[A-Za-z0-9_-]{32}", ref)
+                and isinstance(sub, str) and re.fullmatch(r"[0-9a-f-]{36}", sub)):
+            raise RuntimeError("This page holds no bound member session")
+        try:
+            rows = psql("SELECT coalesce(\"idpSid\", '') FROM \"AuthSession\" WHERE sub='" + sub + "' AND left(translate(encode("
+                        "sha256(convert_to('kin-session-id:' || sid, 'UTF8')), 'base64'), '+/', '-_'), 32) = '" + ref + "';")
+        except RuntimeError:
+            # psql echoes a failing statement; the session reference never reaches a log.
+            raise RuntimeError("The page's own session row could not be read") from None
+        if len(rows) != 1 or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", rows[0]):
+            raise RuntimeError(f"The page's own session does not name exactly one provider session (rows: {len(rows)})")
+        return rows[0]
+
+    def provider_ended(self, provider):
+        """Bounded wait for the logged-out session's provider end: its IdpSessionEnd.confirmedAt and no end_session
+        ProviderChange to it still unknown. A missing row is not a confirmed end. This settles the transfer fixture on the
+        boundary a fresh login needs (OPUS-06); it does not change or claim to repair the auth product."""
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                mark = psql(f"SELECT (\"confirmedAt\" IS NOT NULL)::text FROM \"IdpSessionEnd\" WHERE \"idpSid\"='{provider}';")
+                unknown = psql(f"SELECT count(*) FROM \"ProviderChange\" WHERE kind='end_session' AND target='{provider}' AND state='unknown';")
+            except RuntimeError:
+                raise RuntimeError("The provider end rows could not be read") from None
+            if mark == ["true"] and unknown == ["0"]:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The logged-out session's provider end was not observed within 60 s (end mark: "
+                                   f"{mark[0] if mark else 'missing'}, unknown end_session changes: {unknown[0] if unknown else '?'}); "
+                                   "Login was not pressed")
+            time.sleep(0.2)
+
+    def sign_in_again(self, page, actor, before_login=None):
         """Log Out in this tab, then the real login form again: a new session in the same tab (its sessionStorage stays).
         After a Log Out the landing keeps its end notice and never signs in by itself (index.html boot: an end record
         stops the automatic login), so the person presses its Login button; Keycloak then shows its form - with the
-        username field, or, while its own SSO is still known, the attempted username and its restart-login link."""
+        username field, or, while its own SSO is still known, the attempted username and its restart-login link.
+        Login is pressed only after the old document has unloaded and the old session's exact provider session has
+        observably ended (OPUS-06); `before_login` runs at that point, before the new owner's page exists."""
+        provider = self.provider_session_of(page)
         page.once("dialog", lambda dialog: dialog.accept())
         page.locator("#logout").click()
         page.wait_for_url("**/index.html**", timeout=30000)
+        self.provider_ended(provider)
+        if before_login:
+            before_login()
         name = self.stack.username(actor)
         try:
             page.locator("#signin").click()
@@ -660,10 +703,31 @@ class WorklistE2E(unittest.TestCase):
             page.locator("#password").fill(self.stack.passwords[actor])
             page.locator("#kc-login").click()
         except Exception:
-            # Playwright's call log can include fill() values; never print credentials.
-            raise RuntimeError("Real BFF login form could not be submitted") from None
+            # Playwright's call log can include fill() values; never print credentials. The landing's own enum says why
+            # a callback failed (for example login_failed); it is no secret and it is never retried here.
+            cause = (parse_qs(urlsplit(page.url).query).get("auth_error") or [""])[0]
+            raise RuntimeError("Real BFF login form could not be submitted"
+                               + (f" (landing auth_error={cause})" if re.fullmatch(r"[a-z_]{1,40}", cause) else "")) from None
         page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
         expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+
+    def owner_ready(self, page, actor):
+        """The new owner's document is up: its own bound session answers /me as that subject (non-vacuous milestone)."""
+        me = document_request(page, "GET", self.stack.api + "/me")
+        self.assertEqual(me.status, 200, "the new owner's session answers")
+        self.assertEqual(me.json().get("sub"), self.stack.user_ids[actor], "the page is the new owner's")
+        expect(page.locator("#roles")).not_to_be_empty()
+        return me.json()
+
+    def set_email(self, user_id, email):
+        """An owned synthetic member's Keycloak email (the product's actor claim); the full representation is put back."""
+        found = self.stack.kc_admin("GET", f"/users/{user_id}")
+        if found.status != 200 or not isinstance(found.body, dict):
+            raise RuntimeError(f"Owned synthetic member could not be read ({found.status})")
+        changed = self.stack.kc_admin("PUT", f"/users/{user_id}", {**found.body, "email": email, "emailVerified": True})
+        if changed.status != 204:
+            raise RuntimeError(f"Owned synthetic member email could not be changed ({changed.status})")
+        return found.body.get("email")
 
     def native_download(self, page, fixture, operation):
         """One Download press on the real stack (D1489): one bound grant POST answered 200, then the browser's own GET of the
@@ -950,6 +1014,49 @@ class WorklistE2E(unittest.TestCase):
             self.assertEqual(seen.count(("POST", grant_path)), 1, "one old-operation grant across all reads and new preparation")
             self.assertEqual(self.download_row(old), "prepared|0")
             expect(old_box).to_have_count(1)
+
+            # LIVE-11 (r6): a grant the real service issued (committed) whose answer is delayed until the selection went
+            # A -> B -> A, or until the panel was closed. Neither late answer starts the browser download, the old operation
+            # had exactly one grant and a fresh operation still downloads.
+            other = self.fixture()
+            for ending in ("A-B-A", "Close"):
+                self.select(page, fixture)
+                late = self.download_operation(page, fixture, operations)
+                late_path = prepare_path + f"/{late}/archive/grant"
+                delayed = []
+
+                def hold_grant(route):
+                    response = route.fetch()
+                    self.assertEqual(response.status, 200, "real grant issued before its answer is delayed")
+                    delayed.append((route, response))
+
+                page.route("**" + late_path, hold_grant)
+                try:
+                    self.transfer_box(page, late).get_by_role("button", name="Download", exact=True).click()
+                    deadline = time.monotonic() + 30
+                    while not delayed and time.monotonic() < deadline:
+                        page.wait_for_timeout(100)
+                    self.assertEqual(len(delayed), 1, "the grant reached the real service")
+                    if ending == "A-B-A":
+                        self.select(page, other)
+                        self.select(page, fixture)
+                    else:
+                        page.locator("#study-transfer").get_by_role("button", name="Close", exact=True).click()
+                    route, response = delayed[0]
+                    route.fulfill(response=response)
+                    page.wait_for_timeout(1500)
+                finally:
+                    page.unroute("**" + late_path, hold_grant)
+                self.assertEqual(native_events, [True], f"{ending}: a late grant answer starts no browser download")
+                self.assertEqual(seen.count(("POST", late_path)), 1, f"{ending}: one grant of the old operation")
+                self.assertEqual(self.download_row(late), "prepared|0", f"{ending}: no archive attempt began")
+                self.assertEqual(self.transfer_box(page, late).get_by_role("button", name="Download", exact=True).count(), 0,
+                                 f"{ending}: the spent grant is never offered again")
+            self.select(page, fixture)
+            fresh = self.download_operation(page, fixture, operations)
+            downloaded, _ = self.native_download(page, fixture, fresh)
+            self.archive_supplied(downloaded.path(), fresh, 1)
+            self.assertEqual(native_events, [True, True], "a fresh operation still downloads once")
         finally:
             # The download rows of this case; the fixture's own cleanup removes its study, originals and audit rows.
             ids = [op for op in operations if re.fullmatch(r"[0-9a-f-]{36}", op)]
@@ -1096,6 +1203,45 @@ class WorklistE2E(unittest.TestCase):
                 expect(newest.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Not confirmed", timeout=60000)
                 self.assertEqual(status_steps, ["missing"], "lost answer begins with missing index")
                 self.assertEqual(document_request(page, "GET", self.stack.api + "/me").status, 200, "replaced answer preserves session before explicit re-login")
+                # LIVE-05/07 (r6): a real copy of this tab (window.open copies its sessionStorage) while the answer is lost.
+                # The copy restores the operation's row, reads it with GET only and, even when that read answers a stale
+                # retryable row, offers nothing to send. Only the copy's reads of this operation are answered stale.
+                stale_reads = []
+
+                def stale_retryable(route):
+                    if route.request.method != "GET":
+                        return route.fallback()
+                    stale_reads.append(route.request.method)
+                    row = {k: v for k, v in real_answers[0].items() if k != "operationId"}
+                    first_try = dict(row["attempts"][0], outcome="retryable", code="ORTHANC_UNAVAILABLE", transport="certain-no-write")
+                    row.update(outcome="retryable", code="ORTHANC_UNAVAILABLE", generation=1, attempts=[first_try], writeDisposition=None)
+                    route.fulfill(status=200, json={"operationId": posted[0], "status": "open", "files": [row]})
+
+                page.context.route("**/api/dicom-import/" + posted[0], stale_retryable)
+                try:
+                    with page.expect_popup() as opened:
+                        page.evaluate("url => window.open(url, '_blank')", self.stack.proxy + "/worklist/hpacs-lite/main.html")
+                    copied = opened.value
+                    copy_posts = []
+                    copied.on("request", lambda r: copy_posts.append(r.url) if r.method == "POST" and "/api/dicom-import" in r.url else None)
+                    expect(copied.locator("#dbstat")).to_contain_text("DB Connected", timeout=30000)
+                    copy_box = copied.locator(f'#study-transfer section[data-operation="{posted[0]}"]')
+                    expect(copy_box.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Not confirmed", timeout=30000)
+                    deadline = time.monotonic() + 30
+                    while not stale_reads and time.monotonic() < deadline:
+                        copied.wait_for_timeout(100)
+                    self.assertTrue(stale_reads, "the copy read the operation's status itself")
+                    copied.wait_for_timeout(500)
+                    self.assertEqual(copy_box.locator("li[data-index]").count(), 1, "the copy restored the operation's row")
+                    expect(copy_box.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Not confirmed")
+                    self.assertEqual((copy_box.get_by_role("button", name="Retry", exact=True).count(),
+                                      copy_box.get_by_role("button", name="Choose Files Again", exact=True).count()), (0, 0),
+                                     "a copied lost operation is read-only, a stale retryable status included")
+                    self.assertEqual(copy_posts, [], "the copy never dispatches")
+                    copied.close()
+                finally:
+                    page.context.unroute("**/api/dicom-import/" + posted[0], stale_retryable)
+                self.assertEqual(posted, [posted[0]], "one POST of the lost file across the copy")
                 self.sign_in_again(page, "tech")
                 expect(page.locator("#study-transfer section[data-operation]").first.locator('.study-transfer-state')).to_have_text("Not confirmed", timeout=30000)
                 newest = page.locator(f'#study-transfer section[data-operation="{posted[0]}"]')
@@ -1129,13 +1275,144 @@ class WorklistE2E(unittest.TestCase):
             self.assertEqual(len(originals.body), 3, "lost-answer recovery adds no extra original")
             self.assertEqual({hashlib.sha256(self.stack.orthanc_bytes("/instances/" + oid + "/file")).hexdigest() for oid in originals.body},
                              {hashlib.sha256(b).hexdigest() for b in (first, data, lost)}, "all originals unchanged after ordered recovery")
-            # Another person in the same tab cannot read or display the previous owner's history.
-            before = len(seen)
-            self.sign_in_again(page, "jmryu")
+            # LIVE-06 (r6): this tab's history cannot be read for a while. A new operation (its real answer replaced) stays
+            # in memory only and the page says so; the unread history is not replaced. Once storage reads again, the next
+            # status read merges both and a reload restores everything, with no extra POST.
+            page.add_init_script("""(() => { const get = Storage.prototype.getItem;
+              Storage.prototype.getItem = function (key, ...rest) {
+                if (this === sessionStorage && String(key).startsWith('kin-study-transfer-local')
+                    && get.call(localStorage, 'syn-transfer-read-fault')) throw new Error('SYN storage unavailable');
+                return get.call(this, key, ...rest); }; })();""")
+            kept_history = "() => JSON.stringify(Object.entries(sessionStorage).filter(([k]) => k.startsWith('kin-study-transfer-local')).sort())"
+            page.evaluate("localStorage.setItem('syn-transfer-read-fault', '1')")
+            history = page.evaluate(kept_history)
+            page.reload()
+            expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+            expect(page.locator("#study-transfer")).to_contain_text("보존하지 못했습니다", timeout=30000)
+            replaced_posts = []
+
+            def replaced_answer(route):
+                replaced_posts.append(route.request.headers.get("x-kin-operation-id"))
+                response = route.fetch()
+                self.assertEqual(response.status, 200, "real API answered before answer replacement")
+                route.fulfill(status=502, content_type="text/html", body="<html><body>502 Bad Gateway</body></html>")
+
+            status_down = [True]
+
+            def status_unavailable(route):
+                if route.request.method == "GET" and status_down[0]:
+                    return route.fulfill(status=503, json={"message": "SYN status unavailable"})
+                return route.continue_()
+
+            page.route("**/api/dicom-import", replaced_answer)
+            page.route("**/api/dicom-import/*", status_unavailable)
+            try:
+                page.locator("[data-tab=Technician]").click()
+                with page.expect_file_chooser() as chooser:
+                    page.locator("#t-import").click()
+                chooser.value.set_files(str(upload))
+                expect(page.locator('#study-transfer section[data-operation] li[data-index="0"] .study-transfer-state').first).to_have_text(
+                    "Not confirmed", timeout=60000)
+                [memory_only] = replaced_posts
+                operations.append(memory_only)
+                self.assertIn("보존하지 못했습니다", page.locator("#study-transfer").inner_text(), "memory-only work is disclosed")
+                self.assertEqual(page.evaluate(kept_history), history, "an unread history is never replaced")
+                # Storage and the status read work again in this document: the next read merges and keeps both.
+                page.evaluate("localStorage.removeItem('syn-transfer-read-fault')")
+                status_down[0] = False
+                memory_box = page.locator(f'#study-transfer section[data-operation="{memory_only}"]')
+                with page.expect_response(lambda r: r.request.method == "GET" and r.url.endswith("/api/dicom-import/" + memory_only)):
+                    memory_box.get_by_role("button", name="Check Again", exact=True).click()
+                expect(memory_box.locator(".study-transfer-state")).to_have_text("Already Present", timeout=30000)
+            finally:
+                page.unroute("**/api/dicom-import", replaced_answer)
+                page.unroute("**/api/dicom-import/*", status_unavailable)
+            page.reload()
+            expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+            for kept_op in (lost_retry, lost_op, memory_only):
+                expect(page.locator(f'#study-transfer section[data-operation="{kept_op}"]')).to_have_count(1, timeout=30000)
+            expect(page.locator("#study-transfer")).not_to_contain_text("보존하지 못했습니다")
+            self.assertEqual(replaced_posts, [memory_only], "recovery and restoration send nothing")
+            tech_ops = (lost_retry, operation, duplicate_id, lost_op, memory_only)
+
+            # OPUS-05/07 (r6): another person in the same tab. The window opens after the old document unloaded and before
+            # the new owner's page exists; the new owner's page is then observed ready before the observation.
+            window = {}
+            self.sign_in_again(page, "jmryu", before_login=lambda: window.setdefault("start", len(seen)))
+            self.owner_ready(page, "jmryu")
             page.wait_for_timeout(5000)
-            self.assertEqual([r for r in seen[before:] if operation in r[1]], [], "another person never queries the operation")
-            self.assertEqual(page.locator("#study-transfer section[data-operation]").count(), 0)
-            self.assertEqual(0, len([r for r in seen[before:] if lost_op in r[1]]), "different owner never queries stored history")
+            for old in (operation, lost_op):
+                self.assertEqual([r for r in seen[window["start"]:] if old in r[1]], [], "another person never queries an earlier owner's operation")
+            self.assertEqual(page.locator("#study-transfer section[data-operation]").count(), 0, "another person never sees it")
+            # The second person's own history is kept beside the first person's and survives a reload.
+            page.locator("[data-tab=Technician]").click()
+            with page.expect_file_chooser() as chooser:
+                page.locator("#t-import").click()
+            chooser.value.set_files(str(upload))
+            second_box = page.locator("#study-transfer section[data-operation]").first
+            expect(second_box.locator(".study-transfer-state")).to_have_text("Already Present", timeout=60000)
+            second_op = second_box.get_attribute("data-operation")
+            operations.append(second_op)
+            self.assertNotIn(second_op, tech_ops)
+            expect(page.locator("#study-transfer")).not_to_contain_text("보존하지 못했습니다")
+            start = len(seen)
+            page.reload()
+            expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+            expect(page.locator(f'#study-transfer section[data-operation="{second_op}"]')).to_have_count(1, timeout=30000)
+            page.wait_for_timeout(3000)
+            self.assertEqual(page.locator("#study-transfer section[data-operation]").count(), 1, "only the second person's own history")
+            self.assertEqual([r for r in seen[start:] if any(old in r[1] for old in tech_ops)], [], "never the first person's")
+            # The first person returns to the same tab: its history is still there, the second person's is not read.
+            window = {}
+            self.sign_in_again(page, "tech", before_login=lambda: window.setdefault("start", len(seen)))
+            self.owner_ready(page, "tech")
+            expect(page.locator(f'#study-transfer section[data-operation="{lost_op}"] .study-transfer-state')).to_have_text("Stored", timeout=30000)
+            for old in (lost_retry, memory_only):
+                expect(page.locator(f'#study-transfer section[data-operation="{old}"]')).to_have_count(1)
+            page.wait_for_timeout(3000)
+            self.assertEqual([r for r in seen[window["start"]:] if second_op in r[1]], [], "the first person never queries the second's")
+            self.assertEqual(page.locator(f'#study-transfer section[data-operation="{second_op}"]').count(), 0)
+
+            # LIVE-04 (r6): the owner is the exact subject. The same subject under a renamed actor keeps its history; another
+            # subject that now carries the first person's former actor sees none of it. Owned synthetic members only.
+            tech_id = self.stack.user_ids["tech"]
+            other_id = self.stack.create_test_identity("techb", ["technician"], "hallym")
+            original_email = renamed = other_email = None
+            try:
+                original_email = self.set_email(tech_id, self.stack.username("tech") + "-renamed@local.test")
+                renamed = self.stack.username("tech") + "-renamed@local.test"
+                self.sign_in_again(page, "tech")
+                self.assertEqual(self.owner_ready(page, "tech").get("user"), renamed, "the same subject now has another actor")
+                expect(page.locator(f'#study-transfer section[data-operation="{lost_op}"]')).to_have_count(1, timeout=30000)
+                other_email = self.set_email(other_id, original_email)
+                window = {}
+                self.sign_in_again(page, "techb", before_login=lambda: window.setdefault("start", len(seen)))
+                self.assertEqual(self.owner_ready(page, "techb").get("user"), original_email, "another subject reuses the former actor")
+                page.wait_for_timeout(5000)
+                self.assertEqual([r for r in seen[window["start"]:] if any(old in r[1] for old in tech_ops + (second_op,))], [],
+                                 "a reused actor never queries another subject's operations")
+                self.assertEqual(page.locator("#study-transfer section[data-operation]").count(), 0, "nor sees them")
+                self.assertEqual(len([path for method, path in seen if method == "POST" and path == "/api/dicom-import"]),
+                                 len([op for op in operations if op != held_op]), "one POST per explicit operation, none restored")
+            finally:
+                restore = []
+                if other_email:
+                    try:
+                        self.set_email(other_id, other_email)
+                    except Exception as error:
+                        restore.append(type(error).__name__)
+                if original_email:
+                    try:
+                        self.set_email(tech_id, original_email)
+                    except Exception as error:
+                        restore.append(type(error).__name__)
+                if renamed and re.fullmatch(r"kin-test-[0-9a-f]{12}-tech-renamed@local\.test", renamed):
+                    # Rows the renamed owned actor wrote (its logins and seeded templates): exactly that actor's.
+                    psql(past_audit_guard(f"DELETE FROM \"AuditLog\" WHERE actor='{renamed}';"))
+                    for table in ("ReadingTemplate", "UserFilter", "UserFilterCollection"):
+                        psql(f"DELETE FROM \"{table}\" WHERE owner='{renamed}';")
+                if restore:
+                    raise RuntimeError("Owned synthetic member emails could not be restored: " + ",".join(restore))
         finally:
             upload.unlink(missing_ok=True)
             lost_file.unlink(missing_ok=True)

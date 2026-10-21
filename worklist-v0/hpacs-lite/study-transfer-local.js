@@ -32,6 +32,8 @@ window.KinStudyTransferLocal = function (app) {
   // The page goes online (bootstrap) after the identity is known; operations kept for this tab are read only then.
   const ONLINE_WAIT_MS = 1000;
   const ONLINE_WAITS = 120;
+  // The first slot keeps the history of the owner it already holds (or takes the first owner of an empty one); every other
+  // owner keeps its own under its exact identity, so one person's kept history never stands in another's way (D1617).
   const STORE_KEY = 'kin-study-transfer-local';
   const STORE_OPERATIONS = 20;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -49,16 +51,12 @@ window.KinStudyTransferLocal = function (app) {
   const TEXT = Object.freeze({
     tooMany: n => `한 번에 100개 파일까지 반입할 수 있습니다. 고른 ${n}개 파일은 보내지 않았습니다. 나눠서 다시 고르세요.`,
     tooLarge: '한 파일은 24 MiB(25,165,824 bytes)까지 반입할 수 있습니다. 선택한 파일을 보내지 않았습니다.',
-    // 4.6: a write that may have happened is never described as not stored, after an admin recovery too.
-    mayHaveWritten: '저장된 원본과 충돌하여 완료를 확인할 수 없습니다.',
-    askAdmin: (id, index) => `저장 결과를 확인하지 못했습니다. 관리자에게 작업 번호 ${id.slice(0, 8)}·파일 번호 ${index}의 확인을 요청하세요.`,
     lost: '서버의 답을 받지 못했습니다. 이 작업의 상태를 다시 읽어 확인합니다.',
     // Neither a 404 of the status read (also the answer for an operation whose study this account cannot see now,
     // contract 3) nor a status without this file proves that the file did not arrive, so nothing is offered to send
     // again on them (U4C-03, U4C-03b). D1606 limits Not Sent + Retry to the live document
     // holding a genuine never-dispatched File; no server result restores that opportunity.
     pending: '이번 조회에서 이 파일의 저장 결과를 확인하지 못했습니다. Check Again으로 다시 확인하세요.',
-    unresolved: '서버가 이 작업의 결과를 보여 주지 않습니다. 저장됐을 수 있어 다시 보내지 않았습니다. 잠시 뒤 Check Again으로 다시 확인하고, 계속 같으면 관리자에게 작업 번호를 알려 주세요.',
     unread: '작업 상태를 읽지 못했습니다. Check Again으로 다시 확인하세요.',
     paused: '지금은 요청을 보낼 수 없어 이 파일을 보내지 않았습니다. Retry로 이어서 보낼 수 있습니다.',
     offline: '서버에 연결된 계정에서만 반입·원본 다운로드를 쓸 수 있습니다.',
@@ -79,7 +77,6 @@ window.KinStudyTransferLocal = function (app) {
     resolveInput: '작업 번호(UUID), 파일 번호(0~99), 확인 근거와 확인 시각을 적으세요.',
     resolving: '관리자 확인을 요청하는 중입니다…',
     // An answer this page cannot read as a typed result or refusal: what it did is not known (D1566), never called refused.
-    httpFailure: status => `서버의 답을 확인하지 못했습니다 (HTTP ${status}).`,
     unknownAnswer: '서버의 답을 확인하지 못했습니다(형식이 다르거나 중간에서 바뀐 답). 처리됐을 수 있어 다시 보내지 않았습니다. Check Again으로 상태를 확인하세요.',
     storeFailed: '이 탭의 작업 기록을 보존하지 못했습니다. 새로고침·재로그인 뒤 일부 이력이 보이지 않을 수 있습니다. 필요한 작업 번호를 Copy ID로 보관하세요.',
     prepareUnknown: '원본 준비 요청의 결과를 확인하지 못했습니다. 같은 작업의 상태를 다시 읽습니다.',
@@ -151,6 +148,7 @@ window.KinStudyTransferLocal = function (app) {
   function later(fn, ms) {
     const timer = setTimeout(() => { timers.delete(timer); fn(); }, ms);
     timers.add(timer);
+    return timer;
   }
   function inLane(task) {
     const run = lane.then(task, task);
@@ -237,11 +235,38 @@ window.KinStudyTransferLocal = function (app) {
   const isObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
   const hash = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
   const uid = v => typeof v === 'string' && v.length <= 64 && /^[0-9]+(?:\.[0-9]+)*$/.test(v);
-  const time = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v) && Number.isFinite(Date.parse(v));
+  // The server's own reading of a UTC text (dicom-import-gate.service.ts utcInstant): its calendar fields exist as written
+  // (Date.parse would roll 2026-02-30 over to March) and its year is 1970 or later. Null otherwise.
+  const UTC_TEXT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+  function utcInstant(v) {
+    const m = typeof v === 'string' ? UTC_TEXT.exec(v) : null;
+    if (!m) return null;
+    const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+    if (year < 1970 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+    const at = Date.UTC(year, month - 1, day, hour, minute, second, m[7] ? Number(m[7].padEnd(3, '0')) : 0);
+    const back = new Date(at);
+    return back.getUTCFullYear() === year && back.getUTCMonth() === month - 1 && back.getUTCDate() === day ? at : null;
+  }
+  // A time the server wrote itself (storedTime): exactly the canonical text of such an instant. An admin's recovery
+  // checkedAt is the instant the admin named, accepted by the server without or with 1-3 fractional digits.
+  const time = v => { const at = utcInstant(v); return at !== null && new Date(at).toISOString() === v; };
   const nullableTime = v => v === null || time(v);
   const count = (v, max) => Number.isSafeInteger(v) && v >= 0 && v <= max;
   const code = v => v === null || (typeof v === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(v));
   const complete = a => !!a && a.ok && a.status === 200 && !a.incomplete && !a.auth && isObject(a.body);
+  // The codes an attempt ends retryable with having written nothing (the server's ATTEMPT_RETRY_CODES).
+  const NO_WRITE_RETRY = new Set(['ORTHANC_UNAVAILABLE', 'IMPORT_PERMISSION_REVOKED', 'IMPORT_ATTEMPT_EXPIRED', 'SOP_WRITE_PENDING']);
+
+  /**
+   * The only attempts a positive result can follow (the server's retryEnded, U4BB2-03 table): finished retryable with a
+   * code of its own end and certain-no-write, or RECOVERED_NO_OBJECT after a resolved admin recovery with the transport
+   * its dispatch left (null or unknown). A final, rejected or still running predecessor is no history the server writes.
+   */
+  function retryEnded(a) {
+    if (a.phase !== 'finished' || a.outcome !== 'retryable') return false;
+    if (a.code === 'RECOVERED_NO_OBJECT') return a.transport !== 'certain-no-write' && a.recovery !== null && a.recovery.resolvedAt !== null;
+    return NO_WRITE_RETRY.has(a.code) && a.transport === 'certain-no-write';
+  }
 
   function importPositive(r, entry) {
     if (!isObject(r) || r.index !== entry.index || !POSITIVE.has(r.outcome) || r.code !== null || r.writeDisposition !== null
@@ -258,14 +283,20 @@ window.KinStudyTransferLocal = function (app) {
           || !Object.prototype.hasOwnProperty.call(OUTCOME_NAMES, a.outcome) || !code(a.code)
           || ![null, 'certain-no-write', 'unknown'].includes(a.transport) || !time(a.startedAt)
           || !nullableTime(a.finishedAt) || !nullableTime(a.autoRecheckedAt)
-          || (a.finishedAt !== null && Date.parse(a.finishedAt) < Date.parse(a.startedAt))) return null;
+          // A running attempt (prepared/dispatching) has no end time; every ended one has its own.
+          || ['prepared', 'dispatching'].includes(a.phase) !== (a.finishedAt === null)) return null;
       if (a.recovery !== null && (!isObject(a.recovery) || !BASES.some(b => b[0] === a.recovery.basis)
-          || !time(a.recovery.checkedAt) || !time(a.recovery.requestedAt) || !nullableTime(a.recovery.resolvedAt))) return null;
+          || utcInstant(a.recovery.checkedAt) === null || !time(a.recovery.requestedAt)
+          || !nullableTime(a.recovery.resolvedAt))) return null;
+      if (i < r.attempts.length - 1 && !retryEnded(a)) return null;
       ids.add(a.attemptId);
     }
     const last = r.attempts[r.attempts.length - 1];
+    // Stored rests on a POST or read-back (transport null) or a re-check (unknown); Already Present on the pre-write
+    // lookup (certain-no-write) or a POST (null).
+    const transports = r.outcome === 'stored' ? [null, 'unknown'] : ['certain-no-write', null];
     return last.generation === r.generation && last.phase === 'finished' && last.outcome === r.outcome
-      && last.code === null && time(last.finishedAt) ? r : null;
+      && last.code === null && time(last.finishedAt) && transports.includes(last.transport) ? r : null;
   }
 
   function importRows(answer, op) {
@@ -293,7 +324,6 @@ window.KinStudyTransferLocal = function (app) {
       if (!isObject(a) || typeof a.attemptId !== 'string' || !UUID.test(a.attemptId) || ids.has(a.attemptId)
           || a.number !== i + 1 || !['sending', 'sent', 'incomplete', 'unconfirmed'].includes(a.state)
           || !time(a.startedAt) || !nullableTime(a.endedAt) || (a.state === 'sending') !== (a.endedAt === null)
-          || (a.endedAt !== null && Date.parse(a.endedAt) < Date.parse(a.startedAt))
           || !count(a.objectsComplete, v.objects) || !count(a.bytesSupplied, v.bytes)
           || typeof a.responseFinished !== 'boolean' || ((a.state === 'sending' || a.state === 'sent') && !last)) return null;
       if (a.state === 'sent' ? !(hash(a.archiveSha256) && a.responseFinished && a.objectsComplete === v.objects && a.bytesSupplied === v.bytes)
@@ -360,15 +390,43 @@ window.KinStudyTransferLocal = function (app) {
       : { kind: 'download', id: op.id, uid: op.uid, manifestSha256: op.manifestSha256, preparedAt: op.preparedAt, objects: op.objects, bytes: op.bytes };
   }
 
-  function readHistory() {
-    const raw = sessionStorage.getItem(STORE_KEY);
-    if (raw === null) return [];
+  const sameOwner = value => JSON.stringify(value) === JSON.stringify(owner);
+  // The exact identity the panel was mounted with ([institution, sub]); a name or an actor never selects the slot.
+  const ownerKey = () => STORE_KEY + ':' + JSON.stringify(owner);
+
+  /** One slot's snapshot exactly in a kept format (v1-v3, a named owner, verified operations), or null when empty. */
+  function snapshot(key) {
+    const raw = sessionStorage.getItem(key);
+    if (raw === null) return null;
     const saved = JSON.parse(raw);
-    // A partial/unknown snapshot (including another owner's) is not an empty history we may replace.
-    if (!isObject(saved) || ![1, 2, 3].includes(saved.v) || JSON.stringify(saved.owner) !== JSON.stringify(owner)
-        || !Array.isArray(saved.operations)) throw new Error('Unverified history');
+    // A partial/unknown snapshot is not an empty history anybody may replace (D1617).
+    if (!isObject(saved) || ![1, 2, 3].includes(saved.v) || !Array.isArray(saved.owner) || saved.owner.length !== 2
+        || !(saved.owner[0] === null || (typeof saved.owner[0] === 'string' && saved.owner[0]))
+        || typeof saved.owner[1] !== 'string' || !saved.owner[1] || !Array.isArray(saved.operations)) throw new Error('Unverified history');
+    checkOperations(saved.operations);
+    return saved;
+  }
+
+  /**
+   * This owner's kept history and the slot it is written back to, read again before every write. A verified snapshot of
+   * another owner stays exactly as it is - never shown, read for status, merged, pruned or given any capability - and
+   * this owner keeps its own slot beside it. An unreadable or unverifiable slot is never taken for an empty history.
+   */
+  function readHistory() {
+    const first = snapshot(STORE_KEY), mine = ownerKey(), own = snapshot(mine);
+    if (own && !sameOwner(own.owner)) throw new Error('Unverified history');
+    if (first && sameOwner(first.owner)) {
+      // This page never writes both; if both exist neither is replaced (memory only, disclosed).
+      if (own) throw new Error('Two histories of one owner');
+      return { key: STORE_KEY, operations: ownHistory(first.operations) };
+    }
+    if (own) return { key: mine, operations: ownHistory(own.operations) };
+    return { key: first ? mine : STORE_KEY, operations: [] };
+  }
+
+  function checkOperations(operations) {
     const ids = new Set();
-    for (const kept of saved.operations) {
+    for (const kept of operations) {
       if (!isObject(kept) || typeof kept.id !== 'string' || !UUID.test(kept.id) || ids.has(kept.id)) throw new Error('Unverified operation');
       ids.add(kept.id);
       if (kept.kind === 'import') {
@@ -385,6 +443,12 @@ window.KinStudyTransferLocal = function (app) {
             || !(kept.preparedAt == null || time(kept.preparedAt)) || !(kept.objects == null || count(kept.objects, 65533))
             || !(kept.bytes == null || count(kept.bytes, 4294967294))) throw new Error('Unverified download history');
       } else throw new Error('Unknown history kind');
+    }
+  }
+
+  /** This owner's verified history agrees with what the page already holds of the same operations. */
+  function ownHistory(saved) {
+    for (const kept of saved) {
       const op = operations.find(o => o.id === kept.id) || clearedHistory.get(kept.id);
       if (!op) continue;
       if (op.kind !== kept.kind || (op.kind === 'download' ? op.uid !== kept.uid : op.expect !== (kept.expect ?? null)))
@@ -398,25 +462,28 @@ window.KinStudyTransferLocal = function (app) {
           && (op.manifestSha256 !== kept.manifestSha256 || op.preparedAt !== kept.preparedAt
             || op.objects !== kept.objects || op.bytes !== kept.bytes)) throw new Error('Conflicting manifest history');
     }
-    return saved.operations;
+    return saved;
   }
 
+  // Kept history is a record to observe; writing it succeeds or fails without giving any operation a send or a grant.
   function store() {
     if (!owner) return;
     let added = [];
     try {
-      // Read and merge in the same turn as the write. A failed restore never licenses replacing unseen history.
-      added = mergeHistory(readHistory());
+      // Read, merge and choose the slot in the same turn as the write. A failed restore never licenses replacing unseen
+      // history, and the slot is the one this owner's own history is in now, never one assumed earlier.
+      const history = readHistory();
+      added = mergeHistory(history.operations);
       let confirmed = 0;
       const kept = operations.filter(op => !finished(op) || confirmed++ < STORE_OPERATIONS).map(descriptor);
-      sessionStorage.setItem(STORE_KEY, JSON.stringify({ v: 3, observationOnly: true, owner, operations: kept }));
+      sessionStorage.setItem(history.key, JSON.stringify({ v: 3, observationOnly: true, owner, operations: kept }));
       persistenceFailed = false;
     } catch (_) { persistenceFailed = true; }
     observeHistory(added);
   }
   function restore() {
     let added = [];
-    try { added = mergeHistory(readHistory()); }
+    try { added = mergeHistory(readHistory().operations); }
     catch (_) { persistenceFailed = true; openPanel(); render(); return; }
     if (!operations.length) return;
     openPanel();
@@ -573,12 +640,21 @@ window.KinStudyTransferLocal = function (app) {
     render();
     const headers = { 'Content-Type': 'application/dicom', 'X-KIN-Operation-Id': op.id, 'X-KIN-File-Index': String(entry.index) };
     if (op.expect) headers['X-KIN-Expect-Study'] = op.expect;
-    let answer = null, failure = null, invoked = false;
+    let answer = null, failure = null;
     try {
       const digest = await crypto.subtle.digest('SHA-256', await entry.file.arrayBuffer());
       entry.sha256 = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
-      if (!live(op) || !usable() || !work.admits(at)) { lostAnswer(op, entry); return 'stop'; }
-      invoked = true;
+    } catch (error) { failure = error; }
+    if (failure || !live(op) || !usable() || !work.admits(at)) {
+      // Transport was never invoked: nothing of this file left the page. While this document and its owner are still
+      // current, the resident File keeps its single first send (Retry); a logout, an account change or the page's end
+      // has already removed the operation, so nothing comes back after them (R5-I1).
+      op.inFlight = false;
+      if (live(op) && op.gen === gen && entry.file && sameOwner(app.identity())) { unsent.add(entry); localUnsent(entry); }
+      render();
+      return 'stop';
+    }
+    try {
       answer = await app.transport.request(app.api + '/dicom-import', { method: 'POST', body: entry.file, headers, context: at,
         deadlineMs: IMPORT_DEADLINE_MS });
     } catch (error) { failure = error; }
@@ -586,7 +662,7 @@ window.KinStudyTransferLocal = function (app) {
     const applied = work.commit(at, () => {
       if (!live(op) || op.gen !== gen) return;
       op.inFlight = false;
-      if (failure && (!invoked || failure.sent === false)) {
+      if (failure && failure.sent === false) {
         unsent.add(entry);
         localUnsent(entry);
       } else {
@@ -660,7 +736,7 @@ window.KinStudyTransferLocal = function (app) {
   // ── Download Originals (5.2, 5.3, 6) ──
   function downloadOperation(id, uid) {
     return { kind: 'download', id, uid, state: null, objects: 0, bytes: 0, done: 0, notice: '', gen: generation, readSeq: 0,
-      inFlight: false, lost: false, polling: false, polls: 0, grantId: null, manifestSha256: null, preparedAt: null, label: studyLabel(uid) };
+      inFlight: false, lost: false, polling: false, pollTimer: null, polls: 0, grantId: null, manifestSha256: null, preparedAt: null, label: studyLabel(uid) };
   }
 
   /** The row's Download Originals: a new operation is prepared for that study's fixed manifest (5.2 steps 1-2). */
@@ -677,11 +753,11 @@ window.KinStudyTransferLocal = function (app) {
     op.inFlight = true;
     op.notice = TEXT.preparing;
     render();
-    let answer = null, failed = false;
+    let answer = null;
     try {
       answer = await app.transport.request(app.api + '/studies/' + encodeURIComponent(uid) + '/original-downloads',
         { method: 'POST', json: { operationId: op.id }, context: at });
-    } catch (_) { failed = true; }
+    } catch (_) {}
     const applied = work.commit(at, () => {
       if (!live(op) || op.gen !== gen) return;
       op.inFlight = false;
@@ -718,10 +794,10 @@ window.KinStudyTransferLocal = function (app) {
     op.inFlight = true;
     op.notice = TEXT.granting;
     render();
-    let answer = null, failed = false;
+    let answer = null;
     try {
       answer = await app.transport.request(base + '/grant', { method: 'POST', json: {}, context: at });
-    } catch (_) { failed = true; }
+    } catch (_) {}
     const decision = grantPositive(answer, op);
     let grant = decision ? decision.grant : null;
     if (answer?.body && typeof answer.body === 'object') delete answer.body.grant;
@@ -771,37 +847,48 @@ window.KinStudyTransferLocal = function (app) {
     if (!applied) { pendingClicks.delete(op); lostAnswer(op, null); }
   }
 
+  // An operation has at most one pending automatic read. Whichever read is accepted as current owns it: it ends the
+  // chain on a terminal state or leaves exactly one successor, so a manual Check Again never orphans or doubles it.
   function poll(op) {
-    if (op.polling) return;
+    if (op.pollTimer) { clearTimeout(op.pollTimer); timers.delete(op.pollTimer); }
     op.polling = true;
+    op.pollTimer = later(() => { op.pollTimer = null; readDownload(op, true); }, DOWNLOAD_POLL_MS);
     render();
-    later(() => readDownload(op, true), DOWNLOAD_POLL_MS);
+  }
+  function stopPolling(op) {
+    if (op.pollTimer) { clearTimeout(op.pollTimer); timers.delete(op.pollTimer); }
+    op.pollTimer = null;
+    op.polling = false;
   }
 
   /** GET .../original-downloads/:operationId: the state the server recorded. Sent is not a saved file (5.3). */
   async function readDownload(op, polled = false, keepNotice = false) {
     if (!live(op)) return;
-    if (!usable()) { op.polling = false; op.lost = true; return; }
+    if (!usable()) { stopPolling(op); op.lost = true; return; }
     const gen = op.gen, seq = ++op.readSeq, at = work.capture('document');
-    let answer = null, failed = false;
+    let answer = null;
     try {
       answer = await app.transport.request(app.api + '/studies/' + encodeURIComponent(op.uid) + '/original-downloads/'
         + encodeURIComponent(op.id), { context: at });
-    } catch (_) { failed = true; }
+    } catch (_) {}
     const applied = work.commit(at, () => {
+      // A read overtaken by a newer one changes nothing: neither the state, the notice nor the newer read's polling.
       if (!live(op) || op.gen !== gen || op.readSeq !== seq) return;
       const view = downloadPositive(answer, op);
       if (view) adoptDownload(op, view);
       op.notice = view ? (keepNotice ? op.notice : '') : TEXT.unread;
-      if (polled && op.polling) {
-        op.polls++;
-        if (op.state !== 'sent' && op.polls < DOWNLOAD_START_POLLS) later(() => readDownload(op, true), DOWNLOAD_POLL_MS);
-        else { op.polling = false; if (op.state !== 'sent') op.notice = TEXT.notStarted; }
-      } else if (op.state === 'sending' && !op.polling) { op.polls = 0; poll(op); }
+      if (polled) op.polls++;
+      if (op.polling || polled) {
+        // Sent, Incomplete and Unconfirmed are the server's last word on this attempt; Ready, Downloading or an unreadable
+        // answer keep one bounded successor read.
+        if (['sent', 'incomplete', 'unconfirmed'].includes(op.state)) stopPolling(op);
+        else if (op.polls < DOWNLOAD_START_POLLS) poll(op);
+        else { stopPolling(op); op.notice = TEXT.notStarted; }
+      } else if (op.state === 'sending') { op.polls = 0; poll(op); }
       store();
       render();
     });
-    if (!applied) { op.polling = false; lostAnswer(op, null); }
+    if (!applied) { if (op.readSeq === seq) stopPolling(op); lostAnswer(op, null); }
   }
 
   // ── Resolve Unconfirmed (own-institution admin only, 4.4) ──

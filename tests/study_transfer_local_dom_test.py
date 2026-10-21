@@ -109,6 +109,83 @@ def download_view(op, uid, state="prepared", objects=3, size=3 * 1048576, comple
             "note": SENT if state == "sent" else None, "attempts": attempts, "archiveRequest": None}
 
 
+# r6 (D1668, OPUS-01): the server's finite positive history (dicom-import-gate.service.ts retryEnded/resultBound). A
+# positive may follow only finished retryable attempts that wrote nothing: a code of their own end with certain-no-write,
+# or RECOVERED_NO_OBJECT after a resolved admin recovery (transport null/unknown as its dispatch left it).
+RESOLVED_RECOVERY = {"basis": "orthanc-log-checked", "checkedAt": "2026-10-17T00:00:30.000Z",
+                     "requestedAt": "2026-10-17T00:00:40.000Z", "resolvedAt": "2026-10-17T00:00:50.000Z"}
+
+
+def with_prior(result, outcome="retryable", code="ORTHANC_UNAVAILABLE", transport="certain-no-write", phase="finished",
+               recovery=None, finished=True):
+    """`result` with one earlier attempt before its own; the generations stay consecutive."""
+    prior = dict(result["attempts"][0], attemptId=str(uuid.uuid4()), generation=1, outcome=outcome, code=code,
+                 transport=transport, phase=phase, recovery=recovery, autoRecheckedAt=None)
+    if not finished:
+        prior["finishedAt"] = None
+    for attempt in result["attempts"]:
+        attempt["generation"] += 1
+    result["generation"] += 1
+    result["attempts"].insert(0, prior)
+    return result
+
+
+def last_attempt(**fields):
+    def change(result):
+        result["outcome"] = fields.get("outcome", result["outcome"])
+        result["attempts"][-1].update(fields)
+        return result
+    return change
+
+
+# Each is a 200 positive the server never writes (S9U4-B55 answers such a stored row 503).
+CONTRADICTORY_POSITIVES = [
+    ("stored resting on certain-no-write", last_attempt(transport="certain-no-write")),
+    ("already-present resting on an unknown transport", last_attempt(outcome="already-present", transport="unknown")),
+    ("a stored attempt before the last", lambda r: with_prior(r, "stored", None, None)),
+    ("a still dispatching attempt before the last",
+     lambda r: with_prior(r, "unconfirmed", "IMPORT_UNCONFIRMED", None, phase="dispatching", finished=False)),
+    ("a rejected attempt before the last", lambda r: with_prior(r, "rejected", "SOP_CONTENT_CONFLICT")),
+    ("a retryable attempt before the last without its end time", lambda r: with_prior(r, finished=False)),
+    ("an unresolved admin recovery before the last",
+     lambda r: with_prior(r, code="RECOVERED_NO_OBJECT", transport="unknown", recovery={**RESOLVED_RECOVERY, "resolvedAt": None})),
+    ("a retryable attempt that may have written before the last", lambda r: with_prior(r, transport="unknown")),
+    ("a before-attempt code ending an attempt", lambda r: with_prior(r, code="STUDY_WRITE_PENDING")),
+]
+# Genuine retry histories followed by each positive (both predecessor families).
+LEGITIMATE_POSITIVES = [("stored after " + c, lambda r, c=c: with_prior(r, code=c))
+                        for c in ("ORTHANC_UNAVAILABLE", "IMPORT_PERMISSION_REVOKED", "IMPORT_ATTEMPT_EXPIRED", "SOP_WRITE_PENDING")]
+LEGITIMATE_POSITIVES += [
+    ("stored after a resolved no-object recovery",
+     lambda r: with_prior(r, code="RECOVERED_NO_OBJECT", transport="unknown", recovery=dict(RESOLVED_RECOVERY))),
+    ("stored by a re-check after a no-write retry",
+     lambda r: with_prior(last_attempt(transport="unknown")(r))),
+    ("already-present after a no-write retry",
+     lambda r: with_prior(last_attempt(outcome="already-present", transport="certain-no-write")(r))),
+    ("already-present after a resolved no-object recovery",
+     lambda r: with_prior(last_attempt(outcome="already-present")(r), code="RECOVERED_NO_OBJECT", transport=None,
+                          recovery=dict(RESOLVED_RECOVERY))),
+]
+# The page side of the public module host: the shipped scripts with only the HTTP of fetch synthetic (no product hook).
+HOST_HTML = '<button id="t-import">Import DICOM</button><div id="study-transfer"></div>'
+HOST_MOUNT = """([owner, status]) => {
+  const gate = KinWorkContext.create(); gate.follow({ onLifecycle(fn) { fn({ state: 'active', session: 'SYN-SESSION' }); } });
+  window.KinWorkContext = gate; window.synOwner = owner; window.synCalls = []; window.synStatus = status;
+  const json = (code, body) => new Response(JSON.stringify(body), { status: code, headers: { 'Content-Type': 'application/json' } });
+  const transport = KinSessionTransport.create({ gate, authFailure: () => {}, fetch: async (url, init) => {
+    const method = init.method || 'GET', headers = new Headers(init.headers);
+    const op = method === 'POST' ? headers.get('X-KIN-Operation-Id') : decodeURIComponent(String(url).split('/').pop());
+    synCalls.push([method, op]);
+    // The upload reached the server and its answer was lost on the way back.
+    if (method === 'POST') throw new TypeError('SYN connection reset after dispatch');
+    const row = synStatus[op];
+    return row ? json(200, { operationId: op, status: 'settled', files: [row] }) : json(404, { statusCode: 404, message: 'SYN not found' });
+  } });
+  window.synTransfer = KinStudyTransferLocal({ api: '/api', transport, allowed: () => true, identity: () => synOwner,
+    can: role => role !== 'admin', demo: () => false, study: () => null });
+}"""
+
+
 D1606_SUPERSESSION = {'test_c02_a_retryable_file_goes_again_with_the_same_operation_index_and_bytes_and_a_final_one_never': 'R5-A01 '
                                                                                                        'mixed '
                                                                                                        'queue + '
@@ -826,14 +903,10 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.choose(self.files(2))
         self.observed(lambda:self.site.held_imports)
         op=self.site.imports[0]["operation"]
-        # Ordinary window.open copies the unmodified sessionStorage before the queued sibling dispatches.
-        with self.page.expect_popup() as opened:
-            self.page.evaluate("url => window.open(url, '_blank')",h.MAIN_URL)
-        other=opened.value
+        # Ordinary window.open copies the unmodified sessionStorage before the queued sibling dispatches. r6 (OPUS-03): the
+        # copy is observed after it restored this operation's two rows and read its status itself, before any absence.
+        other, box = self.copied_tab(op, 2)
         try:
-            expect(other.locator("#rows")).to_contain_text(h.PATIENT)
-            other.locator("[data-tab=Technician]").click(); self.settle(300)
-            box=other.locator('#study-transfer section[data-operation]').first
             self.assertEqual(0,box.get_by_role("button",name="Retry",exact=True).count(),"R5-A04: copied unsent descriptor has no capability")
             self.assertEqual(0,box.get_by_role("button",name="Choose Files Again",exact=True).count(),"R5-A04: copied operation cannot reattach")
             self.site.release_import(lambda r:file_result(op,0,"retryable","ORTHANC_UNAVAILABLE"))
@@ -1313,7 +1386,9 @@ class TransferPanelPage(rf.ReportFlowPage):
         route,record=self.site.held_imports.pop(0); op=record['operation']
         self.site.answer(route,200,file_result(op,0,uid=UID_B)); self.settle(250)
         self.assert_policy(row='R5-A07-study')
-        prior=file_result(op,0,'retryable','ORTHANC_UNAVAILABLE')['attempts'][0]
+        # r6 (OPUS-01): the server ends an ORTHANC_UNAVAILABLE attempt with certain-no-write (S9U4-B12, B87); the earlier
+        # fixture's null transport was a history the server never writes.
+        prior=file_result(op,0,'retryable','ORTHANC_UNAVAILABLE')['attempts'][0]; prior['transport']='certain-no-write'
         positive=file_result(op,0,generation=2); positive['attempts'].insert(0,prior)
         self.site.import_state[op]={0:positive}
         self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
@@ -1455,6 +1530,586 @@ class TransferPanelPage(rf.ReportFlowPage):
         good['operationId']=op; self.site.download_state[op]=good
         self.operations().first.get_by_role('button',name='Check Again',exact=True).click(); self.settle(250)
         self.assertEqual('Sent',self.operations().first.locator('.study-transfer-state').inner_text(),'R5-A12-view: complete matching supply accepted')
+
+    # ── r6 (D1668): the consolidated order's acceptance. Preconditions carry no assertion ID; a wait that does not see its
+    # milestone fails with "not observed" and is never a kill. ──
+    def saved_ids(self):
+        """Every operation id in every kept slot of this tab, whichever slot holds it."""
+        return self.page.evaluate("""() => Object.keys(sessionStorage).filter(k => k.startsWith('kin-study-transfer-local'))
+          .flatMap(k => { try { return JSON.parse(sessionStorage.getItem(k)).operations.map(o => o.id); } catch (_) { return []; } })""")
+
+    def slots(self):
+        return self.page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage))")
+
+    def shown(self, page=None):
+        return (page or self.page).locator('#study-transfer section[data-operation]').evaluate_all('n => n.map(x => x.dataset.operation)')
+
+    def held_positive(self, mutate):
+        """One upload answered 200 with mutate(a complete positive of it); the answer is settled before anything is read."""
+        self.site.import_answers = ['hold']
+        self.choose(self.files(1))
+        self.observed(lambda: self.site.held_imports, 'upload received')
+        route, record = self.site.held_imports.pop(0)
+        op = record['operation']
+        self.site.answer(route, 200, mutate(file_result(op, 0)))
+        self.observed(lambda: self.state_of(0) not in ('Waiting', 'Sending'), 'import answer settled')
+        return op
+
+    def test_r6_a01_contradictory_positive_post_stays_unconfirmed_kept_and_a_later_positive_works(self):
+        self.open_as(TECH, 'Technician')
+        for label, mutate in CONTRADICTORY_POSITIVES:
+            with self.subTest(post=label):
+                before = len(self.site.imports)
+                op = self.held_positive(mutate)
+                self.assertEqual('Not confirmed', self.state_of(0), 'R6-A01-post: contradictory positive is not confirmed')
+                self.assert_policy(row='R6-A01-post')
+                clear = self.panel().get_by_role('button', name='Clear Finished', exact=True)
+                if clear.is_enabled():
+                    clear.click()
+                    self.settle(150)
+                self.assertEqual(1, self.panel().locator(f'section[data-operation="{op}"]').count(),
+                                 'R6-A01-post: contradictory positive survives Clear Finished')
+                self.assertIn(op, self.saved_ids(), 'R6-A01-post: contradictory positive stays in kept history')
+                self.assertEqual(before + 1, len(self.site.imports), 'R6-A01-post: no extra old-key POST')
+        # The last contradicted operation is still confirmed by a later complete positive, with a GET only.
+        self.site.import_state[op] = {0: file_result(op, 0)}
+        self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+        self.observed(lambda: self.state_of(0) == 'Stored', 'later complete positive read')
+        self.assertEqual(len(CONTRADICTORY_POSITIVES), len(self.site.imports), 'R6-A01-post: later positive is GET only')
+        for label, mutate in LEGITIMATE_POSITIVES:
+            with self.subTest(control=label):
+                self.held_positive(mutate)
+                expected = 'Already Present' if label.startswith('already') else 'Stored'
+                self.assertEqual(expected, self.state_of(0), 'R6-A01-control: a genuine retry history is accepted')
+
+    def test_r6_a01_status_transition_table_is_enforced_by_the_get(self):
+        self.open_as(TECH, 'Technician')
+        for label, mutate in CONTRADICTORY_POSITIVES:
+            with self.subTest(get=label):
+                self.site.import_answers = ['abort']
+                self.choose(self.files(1))
+                self.observed(lambda: self.site.imports and self.site.import_reads
+                              and self.site.import_reads[-1] == self.site.imports[-1]['operation'], 'lost answer read')
+                op = self.site.imports[-1]['operation']
+                row = mutate(file_result(op, 0))
+                row.pop('operationId')
+                self.site.status_answers = [(200, {'operationId': op, 'status': 'settled', 'files': [row]})]
+                reads = len(self.site.import_reads)
+                self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+                self.observed(lambda: len(self.site.import_reads) > reads, 'contradictory status delivered')
+                self.assertEqual('Not confirmed', self.state_of(0), 'R6-A01-get: contradictory status is not confirmed')
+                clear = self.panel().get_by_role('button', name='Clear Finished', exact=True)
+                if clear.is_enabled():
+                    clear.click()
+                    self.settle(150)
+                self.assertEqual(1, self.panel().locator(f'section[data-operation="{op}"]').count(),
+                                 'R6-A01-get: contradictory status survives Clear Finished')
+        # The last contradicted operation is still confirmed by a later complete positive (the POST case does it for each).
+        self.site.import_state[op] = {0: file_result(op, 0)}
+        self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+        self.observed(lambda: self.state_of(0) == 'Stored', 'later complete positive read')
+        self.assertEqual(len(CONTRADICTORY_POSITIVES), len(self.site.imports), 'R6-A01-get: status reads never dispatch')
+        for label, mutate in (LEGITIMATE_POSITIVES[0], LEGITIMATE_POSITIVES[4], LEGITIMATE_POSITIVES[-1]):
+            with self.subTest(control=label):
+                self.site.import_answers = ['abort']
+                self.choose(self.files(1))
+                self.observed(lambda: self.site.import_reads and self.site.import_reads[-1] == self.site.imports[-1]['operation'],
+                              'lost answer read')
+                op = self.site.imports[-1]['operation']
+                self.site.import_state[op] = {0: mutate(file_result(op, 0))}
+                self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+                self.observed(lambda: self.state_of(0) != 'Not confirmed', 'genuine history read')
+                expected = 'Already Present' if label.startswith('already') else 'Stored'
+                self.assertEqual(expected, self.state_of(0), 'R6-A01-control: a genuine retry history is accepted by the GET')
+
+    def test_r6_a02_real_calendar_instants_and_the_recovery_time_forms(self):
+        self.open_as(TECH, 'Technician')
+        recovered = lambda checked: (lambda r: with_prior(r, code='RECOVERED_NO_OBJECT', transport='unknown',
+                                                          recovery={**RESOLVED_RECOVERY, 'checkedAt': checked}))
+        def stamp(field, value):
+            def change(r):
+                if field == 'at':
+                    r['at'] = value
+                else:
+                    r['attempts'][-1][field] = value
+                return r
+            return change
+        refused = [('a February 30 result time', stamp('at', '2026-02-30T00:00:00.000Z')),
+                   ('a thirteenth month start', stamp('startedAt', '2026-13-01T00:00:00.000Z')),
+                   ('an end on April 31', stamp('finishedAt', '2026-04-31T00:01:00.000Z')),
+                   ('a server time before 1970', stamp('at', '1969-12-31T23:59:59.000Z')),
+                   ('a server time without its milliseconds', stamp('at', '2026-10-17T00:00:00Z')),
+                   ('a February 29 outside a leap year', stamp('finishedAt', '2026-02-29T00:01:00.000Z')),
+                   ('a recovery checked on February 30', recovered('2026-02-30T00:00:30Z'))]
+        accepted = [('a leap-day result', lambda r: stamp('finishedAt', '2028-02-29T00:01:00.000Z')(
+                        stamp('startedAt', '2028-02-29T00:00:00.000Z')(stamp('at', '2028-02-29T00:00:00.000Z')(r)))),
+                    ('a recovery checked without fractional seconds', recovered('2026-10-17T00:00:30Z')),
+                    ('a recovery checked with one fractional digit', recovered('2026-10-17T00:00:30.5Z')),
+                    ('a recovery checked with milliseconds', recovered('2026-10-17T00:00:30.000Z'))]
+        for label, mutate in refused:
+            with self.subTest(refused=label):
+                self.held_positive(mutate)
+                self.assertEqual('Not confirmed', self.state_of(0), 'R6-A02-time: an instant the server never writes is not confirmed')
+        for label, mutate in accepted:
+            with self.subTest(accepted=label):
+                self.held_positive(mutate)
+                self.assertEqual('Stored', self.state_of(0), 'R6-A02-time: a real instant in its server form is accepted')
+
+    def test_r6_a02_invalid_calendar_grant_preparation_and_supply_times(self):
+        self.open_as(RAD_ONLY)
+        for expires, native in (('2026-02-30T00:00:00.000Z', 0), ('2028-02-29T00:02:00.000Z', 1)):
+            with self.subTest(expires=expires):
+                op = self.prepare()
+                before = len(self.downloads)
+                self.site.grant_answers = [(200, {'operationId': op, 'grantId': str(uuid.uuid4()),
+                                                  'grant': secrets.token_urlsafe(32), 'expiresAt': expires})]
+                grants = len(self.site.grants)
+                if native:
+                    with self.page.expect_download():
+                        self.operations().first.get_by_role('button', name='Download', exact=True).click()
+                else:
+                    self.operations().first.get_by_role('button', name='Download', exact=True).click()
+                self.observed(lambda: len(self.site.grants) > grants, 'grant answered')
+                self.assertEqual(native, len(self.downloads) - before, 'R6-A02-grant: only a real expiry instant starts the native download')
+        pattern = '**/api/studies/' + UID_A + '/original-downloads'
+        self.page.route(pattern, lambda route: route.fulfill(status=200, json={
+            **download_view(route.request.post_data_json['operationId'], UID_A), 'preparedAt': '2026-02-30T00:00:00.000Z'}))
+        try:
+            count = self.operations().count()
+            self.row_menu(h.PATIENT)
+            self.menu_item('Download Originals').click()
+            self.observed(lambda: self.operations().count() > count and self.operations().first.get_by_role(
+                'button', name='Check Again', exact=True).count() == 1, 'preparation answered')
+        finally:
+            self.page.unroute(pattern)
+        self.assertNotEqual('Ready', self.operations().first.locator('.study-transfer-state').inner_text(),
+                            'R6-A02-prepare: an impossible preparation time is not Ready')
+        self.assertEqual(0, self.operations().first.get_by_role('button', name='Download', exact=True).count(),
+                         'R6-A02-prepare: an impossible preparation time grants nothing')
+        op = self.prepare()
+        view = download_view(op, UID_A, 'sent', complete=3)
+        view['attempts'][0]['endedAt'] = '2026-04-31T00:01:00.000Z'
+        self.site.download_state[op] = view
+        with self.page.expect_download():
+            self.operations().first.get_by_role('button', name='Download', exact=True).click()
+        self.page.clock.run_for(3100)
+        self.observed(lambda: op in self.site.download_reads, 'supply status read')
+        self.assertNotEqual('Sent', self.operations().first.locator('.study-transfer-state').inner_text(),
+                            'R6-A02-supply: an impossible end time is not Sent')
+        view['attempts'][0]['endedAt'] = '2028-02-29T00:01:00.000Z'
+        self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+        expect(self.operations().first.locator('.study-transfer-state')).to_have_text('Sent')
+
+    def poll_race(self, manual, stale, poll_first=False):
+        """Download once, hold the first automatic status read, overtake it with Check Again and answer both."""
+        op = self.prepare()
+        held = []
+        pattern = '**/api/studies/' + UID_A + '/original-downloads/' + op
+        self.page.route(pattern, lambda route: held.append(route))
+        try:
+            with self.page.expect_download():
+                self.operations().first.get_by_role('button', name='Download', exact=True).click()
+            self.page.clock.run_for(3100)
+            self.observed(lambda: len(held) == 1, 'automatic read held')
+            self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+            self.observed(lambda: len(held) == 2, 'manual read held')
+            answers = [(held[1], manual), (held[0], stale)]
+            for route, answer in (answers[::-1] if poll_first else answers):
+                if answer is None:
+                    route.fulfill(status=503, json={'message': 'SYN status unavailable'})
+                else:
+                    route.fulfill(status=200, json=download_view(op, UID_A, answer, complete=3 if answer == 'sent' else 1))
+                self.settle(250)
+        finally:
+            self.page.unroute(pattern)
+        return op
+
+    def automatic_reads(self, op, ticks=5):
+        """Automatic status reads of `op` over `ticks` poll intervals (each longer than one interval)."""
+        before = self.site.download_reads.count(op)
+        for _ in range(ticks):
+            self.page.clock.run_for(3100)
+            self.settle(40)
+        return self.site.download_reads.count(op) - before
+
+    def test_r6_a03_a_terminal_read_overtaking_a_poll_ends_polling(self):
+        self.open_as(RAD_ONLY)
+        for poll_first in (False, True):
+            with self.subTest(order='poll answered first' if poll_first else 'manual answered first'):
+                op = self.poll_race('sent', None, poll_first)
+                box = self.panel().locator(f'section[data-operation="{op}"]')
+                self.assertEqual('Sent', box.locator('.study-transfer-state').inner_text(), 'R6-A03-terminal: the current read is shown')
+                self.assertNotIn('작업 상태를 읽지 못했습니다', box.inner_text(), 'R6-A03-stale: an overtaken poll changes nothing')
+                self.assertTrue(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_enabled(),
+                                'R6-A03-terminal: a confirmed Sent overtaking a poll is clearable')
+                self.site.download_state[op] = download_view(op, UID_A, 'sent', complete=3)
+                self.assertEqual(0, self.automatic_reads(op), 'R6-A03-terminal: no automatic read after the terminal read')
+        op = self.poll_race('incomplete', 'sending')
+        box = self.panel().locator(f'section[data-operation="{op}"]')
+        self.assertEqual('Incomplete', box.locator('.study-transfer-state').inner_text(), 'R6-A03-stale: an overtaken poll changes nothing')
+        self.site.download_state[op] = download_view(op, UID_A, 'incomplete')
+        self.assertEqual(0, self.automatic_reads(op), 'R6-A03-terminal: no automatic read after the terminal read')
+        clear = self.panel().get_by_role('button', name='Clear Finished', exact=True)
+        if clear.is_enabled():
+            clear.click()
+            self.settle(150)
+        self.assertEqual(1, box.count(), 'R6-A03-terminal: Incomplete is retained by Clear Finished')
+        self.assertEqual(3, len(self.site.grants), 'R6-A03: one grant per operation')
+        self.assertEqual(3, len(self.downloads), 'R6-A03: one native start per operation')
+        self.assertEqual(0, self.operations().get_by_role('button', name='Download', exact=True).count(), 'R6-A03: no capability restored')
+
+    def test_r6_a03_a_nonterminal_read_overtaking_a_poll_leaves_one_successor(self):
+        self.open_as(RAD_ONLY)
+        for poll_first in (False, True):
+            with self.subTest(order='poll answered first' if poll_first else 'manual answered first'):
+                op = self.poll_race('sending', 'sending', poll_first)
+                self.site.download_state[op] = download_view(op, UID_A, 'sent', complete=3)
+                box = self.panel().locator(f'section[data-operation="{op}"]')
+                self.assertEqual(1, self.automatic_reads(op), 'R6-A03-successor: exactly one automatic successor read')
+                self.assertEqual('Sent', box.locator('.study-transfer-state').inner_text(), 'R6-A03-successor: a later Sent is observed automatically')
+                self.assertTrue(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_enabled(),
+                                'R6-A03-successor: the observed Sent is clearable')
+        self.assertEqual((2, 2), (len(self.site.grants), len(self.downloads)), 'R6-A03: one grant and one native start each')
+
+    def test_r6_a03_unreadable_status_polls_are_bounded(self):
+        self.open_as(RAD_ONLY)
+        op = self.prepare()
+        with self.page.expect_download():
+            self.operations().first.get_by_role('button', name='Download', exact=True).click()
+        del self.site.download_state[op]
+        manual = 0
+        reads = self.site.download_reads.count(op)
+        for tick in range(16):
+            if tick == 3:
+                self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+                manual += 1
+            self.page.clock.run_for(3100)
+            self.settle(40)
+        automatic = self.site.download_reads.count(op) - reads - manual
+        self.assertEqual(10, automatic, 'R6-A03-bound: unreadable status reads stop at their bound')
+        box = self.operations().first
+        self.assertIn('시작됐는지 확인하지 못했습니다', box.inner_text(), 'R6-A03-bound: the bound is said neutrally')
+        self.assertEqual(0, box.get_by_role('button', name='Download', exact=True).count(), 'R6-A03-bound: no capability restored')
+        self.assertTrue(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_disabled(), 'R6-A03-bound: retained')
+        self.assertEqual((1, 1), (len(self.site.grants), len(self.downloads)), 'R6-A03-bound: one grant and one native start')
+
+    def copied_tab(self, op, rows):
+        """A real window.open copy of this tab, observed after it restored `op` with its rows and read its status itself
+        (the popup shares this context's frozen clock, so its own timers are advanced until that milestone)."""
+        reads = []
+
+        def note(request):
+            try:
+                if request.method == 'GET' and request.url.endswith('/api/dicom-import/' + op):
+                    reads.append(request.frame.page)
+            except Exception:
+                pass
+        self.context.on('request', note)
+        with self.page.expect_popup() as opened:
+            self.page.evaluate("url => window.open(url, '_blank')", h.MAIN_URL)
+        copied = opened.value
+        expect(copied.locator('#rows')).to_contain_text(h.PATIENT)
+        copied.locator('[data-tab=Technician]').click()
+        box = copied.locator(f'#study-transfer section[data-operation="{op}"]')
+        deadline = time.monotonic() + 10
+        while not (copied in reads and box.count() == 1 and box.locator('li[data-index]').count() == rows):
+            if time.monotonic() > deadline:
+                self.fail(f'copied tab restoration: not observed (reads {len(reads)}, sections {box.count()})')
+            self.page.clock.run_for(1100)
+            copied.wait_for_timeout(50)
+        copied.wait_for_timeout(250)
+        expect(box).to_be_visible()
+        return copied, box
+
+    def test_r6_a07_a_second_person_in_the_same_tab_keeps_both_histories(self):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = ['abort']
+        self.choose(self.files(1))
+        self.observed(lambda: self.site.import_reads, 'first owner lost answer read')
+        first = self.site.imports[0]['operation']
+        kept = self.slots()
+        self.site.account = TECH_OTHER          # another subject, the same actor and display name
+        reads = len(self.site.import_reads)
+        self.reload_transfers()
+        self.assertEqual([], self.shown(), 'R6-A07: another owner is never shown')
+        self.assertEqual(reads, len(self.site.import_reads), 'R6-A07: another owner is never queried')
+        self.site.import_answers = ['abort']
+        self.choose(self.files(1))
+        self.observed(lambda: len(self.site.imports) == 2 and self.site.import_reads[-1] == self.site.imports[1]['operation'],
+                      'second owner lost answer read')
+        second = self.site.imports[1]['operation']
+        self.assertNotIn('보존하지 못했습니다', self.panel().inner_text(), 'R6-A07: the second owner history is kept')
+        self.assertTrue(all(self.slots().get(k) == v for k, v in kept.items()), 'R6-A07: the first owner history is untouched')
+        reads = len(self.site.import_reads)
+        self.reload_transfers()
+        self.assertEqual([second], self.shown(), 'R6-A07: the second owner history survives a reload')
+        self.assertNotIn(first, self.site.import_reads[reads:], 'R6-A07: the second owner never queries the first')
+        self.assert_policy(row='R6-A07')
+        copied, box = self.copied_tab(second, 1)
+        try:
+            self.assertEqual([second], self.shown(copied), 'R6-A07-copy: the copy holds the second owner only')
+            self.assertEqual(0, box.get_by_role('button', name='Retry', exact=True).count(), 'R6-A07-copy: copied history is read-only')
+        finally:
+            copied.close()
+        self.site.account = TECH
+        reads = len(self.site.import_reads)
+        self.reload_transfers()
+        self.assertEqual([first], self.shown(), 'R6-A07: the first owner history is retained when it returns')
+        self.assertNotIn(second, self.site.import_reads[reads:], 'R6-A07: the first owner never queries the second')
+        self.assert_policy(row='R6-A07')
+        self.site.account = {**TECH, 'actor': 'renamed@synthetic.test', 'user': 'renamed@synthetic.test', 'displayName': 'Renamed'}
+        self.reload_transfers()
+        self.assertEqual([first], self.shown(), 'R6-A07: a changed actor of the same subject is the same owner')
+        self.site.account = TECH_OTHER
+        self.reload_transfers()
+        self.assertEqual([second], self.shown(), 'R6-A07: the second owner history is still kept')
+        self.assertEqual(2, len(self.site.imports), 'R6-A07: restoration never sends')
+
+    def host(self):
+        context = self.browser.new_context()
+        self.addCleanup(context.close)
+        context.route('**/*', lambda route: route.fulfill(content_type='text/html', body=HOST_HTML))
+        return context.new_page()
+
+    def mount(self, page, owner, status=None, fault=None):
+        """A new document of the same tab (sessionStorage stays) mounted for `owner`. fault (method, key): that storage
+        call throws for that key while window.synFault is true (cleared to model recovery in the same document)."""
+        page.goto('http://localhost/fixture')
+        for name in ('work-context.js', 'session-transport.js', 'study-transfer-local.js'):
+            source = (Path(__file__).resolve().parents[1] / 'worklist-v0/hpacs-lite' / name).read_text(encoding='utf-8')
+            if self.asset_source and self.asset_source[0] == name:
+                source = self.asset_source[1]
+            page.add_script_tag(content=source)
+        if fault:
+            page.evaluate("""([method, key]) => { const fn = Storage.prototype[method]; window.synFault = true;
+              Storage.prototype[method] = function (k, ...rest) {
+                if (window.synFault && k === key) throw new Error('SYN storage'); return fn.call(this, k, ...rest); }; }""",
+                          list(fault))
+        page.evaluate(HOST_MOUNT, [owner, status or {}])
+        page.wait_for_timeout(250)
+
+    def host_import(self, page):
+        before = len([c for c in page.evaluate('synCalls') if c[0] == 'POST'])
+        with page.expect_file_chooser() as chooser:
+            page.locator('#t-import').click()
+        chooser.value.set_files(self.files(1))
+        page.wait_for_function('n => synCalls.filter(c => c[0] === "POST").length > n', arg=before)
+        op = [c for c in page.evaluate('synCalls') if c[0] == 'POST'][-1][1]
+        page.wait_for_function('op => synCalls.some(c => c[0] === "GET" && c[1] === op)', arg=op)
+        page.wait_for_timeout(60)
+        return op
+
+    @staticmethod
+    def raw(page, key):
+        """A slot's bytes as stored, past any synthetic fault."""
+        return page.evaluate("k => { const f = window.synFault; window.synFault = false; try { return sessionStorage.getItem(k); }"
+                             " finally { window.synFault = f; } }", key)
+
+    @staticmethod
+    def note(page):
+        return page.locator('#study-transfer').text_content() or ''
+
+    def test_r6_a07_identity_vectors_keep_separate_histories(self):
+        page = self.host()
+        a, issuer, third = ['SYN-INST', 'SYN-SUB-A'], ['SYN-INST-2', 'SYN-SUB-A'], ['SYN-INST', 'SYN-SUB-C']
+        self.mount(page, a)
+        ops = {tuple(a): self.host_import(page)}
+        for owner in (issuer, third):
+            with self.subTest(owner=owner):
+                kept = page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage))")
+                self.mount(page, owner)
+                self.assertEqual([], self.shown(page), 'R6-A07-vector: another identity is never shown')
+                self.assertEqual([], page.evaluate('synCalls'), 'R6-A07-vector: another identity is never queried')
+                ops[tuple(owner)] = self.host_import(page)
+                self.assertNotIn('보존하지 못했습니다', self.note(page), 'R6-A07-vector: its own history is kept')
+                now = page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage))")
+                self.assertTrue(all(now.get(k) == v for k, v in kept.items()), 'R6-A07-vector: earlier histories untouched')
+        for owner, op in ops.items():
+            with self.subTest(back=list(owner)):
+                self.mount(page, list(owner))
+                self.assertEqual([op], self.shown(page), 'R6-A07-vector: each identity restores its own history only')
+                self.assertEqual([['GET', op]], page.evaluate('synCalls'), 'R6-A07-vector: each identity reads its own operation only')
+                self.assertEqual(0, page.get_by_role('button', name='Retry', exact=True).count(), 'R6-A07-vector: restored read-only')
+
+    def test_r6_a07_per_slot_storage_faults_recovery_clear_and_cap(self):
+        page = self.host()
+        a, b = ['SYN-INST', 'SYN-SUB-A'], ['SYN-INST', 'SYN-SUB-B']
+        self.mount(page, a)
+        first = self.host_import(page)
+        [first_slot] = page.evaluate("() => Object.keys(sessionStorage)")
+        first_bytes = self.raw(page, first_slot)
+        self.mount(page, b)
+        expected = {self.host_import(page)}
+        own = [k for k in page.evaluate("() => Object.keys(sessionStorage)") if k != first_slot]
+        self.assertEqual(1, len(own), 'R6-A07-slot: the second owner keeps its history beside the first')
+        own = own[0]
+        for method in ('getItem', 'setItem'):
+            with self.subTest(fault=method):
+                before = self.raw(page, own)
+                self.mount(page, b, fault=(method, own))
+                if method == 'getItem':
+                    self.assertIn('보존하지 못했습니다', self.note(page), 'R6-A07-slot: an unreadable own slot is disclosed, never empty')
+                fresh = self.host_import(page)
+                self.assertIn('보존하지 못했습니다', self.note(page), 'R6-A07-slot: new work stays in memory and that is said')
+                self.assertEqual(before, self.raw(page, own), 'R6-A07-slot: a failed own slot is never replaced')
+                self.assertEqual(first_bytes, self.raw(page, first_slot), 'R6-A07-slot: the first owner slot is untouched')
+                # Storage works again in the same document: the next write merges the memory-only work with what it read.
+                page.evaluate('window.synFault = false')
+                page.locator(f'#study-transfer section[data-operation="{fresh}"]').get_by_role(
+                    'button', name='Check Again', exact=True).click()
+                page.wait_for_timeout(250)
+                expected.add(fresh)
+                self.mount(page, b)
+                self.assertEqual(expected, set(self.shown(page)), 'R6-A07-slot: recovery merges and a reload restores all')
+        corrupt = self.raw(page, own)
+        page.evaluate('([k, v]) => sessionStorage.setItem(k, v)', [own, corrupt + '!'])
+        self.mount(page, b)
+        self.assertIn('보존하지 못했습니다', self.note(page), 'R6-A07-slot: a corrupt own slot is disclosed')
+        self.assertEqual([], page.evaluate('synCalls'), 'R6-A07-slot: a corrupt own slot is never read as history')
+        page.evaluate('([k, v]) => sessionStorage.setItem(k, v)', [own, corrupt])
+        confirmed = sorted(expected)[0]
+        status = {confirmed: {k: v for k, v in file_result(confirmed, 0).items() if k != 'operationId'}}
+        self.mount(page, b, status=status)
+        expect(page.locator(f'#study-transfer section[data-operation="{confirmed}"] .study-transfer-state')).to_have_text('Stored')
+        page.get_by_role('button', name='Clear Finished', exact=True).click()
+        page.wait_for_timeout(150)
+        self.assertEqual(expected - {confirmed}, set(self.shown(page)), 'R6-A07-slot: Clear Finished removes only the confirmed')
+        self.mount(page, b, status=status)
+        self.assertEqual(expected - {confirmed}, set(self.shown(page)), 'R6-A07-slot: a cleared operation never comes back')
+        for _ in range(22):
+            self.host_import(page)
+        self.mount(page, b)
+        self.assertEqual(len(expected) - 1 + 22, len(self.shown(page)), 'R6-A07-slot: unconfirmed history is never pruned')
+        self.assertEqual(0, page.get_by_role('button', name='Retry', exact=True).count(), 'R6-A07-slot: no capability is created')
+        self.assertEqual([], [c for c in page.evaluate('synCalls') if c[0] == 'POST'], 'R6-A07-slot: restoration never sends')
+        self.mount(page, a)
+        self.assertEqual([first], self.shown(page), 'R6-A07-slot: the first owner keeps its history')
+        self.assertEqual(first_bytes, self.raw(page, first_slot), 'R6-A07-slot: the first owner slot is untouched')
+
+    def hold_digest(self):
+        """The next SHA-256 of a chosen file waits until window.synDigestRelease(); later ones run as the browser does."""
+        self.page.evaluate("""() => { const original = crypto.subtle.digest, digest = original.bind(crypto.subtle);
+          crypto.subtle.digest = (a, b) => { crypto.subtle.digest = original;
+            return new Promise(r => { window.synDigestRelease = () => r(digest(a, b)); }); }; }""")
+
+    def test_r6_a09_a_never_invoked_file_keeps_its_first_send_after_a_cancelled_logout(self):
+        self.open_as(RAD_TECH)
+        self.open_study(h.PATIENT)
+        self.type('SYN draft during hashing')
+        self.page.locator('[data-tab=Technician]').click()
+        self.hold_digest()
+        self.choose(self.files(1))
+        self.wait(lambda: self.page.evaluate('!!window.synDigestRelease'), 'digest held')
+        self.site.put_answers = [(500, {'message': 'SYN save failure'})]
+        self.page.evaluate("() => document.querySelector('#logout').click()")
+        expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Draft Not Saved')
+        self.page.evaluate('window.synDigestRelease()')
+        self.settle(250)
+        self.page.locator('dialog.kin-logout').get_by_role('button', name='Back to Editing', exact=True).click()
+        self.settle(400)
+        self.assertEqual([], self.site.imports, 'R6-A09: nothing was dispatched')
+        self.assertEqual('Not Sent', self.state_of(0), 'R6-A09: a never-invoked File is Not Sent, never Not confirmed')
+        self.assertEqual(1, self.file_row(0).get_by_role('button', name='Retry', exact=True).count(),
+                         'R6-A09: a never-invoked File keeps its first send')
+        self.assertEqual([], self.site.import_reads, 'R6-A09: nothing to read for a request never sent')
+        self.file_row(0).get_by_role('button', name='Retry', exact=True).evaluate('b => { b.click(); b.click(); }')
+        self.observed(lambda: self.state_of(0) == 'Stored', 'the first POST answered')
+        self.assertEqual(1, len(self.site.imports), 'R6-A09: an explicit Retry makes exactly one first POST')
+        self.assertEqual('SYN draft during hashing', self.page.locator('#findings').input_value(), 'R6-A09: draft kept')
+
+    def test_r6_a09_an_invoked_request_stays_spent(self):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = ['abort']
+        self.choose(self.files(1))
+        self.observed(lambda: self.site.imports, 'the upload reached the server')
+        self.assertEqual('Not confirmed', self.state_of(0), 'R6-A09-invoked: a lost answer of an invoked request stays spent')
+        self.assertEqual(0, self.file_row(0).get_by_role('button', name='Retry', exact=True).count(),
+                         'R6-A09-invoked: a lost answer of an invoked request stays spent')
+        self.observed(lambda: self.site.import_reads, 'status read')
+        self.assertEqual(1, len(self.site.imports), 'R6-A09-invoked: one POST')
+
+    def test_r6_a09_hashing_holds_the_lane_and_a_lifetime_end_restores_nothing(self):
+        self.open_as(TECH, 'Technician')
+        self.hold_digest()
+        self.choose(self.files(1))
+        self.wait(lambda: self.page.evaluate('!!window.synDigestRelease'), 'digest held')
+        self.choose(self.files(1))
+        self.settle(250)
+        self.assertEqual([], self.site.imports, 'R6-A09-lane: hashing keeps the one upload lane reserved')
+        self.page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }))")
+        self.page.evaluate('window.synDigestRelease()')
+        self.settle(300)
+        self.page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))")
+        self.settle(150)
+        self.assertEqual([], self.site.imports, 'R6-A09-end: nothing is dispatched after the page lifetime ended')
+        self.assertEqual(0, self.panel().get_by_role('button', name='Retry', exact=True).count(), 'R6-A09-end: no capability comes back')
+        self.assertEqual(0, self.operations().count(), 'R6-A09-end: the ended document keeps no operation')
+
+    # OPUS-08 detectors (consultation scripts/oracle_closures.py): count requests and kept history, not selectors alone.
+    def test_r6_f2_sent_needs_a_finished_response(self):
+        self.open_as(RAD_ONLY)
+        op = self.prepare()
+        view = download_view(op, UID_A, 'sent', complete=3)
+        view['attempts'][0]['responseFinished'] = False
+        self.site.download_state[op] = view
+        reads = len(self.site.download_reads)
+        with self.page.expect_download():
+            self.operations().first.get_by_role('button', name='Download', exact=True).click()
+        self.page.clock.run_for(3100)
+        self.observed(lambda: len(self.site.download_reads) > reads, 'false-finished response delivered')
+        self.assertNotEqual('Sent', self.operations().first.locator('.study-transfer-state').inner_text(),
+                            'R6-F2: false responseFinished cannot confirm Sent')
+        self.assertTrue(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_disabled(),
+                        'R6-F2: false responseFinished is not clearable')
+        view['attempts'][0]['responseFinished'] = True
+        self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+        expect(self.operations().first.locator('.study-transfer-state')).to_have_text('Sent')
+        self.assertEqual(1, len(self.site.grants), 'R6-F2: one grant')
+        self.assertEqual(1, len(self.downloads), 'R6-F2: one native click')
+
+    def test_r6_f4_a_partly_confirmed_operation_survives_clear_finished(self):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = ['stored', 'abort']
+        self.choose(self.files(2))
+        self.observed(lambda: len(self.site.imports) == 2 and self.site.import_reads, 'mixed result read')
+        partial = self.site.imports[0]['operation']
+        box = self.panel().locator(f'section[data-operation="{partial}"]')
+        expect(box.locator('li[data-index="0"] .study-transfer-state')).to_have_text('Stored')
+        expect(box.locator('li[data-index="1"] .study-transfer-state')).to_have_text('Not confirmed')
+        self.site.import_answers = ['stored']
+        self.choose(self.files(1))
+        self.observed(lambda: len(self.site.imports) == 3, 'fully confirmed control received')
+        control = self.site.imports[-1]['operation']
+        expect(self.operations().first.locator('.study-transfer-state')).to_have_text('Stored')
+        self.panel().get_by_role('button', name='Clear Finished', exact=True).click()
+        self.settle(250)
+        self.assertEqual(1, box.count(), 'R6-F4: Clear Finished retains a partly confirmed operation')
+        self.assertEqual(0, self.panel().locator(f'section[data-operation="{control}"]').count(),
+                         'R6-F4: the confirmed control is actually removed')
+        self.assertIn(partial, self.saved_ids(), 'R6-F4: the partly confirmed operation stays in kept history')
+        self.reload_transfers()
+        self.assertEqual(1, self.panel().locator(f'section[data-operation="{partial}"]').count(), 'R6-F4: it is restored after reload')
+        self.assertEqual(3, len(self.site.imports), 'R6-F4: reload remains read-only')
+
+    def test_r6_f9_a_status_of_another_operation_confirms_nothing(self):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = ['abort']
+        self.choose(self.files(1))
+        self.observed(lambda: self.site.import_reads, 'initial unconfirmed status read')
+        op = self.site.imports[0]['operation']
+        row = file_result(op, 0)
+        row.pop('operationId')
+        self.site.status_answers = [(200, {'operationId': str(uuid.uuid4()), 'status': 'settled', 'files': [row]})]
+        count = len(self.site.import_reads)
+        self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+        self.observed(lambda: len(self.site.import_reads) > count, 'wrong operation status delivered')
+        self.assertEqual('Not confirmed', self.state_of(0), 'R6-F9: another operation cannot confirm this file')
+        self.assertTrue(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_disabled(),
+                        'R6-F9: a mismatched operation is not clearable')
+        self.site.status_answers = [(200, {'operationId': op, 'status': 'settled', 'files': [row]})]
+        self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+        expect(self.file_row(0).locator('.study-transfer-state')).to_have_text('Stored')
+        self.assertEqual(1, len(self.site.imports), 'R6-F9: status reads never dispatch')
 
 
 def own_cases():

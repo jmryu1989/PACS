@@ -5112,3 +5112,44 @@ test('S9U4-B86 D1574 the import answer shapes the page reads, as the real servic
   const refused = await h.request('POST', '/api/dicom-import', { as: TECH, headers: { 'Content-Type': 'application/dicom', 'X-KIN-Operation-Id': 'bad', 'X-KIN-File-Index': '0' }, body: Buffer.from('x') });
   assert.deepEqual([refused.status, keys(refused.body)], [400, shape.request_refusal], 'a request-level refusal');
 });
+
+test('S9U4-B87 D1668 r6 the positive histories the page accepts, as the real service writes them: a no-write retry (its own code, certain-no-write, an end time) then Stored, and a resolved no-object recovery whose checkedAt has no fractional seconds then Stored, on the POST and on the status GET', async () => {
+  const keys = o => Object.keys(o).sort();
+  const serverTime = v => typeof v === 'string' && new Date(v).toISOString() === v;
+  const row = answer => Object.fromEntries(Object.entries(answer).filter(([k]) => k !== 'operationId'));
+  const h = await harness();
+  const study = uid(), series = study + '.1', sop = uid();
+  own(h.s, study, 'inst-a', 'gateway');
+  h.orthanc.fault = call => (call.path.endsWith('/tools/lookup') ? { status: 500 } : null);
+  const bytes = dicom({ study, series, sop, id: 'SYN-B87' });
+  const first = await h.send(bytes);
+  assert.deepEqual([first.status, first.body.outcome, first.body.code], [503, 'retryable', 'ORTHANC_UNAVAILABLE']);
+  h.orthanc.fault = null;
+  const stored = await h.send(bytes, { id: first.id });
+  assert.deepEqual([stored.status, stored.body.outcome, stored.body.generation, stored.body.attempts.length], [200, 'stored', 2, 2]);
+  const [retried, last] = stored.body.attempts;
+  assert.deepEqual([retried.generation, retried.phase, retried.outcome, retried.code, retried.transport, retried.recovery],
+    [1, 'finished', 'retryable', 'ORTHANC_UNAVAILABLE', 'certain-no-write', null], 'a no-write retry before the positive');
+  assert.ok(serverTime(retried.startedAt) && serverTime(retried.finishedAt), 'its server times are canonical');
+  assert.deepEqual([last.generation, last.phase, last.outcome, last.code, last.transport], [2, 'finished', 'stored', null, null]);
+  const status = await h.request('GET', '/api/dicom-import/' + first.id);
+  assert.deepEqual(status.body.files, [row(stored.body)], 'the status row is the same history');
+
+  const lost = await unknownAttempt(h);
+  h.s.advance(31000);
+  const checkedAt = new Date(T0 + 1000).toISOString().replace('.000Z', 'Z');
+  const recovered = await recovery(h, lost.id, { basis: 'orthanc-restarted', checkedAt });
+  assert.deepEqual([recovered.status, recovered.body.outcome, recovered.body.code], [200, 'retryable', 'RECOVERED_NO_OBJECT']);
+  const again = await h.send(lost.bytes, { id: lost.id });
+  assert.deepEqual([again.status, again.body.outcome, again.body.generation, again.body.attempts.length], [200, 'stored', 2, 2]);
+  const [noObject, after] = again.body.attempts;
+  assert.deepEqual([noObject.phase, noObject.outcome, noObject.code, keys(noObject.recovery)],
+    ['finished', 'retryable', 'RECOVERED_NO_OBJECT', ['basis', 'checkedAt', 'requestedAt', 'resolvedAt']]);
+  assert.notEqual(noObject.transport, 'certain-no-write', 'its transport stays as the dispatch left it');
+  assert.equal(noObject.recovery.checkedAt, checkedAt, 'the admin instant is kept without fractional seconds');
+  assert.ok(serverTime(noObject.recovery.requestedAt) && serverTime(noObject.recovery.resolvedAt) && serverTime(noObject.finishedAt),
+    'the recovery is resolved, with canonical server times');
+  assert.deepEqual([after.phase, after.outcome, after.code, after.transport], ['finished', 'stored', null, null]);
+  const read = await h.request('GET', '/api/dicom-import/' + lost.id);
+  assert.deepEqual(read.body.files, [row(again.body)], 'the status row is the same history');
+});

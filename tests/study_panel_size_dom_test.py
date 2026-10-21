@@ -48,7 +48,10 @@ from study_panel_page_dom_test import HIDE_W4, W4_REPORT_NODES
 # fields, the two basis options, Resolve and its result line). Nothing of it is painted; the requirement these counts
 # carry - the Study Panel's options exist only in the opened panel - is unchanged. Its own cases are
 # study_transfer_local_dom_test.py.
-S9U4B_TRANSFER_NODES = 4 + 24
+# r5 (D1617) adds one more node to the mount, so 25: the panel body's persistence note, the paragraph that says when this
+# tab could not keep its transfer history. It is built empty inside the same hidden section and is part of the approved
+# disclosure (D1668 OPUS-04 scope amendment); it is never created later just to stay out of a count (D73).
+S9U4B_TRANSFER_NODES = 4 + 25
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
