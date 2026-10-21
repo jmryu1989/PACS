@@ -45,11 +45,11 @@ async function sample(label, rep, n) {
     new CO.StateCoordinator(d, process.platform === 'linux' ? undefined : request => EW.executeExternal(request)));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus-jcost-')); fs.chmodSync(dir, 0o700);
     if (label === 'r4d') {
-      // The candidate admits a journal only beside an initialized seal lineage (an unexplained journal is refused):
-      // initialize the pair as the service does, close that owner, then seed the retained journal fixture.
-      const owner = new CO.StateCoordinator(dir, process.platform === 'linux' ? undefined : request => EW.executeExternal(request));
-      await new S4.AccessSeal(dir, jcostSql(), new J4.FailureJournal(dir, owner)).recoverAtStart(JCOST_PAIR, crypto.randomUUID());
-      owner.close();
+      // The candidate admits a journal only beside an initialized seal lineage (an unexplained journal is refused), and
+      // its owner fence is released only by process death: a child process initializes the pair as the service does
+      // and exits; then the retained journal fixture is seeded and the measured owner opens.
+      const init = spawnSync(process.execPath, [__filename, r3, r4b, '--init', dir], { encoding: 'utf8', timeout: 60000 });
+      if (init.status !== 0) throw new Error(`pair initialization failed: ${init.stderr || init.error}`);
     }
     seed(dir, n);
     try {
@@ -568,6 +568,11 @@ async function ladderMain() {
 }
 if (LADDER) {
   ladderMain().then(code => { process.exitCode = code; }, error => { process.stderr.write(String(error?.stack ?? error) + '\n'); process.exitCode = 2; });
+} else if (out === '--init') {
+  const dir = process.argv[5];
+  const owner = new CO.StateCoordinator(dir, process.platform === 'linux' ? undefined : request => EW.executeExternal(request));
+  new S4.AccessSeal(dir, jcostSql(), new J4.FailureJournal(dir, owner)).recoverAtStart(JCOST_PAIR, crypto.randomUUID())
+    .then(() => { owner.close(); process.exit(0); }, error => { process.stderr.write(String(error?.stack ?? error) + '\n'); process.exit(1); });
 } else if (out === '--sample') {
   const [label, rep, n] = process.argv.slice(5);
   sample(label, Number(rep), Number(n)).then(row => console.log(JSON.stringify(row)), error => { process.stderr.write(String(error?.stack ?? error) + '\n'); process.exit(1); });
