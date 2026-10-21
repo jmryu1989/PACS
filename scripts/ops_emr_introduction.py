@@ -4369,6 +4369,34 @@ class HostOps:
                 and identity(self.inspect("api")) == identity(client), "State resume target changed during observation")
         return observed["ready"]
 
+    def admit_pristine_pair(self, observed, state_volume):
+        """D1660 Step 1.2 (D1650-T10, D1656-T06): the only launch of the service over a pair with no v3 lineage.
+
+        The read-only inspection found no protected files and both chains empty (the inspection script fails for any
+        other combination). That alone is not provenance: an orphan, previously used, pruned or unknown volume looks
+        the same. The pair is admitted as pristine only when this very introduction phase provisioned and migrated the
+        paired database (steps L-06a/L-06b/L-07 passed in this run) and Compose created the protected volume after
+        this phase began. The launched service then publishes the initial v3 lineage/checkpoint itself, under its
+        lifetime file fence and the exclusive PG recovery fence (seal.ts recoverAtStart); no file is written here, no
+        source is chown'ed and no client ever takes this branch (state_start_admission's client path has no mount)."""
+        intro = self.intro
+        require(intro is not None and getattr(intro, "phase", None) == "introduce",
+                "A pair without v3 provenance may only be initialized by the introduction phase")
+        passed = {step.get("step") for step in getattr(intro, "steps", None) or [] if type(step) is dict and step.get("outcome") == "PASS"}
+        require({"L-06a", "L-06b", "L-07"} <= passed, "Pristine pair lacks this introduction's provisioning and migration evidence")
+        running = (getattr(intro, "state", None) or {}).get("running") or {}
+        started, created = running.get("started_utc"), self.volume_identity(state_volume).get("created")
+        def aware(value):
+            # Docker reports CreatedAt in the daemon's zone; the phase start is UTC. Both must carry an offset.
+            require(type(value) is str and value, "Timestamp missing")
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            require(stamp.tzinfo is not None, "Timestamp must carry its zone")
+            return stamp.astimezone(timezone.utc)
+        require(aware(created) >= aware(started),
+                "The protected state volume predates this introduction; an existing pair is never initialized speculatively")
+        self.records.command({"argv": ["state-start-admission", "pristine"], "exit": 0, "outcome": "admitted",
+                              "volume": state_volume, "created": created, "phase_started": started, "fingerprint": observed["fingerprint"]})
+
     def restart_state_service(self, intro):
         """L-10b (EMR-B2 c): the separate service restart. The service container alone is stopped and started again
         (its own fenced recovery runs; no client recovers anything); the clients that lost their session end
@@ -4557,9 +4585,12 @@ class HostOps:
                 "-e", pre.STATE_INSPECTION_SCRIPT], timeout=60,
                 env={"DATABASE_URL": env["DATABASE_URL"], "KIN_EMR_INSTANCE_ID": project}).stdout)
         observed = inspect_pair()
-        require(observed.get("version") == 3 and observed.get("lineage")
-                and type(observed.get("fingerprint")) is str and pre.HASH.fullmatch(observed["fingerprint"])
-                and type(observed.get("pair")) is dict, "State pair has no admitted v3 initialization provenance")
+        require(type(observed.get("fingerprint")) is str and pre.HASH.fullmatch(observed["fingerprint"])
+                and type(observed.get("pair")) is dict, "State pair observation is incomplete")
+        if observed.get("version") is None and observed.get("lineage") is None:
+            self.admit_pristine_pair(observed, state_volume)
+        else:
+            require(observed.get("version") == 3 and observed.get("lineage"), "State pair has no admitted v3 initialization provenance")
         require({name: self.volume_identity(name) for name in volumes} == before
                 and (not existing or identity(self.inspect_container(container["Name"].lstrip("/"))) == identity(container))
                 and identity(self.inspect("db")) == identity(db),

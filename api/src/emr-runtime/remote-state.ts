@@ -7,8 +7,8 @@ import { CommitBinding, SealRefused } from './seal';
 import { StateClient } from './state-client';
 import { BundleIdentity, ClientIdentity, ExpiryPrefix, HelloResult, Reservation, SealedBundleProof, StateOperation,
   StateProtocolError, StateResults, StateValues } from './state-protocol';
-import { LedgerAttempt, LedgerFailure, LedgerScope, LedgerState, PrismaLedgerSql, ProvisionalAppend, ledgerErrorCode,
-  isConnectionError } from './store';
+import { LedgerAttempt, LedgerFailure, LedgerScope, LedgerState, PrismaLedgerSql, ProvisionalAppend, RetentionScope,
+  ledgerErrorCode, isConnectionError } from './store';
 
 /**
  * EMR-B2 (c): the API's view of the protected state - only the caller operations of one admitted session over the
@@ -138,6 +138,34 @@ export class RemoteLedgerScope implements LedgerScope {
   /** The scope's end, once; a lost session has already ended it on the service side. */
   end(): Promise<void> {
     return this.ending ??= this.call('end', {}).then(() => undefined, () => undefined);
+  }
+
+  /**
+   * The retention job's view of this scope (a retention-role session; the service refuses expiry operations to the
+   * API role). The service prepares and proves the prefix in expiry-prefix before the job stages any deletion; a
+   * service that is absent or not ready refuses there, so the job defers before its deleting statement. A rolled-back
+   * or unknown expiry is journaled on the service; the reservation is settled by the service's next fenced recovery.
+   */
+  retention(): RetentionScope {
+    const unavailable = (error: unknown): never => {
+      if (error instanceof StateProtocolError && error.code === 'CONFLICT') refuse('AccessEventIdConflict');
+      throw error instanceof StateProtocolError ? new SealRefused('SealUnavailable', error.code) : error;
+    };
+    return Object.freeze({
+      async prepare() { /* the service reconciles the frontier itself inside expiry-prefix */ },
+      expiryPrefix: async (through: number) => { try { return await this.call('expiry-prefix', { through }); } catch (error) { return unavailable(error); } },
+      reserve: (binding: Reservation, prefix: ExpiryPrefix) => this.reserve(binding, prefix),
+      failed: (attemptId: string, rolledBack: boolean) => this.note(`expiry:${attemptId}`, rolledBack ? 'append-rolled-back' : 'ledger-unavailable',
+        rolledBack ? 'ledger-refused' : 'commit-unknown', attemptId, 'viewing'),
+      committed: async (binding: CommitBinding) => {
+        let proof: SealedBundleProof;
+        try { proof = await this.call('confirm-bundle', { eventId: null, requiredStreams: ['viewing'], bindings: [binding] }); }
+        catch (error) { return unavailable(error); }
+        const entry = proof.entries[0];
+        if (proof.eventId !== null || proof.entries.length !== 1 || bindingKeys.some(key => entry[key] !== binding[key]) ||
+          entry.sealed.chainId !== binding.chainId || entry.sealed.sequence < binding.sequence) refuse('DurableReceiptRefused');
+      },
+    });
   }
 }
 

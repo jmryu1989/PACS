@@ -1645,19 +1645,20 @@ function contractSuite() {
     const peers = [];
     t.after(async () => { service.close(); for (const socket of peers) socket.destroy(); await service.drained(); coordinator.close(); fs.rmSync(dir, { recursive: true, force: true }); });
     await service.start();
-    const connect = async (clientInstanceId = randomUUID(), faults = {}) => {
+    const connect = async (clientInstanceId = randomUUID(), faults = {}, role = 'api') => {
       const socket = new net.Socket(); peers.push(socket);
-      const hello = await service.dispatch('api', { v: 1, requestId: randomUUID(), serviceEpoch: null, session: null, workId: null,
+      const hello = await service.dispatch(role, { v: 1, requestId: randomUUID(), serviceEpoch: null, session: null, workId: null,
         operation: 'hello', value: { protocol: 1, clientInstanceId } }, socket);
       assert.equal(hello.ok, true, 'control session opens');
       const session = { ...hello.result, serviceEpoch: hello.serviceEpoch, clientInstanceId };
       const loss = new AbortController(), calls = [];
       const client = { unavailable: loss.signal, calls, async callAsync(operation, workId, value) {
         calls.push(operation);
+        if (loss.signal.aborted) throw new P.StateProtocolError('UNAVAILABLE', 'unavailable');
         const fault = faults[operation]?.shift();
         if (fault) throw new P.StateProtocolError(fault, 'unknown');
-        const request = P.parseStateRequest({ v: 1, requestId: randomUUID(), serviceEpoch: session.serviceEpoch, session: session.session, workId, operation, value }, 'api');
-        const response = await service.dispatch('api', request, socket);
+        const request = P.parseStateRequest({ v: 1, requestId: randomUUID(), serviceEpoch: session.serviceEpoch, session: session.session, workId, operation, value }, role);
+        const response = await service.dispatch(role, request, socket);
         if (!response.ok) throw new P.StateProtocolError(response.error.code, response.error.outcome);
         return response.result;
       }, lose() { loss.abort(new P.StateProtocolError('UNAVAILABLE', 'unavailable')); } };
@@ -2006,6 +2007,86 @@ function contractSuite() {
     assert.equal(events.filter(value => value === 'module').length, 1);
     assert(!events.includes('request') && !events.includes('request-tree'));
     assert.equal(events.at(-1), 'module', 'module runs after its eligible provider batches');
+  });
+
+  apiTest('C-A03.R12 the retention job is a distinct-role client: the service proves the prefix before any deletion is staged, the checkpoint is proven after COMMIT, and an absent service defers before the deleting statement', async t => {
+    const w = await serviceWorld(t), api = await w.connect();
+    const { port, control } = RP.createRecordPort(api.store), work = port.begin();
+    const events = [provideEvent(A), provideEvent(A)];
+    for (const event of events) await work.append(event);
+    work.end(); await control.drained();
+    assert.equal(Object.values(w.state().bundles).filter(a => a.phase === 'acknowledged').length, 2, 'both originals are acknowledged proofs');
+    // The retention job's DB side over a memory ledger: positions and times only, deletion staged in one transaction.
+    const retentionModel = world => {
+      const counters = { expireCalls: 0, committed: 0 };
+      const db = {
+        async $queryRaw(strings) {
+          assert.match(strings.join('?'), /retention_view/);
+          return world.ledger.entries.map(e => ({ sequence: e.sequence, hash: e.hash, kind: e.kind, occurred_at: e.occurredAt, held: false }));
+        },
+        async $transaction(body) {
+          let staged = null;
+          const tx = { async $queryRaw(strings, ...values) {
+            const text = strings.join('?');
+            if (/enter_writer|lock_chain/.test(text)) return [];
+            if (text.includes('expire_reserved')) {
+              counters.expireCalls++;
+              const through = values[0], deleted = world.ledger.entries.filter(e => e.sequence <= through), anchor = deleted.at(-1);
+              const payload = C.checkpointPayload('2036-01-01T00:00:00.000Z', through, deleted.length, anchor.hash);
+              const sequence = world.ledger.head.sequence + 1, hash = C.entryHash(sequence, world.ledger.head.hash, payload);
+              const contentSha256 = createHash('sha256').update(payload).digest('hex');
+              staged = { through, row: { sequence, previousHash: world.ledger.head.hash, hash, kind: 'expiry', statutoryAct: null, eventId: null, payload,
+                contentSha256, storedAt: '2036-01-01T00:00:00.000Z', occurredAt: '2036-01-01T00:00:00.000Z', targets: [] },
+                marker: { stream: 'viewing', chainId: world.ledger.chainId, attemptId: values[1], bundleId: values[2], kind: 'expiry', eventId: null, sequence,
+                  previousHash: world.ledger.head.hash, hash, contentSha256, generation: 0, proofDigest: null } };
+              return [{ deleted_count: deleted.length, checkpoint_sequence: sequence, checkpoint_hash: hash, chain_id: world.ledger.chainId,
+                previous_hash: world.ledger.head.hash, content_sha256: contentSha256 }];
+            }
+            if (text.includes('bind_commit')) { staged.marker.generation = Number(values[1]); staged.marker.proofDigest = values[2]; return []; }
+            throw new Error('unexpected retention SQL: ' + text);
+          } };
+          const value = await body(tx);
+          // COMMIT: the expired prefix goes with its checkpoint; the checkpoint's own marker stays.
+          world.ledger.entries = [...world.ledger.entries.filter(e => e.sequence > staged.through), staged.row];
+          world.ledger.markers = [...world.ledger.markers.filter(m => m.stream !== 'viewing' || m.sequence > staged.through), staged.marker];
+          world.ledger.head = { sequence: staged.row.sequence, hash: staged.row.hash };
+          counters.committed++;
+          return value;
+        },
+      };
+      return { db, counters };
+    };
+    const model = retentionModel(w);
+    const retention = await w.connect(randomUUID(), {}, 'retention');
+    const scope = await retention.remote.begin(randomUUID());
+    const result = await RT.expireAccessPrefix(model.db, scope.retention(), '2036-01-01T00:00:00.000Z');
+    assert.deepEqual([result.deleted, model.counters.committed, model.counters.expireCalls], [2, 1, 1]);
+    assert.deepEqual(retention.client.calls, ['begin', 'expiry-prefix', 'reserve', 'confirm-bundle'], 'prefix proof before deletion, checkpoint proof after COMMIT');
+    assert.deepEqual(w.ledger.entries.map(e => e.kind), ['expiry'], 'the expired prefix is gone, the checkpoint remains');
+    const after = w.state();
+    assert.equal(after.tail.streams.viewing.sequence, result.checkpointSequence, 'the service sealed the committed checkpoint');
+    assert.equal(Object.values(after.bundles).length, 3, 'the historical proofs of the deleted originals are retained beside the checkpoint attestation');
+    for (const event of events) assert.equal(w.ledger.entries.some(e => e.eventId === event.eventId), false);
+    // The API role cannot prepare an expiry.
+    const forbidden = await api.remote.begin(randomUUID());
+    await assert.rejects(forbidden.retention().expiryPrefix(1), error => error.code === 'SealUnavailable' || error.code === 'PROTOCOL');
+    await scope.end();
+    // A retention session that lost the service defers before any deleting statement: an expirable prefix stays.
+    const w2 = await serviceWorld(t), api2 = await w2.connect();
+    const second = RP.createRecordPort(api2.store), work2 = second.port.begin();
+    await work2.append(provideEvent(A)); work2.end(); await second.control.drained();
+    const model2 = retentionModel(w2);
+    const lost = await w2.connect(randomUUID(), {}, 'retention');
+    const lostScope = await lost.remote.begin(randomUUID());
+    lost.client.lose();
+    const stale = JSON.stringify(w2.ledger.entries);
+    await rejects(RT.expireAccessPrefix(model2.db, lostScope.retention(), '2036-01-01T00:00:00.000Z'), 'SealUnavailable');
+    assert.deepEqual(model2.counters, { expireCalls: 0, committed: 0 }, 'no deleting statement without the service');
+    assert.equal(JSON.stringify(w2.ledger.entries), stale, 'nothing deleted');
+    // With the service back, the same job completes: deferral lost nothing.
+    const again = await w2.connect(randomUUID(), {}, 'retention'), againScope = await again.remote.begin(randomUUID());
+    const done = await RT.expireAccessPrefix(model2.db, againScope.retention(), '2036-01-01T00:00:00.000Z');
+    assert.deepEqual([done.deleted, model2.counters.committed], [1, 1]);
   });
 
   apiTest('C-A03.R11 the client runtime refuses a protected-state directory, an unpaired service hello and a repeated start; it never constructs an owner', async t => {

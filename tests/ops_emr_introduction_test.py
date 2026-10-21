@@ -4458,6 +4458,65 @@ console.log(JSON.stringify({trace,output,exit:fakeProcess.exitCode}));})().catch
         host.compose(["config", "--format", "json"], files=["-f", "unbound.yml"], mutating=False)
         self.assertEqual(len(launches), 1, "read-only configuration inspection remains available")
 
+    def test_19b_pristine_pair_launch_needs_this_introductions_provisioning_evidence(self):
+        """D1660 Step 1.2 (D1650-T10, D1656-T06): a never-used pair (no protected files, empty chains) may launch the
+        service only when this introduction provisioned and migrated the database (L-06a/L-06b/L-07 passed in this run)
+        and the protected volume was created after the phase began; an orphan/unknown/older volume, a missing step,
+        another phase, a lineage without a version or non-empty chains stay refused before any launch."""
+        from types import SimpleNamespace
+        for change in (None, "no-intro", "wrong-phase", "missing-migrate", "missing-provision", "old-volume",
+                       "lineage-without-version", "version-without-lineage", "nonempty-chains", "no-phase-start"):
+            with self.subTest(change=change):
+                item, args = self.fixture()
+                host = object.__new__(intro.HostOps)
+                steps = [{"step": sid, "outcome": "PASS"} for sid in ("I-00", "L-06a", "L-06b", "L-07")]
+                if change == "missing-migrate": steps = steps[:-1]
+                if change == "missing-provision": steps = [s for s in steps if s["step"] != "L-06b"]
+                running = {} if change == "no-phase-start" else {"running": {"started_utc": "2026-10-21T10:00:00+00:00"}}
+                host.intro = None if change == "no-intro" else SimpleNamespace(
+                    phase="capture" if change == "wrong-phase" else "introduce", steps=steps, state=running, plan_sha256="f" * 64)
+                host.names = {"api": "kin-api", "db": "kin-db"}
+                host.t = {"project": "fixture", "containers": host.names,
+                          "volumes": {"emr_state": args["state_volume"], "pg": "fixture_pg", "emr_access": "fixture_access"}}
+                host.plan = {"release": args["release"]}
+                recorded = []
+                host.records = SimpleNamespace(command=recorded.append)
+                host.text = lambda command: ""
+                # Docker reports the daemon's zone; the admission compares instants.
+                created = "2026-10-21T18:30:00+09:00" if change == "old-volume" else "2026-10-21T19:30:00+09:00"
+                host.volume_identity = lambda name, created=created: {"name": name, "created": created}
+                host.inspect = lambda role: {"Id": "db", "Image": args["release"]["images"]["db"], "State": {"Running": True},
+                    "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "fixture_pg"},
+                               {"Destination": "/var/lib/postgresql/emr-access", "Name": "fixture_access"}]}
+                host.inspect_container = lambda name: None
+                observed = {"version": None, "lineage": None, "fingerprint": "a" * 64, "pair": {"instanceId": "fixture"}}
+                if change == "lineage-without-version": observed["lineage"] = "synthetic-lineage"
+                if change == "version-without-lineage": observed["version"] = 3
+                inspections = []
+                def runner(command, **kwargs):
+                    if command[:3] == ["docker", "image", "inspect"]:
+                        return subprocess.CompletedProcess(command, 0, json.dumps([args["image"]]).encode(), b"")
+                    if command[:2] == ["docker", "run"]:
+                        self.assertTrue(any(word.endswith(",readonly") for word in command), "inspection mounts the volume read-only")
+                        self.assertEqual(command[command.index("--user") + 1], "1000:1000")
+                        inspections.append(command)
+                        if change == "nonempty-chains":
+                            return subprocess.CompletedProcess(command, 1, b"", b"missing")
+                        return subprocess.CompletedProcess(command, 0, ("KIN_RESULT " + json.dumps(observed)).encode(), b"")
+                    self.fail("unexpected admission command " + str(command[:3]))
+                # The worker registry of a live introduction is exercised elsewhere; this judges the admission alone.
+                host.cmd = lambda command, **kwargs: runner(command, **kwargs)
+                if change:
+                    with self.assertRaises((RuntimeError, intro.Stop)):
+                        host.state_start_admission(item, existing=False)
+                    self.assertEqual([r for r in recorded if r.get("argv") == ["state-start-admission", "pristine"]], [])
+                else:
+                    host.state_start_admission(item, existing=False)
+                    self.assertEqual(len(inspections), 2, "the pair is observed again at the serialized handoff")
+                    admitted = [r for r in recorded if r.get("argv") == ["state-start-admission", "pristine"]]
+                    self.assertEqual(len(admitted), 1)
+                    self.assertEqual(admitted[0]["volume"], args["state_volume"])
+
     def test_19_compose_creation_preserves_effective_execution_checks(self):
         """D1656-T03/T08: resolve inherited execution settings before actual up/create dispatch."""
         from types import SimpleNamespace

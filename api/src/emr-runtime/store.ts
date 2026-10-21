@@ -509,8 +509,37 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
  * (contract.ts accessDeadline); the database re-checks the floor and the holds and appends the non-personal checkpoint in
  * the deleting transaction. The history stream is never expired here (unit H). Scheduling it is not part of this unit.
  */
-export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSeal, now = new Date().toISOString()):
+/**
+ * EMR-B2 (c): what the retention job needs of the protected state, as one scope - the local owner (B1 component
+ * tests and the pure checker) or the retention-role remote session (remote-state.ts). The job keeps the deleting
+ * transaction itself; the scope prepares the prefix proof before any deletion, reserves the checkpoint under the
+ * head lock, journals a failure (no client-requested retirement on the remote path) and proves the committed checkpoint.
+ */
+export interface RetentionScope {
+  prepare(): Promise<void>;
+  expiryPrefix(through: number): Promise<ExpiryPrefix>;
+  reserve(binding: Reservation, prefix: ExpiryPrefix): Promise<CommitBinding>;
+  failed(attemptId: string, rolledBack: boolean): Promise<void>;
+  committed(binding: CommitBinding): Promise<void>;
+}
+export function localRetentionScope(seal: AccessSeal): RetentionScope {
+  return Object.freeze({
+    // Establish the retained anchor before taking the head lock. Under that lock only
+    // commits since this frontier need verification; the deletion plan is checked again by SQL.
+    async prepare() { await seal.reconcileCommitted('viewing'); },
+    expiryPrefix: (through: number) => seal.expiryPrefix(through),
+    reserve: (binding: Reservation, prefix: ExpiryPrefix) => Promise.resolve(seal.reserve(binding, prefix)),
+    async failed(attemptId: string, rolledBack: boolean) {
+      seal.recordExpiryFailure(attemptId, rolledBack);
+      if (rolledBack) seal.abort('viewing', attemptId);
+    },
+    async committed(binding: CommitBinding) { await seal.reconcileCommitted('viewing', { sequence: binding.sequence, hash: binding.hash }); },
+  });
+}
+
+export async function expireAccessPrefix(retention: PrismaClient, state: AccessSeal | RetentionScope, now = new Date().toISOString()):
   Promise<{ deleted: number; checkpointSequence: number; checkpointHash: string } | null> {
+  const scope = state instanceof AccessSeal ? localRetentionScope(state) : state;
   // Recovery may settle absent intents only before writers start. An active append may still commit.
   const rows: RetentionRow[] = [];
   let after = 0;
@@ -524,19 +553,19 @@ export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSe
   const plan = planExpiryPrefix(rows, now);
   if (!plan) return null;
   const through = plan.through, attemptId = randomUUID(), bundleId = randomUUID();
-  // Establish the retained anchor before taking the head lock. Under that lock only
-  // commits since this frontier need verification; the deletion plan is checked again by SQL.
-  await seal.reconcileCommitted('viewing');
-  let callbackFailed = false;
+  // No service (remote) or no prepared frontier (local): the job defers here, before any deleting statement.
+  await scope.prepare();
+  let callbackFailed = false, binding: CommitBinding | undefined;
   let result: { deleted: number; checkpointSequence: number; checkpointHash: string };
   try {
     result = await retention.$transaction(async tx => {
       try {
         await tx.$queryRaw`SELECT emr_access.enter_writer()::text`;
         await tx.$queryRaw`SELECT emr_access.lock_chain('viewing'::text)::text`;
-        const prefix = await seal.expiryPrefix(through);
+        // The complete proof of every entry of the prefix is published by the state owner before deletion is staged.
+        const prefix = await scope.expiryPrefix(through);
         const [row] = await tx.$queryRaw<any[]>`SELECT * FROM emr_access.expire_reserved(${through}::bigint, ${attemptId}::text, ${bundleId}::text)`;
-        const binding = seal.reserve({ stream: 'viewing', chainId: string(row.chain_id), attemptId, bundleId, kind: 'expiry', eventId: null,
+        binding = await scope.reserve({ stream: 'viewing', chainId: string(row.chain_id), attemptId, bundleId, kind: 'expiry', eventId: null,
           sequence: toNumber(row.checkpoint_sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.checkpoint_hash),
           contentSha256: sha256(row.content_sha256) }, prefix);
         if (toNumber(row.deleted_count) !== prefix.count) refuse('ExpirySnapshotChanged');
@@ -545,10 +574,12 @@ export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSe
       } catch (error) { callbackFailed = true; throw error; }
     }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS });
   } catch (error) {
-    seal.recordExpiryFailure(attemptId, callbackFailed);
-    if (callbackFailed) seal.abort('viewing', attemptId);
+    // Before any reservation exists (the service deferred the prefix, the lock failed) the journal note is best effort:
+    // an unreachable journal must not replace the deferral itself. Once reserved, a lost note is surfaced as before.
+    try { await scope.failed(attemptId, callbackFailed); }
+    catch (journalFailure) { if (binding !== undefined) throw journalFailure; }
     throw error;
   }
-  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });
+  await scope.committed(binding);
   return result;
 }
