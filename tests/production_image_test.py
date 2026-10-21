@@ -4,6 +4,12 @@ EMR-B1: the image has two entry modes. `start-production.sh migrate` applies the
 credential in its own one-shot container; `serve` (the default) opens the API with the least-privilege runtime role only
 and refuses to start, in production, on any other credential. The disposable database is provisioned first with the
 fixed provisioning SQL (roles, secrets, the dedicated tablespace on its own mount).
+
+EMR-B2 (c): the served API is a client of the protected-state service (`state-serve-v3`, the third entry mode: UID 1000,
+the reader credential, the state volume and the two IPC volumes). The API container here is the deployed shape: UID
+1001 with group 2001, the runtime credential, `KIN_EMR_STATE_SOCKET` on the read-only API IPC volume and
+`KIN_EMR_INSTANCE_ID`; it has no state volume. The service is started once the disposable database is migrated; an
+API-only stop/start reconnects to the same service.
 """
 from __future__ import annotations
 
@@ -26,6 +32,10 @@ emr_compose = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emr_compose)
 INSTALLER_URL = "postgresql://postgres@127.0.0.1:5432/kin"
 RUNTIME_URL = "postgresql://kin_runtime@127.0.0.1:5432/kin"
+READER_URL = "postgresql://kin_emr_reader@127.0.0.1:5432/kin"
+INSTANCE_ID = "production-image-synthetic-pair"
+API_IPC = "/run/kin-emr-api"
+RETENTION_IPC = "/run/kin-emr-retention"
 
 
 class ProductionImageTests(unittest.TestCase):
@@ -52,11 +62,22 @@ class ProductionImageTests(unittest.TestCase):
             raise RuntimeError("Disposable PostgreSQL did not start")
         # Trust authentication in this networkless fixture; the provisioning still requires its secret input.
         ops.run(["docker", "exec", "-u", "postgres", cls.db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
-        provisioned = subprocess.run(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex, cls.db,
+        provisioned = subprocess.run(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex,
+                                      "-e", "KIN_EMR_READER_PASSWORD=" + uuid.uuid4().hex, cls.db,
                                       "psql", "-X", "-U", "postgres", "-d", "kin"], input=emr_compose.PROVISION_SQL.encode(),
                                      capture_output=True, timeout=120)
         if provisioned.returncode:
             raise RuntimeError("EMR provisioning of the disposable database failed")
+        # EMR-B2 (c): the protected-state resources of this disposable pair - created empty here, owned by the
+        # state service alone once it starts (after the migration in test_02).
+        cls.volumes = {}
+        for suffix in ("state", "api-ipc", "retention-ipc"):
+            token = uuid.uuid4().hex
+            name = "kin-rehearsal-" + token[:16] + "-" + suffix
+            cls.addClassCleanup(ops.remove_owned_if_present, "volume", name, token)
+            ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, name])
+            cls.volumes[suffix] = name
+        cls.service = None
         print(json.dumps({"code_sha": ops.text(["git", "rev-parse", "HEAD"]),
                           "image_id": cls.image_id,
                           "revision": cls.image["Config"].get("Labels", {}).get("org.opencontainers.image.revision")}),
@@ -71,6 +92,35 @@ class ProductionImageTests(unittest.TestCase):
         ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, *arguments])
         ops.run(["docker", "start", name])
         return name
+
+    @classmethod
+    def start_service(cls):
+        """EMR-B2 (c): the protected-state service of this pair in the same image - the only process with the state
+        volume, the reader credential and both IPC volumes (UID 1000, groups 2001/2002). Started once, after the
+        migration; ready when it prints its readiness marker."""
+        if cls.service:
+            return cls.service
+        cls.service = cls.container("state-service", [
+            "--network", "container:" + cls.db, "--user", "1000:1000", "--group-add", "2001", "--group-add", "2002",
+            "--stop-timeout", "20",
+            "-e", "DATABASE_URL=" + READER_URL, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
+            "-e", "KIN_EMR_INSTANCE_ID=" + INSTANCE_ID,
+            "-e", "KIN_EMR_API_SOCKET=" + API_IPC + "/writer.sock",
+            "-e", "KIN_EMR_RETENTION_SOCKET=" + RETENTION_IPC + "/writer.sock",
+            "--mount", "type=volume,source=" + cls.volumes["state"] + ",target=" + ops.EMR_STATE,
+            "--mount", "type=volume,source=" + cls.volumes["api-ipc"] + ",target=" + API_IPC,
+            "--mount", "type=volume,source=" + cls.volumes["retention-ipc"] + ",target=" + RETENTION_IPC,
+            "--entrypoint", "sh", cls.image_id, "/app/start-production.sh", "state-serve-v3"])
+        deadline = time.monotonic() + 120
+        while True:
+            result = ops.run(["docker", "logs", cls.service])
+            text = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            if "EMR_STATE_READY" in text:
+                return cls.service
+            running = json.loads(ops.text(["docker", "inspect", cls.service]))[0]["State"]["Running"]
+            if not running or time.monotonic() > deadline:
+                raise RuntimeError("State service did not become ready: " + text[-1500:])
+            time.sleep(0.5)
 
     def migrate(self, suffix, url=INSTALLER_URL):
         """The production image's one-shot migration mode with the installer credential; returns (exit, logs)."""
@@ -90,9 +140,13 @@ class ProductionImageTests(unittest.TestCase):
             "ORTHANC_USER": "disposable-ci-only", "ORTHANC_PASS": uuid.uuid4().hex,
             "KC_ADMIN_URL": "http://127.0.0.1:1/auth", "KC_REALM": "kin",
             "KC_CLIENT_ID": "kin-api", "KC_CLIENT_SECRET": uuid.uuid4().hex,
+            # EMR-B2 (c): a client of the state service; the deployed API has no state directory.
+            "KIN_EMR_STATE_SOCKET": API_IPC + "/writer.sock", "KIN_EMR_INSTANCE_ID": INSTANCE_ID,
         }
         env.update(overrides)
-        args = ["--network", "container:" + self.db]
+        # The image's own user (1001:1001) plus the API client group of the IPC socket; the API IPC volume read-only.
+        args = ["--network", "container:" + self.db, "--group-add", "2001",
+                "--mount", "type=volume,source=" + self.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly"]
         for key, value in env.items():
             args += ["-e", key + "=" + value]
         return self.container(suffix, [*args, self.image_id])
@@ -168,6 +222,8 @@ assert.throws(()=>fs.writeFileSync('/var/lib/kin-emr/forbidden','x'),e=>e.code==
                  "require('./dist/member-rights-import').importMemberRights(db,{listUsers:async()=>({total:0,users:[]})})"
                  ".finally(()=>db.$disconnect()).catch(()=>process.exit(1));"])
         self.assertEqual(self.psql('SELECT id FROM "MemberRightsImport";'), "realm-v1")
+        # EMR-B2 (c): the state service of this pair opens over the migrated database before any API client.
+        self.start_service()
         name = self.api("healthy")
         # A failed migration assertion must not leave port3000 occupied for the drain test.
         self.addCleanup(ops.run, ["docker", "stop", "--time", "10", name])
@@ -200,6 +256,9 @@ assert.throws(()=>fs.writeFileSync('/var/lib/kin-emr/forbidden','x'),e=>e.code==
         self.assertNotEqual(state["ExitCode"], 137, "Shutdown needed SIGKILL")
         ops.run(["docker", "start", name])
         self.wait_running_api(name)
+        # The API-only restart reconnected to the same running service; the service never restarted.
+        self.assertTrue(json.loads(ops.text(["docker", "inspect", self.service]))[0]["State"]["Running"])
+        self.assertEqual(ops.text(["docker", "inspect", "-f", "{{.RestartCount}}", self.service]), "0")
         self.assertEqual(self.psql(history_query), history)
         self.assertEqual(self.psql("SELECT value FROM c1_probe;"), "preserved")
         code, logs = self.migrate("migrate-again")
@@ -219,9 +278,24 @@ assert.throws(()=>fs.writeFileSync('/var/lib/kin-emr/forbidden','x'),e=>e.code==
         """EMR-B1 start boundary: in production the server opens only as the least-privilege runtime role."""
         name = self.api("installer", DATABASE_URL=INSTALLER_URL)
         logs = self.stopped_with_error(name)
-        self.assertIn("EmrRuntimeRefused", logs)
+        # EMR-B2 (c): the launcher prints one closed line - the phase and the refusal class, never the problems,
+        # a connection string or provider text - and the role phase precedes any state-service session.
+        self.assertIn("기동 실패(role/EmrRuntimeRefused)", logs)
+        self.assertNotIn("postgresql://", logs)
         for problem in ("not-the-runtime-role", "rolsuper"):
-            self.assertIn(problem, logs)
+            self.assertNotIn(problem, logs)
+        # The refusal itself still names the installer's problems: the same compiled check, in the image, over the
+        # same connection the API was handed.
+        problems = ops.text(["docker", "run", "--rm", "--network", "container:" + self.db,
+                             "-e", "DATABASE_URL=" + INSTALLER_URL, "--entrypoint", "node", self.image_id, "-e",
+                             "const {PrismaService}=require('./dist/prisma.service');"
+                             "const {verifyRuntimeConnection}=require('./dist/emr-runtime/manifest');const db=new PrismaService();"
+                             "verifyRuntimeConnection(db).then(()=>{console.log('accepted');process.exitCode=1},"
+                             "e=>{console.log(JSON.stringify(e.name==='EmrRuntimeRefused'?e.problems:['unexpected']))})"
+                             ".finally(()=>db.$disconnect())"])
+        problems = json.loads(problems.splitlines()[-1])
+        for problem in ("not-the-runtime-role", "rolsuper"):
+            self.assertIn(problem, problems)
 
     def test_04_production_refuses_disabled_auth(self):
         """TEST-C1-03: packaging must retain the production authentication guard."""

@@ -1,11 +1,15 @@
 /* D889 B -> RISK-EMR-STALE-WRITER -> LOCK-01.
- * Linux production image, real flock(1), independent processes, no DB. */
+ * Linux production image, real flock(1), independent processes, no DB.
+ * EMR-B2 (c): the coordinator is the state service's local primitive alone - there is no API or retention role on the
+ * fence any more (clients reach the service over its sockets), so the only lifetime-fence relation between processes
+ * is one owner per state directory: a second process on the same directory is refused while the first lives and
+ * acquires only after its death. */
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const cp = require('node:child_process'), assert = require('node:assert/strict');
 const { lockFile } = require('/app/dist/emr-runtime/file-lock');
 const { StateCoordinator } = require('/app/dist/emr-runtime/coordinator');
-if (['child', 'retention', 'crash', 'crash-journal'].includes(process.argv[2])) {
-  const owner = new StateCoordinator(process.argv[3], undefined, process.argv[2] === 'retention' ? 'retention' : 'api');
+if (['child', 'crash', 'crash-journal'].includes(process.argv[2])) {
+  const owner = new StateCoordinator(process.argv[3]);
   if (process.argv[2].startsWith('crash')) {
     const writer = require('/app/dist/emr-runtime/external-writer'), execute = writer.executeExternal;
     writer.executeExternal = request => {
@@ -24,26 +28,20 @@ if (['child', 'retention', 'crash', 'crash-journal'].includes(process.argv[2])) 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-lock-'));
     let child;
     try {
-      // A job started before the API must leave the lifetime fence available.
-      const ordered = path.join(dir, 'job-first'); fs.mkdirSync(ordered, { mode: 0o700 });
-      child = cp.spawn(process.execPath, [__filename, 'retention', ordered], { stdio: ['ignore', 'pipe', 'inherit'] });
+      // EMR-B2 (c): one owner per state directory. A second process on the directory of a living owner is refused
+      // at construction, performs no protected write and takes nothing; after the owner's death the same directory
+      // admits the next owner, which recovers the durable state the first one published.
+      const ordered = path.join(dir, 'second-owner'); fs.mkdirSync(ordered, { mode: 0o700 });
+      child = cp.spawn(process.execPath, [__filename, 'child', ordered], { stdio: ['ignore', 'pipe', 'inherit'] });
       await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject); });
-      const api = new StateCoordinator(ordered);
-      const initialized = api.call('update', state => { state.generation++; return state.generation; });
-      assert.equal(initialized.result, 1, 'API acquires the fence even though the retention process started first');
-      // Kill the job exactly during a protected API mutation. Since the API owns
-      // the fence, its durable mutation and response survive the job's exit.
-      const jobExit = new Promise(resolve => child.once('exit', resolve));
-      const mutation = api.call('update', state => { child.kill('SIGKILL'); state.generation++; return state.generation; });
-      await jobExit;
-      assert.equal(mutation.result, 2);
-      assert.equal(api.call('read').generation, 2, 'job exit cannot interrupt API mutation');
-      const absent = path.join(dir, 'api-absent'); fs.mkdirSync(absent, { mode: 0o700 });
-      const job = new StateCoordinator(absent, undefined, 'retention'), started = performance.now();
-      assert.throws(() => job.call('read'), { code: 'SealUnavailable' }, 'job without API defers');
-      assert(performance.now() - started < 10000, 'bounded client retries finish before the 15 s deleting transaction');
-      const fdProbe = fs.openSync(path.join(absent, 'writer.lock'), 'a+', 0o600);
-      assert(lockFile(fdProbe, true, true), 'retention never takes the owner fence'); fs.closeSync(fdProbe);
+      const started = performance.now();
+      assert.throws(() => new StateCoordinator(ordered), { code: 'SealUnavailable' }, 'same-directory second owner is refused while the first lives');
+      assert(performance.now() - started < 10000, 'the refusal is bounded');
+      assert(!fs.existsSync(path.join(ordered, 'journal')), 'refused second owner performs no protected write');
+      const firstExit = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await firstExit;
+      const successor = new StateCoordinator(ordered);
+      const initialized = successor.call('update', state => { state.generation++; return state.generation; });
+      assert.equal(initialized.result, 1, 'after the owner dies the same directory admits the next owner over its durable state');
       child = cp.spawn(process.execPath, [__filename, 'child', dir], { stdio: ['ignore', 'pipe', 'inherit'] });
       const owner = await new Promise((resolve, reject) => {
         child.stdout.once('data', value => resolve(value.toString().trim())); child.once('error', reject);
@@ -98,7 +96,7 @@ if (['child', 'retention', 'crash', 'crash-journal'].includes(process.argv[2])) 
       samples.sort((a, b) => a - b);
       console.log(JSON.stringify({ case: 'LOCK-01', cycles: samples.length, processDeathReleased: true,
         failedAcquisitionRefused: true, survivingPeerTakesOver: true, ambiguousMutationRefused: true, keyedJournalRecoveredOnce: true, deadOwnersSwept: true, liveOwnersPreserved: true,
-        jobFirstApiOwns: true, jobExitDuringApiMutationSafe: true, absentApiDefers: true,
+        sameDirectorySecondOwnerRefused: true, deadOwnerDirectoryAdmitsSuccessor: true,
         flock_pair_us: { p50: samples[49], p95: samples[94], p99: samples[98] } }));
     } finally { if (child?.exitCode === null) child.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
   })().catch(error => { console.error(error); process.exitCode = 1; });

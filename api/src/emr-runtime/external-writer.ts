@@ -9,6 +9,7 @@ import { parseCommitBinding, parseSealedBundleProof } from './state-protocol';
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sameLegacy = (a: unknown, b: unknown) => hash(a) === hash(b);
+const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value));
 const fail = (code: string) => { throw Object.assign(new Error(code), { code }); };
 function atomic(file: string, value: unknown): void {
   const temporary = path.join(path.dirname(file), '.tmp-' + randomBytes(12).toString('hex'));
@@ -41,6 +42,41 @@ export interface StateLineage { version: 1; id: string; origin: PairIdentity }
 export const samePair = (a: PairIdentity, b: PairIdentity) => a && b && a.instanceId === b.instanceId &&
   a.chains.viewing === b.chains.viewing && a.chains.history === b.chains.history &&
   (['database', 'oid', 'address', 'port'] as const).every(k => a.database[k] === b.database[k]);
+
+/**
+ * EMR-B2 (c) v3 private copy (D1656-T07): a captured pair restored as a labelled private copy keeps its origin
+ * lineage unchanged while the physical database it is paired with is another one (new oid/address, the same chain
+ * identifiers because the chains themselves were restored). Only the trusted restore launcher supplies this mapping,
+ * launch-scoped (never persisted, never a wire field): the recovery root admits the copy when the stored origin is
+ * exactly `source`, the independently observed database is exactly `target`, and both share the chains. Clients cannot
+ * select a namespace: the protocol has no such field and the service reports the target pair as its own.
+ */
+export interface CopyMapping { source: PairIdentity; target: PairIdentity }
+function validPair(value: any): value is PairIdentity {
+  return isRecord(value) && keys(value, ['instanceId', 'chains', 'database']) && text(value.instanceId) &&
+    keys(value.chains, ['viewing', 'history']) && uuid(value.chains.viewing) && uuid(value.chains.history) &&
+    keys(value.database, ['database', 'oid', 'address', 'port']) && text(value.database.database) && integer(value.database.oid, 1) &&
+    (value.database.address === null || text(value.database.address)) && (value.database.port === null || integer(value.database.port, 1));
+}
+export function parseCopyMapping(raw: unknown): CopyMapping {
+  const value = raw as any;
+  if (!isRecord(value) || !keys(value, ['source', 'target']) || !validPair(value.source) || !validPair(value.target) ||
+    value.source.chains.viewing !== value.target.chains.viewing || value.source.chains.history !== value.target.chains.history ||
+    samePair(value.source, value.target)) return fail('SealChainMismatch');
+  return { source: clone(value.source), target: clone(value.target) };
+}
+/** The admit-pair value: the observed pair alone, or the observed target with the launch-scoped copy mapping. */
+export interface PairAdmission { pair: PairIdentity; copy: CopyMapping | null }
+export function pairAdmission(raw: unknown): PairAdmission {
+  const value = raw as any;
+  if (isRecord(value) && keys(value, ['pair', 'copy'])) {
+    const copy = value.copy === null ? null : parseCopyMapping(value.copy);
+    if (!validPair(value.pair) || (copy && !samePair(copy.target, value.pair))) return fail('SealChainMismatch');
+    return { pair: clone(value.pair), copy };
+  }
+  if (!validPair(value)) return fail('SealChainMismatch');
+  return { pair: clone(value), copy: null };
+}
 export interface ExternalState {
   version: 3; revision: number; generation: number; tail: any;
   lineage: StateLineage | null; bundles: Record<string, BundleAttestation>;
@@ -238,8 +274,7 @@ function validate(state: ExternalState): void {
 }
 interface Envelope { state: ExternalState; publishing: boolean; digest: string }
 interface Cached { base: string; offset: number; envelope: Envelope }
-export interface WriterContext { pair?: PairIdentity; tailFile?: { file: string; ino: number; fd: number }; checkpoint?: { stamp: string; envelope: Envelope }; journal?: JournalFile; settlement?: Cached; log?: { file: string; ino: number; fd: number } }
-const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value));
+export interface WriterContext { pair?: PairIdentity; copy?: CopyMapping | null; tailFile?: { file: string; ino: number; fd: number }; checkpoint?: { stamp: string; envelope: Envelope }; journal?: JournalFile; settlement?: Cached; log?: { file: string; ino: number; fd: number } }
 function readTail(file: string, context: WriterContext): any {
   const info = fs.lstatSync(file, { throwIfNoEntry: false });
   if (!info) return null;
@@ -405,7 +440,9 @@ export function executeExternal(request: WriterRequest): any {
   try {
   const file = path.join(directory, 'seal', 'settlement.json'), tailFile = path.join(directory, 'seal', 'tail.json');
   const log = path.join(directory, 'seal', 'settlement.jsonl');
-  inspectExternal(directory, operation === 'admit-pair' ? value : context.pair);
+  // A private copy is inspected against its stored origin (the mapping's source), never against the target.
+  const admission = operation === 'admit-pair' ? pairAdmission(value) : null;
+  inspectExternal(directory, admission ? admission.copy?.source ?? admission.pair : context.pair);
   // Version admission precedes even journal-tail repair. Unsupported sources remain
   // available to offline capture, but never become writable merely because maps are empty.
   const source = checkpoint(file, context);
@@ -420,9 +457,13 @@ export function executeExternal(request: WriterRequest): any {
     if (hasFiles('seal') || hasFiles('journal') || hasFiles('expiry-evidence')) return fail('SealMissing');
   }
   if (operation === 'admit-pair') {
-    if (source && !samePair(source.state.lineage?.origin, value)) return fail('SealChainMismatch');
+    const origin = admission.copy ? admission.copy.source : admission.pair;
+    // A copy mapping needs a stored lineage to map from; a pristine pair has none and takes no mapping.
+    if (admission.copy && !source) return fail('SealMissing');
+    if (source && !samePair(source.state.lineage?.origin, origin)) return fail('SealChainMismatch');
     if (source) replay(log, { base: source.digest, offset: 0, envelope: clone(source) }, source.state.revision, false);
-    context.pair = clone(value);
+    context.pair = clone(origin);
+    context.copy = admission.copy;
     return;
   }
   if (operation.startsWith('journal-')) {

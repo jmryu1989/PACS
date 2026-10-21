@@ -13,6 +13,7 @@ import { EMR_STATE_IPC_TIMEOUT_MS, EMR_STATE_MAX_OPERATIONS, EMR_STATE_MAX_SCOPE
 import { databaseIdentity, EMR_STATE_IDENTITIES, verifyStateServiceConnection } from './manifest';
 import { BundleIdentity, encodeStateFrame, PairIdentity, parseStateRequest, parseStateResponse,
   ExpiryPrefix, SealedBundleProof, StateFrameReader, StateProtocolError, StateRequest, StateResponse, StateRole } from './state-protocol';
+import { CopyMapping, parseCopyMapping, samePair } from './external-writer';
 
 interface Session { token: string; role: StateRole; client: string; socket: Socket; live: boolean }
 interface Scope {
@@ -81,11 +82,18 @@ export async function launchStateService(environment: NodeJS.ProcessEnv = proces
     const viewing = await sql.tail('viewing'); check();
     const history = await sql.tail('history'); check();
     const pair = { instanceId, database, chains: { viewing: viewing.chainId, history: history.chainId } };
-    coordinator.call('admit-pair', pair); check();
+    // D1656-T07: a trusted restore launcher may hand this root the launch-scoped copy mapping; the observed pair
+    // must be exactly its target. It is never read from the wire and never persisted.
+    let copy: CopyMapping | null = null;
+    if (environment.KIN_EMR_COPY_MAPPING !== undefined) {
+      try { copy = parseCopyMapping(JSON.parse(environment.KIN_EMR_COPY_MAPPING)); } catch { refuse('PROTOCOL'); }
+      if (!samePair(copy.target, pair)) refuse('CONFLICT', 'conflict');
+    }
+    coordinator.call('admit-pair', copy ? { pair, copy } : pair); check();
     const journal = new FailureJournal(directory, coordinator);
     const seal = new AccessSeal(directory, sql, journal);
     service = new ProtectedStateService({ coordinator, journal, sql, seal,
-      pair }, () => { failed = true; latch(); });
+      pair, copy }, () => { failed = true; latch(); });
     for (const endpoint of endpoints) {
       check();
       const prior = fs.lstatSync(endpoint.file, { throwIfNoEntry: false });
@@ -137,7 +145,10 @@ export async function launchStateService(environment: NodeJS.ProcessEnv = proces
 }
 export interface StateServiceResources {
   coordinator: StateCoordinator; journal: FailureJournal; seal: AccessSeal; sql: PrismaLedgerSql;
+  /** The pair clients observe and the service reports: the target of a private copy, else the stored origin. */
   pair: PairIdentity;
+  /** The launch-scoped private-copy mapping (D1656-T07), or null for the original pair. */
+  copy?: CopyMapping | null;
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const refuse = (code: StateProtocolError['code'], outcome: StateProtocolError['outcome'] = 'not-started'): never => {
@@ -174,7 +185,7 @@ export class ProtectedStateService {
     this.phase = 'starting';
     this.startup = (async () => {
       try {
-        const recovered = await this.resources.seal.recoverAtStart(this.resources.pair, this.serviceEpoch);
+        const recovered = await this.resources.seal.recoverAtStart(this.resources.pair, this.serviceEpoch, this.resources.copy ?? null);
         if (this.phase !== 'starting') refuse('STOPPING');
         if (recovered.seal.streams.viewing.chainId !== this.resources.pair.chains.viewing ||
           recovered.seal.streams.history.chainId !== this.resources.pair.chains.history) refuse('CONFLICT', 'conflict');

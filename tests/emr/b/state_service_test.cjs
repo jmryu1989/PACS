@@ -70,9 +70,9 @@ async function fixture(t, options = {}) {
   const database = options.model ?? model();
   const coordinator = new StateCoordinator(directory, executeExternal);
   const journal = new FailureJournal(directory, coordinator), seal = new AccessSeal(directory, database.sql, journal);
-  const pair = { instanceId: 'synthetic-copy', chains: Object.fromEntries(Object.entries(database.streams).map(([s, v]) => [s, v.chainId])),
-    database: { database: 'isolated', oid: 10001, address: '127.0.0.1', port: 5432 } };
-  const service = new ProtectedStateService({ coordinator, journal, seal, sql: database.sql, pair });
+  const pair = { instanceId: options.pair?.instanceId ?? 'synthetic-copy', chains: Object.fromEntries(Object.entries(database.streams).map(([s, v]) => [s, v.chainId])),
+    database: options.pair?.database ?? { database: 'isolated', oid: 10001, address: '127.0.0.1', port: 5432 } };
+  const service = new ProtectedStateService({ coordinator, journal, seal, sql: database.sql, pair, copy: options.copy ?? null });
   const peers = [];
   t.after(async () => { service.close(); for (const socket of peers) socket.destroy(); await service.drained(); coordinator.close(); });
   if (!options.cold) await service.start();
@@ -1124,6 +1124,52 @@ test('D1656-T01 complete incompatible WAL and wrong pairs refuse before torn jou
       admitted.call('journal-load'), 'an existing owner must revalidate before journal access');
     assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'existing-owner refusal must precede journal repair');
   }
+});
+
+test('D1656-T07 a v3 private copy paired with another physical database is admitted only under the launch-scoped source-to-target mapping; origin lineage, proofs and exclusions survive and the source is never written', async t => {
+  const f = await fixture(t), work = await (await f.hello()).work();
+  const original = await complete(f, work, true), pending = await f.reserve(work, event(false));
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const before = directoryHashes(f.directory), copy = f.directory + '-private';
+  fs.cpSync(f.directory, copy, { recursive: true, errorOnExist: true });
+  const restored = () => model(structuredClone(f.database.streams));
+  const target = { instanceId: 'private-copy', database: { database: 'restored', oid: 20002, address: '10.0.0.2', port: 5433 } };
+  const targetPair = { ...target, chains: f.pair.chains }, mapping = { source: f.pair, target: targetPair };
+  const copyBytes = directoryHashes(copy);
+  // Without the mapping the copy is a wrong pair; a mapping whose source is not the stored origin, or whose target is
+  // not the observed database, is refused as well - all before any recovery write.
+  for (const [label, options] of [
+    ['no mapping', { pair: target }],
+    ['wrong source', { pair: target, copy: { source: { ...f.pair, instanceId: 'other-origin' }, target: targetPair } }],
+    ['wrong target', { pair: { ...target, database: { ...target.database, oid: 30003 } }, copy: mapping }],
+    ['original pair with a mapping', { copy: mapping }],
+  ]) {
+    await assert.rejects(fixture(t, { directory: copy, model: restored(), ...options }), error => error.code === 'SealChainMismatch', label);
+    assert.equal(JSON.stringify(directoryHashes(copy)), JSON.stringify(copyBytes), label + ': refusal writes nothing');
+  }
+  assert.throws(() => load('emr-runtime/external-writer').parseCopyMapping({ source: f.pair, target: f.pair }), { code: 'SealChainMismatch' });
+  // The correct mapping: ready, the service reports the target pair, the original proof and exclusions stand.
+  const g = await fixture(t, { directory: copy, model: restored(), pair: target, copy: mapping });
+  assert.equal(g.service.state, 'ready');
+  const peer = await g.hello(), gw = await peer.work();
+  assert.deepEqual([peer.reply.result.instanceId, peer.reply.result.database], [target.instanceId, target.database], 'clients observe the target pair');
+  assert.equal(g.coordinator.call('read').lineage.origin.instanceId, f.pair.instanceId, 'origin lineage is not rewritten');
+  const outcome = await gw.call('lookup-outcome', original.bundle);
+  assert.equal(outcome.result.outcome, 'committed-and-sealed');
+  assert.equal(JSON.stringify(outcome.result.proof), JSON.stringify(original.proof), 'the original canonical proof survives the copy');
+  for (const b of original.bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+  assert.equal((await gw.call('lookup-outcome', pending.bundle)).result.outcome, 'fenced-not-committed', 'the copy settled the pending attempt under its own fence');
+  await complete(g, gw, true);
+  // A client cannot supply a mapping over the wire, and the source directory was never touched.
+  const forged = { v: 1, requestId: randomUUID(), serviceEpoch: null, session: null, workId: null, operation: 'hello',
+    value: { protocol: 1, clientInstanceId: randomUUID(), copy: mapping } };
+  await assert.rejects(g.service.dispatch('api', forged, new net.Socket()), { code: 'PROTOCOL' });
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'source bytes unchanged');
+  // A restart of the copy needs the same mapping again: it is launch-scoped, never persisted.
+  g.service.close(); await g.service.drained(); g.coordinator.close();
+  await assert.rejects(fixture(t, { directory: copy, model: g.database, pair: target }), error => error.code === 'SealChainMismatch');
+  const h = await fixture(t, { directory: copy, model: g.database, pair: target, copy: mapping });
+  assert.equal(h.service.state, 'ready');
 });
 
 test('D1656-T04 a changed physical root cannot reuse a prior coordinator admission', async t => {

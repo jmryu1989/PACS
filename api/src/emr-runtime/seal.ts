@@ -3,7 +3,7 @@ import { ACCESS_STREAMS, AccessStream, ChainPosition, accessStreams, parseAccess
 import { integer, refuse } from '../emr-contract/validation';
 import { ChainTail, StoredEntry, chainViolation, retainedAnchor, canonicalPayload, entryHash } from './contract';
 import { FailureJournal } from './failure-journal';
-import { ExternalState, attestedProof, samePair, validateAttemptIdentities } from './external-writer';
+import { CopyMapping, ExternalState, attestedProof, samePair, validateAttemptIdentities } from './external-writer';
 import { BundleIdentity, PairIdentity, SealedBundleProof, StateProtocolError } from './state-protocol';
 import type { PrismaLedgerSql, VerificationPage } from './store';
 import { EMR_REPLAY_VERIFY_ROWS } from './limits';
@@ -519,11 +519,15 @@ export class AccessSeal {
   /** The DB exclusive writer fence is held through both positive verification and negative settlement.
    * Every append/expiry must take its shared transaction fence before publishing an intent.
    */
-  recoverAtStart(pair?: PairIdentity, serviceEpoch?: string): Promise<{ seal: SealState; recovered: number; notCommitted: number; streams: Record<AccessStream, RecoveryCount> }> {
+  recoverAtStart(pair?: PairIdentity, serviceEpoch?: string, copy: CopyMapping | null = null): Promise<{ seal: SealState; recovered: number; notCommitted: number; streams: Record<AccessStream, RecoveryCount> }> {
     this.origins = new WeakMap();
     if (serviceEpoch) this.proofEpoch = serviceEpoch;
+    if (copy && !pair) throw new SealRefused('SealChainMismatch', 'copy-target');
     return this.sql.withWriterFence(async sql => {
-      if (pair) this.journal.coordinator.call('admit-pair', pair);
+      // A private copy (D1656-T07) is admitted against its stored origin through the launch-scoped mapping; the
+      // observed pair must be exactly the mapping's target. The origin lineage itself is never rewritten.
+      if (pair) this.journal.coordinator.call('admit-pair', copy ? { pair, copy } : pair);
+      if (copy && !samePair(pair, copy.target)) throw new SealRefused('SealChainMismatch', 'copy-target');
       this.read();
       // Refuse contradictory identities before journal settlement, publication
       // or compaction can normalize away the evidence.
@@ -531,6 +535,8 @@ export class AccessSeal {
       const tails = {} as Record<AccessStream, ChainTail>;
       for (const stream of ACCESS_STREAMS) tails[stream] = await sql.tail(stream);
       if (this.read() === 'absent') {
+        // A pristine pair: no mapping can apply (there is no stored origin to map from).
+        if (copy) throw new SealRefused('SealMissing', 'copy-source');
         if (ACCESS_STREAMS.some(s => tails[s].sequence !== 0)) throw new SealRefused('SealMissing');
         const origin: PairIdentity = pair ?? { instanceId: 'local-owner', database: await sql.identity(),
           chains: { viewing: tails.viewing.chainId, history: tails.history.chainId } };
@@ -540,9 +546,9 @@ export class AccessSeal {
         state.generation = 1; state.revision = 1;
         this.journal.coordinator.call('initialize', state);
       }
-      const origin = this.load().lineage.origin;
+      const origin = this.load().lineage.origin, expected = copy ? copy.source : pair;
       if (ACCESS_STREAMS.some(s => origin.chains[s] !== tails[s].chainId) ||
-        pair && !samePair(origin, pair) || !pair && !same(origin.database, await sql.identity()))
+        expected && !samePair(origin, expected) || !expected && !same(origin.database, await sql.identity()))
         throw new SealRefused('SealChainMismatch', 'capture-lineage');
       const counts = {} as Record<AccessStream, RecoveryCount>;
       this.flushNotFound();
