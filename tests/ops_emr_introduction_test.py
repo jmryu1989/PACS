@@ -1605,7 +1605,7 @@ class FakeDocker:
             labels = {"org.opencontainers.image.revision": release["sha"]} if release else {}
             labels.update(self.image_labels)
             return self.result(stdout=json.dumps([{"Id": self.tags.get(args[3], args[3]),
-                                                   "Config": {"User": "node", "Labels": labels, "Env": [],
+                                                   "Config": {"User": "node", "Labels": labels, "Env": [], "WorkingDir": "/app",
                                                               "Volumes": self.image_volumes.get(args[3], {})}}]))
         if args[:3] == ["docker", "network", "inspect"]:
             name = args[3]
@@ -4160,6 +4160,15 @@ class StateClientLaunchTests(unittest.TestCase):
             lambda c: c["HostConfig"].update(Privileged=True),
             lambda c: c["HostConfig"].update(PidMode="host"),
             lambda c: c["HostConfig"].update(CapAdd=["SYS_ADMIN"]),
+            lambda c: c["HostConfig"].update(Devices=[{"PathOnHost": "/dev/sda", "PathInContainer": "/dev/raw"}]),
+            lambda c: c["HostConfig"].update(Tmpfs={"/app": "rw"}),
+            lambda c: c["HostConfig"].update(SecurityOpt=["seccomp=unconfined"]),
+            lambda c: c["HostConfig"].update(NetworkMode="container:former-owner"),
+            lambda c: c["Config"].update(WorkingDir="/tmp"),
+            lambda c: c["Config"].update(Healthcheck={"Test": ["CMD", "node", "other.js"]}),
+            lambda c: c["Config"]["Env"].append("NODE_OPTIONS=--require=/tmp/other.cjs"),
+            lambda c: c["Config"]["Env"].append("LD_PRELOAD=/tmp/loader.so"),
+            lambda c: c["Config"]["Env"].append("PRISMA_QUERY_ENGINE_LIBRARY=/tmp/engine.node"),
             lambda c: c["Config"].update(Entrypoint=["node"]),
             lambda c: c["Config"].update(Cmd=["serve", "extra"]),
             lambda c: c.update(Args=["/app/start-production.sh", "state-serve-v3"]),
@@ -4199,11 +4208,13 @@ class StateClientLaunchTests(unittest.TestCase):
         from types import SimpleNamespace
         for change in (None, "state-mount", "host-mount", "reader-url", "owner-setting", "old-user", "command",
                        "override-mount", "implicit-volume", "unreviewed-image", "hidden-label-option", "extra-group",
-                       "node-option", "smoke-option", "smoke-operation"):
+                       "node-option", "smoke-option", "smoke-operation", "loader-env", "image-reader-env",
+                       "working-dir", "healthcheck", "devices", "device-reservation", "namespace", "tmpfs", "hook", "config-mount"):
             with self.subTest(change=change):
                 _, args = self.fixture()
                 service = {"image": args["release"]["images"]["api"], "environment": {}, "volumes": []}
-                model = {"services": {"api": service}, "volumes": {"state": {"name": args["state_volume"]}}}
+                model = {"services": {"api": service}, "volumes": {"state": {"name": args["state_volume"]}},
+                         "networks": {"default": {"name": "fixture_default"}}}
                 command = ["run", "--no-deps", "-T", "--name", "fixture-helper-1", "--entrypoint", "node", "--user", "1001:1001",
                            "api", "-e", intro.SERVERINFO_SCRIPT]
                 if change == "state-mount": service["volumes"] = [{"type": "volume", "source": "state", "target": pre.EMR_STATE}]
@@ -4220,6 +4231,16 @@ class StateClientLaunchTests(unittest.TestCase):
                 if change == "implicit-volume": args["image"]["Config"]["Volumes"] = {pre.EMR_STATE: {}}
                 if change == "unreviewed-image": service["image"] = "sha256:" + "0" * 64
                 if change == "extra-group": service["group_add"] = ["2002"]
+                if change == "loader-env": service["environment"]["NODE_OPTIONS"] = "--require=/tmp/other.cjs"
+                if change == "image-reader-env": args["image"]["Config"]["Env"].append("KIN_EMR_READER_PASSWORD=synthetic")
+                if change == "working-dir": service["working_dir"] = "/tmp"
+                if change == "healthcheck": service["healthcheck"] = {"test": ["CMD", "node", "other.js"]}
+                if change == "devices": service["devices"] = ["/dev/sda:/dev/raw"]
+                if change == "device-reservation": service["deploy"] = {"resources": {"reservations": {"devices": [{"capabilities": ["gpu"]}]}}}
+                if change == "namespace": service["network_mode"] = "container:old-owner"
+                if change == "tmpfs": service["tmpfs"] = ["/app"]
+                if change == "hook": service["post_start"] = [{"command": "node other.js"}]
+                if change == "config-mount": service["configs"] = [{"source": "other", "target": "/app/start-production.sh"}]
                 host = object.__new__(intro.HostOps)
                 host.intro = None; host.names = {"api": "kin-api"}
                 host.t = {"project": "fixture", "containers": host.names, "volumes": {"emr_state": args["state_volume"]}}
@@ -4301,6 +4322,75 @@ class StateClientLaunchTests(unittest.TestCase):
                         self.assertEqual(launches, [])
         host.compose(["config", "--format", "json"], files=["-f", "unbound.yml"], mutating=False)
         self.assertEqual(len(launches), 1, "read-only configuration inspection remains available")
+
+    def test_19_compose_creation_preserves_effective_execution_checks(self):
+        """D1656-T03/T08: resolve inherited execution settings before actual up/create dispatch."""
+        from types import SimpleNamespace
+        for role in ("api", "emr-state"):
+            for change in (None, "loader", "path", "engine", "cwd", "healthcheck", "tmpfs", "device", "device-reservation",
+                           "namespace", "security", "config", "hook", "image-owner-secret", "init", "signal"):
+                with self.subTest(role=role, change=change):
+                    item, args = self.client_fixture() if role == "api" else self.fixture()
+                    names = {"api": "kin-api", "db": "kin-db"}
+                    service = {"image": item["Image"], "container_name": item["Name"].lstrip("/"),
+                               "entrypoint": item["Config"]["Entrypoint"], "command": item["Config"]["Cmd"],
+                               "user": item["Config"]["User"], "group_add": item["HostConfig"]["GroupAdd"],
+                               "restart": "no", "environment": dict(e.split("=", 1) for e in item["Config"]["Env"]
+                                                                         if not e.startswith(("PATH=", "NODE_ENV="))),
+                               "volumes": [{"type": "volume", "source": m["Name"], "target": m["Destination"]} for m in item["Mounts"]]}
+                    model = {"services": {role: service}, "networks": {"default": {"name": "fixture_default"}},
+                             "volumes": {m["Name"]: {"name": m["Name"]} for m in item["Mounts"]}}
+                    if change == "loader": service["environment"]["NODE_OPTIONS"] = "--require=/tmp/other.cjs"
+                    if change == "path": service["environment"]["PATH"] = "/tmp/bin"
+                    if change == "engine": service["environment"]["PRISMA_QUERY_ENGINE_LIBRARY"] = "/tmp/engine.node"
+                    if change == "cwd": service["working_dir"] = "/tmp"
+                    if change == "healthcheck": service["healthcheck"] = {"test": ["CMD", "node", "other.js"]}
+                    if change == "tmpfs": service["tmpfs"] = ["/app"]
+                    if change == "device": service["devices"] = ["/dev/sda:/dev/raw"]
+                    if change == "device-reservation": service["deploy"] = {"resources": {"reservations": {"devices": [{"capabilities": ["gpu"]}]}}}
+                    if change == "namespace": service["network_mode"] = "container:old-owner"
+                    if change == "security": service["security_opt"] = ["seccomp=unconfined"]
+                    if change == "config": service["configs"] = [{"source": "replacement", "target": "/app/start-production.sh"}]
+                    if change == "hook": service["post_start"] = [{"command": "node other.js"}]
+                    if change == "init": service["init"] = True
+                    if change == "signal": service["stop_signal"] = "SIGUSR1"
+                    if change == "image-owner-secret":
+                        args["image"]["Config"]["Env"].append("KIN_EMR_READER_PASSWORD=synthetic" if role == "api"
+                                                              else "KIN_EMR_RUNTIME_PASSWORD=synthetic")
+                    host = object.__new__(intro.HostOps)
+                    host.intro = None; host.names = names
+                    host.t = {"project": "fixture", "containers": names,
+                              "volumes": {"emr_state": args["state_volume"], "pg": "fixture_pg", "emr_access": "fixture_access"}}
+                    host.plan = {"release": args["release"]}; host.records = SimpleNamespace(command=lambda value: None)
+                    host.entry_inputs = {}; host.publish_entry = lambda override, project: "pinned"
+                    host.entry = SimpleNamespace(argv=lambda arguments, pointer: (["docker", "compose", *arguments], {}))
+                    host.text = lambda command: ""
+                    host.volume_identity = lambda name: {"name": name, "created": "original"}
+                    host.inspect = lambda role: {"Id": "db", "Image": args["release"]["images"]["db"], "State": {"Running": True},
+                        "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "fixture_pg"},
+                                   {"Destination": "/var/lib/postgresql/emr-access", "Name": "fixture_access"}]}
+                    launches = []
+                    def runner(command, **kwargs):
+                        if command[:3] == ["docker", "compose", "config"]:
+                            value = json.dumps(model).encode()
+                        elif command[:3] == ["docker", "image", "inspect"]:
+                            value = json.dumps([args["image"]]).encode()
+                        elif command[:2] == ["docker", "run"]:
+                            self.assertTrue(any(word.endswith(",readonly") for word in command))
+                            value = ('KIN_RESULT ' + json.dumps({"version": 3, "lineage": "synthetic-lineage",
+                                     "fingerprint": "a" * 64, "pair": {"instanceId": "fixture"}})).encode()
+                        elif command[:3] in (["docker", "compose", "up"], ["docker", "compose", "create"]):
+                            launches.append(command); value = b""
+                        else:
+                            self.fail("Unexpected creation boundary " + str(command[:3]))
+                        return subprocess.CompletedProcess(command, 0, value, b"")
+                    host.run = runner
+                    for operation in ("up", "create"):
+                        if change:
+                            with self.assertRaises(RuntimeError): host.compose([operation, "--no-deps", role], mutating=True)
+                        else:
+                            host.compose([operation, "--no-deps", role], mutating=True)
+                    self.assertEqual(len(launches), 0 if change else 2)
 
 
 if __name__ == "__main__":

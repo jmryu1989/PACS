@@ -4353,14 +4353,14 @@ class HostOps:
             entrypoint, command = service.get("entrypoint"), service.get("command")
             require(entrypoint == pre.STATE_ENTRYPOINT and command == (pre.STATE_COMMAND if role == "emr-state" else ["serve"]),
                     "Compose state role entry mode differs")
+            image = decode(self.cmd(["docker", "image", "inspect", self.plan["release"]["images"]["api"]]).stdout)[0]
+            execution = pre.state_compose_execution(service, image, (model.get("networks", {}).get("default") or {}).get("name"))
             container = {"Name": "/" + service["container_name"], "Image": service.get("image"),
                 "Path": entrypoint[0], "Args": [*entrypoint[1:], *command], "Mounts": mounts,
-                "Config": {"User": service.get("user"), "Entrypoint": entrypoint, "Cmd": command,
-                           "Labels": {"com.docker.compose.service": role},
-                           "Env": [key + "=" + str(value) for key, value in (service.get("environment") or {}).items()]},
-                "HostConfig": {"GroupAdd": service.get("group_add"), "Privileged": service.get("privileged", False),
-                    "NetworkMode": (model.get("networks", {}).get("default") or {}).get("name"),
-                    "PortBindings": service.get("ports") or {}, "PidMode": service.get("pid"), "CapAdd": service.get("cap_add"),
+                "Config": {**execution["Config"], "User": service.get("user"), "Entrypoint": entrypoint, "Cmd": command,
+                           "Labels": {"com.docker.compose.service": role}},
+                "HostConfig": {**execution["HostConfig"], "GroupAdd": service.get("group_add"),
+                    "PortBindings": service.get("ports") or {},
                     "RestartPolicy": {"Name": service.get("restart")}}}
             self.state_start_admission(container, existing=False)
 
@@ -4415,7 +4415,7 @@ class HostOps:
         require(release is not None, "Helper image is outside the fixed release pair")
         image = decode(self.cmd(["docker", "image", "inspect", selected]).stdout)[0]
         pre.check_reviewed_state_image({"Image": selected}, release, image)
-        require(not ((image.get("Config") or {}).get("Volumes")), "Helper image has implicit volumes")
+        execution = pre.state_compose_execution(service, image, (model.get("networks", {}).get("default") or {}).get("name"))
         require(not service.get("privileged") and not service.get("pid") and not service.get("cap_add")
                 and not service.get("devices") and not service.get("volumes_from")
                 and service.get("network_mode") not in ("host", "none")
@@ -4425,7 +4425,7 @@ class HostOps:
                 and mounts[0].get("target") == pre.STATE_API_IPC
                 and (model["volumes"].get(mounts[0].get("source")) or {}).get("name") == self.t["project"] + "_emr-state-api-ipc",
                 "API helper must not inherit protected or host storage")
-        env = service.get("environment") or {}
+        env = pre.container_environment(execution["Config"])
         require(not {"KIN_EMR_STATE_DIR", "KIN_EMR_API_SOCKET", "KIN_EMR_RETENTION_SOCKET", "KIN_EMR_READER_PASSWORD",
                      "KIN_EMR_RETENTION_PASSWORD"} & set(env), "Helper inherited owner configuration")
         try:

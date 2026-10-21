@@ -205,13 +205,14 @@ class StateLaunchTests(unittest.TestCase):
     # executes. A refused start must leave the simulated protected file untouched.
     def fixture(self):
         release = {"sha": "b" * 40, "images": {"api": "sha256:" + "d" * 64, "db": "sha256:" + "e" * 64}}
-        image = {"Id": release["images"]["api"], "Config": {"Labels": {"org.opencontainers.image.revision": release["sha"]}}}
+        image = {"Id": release["images"]["api"], "Config": {"Labels": {"org.opencontainers.image.revision": release["sha"]},
+                 "WorkingDir": "/app", "Env": ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_ENV=production"]}}
         args = dict(release=release, image=image, state_volume="fixture_emr-state", api_ipc_volume="fixture_emr-state-api-ipc",
                     retention_ipc_volume="fixture_emr-state-retention-ipc", instance_id="fixture", database_host="db")
         item = {"Id": "owner", "Name": "/kin-emr-state", "Image": image["Id"], "Path": "sh",
                 "Args": ["/app/start-production.sh", "state-serve-v3"], "State": {"Running": False, "Restarting": False},
-                "Config": {"User": "1000:1000", "Entrypoint": ["sh", "/app/start-production.sh"], "Cmd": ["state-serve-v3"],
-                    "Labels": {"com.docker.compose.service": "emr-state"}, "Env": [
+                "Config": {"User": "1000:1000", "WorkingDir": "/app", "Entrypoint": ["sh", "/app/start-production.sh"], "Cmd": ["state-serve-v3"],
+                    "Labels": {"com.docker.compose.service": "emr-state"}, "Env": [*image["Config"]["Env"],
                         "DATABASE_URL=postgresql://kin_emr_reader:synthetic@db:5432/kin", "KIN_EMR_INSTANCE_ID=fixture",
                         "KIN_EMR_STATE_DIR=/var/lib/kin-emr", "KIN_EMR_API_SOCKET=/run/kin-emr-api/writer.sock",
                         "KIN_EMR_RETENTION_SOCKET=/run/kin-emr-retention/writer.sock"]},
@@ -227,7 +228,8 @@ class StateLaunchTests(unittest.TestCase):
         item.update(Id="client", Name="/kin-api", Args=["/app/start-production.sh", "serve"])
         item["Config"].update(User="1001:1001", Cmd=["serve"], Labels={"com.docker.compose.service": "api"}, Env=[
             "DATABASE_URL=postgresql://kin_runtime:synthetic@db:5432/kin", "KIN_EMR_INSTANCE_ID=fixture",
-            "KIN_EMR_STATE_SOCKET=/run/kin-emr-api/writer.sock", "DEPLOYMENT_MODE=production", "AUTH_REQUIRED=true"])
+            "KIN_EMR_STATE_SOCKET=/run/kin-emr-api/writer.sock", "DEPLOYMENT_MODE=production", "AUTH_REQUIRED=true",
+            *args["image"]["Config"]["Env"]])
         item["HostConfig"]["GroupAdd"] = ["2001"]
         item["Mounts"] = [item["Mounts"][1]]
         return item, args
@@ -261,6 +263,38 @@ class StateLaunchTests(unittest.TestCase):
                                ({"Running": False, "Restarting": False}, "always")]:
             bad = copy.deepcopy(item); bad["State"] = state; bad["HostConfig"]["RestartPolicy"]["Name"] = restart
             with self.assertRaises(RuntimeError): deploy.check_state_owners([bad], args["state_volume"], "new-service")
+
+    def test_execution_overrides_refuse_for_both_owner_and_client(self):
+        """D1656-T03/T05: immutable argv does not authorize a different loader or namespace."""
+        for client in (False, True):
+            item, args = self.client_fixture() if client else self.fixture()
+            if client:
+                args.pop("retention_ipc_volume")
+            check = deploy.check_state_client if client else deploy.check_state_service
+            check(item, **args)
+            changes = [("env", key, value) for key, value in [
+                ("NODE_OPTIONS", "--require=/tmp/other.cjs"), ("NODE_PATH", "/tmp/modules"),
+                ("LD_PRELOAD", "/tmp/loader.so"), ("LD_LIBRARY_PATH", "/tmp"), ("LD_AUDIT", "/tmp/audit.so"),
+                ("PRISMA_QUERY_ENGINE_LIBRARY", "/tmp/engine.node"), ("BASH_ENV", "/tmp/init.sh"),
+                ("ENV", "/tmp/init.sh"), ("OPENSSL_CONF", "/tmp/ssl.cnf"), ("PATH", "/tmp/bin")]]
+            changes += [("config", "WorkingDir", "/tmp"), ("config", "Healthcheck", {"Test": ["CMD", "node", "other.js"]}),
+                        ("config", "StopSignal", "SIGUSR1")]
+            changes += [("host", key, value) for key, value in [
+                ("Devices", [{"PathOnHost": "/dev/sda", "PathInContainer": "/dev/raw", "CgroupPermissions": "rwm"}]),
+                ("DeviceRequests", [{"Driver": "nvidia", "Count": -1}]), ("DeviceCgroupRules", ["a *:* rwm"]),
+                ("VolumesFrom", ["old-owner"]), ("Tmpfs", {"/app": "rw"}), ("IpcMode", "host"),
+                ("UTSMode", "host"), ("UsernsMode", "host"), ("SecurityOpt", ["seccomp=unconfined"]),
+                ("NetworkMode", "container:old-owner"), ("Init", True)]]
+            for section, key, value in changes:
+                bad = copy.deepcopy(item)
+                if section == "env":
+                    bad["Config"]["Env"] = [e for e in bad["Config"]["Env"] if not e.startswith(key + "=")] + [key + "=" + value]
+                else:
+                    bad["Config" if section == "config" else "HostConfig"][key] = value
+                with self.subTest(client=client, section=section, key=key), self.assertRaises(RuntimeError):
+                    check(bad, **args)
+            item["HostConfig"]["SecurityOpt"] = ["no-new-privileges:true"]
+            check(item, **args)
 
     def test_12_actual_start_consumer_refuses_legacy_before_mutation(self):
         import ops_emr_introduction as intro

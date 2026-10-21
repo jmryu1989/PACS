@@ -375,6 +375,64 @@ def check_reviewed_state_image(container, release, image):
             "State service source differs from the reviewed artifact")
 
 
+def check_state_execution(container, image):
+    """The admitted argv must execute the reviewed artifact, including its loader environment.
+
+    Image defaults are part of the immutable selection. Compose and stopped-container
+    overrides must not select another script, native engine, loader or executable mount.
+    Values stay in memory: refusal messages never include configuration or credentials.
+    """
+    config, host = container.get("Config") or {}, container.get("HostConfig") or {}
+    original = image.get("Config") or {}
+    inherited, effective = container_environment(original), container_environment(config)
+    def executable_setting(name):
+        return (name.startswith(("NODE_", "LD_", "DYLD_", "PRISMA_")) or
+                name in {"PATH", "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
+                         "OPENSSL_CONF", "OPENSSL_MODULES"})
+    require({k: v for k, v in effective.items() if executable_setting(k)} ==
+            {k: v for k, v in inherited.items() if executable_setting(k)},
+            "Executable environment differs from the reviewed artifact")
+    require(original.get("WorkingDir") == "/app" and config.get("WorkingDir") == original["WorkingDir"],
+            "Executable working directory differs")
+    require(not original.get("Volumes"), "Executable image has implicit volumes")
+    require(config.get("Healthcheck") == original.get("Healthcheck"), "Executable healthcheck differs")
+    require(config.get("StopSignal") == original.get("StopSignal"), "Executable stop signal differs")
+    require(host.get("Privileged") is False and not host.get("CapAdd")
+            and all(not host.get(key) for key in ("Devices", "DeviceRequests", "DeviceCgroupRules", "VolumesFrom", "Tmpfs",
+                                                 "PidMode", "UTSMode", "UsernsMode", "Init"))
+            and host.get("IpcMode") in (None, "", "private")
+            and all(option in ("no-new-privileges", "no-new-privileges:true") for option in (host.get("SecurityOpt") or [])),
+            "Executable devices, mounts or namespace privileges differ")
+    network = host.get("NetworkMode")
+    require(type(network) is str and network and network not in ("host", "none")
+            and not network.startswith("container:"), "Executable network namespace differs")
+
+
+def state_compose_execution(service, image, network):
+    """Resolve image defaults and Compose overrides before the engine can create a process."""
+    original = image.get("Config") or {}
+    environment = {**container_environment(original), **(service.get("environment") or {})}
+    require(all(type(k) is str and type(v) is str for k, v in environment.items()), "Unresolved executable environment")
+    host = {"Privileged": service.get("privileged", False), "NetworkMode": service.get("network_mode", network)}
+    for compose, engine in (("cap_add", "CapAdd"), ("devices", "Devices"), ("device_cgroup_rules", "DeviceCgroupRules"),
+                            ("volumes_from", "VolumesFrom"), ("tmpfs", "Tmpfs"), ("pid", "PidMode"), ("ipc", "IpcMode"),
+                            ("uts", "UTSMode"), ("userns_mode", "UsernsMode"), ("security_opt", "SecurityOpt"), ("init", "Init")):
+        host[engine] = service.get(compose)
+    require(not service.get("gpus") and not (((service.get("deploy") or {}).get("resources") or {}).get("reservations") or {}).get("devices"),
+            "Executable device reservation differs")
+    # Configs/secrets and lifecycle hooks are additional mount/execution routes,
+    # not entries in the ordinary Compose volumes list checked by the caller.
+    require(all(not service.get(key) for key in ("configs", "secrets", "post_start", "pre_stop")),
+            "Executable auxiliary mounts or lifecycle hooks differ")
+    require("healthcheck" not in service, "Executable healthcheck override is not admitted")
+    observed = {"Config": {"Env": [k + "=" + v for k, v in environment.items()],
+                           "WorkingDir": service.get("working_dir", original.get("WorkingDir")),
+                           "Healthcheck": original.get("Healthcheck"),
+                           "StopSignal": service.get("stop_signal", original.get("StopSignal"))}, "HostConfig": host}
+    check_state_execution(observed, image)
+    return observed
+
+
 def check_state_client(container, *, release, image, state_volume, api_ipc_volume, instance_id, database_host):
     """A stopped API must pass the same capability boundary as a newly created API.
 
@@ -382,6 +440,7 @@ def check_state_client(container, *, release, image, state_volume, api_ipc_volum
     credential, a second IPC endpoint or a privileged host mount.
     """
     check_reviewed_state_image(container, release, image)
+    check_state_execution(container, image)
     config, host = container.get("Config") or {}, container.get("HostConfig") or {}
     require(config.get("Entrypoint") == STATE_ENTRYPOINT and config.get("Cmd") == ["serve"]
             and container.get("Path") == STATE_ENTRYPOINT[0]
@@ -425,6 +484,7 @@ def check_state_service(container, *, release, image, state_volume, api_ipc_volu
     This function issues no reusable admission token and performs no repair.
     """
     check_reviewed_state_image(container, release, image)
+    check_state_execution(container, image)
     config, host = container.get("Config") or {}, container.get("HostConfig") or {}
     require(config.get("Entrypoint") == STATE_ENTRYPOINT and config.get("Cmd") == STATE_COMMAND,
             "State service entry mode differs")
