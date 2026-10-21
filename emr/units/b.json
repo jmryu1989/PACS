@@ -918,6 +918,9 @@
       "D1655-T04",
       "D1655-T05",
       "D1655-T06",
+      "D1655-T07",
+      "D1655-T08",
+      "D1655-T09",
       "D1656-T01",
       "D1656-T04",
       "D1656-T02"
@@ -996,6 +999,26 @@
       }
     ],
     "identity_mutants": [
+      {
+        "id": "D1655-M01",
+        "kill": ["D1655-T07"],
+        "assertions": {"D1655-T07": "failed aggregate publication never returns a complete proof"}
+      },
+      {
+        "id": "D1655-M02",
+        "kill": ["D1655-T08"],
+        "assertions": {"D1655-T08": "retry publishes the acknowledged checkpoint"}
+      },
+      {
+        "id": "D1655-M03",
+        "kill": ["D1655-T08"],
+        "assertions": {"D1655-T08": "failed ack or minimization never returns successful acknowledgement"}
+      },
+      {
+        "id": "D1655-M04",
+        "kill": ["D1655-T09"],
+        "assertions": {"D1655-T09": "historical conflict remains a typed nonfatal refusal"}
+      },
       {
         "id": "D1650-M01",
         "kill": [

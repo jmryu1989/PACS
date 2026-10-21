@@ -209,8 +209,10 @@ async function terminalChild(input) {
       const confirmation = await work.call('confirm-bundle', input.bundle);
       const ack = input.exerciseAck ? await work.call('acknowledge', { proof: input.originalProof, bindings: input.bundle.bindings }) : null;
       const retry = input.exerciseAck ? await work.call('acknowledge', { proof: input.originalProof, bindings: input.bundle.bindings }) : null;
+      const exclusions = [];
+      for (const binding of input.bundle.bindings) exclusions.push(await replayObservation(f, work, binding));
       return { pid: process.pid, phase: f.service.state, lookups, confirmation,
-        ack, retry, state: f.coordinator.call('read'), before, after: directoryHashes(f.directory) };
+        ack, retry, exclusions, state: f.coordinator.call('read'), before, after: directoryHashes(f.directory) };
     }
     if (input.phase === 'seed') {
       const original = await complete(f, work, true);
@@ -893,6 +895,171 @@ test('D1655-T06 exact ack minimizes duplicates and preserves proof lookup and ex
   assert.equal(checkpoint.state.version, 3);
   assert.equal(JSON.stringify(checkpoint.state.bundles), JSON.stringify(after.bundles), 'current checkpoint contains the minimized representation');
   assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'superseded full representation is removed from the active WAL');
+});
+
+// REQ-B2C-06/07/09 -> FALSE-ROLLBACK-OR-DUPLICATE / UNRECORDED-BODY /
+// PREMATURE-RETIREMENT -> C-P07/P08/P10. These are syscall failures, not simulated
+// power loss: bytes that reached the OS remain readable. Linux durability is a separate gate.
+async function storageFailure(directory, cut, code, operation) {
+  const wal = path.join(directory, 'seal/settlement.jsonl');
+  const checkpoint = path.join(directory, 'seal/settlement.json');
+  const inode = fs.statSync(wal).ino;
+  const originals = Object.fromEntries(['writeFileSync', 'fdatasyncSync', 'renameSync', 'openSync'].map(k => [k, fs[k]]));
+  let hits = 0, walFlushes = 0;
+  const fail = () => { hits++; throw Object.assign(new Error('synthetic storage interruption'), { code }); };
+  const isWal = fd => typeof fd === 'number' && fs.fstatSync(fd).ino === inode;
+  fs.writeFileSync = (file, data, ...args) => {
+    if (isWal(file) && cut === 'wal-write') fail();
+    if (isWal(file) && cut === 'wal-torn-write') {
+      const bytes = Buffer.from(data);
+      originals.writeFileSync(file, bytes.subarray(0, Math.max(1, Math.floor(bytes.length / 2))), ...args);
+      fail();
+    }
+    return originals.writeFileSync(file, data, ...args);
+  };
+  fs.fdatasyncSync = fd => {
+    if (isWal(fd)) {
+      walFlushes++;
+      if (cut === 'wal-flush' || cut === 'compact-flush' && walFlushes === 2) fail();
+      const result = originals.fdatasyncSync(fd);
+      if (cut === 'wal-flushed') fail();
+      return result;
+    }
+    return originals.fdatasyncSync(fd);
+  };
+  fs.renameSync = (from, to) => {
+    if (to === checkpoint && cut === 'checkpoint-rename') fail();
+    const result = originals.renameSync(from, to);
+    if (to === checkpoint && cut === 'checkpoint-renamed') fail();
+    return result;
+  };
+  fs.openSync = (file, flags, ...args) => {
+    if (file === wal && flags === 'w' && cut === 'wal-reset') fail();
+    const fd = originals.openSync(file, flags, ...args);
+    if (file === wal && flags === 'w' && cut === 'wal-reset-done') { fs.closeSync(fd); fail(); }
+    return fd;
+  };
+  let reply;
+  try { reply = await operation(); }
+  finally { for (const [name, original] of Object.entries(originals)) fs[name] = original; }
+  return { reply, hits };
+}
+
+test('D1655-T07 aggregate proof storage failures preserve unknown outcome and exact restart recovery', async t => {
+  for (const twoStreams of [false, true]) for (const code of ['EIO', 'ENOSPC'])
+    for (const cut of ['wal-write', 'wal-torn-write', 'wal-flush', 'wal-flushed']) {
+      const f = await fixture(t), work = await (await f.hello()).work();
+      const item = await f.reserve(work, event(twoStreams)); item.commit();
+      // Isolate aggregate publication after every required stream already sealed.
+      for (const b of item.bundle.bindings) await f.seal.advance(b.stream, { sequence: b.sequence, hash: b.hash });
+      const database = JSON.stringify(f.database.streams);
+      const failed = await storageFailure(f.directory, cut, code, () => work.call('confirm-bundle', item.bundle));
+      assert.equal(failed.reply.ok, false, 'failed aggregate publication never returns a complete proof');
+      assert.ok(failed.hits > 0, 'aggregate publication reaches the selected storage cut');
+      assert.equal(failed.reply.error.outcome, 'unknown', 'a storage error cannot prove rollback');
+      assert.equal(JSON.stringify(f.database.streams), database, 'publication failure preserves committed rows and markers');
+      f.service.close(); await f.service.drained(); f.coordinator.close();
+      const evidence = fs.mkdtempSync(path.join(path.dirname(f.directory), 'proof-failure-'));
+      const next = childPhase(evidence, 'historical-reopen', { directory: f.directory,
+        database: f.database.streams, bundle: item.bundle });
+      assert.notEqual(next.pid, process.pid, 'recovery executes in a new process');
+      assert.equal(next.phase, 'ready');
+      assert.equal(next.confirmation.ok, true, 'exact committed bundle remains provable after restart');
+      assert.equal(JSON.stringify(next.confirmation.result.entries.map(({ sealed, ...b }) => b)),
+        JSON.stringify(item.bundle.bindings), 'recovery preserves every original binding');
+      assert.equal(JSON.stringify(next.confirmation.result.requiredStreams), JSON.stringify(item.bundle.requiredStreams));
+      for (const lookup of next.lookups) {
+        assert.equal(lookup.result.outcome, 'committed-and-sealed');
+        assert.equal(JSON.stringify(lookup.result.proof), JSON.stringify(next.confirmation.result), 'first recovered proof stays canonical');
+      }
+      for (const observation of next.exclusions) assertExcluded(observation);
+      console.log('ATTESTATION_FAILURE ' + JSON.stringify({ twoStreams, code, cut, directory: f.directory, evidence }));
+    }
+});
+
+test('D1655-T08 interrupted full-proof ack compaction preserves exact retry and permanent exclusion', async t => {
+  for (const code of ['EIO', 'ENOSPC']) for (const cut of ['wal-write', 'wal-torn-write', 'wal-flush', 'wal-flushed',
+    'checkpoint-rename', 'checkpoint-renamed', 'wal-reset', 'wal-reset-done', 'compact-flush']) {
+    const f = await fixture(t), work = await (await f.hello()).work(), item = await complete(f, work);
+    const database = JSON.stringify(f.database.streams);
+    const failed = await storageFailure(f.directory, cut, code,
+      () => work.call('acknowledge', { proof: item.proof, bindings: item.bundle.bindings }));
+    assert.equal(failed.reply.ok, false, 'failed ack or minimization never returns successful acknowledgement');
+    assert.ok(failed.hits > 0, 'ack reaches the selected storage cut');
+    assert.equal(failed.reply.error.outcome, 'unknown');
+    assert.equal(JSON.stringify(f.database.streams), database, 'ack failure preserves committed rows and markers');
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    const evidence = fs.mkdtempSync(path.join(path.dirname(f.directory), 'ack-failure-'));
+    const next = childPhase(evidence, 'historical-reopen', { directory: f.directory,
+      database: f.database.streams, bundle: item.bundle, originalProof: item.proof, exerciseAck: true });
+    assert.notEqual(next.pid, process.pid, 'ack recovery executes in a new process');
+    assert.equal(next.phase, 'ready');
+    assert.equal(next.confirmation.ok, true);
+    assert.equal(JSON.stringify(next.confirmation.result), JSON.stringify(item.proof), 'failed ack never changes the original full proof');
+    assert.equal(next.ack.ok, true, 'exact full proof finishes an interrupted ack');
+    assert.equal(next.ack.result.status, ['wal-write', 'wal-torn-write'].includes(cut) ? 'acknowledged' : 'already-acknowledged');
+    assert.equal(next.retry.result.status, 'already-acknowledged', 'lost ack reply is safely repeatable');
+    for (const observation of next.exclusions) assertExcluded(observation);
+    for (const b of item.bundle.bindings) assert.equal(next.state.terminal[b.stream + ':' + b.attemptId].owner, undefined);
+    const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
+    assert.equal(checkpoint.state.bundles['bundle:' + item.bundle.bindings[0].bundleId]?.phase, 'acknowledged',
+      'retry publishes the acknowledged checkpoint');
+    assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'retry finishes minimizing the active WAL');
+    console.log('ACK_FAILURE ' + JSON.stringify({ code, cut, directory: f.directory, evidence }));
+  }
+});
+
+test('D1655-T09 historical evidence rejects changed identity and incomplete streams after source expiry', async t => {
+  const base = path.join(root, 'tmp/emr-b2-c-11/historical-conflicts'); fs.mkdirSync(base, { recursive: true });
+  for (const twoStreams of [false, true]) for (const acknowledge of [false, true]) {
+    const evidence = fs.mkdtempSync(path.join(base, 'seed-'));
+    const seed = childPhase(evidence, 'historical-seed', { twoStreams, acknowledge, advance: true });
+    const f = await fixture(t, { directory: seed.directory, model: model(seed.database) });
+    const work = await (await f.hello()).work(), before = directoryHashes(f.directory);
+    assert.equal(f.database.streams.viewing.rows.some(r => r.eventId === seed.bundle.eventId), false);
+    const changes = [
+      b => { b.eventId = randomUUID(); for (const q of b.bindings) q.eventId = b.eventId; },
+      b => { const id = randomUUID(); for (const q of b.bindings) q.bundleId = id; },
+      b => { b.bindings[0].attemptId = randomUUID(); },
+      b => { b.bindings[0].generation++; },
+      b => { b.bindings[0].hash = 'f'.repeat(64); },
+      b => { b.bindings[0].contentSha256 = 'e'.repeat(64); },
+      b => { b.bindings[0].sequence++; },
+    ];
+    if (twoStreams) changes.push(b => { b.requiredStreams = ['viewing']; b.bindings = b.bindings.slice(0, 1); });
+    for (const change of changes) {
+      const changed = structuredClone(seed.bundle); change(changed);
+      const confirmation = await work.call('confirm-bundle', changed);
+      assert.equal(confirmation.ok, false, 'historical proof cannot authorize a changed or incomplete bundle');
+      // An unknown bundle ID has no retained evidence and may be unresolved; it is never a receipt.
+      assert.ok(['CONFLICT', 'UNAVAILABLE'].includes(confirmation.error.code),
+        'historical conflict remains a typed nonfatal refusal: ' + confirmation.error.code);
+      const lookup = await work.call('lookup-outcome', changed);
+      assert.equal(lookup.ok, true);
+      assert.ok(['conflict', 'unresolved'].includes(lookup.result.outcome), 'changed identity is never committed or fenced negative');
+      assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'historical conflicts preserve protected bytes');
+    }
+    for (const field of ['serviceEpoch', 'generation', 'sealed']) {
+      const changed = structuredClone(seed.originalProof);
+      if (field === 'serviceEpoch') changed.serviceEpoch = randomUUID();
+      else if (field === 'generation') changed.entries[0].generation++;
+      else { changed.entries[0].sealed.sequence++; changed.entries[0].sealed.hash = 'f'.repeat(64); }
+      // Keep the wire internally consistent so the stored-proof comparison is exercised.
+      // A mismatched proof/binding pair is separately refused by protocol admission.
+      if (field === 'generation') await assert.rejects(
+        work.call('acknowledge', { proof: changed, bindings: seed.bundle.bindings }), { code: 'PROTOCOL' });
+      const reply = await work.call('acknowledge', { proof: changed,
+        bindings: changed.entries.map(({ sealed, ...binding }) => binding) });
+      assert.equal(reply.ok, false, 'historical ack requires the exact original full proof');
+      assert.equal(reply.error.code, 'CONFLICT');
+      assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before));
+    }
+    assert.equal(f.service.state, 'ready', 'ordinary historical conflicts do not stop healthy work');
+    assert.equal(JSON.stringify((await work.call('confirm-bundle', seed.bundle)).result), JSON.stringify(seed.originalProof));
+    assert.equal((await work.call('acknowledge', { proof: seed.originalProof, bindings: seed.bundle.bindings })).ok, true);
+    for (const binding of seed.bundle.bindings) assertExcluded(await replayObservation(f, work, binding));
+    console.log('HISTORICAL_CONFLICTS ' + JSON.stringify({ twoStreams, acknowledge, bundleChanges: changes.length, proofChanges: 3, evidence }));
+  }
 });
 
 // D1656-T01/T04/T06: read-only format admission precedes any journal owner.

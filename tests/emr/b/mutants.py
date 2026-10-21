@@ -290,6 +290,16 @@ def contract_verdict(text, cases, code):
 
 
 IDENTITY_MUTANTS = {
+    "D1655-M01": ("aggregate attestation returns before its WAL flush", [
+        ("api/src/emr-runtime/external-writer.ts", "fs.writeFileSync(context.log.fd, line); fs.fdatasyncSync(context.log.fd);",
+         "fs.writeFileSync(context.log.fd, line); if (!Object.values(body.patch?.bundles ?? {}).some((a:any) => a?.phase === 'published')) fs.fdatasyncSync(context.log.fd);")]),
+    "D1655-M02": ("ack returns without completing metadata minimization", [
+        ("api/src/emr-runtime/seal.ts", "    this.journal.coordinator.call('compact', { force: true });\n", "")]),
+    "D1655-M03": ("ack silently succeeds after failed compaction", [
+        ("api/src/emr-runtime/seal.ts", "    this.journal.coordinator.call('compact', { force: true });\n",
+         "    try { this.journal.coordinator.call('compact', { force: true }); } catch {}\n")]),
+    "D1655-M04": ("a retained proof is returned for a changed historical bundle", [
+        ("api/src/emr-runtime/seal.ts", "    if (retained) return matches(retained);\n", "    if (retained) return retained;\n")]),
     "D1650-M01": ("requested-slot lookup accepts a moved pending attempt", [
         ("api/src/emr-runtime/seal.ts", "this.attempts(state).get(id)",
          "(this.attempts(state), state.slots[position]?.attemptId === binding.attemptId ? state.slots[position] : undefined)")]),
@@ -372,7 +382,7 @@ def terminal_main(args):
             # These semantics-preserving edits deliberately alter private names,
             # the imported symbol name and layout used by the exercised paths.
             renamed = original.decode("utf-8").replace("reservationState", "reservedSnapshot").replace(
-                "import { createHash }", "import { createHash as hashFactory }").replace("createHash(", "hashFactory(")
+                "import { createHash", "import { createHash as hashFactory").replace("createHash(", "hashFactory(")
             control_file.write_bytes(renamed.replace("  private load()", "\n  private load()").encode("utf-8"))
             control_sha = sha256(control_file)
             try:
