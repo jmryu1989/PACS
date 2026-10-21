@@ -1222,4 +1222,87 @@ test('D1656-T02 closed shell dispatch rejects unchanged legacy scripts before No
   }
 });
 
+// A10 (retention purpose / end condition / dependent copies): a private copy of a lineage whose source payload has
+// lawfully expired still serves the exact canonical proof, the exact ack retry and the permanent exclusion (RET-04/05/06
+// dependent_copies.restore_copies), and a copy whose pair or dependency is wrong is refused before any byte changes
+// (RET-07 restore_copies: a wrong pair stays as it was and is not ready).
+const a10Target = { instanceId: 'private-copy', database: { database: 'restored', oid: 20002, address: '10.0.0.2', port: 5433 } };
+async function a10Expire(f, work) {
+  // The lawful expiry of the retained viewing prefix through the first event, as the historical-seed child performs it.
+  const retention = await (await f.hello('retention')).work();
+  const prepared = await retention.call('expiry-prefix', { through: 1 });
+  assert.equal(prepared.ok, true, 'expiry requires durable complete bundle evidence');
+  const prefix = prepared.result, tail = await f.database.sql.tail('viewing');
+  const payload = C.checkpointPayload('2036-10-19T00:00:00.000Z', prefix.anchor.sequence, prefix.count, prefix.anchor.hash);
+  const binding = { stream: 'viewing', chainId: tail.chainId, attemptId: randomUUID(), bundleId: randomUUID(),
+    kind: 'expiry', eventId: null, sequence: tail.sequence + 1, previousHash: tail.hash,
+    hash: C.entryHash(tail.sequence + 1, tail.hash, payload), contentSha256: sha256(payload) };
+  const reserved = await retention.call('reserve', { binding, prefix });
+  assert.equal(reserved.ok, true, 'issued prefix reserves before the synthetic expiry commit');
+  const s = f.database.streams.viewing;
+  s.rows = [...s.rows.filter(r => r.sequence > 1), { sequence: binding.sequence, previousHash: binding.previousHash, hash: binding.hash,
+    kind: 'expiry', statutoryAct: null, eventId: null, payload, contentSha256: binding.contentSha256, storedAt: '2036-10-19T00:00:00.000Z' }];
+  s.markers = [...s.markers.filter(m => m.sequence > 1), reserved.result];
+  const expiry = await retention.call('confirm-bundle', { eventId: null, requiredStreams: ['viewing'], bindings: [reserved.result] });
+  assert.equal(expiry.ok, true, 'valid retained-prefix checkpoint publishes');
+}
+test('A10-T01 private copy replay after payload expiry preserves canonical proof and exact ack', async t => {
+  const f = await fixture(t), work = await (await f.hello()).work();
+  const original = await complete(f, work, true);
+  await complete(f, work);
+  await a10Expire(f, work);
+  assert.equal(f.database.streams.viewing.rows.some(r => r.eventId === original.bundle.eventId), false, 'original viewing payload is actually absent');
+  f.coordinator.call('compact', { force: true });
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const before = directoryHashes(f.directory), copy = f.directory + '-a10-private';
+  fs.cpSync(f.directory, copy, { recursive: true, errorOnExist: true });
+  const mapping = { source: f.pair, target: { ...a10Target, chains: f.pair.chains } };
+  const g = await fixture(t, { directory: copy, model: model(structuredClone(f.database.streams)), pair: a10Target, copy: mapping });
+  assert.equal(g.service.state, 'ready');
+  const gw = await (await g.hello()).work();
+  const confirmed = await gw.call('confirm-bundle', original.bundle);
+  assert.equal(confirmed.ok, true, 'the expired event remains provable in the private copy');
+  assert.equal(JSON.stringify(confirmed.result), JSON.stringify(original.proof), 'the copy returns the identical canonical proof after expiry');
+  const ack = await gw.call('acknowledge', { proof: original.proof, bindings: original.bundle.bindings });
+  assert.equal(ack.ok, true, 'the exact original proof is accepted by the copy');
+  assert.equal(ack.result.status, 'already-acknowledged', 'the copy repeats the exact earlier ack instead of creating a new one');
+  const outcome = await gw.call('lookup-outcome', original.bundle);
+  assert.equal(outcome.result.outcome, 'committed-and-sealed', 'the original bindings stay committed, never fenced-not-committed');
+  assert.equal(JSON.stringify(outcome.result.proof), JSON.stringify(original.proof));
+  for (const b of original.bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'the source directory bytes are unchanged');
+});
+test('A10-T02 a copy with the wrong pair or a missing dependency is refused before any mutation', async t => {
+  const f = await fixture(t), work = await (await f.hello()).work();
+  await complete(f, work, true);
+  await complete(f, work);
+  await a10Expire(f, work);
+  f.coordinator.call('compact', { force: true });
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const before = directoryHashes(f.directory), copy = f.directory + '-a10-copy', missing = f.directory + '-a10-missing';
+  fs.cpSync(f.directory, copy, { recursive: true, errorOnExist: true });
+  fs.cpSync(f.directory, missing, { recursive: true, errorOnExist: true });
+  const restored = () => model(structuredClone(f.database.streams));
+  const targetPair = { ...a10Target, chains: f.pair.chains }, mapping = { source: f.pair, target: targetPair };
+  // (iii) the dependency the mapping needs: the stored lineage of the copy's checkpoint is removed (the digest is kept valid).
+  const file = path.join(missing, 'seal/settlement.json'), envelope = JSON.parse(fs.readFileSync(file));
+  envelope.state.lineage = null; envelope.digest = sha256(JSON.stringify(envelope.state)); fs.writeFileSync(file, JSON.stringify(envelope));
+  const copyBytes = directoryHashes(copy), missingBytes = directoryHashes(missing);
+  for (const [label, directory, bytes, options, code] of [
+    ['(i) target is another pair than the observed database', copy, copyBytes,
+      { pair: { ...a10Target, database: { ...a10Target.database, oid: 30003 } }, copy: mapping }, 'SealChainMismatch'],
+    ['(ii) mapping source is not the stored origin', copy, copyBytes,
+      { pair: a10Target, copy: { source: { ...f.pair, instanceId: 'other-origin' }, target: targetPair } }, 'SealChainMismatch'],
+    ['(iii) missing lineage dependency', missing, missingBytes, { pair: a10Target, copy: mapping }, 'SealCorrupt'],
+  ]) {
+    await assert.rejects(fixture(t, { directory, model: restored(), ...options }), error => error.code === code, label);
+    assert.equal(JSON.stringify(directoryHashes(directory)), JSON.stringify(bytes), label + ': refusal changes no file of the copy');
+    assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), label + ': refusal changes no file of the source');
+  }
+  // The untouched copy under its correct mapping is still admitted: the refusals were about the pair and the dependency.
+  const g = await fixture(t, { directory: copy, model: restored(), pair: a10Target, copy: mapping });
+  assert.equal(g.service.state, 'ready');
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'source bytes unchanged');
+});
+
 }

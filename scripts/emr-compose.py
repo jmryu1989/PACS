@@ -224,7 +224,7 @@ def check(root, declaration_path):
         problem(problems, "b2c-wire-test-missing")
     service_cases = wire["local_service_cases"]
     if not isinstance(service_cases, list) or not service_cases or any(
-            not isinstance(case, str) or re.fullmatch(r"(?:C-S0[2345]\.D[0-9]{2}|D1641-T[0-9]{2}[A-Z]?|D165[56]-T[0-9]{2}[A-Z]?|D1650-(?:T[0-9]{2}[A-Z]?|D17(?:-V[123])?))", case) is None
+            not isinstance(case, str) or re.fullmatch(r"(?:C-S0[2345]\.D[0-9]{2}|D1641-T[0-9]{2}[A-Z]?|D165[56]-T[0-9]{2}[A-Z]?|D1650-(?:T[0-9]{2}[A-Z]?|D17(?:-V[123])?)|A10-T[0-9]{2})", case) is None
             for case in service_cases) or len(service_cases) != len(set(service_cases)):
         problem(problems, "b2c-service-cases-invalid")
     if wire["local_service_file"] != "tests/emr/b/state_service_test.cjs" or not (root / wire["local_service_file"]).is_file():

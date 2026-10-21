@@ -924,7 +924,9 @@
       "D1656-T01",
       "D1656-T07",
       "D1656-T04",
-      "D1656-T02"
+      "D1656-T02",
+      "A10-T01",
+      "A10-T02"
     ],
     "local_api_file": "tests/emr/b/contract_test.cjs",
     "local_api_selection": "EMR_B2C_API_CASES",

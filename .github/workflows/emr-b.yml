@@ -97,6 +97,30 @@ jobs:
           KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.sha }}
           KIN_TEST_RESOURCE_PREFIX: kin-emrbc-ci-
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/restore-image --cwd . --tree api/src/emr-runtime --file api/Dockerfile --file api/start-production.sh --file scripts/ops_backup.py --file tests/ops_backup_restore_test.py -- python3 -B tests/ops_backup_restore_test.py
+      - name: EMR-B2c C-P01..C-P11 image cell - the real API (UID 1001 client) and the real state service (UID 1000, the service fixture entry over launchStateService) over a disposable PG; independent restarts, second owner, recovery interruption, atomic business+two streams, P07/P08/P09/P10/P11/P12 cutpoints, receipt delivery, service storage faults
+        timeout-minutes: 60
+        env:
+          KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.sha }}
+          KIN_TEST_RESOURCE_PREFIX: kin-emrbc-ci-
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/pg-cutpoints --cwd . --tree api/src/emr-runtime --file api/Dockerfile --file api/start-production.sh --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/production_image_test.py -- python3 -B -m unittest -v tests.production_image_test.StateServiceCutpointTests
+      - name: A03 reconstructed legacy images (fixed sources a86ecf1 = IMG-B1 source, b9690cc = IMG-S5 source; labelled reconstructed, never the historic digest)
+        timeout-minutes: 30
+        run: |
+          set -eu
+          for sha in a86ecf1655c8c587012cef5fd16e233e121ae7dc b9690cc9790d5360829cee861462aac14f5ab0c7; do
+            git cat-file -e "$sha^{commit}" 2>/dev/null || git fetch --depth=1 origin "$sha"
+            rm -rf "tmp/emr-b-ci/legacy-src-$sha" && mkdir -p "tmp/emr-b-ci/legacy-src-$sha"
+            git archive --format=tar "$sha" api | tar -x -C "tmp/emr-b-ci/legacy-src-$sha"
+            docker build --target production --build-arg "VCS_REF=$sha" -t "kin-legacy-recon:${sha:0:12}" "tmp/emr-b-ci/legacy-src-$sha/api"
+          done
+      - name: A03 old-reader cells (D1656-T01/T02/T05) - the former owner image over a private clone of a v3 pair refuses before any mutation; legacy start script has no service entry; the former owner in the client shape gets no state
+        timeout-minutes: 30
+        env:
+          KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.sha }}
+          KIN_TEST_LEGACY_B1_IMAGE: kin-legacy-recon:a86ecf1655c8
+          KIN_TEST_LEGACY_PRE_EMR_IMAGE: kin-legacy-recon:b9690cc9790d
+          KIN_TEST_RESOURCE_PREFIX: kin-emrbc-ci-
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/legacy-cells --cwd . --tree api/src/emr-runtime --file api/Dockerfile --file api/start-production.sh --file tests/production_image_test.py -- python3 -B -m unittest -v tests.production_image_test.LegacyImageTests
       - name: D931 lifetime fence (EMR-B2c) - one owner per state directory, second owner refused, death releases to the successor, peer CAS, crash cutpoints, flock cost
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/lock --cwd . --file api/src/emr-runtime/file-lock.ts --file api/src/emr-runtime/coordinator.ts --file api/src/emr-runtime/state-client.ts --file api/src/emr-runtime/state-client-worker.ts --file tests/emr/b/lock_test.cjs -- docker run --rm --network none --mount "type=bind,source=$PWD/tests/emr/b,target=/emr-b,readonly" "kin-emrb-ci:${{ github.sha }}" node /emr-b/lock_test.cjs
       - name: D878 developer smoke only (fixed-delay SQL model; live D961 acceptance is commander-only)

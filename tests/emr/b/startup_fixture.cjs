@@ -97,6 +97,17 @@ function serviceEvent(eventId) {
     action: 'provide-prepared', result: 'prepared', requestId: 'startup-fixture-' + eventId, auditLinkId: 'audit:' + require('node:crypto').randomUUID(), relatedEventId: null };
 }
 
+/** A synthetic change event (both streams: the viewing fact and the history of a signed report version). */
+function changeEvent(eventId) {
+  const known = value => ({ status: 'known', value });
+  return { ...serviceEvent(eventId), surface: 'POST studies/:uid/report/commit', rolesAtTime: known(['radiologist']),
+    trustedProxyIp: known({ address: '192.0.2.10', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
+    context: { basis: 'assigned-reading', studyId: 'SYNTHETIC-' + eventId, relatedStudyId: null, reason: null },
+    targets: [{ kind: 'report-version', patientLinkSnapshot: known({ linkId: 'synthetic-link', patientId: 'SYNTHETIC', assigningAuthority: 'synthetic-institution' }),
+      studyId: known('SYNTHETIC-' + eventId), recordId: known('synthetic-record-' + eventId), versionId: known('synthetic-version-' + eventId) }],
+    action: 'approve-sign', result: 'succeeded' };
+}
+
 /**
  * Run one scenario. `options.env` is the child's whole environment; `options.onEvent(event, child, events)` may act on an
  * event (send a request or a command, signal the child); the result resolves when the child exits or after
@@ -329,13 +340,58 @@ function child(scenario) {
   }
   const RealStore = storeModule.AccessLedgerStore;
   const stores = [];
+  // Crash cuts (pg): the request of /syn-atomic, the PG backend of its transaction, and the observed points where the
+  // parent kills this whole process (P07 reserve-complete, P08 commit-complete, P09 withheld COMMIT acknowledgement,
+  // P10 commit-entry with the backend terminated by the observer, P12 receipt-complete).
+  let crashRequest = null, backendPid = null;
+  const statusNow = async () => { try { return runtime ? await runtime.status() : null; } catch (error) { return { unavailable: error?.code ?? 'Error' }; } };
+  const cut = async (point, extra = {}) => { send('crash-cut', { point, backendPid, eventId: crashRequest?.event.eventId, businessKey: crashRequest?.businessKey, ...extra }); await released; };
   storeModule.AccessLedgerStore = class ObservedLedgerStore extends RealStore {
     constructor(db, sql, state, journal, poolSize) {
       super(db, sql, state, journal, poolSize);
       stores.push(this);
       send('ledger', { sameClient: db === clients[clients.length - 1], poolSize, remote: !(state instanceof sealModule.AccessSeal) });
+      if (scenario.crashCut && db._engine && typeof db._engine.transaction === 'function') {
+        const transaction = db._engine.transaction.bind(db._engine);
+        db._engine.transaction = async (action, ...args) => {
+          if (action === 'commit' && crashRequest && scenario.crashCut === 'P10') await cut('commit-entry');
+          const value = await transaction(action, ...args);
+          if (action === 'commit' && crashRequest) {
+            send('pg-commit-complete', { eventId: crashRequest.event.eventId });
+            if (scenario.crashCut === 'P08') await cut('commit-complete');
+            if (scenario.crashCut === 'P09') throw Object.assign(Error('successful COMMIT acknowledgement withheld'), { code: 'P1017' });
+          }
+          return value;
+        };
+      }
+    }
+    withAppendTransaction(callback) {
+      return super.withAppendTransaction(async tx => {
+        if (crashRequest) { const [row] = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`; backendPid = row.pid; }
+        return callback(tx);
+      });
+    }
+    async appendWithin(scope, tx, input, served) {
+      const result = await super.appendWithin(scope, tx, input, served);
+      if (crashRequest && input.eventId === crashRequest.event.eventId) {
+        send('append-reserved', { entries: result.entries.map(entry => ({ stream: entry.stream, sequence: entry.sequence, attemptId: entry.attemptId })) });
+        if (scenario.crashCut === 'P07') await cut('reserve-complete');
+      }
+      return result;
     }
   };
+  if (scenario.holdConfirm) {
+    // The confirm of that one event (the service's complete proof, then the receipt) held: in flight when the stop arrives.
+    const confirm = remoteState.RemoteLedgerScope.prototype.confirm;
+    remoteState.RemoteLedgerScope.prototype.confirm = async function (appended) {
+      if (appended.eventId === scenario.holdConfirm) {
+        send('confirm-held', { eventId: appended.eventId });
+        await released;
+        send('confirm-released', { eventId: appended.eventId });
+      }
+      return confirm.call(this, appended);
+    };
+  }
   if (scenario.db === 'memory') {
     // A standalone append without SQL: a timed fake receipt over the live remote scope (the scope itself is the
     // service's), so the drain of begun recording work is observable.
@@ -349,6 +405,9 @@ function child(scenario) {
   }
 
   // ── the protected-state service of this child (the API's counterpart): actual dispatcher, seal and writer ──
+  // (memory only: with `db: 'pg'` the real StateClient reaches the real service process over its Unix socket.)
+  const peers = [];
+  if (scenario.db !== 'pg') {
   const serviceDirectory = process.env.KIN_TEST_STATE || stateDirectory('service');
   const instanceId = process.env.KIN_EMR_INSTANCE_ID;
   const coordinator = new coordinatorModule.StateCoordinator(serviceDirectory, writer.executeExternal);
@@ -357,7 +416,6 @@ function child(scenario) {
   const pair = { instanceId, chains: { ...chains }, database: { ...identity } };
   const service = new stateService.ProtectedStateService({ coordinator, journal, sql: memorySql, seal, pair }, () => send('service-failed'));
   const serviceStarted = scenario.service === 'absent' ? Promise.resolve() : service.start().then(() => send('service-ready'), error => send('service-start-failed', { code: error?.code ?? 'Error' }));
-  const peers = [];
   // The API's client of that service: the same typed frames, dispatched in-process (no socket, worker or UID here).
   stateClientModule.StateClient = class FakeStateClient {
     constructor(endpoint) {
@@ -387,6 +445,22 @@ function child(scenario) {
     lose() { this.loss.abort(new protocol.StateProtocolError('UNAVAILABLE', 'unavailable')); }
     async close() { send('state-client-close'); this.socket.destroy(); }
   };
+  } else {
+    const RealStateClient = stateClientModule.StateClient;
+    stateClientModule.StateClient = class ObservedStateClient extends RealStateClient {
+      constructor(endpoint) {
+        super(endpoint);
+        peers.push(this);
+        send('state-client', { path: typeof endpoint === 'object' && endpoint ? endpoint.path : endpoint, role: typeof endpoint === 'object' && endpoint ? endpoint.role : 'api', real: true });
+      }
+      async openSession(clientInstanceId) {
+        const session = await super.openSession(clientInstanceId);
+        send('session', { instanceId: session.instanceId, serviceEpoch: session.serviceEpoch });
+        return session;
+      }
+      close() { send('state-client-close'); return super.close(); }
+    };
+  }
   const stateClients = () => peers;
 
   const compose = composition.composeEmrAdapters;
@@ -447,6 +521,35 @@ function child(scenario) {
     app = created;
     send('created');
     if (scenario.observeAdmission) created.use((req, _res, next) => { send('http-entry', { url: req.url }); next(); });
+    if (scenario.crashEvent) created.use('/syn-atomic', async (_req, res) => {
+      // One public projected transaction: a synthetic business row and the event's streams, all-or-none; the receipt
+      // only after the actual COMMIT and the service's complete proof; nothing of the body before it.
+      const event = scenario.crashEvent, businessKey = 'r2-' + event.eventId;
+      crashRequest = { event, businessKey };
+      const work = portOf().begin();
+      let token, callbackFailed = false;
+      send('work-begun', { eventId: event.eventId });
+      try {
+        const provisional = await work.transaction(async tx => {
+          token = tx;
+          try {
+            await tx.institution.upsert({ where: { id: businessKey }, create: { id: businessKey, name: 'Synthetic EMR B2' }, update: {} });
+            return await work.appendInTransaction(tx, event);
+          } catch (error) { callbackFailed = true; throw error; }
+        });
+        const receipt = await work.confirm(provisional);
+        send('receipt-ready', { eventId: receipt.eventId, status: await statusNow() });
+        if (scenario.crashCut === 'P12') await cut('receipt-complete');
+        res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(receipt));
+      } catch (error) {
+        try { if (token) await work.settleTransaction(token, event, error, callbackFailed); else await work.settle(event, error); }
+        catch (settling) { send('settle-failed', { code: settling?.code ?? settling?.name ?? 'Error' }); }
+        send('crash-settled', { callbackFailed, code: error?.code ?? error?.name ?? 'Error', status: await statusNow() });
+        // These ambiguous responses are deliberately withheld; the parent kills only after persisted settlement.
+        if (scenario.crashCut === 'P09' || scenario.crashCut === 'P10') await released.then(() => new Promise(() => {}));
+        res.statusCode = 503; res.end('unknown');
+      } finally { work.end(); send('work-ended'); }
+    });
     if (scenario.slowMillis) created.use('/syn-slow', (req, res) => {
       send('slow-begin');
       res.on('finish', () => send('slow-done'));
@@ -550,12 +653,122 @@ function child(scenario) {
         work.append(serviceEvent(eventId)).then(receipt => send('append-done', { eventId: receipt.eventId, same: receipt.eventId === eventId }),
           error => send('append-failed', { code: error?.code ?? error?.name ?? 'Error' }))
           .finally(() => { work.end(); send('work-ended'); });
+      } else if (cmd === 'record-transaction') {
+        // Real business transaction through the port (pg): a business statement and the fact in one transaction, the
+        // receipt after the commit; with `fail`, the callback throws after the append and the attempt is settled.
+        const work = portOf().begin();
+        const eventId = command.eventId ?? randomUUID();
+        let transaction = null, callbackFailed = false;
+        const event = command.change ? changeEvent(eventId) : serviceEvent(eventId);
+        try {
+          const appended = await work.transaction(async tx => {
+            transaction = tx;
+            await tx.institution.findMany({ take: 1, select: { id: true } });
+            try {
+              const provisional = await work.appendInTransaction(tx, event);
+              if (command.fail) throw new Error('synthetic-business-failure');
+              // `holdTransaction`: the transaction stays open (its fact reserved, not committed) until the parent releases it.
+              if (scenario.holdTransaction) { send('transaction-held', { eventId }); await released; send('transaction-released'); }
+              return provisional;
+            } catch (error) { callbackFailed = true; throw error; }
+          });
+          const receipt = await work.confirm(appended);
+          send('transaction-done', { eventId: receipt.eventId, same: receipt.eventId === eventId, entries: appended.entries.length });
+        } catch (error) {
+          try { await work.settleTransaction(transaction, event, error, callbackFailed); }
+          catch (settling) { send('settle-failed', { code: settling?.code ?? settling?.name ?? 'Error' }); }
+          send('transaction-settled', { callbackFailed, code: error?.code ?? error?.message ?? 'Error', status: await statusNow() });
+        } finally { work.end(); send('work-ended'); }
+      } else if (cmd === 'status') {
+        send('status', { status: await statusNow() });
       }
     } catch (error) { send('command-error', { cmd, code: error?.code ?? error?.name ?? 'Error', message: String(error?.message ?? '').slice(0, 200) }); }
   });
   load('main');
 }
 
-if (require.main === module) child(JSON.parse(process.argv[2] || '{}'));
+// ═══════════════════════════════════════ the state service (pg, image) ═══════════════════════════════════════
 
-module.exports = { run, environment, stateDirectory, stop, serviceEvent, SIGNAL_MODE };
+/**
+ * `node startup_fixture.cjs --service '<scenario>'`: the real `state-serve-v3` entry (launchStateService over this
+ * process's environment, UID 1000 in the image) with its seal observed. Events go to the file named by
+ * KIN_EMR_B2_SERVICE_EVENTS (one JSON line each; a bind-mounted control directory the observer reads), never to
+ * stdout, whose EMR_STATE_READY/CLOSED/INCOMPLETE lines are the product's. `hold: [points]` pauses inside that step
+ * until the file `<control>/release-<label>-<point>` exists; `cut: 'viewing-sealed'` with `cutEvent` blocks after
+ * that event's viewing seal advanced and before its history seal (the observer then kills this process); `storage:
+ * {cut, eventId}` injects one syscall failure into the seal's WAL/checkpoint write path while that event is confirmed
+ * (wal-flush | wal-torn-write | checkpoint-rename), as state_service_test's storageFailure does.
+ */
+function serviceChild(scenario) {
+  const events = process.env.KIN_EMR_B2_SERVICE_EVENTS;
+  const control = path.dirname(events);
+  const label = scenario.label || 'service';
+  const send = (what, extra = {}) => { try { fs.appendFileSync(events, JSON.stringify({ what, at: Date.now(), pid: process.pid, label, ...extra }) + '\n'); } catch {} };
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const hold = async point => {
+    if (!(scenario.hold || []).includes(point)) return;
+    send('held', { point });
+    const file = path.join(control, 'release-' + label + '-' + point);
+    while (!fs.existsSync(file)) await sleep(50);
+    send('released', { point });
+  };
+  const load = name => require('/app/dist/' + name);
+  const sealModule = load('emr-runtime/seal');
+  const recover = sealModule.AccessSeal.prototype.recoverAtStart;
+  sealModule.AccessSeal.prototype.recoverAtStart = async function (...args) {
+    send('recovery', { serviceEpoch: args[1] ?? null });
+    await hold('recovery');
+    const result = await recover.apply(this, args);
+    send('recovered', { recovered: result.recovered, notCommitted: result.notCommitted, streams: result.streams, serviceEpoch: args[1] ?? null });
+    await hold('recovered');
+    return result;
+  };
+  let faultArmed = false;
+  const advance = sealModule.AccessSeal.prototype.advanceReceipt;
+  sealModule.AccessSeal.prototype.advanceReceipt = async function (stream, attemptId, eventId, entry) {
+    if (scenario.storage && eventId === scenario.storage.eventId) faultArmed = true;
+    const value = await advance.call(this, stream, attemptId, eventId, entry);
+    send('advanced', { stream, eventId });
+    if (scenario.cut === 'viewing-sealed' && stream === 'viewing' && eventId === scenario.cutEvent) {
+      send('viewing-sealed', { eventId });
+      await new Promise(() => {});
+    }
+    return value;
+  };
+  if (scenario.storage) {
+    const originals = { writeFileSync: fs.writeFileSync, fdatasyncSync: fs.fdatasyncSync, renameSync: fs.renameSync };
+    let hits = 0;
+    const wal = name => typeof name === 'string' && name.endsWith('seal/settlement.jsonl');
+    const isWal = fd => { try { return typeof fd === 'number' && fs.readlinkSync('/proc/self/fd/' + fd).endsWith('seal/settlement.jsonl'); } catch { return false; } };
+    const fail = () => { hits++; send('storage-fault', { cut: scenario.storage.cut, hits }); throw Object.assign(new Error('synthetic storage interruption'), { code: 'EIO' }); };
+    fs.writeFileSync = (file, data, ...args) => {
+      if (faultArmed && hits === 0 && (wal(file) || isWal(file)) && scenario.storage.cut === 'wal-torn-write') {
+        const bytes = Buffer.from(data);
+        originals.writeFileSync(file, bytes.subarray(0, Math.max(1, Math.floor(bytes.length / 2))), ...args);
+        fail();
+      }
+      return originals.writeFileSync(file, data, ...args);
+    };
+    fs.fdatasyncSync = fd => {
+      if (faultArmed && hits === 0 && isWal(fd) && scenario.storage.cut === 'wal-flush') fail();
+      return originals.fdatasyncSync(fd);
+    };
+    fs.renameSync = (from, to) => {
+      if (faultArmed && hits === 0 && typeof to === 'string' && to.endsWith('seal/settlement.json') && scenario.storage.cut === 'checkpoint-rename') fail();
+      return originals.renameSync(from, to);
+    };
+  }
+  send('launch', { argv: process.argv.slice(2), uid: process.getuid?.() ?? null });
+  load('emr-runtime/state-service').launchStateService(process.env).then(code => { send('exit', { code }); process.exit(code); }, error => {
+    send('failed', { code: error?.code ?? error?.name ?? 'Error' });
+    process.stderr.write('EMR_STATE_FAILED\n');
+    process.exit(1);
+  });
+}
+
+if (require.main === module) {
+  if (process.argv[2] === '--service') serviceChild(JSON.parse(process.argv[3] || '{}'));
+  else child(JSON.parse(process.argv[2] || '{}'));
+}
+
+module.exports = { run, environment, stateDirectory, stop, serviceEvent, changeEvent, SIGNAL_MODE };

@@ -3,6 +3,9 @@
 Usage: python scripts/ops_backup.py backup --output <outside-repository-directory> [--rotate-keep N | --no-rotate]
        python scripts/ops_backup.py rehearse <completed-backup-directory>
        python scripts/ops_backup.py rotate --root <backup-root> [--keep N] [--protect NAME ...] [--dry-run]
+       python scripts/ops_backup.py copy-manifest --manifest <set>/manifest.json --copy-id ID --location L --custodian C
+                                   --class RET-xx [--class ...] --restorable yes|no [--hold BASIS] [--dependent ID ...]
+       python scripts/ops_backup.py retirement --lineage <lineage-id> --evidence <evidence.json>
 The running write services pause during backup and are resumed in finally. A complete backup's AuditLog rows are then
 sealed into audit-checkpoint.json and the backup root's ledger (scripts/ops_audit_integrity.py; the root needs a one-time
 `ops_audit_integrity.py init`), and rehearse verifies its restored copy against that seal.
@@ -2854,8 +2857,224 @@ def _retention_reason(name, folder, protect, referenced, audit_kept, undeclared)
     return reason
 
 
+# ── Retention purpose, end condition and dependent-copy closure (A10, EMR-B2 (c)) ──
+# The approved proposal's RET-01..RET-12 classes, the RETIRE-PREDICATE and the COPY-CLOSURE manifest, as written. These
+# are pure descriptions and evaluations: the lifetime of a lineage or a copy ends by purpose and dependency, never by a
+# fixed number of years, and nothing here deletes, schedules or persists anything. The actual disposition of a copy stays
+# with the existing capture/verify/rotation procedures and their approval paths (scope_guard).
+RETENTION_PROPOSAL = {"proposal": "consult-emr-b2-c-prereqs-20261021/answer.json",
+                      "sha256": "d90c7595f8aee72e7b473a358a3e6fc22d8b698a1a23a21fb8338550c455c6b6"}
+RETENTION_CLASSES = tuple({**record, "proposal": RETENTION_PROPOSAL} for record in (
+    {"id": "RET-01", "name": "조회·다운로드·기재 등 접속 원문과 인증 사건",
+     "purpose": "누가 언제 어디서 누구의 자료에 어떤 행위를 했는지의 추적·월별 점검.",
+     "end_of_purpose_condition": "각 사건의 기존 법정 달력 계산에 따른 2년 만료 AND 실제 추가 보존 의무/구체적 hold 없음 AND 필요한 historical proof 선발행. 같은 사실에 별도 원본/이력 의무가 있으면 RET-02 적용.",
+     "dependent_copies": {
+         "backups": "같은 만료를 따른다. 비만료 자료/증거가 새 검증 쌍에 보존되면 만료 원문을 가진 이전 archive 전체를 퇴역; 불가하면 실제 다른 보존 근거와 제한된 상태를 기록한다.",
+         "restore_copies": "격리 복원 후 현행 만료 적용·검증 전 재공개 금지. 새 보존시계 없음.",
+         "ci_artifacts": "실제 사건이면 같은 의무·처분; 합성만이면 RET-12."}},
+    {"id": "RET-02", "name": "진료 원본·추가기재/수정 전후 이력과 그 증거",
+     "purpose": "법정 진료기록 보존 및 기록 변경의 진실성 확인. 접속기록과 구분된 원본 목적.",
+     "end_of_purpose_condition": "기존 제품 record-kind 분류의 법정 기간(진료기록부 10년, 영상/소견 5년 등)과 정당한 연장/hold/후속 의무가 모두 종료. 제공한 기록이 여러 종류이면 가장 늦은 적법 종료.",
+     "dependent_copies": {
+         "backups": "현재 쌍 또는 다른 검증 보존본에 필요한 원본이 모두 남는다면 불필요한 중복 세트는 별도 종료 가능. 유일 보존본 삭제 금지.",
+         "restore_copies": "복원 업무 종료 후 사본 정리; 원본이 있는 pair는 소유자/법정 의무까지 유지.",
+         "ci_artifacts": "생산 원본이 유입된 경우 원본과 같은 의무; CI 명칭은 예외가 아님."}},
+    {"id": "RET-03", "name": "예약·intent·slot·미결 COMMIT/unknown outcome",
+     "purpose": "DB 결과와 state/stream 결속을 복구하고 응답 소실·재시도를 판정.",
+     "end_of_purpose_condition": "실제 결과가 검증된 committed 또는 settled-negative로 내구 확정되고 필요한 binding/proof/K가 영속화되면 중복 transient 상세의 목적 종료. 영구 K 목적은 계속. 미결 시 timeout으로 종료하지 않는다.",
+     "dependent_copies": {
+         "backups": "복원 시 미결 상태를 같은 lineage에서 해결 가능해야 한다. 필수 결과 증거를 잃은 archive를 복원 가능으로 표시하지 않는다.",
+         "restore_copies": "격리 pair에서 실제 복구 후 상태 확인; 임의로 새 빈 map 초기화 금지.",
+         "ci_artifacts": "실행 재현용 합성 상세는 RET-12; 실제 account/event 연결이 있으면 COPY-CLOSURE."}},
+    {"id": "RET-04", "name": "ack 전 canonical full bundle proof/attestation",
+     "purpose": "최초 완전 증명, 정확한 ack 검증, 원문 만료 후에도 기존 lookup/confirm/재시도 결과 재현.",
+     "end_of_purpose_condition": "정확한 canonical proof에 대한 durable ack와 축소용 최소 근거가 함께 내구 완료되면 full 중복 상세의 목적 종료. ack가 없으면 lineage 전체의 RETIRE-PREDICATE 충족 때만 종료; 응답 없음은 ack 아님.",
+     "dependent_copies": {
+         "backups": "capture 시점 상태와 정확히 결속. ack 후 불필요 full 상세가 남은 사본도 COPY-CLOSURE로 종료/교체; live에서 줄였다는 사실만으로 사본 처분 완료 아님.",
+         "restore_copies": "옛 unacked 사본을 복구하면 그 lineage의 실제 ack/미결을 재검증; 임의 ack 생성 금지.",
+         "ci_artifacts": "실제 full proof는 연계 가능한 자료로 관리; 합성 proof는 RET-12."}},
+    {"id": "RET-05", "name": "ack 후 최소 요약·동일 ack 재시도/lookup 근거",
+     "purpose": "응답 유실 후 already-acknowledged 판정 및 고정된 post-ack lookup/confirm 의미.",
+     "end_of_purpose_condition": "RETIRE-PREDICATE 충족. 같은 pair가 살아 있거나 적법하게 복원 가능하고 해당 정확한 재시도 계약이 살아 있으면 목적은 계속된다.",
+     "dependent_copies": {
+         "backups": "요약과 참조 terminal이 함께 복원되어야 함. 참조 대상 하나만 먼저 지우지 않는다.",
+         "restore_copies": "복원된 쌍에서 동일 proof/ack 재시도 판정 보존; source pair로 쓰기 전파하지 않는다.",
+         "ci_artifacts": "CI에 원문/계정 매핑을 복사하지 않고 합성 참조로 증명."}},
+    {"id": "RET-06", "name": "영구 K=(stream, attemptId), committed/settled-negative terminal",
+     "purpose": "시도 식별자 재사용 배제와 정확한 결과 동일성. 특히 payload 만료와 ack 이후에도 보장.",
+     "end_of_purpose_condition": "RETIRE-PREDICATE 충족. active/restorable pair 안에서는 건별 TTL로 목적 종료를 선언하지 않는다.",
+     "dependent_copies": {
+         "backups": "K를 포함한 전체 pair로 복원 가능성을 판단. 잃어버린 K를 hash 추정이나 빈 map으로 재생성하지 않는다.",
+         "restore_copies": "새 DB로의 복원도 원 lineage 배제 의미를 보존. 새 chain 이름으로 잊은 시도를 허용하지 않는다.",
+         "ci_artifacts": "합성 permanent-K 회귀 증거는 RET-12; 실제 K는 자동 익명 취급 금지."}},
+    {"id": "RET-07", "name": "seal/head/commit marker/expiry proof·anchor",
+     "purpose": "체인과 만료 prefix의 완전성, DB와 외부 상태의 쌍·세대 결속.",
+     "end_of_purpose_condition": "참조하는 보유 자료/증명/복원 가능 사본과 pair 무결성 목적이 모두 종료(RETIRE-PREDICATE). 과거 checkpoint가 현재 검증에 더 이상 필요 없으면 검증된 대체가 영속화된 뒤 중복만 정리.",
+     "dependent_copies": {
+         "backups": "DB+state+marker+anchor를 같은 capture로 결속; 혼합 세대/부분 사본을 ready로 표시하지 않는다.",
+         "restore_copies": "원 capture/복구 pair 매핑을 검증. wrong pair는 원본 그대로 보존하고 non-ready.",
+         "ci_artifacts": "재현용 합성 pair 및 해시 증거는 승인 증거 보존 규칙 적용."}},
+    {"id": "RET-08", "name": "checkpoint/WAL/journal 파일 세그먼트·임시 compaction 사본",
+     "purpose": "내구 발행, 원자적 compaction과 장애 복구. 파일 컨테이너에는 여러 클래스가 섞임.",
+     "end_of_purpose_condition": "새 checkpoint가 모든 살아 있는 K/proof/ack/anchor와 복구 경계를 내구 보존하고 검증된 후 대체된 세그먼트의 목적 종료. 포함된 개인정보의 목적 종료도 COPY-CLOSURE로 처리.",
+     "dependent_copies": {
+         "backups": "백업 내 WAL은 해당 capture의 복구에 필요한 경계까지 묶음 보존; 이후 전체 archive 교체/퇴역.",
+         "restore_copies": "원본 hash를 보존한 private copy에서만 복구/compaction 시험; 종료 후 사본 처분.",
+         "ci_artifacts": "원시 실패 로그/세그먼트는 합성 여부를 표시; 테스트 완료를 production 파일 정리 허가로 해석하지 않음."}},
+    {"id": "RET-09", "name": "실패 journal/spool·검역 조각·진단 payload",
+     "purpose": "실패 사실의 내구 기록, 누락 없는 회복, 실제 오염/불완전 기록의 원인 판정.",
+     "end_of_purpose_condition": "법정 접속 사건을 담으면 RET-01 기간을 충족해야 함. 단순 전달/중복 spool이면 canonical 사실과 terminal이 내구 발행되고 미결 복구가 끝나면 중복 목적 종료. 검역 증거는 해당 조사/복구의 실제 종료·hold 해제까지, 임의 무기한 기본은 아님.",
+     "dependent_copies": {
+         "backups": "동일 클래스 기한과 조사 종료를 상속; 오래된 raw payload를 매번 새 백업으로 옮겨 시계를 갱신하지 않음.",
+         "restore_copies": "격리 복구 후 남은 진단 사본도 목록에서 닫음.",
+         "ci_artifacts": "실자료 diagnostic을 CI에 싣지 않는 기본. 이미 있으면 원본 클래스의 종료·사본 처분을 적용."}},
+    {"id": "RET-10", "name": "법적 hold·업무 종료·사본 처분/월별 점검 증거",
+     "purpose": "특정 보존 예외·목적 종료·실제 처분·점검 수행을 설명.",
+     "end_of_purpose_condition": "특정 근거가 정한 보존/분쟁/조사 목적과 그 증거 필요가 종료한 때. hold의 예정일이나 무응답만으로 해제하지 않는다. 조사명 없는 일반적 언젠가 필요 사유는 기본 hold 아님.",
+     "dependent_copies": {
+         "backups": "hold된 사본의 이유와 해제 증거를 명시. 7개 초과라는 이유로 삭제하지 않음.",
+         "restore_copies": "검증·사고 보존 목적이 남으면 격리 보존, 종료 후 원본이 남아 있어도 불필요 중복은 폐기 가능.",
+         "ci_artifacts": "합성 검증 영수증은 기존 비공개 증거 보존; 사람/환자 세부값을 중복 첨부하지 않는다."}},
+    {"id": "RET-11", "name": "daily·held·릴리스 B0·offsite·VM/노트북 backup/restore 세트",
+     "purpose": "같은 시점의 DB+state 복구 및 검증·승인된 릴리스 원본 보존.",
+     "end_of_purpose_condition": "각 사본의 restore/검증 목적 종료 AND 유일하게 필요한 원본/증거를 갖고 있지 않음 AND 구체적 hold/보존 지시가 해제됨. 포함된 만료 개인정보는 별도 무한 보유를 정당화하지 않음.",
+     "dependent_copies": {
+         "backups": "live와 같은 purpose/end를 상속. 기존 S4/S5/ROT17 복사본의 보존 지시를 이 문서만으로 해제하지 않는다.",
+         "restore_copies": "restore 완료·시험 종료 후 DB/data/state volumes, extraction/snapshot/temp/spool 사본을 식별해 종료. 서비스 재개에 쓰는 복원본은 live 역할로 전환하여 계속 관리.",
+         "ci_artifacts": "production backup은 CI artifact가 되어도 같은 원본 의무와 보존 지시를 유지한다."}},
+    {"id": "RET-12", "name": "CI·reconstructed legacy image·합성 시험 원시 증거",
+     "purpose": "정확한 코드/image/형식 경계·복구·용량의 재현 가능한 검증.",
+     "end_of_purpose_condition": "검증/릴리스 증거의 기존 보존 목적과 적용된 보존 지시가 종료한 때. 순수 합성 자료/개인정보 없는 코드 이미지에는 의료 접근로그 2년 의무를 기계적으로 부여하지 않는다.",
+     "dependent_copies": {
+         "backups": "실제 개인정보가 섞이면 해당 원본 클래스 의무와 COPY-CLOSURE가 우선.",
+         "restore_copies": "자신의 합성 private fixture만 기존 시험 소유권/정리 계약에 따라 종료. 기존 원본 VM/DB는 합성으로 추정하지 않음.",
+         "ci_artifacts": "기관별 기본값을 기다릴 필요 없이 합성 CI 기본. actual production-derived artifact 발견 시 사본 원장에 등록하고 원본 목적 종료와 함께 처분."}},
+))
+COPY_MANIFEST_FIELDS = ("copy_id", "location", "custodian", "capture/restore lineage", "DB+state pair digest",
+                        "source/image digest", "data classes and applicable end conditions", "hold basis and closure evidence",
+                        "restorable yes/no", "dependent copy IDs", "actual disposition and verification receipt")
+RETIREMENT_CONDITIONS = {
+    "retired_from_service": "해당 DB/state lineage가 더 이상 업무 기록·증명·재시도를 서비스하지 않으며 모든 기존 진입점과 credentials/mount/config에서 실제로 퇴역되었음(새 lineage를 만들었다는 사실만으로 충족 아님).",
+    "obligations_ended_or_preserved": "보유 원본·변경 이력·법정 access 기록·구체적 hold/분쟁/조사 목적이 모두 종료했거나 계속 필요한 부분이 검증된 별도 적법 보존 쌍에 온전히 남고, 그 쌍도 old K/proof를 더 이상 참조하지 않음.",
+    "no_restorable_copy_remains": "live/standby/daily/held/B0/offsite/VM/private restore/CI/임시 파일·추출물·snapshot 전체 의존 목록에서 그 lineage로 재개/restore/retry할 수 있는 사본이 없음. 남은 하나라도 있으면 해당 증명/K 목적은 계속됨.",
+    "consumers_ended": "현재 post-ack lookup/confirm 계약을 제공해야 할 소비자가 실제로 종료됨. 시간 경과나 클라이언트 무응답을 종료로 간주하지 않음.",
+    "disposition_receipt": "원본 보존 지시와 사본 소유자의 적용 승인 경로를 충족하고, 실제 처분과 재생 불가능 확인을 최소 영수증으로 기록함. 관련 자료가 쉽게 개인을 식별할 수 있으면 개인정보 처분 규칙을 적용함.",
+}
+# Time elapsed and client silence are explicitly not an ending (RETIRE-PREDICATE condition 4, R08).
+NOT_AN_ENDING = ("timeout", "elapsed", "no-response", "silence")
 
 
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def retention_class(class_id):
+    for record in RETENTION_CLASSES:
+        if record["id"] == class_id:
+            return record
+    raise ValueError("unknown retention class: " + str(class_id))
+
+
+def _nonempty_text(value, what):
+    if type(value) is not str or not value.strip():
+        raise ValueError(what + " must be a non-empty string")
+    return value
+
+
+def copy_manifest(*, copy_id, location, custodian, manifest, directory=None, lineage=None, data_classes, hold=None,
+                  restorable, dependent_copies=(), disposition=None):
+    """The COPY-CLOSURE record of one copy, derived from the existing backup manifest it describes (daily/held shape).
+
+    It reads nothing from disk and changes nothing: the pair digest binds the captured DB+state pair to the component
+    checksums the manifest declares, the data classes carry their own end conditions, and a disposition is accepted
+    only together with the verification evidence of what was actually done (a claim without a receipt is refused).
+    """
+    if type(manifest) is not dict or type(manifest.get("sha256")) is not dict:
+        raise ValueError("a backup manifest with its sha256 component map is required")
+    _nonempty_text(copy_id, "copy_id"); _nonempty_text(location, "location"); _nonempty_text(custodian, "custodian")
+    if restorable is not True and restorable is not False:
+        raise ValueError("restorable must be True or False")
+    emr = manifest.get("emr") if type(manifest.get("emr")) is dict else {}
+    pair = emr.get("pair") if type(emr.get("pair")) is dict else None
+    if lineage is not None and type(lineage) is not dict:
+        raise ValueError("lineage must be a mapping describing the restore lineage")
+    classes = []
+    for class_id in data_classes:
+        record = retention_class(class_id)
+        classes.append({"id": record["id"], "name": record["name"], "end_of_purpose_condition": record["end_of_purpose_condition"]})
+    if not classes:
+        raise ValueError("at least one data class is required")
+    if hold is not None:
+        if type(hold) is not dict or set(hold) != {"basis", "closure_evidence"}:
+            raise ValueError("hold must be {basis, closure_evidence}")
+        _nonempty_text(hold["basis"], "hold basis")
+        if hold["closure_evidence"] is not None:
+            _nonempty_text(hold["closure_evidence"], "hold closure evidence")
+    if disposition is not None:
+        if type(disposition) is not dict or set(disposition) != {"disposition", "verification"}:
+            raise ValueError("a disposition needs {disposition, verification}: what was done and the verification evidence")
+        _nonempty_text(disposition["disposition"], "disposition")
+        _nonempty_text(disposition["verification"], "disposition verification evidence")
+    dependents = [_nonempty_text(item, "dependent copy id") for item in dependent_copies]
+    images = manifest.get("running_images") if type(manifest.get("running_images")) is dict else {}
+    return {
+        "copy_id": copy_id,
+        "location": location,
+        "custodian": custodian,
+        "capture/restore lineage": {
+            "capture": {"set": Path(directory).name if directory is not None else None, "created_utc": manifest.get("created_utc"),
+                        "format": manifest.get("format"), "kind": manifest.get("kind"), "shape": manifest.get("shape")},
+            "state": None if pair is None else {"format": emr.get("format"), "instance_id": pair.get("instance_id"),
+                                                "lineage": pair.get("lineage"), "origin": pair.get("origin")},
+            "restore": lineage},
+        "DB+state pair digest": {"sha256": hashlib.sha256(_canonical_json({"pair": pair, "sha256": manifest["sha256"]})).hexdigest(),
+                                 "components": sorted(manifest["sha256"])},
+        "source/image digest": {"git_sha": manifest.get("git_sha"), "git_dirty": manifest.get("git_dirty"),
+                                "running_images": {name: {"id": image.get("id"), "repo_digests": image.get("repo_digests")}
+                                                   for name, image in images.items() if type(image) is dict}},
+        "data classes and applicable end conditions": classes,
+        "hold basis and closure evidence": hold,
+        "restorable yes/no": restorable,
+        "dependent copy IDs": dependents,
+        "actual disposition and verification receipt": disposition,
+    }
+
+
+def retirement(lineage, evidence):
+    """Evaluate RETIRE-PREDICATE for one lineage from explicit evidence; reports only, never disposes of anything.
+
+    Every one of the five conditions must be met. A restorable copy among the listed dependent copies keeps the
+    third condition unmet whatever its flag says, and a consumer ending claimed on a timeout, elapsed time, no response
+    or silence is not an ending. Malformed evidence is refused rather than read as unmet.
+    """
+    _nonempty_text(lineage, "lineage")
+    if type(evidence) is not dict or set(evidence) != set(RETIREMENT_CONDITIONS):
+        raise ValueError("evidence must name exactly the conditions: " + ", ".join(RETIREMENT_CONDITIONS))
+    unmet, why = [], {}
+    for name in RETIREMENT_CONDITIONS:
+        item = evidence[name]
+        if type(item) is not dict or item.get("met") not in (True, False) or type(item.get("evidence")) is not str:
+            raise ValueError("condition " + name + " needs {met: bool, evidence: str}")
+        reason = None if item["met"] else "not met: " + (item["evidence"].strip() or "no evidence")
+        if name == "no_restorable_copy_remains":
+            copies = item.get("copies")
+            if type(copies) is not list:
+                raise ValueError("no_restorable_copy_remains must list the dependent copy manifests considered")
+            restorable = [copy_record.get("copy_id") for copy_record in copies
+                          if type(copy_record) is not dict or copy_record.get("restorable yes/no") in (True, "yes")]
+            if restorable:
+                reason = "restorable copies remain: " + ", ".join(str(item_id) for item_id in restorable)
+        if name == "consumers_ended":
+            basis = item.get("basis")
+            if type(basis) is not str or not basis.strip():
+                reason = "no basis for the consumers' actual ending"
+            elif basis.strip().lower() in NOT_AN_ENDING:
+                reason = "time elapsed or client silence is not an ending: " + basis
+        if reason is not None:
+            unmet.append(name)
+            why[name] = reason
+    return {"lineage": lineage, "retire": not unmet, "unmet": unmet, "why": why,
+            "evaluated_at": datetime.now(timezone.utc).isoformat()}
 
 
 def main():
@@ -2875,7 +3094,35 @@ def main():
     rotate_parser.add_argument("--keep", type=int, default=DAILY_GENERATIONS)
     rotate_parser.add_argument("--protect", action="append", default=[], help="A set name never to delete")
     rotate_parser.add_argument("--dry-run", action="store_true", help="List what would be deleted; change nothing")
+    copy_parser = commands.add_parser("copy-manifest", help="Describe one dependent copy (A10 COPY-CLOSURE); reads the manifest only")
+    copy_parser.add_argument("--manifest", required=True, help="The backup set's manifest.json the copy was taken from")
+    copy_parser.add_argument("--copy-id", required=True)
+    copy_parser.add_argument("--location", required=True)
+    copy_parser.add_argument("--custodian", required=True)
+    copy_parser.add_argument("--class", dest="classes", action="append", required=True, metavar="RET-xx",
+                             help="A retention class of the copy's data (repeatable)")
+    copy_parser.add_argument("--restorable", required=True, choices=("yes", "no"))
+    copy_parser.add_argument("--hold", default=None, help="The specific hold basis, if any (closure evidence is recorded separately)")
+    copy_parser.add_argument("--dependent", action="append", default=[], metavar="ID", help="A dependent copy id (repeatable)")
+    retire_parser = commands.add_parser("retirement", help="Evaluate RETIRE-PREDICATE for a lineage from explicit evidence; reports only")
+    retire_parser.add_argument("--lineage", required=True)
+    retire_parser.add_argument("--evidence", required=True, help="JSON file: the five conditions, each {met, evidence, ...}")
     args = parser.parse_args()
+    if args.action == "copy-manifest":
+        # A description of an existing manifest: no Docker, no lock, no write.
+        manifest_path = Path(args.manifest)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record = copy_manifest(copy_id=args.copy_id, location=args.location, custodian=args.custodian, manifest=manifest,
+                               directory=manifest_path.parent, data_classes=args.classes, restorable=args.restorable == "yes",
+                               hold=None if args.hold is None else {"basis": args.hold, "closure_evidence": None},
+                               dependent_copies=args.dependent)
+        print(json.dumps(record, ensure_ascii=False), flush=True)
+        return
+    if args.action == "retirement":
+        evidence = json.loads(Path(args.evidence).read_text(encoding="utf-8"))
+        result = retirement(args.lineage, evidence)
+        print(json.dumps(result, ensure_ascii=False), flush=True)
+        return
     if args.action == "rotate":
         # Rotation reads and deletes host files only; it needs no Docker, but the lock keeps backup/rehearse out.
         # A dry-run performs no lock-file write either; it reports a current plan without authorizing deletion.

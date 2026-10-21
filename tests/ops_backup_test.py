@@ -14,7 +14,10 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import io
+import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import stat
 import sys
@@ -1630,6 +1633,163 @@ class StateCopyAdmissionTests(unittest.TestCase):
                             with self.assertRaises(RuntimeError): ops.rehearse(directory)
                         commands.assert_not_called(); owners.assert_not_called()
                     self.assertEqual(archive_path.read_bytes(), before)
+
+
+class RetentionPurposeTests(unittest.TestCase):
+    """A10 (retention purpose / end condition / dependent-copy rules): the approved classes RET-01..RET-12, the
+    COPY-CLOSURE copy manifest and the RETIRE-PREDICATE evaluation are descriptions and reports bound to the existing
+    backup manifest; none of them deletes, schedules or invents a TTL."""
+
+    PROPOSAL_SHA256 = "d90c7595f8aee72e7b473a358a3e6fc22d8b698a1a23a21fb8338550c455c6b6"
+
+    @staticmethod
+    def daily_manifest():
+        return {"format": 1, "complete": True, "created_utc": "2026-10-21T00:00:00+00:00", "git_sha": "0" * 40, "git_dirty": False,
+                "running_images": {"kin-api": {"id": "sha256:" + "a" * 64, "configured": "kin-api:test", "repo_digests": []}},
+                "sha256": {"kin.dump": "1" * 64, "keycloak.dump": "2" * 64, "orthanc.tgz": "3" * 64, ".env": "4" * 64,
+                           "docker-compose.yml": "5" * 64, "docker-compose.prod.yml": "6" * 64, "cluster-roles.sql": "7" * 64,
+                           "emr-state.tgz": "8" * 64, "emr-catalog.json": "9" * 64},
+                "emr": {"state_volume": "fixture-emr-state", "tablespace": "kin_emr_access", "same_pause": True, "format": 3,
+                        "pair": {"instance_id": "fixture-pair", "lineage": "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f",
+                                 "origin": V3_ORIGIN, "fingerprint": "f" * 64}}}
+
+    def manifest_record(self, **changes):
+        options = dict(copy_id="COPY-T1", location="/srv/backups/daily/20261021-000000-0a0a0a0a", custodian="ops",
+                       manifest=self.daily_manifest(), directory=Path("/srv/backups/daily/20261021-000000-0a0a0a0a"),
+                       data_classes=("RET-01", "RET-06", "RET-11"), restorable=True)
+        options.update(changes)
+        return ops.copy_manifest(**options)
+
+    @staticmethod
+    def evidence(copies=(), **changes):
+        base = {"retired_from_service": {"met": True, "evidence": "entry points, credentials, mounts and config removed; receipt R1"},
+                "obligations_ended_or_preserved": {"met": True, "evidence": "verified preserved pair P2 holds the remaining records"},
+                "no_restorable_copy_remains": {"met": True, "evidence": "dependent copy list reconciled", "copies": list(copies)},
+                "consumers_ended": {"met": True, "evidence": "client decommissioned", "basis": "client-decommissioned"},
+                "disposition_receipt": {"met": True, "evidence": "receipt R2 with non-recoverability check"}}
+        for name, value in changes.items():
+            base[name] = {**base[name], **value}
+        return base
+
+    def test_a_twelve_classes_carry_purpose_end_condition_and_copy_rules_bound_to_the_proposal(self):
+        self.assertEqual([record["id"] for record in ops.RETENTION_CLASSES], ["RET-%02d" % n for n in range(1, 13)])
+        for record in ops.RETENTION_CLASSES:
+            with self.subTest(record=record["id"]):
+                self.assertEqual(set(record), {"id", "name", "purpose", "end_of_purpose_condition", "dependent_copies", "proposal"})
+                for key in ("name", "purpose", "end_of_purpose_condition"):
+                    self.assertTrue(record[key].strip())
+                self.assertEqual(set(record["dependent_copies"]), {"backups", "restore_copies", "ci_artifacts"})
+                self.assertTrue(all(value.strip() for value in record["dependent_copies"].values()))
+                self.assertEqual(record["proposal"], {"proposal": "consult-emr-b2-c-prereqs-20261021/answer.json", "sha256": self.PROPOSAL_SHA256})
+        self.assertEqual(ops.RETENTION_PROPOSAL["sha256"], self.PROPOSAL_SHA256)
+        self.assertEqual(ops.retention_class("RET-05")["purpose"], "응답 유실 후 already-acknowledged 판정 및 고정된 post-ack lookup/confirm 의미.")
+        with self.assertRaises(ValueError):
+            ops.retention_class("RET-13")
+
+    def test_b_copy_manifest_has_the_eleven_fields_and_binds_the_pair_and_components(self):
+        record = self.manifest_record()
+        self.assertEqual(tuple(record), ops.COPY_MANIFEST_FIELDS)
+        self.assertEqual(len(ops.COPY_MANIFEST_FIELDS), 11)
+        self.assertEqual(record["capture/restore lineage"]["state"]["lineage"], "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f")
+        self.assertEqual(record["capture/restore lineage"]["state"]["origin"], V3_ORIGIN)
+        self.assertEqual(record["capture/restore lineage"]["capture"]["set"], "20261021-000000-0a0a0a0a")
+        self.assertEqual(record["source/image digest"]["git_sha"], "0" * 40)
+        self.assertEqual([item["id"] for item in record["data classes and applicable end conditions"]], ["RET-01", "RET-06", "RET-11"])
+        for item in record["data classes and applicable end conditions"]:
+            self.assertEqual(item["end_of_purpose_condition"], ops.retention_class(item["id"])["end_of_purpose_condition"])
+        self.assertIs(record["restorable yes/no"], True)
+        self.assertEqual(record["dependent copy IDs"], [])
+        self.assertIsNone(record["actual disposition and verification receipt"])
+        digest = record["DB+state pair digest"]["sha256"]
+        self.assertEqual(self.manifest_record()["DB+state pair digest"]["sha256"], digest, "the digest is deterministic")
+        changed_pair = self.daily_manifest(); changed_pair["emr"]["pair"]["lineage"] = "0" * 36
+        self.assertNotEqual(self.manifest_record(manifest=changed_pair)["DB+state pair digest"]["sha256"], digest)
+        changed_component = self.daily_manifest(); changed_component["sha256"]["emr-state.tgz"] = "e" * 64
+        self.assertNotEqual(self.manifest_record(manifest=changed_component)["DB+state pair digest"]["sha256"], digest)
+        legacy = self.daily_manifest(); legacy["emr"] = {"state_volume": "fixture-emr-state", "tablespace": "kin_emr_access", "same_pause": True}
+        legacy_record = self.manifest_record(manifest=legacy)
+        self.assertIsNone(legacy_record["capture/restore lineage"]["state"])
+        self.assertNotEqual(legacy_record["DB+state pair digest"]["sha256"], digest)
+        with self.assertRaises(ValueError):
+            self.manifest_record(data_classes=("RET-01", "RET-13"))
+        with self.assertRaises(ValueError):
+            self.manifest_record(data_classes=())
+        with self.assertRaises(ValueError):
+            self.manifest_record(disposition={"disposition": "archive retired", "verification": ""})
+        with self.assertRaises(ValueError):
+            self.manifest_record(disposition={"disposition": "archive retired"})
+        receipt = self.manifest_record(restorable=False, disposition={"disposition": "whole archive retired after the current pair was verified",
+                                                                      "verification": "receipt R7: listing after removal, non-recoverability confirmed"})
+        self.assertEqual(receipt["actual disposition and verification receipt"]["verification"], "receipt R7: listing after removal, non-recoverability confirmed")
+        held = self.manifest_record(hold={"basis": "investigation INV-3", "closure_evidence": None}, dependent_copies=("COPY-T2",))
+        self.assertEqual(held["hold basis and closure evidence"]["basis"], "investigation INV-3")
+        self.assertEqual(held["dependent copy IDs"], ["COPY-T2"])
+        with self.assertRaises(ValueError):
+            self.manifest_record(hold={"basis": ""})
+
+    def test_c_retirement_is_true_only_when_all_five_conditions_are_met(self):
+        complete = ops.retirement("3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f", self.evidence())
+        self.assertEqual((complete["retire"], complete["unmet"]), (True, []))
+        self.assertEqual(complete["lineage"], "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f")
+        datetime.fromisoformat(complete["evaluated_at"])
+        for name in ops.RETIREMENT_CONDITIONS:
+            with self.subTest(unmet=name):
+                result = ops.retirement("lineage-1", self.evidence(**{name: {"met": False, "evidence": "still pending"}}))
+                self.assertFalse(result["retire"])
+                self.assertEqual(result["unmet"], [name])
+        with self.assertRaises(ValueError):
+            ops.retirement("lineage-1", {name: value for name, value in self.evidence().items() if name != "disposition_receipt"})
+        with self.assertRaises(ValueError):
+            ops.retirement("lineage-1", self.evidence(retired_from_service={"met": "yes"}))
+
+    def test_d_an_intentionally_retained_restorable_backup_keeps_retirement_false(self):
+        retained = self.manifest_record(copy_id="COPY-HELD", restorable=True, hold={"basis": "investigation INV-3", "closure_evidence": None})
+        result = ops.retirement("lineage-1", self.evidence(copies=[retained]))
+        self.assertFalse(result["retire"], "the flag says met but a restorable copy remains")
+        self.assertEqual(result["unmet"], ["no_restorable_copy_remains"])
+        self.assertIn("COPY-HELD", result["why"]["no_restorable_copy_remains"])
+        closed = self.manifest_record(copy_id="COPY-CLOSED", restorable=False, disposition={"disposition": "retired", "verification": "receipt R7"})
+        self.assertTrue(ops.retirement("lineage-1", self.evidence(copies=[closed]))["retire"])
+        with self.assertRaises(ValueError):
+            ops.retirement("lineage-1", self.evidence(no_restorable_copy_remains={"copies": None}))
+
+    def test_e_elapsed_time_or_silence_is_not_a_consumer_ending(self):
+        for basis in ("timeout", "elapsed", "no-response", "silence", "Timeout", ""):
+            with self.subTest(basis=basis):
+                result = ops.retirement("lineage-1", self.evidence(consumers_ended={"met": True, "basis": basis}))
+                self.assertFalse(result["retire"])
+                self.assertEqual(result["unmet"], ["consumers_ended"])
+
+    def test_f_retention_functions_delete_and_run_nothing(self):
+        with patch.object(shutil, "rmtree") as rmtree, patch.object(os, "remove") as remove, patch.object(Path, "unlink") as unlink, \
+                patch.object(subprocess, "run") as run, patch.object(subprocess, "Popen") as popen, \
+                patch.object(ops, "run") as docker_run, patch.object(ops, "text") as docker_text, patch.object(ops, "temporary_run") as owned:
+            retained = self.manifest_record(copy_id="COPY-HELD")
+            ops.retirement("lineage-1", self.evidence(copies=[retained]))
+            ops.retirement("lineage-1", self.evidence())
+        for mock in (rmtree, remove, unlink, run, popen, docker_run, docker_text, owned):
+            mock.assert_not_called()
+
+    def test_g_no_ttl_fields_and_no_scheduler_in_the_retention_section(self):
+        def values(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    self.assertFalse(re.search(r"ttl|days|grace|retain_until|expires", key, re.IGNORECASE), key)
+                    yield from values(value)
+            elif isinstance(node, (list, tuple)):
+                for value in node:
+                    yield from values(value)
+            else:
+                yield node
+        for record in ops.RETENTION_CLASSES:
+            for value in values(record):
+                self.assertNotIsInstance(value, (int, float), "a class record carries no numeric TTL or grace")
+        source = Path(ops.__file__).read_text(encoding="utf-8")
+        start = source.index("# ── Retention purpose, end condition and dependent-copy closure")
+        section = source[start:source.index("\ndef main():", start)]
+        self.assertNotRegex(section, r"\b(cron|daemon|scheduler|threading|sched)\b")
+        self.assertNotRegex(section, r"rmtree|unlink\(|os\.remove|subprocess|docker")
+        self.assertNotRegex(section, r"NOT_AN_ENDING = \(\s*\)")
 
 
 if __name__ == "__main__":

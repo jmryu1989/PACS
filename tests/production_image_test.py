@@ -352,5 +352,394 @@ c.Module({controllers:[Probe],providers:[PrismaService]})(ProbeModule);
                 client.communicate(timeout=15)
 
 
+def _hash_volume(image_id, volume):
+    """sha256 of every file of a (stopped) state volume, read by a throwaway root container of the same image."""
+    script = ("const fs=require('fs'),p=require('path'),c=require('crypto');const out={};"
+              "(function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const f=p.join(d,e.name);"
+              "if(e.isDirectory())walk(f);else if(e.isFile())out[p.relative('/state',f)]=c.createHash('sha256').update(fs.readFileSync(f)).digest('hex');}})('/state');"
+              "process.stdout.write('KIN_RESULT '+JSON.stringify(out)+'\\n');")
+    output = ops.text(["docker", "run", "--rm", "--network", "none", "--user", "0:0", "--read-only",
+                       "--mount", "type=volume,source=" + volume + ",target=/state,readonly",
+                       "--entrypoint", "node", image_id, "-e", script])
+    line = [item for item in output.splitlines() if item.startswith("KIN_RESULT ")][-1]
+    return json.loads(line[len("KIN_RESULT "):])
+
+
+class StateServiceCutpointTests(unittest.TestCase):
+    """EMR-B2 (c) C-P01..C-P11 (the preserved P00..P12 mapping): the real API image in both roles over a disposable
+    PostgreSQL. The suite tests/emr/b/startup_pg_test.cjs runs as the API user inside the image and drives the real
+    API in child processes; this orchestrator owns the state service container (the same image, the service fixture
+    entry of startup_fixture.cjs as UID 1000 over the state and IPC volumes) and answers the suite's control requests
+    (start, stop, terminate, restart, volume hashes) from the bind-mounted control directory. Only owned synthetic
+    containers are ever signalled; the PG backend a cut terminates is the request's own, reported by the API."""
+
+    INSTANCE = "cutpoint-synthetic-pair"
+
+    @classmethod
+    def setUpClass(cls):
+        ops.require_local_docker()
+        cls.image = json.loads(ops.text(["docker", "image", "inspect", os.environ.get("KIN_TEST_API_IMAGE", "kin-api:c1-candidate")]))[0]
+        cls.image_id = cls.image["Id"]
+        cls.stamp = time.strftime("%Y%m%d-%H%M%S")
+        cls.evidence = ROOT / "tmp" / "emr-b2-c-14" / ("pg-" + cls.stamp)
+        cls.control = cls.evidence / "control"
+        cls.control.mkdir(parents=True)
+        cls.db = cls.container("db", ["--network", "none", "--tmpfs", "/var/lib/postgresql/data",
+                                      "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+                                      "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
+        deadline = time.monotonic() + 60
+        while ops.run(["docker", "exec", cls.db, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], check=False).returncode:
+            if time.monotonic() > deadline:
+                raise RuntimeError("Disposable PostgreSQL did not start")
+            time.sleep(0.5)
+        ops.run(["docker", "exec", "-u", "postgres", cls.db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
+        provisioned = subprocess.run(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex,
+                                      "-e", "KIN_EMR_READER_PASSWORD=" + uuid.uuid4().hex, cls.db, "psql", "-X", "-U", "postgres", "-d", "kin"],
+                                     input=emr_compose.PROVISION_SQL.encode(), capture_output=True, timeout=120)
+        if provisioned.returncode:
+            raise RuntimeError("EMR provisioning of the disposable database failed")
+        migrated = subprocess.run(["docker", "run", "--rm", "--network", "container:" + cls.db, "-e", "DATABASE_URL=" + INSTALLER_URL,
+                                   cls.image_id, "sh", "/app/start-production.sh", "migrate"], capture_output=True, timeout=300)
+        if migrated.returncode:
+            raise RuntimeError("Migration failed: " + migrated.stdout.decode(errors="replace")[-800:])
+        cls.volumes = {}
+        for suffix in ("state", "api-ipc", "retention-ipc"):
+            token = uuid.uuid4().hex
+            name = "kin-rehearsal-" + token[:16] + "-" + suffix
+            cls.addClassCleanup(ops.remove_owned_if_present, "volume", name, token)
+            ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, name])
+            cls.volumes[suffix] = name
+        cls.service = None
+        cls.services = []
+        print(json.dumps({"code_sha": ops.text(["git", "rev-parse", "HEAD"]), "image_id": cls.image_id, "evidence": str(cls.evidence)}), flush=True)
+
+    @classmethod
+    def container(cls, suffix, arguments):
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16] + "-" + suffix
+        cls.addClassCleanup(ops.remove_owned_if_present, "container", name, token)
+        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, *arguments])
+        ops.run(["docker", "start", name])
+        return name
+
+    @classmethod
+    def logs(cls, name):
+        result = ops.run(["docker", "logs", name])
+        return (result.stdout + result.stderr).decode("utf-8", errors="replace")
+
+    @classmethod
+    def running(cls, name):
+        return json.loads(ops.text(["docker", "inspect", name]))[0]["State"]["Running"]
+
+    def service_start(self, label, scenario, *, instance_id=None, database_port=None, wait_for=None, extra=False):
+        """The real state-serve-v3 entry (launchStateService) with its seal observed by the service fixture."""
+        url = READER_URL if database_port is None else READER_URL.replace(":5432/", ":" + str(database_port) + "/") + "?connect_timeout=2"
+        name = self.container("state-" + label, [
+            "--network", "container:" + self.db, "--user", "1000:1000", "--group-add", "2001", "--group-add", "2002",
+            "--stop-timeout", "20",
+            "-e", "DATABASE_URL=" + url, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
+            "-e", "KIN_EMR_INSTANCE_ID=" + (instance_id or self.INSTANCE),
+            "-e", "KIN_EMR_API_SOCKET=" + API_IPC + "/writer.sock", "-e", "KIN_EMR_RETENTION_SOCKET=" + RETENTION_IPC + "/writer.sock",
+            "-e", "KIN_EMR_B2_SERVICE_EVENTS=/control/service-events.jsonl", "-e", "NODE_OPTIONS=--max-old-space-size=3072",
+            "--mount", "type=volume,source=" + self.volumes["state"] + ",target=" + ops.EMR_STATE,
+            "--mount", "type=volume,source=" + self.volumes["api-ipc"] + ",target=" + API_IPC,
+            "--mount", "type=volume,source=" + self.volumes["retention-ipc"] + ",target=" + RETENTION_IPC,
+            "--mount", "type=bind,source=" + str(ROOT / "tests" / "emr" / "b") + ",target=/emr-b,readonly",
+            "--mount", "type=bind,source=" + str(self.control) + ",target=/control",
+            "--entrypoint", "node", self.image_id, "/emr-b/startup_fixture.cjs", "--service", json.dumps(scenario)])
+        self.services.append({"label": label, "name": name, "scenario": scenario})
+        deadline = time.monotonic() + 120
+        while True:
+            text = self.logs(name)
+            if "EMR_STATE_READY" in text:
+                if not extra:
+                    self.service = name
+                return {"ready": True, "name": name, "tail": text[-400:]}
+            if wait_for and self._service_event(label, wait_for):
+                return {"ready": None, "held": wait_for, "name": name}
+            if not self.running(name):
+                code = int(ops.text(["docker", "wait", name], timeout=60))
+                return {"ready": False, "exit": code, "name": name, "tail": text[-600:]}
+            if time.monotonic() > deadline:
+                return {"ready": False, "exit": None, "name": name, "tail": "timeout: " + text[-600:]}
+            time.sleep(0.3)
+
+    def _service_event(self, label, what):
+        file = self.control / "service-events.jsonl"
+        if not file.exists():
+            return False
+        for line in file.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                event = json.loads(line)
+                if event.get("label") == label and event.get("what") == what:
+                    return True
+        return False
+
+    def service_stop(self, signal="TERM", name=None):
+        name = name or self.service
+        if not name:
+            return {"stopped": None}
+        if self.running(name):
+            if signal == "KILL":
+                ops.run(["docker", "kill", "--signal", "KILL", name])
+            else:
+                ops.run(["docker", "stop", "--time", "20", name], timeout=120)
+        code = int(ops.text(["docker", "wait", name], timeout=120))
+        text = self.logs(name)
+        if name == self.service:
+            self.service = None
+        return {"stopped": name, "signal": signal, "exit": code, "tail": text[-400:],
+                "closed": text.rstrip().endswith("EMR_STATE_CLOSED")}
+
+    def serve(self, request):
+        action = request["action"]
+        if action == "service-start":
+            return self.service_start(request["label"], request.get("scenario") or {}, instance_id=request.get("instanceId"),
+                                      database_port=request.get("databasePort"), wait_for=request.get("waitFor"), extra=request.get("extra", False))
+        if action == "service-stop":
+            return self.service_stop(request.get("signal", "TERM"))
+        if action == "service-restart":
+            stopped = self.service_stop("TERM")
+            return {"restarted": stopped, **self.service_start(request["label"], request.get("scenario") or {})}
+        if action == "service-wait":
+            return {"running": bool(self.service) and self.running(self.service)}
+        if action == "volume-hashes":
+            if self.service and self.running(self.service):
+                return {"error": "service running"}
+            return {"hashes": _hash_volume(self.image_id, self.volumes["state"])}
+        return {"error": "unknown action " + action}
+
+    def test_01_cutpoints_over_the_real_service_and_database(self):
+        env = {"KIN_EMR_B2_RUNTIME_URL": RUNTIME_URL, "KIN_EMR_B2_INSTALLER_URL": INSTALLER_URL,
+               "KIN_EMR_STATE_SOCKET": API_IPC + "/writer.sock", "KIN_EMR_INSTANCE_ID": self.INSTANCE,
+               "KIN_EMR_B2_CONTROL": "/control", "KIN_EMR_B2_KEEP_RUNS": "1", "NODE_OPTIONS": "--max-old-space-size=3072"}
+        args = ["--network", "container:" + self.db, "--user", "1001:1001", "--group-add", "2001",
+                "--mount", "type=volume,source=" + self.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly",
+                "--mount", "type=bind,source=" + str(ROOT / "tests" / "emr" / "b") + ",target=/emr-b,readonly",
+                "--mount", "type=bind,source=" + str(self.control) + ",target=/control"]
+        for key, value in env.items():
+            args += ["-e", key + "=" + value]
+        suite = self.container("pg-suite", [*args, "--entrypoint", "node", self.image_id, "--test", "--test-concurrency=1", "/emr-b/startup_pg_test.cjs"])
+        answered = set()
+        deadline = time.monotonic() + 3600
+        while True:
+            for file in sorted(self.control.glob("req-*.json")):
+                if file.name in answered:
+                    continue
+                request = json.loads(file.read_text(encoding="utf-8"))
+                try:
+                    reply = self.serve(request)
+                except Exception as error:  # the suite judges; the orchestrator reports
+                    reply = {"error": type(error).__name__ + ": " + str(error)[:500]}
+                target = self.control / ("res-" + request["id"] + ".json")
+                temporary = target.with_suffix(".tmp")
+                temporary.write_text(json.dumps(reply), encoding="utf-8")
+                temporary.replace(target)
+                answered.add(file.name)
+            if not self.running(suite):
+                break
+            if time.monotonic() > deadline:
+                ops.run(["docker", "kill", suite], check=False)
+                self.fail("the cutpoint suite exceeded its wall budget")
+            time.sleep(0.2)
+        code = int(ops.text(["docker", "wait", suite], timeout=60))
+        logs = self.logs(suite)
+        (self.evidence / "suite.log").write_text(logs, encoding="utf-8")
+        for item in self.services:
+            (self.evidence / ("service-" + item["label"] + ".log")).write_text(self.logs(item["name"]), encoding="utf-8")
+        cells = [json.loads(line[len("B2C_PG_EVIDENCE "):]) for line in logs.splitlines() if line.startswith("B2C_PG_EVIDENCE ")]
+        summary = {"exit": code, "cells": [cell["cell"] for cell in cells], "services": [item["label"] for item in self.services],
+                   "pass": next((line for line in logs.splitlines() if line.startswith("# pass ")), None),
+                   "fail": next((line for line in logs.splitlines() if line.startswith("# fail ")), None)}
+        print(json.dumps({"b2c_pg_cutpoints": summary}), flush=True)
+        self.assertEqual(code, 0, logs[-6000:])
+        self.assertEqual(summary["fail"], "# fail 0", logs[-6000:])
+
+
+class LegacyImageTests(unittest.TestCase):
+    """A03 old-reader cells against reconstructed legacy images (D1656-T01/T02/T05 and the pre-EMR start path).
+
+    KIN_TEST_LEGACY_B1_IMAGE: the image rebuilt from the fixed B1 source (a86ecf1; v1+v2 reader, former API owner).
+    KIN_TEST_LEGACY_PRE_EMR_IMAGE: the image rebuilt from the pre-EMR source (b9690cc; migrate-then-serve, no reader).
+    Both are reconstructed artifacts: their digests authenticate the reconstruction only, never the historic deployed
+    image (that provenance is RO-01/RO-02, commander-owned). The v3 pair is a fresh disposable one written by the real
+    current service; every legacy start runs against a private clone of that state volume and must change no byte."""
+
+    INSTANCE = "legacy-synthetic-pair"
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.environ.get("KIN_TEST_LEGACY_B1_IMAGE"):
+            raise unittest.SkipTest("KIN_TEST_LEGACY_B1_IMAGE not given")
+        ops.require_local_docker()
+        cls.image_id = json.loads(ops.text(["docker", "image", "inspect", os.environ["KIN_TEST_API_IMAGE"]]))[0]["Id"]
+        cls.legacy = json.loads(ops.text(["docker", "image", "inspect", os.environ["KIN_TEST_LEGACY_B1_IMAGE"]]))[0]
+        pre = os.environ.get("KIN_TEST_LEGACY_PRE_EMR_IMAGE")
+        cls.pre_emr = json.loads(ops.text(["docker", "image", "inspect", pre]))[0] if pre else None
+        cls.db = StateServiceCutpointTests.container.__func__(cls, "db", [
+            "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
+            "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+            "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
+        deadline = time.monotonic() + 60
+        while ops.run(["docker", "exec", cls.db, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], check=False).returncode:
+            if time.monotonic() > deadline:
+                raise RuntimeError("Disposable PostgreSQL did not start")
+            time.sleep(0.5)
+        ops.run(["docker", "exec", "-u", "postgres", cls.db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
+        provisioned = subprocess.run(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex,
+                                      "-e", "KIN_EMR_READER_PASSWORD=" + uuid.uuid4().hex, cls.db, "psql", "-X", "-U", "postgres", "-d", "kin"],
+                                     input=emr_compose.PROVISION_SQL.encode(), capture_output=True, timeout=120)
+        if provisioned.returncode:
+            raise RuntimeError("EMR provisioning of the disposable database failed")
+        migrated = subprocess.run(["docker", "run", "--rm", "--network", "container:" + cls.db, "-e", "DATABASE_URL=" + INSTALLER_URL,
+                                   cls.image_id, "sh", "/app/start-production.sh", "migrate"], capture_output=True, timeout=300)
+        if migrated.returncode:
+            raise RuntimeError("Migration failed: " + migrated.stdout.decode(errors="replace")[-800:])
+        cls.volumes = {}
+        for suffix in ("state", "api-ipc", "retention-ipc", "clone"):
+            token = uuid.uuid4().hex
+            name = "kin-rehearsal-" + token[:16] + "-" + suffix
+            cls.addClassCleanup(ops.remove_owned_if_present, "volume", name, token)
+            ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, name])
+            cls.volumes[suffix] = name
+        # The v3 pair: the current service recovers the fresh pair, one client appends one synthetic event, the service closes.
+        service = cls.container("state-service", [
+            "--network", "container:" + cls.db, "--user", "1000:1000", "--group-add", "2001", "--group-add", "2002", "--stop-timeout", "20",
+            "-e", "DATABASE_URL=" + READER_URL, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE, "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE,
+            "-e", "KIN_EMR_API_SOCKET=" + API_IPC + "/writer.sock", "-e", "KIN_EMR_RETENTION_SOCKET=" + RETENTION_IPC + "/writer.sock",
+            "--mount", "type=volume,source=" + cls.volumes["state"] + ",target=" + ops.EMR_STATE,
+            "--mount", "type=volume,source=" + cls.volumes["api-ipc"] + ",target=" + API_IPC,
+            "--mount", "type=volume,source=" + cls.volumes["retention-ipc"] + ",target=" + RETENTION_IPC,
+            "--entrypoint", "sh", cls.image_id, "/app/start-production.sh", "state-serve-v3"])
+        ops.wait_state_service(service, 0, timeout=120)
+        import ops_emr_probe as probe
+        event = probe.probe_event({"study": "SYNTHETIC-legacy-cells", "event_id": str(uuid.uuid4()), "institution": "synthetic-institution"})
+        appended = subprocess.run(["docker", "run", "--rm", "--network", "container:" + cls.db, "--user", "1001:1001", "--group-add", "2001", "--read-only",
+                                   "-e", "DATABASE_URL=" + RUNTIME_URL, "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE, "-e", "KIN_EMR_STATE_SOCKET=" + API_IPC + "/writer.sock",
+                                   "--mount", "type=volume,source=" + cls.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly",
+                                   "--entrypoint", "node", cls.image_id, "-e", probe.PROBE_SCRIPT, "append", json.dumps({"event": event})],
+                                  capture_output=True, timeout=180)
+        if appended.returncode:
+            raise RuntimeError("Synthetic append failed: " + appended.stdout.decode(errors="replace")[-800:] + appended.stderr.decode(errors="replace")[-800:])
+        ops.run(["docker", "stop", "--time", "20", service], timeout=120)
+        ops.state_service_closed(service)
+        cls.pair_hashes = _hash_volume(cls.image_id, cls.volumes["state"])
+        cls.counts = cls.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + cls.psql("SELECT count(*) FROM emr_access.commit_marker")
+        print(json.dumps({"legacy_images": {"b1": {"id": cls.legacy["Id"], "labels": cls.legacy["Config"].get("Labels"), "reconstructed": True},
+                                            "pre_emr": cls.pre_emr and {"id": cls.pre_emr["Id"], "labels": cls.pre_emr["Config"].get("Labels"), "reconstructed": True}},
+                          "pair_files": sorted(cls.pair_hashes)}), flush=True)
+
+    @classmethod
+    def psql(cls, sql):
+        return ops.text(["docker", "exec", cls.db, "psql", "-X", "-U", "postgres", "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql])
+
+    def clone(self):
+        """A private clone of the v3 state volume for one legacy start (the pair volume itself is never mounted)."""
+        ops.run(["docker", "run", "--rm", "--network", "none", "--user", "0:0",
+                 "--mount", "type=volume,source=" + self.volumes["state"] + ",target=/source,readonly",
+                 "--mount", "type=volume,source=" + self.volumes["clone"] + ",target=/clone",
+                 "--entrypoint", "sh", self.image_id, "-c", "rm -rf /clone/* /clone/.[!.]* 2>/dev/null; cp -a /source/. /clone/ && chown -R 1000:1000 /clone"])
+        return self.volumes["clone"]
+
+    def legacy_run(self, image, suffix, arguments, timeout=180):
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16] + "-" + suffix
+        self.addCleanup(ops.remove_owned_if_present, "container", name, token)
+        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, *arguments, image])
+        ops.run(["docker", "start", name])
+        code = int(ops.text(["docker", "wait", name], timeout=timeout))
+        result = ops.run(["docker", "logs", name])
+        return code, (result.stdout + result.stderr).decode("utf-8", errors="replace")
+
+    def test_01_legacy_b1_owner_serve_over_a_v3_pair_refuses_before_any_mutation(self):
+        """D1656-T01: the former API owner (v1+v2 reader) started as the owner of a v3 state copy."""
+        clone = self.clone()
+        before = _hash_volume(self.image_id, clone)
+        self.assertEqual(before, self.pair_hashes)
+        code, logs = self.legacy_run(self.legacy["Id"], "legacy-serve", [
+            "--network", "container:" + self.db, "-e", "DATABASE_URL=" + RUNTIME_URL, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
+            "-e", "DEPLOYMENT_MODE=production", "-e", "AUTH_REQUIRED=true", "-e", "KC_ISSUER=http://127.0.0.1:1/auth/realms/kin",
+            "-e", "KC_JWKS_URL=http://127.0.0.1:1/certs", "-e", "KC_AUDIENCE=kin-api", "-e", "KC_WEB_SECRET=disposable-ci-only",
+            "-e", "KIN_COOKIE_SECRET=" + uuid.uuid4().hex, "-e", "PUBLIC_ORIGIN=http://127.0.0.1:3000", "-e", "ORTHANC_USER=disposable-ci-only",
+            "-e", "ORTHANC_PASS=" + uuid.uuid4().hex, "-e", "KC_ADMIN_URL=http://127.0.0.1:1/auth", "-e", "KC_REALM=kin", "-e", "KC_CLIENT_ID=kin-api",
+            "-e", "KC_CLIENT_SECRET=" + uuid.uuid4().hex, "--stop-timeout", "20",
+            "--mount", "type=volume,source=" + clone + ",target=" + ops.EMR_STATE])
+        self.assertNotEqual(code, 0, logs[-1500:])
+        self.assertNotIn("Nest application successfully started", logs)
+        self.assertEqual(_hash_volume(self.image_id, clone), before, "the legacy owner changed a byte of the v3 copy")
+        self.assertEqual(self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker"), self.counts)
+        print(json.dumps({"D1656-T01": {"exit": code, "line": [line for line in logs.splitlines() if "기동 실패" in line or "Seal" in line][:3]}}), flush=True)
+
+    def test_02_legacy_b1_restore_recovery_entry_over_a_v3_copy_refuses_before_any_mutation(self):
+        """D1656-T01 (restore route): the legacy copy launcher's recovery (AccessSeal.recoverAtStart of that image)."""
+        clone = self.clone()
+        before = _hash_volume(self.image_id, clone)
+        script = ("const {AccessSeal}=require('/app/dist/emr-runtime/seal');const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');"
+                  "const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');const {PrismaClient}=require('@prisma/client');"
+                  "const db=new PrismaClient();const dir=process.env.KIN_EMR_STATE_DIR;"
+                  "new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart().then(r=>{console.log('KIN_RESULT '+JSON.stringify({recovered:true,r}));process.exit(3)},"
+                  "e=>{console.log('KIN_RESULT '+JSON.stringify({refused:String(e&&(e.code||e.name))}));process.exit(1)});")
+        code, logs = self._legacy_node(clone, script)
+        self.assertEqual(code, 1, logs[-1500:])
+        self.assertIn('"refused"', logs)
+        self.assertEqual(_hash_volume(self.image_id, clone), before, "the legacy recovery changed a byte of the v3 copy")
+        print(json.dumps({"D1656-T01-restore": {"exit": code, "result": [line for line in logs.splitlines() if line.startswith("KIN_RESULT")]}}), flush=True)
+
+    def _legacy_node(self, clone, script):
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16] + "-legacy-node"
+        self.addCleanup(ops.remove_owned_if_present, "container", name, token)
+        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, "--network", "container:" + self.db,
+                 "-e", "DATABASE_URL=" + RUNTIME_URL, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
+                 "--mount", "type=volume,source=" + clone + ",target=" + ops.EMR_STATE, "--entrypoint", "node", self.legacy["Id"], "-e", script])
+        ops.run(["docker", "start", name])
+        code = int(ops.text(["docker", "wait", name], timeout=180))
+        result = ops.run(["docker", "logs", name])
+        return code, (result.stdout + result.stderr).decode("utf-8", errors="replace")
+
+    def test_03_legacy_start_script_has_no_state_service_entry(self):
+        """D1656-T02: the legacy script refuses `state-serve-v3` (exit 64); the pre-EMR script takes no mode at all."""
+        code, logs = self._entry_run(self.legacy["Id"], "legacy-entry")
+        self.assertEqual(code, 64, logs)
+        self.assertIn("expected migrate or serve", logs)
+        if self.pre_emr:
+            # The pre-EMR script ignores its argument: it would migrate and serve. Only the current preflight excludes it
+            # (ops_deploy_preflight STATE_ENTRYPOINT/STATE_COMMAND); the image gives no refusal of its own.
+            text = ops.text(["docker", "run", "--rm", "--network", "none", "--entrypoint", "cat", self.pre_emr["Id"], "/app/start-production.sh"])
+            self.assertNotIn("state-serve-v3", text)
+            self.assertNotIn('case "${1', text)
+            print(json.dumps({"D1656-T02-pre-emr": {"script_ignores_argument": True, "refusal_by": "ops_deploy_preflight only"}}), flush=True)
+        print(json.dumps({"D1656-T02": {"exit": code}}), flush=True)
+
+    def _entry_run(self, image, suffix):
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16] + "-" + suffix
+        self.addCleanup(ops.remove_owned_if_present, "container", name, token)
+        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, "--network", "none", "--entrypoint", "sh", image,
+                 "/app/start-production.sh", "state-serve-v3"])
+        ops.run(["docker", "start", name])
+        code = int(ops.text(["docker", "wait", name], timeout=60))
+        result = ops.run(["docker", "logs", name])
+        return code, (result.stdout + result.stderr).decode("utf-8", errors="replace")
+
+    def test_04_legacy_b1_in_the_client_role_gets_no_state_and_cannot_serve(self):
+        """D1656-T05: the former owner image started with the (c) client shape: no state mount, no reader secret, the
+        read-only API IPC volume only. It has no client; it exits without reaching the v3 pair."""
+        before = _hash_volume(self.image_id, self.volumes["state"])
+        code, logs = self.legacy_run(self.legacy["Id"], "legacy-client", [
+            "--network", "container:" + self.db, "--group-add", "2001", "-e", "DATABASE_URL=" + RUNTIME_URL,
+            "-e", "KIN_EMR_STATE_SOCKET=" + API_IPC + "/writer.sock", "-e", "KIN_EMR_INSTANCE_ID=" + self.INSTANCE,
+            "-e", "DEPLOYMENT_MODE=production", "-e", "AUTH_REQUIRED=true", "-e", "KC_ISSUER=http://127.0.0.1:1/auth/realms/kin",
+            "-e", "KC_JWKS_URL=http://127.0.0.1:1/certs", "-e", "KC_AUDIENCE=kin-api", "-e", "KC_WEB_SECRET=disposable-ci-only",
+            "-e", "KIN_COOKIE_SECRET=" + uuid.uuid4().hex, "-e", "PUBLIC_ORIGIN=http://127.0.0.1:3000", "-e", "ORTHANC_USER=disposable-ci-only",
+            "-e", "ORTHANC_PASS=" + uuid.uuid4().hex, "-e", "KC_ADMIN_URL=http://127.0.0.1:1/auth", "-e", "KC_REALM=kin", "-e", "KC_CLIENT_ID=kin-api",
+            "-e", "KC_CLIENT_SECRET=" + uuid.uuid4().hex, "--stop-timeout", "20",
+            "--mount", "type=volume,source=" + self.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly"])
+        self.assertNotEqual(code, 0, logs[-1500:])
+        self.assertNotIn("Nest application successfully started", logs)
+        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), before)
+        print(json.dumps({"D1656-T05": {"exit": code, "line": [line for line in logs.splitlines() if "기동 실패" in line][:2]}}), flush=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
