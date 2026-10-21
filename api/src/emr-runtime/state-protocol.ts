@@ -123,6 +123,7 @@ function binding(value: unknown, reserved: boolean): Reservation | CommitBinding
     result.eventId === null || (result.kind === 'history') !== (result.stream === 'history')) throw new Error('binding');
   return reserved ? { ...result, generation: integer(v.generation, 1), proofDigest: v.proofDigest === null ? null : sha256(v.proofDigest) } : result;
 }
+export function parseCommitBinding(value: unknown): CommitBinding { return binding(value, true); }
 function streamSet(value: unknown): ('viewing' | 'history')[] {
   if (!Array.isArray(value) || !(value.length === 1 && value[0] === 'viewing' ||
     value.length === 2 && value[0] === 'viewing' && value[1] === 'history')) throw new Error('streams');
@@ -142,7 +143,7 @@ function bundle(v: Record<string, any>): BundleIdentity {
   if (result.eventId === null && (result.bindings.length !== 1 || result.bindings[0].kind !== 'expiry')) throw new Error('expiry-bundle');
   return result;
 }
-function proof(value: unknown): SealedBundleProof {
+export function parseSealedBundleProof(value: unknown): SealedBundleProof {
   const v = object(value, ['v', 'serviceEpoch', 'eventId', 'requiredStreams', 'entries']);
   if (v.v !== STATE_PROTOCOL_VERSION || !Array.isArray(v.entries) || v.entries.length < 1 || v.entries.length > 2) throw new Error('proof');
   const entries = v.entries.map(raw => {
@@ -156,6 +157,7 @@ function proof(value: unknown): SealedBundleProof {
   const identity = bundle({ ...v, bindings: entries.map(({ sealed: _, ...b }) => b) });
   return { v: 1, serviceEpoch: uuid(v.serviceEpoch), eventId: identity.eventId, requiredStreams: identity.requiredStreams, entries };
 }
+const proof = parseSealedBundleProof;
 function journalBody(kind: JournalKind, value: unknown): Record<string, string | number> {
   const v = object(value, JOURNAL_KINDS[kind]), result = {} as Record<string, string | number>;
   for (const key of JOURNAL_KINDS[kind]) result[key] = key === 'fromSequence' || key === 'toSequence' ? integer(v[key]) :
@@ -319,8 +321,8 @@ export function parseStateResponse<O extends StateOperation>(value: unknown, req
     if (epoch === null) throw new Error('epoch');
     const result: any = parseResult(request.operation, r.result);
     checkResultBinding(request as StateRequest, result);
-    if ((request.operation === 'confirm-bundle' && result.serviceEpoch !== epoch) ||
-      (request.operation === 'lookup-outcome' && result.outcome === 'committed-and-sealed' && result.proof.serviceEpoch !== epoch)) throw new Error('proof-epoch');
+    // The envelope authenticates the current admitted epoch above. The canonical
+    // proof's epoch is historical evidence and survives a service replacement.
     return freeze({ v: 1, requestId: r.requestId, serviceEpoch: epoch, ok: true, result }) as StateResponse<O>;
   } catch (error) {
     if (error instanceof StateProtocolError) throw error;

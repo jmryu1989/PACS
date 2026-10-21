@@ -276,7 +276,7 @@
     ],
     "access_retention": {
       "source": "commander D727/D731 (legal register 2026-10-09 final, Astra cross-check 0 disagreements): deltas D-1 revised, D-19, D-21; delta map D-3, D-18",
-      "streams": "two chains: viewing (every event; its own floor from the event's day, longer only under a hold or legal basis; prefix expiry with checkpoint and external seal) and history (succeeded \uae30\uc7ac\u00b7\ucd94\uac00\uae30\uc7ac\u00b7\uc218\uc815 about a record; kept with the changed record; destroyed with its destruction set by unit H; no deletion path in B1)",
+      "streams": "two chains: viewing (every event; its own floor from the event's day, longer only under a hold or legal basis; prefix expiry with checkpoint and external seal) and history (succeeded 기재·추가기재·수정 about a record; kept with the changed record; destroyed with its destruction set by unit H; no deletion path in B1)",
       "stored": "no deadline on any entry; statutory_act (A's mapping) and each record target (kind, record/version IDs) bound per entry in emr_access.access_target from the chained payload",
       "rule": "api/src/emr-runtime/contract.ts accessDeadline(stream, entry, recordEnd) with ACCESS_RETENTION from A's RECORD_CLASSIFICATION['access-audit'], accessRetentionFloor, recordTargets",
       "database_floor": "emr_access.access_retention_floor(timestamptz), the migration's only civil period; expire_prefix (viewing only) refuses an entry before it (EB004) or held (EB005)",
@@ -911,7 +911,16 @@
       "D1650-D17-V2",
       "D1650-D17-V3",
       "D1650-T08",
-      "D1650-T08A"
+      "D1650-T08A",
+      "D1655-T01",
+      "D1655-T02",
+      "D1655-T03",
+      "D1655-T04",
+      "D1655-T05",
+      "D1655-T06",
+      "D1656-T01",
+      "D1656-T04",
+      "D1656-T02"
     ],
     "terminal_mutants": [
       {

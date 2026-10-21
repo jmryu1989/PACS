@@ -23,6 +23,26 @@ PROTECTED = ["api/prisma", "api/Dockerfile", "api/start-production.sh", "keycloa
 # None of that is an API-only replacement, so this path refuses it outright.
 EMR_MIGRATION = "api/prisma/migrations/20261008120000_emr_b/migration.sql"
 EMR_STATE = "/var/lib/kin-emr"
+STATE_ENTRYPOINT = ["sh", "/app/start-production.sh"]
+STATE_COMMAND = ["state-serve-v3"]
+STATE_API_IPC = "/run/kin-emr-api"
+STATE_RETENTION_IPC = "/run/kin-emr-retention"
+# Executed from the reviewed immutable artifact, with a read-only state mount.
+# This is format/pair inspection, never a second recovery owner.
+STATE_INSPECTION_SCRIPT = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
+const {databaseIdentity,verifyStateServiceConnection}=require('/app/dist/emr-runtime/manifest');
+const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
+const {inspectExternal}=require('/app/dist/emr-runtime/external-writer');
+const db=new PrismaClient();
+(async()=>{await db.$connect();await verifyStateServiceConnection(db);
+const sql=new PrismaLedgerSql(db), viewing=await sql.tail('viewing'), history=await sql.tail('history');
+const pair={instanceId:process.env.KIN_EMR_INSTANCE_ID,database:await databaseIdentity(db),
+chains:{viewing:viewing.chainId,history:history.chainId}};
+const inspected=inspectExternal('/var/lib/kin-emr',pair);
+if(!inspected.state && (viewing.sequence!==0 || history.sequence!==0))throw Error('missing');
+console.log('KIN_RESULT '+JSON.stringify({version:inspected.state?.version??null,
+fingerprint:inspected.fingerprint,pair,lineage:inspected.state?.lineage?.id??null}));
+})().catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -40,6 +60,13 @@ def unique_object(pairs):
         require(key not in result, "Duplicate JSON key")
         result[key] = value
     return result
+
+
+def container_environment(config):
+    values = config.get("Env")
+    require(type(values) is list and all(type(item) is str and "=" in item for item in values),
+            "Container environment is unavailable")
+    return unique_object(item.split("=", 1) for item in values)
 
 
 def parse_request(raw, expected_hash):
@@ -119,7 +146,7 @@ def check_running_api(container, expected_id, emr=False):
     require("Ports" in network and not any((network["Ports"] or {}).values()), "API host ports are exposed or unknown")
     host = container.get("HostConfig") or {}
     require(host.get("NetworkMode") not in (None, "host") and not host.get("PortBindings"), "Unsafe API network mode or host bindings")
-    env = dict(item.split("=", 1) for item in config.get("Env", []) if "=" in item)
+    env = container_environment(config)
     require(env.get("DEPLOYMENT_MODE") == "production" and env.get("AUTH_REQUIRED") == "true", "Production authentication settings required")
     if emr:
         # The server holds the runtime role only: no installer password and no other database user in its environment.
@@ -295,9 +322,8 @@ def check_counts_preserved(before, after):
     require(all(after.get(name) == count for name, count in before.items()), "Row counts of existing tables changed")
 
 
-def check_introduced_api(container, *, name, image, release, working_dir, state_volume):
-    """The running API of the introduced release: OS user node, DB role kin_runtime only, production authentication,
-    exactly one RW named state volume and no host port; no installer secret in its environment."""
+def check_introduced_api(container, *, name, image, release, working_dir, state_volume, api_ipc_volume=None):
+    """The introduced API is a non-promoting client: runtime DB role and API IPC only."""
     require(container.get("Name") == "/" + name, "Wrong API container")
     require(container.get("Image") == image and (container.get("State") or {}).get("Running") is True, "API is not the running target image")
     config = container.get("Config") or {}
@@ -305,31 +331,117 @@ def check_introduced_api(container, *, name, image, release, working_dir, state_
     require(labels.get("kin.deploy.release") == release, "API release label differs")
     require(labels.get("com.docker.compose.project.working_dir") == working_dir and labels.get("com.docker.compose.service") == "api",
             "Wrong Compose working directory or service")
-    require(config.get("User") == "node", "Running API is not the production user")
+    require(config.get("User") == "1001:1001", "Running API is not the client UID")
     mounts = container.get("Mounts")
+    require(type(api_ipc_volume) is str and api_ipc_volume and api_ipc_volume != state_volume,
+            "API IPC volume identity missing")
     require(type(mounts) is list and len(mounts) == 1 and mounts[0].get("Type") == "volume"
-            and mounts[0].get("Name") == state_volume and mounts[0].get("Destination") == EMR_STATE
-            and mounts[0].get("RW") is True, "API must run with only its EMR state volume")
+            and mounts[0].get("Name") == api_ipc_volume and mounts[0].get("Destination") == STATE_API_IPC
+            and mounts[0].get("RW") is True, "API must run with only its API IPC volume")
     network = container.get("NetworkSettings") or {}
     require("Ports" in network and not any((network["Ports"] or {}).values()), "API host ports are exposed or unknown")
     host = container.get("HostConfig") or {}
     require(host.get("NetworkMode") not in (None, "host") and not host.get("PortBindings") and host.get("Privileged") is not True,
             "Unsafe API network mode, host bindings or privilege")
-    env = dict(item.split("=", 1) for item in config.get("Env", []) if "=" in item)
+    env = container_environment(config)
     require(env.get("DEPLOYMENT_MODE") == "production" and env.get("AUTH_REQUIRED") == "true", "Production authentication settings required")
     try:
         user = urlsplit(env.get("DATABASE_URL", "")).username
     except ValueError:
         user = None
-    require(user == "kin_runtime" and env.get("KIN_EMR_STATE_DIR") == EMR_STATE, "API must hold the EMR runtime credential and state directory")
+    require(user == "kin_runtime" and "KIN_EMR_STATE_DIR" not in env
+            and env.get("KIN_EMR_STATE_SOCKET") == STATE_API_IPC + "/writer.sock", "API must hold only the runtime credential and API socket")
     require(not {"POSTGRES_PASSWORD", "PGPASSWORD", "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD"} & set(env),
             "API holds an installer, reader or retention secret")
 
 
 def check_state_volume(observed, storage):
-    """The API state volume as the node account sees it: owner node, 0700, and a file can be created, synced, renamed."""
+    """Read-only state volume admission; a diagnostic must never create a protected file."""
     require((observed["uid"], observed["gid"]) == (storage["node_uid"], storage["node_gid"]), "State volume owner differs")
-    require(observed["mode"] == "700" and observed["writable"] is True, "State volume mode or write test failed")
+    require(observed["mode"] == "700" and observed.get("format") == 3
+            and HASH.fullmatch(observed.get("fingerprint", "")), "State volume mode or format admission failed")
+
+
+def check_state_service(container, *, release, image, state_volume, api_ipc_volume, retention_ipc_volume,
+                        instance_id, database_host):
+    """Admission for a writable state mount, including stopped containers.
+
+    release is the immutable artifact selection from the protected reviewed release/copy
+    plan, never a caller's capability claim. Its acceptance evidence must precede plan
+    installation. Image labels only cross-check that selection; they cannot select it.
+    The launcher owns the operations lock and repeats observations at the launch handoff.
+    This function issues no reusable admission token and performs no repair.
+    """
+    require(type(release) is dict and SHA.fullmatch(release.get("sha", "")) is not None,
+            "State service has no reviewed source")
+    expected = (release.get("images") or {}).get("api")
+    require(type(expected) is str and IMAGE.fullmatch(expected) is not None,
+            "State service needs a reviewed immutable image")
+    require(type(image) is dict and image.get("Id") == expected and container.get("Image") == expected,
+            "State service image differs from the reviewed artifact")
+    require(((image.get("Config") or {}).get("Labels") or {}).get("org.opencontainers.image.revision") == release["sha"],
+            "State service source differs from the reviewed artifact")
+    config, host = container.get("Config") or {}, container.get("HostConfig") or {}
+    require(config.get("Entrypoint") == STATE_ENTRYPOINT and config.get("Cmd") == STATE_COMMAND,
+            "State service entry mode differs")
+    require(container.get("Path") == STATE_ENTRYPOINT[0]
+            and container.get("Args") == [*STATE_ENTRYPOINT[1:], *STATE_COMMAND], "Stale state service command")
+    require((config.get("Labels") or {}).get("com.docker.compose.service") == "emr-state",
+            "Only the state service may receive protected storage")
+    require(config.get("User") == "1000:1000" and sorted(host.get("GroupAdd") or []) == ["2001", "2002"],
+            "State service UID or IPC groups differ")
+    require(host.get("Privileged") is False and host.get("NetworkMode") not in (None, "host")
+            and not host.get("PortBindings") and not host.get("PidMode") and not host.get("CapAdd"),
+            "State service privilege or network differs")
+    require((host.get("RestartPolicy") or {}).get("Name") == "no", "State owner restart must pass launch admission")
+    mounts = container.get("Mounts")
+    expected_mounts = {EMR_STATE: state_volume, STATE_API_IPC: api_ipc_volume, STATE_RETENTION_IPC: retention_ipc_volume}
+    require(all(type(value) is str and value for value in expected_mounts.values())
+            and len(set(expected_mounts.values())) == 3, "State/IPC volumes are not distinct")
+    require(type(mounts) is list and len(mounts) == 3 and
+            {m.get("Destination"): m.get("Name") for m in mounts} == expected_mounts and
+            all(m.get("Type") == "volume" and m.get("RW") is True for m in mounts), "State service mounts differ")
+    env = container_environment(config)
+    require(instance_id and env.get("KIN_EMR_INSTANCE_ID") == instance_id
+            and env.get("KIN_EMR_STATE_DIR") == EMR_STATE
+            and env.get("KIN_EMR_API_SOCKET") == STATE_API_IPC + "/writer.sock"
+            and env.get("KIN_EMR_RETENTION_SOCKET") == STATE_RETENTION_IPC + "/writer.sock", "State service pair or sockets differ")
+    try:
+        database = urlsplit(env.get("DATABASE_URL", ""))
+        valid_database = (database.scheme in ("postgres", "postgresql") and database.username == "kin_emr_reader"
+                          and database.hostname == database_host and database.port == 5432 and database.path == "/kin")
+    except ValueError:
+        valid_database = False
+    require(valid_database, "State service reader or database target differs")
+    require(not {"POSTGRES_PASSWORD", "PGPASSWORD", "KIN_EMR_RUNTIME_PASSWORD", "KIN_EMR_RETENTION_PASSWORD"} & set(env),
+            "State service received another role's credential")
+
+
+def check_state_owners(containers, state_volume, admitted_name):
+    """A retained old container is still an owner if its restart policy can revive it."""
+    require(type(containers) is list, "State owner inventory is unavailable")
+    for container in containers:
+        require(type(container) is dict and type(container.get("Mounts")) is list, "State owner mounts are unavailable")
+        if not any(m.get("Name") == state_volume and m.get("RW") is True for m in container["Mounts"]):
+            continue
+        if container.get("Name") == "/" + admitted_name:
+            continue
+        state, host = container.get("State") or {}, container.get("HostConfig") or {}
+        require(state.get("Running") is False and state.get("Restarting") is False
+                and (host.get("RestartPolicy") or {}).get("Name") == "no",
+                "A legacy state owner is running or eligible for restart")
+
+
+def check_legacy_restore_format(checkpoint_version, wal_versions):
+    """The retained legacy copy launcher must never become a v3 owner.
+
+    This is a refusal gate, not proof of legacy provenance or permission to upgrade.
+    v3 copies require the current compiled service and its verified pair mapping.
+    """
+    require(type(checkpoint_version) is int and checkpoint_version in (1, 2),
+            "Legacy restore refuses unknown/v3 state; verified state-service copy admission required")
+    require(all(type(version) is int and version == checkpoint_version for version in wal_versions),
+            "Legacy restore refuses mixed or unknown state WAL")
 
 
 def check_keycloak_serverinfo(selected):

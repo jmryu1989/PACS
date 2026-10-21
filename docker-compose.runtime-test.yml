@@ -1,6 +1,10 @@
 # Use the production API image with the existing local test ports/Keycloak realm.
 # This file does not contain production hosts, TLS paths or credentials.
 services:
+  emr-state:
+    image: ${KIN_TEST_API_IMAGE:-kin-api:c1-candidate}
+    entrypoint: ["sh", "/app/start-production.sh"]
+    command: ["state-serve-v3"]
   api:
     image: ${KIN_TEST_API_IMAGE:-kin-api:c1-candidate}
     build:
@@ -9,4 +13,5 @@ services:
         VCS_REF: ${KIN_REVISION:-unknown}
     environment:
       DEPLOYMENT_MODE: production
-    volumes: !reset []
+    volumes: !override
+      - emr-state-api-ipc:/run/kin-emr-api

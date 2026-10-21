@@ -4,8 +4,6 @@ import { createServer, Server } from 'node:net';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { PrismaClient } from '@prisma/client';
-import { accessStreams, parseAccessEvent } from '../emr-contract/access-event';
-import { canonicalPayload, entryHash, StoredEntry } from './contract';
 import { StateCoordinator } from './coordinator';
 import { FailureJournal } from './failure-journal';
 import { AccessSeal, CommitBinding } from './seal';
@@ -82,10 +80,12 @@ export async function launchStateService(environment: NodeJS.ProcessEnv = proces
     const sql = new PrismaLedgerSql(db);
     const viewing = await sql.tail('viewing'); check();
     const history = await sql.tail('history'); check();
+    const pair = { instanceId, database, chains: { viewing: viewing.chainId, history: history.chainId } };
+    coordinator.call('admit-pair', pair); check();
     const journal = new FailureJournal(directory, coordinator);
     const seal = new AccessSeal(directory, sql, journal);
     service = new ProtectedStateService({ coordinator, journal, sql, seal,
-      pair: { instanceId, database, chains: { viewing: viewing.chainId, history: history.chainId } } }, () => { failed = true; latch(); });
+      pair }, () => { failed = true; latch(); });
     for (const endpoint of endpoints) {
       check();
       const prior = fs.lstatSync(endpoint.file, { throwIfNoEntry: false });
@@ -174,7 +174,7 @@ export class ProtectedStateService {
     this.phase = 'starting';
     this.startup = (async () => {
       try {
-        const recovered = await this.resources.seal.recoverAtStart();
+        const recovered = await this.resources.seal.recoverAtStart(this.resources.pair, this.serviceEpoch);
         if (this.phase !== 'starting') refuse('STOPPING');
         if (recovered.seal.streams.viewing.chainId !== this.resources.pair.chains.viewing ||
           recovered.seal.streams.history.chainId !== this.resources.pair.chains.history) refuse('CONFLICT', 'conflict');
@@ -328,31 +328,7 @@ export class ProtectedStateService {
         }
       }
       case 'expiry-prefix': return scope.expiryPrefix = await seal.expiryPrefix(request.value.through);
-      case 'acknowledge': {
-        const supplied = request.value.proof;
-        // Old proof data may be replayed only after current service verification. Its epoch is
-        // historical evidence, never authority for the session that admitted this operation.
-        const actual = await this.confirmBundle({ eventId: supplied.eventId, requiredStreams: supplied.requiredStreams,
-          bindings: request.value.bindings });
-        if (actual.entries.some((entry, i) => !exactBinding(request.value.bindings[i], (({ sealed: _, ...binding }) => binding)(entry))))
-          refuse('CONFLICT', 'conflict');
-        await this.resources.sql.snapshot(async reader => {
-          for (let i = 0; i < supplied.entries.length; i++) {
-            const frontier = supplied.entries[i].sealed, current = actual.entries[i].sealed;
-            if (frontier.sequence > current.sequence) refuse('CONFLICT', 'conflict');
-            if (frontier.sequence === current.sequence) {
-              if (frontier.hash !== current.hash) refuse('CONFLICT', 'conflict');
-            } else {
-              const [row] = await reader.entriesAfter(supplied.entries[i].stream, frontier.sequence - 1, 1);
-              if (!row || row.sequence !== frontier.sequence) refuse('UNAVAILABLE', 'unknown');
-              if (row.hash !== frontier.hash || entryHash(row.sequence, row.previousHash, row.payload) !== frontier.hash)
-                refuse('CONFLICT', 'conflict');
-            }
-          }
-        });
-        await Promise.all(request.value.bindings.map(b => seal.acknowledge(b.stream, b.attemptId)));
-        return { status: 'acknowledged' };
-      }
+      case 'acknowledge': return { status: seal.acknowledgeBundle(request.value.proof, request.value.bindings) };
     }
   }
   private fencedAbsent(bindings: CommitBinding[]): boolean {
@@ -363,41 +339,8 @@ export class ProtectedStateService {
       return terminal?.phase === 'aborted' && exactBinding(b, terminal.binding);
     });
   }
-  private async confirmBundle(bundle: BundleIdentity): Promise<SealedBundleProof> {
-    const { sql, seal } = this.resources;
-    const entries = await sql.snapshot(async reader => {
-      const stored: StoredEntry[] = [];
-      let classified: string[] | undefined;
-      for (const binding of bundle.bindings) {
-        const marker = await reader.markerForAttempt(binding.stream, binding.attemptId);
-        const [row] = await reader.entriesAfter(binding.stream, binding.sequence - 1, 1);
-        if (!marker || !row || row.sequence !== binding.sequence) refuse('UNAVAILABLE', 'unknown');
-        if (!exactBinding(binding, marker) || row.eventId !== binding.eventId || row.hash !== binding.hash ||
-          row.previousHash !== binding.previousHash || row.contentSha256 !== binding.contentSha256 || row.kind !== binding.kind ||
-          entryHash(row.sequence, row.previousHash, row.payload) !== row.hash ||
-          createHash('sha256').update(row.payload).digest('hex') !== row.contentSha256) refuse('CONFLICT', 'conflict');
-        if (row.kind === 'expiry') classified = ['viewing'];
-        else {
-          const payload = JSON.parse(row.payload), event = parseAccessEvent(payload.event);
-          const required = [...accessStreams(event)];
-          if (canonicalPayload(event, undefined, binding.stream).text !== row.payload ||
-            classified && !same(classified, required)) refuse('CONFLICT', 'conflict');
-          classified = required;
-        }
-        stored.push(row);
-      }
-      if (!same(classified, bundle.requiredStreams)) refuse('CONFLICT', 'conflict');
-      return stored;
-    });
-    const results = await Promise.allSettled(bundle.bindings.map(async (binding, i) => {
-      const row = entries[i];
-      const covered = binding.eventId !== null ? await seal.advanceReceipt(binding.stream, binding.attemptId, binding.eventId, row) : null;
-      const frontier = covered ?? await seal.advance(binding.stream, { sequence: binding.sequence, hash: binding.hash });
-      return { ...binding, sealed: frontier.streams[binding.stream] };
-    }));
-    for (const result of results) if (result.status === 'rejected') throw result.reason;
-    return { v: 1, serviceEpoch: this.serviceEpoch, eventId: bundle.eventId, requiredStreams: bundle.requiredStreams,
-      entries: results.map(result => (result as PromiseFulfilledResult<SealedBundleProof['entries'][number]>).value) };
+  private confirmBundle(bundle: BundleIdentity): Promise<SealedBundleProof> {
+    return this.resources.seal.confirmBundle(bundle);
   }
 
   /** Control hello is persistent. Mutation sockets must half-close before dispatch,

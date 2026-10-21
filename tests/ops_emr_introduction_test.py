@@ -192,7 +192,7 @@ def receipt_bundle(plan, folder, *, created=None, receipt_id="1" * 32, details=N
 def resolved_model(target, *, target_checkout, maintenance, images=None, recovery=None):
     """The selected, secret-free fields HostOps.resolved() reads from `docker compose config`, for a correct target."""
     project = recovery["project"] if recovery else target["project"]
-    services = list(intro.ROLES) + (list(intro.ONE_SHOTS) if target_checkout else [])
+    services = list(intro.ROLES) + ([*intro.ONE_SHOTS, "emr-state"] if target_checkout else [])
     volumes = {"pg-db": recovery["pg"] if recovery else target["volumes"]["pg"],
                "orthanc-db": recovery["orthanc"] if recovery else target["volumes"]["orthanc"], "proxy-certs": target["project"] + "_proxy-certs"}
     mounts = {role: [] for role in services}
@@ -206,7 +206,11 @@ def resolved_model(target, *, target_checkout, maintenance, images=None, recover
     if target_checkout:
         volumes.update({"emr-access": target["volumes"]["emr_access"], "emr-state": target["volumes"]["emr_state"]})
         mounts["db"].append({"type": "volume", "source": "emr-access", "target": "/var/lib/postgresql/emr-access"})
-        mounts["api"].append({"type": "volume", "source": "emr-state", "target": intro.EMR_STATE_DIR})
+        volumes.update({name: target["project"] + "_" + name for name in ("emr-state-api-ipc", "emr-state-retention-ipc")})
+        mounts["api"].append({"type": "volume", "source": "emr-state-api-ipc", "target": pre.STATE_API_IPC})
+        mounts["emr-state"] += [{"type": "volume", "source": source, "target": destination} for source, destination in
+                              (("emr-state", intro.EMR_STATE_DIR), ("emr-state-api-ipc", pre.STATE_API_IPC),
+                               ("emr-state-retention-ipc", pre.STATE_RETENTION_IPC))]
     ports = {role: [] for role in services}
     ports["proxy"] = [target["ports"]["maintenance"]] if maintenance else list(target["ports"]["public"])
     if target["kind"] == "production":
@@ -217,11 +221,13 @@ def resolved_model(target, *, target_checkout, maintenance, images=None, recover
     for role, entries in target["external_networks"].items():
         networks[role] = sorted(set(networks[role]) | set(entries))
     declared = {key: name for entries in target["external_networks"].values() for key, name in entries.items()}
-    return {"project": project, "containers": {role: target["containers"][role] for role in services}, "volumes": volumes,
+    return {"project": project, "containers": {role: intro.state_service_name(target) if role == "emr-state" else target["containers"][role]
+                                               for role in services}, "volumes": volumes,
             "networks": {"default": project + "_default" if recovery else target["networks"]["default"], "workflow": target["networks"]["workflow"],
                          **declared},
             "service_networks": networks,
-            "mounts": mounts, "ports": ports, "images": dict(images) if images else {role: None for role in services},
+            "mounts": mounts, "ports": ports, "images": {**images, **({"emr-state": images["api"]} if target_checkout else {})}
+                if images else {role: None for role in services},
             "origin": {"api_KC_ISSUER": origin + "/auth/realms/kin", "keycloak_KC_HOSTNAME": origin + "/auth", "api_PUBLIC_ORIGIN": origin},
             "api_environment": ["AUTH_REQUIRED", "DATABASE_URL"], "proxy_ports": ports["proxy"]}
 
@@ -612,13 +618,13 @@ def provisioned_catalog():
             "databases": [], "schemas": ["public"]}
 
 
-def api_container(name="kin-api", state="pacs-starter-kit_emr-state"):
+def api_container(name="kin-api", ipc="pacs-starter-kit_emr-state-api-ipc"):
     return {"Name": "/" + name, "Image": image("6"), "State": {"Running": True},
-            "Config": {"User": "node", "Labels": {"kin.deploy.release": "b" * 40, "com.docker.compose.project.working_dir": "/srv/kin/repository",
+            "Config": {"User": "1001:1001", "Labels": {"kin.deploy.release": "b" * 40, "com.docker.compose.project.working_dir": "/srv/kin/repository",
                                                   "com.docker.compose.service": "api"},
                        "Env": ["DEPLOYMENT_MODE=production", "AUTH_REQUIRED=true", "DATABASE_URL=postgresql://kin_runtime:x@db:5432/kin",
-                               "KIN_EMR_STATE_DIR=" + pre.EMR_STATE]},
-            "Mounts": [{"Type": "volume", "Name": state, "Destination": pre.EMR_STATE, "RW": True}],
+                                "KIN_EMR_STATE_SOCKET=" + pre.STATE_API_IPC + "/writer.sock"]},
+            "Mounts": [{"Type": "volume", "Name": ipc, "Destination": pre.STATE_API_IPC, "RW": True}],
             "NetworkSettings": {"Ports": {"3000/tcp": None}}, "HostConfig": {"NetworkMode": "x_default", "PortBindings": {}}}
 
 
@@ -797,9 +803,9 @@ class PreflightAdditionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Realm members differ"):
             pre.check_member_counts({**plan["members"], "disabled": 0}, plan["members"])
 
-    def test_21_introduced_api_runs_as_node_with_runtime_role_and_one_state_volume(self):
+    def test_21_introduced_api_has_client_uid_runtime_role_and_only_api_ipc(self):
         arguments = {"name": "kin-api", "image": image("6"), "release": "b" * 40, "working_dir": "/srv/kin/repository",
-                     "state_volume": "pacs-starter-kit_emr-state"}
+                     "state_volume": "pacs-starter-kit_emr-state", "api_ipc_volume": "pacs-starter-kit_emr-state-api-ipc"}
         pre.check_introduced_api(api_container(), **arguments)
         mounts = api_container()["Mounts"][0]
         cases = {"user": lambda c: c["Config"].__setitem__("User", "root"),
@@ -811,6 +817,9 @@ class PreflightAdditionTests(unittest.TestCase):
                  "installer url": lambda c: c["Config"]["Env"].__setitem__(2, "DATABASE_URL=postgresql://kin:x@db:5432/kin"),
                  "installer secret": lambda c: c["Config"]["Env"].append("POSTGRES_PASSWORD=x"),
                  "reader secret": lambda c: c["Config"]["Env"].append("KIN_EMR_READER_PASSWORD=x"),
+                  "state directory": lambda c: c["Config"]["Env"].append("KIN_EMR_STATE_DIR=" + pre.EMR_STATE),
+                  "state mount": lambda c: c["Mounts"][0].update(Name="pacs-starter-kit_emr-state", Destination=pre.EMR_STATE),
+                  "retention ipc": lambda c: c["Mounts"][0].update(Name="pacs-starter-kit_emr-state-retention-ipc", Destination=pre.STATE_RETENTION_IPC),
                  "auth off": lambda c: c["Config"]["Env"].__setitem__(1, "AUTH_REQUIRED=false"),
                  "release label": lambda c: c["Config"]["Labels"].__setitem__("kin.deploy.release", "a" * 40),
                  "name": lambda c: c.__setitem__("Name", "/kin-api-copy")}
@@ -822,10 +831,11 @@ class PreflightAdditionTests(unittest.TestCase):
 
     def test_22_state_volume_keycloak_and_proxy(self):
         storage = plan_fixture()["storage"]
-        pre.check_state_volume({"uid": 1000, "gid": 1000, "mode": "700", "writable": True}, storage)
-        for change in ({"uid": 0}, {"mode": "777"}, {"writable": False}):
+        observed = {"uid": 1000, "gid": 1000, "mode": "700", "format": 3, "fingerprint": "a" * 64}
+        pre.check_state_volume(observed, storage)
+        for change in ({"uid": 0}, {"mode": "777"}, {"format": 2}, {"format": None}, {"fingerprint": ""}):
             with self.assertRaises(RuntimeError):
-                pre.check_state_volume({"uid": 1000, "gid": 1000, "mode": "700", "writable": True, **change}, storage)
+                pre.check_state_volume({**observed, **change}, storage)
         pre.check_keycloak_serverinfo({"useCaches": "false", "persistentUserSessions": True})
         for selected in ({"useCaches": "true", "persistentUserSessions": True}, {"useCaches": None, "persistentUserSessions": True},
                          {"useCaches": "false", "persistentUserSessions": False}, {"useCaches": "false", "persistentUserSessions": None}):

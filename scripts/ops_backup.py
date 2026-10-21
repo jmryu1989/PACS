@@ -561,6 +561,46 @@ new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtSta
 .then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
 
 
+def admit_legacy_copy(directory, manifest):
+    """Inspect the immutable archive without extraction, repair or owner construction.
+
+    The old restore route is retained for original-format copies only. It cannot
+    supply v3 pair-mapping provenance; that unfinished route fails before creation.
+    Recheck at the executable handoff as well as before the first copy mutation.
+    """
+    import ops_deploy_preflight as pre
+    archive_path = Path(directory) / "emr-state.tgz"
+    expected = manifest.get("sha256", {}).get("emr-state.tgz")
+    if not expected or archive_path.is_symlink() or digest(archive_path) != expected:
+        raise RuntimeError("State capture changed before copy admission")
+    checkpoint_version, wal_versions, seen = None, set(), set()
+    try:
+        with tarfile.open(archive_path, "r|gz") as archive:
+            for entry in archive:
+                member = PurePosixPath(entry.name)
+                if member.is_absolute() or ".." in member.parts or not (entry.isfile() or entry.isdir()) or str(member) in seen:
+                    raise RuntimeError("Unsafe or duplicate state capture entry")
+                seen.add(str(member))
+                if str(member) == "seal/settlement.json":
+                    if not entry.isfile():
+                        raise RuntimeError("State checkpoint is not a file")
+                    document = json.load(archive.extractfile(entry), object_pairs_hook=pre.unique_object)
+                    checkpoint_version = document["state"]["version"]
+                elif str(member) == "seal/settlement.jsonl":
+                    if not entry.isfile():
+                        raise RuntimeError("State WAL is not a file")
+                    for line in archive.extractfile(entry):
+                        # Torn suffixes are not complete records and remain untouched.
+                        if line.endswith(b"\n"):
+                            document = json.loads(line, object_pairs_hook=pre.unique_object)
+                            wal_versions.add(document["version"])
+    except (ValueError, KeyError, TypeError, tarfile.TarError) as error:
+        raise RuntimeError("State capture format is unavailable") from error
+    pre.check_legacy_restore_format(checkpoint_version, wal_versions)
+    if digest(archive_path) != expected:
+        raise RuntimeError("State capture changed during copy admission")
+
+
 def rehearse_held(directory, manifest, *, daily=False):
     """The isolated restore check of a held capture (L-04c for B0, L-10c for B1): restored exactly as a rollback would,
     in a fresh networkless cluster of the product's shape (bootstrap superuser kin), with its roles replayed and owners
@@ -572,6 +612,8 @@ def rehearse_held(directory, manifest, *, daily=False):
     role catalog compared with the manifest's within the set (R5-02: daily_set_catalog; a source database outside the
     set is named in the result), the AuditLog seal verified as kin (no projection: a daily set has none)."""
     shape = "post" if daily else manifest["shape"]
+    if shape == "post":
+        admit_legacy_copy(directory, manifest)
     token = uuid.uuid4().hex
     name = resource_name(token)
     volume, state_volume = name + "-orthanc", name + "-emr-state"
@@ -618,6 +660,7 @@ def rehearse_held(directory, manifest, *, daily=False):
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
                            "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
                            manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
+            admit_legacy_copy(directory, manifest)
             checked = temporary_run(["--network", "container:" + name, "--read-only", "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
                                      "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node",
                                      manifest["running_images"]["kin-api"]["id"], "-e", EMR_RECOVERY_SCRIPT])
@@ -665,6 +708,8 @@ def rehearse(directory):
     volume = name + "-orthanc"
     state_volume = name + "-emr-state"
     emr = "emr" in manifest
+    if emr:
+        admit_legacy_copy(directory, manifest)
     started = time.monotonic()
     result = {"backup": directory.name, "git_sha": manifest["git_sha"], "success": False}
     try:
@@ -707,17 +752,11 @@ def rehearse(directory):
                  "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
                  manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
             api_image = manifest["running_images"]["kin-api"]["id"]
-            recovery = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
-const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
-const {AccessSeal}=require('/app/dist/emr-runtime/seal');
-const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');
-const db=new PrismaClient(); const dir='/var/lib/kin-emr';
-new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart()
-.then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
+            admit_legacy_copy(directory, manifest)
             # The optional reader login may correctly be disabled in the source catalog. Use the disposable restore
             # administrator for this read-only ledger check; do not alter the preserved source role attributes.
             checked = temporary_run(["--network", "container:"+name, "--read-only", "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
-                "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node", api_image, "-e", recovery])
+                "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node", api_image, "-e", EMR_RECOVERY_SCRIPT])
             if checked != "EMR_RESTORE_VERIFIED":
                 raise RuntimeError("Restored database and external state do not agree")
             result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}

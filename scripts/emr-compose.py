@@ -135,7 +135,7 @@ def compose_shape(root, problems):
     compose = load_yaml(root / "docker-compose.yml")
     prod = load_yaml(root / "docker-compose.prod.yml")
     services = compose.get("services") or {}
-    for name in ("db", "emr-provision", "api-migrate", "api"):
+    for name in ("db", "emr-provision", "api-migrate", "api", "emr-state"):
         if name not in services:
             problem(problems, "compose-service-missing", name)
     if problems:
@@ -158,8 +158,24 @@ def compose_shape(root, problems):
         problem(problems, "compose-api-not-runtime-role")
     if any("POSTGRES_PASSWORD" in str(value) for value in (api.get("environment") or {}).values()):
         problem(problems, "compose-api-holds-installer-secret")
-    if (api.get("environment") or {}).get("KIN_EMR_STATE_DIR") != "/var/lib/kin-emr" or "emr-state:/var/lib/kin-emr" not in (api.get("volumes") or []):
-        problem(problems, "compose-api-state-volume")
+    if "KIN_EMR_STATE_DIR" in (api.get("environment") or {}) or "emr-state:/var/lib/kin-emr" in (api.get("volumes") or []):
+        problem(problems, "compose-api-state-owner")
+    if "emr-state-api-ipc:/run/kin-emr-api" not in (api.get("volumes") or []):
+        problem(problems, "compose-api-ipc-missing")
+    state = services["emr-state"]
+    if (state.get("entrypoint"), state.get("command")) != (["sh", "/app/start-production.sh"], ["state-serve-v3"]):
+        problem(problems, "compose-state-entry-mode")
+    if state.get("user") != "1000:1000" or state.get("group_add") != ["2001", "2002"] or state.get("restart") != "no":
+        problem(problems, "compose-state-identity")
+    if set(state.get("volumes") or []) != {"emr-state:/var/lib/kin-emr", "emr-state-api-ipc:/run/kin-emr-api",
+                                            "emr-state-retention-ipc:/run/kin-emr-retention"}:
+        problem(problems, "compose-state-mounts")
+    if not (state.get("environment") or {}).get("DATABASE_URL", "").startswith("postgresql://kin_emr_reader:${KIN_EMR_READER_PASSWORD"):
+        problem(problems, "compose-state-reader-role")
+    for filename in ("docker-compose.prod.yml", "docker-compose.runtime-test.yml"):
+        overlay = load_yaml(root / filename).get("services", {}).get("emr-state", {})
+        if (overlay.get("entrypoint"), overlay.get("command")) != (["sh", "/app/start-production.sh"], ["state-serve-v3"]):
+            problem(problems, "compose-state-entry-mode", filename)
     if ((api.get("depends_on") or {}).get("api-migrate") or {}).get("condition") != "service_completed_successfully":
         problem(problems, "compose-api-before-migration")
     murl = (migrate.get("environment") or {}).get("DATABASE_URL", "")
@@ -167,15 +183,15 @@ def compose_shape(root, problems):
         problem(problems, "compose-migration-credential")
     if ((migrate.get("depends_on") or {}).get("emr-provision") or {}).get("condition") != "service_completed_successfully":
         problem(problems, "compose-migration-before-provision")
-    for volume in ("emr-access", "emr-state"):
+    for volume in ("emr-access", "emr-state", "emr-state-api-ipc", "emr-state-retention-ipc"):
         if volume not in (compose.get("volumes") or {}):
             problem(problems, "compose-volume-undeclared", volume)
     pservices = prod.get("services") or {}
     papi, pmigrate = pservices.get("api") or {}, pservices.get("api-migrate") or {}
     if (pmigrate.get("build") or {}).get("target") != "production":
         problem(problems, "prod-migration-not-production-image")
-    if list(papi.get("volumes") or []) != ["emr-state:/var/lib/kin-emr"]:
-        problem(problems, "prod-api-state-volume")
+    if list(papi.get("volumes") or []) != ["emr-state-api-ipc:/run/kin-emr-api"]:
+        problem(problems, "prod-api-ipc-volume")
 
 
 def check(root, declaration_path):
@@ -198,7 +214,7 @@ def check(root, declaration_path):
         problem(problems, "b2c-wire-test-missing")
     service_cases = wire["local_service_cases"]
     if not isinstance(service_cases, list) or not service_cases or any(
-            not isinstance(case, str) or re.fullmatch(r"(?:C-S0[2345]\.D[0-9]{2}|D1641-T[0-9]{2}[A-Z]?|D1650-(?:T[0-9]{2}[A-Z]?|D17(?:-V[123])?))", case) is None
+            not isinstance(case, str) or re.fullmatch(r"(?:C-S0[2345]\.D[0-9]{2}|D1641-T[0-9]{2}[A-Z]?|D165[56]-T[0-9]{2}[A-Z]?|D1650-(?:T[0-9]{2}[A-Z]?|D17(?:-V[123])?))", case) is None
             for case in service_cases) or len(service_cases) != len(set(service_cases)):
         problem(problems, "b2c-service-cases-invalid")
     if wire["local_service_file"] != "tests/emr/b/state_service_test.cjs" or not (root / wire["local_service_file"]).is_file():

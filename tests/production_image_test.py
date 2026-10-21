@@ -128,7 +128,7 @@ class ProductionImageTests(unittest.TestCase):
 
     def test_01_runtime_contains_compiled_code_without_build_tools(self):
         """TEST-C1-01: runtime packaging and non-root user are checked inside the image."""
-        self.assertEqual(self.image["Config"]["User"], "node")
+        self.assertEqual(self.image["Config"]["User"], "1001:1001")
         self.assertIn("NODE_ENV=production", self.image["Config"]["Env"])
         self.assertEqual(self.image["Config"]["Cmd"], ["sh", "/app/start-production.sh", "serve"])
         expected = os.environ.get("KIN_EXPECTED_REVISION", "C1-working-tree")
@@ -143,9 +143,12 @@ for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) ass
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
 assert.strictEqual(require('prisma/package.json').version,'5.22.0');
 assert(!fs.readFileSync('start-production.sh').includes(13));
-// EMR-B1 protected state directory: the API's own user only (a named volume inherits this on first mount).
+// The API is a client even when it runs a former owner entry module. Only UID 1000 can open state.
 const state=fs.statSync('/var/lib/kin-emr');
-assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); assert.strictEqual(state.mode&0o777,0o700);
+assert(state.isDirectory()); assert.strictEqual(state.uid,1000); assert.strictEqual(state.mode&0o777,0o700);
+assert.strictEqual(process.getuid(),1001);
+assert.throws(()=>fs.readdirSync('/var/lib/kin-emr'),e=>e.code==='EACCES');
+assert.throws(()=>fs.writeFileSync('/var/lib/kin-emr/forbidden','x'),e=>e.code==='EACCES');
 """
         ops.temporary_run(["--network", "none", "--entrypoint", "node", self.image_id, "-e", script])
 

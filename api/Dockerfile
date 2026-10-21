@@ -13,6 +13,15 @@ RUN apt-get update -y \
 
 WORKDIR /app
 
+# The existing node UID keeps protected storage. Clients only join their IPC group.
+RUN groupadd -g 2001 kin-emr-api \
+ && groupadd -g 2002 kin-emr-retention \
+ && groupadd -g 1001 kin-api \
+ && useradd -u 1001 -g 1001 -G 2001 -M kin-api \
+ && install -d -o 1000 -g 1000 -m 700 /var/lib/kin-emr \
+ && install -d -o 1000 -g 2001 -m 750 /run/kin-emr-api \
+ && install -d -o 1000 -g 2002 -m 750 /run/kin-emr-retention
+
 FROM base AS development
 
 # 의존성 먼저 — package.json이 안 바뀌면 이 레이어는 캐시된다 (빌드가 빨라진다)
@@ -56,6 +65,6 @@ COPY start-production.sh ./start-production.sh
 # EMR-B1 보호 상태 디렉터리(원장 seal·실패 저널): node만 읽고 쓴다. 이름 있는 볼륨은 이 소유·권한을 처음 한 번 물려받는다.
 RUN chmod 644 /app/start-production.sh \
  && install -d -o node -g node -m 700 /var/lib/kin-emr
-USER node
+USER 1001:1001
 EXPOSE 3000
 CMD ["sh", "/app/start-production.sh", "serve"]

@@ -153,11 +153,17 @@ async function terminalChild(input) {
   const cleanup = [], t = { after: fn => cleanup.push(fn) };
   try {
     if (input.phase === 'inspect' || input.phase === 'integrity') {
-      const f = await fixture(t, { directory: input.directory, model: model(input.database), cold: true });
-      const before = directoryHashes(f.directory), state = f.coordinator.call('read');
-      let error = null;
-      if (input.phase === 'integrity') try { await f.service.start(); } catch (failure) { error = failure.code; }
-      return { pid: process.pid, before, after: directoryHashes(f.directory), state, error, phase: f.service.state };
+      const before = directoryHashes(input.directory);
+      try {
+        const f = await fixture(t, { directory: input.directory, model: model(input.database), cold: true });
+        const state = f.coordinator.call('read');
+        let error = null;
+        if (input.phase === 'integrity') try { await f.service.start(); } catch (failure) { error = failure.code; }
+        return { pid: process.pid, before, after: directoryHashes(f.directory), state, error, phase: f.service.state };
+      } catch (failure) {
+        if (input.phase !== 'integrity') throw failure;
+        return { pid: process.pid, before, after: directoryHashes(input.directory), error: failure.code, phase: 'failed' };
+      }
     }
     const f = await fixture(t, ['seed', 'historical-seed'].includes(input.phase) ? {} :
       { directory: input.directory, model: model(input.database) });
@@ -166,24 +172,33 @@ async function terminalChild(input) {
     // These are not selected passing acceptance cases and do not run a real SQL expiry.
     if (input.phase === 'historical-seed') {
       const original = await f.reserve(work, event(input.twoStreams)); original.commit();
-      const proof = await work.call('confirm-bundle', original.bundle);
-      assert.equal(proof.ok, true, 'original complete proof exists before expiry');
+      let proof = input.neverConfirmed ? null : await work.call('confirm-bundle', original.bundle);
+      if (proof) assert.equal(proof.ok, true, 'original complete proof exists before expiry');
       if (input.acknowledge) assert.equal((await work.call('acknowledge',
         { proof: proof.result, bindings: original.bundle.bindings })).ok, true);
+      // Advancing seals must not change the first canonical proof's coverage.
+      if (input.advance) await complete(f, work);
       const retention = await (await f.hello('retention')).work();
-      const prefix = (await retention.call('expiry-prefix', { through: 1 })).result;
+      const prepared = await retention.call('expiry-prefix', { through: 1 });
+      assert.equal(prepared.ok, true, 'deletion requires durable complete bundle evidence');
+      const prefix = prepared.result;
       const payload = C.checkpointPayload('2036-10-19T00:00:00.000Z', 1, 1, prefix.anchor.hash);
+      const sequence = prefix.seal.sequence + 1;
       const binding = { stream: 'viewing', chainId: prefix.seal.chainId, attemptId: randomUUID(), bundleId: randomUUID(),
-        kind: 'expiry', eventId: null, sequence: 2, previousHash: prefix.seal.hash,
-        hash: C.entryHash(2, prefix.seal.hash, payload), contentSha256: sha256(payload) };
+        kind: 'expiry', eventId: null, sequence, previousHash: prefix.seal.hash,
+        hash: C.entryHash(sequence, prefix.seal.hash, payload), contentSha256: sha256(payload) };
       const reserved = await retention.call('reserve', { binding, prefix });
       assert.equal(reserved.ok, true, 'issued prefix reserves before synthetic expiry commit');
-      f.database.streams.viewing.rows = [{ sequence: 2, previousHash: binding.previousHash, hash: binding.hash,
+      f.database.streams.viewing.rows = [...f.database.streams.viewing.rows.filter(r => r.sequence > 1),
+        { sequence, previousHash: binding.previousHash, hash: binding.hash,
         kind: 'expiry', statutoryAct: null, eventId: null, payload, contentSha256: binding.contentSha256,
         storedAt: '2036-10-19T00:00:00.000Z' }];
-      f.database.streams.viewing.markers = [reserved.result];
+      f.database.streams.viewing.markers = [...f.database.streams.viewing.markers.filter(m => m.sequence > 1), reserved.result];
       const expiry = await retention.call('confirm-bundle', { eventId: null, requiredStreams: ['viewing'], bindings: [reserved.result] });
       assert.equal(expiry.ok, true, 'valid retained-prefix checkpoint publishes');
+      if (!proof) proof = await work.call('confirm-bundle', original.bundle);
+      assert.equal(proof.ok, true, 'never-confirmed original remains provable after source deletion');
+      f.coordinator.call('compact', { force: true });
       return { pid: process.pid, directory: f.directory, database: f.database.streams, bundle: original.bundle,
         originalProof: proof.result, expiryProof: expiry.result, state: f.coordinator.call('read'), files: directoryHashes(f.directory) };
     }
@@ -192,8 +207,10 @@ async function terminalChild(input) {
       const lookups = [];
       for (let i = 0; i < 2; i++) lookups.push(await work.call('lookup-outcome', input.bundle));
       const confirmation = await work.call('confirm-bundle', input.bundle);
+      const ack = input.exerciseAck ? await work.call('acknowledge', { proof: input.originalProof, bindings: input.bundle.bindings }) : null;
+      const retry = input.exerciseAck ? await work.call('acknowledge', { proof: input.originalProof, bindings: input.bundle.bindings }) : null;
       return { pid: process.pid, phase: f.service.state, lookups, confirmation,
-        state: f.coordinator.call('read'), before, after: directoryHashes(f.directory) };
+        ack, retry, state: f.coordinator.call('read'), before, after: directoryHashes(f.directory) };
     }
     if (input.phase === 'seed') {
       const original = await complete(f, work, true);
@@ -216,7 +233,7 @@ async function terminalChild(input) {
 function childPhase(directory, phase, input = {}) {
   const config = path.join(directory, phase + '-input.json'), output = path.join(directory, phase + '-output.json');
   fs.writeFileSync(config, JSON.stringify({ ...input,
-    phase: ['seed', 'inspect', 'integrity'].includes(phase) ? phase : 'replay', output }));
+    phase: ['seed', 'inspect', 'integrity', 'historical-seed', 'historical-reopen'].includes(phase) ? phase : 'replay', output }));
   const child = spawnSync(process.execPath, ['--max-old-space-size=3072', __filename, '--terminal-child', config],
     { env: process.env, encoding: 'utf8', timeout: 60000 });
   fs.writeFileSync(path.join(directory, phase + '-stdout.log'), child.stdout ?? '');
@@ -360,7 +377,8 @@ test('C-S05.D11 service recovery preserves unacknowledged complete attempt bindi
   for (const b of pending.bundle.bindings) assert.equal(next.coordinator.call('read').terminal[b.stream + ':' + b.attemptId].binding.hash, b.hash);
   const outcome = await nw.call('lookup-outcome', pending.bundle);
   assert.equal(outcome.result.outcome, 'committed-and-sealed');
-  assert.notEqual(outcome.result.proof.serviceEpoch, f.service.serviceEpoch);
+  assert.equal(outcome.result.proof.serviceEpoch, f.service.serviceEpoch, 'canonical proof keeps its original publication epoch');
+  assert.equal(outcome.serviceEpoch, next.service.serviceEpoch, 'current response still requires current admission');
 });
 test('C-S04.D12 actual sockets wait for EOF, reject trailing frames and invalidate a lost control', async t => {
   const f = await fixture(t), peer = await f.hello(), work = await peer.work();
@@ -717,15 +735,20 @@ test('D1650-T08 contradictory identity records refuse startup before recovery wr
   for (const mode of ['duplicate-slot', 'orphan-intent', 'orphan-slot', 'wrong-intent', 'wrong-proof', 'terminal-conflict']) {
     const { f, binding } = await expiryFixture(t);
     const id = 'viewing:' + binding.attemptId;
-    f.coordinator.call('update', state => {
+    f.coordinator.call('compact', { force: true });
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    // Deliberate damaged disk input, not an accepted writer transition.
+    const file = path.join(f.directory, 'seal/settlement.json'), envelope = JSON.parse(fs.readFileSync(file));
+    const state = envelope.state;
+    {
       if (mode === 'duplicate-slot') state.slots['viewing:4'] = { ...state.slots['viewing:3'], sequence: 4, generation: ++state.generation };
       if (mode === 'orphan-intent') delete state.slots['viewing:3'];
       if (mode === 'orphan-slot') delete state.intents[id];
       if (mode === 'wrong-intent') state.intents[id].contentSha256 = 'e'.repeat(64);
       if (mode === 'wrong-proof') state.proofs[id].count = 0;
       if (mode === 'terminal-conflict') state.terminal[id] = { phase: 'aborted', generation: state.generation, binding: state.slots['viewing:3'] };
-    });
-    f.service.close(); await f.service.drained(); f.coordinator.close();
+    }
+    envelope.digest = sha256(JSON.stringify(state)); fs.writeFileSync(file, JSON.stringify(envelope));
     const evidence = fs.mkdtempSync(path.join(path.dirname(f.directory), 'integrity-'));
     const disk = childPhase(evidence, 'integrity', { directory: f.directory, database: f.database.streams });
     assert.equal(disk.phase, 'failed', 'contradictory attempt state must refuse readiness');
@@ -745,4 +768,233 @@ test('D1650-T08A retained sealed expiry alias loads and remains terminal', async
   try { await restarted.service.start(); } catch { /* The observed readiness is the acceptance result. */ }
   assert.equal(restarted.service.state, 'ready', 'byte-identical terminal expiry alias remains valid');
 });
+
+// D1655 amendment: retained evidence has no patient payload, but remains linkable
+// metadata. SQL deletion is a model boundary here; actual expiry/COMMIT is a PG gate.
+test('D1655-T01 canonical historical proof and exact ack survive expiry and another process', async t => {
+  const base = path.join(root, 'tmp/emr-b2-c-6/historical'); fs.mkdirSync(base, { recursive: true });
+  for (const twoStreams of [false, true]) for (const mode of ['never-confirmed', 'lost-confirm', 'lost-ack']) {
+    const dir = fs.mkdtempSync(path.join(base, `${twoStreams ? 'two' : 'view'}-${mode}-`));
+    const seed = childPhase(dir, 'historical-seed', { twoStreams, neverConfirmed: mode === 'never-confirmed',
+      acknowledge: mode === 'lost-ack', advance: true });
+    const reopened = childPhase(dir, 'historical-reopen', { ...seed, exerciseAck: true });
+    assert.notEqual(seed.pid, reopened.pid, 'historical evidence is read by a new process');
+    assert.equal(reopened.phase, 'ready');
+    for (const result of [...reopened.lookups.map(r => r.result?.proof), reopened.confirmation.result]) {
+      assert.equal(JSON.stringify(result), JSON.stringify(seed.originalProof), 'expiry and restart preserve the exact canonical proof');
+    }
+    assert.equal(reopened.ack.ok, true, 'original full proof can be acknowledged after expiry');
+    assert.equal(reopened.ack.result.status, mode === 'lost-ack' ? 'already-acknowledged' : 'acknowledged');
+    assert.equal(reopened.retry.result.status, 'already-acknowledged', 'new request ID repeats the exact lost ack');
+    assert.equal(seed.database.viewing.rows.some(r => r.eventId === seed.bundle.eventId), false, 'original viewing payload is actually absent');
+    assert.equal(JSON.stringify(reopened.state.bundles).includes('SYN-1'), false, 'no patient payload in attestation');
+    assert.equal(JSON.stringify(reopened.state.bundles).includes('192.0.2.1'), false, 'no access IP in attestation');
+  }
+});
+
+test('D1655-T02 concurrent first publication and later coverage agree on one full proof', async t => {
+  const f = await fixture(t), work = await (await f.hello()).work(), item = await f.reserve(work); item.commit();
+  const results = await Promise.all(Array.from({ length: 2 }, () => work.call('confirm-bundle', item.bundle)));
+  assert.equal(results.every(r => r.ok), true, 'all complete concurrent confirms succeed');
+  assert.equal(new Set(results.map(r => JSON.stringify(r.result))).size, 1, 'first publication has one canonical winner');
+  const original = results[0].result;
+  await complete(f, work);
+  assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(original), 'later seals never rewrite a proof');
+  const partial = { eventId: item.bundle.eventId, requiredStreams: ['viewing'], bindings: [item.bundle.bindings[0]] };
+  const before = directoryHashes(f.directory);
+  assert.equal((await work.call('confirm-bundle', partial)).error.code, 'CONFLICT', 'retained proof rejects an omitted stream');
+  const changed = structuredClone(original); changed.serviceEpoch = randomUUID();
+  assert.equal((await work.call('acknowledge', { proof: changed, bindings: item.bundle.bindings })).error.code, 'CONFLICT', 'ack binds the original proof epoch');
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'invalid proof requests are write-free');
+  assert.equal((await work.call('acknowledge', { proof: original, bindings: item.bundle.bindings })).ok, true);
+});
+
+test('D1655-T03 expiry refuses before deletion when bundle publication cannot become durable', async t => {
+  for (const fault of ['EIO', 'ENOSPC']) {
+    const f = await fixture(t), work = await (await f.hello()).work(), item = await f.reserve(work); item.commit();
+    // Both stream seals complete but no aggregate proof has ever been requested.
+    for (const b of item.bundle.bindings) await f.seal.advance(b.stream, { sequence: b.sequence, hash: b.hash });
+    const retention = await (await f.hello('retention')).work();
+    const old = fs.fdatasyncSync, inode = fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).ino;
+    let injected = 0, result;
+    fs.fdatasyncSync = fd => {
+      if (fs.fstatSync(fd).ino === inode) { injected++; throw Object.assign(new Error('synthetic durability failure'), { code: fault }); }
+      return old(fd);
+    };
+    try { result = await retention.call('expiry-prefix', { through: 1 }); } finally { fs.fdatasyncSync = old; }
+    assert.ok(injected > 0, 'expiry must publish aggregate evidence before authorizing deletion');
+    assert.equal(result.ok, false, 'failed evidence publication cannot authorize expiry');
+    assert.equal(f.database.streams.viewing.rows[0].eventId, item.bundle.eventId, 'failed preparation retains source payload');
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    const recovered = await fixture(t, { directory: f.directory, model: f.database });
+    const retry = await (await recovered.hello('retention')).work();
+    assert.equal((await retry.call('expiry-prefix', { through: 1 })).ok, true, 'fresh recovery can retry the unfinished expiry');
+  }
+});
+
+test('D1655-T04 unsupported formats and missing initialization provenance refuse without repair', async t => {
+  for (const mode of ['v1', 'v2-pruned', 'future', 'missing', 'mixed-wal']) {
+    const f = await fixture(t);
+    f.coordinator.call('compact', { force: true });
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    const file = path.join(f.directory, 'seal/settlement.json');
+    if (mode === 'missing') fs.unlinkSync(file);
+    else if (mode === 'mixed-wal') {
+      const body = { version: 2, revision: 2, generation: 1, patch: {}, publishing: false };
+      fs.writeFileSync(path.join(f.directory, 'seal/settlement.jsonl'), JSON.stringify({ ...body, digest: sha256(JSON.stringify(body)) }) + '\n');
+    } else {
+      const envelope = JSON.parse(fs.readFileSync(file));
+      envelope.state.version = mode === 'v1' ? 1 : mode === 'v2-pruned' ? 2 : 4;
+      envelope.digest = sha256(JSON.stringify(envelope.state)); fs.writeFileSync(file, JSON.stringify(envelope));
+    }
+    // A reader must reject format/provenance before repairing an unrelated torn journal.
+    fs.mkdirSync(path.join(f.directory, 'journal'), { recursive: true });
+    fs.writeFileSync(path.join(f.directory, 'journal/failure-journal.jsonl'), '{"torn":');
+    const before = directoryHashes(f.directory);
+    let error = null;
+    try { await fixture(t, { directory: f.directory, model: f.database }); } catch (e) { error = e.code; }
+    assert.equal(error, mode === 'missing' ? 'SealMissing' : 'SealUnsupportedFormat', 'unsupported lineage never becomes ready');
+    assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'unsupported sources remain byte-for-byte available to capture');
+  }
+});
+
+test('D1655-T05 missing references and contradictory publication refuse before recovery mutation', async t => {
+  for (const mode of ['missing-terminal', 'wrong-bundle', 'missing-lineage', 'wrong-ack-digest']) {
+    const f = await fixture(t), work = await (await f.hello()).work(), item = await complete(f, work, mode === 'wrong-ack-digest');
+    f.coordinator.call('compact', { force: true });
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    const file = path.join(f.directory, 'seal/settlement.json'), envelope = JSON.parse(fs.readFileSync(file));
+    const terminal = 'viewing:' + item.bundle.bindings[0].attemptId;
+    if (mode === 'missing-terminal') delete envelope.state.terminal[terminal];
+    if (mode === 'wrong-bundle') envelope.state.terminal[terminal].binding.bundleId = randomUUID();
+    if (mode === 'missing-lineage') envelope.state.lineage = null;
+    if (mode === 'wrong-ack-digest') Object.values(envelope.state.bundles)[0].proofSha256 = 'f'.repeat(64);
+    envelope.digest = sha256(JSON.stringify(envelope.state)); fs.writeFileSync(file, JSON.stringify(envelope));
+    const before = directoryHashes(f.directory);
+    await assert.rejects(fixture(t, { directory: f.directory, model: f.database }), e => e.code === 'SealCorrupt', 'incomplete publication is not receipt authority');
+    assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'corrupt publication preserves source bytes');
+  }
+});
+
+test('D1655-T06 exact ack minimizes duplicates and preserves proof lookup and exclusion', async t => {
+  const f = await fixture(t), work = await (await f.hello()).work(), item = await complete(f, work);
+  const before = f.coordinator.call('read'), stored = JSON.stringify(before.bundles);
+  const value = { proof: item.proof, bindings: item.bundle.bindings };
+  assert.equal((await work.call('acknowledge', value)).result.status, 'acknowledged');
+  const after = f.coordinator.call('read');
+  assert.ok(Buffer.byteLength(JSON.stringify(after.bundles)) < Buffer.byteLength(stored), 'exact ack reduces retained duplicate metadata');
+  for (const b of item.bundle.bindings) assert.equal(after.terminal[b.stream + ':' + b.attemptId].owner, undefined, 'completed delivery drops the caller identity link');
+  const afterAck = directoryHashes(f.directory);
+  assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'post-ack confirm preserves its full proof contract');
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(afterAck), 'post-ack confirm is read-only');
+  assert.equal((await work.call('acknowledge', value)).result.status, 'already-acknowledged');
+  for (const b of item.bundle.bindings) assertExcluded(await replayObservation(f, work, b));
+  const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
+  assert.equal(checkpoint.state.version, 3);
+  assert.equal(JSON.stringify(checkpoint.state.bundles), JSON.stringify(after.bundles), 'current checkpoint contains the minimized representation');
+  assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'superseded full representation is removed from the active WAL');
+});
+
+// D1656-T01/T04/T06: read-only format admission precedes any journal owner.
+// Linux image/mount/fence and initialization-provenance acceptance remain separate.
+test('D1656-T01 complete incompatible WAL and wrong pairs refuse before torn journal repair', async t => {
+  for (const mode of ['mixed-wal', 'malformed-old-wal', 'invalid-old-value', 'invalid-old-tail',
+    'foreign-old-binding', 'future-old-generation', 'invalid-deletion-key',
+    'invalid-identity', 'wrong-pair', 'missing-lineage', 'invalid-checkpoint-tail', 'invalid-checkpoint-revision']) {
+    const f = await fixture(t), work = await (await f.hello()).work();
+    await complete(f, work); f.coordinator.call('compact', { force: true });
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    const admitted = new StateCoordinator(f.directory, executeExternal);
+    t.after(() => admitted.close());
+    const file = path.join(f.directory, 'seal/settlement.json'), envelope = JSON.parse(fs.readFileSync(file));
+    const journal = path.join(f.directory, 'journal'); fs.mkdirSync(journal, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(journal, 'failure-journal.jsonl'), '{"incomplete":', { mode: 0o600 });
+    if (['mixed-wal', 'malformed-old-wal', 'invalid-old-value', 'invalid-old-tail',
+      'foreign-old-binding', 'future-old-generation', 'invalid-deletion-key'].includes(mode)) {
+      // Even a record covered by a checkpoint must have the supported complete schema.
+      const body = { version: 3, revision: 1, generation: 1, patch: {}, publishing: false };
+      if (mode === 'mixed-wal') body.version = 2;
+      if (mode === 'malformed-old-wal') body.unexpected = true;
+      if (mode === 'invalid-old-value') body.patch = { retired: { viewing: 'corrupt' } };
+      if (mode === 'invalid-old-tail') { body.publishing = true; body.tail = { streams: {} }; }
+      if (mode === 'foreign-old-binding') {
+        const [id, terminal] = Object.entries(envelope.state.terminal)[0];
+        const foreign = structuredClone(terminal); foreign.binding.chainId = randomUUID();
+        body.generation = envelope.state.generation; body.patch = { terminal: { [id]: foreign } };
+      }
+      if (mode === 'future-old-generation') body.generation = envelope.state.generation + 1;
+      if (mode === 'invalid-deletion-key') body.patch = { retired: { unsupported: null } };
+      fs.writeFileSync(path.join(f.directory, 'seal/settlement.jsonl'), JSON.stringify({ ...body, digest: sha256(JSON.stringify(body)) }) + '\n');
+    }
+    if (mode === 'invalid-identity') Object.values(envelope.state.terminal)[0].binding.chainId = randomUUID();
+    if (mode === 'missing-lineage') envelope.state.lineage = null;
+    if (mode === 'invalid-checkpoint-tail') envelope.state.tail.streams.viewing.hash = 'corrupt';
+    if (mode === 'invalid-checkpoint-revision') envelope.state.revision = 0;
+    // A pending tail publication must not cause a write ahead of complete WAL validation.
+    envelope.publishing = true; envelope.digest = sha256(JSON.stringify(envelope.state));
+    fs.writeFileSync(file, JSON.stringify(envelope));
+    const before = directoryHashes(f.directory);
+    let error;
+    try {
+      const inspector = load('emr-runtime/external-writer').inspectExternal;
+      inspector(f.directory, mode === 'wrong-pair' ? { ...f.pair, instanceId: 'other-copy' } : f.pair);
+      new FailureJournal(f.directory, new StateCoordinator(f.directory, executeExternal));
+    } catch (e) { error = e.code; }
+    assert.ok(error, 'incompatible pair must refuse before an owner operation');
+    assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'admission must preserve all protected bytes and entries');
+    assert.throws(() => mode === 'wrong-pair' ? admitted.call('admit-pair', { ...f.pair, instanceId: 'other-copy' }) :
+      admitted.call('journal-load'), 'an existing owner must revalidate before journal access');
+    assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'existing-owner refusal must precede journal repair');
+  }
+});
+
+test('D1656-T04 a changed physical root cannot reuse a prior coordinator admission', async t => {
+  const f = await fixture(t); f.coordinator.call('compact', { force: true });
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const coordinator = new StateCoordinator(f.directory, executeExternal);
+  t.after(() => coordinator.close());
+  const moved = f.directory + '-preserved'; fs.renameSync(f.directory, moved);
+  t.after(() => fs.rmSync(moved, { recursive: true, force: true }));
+  fs.cpSync(moved, f.directory, { recursive: true });
+  const before = directoryHashes(f.directory), original = directoryHashes(moved);
+  assert.throws(() => coordinator.call('read'), { code: 'SealUnavailable' }, 'replacement root must invalidate admission');
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before));
+  assert.equal(JSON.stringify(directoryHashes(moved)), JSON.stringify(original));
+});
+
+test('D1656-T02 closed shell dispatch rejects unchanged legacy scripts before Node', async t => {
+  const shell = process.env.KIN_EMR_SHELL || 'sh';
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-entry-mode-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const bin = path.join(base, 'bin'); fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\nprintf "%s\\n" "$*" > invoked.txt\n', { mode: 0o755 });
+  const refs = ['8cbb23e4aead2899a26df20a18bc85f3d58b7c12', '30cedd9795a70b84b2b6a3083e76be97e08b24ad',
+    '149f960d34a89b95cc9066040b5d74002a8bd37b', 'f6be60f1dda7e4d70b4c23b91419bb530161f240'];
+  const scripts = refs.map(ref => {
+    const result = spawnSync('git', ['show', ref + ':api/start-production.sh'], { cwd: root });
+    assert.equal(result.status, 0, 'mandatory fixed legacy source must be available'); return result.stdout;
+  });
+  assert.equal(new Set(scripts.map(sha256)).size, 1, 'the four fixed references are one legacy shell implementation');
+  const env = { ...process.env, PATH: bin.replace(/\\/g, '/') + ':' + process.env.PATH };
+  for (const bytes of scripts) {
+    const script = path.join(base, 'start.sh'); fs.writeFileSync(script, bytes);
+    const result = spawnSync(shell, [script, 'state-serve-v3'], { cwd: base, env, timeout: 10000 });
+    assert.equal(result.status, 64, 'unchanged old dispatch must refuse the v3 role');
+    assert.equal(fs.existsSync(path.join(base, 'invoked.txt')), false, 'legacy refusal must not enter Node');
+    assert.equal(sha256(fs.readFileSync(script)), sha256(bytes), 'fixed legacy script remains unchanged');
+  }
+  const script = path.join(root, 'api/start-production.sh');
+  for (const args of [[], ['unknown'], ['state-serve-v3', 'extra']]) {
+    const result = spawnSync(shell, [script, ...args], { cwd: base, env, timeout: 10000 });
+    assert.equal(result.status, 64, 'missing, unknown and extra arguments must refuse');
+    assert.equal(fs.existsSync(path.join(base, 'invoked.txt')), false);
+  }
+  for (const [mode, target] of [['state-serve-v3', 'dist/emr-runtime/state-service-main.js'], ['serve', 'dist/main.js']]) {
+    const result = spawnSync(shell, [script, mode], { cwd: base, env, timeout: 10000 });
+    assert.equal(result.status, 0, 'supported entry mode dispatches');
+    assert.equal(fs.readFileSync(path.join(base, 'invoked.txt'), 'utf8').trim(), target);
+    fs.unlinkSync(path.join(base, 'invoked.txt'));
+  }
+});
+
 }

@@ -11,7 +11,7 @@ import {
 } from './contract';
 import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
 import { FailureJournal, JournalUnavailable } from './failure-journal';
-import { RawQuery } from './manifest';
+import { RawQuery, databaseIdentity } from './manifest';
 import { AccessSeal, SealRefused, SealState, CommitBinding } from './seal';
 import { admitAppend } from './admission';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_RECOVERY_TIMEOUT_MS } from './limits';
@@ -68,6 +68,7 @@ export interface VerificationPage {
 }
 export class PrismaLedgerSql {
   constructor(private readonly db: any, private readonly inSnapshot = false) {}
+  identity() { return databaseIdentity(this.db); }
 
   async snapshot<T>(work: (sql: PrismaLedgerSql) => Promise<T>): Promise<T> {
     if (this.inSnapshot) return work(this);

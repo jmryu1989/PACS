@@ -199,5 +199,174 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(json.loads(result.stderr)["deployment_authorized"])
 
 
+class StateLaunchTests(unittest.TestCase):
+    # REQ-B2C-01/10 -> DUAL-OWNER/WRONG-STATE-RECOVERY -> D1656-T03/T04/T08.
+    # Engine observations are boundary doubles; the actual HostOps mutation path
+    # executes. A refused start must leave the simulated protected file untouched.
+    def fixture(self):
+        release = {"sha": "b" * 40, "images": {"api": "sha256:" + "d" * 64, "db": "sha256:" + "e" * 64}}
+        image = {"Id": release["images"]["api"], "Config": {"Labels": {"org.opencontainers.image.revision": release["sha"]}}}
+        args = dict(release=release, image=image, state_volume="fixture_emr-state", api_ipc_volume="fixture_emr-state-api-ipc",
+                    retention_ipc_volume="fixture_emr-state-retention-ipc", instance_id="fixture", database_host="db")
+        item = {"Id": "owner", "Name": "/kin-emr-state", "Image": image["Id"], "Path": "sh",
+                "Args": ["/app/start-production.sh", "state-serve-v3"], "State": {"Running": False, "Restarting": False},
+                "Config": {"User": "1000:1000", "Entrypoint": ["sh", "/app/start-production.sh"], "Cmd": ["state-serve-v3"],
+                    "Labels": {"com.docker.compose.service": "emr-state"}, "Env": [
+                        "DATABASE_URL=postgresql://kin_emr_reader:synthetic@db:5432/kin", "KIN_EMR_INSTANCE_ID=fixture",
+                        "KIN_EMR_STATE_DIR=/var/lib/kin-emr", "KIN_EMR_API_SOCKET=/run/kin-emr-api/writer.sock",
+                        "KIN_EMR_RETENTION_SOCKET=/run/kin-emr-retention/writer.sock"]},
+                "HostConfig": {"GroupAdd": ["2001", "2002"], "Privileged": False, "NetworkMode": "fixture_default",
+                    "PortBindings": {}, "RestartPolicy": {"Name": "no"}},
+                "Mounts": [{"Type": "volume", "Name": name, "Destination": target, "RW": True} for target, name in [
+                    (deploy.EMR_STATE, args["state_volume"]), (deploy.STATE_API_IPC, args["api_ipc_volume"]),
+                    (deploy.STATE_RETENTION_IPC, args["retention_ipc_volume"])]]}
+        return item, args
+
+    def test_10_state_artifact_command_role_mount_and_credential_matrix(self):
+        item, args = self.fixture()
+        deploy.check_state_service(item, **args)
+        mutations = [lambda c: c.update(Image="sha256:" + "a" * 64),
+            lambda c: c["Config"].update(Cmd=["serve"]), lambda c: c["Config"].update(Entrypoint=["node"]),
+            lambda c: c.update(Path="node", Args=["dist/emr-runtime/state-service-main.js"]),
+            lambda c: c["Config"].update(User="1001:1001"),
+            lambda c: c["Config"]["Labels"].update({"com.docker.compose.service": "api"}),
+            lambda c: c["Mounts"][0].update(Name="original-source"),
+            lambda c: c["Mounts"].append({"Type": "bind", "Name": None, "Destination": "/app", "RW": False}),
+            lambda c: c["HostConfig"].update(RestartPolicy={"Name": "always"}),
+            lambda c: c["HostConfig"].update(GroupAdd=["2001"]),
+            lambda c: c["Config"]["Env"].append("KIN_EMR_RUNTIME_PASSWORD=not-allowed"),
+            lambda c: c["Config"]["Env"].append("KIN_EMR_INSTANCE_ID=wrong")]
+        for change in mutations:
+            bad = copy.deepcopy(item); change(bad)
+            with self.subTest(change=mutations.index(change)), self.assertRaises(RuntimeError):
+                deploy.check_state_service(bad, **args)
+        for change in ({"Id": "kin-api:latest"}, {"Config": {"Labels": {"org.opencontainers.image.revision": "a" * 40}}}):
+            with self.assertRaises(RuntimeError): deploy.check_state_service(item, **{**args, "image": {**args["image"], **change}})
+
+    def test_11_legacy_restart_eligibility_is_an_owner(self):
+        item, args = self.fixture(); item["Name"] = "/retained-api"
+        deploy.check_state_owners([item], args["state_volume"], "new-service")
+        for state, restart in [({"Running": True, "Restarting": False}, "no"),
+                               ({"Running": False, "Restarting": True}, "no"),
+                               ({"Running": False, "Restarting": False}, "always")]:
+            bad = copy.deepcopy(item); bad["State"] = state; bad["HostConfig"]["RestartPolicy"]["Name"] = restart
+            with self.assertRaises(RuntimeError): deploy.check_state_owners([bad], args["state_volume"], "new-service")
+
+    def test_12_actual_start_consumer_refuses_legacy_before_mutation(self):
+        import ops_emr_introduction as intro
+        from types import SimpleNamespace
+        item, args = self.fixture()
+        # A stale old container can carry the expected tag/label while its real
+        # command still dispatches serve. Removing the consumer guard starts it.
+        item["Name"] = "/kin-api"; item["Config"]["Cmd"] = ["serve"]
+        item["Args"] = ["/app/start-production.sh", "serve"]
+        with tempfile.TemporaryDirectory() as directory:
+            protected = Path(directory) / "journal"; protected.write_bytes(b'good\n{"torn":')
+            before = protected.read_bytes()
+            host = object.__new__(intro.HostOps)
+            host.intro = None; host.t = {"project": "fixture", "volumes": {"emr_state": args["state_volume"]}}
+            host.plan = {"release": args["release"]}; host.names = {"api": "kin-api"}
+            host.records = SimpleNamespace(command=lambda value: None)
+            host.inspect_container = lambda name: copy.deepcopy(item)
+            calls = []
+            def runner(command, **kwargs):
+                calls.append(command)
+                if command[:3] == ["docker", "image", "inspect"]:
+                    return subprocess.CompletedProcess(command, 0, json.dumps([args["image"]]).encode(), b"")
+                if command[:2] in (["docker", "start"], ["docker", "restart"]):
+                    protected.write_bytes(b'good\n')
+                    return subprocess.CompletedProcess(command, 0, b"", b"")
+                self.fail("unexpected boundary operation " + str(command[:3]))
+            host.run = runner
+            for command in (["docker", "start", "kin-api"], ["docker", "restart", "kin-api"]):
+                refusal = None
+                try: host.cmd(command, mutating=True)
+                except RuntimeError as error: refusal = error
+                self.assertEqual(protected.read_bytes(), before, "start admission must precede owner execution")
+                self.assertIsInstance(refusal, RuntimeError)
+            self.assertFalse(any(c[:2] in (["docker", "start"], ["docker", "restart"]) for c in calls))
+            # Positive client path proves the test reaches the actual mutation boundary.
+            item["Mounts"] = []; item["Config"]["Env"] = []
+            host.cmd(["docker", "start", "kin-api"], mutating=True)
+            self.assertEqual(protected.read_bytes(), b'good\n')
+
+    def test_13_compose_creation_rejects_a_legacy_owner_before_launch(self):
+        import ops_emr_introduction as intro
+        host = object.__new__(intro.HostOps)
+        host.t = {"volumes": {"emr_state": "fixture_emr-state"}}
+        model = {"services": {"api": {"volumes": [{"type": "volume", "source": "state", "target": deploy.EMR_STATE}]}},
+                 "volumes": {"state": {"name": "fixture_emr-state"}}}
+        with self.assertRaises(RuntimeError): host.admit_compose_launch(model, ["up", "api"])
+        model["services"] = {"emr-state": {**model["services"]["api"], "entrypoint": ["node"], "command": ["dist/main.js"]}}
+        with self.assertRaises(RuntimeError): host.admit_compose_launch(model, ["up", "emr-state"])
+
+    def test_14_start_rechecks_changed_image_command_volume_and_database(self):
+        """D1656-T04/T08: the real start consumer reaches inspection, then refuses a changed handoff."""
+        import ops_emr_introduction as intro
+        from types import SimpleNamespace
+        for change in (None, "initial-image", "initial-command", "initial-entrypoint", "image", "command", "volume", "database"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                protected = Path(directory) / "journal"; protected.write_bytes(b'good\n{"torn":')
+                original = protected.read_bytes()
+                item, args = self.fixture()
+                if change == "initial-image": item["Image"] = "sha256:" + "0" * 64
+                if change == "initial-command":
+                    item["Config"]["Cmd"] = ["serve"]
+                    item["Args"] = ["/app/start-production.sh", "serve"]
+                if change == "initial-entrypoint":
+                    item["Config"]["Entrypoint"] = ["node"]
+                    item["Config"]["Cmd"] = ["dist/emr-runtime/state-service-main.js"]
+                    item.update(Path="node", Args=["dist/emr-runtime/state-service-main.js"])
+                db = {"Id": "db", "Image": args["release"]["images"]["db"], "State": {"Running": True},
+                      "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "fixture_pg"},
+                                 {"Destination": "/var/lib/postgresql/emr-access", "Name": "fixture_access"}]}
+                host = object.__new__(intro.HostOps)
+                host.intro = None; host.t = {"project": "fixture", "volumes": {"emr_state": args["state_volume"],
+                    "pg": "fixture_pg", "emr_access": "fixture_access"}}
+                host.plan = {"release": args["release"]}; host.names = {"db": "fixture-db"}
+                host.records = SimpleNamespace(command=lambda value: None)
+                inspected = False
+                def container(name):
+                    current = copy.deepcopy(item)
+                    if inspected and change == "image": current["Image"] = "sha256:" + "0" * 64
+                    if inspected and change == "command": current["Config"]["Cmd"] = ["serve"]
+                    return current
+                def database(role):
+                    current = copy.deepcopy(db)
+                    if inspected and change == "database": current["Id"] = "replacement-db"
+                    return current
+                host.inspect_container = container; host.inspect = database
+                host.volume_identity = lambda name: {"name": name, "created": "replaced" if inspected and change == "volume" else "original"}
+                host.text = lambda command: "kin-emr-state"
+                launches = []
+                def runner(command, **kwargs):
+                    nonlocal inspected
+                    if command[:3] == ["docker", "image", "inspect"]:
+                        return subprocess.CompletedProcess(command, 0, json.dumps([args["image"]]).encode(), b"")
+                    if command[:2] == ["docker", "run"]:
+                        self.assertTrue(any(word.endswith(",readonly") for word in command))
+                        inspected = True
+                        return subprocess.CompletedProcess(command, 0, b'KIN_RESULT {"version":3,"lineage":"verified-copy"}', b"")
+                    if command[:2] == ["docker", "start"]:
+                        launches.append(command); protected.write_bytes(b'good\n')
+                        return subprocess.CompletedProcess(command, 0, b"", b"")
+                    self.fail("Unexpected boundary command " + str(command[:3]))
+                host.run = runner
+                if change is None:
+                    host.cmd(["docker", "start", "kin-emr-state"], mutating=True)
+                    self.assertEqual(len(launches), 1)
+                else:
+                    refusal = None
+                    try: host.cmd(["docker", "start", "kin-emr-state"], mutating=True)
+                    except RuntimeError as error: refusal = error
+                    self.assertEqual(protected.read_bytes(), original)
+                    if change.startswith("initial-"):
+                        self.assertFalse(inspected, "incompatible executable must refuse before even the readonly inspector runs")
+                    else:
+                        self.assertTrue(inspected, "the changed observation must occur after successful readonly inspection")
+                    self.assertIsInstance(refusal, RuntimeError)
+                    self.assertEqual(launches, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

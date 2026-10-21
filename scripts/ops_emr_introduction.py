@@ -613,6 +613,7 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
     expected = {role: target["containers"][role] for role in ROLES}
     if target_checkout:
         expected.update({name: target["containers"][name] for name in ONE_SHOTS})
+        expected["emr-state"] = state_service_name(target)
     require(model["containers"] == expected, "Resolved container names differ from the target manifest")
     volumes = {"pg-db": recovery["pg"] if recovery else target["volumes"]["pg"],
                "orthanc-db": recovery["orthanc"] if recovery else target["volumes"]["orthanc"]}
@@ -637,7 +638,9 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
     mounts = {"db": {"/var/lib/postgresql/data": "pg-db"}, "orthanc": {"/var/lib/orthanc/db": "orthanc-db"}}
     if target_checkout:
         mounts["db"]["/var/lib/postgresql/emr-access"] = "emr-access"
-        mounts["api"] = {EMR_STATE_DIR: "emr-state"}
+        mounts["api"] = {pre.STATE_API_IPC: "emr-state-api-ipc"}
+        mounts["emr-state"] = {EMR_STATE_DIR: "emr-state", pre.STATE_API_IPC: "emr-state-api-ipc",
+                               pre.STATE_RETENTION_IPC: "emr-state-retention-ipc"}
     # Drive-letter paths (a Windows rehearsal host) compare without regard to case, as that file system does.
     fold = (lambda text: text.lower()) if PureWindowsPath(target["repository"]).drive else (lambda text: text)
     path_of = lambda value: PurePosixPath(fold(str(value).replace("\\", "/")))
@@ -679,6 +682,13 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
             "Resolved origin settings differ from the target")
     if images is not None:
         require(all(model["images"].get(role) == images[role] for role in ROLES), "Resolved images differ from the plan")
+        if target_checkout:
+            require(model["images"].get("emr-state") == images["api"], "State service image differs from the plan")
+
+
+def state_service_name(target):
+    # The owner uses the existing target namespace and API artifact; no new plan schema.
+    return target["containers"]["api"] + "-emr-state"
 
 
 ANONYMOUS_VOLUME = re.compile(r"[0-9a-f]{64}")
@@ -2709,10 +2719,10 @@ const get=(url,options={})=>fetch(url,{...options,signal:AbortSignal.timeout(150
 })().catch(e=>{process.stderr.write(String((e&&e.message)||e).slice(0,80)+'\n');process.exitCode=1;});
 """
 STATE_VOLUME_SCRIPT = r"""
-const fs=require('fs'),p='/var/lib/kin-emr',s=fs.statSync(p);let writable=false;
-try{const t=p+'/.kin-introduction-'+process.pid;const fd=fs.openSync(t,'wx',0o600);fs.writeSync(fd,'probe');fs.fsyncSync(fd);fs.closeSync(fd);
- fs.renameSync(t,t+'.renamed');writable=fs.readFileSync(t+'.renamed','utf8')==='probe';fs.unlinkSync(t+'.renamed');}catch{writable=false;}
-process.stdout.write('KIN_RESULT '+JSON.stringify({uid:s.uid,gid:s.gid,mode:(s.mode&0o777).toString(8),writable,uid_self:process.getuid()})+'\n');
+const fs=require('fs'),p='/var/lib/kin-emr',s=fs.statSync(p);
+const inspected=require('/app/dist/emr-runtime/external-writer').inspectExternal(p);
+process.stdout.write('KIN_RESULT '+JSON.stringify({uid:s.uid,gid:s.gid,mode:(s.mode&0o777).toString(8),
+ format:inspected.state?.version??null,fingerprint:inspected.fingerprint,uid_self:process.getuid()})+'\n');
 """
 HEALTH_SCRIPT = r"""
 fetch('http://127.0.0.1:3000/api/health').then(async r=>{const h=await r.json();
@@ -3586,6 +3596,9 @@ class HostOps:
                       and args[args.index("--name") + 1] == pending[0]["resource"])
         if pending and not own_launch and (mutating or args[:2] in (["docker", "run"], ["docker", "exec"])):
             raise Unknown("이전 작업 종료가 미결이므로 새 작업·정리·복원을 시작할 수 없습니다")
+        if args[:2] in (["docker", "start"], ["docker", "restart"]):
+            require(len(args) == 3 and not args[2].startswith("-"), "State-aware start requires one fixed container")
+            self.state_start_admission(self.inspect_container(args[2]))
         if self.intro is not None and args[:2] in (["docker", "run"], ["docker", "exec"]):
             kind = args[1]
             if kind == "run":
@@ -3841,6 +3854,12 @@ class HostOps:
             require(all(key not in environment or environment[key] == value for key, value in (env or {}).items()),
                     "보조 작업 환경이 고정 Compose 입력을 덮으려 합니다")
             environment.update(env or {})
+            if mutating and args[:1] in (["up"], ["create"], ["start"], ["restart"], ["run"]):
+                inspect_command, inspect_env = self.entry.argv(["config", "--format", "json"], pointer)
+                model = decode(self.cmd(inspect_command, timeout=60, env=inspect_env).stdout)
+                self.admit_compose_launch(model, args)
+                require(decode(self.cmd(inspect_command, timeout=60, env=inspect_env).stdout) == model,
+                        "Compose launch target changed after admission")
             return self.cmd(command, timeout=timeout, env=environment, mutating=mutating, check=check)
         require(not mutating, "지속 Compose entry 준비 전에 서비스를 변경할 수 없습니다")
         command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", project or self.t["project"],
@@ -3860,6 +3879,10 @@ class HostOps:
         if side == "release":
             services["api-migrate"] = {"image": images["api"], "container_name": self.names["api-migrate"]}
             services["emr-provision"] = {"image": images["db"], "container_name": self.names["emr-provision"]}
+            services["emr-state"] = {"image": images["api"], "container_name": state_service_name(self.t),
+                "entrypoint": pre.STATE_ENTRYPOINT, "command": pre.STATE_COMMAND, "user": "1000:1000",
+                "group_add": ["2001", "2002"], "restart": "no", "environment": {"KIN_EMR_INSTANCE_ID": self.t["project"]}}
+            services["api"]["environment"] = {"KIN_EMR_INSTANCE_ID": self.t["project"]}
         if maintenance:
             services["proxy"]["ports"] = ("!override", [self.t["ports"]["maintenance"]])
         recovery = intro.state.get("recovery")
@@ -4174,7 +4197,8 @@ class HostOps:
             command, environment = self.entry.argv(["config", "--format", "json"])
             raw = self.cmd(command, timeout=60, env=environment).stdout
         model = json.loads(raw)
-        services = {name: service or {} for name, service in (model.get("services") or {}).items() if name in (*ROLES, *ONE_SHOTS)}
+        services = {name: service or {} for name, service in (model.get("services") or {}).items()
+                    if name in (*ROLES, *ONE_SHOTS, "emr-state")}
 
         def port(item):
             protocol = item.get("protocol", "tcp")
@@ -4271,11 +4295,115 @@ class HostOps:
             item = self.inspect(role)
             if item and item["State"]["Running"]:
                 self.cmd(["docker", "stop", "--time", "45", self.names[role]], timeout=120, mutating=True)
+        volume = self.t["volumes"]["emr_state"]
+        names = self.text(["docker", "container", "ls", "--all", "--filter", "volume=" + volume,
+                           "--format", "{{.Names}}"]).splitlines()
+        for name in names:
+            item = self.inspect_container(name)
+            require(item and type(item.get("Mounts")) is list, "State owner inventory unavailable")
+            if not any(m.get("Name") == volume and m.get("RW") is True for m in item["Mounts"]):
+                continue
+            # A stopped legacy owner with an automatic restart policy is not quiesced.
+            self.cmd(["docker", "update", "--restart=no", name], timeout=60, mutating=True)
+            if item["State"]["Running"] or item["State"]["Restarting"]:
+                self.cmd(["docker", "stop", "--time", "45", name], timeout=120, mutating=True)
+        pre.check_state_owners([self.inspect_container(name) for name in names], volume, "")
 
     def start_roles(self, roles):
         for role in RESUME_ORDER:
             if role in roles:
+                if role == "api":
+                    owner_name = state_service_name(self.t)
+                    owner = self.inspect_container(owner_name)
+                    if owner is not None:
+                        self.cmd(["docker", "start", owner_name], timeout=120, mutating=True)
                 self.cmd(["docker", "start", self.names[role]], timeout=120, mutating=True)
+
+    def admit_compose_launch(self, model, arguments):
+        """Check the effective creation command before Compose can grant a state mount."""
+        services, volumes = model.get("services"), model.get("volumes")
+        require(type(services) is dict and type(volumes) is dict, "Compose launch observations unavailable")
+        selected = [word for word in arguments[1:] if word in services] or list(services)
+        if arguments[0] in ("up", "create", "run") and "--no-deps" not in arguments:
+            for role in selected:
+                for dependency in services[role].get("depends_on") or {}:
+                    require(dependency in services, "Compose launch dependency is unavailable")
+                    if dependency not in selected:
+                        selected.append(dependency)
+        for role in selected:
+            service = services[role]
+            mounts = [{"Type": m.get("type"), "Name": (volumes.get(m.get("source")) or {}).get("name"),
+                       "Destination": m.get("target"), "RW": not m.get("read_only", False)} for m in service.get("volumes") or []]
+            protected = [m for m in mounts if m["Name"] == self.t["volumes"]["emr_state"] or m["Destination"] == ops.EMR_STATE]
+            if not protected:
+                require("KIN_EMR_STATE_DIR" not in (service.get("environment") or {}), "Client has owner configuration")
+                continue
+            require(role == "emr-state" and arguments[0] != "run", "Protected state cannot be mounted by a helper or API")
+            entrypoint, command = service.get("entrypoint"), service.get("command")
+            require(entrypoint == pre.STATE_ENTRYPOINT and command == pre.STATE_COMMAND, "Compose state entry mode differs")
+            container = {"Name": "/" + service["container_name"], "Image": service.get("image"),
+                "Path": entrypoint[0], "Args": [*entrypoint[1:], *command], "Mounts": mounts,
+                "Config": {"User": service.get("user"), "Entrypoint": entrypoint, "Cmd": command,
+                           "Labels": {"com.docker.compose.service": role},
+                           "Env": [key + "=" + str(value) for key, value in (service.get("environment") or {}).items()]},
+                "HostConfig": {"GroupAdd": service.get("group_add"), "Privileged": service.get("privileged", False),
+                    "NetworkMode": (model.get("networks", {}).get("default") or {}).get("name"),
+                    "PortBindings": service.get("ports") or {}, "PidMode": service.get("pid"), "CapAdd": service.get("cap_add"),
+                    "RestartPolicy": {"Name": service.get("restart")}}}
+            self.state_start_admission(container, existing=False)
+
+    def state_start_admission(self, container, *, existing=True):
+        """Fresh observations under the existing deployment lock, immediately before start.
+
+        Even a stopped legacy API container is checked. An old command cannot be
+        grandfathered by a previously passed plan, stopped status or an image tag.
+        """
+        require(type(container) is dict and type(container.get("Mounts")) is list, "Launch container observations unavailable")
+        state_volume = self.t["volumes"]["emr_state"]
+        mounts = container["Mounts"]
+        protected = [m for m in mounts if m.get("Name") == state_volume or m.get("Destination") == ops.EMR_STATE]
+        if not protected:
+            env = pre.container_environment(container.get("Config") or {})
+            require("KIN_EMR_STATE_DIR" not in env and "KIN_EMR_READER_PASSWORD" not in env,
+                    "A client received state-owner configuration")
+            return
+        image = decode(self.cmd(["docker", "image", "inspect", self.plan["release"]["images"]["api"]]).stdout)[0]
+        config = container.get("Config") or {}
+        env = pre.container_environment(config)
+        # The protected plan/Compose entry fixes these names, not the launching caller.
+        project = self.t["project"]
+        pre.check_state_service(container, release=self.plan["release"], image=image, state_volume=state_volume,
+                                api_ipc_volume=project + "_emr-state-api-ipc",
+                                retention_ipc_volume=project + "_emr-state-retention-ipc",
+                                instance_id=project, database_host="db")
+        names = self.text(["docker", "container", "ls", "--all", "--filter", "volume=" + state_volume,
+                           "--format", "{{.Names}}"]).splitlines()
+        owners = [self.inspect_container(name) for name in names]
+        require(all(item is not None for item in owners), "State owner inventory changed")
+        pre.check_state_owners(owners, state_volume, container["Name"].lstrip("/") if existing else "")
+        volumes = [state_volume, self.t["volumes"]["pg"], self.t["volumes"]["emr_access"]]
+        before = {name: self.volume_identity(name) for name in volumes}
+        require(all(value.get("created") for value in before.values()), "Physical DB/state identity unavailable")
+        db = self.inspect("db")
+        require(db and db.get("Image") == self.plan["release"]["images"]["db"]
+                and (db.get("State") or {}).get("Running") is True, "Paired database is unavailable")
+        db_mounts = {m.get("Destination"): m.get("Name") for m in db.get("Mounts") or []}
+        require(db_mounts.get("/var/lib/postgresql/data") == self.t["volumes"]["pg"]
+                and db_mounts.get("/var/lib/postgresql/emr-access") == self.t["volumes"]["emr_access"],
+                "Paired database volumes differ")
+        observed = result_line(self.cmd(["docker", "run", "--rm", "--network", container["HostConfig"]["NetworkMode"], "--read-only",
+                "--user", "1000:1000", "--mount", "type=volume,source=" + state_volume + ",target=" + ops.EMR_STATE + ",readonly",
+                "-e", "DATABASE_URL", "-e", "KIN_EMR_INSTANCE_ID", "--entrypoint", "node", image["Id"],
+                "-e", pre.STATE_INSPECTION_SCRIPT], timeout=60,
+                env={"DATABASE_URL": env["DATABASE_URL"], "KIN_EMR_INSTANCE_ID": project}).stdout)
+        require(observed.get("version") == 3 and observed.get("lineage"), "State pair has no admitted v3 initialization provenance")
+        def identity(item):
+            require(type(item) is dict, "Launch observation disappeared")
+            return {key: item.get(key) for key in ("Id", "Image", "Config", "HostConfig", "Mounts", "Path", "Args")}
+        require({name: self.volume_identity(name) for name in volumes} == before
+                and (not existing or identity(self.inspect_container(container["Name"].lstrip("/"))) == identity(container))
+                and identity(self.inspect("db")) == identity(db),
+                "Launch target changed after admission")
 
     def api_health(self, member_rights):
         def ready():
@@ -5367,14 +5495,15 @@ class HostOps:
                      override=self.pins(intro), timeout=180)
         token = uuid.uuid4().hex[:12]
         out = self.cmd(["docker", "run", "--rm", "--network", "none", "--name", self.t["project"] + "-state-check-" + token,
-                        "--label", "kin.ops.run=" + token, "--mount", "type=volume,source=" + self.t["volumes"]["emr_state"] + ",target=" + ops.EMR_STATE,
+                        "--label", "kin.ops.run=" + token, "--mount", "type=volume,source=" + self.t["volumes"]["emr_state"] + ",target=" + ops.EMR_STATE + ",readonly",
+                        "--read-only", "--user", "1000:1000",
                         "--entrypoint", "node", intro.plan["release"]["images"]["api"], "-e", STATE_VOLUME_SCRIPT], timeout=60)
         observed = result_line(out.stdout)
         pre.check_state_volume(observed, intro.plan["storage"])
         self.cmd(["docker", "start", self.names["api"]], timeout=60, mutating=True)
         self.api_health(member_rights=True)
         pre.check_introduced_api(self.inspect("api"), name=self.names["api"], image=intro.plan["release"]["images"]["api"],
-                                 release=intro.plan["release"]["sha"], working_dir=str(self.repo), state_volume=self.t["volumes"]["emr_state"])
+                                 release=intro.plan["release"]["sha"], working_dir=str(self.repo), state_volume=self.t["volumes"]["emr_state"], api_ipc_volume=self.t["project"] + "_emr-state-api-ipc")
         return {"state_volume": observed}
 
     def served(self, intro):
@@ -5487,7 +5616,7 @@ class HostOps:
         require(images == intro.plan["release"]["images"], "Running images differ from the release")
         api = self.inspect("api")
         pre.check_introduced_api(api, name=self.names["api"], image=intro.plan["release"]["images"]["api"], release=intro.plan["release"]["sha"],
-                                 working_dir=str(self.repo), state_volume=self.t["volumes"]["emr_state"])
+                                 working_dir=str(self.repo), state_volume=self.t["volumes"]["emr_state"], api_ipc_volume=self.t["project"] + "_emr-state-api-ipc")
         model = self.resolved(intro, pinned=False)
         check_resolved(model, self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
         self.verify_running(model)
@@ -6305,6 +6434,10 @@ class IntroductionHost:
                 records.put("state.json", {"status": "RUNNING", "entry": pointer, "arguments": arguments,
                                             "lock_token": token, "change_started": True})
                 for role in roles or ROLES:
+                    observer.admit_compose_launch(model, ["up", role])
+                    check_command, check_environment = entry.argv(["config", "--format", "json"], pointer)
+                    require(decode(runner(check_command, env=check_environment, timeout=60).stdout) == model,
+                            "운영 기동 직전에 Compose 입력이 바뀌었습니다")
                     command, environment = entry.argv(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", role], pointer)
                     result = runner(command, env=environment, timeout=240)
                     records.command({"service": role, "exit": result.returncode, "entry": pointer})

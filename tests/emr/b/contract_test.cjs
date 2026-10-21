@@ -26,10 +26,24 @@ if (process.argv.includes('--emr-b-live')) {
 }
 
 function seedIntents(journal, values) {
+  // Model a crash image with paired reservations. An intent alone is not an
+  // admitted pending attempt; the service publishes the intent and slot together.
   journal.coordinator.call('update', state => {
-    for (const [stream, attemptId, eventId, contentSha256, bundleId] of values)
+    const heads = Object.fromEntries(['viewing', 'history'].map(stream => {
+      const pending = Object.values(state.slots).filter(q => q.stream === stream);
+      return [stream, pending.reduce((last, q) => q.sequence > last.sequence ? q : last, state.tail.streams[stream])];
+    }));
+    for (const [stream, attemptId, eventId, contentSha256, bundleId] of values) {
+      const previous = heads[stream], sequence = previous.sequence + 1;
+      const binding = { stream, attemptId, eventId, contentSha256, bundleId,
+        chainId: state.tail.streams[stream].chainId, kind: stream === 'viewing' ? 'access' : 'history',
+        sequence, previousHash: previous.hash, hash: createHash('sha256').update(JSON.stringify([sequence, previous.hash, contentSha256])).digest('hex'),
+        generation: ++state.generation, proofDigest: null };
+      state.slots[stream + ':' + sequence] = binding;
       state.intents[stream + ':' + attemptId] = { stream, attemptId, eventId, contentSha256, bundleId,
         owner: journal.coordinator.ownerId };
+      heads[stream] = binding;
+    }
   });
 }
 
@@ -388,6 +402,7 @@ function contractSuite() {
   }
   function memorySql(ledger) {
     const sql = {
+      identity: async () => ({ database: 'synthetic', oid: 42, address: '127.0.0.1', port: 5432 }),
       snapshot: async work => { ledger.guard(); return work(sql); }, withWriterFence: async work => work(sql),
       markerForSlot: async (stream, sequence) => ledger.markers.find(m => m.stream === stream && m.sequence === sequence) ?? null,
       markerForAttempt: async (stream, attemptId) => ledger.markers.find(m => m.stream === stream && m.attemptId === attemptId) ?? null,
@@ -679,10 +694,12 @@ function contractSuite() {
       w.ledger.entries.pop(); w.ledger.head = { sequence: 6, hash: w.ledger.entries.at(-1).hash };
       // A damaged or missing seal is never rebuilt from the database end.
       const sealFile = path.join(w.state, 'seal', 'tail.json'), good = fs.readFileSync(sealFile, 'utf8');
-      fs.writeFileSync(sealFile, good.replace(/"sequence":6/, '"sequence":7'));
-      await rejects(w.restart().seal.recoverAtStart(), 'SealTailMismatch');
+      const damaged = good.replace(/"sequence":6/, '"sequence":7');
+      fs.writeFileSync(sealFile, damaged);
+      await rejects(async () => w.restart().seal.recoverAtStart(), 'SealTailMismatch');
+      assert.equal(fs.readFileSync(sealFile, 'utf8'), damaged, 'early admission preserves the damaged tail');
       fs.rmSync(sealFile);
-      await rejects(w.restart().seal.recoverAtStart(), 'SealMissing');
+      await rejects(async () => w.restart().seal.recoverAtStart(), 'SealMissing');
       assert.equal(fs.existsSync(sealFile), false);
     } finally { w.cleanup(); }
   });
@@ -938,11 +955,10 @@ function contractSuite() {
     const w=await world();
     try {
       await w.store.append(authEvent(A)); await stageExpiry(w,1,at);
-      // The unrelated transaction is admitted but has not acquired the head lock.
-      // A reserved slot holds that lock until outcome, so another writer cannot
-      // reuse it while the first transaction remains open.
+      // An unrelated history reservation cannot block a viewing publication.
+      // A viewing reservation at the next slot would hold that stream's DB lock.
       const open=authEvent(A);
-      seedIntents(w.journal, [['viewing',randomUUID(),open.eventId,C.canonicalPayload(open).contentSha256,randomUUID()]]);
+      seedIntents(w.journal, [['history',randomUUID(),open.eventId,C.canonicalPayload(open).contentSha256,randomUUID()]]);
       const own=authEvent(A);assert.equal((await w.store.append(own)).eventId,own.eventId);
       assert(!w.journal.all().some(r=>r.kind==='commit-not-found'));
       await w.restart().seal.recoverAtStart();
@@ -953,29 +969,45 @@ function contractSuite() {
 
   async function stageExpiry(w,through,at) {
     const attemptId=randomUUID(),bundleId=randomUUID(),prefix=await w.seal.expiryPrefix(through);
-    seedIntents(w.journal, [['viewing',attemptId,null,null,bundleId]]);w.ledger.checkpoint(through,at);
-    const e=w.ledger.entries.at(-1);
+    // The reservation publishes its intent and proof together, before the modeled COMMIT.
+    const payload=C.checkpointPayload(at,through,prefix.count,prefix.anchor.hash);
+    const sequence=prefix.seal.sequence+1,previousHash=prefix.seal.hash;
     const binding=w.seal.reserve({stream:'viewing',chainId:w.ledger.chainId,attemptId,bundleId,kind:'expiry',eventId:null,
-      sequence:e.sequence,previousHash:e.previousHash,hash:e.hash,contentSha256:e.contentSha256},prefix);
+      sequence,previousHash,hash:C.entryHash(sequence,previousHash,payload),contentSha256:createHash('sha256').update(payload).digest('hex')},prefix);
+    w.ledger.checkpoint(through,at);
     w.ledger.markers.push(binding); return binding;
   }
 
-  test('C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts', () => {
-    const state = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-journal-r2-'));
-    try {
-      const first = new J.FailureJournal(state), body = { eventId: 'attempt', cause: 'business-rollback' };
+  test('C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts', async () => {
+    // The physical API requires refresh before each operation. The service facade
+    // supplies it, and requires a checkpoint initialized by fenced recovery first.
+    const Physical = load('emr-runtime/journal-file.ts').FailureJournal;
+    for (const physical of [true, false]) {
+      const w = physical ? null : await world();
+      const state = w?.state ?? fs.mkdtempSync(path.join(os.tmpdir(), 'emr-journal-r2-'));
+      const handles = [];
+      const openJournal = () => {
+        const journal = physical ? new Physical(state) : new J.FailureJournal(state);
+        handles.push(journal);
+        if (!physical) return journal;
+        return { tornBytes: journal.tornBytes,
+          all() { journal.refresh(); return journal.all(); },
+          record(...args) { journal.refresh(); return journal.record(...args); } };
+      };
+      try {
+      const first = openJournal(), body = { eventId: 'attempt', cause: 'business-rollback' };
       first.record('good-1', 'append-rolled-back', body);
       const file = path.join(state, 'journal', 'failure-journal.jsonl'), good = fs.readFileSync(file);
       const torn = Buffer.from('{"id":"incomplete"'); assert.equal(torn.length, 18);
       fs.appendFileSync(file, torn);
-      const second = new J.FailureJournal(state);
+      const second = openJournal();
       assert.equal(second.tornBytes, 18); assert.deepEqual(fs.readFileSync(file), good);
       const archives = fs.readdirSync(path.dirname(file)).filter(n => n.startsWith('torn-'));
       assert.equal(archives.length, 1); assert.deepEqual(fs.readFileSync(path.join(path.dirname(file), archives[0])), torn);
       second.record('good-2', 'append-rolled-back', body);
-      const third = new J.FailureJournal(state);
+      const third = openJournal();
       assert.equal(third.tornBytes, 0); third.record('good-3', 'append-rolled-back', body);
-      assert.deepEqual(new J.FailureJournal(state).all().map(r => r.id), ['good-1', 'good-2', 'good-3']);
+      assert.deepEqual(openJournal().all().map(r => r.id), ['good-1', 'good-2', 'good-3']);
       // A coordinator that stayed alive imports another writer's records, keeps
       // idempotency/conflict semantics, and accounts for that writer's quarantine.
       assert.deepEqual(first.all().map(r => r.id), ['good-1', 'good-2', 'good-3']);
@@ -988,10 +1020,35 @@ function contractSuite() {
       fs.unlinkSync(archiveFile); // exact owned synthetic quota fixture, before restart below
       // Interruption after archive publication but before truncation: the same archive is reused without data loss.
       fs.writeFileSync(file, Buffer.concat([good, torn]));
-      assert.equal(new J.FailureJournal(state).tornBytes, 18);
+      assert.equal(openJournal().tornBytes, 18);
       assert.deepEqual(fs.readdirSync(path.dirname(file)).filter(n => n.startsWith('torn-')), archives);
       assert.deepEqual(fs.readFileSync(path.join(path.dirname(file), archives[0])), torn);
-    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+      } finally {
+        for (const journal of handles) journal.coordinator?.close();
+        w?.journal.coordinator.close();
+        fs.rmSync(state, { recursive: true, force: true });
+      }
+    }
+    for (const legacy of [false, true]) {
+      const state = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-orphan-journal-'));
+      try {
+        const journal = new Physical(state);
+        journal.record('orphan', 'append-rolled-back', { eventId: 'attempt', cause: 'business-rollback' });
+        const file = path.join(state, 'journal', 'failure-journal.jsonl');
+        fs.appendFileSync(file, '{"id":"incomplete"');
+        if (legacy) {
+          fs.mkdirSync(path.join(state, 'seal'));
+          fs.writeFileSync(path.join(state, 'seal', 'settlement.json'), JSON.stringify({ state: { version: 2 } }));
+        }
+        const inventory = dir => Object.fromEntries(fs.readdirSync(dir).sort().map(name => {
+          const file = path.join(dir, name);
+          return [name, fs.statSync(file).isDirectory() ? inventory(file) : fs.readFileSync(file).toString('hex')];
+        }));
+        const before = inventory(state);
+        code(() => new J.FailureJournal(state), legacy ? 'SealUnsupportedFormat' : 'SealMissing');
+        assert.deepEqual(inventory(state), before, 'orphan/legacy refusal preserves every entry and damaged byte');
+      } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    }
   });
 
   const orderAt = '2026-01-02T00:00:00.000Z';
@@ -1325,14 +1382,14 @@ function contractSuite() {
         return open(file, flags, ...args);
       };
       try {
-        seedIntents(w.journal, ids.map(id => ['viewing', id, id, 'a'.repeat(64), randomUUID()]));
+        seedIntents(w.journal, ids.map(id => ['history', id, id, 'a'.repeat(64), randomUUID()]));
         const results = await Promise.allSettled([w.store.append(authEvent(A))]);
         assert(cut, 'publication compacts the large valid WAL at ' + boundary);
         assert(results.every(r => r.status === 'rejected'));
       } finally { fs.renameSync = rename; fs.openSync = open; }
       try {
         const restored = w.restart().journal.coordinator.call('read');
-        assert.deepEqual(Object.keys(restored.intents).sort(), ids.map(id => 'viewing:' + id).sort(), 'every durable intent survives compaction interruption');
+        assert.deepEqual(Object.keys(restored.intents).sort(), ids.map(id => 'history:' + id).sort(), 'every durable intent survives compaction interruption');
       } finally { w.cleanup(); }
     }
   });

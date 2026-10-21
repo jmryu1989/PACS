@@ -174,7 +174,8 @@ class FakeHost:
         if "du" in args:
             return "8 /source"
         if output is not None:
-            output.write(archive())
+            output.write(archive((("./seal/settlement.json", b'{"state":{"version":2}}'),))
+                         if any("emr-state" in word for word in args) else archive())
             return ""
         if "python3" in args:
             return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0})

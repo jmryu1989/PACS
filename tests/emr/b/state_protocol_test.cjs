@@ -114,12 +114,15 @@ test('C-S04.W02 full two-stream proof, durable coverage and correlation cannot d
   const r = request('confirm-bundle');
   for (const mutate of [p => p.entries.pop(), p => p.entries.push(p.entries[0]), p => p.requiredStreams.reverse(),
     p => p.entries[1].stream = 'viewing', p => p.entries[1].sealed.sequence = 0, p => p.entries[1].sealed.hash = hash('f'),
-    p => p.entries[1].sealed.chainId = randomUUID(), p => p.eventId = 'other', p => p.serviceEpoch = randomUUID()]) {
+    p => p.entries[1].sealed.chainId = randomUUID(), p => p.eventId = 'other']) {
     const changed = copy(proof); mutate(changed); refuses(() => P.parseStateResponse(response(r, changed), r));
   }
   for (const delta of [{ requestId: randomUUID() }, { v: 2 }, { ok: 'true' }, { result: results.status }])
     refuses(() => P.parseStateResponse({ ...response(r), ...delta }, r));
   refuses(() => P.parseStateResponse({ ...response(r), serviceEpoch: randomUUID() }, r), 'EPOCH');
+  const historical = { ...proof, serviceEpoch: randomUUID() };
+  assert.equal(P.parseStateResponse(response(r, historical), r).result.serviceEpoch, historical.serviceEpoch,
+    'current response may carry the original historical proof epoch');
   const unknown = { v: 1, requestId: r.requestId, serviceEpoch: epoch, ok: false, error: { code: 'TIMEOUT', outcome: 'unknown' } };
   assert.equal(P.parseStateResponse(unknown, r).error.outcome, 'unknown');
   refuses(() => P.parseStateResponse({ ...unknown, error: { ...unknown.error, message: 'connection-string' } }, r));

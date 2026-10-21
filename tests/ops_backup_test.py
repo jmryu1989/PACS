@@ -44,12 +44,15 @@ def rows_stream(rows, guard=PRESENT, schema=()):
                                               for key, value in rows.items()], guard=dict(guard), schema=list(schema))
 
 
-def orthanc_archive():
+def orthanc_archive(*, state=False):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as archive:
-        entry = tarfile.TarInfo("./index")
-        entry.size = 1
-        archive.addfile(entry, io.BytesIO(b"x"))
+        # This transport double declares the legacy state format; actual recovery
+        # and its provenance are exercised separately against the immutable image.
+        payload = json.dumps({"state": {"version": 2}}).encode() if state else b"x"
+        entry = tarfile.TarInfo("./seal/settlement.json" if state else "./index")
+        entry.size = len(payload)
+        archive.addfile(entry, io.BytesIO(payload))
     return stream.getvalue()
 
 
@@ -199,7 +202,7 @@ class Host:
         if "-sk" in args:
             return "8 /source"
         if kwargs.get("output") is not None:
-            kwargs["output"].write(orthanc_archive())
+            kwargs["output"].write(orthanc_archive(state=any("emr-state" in word for word in args)))
             return ""
         return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else self.restore_answer
 
@@ -1105,6 +1108,30 @@ class EmrRestoreVerification(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'Unsafe EMR archive entry'):
                         ops.validate_backup(self.folder)
                     commands.assert_not_called()
+
+
+class StateCopyAdmissionTests(unittest.TestCase):
+    def test_v3_unknown_mixed_and_changed_capture_refuse_before_any_copy_command(self):
+        """D1656-T03/T07: actual legacy restore consumers reject v3 before granting a mount."""
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            archive_path = directory / "emr-state.tgz"
+            for version, wal in [(3, b''), (3, b'{"torn":'), (None, b''), (2, b'{"version":3}\n')]:
+                with self.subTest(version=version, wal=wal):
+                    with tarfile.open(archive_path, "w:gz") as archive:
+                        entries = [("seal/settlement.json", json.dumps({"state": {"version": version}}).encode()),
+                                   ("seal/settlement.jsonl", wal), ("journal/failure-journal.jsonl", b'good\n{"torn":')]
+                        for name, data in entries:
+                            entry = tarfile.TarInfo(name); entry.size = len(data)
+                            archive.addfile(entry, io.BytesIO(data))
+                    before = archive_path.read_bytes()
+                    manifest = {"shape": "post", "emr": {}, "sha256": {"emr-state.tgz": ops.digest(archive_path)}}
+                    with patch.object(ops, "run") as commands, patch.object(ops, "temporary_run") as owners:
+                        with self.assertRaises(RuntimeError): ops.rehearse_held(directory, manifest)
+                        with patch.object(ops, "validate_backup", return_value=(directory, manifest)):
+                            with self.assertRaises(RuntimeError): ops.rehearse(directory)
+                        commands.assert_not_called(); owners.assert_not_called()
+                    self.assertEqual(archive_path.read_bytes(), before)
 
 
 if __name__ == "__main__":

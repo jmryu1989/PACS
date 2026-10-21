@@ -222,17 +222,52 @@ services:
     # 헬스체크도 두지 않는다. 이 이미지에는 curl/wget이 없고 셸 트릭은 환경을 탄다.
     # API는 JWKS를 부팅이 아니라 **첫 요청 때** 가져오므로 Keycloak이 늦게 떠도 괜찮다.
 
+
+  # Only this compiled service receives protected storage and the reader credential.
+  # Writable launches are admitted by the trusted deployment/copy launcher.
+  emr-state:
+    image: ${KIN_EMR_STATE_IMAGE:?검수된 상태 서비스 이미지 digest를 설정하세요}
+    build:
+      context: ./api
+      target: production
+      args:
+        VCS_REF: ${KIN_REVISION:-unknown}
+    container_name: kin-emr-state
+    user: "1000:1000"
+    group_add: ["2001", "2002"]
+    entrypoint: ["sh", "/app/start-production.sh"]
+    command: ["state-serve-v3"]
+    restart: "no"
+    stop_grace_period: 20s
+    environment:
+      DATABASE_URL: postgresql://kin_emr_reader:${KIN_EMR_READER_PASSWORD:?상태 서비스 reader 비밀번호를 설정하세요}@db:5432/kin
+      KIN_EMR_STATE_DIR: /var/lib/kin-emr
+      KIN_EMR_INSTANCE_ID: ${KIN_EMR_INSTANCE_ID:?검증된 DB와 상태 쌍 식별자를 설정하세요}
+      KIN_EMR_API_SOCKET: /run/kin-emr-api/writer.sock
+      KIN_EMR_RETENTION_SOCKET: /run/kin-emr-retention/writer.sock
+    volumes:
+      - emr-state:/var/lib/kin-emr
+      - emr-state-api-ipc:/run/kin-emr-api
+      - emr-state-retention-ipc:/run/kin-emr-retention
+    depends_on:
+      db:
+        condition: service_healthy
+      api-migrate:
+        condition: service_completed_successfully
+
   api:
     build:
       context: ./api
       target: development
     container_name: kin-api
     restart: unless-stopped
+    user: "1001:1001"
+    group_add: ["2001"]
     environment:
       # EMR-B1: 서버는 최소권한 runtime 역할로만 접속한다(업무 DML과 검증된 원장 append 실행만; 소유·superuser·이관 자격 없음).
       DATABASE_URL: postgresql://kin_runtime:${KIN_EMR_RUNTIME_PASSWORD:?KIN_EMR_RUNTIME_PASSWORD를 .env에 설정하세요}@db:5432/kin
-      # 원장 seal·보호 실패 저널: DB 밖의 이 서버 전용 볼륨(DB 역할은 쓸 수 없다).
-      KIN_EMR_STATE_DIR: /var/lib/kin-emr
+      KIN_EMR_STATE_SOCKET: /run/kin-emr-api/writer.sock
+      KIN_EMR_INSTANCE_ID: ${KIN_EMR_INSTANCE_ID:?검증된 DB와 상태 쌍 식별자를 설정하세요}
       # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
       AUTH_REQUIRED: "true"
       # iss는 **브라우저가 본 주소**다 — 토큰에 그렇게 박혀 오기 때문.
@@ -259,6 +294,8 @@ services:
     ports:
       - "3000:3000"
     depends_on:
+      emr-state:
+        condition: service_started
       db:
         condition: service_healthy   # DB는 준비될 때까지 기다린다 (Prisma가 바로 붙는다)
       api-migrate:
@@ -272,11 +309,13 @@ services:
       # node_modules는 마운트하지 않는다 (윈도우 파일과 리눅스 바이너리가 섞이면 깨진다)
       - ./api/src:/app/src
       - ./api/prisma:/app/prisma
-      - emr-state:/var/lib/kin-emr
+      - emr-state-api-ipc:/run/kin-emr-api
 
 volumes:
   orthanc-db:
   pg-db:
   proxy-certs:
   emr-access:   # EMR-B1 원장 tablespace (DB 데이터 볼륨과 별도)
-  emr-state:    # EMR-B1 원장 seal·실패 저널 (API 전용, DB 밖)
+  emr-state:    # Protected service only; clients receive IPC volumes.
+  emr-state-api-ipc:
+  emr-state-retention-ipc:
