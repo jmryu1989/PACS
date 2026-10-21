@@ -4150,6 +4150,141 @@ class StateClientLaunchTests(unittest.TestCase):
         from ops_deploy_preflight_test import StateLaunchTests
         return StateLaunchTests.client_fixture(self)
 
+    def resume_fixture(self, readiness=(True,)):
+        owner, args = self.fixture()
+        client, _ = self.client_fixture()
+        owner["Name"] = "/kin-api-emr-state"
+        objects = {"kin-api-emr-state": owner, "kin-api": client,
+                   "kin-proxy": {"Name": "/kin-proxy", "Config": {"Env": []}, "Mounts": [], "State": {"Running": False}}}
+        host = object.__new__(intro.HostOps)
+        host.intro = None; host.names = {"api": "kin-api", "db": "kin-db", "proxy": "kin-proxy"}
+        host.t = {"project": "fixture", "containers": host.names,
+                  "volumes": {"emr_state": args["state_volume"], "pg": "fixture_pg", "emr_access": "fixture_access"}}
+        host.plan = {"release": args["release"]}
+        host.records = SimpleNamespace(command=lambda value: None, log=lambda name, value: name)
+        host.inspect_container = lambda name: copy.deepcopy(objects.get(name))
+        database = {"Id": "db", "Image": args["release"]["images"]["db"], "State": {"Running": True},
+                    "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "fixture_pg"},
+                               {"Destination": "/var/lib/postgresql/emr-access", "Name": "fixture_access"}]}
+        host.inspect = lambda role: copy.deepcopy(database if role == "db" else objects.get(host.names[role]))
+        host.text = lambda command: "kin-api-emr-state"
+        host.volume_identity = lambda name: {"name": name, "created": "original"}
+        trace, observations = [], iter(readiness)
+        def runner(command, **kwargs):
+            if command[:3] == ["docker", "image", "inspect"]:
+                value = json.dumps([args["image"]]).encode()
+            elif command[:2] == ["docker", "start"]:
+                trace.append(("start", command[2]))
+                if command[2] in objects: objects[command[2]]["State"]["Running"] = True
+                value = b""
+            elif command[:2] == ["docker", "run"]:
+                if command[-1] == pre.STATE_READY_SCRIPT:
+                    # Assert capabilities at the executed boundary, not source spelling.
+                    self.assertEqual(command[command.index("--user") + 1], "1001:1001")
+                    self.assertEqual(command[command.index("--group-add") + 1], "2001")
+                    self.assertEqual(command.count("--mount"), 1)
+                    self.assertEqual(command[command.index("--mount") + 1],
+                        "type=volume,source=fixture_emr-state-api-ipc,target=/run/kin-emr-api,readonly")
+                    self.assertEqual(command[command.index("--entrypoint") + 2], args["image"]["Id"])
+                    self.assertEqual(set(kwargs["env"]), {"DATABASE_URL", "KIN_EMR_INSTANCE_ID", "KIN_EMR_STATE_SOCKET"})
+                    self.assertIn("//kin_runtime:", kwargs["env"]["DATABASE_URL"])
+                    ready = next(observations)
+                    trace.append(("ready", ready))
+                    value = ("KIN_RESULT " + json.dumps({"ready": ready})).encode()
+                else:
+                    self.assertTrue(any(word.endswith(",readonly") for word in command))
+                    value = ('KIN_RESULT ' + json.dumps({"version": 3, "lineage": "synthetic-lineage",
+                             "fingerprint": "a" * 64, "pair": {"instanceId": "fixture"}})).encode()
+            else:
+                self.fail("Unexpected resume boundary " + str(command[:3]))
+            return subprocess.CompletedProcess(command, 0, value, b"")
+        host.run = runner
+        return host, objects, trace
+
+    def test_20_resume_waits_for_current_service_recovery_before_clients(self):
+        """REQ-B2C-08/10 -> STALE-EPOCH/WRONG-STATE-RECOVERY -> C-O03, D1656-T03."""
+        host, _, trace = self.resume_fixture((False, True))
+        with patch.object(intro.time, "sleep"):
+            host.start_roles(["api", "proxy"])
+        self.assertEqual(trace, [("start", "kin-api-emr-state"), ("ready", False), ("ready", True),
+                                 ("start", "kin-api"), ("start", "kin-proxy")])
+
+    def test_21_absent_unready_unknown_or_changed_owner_never_resumes_clients(self):
+        for failure in ("absent", "unready", "helper-unknown", "helper-failed", "owner-restarted", "owner-exited",
+                        "client-replaced", "malformed-ready", "wrong-owner-command", "wrong-network"):
+            with self.subTest(failure=failure):
+                host, objects, trace = self.resume_fixture((False,) if failure == "unready" else (True,))
+                runner = host.run
+                if failure == "absent": del objects["kin-api-emr-state"]
+                if failure == "wrong-owner-command": objects["kin-api-emr-state"]["Config"]["Cmd"] = ["serve"]
+                if failure == "wrong-network": objects["kin-api"]["HostConfig"]["NetworkMode"] = "other_default"
+                def run(command, **kwargs):
+                    if command[-1] != pre.STATE_READY_SCRIPT: return runner(command, **kwargs)
+                    if failure == "helper-unknown": raise intro.Unknown("synthetic lost helper outcome")
+                    if failure == "helper-failed": return subprocess.CompletedProcess(command, 1, b"", b"")
+                    result = runner(command, **kwargs)
+                    if failure == "owner-restarted": objects["kin-api-emr-state"]["RestartCount"] = 1
+                    if failure == "owner-exited": objects["kin-api-emr-state"]["State"]["Running"] = False
+                    if failure == "client-replaced": objects["kin-api"]["Id"] = "replacement"
+                    if failure == "malformed-ready": result.stdout = b'KIN_RESULT {"ready":"true"}'
+                    return result
+                host.run = run
+                # Exercise the actual bounded wait without sleeping through its deadline.
+                with patch.object(intro.time, "monotonic", side_effect=iter(range(0, 10000, 121))), \
+                        patch.object(intro.time, "sleep"), self.assertRaises(RuntimeError):
+                    host.start_roles(["api", "proxy"])
+                self.assertFalse(any(item in trace for item in (("start", "kin-api"), ("start", "kin-proxy"))))
+
+    def test_22_readiness_program_checks_actual_pair_and_accounts_client_cleanup(self):
+        """Execute the fixed observer with DB/IPC boundary doubles; no Docker or PG."""
+        script = r"""const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const input=JSON.parse(fs.readFileSync(0,'utf8')), trace=[], output=[];
+const ts=require(path.resolve('api/node_modules/typescript'));
+require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{
+compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2021,esModuleInterop:true}}).outputText,f);
+const {samePair}=require(path.resolve('api/src/emr-runtime/external-writer.ts'));
+const database={database:'kin',oid:101,address:'192.0.2.2',port:5432};
+const chains={viewing:'11111111-1111-4111-8111-111111111111',history:'22222222-2222-4222-8222-222222222222'};
+const hello={instanceId:'fixture',database:{...database},chains:{...chains},clientInstanceId:'client',serviceEpoch:'epoch'};
+if(input.variant==='wrong-db')hello.database.oid++;
+if(input.variant==='wrong-instance')hello.instanceId='foreign';
+if(input.variant==='wrong-chain')hello.chains.history='foreign';
+class DB { async $connect(){trace.push('connect')} async $disconnect(){trace.push('disconnect');if(input.variant==='db-close-failed')throw Error('closed')} }
+class Client {
+constructor(endpoint){trace.push(['endpoint',endpoint])}
+async openSession(){trace.push('hello');if(input.variant==='not-ready')throw Object.assign(Error('cold'),{code:'NOT_READY'});
+if(input.variant==='lost')throw Object.assign(Error('lost'),{code:'UNAVAILABLE'});return hello}
+async callAsync(op,work,value){trace.push([op,work,value]);return {state:input.variant==='stopping'?'stopping':'ready',
+chains:input.variant==='status-chain'?{...chains,viewing:'foreign'}:chains}}
+async close(){trace.push('close');if(input.variant==='client-close-failed')throw Error('closed')}
+}
+const fakeProcess={env:{KIN_EMR_INSTANCE_ID:'fixture',KIN_EMR_STATE_SOCKET:'/run/kin-emr-api/writer.sock'},exitCode:0};
+const imports={
+'/app/node_modules/@prisma/client':{PrismaClient:DB},
+'/app/dist/emr-runtime/manifest':{databaseIdentity:async()=>database,verifyRuntimeConnection:async()=>{
+trace.push('verify-role');if(input.variant==='wrong-role')throw Error('role')},EMR_STATE_IDENTITIES:{serviceUid:1000,apiGroup:2001}},
+'/app/dist/emr-runtime/store':{PrismaLedgerSql:class {async tail(s){return {chainId:chains[s]}}}},
+'/app/dist/emr-runtime/state-client':{StateClient:Client},'/app/dist/emr-runtime/external-writer':{samePair},'node:crypto':require('node:crypto')};
+(async()=>{await vm.runInNewContext(input.script,{process:fakeProcess,console:{log:x=>output.push(x)},
+require:name=>{if(!imports[name])throw Error('unexpected capability '+name);return imports[name]}});
+console.log(JSON.stringify({trace,output,exit:fakeProcess.exitCode}));})().catch(()=>{process.exitCode=2});"""
+        for variant in ("ready", "not-ready", "stopping", "wrong-db", "wrong-instance", "wrong-chain", "status-chain",
+                        "wrong-role", "lost", "client-close-failed", "db-close-failed"):
+            with self.subTest(variant=variant):
+                child = subprocess.run(["node", "--max-old-space-size=3072", "-e", script],
+                    input=json.dumps({"script": pre.STATE_READY_SCRIPT, "variant": variant}),
+                    text=True, capture_output=True, timeout=30)
+                self.assertEqual(child.returncode, 0, child.stderr[-1000:])
+                result = json.loads(child.stdout)
+                self.assertEqual(result["trace"].count("close"), 1)
+                self.assertEqual(result["trace"].count("disconnect"), 1)
+                success = variant in ("ready", "not-ready", "stopping")
+                self.assertEqual(result["exit"], 0 if success else 1)
+                self.assertEqual(result["output"], ['KIN_RESULT ' + json.dumps({"ready": variant == "ready"}, separators=(",", ":"))]
+                                 if success else [])
+                if variant in ("wrong-db", "wrong-instance", "wrong-chain", "wrong-role", "lost", "not-ready"):
+                    self.assertFalse(any(isinstance(item, list) and item[0] == "status" for item in result["trace"]))
+
     def test_15_client_start_checks_artifact_command_privileges_mounts_and_secrets(self):
         """D1656-T03/T05/T08: no-mount is not sufficient authority to start an API."""
         import ops_emr_introduction as intro

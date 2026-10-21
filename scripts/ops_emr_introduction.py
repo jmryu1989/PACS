@@ -4323,7 +4323,51 @@ class HostOps:
                     owner = self.inspect_container(owner_name)
                     if owner is not None:
                         self.cmd(["docker", "start", owner_name], timeout=120, mutating=True)
+                        self.wait(self.state_ready, 120, "State service did not complete recovery before client resume")
+                    else:
+                        # A pre-EMR release still uses its existing launch admission.
+                        # A configured service client cannot take that legacy branch.
+                        client = self.inspect("api")
+                        require(client and "KIN_EMR_STATE_SOCKET" not in pre.container_environment(client.get("Config") or {}),
+                                "State service is absent; clients cannot resume")
                 self.cmd(["docker", "start", self.names[role]], timeout=120, mutating=True)
+
+    def state_ready(self):
+        """Observe current IPC readiness after owner launch, before starting dependent clients.
+
+        Container Running is not recovery completion. The fixed observer cannot own
+        protected storage, and a timeout/unknown helper is handled by the existing
+        worker accounting, never converted into readiness or retried by this method.
+        """
+        owner_name = state_service_name(self.t)
+        owner, client = self.inspect_container(owner_name), self.inspect("api")
+        require(owner and (owner.get("State") or {}).get("Running") is True
+                and (owner.get("State") or {}).get("Restarting") is False, "State service exited during resume")
+        self.state_start_admission(client)
+        image = decode(self.cmd(["docker", "image", "inspect", self.plan["release"]["images"]["api"]]).stdout)[0]
+        project = self.t["project"]
+        pre.check_state_service(owner, release=self.plan["release"], image=image,
+                                state_volume=self.t["volumes"]["emr_state"], api_ipc_volume=project + "_emr-state-api-ipc",
+                                retention_ipc_volume=project + "_emr-state-retention-ipc",
+                                instance_id=project, database_host="db")
+        require(owner["HostConfig"]["NetworkMode"] == client["HostConfig"]["NetworkMode"],
+                "State observer network differs from the client")
+        env = pre.container_environment(client["Config"])
+        observed = result_line(self.cmd(["docker", "run", "--rm", "--read-only", "--network", client["HostConfig"]["NetworkMode"],
+            "--user", "1001:1001", "--group-add", "2001", "--mount",
+            "type=volume,source=" + project + "_emr-state-api-ipc,target=" + pre.STATE_API_IPC + ",readonly",
+            "-e", "DATABASE_URL", "-e", "KIN_EMR_INSTANCE_ID", "-e", "KIN_EMR_STATE_SOCKET", "--entrypoint", "node", image["Id"],
+            "--max-old-space-size=3072", "-e", pre.STATE_READY_SCRIPT], timeout=30,
+            env={key: env[key] for key in ("DATABASE_URL", "KIN_EMR_INSTANCE_ID", "KIN_EMR_STATE_SOCKET")}).stdout)
+        require(type(observed) is dict and set(observed) == {"ready"} and type(observed["ready"]) is bool,
+                "State observer returned no readiness result")
+        def identity(item):
+            require(type(item) is dict, "State resume observation disappeared")
+            return {key: item.get(key) for key in ("Id", "Image", "Config", "HostConfig", "Mounts", "Path", "Args",
+                                                  "RestartCount", "State")}
+        require(identity(self.inspect_container(owner_name)) == identity(owner)
+                and identity(self.inspect("api")) == identity(client), "State resume target changed during observation")
+        return observed["ready"]
 
     def admit_compose_launch(self, model, arguments):
         """Check the effective creation command before Compose can grant a state mount."""

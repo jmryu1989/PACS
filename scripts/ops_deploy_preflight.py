@@ -43,6 +43,36 @@ if(!inspected.state && (viewing.sequence!==0 || history.sequence!==0))throw Erro
 console.log('KIN_RESULT '+JSON.stringify({version:inspected.state?.version??null,
 fingerprint:inspected.fingerprint,pair,lineage:inspected.state?.lineage?.id??null}));
 })().catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
+# The resume observer is a non-promoting client. It receives only the API IPC
+# mount and runtime credential, and checks the pair through its own DB connection.
+STATE_READY_SCRIPT = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
+const {randomUUID}=require('node:crypto');
+const {databaseIdentity,verifyRuntimeConnection,EMR_STATE_IDENTITIES}=require('/app/dist/emr-runtime/manifest');
+const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
+const {StateClient}=require('/app/dist/emr-runtime/state-client');
+const {samePair}=require('/app/dist/emr-runtime/external-writer');
+const db=new PrismaClient(), client=new StateClient({path:process.env.KIN_EMR_STATE_SOCKET,
+role:'api',ownerUid:EMR_STATE_IDENTITIES.serviceUid,groupId:EMR_STATE_IDENTITIES.apiGroup});
+(async()=>{let result;
+try {
+await db.$connect();await verifyRuntimeConnection(db);
+const sql=new PrismaLedgerSql(db), viewing=await sql.tail('viewing'), history=await sql.tail('history');
+const pair={instanceId:process.env.KIN_EMR_INSTANCE_ID,database:await databaseIdentity(db),
+chains:{viewing:viewing.chainId,history:history.chainId}};
+const hello=await client.openSession(randomUUID());
+if(!samePair(hello,pair))throw Error('pair');
+const status=await client.callAsync('status',null,{clientInstanceId:hello.clientInstanceId,chains:pair.chains});
+if(status.chains.viewing!==pair.chains.viewing || status.chains.history!==pair.chains.history)throw Error('chains');
+result={ready:status.state==='ready'};
+} catch(error) {
+if(error.code!=='NOT_READY')throw error;
+result={ready:false};
+} finally {
+const closed=await Promise.allSettled([client.close(),db.$disconnect()]);
+if(closed.some(item=>item.status==='rejected'))throw Error('cleanup');
+}
+console.log('KIN_RESULT '+JSON.stringify(result));
+})().catch(()=>{process.exitCode=1});"""
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
