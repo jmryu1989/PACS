@@ -43,10 +43,17 @@ function seed(dir, n) {
 async function sample(label, rep, n) {
   const make = label === 'r3' ? d => new J3.FailureJournal(d) : d => new J4.FailureJournal(d,
     new CO.StateCoordinator(d, process.platform === 'linux' ? undefined : request => EW.executeExternal(request)));
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus-jcost-')); fs.chmodSync(dir, 0o700); seed(dir, n);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus-jcost-')); fs.chmodSync(dir, 0o700);
+    if (label === 'r4d') {
+      // The candidate admits a journal only beside an initialized seal lineage (an unexplained journal is refused):
+      // initialize the pair as the service does, close that owner, then seed the retained journal fixture.
+      const owner = new CO.StateCoordinator(dir, process.platform === 'linux' ? undefined : request => EW.executeExternal(request));
+      await new S4.AccessSeal(dir, jcostSql(), new J4.FailureJournal(dir, owner)).recoverAtStart(JCOST_PAIR, crypto.randomUUID());
+      owner.close();
+    }
+    seed(dir, n);
     try {
       const t0 = performance.now(), j = make(dir), open_ms = performance.now() - t0, times = [];
-      if (label === 'r4d') await new S4.AccessSeal(dir, jcostSql(), j).recoverAtStart(JCOST_PAIR, crypto.randomUUID());
       let readBytes=0;
       const fileRead=fs.readFileSync,rangeRead=fs.readSync;
       fs.readFileSync=function(...args){const v=fileRead.apply(this,args);readBytes+=Buffer.byteLength(v);return v;};
