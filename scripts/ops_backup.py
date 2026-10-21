@@ -1294,7 +1294,9 @@ def rehearse(directory):
 # ── Held capture: the EMR-introduction release mode's B0 (before the EMR storage) and B1 (after it) ──
 # The legacy manifest keys of running_images name roles ("kin-api" is "the API"), so ops.rehearse() and validate_backup()
 # accept a held capture unchanged. The actual container names come from the caller's target manifest.
-ROLE_KEYS = {"api": "kin-api", "keycloak": "kin-keycloak", "orthanc": "kin-orthanc", "db": "kin-db", "proxy": "kin-proxy"}
+ROLE_KEYS = {"api": "kin-api", "keycloak": "kin-keycloak", "orthanc": "kin-orthanc", "db": "kin-db", "proxy": "kin-proxy",
+             # EMR-B2 (c): the protected-state service role of a target that has one (optional in the caller's resources)
+             "state": STATE_SERVICE}
 WRITER_ROLES = ("api", "keycloak", "orthanc", "proxy")
 HELD_KIND = "held-capture"
 HELD_LABEL = re.compile(r"[a-z][a-z0-9]{0,15}(?:-[a-z0-9]{1,16}){0,3}")
@@ -2267,7 +2269,7 @@ def env_names(path):
 
 def _held_resources(resources):
     containers, volumes = resources.get("containers"), resources.get("volumes")
-    if (type(containers) is not dict or set(containers) != set(ROLE_KEYS) or type(volumes) is not dict
+    if (type(containers) is not dict or set(containers) not in (set(ROLE_KEYS) - {"state"}, set(ROLE_KEYS)) or type(volumes) is not dict
             or not {"orthanc", "pg"} <= set(volumes)
             or any(type(name) is not str or not RESOURCE_NAME.fullmatch(name)
                    for name in (*containers.values(), *volumes.values()))):
@@ -2320,7 +2322,7 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
     db = by_role["db"]
     if not db["State"]["Running"] or any(item["State"].get("Restarting") for item in by_role.values()):
         raise RuntimeError("PostgreSQL must run and nothing may be restarting")
-    running = [role for role in WRITER_ROLES if by_role[role]["State"]["Running"]]
+    running = [role for role in (*WRITER_ROLES, *(["state"] if "state" in by_role else [])) if by_role[role]["State"]["Running"]]
     if running:
         raise RuntimeError("Writers are not fenced: " + ", ".join(running))
     if _volume_of(by_role["orthanc"], "/var/lib/orthanc/db") != volumes["orthanc"]:
@@ -2330,14 +2332,28 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
     db_name = containers["db"]
     roles = role_catalog(db_name)
     present = {role["rolname"] for role in roles["roles"]} & set(EMR_ROLES)
+    service = by_role.get("state")
     if shape == "pre":
         if (present or any(str(name).startswith("emr_") for name in roles["schemas"])
                 or any(space.get("name") == "kin_emr_access" for space in roles["tablespaces"])
-                or any(m.get("Destination") == EMR_STATE for m in by_role["api"].get("Mounts") or [])):
+                or any(m.get("Destination") == EMR_STATE for m in by_role["api"].get("Mounts") or []) or service is not None):
             raise RuntimeError("A pre-EMR capture found EMR storage")
         # A B0 that a rollback could not rebuild exactly is refused before anything is written.
         supported_pre_catalog(roles)
         state_volume = None
+    elif service is not None:
+        # EMR-B2 (c): the state volume is the fenced service's alone; its close must be complete (exit 0,
+        # EMR_STATE_CLOSED) before the paired capture, and the API client carries no state mount.
+        import ops_deploy_preflight as pre
+        if any(m.get("Destination") == EMR_STATE for m in by_role["api"].get("Mounts") or []):
+            raise RuntimeError("The API client carries a protected state mount")
+        if service.get("Path") != pre.STATE_ENTRYPOINT[0] or service.get("Args") != [*pre.STATE_ENTRYPOINT[1:], *pre.STATE_COMMAND]:
+            raise RuntimeError("State service entry mode differs")
+        state_volume = _volume_of(service, EMR_STATE)
+        if state_volume != volumes["emr_state"] or present != set(EMR_ROLES):
+            raise RuntimeError("Post-EMR capture resources differ from the target manifest")
+        state_service_closed(containers["state"])
+        supported_catalog(roles, shape="post")
     else:
         state_volume = _volume_of(by_role["api"], EMR_STATE)
         if state_volume != volumes["emr_state"] or present != set(EMR_ROLES):
@@ -2375,6 +2391,10 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
                 "resources": {"containers": dict(containers), "volumes": dict(volumes)}, "counts": {}}
     if shape == "post":
         manifest["emr"] = {"state_volume": state_volume, "tablespace": "kin_emr_access", "same_pause": True}
+        if service is not None:
+            manifest["emr"].update(format=STATE_FORMAT, service={"container": containers["state"], "image": service["Image"],
+                                   "entry": [service["Path"], *service["Args"]], "running_before": False, "exit_code": 0, "closed": True},
+                                   pair=None)
     write_json(directory / "manifest.json", manifest)
     started = time.monotonic()
     stage = "catalog"
@@ -2403,6 +2423,12 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
             with (directory / "emr-state.tgz").open("wb") as handle:
                 temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
                                "--entrypoint", "tar", db["Image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
+            if service is not None:
+                # The captured v3 state admitted read-only and bound to its pair (identifiers only) for the restore route.
+                with (directory / "emr-state.tgz").open("rb") as handle:
+                    admitted = admit_v3_archive(handle)
+                manifest["emr"]["pair"] = {"instance_id": admitted["origin"]["instanceId"], "lineage": admitted["lineage"],
+                                           "origin": admitted["origin"], "fingerprint": admitted["fingerprint"]}
         stage = "copy configuration and metadata"
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)

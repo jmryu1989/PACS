@@ -63,14 +63,29 @@ def archive(entries=(("./index", b"x"),)):
     return stream.getvalue()
 
 
+# EMR-B2 (c): the state service of the target (the held capture's optional "state" role) and the v3 state it leaves.
+STATE_SERVICE = RESOURCES["containers"]["api"] + "-emr-state"
+RESOURCES_C = {"containers": {**RESOURCES["containers"], "state": STATE_SERVICE}, "volumes": dict(RESOURCES["volumes"])}
+V3_ORIGIN = {"instanceId": "kin-rh", "chains": {"viewing": "7c0b6e8e-1c1b-4a3a-8f2e-1a2b3c4d5e01", "history": "7c0b6e8e-1c1b-4a3a-8f2e-1a2b3c4d5e02"},
+             "database": {"database": "kin", "oid": 16384, "address": "172.18.0.2", "port": 5432}}
+
+
+def v3_archive():
+    document = {"state": {"version": 3, "revision": 4, "generation": 2, "lineage": {"version": 1, "id": "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f", "origin": V3_ORIGIN}}}
+    return archive((("./seal/settlement.json", json.dumps(document).encode()), ("./seal/settlement.jsonl", b'{"version":3}\n'), ("./seal/tail.json", b'{"streams":{}}')))
+
+
 class FakeHost:
-    def __init__(self, folder, shape="pre"):
+    def __init__(self, folder, shape="pre", service=False):
         self.repo = Path(folder) / "repo"
         self.repo.mkdir()
         for name in (".env", "docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml"):
             (self.repo / name).write_text("SYNTHETIC=placeholder\n")
         self.parent = Path(folder) / "backups"
         self.shape = shape
+        self.service = service
+        self.service_closed = ("false 0", "EMR_STATE_READY\nEMR_STATE_CLOSED\n")
+        self.resources = RESOURCES_C if service else RESOURCES
         self.running = {role: False for role in ops.WRITER_ROLES}
         self.clients = "0"
         self.commands = []
@@ -82,17 +97,25 @@ class FakeHost:
 
     def containers(self):
         out = []
-        for role, name in RESOURCES["containers"].items():
+        for role, name in self.resources["containers"].items():
             mounts = []
             if role == "db":
                 mounts.append({"Destination": "/var/lib/postgresql/data", "Type": "volume", "Name": RESOURCES["volumes"]["pg"]})
             if role == "orthanc":
                 mounts.append({"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": RESOURCES["volumes"]["orthanc"]})
-            if role == "api" and self.shape == "post":
+            if role == "api" and self.shape == "post" and not self.service:
                 mounts.append({"Destination": ops.EMR_STATE, "Type": "volume", "Name": RESOURCES["volumes"]["emr_state"]})
-            out.append({"Name": "/" + name, "Image": "sha256:" + str(len(out)) * 64,
-                        "State": {"Running": role == "db" or self.running.get(role, False)},
-                        "Config": {"Image": role + ":synthetic"}, "Mounts": mounts})
+            if role == "api" and self.service:
+                mounts.append({"Destination": "/run/kin-emr-api", "Type": "volume", "Name": "kin-rh_emr-state-api-ipc", "RW": False})
+            if role == "state":
+                mounts.append({"Destination": ops.EMR_STATE, "Type": "volume", "Name": RESOURCES["volumes"]["emr_state"], "RW": True})
+                mounts.append({"Destination": "/run/kin-emr-api", "Type": "volume", "Name": "kin-rh_emr-state-api-ipc", "RW": True})
+            item = {"Name": "/" + name, "Image": "sha256:" + str(len(out)) * 64,
+                    "State": {"Running": role == "db" or self.running.get(role, False)},
+                    "Config": {"Image": role + ":synthetic"}, "Mounts": mounts}
+            if role == "state":
+                item.update(Path="sh", Args=["/app/start-production.sh", "state-serve-v3"], Image=next(row["Image"] for row in out if row["Name"] == "/" + RESOURCES["containers"]["api"]))
+            out.append(item)
         return out
 
     def catalog(self, container=None):
@@ -115,6 +138,8 @@ class FakeHost:
     def text(self, args, **kwargs):
         self.commands.append(list(args))
         joined = " ".join(args)
+        if args[:2] == ["docker", "inspect"] and "--format" in args and args[-1] == STATE_SERVICE:
+            return self.service_closed[0]
         if args[:2] == ["docker", "inspect"]:
             return json.dumps(self.containers())
         if "pg_stat_activity" in joined:
@@ -148,6 +173,8 @@ class FakeHost:
 
     def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
         self.commands.append(list(args))
+        if args[:2] == ["docker", "logs"] and args[-1] == STATE_SERVICE:
+            return SimpleNamespace(returncode=0, stdout=self.service_closed[1].encode(), stderr=b"")
         if args[:3] == ["docker", "run", "-d"]:
             self.verifiers[args[args.index("--name") + 1]] = set()
         if "psql" in args and input_file is not None and "-f" not in args:
@@ -174,7 +201,7 @@ class FakeHost:
         if "du" in args:
             return "8 /source"
         if output is not None:
-            output.write(archive((("./seal/settlement.json", b'{"state":{"version":2}}'),))
+            output.write((v3_archive() if self.service else archive((("./seal/settlement.json", b'{"state":{"version":2}}'),)))
                          if any("emr-state" in word for word in args) else archive())
             return ""
         if "python3" in args:
@@ -195,7 +222,7 @@ class FakeHost:
 
     def capture(self, **kwargs):
         with self.bound():
-            return ops.capture_held(self.parent, RESOURCES, shape=self.shape, label=kwargs.pop("label", "emr-b0"),
+            return ops.capture_held(self.parent, self.resources, shape=self.shape, label=kwargs.pop("label", "emr-b0"),
                                     config={"docker-compose.monitor.yml": self.repo / "docker-compose.monitor.yml"}, **kwargs)
 
     def lifecycle_commands(self):
@@ -268,6 +295,58 @@ class HeldCaptureTests(unittest.TestCase):
         _, manifest, _ = ops.validate_held(directory)
         self.assertEqual(manifest["emr"], {"state_volume": RESOURCES["volumes"]["emr_state"], "tablespace": "kin_emr_access", "same_pause": True})
         self.assertTrue({"emr-state.tgz", "emr-catalog.json", "cluster-roles.sql"} <= set(manifest["sha256"]))
+
+    def test_04b_a_post_capture_over_the_state_service_reads_its_volume_and_binds_the_v3_pair(self):
+        """EMR-B2 (c): the target's state service is the capture's state role - fenced, closed completely, its volume
+        the archive's source - and the format-3 pair is recorded; an API carrying the mount, a running or incompletely
+        closed service, a legacy serve entry and a pre-EMR shape are refused before anything is written."""
+        host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post", service=True)
+        directory = host.capture(label="emr-b1")
+        _, manifest, _ = ops.validate_held(directory)
+        self.assertEqual(manifest["emr"]["format"], 3)
+        self.assertEqual(manifest["emr"]["state_volume"], RESOURCES["volumes"]["emr_state"])
+        self.assertEqual(manifest["emr"]["service"]["container"], STATE_SERVICE)
+        self.assertEqual((manifest["emr"]["service"]["exit_code"], manifest["emr"]["service"]["closed"]), (0, True))
+        self.assertEqual(manifest["emr"]["pair"]["origin"], V3_ORIGIN)
+        self.assertEqual(manifest["emr"]["pair"]["lineage"], "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f")
+        self.assertIn("kin-emr-state", manifest["running_images"])
+        self.assertEqual(manifest["running_images"]["kin-emr-state"]["id"], manifest["running_images"]["kin-api"]["id"])
+        with (directory / "emr-state.tgz").open("rb") as stream:
+            self.assertEqual(ops.admit_v3_archive(stream)["fingerprint"], manifest["emr"]["pair"]["fingerprint"])
+        self.assertEqual(host.lifecycle_commands(), [], "the capture starts and stops nothing")
+        refusals = {
+            "a running service": lambda h: h.running.update(state=True),
+            "an incomplete close": lambda h: setattr(h, "service_closed", ("false 0", "EMR_STATE_READY\nEMR_STATE_INCOMPLETE\n")),
+            "a nonzero exit": lambda h: setattr(h, "service_closed", ("false 1", "EMR_STATE_READY\nEMR_STATE_CLOSED\n")),
+        }
+        for label, mutate in refusals.items():
+            with self.subTest(case=label):
+                host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post", service=True)
+                mutate(host)
+                with self.assertRaises(RuntimeError):
+                    host.capture(label="emr-b1")
+                self.assertEqual(list(host.parent.iterdir()) if host.parent.exists() else [], [], "nothing written")
+        host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post", service=True)
+        original = host.containers
+        def api_with_mount():
+            rows = original()
+            next(row for row in rows if row["Name"] == "/" + RESOURCES["containers"]["api"])["Mounts"].append(
+                {"Destination": ops.EMR_STATE, "Type": "volume", "Name": RESOURCES["volumes"]["emr_state"], "RW": True})
+            return rows
+        host.containers = api_with_mount
+        with self.assertRaisesRegex(RuntimeError, "API client carries a protected state mount"):
+            host.capture(label="emr-b1")
+        host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post", service=True)
+        def legacy_serve():
+            rows = original()
+            next(row for row in rows if row["Name"] == "/" + STATE_SERVICE)["Args"] = ["/app/start-production.sh", "serve"]
+            return rows
+        host.containers = legacy_serve
+        with self.assertRaisesRegex(RuntimeError, "State service entry mode differs"):
+            host.capture(label="emr-b1")
+        host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="pre", service=True)
+        with self.assertRaisesRegex(RuntimeError, "pre-EMR capture found EMR storage"):
+            host.capture()
 
     def test_05_volumes_must_be_the_manifests(self):
         host = FakeHost(self.folder)

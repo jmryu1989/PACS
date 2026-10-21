@@ -4265,8 +4265,12 @@ class HostOps:
         return compose_digest(entries)
 
     def resources(self):
-        return {"containers": {role: self.names[role] for role in ROLES},
-                "volumes": {key: self.t["volumes"][key] for key in VOLUMES}}
+        containers = {role: self.names[role] for role in ROLES}
+        # EMR-B2 (c): a deployment with the protected-state service names it as the capture's state role, so the held
+        # capture reads the state volume from the service (not the API client) and records the format-3 pair.
+        if self.inspect_container(state_service_name(self.t)) is not None:
+            containers["state"] = state_service_name(self.t)
+        return {"containers": containers, "volumes": {key: self.t["volumes"][key] for key in VOLUMES}}
 
     def capture_config(self):
         """Compose files beyond the legacy pair (monitor overlay, a rehearsal override) are captured by their own names."""
