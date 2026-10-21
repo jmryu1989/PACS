@@ -14,8 +14,22 @@ const [r3, r4b, out] = LADDER ? [] : process.argv.slice(2);
 const J3 = LADDER ? null : require(path.join(r3, 'api/src/emr-runtime/failure-journal.ts'));
 const J4 = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/failure-journal.ts'));
 const CO = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/coordinator.ts')), EW = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/external-writer.ts'));
+const S4 = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/seal.ts'));
+// The candidate (EMR-B2 c) refuses a bare journal record on a directory no seal initialized: the sample initializes the
+// pair exactly as the service does (AccessSeal.recoverAtStart over two empty chains of fixed identity), outside the
+// timed section. The journal fixture itself is unchanged.
+const JCOST_CHAINS = { viewing: '7c1f3a52-0000-4000-8000-00000000c051', history: '7c1f3a52-0000-4000-8000-00000000c052' };
+const JCOST_PAIR = { instanceId: 'journal-cost-synthetic-pair', chains: { ...JCOST_CHAINS }, database: { database: 'synthetic', oid: 42, address: '127.0.0.1', port: 5432 } };
+function jcostSql() {
+  const sql = { identity: async () => ({ ...JCOST_PAIR.database }), snapshot: async work => work(sql), withWriterFence: async work => work(sql),
+    markerForSlot: async () => null, markerForAttempt: async () => null, tail: async stream => ({ chainId: JCOST_CHAINS[stream], sequence: 0, hash: '0'.repeat(64) }),
+    entriesAfter: async () => [], entryForEvent: async () => null, placement: async () => [] };
+  sql.verificationPage = async stream => ({ tail: await sql.tail(stream), first: null, entries: [] });
+  return sql;
+}
 function seed(dir, n) {
-  fs.mkdirSync(path.join(dir, 'journal'), { recursive: true });
+  // A protected state directory as the owner keeps it: private subdirectories (the candidate's inspection refuses others).
+  fs.mkdirSync(path.join(dir, 'journal'), { recursive: true, mode: 0o700 });
   const lines = [];
   for (let i = 0; i < n; i++) {
     const rec = { id: 'append-rolled-back:viewing:' + crypto.randomUUID() + ':business-rollback', kind: 'append-rolled-back', at: '2026-10-10T00:00:00.000Z', body: { eventId: crypto.randomUUID(), cause: 'business-rollback' } };
@@ -26,12 +40,13 @@ function seed(dir, n) {
   const fd=fs.openSync(path.join(dir,'journal','failure-journal.jsonl'),'w');
   try{fs.writeFileSync(fd,lines.length?lines.join('\n')+'\n':'');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
 }
-function sample(label, rep, n) {
+async function sample(label, rep, n) {
   const make = label === 'r3' ? d => new J3.FailureJournal(d) : d => new J4.FailureJournal(d,
     new CO.StateCoordinator(d, process.platform === 'linux' ? undefined : request => EW.executeExternal(request)));
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus-jcost-')); seed(dir, n);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus-jcost-')); fs.chmodSync(dir, 0o700); seed(dir, n);
     try {
       const t0 = performance.now(), j = make(dir), open_ms = performance.now() - t0, times = [];
+      if (label === 'r4d') await new S4.AccessSeal(dir, jcostSql(), j).recoverAtStart(JCOST_PAIR, crypto.randomUUID());
       let readBytes=0;
       const fileRead=fs.readFileSync,rangeRead=fs.readSync;
       fs.readFileSync=function(...args){const v=fileRead.apply(this,args);readBytes+=Buffer.byteLength(v);return v;};
@@ -548,7 +563,7 @@ if (LADDER) {
   ladderMain().then(code => { process.exitCode = code; }, error => { process.stderr.write(String(error?.stack ?? error) + '\n'); process.exitCode = 2; });
 } else if (out === '--sample') {
   const [label, rep, n] = process.argv.slice(5);
-  console.log(JSON.stringify(sample(label, Number(rep), Number(n))));
+  sample(label, Number(rep), Number(n)).then(row => console.log(JSON.stringify(row)), error => { process.stderr.write(String(error?.stack ?? error) + '\n'); process.exit(1); });
 } else {
   const rows = [], reps = Number(process.env.JOURNAL_REPS || 5);
   for (let rep = 0; rep < reps; rep++) {
