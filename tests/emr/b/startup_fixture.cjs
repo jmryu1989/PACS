@@ -663,7 +663,10 @@ function child(scenario) {
         try {
           const appended = await work.transaction(async tx => {
             transaction = tx;
-            await tx.institution.findMany({ take: 1, select: { id: true } });
+            // `change`: the synthetic business row of this event in the same transaction (as /syn-atomic does);
+            // otherwise a business read only.
+            if (command.change) await tx.institution.upsert({ where: { id: 'r2-' + eventId }, create: { id: 'r2-' + eventId, name: 'Synthetic EMR B2' }, update: {} });
+            else await tx.institution.findMany({ take: 1, select: { id: true } });
             try {
               const provisional = await work.appendInTransaction(tx, event);
               if (command.fail) throw new Error('synthetic-business-failure');

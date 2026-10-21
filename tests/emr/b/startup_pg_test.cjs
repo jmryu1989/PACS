@@ -323,7 +323,7 @@ for (const [cell, cutpoint, committed, recovered] of [
     assert.equal(before.business.length, committed ? 1 : 0);
     assert.deepEqual(before.entries.map(row => row.stream).sort(), committed ? ['history', 'viewing'] : []);
     assert.deepEqual(before.markers.map(row => row.stream).sort(), committed ? ['history', 'viewing'] : []);
-    for (const row of before.entries) assert.equal(JSON.parse(row.payload).eventId, event.eventId);
+    for (const row of before.entries) assert.equal(JSON.parse(row.payload).event.eventId, event.eventId, 'the stored canonical payload carries the event');
     if (committed) {
       assert.equal(new Set(before.markers.map(row => row.bundle_id)).size, 1);
       assert.equal(new Set(before.markers.map(row => row.attempt_id)).size, 1);
@@ -386,7 +386,9 @@ test('C-P07/P11 the service ends after the viewing seal and before the history s
       }
     } });
     dump('C-P07', { api: observed(result), stopped: seen.stopped ?? null, before: seen.before ?? null, serviceEvents: serviceEvents(service.label) });
-    assert.equal(result.signal, 'SIGKILL', JSON.stringify(result.names));
+    // The service was terminated between the two seals; the API either dies with it (SIGKILL from here) or, having
+    // lost its session first, ends nonzero by itself - in both cases without a receipt.
+    assert(result.signal === 'SIGKILL' || (result.code === 1 && !result.names.includes('receipt-ready')), JSON.stringify({ code: result.code, signal: result.signal, names: result.names }));
     await seen.http.done;
     assert.equal(seen.http.bytes, '', 'no aggregate receipt or first body before both seals');
     const before = await persisted(observer, event.eventId);
