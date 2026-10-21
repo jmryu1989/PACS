@@ -28,6 +28,12 @@ LITE = ROOT / "worklist-v0/hpacs-lite"
 
 # (label, file, old, new, the behavior case that must catch it)
 MUTANTS = [
+    ('M9-late-reload-admission-removed', 'report-editor.js', '          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }', '', 'test_w5r3_reload_started_before_mode_cannot_replace_target_in_mode'),
+    ('M9-shared-command-admission-removed', 'report-commit.js', '      if (relatedMode?.active()) return relatedMode.reason();', '', 'test_w5r3_report_inventory_normal'),
+    ('M11-citationIds-proposal', 'related_report_mode_dom_test.py', '            sorted(body["citationIds"], key=lambda s: s.encode(\'utf-16-be\', errors=\'surrogatepass\'))', '            sorted(body["citationIds"])', 'test_w5r3_citation_ids_match_frozen_utf16_hashes'),
+    ('M11-citationIds-binding', 'related_report_mode_dom_test.py', '"citationIds": sorted(body["citationIds"], key=lambda s: s.encode(\'utf-16-be\', errors=\'surrogatepass\'))', '"citationIds": sorted(body["citationIds"])', 'test_w5r3_citation_ids_match_frozen_utf16_hashes'),
+    ('M11-structureIds-proposal', 'related_report_mode_dom_test.py', '            sorted(body["structureIds"], key=lambda s: s.encode(\'utf-16-be\', errors=\'surrogatepass\'))', '            sorted(body["structureIds"])', 'test_w5r3_structure_ids_match_frozen_utf16_hashes'),
+    ('M11-structureIds-binding', 'related_report_mode_dom_test.py', '"structureIds": sorted(body["structureIds"], key=lambda s: s.encode(\'utf-16-be\', errors=\'surrogatepass\'))', '"structureIds": sorted(body["structureIds"])', 'test_w5r3_structure_ids_match_frozen_utf16_hashes'),
     ("W5A-01-first-pair-trusted", "report-draft-client.js",
      "return receipt.requestHash === hashes.requestHash && receipt.proposalHash === hashes.proposalHash;",
      "return true;", "test_w5r2_first_receipt_hash_must_match_frozen_request"),
@@ -48,7 +54,7 @@ MUTANTS = [
      '      if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }', "",
      "test_w5r2_source_identity_on_inverse_focus_after_back_keeps_operation"),
     ("W5A-04-cvr-mode-admission-removed", "critical-result-mounts.js",
-     "blocked: () => relatedMode?.active() ? relatedMode.reason() : null", "blocked: () => null",
+     "blocked: () => relatedMode?.active() ? relatedMode.reason() : null });", "blocked: () => null });",
      "test_w5r2_cvr_unknown_retry_is_blocked_in_related_mode"),
     ("W5A-05-source-provenance-dropped", "related-report-mode.js",
      "const pair = (...values) => values.filter", "const pair = (a, b) => [a, b].filter",
@@ -100,7 +106,7 @@ MUTANTS = [
      '      const related = relatedCommandBlock(action);\n      if (related) { toast(related, "err"); relatedInsertNotice(selectedUid); return; }',
      "", "test_w5_mode_blocks_every_report_command_shortcut_and_late_writer"),
     ("cvr-in-the-mode", "critical-result-mounts.js",
-     "blocked: () => relatedMode?.active() ? relatedMode.reason() : null", "blocked: () => null",
+     "blocked: () => relatedMode?.active() ? relatedMode.reason() : null });", "blocked: () => null });",
      "test_w5_mode_blocks_every_report_command_shortcut_and_late_writer"),
     ("late-writer-in-the-mode", "order-list-store.js",
      "return relatedMode?.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);",
@@ -189,6 +195,71 @@ MUTANTS = [
 ]
 
 
+# D114 M1..M8/M10 execute the shipped CVR modules through their existing DOM hosts.
+CVR_MUTANTS = [
+    ('M4-row-action-explanation-cleared', 'sender', [('control.title = waiting || rowActionHints.get(control);', "control.title = waiting || '';")], 'test_w5r3_row_action_explanations_survive_mode_round_trip'),
+    ('M1-row-open', 'sender', [('function openForm(item, kind) {\n      if (refuseMode()) return;', 'function openForm(item, kind) {')], 'test_w5r3_row_entries_refuse_pointer_keyboard_and_callback'),
+    ('M2-send-confirm', 'sender', [('function send() {\n      if (refuseMode()) return;', 'function send() {')], 'test_w5r3_preopened_send_refuses_before_attempt'),
+    ('M2-cancel-confirm', 'sender', [('function submitForm(form) {\n      if (refuseMode()) return;', "function submitForm(form) {\n      if (form.kind !== 'cancel' && refuseMode()) return;")], 'test_w5r3_preopened_cancel_refuses_before_attempt'),
+    ('M2-supersede-confirm', 'sender', [('function submitForm(form) {\n      if (refuseMode()) return;', "function submitForm(form) {\n      if (form.kind !== 'supersede' && refuseMode()) return;")], 'test_w5r3_preopened_supersede_refuses_before_attempt'),
+    ('M3-presentation-only', 'sender', [('function refuseMode() {\n      if (!blocked()) return false;', 'function refuseMode() {\n      return false;\n      if (!blocked()) return false;')], 'test_w5r3_preopened_send_refuses_before_attempt'),
+    ('M4-focused-form-not-updated', 'sender', [('function paintWriteControls() {', 'function paintWriteControls() {\n      if (rows.contains(document.activeElement)) return;')], 'test_w5r3_focused_form_and_late_source_remain_blocked'),
+    ('M4-late-source-enables-confirm', 'sender', [('form.note.hidden = listed;\n        paintWriteControls();', 'form.note.hidden = listed;\n        form.confirm.disabled = false;')], 'test_w5r3_focused_form_and_late_source_remain_blocked'),
+    ('M5-zero-dispatch-unknown', 'sender', [("attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';", "attempt.state = 'unknown';")], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
+    ('M5-untyped-local-refusal', 'sender', [("{ kin: true, outcome: 'not-sent' }", '{ kin: true, status: 0 }')], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
+    ('M6-first-real-dispatch-is-retry', 'sender', [('const retry = attempt.dispatches > 0;', 'const retry = true;')], 'test_w5r3_create_first_actual_dispatch_classification'),
+    ('M7-prior-unknown-lost', 'sender', [("attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';", "attempt.state = 'not-sent';")], 'test_w5r3_call_preserves_prior_unknown'),
+    ('M7-retry-refusal-is-final', 'sender', [('if (!retry && refused(error)) {', 'if (refused(error)) {')], 'test_w5r3_create_unknown_survives_mode_and_retry_404'),
+    ('M8-transmit-backstop-removed', 'sender', [('if (waiting) { localRefusal(attempt, waiting); return; }', '')], 'test_w5r3_transmit_zero_dispatch_is_not_sent'),
+    ('M8-call-backstop-removed', 'sender', [("if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });", '')], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
+    ('M10-ack-before-admission', 'recipient', [('function acknowledge(id) {\n      if (refuseMode()) return;', 'function acknowledge(id) {')], 'test_w5r3_related_ack_is_refused_before_allocation'),
+    ('M10-all-recipient-gates-removed', 'recipient', [('const work = window.KinWorkContext, transport = window.KinSessionTransport.page();', 'blocked = () => null;\n    const work = window.KinWorkContext, transport = window.KinSessionTransport.page();')], 'test_w5r3_related_keeps_unknown_ack_and_frozen_retry'),
+    ('M10-clinician-globally-blocked', 'recipient', [('blocked = () => null }) {', "blocked = () => 'Related Report 모드에서는 쓸 수 없습니다' }) {")], 'test_rd01_c2_full_row_shows_the_pinned_version_and_offers_acknowledge'),
+]
+
+
+def run_cvr_mutants():
+    import critical_result_sender_dom_test as sender
+    import critical_result_recipient_dom_test as recipient
+    hosts = {'sender': (sender, sender.CriticalResultSenderDOMTest), 'recipient': (recipient, recipient.CriticalResultRecipientDOMTest)}
+    for host, (module, case) in hosts.items():
+        names = sorted({row[-1] for row in CVR_MUTANTS if row[1] == host})
+        baseline = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
+        if not baseline.wasSuccessful() or baseline.skipped:
+            print('CVR MUTANT BASELINE FAILED ' + host, flush=True)
+            return 1
+    results = []
+    for label, host, replacements, name in CVR_MUTANTS:
+        module, case = hosts[host]
+        original = module.SHIPPED_JS if host == 'sender' else module.HOME_FILES[module.INBOX]
+        changed = original
+        for old, new in replacements:
+            if changed.count(old) != 1:
+                raise AssertionError('mutation location not unique: ' + label)
+            changed = changed.replace(old, new, 1)
+        if host == 'sender':
+            module.SHIPPED_JS = changed
+        else:
+            module.HOME_FILES[module.INBOX] = changed
+        output = io.StringIO()
+        try:
+            result = unittest.TextTestRunner(stream=output, verbosity=2, failfast=True).run(unittest.TestSuite([case(name)]))
+        finally:
+            if host == 'sender':
+                module.SHIPPED_JS = original
+            else:
+                module.HOME_FILES[module.INBOX] = original
+        caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
+        results.append({'mutant': label, 'host': host, 'case': name, 'killed': caught})
+        print(label, 'KILLED' if caught else 'NOT PROVEN', flush=True)
+        print(output.getvalue(), end='', flush=True)
+        if not caught:
+            print('W5R3-CVR-MUTANTS ' + json.dumps(results), flush=True)
+            return 1
+    print('W5R3-CVR-MUTANTS ' + json.dumps(results), flush=True)
+    return 0
+
+
 def run():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     case = w5.RelatedModePage
@@ -226,9 +297,12 @@ def run():
         print(label, file, "KILLED" if caught else "NOT PROVEN", flush=True)
         print(output.getvalue(), end="", flush=True)
         killed += int(caught)
+        if not caught:
+            print('W5-UI-MUTANTS ' + json.dumps(results), flush=True)
+            return 1
     print("W5-UI-MUTANTS " + json.dumps(results), flush=True)
     print("W5 related report mode mutants killed: %s/%s" % (killed, len(MUTANTS)), flush=True)
-    return 0 if killed == len(MUTANTS) else 1
+    return run_cvr_mutants() if killed == len(MUTANTS) else 1
 
 
 if __name__ == "__main__":

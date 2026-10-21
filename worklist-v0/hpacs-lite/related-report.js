@@ -98,7 +98,7 @@
       ++relatedReportSeq;
       clearRelatedReport();
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
-      if (left) { updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
+      if (left) { criticalInbox?.sync(); updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
       $("#related-current").focus({ preventScroll: true });
     }
 
@@ -112,6 +112,7 @@
       const left = relatedMode?.exit() ?? null;
       if (!left) return false;
       renderClinical(); updateReportButtons(); renderDraftBar();
+      criticalInbox?.sync();
       relatedMode.restore(left);
       return true;
     }
@@ -187,6 +188,7 @@
       relatedMode.enter({ target, selectionSeq: seq, owner, opening, focus });
       // The controls that wait for Back say so now (report buttons, Send CVR, the draft line).
       renderClinical(); updateReportButtons(); renderDraftBar();
+      criticalInbox?.sync();
     }
 
     /**

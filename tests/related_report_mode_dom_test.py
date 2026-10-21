@@ -81,7 +81,8 @@ def insertion_text(version, parts, seed):
 
 def proposal_tuple(body):
     return ["related-insert-proposal-v1", *(body[k] for k in FIELDS), body["baseVersion"],
-            sorted(body["citationIds"]), sorted(body["structureIds"])]
+            sorted(body["citationIds"], key=lambda s: s.encode('utf-16-be', errors='surrogatepass')),
+            sorted(body["structureIds"], key=lambda s: s.encode('utf-16-be', errors='surrogatepass'))]
 
 
 def request_hash(body):
@@ -176,8 +177,9 @@ class W5Site(rf.FlowSite):
     def binding_of(self, uid, body, account):
         ri = {k: v for k, v in body["relatedInsert"].items() if k not in ("intent", "expectedReceiptRevision")}
         rest = {k: body[k] for k in ("expectedRevision", *FIELDS, "baseVersion")}
-        return {"owner": h.owner_of(account), "uid": uid, **rest, "citationIds": sorted(body["citationIds"]),
-                "structureIds": sorted(body["structureIds"]), "relatedInsert": ri}
+        return {"owner": h.owner_of(account), "uid": uid, **rest,
+                "citationIds": sorted(body["citationIds"], key=lambda s: s.encode('utf-16-be', errors='surrogatepass')),
+                "structureIds": sorted(body["structureIds"], key=lambda s: s.encode('utf-16-be', errors='surrogatepass')), "relatedInsert": ri}
 
     @staticmethod
     def proposal_row(body):
@@ -212,6 +214,9 @@ class W5Site(rf.FlowSite):
         ri = body.get("relatedInsert")
         if not isinstance(ri, dict) or ri.get("intent") not in ("apply", "discard"):
             return self.invalid("intent")
+        for field in ('citationIds', 'structureIds'):
+            if len(set(body[field])) != len(body[field]):
+                return self.invalid(field)
         rid = ri.get("insertRequestId")
         if not isinstance(rid, str) or not UUID.match(rid):
             return self.invalid("insertRequestId")
@@ -327,6 +332,13 @@ class W5Site(rf.FlowSite):
         return 200, {**self.envelope_of(uid, account), "relatedInsert": view}
 
     def api(self, route, request, method, path, query):
+        # FlowSite handles bootstrap before the inherited generic hold queue.
+        # Park that read here so delayed Reload Report exercises the real continuation.
+        if method == "GET" and path in self.held_gets:
+            account, refused = self.authenticate(request)
+            if refused:
+                return self.refuse(route, *refused)
+            return self.held_gets[path].append(route)
         found = re.fullmatch(r"/api/studies/([^/]+)/(report|draft|report/versions)", path)
         if found and found.group(1) in self.store:
             uid, what = found.groups()
@@ -1660,7 +1672,7 @@ class RelatedModePage(unittest.TestCase):
         # D73/B6: byte identity itself is the provenance requirement here, not a constraint on product behavior.
         # Hash the HTTP bodies actually served, rather than treating the recorder HEAD as the runtime subject.
         self.open()
-        names = ['main.html', 'main-split.bundle.js', 'report-draft-client.js', 'critical-result-send.js', 'related-report-mode.js']
+        names = ['main.html', 'main-split.bundle.js', 'report-draft-client.js', 'critical-result-send.js', 'critical-result-inbox.js', 'related-report-mode.js']
         observed = self.js('''async names => {
           const result = {};
           for (const name of names) {
@@ -1675,6 +1687,149 @@ class RelatedModePage(unittest.TestCase):
             self.assertEqual(hashlib.sha256(expected).hexdigest(), observed[name], 'W5A-07: current runtime source ' + name)
         print('W5-UI-RUNTIME-SOURCES ' + json.dumps({'subject': 'current Phase A working sources with declared markup injection',
                                                   'served_sha256': observed}), flush=True)
+
+    def r3_id_vectors(self, field):
+        # W5R3-WIRE-11: independently executed 02c8a87 relatedRequestHash/relatedProposalHash.
+        # Synthetic helper inputs, not a claim that these IDs can be persisted as citation keys.
+        expected = {
+            'citationIds': [
+                ('860dab4271b8e6ec1657835575a1b5ca351db2f21df39a23350198ba07f4f0ba', 'b4ae9e6253a5e9072235fe13383a0bbd929cca4b42391487c5cdc317a7a20a66'),
+                ('336c0d0cb9e3bf7c7423cca6e515e9d01764f1152ae6dfaaa432f2b35d97ba6d', '2642273828e036cddcd66fca6d993a045197f74915a67dc77385fe827341e3f5'),
+                ('a205c477e2021b82126cd530cd502aa809c97a5e0d6f3752f8751bcdab6a9441', 'e356bb58cfc165f01e625688801905156a7489ead6a0bad15ed081a90ed26481')],
+            'structureIds': [
+                ('588471c544c35d3eb8b2ea9fcb37c4736ef101234c8795d1a38d009303f9d508', 'ca74ddf4f60aa4cf148f42d5966857406723c20a21b2178951ed2711a61c5154'),
+                ('1ad184993c8085e2dbf3c3cf82771ace4640e3148ed935017efb51ed3e472222', 'fa17ccfca45ec7d58b4e03aea0af2b942023b920b46d776bf353bfd8f08daff4'),
+                ('77f4ee87ddd506f7399099eeeb950344817e0cc2f8ee4d9ebca27f1cdd177a63', '052894bb98acfa6f0cc45426f4565606e1d2a9191945af9d281b27e47e754de4')],
+        }
+        for ids, hashes in zip([['a', 'z'], ['\U00010000', '\uffff'], ['\ud800', '\uffff']], expected[field]):
+            for values in (ids, list(reversed(ids))):
+                with self.subTest(field=field, ids=ascii(values)):
+                    body = wire_request()
+                    body[field] = values
+                    self.assertEqual(ids, self.site.binding_of(UID_A, body, h.RAD)[field], 'wire binding uses JS UTF-16 order')
+                    self.assertEqual(hashes, (request_hash(body), sha(proposal_tuple(body))))
+        body = wire_request()
+        body[field] = ['duplicate', 'duplicate']
+        self.assertEqual(400, self.site.related_put(UID_A, body, h.RAD)[0], 'duplicate evidence IDs remain invalid')
+
+    def test_w5r3_citation_ids_match_frozen_utf16_hashes(self):
+        self.r3_id_vectors('citationIds')
+
+    def test_w5r3_structure_ids_match_frozen_utf16_hashes(self):
+        self.r3_id_vectors('structureIds')
+
+    def r3_inventory(self, reading=False):
+        # W5R3-ADMIT-07/08: real registered callbacks, delayed clipboard and native editor admission.
+        self.site.templates = [{**rf.TEMPLATE, 'shortcut': 'synr3'}]
+        self.site.store[UID_A]['report'] = {'version': 1, 'rs': 'T', 'findings': 'synr3',
+                                          'conclusion': 'SYN kept conclusion', 'recommendation': ''}
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+        self.js("""() => {
+          window.r3Pin = dictationContext('findings');
+          window.r3Native = reportFrame.capture('findings', {start:0,end:5});
+          Object.defineProperty(navigator, 'clipboard', {configurable:true,value:{
+            readText:()=>new Promise(resolve=>window.r3Paste=resolve),
+            writeText:text=>{window.r3Copied=text;return Promise.resolve();}}});
+          document.querySelector('#b-paste').dispatchEvent(new MouseEvent('click'));
+          document.querySelector('#b-report-template').dispatchEvent(new MouseEvent('click'));
+        }""")
+        self.page.locator('#tpl-t').fill('SYN from Target')
+        self.assertTrue(self.js("typeof window.r3Paste === 'function'"), 'clipboard was actually pending')
+        self.js('uid => enterRelatedMode(uid)', UID_B)
+        expect(self.mode()).to_be_visible()
+        before = {k: self.value(k) for k in FIELDS}
+        start = len(self.site.calls)
+        # Save as Template was opened before the mode: the final Save rechecks admission.
+        self.page.locator('#tpl-save').dispatch_event('click')
+        self.assertIn(MODE_REASON, self.page.locator('#tpl-source').text_content())
+        self.js('closeTemplateEditor(false)')
+        for selector in ('#b-save', '#b-transcribe', '#b-approve', '#b-approve-next', '#b-addendum',
+                         '#b-clear', '#b-paste', '#b-report-template', '#b-draft-discard', '#b-draft-load', '#b-report-reload'):
+            with self.subTest(entry=selector, reading=reading):
+                self.page.locator(selector).dispatch_event('click')
+                self.settle(30)
+                self.assertEqual(before, {k: self.value(k) for k in FIELDS})
+        for selector in ('#b-unread', '#b-defer'):
+            self.page.locator(selector).dispatch_event('click')
+            self.page.locator('#reason-choices input').first.check(force=True)
+            self.page.locator('#reason-ok').dispatch_event('click')
+        # Direct continuations carry valid reasons/peer values; the shared command rejects before dispatch.
+        for action in ('save', 'approve', 'preliminary', 'addendum', 'reset', 'defer'):
+            self.js("action => commitReport(action, 'SYN explicit reason', 'SYN peer')", action)
+        self.assertFalse(self.js('KinReportCommands.finalize()'))
+        self.js("() => { document.querySelector('#related-mode-title').focus(); }")
+        self.page.keyboard.press('Control+s')
+        # Remap the registered Finalize command through the real shortcuts editor.
+        self.context.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, json={'message':'SYN unavailable'}))
+        self.page.locator('#workspace-shortcuts-edit').dispatch_event('click')
+        self.page.locator('#workspace-shortcut-finalize').focus()
+        self.page.keyboard.press('Control+Alt+t')
+        self.page.locator('#workspace-shortcuts-apply').click()
+        self.assertEqual('Control+Alt+KeyT', self.js('KinWorkspaceShortcuts.readV2(workspaceStorage, workspaceOwner.slice(KinWorkspaceLayout.PREFIX.length)).finalize'))
+        self.page.locator('#related-mode-title').focus()
+        self.page.keyboard.press('Control+Alt+t')
+        if reading:
+            canvas = self.page.frame_locator('#reading-frame').locator('.cornerstone-canvas')
+            canvas.focus()
+            self.page.keyboard.press('Control+Alt+t')
+        self.assertFalse(self.js('() => insertTemplate(templates[0])'))
+        self.js("() => { const e=document.querySelector('#findings');e.setSelectionRange(5,5);e.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true})); }")
+        self.assertFalse(self.js("() => dictationInsert({...window.r3Pin, expectedValue:window.r3Pin.value,text:'SYN delayed dictation'})"))
+        self.assertFalse(self.js("() => editReport([{field:'findings',at:window.r3Native,text:'SYN delayed edit'}])"))
+        self.js("window.r3Paste('SYN delayed clipboard')")
+        self.js("() => { void stashReport(); window.dispatchEvent(new Event('online')); }")
+        self.page.clock.fast_forward(21000)
+        self.settle(300)
+        self.assertEqual(before, {k: self.value(k) for k in FIELDS})
+        writes = [c for c in self.site.calls[start:] if c[0] != 'GET' and c[1].endswith(('/report','/report/commit','/draft','/templates'))]
+        self.assertEqual([], writes, 'no report/template write, including autosave/reconnect')
+        self.assertEqual([], self.site.flow_commits)
+        self.assertEqual([], self.site.flow_puts)
+        self.assertIn(MODE_REASON, self.js('reportWriteBlock()'))
+        # Read-only copy still reads the retained Target; the mode never replaces it with Source.
+        self.page.locator('#b-copy').dispatch_event('click')
+        self.assertIn(before['findings'], self.js('window.r3Copied'))
+        self.assertNotIn(PRIOR_B['findings'], self.js('window.r3Copied'))
+        self.back()
+        self.page.locator('#findings').focus()
+        self.page.keyboard.press('Control+Alt+t')
+        self.wait(lambda: len(self.site.flow_commits) == 1, 'the registered remapped command after Back')
+        self.assertEqual((UID_A, 'approve', before['findings']),
+                         (self.site.flow_commits[0][0], self.site.flow_commits[0][1]['action'], self.site.flow_commits[0][1]['findings']))
+
+    def test_w5r3_report_inventory_normal(self):
+        self.r3_inventory()
+
+    def test_w5r3_report_inventory_reading(self):
+        self.r3_inventory(reading=True)
+
+    def test_w5r3_reload_started_before_mode_cannot_replace_target_in_mode(self):
+        # W5R3-ADMIT-07: the actual Reload Report continuation, not only its entry gate.
+        self.site.store[UID_A]['report'] = {'version': 1, 'rs': 'T', 'findings': 'SYN original Target',
+                                          'conclusion': '', 'recommendation': ''}
+        self.open()
+        self.open_target()
+        if getattr(self, 'r3_reading', False):
+            self.enter_reading()
+        before = self.value()
+        held = self.site.held_gets['/api/bootstrap'] = []
+        self.js('() => { void reloadServerReport(); }')
+        self.wait(lambda: bool(held), 'the pre-mode reload read')
+        self.js('uid => enterRelatedMode(uid)', UID_B)
+        expect(self.mode()).to_be_visible()
+        self.site.store[UID_A]['report'] = {'version': 2, 'rs': 'T', 'findings': 'SYN late remote replacement',
+                                          'conclusion': '', 'recommendation': ''}
+        held.pop(0).fulfill(json={'states': {UID_A: self.site.state_of(UID_A, h.RAD)}})
+        self.settle(300)
+        expect(self.mode()).to_be_visible()
+        self.assertEqual(before, self.value(), 'a pre-mode Reload Report must not replace the Related-mode Target')
+
+    def test_w5r3_late_reload_reading(self):
+        self.r3_reading = True
+        self.test_w5r3_reload_started_before_mode_cannot_replace_target_in_mode()
 
 
 def run_mutants():

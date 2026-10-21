@@ -141,6 +141,7 @@ const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
 
 let sess = window.synSession, serverMode = !!window.synMode.serverMode, demoMode = !!window.synMode.demoMode;
 let offline = !!window.synMode.offline, selectedUid = null;
+let relatedMode = null;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
 const KinAuth = {
   session: () => window.synSession,
@@ -1161,6 +1162,72 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual(logouts, len(self.logouts), "a replaced session is not logged out by this document")
 
     # ── RD01-RD04: rows as the server's view draws them ──
+    # W5R3-ADMIT-09 -> REQ-S7-U2a-EXPLICIT-ACK / false ACK and Unknown preservation.
+    def r3_mode(self, active):
+        self.page.evaluate("""active => {
+          window.synRelated = active;
+          relatedMode = {active: () => window.synRelated,
+            reason: () => 'Related Report 모드에서는 쓸 수 없습니다. Back으로 돌아가세요.'};
+        }""", active)
+        # The existing host watch also updates an already-open inbox.
+        self.page.clock.fast_forward(1100)
+        self.settle()
+
+    def r3_panel(self):
+        self.server = RecipientServer([INSTITUTION, RAD['sub']])
+        self.servers = [self.server]
+        self.server.add(rec(141, case='R2'))
+        self.open_panel(fold_open=True)
+        self.page.evaluate("""() => {
+          window.synAllocations = 0;
+          const uuid = crypto.randomUUID.bind(crypto);
+          crypto.randomUUID = () => { window.synAllocations++; return uuid(); };
+        }""")
+
+    def test_w5r3_related_ack_is_refused_before_allocation(self):
+        self.r3_panel()
+        ack = self.row_locator('SYN-PT-141').get_by_role('button', name='Acknowledge')
+        self.r3_mode(True)
+        ack.dispatch_event('click')
+        self.settle()
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'), 'Related must refuse before ACK attempt allocation')
+        self.assertEqual([], self.posts())
+        expect(ack).to_be_disabled()
+        expect(ack).to_have_attribute('title', re.compile('Related Report'))
+        expect(self.region()).to_contain_text('Related Report 모드에서는 쓸 수 없습니다')
+        self.r3_mode(False)
+        self.assertEqual([], self.posts(), 'Back never acknowledges implicitly')
+        ack.focus()
+        self.page.keyboard.press('Space')
+        self.wait_until(lambda: len(self.posts()) == 1, 'explicit ACK after Back')
+        expect(self.row_locator('SYN-PT-141')).to_contain_text('Acknowledged')
+
+    def test_w5r3_related_keeps_unknown_ack_and_frozen_retry(self):
+        self.r3_panel()
+        self.fault('ack', abort=True)
+        self.acknowledge('SYN-PT-141')
+        line = self.line_locator('SYN-PT-141')
+        expect(line).to_contain_text(UNKNOWN_WORD)
+        first = self.posts()[0]['body']
+        self.r3_mode(True)
+        again = line.get_by_role('button', name='Check Again')
+        again.dispatch_event('click')
+        self.settle()
+        self.assertEqual(1, len(self.posts()), 'Related cannot retry an Unknown ACK')
+        expect(again).to_be_disabled()
+        expect(line).to_contain_text(UNKNOWN_WORD)
+        self.r3_mode(False)
+        self.fault('ack', hold=True, status=404, body={'code': 'CRITICAL_RESULT_NOT_FOUND', 'message': 'SYN refused'})
+        again.click()
+        self.wait_until(lambda: len(self.posts()) == 2, 'same ACK after Back')
+        held = self.take('ack')
+        expect(again).to_be_disabled()
+        self.assertEqual(first, self.posts()[1]['body'])
+        self.release(held)
+        expect(line).to_contain_text('SYN refused')
+        expect(line).to_contain_text(UNKNOWN_WORD)
+        expect(again).to_be_enabled()
+
     def test_rd01_c2_full_row_shows_the_pinned_version_and_offers_acknowledge(self):
         r = self.server.add(rec(1, source={"version": 3, "action": "approve", "author": "syn-rad@kin", "at": "2026-09-28T00:30:00.000Z"}))
         self.server.plant = True

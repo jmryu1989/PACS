@@ -710,6 +710,8 @@
         if (!work.admits(at)) return;
         const b = await api("GET", "/bootstrap", undefined, undefined, at);
         work.commit(at, () => {
+          // Related can open while the read is pending; its Target must keep the opening text.
+          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
           appState[uid] = replaceReportState(uid, b.states?.[uid]);
           syncStudy(uid);
           loadReport({ force: true });
