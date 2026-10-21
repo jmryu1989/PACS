@@ -8,9 +8,9 @@ tool on purpose - the cross-tree admission is a cache contract that proves an al
 so byte identity itself is the requirement. CheckpointTimeTests asserts the product's 7-day receipt age and 5-minute
 skew because the spec (section 6) requires that a checkpoint never changes those contracts.
 
-CheckpointMutationContracts (T18) applies M01-M44 and M46-M66 to temporary copies of tests/ops_release_checkpoints.py,
-(M15-M17, M35) tests/ops_deploy_host_container_test.py, (M51, M56) tests/ops_release_checkpoints_native_test.py and (M64)
-tests/ops_release_checkpoints_live_test.py only, runs
+CheckpointMutationContracts (T18) applies M01-M44 and M46-M79 (78 mutants; there is no M45) to temporary copies of
+tests/ops_release_checkpoints.py, (M15-M17, M35) tests/ops_deploy_host_container_test.py, (M51, M56, M72-M77, M79)
+tests/ops_release_checkpoints_native_test.py and (M64) tests/ops_release_checkpoints_live_test.py only, runs
 the named contract against the unmodified copies (control) and the mutant in fresh processes, and counts a kill only when
 the control passes and the mutant fails an assertion (an import, launch or fixture error is not a kill). M01-M14 are the
 spec's contracts; M15-M30 were added by hardening round 1 for CKPT-01..09 (one or more per finding); M31-M42 by round 3
@@ -21,7 +21,9 @@ not corroborated, a row's image not bound); M55-M57 by round 8 (consult-checkpoi
 unchecked, the native evidence taking the caller's descriptor, a fact kind looked up before its type is checked);
 M58-M59 by the r8 self-review (D1556: bundle_inputs' B0 type unchecked, the verified descriptor shared between reads);
 M60-M66 by round 9 (D1575 CKPT8-1/CKPT8-2 and the typed-read inventory: the loader's parent, phase_reached, identity and
-owned guards, parent_chain's link type, resolve_parent's checkpoint type, restore_boundary's stack type).
+owned guards, parent_chain's link type, resolve_parent's checkpoint type, restore_boundary's stack type); M67-M79 by
+round 10 (D1600: the omission/type guards at the restore and verified native boundaries). Rounds 11 and 12 add no mutant
+(their adapter faults run as separate executed variants outside this suite).
 
 Round 11 (consult-checkpoints-t16-host-20261021 option b, D1666/D1669): CheckpointLayerStorageTests runs the real
 CheckpointDocker.layer_facts over a fake process table (docker info/inspect, containerd's ctr) and a real upper folder:
@@ -1086,13 +1088,13 @@ class CheckpointClaimTests(unittest.TestCase):
 
 
 class CaptureFixture:
-    def captured(self, checkpoint_id, backend=None, *, running=None, descriptor=None, fixture=None, store_root=None, before=None):
+    def captured(self, checkpoint_id, backend=None, *, running=None, descriptor=None, fixture=None, store_root=None, before=None, ids=None):
         target = target_fixture()
         names = {role: target["containers"][role] for role in intro.ROLES}
         volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
         backend = backend or FakeBackend(names, volumes, running=running)
         fixture = fixture or self.tempdir()
-        made = realistic(fixture, checkpoint_id, layer=False, descriptor=descriptor)
+        made = realistic(fixture, checkpoint_id, layer=False, descriptor=descriptor, ids=ids)
         # r7: the containers run the boundary generation's pinned images unless a case gives another one, and the seal's
         # boundary facts are taken from the same daemon before the stop (seal_boundary).
         pins = cp.pinned_images(made.plan, made.state)
@@ -4503,9 +4505,13 @@ STORAGE_INFO = {
 
 class StorageDaemon:
     """A fake process table for CheckpointDocker's storage reads: `docker info`, `docker container inspect` and
-    containerd's client (`ctr ... snapshots info|mounts`). An answer is (exit, stdout bytes), an exception to raise, or a
-    callable of the call's ordinal for its kind (0 = the resolution before the read, 1 = after). Every call is recorded;
-    any other command fails the test (the adapter may only read)."""
+    containerd's client (`ctr ... snapshots info|mounts`), and (r12) the reads of CheckpointDocker.inventory - the
+    capture's own listing (`docker ps`, `docker inspect <ids>`, volume/network/image listings) whose container identity
+    the layer read is bound to. An answer is (exit, stdout bytes), an exception to raise, or a callable of the call's
+    ordinal for its kind (0 = the resolution before the read, 1 = after). Every call is recorded; any other command
+    fails the test (the adapter may only read)."""
+
+    INVENTORY = ("ps", "listed", "volumes", "networks", "images")
 
     def __init__(self, answers):
         self.answers, self.calls, self.seen = answers, [], {}
@@ -4516,6 +4522,12 @@ class StorageDaemon:
             return "info"
         if args[:3] == ["docker", "container", "inspect"]:
             return "inspect"
+        if args[:2] == ["docker", "ps"]:
+            return "ps"
+        if args[:2] == ["docker", "inspect"]:
+            return "listed"
+        if args[:3] in (["docker", "volume", "ls"], ["docker", "network", "ls"], ["docker", "image", "ls"]):
+            return {"volume": "volumes", "network": "networks", "image": "images"}[args[1]]
         if args[:1] == ["ctr"] and "snapshots" in args and args[-2:-1] == ["info"]:
             return "snapshot"
         if args[:1] == ["ctr"] and "snapshots" in args and args[-3:-2] == ["mounts"]:
@@ -4535,12 +4547,21 @@ class StorageDaemon:
 
 
 class LayerAdapterBackend(FakeBackend):
-    """FakeBackend whose layer_facts is the real CheckpointDocker.layer_facts over a StorageDaemon and a real folder."""
+    """FakeBackend whose layer_facts is the real CheckpointDocker.layer_facts over a StorageDaemon and a real folder.
+    r12 (CKPT11-01): the capture's inventory lists the Orthanc container as the same real adapter's inventory parsed it
+    from the daemon, so the identity capture_checkpoint seals and the one the layer read is bound to come from one
+    listing (the r11 fixture sealed id-<name> while the adapter read another ID)."""
     adapter = None
+
+    def inventory(self):
+        listing = super().inventory()
+        real = {item["name"]: item for item in self.adapter.inventory()["containers"]}
+        listing["containers"] = [real.get(item["name"], item) for item in listing["containers"]]
+        return listing
 
     def layer_facts(self, name, paths):
         self.calls.append(("layer_facts", name))
-        return self.adapter(name, paths)
+        return self.adapter(name, paths, listed=False)   # bound to the capture's own inventory above, not a new one
 
 
 class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
@@ -4588,34 +4609,42 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
         text = ",".join(key + "=" + value if value is not True else key for key, value in values.items() if value is not None)
         return ("mount -t overlay overlay /kin-ckpt-not-mounted -o " + text + "\n").encode()
 
-    def answers(self, backend, tree, *, name=None, edit=None, raw=None):
+    def answers(self, backend, tree, *, name=None, edit=None, raw=None, listed_id=None):
         """The daemon's normal answers for one stopped container of `backend`, each edited (`edit`: kind -> function of
-        a deep copy) or replaced (`raw`: kind -> answer)."""
+        a deep copy) or replaced (`raw`: kind -> answer). `listed` is the same container as the capture's inventory saw
+        it before the stop (running, ID `listed_id`, default the resolved one): the identity the read is bound to."""
         name = name or self.NAME
         container = {"Id": STORAGE_CONTAINER_ID, "Name": "/" + name, "Image": ORTHANC_IMAGE,
+                     "Config": {"Labels": {"com.docker.compose.project": PROJECT}}, "Mounts": [],
                      "State": {"Status": "exited", "Running": False, "Paused": False, "Restarting": False, "ExitCode": 0}}
         if backend == "overlay2":
             container["GraphDriver"] = {"Name": "overlay2", "Data": {"LowerDir": str(tree.root / "lower"), "MergedDir": str(tree.root / "merged"),
                                                                       "UpperDir": str(tree.upper), "WorkDir": str(tree.work)}}
         else:
             container.update(GraphDriver=None, Storage={"RootFS": {"Snapshot": {"Name": "overlayfs"}}})
-        documents = {"info": copy.deepcopy(STORAGE_INFO[backend]), "inspect": [container],
+        listed = {**copy.deepcopy(container), "Id": listed_id or STORAGE_CONTAINER_ID,
+                  "State": {"Status": "running", "Running": True, "Paused": False, "Restarting": False, "ExitCode": 0}}
+        documents = {"info": copy.deepcopy(STORAGE_INFO[backend]), "inspect": [container], "listed": [listed],
                      "snapshot": {"Kind": "Active", "Name": STORAGE_CONTAINER_ID, "Parent": "sha256:" + "6" * 64,
                                   "Labels": {"containerd.io/gc.root": "2026-10-21T10:17:30Z"}, "Created": "2026-10-21T10:17:20Z"}}
         for kind, change in (edit or {}).items():
             documents[kind] = change(copy.deepcopy(documents[kind]))
         answers = {kind: (0, json.dumps(document).encode()) for kind, document in documents.items()}
-        answers["mounts"] = (0, self.mount_line(tree))
+        answers.update(mounts=(0, self.mount_line(tree)), ps=(0, (documents["listed"][0]["Id"] + "\n").encode()),
+                       volumes=(0, b""), networks=(0, b""), images=(0, b""))
         answers.update(raw or {})
         return answers
 
     def adapter(self, backend, tree, **changes):
-        """(layer_facts callable, the StorageDaemon, the observations it records) of the real adapter."""
+        """(layer_facts callable, the StorageDaemon, the observations it records) of one real adapter. The callable
+        takes the adapter's own inventory first (as capture_checkpoint does before the stop) unless `listed` is False
+        in `changes` or it is called with listed=False; `.inventory` runs that inventory alone (the capture's listing)."""
         import ops_deploy_host_container_test as rehearsal
-        daemon = StorageDaemon(self.answers(backend, tree, **{key: changes[key] for key in ("name", "edit", "raw") if key in changes}))
+        daemon = StorageDaemon(self.answers(backend, tree, **{key: changes[key] for key in ("name", "edit", "raw", "listed_id") if key in changes}))
         given = {**tree.given, **changes.get("given", {})}
         real = Path.lstat
         start = len(rehearsal.LAYER_RESOLUTIONS)
+        docker = rehearsal.CheckpointDocker(None, None)
 
         def lstat(path, *args, **kwargs):
             fact = given.get(str(path))
@@ -4623,11 +4652,17 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
                 raise fact
             return fact if fact is not None else real(path, *args, **kwargs)
 
-        def facts(name, paths):
+        def patched(call):
             clean = {key: value for key, value in os.environ.items() if not key.startswith(("DOCKER_", "COMPOSE_"))}
             with patch.object(rehearsal, "subprocess", SimpleNamespace(run=daemon.run, PIPE=subprocess.PIPE)), \
                     patch.object(Path, "lstat", lstat), patch.dict(os.environ, {**clean, "DOCKER_HOST": "tcp://elsewhere:2376"}, clear=True):
-                return rehearsal.CheckpointDocker(None, None).layer_facts(name, paths)
+                return call()
+
+        def facts(name, paths, listed=changes.get("listed", True)):
+            if listed:
+                patched(docker.inventory)
+            return patched(lambda: docker.layer_facts(name, paths))
+        facts.inventory = lambda: patched(docker.inventory)
         return facts, daemon, lambda: rehearsal.LAYER_RESOLUTIONS[start:]
 
     PATHS = sorted([*cp.REGENERATED_ANCESTORS, cp.HOSTID, cp.PYCACHE, *(cp.PYCACHE + "/" + name for name in PYC),
@@ -4647,7 +4682,9 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
                 self.assertEqual(sorted(observed[backend] or {}), self.PATHS)
                 kinds = [call[0] for call in daemon.calls]
                 expected = ["info", "inspect"] + (["snapshot", "mounts"] if backend == "containerd" else [])
-                self.assertEqual(kinds, expected * 2, "one resolution before and one after the read, reads only")
+                listing = [kind for kind in kinds if kind in StorageDaemon.INVENTORY]
+                self.assertEqual(kinds[:len(listing)], listing, "the capture's inventory comes first")
+                self.assertEqual(kinds[len(listing):], expected * 2, "one resolution before and one after the read, reads only")
                 self.assertTrue(all(not key.startswith(("DOCKER_", "COMPOSE_")) for call in daemon.calls for key in call[2]))
                 for kind, args, _ in daemon.calls:
                     if args[0] == "ctr":
@@ -4657,6 +4694,7 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
                 record = records()[-1]
                 self.assertEqual((record["outcome"], record["before"], record["after"]["upper"]), ("observed", record["after"], str(tree.upper)))
                 self.assertEqual((record["before"]["container_id"], record["before"]["backend"]), (STORAGE_CONTAINER_ID, backend))
+                self.assertEqual(record["capture_identity"], {"id": STORAGE_CONTAINER_ID, "image": ORTHANC_IMAGE}, "bound to the inventory's identity")
         self.assertEqual(observed["overlay2"], observed["containerd"], "TEST-CKPT-STORAGE-01: fact parity")
         facts = observed["containerd"]
         data = tree.files[cp.HOSTID]
@@ -4749,6 +4787,85 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
             "a running overlay2 container": ("overlay2", {"edit": {"inspect": inspect(State={"Running": True})}}),
             "an overlay2 upper folder that does not exist": ("overlay2", {"edit": {"inspect": inspect(GraphDriver={"Name": "overlay2", "Data": {"UpperDir": str(tree.root / "absent")}})}}),
             "a relative overlay2 upper folder": ("overlay2", {"edit": {"inspect": inspect(GraphDriver={"Name": "overlay2", "Data": {"UpperDir": "snapshots/17/fs"}})}}),
+            **self.unestablished_r12(tree),
+        }
+
+    def unestablished_r12(self, tree):
+        """r12 (CKPT11-01..03), on both backends where the field is consumed by both: the capture's identity, present
+        malformed metadata, an invalid upper path and an unavailable metadata client."""
+        other, image7 = "7" * 64, "sha256:" + "7" * 64
+        normal = {backend: self.answers(backend, tree)["inspect"] for backend in ("overlay2", "containerd")}
+
+        def inspect(**fields):
+            return {"edit": {"inspect": lambda items: [{**items[0], **fields}]}}
+
+        def state(value):
+            return inspect(State={"Status": "exited", "Running": False, "Paused": False, "Restarting": value, "ExitCode": 0})
+
+        def replaced_after(backend, **fields):
+            first = normal[backend]
+            return {"raw": {"inspect": lambda ordinal: first if ordinal == 0 else (0, json.dumps([{**json.loads(first[1])[0], **fields}]).encode())}}
+        nul = {"overlay2": inspect(GraphDriver={"Name": "overlay2", "Data": {"UpperDir": str(tree.upper) + "\x00"}}),
+               # the snapshotter's own layout (snapshots/<n>/fs beside work) under a root that has the NUL
+               "containerd": {"raw": {"mounts": (0, self.mount_line(tree, upperdir=tree.root.as_posix() + "\x00/snapshots/17/fs",
+                                                                     workdir=tree.root.as_posix() + "\x00/snapshots/17/work"))}}}
+        cases = {}
+        for backend in ("overlay2", "containerd"):
+            per = {
+                # CKPT11-01: the capture's identity (its inventory's ID and image) across both resolutions
+                "the name resolves to another container than the capture's inventory listed": inspect(Id=other),
+                "the capture's inventory listed another container under the name": {"listed_id": other},
+                "no capture inventory listed the container": {"listed": False},
+                "the capture's inventory listed another image": {"edit": {"listed": lambda items: [{**items[0], "Image": image7}]}},
+                "the capture's inventory listed an image that is not a string": {"edit": {"listed": lambda items: [{**items[0], "Image": 7}]}},
+                "the inspected image is not the capture's": inspect(Image=image7),
+                "the inspected image is missing": {"edit": {"inspect": lambda items: [{k: v for k, v in items[0].items() if k != "Image"}]}},
+                "the container is replaced by another ID between the resolutions": replaced_after(backend, Id=other),
+                "the image changes between the resolutions": replaced_after(backend, Image=image7),
+                # CKPT11-02: present malformed state and daemon identity are no facts
+                **{"State.Restarting is %s" % label: state(value) for label, value in
+                   (("'true'", "true"), ("1", 1), ("[]", []), ("{}", {}), ("null", None))},
+                "State.Restarting is missing": inspect(State={"Status": "exited", "Running": False}),
+                "State.Running is 0": inspect(State={"Running": 0, "Restarting": False}),
+                "the daemon reports no ID": {"edit": {"info": lambda document: {k: v for k, v in document.items() if k != "ID"}}},
+                "the daemon's ID is empty": {"edit": {"info": lambda document: {**document, "ID": ""}}},
+                "the daemon's ID is not a string": {"edit": {"info": lambda document: {**document, "ID": 7}}},
+                "a GraphDriver without a string Name": inspect(GraphDriver={"Name": 7, "Data": None}),
+                "a GraphDriver whose Data is a string": inspect(GraphDriver={"Name": "overlay2", "Data": "upper"}),
+                "a GraphDriver UpperDir that is a list": inspect(GraphDriver={"Name": "overlay2", "Data": {"UpperDir": [str(tree.upper)]}}),
+                # CKPT11-03: an invalid upper path and an unavailable metadata client
+                "an upper folder with an embedded NUL": nul[backend],
+                "docker is not installed (info)": {"raw": {"info": FileNotFoundError(2, "docker")}},
+                "docker is not executable (inspect)": {"raw": {"inspect": PermissionError(13, "docker")}},
+            }
+            cases.update({backend + ": " + name: (backend, changes) for name, changes in per.items()})
+        for value in ([], "overlayfs", 7, {"RootFS": []}, {"RootFS": "overlayfs"}, {"RootFS": {"Snapshot": []}},
+                      {"RootFS": {"Snapshot": "overlayfs"}}, {"RootFS": {"Snapshot": {}}}, {"RootFS": {"Snapshot": {"Name": None}}},
+                      {"RootFS": {"Snapshot": {"Name": []}}}):
+            cases["containerd: Storage = " + json.dumps(value)] = ("containerd", inspect(Storage=value))
+        return cases
+
+    def optional_absences(self, tree):
+        """name -> (backend, changes): metadata the Engine legitimately omits (omitempty) - still facts (CKPT11-02's
+        controls: the strict checks refuse a present malformed value, not an allowed absence)."""
+        def inspect(transform):
+            return {"edit": {"inspect": lambda items: [transform(dict(items[0]))]}}
+
+        def without(*keys):
+            return inspect(lambda item: {k: v for k, v in item.items() if k not in keys})
+        return {
+            "containerd: no Storage (an older Engine API)": ("containerd", without("Storage")),
+            "containerd: Storage null": ("containerd", inspect(lambda item: {**item, "Storage": None})),
+            "containerd: Storage without RootFS": ("containerd", inspect(lambda item: {**item, "Storage": {}})),
+            "containerd: RootFS null": ("containerd", inspect(lambda item: {**item, "Storage": {"RootFS": None}})),
+            "containerd: Snapshot null": ("containerd", inspect(lambda item: {**item, "Storage": {"RootFS": {"Snapshot": None}}})),
+            "containerd: no GraphDriver": ("containerd", without("GraphDriver")),
+            "containerd: a GraphDriver of the snapshotter without Data": ("containerd", inspect(lambda item: {**item, "GraphDriver": {"Name": "overlayfs", "Data": None}})),
+            "overlay2: no Containerd section in docker info": ("overlay2", {"edit": {"info": lambda document: {k: v for k, v in document.items() if k != "Containerd"}}}),
+            "overlay2: no Storage": ("overlay2", without("Storage")),
+            # recorded only, never judged: another shape is kept as recorded (None for a non-string Parent)
+            "overlay2: ServerVersion that is not a string": ("overlay2", {"edit": {"info": lambda document: {**document, "ServerVersion": [29]}}}),
+            "containerd: a snapshot Parent that is not a string": ("containerd", {"edit": {"snapshot": lambda document: {**document, "Parent": []}}}),
         }
 
     def test_a_mapping_that_is_not_established_gives_no_facts(self):
@@ -4759,28 +4876,74 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
         for name, (backend, changes) in self.unestablished(tree).items():
             with self.subTest(refused=name):
                 facts, daemon, records = self.adapter(backend, tree, **changes)
-                self.assertIsNone(facts(self.NAME, self.PATHS))
+                try:
+                    value = facts(self.NAME, self.PATHS)
+                except Exception as error:   # CKPT11-03: an unestablished mapping is no facts, never an exception
+                    self.fail("raised %s: %s" % (type(error).__name__, error))
+                self.assertIsNone(value)
+                self.assertTrue(records(), "the observation is recorded")
                 record = records()[-1]
                 reason = record.get("reason") or (record.get("before") or {}).get("reason")
                 self.assertEqual(record["outcome"], "unobservable")
                 self.assertTrue(type(reason) is str and reason, record)
-                self.assertTrue(daemon.calls and all(kind in ("info", "inspect", "snapshot", "mounts") for kind, _, _ in daemon.calls))
+                self.assertTrue(daemon.calls and all(kind in ("info", "inspect", "snapshot", "mounts", *StorageDaemon.INVENTORY)
+                                                     for kind, _, _ in daemon.calls))
+
+    def test_an_allowed_omission_is_not_a_malformed_field(self):
+        """CKPT11-02 controls: fields the Engine omits (omitempty) where it has nothing to declare still give the same
+        facts as the normal answer; only a present value of another shape is refused."""
+        tree = self.tree()
+        expected = {backend: self.adapter(backend, tree)[0](self.NAME, self.PATHS) for backend in ("overlay2", "containerd")}
+        for name, (backend, changes) in self.optional_absences(tree).items():
+            with self.subTest(allowed=name):
+                facts, _, records = self.adapter(backend, tree, **changes)
+                self.assertEqual(facts(self.NAME, self.PATHS), expected[backend])
+                self.assertEqual(records()[-1]["outcome"], "observed")
+
+    def test_an_observation_failure_is_recorded_and_only_a_stop_escapes(self):
+        """CKPT11-03: a changed path the OS cannot name (an embedded NUL) gives no facts like an unreadable one, with its
+        observation kept; a deadline cut and a programming error are not observation failures - they still end the
+        capture as before (never read as 'unobservable' and continued), and their observation is kept too."""
+        tree = self.tree()
+        for backend in ("overlay2", "containerd"):
+            with self.subTest(backend=backend, case="a changed path with an embedded NUL"):
+                facts, _, records = self.adapter(backend, tree)
+                try:
+                    value = facts(self.NAME, [cp.HOSTID, "/etc/kin\x00hostid"])
+                except Exception as error:
+                    self.fail("raised %s: %s" % (type(error).__name__, error))
+                self.assertIsNone(value)
+                self.assertEqual((records()[-1]["outcome"], records()[-1]["reason"]), ("unobservable", "a changed path could not be read"))
+            for kind, error in (("info", cp.DeadlineExpired("cut", {"kind": "cut"})), ("inspect", cp.DeadlineExpired("cut", {"kind": "cut"})),
+                                ("inspect", TypeError("a programming error"))):
+                with self.subTest(backend=backend, stop=type(error).__name__, at=kind):
+                    facts, _, records = self.adapter(backend, tree, raw={kind: error})
+                    with self.assertRaises(type(error)):
+                        facts(self.NAME, self.PATHS)
+                    self.assertEqual([(row["outcome"], row.get("interrupted")) for row in records()[-1:]], [("unobservable", type(error).__name__)])
 
     def judged(self, backend, tree, descriptor, **changes):
         """capture_checkpoint at INTRODUCED with the Orthanc role's normal start, its writable layer read by the real
-        adapter over `backend`. Returns (code, layer record, store listing)."""
+        adapter over `backend`. r12: the capture's identity is the descriptor's container ID - the capture's inventory
+        lists the Orthanc container under it through the same real adapter, and the boundary facts and capture
+        observation carry it - so what is sealed and what the layer read is bound to are one identity. Returns (code,
+        layer record, store listing)."""
         target = target_fixture()
         names = {item: target["containers"][item] for item in intro.ROLES}
         volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
+        capture = descriptor["container_id"]
         layered = LayerAdapterBackend(names, volumes, images=cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}))
-        layered.adapter = self.adapter(backend, tree, name=names["orthanc"], **changes)[0]
+        layered.adapter = self.adapter(backend, tree, name=names["orthanc"], **{"listed_id": capture, **changes})[0]
+        layered.containers[names["orthanc"]]["id"] = capture
         layered.diffs[names["orthanc"]] = list(ORTHANC_START)
         fixture, store_root = self.tempdir(), self.tempdir() / "bundles"
         try:
-            self.captured("introduced", layered, descriptor=descriptor, fixture=fixture, store_root=store_root)
+            self.captured("introduced", layered, descriptor=descriptor, fixture=fixture, store_root=store_root, ids={"orthanc": capture})
             code = "SEALED"
         except cp.Refused as error:
             code = error.code
+        except Exception as error:   # CKPT11-03: an observation failure is the typed refusal, never another exception
+            self.fail("the capture raised %s: %s" % (type(error).__name__, error))
         layers = sorted(fixture.glob("*/records/" + cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE))
         record = json.loads(layers[-1].read_bytes()) if len(layers) == 1 else None
         return code, record, sorted(path.name for path in store_root.iterdir()) if store_root.exists() else []
@@ -4789,11 +4952,12 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
         """TEST-CKPT-STORAGE-01/02 through the live judgement: a normal Orthanc start read on the containerd snapshotter
         or on overlay2 is accepted as the pinned image's regeneration and sealed; the same start whose mapping is not
         established is refused WRITABLE_LAYER before store.begin (no bundle, no partial), its record kept unobservable."""
+        import ops_deploy_host_container_test as rehearsal
         tree = self.tree()
         paths = cp.regenerated_candidates(ORTHANC_START)
         read = self.adapter("overlay2", tree, name=PROJECT + "-orthanc")[0](PROJECT + "-orthanc", paths)
         names = {item: target_fixture()["containers"][item] for item in intro.ROLES}
-        descriptor = regenerated_fixture("id-" + names["orthanc"])
+        descriptor = regenerated_fixture(STORAGE_CONTAINER_ID)   # r12: the container the daemon resolves (r11 sealed id-<name>)
         meta = {key: read[cp.HOSTID][key] for key in ("type", "mode", "uid", "gid")}
         descriptor["image"]["hostid"] = {**meta, "size": 14, "sha256": hashlib.sha256(b"not-generated\n").hexdigest(), "text": "placeholder"}
         descriptor["image"]["ancestors"] = {path: dict(read[path]) for path in cp.REGENERATED_ANCESTORS}
@@ -4811,16 +4975,32 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
                 self.assertEqual(row["facts"], read)
                 self.assertEqual({item["verdict"] for item in row["verdicts"]} - {"transient-or-mount"},
                                  {"regenerated:hostid", "regenerated:pycache", "regenerated:pyc", "regenerated:plugin", "regenerated:ancestor"})
+                observation = rehearsal.LAYER_RESOLUTIONS[-1]
+                self.assertEqual((row["container_id"], observation["capture_identity"]["id"], observation["before"]["container_id"],
+                                  observation["after"]["container_id"]), (descriptor["container_id"],) * 4, "sealed = listed = resolved twice")
         start = [change for change in ORTHANC_START if not cp.writable_layer_allowed(change)]
-        for name in ("a snapshot keyed by another ID", "the containerd native snapshotter", "no containerd client on the host",
-                     "the snapshot's upper folder changes during the read", "a changed path that cannot be read", "a btrfs graph driver"):
-            backend, changes = self.unestablished(tree)[name]
+        refused = ["a snapshot keyed by another ID", "the containerd native snapshotter", "no containerd client on the host",
+                   "the snapshot's upper folder changes during the read", "a changed path that cannot be read", "a btrfs graph driver"]
+        # r12 (CKPT11-01..03) through capture_checkpoint on both backends: Astra's capture probes and their kin.
+        refused += [backend + ": " + name for backend in ("overlay2", "containerd") for name in (
+            "the name resolves to another container than the capture's inventory listed",
+            "the container is replaced by another ID between the resolutions", "the inspected image is not the capture's",
+            "the image changes between the resolutions", "State.Restarting is 'true'", "the daemon reports no ID",
+            "an upper folder with an embedded NUL", "docker is not installed (info)", "docker is not executable (inspect)")]
+        refused += ["containerd: Storage = []", 'containerd: Storage = {"RootFS": {"Snapshot": []}}']
+        cases = self.unestablished(tree)
+        for name in refused:
+            backend, changes = cases[name]
             with self.subTest(refused=name):
                 code, record, stored = self.judged(backend, tree, descriptor, **changes)
                 self.assertEqual((code, stored), ("WRITABLE_LAYER", []), "refused before store.begin: no bundle, no partial")
                 row = record["roles"]["orthanc"]
                 self.assertEqual((record["outcome"], row["layer_observable"], row["facts"]), ("REFUSED", False, {}))
                 self.assertEqual(record["refused"], sorted("orthanc: " + change for change in start))
+                observation = rehearsal.LAYER_RESOLUTIONS[-1]
+                reason = observation.get("reason") or observation["before"].get("reason")
+                self.assertEqual(observation["outcome"], "unobservable")
+                self.assertTrue(type(reason) is str and reason, observation)
 
 
 class CheckpointDeadlineTests(RefusalAssertions, TempCase):

@@ -883,6 +883,10 @@ class CheckpointDocker:
 
     def __init__(self, stack, helper_image):
         self.stack, self.helper = stack, helper_image
+        # r12 (CKPT11-01): name -> {"id", "image"} of every container in this adapter's last inventory. capture_checkpoint
+        # takes its inventory here, seals those IDs and judges each role's layer against that very inventory, so a
+        # layer read is bound to this identity, never to whatever the name resolves to later.
+        self.listed = {}
 
     def run(self, args, *, timeout=300, check=True, **kwargs):
         """Every Docker/Compose call of the adapter: `timeout` is a cap only; under an active deadline (r6, the native
@@ -914,6 +918,7 @@ class CheckpointDocker:
             if tag and "<none>" not in tag:
                 tags[ident].add(tag)
         images = [{"id": ident, "tags": sorted(names)} for ident, names in sorted(tags.items())]
+        self.listed = {item["name"]: {"id": item["id"], "image": item["image"]} for item in containers}
         return checkpoints.note_inventory({"containers": containers, "volumes": volumes, "networks": networks, "images": images})
 
     def stop(self, name):
@@ -1116,6 +1121,11 @@ class CheckpointDocker:
     # and the stopped container is never started. Anything else - another driver or snapshotter, missing, malformed or
     # ambiguous metadata, another container, a running one, a folder that is not the snapshotter's, a mapping that
     # changed while it was read - gives no facts (None), and the typed exception then refuses before any bundle byte.
+    # r12 (CKPT11-01..03): both resolutions must name exactly the container ID and image of this capture's inventory
+    # (self.listed), not merely agree with each other; present-but-malformed metadata (State.Restarting, the daemon's ID,
+    # the container's declared Storage) is refused like missing metadata instead of being read as an optional absence;
+    # an invalid upper path and an unavailable metadata client give no facts with their reason recorded, never an
+    # exception. A deadline cut (checkpoints.DeadlineExpired) and a plain call timeout still stop the capture as before.
     CONTAINERD_DRIVER_TYPE = "io.containerd.snapshotter.v1"
     CONTAINERD_SNAPSHOTTERS = ("overlayfs",)
     MOUNTS_TARGET = "/kin-ckpt-not-mounted"
@@ -1130,14 +1140,28 @@ class CheckpointDocker:
         except ValueError:
             return None
 
+    def read_metadata(self, args):
+        """(document or None, why not): one read-only metadata call; a client that cannot be run (OSError: not
+        installed, not executable) is an unavailable observation, not an error of the capture."""
+        try:
+            return self.metadata(self.run(args, check=False, timeout=60)), None
+        except OSError as error:
+            return None, args[0] + " could not be run: " + type(error).__name__
+
     def storage_backend(self):
         """The daemon's container storage as `docker info` reports it: {"backend": "overlay2" | "containerd" | None, the
         driver facts, for containerd the snapshotter, endpoint and namespace, and for None the reason}."""
-        info = self.metadata(self.run(["docker", "info", "--format", "{{json .}}"], check=False, timeout=60))
+        info, unavailable = self.read_metadata(["docker", "info", "--format", "{{json .}}"])
+        if unavailable:
+            return {"backend": None, "reason": "the daemon's storage facts are unavailable: " + unavailable}
         if type(info) is not dict:
             return {"backend": None, "reason": "the daemon answered no storage facts"}
         driver, status = info.get("Driver"), info.get("DriverStatus")
         facts = {"driver": driver, "daemon_identity": info.get("ID"), "server": info.get("ServerVersion")}
+        # The daemon's ID is what makes "the same daemon before and after the read" evidence: a missing one would let
+        # two unidentified answers compare equal.
+        if type(info.get("ID")) is not str or not info["ID"].strip():
+            return {**facts, "backend": None, "reason": "the daemon reports no identity"}
         if type(driver) is not str or type(status) is not list or not all(
                 type(row) is list and len(row) == 2 and all(type(item) is str for item in row) for row in status):
             return {**facts, "backend": None, "reason": "the daemon's storage driver facts are malformed"}
@@ -1179,16 +1203,39 @@ class CheckpointDocker:
             return None, "the upper folder is not the snapshotter's own folder of this snapshot"
         return str(upper), None
 
-    def writable_upper(self, name, storage):
-        """(upper folder, resolution) of one stopped container on `storage` (storage_backend); (None, resolution with its
-        reason) when the backend's own metadata do not name exactly one readable upper folder of exactly this container."""
-        resolution = {"container_name": name, "backend": storage.get("backend")}
+    @staticmethod
+    def declared_snapshotter(item):
+        """(the snapshotter a container inspection declares in Storage.RootFS.Snapshot.Name or None, malformed). The
+        Engine omits Storage, RootFS and Snapshot (omitempty pointers) where it has nothing to say - an absence or null
+        there is no declaration; a present level of another type, or a Snapshot without a string Name, is malformed."""
+        value = item.get("Storage")
+        for key in ("RootFS", "Snapshot"):
+            if value is None:
+                return None, False
+            if type(value) is not dict:
+                return None, True
+            value = value.get(key)
+        if value is None:
+            return None, False
+        if type(value) is not dict or type(value.get("Name")) is not str:
+            return None, True
+        return value["Name"], False
+
+    def writable_upper(self, name, storage, identity):
+        """(upper folder, resolution) of one stopped container on `storage` (storage_backend) that is exactly `identity`
+        ({"id", "image"} of the capture's inventory); (None, resolution with its reason) when the backend's own metadata
+        do not name exactly one readable upper folder of exactly that container."""
+        resolution = {"container_name": name, "backend": storage.get("backend"), "capture_identity": identity}
 
         def refuse(reason):
             return None, {**resolution, "reason": reason}
         if storage.get("backend") not in ("overlay2", "containerd"):
             return refuse(storage.get("reason") or "an unsupported storage backend")
-        items = self.metadata(self.run(["docker", "container", "inspect", name], check=False, timeout=60))
+        if type(identity) is not dict or type(identity.get("id")) is not str or type(identity.get("image")) is not str:
+            return refuse("no capture identity of the container: this adapter's inventory did not list it")
+        items, unavailable = self.read_metadata(["docker", "container", "inspect", name])
+        if unavailable:
+            return refuse("the container's inspection is unavailable: " + unavailable)
         if type(items) is not list or len(items) != 1 or type(items[0]) is not dict:
             return refuse("the daemon gave no single inspection of the container")
         item = items[0]
@@ -1196,22 +1243,32 @@ class CheckpointDocker:
         if type(ident) is not str or re.fullmatch(r"[0-9a-f]{64}", ident) is None or type(item.get("Name")) is not str \
                 or item["Name"].lstrip("/") != name:
             return refuse("the inspection is not of this exact container")
-        resolution["container_id"] = ident
-        if type(state) is not dict or state.get("Running") is not False or state.get("Restarting") is True:
-            return refuse("the container is not stopped")
-        if graph is not None and (type(graph) is not dict or (graph.get("Data") is not None and type(graph.get("Data")) is not dict)):
+        resolution.update(container_id=ident, image=item.get("Image"))
+        if ident != identity["id"]:
+            return refuse("the name now resolves to another container than the capture's (replaced since its inventory)")
+        if item.get("Image") != identity["image"]:
+            return refuse("the container's image is not the image of the capture's inventory")
+        # Running and Restarting are always present in an Engine inspection (no omitempty): only a definite false/false
+        # is a stopped container.
+        if type(state) is not dict or state.get("Running") is not False or state.get("Restarting") is not False:
+            return refuse("the container is not definitely stopped")
+        data = graph.get("Data") if type(graph) is dict else None
+        if graph is not None and (type(graph) is not dict or type(graph.get("Name")) is not str
+                                  or (data is not None and type(data) is not dict)):
             return refuse("the container's storage driver facts are malformed")
         graph = graph or {}
-        upper_dir = (graph.get("Data") or {}).get("UpperDir")
+        upper_dir = (data or {}).get("UpperDir")
+        if upper_dir is not None and type(upper_dir) is not str:
+            return refuse("the container's storage driver facts are malformed")
         if storage["backend"] == "overlay2":
-            if graph.get("Name") != "overlay2" or type(upper_dir) is not str:
+            if graph.get("Name") != "overlay2" or upper_dir is None:
                 return refuse("the daemon reports no overlay2 upper folder of the container")
             upper, resolution["source"] = upper_dir, "GraphDriver.Data.UpperDir"
         else:
             snapshotter = storage["snapshotter"]
-            declared = item.get("Storage")
-            for key in ("RootFS", "Snapshot", "Name"):
-                declared = declared.get(key) if type(declared) is dict else None
+            declared, malformed = self.declared_snapshotter(item)
+            if malformed:
+                return refuse("the container's declared storage is malformed")
             if upper_dir is not None or graph.get("Name") not in (None, snapshotter) or declared not in (None, snapshotter):
                 return refuse("the container reports another storage than the daemon's snapshotter")
             resolution.update(snapshotter=snapshotter, address=storage["address"], namespace=storage["namespace"], snapshot_key=ident,
@@ -1228,39 +1285,51 @@ class CheckpointDocker:
             upper, reason = self.overlay_upper(mounted)
             if upper is None:
                 return refuse(reason)
+        # A path the OS cannot even name (an embedded NUL) is no folder of the backend: refused, never a ValueError.
+        if "\x00" in upper or not Path(upper).is_absolute():
+            return refuse("the upper folder is not a valid absolute path")
         try:
             folder = Path(upper).lstat()
-        except OSError as error:
+        except (OSError, ValueError) as error:
             return refuse("the upper folder cannot be read: " + type(error).__name__)
-        if not Path(upper).is_absolute() or not stat.S_ISDIR(folder.st_mode):
+        if not stat.S_ISDIR(folder.st_mode):
             return refuse("the upper folder is not a folder")
         return upper, {**resolution, "upper": upper}
 
     def layer_facts(self, name, paths):
         """lstat facts (and SHA-256 of regular files) of changed paths in one stopped container's writable layer, read
         from the upper folder the daemon's storage backend maps to it (writable_upper: overlay2 or the containerd
-        overlayfs snapshotter); None when no such folder is established, the read fails or the mapping is not the same
-        after the read (the typed exception then refuses). /etc/hostid's content class is recorded, never its value."""
-        storage = self.storage_backend()
-        upper, before = self.writable_upper(name, storage)
-        record = {"container_name": name, "paths": len(paths), "storage": storage, "before": before}
+        overlayfs snapshotter); None when no such folder of exactly the container this adapter's inventory listed under
+        `name` (its ID and image: the capture's identity) is established, the read fails or the mapping is not the same
+        after the read (the typed exception then refuses). /etc/hostid's content class is recorded, never its value. The
+        observation is recorded in every case, also when a deadline cut or another error ends it."""
+        identity = self.listed.get(name)
+        record = {"container_name": name, "paths": len(paths), "capture_identity": identity}
         out = None
-        if upper is not None:
-            out = self.read_layer(Path(upper), paths)
-            storage_after = self.storage_backend()
-            _, after = self.writable_upper(name, storage_after)
-            record.update(storage_after=storage_after, after=after)
-            if out is None:
-                record["reason"] = "a changed path could not be read"
-            elif (storage_after, after) != (storage, before):
-                out, record["reason"] = None, "the storage or the container's mapping changed during the read"
-        record["outcome"] = "observed" if out is not None else "unobservable"
-        LAYER_RESOLUTIONS.append(record)
+        try:
+            storage = self.storage_backend()
+            upper, before = self.writable_upper(name, storage, identity)
+            record.update(storage=storage, before=before)
+            if upper is not None:
+                out = self.read_layer(Path(upper), paths)
+                storage_after = self.storage_backend()
+                _, after = self.writable_upper(name, storage_after, identity)
+                record.update(storage_after=storage_after, after=after)
+                if out is None:
+                    record["reason"] = "a changed path could not be read"
+                elif (storage_after, after) != (storage, before):
+                    out, record["reason"] = None, "the storage or the container's mapping changed during the read"
+        except BaseException as error:
+            out, record["interrupted"] = None, type(error).__name__
+            raise
+        finally:
+            record["outcome"] = "observed" if out is not None else "unobservable"
+            LAYER_RESOLUTIONS.append(record)
         return out
 
     @staticmethod
     def read_layer(upper, paths):
-        """The facts of `paths` under one upper folder; None when one cannot be read (never a partial map)."""
+        """The facts of `paths` under one upper folder; None when one cannot be read or named (never a partial map)."""
         out = {}
         for path in paths:
             target = upper / path.lstrip("/")
@@ -1269,7 +1338,7 @@ class CheckpointDocker:
             except FileNotFoundError:
                 out[path] = {"type": "absent"}
                 continue
-            except OSError:
+            except (OSError, ValueError):
                 return None
             mode = info.st_mode
             kind = ("dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "link" if stat.S_ISLNK(mode)

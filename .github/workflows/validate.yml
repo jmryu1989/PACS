@@ -1317,7 +1317,7 @@ jobs:
       # RELEASE-TOOLS-CHECKPOINTS (D1338, hardening 1 D1354, round 3 D1366): pure checkpoint contracts T01-T15 (the real
       # rehearsal stage methods over a synthetic product), host adapter, bundle inputs, raw records, the raw-evidence
       # index, lineage, retries, the supervised browser child against a frozen copy, comparison, the r5 observation context and commands smoke contracts,
-      # the r6 regenerated-artifact contract and real deadlines (local children only), and mutants M01-M44 and M46-M66; no
+      # the r6 regenerated-artifact contract and real deadlines (local children only), and mutants M01-M44 and M46-M79; no
       # Docker. The child runs as root because the ComposeEntry fork contract needs root-owned protected folders, as the
       # product entry does.
       - name: RELEASE-TOOLS-CHECKPOINTS boundary, bundle, identity, fork admission, budget, gate, time, cleanup, record, stage, lineage, observation, regenerated-artifact and deadline contracts with 78 mutants

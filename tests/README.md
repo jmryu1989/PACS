@@ -2201,6 +2201,36 @@ bundle byte), -03 (native: the smoke's seeded/held regeneration and cold restore
   mapping is not established. Native: CI's runner exercises its own backend (recorded in `host-facts.json`); the
   containerd path runs natively only on the VM's normal smoke and T16/T17 after admission of the new SHA.
 
+### Round 12: the layer read is bound to the capture's identity (Astra review of 50b23d6, CKPT11-01..04, D1679)
+
+- Identity (CKPT11-01): `CheckpointDocker.inventory` keeps each listed container's ID and image (`listed`);
+  `capture_checkpoint` takes exactly that inventory, seals its IDs and judges each role against it, so `layer_facts`
+  requires both resolutions (before and after the read) to name that ID and that image - not merely to agree with each
+  other or with the name's current container. A name that now resolves to another container (replaced before the first
+  resolution or between the two), another or a missing image, or a name the inventory did not list gives no facts:
+  `layer_observable` false, WRITABLE_LAYER before `store.begin`, no bundle. The judgement only asks for facts when the
+  inventory image is the pinned image (`regenerated_applicable`), so the bound image is the pinned one.
+- Strict metadata (CKPT11-02): only `State.Running` false and `State.Restarting` false (both always present in an Engine
+  inspection) is a stopped container; the daemon's `ID` must be a non-empty string (it is what makes "the same daemon
+  after the read" evidence); `GraphDriver` is null/absent or an object with a string `Name` and a null or object `Data`
+  whose `UpperDir` is null or a string; on containerd `Storage`, `RootFS` and `Snapshot` may be absent or null (omitempty
+  on older APIs: no declaration) but a present level of another type, or a `Snapshot` without a string `Name`, is
+  malformed and gives no facts. The allowed absences are executed as controls that still give the normal facts.
+- Observation failures (CKPT11-03): an upper folder or changed path the OS cannot name (an embedded NUL) and a metadata
+  client that cannot be run (`docker` or `ctr` missing or not executable: OSError) give no facts with their reason kept;
+  every observation is recorded even when it ends otherwise. A deadline cut (`DeadlineExpired`), a plain call timeout and
+  a programming error are not observation failures: they still end the capture as before, with the observation kept and
+  marked `interrupted`.
+- Pure: `CheckpointLayerStorageTests` (5 tests) - the r11 cases plus each case above on both backends where both consume
+  the field, Astra's r11 capture probes through `capture_checkpoint` (same-identity control sealed; replacement, wrong
+  image, malformed `Restarting` and malformed `Storage` refused with no bundle), the allowed-absence controls and the
+  stop/programming-error propagation. The positive fixture now seals the container ID the adapter resolves (r11 sealed
+  `id-<name>` while the adapter read another ID).
+- Host note (R11-HOST-P8, documentation only): on a Windows host whose `time.monotonic` is GetTickCount64 (15.625 ms
+  ticks) `CheckpointDeadlineTests` P8 reads the product Runner's given timeout as 0.3 plus float error and fails, and T18
+  then stops at M49 (its control is P8). This is pre-existing and unchanged; the assertion is not relaxed. C06 closes on
+  the Linux CI run of the whole suite (all its tests and the 78 control/kill pairs).
+
 # 뷰어 반전 정밀도
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,
