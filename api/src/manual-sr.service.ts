@@ -1,8 +1,9 @@
 import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
-import { Injectable, BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, GoneException, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, Inject, Optional, BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, GoneException, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID, createHash } from 'node:crypto';
+import { BackgroundWork, BackgroundWorkControl, EMR_BACKGROUND_WORK, createBackgroundWorkRegistry } from './emr-runtime/background-work';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
@@ -30,17 +31,24 @@ function selection(raw: Buffer) {
 export class ManualSrService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ManualSrService.name);
   private preparing = 0;
-  private recoveryTimer: ReturnType<typeof setInterval>;
+  private stopRecovery?: () => void;
   private recovering = false;
-  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
+  // EMR-B2 (c): the recovery timer and the work each tick starts are owned by the process's background-work registry
+  // (quiesced and drained by the launcher's stop); outside the launcher the service owns a private registry.
+  private readonly background: BackgroundWork;
+  private readonly ownRegistry: BackgroundWorkControl | undefined;
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService,
+    @Optional() @Inject(EMR_BACKGROUND_WORK) background?: BackgroundWork) {
+    this.ownRegistry = background ? undefined : createBackgroundWorkRegistry();
+    this.background = background ?? this.ownRegistry.work;
+  }
 
   onModuleInit() {
     // Reconciliation never initiates an upload. It attributes bytes already
     // accepted by Orthanc, even if the initiating account lost access later.
-    this.recoveryTimer = setInterval(() => { void this.recoverPending(); }, 15000);
-    this.recoveryTimer.unref();
+    this.stopRecovery = this.background.every('manualSr.recoverPending', 15000, () => this.recoverPending());
   }
-  onModuleDestroy() { clearInterval(this.recoveryTimer); }
+  onModuleDestroy() { this.stopRecovery?.(); this.ownRegistry?.quiesce(); }
 
   private async recoverPending() {
     if (this.recovering) return; this.recovering = true;

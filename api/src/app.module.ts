@@ -13,7 +13,9 @@ import { CriticalResultController } from './critical-result.controller';
 import { CriticalResultService } from './critical-result.service';
 import { ReaderAssignmentController } from './reader-assignment.controller';
 import { ReaderAssignmentService } from './reader-assignment.service';
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { DynamicModule, MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { BackgroundWork, EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
+import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PrismaService } from './prisma.service';
 import { PacsController } from './pacs.controller';
@@ -59,6 +61,16 @@ function adminNoStore(_req: any, res: any, next: () => void) {
   ],
 })
 export class AppModule implements NestModule {
+  // Construction closure (imports, field initializers, factories including async/useValue, constructors and configure)
+  // must remain resource-free. No connection, file handle, timer, worker, process listener or detached acquisition here.
+  // Acquire only in awaited init/bootstrap hooks, retaining a cleanup handle before waiting. The launcher registers
+  // the lifecycle adapter first, and its settlement barrier joins peer acquisitions even when one hook rejects.
+  /** EMR-B2 (c): the module as the launcher creates it - the record port it prepared and the process's background-work
+   * handle, by value under their tokens. Nothing else of the EMR lifetime is a provider, so no consumer can start,
+   * close, recover, compose or reach the protected-state session or transport. */
+  static forLaunch(port: EmrRecordPort, background: BackgroundWork): DynamicModule {
+    return { module: AppModule, providers: [{ provide: EMR_RECORD_PORT, useValue: port }, { provide: EMR_BACKGROUND_WORK, useValue: background }] };
+  }
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
     consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);

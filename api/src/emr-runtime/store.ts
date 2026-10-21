@@ -15,6 +15,7 @@ import { RawQuery, databaseIdentity } from './manifest';
 import { AccessSeal, SealRefused, SealState, CommitBinding } from './seal';
 import { admitAppend } from './admission';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_RECOVERY_TIMEOUT_MS } from './limits';
+import type { ExpiryPrefix, Reservation } from './state-protocol';
 
 /**
  * The protected access ledger store (EMR-B1). A ledger fact commits in the same PostgreSQL transaction as the business
@@ -33,9 +34,27 @@ export class LedgerFailure extends Error {
     super(ledgerCode ? `${code}: ${ledgerCode}` : code); this.name = 'LedgerFailure';
   }
 }
-/** In-transaction positions of an append, one per stream. Not durable and never handed out as a receipt. */
-export interface ProvisionalEntry { readonly stream: AccessStream; readonly sequence: number; readonly hash: string; readonly contentSha256: string; readonly attemptId: string; readonly previousHash: string; readonly payload: string; readonly storedAt: string }
+/** In-transaction positions of an append, one per stream. Not durable and never handed out as a receipt. `binding` is
+ * the exact durable reservation (or, for a replay of a stored event, that event's own commit marker): what the complete
+ * proof is checked against. */
+export interface ProvisionalEntry { readonly stream: AccessStream; readonly sequence: number; readonly hash: string; readonly contentSha256: string; readonly attemptId: string; readonly previousHash: string; readonly payload: string; readonly storedAt: string; readonly binding: CommitBinding | null }
 export interface ProvisionalAppend { readonly provisional: true; readonly eventId: string; readonly entries: readonly ProvisionalEntry[] }
+export interface LedgerAttempt { readonly attemptId: string; readonly streams: readonly AccessStream[] }
+
+/**
+ * EMR-B2 (c): the protected-state operations the store needs, as one scope of recording work - the shape both the
+ * local owner (B1 component tests, the retention job and the pure checker: LocalLedgerScope below) and the API's
+ * remote session (remote-state.ts) implement. Reserve under the caller's head lock, the complete proof after COMMIT,
+ * the settlement of a transaction that reported no commit, and the scope's end. Nothing of the owner's lifetime
+ * (fence, recovery, files, start, close) is reachable through it.
+ */
+export interface LedgerScope {
+  reserve(binding: Reservation, prefix?: ExpiryPrefix | null): Promise<CommitBinding>;
+  confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt>;
+  settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[], rolledBack?: boolean, attempt?: LedgerAttempt): Promise<void>;
+  end(): Promise<void>;
+}
+export interface LedgerState { begin(workId: string): Promise<LedgerScope> }
 
 /** The SQLSTATE a schema emr_access function raised, read from Prisma's raw-query error. */
 export function ledgerErrorCode(error: unknown): string | null {
@@ -44,7 +63,7 @@ export function ledgerErrorCode(error: unknown): string | null {
   const match = /\bCode: `(EB\d{3})`/.exec(String((error as any)?.message ?? ''));
   return match ? match[1] : null;
 }
-function isConnectionError(error: unknown): boolean {
+export function isConnectionError(error: unknown): boolean {
   const code = (error as any)?.code;
   return typeof code === 'string' && ['P1001', 'P1002', 'P1008', 'P1017', 'P2024'].includes(code);
 }
@@ -135,58 +154,16 @@ export class PrismaLedgerSql {
   }
 }
 
-export class AccessLedgerStore implements AppendOnlyAccessStore {
-  private readonly attempts = new WeakMap<object, { attemptId: string; streams: readonly AccessStream[] }>();
-  constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal,
-    private readonly poolSize: number = (db as PrismaClient & { emrAppendPoolSize?: number })?.emrAppendPoolSize ?? 3) {}
-
-  /** Both standalone and business writers enter before acquiring a connection.
-   * Callers include their business change and appendInTransaction in this same
-   * callback; confirm remains outside it, after the successful COMMIT. Starting
-   * a raw Prisma transaction first would bypass admission and reintroduce the
-   * head-lock/pool priority inversion for business writes.
-   */
-  withAppendTransaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
-    return admitAppend(this.db, this.poolSize, () => this.db.$transaction(work,
-      { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }));
+/**
+ * The local owner's scope (B1): the process holds the AccessSeal and FailureJournal itself. The service process, the
+ * B1 component tests, the pure checker and the retention job use it; the API never constructs one (application.ts
+ * hands the store a RemoteLedgerState). confirm and settle are B1's own semantics, unchanged.
+ */
+export class LocalLedgerScope implements LedgerScope {
+  constructor(private readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal) {}
+  reserve(binding: Reservation, prefix?: ExpiryPrefix | null): Promise<CommitBinding> {
+    return Promise.resolve(this.seal.reserve(binding, prefix ?? undefined));
   }
-
-  /**
-   * Inside the caller's open business transaction, last: A parses the event and names its streams and 의료법 제23조④ act;
-   * each stream stages its row under the head lock, then durably records intent and exact reservation together.
-   * EB008 forbids COMMIT until that reservation is bound in the same transaction. No deadline is stored (contract.ts accessDeadline
-   * computes it when destruction is considered). Any failure here must abort the caller's transaction.
-   */
-  async appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
-    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];
-    const attemptId = randomUUID(), bundleId = randomUUID();
-    await this.enterWriter(tx);
-    this.attempts.set(tx, { attemptId, streams: accessStreams(input, served) });
-    let eventId = '';
-    for (const stream of accessStreams(input, served)) {
-      const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
-      eventId = event.eventId;
-      let result: AppendResult;
-      try { result = await this.appendRow(tx, stream, event.eventId, text, act, attemptId, bundleId); }
-      catch (error) { if (ledgerErrorCode(error) === 'EB002') refuse('AccessEventIdConflict'); throw error; }
-      if (!result.replay) {
-        const binding = this.seal.reserve({ stream, chainId: result.chainId, attemptId, bundleId,
-          kind: stream === 'viewing' ? 'access' : 'history', eventId, sequence: result.sequence,
-          previousHash: result.previousHash, hash: result.hash, contentSha256 });
-        await this.bindCommit(tx, binding);
-      }
-      entries.push(Object.freeze({ stream, sequence: result.sequence, hash: result.hash, contentSha256, attemptId, previousHash: result.previousHash, payload: text, storedAt: result.storedAt }));
-    }
-    return Object.freeze({ provisional: true as const, eventId, entries: Object.freeze(entries) });
-  }
-  async enterWriter(tx: object): Promise<void> {
-    await (tx as RawQuery).$queryRaw`SELECT emr_access.enter_writer()::text`;
-  }
-  async bindCommit(tx: object, binding: CommitBinding): Promise<void> {
-    await (tx as RawQuery).$queryRaw`SELECT emr_access.bind_commit(${binding.stream}::text, ${binding.attemptId}::text,
-      ${binding.generation}::bigint, ${binding.proofDigest}::text)::text`;
-  }
-
   /** After the caller's commit: prove every entry from storage, seal each stream, and only then mint the receipt. */
   async confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt> {
     let receipt: DurableAccessReceipt | null = null;
@@ -234,23 +211,6 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     await Promise.all(appended.entries.map(p => this.seal.acknowledge(p.stream, p.attemptId)));
     return receipt;
   }
-
-  /** One standalone ledger fact (a provision before its body, a refusal, an end without a business change). */
-  async append(input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<DurableAccessReceipt> {
-    let appended: ProvisionalAppend, callbackFailed = false, transaction: object;
-    try {
-      appended = await this.withAppendTransaction(async tx => {
-        transaction = tx;
-        try { return await this.appendInTransaction(tx, input, served); }
-        catch (error) { callbackFailed = true; throw error; }
-      });
-    } catch (error) {
-      await this.settleTransaction(transaction, input, error, callbackFailed, served);
-      throw error;
-    }
-    return this.confirm(appended);
-  }
-
   /**
    * A transaction that did not report a commit. No stored entry in any of its streams: the attempt rolled back (journal
    * it, drop its intents). Storage unreadable, or this very content stored after all: the commit is unknown to this
@@ -258,7 +218,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * success, never a new event. Another content stored under this ID: this attempt was refused; the first attempt's
    * intents stay.
    */
-  async settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[], rolledBack = false, attempt?: {attemptId: string; streams: readonly AccessStream[]}): Promise<void> {
+  async settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[], rolledBack = false, attempt?: LedgerAttempt): Promise<void> {
     const streams = accessStreams(input, served);
     if (rolledBack) {
       const eventId = canonicalPayload(input, served, streams[0]).event.eventId;
@@ -281,16 +241,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     // The caller may have lost COMMIT's response. Only startup's global writer fence decides absence.
     this.note(eventId, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId);
   }
-
-  /** A caller that observed its callback reject can settle exactly that transaction's own attempt.
-   * A failed/unknown COMMIT response never uses this negative path merely because a SELECT is empty.
-   */
-  async settleTransaction(tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]): Promise<void> {
-    const attempt = tx && this.attempts.get(tx);
-    await this.settle(input, error, served, callbackFailed, attempt);
-    if (tx && callbackFailed) this.attempts.delete(tx);
-  }
-
+  end(): Promise<void> { return Promise.resolve(); }
   private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string, attemptId = `unassigned:${eventId}`, stream: AccessStream | 'transaction' = 'transaction'): void {
     try { this.journal.record(`${kind}:${stream}:${attemptId}:${cause}`, kind, { eventId, cause }); }
     catch (error) {
@@ -298,6 +249,151 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       if (error instanceof JournalUnavailable) throw new LedgerFailure('LedgerUnreachable', error.code);
       throw error;
     }
+  }
+}
+
+/** One scope's view of the store (record-port.ts): the same SQL, admission and client, bound to one LedgerScope. */
+export interface ScopedLedgerStore {
+  readonly scope: LedgerScope;
+  withAppendTransaction<T>(work: (tx: any) => Promise<T>): Promise<T>;
+  appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend>;
+  confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt>;
+  settleTransaction(tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]): Promise<void>;
+  settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[]): Promise<void>;
+  end(): Promise<void>;
+}
+
+export class AccessLedgerStore implements AppendOnlyAccessStore {
+  private readonly attempts = new WeakMap<object, LedgerAttempt>();
+  private readonly state: LedgerState;
+  /** The local owner's one scope (B1 consumers call the scope-less methods below); absent for the API's remote state. */
+  private readonly local: LocalLedgerScope | undefined;
+  readonly seal: AccessSeal | undefined;
+  readonly journal: FailureJournal | undefined;
+  constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, state: LedgerState | AccessSeal, journal?: FailureJournal,
+    private readonly poolSize: number = (db as PrismaClient & { emrAppendPoolSize?: number })?.emrAppendPoolSize ?? 3) {
+    if (state instanceof AccessSeal) {
+      const local = this.local = new LocalLedgerScope(sql, state, journal);
+      this.seal = state; this.journal = journal;
+      this.state = { begin: () => Promise.resolve(local) };
+    } else this.state = state;
+  }
+
+  /** One unit of recording work's scope of the protected state: the API's record port pins it before any business SQL. */
+  async begin(workId: string): Promise<ScopedLedgerStore> {
+    const scope = await this.state.begin(workId);
+    return Object.freeze({
+      scope,
+      withAppendTransaction: <T>(work: (tx: any) => Promise<T>) => this.withAppendTransaction(work),
+      appendInTransaction: (tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]) => this.appendWithin(scope, tx, input, served),
+      confirm: (appended: ProvisionalAppend) => scope.confirm(appended),
+      settleTransaction: (tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]) =>
+        this.settleWithin(scope, tx, input, error, callbackFailed, served),
+      settle: (input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[]) => scope.settle(input, error, served),
+      end: () => scope.end(),
+    });
+  }
+  /** The local owner's scope for the scope-less B1 methods; the remote state has none. */
+  private own(): LedgerScope {
+    return this.local ?? refuse('EmrScopeRequired');
+  }
+
+  /** Both standalone and business writers enter before acquiring a connection.
+   * Callers include their business change and appendInTransaction in this same
+   * callback; confirm remains outside it, after the successful COMMIT. Starting
+   * a raw Prisma transaction first would bypass admission and reintroduce the
+   * head-lock/pool priority inversion for business writes.
+   */
+  withAppendTransaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
+    return admitAppend(this.db, this.poolSize, () => this.db.$transaction(work,
+      { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }));
+  }
+
+  /**
+   * Inside the caller's open business transaction, last: A parses the event and names its streams and 의료법 제23조④ act;
+   * each stream stages its row under the head lock, then durably records intent and exact reservation together.
+   * EB008 forbids COMMIT until that reservation is bound in the same transaction. No deadline is stored (contract.ts accessDeadline
+   * computes it when destruction is considered). Any failure here must abort the caller's transaction.
+   */
+  appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
+    return this.appendWithin(this.own(), tx, input, served);
+  }
+  async appendWithin(scope: LedgerScope, tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
+    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];
+    const attemptId = randomUUID(), bundleId = randomUUID();
+    await this.enterWriter(tx);
+    this.attempts.set(tx, { attemptId, streams: accessStreams(input, served) });
+    let eventId = '';
+    for (const stream of accessStreams(input, served)) {
+      const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
+      eventId = event.eventId;
+      let result: AppendResult;
+      try { result = await this.appendRow(tx, stream, event.eventId, text, act, attemptId, bundleId); }
+      catch (error) { if (ledgerErrorCode(error) === 'EB002') refuse('AccessEventIdConflict'); throw error; }
+      let binding: CommitBinding | null = null;
+      if (!result.replay) {
+        binding = await scope.reserve({ stream, chainId: result.chainId, attemptId, bundleId,
+          kind: stream === 'viewing' ? 'access' : 'history', eventId, sequence: result.sequence,
+          previousHash: result.previousHash, hash: result.hash, contentSha256 });
+        await this.bindCommit(tx, binding);
+      } else {
+        // A replay of a stored event owns no new reservation: the original attempt's own commit marker, read in this
+        // same transaction, is the binding its complete proof is checked against.
+        binding = await this.markerInTransaction(tx, stream, result.sequence);
+      }
+      entries.push(Object.freeze({ stream, sequence: result.sequence, hash: result.hash, contentSha256, attemptId, previousHash: result.previousHash, payload: text, storedAt: result.storedAt, binding }));
+    }
+    return Object.freeze({ provisional: true as const, eventId, entries: Object.freeze(entries) });
+  }
+  async enterWriter(tx: object): Promise<void> {
+    await (tx as RawQuery).$queryRaw`SELECT emr_access.enter_writer()::text`;
+  }
+  /** The commit marker of a stored slot, read under the caller's transaction (a replay's binding). */
+  markerInTransaction(tx: object, stream: AccessStream, sequence: number): Promise<CommitBinding | null> {
+    return new PrismaLedgerSql(tx, true).markerForSlot(stream, sequence);
+  }
+  async bindCommit(tx: object, binding: CommitBinding): Promise<void> {
+    await (tx as RawQuery).$queryRaw`SELECT emr_access.bind_commit(${binding.stream}::text, ${binding.attemptId}::text,
+      ${binding.generation}::bigint, ${binding.proofDigest}::text)::text`;
+  }
+
+  /** After the caller's commit: the complete proof of every entry, then the receipt (the scope's own semantics). */
+  confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt> {
+    return this.own().confirm(appended);
+  }
+
+  /** One standalone ledger fact (a provision before its body, a refusal, an end without a business change). */
+  async append(input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<DurableAccessReceipt> {
+    const scope = this.own();
+    let appended: ProvisionalAppend, callbackFailed = false, transaction: object;
+    try {
+      appended = await this.withAppendTransaction(async tx => {
+        transaction = tx;
+        try { return await this.appendWithin(scope, tx, input, served); }
+        catch (error) { callbackFailed = true; throw error; }
+      });
+    } catch (error) {
+      await this.settleWithin(scope, transaction, input, error, callbackFailed, served);
+      throw error;
+    }
+    return scope.confirm(appended);
+  }
+
+  /** A transaction that did not report a commit: settled by the scope (see LocalLedgerScope.settle). */
+  settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[], rolledBack = false, attempt?: LedgerAttempt): Promise<void> {
+    return this.own().settle(input, error, served, rolledBack, attempt);
+  }
+
+  /** A caller that observed its callback reject can settle exactly that transaction's own attempt.
+   * A failed/unknown COMMIT response never uses this negative path merely because a SELECT is empty.
+   */
+  settleTransaction(tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]): Promise<void> {
+    return this.settleWithin(this.own(), tx, input, error, callbackFailed, served);
+  }
+  async settleWithin(scope: LedgerScope, tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]): Promise<void> {
+    const attempt = tx && this.attempts.get(tx);
+    await scope.settle(input, error, served, callbackFailed, attempt);
+    if (tx && callbackFailed) this.attempts.delete(tx);
   }
 
   /** Every fact one A decision may consult, read under the caller's transaction, as that transaction's snapshot. */

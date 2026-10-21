@@ -1,10 +1,11 @@
 import {
-  HttpException, Injectable, InternalServerErrorException, Logger,
-  OnModuleDestroy, OnModuleInit, UnauthorizedException,
+  HttpException, Inject, Injectable, InternalServerErrorException, Logger,
+  OnModuleDestroy, OnModuleInit, Optional, UnauthorizedException,
 } from '@nestjs/common';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { isIP } from 'net';
 import { createRemoteJWKSet, decodeJwt, jwtVerify, JWTPayload } from 'jose';
+import { BackgroundWork, BackgroundWorkControl, EMR_BACKGROUND_WORK, createBackgroundWorkRegistry } from './emr-runtime/background-work';
 import { PrismaService } from './prisma.service';
 import { ChangeAnswer, KeycloakService, RosterWriteFailure, within } from './keycloak.service';
 import { rightsAllow, lockMemberRights } from './member-rights';
@@ -188,52 +189,64 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     ? createRemoteJWKSet(new URL(process.env.KC_JWKS_URL))
     : null;
   private readonly logger = new Logger('AuthSession');
-  private cleanupTimer?: NodeJS.Timeout;
-  private idpEndTimer?: NodeJS.Timeout;
+  private stopSweep?: () => void;
+  private stopIdpEnds?: () => void;
   private resuming = false;
-  private importTimer?: NodeJS.Timeout;
+  private cancelImportRetry?: () => void;
   private stopping = false;
   /**
    * 이 프로세스가 보내 놓고 아직 답을 기다리는 변경 호출의 수(대상별: `<kind>:<target>`, 회원은 `member:<sub>`). 재시도
    * 주기가 같은 대상에 요청을 쌓지 않게 할 뿐이다 — 판정은 DB의 기록이 한다(다른 프로세스의 호출은 여기에 없다).
    */
   private readonly flying = new Map<string, number>();
+  /**
+   * EMR-B2 (c): every task this service starts outside a request (the rights import and its retries, the IdP end
+   * resumption, the hourly sweep, the post-response IdP/credential continuations) is owned by the process's
+   * background-work registry: the launcher quiesces it at the stop latch (no new task or timer, started tasks see the
+   * signal) and drains the started ones before the ledger goes. Outside the launcher (tests, tools) the service owns a
+   * private registry and quiesces it itself on destroy. Authentication, rights and event content are unchanged.
+   */
+  private readonly background: BackgroundWork;
+  private readonly ownRegistry: BackgroundWorkControl | undefined;
 
-  constructor(private prisma: PrismaService, private keycloak: KeycloakService) {}
+  constructor(private prisma: PrismaService, private keycloak: KeycloakService,
+    @Optional() @Inject(EMR_BACKGROUND_WORK) background?: BackgroundWork) {
+    this.ownRegistry = background ? undefined : createBackgroundWorkRegistry();
+    this.background = background ?? this.ownRegistry.work;
+  }
 
   async onModuleInit() {
     // Realm startup may follow API startup. Entry checks the committed marker while this single task retries.
-    void this.importRights(1);
+    this.background.tryRun('auth.importRights', signal => this.importRights(1, signal));
     // 조회 시 idle 검사가 본체다. 타이머는 다시 오지 않는 세션 행을 치우는 수거원이고, 치운 세션도 접속기록에 남긴다.
-    this.cleanupTimer = setInterval(() => {
-      this.sweep().catch(() => this.storageWarning('sweep_cycle'));
-    }, 60 * 60 * 1000);
-    this.cleanupTimer.unref();
+    this.stopSweep = this.background.every('auth.sweep', 60 * 60 * 1000,
+      () => this.sweep().catch(() => this.storageWarning('sweep_cycle')));
     // 표식 표가 곧 provider 종료의 대기열이다: 프로세스가 죽어도 잃지 않고, 시작할 때 미확인 행을 기한과 무관하게 다시 청한다.
-    this.idpEndTimer = setInterval(() => { void this.resumeIdpEnds(false); }, IDP_END_TICK_MS);
-    this.idpEndTimer.unref();
-    void this.resumeIdpEnds(true);
+    this.stopIdpEnds = this.background.every('auth.resumeIdpEnds', IDP_END_TICK_MS, () => this.resumeIdpEnds(false));
+    this.background.tryRun('auth.resumeIdpEnds', () => this.resumeIdpEnds(true));
   }
 
   onModuleDestroy() {
     this.stopping = true;
-    if (this.importTimer) clearTimeout(this.importTimer);
-    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
-    if (this.idpEndTimer) clearInterval(this.idpEndTimer);
+    this.cancelImportRetry?.();
+    this.stopSweep?.();
+    this.stopIdpEnds?.();
+    this.ownRegistry?.quiesce();
   }
 
-  private async importRights(attempt: number): Promise<void> {
-    if (this.stopping) return;
+  private async importRights(attempt: number, signal: AbortSignal): Promise<void> {
+    if (this.stopping || signal.aborted) return;
     this.logger.log(`Member rights import attempt ${attempt}: checking realm-v1`);
     try {
-      await importMemberRights(this.prisma, this.keycloak, AbortSignal.timeout(30000));
+      // The held DB import completes under the quiesce signal too: once it is aborted, no roster publication starts.
+      const outcome = await importMemberRights(this.prisma, this.keycloak, AbortSignal.any([signal, AbortSignal.timeout(30000)]));
       this.logger.log(`Member rights import attempt ${attempt}: ready`);
+      if (outcome?.publication) await outcome.publication;
     } catch (error: any) {
       const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt - 1, 5));
       this.logger.warn(`Member rights import attempt ${attempt}: ${error?.message ?? 'storage/provider failure'}; retry in ${delay}ms`);
-      if (!this.stopping) {
-        this.importTimer = setTimeout(() => { void this.importRights(attempt + 1); }, delay);
-        this.importTimer.unref();
+      if (!this.stopping && !signal.aborted) {
+        this.cancelImportRetry = this.background.schedule('auth.importRights', delay, next => this.importRights(attempt + 1, next));
       }
     }
   }
@@ -649,8 +662,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   private async sendChange(change: Change, key: string, send: () => Promise<ChangeAnswer>, waitMs: number)
     : Promise<'done' | 'void' | 'unknown' | 'pending'> {
-    this.flying.set(key, (this.flying.get(key) ?? 0) + 1);
-    const settled = (async () => {
+    // EMR-B2 (c): the send and its settlement are one owned background task. After the quiesce no provider request
+    // starts: the recorded intent (state unknown) stays for the next process's resumption - 'pending' here, as for an
+    // answer that did not arrive within the wait.
+    let state: 'done' | 'void' | 'unknown' = 'unknown';
+    const task = this.background.tryRun('auth.change:' + change.kind, async () => {
+      this.flying.set(key, (this.flying.get(key) ?? 0) + 1);
       let answer: ChangeAnswer;
       try { answer = await send(); }
       catch { answer = { state: 'unknown', outcome: 'transport' }; }
@@ -660,8 +677,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         if (open > 0) this.flying.set(key, open);
         else this.flying.delete(key);
       }
-      return answer.state;
-    })();
+      state = answer.state;
+    });
+    if (!task) return 'pending';
+    const settled = task.settled.then(() => state);
     let timer: NodeJS.Timeout | undefined;
     const waited = new Promise<'pending'>(resolve => { timer = setTimeout(() => resolve('pending'), Math.max(0, waitMs)); });
     try { return await Promise.race([settled, waited]); }
@@ -710,7 +729,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 자기 답으로 정해졌을 때(confirmEndIfSettled). 다른 요청의 204·404가 먼저 와도 답을 모르는 요청이 남으면 false다.
    */
   private async confirmIdpEnd(change: Change, waitMs: number): Promise<boolean> {
-    const signal = within(waitMs);
+    // The provider request is bounded by its own wait and ends with the process's quiesce.
+    const signal = AbortSignal.any([within(waitMs), this.background.signal]);
     const answer = await this.sendChange(change, 'end_session:' + change.target,
       () => this.keycloak.endSession(change.target, signal), waitMs);
     if (answer !== 'done') return false;
@@ -747,7 +767,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /** 방금 끝낸 세션의 provider 종료(기록해 둔 요청)를 보낸다. 답을 기다리지 않고, 확인되지 않으면 표식이 주기를 부른다. */
   private tellIdp(change: Change) {
-    void (async () => {
+    // An owned continuation: after the quiesce it does not start, and the marker's own retry cycle (the next process's
+    // resumeIdpEnds) sends the recorded request instead.
+    this.background.tryRun('auth.tellIdp', async () => {
       try {
         await this.prisma.idpSessionEnd.updateMany({
           where: { idpSid: change.target, confirmedAt: null },
@@ -758,7 +780,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         this.storageWarning('idp_end_write');
       }
       await this.confirmIdpEnd(change, IDP_END_MS);
-    })();
+    });
   }
 
   /**
@@ -1426,7 +1448,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
      * 접속 시각이 갱신되지 않는다. 기다리지 않는다 — 그 갱신의 답(저장·거절로 인한 종료·닿지 못함)은 이미 채택한 이
      * 요청을 바꾸지 않고, 저장소 실패는 `storage`가 고정 분류로 남겼다.
      */
-    if (refreshAhead) this.refresh(session, ip).catch(() => undefined);
+    if (refreshAhead) this.background.tryRun('auth.refreshAhead', () => this.refresh(session, ip).catch(() => undefined));
     return session;
   }
 

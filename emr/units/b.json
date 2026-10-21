@@ -925,6 +925,21 @@
       "D1656-T04",
       "D1656-T02"
     ],
+    "local_api_file": "tests/emr/b/contract_test.cjs",
+    "local_api_selection": "EMR_B2C_API_CASES",
+    "local_api_cases": [
+      "C-A03.R01",
+      "C-A03.R02",
+      "C-A03.R03",
+      "C-A03.R04",
+      "C-A03.R05",
+      "C-A02.R06",
+      "C-A02.R07",
+      "C-A01.R08",
+      "C-A02.R09",
+      "C-A02.R10",
+      "C-A03.R11"
+    ],
     "terminal_mutants": [
       {
         "id": "D1641-M01",

@@ -31,17 +31,29 @@ PROBE = {"study": "SYNTHETIC-release-probe", "event_id": "12345678-1234-4123-812
          "approved_by": "commander", "approved_at": "2026-10-12T00:00:00Z"}
 
 
+SERVICE = {"epoch": "0f5c2d2e-7a1b-4c3d-8e9f-000000000001", "instanceId": "synthetic-pair", "state": "ready"}
+
+
 def outputs(existed=False):
+    """EMR-B2 (c): two client-only processes; the second is an API-only restart that sees the same service epoch."""
     entry = {"sequence": 5, "hash": "e" * 64, "kind": "access", "eventId": PROBE["event_id"]}
     tail = {"sequence": 5, "hash": "e" * 64}
-    first = {"operation": "append", "recovery": {"recovered": 0, "notCommitted": 0},
+    first = {"operation": "append", "service": dict(SERVICE),
              "tail_before": tail if existed else {"sequence": 4, "hash": "d" * 64}, "existed_before": existed,
-             "journal_before": 0, "receipt": {"eventId": PROBE["event_id"], "durableAt": "2026-10-13T01:00:00.000Z"},
+             "journal_before": 0, "pending_before": 0, "sealed_before": dict(tail) if existed else {"sequence": 4, "hash": "d" * 64},
+             "receipt": {"eventId": PROBE["event_id"], "durableAt": "2026-10-13T01:00:00.000Z"},
              "tail_after": dict(tail), "replay": {"eventId": PROBE["event_id"], "durableAt": "2026-10-13T01:00:00.000Z"},
-             "tail_replay": dict(tail), "stored": dict(entry), "sealed": dict(tail), "journal_after": 0}
-    second = {"operation": "restart", "recovery": {"recovered": 0, "notCommitted": 0}, "tail_before": dict(tail),
-              "existed_before": True, "journal_before": 0, "stored": dict(entry), "sealed": dict(tail), "journal_after": 0}
+             "tail_replay": dict(tail), "stored": dict(entry), "sealed": dict(tail), "journal_after": 0, "pending_after": 0, "scopes_after": 0}
+    second = {"operation": "restart", "service": dict(SERVICE), "tail_before": dict(tail), "existed_before": True,
+              "journal_before": 0, "pending_before": 0, "sealed_before": dict(tail), "stored": dict(entry), "sealed": dict(tail),
+              "journal_after": 0, "pending_after": 0, "scopes_after": 0}
     return first, second
+
+
+def after_service_restart():
+    """A third client process after the service itself restarted: a new epoch, the same chain and seal."""
+    _first, second = outputs()
+    return {**second, "service": {**SERVICE, "epoch": "0f5c2d2e-7a1b-4c3d-8e9f-000000000002"}}
 
 
 class ProbeVerdictTests(unittest.TestCase):
@@ -74,9 +86,14 @@ class ProbeVerdictTests(unittest.TestCase):
             "history kind": lambda f, s: f["stored"].update(kind="history"),
             "seal behind": lambda f, s: f.update(sealed={"sequence": 4, "hash": "d" * 64}),
             "failure journal": lambda f, s: f.update(journal_after=1),
+            "pending reservation left": lambda f, s: f.update(pending_after=1),
+            "live scope left": lambda f, s: f.update(scopes_after=1),
+            "service not ready": lambda f, s: f["service"].update(state="stopping"),
             "restart lost entry": lambda f, s: s.update(stored=None),
             "restart chain changed": lambda f, s: s.update(tail_before={"sequence": 6, "hash": "f" * 64}),
-            "restart unsealed work": lambda f, s: s["recovery"].update(recovered=1),
+            "restart changed the service epoch": lambda f, s: s["service"].update(epoch="0f5c2d2e-7a1b-4c3d-8e9f-000000000009"),
+            "restart saw another instance": lambda f, s: s["service"].update(instanceId="other-pair"),
+            "restart found pending work": lambda f, s: s.update(pending_before=1),
             "restart journal": lambda f, s: s.update(journal_after=2),
             "operations swapped": lambda f, s: s.update(operation="append"),
         }
@@ -85,6 +102,27 @@ class ProbeVerdictTests(unittest.TestCase):
             change(first, second)
             with self.subTest(case=name), self.assertRaises((intro.Stop, KeyError, TypeError)):
                 probe.verify(first, second, PROBE["event_id"])
+
+    def test_03b_a_separate_service_restart_needs_a_new_epoch_and_the_same_chain(self):
+        first, second = outputs()
+        evidence = probe.verify(first, second, PROBE["event_id"])
+        third = after_service_restart()
+        result = probe.verify_after_service_restart(evidence, third, PROBE["event_id"])
+        self.assertEqual(result["service_restart"], "new epoch, same chain and seal")
+        self.assertNotEqual(result["service_epoch_after_restart"], evidence["service_epoch"])
+        cases = {
+            "same epoch (no service restart happened)": lambda t: t["service"].update(epoch=SERVICE["epoch"]),
+            "chain changed": lambda t: t.update(sealed={"sequence": 6, "hash": "f" * 64}),
+            "entry lost": lambda t: t.update(stored=None),
+            "pending work": lambda t: t.update(pending_after=1),
+            "new failure record": lambda t: t.update(journal_after=1),
+            "process failed": lambda t: t.update(error="EmrStatePairMismatch"),
+        }
+        for name, change in cases.items():
+            third = after_service_restart()
+            change(third)
+            with self.subTest(case=name), self.assertRaises((intro.Stop, KeyError, TypeError)):
+                probe.verify_after_service_restart(evidence, third, PROBE["event_id"])
 
     def test_04_cli_verify_and_event(self):
         import tempfile

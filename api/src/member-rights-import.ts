@@ -86,12 +86,19 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
     return { legacy, bound };
   }, { maxWait: 4000, timeout: 120000 });
   new Logger('MemberRightsImport').log(`realm-v1 designation rows bound: ${changes.bound}`);
+  // EMR-B2 (c): a held import whose DB transaction completes after the process began to stop starts no provider
+  // request: the recorded intents (state unknown) are the recovery CLI's and the next process's to send.
+  if (signal?.aborted) {
+    new Logger('MemberRightsImport').warn(`명부 반영 ${changes.legacy.length}건은 종료 중이라 보내지 않았습니다(기록된 요청은 재시도 대상입니다)`);
+    return { publication: Promise.resolve([] as string[]), withheld: changes.legacy.length };
+  }
   const publications = changes.legacy.map(change => {
     // Neither startup, a member command, nor login waits for this one-shot post-commit send.
     return sendMemberRoster(prisma, keycloak, change).catch(() => new Logger('MemberRightsImport').warn('명부 반영 미확인'));
   });
-  // The CLI drains its own I/O before disconnecting; API startup only awaits the import transaction above.
-  return { publication: Promise.all(publications) };
+  // The CLI drains its own I/O before disconnecting; the API's import task accounts this publication work
+  // (auth.service.ts importRights) so the launcher's drain sees it.
+  return { publication: Promise.all(publications), withheld: 0 };
 }
 
 /** Operator recovery uses the original recorded intent, never provider claims as PACS rights. */

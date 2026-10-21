@@ -87,6 +87,72 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
   return { role: role.name, relations: placement.length };
 }
 
+const STARTUP_PHASES: Readonly<Record<string, string>> = freeze({
+  create: 'Nest 애플리케이션 구성에 실패했습니다',
+  config: '접속 원장 설정을 확인하지 못했습니다',
+  connect: '접속 원장 DB에 연결하지 못했습니다',
+  role: '접속 원장 DB 역할·저장소를 확인하지 못했습니다',
+  session: '접속 원장 상태 서비스에 연결하지 못했습니다',
+  pair: '접속 원장 상태 서비스와 이 API의 DB·체인·인스턴스가 다릅니다',
+  compose: '접속 원장 reader를 구성하지 못했습니다',
+  init: '서비스 초기화에 실패했습니다',
+  listen: 'HTTP 수신을 시작하지 못했습니다',
+});
+const STARTUP_CODES: Readonly<Record<string, string>> = freeze({
+  EmrDatabaseUrlRequired: 'DATABASE_URL이 없거나 PostgreSQL 주소가 아닙니다',
+  EmrAppendPoolTooSmall: 'DATABASE_URL의 connection_limit가 접속 원장 검증 예비 연결보다 작습니다',
+  EmrStateSocketRequired: 'KIN_EMR_STATE_SOCKET 경로가 없거나 절대 경로가 아닙니다',
+  EmrStateInstanceRequired: 'KIN_EMR_INSTANCE_ID가 없습니다',
+  EmrStateDirectoryForbidden: 'API 프로세스에 KIN_EMR_STATE_DIR가 주어졌습니다(보호 상태는 상태 서비스만 가집니다)',
+  EmrStatePairMismatch: '상태 서비스가 보고한 인스턴스·DB·체인이 이 API가 관찰한 값과 다릅니다',
+  EmrStartupRepeated: '접속 원장 기동이 이미 시작되었습니다',
+  EmrStartupInterrupted: '접속 원장 기동 중에 종료 요청을 받아 기동을 멈췄습니다',
+  P1000: 'DB 인증에 실패했습니다', P1001: 'DB 서버에 닿지 못했습니다', P1002: 'DB 서버 응답 시간이 초과되었습니다',
+  P1003: 'DB가 없습니다', P1008: 'DB 작업 시간이 초과되었습니다', P1010: 'DB 접근이 거부되었습니다',
+  P1011: 'DB TLS 연결을 열지 못했습니다', P1017: 'DB 서버가 연결을 닫았습니다', P2024: 'DB 연결 풀 대기 시간이 초과되었습니다',
+  EmrRuntimeRefused: '접속 원장 DB 역할·저장소 검증에 실패했습니다(최소권한 kin_runtime과 전용 저장소가 필요합니다)',
+  NOT_READY: '상태 서비스가 아직 복구를 마치지 않았습니다', STOPPING: '상태 서비스가 종료 중입니다',
+  UNAVAILABLE: '상태 서비스에 연결할 수 없습니다', PROTOCOL: '상태 서비스의 응답이 프로토콜과 다릅니다',
+  FORBIDDEN: '상태 서비스가 이 역할의 접속을 거절했습니다', SESSION: '상태 서비스 세션을 열지 못했습니다',
+  OVERLOADED: '상태 서비스의 세션 한도에 도달했습니다', TIMEOUT: '상태 서비스 응답 시간이 초과되었습니다',
+  EPOCH: '상태 서비스의 epoch가 바뀌었습니다', CLOSED: '상태 서비스 연결이 닫혔습니다',
+  EmrAdaptersAlreadyComposed: '접속 원장 reader가 이미 구성되었습니다',
+  EmrAdapterRequired: '접속 원장 reader 구성에 필요한 부분이 없습니다',
+  EADDRINUSE: 'HTTP 포트가 이미 사용 중입니다', EACCES: 'HTTP 포트를 열 권한이 없습니다',
+});
+/**
+ * EMR-B2 (c): the one line a failed API start prints (launcher.ts), with a closed phase and, when the thrown value is one
+ * of the explicitly mapped classes, its closed code: EmrRuntimeRefused by its class only (never its problems), the
+ * start-up refusals and state-protocol codes by their code, the listed provider connection codes and the two listen
+ * errors. Anything else is the phase's own line. No message, name, URL, SQL, bind value, stack or newline of the thrown
+ * value reaches it - provider errors can carry credential-bearing connection strings.
+ */
+export function startupFailureMessage(phase: 'create' | 'config' | 'connect' | 'role' | 'session' | 'pair' | 'compose' | 'init' | 'listen',
+  error: unknown): string {
+  const step = Object.prototype.hasOwnProperty.call(STARTUP_PHASES, phase) ? phase : 'create';
+  const value = (error !== null && typeof error === 'object' ? error : {}) as { code?: unknown; errorCode?: unknown; message?: unknown };
+  const candidates = error instanceof EmrRuntimeRefused ? ['EmrRuntimeRefused'] : [value.errorCode, value.code, value.message];
+  const code = candidates.find(item => typeof item === 'string' && Object.prototype.hasOwnProperty.call(STARTUP_CODES, item)) as string | undefined;
+  return `기동 실패(${step}${code ? '/' + code : ''}): ${code ? STARTUP_CODES[code] : STARTUP_PHASES[step]}. 기동을 중단합니다.`;
+}
+
+/** The closed phases of a stop that did not end within its bound (launcher.ts): the step the start was still in, the
+ * drain of admitted requests, recording work and background tasks (10 s), the service's own close hooks and the
+ * ledger client/session release (5 s). */
+export type EmrStopPhase = 'start' | 'drain' | 'app' | 'ledger';
+const STOP_PHASES: Readonly<Record<EmrStopPhase, string>> = freeze({
+  start: '기동 중이던 단계가 5초 안에 끝나지 않았습니다',
+  drain: '진행 중인 요청·접속 원장 기록 작업·배경 작업이 10초 안에 끝나지 않았습니다',
+  app: '서비스 종료 훅이 5초 안에 끝나지 않았습니다',
+  ledger: '접속 원장 연결·상태 서비스 세션 정리가 5초 안에 끝나지 않았습니다',
+});
+/** EMR-B2 (c): the one line a stop prints when a bound was exceeded; the process then ends nonzero. Nothing of the
+ * work that did not end (requests, errors, provider text) reaches it. */
+export function stopFailureMessage(phase: EmrStopPhase): string {
+  const step: EmrStopPhase = Object.prototype.hasOwnProperty.call(STOP_PHASES, phase) ? phase : 'ledger';
+  return `종료 실패(${step}): ${STOP_PHASES[step]}. 프로세스를 끝냅니다.`;
+}
+
 /** Fixed deployment identities; Compose/image/preflight consumers must use the same values.
  * The existing protected volume keeps the node UID. Client groups can connect but cannot replace sockets. */
 export const EMR_STATE_IDENTITIES = freeze({ serviceUid: 1000, apiUid: 1001, apiGroup: 2001, retentionGroup: 2002 });

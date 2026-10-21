@@ -50,6 +50,13 @@ jobs:
       - name: EMR-B2c service capability, scopes and protected storage components
         timeout-minutes: 15
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/state-service --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs -- node --max-old-space-size=3072 --test --test-concurrency=1 tests/emr/b/state_service_test.cjs
+      - name: EMR-B2c API-side components (record projection, remote scope lifetime, proofs, background work, raw HTTP admission, Nest lifecycle), exactly the declared cases each passed once
+        timeout-minutes: 10
+        run: |
+          EMR_B2C_API_CASES="$(python3 -c "import json; print(','.join(json.load(open('emr/units/b.json'))['b2c']['local_api_cases']))")"
+          export EMR_B2C_API_CASES
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/api-components --cwd . --tree api/src --file api/package-lock.json --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs -- node --max-old-space-size=3072 --test --test-concurrency=1 --test-reporter=tap --test-name-pattern "^C-A0" tests/emr/b/contract_test.cjs
+          python3 -B scripts/emr-compose.py check-run --kind node --cases-from b2c-api --run-dir tmp/emr-b-ci/api-components
       - name: D1641 terminal identity component mutants and rename-alias-format oracle control
         timeout-minutes: 45
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/terminal-mutants-run --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --terminal --worktree --out tmp/emr-b-ci/terminal-mutants

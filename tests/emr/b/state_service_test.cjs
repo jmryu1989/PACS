@@ -223,7 +223,12 @@ async function terminalChild(input) {
     const old = work.req('reserve', { binding: reservation(input.bundle.bindings[0]), prefix: null });
     old.serviceEpoch = input.epoch;
     const stale = await f.service.dispatch('api', old, peer.socket);
+    // D1660: a later acknowledged event compacts the checkpoint in this new process; attempts that
+    // recovery settled negative (aborted, slot free above the frontier) must stay excluded after it.
+    if (input.acknowledgeBeforeReplay) await complete(f, work, true);
     const observations = [];
+    // The settled-negative attempt first: its slot is free above the frontier, so only its terminal identity excludes it.
+    for (const binding of input.abortedBindings ?? []) observations.push(await replayObservation(f, work, binding));
     for (const binding of input.bundle.bindings) observations.push(await replayObservation(f, work, binding));
     const proof = await work.call('lookup-outcome', input.bundle);
     return { directory: f.directory, database: f.database.streams, bundle: input.bundle,
@@ -553,12 +558,18 @@ test('D1641-T06 actual WAL checkpoint compaction preserves exclusion through a n
     checkpointBytes: fs.statSync(checkpoint).size, walBytes: fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size };
   fs.writeFileSync(path.join(path.dirname(f.directory), path.basename(f.directory) + '-compaction.json'), JSON.stringify(measurements, null, 2) + '\n');
   console.log('TERMINAL_COMPACTION ' + JSON.stringify(measurements));
+  // A reservation whose COMMIT never happens, above the slot the next event will take: the new process
+  // settles it negative (terminal aborted, slot free), then compacts again on its own acknowledgement.
+  const tail = await f.database.sql.tail('viewing'), pending = {
+    ...reservation(original.bundle.bindings[0]), attemptId: randomUUID(), bundleId: randomUUID(), eventId: randomUUID(),
+    sequence: tail.sequence + 2, previousHash: 'a'.repeat(64), hash: 'b'.repeat(64) };
+  assert.equal((await work.call('reserve', { binding: pending, prefix: null })).ok, true, 'fresh valid reserve must succeed');
   f.service.close(); await f.service.drained(); f.coordinator.close();
   const evidence = fs.mkdtempSync(path.join(path.dirname(f.directory), 'compacted-'));
   const next = childPhase(evidence, 'restart', { directory: f.directory, database: f.database.streams,
-    bundle: original.bundle, epoch: f.service.serviceEpoch });
+    bundle: original.bundle, epoch: f.service.serviceEpoch, abortedBindings: [pending], acknowledgeBeforeReplay: true });
   for (const observation of next.observations) assertExcluded(observation);
-  assert.equal(next.observation.terminals, 2 * count, 'compaction retains every acknowledged stream identity');
+  assert.equal(next.observation.terminals, 2 * (count + 1) + 1, 'compaction retains every acknowledged and settled stream identity');
 });
 
 test('D1641-T06F publication flush failures never acknowledge success or erase terminal exclusion', async t => {

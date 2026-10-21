@@ -4369,6 +4369,23 @@ class HostOps:
                 and identity(self.inspect("api")) == identity(client), "State resume target changed during observation")
         return observed["ready"]
 
+    def restart_state_service(self, intro):
+        """L-10b (EMR-B2 c): the separate service restart. The service container alone is stopped and started again
+        (its own fenced recovery runs; no client recovers anything); the clients that lost their session end
+        themselves and come back by their restart policy. Returns once the service is ready again and the
+        persistent API client is running; the probe's third process then observes a new epoch over the same chain."""
+        owner_name = state_service_name(self.t)
+        owner = self.inspect_container(owner_name)
+        require(owner is not None and (owner.get("State") or {}).get("Running") is True, "State service is not running before its restart")
+        self.cmd(["docker", "stop", "--time", "45", owner_name], timeout=120, mutating=True)
+        stopped = self.inspect_container(owner_name)
+        require(stopped is not None and (stopped.get("State") or {}).get("Running") is False, "State service did not stop")
+        self.cmd(["docker", "start", owner_name], timeout=120, mutating=True)
+        self.wait(self.state_ready, 120, "State service did not complete recovery after its restart")
+        self.wait(lambda: ((self.inspect("api") or {}).get("State") or {}).get("Running") is True, 120,
+                  "API client did not return after the service restart")
+        return {"restarted": owner_name, "recovered": True}
+
     def admit_compose_launch(self, model, arguments):
         """Check the effective creation command before Compose can grant a state mount."""
         services, volumes = model.get("services"), model.get("volumes")

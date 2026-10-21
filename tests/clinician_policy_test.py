@@ -799,7 +799,9 @@ class Compiler:
                 self.answers[key].setdefault(API / name, {}).update(
                     relative_loads=dict(contract["relative_loads"]),
                     prototype_comparisons=set(contract["prototype_comparisons"]),
-                    constructors_without_return=set(contract["constructors_without_return"]))
+                    constructors_returning_another_object=set(contract["constructors_returning_another_object"]),
+                    process_uses=None if contract["process_uses"] is None else
+                    tuple((at, kind, member) for at, kind, member in contract["process_uses"]))
         return self.answers[key]
 
     def request(self, request):
@@ -1255,11 +1257,24 @@ def contract_names(path, code, bindings=None):
         used = code.startswith((".", "<"), after) or keyword == "new" and code.startswith("(", after)
         if keyword in DECLARING or not used:
             add(match, f"{match.group(0)} other than {match.group(0)}.<member>")
-    for match in words(PROCESS_NAME, code):
-        dot = skip_gap(code, match.end())
-        member = IDENTIFIER.match(code, skip_gap(code, dot + 1)) if code.startswith(".", dot) else None
-        if not is_property(code, match.start()) and (member is None or member.group(0) not in PROCESS_MEMBERS):
-            add(match, "process" + ("." + member.group(0) if member else ""))
+    uses = (bindings or {}).get("process_uses")
+    if uses is None:
+        # No AST answer (the file does not parse, or the caller judged no source set): the text reader, fail-closed.
+        for match in words(PROCESS_NAME, code):
+            dot = skip_gap(code, match.end())
+            member = IDENTIFIER.match(code, skip_gap(code, dot + 1)) if code.startswith(".", dot) else None
+            if not is_property(code, match.start()) and (member is None or member.group(0) not in PROCESS_MEMBERS):
+                add(match, "process" + ("." + member.group(0) if member else ""))
+    else:
+        # D1660 (D73 §15): the TypeScript AST says what each `process` is (route_inventory_ts.js process_uses); the
+        # closed contract says which members are reviewed. A member by '.' or by one plain literal key passes only when
+        # process_members lists it; a computed key, an optional member, the value handed on or a rebinding is refused.
+        for at, kind, member in uses:
+            if kind == "member" and member in PROCESS_MEMBERS:
+                continue
+            found.append((line_of(code, at), "process" + ("." + member if kind in ("member", "optional") else
+                                                           "[...]" if kind == "computed" else
+                                                           " rebound by a declaration" if kind == "shadow" else "")))
     for match in words(PROTOTYPE_NAME, code):
         base = owner(code, match.start())
         if base is None or base[0] not in PROTOTYPE_OWNERS or is_property(code, base[1]):
@@ -1277,8 +1292,13 @@ def contract_names(path, code, bindings=None):
             add(match, "constructor as a property")
         elif not code.startswith("(", paren) or not code.startswith("{", body):
             add(match, "constructor other than a declaration")
-        elif RETURN_WORD.search(code, body, bracket_end(code, body)) and match.start() not in (bindings or {}).get("constructors_without_return", ()):
-            add(match, "return in a constructor")
+        elif "constructors_returning_another_object" in (bindings or {}):
+            # D1660 (D73 §15): the AST decides whether the constructor's own scope returns another object; a bare
+            # `return;` or `return this` keeps the instance Nest serves (route_inventory_ts.js).
+            if match.start() in bindings["constructors_returning_another_object"]:
+                add(match, "return of another object in a constructor")
+        elif RETURN_WORD.search(code, body, bracket_end(code, body)):
+            add(match, "return of another object in a constructor")
     if found:
         raise AssertionError(f"{path.name}: a sealed name or a form the source contract does not list: {sorted(found)}")
 

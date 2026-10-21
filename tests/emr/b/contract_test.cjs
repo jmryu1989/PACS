@@ -430,6 +430,7 @@ function contractSuite() {
     async dutyRequestRow(tx, kind, requestId, phase, body) { tx.requests.push({ kind, requestId, phase, body }); }
     async clauseRows(tx, clauseId) { return this.ledger.clauses.filter(c => c.clauseId === clauseId).map(({ clauseId: _, ...row }) => row); }
     async entryRow(tx, eventId) { const e = this.ledger.visible(tx).find(x => x.eventId === eventId); return e ? this.ledger.stored(e) : null; }
+    async markerInTransaction(tx, stream, sequence) { return [...this.ledger.markers, ...tx.markers].find(m => m.stream === stream && m.sequence === sequence) ?? null; }
   }
   /** A started server's ledger: its seal is created by the start-up recovery over the empty chains, as in production. */
   async function world() {
@@ -1607,5 +1608,439 @@ function contractSuite() {
       assert(judge(evidence('failed', 0, [...tap(ids), 'not ok 11 - C03 synthetic failure'])).problems.some(p => p.startsWith('cases-not-passed')));
       assert(judge(evidence('twice', 0, tap([...ids, ids[0]]))).problems.some(p => p.startsWith('case-not-passed-once')));
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  });
+
+  // ═══════════════════════════ EMR-B2 (c) API-side components: C-A01/C-A02/C-A03 local subsets ═══════════════════════════
+  // REQ-B2C-01/03/04/05/06/07 -> RISK-B2C-DUAL-OWNER/CAPABILITY-LEAK/LATE-WORK/SPLIT-COMMIT/FALSE-ROLLBACK-OR-DUPLICATE/
+  // UNRECORDED-BODY -> C-A01 (raw HTTP admission), C-A02 (owned background work and the Nest lifecycle), C-A03 (record
+  // projection, remote scope lifetime, complete-proof receipts). Selected only under EMR_B2C_API_CASES (emr/units/b.json
+  // b2c.local_api_cases), so the B1 selection above stays exactly the declared cases. The service here is the actual
+  // ProtectedStateService, AccessSeal and external writer over the in-memory ledger model; the socket, worker and Linux
+  // boundaries are the wire/service suites and the image cells. Assertions observe effects, never private source form.
+  const apiSelected = process.env.EMR_B2C_API_CASES ? process.env.EMR_B2C_API_CASES.split(',') : [];
+  const apiTest = (name, body) => { if (apiSelected.includes(name.split(' ')[0])) test(name, body); };
+  const RP = load('emr-runtime/record-port.ts'), RS = load('emr-runtime/remote-state.ts'), BW = load('emr-runtime/background-work.ts');
+  const HA = load('emr-runtime/http-admission.ts'), NL = load('emr-runtime/nest-lifecycle.ts'), SS = load('emr-runtime/state-service.ts');
+  const P = load('emr-runtime/state-protocol.ts');
+  const net = require('node:net'), http = require('node:http'), { once } = require('node:events');
+  const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  const settle = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
+  const nest = name => require(path.join(api, 'node_modules/@nestjs', name));
+  if (apiSelected.length) {
+    assert.equal(new Set(apiSelected).size, apiSelected.length);
+    assert.equal(apiSelected.every(id => declaration.b2c.local_api_cases.includes(id)), true, 'only declared (c) API cases can be selected');
+    console.log('API_SELECTION ' + JSON.stringify(apiSelected));
+  }
+
+  /** The actual service over the memory ledger, reached in-process: the dispatcher, admission, seal and protected files
+   * are the product's; only the socket/worker transport is replaced by a direct dispatch with the same typed frames. */
+  async function serviceWorld(t) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-c-api-'));
+    const ledger = new MemoryLedger(), sql = memorySql(ledger);
+    const coordinator = new CO.StateCoordinator(dir, EW.executeExternal);
+    const journal = new J0.FailureJournal(dir, coordinator), seal = new S.AccessSeal(dir, sql, journal);
+    const pair = { instanceId: 'synthetic-api', chains: { viewing: ledger.streams.viewing.chainId, history: ledger.streams.history.chainId }, database: await sql.identity() };
+    const service = new SS.ProtectedStateService({ coordinator, journal, sql, seal, pair });
+    const peers = [];
+    t.after(async () => { service.close(); for (const socket of peers) socket.destroy(); await service.drained(); coordinator.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+    await service.start();
+    const connect = async (clientInstanceId = randomUUID(), faults = {}) => {
+      const socket = new net.Socket(); peers.push(socket);
+      const hello = await service.dispatch('api', { v: 1, requestId: randomUUID(), serviceEpoch: null, session: null, workId: null,
+        operation: 'hello', value: { protocol: 1, clientInstanceId } }, socket);
+      assert.equal(hello.ok, true, 'control session opens');
+      const session = { ...hello.result, serviceEpoch: hello.serviceEpoch, clientInstanceId };
+      const loss = new AbortController(), calls = [];
+      const client = { unavailable: loss.signal, calls, async callAsync(operation, workId, value) {
+        calls.push(operation);
+        const fault = faults[operation]?.shift();
+        if (fault) throw new P.StateProtocolError(fault, 'unknown');
+        const request = P.parseStateRequest({ v: 1, requestId: randomUUID(), serviceEpoch: session.serviceEpoch, session: session.session, workId, operation, value }, 'api');
+        const response = await service.dispatch('api', request, socket);
+        if (!response.ok) throw new P.StateProtocolError(response.error.code, response.error.outcome);
+        return response.result;
+      }, lose() { loss.abort(new P.StateProtocolError('UNAVAILABLE', 'unavailable')); } };
+      const remote = new RS.RemoteLedgerState(client, session, sql);
+      return { client, session, remote, store: new MemoryStore(ledger, remote), socket };
+    };
+    const status = async peer => (await peer.client.callAsync('status', null, { clientInstanceId: peer.session.clientInstanceId, chains: peer.session.chains }));
+    return { dir, ledger, sql, coordinator, journal, seal, service, pair, connect, status, state: () => coordinator.call('read') };
+  }
+
+  apiTest('C-A03.R01 record work pins its live remote scope before the first business SQL callback and keeps its lease through the scope\'s end', async () => {
+    const events = [], scopes = [];
+    const raw = { institution: { findMany: async () => [{ id: 'synthetic' }] } };
+    const fakeStore = {
+      async begin(workId) {
+        events.push('begin');
+        const gate = deferred();
+        const scope = { workId, gate, flag: null, ended: false,
+          async withAppendTransaction(callback) { events.push('tx'); return callback(raw); },
+          async appendInTransaction() { return { provisional: true, eventId: 'synthetic', entries: [] }; },
+          async confirm() { events.push('confirm'); return { eventId: 'synthetic', durableAt: '2026-10-21T00:00:00.000Z' }; },
+          async settleTransaction(tx, input, error, flag) { scope.flag = flag; },
+          async settle() { events.push('settle'); },
+          async end() { events.push('end-requested'); await gate.promise; scope.ended = true; events.push('ended'); } };
+        scopes.push(scope);
+        return scope;
+      },
+      async snapshot() { return {}; }, async resolveIdentity() { return 'member'; },
+    };
+    const { port, control } = RP.createRecordPort(fakeStore);
+    const work = port.begin();
+    assert.deepEqual(events, [], 'local admission alone reaches no service');
+    let token;
+    const value = await work.transaction(async tx => {
+      token = tx;
+      assert.deepEqual(events, ['begin', 'tx'], 'the live scope is pinned before the business callback runs');
+      assert.equal(Object.getPrototypeOf(tx), null); assert.equal(Object.isFrozen(tx), true);
+      assert.equal('$transaction' in tx || '$queryRaw' in tx || '$connect' in tx, false, 'no raw client capability on the projection');
+      const query = tx.institution.findMany({ select: { id: true } });
+      assert.equal(Object.getPrototypeOf(query), Promise.prototype, 'native promises only');
+      return (await query)[0].id;
+    });
+    assert.equal(value, 'synthetic');
+    code(() => token.institution.findMany(), 'EmrRecordTransactionRefused');
+    await work.append(provideEvent(A));
+    assert.deepEqual(events.slice(2), ['tx', 'confirm'], 'one scope serves the whole work');
+    work.end(); work.end();
+    code(() => work.append(provideEvent(A)), 'EmrRecordWorkEnded');
+    await settle();
+    assert.equal(control.live(), 1, 'the work stays live while its remote scope ends');
+    assert.equal(events.at(-1), 'end-requested');
+    let drained = false; control.drained().then(() => { drained = true; });
+    await settle(); assert.equal(drained, false);
+    scopes[0].gate.resolve(); await settle();
+    assert.equal(scopes[0].ended, true); assert.equal(control.live(), 0); assert.equal(drained, true);
+    // A work that never reached the service ends locally: no scope, no remote end.
+    const idle = port.begin(); idle.end(); await settle();
+    assert.equal(control.live(), 0); assert.equal(scopes.length, 1);
+    // The caller cannot claim a callback rollback: only an observed rejection is a rollback.
+    const second = port.begin();
+    await second.transaction(async tx => { token = tx; });
+    await second.settleTransaction(token, provideEvent(A), Error('unknown commit'), true);
+    assert.equal(scopes[1].flag, false, 'caller-supplied callbackFailed=true is not trusted');
+    await rejects(second.transaction(async tx => { token = tx; throw Error('callback refused'); }), 'callback refused');
+    await second.settleTransaction(token, provideEvent(A), Error('callback refused'), false);
+    assert.equal(scopes[1].flag, true, 'an observed callback rejection is settled as one');
+    second.end(); scopes[1].gate.resolve(); await settle();
+    control.close();
+    code(() => port.begin(), 'EmrRecordPortClosed');
+    assert.equal(control.live(), 0);
+  });
+
+  apiTest('C-A03.R02 the remote scope over the actual service: exact reserve, two-stream complete proof revalidated locally, genuine receipt, exact ack and replay', async t => {
+    const w = await serviceWorld(t), peer = await w.connect();
+    const { port, control } = RP.createRecordPort(peer.store), work = port.begin();
+    const event = changeEvent();
+    const receipt = await work.append(event);
+    assert.equal(C.isDurableReceipt(receipt), true, 'a genuine process-local receipt'); assert.equal(receipt.eventId, event.eventId);
+    assert.deepEqual(peer.client.calls, ['begin', 'reserve', 'reserve', 'confirm-bundle', 'acknowledge'], 'append = scope, one reserve per stream, one complete proof, one exact ack');
+    assert.equal(w.ledger.streams.viewing.entries.length, 1); assert.equal(w.ledger.streams.history.entries.length, 1);
+    let state = w.state();
+    const attestations = Object.values(state.bundles);
+    assert.equal(attestations.length, 1); assert.equal(attestations[0].phase, 'acknowledged', 'exact full-proof ack minimized the attestation');
+    assert.equal(Object.keys(state.terminal).length, 2, 'both stream attempts are terminal');
+    assert.deepEqual(w.seal.read().streams.viewing, { chainId: w.ledger.chainId, sequence: 1, hash: w.ledger.head.hash }, 'the service sealed the committed row');
+    // The same event again: the stored row is replayed, its original marker is the binding, no second attestation.
+    const again = await work.append(event);
+    assert.equal(again.eventId, event.eventId); assert.equal(C.isDurableReceipt(again), true);
+    assert.equal(w.ledger.streams.viewing.entries.length, 1, 'replay appends no row');
+    state = w.state();
+    assert.equal(Object.values(state.bundles).length, 1, 'replay publishes no second proof');
+    assert.equal(Object.keys(state.terminal).length, 2);
+    // Another content under the same event ID is refused by storage before any reservation.
+    await rejects(work.append({ ...event, requestId: 'request-2' }), 'AccessEventIdConflict');
+    assert.equal(Object.keys(w.state().intents).length, 0, 'a refused append leaves no pending intent');
+    work.end(); await control.drained();
+    assert.equal((await w.status(peer)).scopes, 0, 'the ended work released its service scope');
+  });
+
+  apiTest('C-A03.R03 a lost confirm reply resolves only through the service\'s fenced knowledge: committed proof, or unknown with no receipt and no resend', async t => {
+    const w = await serviceWorld(t);
+    // Lost reply after the service published: the lookup returns the committed proof and the receipt follows.
+    const lost = await w.connect(randomUUID(), { 'confirm-bundle': ['UNAVAILABLE'] });
+    const first = RP.createRecordPort(lost.store), work = first.port.begin(), event = changeEvent();
+    const receipt = await work.append(event);
+    assert.equal(C.isDurableReceipt(receipt), true);
+    assert.deepEqual(lost.client.calls.filter(c => c !== 'reserve'), ['begin', 'confirm-bundle', 'lookup-outcome', 'acknowledge']);
+    assert.equal(Object.values(w.state().bundles)[0].phase, 'acknowledged');
+    // Lost reply and no fenced knowledge yet: unknown stays unknown - journaled, no receipt, no second attempt.
+    const dark = await w.connect(randomUUID(), { 'confirm-bundle': ['UNAVAILABLE'], 'lookup-outcome': ['UNAVAILABLE'] });
+    const second = RP.createRecordPort(dark.store), other = second.port.begin(), next = changeEvent();
+    await rejects(other.append(next), 'CommitUnknown');
+    const records = w.journal.all().filter(r => r.kind === 'ledger-unavailable' && r.body.eventId === next.eventId);
+    assert.equal(records.length, 1, 'the unknown outcome is journaled once on the service');
+    assert.equal(records[0].body.cause, 'commit-unknown');
+    assert.equal(w.ledger.streams.viewing.entries.length, 2, 'the committed row stands; nothing was resent');
+    assert.equal(Object.keys(w.state().intents).length, 2, 'the pending reservation is retained for recovery, not retired by the client');
+    // A later process's fenced recovery is the only absence/commit authority; the client asked for nothing of the kind.
+    assert.equal(dark.client.calls.includes('end') || dark.client.calls.includes('acknowledge'), false);
+    work.end(); other.end(); await first.control.drained(); await second.control.drained();
+  });
+
+  apiTest('C-A03.R04 a rejected business callback settles only its own attempt through the service journal; recovery, not the client, retires the reservation', async t => {
+    const w = await serviceWorld(t), peer = await w.connect();
+    const { port, control } = RP.createRecordPort(peer.store), work = port.begin(), event = changeEvent();
+    let token, appended;
+    await rejects(work.transaction(async tx => { token = tx; appended = await work.appendInTransaction(tx, event); throw Error('business refused'); }), 'business refused');
+    assert.equal(appended.entries.length, 2, 'the fact was reserved inside the rolled-back transaction');
+    await work.settleTransaction(token, event, Error('business refused'), true);
+    const journaled = w.journal.all().filter(r => r.kind === 'append-rolled-back' && r.body.eventId === event.eventId);
+    assert.equal(journaled.length, 1); assert.equal(journaled[0].body.cause, 'business-rollback');
+    assert.equal(w.ledger.streams.viewing.entries.length, 0, 'no row committed');
+    assert.equal(Object.keys(w.state().intents).length, 2, 'the client requested no negative retirement');
+    assert.deepEqual(peer.client.calls.filter(c => c !== 'reserve' && c !== 'begin'), ['journal-record'], 'settlement is one journal record');
+    work.end(); await control.drained();
+    // The next service process settles the pending attempts negative under its own fence.
+    w.service.close(); await w.service.drained(); w.coordinator.close();
+    const coordinator = new CO.StateCoordinator(w.dir, EW.executeExternal), journal = new J0.FailureJournal(w.dir, coordinator);
+    const seal = new S.AccessSeal(w.dir, w.sql, journal), service = new SS.ProtectedStateService({ coordinator, journal, sql: w.sql, seal, pair: w.pair });
+    t.after(async () => { service.close(); await service.drained(); coordinator.close(); });
+    await service.start();
+    const recovered = coordinator.call('read');
+    assert.equal(Object.keys(recovered.intents).length, 0);
+    assert.deepEqual(Object.values(recovered.terminal).map(x => x.phase), ['aborted', 'aborted']);
+    assert.equal(journal.all().filter(r => r.kind === 'commit-not-found' && r.body.eventId === event.eventId).length, 2);
+  });
+
+  apiTest('C-A03.R05 a changed or partial proof grants no receipt and the lost control session closes admission for the rest of the process', async t => {
+    const w = await serviceWorld(t), peer = await w.connect();
+    const scope = await peer.remote.begin(randomUUID());
+    const original = await peer.store.begin(randomUUID());
+    const event = changeEvent();
+    let appended;
+    await original.withAppendTransaction(async tx => { appended = await original.appendInTransaction(tx, event); });
+    // A proof whose coverage, binding or stream set differs from this process's exact bindings is no receipt.
+    const forged = JSON.parse(JSON.stringify(appended));
+    forged.entries[0].binding.generation += 1;
+    await rejects(scope.confirm(forged), 'DurableReceiptRefused');
+    const partial = { ...appended, entries: [appended.entries[0]] };
+    await rejects(scope.confirm(partial), 'DurableReceiptRefused');
+    assert.equal(Object.values(w.state().bundles).length, 0, 'no attestation was published for a mismatched request');
+    const receipt = await scope.confirm(appended);
+    assert.equal(C.isDurableReceipt(receipt), true);
+    await scope.end(); await original.end();
+    // Control loss: the state refuses new scopes; the launcher ends the process (application.ts onLoss).
+    peer.client.lose();
+    await rejects(peer.remote.begin(randomUUID()), 'SealUnavailable');
+  });
+
+  apiTest('C-A02.R06 the background registry admits, cancels, drains and accounts the process\'s own tasks; nothing starts after the quiesce', async () => {
+    const registry = BW.createBackgroundWorkRegistry(), work = registry.work;
+    const gate = deferred();
+    let sawAbort = null, late = 0;
+    const started = work.run('held', async signal => { await gate.promise; sawAbort = signal.aborted; });
+    assert.equal(registry.live(), 1);
+    work.schedule('timer', 5, async () => { late++; });
+    work.every('interval', 5, async () => { late++; });
+    registry.quiesce(); registry.quiesce();
+    assert.equal(work.quiesced, true); assert.equal(work.signal.aborted, true);
+    code(() => work.run('refused', async () => { late++; }), 'EmrBackgroundQuiesced');
+    assert.equal(work.tryRun('refused', async () => { late++; }), null);
+    assert.equal(typeof work.schedule('refused', 1, async () => { late++; }), 'function');
+    let drained = false; registry.drained().then(() => { drained = true; });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(late, 0, 'quiesce cleared the owned timers and refused new tasks');
+    assert.equal(drained, false, 'the started task is still accounted');
+    gate.resolve(); await started.settled; await settle();
+    assert.equal(sawAbort, true, 'a started task sees the cancellation at its next await');
+    assert.equal(registry.live(), 0); assert.equal(drained, true);
+    assert.deepEqual(registry.accounting(), { started: 1, settled: 1, refused: 3, live: [] });
+    // A throwing task settles; an interval tick never overlaps its own running body.
+    const other = BW.createBackgroundWorkRegistry();
+    await other.work.run('throws', async () => { throw Error('synthetic'); }).settled;
+    assert.equal(other.live(), 0);
+    let ticks = 0, overlap = 0, running = 0;
+    const stop = other.work.every('slow', 2, async () => { ticks++; if (running++) overlap++; await new Promise(resolve => setTimeout(resolve, 12)); running--; });
+    await new Promise(resolve => setTimeout(resolve, 40)); stop();
+    assert.ok(ticks >= 1 && ticks <= 4, 'ticks: ' + ticks); assert.equal(overlap, 0);
+    other.quiesce(); await other.drained();
+  });
+
+  apiTest('C-A02.R07 Auth owns its rights import and IdP continuations: a held import that completes after the quiesce starts no Keycloak request; the control sends', { timeout: 20000 }, async () => {
+    const { AuthService } = load('auth.service.ts');
+    const user = { id: 'synthetic-member', username: 'synthetic', email: null, firstName: 'Syn', lastName: 'Thetic', emailVerified: true, enabled: false, groups: ['hospital-a'], roles: ['radiologist'] };
+    function fixture(hold) {
+      const held = deferred(), keycloakCalls = [];
+      const prisma = {
+        memberRightsImport: { findUnique: async () => null },
+        $transaction: async () => { if (hold) await held.promise; return { legacy: [{ id: 1, sub: user.id, target: 'legacy-enable:' + user.id, generation: 1 }], bound: 0 }; },
+        idpSessionEnd: { findMany: async () => [], updateMany: async () => ({ count: 0 }), deleteMany: async () => ({ count: 0 }) },
+        authSession: { findMany: async () => [] },
+        providerChange: { updateMany: async () => ({ count: 1 }), deleteMany: async () => ({ count: 0 }) },
+      };
+      const keycloak = { listUsers: async () => ({ total: 1, users: [user] }),
+        setEnabled: async (...args) => { keycloakCalls.push(['setEnabled', ...args]); }, setGroups: async () => { keycloakCalls.push(['setGroups']); },
+        setRoles: async () => { keycloakCalls.push(['setRoles']); }, endSession: async () => { keycloakCalls.push(['endSession']); return { state: 'done', outcome: 'completed' }; } };
+      const registry = BW.createBackgroundWorkRegistry();
+      return { held, keycloakCalls, registry, auth: new AuthService(prisma, keycloak, registry.work) };
+    }
+    // Control: the import completes while serving and publishes the legacy enable to the provider.
+    const control = fixture(false);
+    await control.auth.onModuleInit(); await control.registry.drained();
+    assert.deepEqual(control.keycloakCalls, [['setEnabled', user.id, true]], 'the import actually sends when the process serves');
+    control.auth.onModuleDestroy(); control.registry.quiesce();
+    // The quiesce arrives while the import's DB transaction is held; its completion starts no provider request.
+    const quiesced = fixture(true);
+    await quiesced.auth.onModuleInit(); await settle();
+    assert.ok(quiesced.registry.live() >= 1, 'the import is an accounted task');
+    assert.deepEqual(quiesced.registry.accounting().live.filter(name => name === 'auth.importRights'), ['auth.importRights']);
+    quiesced.registry.quiesce();
+    quiesced.held.resolve();
+    await quiesced.registry.drained();
+    assert.deepEqual(quiesced.keycloakCalls, [], 'held import DB completion after quiesce starts no Keycloak HTTP');
+    assert.equal(quiesced.registry.live(), 0);
+    assert.equal(quiesced.registry.accounting().refused >= 0, true);
+    quiesced.auth.onModuleDestroy();
+    // Outside the launcher the service owns a private registry and quiesces it itself.
+    const alone = fixture(false);
+    const own = new AuthService({ ...alone.auth.prisma }, {}, undefined);
+    assert.equal(typeof own.onModuleDestroy, 'function');
+    own.onModuleDestroy();
+  });
+
+  apiTest('C-A01.R08 raw admission owns expectation and unsupported transports and rejects a preconnected request after stop (r2 C42 carried)', async () => {
+    const latch = new AbortController(), entries = [];
+    const server = http.createServer((request, response) => { entries.push(request.url); response.setHeader('Connection', 'close'); response.end('admitted'); });
+    const admission = HA.installHttpAdmission(server, latch.signal);
+    server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const exchange = async (bytes, connected) => {
+      const socket = net.connect(server.address().port, '127.0.0.1'); let wire = '';
+      socket.on('data', chunk => { wire += chunk.toString(); });
+      socket.on('error', () => {});
+      const closed = new Promise(resolve => socket.once('close', resolve));
+      await once(socket, 'connect');
+      if (connected) connected();
+      socket.end(bytes); await closed; return wire;
+    };
+    try {
+      admission.verifyOwnership();
+      const continued = await exchange('POST /continue HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\nx');
+      assert.deepEqual([...continued.matchAll(/HTTP\/1\.1 (\d+)/g)].map(m => Number(m[1])), [100, 200]);
+      assert.deepEqual(entries, ['/continue']);
+      assert.match(await exchange('POST /expect HTTP/1.1\r\nHost: localhost\r\nExpect: unsupported\r\nContent-Length: 0\r\n\r\n'), /HTTP\/1\.1 417/);
+      assert.equal(await exchange('GET /upgrade HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: synthetic\r\n\r\n'), '');
+      assert.equal(await exchange('CONNECT localhost:1234 HTTP/1.1\r\nHost: localhost\r\n\r\n'), '');
+      const stopped = await exchange('GET /fresh HTTP/1.1\r\nHost: localhost\r\n\r\n', () => latch.abort());
+      assert.match(stopped, /HTTP\/1\.1 503/); assert.match(stopped, /Connection: close/i); assert.match(stopped, /Cache-Control: no-store/i);
+      assert.deepEqual(entries, ['/continue'], 'no downstream entry after the stop');
+      for (const event of ['request', 'checkContinue', 'checkExpectation', 'upgrade', 'connect']) {
+        const foreign = () => {}; server.on(event, foreign);
+        code(() => admission.verifyOwnership(), 'EmrHttpOwnershipRefused'); server.removeListener(event, foreign);
+      }
+      const duplicate = http.createServer(() => {}); duplicate.on('request', () => {});
+      code(() => HA.installHttpAdmission(duplicate, latch.signal), 'EmrHttpOwnershipRefused');
+    } finally { admission.destroyAll(); await new Promise(resolve => server.close(resolve)); }
+  });
+
+  apiTest('C-A02.R09 every Nest lifecycle stage joins rejecting and slow peers and invokes actual identities once (r2 C36 carried)', { timeout: 30000 }, async () => {
+    const { NestFactory } = nest('core'), { Module } = nest('common');
+    const hooks = ['onModuleInit', 'onApplicationBootstrap', 'onModuleDestroy', 'beforeApplicationShutdown', 'onApplicationShutdown'];
+    for (const failure of [...hooks, 'dispose']) {
+      const trace = [], latch = new AbortController();
+      const shared = Object.fromEntries(hooks.map(hook => [hook, () => { trace.push('shared:' + hook); }]));
+      const slow = Object.fromEntries(hooks.map(hook => [hook, async () => {
+        trace.push('slow-start:' + hook); await new Promise(resolve => setTimeout(resolve, 15)); trace.push('slow-end:' + hook);
+        if (hook === failure) throw Error('slow rejection');
+      }]));
+      const fast = Object.fromEntries(hooks.map(hook => [hook, () => { trace.push('fast:' + hook); if (hook === failure) throw Error('fast rejection'); }]));
+      class Child {} Module({ providers: [{ provide: 'shared-child', useValue: shared }] })(Child);
+      class Root {} Module({ imports: [Child], providers: [{ provide: 'shared-a', useValue: shared }, { provide: 'shared-b', useValue: shared },
+        { provide: 'slow', useValue: slow }, { provide: 'fast', useValue: fast }] })(Root);
+      const app = await NestFactory.create(Root, { logger: false, abortOnError: false });
+      const lifecycle = NL.createNestLifecycle(app, latch.signal);
+      const close = app.getHttpAdapter().close.bind(app.getHttpAdapter());
+      app.getHttpAdapter().close = async () => { trace.push('dispose'); await close(); if (failure === 'dispose') throw Error('dispose'); };
+      if (failure === 'onModuleInit' || failure === 'onApplicationBootstrap') {
+        await assert.rejects(app.init());
+        assert(trace.includes('slow-end:' + failure), 'rejected initialization has joined the slow acquisition');
+      } else await app.init();
+      const promise = lifecycle.close('SIGTERM');
+      assert.equal(lifecycle.close('SIGINT'), promise);
+      if (failure === 'onModuleInit' || failure === 'onApplicationBootstrap') await promise;
+      else await assert.rejects(promise);
+      const expected = failure === 'onModuleInit' ? hooks.filter(hook => hook !== 'onApplicationBootstrap') : hooks;
+      for (const hook of expected) {
+        assert.equal(trace.filter(value => value === 'shared:' + hook).length, 1, failure + ':' + hook);
+        assert.equal(trace.filter(value => value === 'slow-end:' + hook).length, 1);
+      }
+      for (const [left, right] of [['onModuleDestroy', 'beforeApplicationShutdown'], ['beforeApplicationShutdown', 'onApplicationShutdown']]) {
+        assert(trace.indexOf('slow-end:' + left) < trace.indexOf('shared:' + right), failure + ': peer settlement before next stage');
+      }
+      assert.equal(trace.filter(value => value === 'dispose').length, 1);
+      assert.equal(lifecycle.accounting().some(stage => stage.status === 'running'), false);
+    }
+  });
+
+  apiTest('C-A02.R10 Nest scope eligibility includes static transients, module hooks and initialized middleware and excludes request trees (r2 C39 carried)', async () => {
+    const { Module, Injectable, Inject, Scope } = nest('common'), { NestFactory } = nest('core');
+    const events = [];
+    let identity = 0;
+    class Transient { constructor() { this.id = ++identity; } onModuleDestroy() { events.push('transient-' + this.id); } }
+    Injectable({ scope: Scope.TRANSIENT })(Transient);
+    class Request { onModuleDestroy() { events.push('request'); } }
+    Injectable({ scope: Scope.REQUEST })(Request);
+    class Alpha { constructor(dependency) { this.dependency = dependency; } onModuleDestroy() { events.push('a'); } }
+    Inject(Transient)(Alpha, undefined, 0); Injectable()(Alpha);
+    class Beta { constructor(dependency) { this.dependency = dependency; } onModuleDestroy() { events.push('b'); } }
+    Inject(Transient)(Beta, undefined, 0); Injectable()(Beta);
+    class Scoped { constructor(dependency) { this.dependency = dependency; } onModuleDestroy() { events.push('request-tree'); } }
+    Inject(Request)(Scoped, undefined, 0); Injectable()(Scoped);
+    class Middleware { use(_req, _res, next) { next(); } onModuleDestroy() { events.push('middleware'); } }
+    Injectable()(Middleware);
+    class Root {
+      configure(consumer) { consumer.apply(Middleware).forRoutes('*'); }
+      onModuleDestroy() { events.push('module'); }
+    }
+    Module({ providers: [Transient, Request, Alpha, Beta, Scoped] })(Root);
+    const app = await NestFactory.create(Root, { logger: false, abortOnError: false });
+    const lifecycle = NL.createNestLifecycle(app, new AbortController().signal);
+    await app.init(); await app.resolve(Scoped);
+    const transientIds = [app.get(Alpha).dependency.id, app.get(Beta).dependency.id];
+    assert.equal(new Set(transientIds).size, 2);
+    await lifecycle.close();
+    assert.deepEqual(events.filter(value => value.startsWith('transient-')).sort(), transientIds.map(id => 'transient-' + id).sort());
+    assert.equal(events.filter(value => value === 'middleware').length, 1);
+    assert.equal(events.filter(value => value === 'module').length, 1);
+    assert(!events.includes('request') && !events.includes('request-tree'));
+    assert.equal(events.at(-1), 'module', 'module runs after its eligible provider batches');
+  });
+
+  apiTest('C-A03.R11 the client runtime refuses a protected-state directory, an unpaired service hello and a repeated start; it never constructs an owner', async t => {
+    const AP = load('emr-runtime/application.ts');
+    // The socket path is platform-absolute here; the deployment's /run/kin-emr/api.sock shape is the image cell's.
+    const base = { DATABASE_URL: 'postgresql://kin_runtime:synthetic@127.0.0.1:1/kin', KIN_EMR_STATE_SOCKET: path.resolve('/run/kin-emr-api/writer.sock'), KIN_EMR_INSTANCE_ID: 'synthetic-api' };
+    for (const [env, phase, codeName] of [
+      [{ ...base, KIN_EMR_STATE_DIR: '/var/lib/kin/emr' }, 'config', 'EmrStateDirectoryForbidden'],
+      [{ ...base, KIN_EMR_STATE_SOCKET: 'relative.sock' }, 'config', 'EmrStateSocketRequired'],
+      [{ ...base, KIN_EMR_INSTANCE_ID: '' }, 'config', 'EmrStateInstanceRequired'],
+      [{ ...base, DATABASE_URL: 'mysql://x' }, 'config', 'EmrDatabaseUrlRequired'],
+    ]) {
+      try { new AP.EmrApiClientRuntime(env); assert.fail('refused'); }
+      catch (error) { assert.equal(error.phase, phase); assert.equal(error.failure?.code, codeName, codeName); }
+    }
+    // The pair comparison is independent of the hello: a service paired with another database or chain refuses before composition.
+    const MF = load('emr-runtime/manifest.ts');
+    assert.equal(typeof MF.startupFailureMessage, 'function');
+    assert.match(MF.startupFailureMessage('pair', Object.assign(new Error('x'), { code: 'EmrStatePairMismatch' })), /pair\/EmrStatePairMismatch/);
+    assert.match(MF.startupFailureMessage('session', new P.StateProtocolError('NOT_READY', 'not-started')), /session\/NOT_READY/);
+    assert.match(MF.stopFailureMessage('drain'), /drain/);
+    // No owner primitive is reachable from the API runtime module: it exports the client runtime and the failure class only.
+    assert.deepEqual(Object.keys(AP).sort(), ['EmrApiClientRuntime', 'EmrStartupFailure']);
+    // A stop requested while the connect is in flight ends the start at that step as an interruption (exit 0 for the
+    // launcher); a start asked for afterwards is refused before it creates anything; the store is never handed out.
+    const runtime = new AP.EmrApiClientRuntime(base);
+    const started = runtime.start();
+    runtime.interrupt();
+    await assert.rejects(started, error => error.phase === 'connect' && error.interrupted === true);
+    await assert.rejects(runtime.start(), error => error?.code === 'EmrStartupRepeated');
+    code(() => runtime.store(), 'EmrRuntimeNotReady');
+    await runtime.close();
+    const cold = new AP.EmrApiClientRuntime(base);
+    cold.interrupt();
+    await assert.rejects(cold.start(), error => error?.code === 'EmrStartupRepeated');
+    await cold.close();
   });
 }

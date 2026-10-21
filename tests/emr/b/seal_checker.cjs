@@ -480,6 +480,36 @@ async function named(){
     catch(e){if(!['UnsealedEntryUnexplained','SealTailMismatch'].includes(e.code))throw e;result['X-STALE'].refusal={code:e.code,detail:e.detail};}
     }
   }
+  // X-STALE-ALIAS (D1660, the designated M32 witness): E1's prepared expiry proof stays pending after its
+  // unknown COMMIT while the DB holds a byte-identical checkpoint row committed by a DISTINCT attempt E2
+  // (same content/hash, other attempt/bundle/generation marker). Slot, intent and proof of E1 form an
+  // admissible identity graph, so structural admission passes; only the marker binding at proof use can
+  // tell that E1's prepared proof is no authority for E2's committed row. Healthy must refuse exactly there
+  // (UnsealedEntryUnexplained); a proof keyed by slot alone (M32) accepts and recovers a forged frontier.
+  {
+    const w=create();await w.seed();await w.start('E');await w.commit('E','unknown0');await w.deliver('E');
+    const staged=clone(w.actors.E.staged), marker=clone(w.actors.E.marker);
+    assert(Object.keys(w.coordinator.call('read').proofs).length>0,'the alias attack must retain an actual prepared expiry proof');
+    let healthy=true;try{await create(w.snapshot()).seal.recoverAtStart();}catch(e){if(e.code!=='UnsealedEntryUnexplained')throw e;healthy=false;finding('I2',['X-STALE-ALIAS-healthy-sibling'],{code:e.code});}
+    result['X-STALE-ALIAS']={healthy,accepted:false,refusal:null,structuralAdmission:null};
+    if(healthy){
+      const alias={...marker,attemptId:'00000000-0000-4000-8000-0000000000e2',bundleId:'00000000-0000-4000-8000-0000000000b2',generation:marker.generation+1};
+      alias.proofDigest=sha(JSON.stringify({format:1,binding:(({proofDigest:_,...rest})=>rest)(alias)}));
+      w.rows=staged.rows;w.head={...w.head,sequence:staged.row.sequence,hash:staged.row.hash};
+      w.markers=w.markers.filter(m=>m.sequence<marker.sequence).concat(alias);
+      const before=JSON.stringify({rows:w.rows,markers:w.markers});
+      const r=create(w.snapshot(),true,true);
+      // The identity graph must pass structural admission on its own; the witness is a proof-use refusal.
+      try{r.EW.validateAttemptIdentities(r.coordinator.call('read'));result['X-STALE-ALIAS'].structuralAdmission='passed';}
+      catch(e){result['X-STALE-ALIAS'].structuralAdmission=e.code;}
+      try{await r.seal.recoverAtStart();result['X-STALE-ALIAS'].accepted=true;
+        finding('I1-stale-proof',['E1:prepared-proof','E1:unknown0','E2:identical-checkpoint-COMMIT','restart:E1-proof-used-for-E2-marker'],
+          {accepted:true,proofAttempt:marker.attemptId,markerAttempt:alias.attemptId,sealed:r.seal.read().streams.viewing});}
+      catch(e){if(!['UnsealedEntryUnexplained','SealTailMismatch','LedgerChainBroken'].includes(e.code))throw e;result['X-STALE-ALIAS'].refusal={code:e.code,detail:e.detail};}
+      assert.equal(JSON.stringify({rows:w.rows,markers:w.markers}),before,'alias refusal preserves raw DB facts');
+      console.log(JSON.stringify({case:'X-STALE-ALIAS',...result['X-STALE-ALIAS']}));
+    }
+  }
   {
     const w=create();await w.seed();w.failBinding=true;
     await w.start('E');await w.commit('E','ok');await w.deliver('E');

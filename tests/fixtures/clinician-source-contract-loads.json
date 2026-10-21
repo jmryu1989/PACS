@@ -134,11 +134,37 @@
     "refused": "require not called"
   },
   {
-    "name": "removed process stdout allowance is refused",
+    "name": "process stdout and stderr writes are listed members (D1660 EMR-B2 c: the state-service root's closed readiness and failure lines)",
     "files": {
-      "probe.ts": "process.stdout.write('entry');\nexport const value = 1;\n"
+      "probe.ts": "process.stdout.write('entry');\nprocess.stderr.write('entry');\nexport const value = 1;\n"
+    }
+  },
+  {
+    "name": "process signal subscription and getuid are listed members (D1660 EMR-B2 c: the fixed-identity service root)",
+    "files": {
+      "probe.ts": "process.on('SIGTERM', () => {});\nexport const value = process.getuid();\n"
+    }
+  },
+  {
+    "name": "an unlisted process member stays refused by the AST reader",
+    "files": {
+      "probe.ts": "export const value = process.binding('fs');\n"
     },
-    "refused": "process.stdout"
+    "refused": "process.binding"
+  },
+  {
+    "name": "an optional or computed process member stays refused by the AST reader",
+    "files": {
+      "probe.ts": "const key = 'env';\nexport const value = [process?.env, process[key]];\n"
+    },
+    "refused": "process[...]"
+  },
+  {
+    "name": "a project declaration named process is refused as a rebinding",
+    "files": {
+      "probe.ts": "export const read = (process: { env: object }) => process.env;\n"
+    },
+    "refused": "process rebound by a declaration"
   },
   {
     "name": "constructor callbacks return from their own scopes",
@@ -151,13 +177,19 @@
     "files": {
       "probe.ts": "export class Peer { constructor() { return {}; } }\n"
     },
-    "refused": "return in a constructor"
+    "refused": "return of another object in a constructor"
   },
   {
     "name": "constructor return inside control flow stays refused",
     "files": {
       "probe.ts": "export class Peer { constructor(flag: boolean) { const callback = () => { return 1; }; if (flag) { return {}; } callback(); } }\n"
     },
-    "refused": "return in a constructor"
+    "refused": "return of another object in a constructor"
+  },
+  {
+    "name": "a bare early return or return this keeps the constructed instance (D1660 EMR-B2 c)",
+    "files": {
+      "probe.ts": "export class Peer { constructor(flag: boolean) { if (flag) return; this.flag = (() => { return this; })(); return this; } flag: unknown; }\n"
+    }
   }
 ]

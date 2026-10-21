@@ -3,7 +3,7 @@
 
   python scripts/emr-compose.py sql provision        print the provisioning SQL (no secrets; psql reads them via \\getenv)
   python scripts/emr-compose.py check [--json]        the unit declaration emr/units/b.json against this checkout
-  python scripts/emr-compose.py check-run --kind node|unittest --run-dir DIR --cases-from contract|live
+  python scripts/emr-compose.py check-run --kind node|unittest --run-dir DIR --cases-from contract|live|b2c-api
                                                       a record-run.py evidence directory against the declared cases
 
 This tool never connects to a database or a Docker daemon and never runs an operational command. Provisioning is
@@ -203,9 +203,18 @@ def check(root, declaration_path):
     if not isinstance(declaration, dict) or set(declaration) != DECLARATION_KEYS:
         return ["declaration-keys: " + ",".join(sorted(set(declaration) ^ DECLARATION_KEYS if isinstance(declaration, dict) else DECLARATION_KEYS))]
     wire = declaration["b2c"]
-    wire_keys = {"status", "option", "protocol", "local_wire_cases", "local_wire_file", "local_service_cases", "local_service_file", "acceptance_note", "requirements", "terminal_mutants", "identity_mutants"}
+    wire_keys = {"status", "option", "protocol", "local_wire_cases", "local_wire_file", "local_service_cases", "local_service_file",
+                 "local_api_cases", "local_api_file", "local_api_selection", "acceptance_note", "requirements", "terminal_mutants", "identity_mutants"}
     if not isinstance(wire, dict) or set(wire) != wire_keys or wire.get("option") != "c":
         return ["b2c-declaration-invalid"]
+    # EMR-B2 (c) API-side component cases live in the B1 contract file under their own selection variable, so the B1
+    # selection stays exactly its declared cases; the executed run compares the selection it printed with this list.
+    api_cases = wire["local_api_cases"]
+    if not isinstance(api_cases, list) or not api_cases or any(
+            not isinstance(case, str) or re.fullmatch(r"C-A0[123]\.R[0-9]{2}", case) is None for case in api_cases) or len(api_cases) != len(set(api_cases)):
+        problem(problems, "b2c-api-cases-invalid")
+    if wire["local_api_file"] != "tests/emr/b/contract_test.cjs" or not (root / wire["local_api_file"]).is_file() or wire["local_api_selection"] != "EMR_B2C_API_CASES":
+        problem(problems, "b2c-api-test-missing")
     cases = wire["local_wire_cases"]
     if not isinstance(cases, list) or not cases or any(
             not isinstance(case, str) or re.fullmatch(r"C-S04\.W[0-9]{2}", case) is None for case in cases) or len(cases) != len(set(cases)):
@@ -291,6 +300,9 @@ def check(root, declaration_path):
 
 
 def run_cases(declaration, which):
+    # EMR-B2 (c): the API-side component cases are declared under b2c and selected by EMR_B2C_API_CASES.
+    if which == "b2c-api":
+        return list(declaration["b2c"]["local_api_cases"])
     return [case.split(" ", 1)[0] for case in declaration["cases"][which][declaration["round"]]]
 
 
@@ -341,7 +353,7 @@ def main(argv=None):
     run = sub.add_parser("check-run")
     run.add_argument("--declaration", type=Path, default=DECLARATION)
     run.add_argument("--kind", choices=["node", "unittest"], required=True)
-    run.add_argument("--cases-from", choices=["contract", "live"], required=True)
+    run.add_argument("--cases-from", choices=["contract", "live", "b2c-api"], required=True)
     run.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "sql":

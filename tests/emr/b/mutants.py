@@ -174,9 +174,16 @@ TERMINAL_MUTANTS = {
         ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n",
          "    if (this.load().terminal[key(binding.stream, binding.attemptId)]) this.change(state => { ++state.generation; });\n"
          "    let superseded = false;\n")]),
+    # D1660 re-anchor: compaction now takes a force argument and writes the checkpoint through
+    # atomic(). Acknowledged attestations are derived from their terminals, so a checkpoint that
+    # drops terminal identities can only load if their attestations go with them; the semantic
+    # fault (durable exclusion lost at compaction) is unchanged and D1641-T06's restart replay
+    # observes it as a mutated durable state instead of a refused reserve.
     "D1641-M05": ("checkpoint compaction drops terminal identities", [
-        ("api/src/emr-runtime/external-writer.ts", "    if (cached.offset < 4 * 1024 * 1024) return;\n",
-         "    if (cached.offset < 4 * 1024 * 1024) return;\n    envelope.state.terminal = {};\n")]),
+        ("api/src/emr-runtime/external-writer.ts",
+         "    atomic(file, { state: envelope.state, publishing: false, digest: hash(envelope.state) });\n    const fd = fs.openSync(log, 'w', 0o600);\n",
+         "    envelope.state.terminal = {}; envelope.state.bundles = {};\n"
+         "    atomic(file, { state: envelope.state, publishing: false, digest: hash(envelope.state) });\n    const fd = fs.openSync(log, 'w', 0o600);\n")]),
     "D1641-M06": ("terminal WAL success is returned without its flush barrier", [
         ("api/src/emr-runtime/external-writer.ts", "fs.writeFileSync(context.log.fd, line); fs.fdatasyncSync(context.log.fd);",
          "fs.writeFileSync(context.log.fd, line);")]),
@@ -320,8 +327,17 @@ IDENTITY_MUTANTS = {
          "    this.change(state => { delete state.terminal[key(_stream, _attemptId)]; });\n    return Promise.resolve();\n")]),
     "D1650-M07": ("startup normalizes contradictory attempt state", [
         ("api/src/emr-runtime/seal.ts", "      this.attempts(this.load());\n", "")]),
+    # D1660 re-anchor: identity validation moved from seal.ts into external-writer.ts, where it runs on
+    # every stored-state admission (also the publication that creates the alias). Rejecting the alias
+    # inside validateAttemptIdentities would fail D1650-T08A at its publication step, not at the load
+    # the case judges, so the same fault (a retained sealed expiry alias treated as a contradictory
+    # live attempt) is injected where only a (re)starting owner reads the stored state: pair admission.
     "D1650-M07-ALIAS": ("valid historical expiry alias is rejected", [
-        ("api/src/emr-runtime/seal.ts", "      if (terminal) {\n", "      if (terminal) {\n        corrupt();\n")]),
+        ("api/src/emr-runtime/external-writer.ts",
+         "    if (source) replay(log, { base: source.digest, offset: 0, envelope: clone(source) }, source.state.revision, false);\n    context.pair = clone(value);\n",
+         "    if (source) { const admitted = { base: source.digest, offset: 0, envelope: clone(source) }; replay(log, admitted, source.state.revision, false);\n"
+         "      if (Object.values(admitted.envelope.state.slots).some((q: any) => admitted.envelope.state.terminal[q.stream + ':' + q.attemptId])) return fail('UnsealedEntryUnexplained'); }\n"
+         "    context.pair = clone(value);\n")]),
     "D1650-M08": ("a committed tombstone is misclassified as fenced negative", [
         ("api/src/emr-runtime/state-service.ts", "terminal?.phase === 'aborted' && exactBinding(b, terminal.binding)",
          "terminal && exactBinding(b, terminal.binding)")]),

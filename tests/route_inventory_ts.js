@@ -29,6 +29,11 @@
  * code-point offset, using this same program and its AST. The closed source contract decides which forms to accept.
  * EMR-R1-LAND: {"classPropertySource": maskedSource} returns {"class_properties": [codePointOffset, ...]} without
  * changing the binding program's source set. Only AST-confirmed property names are excluded by the heading reader.
+ * D1660 (EMR-B2 c, D73 §15): contracts also reports, per file, constructors_returning_another_object (the constructor
+ * keyword offsets whose own scope returns an expression other than `this`) and process_uses ([offset, kind, member]
+ * for every use of the global process: 'member' by '.' or one plain literal key, 'optional', 'computed', 'value' or
+ * 'shadow' for a project declaration of that name); null for a file that does not parse. The closed source contract
+ * decides which members and forms are accepted.
  */
 const path = require('path');
 const readline = require('readline');
@@ -206,19 +211,53 @@ function fixedPrototypeComparison(node, file) {
   return codePoint(file, node.expression.name.getStart(file));
 }
 
-function constructorWithoutReturn(node, file) {
+function constructorReturningAnotherObject(node, file) {
+  // D1660 (D73 §15): only a `return <expression>` other than `return this` can substitute the instance Nest serves;
+  // a bare `return;` ends the constructor early and keeps it. Nested callbacks and classes return from their own
+  // scope, never replace the outer constructor's instance. Use TS's scope nodes rather than text.
   if (!ts.isConstructorDeclaration(node) || !node.body) return null;
-  let returns = false;
+  let substitutes = false;
   const visit = child => {
-    if (ts.isReturnStatement(child)) { returns = true; return; }
-    // Nested callbacks and classes return from their own scope, never replace
-    // the outer constructor's instance. Use TS's scope nodes rather than text.
+    if (ts.isReturnStatement(child)) {
+      let value = child.expression;
+      while (value && ts.isParenthesizedExpression(value)) value = value.expression;
+      if (value && value.kind !== ts.SyntaxKind.ThisKeyword) substitutes = true;
+      return;
+    }
     if (ts.isFunctionLike(child) || ts.isClassLike(child)) return;
     ts.forEachChild(child, visit);
   };
   visit(node.body);
   const keyword = node.getChildren(file).find(child => child.kind === ts.SyntaxKind.ConstructorKeyword);
-  return !returns && keyword ? codePoint(file, keyword.getStart(file)) : null;
+  return substitutes && keyword ? codePoint(file, keyword.getStart(file)) : null;
+}
+
+// D1660 (D73 §15): every use of the global `process`, judged by the AST and the checker's binding instead of a
+// source-text reader. A member reached by '.' or by one plain literal key is reported by name (the source contract
+// lists the members that neither load nor evaluate code nor write metadata); every other use is reported as what it
+// is: a computed key, an optional member, the value handed on, or a project declaration that rebinds the name.
+function processUse(node, file, checker, files) {
+  if (!ts.isIdentifier(node) || node.text !== 'process') return null;
+  const parent = node.parent;
+  if (!parent) return null;
+  if ((ts.isPropertyAccessExpression(parent) && parent.name === node) || (ts.isQualifiedName(parent) && parent.right === node) ||
+      (ts.isBindingElement(parent) && parent.propertyName === node) ||
+      ((ts.isPropertyAssignment(parent) || ts.isPropertySignature(parent) || ts.isPropertyDeclaration(parent) ||
+        ts.isMethodDeclaration(parent) || ts.isMethodSignature(parent) || ts.isEnumMember(parent) ||
+        ts.isGetAccessorDeclaration(parent) || ts.isSetAccessorDeclaration(parent)) && parent.name === node)) return null;
+  const offset = codePoint(file, node.getStart(file));
+  const symbol = target(checker, checker.getSymbolAtLocation(node));
+  const declared = symbol && symbol.declarations && symbol.declarations.length ? symbol.declarations : [];
+  if (declared.length && declared.every(d => files.has(absolute(d.getSourceFile().fileName)))) return [offset, 'shadow', null];
+  if (ts.isPropertyAccessExpression(parent) && parent.expression === node) {
+    return parent.questionDotToken ? [offset, 'optional', parent.name.text] : [offset, 'member', parent.name.text];
+  }
+  if (ts.isElementAccessExpression(parent) && parent.expression === node) {
+    const key = parent.argumentExpression;
+    if (!parent.questionDotToken && key && (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key))) return [offset, 'member', key.text];
+    return [offset, 'computed', null];
+  }
+  return [offset, 'value', null];
 }
 
 function answer(request) {
@@ -271,15 +310,17 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [], constructors = [];
+    const loads = [], comparisons = [], constructors = [], processUses = [];
     const visit = node => {
       if (!broken) {
-        const constructor = constructorWithoutReturn(node, file);
+        const constructor = constructorReturningAnotherObject(node, file);
         if (constructor !== null) constructors.push(constructor);
         const load = relativeLoad(node, file, program, checker, known, files);
         if (load) loads.push(load);
         const comparison = fixedPrototypeComparison(node, file);
         if (comparison !== null) comparisons.push(comparison);
+        const use = processUse(node, file, checker, files);
+        if (use) processUses.push(use);
       }
       if (ts.isIdentifier(node) && names.has(node.text)) {
         const start = node.getStart(file);
@@ -291,7 +332,8 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
-    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors };
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons,
+      constructors_returning_another_object: constructors, process_uses: broken ? null : processUses };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {
