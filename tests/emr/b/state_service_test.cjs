@@ -134,7 +134,8 @@ function directoryHashes(directory) {
 async function complete(f, work, acknowledge = false) {
   const item = await f.reserve(work); item.commit();
   const proof = await work.call('confirm-bundle', item.bundle); assert.equal(proof.ok, true, 'new complete event seals');
-  if (acknowledge) assert.equal((await work.call('acknowledge', { proof: proof.result, bindings: item.bundle.bindings })).ok, true);
+  if (acknowledge) assert.equal((await work.call('acknowledge', { proof: proof.result, bindings: item.bundle.bindings })).ok, true,
+    'exact full-proof acknowledgement must be accepted');
   return { ...item, proof: proof.result };
 }
 async function replayObservation(f, work, binding) {
@@ -524,8 +525,8 @@ test('D1641-T05 missing lost duplicate and invalid acknowledgements never erase 
     const f = await fixture(t), work = await (await f.hello()).work(), original = await complete(f, work);
     const value = { proof: original.proof, bindings: original.bundle.bindings };
     if (mode === 'lost' || mode === 'duplicate') {
-      await work.call('acknowledge', value);
-      if (mode === 'duplicate') assert.equal((await work.call('acknowledge', value)).ok, true);
+      assert.equal((await work.call('acknowledge', value)).ok, true, 'exact full-proof acknowledgement must be accepted');
+      if (mode === 'duplicate') assert.equal((await work.call('acknowledge', value)).ok, true, 'exact full-proof acknowledgement must be accepted');
     }
     if (mode === 'forged') {
       const forged = structuredClone(value); forged.proof.entries[0].sealed.hash = 'f'.repeat(64);

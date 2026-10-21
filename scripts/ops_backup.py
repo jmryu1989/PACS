@@ -43,6 +43,10 @@ FILES = ("kin.dump", "keycloak.dump", "orthanc.tgz", ".env", "docker-compose.yml
 EMR_FILES = ("cluster-roles.sql", "emr-state.tgz", "emr-catalog.json")
 EMR_STATE = "/var/lib/kin-emr"
 EMR_TABLESPACE = "/var/lib/postgresql/emr-access/ts"
+# EMR-B2 (c): the protected-state service of the Compose deployment (docker-compose.yml service emr-state) - the only
+# process with the state volume; the API is its client. A daily set of this topology records format 3.
+STATE_SERVICE = "kin-emr-state"
+STATE_FORMAT = 3
 
 
 _resource_prefix = ContextVar("backup_resource_prefix", default="kin-rehearsal-")
@@ -384,6 +388,118 @@ class LegacyBackupBoundary:
         self.check_owners()
         self.check_containers()
         lease.verify()
+        self.observed = observed
+
+
+class StateServiceBackupBoundary(LegacyBackupBoundary):
+    """EMR-B2 (c): the daily route over the protected-state service (v3 state).
+
+    The state volume belongs to the service container alone (kin-emr-state, the Compose role emr-state, UID 1000); the
+    API is a client with the read-only IPC volume and no state mount. The read-only inspection admits the v3 format
+    (checkpoint, WAL, lineage/origin) without loading a journal or executing application code; the service is stopped
+    and its complete close verified before the paired DB+state capture, and it is started and observed ready - by an
+    independent non-promoting client over the IPC socket - before any client resumes. IPC sockets are runtime state,
+    never backup authority: the archive is the state volume alone.
+    """
+    def __init__(self, containers, state_volume):
+        import ops_deploy_preflight as pre
+        api, service = containers["kin-api"], containers[STATE_SERVICE]
+        if any(m.get("Destination") == EMR_STATE or m.get("Name") == state_volume for m in api.get("Mounts") or []):
+            raise RuntimeError("The API client carries a protected state mount")
+        env = pre.container_environment(api.get("Config") or {})
+        if "KIN_EMR_STATE_DIR" in env or "KIN_EMR_READER_PASSWORD" in env or "KIN_EMR_STATE_SOCKET" not in env:
+            raise RuntimeError("The API is not configured as a state-service client")
+        if service.get("Path") != pre.STATE_ENTRYPOINT[0] or service.get("Args") != [*pre.STATE_ENTRYPOINT[1:], *pre.STATE_COMMAND]:
+            raise RuntimeError("State service entry mode differs")
+        if service["Image"] != api["Image"]:
+            raise RuntimeError("State service and API run different images")
+        super().__init__(containers, state_volume)
+
+    def check_owners(self):
+        import ops_deploy_preflight as pre
+        names = text(["docker", "container", "ls", "--all", "--filter", "volume=" + self.volume,
+                      "--format", "{{.Names}}"]).splitlines()
+        if STATE_SERVICE not in names or len(names) != len(set(names)):
+            raise RuntimeError("Backup state owner inventory is unavailable")
+        owners = json.loads(text(["docker", "inspect", *names]))
+        if (type(owners) is not list or len(owners) != len(names)
+                or {item.get("Name", "").lstrip("/") for item in owners} != set(names)):
+            raise RuntimeError("Backup state owner inventory changed")
+        pre.check_state_owners(owners, self.volume, STATE_SERVICE)
+
+    def inspect_state(self):
+        with tempfile.TemporaryFile() as captured:
+            temporary_run(["--network", "none", "--read-only", "--mount",
+                f"type=volume,source={self.volume},target=/source,readonly", "--entrypoint", "tar",
+                self.containers["kin-db"]["Image"], "-czf", "-", "-C", "/source", "."],
+                timeout=1800, output=captured)
+            captured.seek(0)
+            return admit_v3_archive(captured)
+
+
+def state_service_closed(name):
+    """The stopped service's exit: 0 and its last closed line EMR_STATE_CLOSED (an incomplete close leaves work the
+    capture must not pretend is settled). Returns the exit code."""
+    state = text(["docker", "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name]).split()
+    if state[:1] != ["false"]:
+        raise RuntimeError("State service is still running")
+    lines = [line for line in service_logs(name).splitlines() if line.strip()]
+    if state[1:] != ["0"] or not lines or lines[-1].strip() != "EMR_STATE_CLOSED":
+        raise RuntimeError("State service did not close completely")
+    return int(state[1])
+
+
+def service_logs(name):
+    result = run(["docker", "logs", name], timeout=120)
+    return result.stdout.decode("utf-8", errors="replace") + result.stderr.decode("utf-8", errors="replace")
+
+
+def wait_state_service(name, ready_before, timeout=120):
+    """The started service's own readiness line (a new EMR_STATE_READY beyond the ones its earlier runs printed); its
+    container must stay running meanwhile."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if service_logs(name).count("EMR_STATE_READY") > ready_before:
+            return
+        state = text(["docker", "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name]).split()
+        if state[:1] != ["true"] or time.monotonic() > deadline:
+            raise RuntimeError("State service did not become ready after resume")
+        time.sleep(0.5)
+
+
+def observe_state_client_ready(api, api_env, image):
+    """An independent, non-promoting client (the API UID and group, the runtime credential, the read-only API IPC
+    volume) checks the pair and readiness over the socket (ops_deploy_preflight.STATE_READY_SCRIPT). The credential
+    reaches the helper by a private env file, never argv."""
+    import ops_deploy_preflight as pre
+    network = (api.get("HostConfig") or {}).get("NetworkMode")
+    if not network or network in ("host", "none"):
+        raise RuntimeError("API client network is unavailable for the readiness observer")
+    ipc = _volume_of({"Mounts": [m for m in api.get("Mounts") or [] if m.get("Destination") == pre.STATE_API_IPC]}, pre.STATE_API_IPC)
+    keys = ("DATABASE_URL", "KIN_EMR_INSTANCE_ID", "KIN_EMR_STATE_SOCKET")
+    if any(key not in api_env for key in keys):
+        raise RuntimeError("API client configuration is incomplete for the readiness observer")
+    descriptor, path = tempfile.mkstemp(prefix="kin-ready-", suffix=".env")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            for key in keys:
+                if "\n" in api_env[key]:
+                    raise RuntimeError("API client configuration value is not a single line")
+                handle.write(key + "=" + api_env[key] + "\n")
+        observed = temporary_run(["--read-only", "--network", network, "--user", "1001:1001", "--group-add", "2001",
+                                  "--mount", f"type=volume,source={ipc},target={pre.STATE_API_IPC},readonly",
+                                  "--env-file", path, "--entrypoint", "node", image, "--max-old-space-size=3072", "-e",
+                                  pre.STATE_READY_SCRIPT], timeout=60)
+    finally:
+        os.unlink(path)
+    line = next((line for line in observed.splitlines() if line.startswith("KIN_RESULT ")), None)
+    try:
+        result = json.loads(line[len("KIN_RESULT "):]) if line else None
+    except ValueError:
+        result = None
+    if type(result) is not dict or set(result) != {"ready"} or type(result["ready"]) is not bool:
+        raise RuntimeError("State readiness observer returned no result")
+    return result["ready"]
 
 
 def backup(output, ready_timeout=120):
@@ -415,13 +531,36 @@ def backup(output, ready_timeout=120):
     if len(mounts) != 1 or mounts[0]["Type"] != "volume":
         raise RuntimeError("Expected one named Orthanc volume")
     volume = mounts[0]["Name"]
-    state_mounts = [m for m in by_name["kin-api"]["Mounts"] if m["Destination"] == EMR_STATE]
-    if len(state_mounts) != 1 or state_mounts[0]["Type"] != "volume":
-        raise RuntimeError("Expected one named EMR state volume")
-    state_volume = state_mounts[0]["Name"]
-    boundary = LegacyBackupBoundary(by_name, state_volume)
+    # EMR-B2 (c): with the protected-state service present the state volume is its alone (format 3); without it the
+    # daily route keeps its original legacy-owner form (the API owns the volume; v3 state refused).
+    service = None
+    if STATE_SERVICE in text(["docker", "container", "ls", "--all", "--filter", "name=^/" + STATE_SERVICE + "$",
+                              "--format", "{{.Names}}"]).splitlines():
+        rows = json.loads(text(["docker", "inspect", STATE_SERVICE]))
+        if type(rows) is not list or len(rows) != 1 or type(rows[0]) is not dict or rows[0].get("Name") != "/" + STATE_SERVICE:
+            raise RuntimeError("State service observation is unavailable")
+        service = rows[0]
+    if service is not None:
+        if service["State"].get("Restarting"):
+            raise RuntimeError("Resolve restarting containers before taking a consistent backup")
+        labels = service["Config"].get("Labels", {})
+        if labels.get("com.docker.compose.project") not in projects or labels.get("com.docker.compose.service") != "emr-state":
+            raise RuntimeError("State service does not belong to this Compose project")
+        state_mounts = [m for m in service["Mounts"] if m["Destination"] == EMR_STATE]
+        if len(state_mounts) != 1 or state_mounts[0]["Type"] != "volume" or state_mounts[0].get("RW") is not True:
+            raise RuntimeError("Expected one named EMR state volume on the state service")
+        state_volume = state_mounts[0]["Name"]
+        by_name[STATE_SERVICE] = service
+        boundary = StateServiceBackupBoundary(by_name, state_volume)
+    else:
+        state_mounts = [m for m in by_name["kin-api"]["Mounts"] if m["Destination"] == EMR_STATE]
+        if len(state_mounts) != 1 or state_mounts[0]["Type"] != "volume":
+            raise RuntimeError("Expected one named EMR state volume")
+        state_volume = state_mounts[0]["Name"]
+        boundary = LegacyBackupBoundary(by_name, state_volume)
     boundary.admit()
     initial_running = [name for name in CONTAINERS[:-1] if by_name[name]["State"]["Running"]]
+    service_running = service is not None and service["State"]["Running"]
     api_env = dict(entry.split("=", 1) for entry in by_name["kin-api"]["Config"].get("Env", []) if "=" in entry)
     origin = api_env.get("PUBLIC_ORIGIN", "https://localhost:9443").rstrip("/")
     if prepare_backup_parent(parent) is not None:
@@ -452,10 +591,19 @@ def backup(output, ready_timeout=120):
     for image in manifest["running_images"].values():
         metadata = json.loads(text(["docker", "image", "inspect", image["id"]]))[0]
         image["repo_digests"] = metadata.get("RepoDigests") or []
+    if service is not None:
+        # The derived service identity and the captured pair (no secret: the instance, lineage and chain identifiers and
+        # the database identity the checkpoint carries); the archive is admitted against them after the capture.
+        manifest["emr"].update(format=STATE_FORMAT, service={"container": STATE_SERVICE, "image": service["Image"],
+                               "entry": [service["Path"], *service["Args"]], "running_before": service_running,
+                               "exit_code": None, "closed": None},
+                               pair=None)
     write_json(directory / "manifest.json", manifest)
     pause_started = time.monotonic()
     stage = "stop writers"
     pause_settled = not initial_running
+    service_settled = not service_running
+    ready_before = 0
     try:
         if initial_running:
             run(["docker", "stop", "--time", "45", *initial_running], timeout=180)
@@ -463,8 +611,22 @@ def backup(output, ready_timeout=120):
             if text(["docker", "inspect", "--format", "{{.State.Running}}", name]) != "false":
                 raise RuntimeError("A write service is still running")
         pause_settled = True
+        if service is not None:
+            # Clients are quiesced; now the service itself ends under its own drain, and only a complete close
+            # (exit 0, EMR_STATE_CLOSED) is captured: an incomplete close leaves unsettled protected work.
+            stage = "stop state service"
+            if service_running:
+                run(["docker", "stop", "--time", "45", STATE_SERVICE], timeout=180)
+            service_settled = True
+            exit_code = state_service_closed(STATE_SERVICE)
+            ready_before = service_logs(STATE_SERVICE).count("EMR_STATE_READY")
+            manifest["emr"]["service"].update(exit_code=exit_code, closed=True)
         stage = "check EMR writers and preserve catalog"
         boundary.admit()
+        if service is not None:
+            admitted = boundary.inspect_state()
+            manifest["emr"]["pair"] = {"instance_id": admitted["origin"]["instanceId"], "lineage": admitted["lineage"],
+                                       "origin": admitted["origin"], "fingerprint": admitted["fingerprint"]}
         active = text(["docker", "exec", "kin-db", "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
                        "SELECT count(*) FROM pg_stat_activity WHERE datname='kin' AND backend_type='client backend' AND pid<>pg_backend_pid();"])
         if active != "0":
@@ -495,7 +657,13 @@ def backup(output, ready_timeout=120):
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
                            "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
         with (directory / "emr-state.tgz").open("rb") as handle:
-            admit_legacy_archive(handle)
+            if service is None:
+                admit_legacy_archive(handle)
+            else:
+                captured = admit_v3_archive(handle)
+                pair = manifest["emr"]["pair"]
+                if (captured["lineage"], captured["origin"], captured["fingerprint"]) != (pair["lineage"], pair["origin"], pair["fingerprint"]):
+                    raise RuntimeError("Backup protected state changed during capture")
         stage = "copy configuration and checksum"
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)
@@ -513,12 +681,43 @@ def backup(output, ready_timeout=120):
         raise
     finally:
         resume_failures = []
-        if not pause_settled:
+        if not pause_settled or not service_settled:
             # A delayed stop may still reach the daemon. Starting the same
             # container now races that unfinished operation and is not recovery.
             _operations_lease.get().retained = True
+        service_ready = service is None
+        if service_running:
+            # EMR-B2 (c): the service recovers first, under the same admission (executable, owners and the captured
+            # state unchanged), and an independent client observes its pair and readiness over the IPC socket before
+            # any client resumes. A cached observation is not a lease: this is the observation of this resume.
+            dispatched = False
+            try:
+                if not pause_settled or not service_settled:
+                    raise RuntimeError("State service stop did not settle")
+                boundary.admit(STATE_SERVICE)
+                # The state the service recovers is the captured one (or, when no capture was taken, the same
+                # lineage/origin the pre-pause admission observed: the close itself may have published).
+                current, pair = boundary.inspect_state(), manifest["emr"]["pair"]
+                if pair is not None and current["fingerprint"] != pair["fingerprint"]:
+                    raise RuntimeError("Backup protected state changed before resume")
+                if pair is None and (current["lineage"], current["origin"]) != (boundary.observed["lineage"], boundary.observed["origin"]):
+                    raise RuntimeError("Backup protected state changed before resume")
+                _operations_lease.get().verify()
+                dispatched = True
+                run(["docker", "start", STATE_SERVICE], timeout=120)
+                wait_state_service(STATE_SERVICE, ready_before)
+                service_ready = observe_state_client_ready(by_name["kin-api"], api_env, service["Image"])
+                if not service_ready:
+                    raise RuntimeError("State service is not ready for clients")
+            except Exception:
+                resume_failures.append(STATE_SERVICE)
+                if dispatched:
+                    _operations_lease.get().retained = True
+            manifest["emr"]["service"]["resumed_ready"] = service_ready
         for name in initial_running:
-            if not pause_settled:
+            if not pause_settled or not service_ready:
+                # Clients never resume ahead of their service: a client that starts without it ends itself, and a
+                # client that starts against an unverified pair is exactly the recovery mistake the admission exists for.
                 resume_failures.append(name)
                 continue
             dispatched = False
@@ -723,6 +922,183 @@ def admit_legacy_copy(directory, manifest):
         raise RuntimeError("State capture changed during copy admission")
 
 
+def admit_v3_archive(stream):
+    """EMR-B2 (c): the read-only format gate of a v3 state capture (live volume observation or immutable copy).
+
+    Reads the checkpoint (seal/settlement.json: state.version 3 with its lineage and origin pair), every complete WAL
+    record's version (all 3; torn suffixes stay untouched) and hashes every entry; nothing is extracted, repaired or
+    executed. Returns the inventory fingerprint, the lineage id and the origin pair (no secret: identifiers only)."""
+    import ops_deploy_preflight as pre
+    checkpoint, wal_versions, seen, inventory = None, set(), set(), []
+    try:
+        with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+            for entry in archive:
+                member = PurePosixPath(entry.name)
+                if member.is_absolute() or ".." in member.parts or not (entry.isfile() or entry.isdir()) or str(member) in seen:
+                    raise RuntimeError("Unsafe or duplicate state capture entry")
+                seen.add(str(member))
+                content = archive.extractfile(entry) if entry.isfile() else None
+                hashed = hashlib.sha256()
+                if str(member) == "seal/settlement.json":
+                    if not entry.isfile():
+                        raise RuntimeError("State checkpoint is not a file")
+                    raw = content.read()
+                    hashed.update(raw)
+                    checkpoint = json.loads(raw, object_pairs_hook=pre.unique_object)
+                elif str(member) == "seal/settlement.jsonl":
+                    if not entry.isfile():
+                        raise RuntimeError("State WAL is not a file")
+                    for line in content:
+                        hashed.update(line)
+                        if line.endswith(b"\n"):
+                            document = json.loads(line, object_pairs_hook=pre.unique_object)
+                            wal_versions.add(document["version"])
+                elif content is not None:
+                    for block in iter(lambda: content.read(1024 * 1024), b""):
+                        hashed.update(block)
+                inventory.append((str(member), entry.type.decode('ascii'), entry.size, entry.mode,
+                                  entry.uid, entry.gid, entry.mtime, hashed.hexdigest()))
+    except (ValueError, KeyError, TypeError, tarfile.TarError) as error:
+        raise RuntimeError("State capture format is unavailable") from error
+    if checkpoint is None:
+        raise RuntimeError("v3 state capture has no checkpoint")
+    state = checkpoint.get("state") if type(checkpoint) is dict else None
+    if type(state) is not dict or state.get("version") != STATE_FORMAT:
+        raise RuntimeError("v3 state capture admits only a version-3 checkpoint")
+    if any(type(version) is not int or version != STATE_FORMAT for version in wal_versions):
+        raise RuntimeError("v3 state capture refuses mixed or unknown state WAL")
+    lineage = state.get("lineage")
+    origin = lineage.get("origin") if type(lineage) is dict else None
+    if (type(lineage) is not dict or lineage.get("version") != 1 or type(lineage.get("id")) is not str or not lineage["id"]
+            or type(origin) is not dict or set(origin) != {"instanceId", "chains", "database"}
+            or type(origin["instanceId"]) is not str or not origin["instanceId"]
+            or type(origin["chains"]) is not dict or set(origin["chains"]) != {"viewing", "history"}
+            or any(type(value) is not str or not value for value in origin["chains"].values())
+            or type(origin["database"]) is not dict or set(origin["database"]) != {"database", "oid", "address", "port"}):
+        raise RuntimeError("v3 state capture has no origin lineage")
+    return {"fingerprint": hashlib.sha256(json.dumps(sorted(inventory), separators=(',', ':')).encode()).hexdigest(),
+            "lineage": lineage["id"], "origin": origin}
+
+
+def admit_v3_copy(directory, manifest):
+    """The immutable v3 copy: its bytes are the manifest's, its checkpoint lineage/origin are the captured pair's.
+    Recheck at the executable handoff as well as before the first copy mutation."""
+    archive_path = Path(directory) / "emr-state.tgz"
+    expected = manifest.get("sha256", {}).get("emr-state.tgz")
+    pair = (manifest.get("emr") or {}).get("pair")
+    if not expected or archive_path.is_symlink() or digest(archive_path) != expected:
+        raise RuntimeError("State capture changed before copy admission")
+    with archive_path.open("rb") as stream:
+        admitted = admit_v3_archive(stream)
+    if (type(pair) is not dict or admitted["lineage"] != pair.get("lineage") or admitted["origin"] != pair.get("origin")
+            or admitted["fingerprint"] != pair.get("fingerprint")):
+        raise RuntimeError("State capture does not carry its captured pair")
+    if digest(archive_path) != expected:
+        raise RuntimeError("State capture changed during copy admission")
+    return admitted
+
+
+# The target pair of a private copy, observed independently on the restored database by the image's own identity
+# readers (manifest.ts databaseIdentity, store.ts PrismaLedgerSql.tail); no protected mount, no owner.
+EMR_PAIR_SCRIPT = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
+const {databaseIdentity}=require('/app/dist/emr-runtime/manifest');
+const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
+const db=new PrismaClient();
+(async()=>{await db.$connect();const sql=new PrismaLedgerSql(db);
+const viewing=await sql.tail('viewing'), history=await sql.tail('history');
+console.log('KIN_RESULT '+JSON.stringify({database:await databaseIdentity(db),chains:{viewing:viewing.chainId,history:history.chainId}}));
+})().catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
+
+
+def _kin_result(output):
+    line = next((line for line in output.splitlines() if line.startswith("KIN_RESULT ")), None)
+    try:
+        return json.loads(line[len("KIN_RESULT "):]) if line else None
+    except ValueError:
+        return None
+
+
+def verify_v3_copy(directory, manifest, name, token, state_volume):
+    """EMR-B2 (c) positive v3 private restore (D1656-T07, C-O02): the captured state on a labelled private state volume,
+    paired with the privately restored database through the launch-scoped source->target mapping, recovered by the
+    same compiled service root (the capture's API image, state-serve-v3 as UID 1000), observed ready by an independent
+    non-promoting IPC client, with a second owner of the same private copy refused while the first lives, and closed
+    completely. The copy's origin lineage is never rewritten; the source set's bytes are rechecked at every handoff."""
+    import ops_deploy_preflight as pre
+    admitted = admit_v3_copy(directory, manifest)
+    origin = admitted["origin"]
+    api_image = manifest["running_images"]["kin-api"]["id"]
+    api_ipc, retention_ipc, service = name + "-emr-api-ipc", name + "-emr-retention-ipc", name + "-emr-state"
+    result = {"format": STATE_FORMAT, "lineage": admitted["lineage"], "copy_mapping": None, "ipc_ready": False,
+              "second_owner_refused": False, "service_closed": False}
+    try:
+        for volume in (api_ipc, retention_ipc):
+            run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, volume])
+        temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
+                       "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
+                       manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
+        admit_v3_copy(directory, manifest)
+        # The target pair: the private database's own identity and the restored chains (which must be the origin's).
+        observed = _kin_result(temporary_run(["--network", "container:" + name, "--read-only",
+                                              "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
+                                              "--entrypoint", "node", api_image, "-e", EMR_PAIR_SCRIPT], timeout=120))
+        if (type(observed) is not dict or set(observed) != {"database", "chains"} or type(observed["database"]) is not dict
+                or set(observed["database"]) != {"database", "oid", "address", "port"} or observed["chains"] != origin["chains"]):
+            raise RuntimeError("Restored ledger chains or database identity differ from the captured pair")
+        target = {"instanceId": origin["instanceId"], "chains": observed["chains"], "database": observed["database"]}
+        mapping = None if target == origin else {"source": origin, "target": target}
+        result["copy_mapping"] = mapping is not None
+        # The private copy's reader credential: the restored role attributes are the source's (the reader login may be
+        # disabled there); the private cluster trusts local connections, so only the login attribute is set, privately.
+        run(["docker", "exec", name, "psql", "-X", "-U", "kin", "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
+             "ALTER ROLE kin_emr_reader LOGIN; ALTER ROLE kin_runtime LOGIN;"])
+        service_args = ["--network", "container:" + name, "--label", "kin.ops.run=" + token, "--user", "1000:1000",
+                        "--group-add", "2001", "--group-add", "2002", "--stop-timeout", "20",
+                        "-e", "DATABASE_URL=postgresql://kin_emr_reader@127.0.0.1:5432/kin",
+                        "-e", "KIN_EMR_STATE_DIR=" + EMR_STATE, "-e", "KIN_EMR_INSTANCE_ID=" + origin["instanceId"],
+                        "-e", "KIN_EMR_API_SOCKET=" + pre.STATE_API_IPC + "/writer.sock",
+                        "-e", "KIN_EMR_RETENTION_SOCKET=" + pre.STATE_RETENTION_IPC + "/writer.sock",
+                        *(["-e", "KIN_EMR_COPY_MAPPING=" + json.dumps(mapping, separators=(",", ":"))] if mapping else []),
+                        "--mount", f"type=volume,source={state_volume},target={EMR_STATE}",
+                        "--mount", f"type=volume,source={api_ipc},target={pre.STATE_API_IPC}",
+                        "--mount", f"type=volume,source={retention_ipc},target={pre.STATE_RETENTION_IPC}",
+                        "--entrypoint", "sh", api_image, "/app/start-production.sh", "state-serve-v3"]
+        run(["docker", "run", "-d", "--name", service, *service_args])
+        wait_state_service(service, 0, timeout=120)
+        client = ["--network", "container:" + name, "--read-only", "--user", "1001:1001", "--group-add", "2001",
+                  "-e", "DATABASE_URL=postgresql://kin_runtime@127.0.0.1:5432/kin",
+                  "-e", "KIN_EMR_INSTANCE_ID=" + origin["instanceId"], "-e", "KIN_EMR_STATE_SOCKET=" + pre.STATE_API_IPC + "/writer.sock",
+                  "--mount", f"type=volume,source={api_ipc},target={pre.STATE_API_IPC},readonly",
+                  "--entrypoint", "node", api_image, "--max-old-space-size=3072", "-e", pre.STATE_READY_SCRIPT]
+        ready = _kin_result(temporary_run(client, timeout=60))
+        if type(ready) is not dict or ready.get("ready") is not True:
+            raise RuntimeError("Restored state service is not ready for clients")
+        result["ipc_ready"] = True
+        # A second owner of the same private copy, while the first lives: refused before readiness; the first stays ready.
+        second = run(["docker", "run", "--rm", "--name", service + "-second", *service_args], check=False, timeout=180)
+        second_output = second.stdout.decode("utf-8", errors="replace") + second.stderr.decode("utf-8", errors="replace")
+        if second.returncode == 0 or "EMR_STATE_READY" in second_output:
+            raise RuntimeError("A second owner of the private copy was not refused")
+        if _kin_result(temporary_run(client, timeout=60)) != {"ready": True}:
+            raise RuntimeError("The first owner did not stay ready while the second was refused")
+        result["second_owner_refused"] = True
+        run(["docker", "stop", "--time", "20", service], timeout=120)
+        state_service_closed(service)
+        result["service_closed"] = True
+        admit_v3_copy(directory, manifest)
+    finally:
+        failures = []
+        for kind, resource in (("container", service + "-second"), ("container", service), ("volume", api_ipc), ("volume", retention_ipc)):
+            try:
+                remove_owned_if_present(kind, resource, token)
+            except Exception:
+                failures.append(resource)
+        result["cleanup_failures"] = failures
+    if result["cleanup_failures"]:
+        raise RuntimeError("Private copy cleanup failed: " + ", ".join(result["cleanup_failures"]))
+    return result
+
+
 def rehearse_held(directory, manifest, *, daily=False):
     """The isolated restore check of a held capture (L-04c for B0, L-10c for B1): restored exactly as a rollback would,
     in a fresh networkless cluster of the product's shape (bootstrap superuser kin), with its roles replayed and owners
@@ -734,8 +1110,11 @@ def rehearse_held(directory, manifest, *, daily=False):
     role catalog compared with the manifest's within the set (R5-02: daily_set_catalog; a source database outside the
     set is named in the result), the AuditLog seal verified as kin (no projection: a daily set has none)."""
     shape = "post" if daily else manifest["shape"]
+    # EMR-B2 (c): a format-3 set (captured from the protected-state service) takes the private-copy route with the same
+    # compiled service root; everything else keeps the original-format legacy reader route.
+    v3 = shape == "post" and (manifest.get("emr") or {}).get("format") == STATE_FORMAT
     if shape == "post":
-        admit_legacy_copy(directory, manifest)
+        (admit_v3_copy if v3 else admit_legacy_copy)(directory, manifest)
     token = uuid.uuid4().hex
     name = resource_name(token)
     volume, state_volume = name + "-orthanc", name + "-emr-state"
@@ -779,16 +1158,20 @@ def rehearse_held(directory, manifest, *, daily=False):
         if shape == "post":
             if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
                 raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
-            temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
-                           "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
-                           manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
-            admit_legacy_copy(directory, manifest)
-            checked = temporary_run(["--network", "container:" + name, "--read-only", "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
-                                     "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node",
-                                     manifest["running_images"]["kin-api"]["id"], "-e", EMR_RECOVERY_SCRIPT])
-            if checked != "EMR_RESTORE_VERIFIED":
-                raise RuntimeError("Restored database and external state do not agree")
-            result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}
+            if v3:
+                result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True,
+                                 **verify_v3_copy(directory, manifest, name, token, state_volume)}
+            else:
+                temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
+                               "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
+                               manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
+                admit_legacy_copy(directory, manifest)
+                checked = temporary_run(["--network", "container:" + name, "--read-only", "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
+                                         "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node",
+                                         manifest["running_images"]["kin-api"]["id"], "-e", EMR_RECOVERY_SCRIPT])
+                if checked != "EMR_RESTORE_VERIFIED":
+                    raise RuntimeError("Restored database and external state do not agree")
+                result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}
         result["audit"] = rehearse_audit(directory, manifest, name, user="kin")
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")

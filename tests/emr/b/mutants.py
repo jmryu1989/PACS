@@ -154,10 +154,20 @@ MUTANTS = {
 # Mutation strings locate the intentional changes; no acceptance assertion inspects
 # a private product name or source spelling. M08 awaits the legacy compatibility gate.
 TERMINAL_MUTANTS = {
+    # D1660 re-anchor: in the (c) service the exact full-proof acknowledgement is acknowledgeBundle (the
+    # local-owner acknowledge() is a no-op the service never calls, so an edit there has no effect and is
+    # not a kill). The same semantic fault - the acknowledgement erases the durable terminal identity
+    # instead of only its caller ownership - at the live acknowledgement.
+    # The stored-state validator refuses an attestation whose terminals are gone, so the fault is the
+    # consistent erasure: the acknowledgement discards the attestation and the terminal identities.
     "D1641-M01": ("acknowledgement deletes the durable terminal identity", [
-        ("api/src/emr-runtime/seal.ts", "  acknowledge(_stream: AccessStream, _attemptId: string): Promise<void> {\n",
-         "  acknowledge(_stream: AccessStream, _attemptId: string): Promise<void> {\n"
-         "    this.change(state => { delete state.terminal[key(_stream, _attemptId)]; });\n")]),
+        ("api/src/emr-runtime/seal.ts",
+         "      state.bundles['bundle:' + id] = { version: 1, phase: 'acknowledged', serviceEpoch: previous.serviceEpoch,\n"
+         "        refs: previous.refs, proofSha256: digest(actual) };\n"
+         "      // Caller ownership is no longer required after exact full-proof delivery.\n"
+         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)].owner;\n",
+         "      delete state.bundles['bundle:' + id];\n"
+         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)];\n")]),
     "D1641-M02": ("a new client instance bypasses another client's terminal exclusion", [
         ("api/src/emr-runtime/seal.ts", "\n    if (state.terminal[id]) refuse('AttemptAlreadySettled');",
          "\n    if (state.terminal[id]?.owner === owner) refuse('AttemptAlreadySettled');"),
@@ -322,11 +332,22 @@ IDENTITY_MUTANTS = {
          "    if (this.load().intents[key(binding.stream, binding.attemptId)]) this.change(state => { ++state.generation; });\n    let superseded = false;\n")]),
     "D1650-M05": ("client identity alone adopts another live work", [
         ("api/src/emr-runtime/seal.ts", " || !this.origins.get(origin)?.has(id)", "")]),
+    # D1660 re-anchor (see D1641-M01): the live acknowledgement is acknowledgeBundle.
     "D1650-M06": ("ack erases permanent identity", [
-        ("api/src/emr-runtime/seal.ts", "    return Promise.resolve();\n",
-         "    this.change(state => { delete state.terminal[key(_stream, _attemptId)]; });\n    return Promise.resolve();\n")]),
+        ("api/src/emr-runtime/seal.ts",
+         "      state.bundles['bundle:' + id] = { version: 1, phase: 'acknowledged', serviceEpoch: previous.serviceEpoch,\n"
+         "        refs: previous.refs, proofSha256: digest(actual) };\n"
+         "      // Caller ownership is no longer required after exact full-proof delivery.\n"
+         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)].owner;\n",
+         "      delete state.bundles['bundle:' + id];\n"
+         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)];\n")]),
+    # D1660 re-anchor: identity validation now runs twice at startup - in external-writer.ts on every
+    # stored-state admission (validateAttemptIdentities inside validate) and in seal.ts recoverAtStart
+    # (this.attempts). A startup that normalizes contradictory records instead of refusing them is the
+    # fault only when neither layer refuses; the mutant removes both calls (two edits, one fault).
     "D1650-M07": ("startup normalizes contradictory attempt state", [
-        ("api/src/emr-runtime/seal.ts", "      this.attempts(this.load());\n", "")]),
+        ("api/src/emr-runtime/seal.ts", "      this.attempts(this.load());\n", ""),
+        ("api/src/emr-runtime/external-writer.ts", "  validateAttemptIdentities(state);\n", "")]),
     # D1660 re-anchor: identity validation moved from seal.ts into external-writer.ts, where it runs on
     # every stored-state admission (also the publication that creates the alias). Rejecting the alias
     # inside validateAttemptIdentities would fail D1650-T08A at its publication step, not at the load
@@ -334,10 +355,10 @@ IDENTITY_MUTANTS = {
     # live attempt) is injected where only a (re)starting owner reads the stored state: pair admission.
     "D1650-M07-ALIAS": ("valid historical expiry alias is rejected", [
         ("api/src/emr-runtime/external-writer.ts",
-         "    if (source) replay(log, { base: source.digest, offset: 0, envelope: clone(source) }, source.state.revision, false);\n    context.pair = clone(value);\n",
+         "    if (source) replay(log, { base: source.digest, offset: 0, envelope: clone(source) }, source.state.revision, false);\n    context.pair = clone(origin);\n",
          "    if (source) { const admitted = { base: source.digest, offset: 0, envelope: clone(source) }; replay(log, admitted, source.state.revision, false);\n"
          "      if (Object.values(admitted.envelope.state.slots).some((q: any) => admitted.envelope.state.terminal[q.stream + ':' + q.attemptId])) return fail('UnsealedEntryUnexplained'); }\n"
-         "    context.pair = clone(value);\n")]),
+         "    context.pair = clone(origin);\n")]),
     "D1650-M08": ("a committed tombstone is misclassified as fenced negative", [
         ("api/src/emr-runtime/state-service.ts", "terminal?.phase === 'aborted' && exactBinding(b, terminal.binding)",
          "terminal && exactBinding(b, terminal.binding)")]),

@@ -1354,6 +1354,260 @@ class DailyStateAdmissionTests(unittest.TestCase):
         self.assertTrue((host.repo / '.kin-ops.lock').is_file())
 
 
+V3_ORIGIN = {"instanceId": "fixture-pair", "chains": {"viewing": "7c0b6e8e-1c1b-4a3a-8f2e-1a2b3c4d5e01", "history": "7c0b6e8e-1c1b-4a3a-8f2e-1a2b3c4d5e02"},
+             "database": {"database": "kin", "oid": 16384, "address": "172.18.0.2", "port": 5432}}
+
+
+def v3_archive(*, lineage="3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f", origin=None, wal=b'{"version":3}\n', extra=(), checkpoint=None):
+    """A v3 state capture as the service leaves it: checkpoint with its lineage/origin, WAL, tail; identifiers only."""
+    stream = io.BytesIO()
+    document = checkpoint if checkpoint is not None else {"state": {"version": 3, "revision": 4, "generation": 2, "lineage": {
+        "version": 1, "id": lineage, "origin": origin or V3_ORIGIN}}}
+    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        for name, data in ([("./seal/settlement.json", json.dumps(document).encode()), ("./seal/settlement.jsonl", wal),
+                            ("./seal/tail.json", b'{"streams":{}}')] + list(extra)):
+            entry = tarfile.TarInfo(name)
+            entry.size, entry.uid, entry.gid, entry.mode = len(data), 1000, 1000, 0o600
+            archive.addfile(entry, io.BytesIO(data))
+    return stream.getvalue()
+
+
+def service_containers(repo):
+    """The (c) deployment: the state service owns the state volume; the API is its client over the read-only IPC volume."""
+    info = daily_containers(repo)
+    api = next(item for item in info if item["Name"] == "/kin-api")
+    api["Mounts"] = [{"Destination": "/run/kin-emr-api", "Type": "volume", "Name": "fixture-api-ipc", "RW": False}]
+    api["Config"]["Env"] = ["DATABASE_URL=postgresql://kin_runtime:synthetic-runtime@db:5432/kin", "KIN_EMR_INSTANCE_ID=fixture-pair",
+                            "KIN_EMR_STATE_SOCKET=/run/kin-emr-api/writer.sock", "PUBLIC_ORIGIN=https://localhost:9443"]
+    api["HostConfig"]["NetworkMode"] = "fixture_default"
+    service = copy.deepcopy(api)
+    service.update(Name="/" + ops.STATE_SERVICE, Id=hashlib.sha256(b"kin-emr-state").hexdigest(),
+                   Path="sh", Args=["/app/start-production.sh", "state-serve-v3"])
+    service["Config"]["Labels"]["com.docker.compose.service"] = "emr-state"
+    service["Config"]["Env"] = ["DATABASE_URL=postgresql://kin_emr_reader:synthetic-reader@db:5432/kin", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
+                                "KIN_EMR_INSTANCE_ID=fixture-pair", "KIN_EMR_API_SOCKET=/run/kin-emr-api/writer.sock",
+                                "KIN_EMR_RETENTION_SOCKET=/run/kin-emr-retention/writer.sock"]
+    service["Mounts"] = [{"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state", "RW": True},
+                         {"Destination": "/run/kin-emr-api", "Type": "volume", "Name": "fixture-api-ipc", "RW": True},
+                         {"Destination": "/run/kin-emr-retention", "Type": "volume", "Name": "fixture-retention-ipc", "RW": True}]
+    info.append(service)
+    return info
+
+
+class ServiceHost(Host):
+    """The fake (c) host: the service's container state, exit code and closed lines follow the stop/start commands the
+    backup issues; the readiness observer (a non-promoting client over the IPC socket) answers `ready`."""
+
+    def __init__(self, temporary):
+        super().__init__(temporary)
+        self.info = service_containers(self.repo)
+        self.state_archive = v3_archive()
+        self.service = {"running": True, "exit_code": None, "lines": ["EMR_STATE_READY"]}
+        self.close_lines = ["EMR_STATE_CLOSED"]
+        self.close_exit = 0
+        self.ready = True
+        self.observer_runs = 0
+
+    def fake_text(self, args, **kwargs):
+        joined = " ".join(args)
+        if args[:3] == ["docker", "container", "ls"] and "name=^/" + ops.STATE_SERVICE + "$" in joined:
+            self.events.append(("command", list(args)))
+            return ops.STATE_SERVICE if any(row["Name"] == "/" + ops.STATE_SERVICE for row in self.info) else ""
+        if args[:2] == ["docker", "inspect"] and "--format" in args and args[-1] == ops.STATE_SERVICE:
+            self.events.append(("command", list(args)))
+            running = "true" if self.service["running"] else "false"
+            return running + (" " + str(self.service["exit_code"]) if "ExitCode" in joined else "")
+        value = super().fake_text(args, **kwargs)
+        if args[:2] == ["docker", "inspect"] and "--format" not in args:
+            # the service's live container state follows the fake's stop/start
+            rows = json.loads(value)
+            for row in rows:
+                if row["Name"] == "/" + ops.STATE_SERVICE:
+                    row["State"]["Running"] = self.service["running"]
+            return json.dumps(rows)
+        return value
+
+    def fake_run(self, args, **kwargs):
+        if args[:2] == ["docker", "stop"] and ops.STATE_SERVICE in args:
+            self.events.append(("command", list(args)))
+            self.service.update(running=False, exit_code=self.close_exit, lines=self.service["lines"] + self.close_lines)
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if args[:2] == ["docker", "start"] and ops.STATE_SERVICE in args:
+            self.events.append(("command", list(args)))
+            self.service.update(running=True, exit_code=0, lines=self.service["lines"] + ["EMR_STATE_READY"])
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if args[:2] == ["docker", "logs"] and args[-1] == ops.STATE_SERVICE:
+            self.events.append(("command", list(args)))
+            return SimpleNamespace(returncode=0, stdout=("\n".join(self.service["lines"]) + "\n").encode(), stderr=b"")
+        return super().fake_run(args, **kwargs)
+
+    def fake_archive(self, args, **kwargs):
+        if "--env-file" in args:
+            self.observer_runs += 1
+            self.events.append(("observer", [word for word in args if not word.startswith("const ")]))
+            path = Path(args[args.index("--env-file") + 1])
+            self.assertion = path.read_text(encoding="utf-8")
+            return "KIN_RESULT " + json.dumps({"ready": self.ready})
+        return super().fake_archive(args, **kwargs)
+
+
+class StateServiceDailyTests(unittest.TestCase):
+    """EMR-B2 (c) daily capture over the protected-state service (D1656-T03/T04/T07/T08, C-O03): the service is stopped
+    and its complete close verified before the paired capture; the v3 archive is admitted read-only against the
+    captured pair; on resume the service recovers first and an independent client observes it ready before any client
+    starts; every refusal leaves the source bytes and the writers as they were."""
+
+    def make_host(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        host = ServiceHost(temporary.name)
+        host.init_ledger()
+        return host
+
+    @staticmethod
+    def commands(host):
+        return [event[1] for event in host.events if event[0] == "command"]
+
+    def test_v3_capture_stops_the_service_after_the_clients_and_resumes_it_first(self):
+        host = self.make_host()
+        before = host.state_archive
+        folder, manifest, error = host.backup(rows_stream({1: "synthetic-audit"}))
+        self.assertIsNone(error)
+        self.assertTrue(manifest["complete"])
+        self.assertEqual(manifest["resume_failures"], [])
+        self.assertEqual((folder / "emr-state.tgz").read_bytes(), before)
+        emr = manifest["emr"]
+        self.assertEqual((emr["format"], emr["state_volume"], emr["same_pause"]), (3, "fixture-emr-state", True))
+        self.assertEqual(emr["service"]["container"], ops.STATE_SERVICE)
+        self.assertEqual((emr["service"]["exit_code"], emr["service"]["closed"], emr["service"]["resumed_ready"]), (0, True, True))
+        self.assertEqual(emr["pair"]["origin"], V3_ORIGIN)
+        self.assertEqual(emr["pair"]["lineage"], "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f")
+        self.assertEqual(len(emr["pair"]["fingerprint"]), 64)
+        commands = self.commands(host)
+        stops = [cmd for cmd in commands if cmd[:2] == ["docker", "stop"]]
+        starts = [cmd for cmd in commands if cmd[:2] == ["docker", "start"]]
+        self.assertEqual(stops[0][4:], list(ops.CONTAINERS[:-1]), "clients are quiesced first")
+        self.assertEqual(stops[1], ["docker", "stop", "--time", "45", ops.STATE_SERVICE], "then the service closes")
+        self.assertEqual(starts, [["docker", "start", ops.STATE_SERVICE], *[["docker", "start", name] for name in ops.CONTAINERS[:-1]]],
+                         "the service recovers before any client")
+        service_stop = commands.index(["docker", "stop", "--time", "45", ops.STATE_SERVICE])
+        self.assertTrue(all(service_stop < i for i, cmd in enumerate(commands) if "pg_dump" in cmd), "the capture follows the service close")
+        self.assertEqual(host.observer_runs, 1, "one independent readiness observation per resume")
+        observer_at = next(i for i, event in enumerate(host.events) if event[0] == "observer")
+        api_start = next(i for i, event in enumerate(host.events) if event == ("command", ["docker", "start", "kin-api"]))
+        self.assertLess(observer_at, api_start, "the client resumes only after the readiness observation")
+        self.assertIn("--read-only", host.events[observer_at][1])
+        self.assertIn("1001:1001", host.events[observer_at][1])
+        self.assertNotIn("synthetic-runtime", " ".join(host.events[observer_at][1]), "the credential never reaches argv")
+        self.assertIn("DATABASE_URL=postgresql://kin_runtime:synthetic-runtime@db:5432/kin", host.assertion)
+        self.assertEqual(host.state_archive, before)
+
+    def test_an_incomplete_service_close_refuses_the_capture_and_still_recovers_the_service_first(self):
+        for close_lines, close_exit in ((["EMR_STATE_INCOMPLETE"], 0), (["EMR_STATE_CLOSED"], 1), ([], 0)):
+            with self.subTest(close=close_lines, exit=close_exit):
+                host = self.make_host()
+                host.close_lines, host.close_exit = close_lines, close_exit
+                folder, manifest, error = host.backup(rows_stream({1: "synthetic-audit"}))
+                self.assertIsInstance(error, RuntimeError)
+                self.assertFalse(manifest["complete"])
+                self.assertEqual(manifest["backup_error"]["stage"], "stop state service")
+                self.assertIsNone(manifest["emr"]["pair"])
+                self.assertFalse(any("pg_dump" in cmd for cmd in self.commands(host)), "nothing is captured")
+                starts = [cmd for cmd in self.commands(host) if cmd[:2] == ["docker", "start"]]
+                self.assertEqual(starts[0], ["docker", "start", ops.STATE_SERVICE])
+                self.assertEqual(manifest["resume_failures"], [])
+
+    def test_a_service_that_is_not_ready_after_resume_keeps_every_client_stopped(self):
+        host = self.make_host()
+        host.ready = False
+        folder, manifest, error = host.backup(rows_stream({1: "synthetic-audit"}))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertTrue(manifest["complete"])
+        self.assertEqual(manifest["resume_failures"], [ops.STATE_SERVICE, *ops.CONTAINERS[:-1]])
+        self.assertEqual([cmd for cmd in self.commands(host) if cmd[:2] == ["docker", "start"]], [["docker", "start", ops.STATE_SERVICE]])
+        self.assertFalse(manifest["emr"]["service"]["resumed_ready"])
+        self.assertTrue((host.repo / ".kin-ops.lock").is_file(), "the operations lease is retained")
+
+    def test_legacy_or_malformed_state_under_the_service_refuses_before_any_pause(self):
+        cases = {
+            "legacy v2": orthanc_archive(state=True, version=2),
+            "mixed WAL": v3_archive(wal=b'{"version":2}\n'),
+            "no lineage": v3_archive(checkpoint={"state": {"version": 3}}),
+            "foreign origin shape": v3_archive(origin={"instanceId": "x", "chains": {"viewing": "a"}, "database": {}}),
+            "duplicate path": v3_archive(extra=[("seal/settlement.json", b"{}")]),
+            "unsafe path": v3_archive(extra=[("../outside", b"x")]),
+        }
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                host = self.make_host()
+                host.state_archive = raw
+                folder, manifest, error = host.backup(rows_stream({1: "synthetic-audit"}))
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIsNone(folder)
+                self.assertFalse(any(cmd[:2] in (["docker", "stop"], ["docker", "start"]) or "pg_dump" in cmd for cmd in self.commands(host)))
+                self.assertEqual(host.state_archive, raw)
+
+    def test_a_client_with_owner_configuration_or_a_foreign_service_refuses_before_any_pause(self):
+        def with_state_mount(host):
+            api = next(row for row in host.info if row["Name"] == "/kin-api")
+            api["Mounts"].append({"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state", "RW": True})
+        def with_state_dir(host):
+            api = next(row for row in host.info if row["Name"] == "/kin-api")
+            api["Config"]["Env"].append("KIN_EMR_STATE_DIR=" + ops.EMR_STATE)
+        def other_image(host):
+            next(row for row in host.info if row["Name"] == "/" + ops.STATE_SERVICE)["Image"] = "sha256:" + "b" * 64
+        def legacy_serve(host):
+            next(row for row in host.info if row["Name"] == "/" + ops.STATE_SERVICE)["Args"] = ["/app/start-production.sh", "serve"]
+        def other_project(host):
+            next(row for row in host.info if row["Name"] == "/" + ops.STATE_SERVICE)["Config"]["Labels"]["com.docker.compose.project"] = "other"
+        def second_owner(host):
+            retained = copy.deepcopy(next(row for row in host.info if row["Name"] == "/" + ops.STATE_SERVICE))
+            retained.update(Name="/retained-old-owner", Id="c" * 64)
+            retained["HostConfig"]["RestartPolicy"]["Name"] = "always"
+            retained["State"]["Running"] = False
+            host.info.append(retained)
+        for label, mutate in (("API with a state mount", with_state_mount), ("API with KIN_EMR_STATE_DIR", with_state_dir),
+                              ("service on another image", other_image), ("service in legacy serve mode", legacy_serve),
+                              ("service of another project", other_project), ("a retained restartable owner", second_owner)):
+            with self.subTest(case=label):
+                host = self.make_host()
+                mutate(host)
+                folder, manifest, error = host.backup(rows_stream({1: "synthetic-audit"}))
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIsNone(folder)
+                self.assertFalse(any(cmd[:2] in (["docker", "stop"], ["docker", "start"]) or "pg_dump" in cmd for cmd in self.commands(host)))
+
+    def test_v3_copy_admission_binds_the_archive_to_its_captured_pair(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            archive_path = directory / "emr-state.tgz"
+            archive_path.write_bytes(v3_archive())
+            with archive_path.open("rb") as stream:
+                admitted = ops.admit_v3_archive(stream)
+            manifest = {"sha256": {"emr-state.tgz": ops.digest(archive_path)}, "emr": {"format": 3, "pair": {
+                "instance_id": "fixture-pair", "lineage": admitted["lineage"], "origin": admitted["origin"], "fingerprint": admitted["fingerprint"]}}}
+            self.assertEqual(ops.admit_v3_copy(directory, manifest), admitted)
+            for label, change in (("another lineage", lambda m: m["emr"]["pair"].update(lineage="0" * 36)),
+                                  ("another origin", lambda m: m["emr"]["pair"]["origin"]["database"].update(oid=1)),
+                                  ("another fingerprint", lambda m: m["emr"]["pair"].update(fingerprint="0" * 64)),
+                                  ("no pair", lambda m: m["emr"].update(pair=None)),
+                                  ("another digest", lambda m: m["sha256"].update({"emr-state.tgz": "0" * 64}))):
+                with self.subTest(case=label):
+                    changed = copy.deepcopy(manifest)
+                    change(changed)
+                    with self.assertRaises(RuntimeError):
+                        ops.admit_v3_copy(directory, changed)
+            # the legacy reader route never admits a v3 copy, and the v3 route never admits a legacy one
+            with self.assertRaises(RuntimeError):
+                ops.admit_legacy_copy(directory, manifest)
+            archive_path.write_bytes(orthanc_archive(state=True, version=2))
+            legacy = {"sha256": {"emr-state.tgz": ops.digest(archive_path)}, "emr": {}}
+            ops.admit_legacy_copy(directory, legacy)
+            with self.assertRaises(RuntimeError):
+                ops.admit_v3_copy(directory, {**legacy, "emr": {"format": 3, "pair": manifest["emr"]["pair"]}})
+            self.assertEqual(archive_path.read_bytes(), orthanc_archive(state=True, version=2))
+
+
 class StateCopyAdmissionTests(unittest.TestCase):
     def test_v3_unknown_mixed_and_changed_capture_refuse_before_any_copy_command(self):
         """D1656-T03/T07: actual legacy restore consumers reject v3 before granting a mount."""

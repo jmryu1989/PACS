@@ -950,9 +950,10 @@
           "D1641-T05"
         ],
         "assertions": {
-          "D1641-T01": "terminal replay must not mutate durable state",
-          "D1641-T05": "terminal replay must not mutate durable state"
-        }
+          "D1641-T01": "exact full-proof acknowledgement must be accepted",
+          "D1641-T05": "exact full-proof acknowledgement must be accepted"
+        },
+        "assertion_note": "D1660 re-anchor to the live acknowledgement (seal.ts acknowledgeBundle; the local-owner acknowledge() is a no-op the service never calls). The stored-state identity validator (external-writer.ts validateAttemptIdentities, D1650) refuses the publication that would erase the terminal identities with their attestation, so the erasing acknowledgement itself is refused before any durable mutation: the mutant is observed as the refused exact acknowledgement, not as a later mutated durable state."
       },
       {
         "id": "D1641-M02",
@@ -961,9 +962,10 @@
           "D1641-T02"
         ],
         "assertions": {
-          "D1641-T01": "terminal replay must not mutate durable state",
-          "D1641-T02": "terminal replay must not mutate durable state"
-        }
+          "D1641-T01": "terminal refusal is a typed conflict",
+          "D1641-T02": "terminal refusal is a typed conflict"
+        },
+        "assertion_note": "D1660: the stored-state identity validator (external-writer.ts validateAttemptIdentities, D1650) refuses the bypassed reserve's publication before any protected byte changes, so the mutant is observed as the refusal class (DURABILITY instead of the typed CONFLICT) and the failed service, not as a mutated durable state."
       },
       {
         "id": "D1641-M03",
@@ -971,8 +973,9 @@
           "D1641-T02"
         ],
         "assertions": {
-          "D1641-T02": "terminal replay must not mutate durable state"
-        }
+          "D1641-T02": "terminal refusal is a typed conflict"
+        },
+        "assertion_note": "D1660: as D1641-M02 - the identity validator refuses the publication; the observable is the refusal class."
       },
       {
         "id": "D1641-M04",
@@ -1043,9 +1046,10 @@
           "D1650-D17-V1"
         ],
         "assertions": {
-          "D1650-D17": "conflict must preserve every protected byte",
-          "D1650-D17-V1": "conflict must preserve every protected byte"
-        }
+          "D1650-D17": "ordinary conflict must stay typed",
+          "D1650-D17-V1": "ordinary conflict must stay typed"
+        },
+        "assertion_note": "D1660: the moved pending attempt the mutant accepts at the seal is refused by the stored-state identity validator before publication (every protected byte preserved), so the mutant is observed as the refusal class (DURABILITY instead of the typed CONFLICT)."
       },
       {
         "id": "D1650-M02",
@@ -1100,8 +1104,9 @@
           "D1641-T01"
         ],
         "assertions": {
-          "D1641-T01": "terminal replay must not mutate durable state"
-        }
+          "D1641-T01": "exact full-proof acknowledgement must be accepted"
+        },
+        "assertion_note": "D1660: as D1641-M01 - re-anchored to acknowledgeBundle; the identity validator refuses the erasing publication, so the acknowledgement is refused."
       },
       {
         "id": "D1650-M07",
