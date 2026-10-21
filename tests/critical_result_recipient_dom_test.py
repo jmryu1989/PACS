@@ -1188,6 +1188,11 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.r3_panel()
         ack = self.row_locator('SYN-PT-141').get_by_role('button', name='Acknowledge')
         self.r3_mode(True)
+        # W5R3B-02: mode entry itself repaints the already-rendered row, before any interaction can repaint it.
+        expect(ack).to_be_disabled()
+        expect(ack).to_have_attribute('title', re.compile('Related Report'))
+        expect(self.region()).to_contain_text('Related Report 모드에서는 쓸 수 없습니다')
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'))
         ack.dispatch_event('click')
         self.settle()
         self.assertEqual(0, self.page.evaluate('window.synAllocations'), 'Related must refuse before ACK attempt allocation')
@@ -1211,6 +1216,10 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         first = self.posts()[0]['body']
         self.r3_mode(True)
         again = line.get_by_role('button', name='Check Again')
+        # W5R3B-02: the Unknown line's retry is restricted by mode entry alone, with the reason shown.
+        expect(again).to_be_disabled()
+        expect(again).to_have_attribute('title', re.compile('Related Report'))
+        expect(self.region()).to_contain_text('Related Report 모드에서는 쓸 수 없습니다')
         again.dispatch_event('click')
         self.settle()
         self.assertEqual(1, len(self.posts()), 'Related cannot retry an Unknown ACK')

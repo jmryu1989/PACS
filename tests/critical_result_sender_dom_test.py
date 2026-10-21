@@ -898,6 +898,27 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         for name, control in controls.items():
             expect(control).to_be_enabled()
             self.assertEqual(hints[name], control.get_attribute('title'), 'Back restores action guidance')
+        # W5R3B-01: a list read that lands while focus is in the rows defers the row repaint; Related mode begins, then focus
+        # leaves the rows and the deferred repaint runs. The rebuilt actions must carry the mode's restriction, not their
+        # ordinary state, and Back must give the guidance back.
+        controls['Cancel Delivery'].focus()
+        before = len(self.log)
+        self.page.locator('#cvr-sent-refresh').dispatch_event('click')
+        self.wait_until(lambda: len(self.log) > before, 'list read while focus is in the rows')
+        self.settle()
+        self.r3_mode(True)
+        self.settle()
+        self.page.evaluate('() => document.activeElement && document.activeElement.blur()')
+        self.settle()
+        for control in controls.values():
+            expect(control).to_be_disabled()
+            expect(control).to_have_attribute('title', re.compile('Related Report'))
+        controls['Cancel Delivery'].dispatch_event('click')
+        self.assertEqual(0, self.page.locator('tr[data-form]').count(), 'blocked row entry keeps the form closed')
+        self.r3_mode(False)
+        for name, control in controls.items():
+            expect(control).to_be_enabled()
+            self.assertEqual(hints[name], control.get_attribute('title'), 'Back restores action guidance after the deferred paint')
         self.assertEqual([], [r for r in self.log if r['method'] == 'POST'])
 
     def r3_unknown(self, action):
@@ -935,6 +956,51 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
     def test_w5r3_supersede_unknown_survives_mode_and_retry_404(self):
         self.r3_unknown('supersede')
 
+    # W5R3B-04 (D73 §1-B.14): the outcome oracle is what the reader sees once the response is consumed - the status word
+    # (first line of the dialog status or of the attempt line), its explanation and the retry control's label - never the
+    # module's private attempt state. The words and explanations are the §4 product wording (TEXT in the module).
+    R3_WORDS = {
+        'create': {'not-sent': 'Not Sent', 'unknown': 'Delivery status unknown', 'rejected': 'Not delivered', 'delivered': 'Delivered'},
+        'supersede': {'not-sent': 'Not Sent', 'unknown': 'Delivery status unknown', 'rejected': 'Not delivered', 'delivered': 'Delivered'},
+        'cancel': {'not-sent': 'Not Sent', 'unknown': 'Cancellation status unknown', 'rejected': 'Not cancelled', 'cancelled': 'Cancelled'},
+    }
+    R3_LINES = {'unknown': {'create': '전달되었을 수 있습니다', 'supersede': '전달되었을 수 있습니다', 'cancel': '취소되었을 수 있습니다'},
+                'delivered': '전달 기록이 저장되었습니다', 'cancelled': '전달을 취소했습니다',
+                'not-sent': 'Related Report 모드에서는 쓸 수 없습니다'}
+
+    def r3_retry(self, action):
+        return self.page.locator('#cvr-send-check' if action == 'create' else '#cvr-sent-attempts li button')
+
+    def r3_expect_outcome(self, action, outcome):
+        """Wait until the visible outcome is `outcome`'s word, then require its explanation and retry control."""
+        words = self.R3_WORDS[action]
+        word = words[outcome]
+        region = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts li')
+        expect(region).to_have_count(1)
+        # Pending text never satisfies this: a dispatched request shows no word (dialog) or 'Sending' (line) until settled.
+        expect(region).to_contain_text(re.compile(r'^\s*' + re.escape(word) + r'(\s·|\s*$)', re.M), use_inner_text=True)
+        text = region.inner_text()
+        first = next(line.strip() for line in text.splitlines() if line.strip())
+        self.assertRegex(first, r'^' + re.escape(word) + r'( · |$)', 'the status word is the first visible line')
+        for other in set(words.values()) - {word}:
+            self.assertNotIn(other, first, f'{outcome}: no other outcome word is shown')
+        expected = self.R3_LINES.get(outcome)
+        if isinstance(expected, dict):
+            expected = expected[action]
+        if expected:
+            self.assertIn(expected, text, f'{outcome}: its explanation is shown')
+        for name, line in (('unknown', '되었을 수 있습니다'), ('delivered', self.R3_LINES['delivered']),
+                           ('cancelled', self.R3_LINES['cancelled'])):
+            if name != outcome:
+                self.assertNotIn(line, text, f'{outcome}: the {name} explanation is not shown')
+        retry = self.r3_retry(action)
+        if outcome in ('not-sent', 'unknown'):
+            expect(retry).to_be_visible()
+            expect(retry).to_have_text('Send' if outcome == 'not-sent' else 'Check Again')
+        else:
+            expect(retry).to_be_hidden()
+        return retry
+
     def r3_boundary(self, action, boundary, prior=False):
         self.js = expose_sender_boundaries(self.js)
         box, field, confirm = self.r3_prepare(action)
@@ -961,9 +1027,9 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
                 confirm.click()
         self.settle()
         self.assertEqual(1 if prior else 0, len(self.requests(action)), 'isolated boundary must stop transport')
-        state = self.page.evaluate('synCvrBoundary.attempts()[0].state')
-        self.assertEqual('unknown' if prior else 'not-sent', state, 'local refusal retains prior transport provenance')
-        retry = self.page.locator('#cvr-send-check' if action == 'create' else '#cvr-sent-attempts button')
+        # Local refusal retains prior transport provenance: a request never dispatched says Not Sent with Send, one whose
+        # reply was lost stays status unknown with Check Again.
+        retry = self.r3_expect_outcome(action, 'unknown' if prior else 'not-sent')
         expect(retry).to_be_disabled()
         expect(retry).to_have_attribute('title', re.compile('Related Report'))
         # The call-level refusal must be distinguishable from a transport error even when called independently.
@@ -977,10 +1043,13 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         if prior:
             self.r3_mode(False)
             self.fault(action, status=404, body={'code': 'CRITICAL_RESULT_NOT_FOUND', 'message': 'SYN refused'})
-            self.page.evaluate('synCvrBoundary.transmit(synCvrBoundary.attempts()[0])')
+            expect(retry).to_be_enabled()
+            retry.click()
             self.wait_until(lambda: len(self.requests(action)) == 2, 'real retry')
-            self.settle()
-            self.assertEqual('unknown', self.page.evaluate('synCvrBoundary.attempts()[0].state'))
+            # Response barrier: the retry's own refusal detail is displayed before the outcome is judged.
+            outcome = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts li')
+            expect(outcome).to_contain_text('SYN refused')
+            expect(self.r3_expect_outcome(action, 'unknown')).to_be_enabled()
             self.assertEqual(first, self.requests(action)[1]['raw'])
 
     def r3_boundaries(self, boundary, prior=False):
@@ -1057,10 +1126,12 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
                     self.fault(action, abort=True)
                 elif status != 201:
                     self.fault(action, status=status, body={'code': code, 'message': 'SYN response'})
-                self.page.evaluate('synCvrBoundary.transmit(synCvrBoundary.attempts()[0])')
+                # The reader's Send on the Not Sent request is its first actual dispatch.
+                retry = self.r3_expect_outcome(action, 'not-sent')
+                expect(retry).to_be_enabled()
+                retry.click()
                 self.wait_until(lambda: len(self.requests(action)) == 1, 'first actual dispatch')
-                self.settle()
-                self.assertEqual(state, self.page.evaluate('synCvrBoundary.attempts()[0].state'))
+                self.r3_expect_outcome(action, state)
 
     def test_w5r3_create_first_actual_dispatch_classification(self):
         self.r3_first_dispatch('create')

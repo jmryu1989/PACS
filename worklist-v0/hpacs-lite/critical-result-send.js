@@ -1180,7 +1180,8 @@
     moreButton.addEventListener('click', () => loadList(true));
     rows.addEventListener('focusout', () => {
       if (!staleRows) return;
-      setTimeout(guarded(() => { if (staleRows && !rows.contains(document.activeElement)) paintRows(); }), 0);
+      // The rebuilt rows take the current admission too (Related mode may have begun while the paint waited).
+      setTimeout(guarded(() => { if (staleRows && !rows.contains(document.activeElement)) { paintRows(); paintWriteControls(); } }), 0);
     });
     // 문서가 보이고 이 줄이 서 있는(보낼 수 있는 세션) 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다)
     // 알림도 띄우지 않는다.

@@ -197,6 +197,8 @@ MUTANTS = [
 
 # D114 M1..M8/M10 execute the shipped CVR modules through their existing DOM hosts.
 CVR_MUTANTS = [
+    # W5R3B-01: the deferred focusout row repaint without the admission paint (the r3 defect itself).
+    ('M4-focusout-repaint-without-admission', 'sender', [('{ paintRows(); paintWriteControls(); }', 'paintRows();')], 'test_w5r3_row_action_explanations_survive_mode_round_trip'),
     ('M4-row-action-explanation-cleared', 'sender', [('control.title = waiting || rowActionHints.get(control);', "control.title = waiting || '';")], 'test_w5r3_row_action_explanations_survive_mode_round_trip'),
     ('M1-row-open', 'sender', [('function openForm(item, kind) {\n      if (refuseMode()) return;', 'function openForm(item, kind) {')], 'test_w5r3_row_entries_refuse_pointer_keyboard_and_callback'),
     ('M2-send-confirm', 'sender', [('function send() {\n      if (refuseMode()) return;', 'function send() {')], 'test_w5r3_preopened_send_refuses_before_attempt'),
@@ -207,11 +209,17 @@ CVR_MUTANTS = [
     ('M4-late-source-enables-confirm', 'sender', [('form.note.hidden = listed;\n        paintWriteControls();', 'form.note.hidden = listed;\n        form.confirm.disabled = false;')], 'test_w5r3_focused_form_and_late_source_remain_blocked'),
     ('M5-zero-dispatch-unknown', 'sender', [("attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';", "attempt.state = 'unknown';")], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
     ('M5-untyped-local-refusal', 'sender', [("{ kin: true, outcome: 'not-sent' }", '{ kin: true, status: 0 }')], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
+    # W5R3B-04 (Astra AF3): only the shown zero-dispatch outcome changes, Not Sent -> Delivery status unknown. The sender cases
+    # judge the visible word, explanation and retry label, so both the boundary and the first-dispatch matrices must catch it.
+    ('M5-not-sent-shown-unknown-boundary', 'sender', [("case 'not-sent': return { word: 'Not Sent', line: attempt.detail, detail: '' };", "case 'not-sent': return { word: 'Delivery status unknown', line: attempt.detail, detail: '' };")], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
+    ('M5-not-sent-shown-unknown-first-dispatch', 'sender', [("case 'not-sent': return { word: 'Not Sent', line: attempt.detail, detail: '' };", "case 'not-sent': return { word: 'Delivery status unknown', line: attempt.detail, detail: '' };")], 'test_w5r3_create_first_actual_dispatch_classification'),
     ('M6-first-real-dispatch-is-retry', 'sender', [('const retry = attempt.dispatches > 0;', 'const retry = true;')], 'test_w5r3_create_first_actual_dispatch_classification'),
     ('M7-prior-unknown-lost', 'sender', [("attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';", "attempt.state = 'not-sent';")], 'test_w5r3_call_preserves_prior_unknown'),
     ('M7-retry-refusal-is-final', 'sender', [('if (!retry && refused(error)) {', 'if (refused(error)) {')], 'test_w5r3_create_unknown_survives_mode_and_retry_404'),
     ('M8-transmit-backstop-removed', 'sender', [('if (waiting) { localRefusal(attempt, waiting); return; }', '')], 'test_w5r3_transmit_zero_dispatch_is_not_sent'),
     ('M8-call-backstop-removed', 'sender', [("if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });", '')], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
+    # W5R3B-02 (Opus OF9 / Astra AF5): mode entry no longer repaints an already-rendered row; only a click would.
+    ('M10-entry-repaint-omitted', 'recipient', [('const now = allowed();\n      paintAdmission();', 'const now = allowed();\n      if (!blocked()) paintAdmission();')], 'test_w5r3_related_ack_is_refused_before_allocation'),
     ('M10-ack-before-admission', 'recipient', [('function acknowledge(id) {\n      if (refuseMode()) return;', 'function acknowledge(id) {')], 'test_w5r3_related_ack_is_refused_before_allocation'),
     ('M10-all-recipient-gates-removed', 'recipient', [('const work = window.KinWorkContext, transport = window.KinSessionTransport.page();', 'blocked = () => null;\n    const work = window.KinWorkContext, transport = window.KinSessionTransport.page();')], 'test_w5r3_related_keeps_unknown_ack_and_frozen_retry'),
     ('M10-clinician-globally-blocked', 'recipient', [('blocked = () => null }) {', "blocked = () => 'Related Report 모드에서는 쓸 수 없습니다' }) {")], 'test_rd01_c2_full_row_shows_the_pinned_version_and_offers_acknowledge'),
@@ -222,21 +230,33 @@ def run_cvr_mutants():
     import critical_result_sender_dom_test as sender
     import critical_result_recipient_dom_test as recipient
     hosts = {'sender': (sender, sender.CriticalResultSenderDOMTest), 'recipient': (recipient, recipient.CriticalResultRecipientDOMTest)}
+    # W5R3B-06: every mutant runs; the exit is decided after the whole inventory. A host whose baseline is not green claims no
+    # kill (its mutants are reported 'baseline-failed', never executed or counted as killed).
+    green = {}
     for host, (module, case) in hosts.items():
         names = sorted({row[-1] for row in CVR_MUTANTS if row[1] == host})
         baseline = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
-        if not baseline.wasSuccessful() or baseline.skipped:
+        green[host] = baseline.wasSuccessful() and not baseline.skipped
+        if not green[host]:
             print('CVR MUTANT BASELINE FAILED ' + host, flush=True)
-            return 1
     results = []
     for label, host, replacements, name in CVR_MUTANTS:
         module, case = hosts[host]
+        if not green[host]:
+            results.append({'mutant': label, 'host': host, 'case': name, 'killed': False, 'outcome': 'baseline-failed'})
+            print(label, 'NOT EXECUTED (baseline failed)', flush=True)
+            continue
         original = module.SHIPPED_JS if host == 'sender' else module.HOME_FILES[module.INBOX]
         changed = original
         for old, new in replacements:
             if changed.count(old) != 1:
-                raise AssertionError('mutation location not unique: ' + label)
+                changed = None
+                break
             changed = changed.replace(old, new, 1)
+        if changed is None:
+            results.append({'mutant': label, 'host': host, 'case': name, 'killed': False, 'outcome': 'location-not-unique'})
+            print(label, 'NOT PROVEN (mutation location not unique)', flush=True)
+            continue
         if host == 'sender':
             module.SHIPPED_JS = changed
         else:
@@ -250,14 +270,24 @@ def run_cvr_mutants():
             else:
                 module.HOME_FILES[module.INBOX] = original
         caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
-        results.append({'mutant': label, 'host': host, 'case': name, 'killed': caught})
+        results.append({'mutant': label, 'host': host, 'case': name, 'killed': caught, 'outcome': outcome_of(result)})
         print(label, 'KILLED' if caught else 'NOT PROVEN', flush=True)
         print(output.getvalue(), end='', flush=True)
-        if not caught:
-            print('W5R3-CVR-MUTANTS ' + json.dumps(results), flush=True)
-            return 1
     print('W5R3-CVR-MUTANTS ' + json.dumps(results), flush=True)
-    return 0
+    killed = sum(row['killed'] for row in results)
+    print('W5R3 CVR mutants killed: %s/%s' % (killed, len(CVR_MUTANTS)), flush=True)
+    return 0 if killed == len(CVR_MUTANTS) else 1
+
+
+def outcome_of(result):
+    """One mutant run's class: an assertion kill is the only kill; errors, skips and a passing case stay distinct."""
+    if result.errors:
+        return 'error'
+    if result.skipped:
+        return 'skipped'
+    if result.failures:
+        return 'killed' if result.testsRun == 1 else 'failed-not-single'
+    return 'survived'
 
 
 def run():
@@ -265,8 +295,13 @@ def run():
     case = w5.RelatedModePage
     names = sorted({row[-1] for row in MUTANTS})
     baseline = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
+    # W5R3B-06: a red page baseline claims no page kill, but the independent CVR inventory still runs; every mutant runs and the
+    # exit is decided after both inventories.
     if not baseline.wasSuccessful() or baseline.skipped:
         print("W5 RELATED MODE BASELINE FAILED; no kills claimed", flush=True)
+        print('W5-UI-MUTANTS ' + json.dumps([{"mutant": row[0], "file": row[1], "case": row[-1], "killed": False,
+                                               "outcome": "baseline-failed"} for row in MUTANTS]), flush=True)
+        run_cvr_mutants()
         return 1
     order = json.loads((ROOT / "scripts/main-split-order.json").read_text(encoding="utf-8"))["sources"]
     originals = {row["file"]: (LITE / row["file"]).read_text(encoding="utf-8") for row in order}
@@ -275,7 +310,9 @@ def run():
         case = w5.RelatedModePage
         source = originals[file] if file in originals else ((ROOT / "tests" if file.endswith('.py') else LITE) / file).read_text(encoding="utf-8")
         if old is not None and source.count(old) != 1:
-            raise AssertionError("mutation location not unique: " + label)
+            results.append({"mutant": label, "file": file, "case": name, "killed": False, "outcome": "location-not-unique"})
+            print(label, file, "NOT PROVEN (mutation location not unique)", flush=True)
+            continue
         changed = source.replace(old, new, 1) if old is not None else subprocess.check_output(
             ['git', 'show', new + ':worklist-v0/hpacs-lite/' + file], cwd=ROOT).decode('utf-8')
         if file.endswith('.py'):
@@ -293,16 +330,14 @@ def run():
             case.bundle_source = None
             case.asset_source = None
         caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
-        results.append({"mutant": label, "file": file, "case": name, "killed": caught})
+        results.append({"mutant": label, "file": file, "case": name, "killed": caught, "outcome": outcome_of(result)})
         print(label, file, "KILLED" if caught else "NOT PROVEN", flush=True)
         print(output.getvalue(), end="", flush=True)
         killed += int(caught)
-        if not caught:
-            print('W5-UI-MUTANTS ' + json.dumps(results), flush=True)
-            return 1
     print("W5-UI-MUTANTS " + json.dumps(results), flush=True)
     print("W5 related report mode mutants killed: %s/%s" % (killed, len(MUTANTS)), flush=True)
-    return run_cvr_mutants() if killed == len(MUTANTS) else 1
+    cvr = run_cvr_mutants()
+    return 0 if killed == len(MUTANTS) and cvr == 0 else 1
 
 
 if __name__ == "__main__":
