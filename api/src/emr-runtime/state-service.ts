@@ -283,10 +283,11 @@ export class ProtectedStateService {
     if (!session?.live || session.role !== role || session.client !== request.value.clientInstanceId) refuse('SESSION');
     if (!same(request.value.chains, this.resources.pair.chains)) refuse('CONFLICT', 'conflict');
     if (request.operation === 'status') {
-      const state = this.resources.coordinator.call('read');
-      return { state: this.phase, chains: this.resources.pair.chains, sealed: state.tail.streams,
+      // The owner's small view (frontiers and pending work), never the materialized history.
+      const view = this.resources.coordinator.call('view');
+      return { state: this.phase, chains: this.resources.pair.chains, sealed: view.tail.streams,
         sessions: this.sessions.size, scopes: this.scopes.size, operations: this.operations.size,
-        journalRecords: this.resources.journal.all().length, pending: Object.keys(state.intents).length };
+        journalRecords: this.resources.journal.all().length, pending: Object.keys(view.intents).length };
     }
     const id = this.scopeId(session, request.workId);
     let scope = this.scopes.get(id);
@@ -343,9 +344,8 @@ export class ProtectedStateService {
     }
   }
   private fencedAbsent(bindings: CommitBinding[]): boolean {
-    const state = this.resources.coordinator.call('read');
     return bindings.every(b => {
-      const terminal = state.terminal[b.stream + ':' + b.attemptId];
+      const terminal = this.resources.coordinator.call('get', { map: 'terminal', id: b.stream + ':' + b.attemptId });
       // Only recoverAtStart creates an aborted terminal in this service. No remote abort exists.
       return terminal?.phase === 'aborted' && exactBinding(b, terminal.binding);
     });

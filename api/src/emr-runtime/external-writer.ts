@@ -274,35 +274,22 @@ function validate(state: ExternalState): void {
   }
 }
 interface Envelope { state: ExternalState; publishing: boolean; digest: string }
-interface Cached { base: string; offset: number; envelope: Envelope }
-export interface WriterContext { pair?: PairIdentity; copy?: CopyMapping | null; tailFile?: { file: string; ino: number; fd: number }; checkpoint?: { stamp: string; envelope: Envelope }; journal?: JournalFile; settlement?: Cached; log?: { file: string; ino: number; fd: number } }
-function readTail(file: string, context: WriterContext): any {
+export interface WriterContext { pair?: PairIdentity; copy?: CopyMapping | null; journal?: JournalFile; engine?: Engine; log?: { file: string; ino: number; fd: number } }
+function readTailFile(file: string): any {
   const info = fs.lstatSync(file, { throwIfNoEntry: false });
   if (!info) return null;
-  if (!context.tailFile || context.tailFile.file !== file || context.tailFile.ino !== info.ino) {
-    if (context.tailFile) fs.closeSync(context.tailFile.fd);
-    context.tailFile = { file, ino: info.ino, fd: fs.openSync(file, 'r') };
-  }
-  const bytes = Buffer.alloc(info.size);
-  let read = 0;
-  while (read < bytes.length) {
-    const count = fs.readSync(context.tailFile.fd, bytes, read, bytes.length - read, read);
-    if (!count) return fail('SealCorrupt');
-    read += count;
-  }
-  try { return JSON.parse(bytes.toString('utf8')); } catch { return fail('SealCorrupt'); }
+  const fd = fs.openSync(file, 'r');
+  try {
+    const bytes = Buffer.alloc(info.size);
+    let read = 0;
+    while (read < bytes.length) {
+      const count = fs.readSync(fd, bytes, read, bytes.length - read, read);
+      if (!count) return fail('SealCorrupt');
+      read += count;
+    }
+    try { return JSON.parse(bytes.toString('utf8')); } catch { return fail('SealCorrupt'); }
+  } finally { fs.closeSync(fd); }
 }
-function checkpoint(file: string, context: WriterContext): Envelope | null {
-  const info = fs.lstatSync(file, { throwIfNoEntry: false });
-  if (!info) { context.checkpoint = undefined; return null; }
-  // The checkpoint is immutable between atomic compactions. Other writers change
-  // its inode or change time; only WAL suffixes are read on ordinary reservations.
-  // Tail is deliberately read afresh below to detect its independent rollback.
-  const stamp = `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
-  if (context.checkpoint?.stamp !== stamp) context.checkpoint = { stamp, envelope: load(file) };
-  return clone(context.checkpoint.envelope);
-}
-
 function append(file: string, body: any, context: WriterContext): number {
   const line = JSON.stringify({ ...body, digest: hash(body) }) + '\n';
   const info = fs.lstatSync(file, { throwIfNoEntry: false });
@@ -315,20 +302,21 @@ function append(file: string, body: any, context: WriterContext): number {
   if (!info) syncDirectory(path.dirname(file));
   return Buffer.byteLength(line);
 }
-function replay(file: string, cached: Cached, baseRevision: number, repair = true): void {
+/** The complete WAL records after `offset` (each digest/syntax checked once) and the torn suffix, if any. */
+function readWal(file: string, offset: number): { records: any[]; good: number; raw: Buffer } {
   const size = fs.lstatSync(file, { throwIfNoEntry: false })?.size ?? 0;
-  if (size < cached.offset) return fail('SealCorrupt');
-  if (size === cached.offset) return;
-  const raw = Buffer.alloc(size - cached.offset), fd = fs.openSync(file, 'r');
+  if (size < offset) return fail('SealCorrupt');
+  if (size === offset) return { records: [], good: 0, raw: Buffer.alloc(0) };
+  const raw = Buffer.alloc(size - offset), fd = fs.openSync(file, 'r');
   try {
     let read = 0;
     while (read < raw.length) {
-      const n = fs.readSync(fd, raw, read, raw.length - read, cached.offset + read);
+      const n = fs.readSync(fd, raw, read, raw.length - read, offset + read);
       if (!n) return fail('SealCorrupt');
       read += n;
     }
   } finally { fs.closeSync(fd); }
-  const good = raw.lastIndexOf(10) + 1, envelope = cached.envelope;
+  const good = raw.lastIndexOf(10) + 1, records: any[] = [];
   for (const line of raw.subarray(0, good).toString('utf8').split('\n').slice(0, -1)) {
     let record: any;
     try { record = JSON.parse(line); } catch { return fail('SealCorrupt'); }
@@ -336,46 +324,278 @@ function replay(file: string, cached: Cached, baseRevision: number, repair = tru
     const { digest, ...body } = record;
     if (hash(body) !== digest) return fail('SealCorrupt');
     if (body.version !== 3) return fail('SealUnsupportedFormat');
-    if (body.published) {
-      if (!keys(body, ['version', 'revision', 'published']) || body.published !== true ||
-        !integer(body.revision, 1)) return fail('SealCorrupt');
-      if (body.revision <= baseRevision) continue;
-      if (body.revision !== envelope.state.revision || !envelope.publishing) return fail('SealCorrupt');
-      envelope.publishing = false;
-      continue;
-    }
-    if (!keys(body, body.publishing ? ['version', 'revision', 'generation', 'patch', 'publishing', 'tail'] :
-      ['version', 'revision', 'generation', 'patch', 'publishing']) ||
-      typeof body.publishing !== 'boolean' || !isRecord(body.patch) ||
-      Object.keys(body.patch).some(n => !maps.includes(n as any) || !isRecord(body.patch[n])) ||
-      !integer(body.revision, 1) || !integer(body.generation, 1)) return fail('SealCorrupt');
-    for (const name of maps) for (const [id, value] of Object.entries(body.patch[name] ?? {})) {
-      validateMapKey(name, id);
-      if (value !== null) validateMapValue(name, id, value, body.generation, envelope.state.lineage.origin);
-    }
-    if (body.revision <= baseRevision && body.generation > envelope.state.generation) return fail('SealCorrupt');
-    if (body.publishing) validateTail(body.tail, body.generation, envelope.state.lineage.origin);
-    if (body.revision <= baseRevision) continue;
-    const state = envelope.state;
-    if (body.revision !== state.revision + 1 || body.generation < state.generation || envelope.publishing) return fail('SealCorrupt');
-    state.revision = body.revision; state.generation = body.generation;
-    for (const name of maps) for (const [id, v] of Object.entries(body.patch[name] ?? {})) {
-      if (['__proto__', 'constructor', 'prototype'].includes(id)) return fail('SealCorrupt');
-      if (v === null) delete state[name][id]; else state[name][id] = v;
-    }
-    if (body.publishing) state.tail = body.tail;
-    validate(state);
-    envelope.publishing = body.publishing;
+    records.push(body);
   }
-  cached.offset += good;
-  if (good < raw.length && repair) {
-    // A partial final write was never acknowledged. Preserve its bytes before
-    // shortening the log; complete records remain recovery authority.
-    const evidence = path.join(path.dirname(file), 'torn-settlement-' + hash(raw.toString('hex')) + '.json');
-    if (!fs.existsSync(evidence)) atomic(evidence, { bytes: raw.subarray(good).toString('hex') });
-    const fd = fs.openSync(file, 'r+');
-    try { fs.ftruncateSync(fd, cached.offset); fs.fdatasyncSync(fd); } finally { fs.closeSync(fd); }
+  return { records, good, raw };
+}
+/** Preserve a torn WAL suffix durably before shortening the log to its complete records (writer only). */
+function quarantineTorn(file: string, raw: Buffer, good: number, offset: number): void {
+  const evidence = path.join(path.dirname(file), 'torn-settlement-' + hash(raw.toString('hex')) + '.json');
+  if (!fs.existsSync(evidence)) atomic(evidence, { bytes: raw.subarray(good).toString('hex') });
+  const fd = fs.openSync(file, 'r+');
+  try { fs.ftruncateSync(fd, offset + good); fs.fdatasyncSync(fd); } finally { fs.closeSync(fd); }
+}
+/** One WAL patch record's structure and the independent validity of every member it carries (no state applied). */
+function validateRecordShape(body: any, origin: PairIdentity | undefined): void {
+  if (body.published) {
+    if (!keys(body, ['version', 'revision', 'published']) || body.published !== true || !integer(body.revision, 1)) fail('SealCorrupt');
+    return;
   }
+  if (!keys(body, body.publishing ? ['version', 'revision', 'generation', 'patch', 'publishing', 'tail'] :
+    ['version', 'revision', 'generation', 'patch', 'publishing']) ||
+    typeof body.publishing !== 'boolean' || !isRecord(body.patch) ||
+    Object.keys(body.patch).some(n => !maps.includes(n as any) || !isRecord(body.patch[n])) ||
+    !integer(body.revision, 1) || !integer(body.generation, 1)) fail('SealCorrupt');
+  for (const name of maps) for (const [id, value] of Object.entries(body.patch[name] ?? {})) {
+    if (['__proto__', 'constructor', 'prototype'].includes(id)) fail('SealCorrupt');
+    validateMapKey(name, id);
+    if (value !== null) validateMapValue(name, id, value, body.generation, origin);
+  }
+  if (body.publishing) validateTail(body.tail, body.generation, origin);
+}
+
+// ───────────────────────── the owner's verified view (D1682 items 1, 2, 3, 4, 5) ─────────────────────────
+/** A large map as the bounded view of the checkpoint region plus the changes since: lookups by key go to the
+ * in-memory change set first, then a small cache, then the navigable file region; whole-map iteration merges both
+ * in key order. Values that leave the cache are still on disk or in the change set: nothing is dropped. */
+class HistoryMap {
+  readonly delta = new Map<string, any>();
+  private readonly cache = new Map<string, any>();
+  added = 0; removed = 0;
+  /** The checkpoint file is opened per access and closed again: no handle outlives an operation, so the file can be
+   * replaced by a compaction (or inspected elsewhere) without a lingering descriptor. */
+  constructor(readonly name: 'terminal' | 'bundles', readonly file: string, readonly region: MapRegion | null, readonly baseCount: number,
+    private readonly cacheLimit = 4096) {}
+  private get navigable(): boolean { return !!(this.region && this.region.navigable && this.region.count); }
+  get(key: string): any {
+    if (this.delta.has(key)) { const v = this.delta.get(key); return v === null ? undefined : v; }
+    const cached = this.cache.get(key);
+    if (cached !== undefined) return cached;
+    if (!this.navigable) return undefined;
+    const fd = fs.openSync(this.file, 'r');
+    let raw: Buffer | null;
+    try { raw = new RegionIndex(fd, this.region!).find(key); } finally { fs.closeSync(fd); }
+    if (!raw) return undefined;
+    const value = parseRaw(raw);
+    if (this.cache.size >= this.cacheLimit) this.cache.delete(this.cache.keys().next().value!);
+    this.cache.set(key, value);
+    return value;
+  }
+  set(key: string, value: any): void {
+    const before = this.get(key);
+    if (value === null) { if (before !== undefined) this.removed++; }
+    else if (before === undefined) this.added++;
+    this.delta.set(key, value); this.cache.delete(key);
+  }
+  get count(): number { return this.baseCount + this.added - this.removed; }
+  /** Every live member in byte-sorted key order (region ∪ change set, change set wins). */
+  *entries(): Generator<[string, any]> {
+    const changed = [...this.delta.keys()].sort();
+    let c = 0;
+    const emitChanged = (through?: string) => { const out: [string, any][] = []; while (c < changed.length && (through === undefined || changed[c] < through)) { const v = this.delta.get(changed[c]); if (v !== null) out.push([changed[c], v]); c++; } return out; };
+    if (this.navigable) {
+      const fd = fs.openSync(this.file, 'r');
+      try {
+        for (const [key, value] of iterateRegion(fd, this.region!)) {
+          for (const item of emitChanged(key)) yield item;
+          if (c < changed.length && changed[c] === key) { const v = this.delta.get(key); c++; if (v !== null) yield [key, v]; }
+          else yield [key, value];
+        }
+      } finally { fs.closeSync(fd); }
+    }
+    for (const item of emitChanged()) yield item;
+  }
+}
+function* iterateRegion(fd: number, region: MapRegion): Generator<[string, any]> {
+  if (!region.count || fd < 0) return;
+  const reader = new ByteScanner(fd, region.end, region.start);
+  for (;;) {
+    reader.skipWhitespace();
+    if (reader.position >= region.end) return;
+    const keyRaw = reader.readValue(64 * 1024);
+    if (keyRaw[0] !== QUOTE) fail('SealCorrupt');
+    const key = parseRaw(keyRaw);
+    reader.skipWhitespace(); reader.expect(COLON); reader.skipWhitespace();
+    yield [key, parseRaw(reader.readValue(16 * 1024 * 1024))];
+    reader.skipWhitespace();
+    if (reader.position >= region.end) return;
+    if (reader.next() !== COMMA) fail('SealCorrupt');
+  }
+}
+interface Pins { checkpoint: { ino: number; size: number } | null; log: { ino: number; size: number } | null; tail: { ino: number; size: number; mtimeMs: number } | null }
+/** The owner's verified view: admitted once per incarnation (full streaming validation), then advanced by validated
+ * patches; pinned file identities detect any foreign change, which closes admission until a fresh full admission. */
+export class Engine {
+  readonly file: string; readonly log: string; readonly tailFile: string;
+  head!: { version: 3; revision: number; generation: number; tail: any; lineage: StateLineage | null; retired: Record<string, number> };
+  intents: Record<string, any> = {}; slots: Record<string, any> = {}; proofs: Record<string, any> = {};
+  terminal!: HistoryMap; bundles!: HistoryMap;
+  readonly slotOf = new Map<string, string>();
+  readonly notFound = new Set<string>();
+  checkpoint: { digest: string; bytes: number; revision: number; publishing: boolean; navigable: boolean } | null = null;
+  walOffset = 0; publishing = false; tainted = false;
+  pins: Pins = { checkpoint: null, log: null, tail: null };
+  constructor(readonly directory: string) {
+    this.file = path.join(directory, 'seal', 'settlement.json');
+    this.log = path.join(directory, 'seal', 'settlement.jsonl');
+    this.tailFile = path.join(directory, 'seal', 'tail.json');
+  }
+  close(): void { /* no descriptor outlives an operation */ }
+  get pristine(): boolean { return !this.head.lineage; }
+  pin(): void {
+    const stat = (file: string) => fs.lstatSync(file, { throwIfNoEntry: false });
+    const c = stat(this.file), l = stat(this.log), t = stat(this.tailFile);
+    this.pins = { checkpoint: c ? { ino: c.ino, size: c.size } : null, log: l ? { ino: l.ino, size: l.size } : null,
+      tail: t ? { ino: t.ino, size: t.size, mtimeMs: t.mtimeMs } : null };
+  }
+  /** Whether the pinned identities and sizes are exactly what this owner last observed or wrote. Anything else
+   * (replacement, shrink, growth, an uncertain write of our own) retires this view: the files are admitted afresh. */
+  unchanged(): boolean {
+    if (this.tainted) return false;
+    const stat = (file: string) => fs.lstatSync(file, { throwIfNoEntry: false });
+    const same = (a: any, b: any) => (!a && !b) || (a && b && a.ino === b.ino && a.size === b.size && (a.mtimeMs === undefined || a.mtimeMs === b.mtimeMs));
+    const c = stat(this.file), l = stat(this.log), t = stat(this.tailFile);
+    return same(this.pins.checkpoint, c && { ino: c.ino, size: c.size }) && same(this.pins.log, l && { ino: l.ino, size: l.size }) &&
+      same(this.pins.tail, t && { ino: t.ino, size: t.size, mtimeMs: t.mtimeMs });
+  }
+  view(): { revision: number; generation: number; tail: any; lineage: StateLineage | null; retired: Record<string, number>;
+    intents: Record<string, any>; slots: Record<string, any>; proofs: Record<string, any> } {
+    return { revision: this.head.revision, generation: this.head.generation, tail: this.head.tail, lineage: this.head.lineage, retired: this.head.retired,
+      intents: this.intents, slots: this.slots, proofs: this.proofs };
+  }
+  /** The whole logical state as one object: reads of the full history, for inspectors and tests (O(history)). */
+  materialize(): ExternalState {
+    const state: ExternalState = { version: 3, revision: this.head.revision, generation: this.head.generation, tail: clone(this.head.tail), lineage: clone(this.head.lineage),
+      bundles: {}, intents: clone(this.intents), slots: clone(this.slots), proofs: clone(this.proofs), terminal: {}, retired: clone(this.head.retired) };
+    for (const [key, value] of this.terminal.entries()) state.terminal[key] = clone(value);
+    for (const [key, value] of this.bundles.entries()) state.bundles[key] = clone(value);
+    return state;
+  }
+  lookup(map: string, id: string): any {
+    if (map === 'terminal') return this.terminal.get(id);
+    if (map === 'bundles') return this.bundles.get(id);
+    if (map === 'intents' || map === 'slots' || map === 'proofs') return (this as any)[map][id];
+    if (map === 'retired') return this.head.retired[id];
+    return fail('SealCorrupt');
+  }
+  /** Apply one validated record to the view, keeping an undo list so a refused closure leaves the view unchanged. */
+  apply(body: any, touched: Map<string, Set<string>>, undo: (() => void)[]): void {
+    const setMap = (name: string, id: string, value: any) => {
+      if (name === 'terminal' || name === 'bundles') {
+        const map = name === 'terminal' ? this.terminal : this.bundles;
+        const snapshot = { had: map.delta.has(id), value: map.delta.get(id), added: map.added, removed: map.removed, notFound: this.notFound.has(id) };
+        undo.push(() => {
+          if (snapshot.had) map.delta.set(id, snapshot.value); else map.delta.delete(id);
+          map.added = snapshot.added; map.removed = snapshot.removed;
+          if (snapshot.notFound) this.notFound.add(id); else this.notFound.delete(id);
+        });
+        map.set(id, value);
+        if (name === 'terminal') { if (value && value.notFound) this.notFound.add(id); else this.notFound.delete(id); }
+      } else if (name === 'retired') {
+        const before = this.head.retired[id]; undo.push(() => { this.head.retired[id] = before; });
+        if (value === null) fail('SealCorrupt'); this.head.retired[id] = value;
+      } else {
+        const target = (this as any)[name] as Record<string, any>, before = target[id], had = has(target, id);
+        undo.push(() => { if (had) target[id] = before; else delete target[id]; });
+        if (value === null) delete target[id]; else target[id] = value;
+        if (name === 'slots') {
+          if (had) { const old = before; if (this.slotOf.get(old.stream + ':' + old.attemptId) === id) { this.slotOf.delete(old.stream + ':' + old.attemptId); undo.push(() => this.slotOf.set(old.stream + ':' + old.attemptId, id)); } }
+          if (value !== null) { const k = value.stream + ':' + value.attemptId; undo.push(() => this.slotOf.delete(k)); this.slotOf.set(k, id); }
+        }
+      }
+      let set = touched.get(name); if (!set) touched.set(name, set = new Set()); set.add(id);
+    };
+    const previous = { revision: this.head.revision, generation: this.head.generation, tail: this.head.tail };
+    undo.push(() => { this.head.revision = previous.revision; this.head.generation = previous.generation; this.head.tail = previous.tail; });
+    this.head.revision = body.revision; this.head.generation = body.generation;
+    for (const name of maps) for (const [id, v] of Object.entries(body.patch[name] ?? {})) setMap(name, id, v);
+    if (body.publishing) this.head.tail = body.tail;
+  }
+  /** The identity closure of the touched records (the per-record subset of validateAttemptIdentities/attestedProof). */
+  validateTouched(touched: Map<string, Set<string>>, publishing: boolean): void {
+    const corrupt = (): never => fail('UnsealedEntryUnexplained');
+    const tailStreams = this.head.tail?.streams;
+    if (!tailStreams) { if (touched.size) fail('SealCorrupt'); return; }
+    const validBinding = (id: string, q: CommitBinding): boolean => q && ['viewing', 'history'].includes(q.stream) &&
+      id === q.stream + ':' + q.attemptId && q.chainId === tailStreams[q.stream]?.chainId &&
+      Number.isSafeInteger(q.generation) && q.generation > 0 && q.generation <= this.head.generation;
+    const ids = new Set<string>();
+    for (const position of touched.get('slots') ?? []) { const q = this.slots[position]; if (q) ids.add(q.stream + ':' + q.attemptId); }
+    for (const name of ['intents', 'proofs', 'terminal'] as const) for (const id of touched.get(name) ?? []) ids.add(id);
+    // Deleted slots: their former attempt (if still pending) must now be explained by another record.
+    for (const id of ids) {
+      const position = this.slotOf.get(id), q: CommitBinding | undefined = position ? this.slots[position] : undefined;
+      const intent = this.intents[id], terminal = this.terminal.get(id), core: ExpiryCore | undefined = this.proofs[id];
+      if (q) {
+        if (!validBinding(id, q) || position !== q.stream + ':' + q.sequence) corrupt();
+        if (terminal) {
+          if (terminal.phase !== 'committed' || q.kind !== 'expiry' || intent || !sameStoredBinding(q, terminal.binding) ||
+            q.generation !== terminal.binding.generation || q.proofDigest !== terminal.binding.proofDigest || q.sequence > tailStreams[q.stream].sequence) corrupt();
+        } else {
+          if (!intent || intent.stream !== q.stream || intent.attemptId !== q.attemptId || intent.bundleId !== q.bundleId ||
+            intent.eventId !== q.eventId || intent.contentSha256 !== q.contentSha256 || typeof intent.owner !== 'string' ||
+            q.sequence <= tailStreams[q.stream].sequence) corrupt();
+        }
+        if (q.kind === 'expiry') {
+          if (!core || core.format !== 1 || !sameStoredBinding(core.binding, q) || core.binding.generation !== q.generation ||
+            q.proofDigest !== hash(core) || core.seal.chainId !== q.chainId || core.seal.sequence + 1 !== q.sequence ||
+            core.seal.hash !== q.previousHash || core.anchor.sequence > core.seal.sequence ||
+            !Number.isSafeInteger(core.count) || core.count < 1 || core.count > core.anchor.sequence) corrupt();
+        } else if (core || q.proofDigest !== null) corrupt();
+      } else {
+        if (intent) corrupt();           // an intent without its reservation slot
+        if (core) corrupt();             // a proof without its slot
+      }
+      if (terminal) {
+        const b: CommitBinding = terminal.binding;
+        if (!validBinding(id, b) || terminal.generation !== b.generation || !['committed', 'aborted', 'superseded'].includes(terminal.phase) ||
+          terminal.phase === 'committed' && b.sequence > tailStreams[b.stream].sequence) corrupt();
+      }
+    }
+    // A slot's attempt may not be reserved twice: the reverse index is one-to-one with the live slots.
+    for (const position of touched.get('slots') ?? []) {
+      const q = this.slots[position]; if (!q) continue;
+      let count = 0; for (const [, binding] of Object.entries(this.slots)) if (binding.stream === q.stream && binding.attemptId === q.attemptId) count++;
+      if (count !== 1) corrupt();
+    }
+    for (const key of touched.get('bundles') ?? []) {
+      const a = this.bundles.get(key);
+      if (a === undefined) fail('SealCorrupt');   // attestations are never removed
+      attestedProofFrom(id => this.terminal.get(id), this.head, key.slice(7), a);
+    }
+    if (publishing) {
+      // Every slot behind the new frontier must have been retired or retained as an expiry checkpoint.
+      for (const [position, q] of Object.entries(this.slots) as [string, CommitBinding][])
+        if (q.sequence <= tailStreams[q.stream].sequence && !this.terminal.get(q.stream + ':' + q.attemptId)) corrupt();
+    }
+  }
+}
+/** attestedProof over any terminal lookup (the view, a scan, or a materialized state). */
+export function attestedProofFrom(terminalOf: (id: string) => any, head: { generation: number; tail: any; lineage: StateLineage | null }, bundleId: string, a: any): SealedBundleProof {
+  validateAttestation(a);
+  const entries = a.refs.map((r: any, i: number) => {
+    if (!keys(r, ['stream', 'attemptId', 'sealed']) || r.stream !== (i === 0 ? 'viewing' : 'history') ||
+      typeof r.attemptId !== 'string' || !keys(r.sealed, ['sequence', 'hash']) ||
+      !integer(r.sealed.sequence, 1) || !sha(r.sealed.hash)) return fail('SealCorrupt');
+    const terminal = terminalOf(r.stream + ':' + r.attemptId), b: CommitBinding = terminal?.binding;
+    const tail = head.tail?.streams[r.stream];
+    if (!b || terminal.phase !== 'committed' || b.stream !== r.stream || b.attemptId !== r.attemptId ||
+      b.bundleId !== bundleId || b.chainId !== head.lineage?.origin.chains[r.stream] ||
+      !tail || b.chainId !== tail.chainId || !integer(b.sequence, 1) || !integer(b.generation, 1) ||
+      b.generation > head.generation || terminal.generation !== b.generation ||
+      r.sealed.sequence < b.sequence || r.sealed.sequence > tail.sequence ||
+      r.sealed.sequence === b.sequence && r.sealed.hash !== b.hash ||
+      r.sealed.sequence === tail.sequence && r.sealed.hash !== tail.hash) return fail('SealCorrupt');
+    return { ...b, sealed: { chainId: b.chainId, ...r.sealed } };
+  });
+  const eventId = entries[0].eventId, requiredStreams = entries.map((e: any) => e.stream);
+  if (entries.some((e: any) => e.eventId !== eventId) ||
+    eventId === null && (entries.length !== 1 || entries[0].kind !== 'expiry')) return fail('SealCorrupt');
+  const proof: SealedBundleProof = { v: 1, serviceEpoch: a.serviceEpoch, eventId, requiredStreams, entries };
+  try { parseSealedBundleProof(proof); } catch { return fail('SealCorrupt'); }
+  if (a.phase === 'published' ? a.eventId !== eventId || !sameLegacy(a.requiredStreams, requiredStreams) :
+    !sha(a.proofSha256) || a.proofSha256 !== hash(proof)) return fail('SealCorrupt');
+  return proof;
 }
 function delta(before: ExternalState, state: ExternalState): any {
   const patch = {};
@@ -642,6 +862,9 @@ export function scanCheckpoint(file: string, options: ScanOptions = {}): ScanRes
     let spill: SpillSorter | null = null;
     const small = (key: string, value: any) => {
       if (seen.has(key)) fail('SealCorrupt'); seen.add(key); top[key] = value;
+      // Version admission precedes every other check: an unsupported generation is never "corrupt".
+      if (key === 'version') { if (value !== 3) fail('SealUnsupportedFormat'); }
+      else if (!seen.has('version')) fail(typeof value === 'number' || key === 'tail' ? 'SealUnsupportedFormat' : 'SealCorrupt');
       if (key === 'generation') { if (!integer(value)) fail('SealCorrupt'); generation = value; }
       if (key === 'lineage') { if (value !== null && !(isRecord(value) && validPair(value.origin))) fail('SealCorrupt'); origin = value?.origin; }
       if (key === 'tail' && value !== null) tailStreams = value.streams;
@@ -865,7 +1088,8 @@ function* lineReader(file: string): Generator<string> {
  */
 export function writeNavigableCheckpoint(file: string, head: { version: 3; revision: number; generation: number; tail: any; lineage: StateLineage | null;
   retired: Record<string, number>; intents: Record<string, any>; slots: Record<string, any>; proofs: Record<string, any> },
-  members: (map: 'terminal' | 'bundles') => Iterable<[string, string]>, publishing: boolean): { digest: string; bytes: number } {
+  members: (map: 'terminal' | 'bundles') => Iterable<[string, string]>, publishing: boolean,
+  beforeInstall: () => void = () => {}): { digest: string; bytes: number } {
   const temporary = path.join(path.dirname(file), '.tmp-' + randomBytes(12).toString('hex'));
   const fd = fs.openSync(temporary, 'wx', 0o600);
   const digest = createHash('sha256');
@@ -892,20 +1116,21 @@ export function writeNavigableCheckpoint(file: string, head: { version: 3; revis
     write(',"publishing":' + String(publishing) + ',"digest":"' + hex + '"}', false);
     if (buffer) { bytes += Buffer.byteLength(buffer); fs.writeSync(fd, buffer); buffer = ''; }
     fs.fsyncSync(fd); fs.closeSync(fd);
+    // The caller releases its handles on the previous checkpoint here (a replaced file may not be open on every OS).
+    beforeInstall();
     fs.renameSync(temporary, file); syncDirectory(path.dirname(file));
     return { digest: hex, bytes };
   } catch (error) { try { fs.closeSync(fd); } catch { /* closed */ } try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ } throw error; }
 }
 
-/** Read-only admission, also usable by a trusted inspector on a read-only copy.
- * Never instantiate the physical journal here: its constructor repairs torn bytes.
- * The caller repeats this check under the lifetime fence before opening any writer. */
-export function inspectExternal(directory: string, pair?: PairIdentity): { state: ExternalState | null; fingerprint: string } {
+/** The protected directory's structure and file inventory (identities, sizes, stamps): no file content is read. */
+function directoryInventory(directory: string): { root: string; inventory: unknown[]; empty: boolean } {
   if (!directory || !path.isAbsolute(directory) || directory.includes('\0')) return fail('SealUnavailable');
   const root = path.resolve(directory), info = fs.lstatSync(root, { throwIfNoEntry: false });
   const samePath = (a: string, b: string) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   if (!info?.isDirectory() || info.isSymbolicLink() || !samePath(fs.realpathSync.native(root), root)) return fail('SealUnavailable');
   const inventory: unknown[] = [[info.dev, info.ino, info.uid, info.gid, info.mode]];
+  let empty = true;
   for (const entry of fs.readdirSync(root).sort()) {
     if (entry === 'writer.lock') continue;
     if (!['seal', 'journal', 'expiry-evidence'].includes(entry)) return fail('SealUnsupportedFormat');
@@ -917,164 +1142,261 @@ export function inspectExternal(directory: string, pair?: PairIdentity): { state
       const file = path.join(child, name), stat = fs.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) return fail('SealUnavailable');
       inventory.push([entry, name, stat.dev, stat.ino, stat.uid, stat.gid, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs]);
+      empty = false;
     }
   }
-  const file = path.join(root, 'seal', 'settlement.json'), log = path.join(root, 'seal', 'settlement.jsonl');
-  const source: Envelope = load(file);
-  if (!source) {
-    if (['seal', 'journal', 'expiry-evidence'].some(child => fs.existsSync(path.join(root, child)) &&
-      fs.readdirSync(path.join(root, child)).length)) return fail('SealMissing');
-    return { state: null, fingerprint: hash(inventory) };
+  return { root, inventory, empty };
+}
+/**
+ * Full admission of a protected directory into a verified view: one streaming validation of the checkpoint (every
+ * member once, digest), every complete WAL record validated once and replayed once, the tail checked. `repair`
+ * (writer only, under the lifetime fence) quarantines a torn WAL suffix and completes an in-flight tail publication.
+ */
+function admitEngine(directory: string, pair: PairIdentity | undefined, repair: boolean): Engine {
+  const { root, inventory, empty } = directoryInventory(directory);
+  const engine = new Engine(root);
+  const file = engine.file, info = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!info) {
+    if (!empty) return fail('SealMissing');
+    engine.head = { version: 3, revision: 0, generation: 0, tail: null, lineage: null, retired: { viewing: 0, history: 0 } };
+    engine.terminal = new HistoryMap('terminal', file, null, 0); engine.bundles = new HistoryMap('bundles', file, null, 0);
+    engine.pin(); (engine as any).inventory = inventory;
+    return engine;
   }
-  if (source.state?.version !== 3) return fail('SealUnsupportedFormat');
-  if (!keys(source, ['state', 'publishing', 'digest']) || typeof source.publishing !== 'boolean' ||
-    source.digest !== hash(source.state)) return fail('SealCorrupt');
-  validate(source.state);
-  if (!source.state.lineage) return fail('SealMissing');
-  if (pair && !samePair(source.state.lineage.origin, pair)) return fail('SealChainMismatch');
-  const replayed = { base: source.digest, offset: 0, envelope: clone(source) };
-  replay(log, replayed, source.state.revision, false);
-  // Pending publication is the only authority for a torn/missing tail. Complete
-  // incompatible WAL records must be rejected even when that repair is pending.
-  if (!source.publishing && !replayed.envelope.publishing) {
-    const tail = load(path.join(root, 'seal', 'tail.json'));
-    if (!tail) return fail('SealMissing');
-    if (hash(tail) !== hash(replayed.envelope.state.tail)) return fail('SealTailMismatch');
+  // Admission of an unsupported or corrupt checkpoint never repairs anything.
+  const scanned = scanCheckpoint(file, { pair, join: info.size < 64 * 1024 * 1024 ? 'lookup' : 'merge' });
+  if (!scanned.lineage) return fail('SealMissing');
+  const fd = fs.openSync(file, 'r');
+  try {
+    engine.head = { version: 3, revision: scanned.revision, generation: scanned.generation, tail: scanned.tail, lineage: scanned.lineage, retired: scanned.retired };
+    engine.intents = scanned.intents; engine.slots = scanned.slots; engine.proofs = scanned.proofs;
+    for (const [position, q] of Object.entries(engine.slots) as [string, CommitBinding][]) engine.slotOf.set(q.stream + ':' + q.attemptId, position);
+    const navigable = scanned.regions.terminal.navigable && scanned.regions.bundles.navigable;
+    engine.terminal = new HistoryMap('terminal', file, navigable ? scanned.regions.terminal : null, navigable ? scanned.counts.terminal : 0);
+    engine.bundles = new HistoryMap('bundles', file, navigable ? scanned.regions.bundles : null, navigable ? scanned.counts.bundles : 0);
+    if (!navigable) {
+      // An old compact layout: its members live in the change set until the next compaction rewrites them navigably.
+      forEachMember(fd, scanned.regions.terminal, (key, value) => { engine.terminal.set(key, value); });
+      forEachMember(fd, scanned.regions.bundles, (key, value) => { engine.bundles.set(key, value); });
+    } else {
+      // Terminals carrying a pending not-found record are few; their identities are needed without a scan.
+      forEachMember(fd, scanned.regions.terminal, (key, value) => { if (value.notFound) engine.notFound.add(key); });
+    }
+    engine.checkpoint = { digest: scanned.digest, bytes: scanned.bytes, revision: scanned.revision, publishing: scanned.publishing, navigable };
+    engine.publishing = scanned.publishing;
+    // The WAL: complete records after the checkpoint are replayed once; covered records are still shape-checked.
+    const { records, good, raw } = readWal(engine.log, 0);
+    for (const body of records) {
+      validateRecordShape(body, engine.head.lineage?.origin);
+      if (body.published) {
+        if (body.revision <= engine.checkpoint.revision && !(engine.publishing && body.revision === engine.checkpoint.revision)) continue;
+        if (body.revision !== engine.head.revision || !engine.publishing) fail('SealCorrupt');
+        engine.publishing = false; continue;
+      }
+      if (body.revision <= engine.checkpoint.revision) { if (body.generation > engine.head.generation) fail('SealCorrupt'); continue; }
+      if (body.revision !== engine.head.revision + 1 || body.generation < engine.head.generation || engine.publishing) fail('SealCorrupt');
+      const touched = new Map<string, Set<string>>(), undo: (() => void)[] = [];
+      engine.apply(body, touched, undo);
+      engine.validateTouched(touched, body.publishing);
+      engine.publishing = body.publishing;
+    }
+    engine.walOffset = good;
+    // A torn suffix is not a complete record: the writer preserves and shortens it; an inspector reads past it.
+    if (good < raw.length && repair) quarantineTorn(engine.log, raw, good, 0);
+    // Pending publication is the only authority for a torn/missing tail. Complete
+    // incompatible WAL records must be rejected even when that repair is pending.
+    if (!engine.publishing) {
+      const tail = readTailFile(engine.tailFile);
+      if (!tail) fail('SealMissing');
+      if (hash(tail) !== hash(engine.head.tail)) fail('SealTailMismatch');
+    }
+    engine.pin(); (engine as any).inventory = inventory;
+    return engine;
+  } finally { fs.closeSync(fd); }
+}
+/** Read-only admission, also usable by a trusted inspector on a read-only copy: the whole state as one object.
+ * Never instantiate the physical journal here: its constructor repairs torn bytes.
+ * The caller repeats this check under the lifetime fence before opening any writer. */
+export function inspectExternal(directory: string, pair?: PairIdentity): { state: ExternalState | null; fingerprint: string } {
+  const engine = admitEngine(directory, pair, false);
+  try {
+    if (engine.pristine) return { state: null, fingerprint: hash((engine as any).inventory) };
+    const state = engine.materialize();
+    return { state, fingerprint: hash([(engine as any).inventory, engine.checkpoint, engine.walOffset, state.revision, state.tail]) };
+  } finally { engine.close(); }
+}
+/** The bytes-level identity of a protected directory (inventory, file digests): what an owner compares across the
+ * fence acquisition after its one validating admission. */
+export function inspectFingerprint(directory: string): string {
+  const { root, inventory } = directoryInventory(directory);
+  const digests: string[] = [];
+  for (const name of ['settlement.json', 'settlement.jsonl', 'tail.json']) {
+    const file = path.join(root, 'seal', name);
+    if (!fs.existsSync(file)) { digests.push('absent'); continue; }
+    const h = createHash('sha256'), fd = fs.openSync(file, 'r'), chunk = Buffer.allocUnsafe(SCAN_CHUNK);
+    try { let position = 0; for (;;) { const n = fs.readSync(fd, chunk, 0, chunk.length, position); if (!n) break; h.update(chunk.subarray(0, n)); position += n; } }
+    finally { fs.closeSync(fd); }
+    digests.push(h.digest('hex'));
   }
-  return { state: replayed.envelope.state, fingerprint: hash([inventory, source, replayed]) };
+  return hash([inventory, digests]);
+}
+const COMPACTION_FLOOR = 4 * 1024 * 1024;
+/** Size-proportional amortization: compact once the WAL has grown to a quarter of the checkpoint, never below 4 MiB. */
+function compactionDue(engine: Engine): boolean {
+  return engine.walOffset >= Math.max(COMPACTION_FLOOR, Math.floor((engine.checkpoint?.bytes ?? 0) / 4));
+}
+/** Streaming merge of the checkpoint region and the change set into a new navigable checkpoint, then the WAL reset
+ * (checkpoint before WAL reset; the owner is single-threaded, so no append can interleave). */
+function compactEngine(engine: Engine, context: WriterContext): void {
+  if (engine.publishing) fail('SealCorrupt');
+  const head = { version: 3 as const, revision: engine.head.revision, generation: engine.head.generation, tail: engine.head.tail, lineage: engine.head.lineage,
+    retired: engine.head.retired, intents: engine.intents, slots: engine.slots, proofs: engine.proofs };
+  const written = writeNavigableCheckpoint(engine.file, head, map => (function* () {
+    for (const [key, value] of (map === 'terminal' ? engine.terminal : engine.bundles).entries()) yield [key, JSON.stringify(value)] as [string, string];
+  })(), false, () => engine.close());
+  if (context.log) { try { fs.closeSync(context.log.fd); } catch { /* reopened below */ } context.log = undefined; }
+  const fd = fs.openSync(engine.log, 'w', 0o600);
+  try { fs.fdatasyncSync(fd); } finally { fs.closeSync(fd); }
+  // The new checkpoint is the installed base: re-admit the view from it (one validated pass of the bytes just written).
+  const fresh = admitEngine(engine.directory, context.pair, true);
+  engine.head = fresh.head; engine.intents = fresh.intents; engine.slots = fresh.slots; engine.proofs = fresh.proofs;
+  engine.terminal = fresh.terminal; engine.bundles = fresh.bundles; engine.slotOf.clear(); for (const [k, v] of fresh.slotOf) engine.slotOf.set(k, v);
+  engine.notFound.clear(); for (const id of fresh.notFound) engine.notFound.add(id);
+  engine.checkpoint = fresh.checkpoint; engine.walOffset = fresh.walOffset; engine.publishing = fresh.publishing; engine.pins = fresh.pins; engine.tainted = false;
+  void written;
+}
+/** Commit one record: validate the touched closure on the view, append it durably, publish the tail if asked. The
+ * view is reverted if validation or the append fails; an uncertain write taints the view (fresh admission next). */
+function commitRecord(engine: Engine, context: WriterContext, body: any, kind: 'update' | 'reserve'): void {
+  if (engine.publishing) fail('SealCorrupt');
+  validateRecordShape(body, engine.head.lineage?.origin);
+  if (body.revision !== engine.head.revision + 1 || body.generation < engine.head.generation) fail('SealCorrupt');
+  if (kind === 'reserve' && (body.publishing || body.generation !== engine.head.generation + 1)) fail('SealCorrupt');
+  const touched = new Map<string, Set<string>>(), undo: (() => void)[] = [];
+  const revert = () => { for (const step of undo.reverse()) step(); };
+  try {
+    engine.apply(body, touched, undo);
+    engine.validateTouched(touched, body.publishing);
+  } catch (error) { revert(); throw error; }
+  try {
+    engine.walOffset += append(engine.log, body, context);
+  } catch (error) { revert(); engine.tainted = true; throw error; }
+  if (body.publishing) {
+    engine.publishing = true;
+    try {
+      publishTail(engine.tailFile, body.tail);
+      engine.walOffset += append(engine.log, { version: 3, revision: body.revision, published: true }, context);
+    } catch (error) { engine.tainted = true; throw error; }
+    engine.publishing = false;
+  }
+  engine.pin();
 }
 /** Called only by the lock-owning writer. Tests substitute OS/FS transport, not state transitions. */
 export function executeExternal(request: WriterRequest): any {
   const { directory, operation, value } = request, context = request.context ?? {};
-  try {
-  const file = path.join(directory, 'seal', 'settlement.json'), tailFile = path.join(directory, 'seal', 'tail.json');
-  const log = path.join(directory, 'seal', 'settlement.jsonl');
-  // A private copy is inspected against its stored origin (the mapping's source), never against the target.
+  // Admission once per owner incarnation; afterwards only the pinned identities are checked before each operation.
   const admission = operation === 'admit-pair' ? pairAdmission(value) : null;
-  inspectExternal(directory, admission ? admission.copy?.source ?? admission.pair : context.pair);
-  // Version admission precedes even journal-tail repair. Unsupported sources remain
-  // available to offline capture, but never become writable merely because maps are empty.
-  const source = checkpoint(file, context);
-  if (source) {
-    if (source.state?.version !== 3) return fail('SealUnsupportedFormat');
-    if (!keys(source, ['state', 'publishing', 'digest']) || typeof source.publishing !== 'boolean' ||
-      source.digest !== hash(source.state)) return fail('SealCorrupt');
-    validate(source.state);
-  } else {
-    const hasFiles = (child: string) => fs.existsSync(path.join(directory, child)) &&
-      fs.readdirSync(path.join(directory, child)).length !== 0;
-    if (hasFiles('seal') || hasFiles('journal') || hasFiles('expiry-evidence')) return fail('SealMissing');
-  }
-  if (operation === 'admit-pair') {
-    const origin = admission.copy ? admission.copy.source : admission.pair;
-    // A copy mapping needs a stored lineage to map from; a pristine pair has none and takes no mapping.
-    if (admission.copy && !source) return fail('SealMissing');
-    if (source && !samePair(source.state.lineage?.origin, origin)) return fail('SealChainMismatch');
-    if (source) replay(log, { base: source.digest, offset: 0, envelope: clone(source) }, source.state.revision, false);
-    context.pair = clone(origin);
-    context.copy = admission.copy;
-    return;
-  }
-  if (operation.startsWith('journal-')) {
-    // The facade may be assembled before initialization, but no journal file or
-    // directory is opened until the fenced initialization publishes a checkpoint.
-    if (!source) {
-      if (operation === 'journal-load') return { records: [], tornBytes: 0 };
-      return fail('SealMissing');
+  let engine = context.engine;
+  if (engine && !engine.unchanged()) { engine.close(); engine = context.engine = undefined; }
+  if (!engine) engine = context.engine = admitEngine(directory, admission ? admission.copy?.source ?? admission.pair : context.pair, true);
+  try {
+    const file = engine.file, tailFile = engine.tailFile, log = engine.log;
+    if (operation === 'admit-pair') {
+      const origin = admission!.copy ? admission!.copy.source : admission!.pair;
+      if (admission!.copy && engine.pristine) return fail('SealMissing');
+      if (!engine.pristine && !samePair(engine.head.lineage!.origin, origin)) return fail('SealChainMismatch');
+      context.pair = clone(origin);
+      context.copy = admission!.copy;
+      return;
     }
-    if (source) replay(log, { base: source.digest, offset: 0, envelope: clone(source) }, source.state.revision, false);
-    const journal = context.journal ??= new JournalFile(directory);
-    journal.refresh();
-    if (operation === 'journal-load') return { records: journal.all(), tornBytes: journal.tornBytes };
-    if (operation === 'journal-record') return journal.record(value.id, value.kind, value.body, value.at);
-    if (operation === 'journal-find') return journal.find(value);
-    return fail('SealCorrupt');
-  }
-  let envelope = source, tail: any, tailCorrupt = false;
-  try { tail = readTail(tailFile, context); } catch { tailCorrupt = true; }
-  if (!envelope) {
-    if (tailCorrupt) return fail('SealCorrupt');
-    const state: ExternalState = { version: 3, revision: 0, generation: 0, tail: null, lineage: null, bundles: {}, intents: {}, slots: {}, proofs: {},
-      terminal: {}, retired: { viewing: 0, history: 0 } };
-    if (operation === 'read') return state;
-    if (operation !== 'initialize') return fail('SealMissing');
-    const initialized: ExternalState = value;
-    validate(initialized);
-    if (!initialized.lineage || initialized.revision !== 1 || initialized.generation !== 1 ||
-      maps.some(n => n !== 'retired' && Object.keys(initialized[n]).length) ||
-      ['viewing', 'history'].some(s => initialized.tail.streams[s].sequence !== 0 ||
-        initialized.tail.streams[s].hash !== '0'.repeat(64))) return fail('SealCorrupt');
-    // The caller holds the exclusive DB fence and has checked both empty chains.
-    // Initialization is itself a recoverable tail publication, never an empty-map upgrade.
-    protectedDirectory(directory, 'seal');
-    atomic(file, { state: initialized, publishing: true, digest: hash(initialized) });
-    publishTail(tailFile, initialized.tail);
-    atomic(file, { state: initialized, publishing: false, digest: hash(initialized) });
-    context.checkpoint = undefined; context.settlement = undefined;
-    return;
-  }
-  if (operation === 'initialize') return fail('SealCorrupt');
-  if (envelope.publishing) {
-    // The complete durable frontier authorizes only its own in-flight tail publication.
-    publishTail(tailFile, envelope.state.tail); tail = envelope.state.tail; tailCorrupt = false;
-    envelope.publishing = false; atomic(file, envelope);
-  }
-  const base = envelope;
-  const cached: Cached = context.settlement?.base === base.digest ? context.settlement :
-    { base: base.digest, offset: 0, envelope: clone(base) };
-  replay(log, cached, base.state.revision);
-  envelope = cached.envelope;
-  if (envelope.publishing) {
-    publishTail(tailFile, envelope.state.tail); tail = envelope.state.tail; tailCorrupt = false;
-    cached.offset += append(log, { version: 3, revision: envelope.state.revision, published: true }, context);
-    envelope.publishing = false;
-  }
-  if (tailCorrupt) return fail('SealCorrupt');
-  if (hash(tail) !== hash(envelope.state.tail)) return fail(tail === null ? 'SealMissing' : 'SealTailMismatch');
-  context.settlement = cached;
-  const compact = (force = false) => {
-    if (!force && cached.offset < 4 * 1024 * 1024) return;
-    atomic(file, { state: envelope.state, publishing: false, digest: hash(envelope.state) });
-    const fd = fs.openSync(log, 'w', 0o600);
-    try { fs.fdatasyncSync(fd); } finally { fs.closeSync(fd); }
-    context.settlement = undefined;
-  };
-  if (operation === 'compact') { compact(value?.force === true); return; }
-  if (operation === 'read') return clone(envelope.state);
-  if (!['update', 'reserve', 'compare-and-set'].includes(operation)) return fail('SealCorrupt');
-  const prior = envelope.state;
-  if (operation === 'compare-and-set' && value.before !== prior.revision) return { changed: false };
-  const state: ExternalState = operation === 'compare-and-set' ? clone(value.state) : clone(prior);
-  const result = operation === 'compare-and-set' ? undefined : value(state);
-  if (operation !== 'compare-and-set') {
-    if (hash(state) === hash(prior)) return { changed: false, result: clone(result) };
-    state.revision++;
-  }
-  validate(state);
-  if (state.version !== 3 || state.revision !== prior.revision + 1 || state.generation < prior.generation ||
-    !sameLegacy(state.lineage, prior.lineage)) return fail('SealCorrupt');
-  for (const id of Object.keys(prior.bundles)) {
-    if (!state.bundles[id] || !sameLegacy(attestedProof(prior, id.slice(7)), attestedProof(state, id.slice(7))) ||
-      prior.bundles[id].phase === 'acknowledged' && state.bundles[id].phase !== 'acknowledged') return fail('SealCorrupt');
-  }
-  const body = delta(prior, state);
-  if ((operation === 'reserve' || operation === 'compare-and-set' && value.operation === 'reserve') &&
-      (body.publishing || state.generation !== prior.generation + 1)) return fail('SealCorrupt');
-  cached.offset += append(log, body, context);
-  envelope.state = state;
-  if (body.publishing) {
-    publishTail(tailFile, state.tail);
-    cached.offset += append(log, { version: 3, revision: state.revision, published: true }, context);
-  }
-  // Compact only after a completed publication, never in the reservation's head-
-  // locked durability barrier. Startup also compacts behind the writer fence.
-  if (body.publishing) compact();
-  // A caller's verification snapshot must not alias the coordinator's live index:
-  // another process's WAL suffix can change that index before publication checks it.
-  return { changed: true, result: clone(result) };
+    if (operation.startsWith('journal-')) {
+      // The facade may be assembled before initialization, but no journal file or
+      // directory is opened until the fenced initialization publishes a checkpoint.
+      if (engine.pristine) {
+        if (operation === 'journal-load') return { records: [], tornBytes: 0 };
+        return fail('SealMissing');
+      }
+      // The one admitted physical journal: its ID index and loaded offset serve every record/find (no state replay here).
+      const journal = context.journal ??= new JournalFile(directory);
+      journal.refresh();
+      if (operation === 'journal-load') return { records: journal.all(), tornBytes: journal.tornBytes };
+      if (operation === 'journal-record') return journal.record(value.id, value.kind, value.body, value.at);
+      if (operation === 'journal-find') return journal.find(value);
+      return fail('SealCorrupt');
+    }
+    if (engine.pristine) {
+      if (operation === 'read') return engine.materialize();
+      if (operation === 'view') return engine.view();
+      if (operation !== 'initialize') return fail('SealMissing');
+      const initialized: ExternalState = value;
+      validate(initialized);
+      if (!initialized.lineage || initialized.revision !== 1 || initialized.generation !== 1 ||
+        maps.some(n => n !== 'retired' && Object.keys(initialized[n]).length) ||
+        ['viewing', 'history'].some(s => initialized.tail.streams[s].sequence !== 0 ||
+          initialized.tail.streams[s].hash !== '0'.repeat(64))) return fail('SealCorrupt');
+      // The caller holds the exclusive DB fence and has checked both empty chains.
+      // Initialization is itself a recoverable tail publication, never an empty-map upgrade.
+      protectedDirectory(directory, 'seal');
+      atomic(file, { state: initialized, publishing: true, digest: hash(initialized) });
+      publishTail(tailFile, initialized.tail);
+      atomic(file, { state: initialized, publishing: false, digest: hash(initialized) });
+      engine.close(); context.engine = undefined;
+      return;
+    }
+    if (operation === 'initialize') return fail('SealCorrupt');
+    if (engine.publishing) {
+      // The complete durable frontier authorizes only its own in-flight tail publication.
+      publishTail(tailFile, engine.head.tail);
+      engine.walOffset += append(log, { version: 3, revision: engine.head.revision, published: true }, context);
+      engine.publishing = false; engine.pin();
+    }
+    switch (operation) {
+      case 'compact': if (value?.force === true || compactionDue(engine)) compactEngine(engine, context); return;
+      case 'read': return engine.materialize();
+      case 'view': return engine.view();
+      case 'get': return engine.lookup(value.map, value.id) ?? null;
+      case 'slot-of': return engine.slotOf.get(value) ?? null;
+      case 'not-found': return [...engine.notFound].map(id => [id, engine.terminal.get(id)?.notFound ?? null]).filter(([, v]) => v);
+      case 'patch': {
+        // An explicit patch: only the changed records (null deletes), the next revision, the generation the caller
+        // claims, and optionally the new tail (a publication).
+        const changes = value.changes ?? {};
+        if (!isRecord(changes) || Object.keys(changes).some(n => !maps.includes(n as any) || !isRecord(changes[n]))) return fail('SealCorrupt');
+        const generation = value.generation ?? engine.head.generation;
+        const publishing = value.tail !== undefined && value.tail !== null;
+        const body: any = { version: 3, revision: engine.head.revision + 1, generation, patch: changes, publishing, ...(publishing ? { tail: value.tail } : {}) };
+        commitRecord(engine, context, body, value.kind === 'reserve' ? 'reserve' : 'update');
+        if (publishing && compactionDue(engine)) compactEngine(engine, context);
+        return { changed: true, revision: engine.head.revision, generation: engine.head.generation };
+      }
+      case 'update': case 'reserve': case 'compare-and-set': {
+        // Whole-state operations (materialized: inspectors, tests and the compatibility path), validated in full.
+        const prior = engine.materialize();
+        if (operation === 'compare-and-set' && value.before !== prior.revision) return { changed: false };
+        const state: ExternalState = operation === 'compare-and-set' ? clone(value.state) : clone(prior);
+        const result = operation === 'compare-and-set' ? undefined : value(state);
+        if (operation !== 'compare-and-set') {
+          if (hash(state) === hash(prior)) return { changed: false, result: clone(result) };
+          state.revision++;
+        }
+        validate(state);
+        if (state.version !== 3 || state.revision !== prior.revision + 1 || state.generation < prior.generation ||
+          !sameLegacy(state.lineage, prior.lineage)) return fail('SealCorrupt');
+        for (const id of Object.keys(prior.bundles)) {
+          if (!state.bundles[id] || !sameLegacy(attestedProof(prior, id.slice(7)), attestedProof(state, id.slice(7))) ||
+            prior.bundles[id].phase === 'acknowledged' && state.bundles[id].phase !== 'acknowledged') return fail('SealCorrupt');
+        }
+        const body = delta(prior, state);
+        const reserveKind = operation === 'reserve' || operation === 'compare-and-set' && value.operation === 'reserve';
+        commitRecord(engine, context, body, reserveKind ? 'reserve' : 'update');
+        if (body.publishing && compactionDue(engine)) compactEngine(engine, context);
+        return { changed: true, result: clone(result) };
+      }
+      default: return fail('SealCorrupt');
+    }
   } catch (error) {
-    // A failed write may have reached disk; reconstruct its outcome on next use.
-    context.settlement = undefined;
+    // A failed write may have reached disk; a tainted view is re-admitted from the files on the next use.
+    if (context.engine && context.engine.tainted) { context.engine.close(); context.engine = undefined; }
     throw error;
   }
 }

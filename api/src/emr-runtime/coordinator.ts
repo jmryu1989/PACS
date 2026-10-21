@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { executeExternal, inspectExternal, WriterContext } from './external-writer';
+import { executeExternal, inspectExternal, inspectFingerprint, WriterContext } from './external-writer';
 import { lockFile } from './file-lock';
 
 export interface WriterRequest { directory: string; operation: string; value?: any; context?: WriterContext }
@@ -21,7 +21,9 @@ export class StateCoordinator {
   constructor(directory: string, private readonly transport?: WriterTransport) {
     if (!directory || !path.isAbsolute(directory) || directory.includes('\0')) this.refuse();
     this.directory = path.resolve(directory);
-    const inspected = inspectExternal(this.directory);
+    // One validating admission of the directory's content; the re-checks across the fence compare bytes identities.
+    inspectExternal(this.directory);
+    const inspected = { fingerprint: inspectFingerprint(this.directory) };
     const root = fs.lstatSync(this.directory);
     this.rootIdentity = `${root.dev}:${root.ino}`;
     // Explicit transports are used by local storage components; they expose no deployable IPC path.
@@ -35,7 +37,7 @@ export class StateCoordinator {
     try {
       const opened = fs.fstatSync(directoryFd);
       if (`${opened.dev}:${opened.ino}` !== this.rootIdentity ||
-        inspectExternal(this.directory).fingerprint !== inspected.fingerprint) this.refuse();
+        inspectFingerprint(this.directory) !== inspected.fingerprint) this.refuse();
       const file = `/proc/self/fd/${directoryFd}/writer.lock`;
       const fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW, 0o600);
       try {
@@ -47,7 +49,7 @@ export class StateCoordinator {
     } finally { fs.closeSync(directoryFd); }
     // A pre-lock observation is not a lease. Revalidate the exact target after
     // acquiring the fence; leave it held until process death even on refusal.
-    if (inspectExternal(this.directory).fingerprint !== inspected.fingerprint) this.refuse();
+    if (inspectFingerprint(this.directory) !== inspected.fingerprint) this.refuse();
   }
   private refuse(): never { throw Object.assign(new Error('StateOwnerRefused'), { code: 'SealUnavailable' }); }
   get holdsWriterFence(): boolean { return !this.closed && this.fd !== undefined; }
@@ -66,12 +68,14 @@ export class StateCoordinator {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    const handles = [this.context.tailFile?.fd, this.context.log?.fd];
-    this.context.tailFile = undefined; this.context.log = undefined;
+    const handles = [this.context.log?.fd];
+    this.context.log = undefined;
     const errors: unknown[] = [];
     for (const fd of new Set(handles)) if (fd !== undefined) {
       try { fs.closeSync(fd); } catch (error) { errors.push(error); }
     }
+    try { this.context.engine?.close(); } catch (error) { errors.push(error); }
+    this.context.engine = undefined;
     if (errors.length) this.refuse();
   }
 }

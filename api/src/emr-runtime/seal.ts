@@ -3,7 +3,7 @@ import { ACCESS_STREAMS, AccessStream, ChainPosition, accessStreams, parseAccess
 import { integer, refuse } from '../emr-contract/validation';
 import { ChainTail, StoredEntry, chainViolation, retainedAnchor, canonicalPayload, entryHash } from './contract';
 import { FailureJournal } from './failure-journal';
-import { CopyMapping, ExternalState, attestedProof, samePair, validateAttemptIdentities } from './external-writer';
+import { CopyMapping, StateLineage, attestedProofFrom, samePair } from './external-writer';
 import { BundleIdentity, PairIdentity, SealedBundleProof, StateProtocolError } from './state-protocol';
 import type { PrismaLedgerSql, VerificationPage } from './store';
 import { EMR_REPLAY_VERIFY_ROWS } from './limits';
@@ -42,6 +42,14 @@ export interface ReservationAdmission {
   origin: object;
   issuedPrefix?: { seal: StreamSeal; anchor: ChainPosition; count: number };
 }
+/** The owner's verified view as the seal reads it: the small resident maps by reference (read-only here; every
+ * change is an explicit patch), the two large maps by keyed lookup. Revision-bound: a later patch is a new view. */
+interface View {
+  revision: number; generation: number; tail: SealState | null; lineage: StateLineage | null; retired: Record<string, number>;
+  intents: Record<string, any>; slots: Record<string, CommitBinding>; proofs: Record<string, ExpiryCore>;
+}
+/** Only the changed records (null deletes) and, for a publication, the new tail. */
+interface Changes { intents?: Record<string, any>; slots?: Record<string, any>; proofs?: Record<string, any>; terminal?: Record<string, any>; bundles?: Record<string, any>; retired?: Record<string, number> }
 
 /** DB finality is trusted for response-unknown recovery, never described as independent proof.
  * The protected settlement frontier authorizes exact reservations and detects tail-only rollback.
@@ -53,92 +61,108 @@ export class AccessSeal {
   // Weak ownership lets ended scopes disappear without forgetting durable identity.
   // A different scope cannot adopt an existing reservation, even for the same client.
   private origins = new WeakMap<object, Set<string>>();
-  private attempts(state: ExternalState): Map<string, CommitBinding> {
-    return validateAttemptIdentities(state);
-  }
-  private load(): ExternalState {
-    try { return this.journal.coordinator.call('read'); }
-    catch (error: any) { throw new SealRefused(/^Seal|^Ledger|^Unsealed/.test(error.code || '') ? error.code : 'SealUnavailable', error.detail); }
-  }
-  private change<T>(work: (state: ExternalState) => T, operation = 'update'): T {
-    try { return this.journal.coordinator.call(operation, work).result; }
+  private call<T = any>(operation: string, value?: any): T {
+    try { return this.journal.coordinator.call(operation, value); }
     catch (error: any) {
       if (error instanceof SealRefused || error instanceof StateProtocolError || error.name === 'ContractError') throw error;
-      throw new SealRefused(/^Seal|^Ledger|^Unsealed/.test(error.code || '') ? error.code : 'SealUnavailable', error.detail);
+      const known = /^Seal|^Ledger|^Unsealed/.test(error.code || '');
+      // An unexpected failure (not a seal refusal) keeps its own message as the detail: diagnosable, never a success.
+      throw new SealRefused(known ? error.code : 'SealUnavailable', error.detail ?? (known ? null : String(error.message ?? error).slice(0, 200)));
     }
   }
-  read(): SealState | 'absent' { return this.load().tail ?? 'absent'; }
-  private addIntent(state: ExternalState, value: { stream: AccessStream; attemptId: string; eventId: string | null; contentSha256: string | null; bundleId: string }, owner: string): void {
-    const id = key(value.stream, value.attemptId);
-    const owned = { ...value, owner };
-    if (state.intents[id] && !same(state.intents[id], owned)) refuse('AccessEventIdConflict');
-    if (state.terminal[id]) refuse('AttemptAlreadySettled');
-    state.intents[id] = owned;
+  private view(): View { return this.call('view'); }
+  private terminal(id: string): any { return this.call('get', { map: 'terminal', id }) ?? undefined; }
+  private bundle(bundleId: string): any { return this.call('get', { map: 'bundles', id: 'bundle:' + bundleId }) ?? undefined; }
+  private slotOf(id: string): string | undefined { return this.call('slot-of', id) ?? undefined; }
+  /** One durable WAL record of exactly the changed records; `tail` makes it a publication (tail published, completion flushed). */
+  private patch(changes: Changes, options: { kind?: 'update' | 'reserve'; generation?: number; tail?: SealState } = {}): void {
+    this.call('patch', { changes, kind: options.kind ?? 'update', generation: options.generation, tail: options.tail ?? null });
+  }
+  read(): SealState | 'absent' { return this.view().tail ?? 'absent'; }
+  /** The retained canonical proof of a published bundle from the current view (null when unknown). */
+  private proofOf(bundleId: string, view = this.view()): SealedBundleProof | null {
+    const a = this.bundle(bundleId);
+    if (!a) return null;
+    try { return attestedProofFrom(id => this.terminal(id), view, bundleId, a); }
+    catch (error: any) { throw new SealRefused(/^Seal|^Unsealed/.test(error.code || '') ? error.code : 'SealCorrupt', error.detail); }
   }
 
   /** Intent and exact reservation share one durable WAL record under the head lock.
    * EB008 prevents staged SQL from committing before this record is bound. Reusing
    * a slot proves that its old transaction ended without committing.
+   * Lookups: terminal K first, then pending K independently of the requested slot, then the destination slot.
    */
-  private reservationState: ExternalState | undefined;
   reserve(binding: Omit<CommitBinding, 'generation' | 'proofDigest'>, prefix?: { seal: StreamSeal; anchor: ChainPosition; count: number },
     owner: string = this.journal.coordinator.ownerId, admission?: ReservationAdmission): CommitBinding {
-    let superseded = false;
     const origin = admission?.origin ?? this;
-    const result = this.change(state => {
-      const id = key(binding.stream, binding.attemptId), position = slot(binding.stream, binding.sequence);
-      if (state.terminal[id]) refuse('AttemptAlreadySettled');
-      const pending = this.attempts(state).get(id), intent = state.intents[id];
-      if (pending) {
-        if (intent.owner !== owner || !this.origins.get(origin)?.has(id) ||
-          !sameBinding(pending, binding) || !samePrefix(state.proofs[id], prefix)) refuse('AccessEventIdConflict');
-        return { binding: pending, state };
-      }
+    const view = this.view();
+    if (!view.tail) throw new SealRefused('SealMissing');
+    const id = key(binding.stream, binding.attemptId), position = slot(binding.stream, binding.sequence);
+    if (this.terminal(id)) refuse('AttemptAlreadySettled');
+    const pendingPosition = this.slotOf(id), pending = pendingPosition ? view.slots[pendingPosition] : undefined, intent = view.intents[id];
+    let result: CommitBinding, superseded = false;
+    if (pending) {
+      if (!intent || intent.owner !== owner || !this.origins.get(origin)?.has(id) ||
+        !sameBinding(pending, binding) || !samePrefix(view.proofs[id], prefix)) refuse('AccessEventIdConflict');
+      result = pending;
+    } else {
       // A live replay uses its original durable proof; only an unseen identity
       // must match the scope's most recently issued expiry prefix.
       if (admission && prefix && !samePrefix(admission.issuedPrefix, prefix)) refuse('AccessEventIdConflict');
-      if (!intent) this.addIntent(state, { stream: binding.stream, attemptId: binding.attemptId,
-        eventId: binding.eventId, contentSha256: binding.contentSha256, bundleId: binding.bundleId }, owner);
-      const prior = state.slots[position];
+      const changes: Changes = { intents: {}, slots: {}, proofs: {}, terminal: {} };
+      const owned = { stream: binding.stream, attemptId: binding.attemptId, eventId: binding.eventId, contentSha256: binding.contentSha256, bundleId: binding.bundleId, owner };
+      if (intent && !same(intent, owned)) refuse('AccessEventIdConflict');
+      if (!intent) changes.intents![id] = owned;
+      const prior = view.slots[position];
       if (prior) {
         superseded = true;
         const old = key(prior.stream, prior.attemptId);
-        state.terminal[old] = { phase: 'superseded', generation: prior.generation, binding: prior,
+        changes.terminal![old] = { phase: 'superseded', generation: prior.generation, binding: prior,
           notFound: { eventId: prior.eventId ?? `expiry:${prior.attemptId}`, contentSha256: prior.contentSha256 } };
-        delete state.proofs[old]; delete state.intents[old];
+        changes.proofs![old] = null; changes.intents![old] = null;
       }
-      const next = { ...binding, generation: ++state.generation, proofDigest: null } as CommitBinding;
+      const generation = view.generation + 1;
+      const next = { ...binding, generation, proofDigest: null } as CommitBinding;
       if (prefix) {
         const { proofDigest: _, ...identity } = next;
         const core: ExpiryCore = { format: 1, binding: identity, ...prefix };
         next.proofDigest = digest(core);
-        state.proofs[id] = core;
+        changes.proofs![id] = core;
       }
-      state.slots[position] = next;
-      return { binding: next, state };
-    }, 'reserve');
+      changes.slots![position] = next;
+      this.patch(changes, { kind: 'reserve', generation });
+      result = next;
+    }
     const admitted = this.origins.get(origin) ?? new Set<string>();
-    admitted.add(key(binding.stream, binding.attemptId)); this.origins.set(origin, admitted);
-    this.reservationState = result.state;
+    admitted.add(id); this.origins.set(origin, admitted);
     if (superseded) this.flushNotFound();
-    return result.binding;
+    return result;
   }
   private flushNotFound(): void {
-    const pending = Object.entries(this.load().terminal).filter(([, t]) => t.notFound);
-    for (const [id, t] of pending) this.journal.record(`commit-not-found:${id}`, 'commit-not-found', t.notFound);
-    if (pending.length) this.change(state => { for (const [id] of pending) if (state.terminal[id]) delete state.terminal[id].notFound; });
+    const pending: [string, any][] = this.call('not-found');
+    for (const [id, notFound] of pending) this.journal.record(`commit-not-found:${id}`, 'commit-not-found', notFound);
+    if (!pending.length) return;
+    const changes: Changes = { terminal: {} };
+    for (const [id] of pending) {
+      const terminal = this.terminal(id);
+      if (!terminal) continue;
+      const { notFound: _, ...rest } = terminal;
+      changes.terminal![id] = rest;
+    }
+    if (Object.keys(changes.terminal!).length) this.patch(changes);
   }
   /** A proven callback rollback settles only its own attempt; unknown responses keep their evidence. */
   abort(stream: AccessStream, attemptId: string): void {
-    this.change(state => {
-      const id = key(stream, attemptId), reservation = Object.values(state.slots).find(q => key(q.stream, q.attemptId) === id);
-      if (state.terminal[id]?.phase === 'committed') throw new SealRefused('SealTailMismatch', 'abort-committed');
-      if (!reservation && !state.intents[id] && !state.terminal[id]) return;
-      state.terminal[id] = { phase: 'aborted', generation: reservation?.generation ?? state.generation,
-        ...(reservation ? { binding: reservation } : {}) };
-      if (reservation) delete state.slots[slot(stream, reservation.sequence)];
-      delete state.proofs[id]; delete state.intents[id];
-    });
+    const view = this.view(), id = key(stream, attemptId);
+    const position = this.slotOf(id), reservation = position ? view.slots[position] : undefined, terminal = this.terminal(id);
+    if (terminal?.phase === 'committed') throw new SealRefused('SealTailMismatch', 'abort-committed');
+    if (!reservation && !view.intents[id] && !terminal) return;
+    const changes: Changes = { terminal: {}, slots: {}, proofs: {}, intents: {} };
+    changes.terminal![id] = { phase: 'aborted', generation: reservation?.generation ?? view.generation, ...(reservation ? { binding: reservation } : {}) };
+    if (reservation) changes.slots![slot(stream, reservation.sequence)] = null;
+    if (view.proofs[id]) changes.proofs![id] = null;
+    if (view.intents[id]) changes.intents![id] = null;
+    this.patch(changes);
   }
   recordExpiryFailure(attemptId: string, rolledBack: boolean): void {
     const kind = rolledBack ? 'append-rolled-back' : 'ledger-unavailable';
@@ -157,11 +181,11 @@ export class AccessSeal {
     }
     return entries;
   }
-  private proof(state: ExternalState, entry: StoredEntry, chainId: string): ExpiryCore | null {
-    const q: CommitBinding = state.slots[slot('viewing', entry.sequence)];
-    const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];
+  private proof(view: View, entry: StoredEntry, chainId: string): ExpiryCore | null {
+    const q: CommitBinding = view.slots[slot('viewing', entry.sequence)];
+    const core: ExpiryCore = q && view.proofs[key('viewing', q.attemptId)];
     if (!core || q.chainId !== chainId || q.kind !== 'expiry' || q.sequence !== entry.sequence || q.hash !== entry.hash ||
-        q.previousHash !== entry.previousHash || q.contentSha256 !== entry.contentSha256 || (q.proofDigest !== digest(core) && !(q.attemptId === `legacy:${q.stream}:${q.sequence}` && q.proofDigest === null && q.sequence <= state.retired[q.stream])) ||
+        q.previousHash !== entry.previousHash || q.contentSha256 !== entry.contentSha256 || (q.proofDigest !== digest(core) && !(q.attemptId === `legacy:${q.stream}:${q.sequence}` && q.proofDigest === null && q.sequence <= view.retired[q.stream])) ||
         !same(core.binding, (({ proofDigest: _, ...rest }) => rest)(q))) return null;
     let p: any;
     try { p = JSON.parse(entry.payload); } catch { throw new SealRefused('LedgerChainBroken', 'checkpoint-format'); }
@@ -170,20 +194,20 @@ export class AccessSeal {
         core.anchor.sequence > core.seal.sequence) return null;
     return core;
   }
-  private async explain(sql: PrismaLedgerSql, state: ExternalState, stream: AccessStream, entry: StoredEntry, chainId: string, suppliedMarker?: CommitBinding | null): Promise<void> {
-    const q: CommitBinding = state.slots[slot(stream, entry.sequence)];
+  private async explain(sql: PrismaLedgerSql, view: View, stream: AccessStream, entry: StoredEntry, chainId: string, suppliedMarker?: CommitBinding | null): Promise<void> {
+    const q: CommitBinding = view.slots[slot(stream, entry.sequence)];
     const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;
     if (!q || !marker || !same(q, marker) || q.chainId !== chainId || q.sequence !== entry.sequence || q.eventId !== entry.eventId ||
         q.hash !== entry.hash || q.previousHash !== entry.previousHash || q.contentSha256 !== entry.contentSha256 || q.kind !== entry.kind ||
-        ['aborted', 'superseded'].includes(state.terminal[key(stream, q.attemptId)]?.phase) ||
-        (entry.kind === 'expiry' && !this.proof(state, entry, chainId)))
+        ['aborted', 'superseded'].includes(this.terminal(key(stream, q.attemptId))?.phase) ||
+        (entry.kind === 'expiry' && !this.proof(view, entry, chainId)))
       throw new SealRefused('UnsealedEntryUnexplained', `${stream}:${entry.sequence}`);
   }
   private readonly anchors = new Map<AccessStream, string>();
   private readonly retainedStarts = new Map<AccessStream, number>();
-  private async verify(sql: PrismaLedgerSql, state: ExternalState, stream: AccessStream, tail: ChainTail,
+  private async verify(sql: PrismaLedgerSql, view: View, stream: AccessStream, tail: ChainTail,
     end: ChainPosition = tail, full = false, page?: VerificationPage): Promise<StoredEntry[]> {
-    const current = state.tail.streams[stream];
+    const current = view.tail!.streams[stream];
     if (tail.chainId !== current.chainId) throw new SealRefused('SealChainMismatch', stream);
     if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);
     const first = page ? page.first : (await sql.entriesAfter(stream, 0, 1))[0];
@@ -212,9 +236,9 @@ export class AccessSeal {
     const violation = chainViolation(anchor, entries, tail, stream);
     if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
     if (anchor.sequence > 0) {
-      const checkpoint = entries.find(e => e.kind === 'expiry' && same(this.proof(state, e, current.chainId)?.anchor, anchor));
+      const checkpoint = entries.find(e => e.kind === 'expiry' && same(this.proof(view, e, current.chainId)?.anchor, anchor));
       if (!checkpoint) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-anchor');
-      await this.explain(sql, state, stream, checkpoint, current.chainId);
+      await this.explain(sql, view, stream, checkpoint, current.chainId);
     }
     const sealed = entries.find(e => e.sequence === current.sequence) ?? anchor;
     if (sealed.sequence !== current.sequence || sealed.hash !== current.hash) throw new SealRefused('SealTailMismatch', stream);
@@ -223,10 +247,10 @@ export class AccessSeal {
   }
   /** Positive facts only. An unrelated pending intent is never a receipt prerequisite. */
   async reconcileCommitted(stream: AccessStream, target?: ChainPosition, reader = this.sql, recovering = false): Promise<SealState> {
-    return (await this.reconcileState(stream, target, reader, recovering)).tail;
+    return (await this.reconcileState(stream, target, reader, recovering)).tail!;
   }
-  private async bindSealedTarget(sql: PrismaLedgerSql, state: ExternalState, stream: AccessStream, target: ChainPosition): Promise<void> {
-    const sealed = state.tail.streams[stream];
+  private async bindSealedTarget(sql: PrismaLedgerSql, view: View, stream: AccessStream, target: ChainPosition): Promise<void> {
+    const sealed = view.tail!.streams[stream];
     const tail = await sql.tail(stream);
     if (tail.chainId !== sealed.chainId) throw new SealRefused('SealChainMismatch', stream);
     if (tail.sequence < sealed.sequence) throw new SealRefused('LedgerBehindSeal', stream);
@@ -235,18 +259,13 @@ export class AccessSeal {
         chainViolation({ sequence: first.sequence - 1, hash: first.previousHash }, entries, sealed, stream))
       throw new SealRefused('LedgerChainBroken', 'sealed-target');
   }
-  private async reconcileState(stream: AccessStream, target?: ChainPosition, reader = this.sql, recovering = false): Promise<ExternalState> {
-    // A reservation already read and durably updated this protected frontier under
-    // the head lock. It is a sufficient starting point for verifying its own new
-    // target. Publication still reloads and validates the actual protected files,
-    // merges exact bindings, and retries if another writer advanced the frontier.
-    const basis = this.reservationState;
-    let useBasis = !recovering && target && basis?.tail && target.sequence > basis.tail.streams[stream].sequence &&
-      basis.slots[slot(stream, target.sequence)]?.hash === target.hash;
+  private async reconcileState(stream: AccessStream, target?: ChainPosition, reader = this.sql, recovering = false): Promise<View> {
+    // Publication reloads the actual verified view, merges exact bindings, and retries
+    // if another writer advanced the frontier while SQL verification ran.
     for (;;) {
-      const state = useBasis ? basis : this.load(); useBasis = false;
-      if (!state.tail) throw new SealRefused('SealMissing');
-      const sealed = state.tail.streams[stream];
+      const view = this.view();
+      if (!view.tail) throw new SealRefused('SealMissing');
+      const sealed = view.tail.streams[stream];
       if (target && target.sequence <= sealed.sequence && !recovering) {
         if (target.sequence === sealed.sequence && target.hash !== sealed.hash) throw new SealRefused('SealTailMismatch', 'target');
         try {
@@ -254,14 +273,13 @@ export class AccessSeal {
           // advanceReceipt's exact attempt binding bypasses this DB-byte proof.
           if (sealed.sequence - target.sequence + 1 > EMR_REPLAY_VERIFY_ROWS)
             throw new SealRefused('SealUnavailable', 'replay-verification-limit');
-          await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));
+          await reader.snapshot(sql => this.bindSealedTarget(sql, view, stream, target));
         }
         catch (error) {
-          if (!same(this.load().tail.streams[stream], sealed)) continue;
+          if (!same(this.view().tail!.streams[stream], sealed)) continue;
           throw error;
         }
-        this.reservationState = state;
-        return state;
+        return view;
       }
       let result: {current: StreamSeal; end: ChainPosition; entries: StoredEntry[]; unsealed: StoredEntry[]};
       try {
@@ -280,90 +298,113 @@ export class AccessSeal {
         // Freeze an omitted target at this snapshot, including across retries.
         target ??= { sequence: tail.sequence, hash: tail.hash };
         const requested = target;
-        const entries = await this.verify(sql, state, stream, tail, requested, recovering, page);
+        const entries = await this.verify(sql, view, stream, tail, requested, recovering, page);
         const own = entries.find(e => e.sequence === requested.sequence);
         if (requested.sequence > tail.sequence || (requested.sequence > sealed.sequence && (!own || own.hash !== requested.hash)))
           throw new SealRefused('SealTailMismatch', 'target');
         const end = requested;
-        const current = state.tail.streams[stream];
+        const current = view.tail!.streams[stream];
         const unsealed = entries.filter(e => e.sequence > current.sequence && e.sequence <= end.sequence);
         const markers = new Map(page?.entries.map(item => [item.entry.sequence, item.marker]));
-        for (const entry of unsealed) await this.explain(sql, state, stream, entry, current.chainId, markers.get(entry.sequence));
+        for (const entry of unsealed) await this.explain(sql, view, stream, entry, current.chainId, markers.get(entry.sequence));
         return { current, end, entries, unsealed };
         };
         result = complete ? await verifySnapshot(reader, page) : await reader.snapshot(sql => verifySnapshot(sql));
       } catch(error) {
         // A concurrent expiry may replace the prefix after this frontier was read. Re-read
         // under a new DB snapshot only when the protected writer actually advanced its revision.
-        if (!same(this.load().tail.streams[stream], sealed)) continue;
+        if (!same(this.view().tail!.streams[stream], sealed)) continue;
         throw error;
       }
-      if (!result.unsealed.length) { this.reservationState = state; return state; }
+      if (!result.unsealed.length) return view;
       if (recovering) this.journal.record(`seal-recovered:${stream}:${result.current.sequence}-${result.end.sequence}`, 'seal-recovered',
         { chainId: result.current.chainId, fromSequence: result.current.sequence, toSequence: result.end.sequence, toHash: result.end.hash });
       // Settled slots can retire behind the frontier; their terminal identities must
       // remain durable so a delayed reserve cannot allocate the same attempt again.
-      const retained = new Set(Object.values(state.slots).filter(q => q.stream === stream && q.kind === 'expiry' &&
-        q.sequence >= this.retainedStarts.get(stream)).map(q => q.sequence));
+      const retained = new Set(Object.values(view.slots).filter(q => q.stream === stream && q.kind === 'expiry' &&
+        q.sequence >= this.retainedStarts.get(stream)!).map(q => q.sequence));
       // Reservations/intents in other requests can change the global revision during
       // SQL verification. Merge only this verified frontier under the writer lock;
       // a changed frontier (including expiry) still requires a fresh DB snapshot.
       const installed = await this.publish(latest => {
-        if (!same(latest.tail.streams[stream], result.current)) return null;
+        if (!same(latest.tail!.streams[stream], result.current)) return null;
+        const changes: Changes = { terminal: {}, intents: {}, slots: {}, proofs: {}, retired: {} };
         for (const entry of result.unsealed) {
           const position = slot(stream, entry.sequence), q = latest.slots[position];
-          const expected = state.slots[position];
+          const expected = view.slots[position];
           if (!q || !same(q, expected)) throw new SealRefused('UnsealedEntryUnexplained', position);
         }
-        latest.tail = { streams: { ...latest.tail.streams, [stream]: { chainId: result.current.chainId, ...result.end } },
-          sealedAt: new Date().toISOString(), generation: ++latest.generation };
+        const tail: SealState = { streams: { ...latest.tail!.streams, [stream]: { chainId: result.current.chainId, ...result.end } },
+          sealedAt: new Date().toISOString(), generation: latest.generation + 1 };
         for (const entry of result.unsealed) {
           const position = slot(stream, entry.sequence), q = latest.slots[position], id = key(stream, q.attemptId);
-          latest.terminal[id] = { phase: 'committed', generation: q.generation, binding: q, owner: latest.intents[id]?.owner };
-          delete latest.intents[id];
+          const owner = latest.intents[id]?.owner;
+          changes.terminal![id] = { phase: 'committed', generation: q.generation, binding: q, ...(owner !== undefined ? { owner } : {}) };
+          if (latest.intents[id]) changes.intents![id] = null;
         }
+        let retired = latest.retired[stream];
         for (const [position, q] of Object.entries(latest.slots)) {
-          if (q.stream !== stream || q.sequence > latest.tail.streams[stream].sequence || retained.has(q.sequence)) continue;
-          delete latest.slots[position]; delete latest.proofs[key(stream, q.attemptId)];
-          latest.retired[stream] = Math.max(latest.retired[stream], q.generation);
+          if (q.stream !== stream || q.sequence > tail.streams[stream].sequence || retained.has(q.sequence)) continue;
+          changes.slots![position] = null; if (latest.proofs[key(stream, q.attemptId)]) changes.proofs![key(stream, q.attemptId)] = null;
+          retired = Math.max(retired, q.generation);
         }
+        if (retired !== latest.retired[stream]) changes.retired![stream] = retired;
         // Negative attempts also remain terminal. Forgetting one would permit an old RPC to reserve it anew.
-        return latest;
+        return { changes, tail, generation: tail.generation };
       });
-      if (installed) { this.reservationState = installed; return installed; }
+      if (installed) return installed;
     }
   }
-  private publications: { install: (state: ExternalState) => ExternalState | null;
-    resolve: (state: ExternalState | null) => void; reject: (error: unknown) => void }[] | null = null;
-  /** Adjacent verified advances share one WAL/tail publication. Keep all three
-   * durability barriers: removing the completion barrier would let a later torn
-   * or rolled-back completed tail masquerade as a crash awaiting repair.
-   * Only already-verified frontiers enter this group; it never waits for an
+  private publications: { install: (latest: View) => { changes: Changes; tail: SealState; generation: number } | null;
+    resolve: (view: View | null) => void; reject: (error: unknown) => void }[] | null = null;
+  /** Adjacent verified advances are installed in one turn, each as its own durable publication with all three
+   * barriers (record, tail, completion). Only already-verified frontiers enter this group; it never waits for an
    * unrelated transaction to commit or acquire a head lock. */
-  private publish(install: (state: ExternalState) => ExternalState | null): Promise<ExternalState | null> {
+  private publish(install: (latest: View) => { changes: Changes; tail: SealState; generation: number } | null): Promise<View | null> {
     return new Promise((resolve, reject) => {
       const item = { install, resolve, reject };
       if (this.publications) { this.publications.push(item); return; }
       this.publications = [item];
       setImmediate(() => {
-        const group = this.publications; this.publications = null;
+        const group = this.publications!; this.publications = null;
+        // Each install plans against a staged view that already reflects the earlier installs of this turn; the
+        // accepted plans then form one record, one tail publication and one completion flush.
+        const live = this.view();
+        const staged: View = { ...live, tail: live.tail, retired: { ...live.retired }, intents: { ...live.intents }, slots: { ...live.slots }, proofs: { ...live.proofs } };
+        const merged: Changes = { terminal: {}, intents: {}, slots: {}, proofs: {}, bundles: {}, retired: {} };
+        let tail: SealState | undefined, generation = live.generation;
+        const accepted: typeof group = [];
+        for (const entry of group) {
+          try {
+            const plan = entry.install(staged);
+            if (!plan) { entry.resolve(null); continue; }
+            for (const name of ['intents', 'slots', 'proofs', 'retired'] as const) for (const [id, value] of Object.entries(plan.changes[name] ?? {})) {
+              (merged[name] as any)[id] = value;
+              if (name === 'retired') staged.retired[id] = value as number; else if (value === null) delete (staged as any)[name][id]; else (staged as any)[name][id] = value;
+            }
+            for (const name of ['terminal', 'bundles'] as const) for (const [id, value] of Object.entries(plan.changes[name] ?? {})) (merged[name] as any)[id] = value;
+            staged.tail = plan.tail; staged.generation = plan.generation; tail = plan.tail; generation = plan.generation;
+            accepted.push(entry);
+          } catch (error) { entry.reject(error); }
+        }
+        if (!accepted.length) return;
         try {
-          const result = this.change(state => {
-            return { accepted: group.map(entry => Boolean(entry.install(state))), state };
-          });
-          for (let i = 0; i < group.length; i++) group[i].resolve(result.accepted[i] ? result.state : null);
-        } catch (error) { for (const entry of group) entry.reject(error); }
+          for (const name of Object.keys(merged) as (keyof Changes)[]) if (!Object.keys(merged[name]!).length) delete merged[name];
+          this.patch(merged, { generation, tail });
+          const after = this.view();
+          for (const entry of accepted) entry.resolve(after);
+        } catch (error) { for (const entry of accepted) entry.reject(error); }
       });
     });
   }
-  private readonly advances = new Map<AccessStream, { target: ChainPosition; resolve: (state: ExternalState) => void; reject: (error: unknown) => void }[]>();
+  private readonly advances = new Map<AccessStream, { target: ChainPosition; resolve: (view: View) => void; reject: (error: unknown) => void }[]>();
   /** Coalesce only requests whose COMMIT already finished. No pending transaction or unrelated
    * intent joins this group, and a newly arriving request never extends an in-flight snapshot.
    */
   async advance(stream: AccessStream, target: ChainPosition): Promise<SealState> {
-    return (await this.advanceState(stream, target)).tail;
+    return (await this.advanceState(stream, target)).tail!;
   }
-  private advanceState(stream: AccessStream, target: ChainPosition): Promise<ExternalState> {
+  private advanceState(stream: AccessStream, target: ChainPosition): Promise<View> {
     return new Promise((resolve, reject) => {
       const waiting = this.advances.get(stream);
       if (waiting) { waiting.push({ target, resolve, reject }); return; }
@@ -372,7 +413,7 @@ export class AccessSeal {
       const drain = async () => {
         while (queue.length) {
           const group = queue.splice(0), through = group.reduce((a, b) => a.sequence >= b.target.sequence ? a : b.target, group[0].target);
-          try { const state = await this.reconcileState(stream, through); for (const item of group) item.resolve(state); }
+          try { const view = await this.reconcileState(stream, through); for (const item of group) item.resolve(view); }
           catch (error) { for (const item of group) item.reject(error); }
         }
         this.advances.delete(stream);
@@ -386,29 +427,29 @@ export class AccessSeal {
    * attempt. Neither acknowledgement nor a new process makes that identity available again.
    */
   committedReceipt(stream: AccessStream, attemptId: string, eventId: string, entry: StoredEntry): SealState | null {
-    return this.receiptFrom(this.load(), stream, attemptId, eventId, entry);
+    return this.receiptFrom(this.view(), stream, attemptId, eventId, entry);
   }
-  /** The same protected snapshot that completed this batch proves its receipts.
+  /** The same protected view that completed this batch proves its receipts.
    * Returning its exact binding avoids a second lock/read after publication; no
    * cached evidence is reused for a later request or after a failed publication. */
   async advanceReceipt(stream: AccessStream, attemptId: string, eventId: string, entry: StoredEntry): Promise<SealState | null> {
     // A helper can publish after this instance reserved, even while our COMMIT
     // response is delayed. Consult the current protected authority before adding
     // a DB dependency; a cached reservation must not hide an already sealed receipt.
-    const current = this.load(), receipt = this.receiptFrom(current, stream, attemptId, eventId, entry);
+    const current = this.view(), receipt = this.receiptFrom(current, stream, attemptId, eventId, entry);
     if (receipt) return receipt;
     // A replay owns neither a new reservation nor the original receipt attempt.
     // Its caller will read the event and bind its bytes through the sealed tail.
     if (current.slots[slot(stream, entry.sequence)]?.attemptId !== attemptId) return null;
-    const state = await this.advanceState(stream, { sequence: entry.sequence, hash: entry.hash });
-    return this.receiptFrom(state, stream, attemptId, eventId, entry);
+    const view = await this.advanceState(stream, { sequence: entry.sequence, hash: entry.hash });
+    return this.receiptFrom(view, stream, attemptId, eventId, entry);
   }
-  private receiptFrom(state: ExternalState, stream: AccessStream, attemptId: string, eventId: string, entry: StoredEntry): SealState | null {
-    const q: CommitBinding = state.terminal[key(stream, attemptId)]?.binding;
-    if (!q || q.eventId !== eventId || q.hash !== entry.hash || q.sequence !== entry.sequence ||
+  private receiptFrom(view: View, stream: AccessStream, attemptId: string, eventId: string, entry: StoredEntry): SealState | null {
+    const q: CommitBinding = this.terminal(key(stream, attemptId))?.binding;
+    if (!q || !view.tail || q.eventId !== eventId || q.hash !== entry.hash || q.sequence !== entry.sequence ||
         q.contentSha256 !== entry.contentSha256 || q.previousHash !== entry.previousHash ||
-        q.chainId !== state.tail.streams[stream].chainId || q.sequence > state.tail.streams[stream].sequence) return null;
-    return state.tail;
+        q.chainId !== view.tail.streams[stream].chainId || q.sequence > view.tail.streams[stream].sequence) return null;
+    return view.tail;
   }
   /** The caller verifies the full proof before acknowledging delivery. There is no
    * durable cleanup here: the existing terminal record is also reserve's permanent
@@ -430,7 +471,7 @@ export class AccessSeal {
         !same(proof.entries.map(({ sealed: _, ...b }) => b), bundle.bindings)) return conflict();
       return proof;
     };
-    const retained = attestedProof(this.load(), bundleId);
+    const retained = this.proofOf(bundleId);
     if (retained) return matches(retained);
     const entries = await this.sql.snapshot(async reader => {
       const stored: StoredEntry[] = [];
@@ -460,46 +501,46 @@ export class AccessSeal {
         sealed: { sequence: frontier.streams[binding.stream].sequence, hash: frontier.streams[binding.stream].hash } };
     }));
     for (const result of results) if (result.status === 'rejected') throw result.reason;
-    return this.change(state => {
-      // Synchronous owner publication chooses the first winner for concurrent confirms.
-      const existing = attestedProof(state, bundleId);
-      if (existing) return matches(existing);
-      state.bundles['bundle:' + bundleId] = { version: 1, phase: 'published', serviceEpoch: this.proofEpoch,
-        eventId: bundle.eventId, requiredStreams: [...bundle.requiredStreams],
-        refs: results.map(r => (r as PromiseFulfilledResult<any>).value) };
-      return matches(attestedProof(state, bundleId));
-    });
+    // Synchronous owner publication chooses the first winner for concurrent confirms.
+    const existing = this.proofOf(bundleId);
+    if (existing) return matches(existing);
+    const attestation = { version: 1, phase: 'published', serviceEpoch: this.proofEpoch,
+      eventId: bundle.eventId, requiredStreams: [...bundle.requiredStreams],
+      refs: results.map(r => (r as PromiseFulfilledResult<any>).value) };
+    this.patch({ bundles: { ['bundle:' + bundleId]: attestation } });
+    return matches(this.proofOf(bundleId)!);
   }
 
+  /** An exact acknowledgement installs the minimal acknowledged representation and drops the live owner linkage in
+   * one durable record. The superseded full representation leaves the active WAL/checkpoint at the next amortized
+   * compaction (size-proportional), never by a whole-checkpoint rewrite per acknowledgement. */
   acknowledgeBundle(proof: SealedBundleProof, bindings: CommitBinding[]): 'acknowledged' | 'already-acknowledged' {
-    const result = this.change(state => {
-      const id = bindings[0]?.bundleId, actual = id && attestedProof(state, id);
-      if (!actual || !same(actual, proof) || !same(actual.entries.map(({ sealed: _, ...b }) => b), bindings))
-        throw new StateProtocolError('CONFLICT', 'conflict');
-      const previous = state.bundles['bundle:' + id];
-      if (previous.phase === 'acknowledged') return 'already-acknowledged' as const;
-      state.bundles['bundle:' + id] = { version: 1, phase: 'acknowledged', serviceEpoch: previous.serviceEpoch,
-        refs: previous.refs, proofSha256: digest(actual) };
-      // Caller ownership is no longer required after exact full-proof delivery.
-      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)].owner;
-      return 'acknowledged' as const;
-    });
-    // Remove the superseded representation from current WAL/checkpoint as well.
-    // A failed compaction returns failure; the same exact ack can finish it later.
-    this.journal.coordinator.call('compact', { force: true });
-    return result;
+    const id = bindings[0]?.bundleId, actual = id && this.proofOf(id);
+    if (!actual || !same(actual, proof) || !same(actual.entries.map(({ sealed: _, ...b }) => b), bindings))
+      throw new StateProtocolError('CONFLICT', 'conflict');
+    const previous = this.bundle(id);
+    if (previous.phase === 'acknowledged') return 'already-acknowledged';
+    const changes: Changes = { bundles: {}, terminal: {} };
+    changes.bundles!['bundle:' + id] = { version: 1, phase: 'acknowledged', serviceEpoch: previous.serviceEpoch, refs: previous.refs, proofSha256: digest(actual) };
+    // Caller ownership is no longer required after exact full-proof delivery.
+    for (const b of bindings) {
+      const terminal = this.terminal(key(b.stream, b.attemptId));
+      if (terminal && terminal.owner !== undefined) { const { owner: _, ...rest } = terminal; changes.terminal![key(b.stream, b.attemptId)] = rest; }
+    }
+    this.patch(changes);
+    return 'acknowledged';
   }
 
   /** Called in the deleting transaction, with its head lock held, before staging deletion. */
   async expiryPrefix(through: number): Promise<{ seal: StreamSeal; anchor: ChainPosition; count: number }> {
     const sql = this.sql;
     await this.reconcileCommitted('viewing', undefined, sql);
-    const state = this.load();
+    const view = this.view();
     integer(through, 1);
     const [first] = await sql.entriesAfter('viewing', 0, 1);
     const [last] = await sql.entriesAfter('viewing', through - 1, 1);
     if (!last || last.sequence !== through) throw new SealRefused('LedgerChainBroken', 'expiry-prefix');
-    if (!first || through < first.sequence || through > state.tail.streams.viewing.sequence) throw new SealRefused('LedgerChainBroken', 'expiry-prefix');
+    if (!first || through < first.sequence || through > view.tail!.streams.viewing.sequence) throw new SealRefused('LedgerChainBroken', 'expiry-prefix');
     // Include never-confirmed COMMITs. This uses only shared reader snapshots and
     // completed publications, never startup's exclusive fence inside a live writer.
     for (const row of await this.range(sql, 'viewing', through, first.sequence - 1)) {
@@ -513,11 +554,12 @@ export class AccessSeal {
       }
       await this.confirmBundle({ eventId: row.eventId, requiredStreams: [...required], bindings });
     }
-    return { seal: state.tail.streams.viewing, anchor: { sequence: through, hash: last.hash }, count: through - first.sequence + 1 };
+    return { seal: view.tail!.streams.viewing, anchor: { sequence: through, hash: last.hash }, count: through - first.sequence + 1 };
   }
 
   /** The DB exclusive writer fence is held through both positive verification and negative settlement.
    * Every append/expiry must take its shared transaction fence before publishing an intent.
+   * (Full-restart recovery cost at the envelope is BLOCKED_DECISION per D1684: this path keeps its original passes.)
    */
   recoverAtStart(pair?: PairIdentity, serviceEpoch?: string, copy: CopyMapping | null = null): Promise<{ seal: SealState; recovered: number; notCommitted: number; streams: Record<AccessStream, RecoveryCount> }> {
     this.origins = new WeakMap();
@@ -526,12 +568,10 @@ export class AccessSeal {
     return this.sql.withWriterFence(async sql => {
       // A private copy (D1656-T07) is admitted against its stored origin through the launch-scoped mapping; the
       // observed pair must be exactly the mapping's target. The origin lineage itself is never rewritten.
-      if (pair) this.journal.coordinator.call('admit-pair', copy ? { pair, copy } : pair);
-      if (copy && !samePair(pair, copy.target)) throw new SealRefused('SealChainMismatch', 'copy-target');
+      if (pair) this.call('admit-pair', copy ? { pair, copy } : pair);
+      if (copy && !samePair(pair!, copy.target)) throw new SealRefused('SealChainMismatch', 'copy-target');
+      // Admission validated every stored identity before any journal settlement, publication or compaction.
       this.read();
-      // Refuse contradictory identities before journal settlement, publication
-      // or compaction can normalize away the evidence.
-      this.attempts(this.load());
       const tails = {} as Record<AccessStream, ChainTail>;
       for (const stream of ACCESS_STREAMS) tails[stream] = await sql.tail(stream);
       if (this.read() === 'absent') {
@@ -540,13 +580,11 @@ export class AccessSeal {
         if (ACCESS_STREAMS.some(s => tails[s].sequence !== 0)) throw new SealRefused('SealMissing');
         const origin: PairIdentity = pair ?? { instanceId: 'local-owner', database: await sql.identity(),
           chains: { viewing: tails.viewing.chainId, history: tails.history.chainId } };
-        const state = this.load();
-        state.lineage = { version: 1, id: randomUUID(), origin };
-        state.tail = { streams: tails, sealedAt: new Date().toISOString(), generation: 1 };
-        state.generation = 1; state.revision = 1;
-        this.journal.coordinator.call('initialize', state);
+        const state = { version: 3, revision: 1, generation: 1, tail: { streams: tails, sealedAt: new Date().toISOString(), generation: 1 },
+          lineage: { version: 1, id: randomUUID(), origin }, bundles: {}, intents: {}, slots: {}, proofs: {}, terminal: {}, retired: { viewing: 0, history: 0 } };
+        this.call('initialize', state);
       }
-      const origin = this.load().lineage.origin, expected = copy ? copy.source : pair;
+      const origin = this.view().lineage!.origin, expected = copy ? copy.source : pair;
       if (ACCESS_STREAMS.some(s => origin.chains[s] !== tails[s].chainId) ||
         expected && !samePair(origin, expected) || !expected && !same(origin.database, await sql.identity()))
         throw new SealRefused('SealChainMismatch', 'capture-lineage');
@@ -556,7 +594,7 @@ export class AccessSeal {
         const before = (this.read() as SealState).streams[stream].sequence;
         await this.reconcileCommitted(stream, undefined, sql, true);
         let notCommitted = 0;
-        for (const intent of Object.values(this.load().intents).filter(i => i.stream === stream)) {
+        for (const intent of Object.values(this.view().intents).filter(i => i.stream === stream)) {
           const marker = await sql.markerForAttempt(stream, intent.attemptId);
           if (marker) throw new SealRefused('UnsealedEntryUnexplained', 'unsettled-marker');
           this.journal.record(`commit-not-found:${stream}:${intent.attemptId}`, 'commit-not-found',
@@ -567,14 +605,15 @@ export class AccessSeal {
       }
       // The exclusive PG fence proves transaction finality, not receipt delivery.
       // Preserve every terminal identity even after exact acknowledgement.
-      for (const terminal of Object.values(this.load().terminal)) {
+      // BLOCKED_DECISION (D1684): one SQL probe per historical aborted terminal over the materialized history.
+      for (const terminal of Object.values(this.call('read').terminal) as any[]) {
         if (terminal.phase !== 'aborted' || !terminal.binding) continue;
         const binding: CommitBinding = terminal.binding;
         if (await sql.markerForAttempt(binding.stream, binding.attemptId))
           throw new SealRefused('UnsealedEntryUnexplained', 'aborted-marker');
       }
-      // Startup holds the writer fence, never a stream head lock.
-      this.journal.coordinator.call('compact', { force: Object.values(this.load().bundles).some(a => a.phase === 'acknowledged') });
+      // Startup holds the writer fence, never a stream head lock; compaction is amortized, never forced here.
+      this.call('compact', { force: false });
       return { seal: this.read() as SealState, streams: counts, recovered: ACCESS_STREAMS.reduce((n, s) => n + counts[s].recovered, 0),
         notCommitted: ACCESS_STREAMS.reduce((n, s) => n + counts[s].notCommitted, 0) };
     });

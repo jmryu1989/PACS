@@ -903,10 +903,23 @@ test('D1655-T06 exact ack minimizes duplicates and preserves proof lookup and ex
   assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(afterAck), 'post-ack confirm is read-only');
   assert.equal((await work.call('acknowledge', value)).result.status, 'already-acknowledged');
   for (const b of item.bundle.bindings) assertExcluded(await replayObservation(f, work, b));
+  // The durable contract of an acknowledgement (D1682 item 4): the acknowledged minimal representation is what a fresh
+  // admission of the files reads (checkpoint plus WAL), the full published attestation is no longer the current
+  // record, and the superseded bytes leave the active WAL/checkpoint at the amortized reclamation - never by a
+  // whole-checkpoint rewrite per acknowledgement.
+  const inspector = load('emr-runtime/external-writer').inspectExternal;
+  const admitted = inspector(f.directory).state;
+  assert.equal(admitted.version, 3);
+  assert.equal(JSON.stringify(admitted.bundles), JSON.stringify(after.bundles), 'a fresh admission of the files reads the minimized representation');
+  const walBefore = fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size;
+  f.coordinator.call('compact', { force: true });
   const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
   assert.equal(checkpoint.state.version, 3);
-  assert.equal(JSON.stringify(checkpoint.state.bundles), JSON.stringify(after.bundles), 'current checkpoint contains the minimized representation');
-  assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'superseded full representation is removed from the active WAL');
+  assert.equal(JSON.stringify(checkpoint.state.bundles), JSON.stringify(after.bundles), 'reclamation installs the minimized representation in the checkpoint');
+  assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'reclamation removes the superseded full representation from the active WAL');
+  assert.ok(walBefore >= 0, 'the WAL before reclamation is measured, not prescribed');
+  assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'post-reclamation confirm preserves its full proof contract');
+  assert.equal((await work.call('acknowledge', value)).result.status, 'already-acknowledged', 'post-reclamation exact ack retry is repeatable');
 });
 
 // REQ-B2C-06/07/09 -> FALSE-ROLLBACK-OR-DUPLICATE / UNRECORDED-BODY /
@@ -932,7 +945,7 @@ async function storageFailure(directory, cut, code, operation) {
   fs.fdatasyncSync = fd => {
     if (isWal(fd)) {
       walFlushes++;
-      if (cut === 'wal-flush' || cut === 'compact-flush' && walFlushes === 2) fail();
+      if (cut === 'wal-flush' || cut === 'compact-flush' && walFlushes === 1) fail();
       const result = originals.fdatasyncSync(fd);
       if (cut === 'wal-flushed') fail();
       return result;
@@ -990,16 +1003,28 @@ test('D1655-T07 aggregate proof storage failures preserve unknown outcome and ex
 });
 
 test('D1655-T08 interrupted full-proof ack compaction preserves exact retry and permanent exclusion', async t => {
-  for (const code of ['EIO', 'ENOSPC']) for (const cut of ['wal-write', 'wal-torn-write', 'wal-flush', 'wal-flushed',
-    'checkpoint-rename', 'checkpoint-renamed', 'wal-reset', 'wal-reset-done', 'compact-flush']) {
+  // The acknowledgement's own barriers (its WAL record) and the reclamation's barriers (the amortized compaction that
+  // later removes the superseded representation) are separate durable steps (D1682 item 4); each is cut in turn.
+  const ackCuts = ['wal-write', 'wal-torn-write', 'wal-flush', 'wal-flushed'];
+  const reclamationCuts = ['checkpoint-rename', 'checkpoint-renamed', 'wal-reset', 'wal-reset-done', 'compact-flush'];
+  for (const code of ['EIO', 'ENOSPC']) for (const cut of [...ackCuts, ...reclamationCuts]) {
     const f = await fixture(t), work = await (await f.hello()).work(), item = await complete(f, work);
     const database = JSON.stringify(f.database.streams);
-    const failed = await storageFailure(f.directory, cut, code,
-      () => work.call('acknowledge', { proof: item.proof, bindings: item.bundle.bindings }));
-    assert.equal(failed.reply.ok, false, 'failed ack or minimization never returns successful acknowledgement');
-    assert.ok(failed.hits > 0, 'ack reaches the selected storage cut');
-    assert.equal(failed.reply.error.outcome, 'unknown');
-    assert.equal(JSON.stringify(f.database.streams), database, 'ack failure preserves committed rows and markers');
+    if (ackCuts.includes(cut)) {
+      const failed = await storageFailure(f.directory, cut, code,
+        () => work.call('acknowledge', { proof: item.proof, bindings: item.bundle.bindings }));
+      assert.equal(failed.reply.ok, false, 'failed ack never returns successful acknowledgement');
+      assert.ok(failed.hits > 0, 'ack reaches the selected storage cut');
+      assert.equal(failed.reply.error.outcome, 'unknown');
+    } else {
+      assert.equal((await work.call('acknowledge', { proof: item.proof, bindings: item.bundle.bindings })).result.status, 'acknowledged');
+      const failed = await storageFailure(f.directory, cut, code, async () => {
+        try { f.coordinator.call('compact', { force: true }); return { ok: true }; } catch (error) { return { ok: false, code: error.code }; }
+      });
+      assert.equal(failed.reply.ok, false, 'a failed reclamation reports failure');
+      assert.ok(failed.hits > 0, 'reclamation reaches the selected storage cut');
+    }
+    assert.equal(JSON.stringify(f.database.streams), database, 'ack or reclamation failure preserves committed rows and markers');
     f.service.close(); await f.service.drained(); f.coordinator.close();
     const evidence = fs.mkdtempSync(path.join(path.dirname(f.directory), 'ack-failure-'));
     const next = childPhase(evidence, 'historical-reopen', { directory: f.directory,
@@ -1013,10 +1038,19 @@ test('D1655-T08 interrupted full-proof ack compaction preserves exact retry and 
     assert.equal(next.retry.result.status, 'already-acknowledged', 'lost ack reply is safely repeatable');
     for (const observation of next.exclusions) assertExcluded(observation);
     for (const b of item.bundle.bindings) assert.equal(next.state.terminal[b.stream + ':' + b.attemptId].owner, undefined);
-    const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
-    assert.equal(checkpoint.state.bundles['bundle:' + item.bundle.bindings[0].bundleId]?.phase, 'acknowledged',
-      'retry publishes the acknowledged checkpoint');
-    assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'retry finishes minimizing the active WAL');
+    // The durable contract after an interrupted ack and its exact retry: a fresh admission of the files reads the
+    // acknowledged representation; its reclamation into the checkpoint is the amortized compaction, exercised here
+    // explicitly (D1682 item 4: no checkpoint rewrite is prescribed per acknowledgement).
+    const inspector = load('emr-runtime/external-writer').inspectExternal;
+    assert.equal(inspector(f.directory).state.bundles['bundle:' + item.bundle.bindings[0].bundleId]?.phase, 'acknowledged',
+      'retry leaves the acknowledged representation durable');
+    const owner = new StateCoordinator(f.directory, executeExternal);
+    try {
+      owner.call('compact', { force: true });
+      const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
+      assert.equal(checkpoint.state.bundles['bundle:' + item.bundle.bindings[0].bundleId]?.phase, 'acknowledged', 'reclamation installs the acknowledged checkpoint');
+      assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'reclamation finishes minimizing the active WAL');
+    } finally { owner.close(); }
     console.log('ACK_FAILURE ' + JSON.stringify({ code, cut, directory: f.directory, evidence }));
   }
 });
