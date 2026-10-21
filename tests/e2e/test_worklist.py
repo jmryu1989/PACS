@@ -791,6 +791,8 @@ class WorklistE2E(unittest.TestCase):
         are read-only, Check Again reads status, and Prepare Again creates a new UUID while preserving old attempts.
         No Range/resume, no text saying the file was saved."""
         fixture = self.fixture()
+        # LIVE-11's second study B exists before the doctor's page loads its worklist, so its row can be selected (D1677).
+        other = self.fixture()
         operations = []
         try:
             page = self.login("doctor")
@@ -1018,7 +1020,6 @@ class WorklistE2E(unittest.TestCase):
             # LIVE-11 (r6): a grant the real service issued (committed) whose answer is delayed until the selection went
             # A -> B -> A, or until the panel was closed. Neither late answer starts the browser download, the old operation
             # had exactly one grant and a fresh operation still downloads.
-            other = self.fixture()
             for ending in ("A-B-A", "Close"):
                 self.select(page, fixture)
                 late = self.download_operation(page, fixture, operations)

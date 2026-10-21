@@ -1571,11 +1571,11 @@ class TransferPanelPage(rf.ReportFlowPage):
                                  'R6-A01-post: contradictory positive survives Clear Finished')
                 self.assertIn(op, self.saved_ids(), 'R6-A01-post: contradictory positive stays in kept history')
                 self.assertEqual(before + 1, len(self.site.imports), 'R6-A01-post: no extra old-key POST')
-        # The last contradicted operation is still confirmed by a later complete positive, with a GET only.
-        self.site.import_state[op] = {0: file_result(op, 0)}
-        self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
-        self.observed(lambda: self.state_of(0) == 'Stored', 'later complete positive read')
-        self.assertEqual(len(CONTRADICTORY_POSITIVES), len(self.site.imports), 'R6-A01-post: later positive is GET only')
+                # D1677: only an operation just asserted Not confirmed is then confirmed by a later complete positive.
+                self.site.import_state[op] = {0: file_result(op, 0)}
+                self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
+                self.observed(lambda: self.state_of(0) == 'Stored', 'later complete positive read')
+                self.assertEqual(before + 1, len(self.site.imports), 'R6-A01-post: later positive is GET only')
         for label, mutate in LEGITIMATE_POSITIVES:
             with self.subTest(control=label):
                 self.held_positive(mutate)
