@@ -260,6 +260,79 @@ function processUse(node, file, checker, files) {
   return [offset, 'value', null];
 }
 
+// D1660 (D73 §15): every identifier `module`, judged by the AST and the checker's binding. 'key' is the name of an
+// object-literal property assignment ({ module: AppModule, providers }, Nest's DynamicModule); 'local' is a const
+// variable declared in the checked files whose declared type is not any (a loop variable over typed Nest modules),
+// at its declaration and at each use; everything else - a shorthand property, a label, a parameter, an any-typed
+// local, a member access on another value or the CommonJS `module` itself - is 'other' and stays a sealed word.
+function moduleUse(node, file, checker, files) {
+  if (!ts.isIdentifier(node) || node.text !== 'module' || !node.parent) return null;
+  const parent = node.parent;
+  if ((ts.isPropertyAccessExpression(parent) && parent.name === node) || (ts.isQualifiedName(parent) && parent.right === node)) return null;
+  const offset = codePoint(file, node.getStart(file));
+  if (ts.isPropertyAssignment(parent) && parent.name === node && ts.isObjectLiteralExpression(parent.parent)) return [offset, 'key'];
+  const symbol = checker.getSymbolAtLocation(node);
+  const declaration = symbol && symbol.valueDeclaration;
+  if (declaration && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name) &&
+      ts.isVariableDeclarationList(declaration.parent) && (declaration.parent.flags & ts.NodeFlags.Const) &&
+      files.has(absolute(declaration.getSourceFile().fileName)) &&
+      !(checker.getTypeAtLocation(declaration).flags & ts.TypeFlags.Any)) return [offset, 'local'];
+  return [offset, 'other'];
+}
+
+// D1660 (D73 §15): Object.defineProperty(<identifier>, <key>, { <names>: ... }) read by the AST: the target's name,
+// every key the call can name (a string literal, or a const for-of variable - plain or an array-binding element -
+// over an `as const` array literal of string literals or of such arrays), the descriptor's property names and
+// whether its value is a function. The fixture's sealed_forms says which file may hold which exact form; a key the
+// reader cannot enumerate, a non-identifier target or a descriptor other than plain assignments is reported as such.
+function constKeys(checker, key) {
+  if (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) return [key.text];
+  if (!ts.isIdentifier(key)) return null;
+  const symbol = checker.getSymbolAtLocation(key);
+  const declaration = symbol && symbol.valueDeclaration;
+  if (!declaration) return null;
+  let variable = declaration, index = null;
+  if (ts.isBindingElement(declaration) && ts.isArrayBindingPattern(declaration.parent) && !declaration.dotDotDotToken &&
+      !declaration.propertyName && ts.isVariableDeclaration(declaration.parent.parent)) {
+    index = declaration.parent.elements.indexOf(declaration);
+    variable = declaration.parent.parent;
+  }
+  if (!ts.isVariableDeclaration(variable) || !ts.isVariableDeclarationList(variable.parent) || !(variable.parent.flags & ts.NodeFlags.Const) ||
+      !ts.isForOfStatement(variable.parent.parent) || variable.parent.parent.initializer !== variable.parent) return null;
+  let tuple = variable.parent.parent.expression;
+  if (!ts.isAsExpression(tuple) || !ts.isTypeReferenceNode(tuple.type) || !ts.isIdentifier(tuple.type.typeName) ||
+      tuple.type.typeName.text !== 'const' || !ts.isArrayLiteralExpression(tuple.expression)) return null;
+  const keys = [];
+  for (const element of tuple.expression.elements) {
+    let value = element;
+    if (index !== null) {
+      if (!ts.isArrayLiteralExpression(element) || element.elements.length <= index) return null;
+      value = element.elements[index];
+    }
+    if (!ts.isStringLiteral(value)) return null;
+    keys.push(value.text);
+  }
+  return keys.length ? keys : null;
+}
+
+function definePropertyUse(node, file, checker) {
+  if (!ts.isCallExpression(node) || node.questionDotToken || !ts.isPropertyAccessExpression(node.expression) ||
+      node.expression.questionDotToken || !ts.isIdentifier(node.expression.expression) ||
+      node.expression.expression.text !== 'Object' || node.expression.name.text !== 'defineProperty') return null;
+  const offset = codePoint(file, node.expression.name.getStart(file));
+  const [target, key, descriptor] = node.arguments;
+  if (node.arguments.length !== 3 || !ts.isIdentifier(target) || !ts.isObjectLiteralExpression(descriptor)) return [offset, null, null, null, false];
+  const keys = constKeys(checker, key);
+  const names = [];
+  let functionValue = false;
+  for (const property of descriptor.properties) {
+    if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) return [offset, target.text, keys, null, false];
+    names.push(property.name.text);
+    if (property.name.text === 'value') functionValue = ts.isArrowFunction(property.initializer) || ts.isFunctionExpression(property.initializer);
+  }
+  return [offset, target.text, keys, names, functionValue];
+}
+
 function answer(request) {
   if (loadError) throw loadError;
   if (typeof request.classPropertySource === 'string') {
@@ -310,7 +383,7 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [], constructors = [], processUses = [];
+    const loads = [], comparisons = [], constructors = [], processUses = [], moduleUses = [], defineProperties = [];
     const visit = node => {
       if (!broken) {
         const constructor = constructorReturningAnotherObject(node, file);
@@ -321,6 +394,10 @@ function answer(request) {
         if (comparison !== null) comparisons.push(comparison);
         const use = processUse(node, file, checker, files);
         if (use) processUses.push(use);
+        const moduleIdentifier = moduleUse(node, file, checker, files);
+        if (moduleIdentifier) moduleUses.push(moduleIdentifier);
+        const definition = definePropertyUse(node, file, checker);
+        if (definition) defineProperties.push(definition);
       }
       if (ts.isIdentifier(node) && names.has(node.text)) {
         const start = node.getStart(file);
@@ -333,7 +410,8 @@ function answer(request) {
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
     contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons,
-      constructors_returning_another_object: constructors, process_uses: broken ? null : processUses };
+      constructors_returning_another_object: constructors, process_uses: broken ? null : processUses,
+      module_uses: broken ? null : moduleUses, define_property_uses: broken ? null : defineProperties };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {

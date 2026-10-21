@@ -185,6 +185,8 @@ FILE_PACKAGES = {name: frozenset(packages) for name, packages in CONTRACT.get("f
 LOADED_PACKAGES = frozenset(CONTRACT["loaded_packages"])
 REFLECT_MEMBERS = frozenset(CONTRACT["reflect_members"])
 PROCESS_MEMBERS = frozenset(CONTRACT["process_members"])
+# D1660 EMR-B2 (c): the one place a sealed word stands in an exact AST form, by api/src-relative file (sealed_forms)
+SEALED_FORMS = {name: tuple(forms) for name, forms in CONTRACT.get("sealed_forms", {}).items()}
 PROTOTYPE_OWNERS = frozenset(CONTRACT["prototype_owners"])
 SEALED_WORD = re.compile(rf"(?:{'|'.join(sorted(map(re.escape, CONTRACT['sealed_words'])))})(?![\w$])")
 OWNER_NAME = re.compile(rf"(?:{'|'.join(sorted(PROTOTYPE_OWNERS))})(?![\w$])")
@@ -801,7 +803,12 @@ class Compiler:
                     prototype_comparisons=set(contract["prototype_comparisons"]),
                     constructors_returning_another_object=set(contract["constructors_returning_another_object"]),
                     process_uses=None if contract["process_uses"] is None else
-                    tuple((at, kind, member) for at, kind, member in contract["process_uses"]))
+                    tuple((at, kind, member) for at, kind, member in contract["process_uses"]),
+                    module_uses=None if contract["module_uses"] is None else
+                    {at: kind for at, kind in contract["module_uses"]},
+                    define_property_uses=None if contract["define_property_uses"] is None else
+                    {at: (target, None if keys is None else tuple(keys), None if names is None else tuple(names), function)
+                     for at, target, keys, names, function in contract["define_property_uses"]})
         return self.answers[key]
 
     def request(self, request):
@@ -1245,7 +1252,30 @@ def contract_names(path, code, bindings=None):
     constructor reached as a property) or reaches a loader through process or module: each would put route methods
     read under one file's prefix on an instance served under another's, or load a module unread.
     """
-    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)]
+    # D1660 (D73 §15): two sealed words have exact AST-read forms. `module` as the name of an object-literal property
+    # assignment ({ module: AppModule, providers }, Nest's DynamicModule) or as a const variable of a non-any type
+    # declared in the checked files (route_inventory_ts.js moduleUse: 'key' / 'local') names no loader; a shorthand
+    # property, a label, a parameter, an any-typed local and a member access stay refused. `defineProperty` only as
+    # the exact Object.defineProperty(<target>, <key>, { <descriptor> }) form that source_contract.sealed_forms lists
+    # for this file: the named target, every key the call can name inside the listed keys, exactly the listed
+    # descriptor names with a function value (route_inventory_ts.js definePropertyUse). Without an AST answer (the
+    # file does not parse) every occurrence of both words stays refused.
+    module_uses = (bindings or {}).get("module_uses") or {}
+    definitions = (bindings or {}).get("define_property_uses") or {}
+    forms = SEALED_FORMS.get(path.relative_to(API).as_posix() if API in path.parents else "", ())
+
+    def listed(match):
+        word = match.group(0)
+        if word == "module":
+            return module_uses.get(match.start()) in ("key", "local")
+        if word == "defineProperty" and match.start() in definitions:
+            target, keys, names, function = definitions[match.start()]
+            return any(form["word"] == word and target == form["target"] and keys is not None and
+                       set(keys) <= set(form["keys"]) and names is not None and sorted(names) == sorted(form["descriptor"])
+                       and function for form in forms)
+        return False
+
+    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code) if not listed(match)]
 
     def add(match, text):
         found.append((line_of(code, match.start()), text))
@@ -2910,6 +2940,9 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         tags, outside, helpers, app = (API / "study-tags.controller.ts", API / "unlisted-routes.ts",
                                        API / "route-helpers.ts", API / "app.module.ts")
+        lifecycle = API / "emr-runtime" / "nest-lifecycle.ts"
+        self.assertEqual(sorted(SEALED_FORMS), [lifecycle.relative_to(API).as_posix()], "sealed_forms names the lifecycle adapter alone")
+        self.assertIn(lifecycle, sources)
         member, registered = "  @Get() read(", "StudyAccessController],"
         heading, constructor = "export class StudyTagsController {", "constructor(private service:StudyTagsService){}"
         for text in (member, heading, constructor):
@@ -3005,6 +3038,24 @@ class ClinicianPolicySpec(unittest.TestCase):
             "process.mainModule": service("export const main = process.mainModule;\n"),
             "process.mainModule by a literal key": service("export const main = process['mainModule'];\n"),
             "process handed on": service("export const proc = process;\n"),
+            # D1660 EMR-B2 (c): `module` only as an object key or a typed local const; defineProperty only in its listed form
+            "a shorthand module property": service("export const box = (module: any) => ({ module });\n"),
+            "module as a label": service("export function run() {\n  module: for (;;) {\n    break module;\n  }\n}\n"),
+            "a quoted module key": service("export const dynamic = { 'module': Helper };\n"),
+            "module as a member": service("export const own = (holder: any) => holder.module;\n"),
+            "module as a parameter": service("export const own = (module: { id: string }) => module.id;\n"),
+            "module as an any-typed local": service("export const own = (holder: any) => { const module: any = holder; return module.id; };\n"),
+            "module as a let variable": service("export const own = (holder: { id: string }) => { let module = holder; return module.id; };\n"),
+            "Object.defineProperty on an instance outside the listed file": service(
+                "export const seam = (app: any) => Object.defineProperty(app, 'callInitHook', { configurable: true, value: () => 1 });\n"),
+            "Object.defineProperty of an unlisted key in the listed file": {lifecycle: sources[lifecycle] +
+                "export const other = (app: any) => Object.defineProperty(app, 'callDestroyHook', { configurable: true, value: () => 1 });\n"},
+            "Object.defineProperty on another target in the listed file": {lifecycle: sources[lifecycle] +
+                "export const other = (holder: any) => Object.defineProperty(holder, 'callInitHook', { configurable: true, value: () => 1 });\n"},
+            "Object.defineProperty with another descriptor in the listed file": {lifecycle: sources[lifecycle] +
+                "export const other = (app: any) => Object.defineProperty(app, 'callInitHook', { configurable: true, get: () => 1 });\n"},
+            "Object.defineProperty of a computed key in the listed file": {lifecycle: sources[lifecycle] +
+                "export const other = (app: any, key: string) => Object.defineProperty(app, key, { configurable: true, value: () => 1 });\n"},
             "Proxy": service("export const wrap = (target: any) => new Proxy(target, {});\n"),
             "a constructor as a property": service("export const make = (value: any) => value.constructor.constructor;\n"),
             "a constructor by a literal key": service("export const make = (value: any) => value['constructor'];\n"),
@@ -3098,6 +3149,14 @@ class ClinicianPolicySpec(unittest.TestCase):
                 "export const list = (value: any): Array<number> => Array.isArray(value) && Object.getPrototypeOf(value) "
                 "!== Array.prototype ? new Array(value.length) : Object.keys(value).map(Number);\n"),
             "process.env and process.exit": service("export const port = () => process.env.PORT ?? process.exit(1);\n"),
+            # D1660 EMR-B2 (c): Nest's DynamicModule key, a typed loop variable over modules, the listed lifecycle seam
+            "an object-literal key named module (Nest's DynamicModule)": service(
+                "export const dynamic = { module: Helper, providers: [Helper] };\n"),
+            "module as a typed local const": service(
+                "export const names = (modules: Array<{ id: string }>) => {\n  const out: string[] = [];\n"
+                "  for (const module of modules) out.push(module.id);\n  return out;\n};\n"),
+            "Object.defineProperty of a listed key on the application in the listed file": {lifecycle: sources[lifecycle] +
+                "export const seam = (app: any) => Object.defineProperty(app, 'callBootstrapHook', { configurable: true, value: async () => undefined });\n"},
             "Reflect.ownKeys and a namespace of a listed package": service(
                 "export const keys = (v: object) => Reflect.ownKeys(v).length + nodeCrypto.randomBytes(1).length;\n",
                 "import * as nodeCrypto from 'node:crypto';\n"),
