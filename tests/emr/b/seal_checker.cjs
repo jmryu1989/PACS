@@ -22,6 +22,7 @@ const revision = 'working-tree';
 const ciProfile=limitText==='ci', depthBound=ciProfile?4:Infinity;
 const root=path.resolve(inputRoot);
 const ts = require(path.resolve(tsRoot)), clock = '2026-10-10T00:00:00.000Z', zero = '0'.repeat(64);
+const chains = {viewing:'00000000-0000-4000-8000-000000000021',history:'00000000-0000-4000-8000-000000000022'};
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const source = new Map(), compiled = new Map(), sharedModules = new Map();
 let genesisSealText;
@@ -39,7 +40,7 @@ class MemFS {
   key(p) { let key=pathKeys.get(p);if(key===undefined){key=path.resolve(p).toLowerCase();pathKeys.set(p,key);}return key; }
   lstatSync(p, opt) { const n=this.nodes.get(this.key(p)); if(!n) { if(opt?.throwIfNoEntry===false)return; throw errno('ENOENT'); }
     if(!this.statVersions.has(n))this.statVersions.set(n,++this.statClock);
-    return {dev:1,ino:this.key(p),mtimeMs:this.statVersions.get(n),ctimeMs:this.statVersions.get(n),isDirectory:()=>n.dir,isFile:()=>!n.dir,isSymbolicLink:()=>false,mode:n.dir?0o700:0o600,size:n.dir?0:Buffer.byteLength(n.data)}; }
+    return {dev:1,ino:this.key(p),nlink:1,uid:1000,gid:1000,mtimeMs:this.statVersions.get(n),ctimeMs:this.statVersions.get(n),isDirectory:()=>n.dir,isFile:()=>!n.dir,isSymbolicLink:()=>false,mode:n.dir?0o700:0o600,size:n.dir?0:Buffer.byteLength(n.data)}; }
   mkdirSync(p) { p=this.key(p); if(this.nodes.has(p))throw errno('EEXIST'); this.nodes.set(p,{dir:true}); }
   existsSync(p) { return this.nodes.has(this.key(p)); }
   realpathSync = Object.assign(p=>path.resolve(p), {native:p=>path.resolve(p)});
@@ -112,7 +113,7 @@ const drain=async()=>{for(let i=0;i<90;i++)await Promise.resolve();await new Pro
 const clone=v=>JSON.parse(JSON.stringify(v));
 function create(snapshot, eligible=true, recoveryProcess=false) {
   const w={epoch:recoveryProcess?1:0,dir:path.join(root,'VIRTUAL_ONLY'),mem:new MemFS(snapshot?.files),rows:clone(snapshot?.rows||[]),truth:clone(snapshot?.truth||[]),
-    markers:clone(snapshot?.markers||[]), head:clone(snapshot?.head||{chainId:'view-chain',sequence:0,hash:zero}), actors:{}, eligible,unreadable:false};
+    markers:clone(snapshot?.markers||[]), head:clone(snapshot?.head||{chainId:chains.viewing,sequence:0,hash:zero}), actors:{}, eligible,unreadable:false};
   if(!snapshot)w.mem.mkdirSync(w.dir);
   Object.assign(w,modules(w.mem));
   const rawMarker=m=>m&&({stream:m.stream,chain_id:m.chainId,attempt_id:m.attemptId,bundle_id:m.bundleId,kind:m.kind,event_id:m.eventId,
@@ -121,15 +122,16 @@ function create(snapshot, eligible=true, recoveryProcess=false) {
   w.readSql=async(strings,...v)=>{
     if(w.unreadable)throw errno('P1001');
     const text=strings.join('?');
+    if(text.includes('current_database()'))return [{database:'synthetic',oid:42,address:'127.0.0.1',port:5432}];
     if(/enter_writer|fence_writers|lock_chain/.test(text))return [];
     if(text.includes('AS tail_chain_id')) {
       const rows=v[0]==='viewing'?w.rows:[], first=rows[0], page=rows.filter(e=>e.sequence>v[3]).slice(0,v[4]);
-      const head=v[0]==='viewing'?w.head:{chainId:'history-chain',sequence:0,hash:zero};
+      const head=v[0]==='viewing'?w.head:{chainId:chains.history,sequence:0,hash:zero};
       return (page.length?page:[null]).map(e=>({tail_chain_id:head.chainId,tail_sequence:head.sequence,tail_hash:head.hash,
         first_sequence:first?.sequence??null,first_previous_hash:first?.previousHash??null,
         ...(e?rawEntry(e):{sequence:null}),commit_marker:e?rawMarker(w.markers.find(m=>m.stream===v[0]&&m.sequence===e.sequence)):null}));
     }
-    if(text.includes('chain_tail'))return [{chain_id:v[0]==='viewing'?w.head.chainId:'history-chain',sequence:v[0]==='viewing'?w.head.sequence:0,hash:v[0]==='viewing'?w.head.hash:zero}];
+    if(text.includes('chain_tail'))return [{chain_id:v[0]==='viewing'?w.head.chainId:chains.history,sequence:v[0]==='viewing'?w.head.sequence:0,hash:v[0]==='viewing'?w.head.hash:zero}];
     if(text.includes('entries_after'))return v[0]==='viewing'?w.rows.filter(e=>e.sequence>v[1]).slice(0,v[2]).map(rawEntry):[];
     if(text.includes('entry_for_event'))return w.rows.filter(e=>e.eventId===v[1]).map(rawEntry);
     if(text.includes('commit_marker_for_slot'))return w.markers.filter(m=>m.stream===v[0]&&m.sequence===v[1]).map(rawMarker);
@@ -141,7 +143,19 @@ function create(snapshot, eligible=true, recoveryProcess=false) {
   w.sql.withWriterFence=async work=>work(w.sql); // crash discards every open tx before this call
   w.coordinator=fsScope.run(w.mem,()=>new w.CO.StateCoordinator(w.dir,request=>fsScope.run(w.mem,()=>
     request.operation==='owner-alive' ? !recoveryProcess : w.EW.executeExternal(request))));
-  w.journal=new w.J.FailureJournal(w.dir,w.coordinator);w.seal=new w.S.AccessSeal(w.dir,w.sql,w.journal);w.store=new w.RT.AccessLedgerStore(null,w.sql,w.seal,w.journal);
+  // Path admission runs before the transport. Keep the whole public operation
+  // inside this modeled process, including constructor-time journal reads.
+  const call=w.coordinator.call.bind(w.coordinator);
+  w.coordinator.call=(...args)=>fsScope.run(w.mem,()=>call(...args));
+  fsScope.run(w.mem,()=>{w.journal=new w.J.FailureJournal(w.dir,w.coordinator);w.seal=new w.S.AccessSeal(w.dir,w.sql,w.journal);});
+  const localSeal=w.seal;
+  w.seal=new Proxy(localSeal,{get(target,key){const value=Reflect.get(target,key);return typeof value==='function'?
+    (...args)=>fsScope.run(w.mem,()=>Reflect.apply(value,target,args)):value;}});
+  w.store=new w.RT.AccessLedgerStore(null,w.sql,w.seal,w.journal);
+  // Corruption enters through stored bytes, not through a validated mutation API.
+  // Keep the WAL so admission also checks its covered records against the checkpoint.
+  w.tamperState=change=>{const state=w.coordinator.call('read');change(state);state.revision++;
+    w.mem.writeFileSync(path.join(w.dir,'seal','settlement.json'),JSON.stringify({state,publishing:false,digest:sha(JSON.stringify(state))}));};
   w.snapshot=()=>({files:w.mem.snapshot(),rows:w.rows,markers:w.markers,head:w.head,truth:w.truth});
   w.cutSnapshots=[];w.captureCuts=false;const localCuts=new Set();
   w.mem.onMutation=operation=>{if(w.captureCuts){
@@ -371,7 +385,9 @@ async function named(){
     const target={sequence:w.head.sequence,hash:w.head.hash}, read=w.sql.verificationPage.bind(w.sql);
     let rows=0, changed=false;
     w.sql.verificationPage=async(...args)=>{
-      if(!changed){changed=true;await w.commit('B','ok');w.journal.coordinator.call('update',state=>{state.intents['history:unrelated']={stream:'history',attemptId:'unrelated',eventId:'unrelated',contentSha256:'a'.repeat(64),bundleId:'other-bundle',owner:w.journal.coordinator.ownerId};});}
+      if(!changed){changed=true;await w.commit('B','ok');w.seal.reserve({stream:'history',chainId:chains.history,
+        attemptId:'unrelated',eventId:'unrelated',contentSha256:'a'.repeat(64),bundleId:'other-bundle',kind:'history',
+        sequence:1,previousHash:zero,hash:'b'.repeat(64)});}
       const page=await read(...args);rows+=page.entries.length+(page.first?1:0);return page;
     };
     try { await w.seal.advance('viewing',target); }
@@ -391,7 +407,7 @@ async function named(){
   await run('R4c-reservation-snapshot-revalidates-before-publication',['A:start','A:commit:ok'],async w=>{
     // The DB still has A's exact marker; removing its independent protected slot
     // after reservation must prevent a receipt even if verification began from it.
-    w.coordinator.call('update',state=>{delete state.slots['viewing:'+w.head.sequence];});
+    w.tamperState(state=>{delete state.slots['viewing:'+w.head.sequence];});
     await w.deliver('A');
     assert(w.actors.A.error,'publication must reload the current protected authority');
     assert(!w.actors.A.value?.eventId,'a cached reservation cannot authorize success by itself');
@@ -451,14 +467,17 @@ async function named(){
   {
     const w=create();await w.seed();await w.start('E');await w.commit('E','unknown0');await w.deliver('E');
     const prior=clone(w.coordinator.call('read').proofs), staged=clone(w.actors.E.staged), marker=clone(w.actors.E.marker);
+    assert(Object.keys(prior).length>0,'the stale-proof attack must retain an actual prepared expiry proof');
     await w.start('A');await w.commit('A','ok');
+    assert.equal(staged.row.sequence,w.actors.A.staged.row.sequence,'the superseding append must occupy the same slot');
     let healthy=true;try{await create(w.snapshot()).seal.recoverAtStart();}catch(e){if(e.code!=='UnsealedEntryUnexplained')throw e;healthy=false;finding('I2',['X-STALE-healthy-sibling'],{code:e.code});}
+    result['X-STALE']={healthy,accepted:false,refusal:null};
     if(healthy){
     w.rows=staged.rows;w.head={...w.head,sequence:staged.row.sequence,hash:staged.row.hash};
     w.markers=w.markers.filter(m=>m.sequence<marker.sequence).concat(marker);
-    const state=w.coordinator.call('read'),before=state.revision++;Object.assign(state.proofs,prior);w.coordinator.call('compare-and-set',{before,state});
-    try{await w.seal.recoverAtStart();finding('I1-stale-proof',['E:unknown0','A:COMMIT','replay:E-checkpoint-and-proof'],{accepted:true});}
-    catch(e){if(!['UnsealedEntryUnexplained','SealTailMismatch'].includes(e.code))throw e;}
+    w.tamperState(state=>Object.assign(state.proofs,prior));
+    try{await w.seal.recoverAtStart();result['X-STALE'].accepted=true;finding('I1-stale-proof',['E:unknown0','A:COMMIT','replay:E-checkpoint-and-proof'],{accepted:true});}
+    catch(e){if(!['UnsealedEntryUnexplained','SealTailMismatch'].includes(e.code))throw e;result['X-STALE'].refusal={code:e.code,detail:e.detail};}
     }
   }
   {

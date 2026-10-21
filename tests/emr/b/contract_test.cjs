@@ -891,9 +891,17 @@ function contractSuite() {
     const checked=spawnSync(process.execPath,[path.join(__dirname,'seal_checker.cjs'),root,path.join(api,'node_modules/typescript'),'', 'named'],{encoding:'utf8',timeout:180000});
     if(checked.error||checked.status===2||checked.status===3)throw new Error('seal checker harness failed: '+checked.stderr);
       assert.equal(checked.status,0,'seal invariant behaviour: '+checked.stdout);
-      // Already-applied v2 bytes must upgrade without manufacturing authority for an unsealed suffix.
+      // D1650-T10/D1656-T07: this tail-only legacy fixture has no complete
+      // attempt/lineage provenance. Preserve it as non-ready, including on a
+      // private copy. Recovery by its unchanged original reader is a separate
+      // original-format compatibility case; it cannot authorize a v3 upgrade.
+      const inventory = dir => Object.fromEntries(fs.readdirSync(dir).sort().map(name => {
+        const file=path.join(dir,name), info=fs.lstatSync(file);
+        return [name,info.isDirectory()?inventory(file):fs.readFileSync(file).toString('hex')];
+      }));
       for (const suffix of [false, true]) {
         const w = await world();
+        const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-b-legacy-copy-'));
         try {
           await w.store.append(authEvent(A));
           const old = w.seal.read(), canonical = {streams:old.streams,sealedAt:old.sealedAt};
@@ -904,13 +912,15 @@ function contractSuite() {
           fs.unlinkSync(path.join(w.state,'seal','settlement.json'));
           fs.rmSync(path.join(w.state,'seal','settlement.jsonl'),{force:true});
           fs.writeFileSync(path.join(w.state,'seal','tail.json'),JSON.stringify({format:2,...canonical,digest:createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}));
-          if (suffix) await assert.rejects(w.restart().seal.recoverAtStart(),error=>error.code==='SealTailMismatch');
-          else {
-            assert.equal((await w.restart().seal.recoverAtStart()).recovered,0);
-            assert(C.isDurableReceipt(await w.store.append(authEvent(A))));
-            assert.equal(w.seal.read().streams.viewing.sequence,2);
-          }
-        } finally { w.cleanup(); }
+          const before=inventory(w.state), database=structuredClone({entries:w.ledger.entries,markers:w.ledger.markers});
+          fs.cpSync(w.state,copy,{recursive:true});
+          await assert.rejects(async()=>w.restart().seal.recoverAtStart(),error=>error.code==='SealMissing');
+          await assert.rejects(async()=>new S.AccessSeal(copy,memorySql(w.ledger),new J.FailureJournal(copy)).recoverAtStart(),
+            error=>error.code==='SealMissing');
+          assert.deepEqual(inventory(w.state),before,'unsupported source is unchanged');
+          assert.deepEqual(inventory(copy),before,'unsupported private copy is unchanged');
+          assert.deepEqual({entries:w.ledger.entries,markers:w.ledger.markers},database,'unsupported admission preserves both DB outcomes');
+        } finally { w.cleanup(); fs.rmSync(copy,{recursive:true,force:true}); }
       }
     const at = '2035-01-01T00:00:00.000Z';
     for (const cut of ['before-delete', 'after-delete', 'after-seal']) {
@@ -941,13 +951,17 @@ function contractSuite() {
           if(attack==='missing-proof')delete state.proofs[id];
           if(attack==='wrong-proof')state.proofs[id].binding.hash='f'.repeat(64);
           if(attack==='stale-slot')state.slots['viewing:'+marker.sequence].generation++;
-          const before=state.revision++;co.call('compare-and-set',{before,state});
+          // Deliberate stored corruption must reach the read boundary; the
+          // current mutation API itself rejects these contradictory records.
+          state.revision++;
+          fs.writeFileSync(path.join(w.state,'seal','settlement.json'),JSON.stringify({state,publishing:false,
+            digest:createHash('sha256').update(JSON.stringify(state)).digest('hex')}));
         }
         if(attack==='different-checkpoint') { const e=w.ledger.entries.at(-1);e.payload=e.payload.replace('2035','2036');e.contentSha256=createHash('sha256').update(e.payload).digest('hex');e.hash=C.entryHash(e.sequence,e.previousHash,e.payload);w.ledger.head.hash=e.hash; }
         if(attack==='chain-id')w.ledger.streams.viewing.chainId=randomUUID();
         if(attack==='tail-replay')fs.writeFileSync(path.join(w.state,'seal','tail.json'),oldTail);
         const before=structuredClone(w.ledger.entries);
-        await assert.rejects(w.restart().seal.recoverAtStart(),e=>['UnsealedEntryUnexplained','SealChainMismatch','SealTailMismatch','LedgerChainBroken'].includes(e.code),attack);
+        await assert.rejects(async()=>w.restart().seal.recoverAtStart(),e=>['UnsealedEntryUnexplained','SealCorrupt','SealChainMismatch','SealTailMismatch','LedgerChainBroken'].includes(e.code),attack);
         assert.deepEqual(w.ledger.entries,before,'refusal preserves DB evidence');
       } finally {w.cleanup();}
     }

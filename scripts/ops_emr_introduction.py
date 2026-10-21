@@ -3854,14 +3854,15 @@ class HostOps:
             require(all(key not in environment or environment[key] == value for key, value in (env or {}).items()),
                     "보조 작업 환경이 고정 Compose 입력을 덮으려 합니다")
             environment.update(env or {})
-            if mutating and args[:1] in (["up"], ["create"], ["start"], ["restart"], ["run"]):
+            if args[:1] in (["up"], ["create"], ["start"], ["restart"], ["run"]):
                 inspect_command, inspect_env = self.entry.argv(["config", "--format", "json"], pointer)
                 model = decode(self.cmd(inspect_command, timeout=60, env=inspect_env).stdout)
                 self.admit_compose_launch(model, args)
                 require(decode(self.cmd(inspect_command, timeout=60, env=inspect_env).stdout) == model,
                         "Compose launch target changed after admission")
             return self.cmd(command, timeout=timeout, env=environment, mutating=mutating, check=check)
-        require(not mutating, "지속 Compose entry 준비 전에 서비스를 변경할 수 없습니다")
+        require(not mutating and args[:1] not in (["up"], ["create"], ["start"], ["restart"], ["run"]),
+                "고정 Compose entry 없이 서비스를 생성하거나 기동할 수 없습니다")
         command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", project or self.t["project"],
                    *(files if files is not None else self.compose_files()), *(["-f", "-"] if override else []), *args]
         environment = {**self.compose_env, **(env or {})} or None
@@ -4128,6 +4129,11 @@ class HostOps:
             command += ["-e", key]
         if entrypoint:
             command += ["--entrypoint", entrypoint]
+        if service == "api":
+            # Helpers use the API artifact without inheriting an old image's
+            # protected-state owner UID. Their scripts and mounts are admitted
+            # independently of the persistent API's closed serve command.
+            command += ["--user", "1001:1001"]
         command += [service, *args]
         require(self.inspect_container(container) is None, "보조 작업 이름을 기존 컨테이너가 사용 중입니다")
         registered = self.register_worker("compose-run", container, timeout, mutating=worker)
@@ -4323,6 +4329,10 @@ class HostOps:
         """Check the effective creation command before Compose can grant a state mount."""
         services, volumes = model.get("services"), model.get("volumes")
         require(type(services) is dict and type(volumes) is dict, "Compose launch observations unavailable")
+        if arguments[0] == "run":
+            role = self.admit_compose_helper(model, arguments)
+            if role == "api":
+                return
         selected = [word for word in arguments[1:] if word in services] or list(services)
         if arguments[0] in ("up", "create", "run") and "--no-deps" not in arguments:
             for role in selected:
@@ -4335,12 +4345,14 @@ class HostOps:
             mounts = [{"Type": m.get("type"), "Name": (volumes.get(m.get("source")) or {}).get("name"),
                        "Destination": m.get("target"), "RW": not m.get("read_only", False)} for m in service.get("volumes") or []]
             protected = [m for m in mounts if m["Name"] == self.t["volumes"]["emr_state"] or m["Destination"] == ops.EMR_STATE]
-            if not protected:
+            if not protected and role not in ("api", "emr-state"):
                 require("KIN_EMR_STATE_DIR" not in (service.get("environment") or {}), "Client has owner configuration")
                 continue
-            require(role == "emr-state" and arguments[0] != "run", "Protected state cannot be mounted by a helper or API")
+            require((not protected or role == "emr-state") and arguments[0] != "run",
+                    "State roles require their fixed service launch, not a helper override")
             entrypoint, command = service.get("entrypoint"), service.get("command")
-            require(entrypoint == pre.STATE_ENTRYPOINT and command == pre.STATE_COMMAND, "Compose state entry mode differs")
+            require(entrypoint == pre.STATE_ENTRYPOINT and command == (pre.STATE_COMMAND if role == "emr-state" else ["serve"]),
+                    "Compose state role entry mode differs")
             container = {"Name": "/" + service["container_name"], "Image": service.get("image"),
                 "Path": entrypoint[0], "Args": [*entrypoint[1:], *command], "Mounts": mounts,
                 "Config": {"User": service.get("user"), "Entrypoint": entrypoint, "Cmd": command,
@@ -4352,6 +4364,77 @@ class HostOps:
                     "RestartPolicy": {"Name": service.get("restart")}}}
             self.state_start_admission(container, existing=False)
 
+    def admit_compose_helper(self, model, arguments):
+        """Admit only the existing fixed helper programs, never a state owner.
+
+        Parse the effective run argv so an option cannot silently grant another
+        mount, entrypoint or user. This also covers read-only helper launches:
+        a caller's mutating=False is not executable-capability authority.
+        """
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
+        parser.add_argument("--no-deps", action="store_true")
+        parser.add_argument("-T", action="store_true")
+        parser.add_argument("--name", required=True)
+        parser.add_argument("--label", action="append", default=[])
+        parser.add_argument("-e", action="append", default=[])
+        parser.add_argument("--entrypoint")
+        parser.add_argument("--user")
+        parser.add_argument("service")
+        parser.add_argument("command", nargs=argparse.REMAINDER)
+        try:
+            parsed = parser.parse_args(arguments[1:])
+        except (argparse.ArgumentError, SystemExit):
+            raise Stop("Unknown helper launch option") from None
+        require(parsed.service != "emr-state", "A helper cannot launch the protected owner")
+        if parsed.service != "api":
+            return parsed.service
+        command = parsed.command
+        scripts = (SERVERINFO_SCRIPT, ROSTER_SCRIPT, RIGHTS_SCRIPT)
+        fixed_script = len(command) == 2 and command[0] == "-e" and command[1] in scripts
+        smoke_script = (len(command) == 4 and command[:2] == ["-e", SMOKE_ADMIN_SCRIPT]
+                        and command[2] in ("create-member", "create-client", "owned", "remove"))
+        if smoke_script:
+            try:
+                payload = json.loads(command[3])
+            except (TypeError, ValueError):
+                raise Stop("Smoke helper payload is not an object") from None
+            require(type(payload) is dict, "Smoke helper payload is not an object")
+        # Node still recognizes options after -e. A fixed script alone cannot
+        # authorize a trailing --require, --import or another executable option.
+        member_import = command in (["prisma/import-member-rights.cjs"], ["prisma/import-member-rights.cjs", "--retry-roster"])
+        require(parsed.no_deps and parsed.T and parsed.entrypoint == "node" and parsed.user == "1001:1001"
+                and (fixed_script or smoke_script or member_import), "API helper command or execution identity differs")
+        require(parsed.name.startswith(self.t["project"] + "-") and parsed.name not in self.names.values(),
+                "API helper must use its own registered name")
+        require(set(parsed.e) <= {"KIN_KC_ADMIN_USER", "KIN_KC_ADMIN_PASSWORD", "KIN_SMOKE_PASSWORD", "KIN_SMOKE_DEADLINE"},
+                "API helper requested an unapproved environment override")
+        service = model["services"]["api"]
+        selected = service.get("image")
+        releases = [self.plan["release"], self.plan["previous"]]
+        release = next((row for row in releases if row["images"]["api"] == selected), None)
+        require(release is not None, "Helper image is outside the fixed release pair")
+        image = decode(self.cmd(["docker", "image", "inspect", selected]).stdout)[0]
+        pre.check_reviewed_state_image({"Image": selected}, release, image)
+        require(not ((image.get("Config") or {}).get("Volumes")), "Helper image has implicit volumes")
+        require(not service.get("privileged") and not service.get("pid") and not service.get("cap_add")
+                and not service.get("devices") and not service.get("volumes_from")
+                and service.get("network_mode") not in ("host", "none")
+                and (service.get("group_add") or []) in ([], ["2001"]), "Helper privileges differ")
+        mounts = service.get("volumes") or []
+        require(not mounts or len(mounts) == 1 and mounts[0].get("type") == "volume"
+                and mounts[0].get("target") == pre.STATE_API_IPC
+                and (model["volumes"].get(mounts[0].get("source")) or {}).get("name") == self.t["project"] + "_emr-state-api-ipc",
+                "API helper must not inherit protected or host storage")
+        env = service.get("environment") or {}
+        require(not {"KIN_EMR_STATE_DIR", "KIN_EMR_API_SOCKET", "KIN_EMR_RETENTION_SOCKET", "KIN_EMR_READER_PASSWORD",
+                     "KIN_EMR_RETENTION_PASSWORD"} & set(env), "Helper inherited owner configuration")
+        try:
+            reader = urlsplit(env.get("DATABASE_URL", "")).username == "kin_emr_reader"
+        except ValueError:
+            raise Stop("Helper database URL is malformed") from None
+        require(not reader, "Helper inherited the state reader credential")
+        return parsed.service
+
     def state_start_admission(self, container, *, existing=True):
         """Fresh observations under the existing deployment lock, immediately before start.
 
@@ -4362,10 +4445,25 @@ class HostOps:
         state_volume = self.t["volumes"]["emr_state"]
         mounts = container["Mounts"]
         protected = [m for m in mounts if m.get("Name") == state_volume or m.get("Destination") == ops.EMR_STATE]
+        def identity(item):
+            require(type(item) is dict, "Launch observation disappeared")
+            return {key: item.get(key) for key in ("Id", "Image", "Config", "HostConfig", "Mounts", "Path", "Args")}
         if not protected:
-            env = pre.container_environment(container.get("Config") or {})
+            config = container.get("Config") or {}
+            env = pre.container_environment(config)
             require("KIN_EMR_STATE_DIR" not in env and "KIN_EMR_READER_PASSWORD" not in env,
                     "A client received state-owner configuration")
+            role = (config.get("Labels") or {}).get("com.docker.compose.service")
+            require(role != "emr-state" and container.get("Name") != "/" + state_service_name(self.t),
+                    "State service has no protected mount")
+            if (role == "api" or container.get("Name") == "/" + self.names.get("api", "")
+                    or "KIN_EMR_STATE_SOCKET" in env):
+                image = decode(self.cmd(["docker", "image", "inspect", self.plan["release"]["images"]["api"]]).stdout)[0]
+                pre.check_state_client(container, release=self.plan["release"], image=image, state_volume=state_volume,
+                                       api_ipc_volume=self.t["project"] + "_emr-state-api-ipc",
+                                       instance_id=self.t["project"], database_host="db")
+                require(not existing or identity(self.inspect_container(container["Name"].lstrip("/"))) == identity(container),
+                        "Client launch target changed after admission")
             return
         image = decode(self.cmd(["docker", "image", "inspect", self.plan["release"]["images"]["api"]]).stdout)[0]
         config = container.get("Config") or {}
@@ -4391,19 +4489,24 @@ class HostOps:
         require(db_mounts.get("/var/lib/postgresql/data") == self.t["volumes"]["pg"]
                 and db_mounts.get("/var/lib/postgresql/emr-access") == self.t["volumes"]["emr_access"],
                 "Paired database volumes differ")
-        observed = result_line(self.cmd(["docker", "run", "--rm", "--network", container["HostConfig"]["NetworkMode"], "--read-only",
+        def inspect_pair():
+            return result_line(self.cmd(["docker", "run", "--rm", "--network", container["HostConfig"]["NetworkMode"], "--read-only",
                 "--user", "1000:1000", "--mount", "type=volume,source=" + state_volume + ",target=" + ops.EMR_STATE + ",readonly",
                 "-e", "DATABASE_URL", "-e", "KIN_EMR_INSTANCE_ID", "--entrypoint", "node", image["Id"],
                 "-e", pre.STATE_INSPECTION_SCRIPT], timeout=60,
                 env={"DATABASE_URL": env["DATABASE_URL"], "KIN_EMR_INSTANCE_ID": project}).stdout)
-        require(observed.get("version") == 3 and observed.get("lineage"), "State pair has no admitted v3 initialization provenance")
-        def identity(item):
-            require(type(item) is dict, "Launch observation disappeared")
-            return {key: item.get(key) for key in ("Id", "Image", "Config", "HostConfig", "Mounts", "Path", "Args")}
+        observed = inspect_pair()
+        require(observed.get("version") == 3 and observed.get("lineage")
+                and type(observed.get("fingerprint")) is str and pre.HASH.fullmatch(observed["fingerprint"])
+                and type(observed.get("pair")) is dict, "State pair has no admitted v3 initialization provenance")
         require({name: self.volume_identity(name) for name in volumes} == before
                 and (not existing or identity(self.inspect_container(container["Name"].lstrip("/"))) == identity(container))
                 and identity(self.inspect("db")) == identity(db),
                 "Launch target changed after admission")
+        # Docker metadata can remain identical while bytes within the same volume
+        # are replaced. Repeat the read-only observation at the serialized handoff;
+        # the launched service still performs its own admission under its fence.
+        require(inspect_pair() == observed, "Protected state or DB pair changed after admission")
 
     def api_health(self, member_rights):
         def ready():

@@ -362,6 +362,58 @@ def check_state_volume(observed, storage):
             and HASH.fullmatch(observed.get("fingerprint", "")), "State volume mode or format admission failed")
 
 
+def check_reviewed_state_image(container, release, image):
+    """Bind executable bytes to the installed release plan for both owner and clients."""
+    require(type(release) is dict and SHA.fullmatch(release.get("sha", "")) is not None,
+            "State service has no reviewed source")
+    expected = (release.get("images") or {}).get("api")
+    require(type(expected) is str and IMAGE.fullmatch(expected) is not None,
+            "State service needs a reviewed immutable image")
+    require(type(image) is dict and image.get("Id") == expected and container.get("Image") == expected,
+            "State service image differs from the reviewed artifact")
+    require(((image.get("Config") or {}).get("Labels") or {}).get("org.opencontainers.image.revision") == release["sha"],
+            "State service source differs from the reviewed artifact")
+
+
+def check_state_client(container, *, release, image, state_volume, api_ipc_volume, instance_id, database_host):
+    """A stopped API must pass the same capability boundary as a newly created API.
+
+    Absence of a state mount alone does not admit an old executable, a reader
+    credential, a second IPC endpoint or a privileged host mount.
+    """
+    check_reviewed_state_image(container, release, image)
+    config, host = container.get("Config") or {}, container.get("HostConfig") or {}
+    require(config.get("Entrypoint") == STATE_ENTRYPOINT and config.get("Cmd") == ["serve"]
+            and container.get("Path") == STATE_ENTRYPOINT[0]
+            and container.get("Args") == [*STATE_ENTRYPOINT[1:], "serve"], "API client entry mode differs")
+    require((config.get("Labels") or {}).get("com.docker.compose.service") == "api",
+            "API client role differs")
+    require(config.get("User") == "1001:1001" and host.get("GroupAdd") == ["2001"],
+            "API client UID or IPC group differs")
+    require(host.get("Privileged") is False and host.get("NetworkMode") not in (None, "host")
+            and not host.get("PortBindings") and not host.get("PidMode") and not host.get("CapAdd"),
+            "API client privilege or network differs")
+    mounts = container.get("Mounts")
+    require(type(api_ipc_volume) is str and api_ipc_volume and api_ipc_volume != state_volume
+            and type(mounts) is list and len(mounts) == 1 and mounts[0].get("Type") == "volume"
+            and mounts[0].get("Name") == api_ipc_volume and mounts[0].get("Destination") == STATE_API_IPC
+            and mounts[0].get("RW") is True, "API client must receive only its IPC volume")
+    env = container_environment(config)
+    require(env.get("DEPLOYMENT_MODE") == "production" and env.get("AUTH_REQUIRED") == "true"
+            and instance_id and env.get("KIN_EMR_INSTANCE_ID") == instance_id
+            and env.get("KIN_EMR_STATE_SOCKET") == STATE_API_IPC + "/writer.sock", "API client pair or settings differ")
+    require(not {"KIN_EMR_STATE_DIR", "KIN_EMR_API_SOCKET", "KIN_EMR_RETENTION_SOCKET",
+                 "POSTGRES_PASSWORD", "PGPASSWORD", "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD"} & set(env),
+            "API client received an owner setting or another role's credential")
+    try:
+        database = urlsplit(env.get("DATABASE_URL", ""))
+        valid = (database.scheme in ("postgres", "postgresql") and database.username == "kin_runtime"
+                 and database.hostname == database_host and database.port == 5432 and database.path == "/kin")
+    except ValueError:
+        valid = False
+    require(valid, "API client runtime credential or database target differs")
+
+
 def check_state_service(container, *, release, image, state_volume, api_ipc_volume, retention_ipc_volume,
                         instance_id, database_host):
     """Admission for a writable state mount, including stopped containers.
@@ -372,15 +424,7 @@ def check_state_service(container, *, release, image, state_volume, api_ipc_volu
     The launcher owns the operations lock and repeats observations at the launch handoff.
     This function issues no reusable admission token and performs no repair.
     """
-    require(type(release) is dict and SHA.fullmatch(release.get("sha", "")) is not None,
-            "State service has no reviewed source")
-    expected = (release.get("images") or {}).get("api")
-    require(type(expected) is str and IMAGE.fullmatch(expected) is not None,
-            "State service needs a reviewed immutable image")
-    require(type(image) is dict and image.get("Id") == expected and container.get("Image") == expected,
-            "State service image differs from the reviewed artifact")
-    require(((image.get("Config") or {}).get("Labels") or {}).get("org.opencontainers.image.revision") == release["sha"],
-            "State service source differs from the reviewed artifact")
+    check_reviewed_state_image(container, release, image)
     config, host = container.get("Config") or {}, container.get("HostConfig") or {}
     require(config.get("Entrypoint") == STATE_ENTRYPOINT and config.get("Cmd") == STATE_COMMAND,
             "State service entry mode differs")

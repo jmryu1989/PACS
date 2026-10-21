@@ -1599,8 +1599,13 @@ class FakeDocker:
             item = self.volumes.get(args[3])
             return self.result(stdout=json.dumps([item])) if item else self.result(1, stderr=b"no such volume")
         if args[:3] == ["docker", "image", "inspect"]:
+            selected = self.tags.get(args[3], args[3])
+            release = next((row for row in (self.plan["release"], self.plan["previous"])
+                            if selected in row["images"].values()), None)
+            labels = {"org.opencontainers.image.revision": release["sha"]} if release else {}
+            labels.update(self.image_labels)
             return self.result(stdout=json.dumps([{"Id": self.tags.get(args[3], args[3]),
-                                                   "Config": {"User": "node", "Labels": dict(self.image_labels), "Env": [],
+                                                   "Config": {"User": "node", "Labels": labels, "Env": [],
                                                               "Volumes": self.image_volumes.get(args[3], {})}}]))
         if args[:3] == ["docker", "network", "inspect"]:
             name = args[3]
@@ -4129,6 +4134,173 @@ class ProtectedHostTests(unittest.TestCase):
         with self.assertRaises(intro.Stop):
             rollback()
         self.assertEqual((git.stat().st_mode & 0o777), 0o755)
+
+
+class StateClientLaunchTests(unittest.TestCase):
+    """Actual HostOps admission with a replaced Docker boundary; no container process can run.
+
+    These belong with the introduction tool's existing fake-runner contracts,
+    including the explicit TG02 mock classification, not a live Compose fixture.
+    """
+    def fixture(self):
+        from ops_deploy_preflight_test import StateLaunchTests
+        return StateLaunchTests.fixture(self)
+
+    def client_fixture(self):
+        from ops_deploy_preflight_test import StateLaunchTests
+        return StateLaunchTests.client_fixture(self)
+
+    def test_15_client_start_checks_artifact_command_privileges_mounts_and_secrets(self):
+        """D1656-T03/T05/T08: no-mount is not sufficient authority to start an API."""
+        import ops_emr_introduction as intro
+        from types import SimpleNamespace
+        mutations = [None, lambda c: c.update(Image="sha256:" + "0" * 64),
+            lambda c: c["Config"].update(User="1000:1000"),
+            lambda c: c["HostConfig"].update(GroupAdd=["2001", "2002"]),
+            lambda c: c["HostConfig"].update(Privileged=True),
+            lambda c: c["HostConfig"].update(PidMode="host"),
+            lambda c: c["HostConfig"].update(CapAdd=["SYS_ADMIN"]),
+            lambda c: c["Config"].update(Entrypoint=["node"]),
+            lambda c: c["Config"].update(Cmd=["serve", "extra"]),
+            lambda c: c.update(Args=["/app/start-production.sh", "state-serve-v3"]),
+            lambda c: c["Mounts"].clear(),
+            lambda c: c["Mounts"].append({"Type": "bind", "Source": "/", "Destination": "/host", "RW": True}),
+            lambda c: c["Mounts"][0].update(Name="fixture_emr-state-retention-ipc", Destination=pre.STATE_RETENTION_IPC),
+            lambda c: c["Config"]["Env"].append("KIN_EMR_READER_PASSWORD=synthetic"),
+            lambda c: c["Config"]["Env"].__setitem__(0, "DATABASE_URL=postgresql://kin_emr_reader:synthetic@db:5432/kin"),
+            lambda c: c["Config"]["Env"].__setitem__(1, "KIN_EMR_INSTANCE_ID=wrong")]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                item, args = self.client_fixture()
+                if mutate: mutate(item)
+                host = object.__new__(intro.HostOps)
+                host.intro = None; host.names = {"api": "kin-api"}
+                host.t = {"project": "fixture", "containers": host.names, "volumes": {"emr_state": args["state_volume"]}}
+                host.plan = {"release": args["release"]}; host.records = SimpleNamespace(command=lambda value: None)
+                host.inspect_container = lambda name: copy.deepcopy(item)
+                starts = []
+                def runner(command, **kwargs):
+                    if command[:3] == ["docker", "image", "inspect"]:
+                        return subprocess.CompletedProcess(command, 0, json.dumps([args["image"]]).encode(), b"")
+                    if command[:2] in (["docker", "start"], ["docker", "restart"]):
+                        starts.append(command)
+                        return subprocess.CompletedProcess(command, 0, b"", b"")
+                    self.fail("unexpected client boundary " + str(command[:3]))
+                host.run = runner
+                for operation in ("start", "restart"):
+                    if mutate:
+                        with self.assertRaises(RuntimeError): host.cmd(["docker", operation, "kin-api"], mutating=True)
+                    else: host.cmd(["docker", operation, "kin-api"], mutating=True)
+                self.assertEqual(len(starts), 0 if mutate else 2)
+
+    def test_16_readonly_helpers_are_fixed_programs_without_owner_capabilities(self):
+        """D1656-T03/T05/T08: even mutating=False executes the common creation guard."""
+        import ops_emr_introduction as intro
+        from types import SimpleNamespace
+        for change in (None, "state-mount", "host-mount", "reader-url", "owner-setting", "old-user", "command",
+                       "override-mount", "implicit-volume", "unreviewed-image", "hidden-label-option", "extra-group",
+                       "node-option", "smoke-option", "smoke-operation"):
+            with self.subTest(change=change):
+                _, args = self.fixture()
+                service = {"image": args["release"]["images"]["api"], "environment": {}, "volumes": []}
+                model = {"services": {"api": service}, "volumes": {"state": {"name": args["state_volume"]}}}
+                command = ["run", "--no-deps", "-T", "--name", "fixture-helper-1", "--entrypoint", "node", "--user", "1001:1001",
+                           "api", "-e", intro.SERVERINFO_SCRIPT]
+                if change == "state-mount": service["volumes"] = [{"type": "volume", "source": "state", "target": pre.EMR_STATE}]
+                if change == "host-mount": service["volumes"] = [{"type": "bind", "source": "/", "target": "/host"}]
+                if change == "reader-url": service["environment"]["DATABASE_URL"] = "postgresql://kin_emr_reader:fixture@db:5432/kin"
+                if change == "owner-setting": service["environment"]["KIN_EMR_STATE_DIR"] = pre.EMR_STATE
+                if change == "old-user": command[command.index("--user") + 1] = "1000:1000"
+                if change == "command": command[-1] = "require('/app/dist/emr-runtime/state-service-main')"
+                if change == "node-option": command += ["--require", "/app/dist/emr-runtime/state-service-main.js"]
+                if change == "smoke-option": command[-1:] = [intro.SMOKE_ADMIN_SCRIPT, "owned", "--require"]
+                if change == "smoke-operation": command[-1:] = [intro.SMOKE_ADMIN_SCRIPT, "--inspect", "{}"]
+                if change == "override-mount": command[1:1] = ["--volume", "source:/var/lib/kin-emr"]
+                if change == "hidden-label-option": command[1:1] = ["--label=api", "--privileged"]
+                if change == "implicit-volume": args["image"]["Config"]["Volumes"] = {pre.EMR_STATE: {}}
+                if change == "unreviewed-image": service["image"] = "sha256:" + "0" * 64
+                if change == "extra-group": service["group_add"] = ["2002"]
+                host = object.__new__(intro.HostOps)
+                host.intro = None; host.names = {"api": "kin-api"}
+                host.t = {"project": "fixture", "containers": host.names, "volumes": {"emr_state": args["state_volume"]}}
+                host.plan = {"release": args["release"], "previous": {"sha": "c" * 40, "images": {"api": "sha256:" + "f" * 64}}}
+                host.entry_inputs = {}; host.publish_entry = lambda override, project: "pinned"
+                host.entry = SimpleNamespace(argv=lambda arguments, pointer: (["docker", "compose", *arguments], {}))
+                host.records = SimpleNamespace(command=lambda value: None)
+                launches = []
+                def runner(command, **kwargs):
+                    if command[:3] == ["docker", "image", "inspect"]:
+                        return subprocess.CompletedProcess(command, 0, json.dumps([args["image"]]).encode(), b"")
+                    if command[:3] == ["docker", "compose", "config"]:
+                        return subprocess.CompletedProcess(command, 0, json.dumps(model).encode(), b"")
+                    if command[:3] == ["docker", "compose", "run"]:
+                        launches.append(command)
+                        return subprocess.CompletedProcess(command, 0, b"", b"")
+                    self.fail("unexpected helper boundary " + str(command[:3]))
+                host.run = runner
+                if change:
+                    with self.assertRaises(RuntimeError): host.compose(command, mutating=False)
+                else: host.compose(command, mutating=False)
+                self.assertEqual(len(launches), 0 if change else 1)
+
+    def test_17_client_handoff_rechecks_the_actual_stopped_container(self):
+        """D1656-T04/T08: an admitted observation cannot authorize a replacement client."""
+        import ops_emr_introduction as intro
+        from types import SimpleNamespace
+        for change in (None, "identity", "image", "command", "mount", "credential"):
+            with self.subTest(change=change):
+                item, args = self.client_fixture()
+                host = object.__new__(intro.HostOps)
+                host.intro = None; host.names = {"api": "kin-api"}
+                host.t = {"project": "fixture", "containers": host.names, "volumes": {"emr_state": args["state_volume"]}}
+                host.plan = {"release": args["release"]}; host.records = SimpleNamespace(command=lambda value: None)
+                inspected = False
+                def observe(name):
+                    current = copy.deepcopy(item)
+                    if inspected:
+                        if change == "identity": current["Id"] = "replacement-client"
+                        if change == "image": current["Image"] = "sha256:" + "0" * 64
+                        if change == "command": current["Config"]["Cmd"] = ["state-serve-v3"]
+                        if change == "mount": current["Mounts"].append({"Type": "volume", "Name": args["state_volume"],
+                                                                        "Destination": pre.EMR_STATE, "RW": True})
+                        if change == "credential": current["Config"]["Env"].append("KIN_EMR_READER_PASSWORD=synthetic")
+                    return current
+                host.inspect_container = observe
+                starts = []
+                def runner(command, **kwargs):
+                    nonlocal inspected
+                    if command[:3] == ["docker", "image", "inspect"]:
+                        inspected = True
+                        return subprocess.CompletedProcess(command, 0, json.dumps([args["image"]]).encode(), b"")
+                    if command[:2] == ["docker", "start"]:
+                        starts.append(command)
+                        return subprocess.CompletedProcess(command, 0, b"", b"")
+                    self.fail("unexpected client handoff command " + str(command[:3]))
+                host.run = runner
+                if change:
+                    with self.assertRaises(RuntimeError): host.cmd(["docker", "start", "kin-api"], mutating=True)
+                else: host.cmd(["docker", "start", "kin-api"], mutating=True)
+                self.assertTrue(inspected)
+                self.assertEqual(len(starts), 0 if change else 1)
+
+    def test_18_unbound_or_alternate_compose_inputs_cannot_launch(self):
+        """D1656-T03/T08: a read-only flag cannot authorize execution before entry binding."""
+        for operation in ("up", "create", "start", "restart", "run"):
+            for alternate_files in (None, ["-f", "unbound.yml"]):
+                for mutating in (False, True):
+                    with self.subTest(operation=operation, files=alternate_files, mutating=mutating):
+                        host = object.__new__(intro.HostOps)
+                        host.intro = None
+                        host.entry_inputs = {} if alternate_files else None
+                        host.repo = Path("."); host.t = {"project": "fixture"}; host.compose_env = {}
+                        host.compose_files = lambda: ["-f", "fixture.yml"]
+                        launches = []
+                        host.cmd = lambda *a, **k: launches.append(a)
+                        with self.assertRaises(RuntimeError):
+                            host.compose([operation, "api"], files=alternate_files, mutating=mutating)
+                        self.assertEqual(launches, [])
+        host.compose(["config", "--format", "json"], files=["-f", "unbound.yml"], mutating=False)
+        self.assertEqual(len(launches), 1, "read-only configuration inspection remains available")
 
 
 if __name__ == "__main__":

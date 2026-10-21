@@ -60,6 +60,8 @@ services:
     logging: *bounded-logging
 
   api:
+    entrypoint: ["sh", "/app/start-production.sh"]
+    command: ["serve"]
     build:
       target: production
       args:

@@ -222,6 +222,16 @@ class StateLaunchTests(unittest.TestCase):
                     (deploy.STATE_RETENTION_IPC, args["retention_ipc_volume"])]]}
         return item, args
 
+    def client_fixture(self):
+        item, args = self.fixture()
+        item.update(Id="client", Name="/kin-api", Args=["/app/start-production.sh", "serve"])
+        item["Config"].update(User="1001:1001", Cmd=["serve"], Labels={"com.docker.compose.service": "api"}, Env=[
+            "DATABASE_URL=postgresql://kin_runtime:synthetic@db:5432/kin", "KIN_EMR_INSTANCE_ID=fixture",
+            "KIN_EMR_STATE_SOCKET=/run/kin-emr-api/writer.sock", "DEPLOYMENT_MODE=production", "AUTH_REQUIRED=true"])
+        item["HostConfig"]["GroupAdd"] = ["2001"]
+        item["Mounts"] = [item["Mounts"][1]]
+        return item, args
+
     def test_10_state_artifact_command_role_mount_and_credential_matrix(self):
         item, args = self.fixture()
         deploy.check_state_service(item, **args)
@@ -264,7 +274,8 @@ class StateLaunchTests(unittest.TestCase):
             protected = Path(directory) / "journal"; protected.write_bytes(b'good\n{"torn":')
             before = protected.read_bytes()
             host = object.__new__(intro.HostOps)
-            host.intro = None; host.t = {"project": "fixture", "volumes": {"emr_state": args["state_volume"]}}
+            host.intro = None; host.t = {"project": "fixture", "containers": {"api": "kin-api"},
+                                        "volumes": {"emr_state": args["state_volume"]}}
             host.plan = {"release": args["release"]}; host.names = {"api": "kin-api"}
             host.records = SimpleNamespace(command=lambda value: None)
             host.inspect_container = lambda name: copy.deepcopy(item)
@@ -286,7 +297,7 @@ class StateLaunchTests(unittest.TestCase):
                 self.assertIsInstance(refusal, RuntimeError)
             self.assertFalse(any(c[:2] in (["docker", "start"], ["docker", "restart"]) for c in calls))
             # Positive client path proves the test reaches the actual mutation boundary.
-            item["Mounts"] = []; item["Config"]["Env"] = []
+            item, _ = self.client_fixture()
             host.cmd(["docker", "start", "kin-api"], mutating=True)
             self.assertEqual(protected.read_bytes(), b'good\n')
 
@@ -304,7 +315,8 @@ class StateLaunchTests(unittest.TestCase):
         """D1656-T04/T08: the real start consumer reaches inspection, then refuses a changed handoff."""
         import ops_emr_introduction as intro
         from types import SimpleNamespace
-        for change in (None, "initial-image", "initial-command", "initial-entrypoint", "image", "command", "volume", "database"):
+        for change in (None, "initial-image", "initial-command", "initial-entrypoint", "image", "command", "volume", "database",
+                       "same-volume-bytes", "same-volume-lineage", "same-volume-pair", "missing-fingerprint"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
                 protected = Path(directory) / "journal"; protected.write_bytes(b'good\n{"torn":')
                 original = protected.read_bytes()
@@ -345,8 +357,15 @@ class StateLaunchTests(unittest.TestCase):
                         return subprocess.CompletedProcess(command, 0, json.dumps([args["image"]]).encode(), b"")
                     if command[:2] == ["docker", "run"]:
                         self.assertTrue(any(word.endswith(",readonly") for word in command))
+                        value = {"version": 3, "lineage": "00000000-0000-4000-8000-000000000001", "fingerprint": "a" * 64,
+                                 "pair": {"instanceId": "fixture", "database": {"database": "kin", "oid": 42, "address": "127.0.0.1", "port": 5432},
+                                          "chains": {"viewing": "00000000-0000-4000-8000-000000000002", "history": "00000000-0000-4000-8000-000000000003"}}}
+                        if change == "missing-fingerprint": value.pop("fingerprint")
+                        if inspected and change == "same-volume-bytes": value["fingerprint"] = "b" * 64
+                        if inspected and change == "same-volume-lineage": value["lineage"] = "00000000-0000-4000-8000-000000000004"
+                        if inspected and change == "same-volume-pair": value["pair"]["database"]["oid"] += 1
                         inspected = True
-                        return subprocess.CompletedProcess(command, 0, b'KIN_RESULT {"version":3,"lineage":"verified-copy"}', b"")
+                        return subprocess.CompletedProcess(command, 0, ("KIN_RESULT " + json.dumps(value)).encode(), b"")
                     if command[:2] == ["docker", "start"]:
                         launches.append(command); protected.write_bytes(b'good\n')
                         return subprocess.CompletedProcess(command, 0, b"", b"")
@@ -366,7 +385,6 @@ class StateLaunchTests(unittest.TestCase):
                         self.assertTrue(inspected, "the changed observation must occur after successful readonly inspection")
                     self.assertIsInstance(refusal, RuntimeError)
                     self.assertEqual(launches, [])
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
