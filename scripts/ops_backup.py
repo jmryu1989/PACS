@@ -31,6 +31,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -306,6 +307,85 @@ def seal_audit(directory, parent, manifest):
         audit.replace_json(directory / "manifest.json", manifest)
 
 
+def backup_container_identity(item):
+    # State/health changes during the pause; executable and storage identity must not.
+    if (type(item) is not dict or not item.get("Id") or
+            not re.fullmatch(r"sha256:[a-f0-9]{64}", item.get("Image", "")) or
+            type(item.get("Config")) is not dict or type(item.get("HostConfig")) is not dict or
+            type(item.get("Mounts")) is not list):
+        raise RuntimeError("Backup container identity is unavailable")
+    return {key: item.get(key) for key in ("Id", "Name", "Image", "Config", "HostConfig", "Mounts", "Path", "Args")}
+
+
+class LegacyBackupBoundary:
+    """Keep the daily legacy-owner route on its original executable and state format.
+
+    This route has no reviewed v3 release/copy plan, so it cannot launch a v3 owner.
+    The read-only tar helper does not load a journal or execute application code.
+    The operations lease excludes cooperating launchers; no admission is cached
+    across the pause or across a start. v3 capture/resume requires the reviewed service workflow.
+    """
+    def __init__(self, containers, state_volume):
+        self.containers = containers
+        self.identities = {name: backup_container_identity(item) for name, item in containers.items()}
+        self.volume = state_volume
+        self.volume_identity = self.observe_volume()
+
+    def observe_volume(self):
+        rows = json.loads(text(["docker", "volume", "inspect", self.volume]))
+        if (type(rows) is not list or len(rows) != 1 or rows[0].get("Name") != self.volume
+                or not rows[0].get("CreatedAt") or not rows[0].get("Mountpoint")):
+            raise RuntimeError("Backup state volume identity is unavailable")
+        return rows[0]
+
+    def check_containers(self):
+        rows = json.loads(text(["docker", "inspect", *self.containers]))
+        if type(rows) is not list or len(rows) != len(self.containers):
+            raise RuntimeError("Backup container inventory changed")
+        observed = {item.get("Name", "").lstrip("/"): backup_container_identity(item) for item in rows}
+        if observed != self.identities or self.observe_volume() != self.volume_identity:
+            raise RuntimeError("Backup executable or state volume changed")
+
+    def check_owners(self):
+        import ops_deploy_preflight as pre
+        names = text(["docker", "container", "ls", "--all", "--filter", "volume=" + self.volume,
+                      "--format", "{{.Names}}"]).splitlines()
+        if "kin-api" not in names or len(names) != len(set(names)):
+            raise RuntimeError("Backup state owner inventory is unavailable")
+        owners = json.loads(text(["docker", "inspect", *names]))
+        if (type(owners) is not list or len(owners) != len(names)
+                or {item.get("Name", "").lstrip("/") for item in owners} != set(names)):
+            raise RuntimeError("Backup state owner inventory changed")
+        pre.check_state_owners(owners, self.volume, "kin-api")
+
+    def inspect_state(self):
+        # Disk-backed streaming avoids holding the protected journal in RAM. The
+        # private temporary archive is discarded; source bytes remain read-only.
+        with tempfile.TemporaryFile() as captured:
+            temporary_run(["--network", "none", "--read-only", "--mount",
+                f"type=volume,source={self.volume},target=/source,readonly", "--entrypoint", "tar",
+                self.containers["kin-db"]["Image"], "-czf", "-", "-C", "/source", "."],
+                timeout=1800, output=captured)
+            captured.seek(0)
+            return admit_legacy_archive(captured)
+
+    def admit(self, name=None):
+        lease = _operations_lease.get()
+        if lease is None:
+            raise RuntimeError("Backup launch admission requires the operations lease")
+        lease.verify()
+        self.check_containers()
+        if name is not None and name != "kin-api":
+            return
+        self.check_owners()
+        observed = self.inspect_state()
+        if self.inspect_state() != observed:
+            raise RuntimeError("Backup protected state changed during admission")
+        self.check_owners()
+        self.check_containers()
+        lease.verify()
+
+
 def backup(output, ready_timeout=120):
     if not 1 <= ready_timeout <= 900:
         raise RuntimeError("Readiness timeout must be between 1 and 900 seconds")
@@ -314,6 +394,9 @@ def backup(output, ready_timeout=120):
         raise RuntimeError("Backups containing secrets must be outside the Git repository")
     if not (ROOT / ".env").is_file():
         raise RuntimeError("Local .env is required")
+    if _operations_lease.get() is None:
+        with lock():
+            return backup(output, ready_timeout)
     # Inspect may contain secrets; only selected fields go into the manifest.
     info = json.loads(text(["docker", "inspect", *CONTAINERS, "kin-proxy"]))
     by_name = {item["Name"].lstrip("/"): item for item in info}
@@ -336,6 +419,8 @@ def backup(output, ready_timeout=120):
     if len(state_mounts) != 1 or state_mounts[0]["Type"] != "volume":
         raise RuntimeError("Expected one named EMR state volume")
     state_volume = state_mounts[0]["Name"]
+    boundary = LegacyBackupBoundary(by_name, state_volume)
+    boundary.admit()
     initial_running = [name for name in CONTAINERS[:-1] if by_name[name]["State"]["Running"]]
     api_env = dict(entry.split("=", 1) for entry in by_name["kin-api"]["Config"].get("Env", []) if "=" in entry)
     origin = api_env.get("PUBLIC_ORIGIN", "https://localhost:9443").rstrip("/")
@@ -370,13 +455,16 @@ def backup(output, ready_timeout=120):
     write_json(directory / "manifest.json", manifest)
     pause_started = time.monotonic()
     stage = "stop writers"
+    pause_settled = not initial_running
     try:
         if initial_running:
             run(["docker", "stop", "--time", "45", *initial_running], timeout=180)
         for name in initial_running:
             if text(["docker", "inspect", "--format", "{{.State.Running}}", name]) != "false":
                 raise RuntimeError("A write service is still running")
+        pause_settled = True
         stage = "check EMR writers and preserve catalog"
+        boundary.admit()
         active = text(["docker", "exec", "kin-db", "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
                        "SELECT count(*) FROM pg_stat_activity WHERE datname='kin' AND backend_type='client backend' AND pid<>pg_backend_pid();"])
         if active != "0":
@@ -406,6 +494,8 @@ def backup(output, ready_timeout=120):
         with (directory / "emr-state.tgz").open("wb") as handle:
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
                            "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
+        with (directory / "emr-state.tgz").open("rb") as handle:
+            admit_legacy_archive(handle)
         stage = "copy configuration and checksum"
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)
@@ -423,11 +513,26 @@ def backup(output, ready_timeout=120):
         raise
     finally:
         resume_failures = []
+        if not pause_settled:
+            # A delayed stop may still reach the daemon. Starting the same
+            # container now races that unfinished operation and is not recovery.
+            _operations_lease.get().retained = True
         for name in initial_running:
+            if not pause_settled:
+                resume_failures.append(name)
+                continue
+            dispatched = False
             try:
+                boundary.admit(name)
+                _operations_lease.get().verify()
+                dispatched = True
                 run(["docker", "start", name], timeout=120)
             except Exception:
                 resume_failures.append(name)
+                if dispatched:
+                    # A failed/timed-out Docker client does not establish that
+                    # the start never reached the daemon. Keep the existing lease.
+                    _operations_lease.get().retained = True
         manifest["pause_seconds"] = round(time.monotonic() - pause_started, 3)
         manifest["proxy_reloaded"] = None
         if not resume_failures and initial_running and by_name["kin-proxy"]["State"]["Running"]:
@@ -561,6 +666,46 @@ new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtSta
 .then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
 
 
+def admit_legacy_archive(stream):
+    """One format gate for read-only live observations and immutable legacy copies."""
+    import ops_deploy_preflight as pre
+    checkpoint_version, wal_versions, seen, inventory = None, set(), set(), []
+    try:
+        with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+            for entry in archive:
+                member = PurePosixPath(entry.name)
+                if member.is_absolute() or ".." in member.parts or not (entry.isfile() or entry.isdir()) or str(member) in seen:
+                    raise RuntimeError("Unsafe or duplicate state capture entry")
+                seen.add(str(member))
+                content = archive.extractfile(entry) if entry.isfile() else None
+                hashed = hashlib.sha256()
+                if str(member) == "seal/settlement.json":
+                    if not entry.isfile():
+                        raise RuntimeError("State checkpoint is not a file")
+                    raw = content.read()
+                    hashed.update(raw)
+                    document = json.loads(raw, object_pairs_hook=pre.unique_object)
+                    checkpoint_version = document["state"]["version"]
+                elif str(member) == "seal/settlement.jsonl":
+                    if not entry.isfile():
+                        raise RuntimeError("State WAL is not a file")
+                    for line in content:
+                        hashed.update(line)
+                        # Torn suffixes are not complete records and remain untouched.
+                        if line.endswith(b"\n"):
+                            document = json.loads(line, object_pairs_hook=pre.unique_object)
+                            wal_versions.add(document["version"])
+                elif content is not None:
+                    for block in iter(lambda: content.read(1024 * 1024), b""):
+                        hashed.update(block)
+                inventory.append((str(member), entry.type.decode('ascii'), entry.size, entry.mode,
+                                  entry.uid, entry.gid, entry.mtime, hashed.hexdigest()))
+    except (ValueError, KeyError, TypeError, tarfile.TarError) as error:
+        raise RuntimeError("State capture format is unavailable") from error
+    pre.check_legacy_restore_format(checkpoint_version, wal_versions)
+    return hashlib.sha256(json.dumps(sorted(inventory), separators=(',', ':')).encode()).hexdigest()
+
+
 def admit_legacy_copy(directory, manifest):
     """Inspect the immutable archive without extraction, repair or owner construction.
 
@@ -568,35 +713,12 @@ def admit_legacy_copy(directory, manifest):
     supply v3 pair-mapping provenance; that unfinished route fails before creation.
     Recheck at the executable handoff as well as before the first copy mutation.
     """
-    import ops_deploy_preflight as pre
     archive_path = Path(directory) / "emr-state.tgz"
     expected = manifest.get("sha256", {}).get("emr-state.tgz")
     if not expected or archive_path.is_symlink() or digest(archive_path) != expected:
         raise RuntimeError("State capture changed before copy admission")
-    checkpoint_version, wal_versions, seen = None, set(), set()
-    try:
-        with tarfile.open(archive_path, "r|gz") as archive:
-            for entry in archive:
-                member = PurePosixPath(entry.name)
-                if member.is_absolute() or ".." in member.parts or not (entry.isfile() or entry.isdir()) or str(member) in seen:
-                    raise RuntimeError("Unsafe or duplicate state capture entry")
-                seen.add(str(member))
-                if str(member) == "seal/settlement.json":
-                    if not entry.isfile():
-                        raise RuntimeError("State checkpoint is not a file")
-                    document = json.load(archive.extractfile(entry), object_pairs_hook=pre.unique_object)
-                    checkpoint_version = document["state"]["version"]
-                elif str(member) == "seal/settlement.jsonl":
-                    if not entry.isfile():
-                        raise RuntimeError("State WAL is not a file")
-                    for line in archive.extractfile(entry):
-                        # Torn suffixes are not complete records and remain untouched.
-                        if line.endswith(b"\n"):
-                            document = json.loads(line, object_pairs_hook=pre.unique_object)
-                            wal_versions.add(document["version"])
-    except (ValueError, KeyError, TypeError, tarfile.TarError) as error:
-        raise RuntimeError("State capture format is unavailable") from error
-    pre.check_legacy_restore_format(checkpoint_version, wal_versions)
+    with archive_path.open("rb") as stream:
+        admit_legacy_archive(stream)
     if digest(archive_path) != expected:
         raise RuntimeError("State capture changed during copy admission")
 

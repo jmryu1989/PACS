@@ -44,16 +44,49 @@ def rows_stream(rows, guard=PRESENT, schema=()):
                                               for key, value in rows.items()], guard=dict(guard), schema=list(schema))
 
 
-def orthanc_archive(*, state=False):
+def orthanc_archive(*, state=False, version=2, wal=None, extra=()):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as archive:
         # This transport double declares the legacy state format; actual recovery
         # and its provenance are exercised separately against the immutable image.
-        payload = json.dumps({"state": {"version": 2}}).encode() if state else b"x"
+        payload = json.dumps({"state": {"version": version}}).encode() if state else b"x"
         entry = tarfile.TarInfo("./seal/settlement.json" if state else "./index")
         entry.size = len(payload)
         archive.addfile(entry, io.BytesIO(payload))
+        for name, data in ([('seal/settlement.jsonl', wal)] if wal is not None else []) + list(extra):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
     return stream.getvalue()
+
+
+def daily_containers(repo):
+    mounts = {
+        'kin-api': [(ops.EMR_STATE, 'fixture-emr-state')],
+        'kin-db': [('/var/lib/postgresql/data', 'fixture-pg')],
+        'kin-orthanc': [('/var/lib/orthanc/db', 'fixture-volume')],
+    }
+    return [{"Name": "/" + name, "Id": hashlib.sha256(name.encode()).hexdigest(),
+             "State": {"Running": True, "Restarting": False}, "Image": "sha256:" + "a" * 64,
+             "Path": "sh", "Args": ["/app/start-production.sh", "serve"],
+             "HostConfig": {"RestartPolicy": {"Name": "no"}},
+             "Config": {"Labels": {"com.docker.compose.project": "fixture",
+                                   "com.docker.compose.project.working_dir": str(repo)}},
+             "Mounts": [{"Destination": target, "Type": "volume", "Name": volume, "RW": True}
+                        for target, volume in mounts.get(name, [])]}
+            for name in (*ops.CONTAINERS, "kin-proxy")]
+
+
+def daily_inspection(args, info):
+    if args[:2] == ['docker', 'inspect']:
+        return 'false' if '--format' in args else json.dumps([row for row in info if row['Name'][1:] in args[2:]])
+    if args[:3] == ['docker', 'volume', 'inspect']:
+        return json.dumps([{'Name': args[-1], 'CreatedAt': '2026-10-21T00:00:00Z',
+                            'Mountpoint': '/var/lib/docker/volumes/' + args[-1] + '/_data'}])
+    if args[:3] == ['docker', 'container', 'ls']:
+        return '\n'.join(row['Name'][1:] for row in info
+                         if any(m.get('Name') == 'fixture-emr-state' for m in row['Mounts']))
+    return None
 
 
 def pg_role(name, *, superuser=False, login=False, inherit=True, connlimit=-1):
@@ -153,16 +186,13 @@ class Host:
         (self.repo / ".env").write_text("POSTGRES_PASSWORD=synthetic-fixture\nKIN_EMR_RUNTIME_PASSWORD=synthetic-runtime\n")
         self.parent = Path(temporary) / "backups"
         self.parent.mkdir(mode=0o700)
-        self.info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a" * 64,
-                      "Config": {"Labels": {"com.docker.compose.project": "fixture",
-                                            "com.docker.compose.project.working_dir": str(self.repo)}},
-                      "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]}
-                     for name in (*ops.CONTAINERS, "kin-proxy")]
+        self.info = daily_containers(self.repo)
         self.events = []
         self.sources = []
         self.catalog = {"synthetic": "catalog"}
         self.restored_catalog = None
         self.restore_answer = "EMR_RESTORE_VERIFIED"
+        self.state_archive = orthanc_archive(state=True)
         # D23: the cluster's role catalog the backup records, and (when set) what a rehearsal's restore comes out with.
         self.role_catalog = daily_role_catalog()
         self.restored_role_catalog = None
@@ -180,8 +210,9 @@ class Host:
 
     def fake_text(self, args, **kwargs):
         self.events.append(("command", list(args)))
-        if args[:2] == ["docker", "inspect"]:
-            return "false" if "--format" in args else json.dumps(self.info)
+        inspection = daily_inspection(args, self.info)
+        if inspection is not None:
+            return inspection
         if args[:3] == ["docker", "image", "inspect"]:
             return '[{"RepoDigests": []}]'
         if "pg_database_size('kin')" in " ".join(args):
@@ -202,7 +233,7 @@ class Host:
         if "-sk" in args:
             return "8 /source"
         if kwargs.get("output") is not None:
-            kwargs["output"].write(orthanc_archive(state=any("emr-state" in word for word in args)))
+            kwargs["output"].write(self.state_archive if any("emr-state" in word for word in args) else orthanc_archive())
             return ""
         return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else self.restore_answer
 
@@ -233,7 +264,10 @@ class Host:
                 ops.backup(self.parent)
             except RuntimeError as caught:
                 error = caught
-        folder = next(self.parent / name for name in {entry.name for entry in self.parent.iterdir()} - before)
+        folders = {entry.name for entry in self.parent.iterdir()} - before
+        if not folders:
+            return None, None, error
+        folder = next(self.parent / name for name in folders)
         return folder, json.loads((folder / "manifest.json").read_text(encoding="utf-8")), error
 
     def rehearse(self, folder, answer):
@@ -281,17 +315,13 @@ class BackupSafetyTests(unittest.TestCase):
             root = Path(temporary) / "repo"
             root.mkdir()
             (root / ".env").write_text("TEST_ONLY=placeholder")
-            info = []
-            for name in (*ops.CONTAINERS, "kin-proxy"):
-                info.append({"Name": "/" + name, "State": {"Running": name != "kin-keycloak"},
-                             "Image": "sha256:" + "a" * 64,
-                             "Config": {"Labels": {"com.docker.compose.project": "fixture",
-                                                   "com.docker.compose.project.working_dir": str(root)}},
-                             "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]})
+            info = daily_containers(root)
+            next(item for item in info if item['Name'] == '/kin-keycloak')['State']['Running'] = False
 
             def fake_text(args, **kwargs):
-                if args[:2] == ["docker", "inspect"]:
-                    return "false" if "--format" in args else json.dumps(info)
+                inspection = daily_inspection(args, info)
+                if inspection is not None:
+                    return inspection
                 if "pg_database_size('kin')" in " ".join(args):
                     return "4096"
                 if args[:3] == ["docker", "image", "inspect"]:
@@ -312,7 +342,8 @@ class BackupSafetyTests(unittest.TestCase):
             output = Path(temporary) / "backups"
             with patch.object(ops, "ROOT", root), patch.object(ops, "text", side_effect=fake_text), \
                     patch.object(ops, "run", side_effect=fake_run) as commands, \
-                    patch.object(ops, "temporary_run", return_value="8 /source"), \
+                    patch.object(ops, "temporary_run", side_effect=lambda args, **kw:
+                        "8 /source" if "-sk" in args else kw["output"].write(orthanc_archive(state=True))), \
                     patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
                     patch.object(ops, "counts", return_value={"public.Report": 5}):
                 with self.assertRaisesRegex(RuntimeError, "simulated dump failure"):
@@ -450,15 +481,12 @@ class BackupSafetyTests(unittest.TestCase):
             root.mkdir()
             for filename in ops.FILES[3:]:
                 (root / filename).write_text("TEST_ONLY=placeholder")
-            info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a"*64,
-                     "Config": {"Labels": {"com.docker.compose.project": "fixture",
-                                           "com.docker.compose.project.working_dir": str(root)}},
-                     "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]}
-                    for name in (*ops.CONTAINERS, "kin-proxy")]
+            info = daily_containers(root)
 
             def fake_text(args, **kwargs):
-                if args[:2] == ["docker", "inspect"]:
-                    return "false" if "--format" in args else json.dumps(info)
+                inspection = daily_inspection(args, info)
+                if inspection is not None:
+                    return inspection
                 if args[:3] == ["docker", "image", "inspect"]:
                     return '[{"RepoDigests": []}]'
                 if "pg_database_size('kin')" in " ".join(args):
@@ -477,7 +505,7 @@ class BackupSafetyTests(unittest.TestCase):
             def fake_archive(args, **kwargs):
                 if "-sk" in args:
                     return "8 /source"
-                kwargs["output"].write(b"fixture archive")
+                kwargs["output"].write(orthanc_archive(state=any("emr-state" in word for word in args)))
                 return ""
 
             output = Path(temporary) / "backups"
@@ -1108,6 +1136,222 @@ class EmrRestoreVerification(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'Unsafe EMR archive entry'):
                         ops.validate_backup(self.folder)
                     commands.assert_not_called()
+
+
+class DailyStateAdmissionTests(unittest.TestCase):
+    """REQ-B2C-01/10 -> RISK-B2C-DUAL-OWNER/WRONG-STATE-RECOVERY -> D1656-T03/04/08.
+
+    Run the daily backup consumer with a synthetic engine and actual archive bytes.
+    These checks establish refusal/continuity, not original-reader or Linux acceptance.
+    """
+    def make_host(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        host = Host(temporary.name)
+        host.init_ledger()
+        return host
+
+    @staticmethod
+    def launches(host):
+        return [event[1] for event in host.events if event[0] == 'command' and event[1][:2] == ['docker', 'start']]
+
+    def test_original_format_backup_keeps_bytes_and_resumes_original_writers(self):
+        host = self.make_host()
+        host.state_archive = orthanc_archive(state=True, wal=b'{"version":2}\n{"torn":')
+        before = host.state_archive
+        folder, manifest, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+        self.assertIsNone(error)
+        self.assertTrue(manifest['complete'])
+        self.assertEqual((folder / 'emr-state.tgz').read_bytes(), before)
+        self.assertEqual(host.state_archive, before)
+        self.assertEqual(self.launches(host), [['docker', 'start', name] for name in ops.CONTAINERS[:-1]])
+
+    def test_unsupported_state_refuses_before_pause_capture_or_launch(self):
+        cases = {
+            'v3': orthanc_archive(state=True, version=3),
+            'unknown': orthanc_archive(state=True, version=99),
+            'mixed-wal': orthanc_archive(state=True, wal=b'{"version":3}\n'),
+            'missing-checkpoint': orthanc_archive(),
+            'malformed-wal': orthanc_archive(state=True, wal=b'{bad}\n'),
+            'duplicate-version': orthanc_archive(state=True, wal=b'{"version":2,"version":3}\n'),
+            'duplicate-path': orthanc_archive(state=True, extra=[('seal/settlement.json', b'{}')]),
+            'unsafe-path': orthanc_archive(state=True, extra=[('../outside', b'x')]),
+        }
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                host = self.make_host()
+                host.state_archive = raw
+                before = copy.deepcopy(host.info)
+                folder, manifest, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIsNone(folder)
+                self.assertIsNone(manifest)
+                self.assertEqual(host.info, before)
+                self.assertEqual(host.state_archive, raw)
+                self.assertFalse(any(event[0] == 'command' and
+                    (event[1][:2] in (['docker', 'start'], ['docker', 'stop']) or 'pg_dump' in event[1])
+                    for event in host.events))
+
+    def test_changed_executable_or_volume_never_resumes_even_after_dump_failure(self):
+        for field in ('Id', 'Image', 'Args', 'Config', 'Mounts', 'volume-created'):
+            with self.subTest(field=field):
+                host = self.make_host()
+                original_run, original_text = host.fake_run, host.fake_text
+                changed = False
+
+                def fail_dump(args, **kwargs):
+                    nonlocal changed
+                    if 'pg_dump' in args:
+                        changed = True
+                        api = next(row for row in host.info if row['Name'] == '/kin-api')
+                        if field == 'Id': api['Id'] = 'b' * 64
+                        if field == 'Image': api['Image'] = 'sha256:' + 'b' * 64
+                        if field == 'Args': api['Args'] = ['-e', 'unknown executable']
+                        if field == 'Config': api['Config']['Env'] = ['NODE_OPTIONS=--require=/tmp/other.js']
+                        if field == 'Mounts': api['Mounts'][0]['Name'] = 'other-state'
+                        raise RuntimeError('synthetic dump failure')
+                    return original_run(args, **kwargs)
+
+                def inspect(args, **kwargs):
+                    value = original_text(args, **kwargs)
+                    if changed and field == 'volume-created' and args[:3] == ['docker', 'volume', 'inspect']:
+                        rows = json.loads(value)
+                        rows[0]['CreatedAt'] = '2026-10-21T01:00:00Z'
+                        return json.dumps(rows)
+                    return value
+
+                with patch.object(host, 'fake_run', side_effect=fail_dump), patch.object(host, 'fake_text', side_effect=inspect):
+                    folder, manifest, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+                self.assertIsInstance(error, RuntimeError)
+                self.assertFalse(manifest['complete'])
+                self.assertEqual(manifest['backup_error']['stage'], 'dump kin')
+                self.assertIn('kin-api', manifest['resume_failures'])
+                self.assertEqual(self.launches(host), [])
+                self.assertTrue((folder / 'manifest.json').is_file())
+
+    def test_state_replacement_before_finally_refuses_owner_resume_and_preserves_snapshot(self):
+        host = self.make_host()
+        original_archive = host.fake_archive
+        captured = host.state_archive
+        replacement = orthanc_archive(state=True, version=3)
+
+        def archive(args, **kwargs):
+            value = original_archive(args, **kwargs)
+            output = kwargs.get('output')
+            if output is not None and str(getattr(output, 'name', '')).endswith('emr-state.tgz'):
+                host.state_archive = replacement
+            return value
+
+        with patch.object(host, 'fake_archive', side_effect=archive):
+            folder, manifest, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertTrue(manifest['complete'])
+        self.assertEqual(manifest['resume_failures'], ['kin-api'])
+        self.assertNotIn(['docker', 'start', 'kin-api'], self.launches(host))
+        self.assertEqual((folder / 'emr-state.tgz').read_bytes(), captured)
+        self.assertEqual(host.state_archive, replacement)
+
+    def test_same_volume_changed_bytes_at_inspection_handoff_refuse(self):
+        host = self.make_host()
+        original_archive = host.fake_archive
+        count = 0
+        replacement = orthanc_archive(state=True, extra=[('journal/records', b'changed')])
+
+        def archive(args, **kwargs):
+            nonlocal count
+            value = original_archive(args, **kwargs)
+            if kwargs.get('output') is not None:
+                count += 1
+                if count == 1:
+                    host.state_archive = replacement
+            return value
+
+        with patch.object(host, 'fake_archive', side_effect=archive):
+            folder, _, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIsNone(folder)
+        self.assertEqual(host.state_archive, replacement)
+        self.assertEqual(self.launches(host), [])
+
+    def test_additional_active_or_restartable_owner_refuses(self):
+        for running, restart in ((True, 'no'), (False, 'always'), (False, 'unless-stopped')):
+            with self.subTest(running=running, restart=restart):
+                host = self.make_host()
+                retained = copy.deepcopy(host.info[0])
+                retained.update(Name='/retained-old-owner', Id='b' * 64)
+                retained['State']['Running'] = running
+                retained['HostConfig']['RestartPolicy']['Name'] = restart
+                host.info.append(retained)
+                folder, _, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIsNone(folder)
+                self.assertEqual(self.launches(host), [])
+
+    def test_owner_inventory_is_rechecked_after_state_inspection(self):
+        host = self.make_host()
+        original_archive = host.fake_archive
+        appeared = False
+
+        def archive(args, **kwargs):
+            nonlocal appeared
+            value = original_archive(args, **kwargs)
+            if kwargs.get('output') is not None and not appeared:
+                appeared = True
+                retained = copy.deepcopy(host.info[0])
+                retained.update(Name='/late-owner', Id='b' * 64)
+                host.info.append(retained)
+            return value
+
+        with patch.object(host, 'fake_archive', side_effect=archive):
+            folder, _, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIsNone(folder)
+        self.assertEqual(self.launches(host), [])
+
+    def test_unknown_start_retains_operations_lease_and_complete_snapshot(self):
+        host = self.make_host()
+        original_run = host.fake_run
+
+        def run(args, **kwargs):
+            value = original_run(args, **kwargs)
+            if args == ['docker', 'start', 'kin-api']:
+                raise subprocess.TimeoutExpired('synthetic docker start', 120)
+            return value
+
+        with patch.object(host, 'fake_run', side_effect=run):
+            folder, manifest, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertTrue(manifest['complete'])
+        self.assertEqual(manifest['resume_failures'], ['kin-api'])
+        self.assertTrue((host.repo / '.kin-ops.lock').is_file())
+        self.assertEqual((folder / 'emr-state.tgz').read_bytes(), host.state_archive)
+        # The next cooperating operation cannot silently discard unknown work.
+        with patch.object(ops, 'ROOT', host.repo), self.assertRaises(FileExistsError):
+            with ops.lock():
+                self.fail('retained lock was bypassed')
+
+    def test_unknown_stop_never_races_a_resume_and_retains_incomplete_capture(self):
+        host = self.make_host()
+        original_run = host.fake_run
+
+        def run(args, **kwargs):
+            value = original_run(args, **kwargs)
+            if args[:2] == ['docker', 'stop']:
+                raise subprocess.TimeoutExpired('synthetic docker stop', 180)
+            return value
+
+        with patch.object(host, 'fake_run', side_effect=run):
+            try:
+                folder, manifest, error = host.backup(rows_stream({1: 'synthetic-audit'}))
+            except subprocess.TimeoutExpired:
+                # The old consumer lets the timeout escape after starting writers.
+                folder = next(host.parent.glob('20*-*'))
+                manifest = json.loads((folder / 'manifest.json').read_text())
+        self.assertFalse(manifest['complete'])
+        self.assertEqual(manifest['backup_error']['stage'], 'stop writers')
+        self.assertEqual(self.launches(host), [])
+        self.assertEqual(manifest['resume_failures'], list(ops.CONTAINERS[:-1]))
+        self.assertTrue((host.repo / '.kin-ops.lock').is_file())
 
 
 class StateCopyAdmissionTests(unittest.TestCase):
