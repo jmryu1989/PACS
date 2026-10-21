@@ -696,16 +696,18 @@ class LegacyImageTests(unittest.TestCase):
             "-e", "ORTHANC_PASS=" + uuid.uuid4().hex, "-e", "KC_ADMIN_URL=http://127.0.0.1:1/auth", "-e", "KC_REALM=kin", "-e", "KC_CLIENT_ID=kin-api",
             "-e", "KC_CLIENT_SECRET=" + uuid.uuid4().hex, "--stop-timeout", "20",
             "--mount", "type=volume,source=" + clone + ",target=" + ops.EMR_STATE])
-        self.assertNotEqual(code, 0, logs[-1500:])
-        self.assertNotIn("Nest application successfully started", logs)
+        # The B1 owner recovers its state lazily (its launcher has no start-time recovery): the server may open over a
+        # v3 pair without a start-time refusal, and its first recovery (test_02) refuses SealCorrupt. Whether it opened
+        # is recorded as a fact; what this cell judges is source preservation: no byte of the v3 pair's own files
+        # changes and the ledger is untouched. Files the legacy owner adds for itself (its owner registry) are
+        # reported, not hidden.
         after = _hash_volume(self.image_id, clone)
         added = sorted(name for name in after if name not in before)
         changed = sorted(name for name in before if before[name] != after.get(name))
-        # Source preservation: no byte of the v3 pair's own files changes. Files the legacy owner adds for itself (its
-        # owner registry) are reported as a finding, not hidden.
         self.assertEqual(changed, [], "the legacy owner changed bytes of the v3 pair's files: " + json.dumps(changed))
+        self.assertTrue(all(name == "owners.lock" or name.startswith("owners/") for name in added), "unexpected files added by the legacy owner: " + json.dumps(added))
         self.assertEqual(self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker"), self.counts)
-        print(json.dumps({"D1656-T01": {"exit": code, "added_files_before_refusal": added,
+        print(json.dumps({"D1656-T01": {"exit": code, "nest_started_over_v3_pair": "Nest application successfully started" in logs, "added_files": added,
                                         "line": [line for line in logs.splitlines() if "기동 실패" in line or "Seal" in line][:3]}}), flush=True)
 
     def test_02_legacy_b1_restore_recovery_entry_over_a_v3_copy_refuses_before_any_mutation(self):

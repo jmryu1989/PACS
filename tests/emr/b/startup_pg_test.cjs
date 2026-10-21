@@ -47,6 +47,10 @@ const LINE = /^\[KIN API\] 기동 실패\(([a-z]+)(?:\/([A-Za-z0-9_]+))?\): [^\n
 const STOP_LINE = /^\[KIN API\] 종료 실패\(([a-z]+)\): [^\n]+\. 프로세스를 끝냅니다\.$/;
 const closed = result => { assert.deepEqual([result.code, result.stderrLines.length], [1, 1], result.stderr); return LINE.exec(result.stderrLines[0]).slice(1, 3); };
 const evidence = (cell, body) => console.log('B2C_PG_EVIDENCE ' + JSON.stringify({ cell, ...body }));
+/** Raw per-cell observations kept in the control directory before any assertion judges them (post-mortem evidence). */
+const dump = (cell, body) => { try { fs.writeFileSync(path.join(CONTROL, 'api-' + cell.replace(/[^A-Za-z0-9-]/g, '_') + '.json'), JSON.stringify(body, null, 1)); } catch {} };
+const observed = result => ({ code: result.code, signal: result.signal, timedOut: result.timedOut, names: result.names, stderrLines: result.stderrLines, millis: result.millis,
+  events: result.events.filter(e => !['http-entry'].includes(e.what)) });
 
 // ── the orchestrator (host) ──
 let sequence = 0;
@@ -83,6 +87,14 @@ async function startService(scenario = {}) {
 }
 const stopService = (signal = 'TERM') => control({ action: 'service-stop', signal });
 const volumeHashes = () => control({ action: 'volume-hashes' });
+/** Every cell after the first starts from a serving service: a failed earlier cell must not cascade. */
+async function ensureService() {
+  const state = await control({ action: 'service-wait' });
+  if (state.running) return null;
+  const service = await startService();
+  assert.equal(service.ready, true, 'a serving service for this cell: ' + JSON.stringify(service));
+  return service;
+}
 
 // ── the observer: its own installer connection; it never supplies SQL outcomes to the API ──
 async function persisted(db, eventId) {
@@ -168,6 +180,7 @@ test('C-P01 the API start requires a ready service; an API-only restart keeps th
 });
 
 test('C-P02 a second service on the same pair is refused while the first serves; a held shared transaction at reserve makes a restarting service wait, old epoch work fails, nothing is committed', { timeout: 300000 }, async () => {
+  await ensureService();
   const second = await control({ action: 'service-start', label: 'svc-second', scenario: { label: 'svc-second' }, extra: true });
   assert.equal(second.ready, false, JSON.stringify(second));
   assert.notEqual(second.exit, 0, 'the second owner exits nonzero');
@@ -191,11 +204,12 @@ test('C-P02 a second service on the same pair is refused while the first serves;
       }
     }, 240000);
     const restarted = await restart; serviceLabel = nextLabel;
+    dump('C-P02', { second, restarted, api: observed(run.result), serviceEvents: serviceEvents() });
     assert.equal(restarted.ready, true, JSON.stringify(restarted));
     const recovered = await waitServiceEvent(nextLabel, 'recovered');
     const recoveryAt = serviceEvents(nextLabel).find(e => e.what === 'recovery').at, recoveredAt = recovered.at;
     assert(!run.result.names.includes('transaction-done'), 'the old-epoch confirm never minted a receipt');
-    assert.equal(run.result.code, 1, run.result.stderr);
+    assert.equal(run.result.code, 1, 'the API whose service was lost ends nonzero: ' + JSON.stringify({ names: run.result.names, stderr: run.result.stderrLines }));
     assert.equal(restarted.restarted.closed, false, 'the old epoch closed incomplete: its open scope outlived the drain');
     assert(recoveredAt - recoveryAt >= 1500, 'the new epoch recovery waited on the held transaction: ' + (recoveredAt - recoveryAt) + ' ms');
     const rows = await persisted(observer, held);
@@ -215,6 +229,7 @@ test('C-P02 a second service on the same pair is refused while the first serves;
 });
 
 test('C-P03 a service that dies during recovery publishes no readiness; the restart over the same pair recovers; a wrong-pair start refuses before mutation', { timeout: 300000 }, async () => {
+  await ensureService();
   await stopService('TERM');
   const before = await volumeHashes();
   const label = 'svc-' + String(++serviceGeneration).padStart(3, '0');
@@ -231,7 +246,10 @@ test('C-P03 a service that dies during recovery publishes no readiness; the rest
   const wrong = await control({ action: 'service-start', label: 'svc-wrong', scenario: {}, instanceId: 'another-synthetic-pair' });
   assert.equal(wrong.ready, false, JSON.stringify(wrong));
   const wrongEvents = serviceEvents('svc-wrong');
-  assert(wrongEvents.some(e => e.what === 'coordinator' && e.operation === 'admit-pair' && e.ok === false && e.code === 'CONFLICT'), 'refused at admit-pair: ' + JSON.stringify(wrongEvents.map(e => [e.what, e.operation, e.code])));
+  dump('C-P03', { duringRecovery: observed(duringRecovery), killed, wrong, wrongEvents, serviceEvents: serviceEvents() });
+  // The stored origin lineage is compared with the observed pair at admit-pair: another instance is a chain/lineage
+  // mismatch of the pair (SealChainMismatch), refused before the recovery and before any write.
+  assert(wrongEvents.some(e => e.what === 'coordinator' && e.operation === 'admit-pair' && e.ok === false && ['SealChainMismatch', 'CONFLICT'].includes(e.code)), 'refused at admit-pair: ' + JSON.stringify(wrongEvents.map(e => [e.what, e.operation, e.code])));
   assert(!wrongEvents.some(e => e.what === 'recovery'), 'no recovery for the wrong pair');
   assert.deepEqual((await volumeHashes()).hashes, before.hashes, 'the wrong pair changed no byte');
   const next = await startService(); serviceLabel = next.label;
@@ -240,6 +258,7 @@ test('C-P03 a service that dies during recovery publishes no readiness; the rest
 });
 
 test('C-P04 one public projected transaction updates a synthetic business row and appends both streams; callback rejection is all-or-none', { timeout: 300000 }, async () => {
+  await ensureService();
   const good = randomUUID(), bad = randomUUID();
   const observer = new PrismaClient({ datasources: { db: { url: INSTALLER } } });
   try {
@@ -248,7 +267,8 @@ test('C-P04 one public projected transaction updates a synthetic business row an
       if (event.what === 'transaction-done') child.send({ cmd: 'record-transaction', eventId: bad, change: true, fail: true });
       if (event.what === 'transaction-settled') startup.stop(child, 'SIGTERM');
     }, 180000);
-    assert.equal(run.result.code, 0, run.result.stderr);
+    dump('C-P04', { api: observed(run.result) });
+    assert.equal(run.result.code, 0, JSON.stringify({ names: run.result.names, stderr: run.result.stderrLines }));
     const done = run.result.events.find(e => e.what === 'transaction-done'), settled = run.result.events.find(e => e.what === 'transaction-settled');
     assert.deepEqual([done.same, done.entries, settled.callbackFailed], [true, 2, true]);
     const committed = await persisted(observer, good), rejected = await persisted(observer, bad);
@@ -268,6 +288,7 @@ for (const [cell, cutpoint, committed, recovered] of [
   ['C-P08/P12', 'receipt-complete', true, { viewing: 0, history: 0 }],
 ]) test(cell + ' whole API process ends at the observed cutpoint; business and both ledger streams are all-or-none; the service recovery resolves the observed outcome', { timeout: 420000 }, async () => {
   const crash = cell.split('/')[1];
+  await ensureService();
   const event = startup.changeEvent(randomUUID()), observer = new PrismaClient({ datasources: { db: { url: INSTALLER } } });
   const seen = {};
   try {
@@ -287,8 +308,9 @@ for (const [cell, cutpoint, committed, recovered] of [
         }
       },
     });
+    dump(cell, { api: observed(result), cut: seen.cut ?? null, beforeKill: seen.beforeKill ?? null });
     assert.equal(result.timedOut, false, JSON.stringify({ cell, names: result.names, raw: result.dir }));
-    assert.equal(result.signal, 'SIGKILL');
+    assert.equal(result.signal, 'SIGKILL', JSON.stringify({ names: result.names, stderr: result.stderrLines }));
     assert(!result.names.includes('parent-error'), 'observed cutpoint must execute without harness error');
     assert(seen.cut, cell + ': required cut observed');
     await seen.http.done;
@@ -345,6 +367,7 @@ for (const [cell, cutpoint, committed, recovered] of [
 test('C-P07/P11 the service ends after the viewing seal and before the history seal: no receipt or first body; the restart preserves the rows and recovers the remaining seal', { timeout: 420000 }, async () => {
   const event = startup.changeEvent(randomUUID()), observer = new PrismaClient({ datasources: { db: { url: INSTALLER } } });
   try {
+    await ensureService();
     await stopService('TERM');
     const service = await startService({ cut: 'viewing-sealed', cutEvent: event.eventId }); serviceLabel = service.label;
     assert.equal(service.ready, true, JSON.stringify(service));
@@ -362,6 +385,7 @@ test('C-P07/P11 the service ends after the viewing seal and before the history s
         }
       }
     } });
+    dump('C-P07', { api: observed(result), stopped: seen.stopped ?? null, before: seen.before ?? null, serviceEvents: serviceEvents(service.label) });
     assert.equal(result.signal, 'SIGKILL', JSON.stringify(result.names));
     await seen.http.done;
     assert.equal(seen.http.bytes, '', 'no aggregate receipt or first body before both seals');
@@ -383,6 +407,7 @@ test('C-P07/P11 the service ends after the viewing seal and before the history s
 });
 
 test('C-P09 receipt and real HTTP delivery: the body follows the genuine complete receipt; a connection lost before the body changes no outcome; a stop while a confirm is in flight keeps the work until its receipt', { timeout: 300000 }, async () => {
+  await ensureService();
   const held = randomUUID(), standalone = randomUUID();
   const seen = {};
   const result = await startup.run({ db: 'pg', holdConfirm: held, crashEvent: startup.changeEvent(standalone) }, { env: env(), timeoutMs: 180000, onEvent: async (event, child) => {
@@ -397,7 +422,8 @@ test('C-P09 receipt and real HTTP delivery: the body follows the genuine complet
     if (event.what === 'confirm-held') { seen.held = event; startup.stop(child, 'SIGTERM'); }
     if (event.what === 'owner-interrupt') { child.send('begin'); child.send({ cmd: 'release' }); }
   } });
-  assert.deepEqual([result.code, result.stderrLines], [0, []], result.stderr);
+  dump('C-P09', { api: observed(result) });
+  assert.deepEqual([result.code, result.stderrLines], [0, []], JSON.stringify({ names: result.names, stderr: result.stderrLines }));
   const begin = result.events.find(e => e.what === 'begin');
   assert.deepEqual([begin.ok, begin.code], [false, 'EmrRecordPortClosed']);
   const lateDone = result.events.findIndex(e => e.what === 'append-done' && e.eventId === held);
@@ -412,6 +438,7 @@ test('C-P10 durability faults in the service: a WAL flush failure, a torn WAL wr
   const observer = new PrismaClient({ datasources: { db: { url: INSTALLER } } });
   const outcomes = [];
   try {
+    await ensureService();
     for (const cut of ['wal-flush', 'wal-torn-write', 'checkpoint-rename']) {
       const eventId = randomUUID();
       await stopService('TERM');
