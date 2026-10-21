@@ -67,8 +67,8 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
             expect(page.locator("#related-current")).to_have_text(expected_current)
             expect(page.locator("#findings")).to_have_value(draft)
         expect(page.locator(".prior-report-head b")).to_have_text("Related Report")
-        # W5 PAGE-10: a Related row's click opens Related Report mode and its double click no longer opens images; the
-        # explicit Compare Images action opens the Target and the Source (the shared helper drives its opener by dblclick()).
+        # W5 PAGE-10 (D1520, Phase A related-controls.js): a Related row's double click no longer opens images; the explicit
+        # Compare Images action opens the Target and the Source (the shared helper drives its opener by dblclick()).
         compare = page.locator(f'[data-related-open="{future.uid}"]')
         self.viewer(page, SimpleNamespace(dblclick=compare.click), [current, future])
         expect(page.locator(f'#rows tr[data-uid="{current.uid}"]')).to_have_class(re.compile(r"\bsel\b"))

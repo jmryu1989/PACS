@@ -35,9 +35,8 @@ class ReadingFlowE2E(ReadingWorkspaceE2E):
   p.locator('#findings').fill('KEYBOARD UNSAVED REPORT')
   p.keyboard.press('Control+Alt+ArrowRight')
   expect(p.locator('#reading-target')).to_contain_text(a.uid)
-  # W5: with the prior still viewed, Related Report opens Related Report mode on it (the typed draft is saved first).
   p.keyboard.press('Control+Alt+3')
-  expect(p.locator('#related-mode-title')).to_be_focused()
+  expect(p.locator('.prior-report-pane')).to_be_focused()
   p.keyboard.press('Control+Alt+2')
   expect(p.locator('#reading-frame')).to_be_focused()
   p.keyboard.press('Control+Alt+4')
