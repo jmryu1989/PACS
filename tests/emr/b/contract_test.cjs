@@ -1618,7 +1618,14 @@ function contractSuite() {
   // ProtectedStateService, AccessSeal and external writer over the in-memory ledger model; the socket, worker and Linux
   // boundaries are the wire/service suites and the image cells. Assertions observe effects, never private source form.
   const apiSelected = process.env.EMR_B2C_API_CASES ? process.env.EMR_B2C_API_CASES.split(',') : [];
-  const apiTest = (name, body) => { if (apiSelected.includes(name.split(' ')[0])) test(name, body); };
+  // Options (a timeout) and the body are forwarded as given: a case registered with options but no body would pass
+  // vacuously, so the registration refuses anything that is not exactly (name, [options,] body).
+  const apiTest = (name, ...rest) => {
+    const body = rest.at(-1);
+    assert.equal(typeof body, 'function', name + ': a case needs a body');
+    assert.equal(rest.length === 1 || (rest.length === 2 && rest[0] && typeof rest[0] === 'object'), true, name + ': (name, [options,] body)');
+    if (apiSelected.includes(name.split(' ')[0])) test(name, ...rest);
+  };
   const RP = load('emr-runtime/record-port.ts'), RS = load('emr-runtime/remote-state.ts'), BW = load('emr-runtime/background-work.ts');
   const HA = load('emr-runtime/http-admission.ts'), NL = load('emr-runtime/nest-lifecycle.ts'), SS = load('emr-runtime/state-service.ts');
   const P = load('emr-runtime/state-protocol.ts');
@@ -2123,5 +2130,148 @@ function contractSuite() {
     cold.interrupt();
     await assert.rejects(cold.start(), error => error?.code === 'EmrStartupRepeated');
     await cold.close();
+  });
+
+  // ─── the real main.ts, launcher, Nest and HTTP server in child processes (tests/emr/b/startup_fixture.cjs) ───
+  // The database clients are the fixture's (no PostgreSQL here); the protected-state service is the actual service in
+  // the same child over the fixture's empty two-chain model, reached by a fake client that dispatches the same typed
+  // frames in-process. A stop signal is the OS signal on Linux and the child's own process.emit elsewhere
+  // (result.signalMode): the OS-signal evidence is the Linux run. Assertions read exit codes, the stderr lines' closed
+  // phase and code, the order of observed product calls and the HTTP bytes on the wire - never product text beyond that.
+  const startup = require('./startup_fixture.cjs');
+  const STARTUP_LINE = /^\[KIN API\] 기동 실패\(([a-z]+)(?:\/([A-Za-z0-9_]+))?\): [^\n]+\. 기동을 중단합니다\.$/;
+
+  apiTest('C-A01.R13 request admission rejects stopped pipelines before Nest while admitted responses drain in HTTP order (r2 C33 carried)', { timeout: 260000 }, async () => {
+    for (const mode of ['late', 'health', 'parser', 'partial', 'expect', 'both-before']) {
+      let socket, wire = '', sent = false, first = false;
+      const state = startup.stateDirectory('c-admission');
+      const second = mode === 'health' ? 'GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n'
+        : mode === 'parser' ? 'POST /api/auth/callback HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n{'
+        : mode === 'expect' ? 'POST /syn-slow HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n'
+        : 'GET /syn-slow HTTP/1.1\r\nHost: localhost\r\n\r\n';
+      const result = await startup.run({ db: 'memory', slowMillis: 350, observeAdmission: true }, {
+        env: startup.environment(state), timeoutMs: 40000, onEvent(event, child, events) {
+          if (event.what === 'listening') {
+            socket = net.connect(event.port, '127.0.0.1', () => socket.write('GET /syn-slow HTTP/1.1\r\nHost: localhost\r\n\r\n' + (mode === 'both-before' ? second : '')));
+            socket.on('data', data => { wire += data.toString(); }); socket.on('error', () => {});
+          }
+          if (event.what === 'slow-begin' && !first) {
+            first = true;
+            if (mode === 'partial') socket.write(second.slice(0, -2));
+            if (mode !== 'both-before') startup.stop(child);
+          }
+          if (mode === 'both-before' && events.filter(e => e.what === 'slow-begin').length === 2 && !sent) { sent = true; startup.stop(child); }
+          if (event.what === 'owner-interrupt' && mode !== 'both-before') { sent = true; socket.write(mode === 'partial' ? '\r\n' : second); }
+        },
+      });
+      socket?.destroy();
+      try {
+        assert.equal(result.timedOut, false, JSON.stringify({ mode, dir: result.dir, names: result.names }));
+        assert.equal(result.code, 0, mode + ': ' + result.stderr);
+        assert.equal(sent, true, mode);
+        assert.equal(result.names.includes('service-ready') && result.names.includes('session'), true, mode + ': the service was paired');
+        const statuses = [...wire.matchAll(/HTTP\/1\.1 (\d+)/g)].map(match => Number(match[1]));
+        assert.deepEqual(statuses, mode === 'both-before' ? [200, 200] : [200, 503], mode + ': ' + wire);
+        const after = result.events.slice(result.names.indexOf('owner-interrupt') + 1);
+        assert.equal(after.filter(e => e.what === 'http-entry' || e.what === 'work-begun').length, 0, mode + ': no downstream entry');
+        if (mode !== 'both-before') { assert.match(wire, /Connection: close/i); assert.match(wire, /Cache-Control: no-store/i); }
+        assert.equal(result.stderrLines.length, 0, mode + ': a clean bounded stop prints no failure line');
+      } finally { fs.rmSync(state, { recursive: true, force: true }); }
+      console.log('B2C_ADMISSION_EVIDENCE ' + JSON.stringify({ mode, statuses: [...wire.matchAll(/HTTP\/1\.1 (\d+)/g)].map(m => Number(m[1])), signalMode: result.signalMode }));
+    }
+  });
+
+  apiTest('C-A02.R14 the launcher joins lifecycle peers before the ledger release and bounds a hung stage once (r2 C38 carried)', { timeout: 240000 }, async () => {
+    for (const hook of ['onModuleInit', 'onApplicationBootstrap', 'onModuleDestroy', 'beforeApplicationShutdown', 'onApplicationShutdown']) {
+      const state = startup.stateDirectory('c-lifecycle');
+      const result = await startup.run({ db: 'memory', lifecycleStage: hook }, {
+        env: startup.environment(state), timeoutMs: 40000,
+        onEvent(event, child) { if (event.what === 'listening') startup.stop(child); },
+      });
+      fs.rmSync(state, { recursive: true, force: true });
+      assert.equal(result.code, 1, hook + ': ' + result.stderr);
+      assert.equal(result.timedOut, false);
+      const completed = result.events.findIndex(event => event.what === 'peer-end' && event.hook === hook);
+      assert(completed >= 0 && completed < result.names.indexOf('disconnect'), hook + ': ledger after peer');
+      assert.equal(result.names.filter(name => name === 'disconnect').length, 1);
+      assert.equal(result.names.filter(name => name === 'prisma-shutdown').length, 1);
+      assert.equal(result.names.filter(name => name === 'state-client-close').length, 1, hook + ': the control session is released once');
+      if (hook === 'onModuleInit' || hook === 'onApplicationBootstrap') assert(!result.names.includes('bind'));
+    }
+    const state = startup.stateDirectory('c-hung');
+    const result = await startup.run({ db: 'memory', lifecycleStage: 'onModuleDestroy', hungHook: true, disconnect: 'hang' }, {
+      env: startup.environment(state), timeoutMs: 40000,
+      onEvent(event, child) { if (event.what === 'listening') { startup.stop(child); startup.stop(child, 'SIGINT'); } },
+    });
+    fs.rmSync(state, { recursive: true, force: true });
+    assert.equal(result.code, 1);
+    assert.equal(result.stderrLines.length, 1, result.stderr);
+    assert.match(result.stderr, /종료 실패\(app\)/);
+    const stopped = result.events.find(event => event.what === 'owner-interrupt').at;
+    const disconnect = result.events.find(event => event.what === 'disconnect').at;
+    assert(disconnect - stopped >= 4900 && disconnect - stopped < 6500, 'one shared fatal cleanup deadline');
+    assert(result.events.find(event => event.what === 'exit').at - stopped < 6500, 'ledger wait cannot renew the expired fatal budget');
+    assert.equal(result.names.filter(name => name === 'disconnect').length, 1);
+    const accounting = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('[KIN API] lifecycle accounting: ')).slice('[KIN API] lifecycle accounting: '.length));
+    assert.equal(accounting.find(stage => stage.stage === 'onModuleDestroy').status, 'running');
+    for (const stage of ['beforeApplicationShutdown', 'dispose', 'onApplicationShutdown']) assert.equal(accounting.find(row => row.stage === stage).status, 'not-started');
+  });
+
+  apiTest('C-A01.R15 incomplete headers and an admitted response beyond grace are force closed without late Nest entry (r2 C40 carried)', { timeout: 50000 }, async () => {
+    const sockets = [], state = startup.stateDirectory('c-http-deadline');
+    let second, wire = '', finished = 0, stoppedAt, lastClosed;
+    const closedSocket = () => { finished++; lastClosed = Date.now(); };
+    const result = await startup.run({ db: 'memory', observeAdmission: true, slowMillis: 20000, slowDestroy: 2000 }, {
+      env: startup.environment(state), timeoutMs: 40000,
+      onEvent(event, child) {
+        if (event.what === 'listening') {
+          const incomplete = net.connect(event.port, '127.0.0.1', () => incomplete.write('GET /never HTTP/1.1\r\nHost:'));
+          incomplete.on('close', closedSocket); incomplete.on('error', () => {}); sockets.push(incomplete);
+          second = net.connect(event.port, '127.0.0.1', () => second.write('GET /syn-slow HTTP/1.1\r\nHost: localhost\r\n\r\n'));
+          second.on('data', bytes => { wire += bytes; }); second.on('close', closedSocket); second.on('error', () => {}); sockets.push(second);
+        }
+        if (event.what === 'slow-begin') startup.stop(child);
+        if (event.what === 'owner-interrupt') { stoppedAt = Date.now(); second.write('GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n'); }
+      },
+    });
+    await tick(); for (const socket of sockets) socket.destroy();
+    fs.rmSync(state, { recursive: true, force: true });
+    assert.equal(result.code, 1, result.stderr); assert.equal(result.timedOut, false);
+    assert.equal(result.stderrLines.length, 1); assert.match(result.stderr, /종료 실패\(drain\)/);
+    assert.equal(finished, 2, 'all sockets including incomplete headers close at the bound');
+    assert(lastClosed - stoppedAt < 11500, 'socket deadline does not wait for provider cleanup or process exit');
+    assert.equal(wire, '', 'blocked pipeline cannot promise a delivered 503');
+    assert.equal(result.events.slice(result.names.indexOf('owner-interrupt') + 1).filter(event => event.what === 'http-entry').length, 0);
+  });
+
+  apiTest('C-A01.R16 an absent service closes admission at the session phase with one closed line, and a lost session after readiness ends the process nonzero without a failure line', { timeout: 90000 }, async () => {
+    const absent = startup.stateDirectory('c-absent');
+    const refused = await startup.run({ db: 'memory', service: 'absent' }, { env: startup.environment(absent), timeoutMs: 40000 });
+    fs.rmSync(absent, { recursive: true, force: true });
+    assert.equal(refused.timedOut, false); assert.equal(refused.code, 1, refused.stderr);
+    assert.equal(refused.stderrLines.length, 1, refused.stderr);
+    const line = STARTUP_LINE.exec(refused.stderrLines[0]);
+    assert(line, refused.stderr); assert.deepEqual([line[1], line[2]], ['session', 'UNAVAILABLE']);
+    assert.equal(refused.names.includes('bind'), false, 'no listener without the service');
+    assert.equal(refused.names.includes('create'), false, 'no Nest application without the service');
+    assert.equal(refused.names.filter(name => name === 'disconnect').length, 1, 'the dedicated client is released');
+    assert.equal(refused.stderr.includes('Synthetic-Fixture-Secret'), false);
+    const lost = startup.stateDirectory('c-lost');
+    let listening = false;
+    const dropped = await startup.run({ db: 'memory', observeAdmission: true }, {
+      env: startup.environment(lost), timeoutMs: 40000,
+      onEvent(event, child) { if (event.what === 'listening') { listening = true; child.send({ cmd: 'lose-service' }); } },
+    });
+    fs.rmSync(lost, { recursive: true, force: true });
+    assert.equal(listening, true);
+    assert.equal(dropped.timedOut, false); assert.equal(dropped.code, 1, dropped.stderr);
+    assert.equal(dropped.stderrLines.length, 0, 'a bounded clean stop after the loss prints no failure line: ' + dropped.stderr);
+    // The loss trips the latch in the same turn (the child reports the command after it took effect), so the stop's
+    // own order is what is judged: admission closed -> listener released -> ledger released, all after readiness.
+    const at = name => dropped.names.indexOf(name);
+    assert(at('listening') < at('owner-interrupt') && at('owner-interrupt') < at('server-close') && at('server-close') < at('disconnect'),
+      'ready -> admission closed -> listener released -> ledger released: ' + JSON.stringify(dropped.names));
+    assert.equal(dropped.names.includes('service-lost-sent'), true);
+    assert.equal(dropped.names.filter(name => name === 'state-client-close').length, 1);
   });
 }
