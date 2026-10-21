@@ -346,8 +346,10 @@ class StateCopyRestoreContainerTests(unittest.TestCase):
         with (cls.directory / "roles.sql").open("rb") as handle:
             ops.run(["docker", "exec", "-i", cls.private, "psql", "-X", "-U", "kin", "-d", "postgres", "-v", "ON_ERROR_STOP=0"], input_file=handle)
         ops.run(["docker", "exec", "-u", "postgres", cls.private, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
-        ops.run(["docker", "exec", cls.private, "psql", "-X", "-U", "kin", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
-                 "CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '/var/lib/postgresql/emr-access/ts'; CREATE DATABASE kin;"])
+        # Neither statement may run inside a transaction block: one psql command each.
+        for statement in ("CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '/var/lib/postgresql/emr-access/ts';",
+                          "CREATE DATABASE kin;"):
+            ops.run(["docker", "exec", cls.private, "psql", "-X", "-U", "kin", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", statement])
         with (cls.directory / "kin.dump").open("rb") as handle:
             ops.run(["docker", "exec", "-i", cls.private, "pg_restore", "-U", "kin", "-d", "kin", "--exit-on-error"], input_file=handle)
 
