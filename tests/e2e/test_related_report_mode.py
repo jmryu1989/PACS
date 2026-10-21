@@ -9,6 +9,10 @@ same receipt. Back returns to the editor at the insertion end, Approve commits t
 study shows it once; the receipt stays applied but no longer matches the cleared draft. The Source's versions and every
 original DICOM instance are unchanged. Page-level outcomes (refused, discard tombstone, superseded, ID_REUSED, logout,
 both layouts) are cases in tests/related_report_mode_dom_test.py; restart and lock order are W5-API's PostgreSQL cases.
+
+Owner: W5-UI Phase B (D1675). Phase A serves no Related Report mode markup on the live page (W5-PHASE-A-INTERIM), so this
+flow is not in the Phase A candidate selection (tests/candidate_ci.py FLOWS, 130 cases) and passes nothing there. Phase B
+adds it back to FLOWS (130 -> 131) together with main.html's mode markup.
 """
 from __future__ import annotations
 

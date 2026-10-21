@@ -1,5 +1,5 @@
 # coding: utf-8
-"""TEST-RELATED-KEYBOARD: Related Report mode by keyboard, related preview and image comparison retain report work."""
+"""TEST-RELATED-KEYBOARD: related preview and image comparison retain report work."""
 import json,unittest
 from pathlib import Path
 from playwright.sync_api import expect
@@ -16,17 +16,11 @@ class RelatedKeyboardE2E(ReadingWorkspaceE2E):
   print('RELATED_TAB',p.evaluate("()=>({active:document.activeElement.outerHTML,parent:document.activeElement.parentElement?.className})"),flush=True)
   # The last visible filter control precedes the sole row; pagination is hidden.
   expect(p.locator(f'#relrows tr[data-uid="{b.uid}"]')).to_be_focused();expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(1)
-  # W5 (design v5 §1, D1244): Enter on a Related row opens Related Report mode on that Source. The typed Target is saved
-  # first through the W4 move gate; the editor is put away with its text and the mode's title takes the focus.
-  p.keyboard.press('Enter');expect(p.locator('#related-mode')).to_be_visible();expect(p.locator('#related-mode-title')).to_be_focused()
-  expect(p.locator('#related-mode [data-related-source="findings"]')).to_have_text('PRIOR '+b.uid);expect(p.locator('#findings')).to_be_hidden();expect(p.locator('#findings')).to_have_value('KEEP RELATED KEYBOARD REPORT')
-  self.assertEqual(p.evaluate('selectedUid'),a.uid);self.assertEqual(p.evaluate('relatedUid'),b.uid)
-  # The explicit image action stays reachable in the mode and still opens Target + Source (PAGE-10).
-  compare=p.locator(f'[data-related-open="{b.uid}"]');compare.focus();expect(compare).to_be_focused()
-  folder=Path('../tmp/related-keyboard/screens');folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'related-mode.png'));p.keyboard.press('Enter')
+  p.keyboard.press('Enter');expect(p.locator('#prior-findings')).to_have_text('PRIOR '+b.uid);expect(p.locator('#findings')).to_have_value('KEEP RELATED KEYBOARD REPORT');self.assertEqual(p.evaluate('selectedUid'),a.uid)
+  expect(p.locator(f'#relrows tr[data-uid="{b.uid}"]')).to_be_focused();p.keyboard.press('Tab');expect(p.locator(f'[data-related-open="{b.uid}"]')).to_be_focused()
+  folder=Path('../tmp/related-keyboard/screens');folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'related-preview.png'));p.keyboard.press('Enter')
   expect(p.locator('#reading-status')).to_have_text('영상 작업공간 연결됨',timeout=60000);f=p.locator('#reading-frame').element_handle().content_frame();canvas_ready(f,2)
-  # Report Editor (Ctrl+Alt+4) is the mode's Back: the editor returns focused with the typed text, never the Source's.
-  self.assertIn(a.uid+','+b.uid,f.url);p.keyboard.press('Control+Alt+4');expect(p.locator('#related-mode')).to_be_hidden();expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP RELATED KEYBOARD REPORT');self.assertEqual(p.evaluate('selectedUid'),a.uid);self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
+  self.assertIn(a.uid+','+b.uid,f.url);p.keyboard.press('Control+Alt+4');expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP RELATED KEYBOARD REPORT');self.assertEqual(p.evaluate('selectedUid'),a.uid);self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
  def test_related_keyboard_02_refresh_filter_and_session(self):
   a,b=self.pair();p=self.login();self.choose(p,a);button=p.locator(f'[data-related-open="{b.uid}"]');button.focus();p.evaluate('renderRelated()');expect(button).to_be_focused()
   p.locator('#findings').focus();p.evaluate('renderRelated()');expect(p.locator('#findings')).to_be_focused()
