@@ -10,11 +10,12 @@ const { spawnSync, spawn } = require('node:child_process');
 const ts = require(process.env.KIN_EMR_TYPESCRIPT || path.resolve(__dirname, '../../../api/node_modules/typescript'));
 require.extensions['.ts'] = (m, f) => m._compile(ts.transpileModule(fs.readFileSync(f, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, esModuleInterop: true, experimentalDecorators: true }, fileName: f }).outputText, f);
 const LADDER = process.argv.includes('--ladder');
-const [r3, r4b, out] = LADDER ? [] : process.argv.slice(2);
-const J3 = LADDER ? null : require(path.join(r3, 'api/src/emr-runtime/failure-journal.ts'));
-const J4 = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/failure-journal.ts'));
-const CO = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/coordinator.ts')), EW = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/external-writer.ts'));
-const S4 = LADDER ? null : require(path.join(r4b, 'api/src/emr-runtime/seal.ts'));
+const PROBE = process.argv.includes('--recovery-probe');
+const [r3, r4b, out] = LADDER || PROBE ? [] : process.argv.slice(2);
+const J3 = LADDER || PROBE ? null : require(path.join(r3, 'api/src/emr-runtime/failure-journal.ts'));
+const J4 = LADDER || PROBE ? null : require(path.join(r4b, 'api/src/emr-runtime/failure-journal.ts'));
+const CO = LADDER || PROBE ? null : require(path.join(r4b, 'api/src/emr-runtime/coordinator.ts')), EW = LADDER || PROBE ? null : require(path.join(r4b, 'api/src/emr-runtime/external-writer.ts'));
+const S4 = LADDER || PROBE ? null : require(path.join(r4b, 'api/src/emr-runtime/seal.ts'));
 // The candidate (EMR-B2 c) refuses a bare journal record on a directory no seal initialized: the sample initializes the
 // pair exactly as the service does (AccessSeal.recoverAtStart over two empty chains of fixed identity), outside the
 // timed section. The journal fixture itself is unchanged.
@@ -566,7 +567,159 @@ async function ladderMain() {
   process.stdout.write('CAPACITY_LADDER ' + JSON.stringify(ladderSummary(record, outFile)) + '\n');
   return record.outcome === 'COMPLETED' ? 0 : 2;
 }
-if (LADDER) {
+/* ── D1683 early milestone: same-v3 recovery feasibility probe ─────────────────────────────────────────
+ * node --max-old-space-size=3072 journal_cost.cjs --recovery-probe --keys <terminals per stream> --out <dir>
+ *   [--bundles <count, default = keys>] [--directory-every N] [--phases read,hash,lookup,merge,navigate] [--keep]
+ * Writes a navigable sorted v3 checkpoint through the product's writeNavigableCheckpoint (two streams of committed
+ * terminals, two-stream bundles 95 % acknowledged / 5 % published, realistic field widths), then measures each
+ * recovery ingredient as the product's scanCheckpoint performs it, and extrapolates linearly to the A11 maxima
+ * (600M attempt keys = 300M terminals per stream, 100M bundles) against the warm 300 s / cold 1800 s budgets.
+ * Cache-warm, this host; every number is labelled as such. Nothing here is acceptance. */
+function parseProbeArgs(argv) {
+  const o = { keys: null, bundles: null, out: null, directoryEvery: 4096, phases: ['read', 'hash', 'lookup', 'merge', 'navigate'], keep: false };
+  for (let i = argv.indexOf('--recovery-probe') + 1; i < argv.length; i++) {
+    const key = argv[i], value = argv[i + 1];
+    if (key === '--keep') { o.keep = true; continue; }
+    if (value === undefined) throw new Error('missing value for ' + key);
+    if (key === '--keys') o.keys = Number(value);
+    else if (key === '--bundles') o.bundles = Number(value);
+    else if (key === '--out') o.out = path.resolve(value);
+    else if (key === '--directory-every') o.directoryEvery = Number(value);
+    else if (key === '--phases') o.phases = value.split(',');
+    else throw new Error('unknown option ' + key);
+    i++;
+  }
+  if (!Number.isSafeInteger(o.keys) || o.keys < 1) throw new Error('--keys must be a positive integer');
+  if (o.bundles === null) o.bundles = o.keys;
+  if (!o.out) throw new Error('--out <dir> is required');
+  return o;
+}
+async function recoveryProbe() {
+  const o = parseProbeArgs(process.argv);
+  const root = path.resolve(__dirname, '../../..'), EW2 = require(path.join(root, 'api/src/emr-runtime/external-writer.ts'));
+  fs.mkdirSync(path.join(o.out, 'seal'), { recursive: true, mode: 0o700 });
+  const file = path.join(o.out, 'seal', 'settlement.json');
+  const uuidAt = (prefix, i) => `${prefix}-0000-4000-8000-${i.toString(16).padStart(12, '0')}`;
+  const chains = { viewing: uuidAt('7c1f3a52', 1), history: uuidAt('7c1f3a52', 2) };
+  const hex = (seed, i) => crypto.createHash('sha256').update(seed + ':' + i).digest('hex');
+  const N = o.keys, B = Math.min(o.bundles, N), generation = 2 * N + 1, serviceEpoch = uuidAt('5e51c000', 7);
+  const tail = { streams: { viewing: { chainId: chains.viewing, sequence: N, hash: hex('v', N) }, history: { chainId: chains.history, sequence: N, hash: hex('h', N) } },
+    sealedAt: '2026-10-22T00:00:00.000Z', generation };
+  const head = { version: 3, revision: 1, generation, tail, lineage: { version: 1, id: uuidAt('11aa0000', 9), origin: { instanceId: 'recovery-probe-synthetic-pair',
+    chains, database: { database: 'synthetic', oid: 42, address: '127.0.0.1', port: 5432 } } }, retired: { viewing: 0, history: 0 }, intents: {}, slots: {}, proofs: {} };
+  const binding = (stream, i) => ({ stream, chainId: chains[stream], attemptId: uuidAt(stream === 'viewing' ? 'a0000000' : 'a1000000', i), bundleId: uuidAt('b0000000', i),
+    kind: stream === 'viewing' ? 'access' : 'history', eventId: uuidAt('e0000000', i), sequence: i, previousHash: hex(stream[0], i - 1), hash: hex(stream[0], i),
+    contentSha256: hex('c' + stream[0], i), generation: stream === 'viewing' ? 2 * i - 1 : 2 * i, proofDigest: null });
+  const proofHash = i => {
+    const entries = ['viewing', 'history'].map(s => { const b = binding(s, i); return { ...b, sealed: { chainId: b.chainId, sequence: b.sequence, hash: b.hash } }; });
+    return sha256(JSON.stringify({ v: 1, serviceEpoch, eventId: uuidAt('e0000000', i), requiredStreams: ['viewing', 'history'], entries }));
+  };
+  function* terminals() {
+    for (const stream of ['history', 'viewing']) for (let i = 1; i <= N; i++) {
+      const b = binding(stream, i), acked = i % 20 !== 0 && i <= B;
+      yield [stream + ':' + b.attemptId, JSON.stringify({ phase: 'committed', generation: b.generation, binding: b, ...(acked ? {} : { owner: uuidAt('0c000000', 1) }) })];
+    }
+  }
+  function* bundles() {
+    for (let i = 1; i <= B; i++) {
+      const refs = ['viewing', 'history'].map(s => { const b = binding(s, i); return { stream: s, attemptId: b.attemptId, sealed: { sequence: b.sequence, hash: b.hash } }; });
+      const acked = i % 20 !== 0;
+      yield ['bundle:' + uuidAt('b0000000', i), JSON.stringify(acked ? { version: 1, phase: 'acknowledged', serviceEpoch, refs, proofSha256: proofHash(i) } :
+        { version: 1, phase: 'published', serviceEpoch, refs, eventId: uuidAt('e0000000', i), requiredStreams: ['viewing', 'history'] })];
+    }
+  }
+  const record = { tool: 'tests/emr/b/journal_cost.cjs --recovery-probe', started_at: new Date().toISOString(), pid: process.pid,
+    host: { platform: process.platform, release: os.release(), arch: process.arch, node: process.version, logical_cpus: os.cpus().length, cpu: os.cpus()[0]?.model ?? null, total_memory_bytes: os.totalmem() },
+    cache_state: 'warm (the checkpoint was written moments before by this process; this is not a cold-device measurement)',
+    keys_per_stream: N, terminals: 2 * N, bundles: B, directory_every: o.directoryEvery, phases: {}, envelope_budgets: ENVELOPE.recovery_restore_and_full_disk, envelope_maxima: ENVELOPE.cardinality };
+  const memory = () => { global.gc?.(); const m = process.memoryUsage(); return { rss: m.rss, heapUsed: m.heapUsed, external: m.external }; };
+  const phase = async (name, work) => {
+    const before = memory(), cpu0 = process.cpuUsage(), t0 = performance.now();
+    let result, error = null;
+    try { result = await work(); } catch (e) { error = { code: e?.code ?? e?.name ?? 'Error', message: String(e?.message ?? e).slice(0, 300) }; }
+    const ms = performance.now() - t0, cpu = process.cpuUsage(cpu0);
+    record.phases[name] = { ms: +ms.toFixed(1), cpu_ms: +((cpu.user + cpu.system) / 1000).toFixed(1), memory_before: before, memory_after: memory(), error, ...(result ?? {}) };
+    process.stderr.write(`[probe ${N}] ${name}: ${ms.toFixed(0)} ms ${error ? 'ERROR ' + JSON.stringify(error) : ''}\n`);
+  };
+  await phase('generate', async () => { const written = EW2.writeNavigableCheckpoint(file, head, map => map === 'terminal' ? terminals() : bundles(), false); return { bytes: written.bytes, digest: written.digest }; });
+  fs.writeFileSync(path.join(o.out, 'seal', 'tail.json'), JSON.stringify(tail));
+  const bytes = fs.statSync(file).size;
+  record.bytes = bytes; record.bytes_per_terminal = +(bytes / (2 * N)).toFixed(1);
+  const sequential = (hashing) => () => {
+    const fd = fs.openSync(file, 'r'), chunk = Buffer.allocUnsafe(4 * 1024 * 1024); let position = 0, read = 0;
+    const h = hashing ? crypto.createHash('sha256') : null;
+    try {
+      while (position < bytes) {
+        const n = fs.readSync(fd, chunk, 0, chunk.length, position); if (!n) break; position += n; read += n;
+        if (h) { const slice = chunk.subarray(0, n); let at = 0; for (;;) { const lf = slice.indexOf(10, at); if (lf < 0) { if (at < n) h.update(slice.subarray(at)); break; } if (lf > at) h.update(slice.subarray(at, lf)); at = lf + 1; } }
+      }
+    } finally { fs.closeSync(fd); }
+    return { bytes: read, ...(h ? { digest_of_all_bytes_lf_stripped: h.digest('hex') } : {}) };
+  };
+  if (o.phases.includes('read')) await phase('read_sequential', sequential(false));
+  if (o.phases.includes('hash')) await phase('hash_sequential', sequential(true));
+  let scanned = null;
+  if (o.phases.includes('scan')) await phase('scan_validate_members_only', async () => {
+    const r = EW2.scanCheckpoint(file, { directoryEvery: o.directoryEvery, join: 'none' }); scanned = r;
+    return { digest_ok: r.digest === record.phases.generate.digest, counts: r.counts, scan_ms: +r.timing.scanMs.toFixed(1), note: 'bundle-terminal join skipped: member validation and digest only' };
+  });
+  if (o.phases.includes('lookup')) await phase('scan_validate_join_lookup', async () => {
+    const r = EW2.scanCheckpoint(file, { directoryEvery: o.directoryEvery, join: 'lookup' }); scanned = r;
+    return { digest_ok: r.digest === record.phases.generate.digest, counts: r.counts, joined: r.joined, scan_ms: +r.timing.scanMs.toFixed(1), join_ms: +r.timing.joinMs.toFixed(1),
+      directory_entries: { terminal: r.regions.terminal.directory.length, bundles: r.regions.bundles.directory.length }, navigable: { terminal: r.regions.terminal.navigable, bundles: r.regions.bundles.navigable } };
+  });
+  if (o.phases.includes('merge')) await phase('scan_validate_join_merge', async () => {
+    const r = EW2.scanCheckpoint(file, { directoryEvery: o.directoryEvery, join: 'merge', workDirectory: o.out }); scanned = scanned ?? r;
+    return { digest_ok: r.digest === record.phases.generate.digest, counts: r.counts, joined: r.joined, scan_ms: +r.timing.scanMs.toFixed(1), join_ms: +r.timing.joinMs.toFixed(1) };
+  });
+  if (o.phases.includes('navigate') && scanned) await phase('navigate_lookups', async () => {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const index = new EW2.RegionIndex(fd, scanned.regions.terminal), times = [];
+      let found = 0, readCalls = 0; const original = fs.readSync; fs.readSync = (...a) => { readCalls++; return original.apply(fs, a); };
+      try {
+        for (let i = 0; i < 1000; i++) {
+          const k = 1 + (Math.imul(i, 7919) >>> 0) % N, stream = i % 2 ? 'viewing' : 'history', key = stream + ':' + binding(stream, k).attemptId;
+          const t = performance.now(); const raw = index.find(key); times.push(performance.now() - t);
+          if (raw && JSON.parse(raw.toString()).binding.sequence === k) found++;
+        }
+        const absent = index.find('viewing:' + uuidAt('a0000000', N + 5)) === null;
+        times.sort((a, b) => a - b);
+        const q = p => +times[Math.min(times.length - 1, Math.ceil(times.length * p) - 1)].toFixed(3);
+        return { lookups: 1000, found, absent_is_null: absent, p50_ms: q(.5), p95_ms: q(.95), p99_ms: q(.99), read_calls: readCalls };
+      } finally { fs.readSync = original; }
+    } finally { fs.closeSync(fd); }
+  });
+  // Linear extrapolation to the envelope maxima (labelled, not a measurement).
+  const maxima = ENVELOPE.cardinality, terminalsMax = maxima.both_streams_lifetime_attempt_keys, bundlesMax = maxima.lifetime_bundle_attestations;
+  const perTerminalMs = name => record.phases[name] && !record.phases[name].error ? record.phases[name].ms / (2 * N) : null;
+  const bytesMax = record.bytes_per_terminal * terminalsMax;
+  const x = {};
+  for (const name of ['read_sequential', 'hash_sequential']) if (record.phases[name] && !record.phases[name].error) x[name] = { mb_per_s: +(bytes / 1048576 / (record.phases[name].ms / 1000)).toFixed(1), seconds_at_600m_keys: +(bytesMax / 1048576 / (bytes / 1048576 / (record.phases[name].ms / 1000))).toFixed(0) };
+  for (const name of ['scan_validate_members_only', 'scan_validate_join_lookup', 'scan_validate_join_merge']) if (record.phases[name] && !record.phases[name].error) {
+    const p = record.phases[name], scanPerTerminal = p.scan_ms / (2 * N), joinPerBundle = (p.join_ms ?? 0) / Math.max(1, B);
+    x[name] = { terminals_per_s: +((2 * N) / (p.scan_ms / 1000)).toFixed(0), scan_seconds_at_600m_keys: +(scanPerTerminal * terminalsMax / 1000).toFixed(0),
+      join_seconds_at_100m_bundles: +(joinPerBundle * bundlesMax / 1000).toFixed(0), total_seconds_at_envelope: +((scanPerTerminal * terminalsMax + joinPerBundle * bundlesMax) / 1000).toFixed(0) };
+  }
+  void perTerminalMs;
+  record.extrapolation = { method: 'linear per terminal / per bundle, cache-warm, this host (' + os.cpus().length + ' logical CPUs; the approved host class has 2)', projected_checkpoint_bytes_at_600m_keys: bytesMax, ...x,
+    budgets: { warm_owner_restart_ready_seconds_max: 300, cold_validated_pair_recovery_seconds_max: 1800 } };
+  const verdicts = [];
+  for (const [name, v] of Object.entries(x)) {
+    const seconds = v.total_seconds_at_envelope ?? v.seconds_at_600m_keys;
+    verdicts.push({ ingredient: name, seconds_at_envelope: seconds, warm_300s: seconds <= 300 ? 'PASS' : 'FAIL', cold_1800s: seconds <= 1800 ? 'PASS' : 'FAIL' });
+  }
+  record.verdict = verdicts;
+  record.finished_at = new Date().toISOString();
+  const resultFile = path.join(o.out, `recovery-probe-${N}.json`);
+  writeJsonAtomic(resultFile, record);
+  if (!o.keep) { fs.rmSync(path.join(o.out, 'seal'), { recursive: true, force: true }); }
+  process.stdout.write('RECOVERY_PROBE ' + JSON.stringify({ keys_per_stream: N, bytes, phases: Object.fromEntries(Object.entries(record.phases).map(([k, v]) => [k, v.error ? 'ERROR' : v.ms])), extrapolation: x, verdict: verdicts, file: resultFile }) + '\n');
+  return verdicts.length && verdicts.every(v => v.cold_1800s === 'PASS') ? 0 : 3;
+}
+if (PROBE) {
+  recoveryProbe().then(code => { process.exitCode = code; }, error => { process.stderr.write(String(error?.stack ?? error) + '\n'); process.exitCode = 2; });
+} else if (LADDER) {
   ladderMain().then(code => { process.exitCode = code; }, error => { process.stderr.write(String(error?.stack ?? error) + '\n'); process.exitCode = 2; });
 } else if (out === '--init') {
   const dir = process.argv[5];
