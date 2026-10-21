@@ -640,9 +640,12 @@ class LegacyImageTests(unittest.TestCase):
             ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, name])
             cls.volumes[suffix] = name
         # The v3 pair: the current service recovers the fresh pair, one client appends one synthetic event, the service closes.
+        # Both reach the database over the named network as the launch shape does (the pair's physical database identity
+        # records the server address the connection observed: inet_server_addr(); a loopback namespace would record
+        # 127.0.0.1 and the reviewed sibling over the network would then refuse the clone as another pair).
         service = cls.container("state-service", [
-            "--network", "container:" + cls.db, "--user", "1000:1000", "--group-add", "2001", "--group-add", "2002", "--stop-timeout", "20",
-            "-e", "DATABASE_URL=" + READER_URL, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE, "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE,
+            "--network", cls.network, "--user", "1000:1000", "--group-add", "2001", "--group-add", "2002", "--stop-timeout", "20",
+            "-e", "DATABASE_URL=postgresql://kin_emr_reader@db:5432/kin", "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE, "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE,
             "-e", "KIN_EMR_API_SOCKET=" + API_IPC + "/writer.sock", "-e", "KIN_EMR_RETENTION_SOCKET=" + RETENTION_IPC + "/writer.sock",
             "--mount", "type=volume,source=" + cls.volumes["state"] + ",target=" + ops.EMR_STATE,
             "--mount", "type=volume,source=" + cls.volumes["api-ipc"] + ",target=" + API_IPC,
@@ -651,8 +654,8 @@ class LegacyImageTests(unittest.TestCase):
         ops.wait_state_service(service, 0, timeout=120)
         import ops_emr_probe as probe
         event = probe.probe_event({"study": "SYNTHETIC-legacy-cells", "event_id": str(uuid.uuid4()), "institution": "synthetic-institution"})
-        appended = subprocess.run(["docker", "run", "--rm", "--network", "container:" + cls.db, "--user", "1001:1001", "--group-add", "2001", "--read-only",
-                                   "-e", "DATABASE_URL=" + RUNTIME_URL, "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE, "-e", "KIN_EMR_STATE_SOCKET=" + API_IPC + "/writer.sock",
+        appended = subprocess.run(["docker", "run", "--rm", "--network", cls.network, "--user", "1001:1001", "--group-add", "2001", "--read-only",
+                                   "-e", "DATABASE_URL=postgresql://kin_runtime@db:5432/kin", "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE, "-e", "KIN_EMR_STATE_SOCKET=" + API_IPC + "/writer.sock",
                                    "--mount", "type=volume,source=" + cls.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly",
                                    "--entrypoint", "node", cls.image_id, "-e", probe.PROBE_SCRIPT, "append", json.dumps({"event": event})],
                                   capture_output=True, timeout=180)
