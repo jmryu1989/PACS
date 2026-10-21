@@ -365,6 +365,28 @@ def _hash_volume(image_id, volume):
     return json.loads(line[len("KIN_RESULT "):])
 
 
+def _volume_entries(image_id, volume):
+    """Every entry of a (stopped) volume with its type (file, directory, socket, other): the complete inventory a refused
+    launch must leave unchanged, including owner registry files and IPC sockets."""
+    script = ("const fs=require('fs'),p=require('path');const out=[];"
+              "(function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const f=p.join(d,e.name);"
+              "out.push([p.relative('/state',f),e.isDirectory()?'directory':e.isFile()?'file':e.isSocket()?'socket':'other']);"
+              "if(e.isDirectory())walk(f);}})('/state');out.sort();"
+              "process.stdout.write('KIN_RESULT '+JSON.stringify(out)+'\\n');")
+    output = ops.text(["docker", "run", "--rm", "--network", "none", "--user", "0:0", "--read-only",
+                       "--mount", "type=volume,source=" + volume + ",target=/state,readonly",
+                       "--entrypoint", "node", image_id, "-e", script])
+    line = [item for item in output.splitlines() if item.startswith("KIN_RESULT ")][-1]
+    return json.loads(line[len("KIN_RESULT "):])
+
+
+def _volume_archive(image_id, volume):
+    """The volume's bytes as the tar.gz stream the legacy copy route's format gate reads (read-only)."""
+    return ops.run(["docker", "run", "--rm", "--network", "none", "--user", "0:0", "--read-only",
+                    "--mount", "type=volume,source=" + volume + ",target=/state,readonly",
+                    "--entrypoint", "tar", image_id, "-czf", "-", "-C", "/state", "."]).stdout
+
+
 class StateServiceCutpointTests(unittest.TestCase):
     """EMR-B2 (c) C-P01..C-P11 (the preserved P00..P12 mapping): the real API image in both roles over a disposable
     PostgreSQL. The suite tests/emr/b/startup_pg_test.cjs runs as the API user inside the image and drives the real
@@ -581,6 +603,10 @@ class LegacyImageTests(unittest.TestCase):
         cls.legacy = json.loads(ops.text(["docker", "image", "inspect", os.environ["KIN_TEST_LEGACY_B1_IMAGE"]]))[0]
         pre = os.environ.get("KIN_TEST_LEGACY_PRE_EMR_IMAGE")
         cls.pre_emr = json.loads(ops.text(["docker", "image", "inspect", pre]))[0] if pre else None
+        # Compose binds images by reference; the consumers compare the resolved immutable IDs.
+        cls.tags = {cls.image_id: os.environ["KIN_TEST_API_IMAGE"], cls.legacy["Id"]: os.environ["KIN_TEST_LEGACY_B1_IMAGE"]}
+        if pre:
+            cls.tags[cls.pre_emr["Id"]] = pre
         cls.db = cls.container("db", [
             "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
             "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
@@ -651,13 +677,14 @@ class LegacyImageTests(unittest.TestCase):
     def changed(before, after):
         return sorted({name for name in set(before) | set(after) if before.get(name) != after.get(name)})
 
-    def clone(self):
-        """A private clone of the v3 state volume for one legacy start (the pair volume itself is never mounted)."""
+    def clone(self, source=None, target=None):
+        """A private clone of a state volume (by default the v3 pair volume, which itself is never mounted by any cell)."""
+        source, target = source or self.volumes["state"], target or self.volumes["clone"]
         ops.run(["docker", "run", "--rm", "--network", "none", "--user", "0:0",
-                 "--mount", "type=volume,source=" + self.volumes["state"] + ",target=/source,readonly",
-                 "--mount", "type=volume,source=" + self.volumes["clone"] + ",target=/clone",
+                 "--mount", "type=volume,source=" + source + ",target=/source,readonly",
+                 "--mount", "type=volume,source=" + target + ",target=/clone",
                  "--entrypoint", "sh", self.image_id, "-c", "rm -rf /clone/* /clone/.[!.]* 2>/dev/null; cp -a /source/. /clone/ && chown -R 1000:1000 /clone"])
-        return self.volumes["clone"]
+        return target
 
     def legacy_run(self, image, suffix, arguments, timeout=120):
         """A legacy container started and observed for at most `timeout` seconds: (exit code or None if still running
@@ -683,11 +710,247 @@ class LegacyImageTests(unittest.TestCase):
         self.legacy_inspect = inspected
         return code, logs
 
-    def test_01_legacy_b1_owner_serve_over_a_v3_pair_refuses_before_any_mutation(self):
-        """D1656-T01: the former API owner (v1+v2 reader) started as the owner of a v3 state copy."""
+    # ----- the supported launch boundary (D1684 item 7 / F-A03-01, F-A03-02) -------------------------------------------
+    # The acceptance cells exercise the actual launch consumers (ops_emr_introduction.state_start_admission ->
+    # ops_deploy_preflight.check_state_service + check_state_owners; ops_backup.admit_legacy_archive ->
+    # check_legacy_restore_format) over containers Docker Compose created in the real emr-state launch shape and never
+    # started: the refusal binds to the immutable image identity before incompatible code gets writable execution, and
+    # the complete inventory (every file of the pair volume, the IPC volumes' entries, the ledger rows, the container's
+    # own state) is compared before/after. Historical-behaviour diagnostics (test_06/test_07) are retained as
+    # counterexamples, not as reject-before-mutation acceptance.
+
+    def compose_create(self, suffix, image_id, state_volume, *, restart="no", command=("state-serve-v3",)):
+        """The emr-state launch shape of docker-compose.yml, created by Docker Compose and never started here: the
+        two-token entrypoint + command the launch admission binds (a CLI --entrypoint cannot express it), UID 1000 with
+        the IPC groups, three RW volumes, the compose role label, the reader credential and the instance pair."""
+        import shutil
+        import tempfile
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16] + "-" + suffix
+        project = "kinrehearsal" + token[:12]
+        folder = Path(tempfile.mkdtemp(prefix="kin-legacy-shape-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.addCleanup(ops.run, ["docker", "network", "rm", project + "_default"], check=False)
+        self.addCleanup(ops.remove_owned_if_present, "container", name, token)
+        service = {"image": self.tags.get(image_id, image_id), "container_name": name, "user": "1000:1000", "group_add": ["2001", "2002"],
+                   "entrypoint": ["sh", "/app/start-production.sh"], "command": list(command), "restart": restart,
+                   "stop_grace_period": "20s", "network_mode": "container:" + self.db, "labels": {"kin.ops.run": token},
+                   "environment": {"DATABASE_URL": READER_URL, "KIN_EMR_STATE_DIR": ops.EMR_STATE, "KIN_EMR_INSTANCE_ID": self.INSTANCE,
+                                   "KIN_EMR_API_SOCKET": API_IPC + "/writer.sock", "KIN_EMR_RETENTION_SOCKET": RETENTION_IPC + "/writer.sock"},
+                   "volumes": [state_volume + ":" + ops.EMR_STATE, self.volumes["api-ipc"] + ":" + API_IPC,
+                               self.volumes["retention-ipc"] + ":" + RETENTION_IPC]}
+        spec = {"services": {"emr-state": service},
+                "volumes": {state_volume: {"external": True}, self.volumes["api-ipc"]: {"external": True}, self.volumes["retention-ipc"]: {"external": True}}}
+        (folder / "compose.yaml").write_text(json.dumps(spec), encoding="utf-8")
+        ops.run(["docker", "compose", "--project-directory", str(folder), "--project-name", project, "-f", str(folder / "compose.yaml"),
+                 "create", "--no-build", "--pull", "never", "emr-state"], timeout=180)
+        return name
+
+    def admission(self, name, *, existing=False):
+        """The launch consumer's checks over a created container, exactly as state_start_admission applies them: the
+        reviewed release (this checkout's HEAD, this candidate image) and the inventory of every container holding the
+        same state volume. Raises RuntimeError with the consumer's refusal; returns the observation on admission."""
+        import ops_deploy_preflight as preflight
+        container = json.loads(ops.text(["docker", "inspect", name]))[0]
+        release = {"sha": ops.text(["git", "rev-parse", "HEAD"]), "images": {"api": self.image_id}}
+        reviewed = json.loads(ops.text(["docker", "image", "inspect", self.image_id]))[0]
+        state_volume = next(m["Name"] for m in container["Mounts"] if m.get("Destination") == ops.EMR_STATE)
+        preflight.check_state_service(container, release=release, image=reviewed, state_volume=state_volume,
+                                      api_ipc_volume=self.volumes["api-ipc"], retention_ipc_volume=self.volumes["retention-ipc"],
+                                      instance_id=self.INSTANCE, database_host="127.0.0.1")
+        names = ops.text(["docker", "container", "ls", "--all", "--filter", "volume=" + state_volume, "--format", "{{.Names}}"]).splitlines()
+        owners = [json.loads(ops.text(["docker", "inspect", item]))[0] for item in names if item]
+        preflight.check_state_owners(owners, state_volume, name if existing else "")
+        return container
+
+    def inventory(self, state_volume):
+        """Everything the boundary must leave unchanged: every file's digest and every entry (files, directories,
+        sockets) of the state volume and of both IPC volumes, and the ledger row counts."""
+        return {"state_files": _hash_volume(self.image_id, state_volume), "state_entries": _volume_entries(self.image_id, state_volume),
+                "api_ipc": _volume_entries(self.image_id, self.volumes["api-ipc"]),
+                "retention_ipc": _volume_entries(self.image_id, self.volumes["retention-ipc"]),
+                "ledger": self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker")}
+
+    def never_started(self, name):
+        state = json.loads(ops.text(["docker", "inspect", name]))[0]["State"]
+        self.assertEqual((state.get("Status"), state.get("Running"), state.get("StartedAt")), ("created", False, "0001-01-01T00:00:00Z"),
+                         "the refused container must never have executed: " + json.dumps(state))
+        return state
+
+    def refused_before_execution(self, label, image, cell):
+        clone = self.clone()
+        before = self.inventory(clone)
+        self.assertEqual(before["state_files"], self.pair_hashes, "the private clone starts byte-identical to the v3 pair")
+        name = self.compose_create(label, image["Id"], clone)
+        with self.assertRaises(RuntimeError) as refused:
+            self.admission(name)
+        self.assertEqual(str(refused.exception), "State service image differs from the reviewed artifact",
+                         "the supported launch refuses the former image by its immutable identity, before any other difference")
+        state = self.never_started(name)
+        after = self.inventory(clone)
+        self.assertEqual(after, before, "a refused launch changes nothing: no file, no owner registry, no socket, no ledger row")
+        # Recreate under the same shape with the reviewed image: the same consumer admits it (the sibling is started in test_03).
+        ops.run(["docker", "rm", name])
+        sibling = self.compose_create(label + "-recreated", self.image_id, clone)
+        self.admission(sibling)
+        self.never_started(sibling)
+        self.assertEqual(self.inventory(clone), before)
+        print(json.dumps({cell: {"image": image["Id"], "labels": image["Config"].get("Labels"), "reconstructed": True,
+                                 "refusal": str(refused.exception), "container_state": state, "recreated_reviewed_sibling_admitted": True}}), flush=True)
+
+    def test_01_supported_launch_refuses_the_former_owner_image_before_execution(self):
+        """D1656-T01 (acceptance): the former API owner (v1+v2 reader) in the exact emr-state launch shape over a private
+        v3 clone is refused by the launch consumer before it executes; the complete inventory is unchanged."""
+        self.refused_before_execution("legacy-owner", self.legacy, "D1656-T01")
+
+    def test_02_supported_launch_refuses_the_pre_emr_image_before_execution(self):
+        """D1656-T02 (acceptance): the pre-EMR image, whose start script ignores its argument (it would migrate and
+        serve), is refused by the same identity binding before execution; `state-serve-v3` is not its protection."""
+        if not self.pre_emr:
+            self.skipTest("KIN_TEST_LEGACY_PRE_EMR_IMAGE not given")
+        text = ops.text(["docker", "run", "--rm", "--network", "none", "--entrypoint", "cat", self.pre_emr["Id"], "/app/start-production.sh"])
+        self.assertNotIn("state-serve-v3", text)
+        self.assertNotIn('case "${1', text)
+        self.refused_before_execution("pre-emr-owner", self.pre_emr, "D1656-T02-launch")
+
+    def test_03_supported_launch_admits_the_reviewed_image_which_serves_and_resumes(self):
+        """The positive reviewed-v3 sibling: the same consumer admits the reviewed image in the same shape; started, it
+        recovers the clone and serves (EMR_STATE_READY), closes completely, and is admitted again for resume as the
+        existing stopped owner - unless a restart policy would revive it outside launch admission."""
+        clone = self.clone()
+        before = self.inventory(clone)
+        name = self.compose_create("reviewed-owner", self.image_id, clone)
+        admitted = self.admission(name)
+        self.never_started(name)
+        self.assertEqual(self.inventory(clone), before, "admission itself changes nothing")
+        ops.run(["docker", "start", name])
+        ops.wait_state_service(name, 0, timeout=120)
+        ops.run(["docker", "stop", "--time", "20", name], timeout=120)
+        ops.state_service_closed(name)
+        after = self.inventory(clone)
+        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), self.pair_hashes, "the source pair volume is never mounted")
+        self.assertEqual(after["ledger"], before["ledger"], "recovery of an already sealed pair appends no ledger row")
+        changed = sorted(set(before["state_files"]) ^ set(after["state_files"]) |
+                         {item for item in before["state_files"] if before["state_files"][item] != after["state_files"].get(item)})
+        self.assertTrue(all(item.startswith("seal/") or item.startswith("journal/") for item in changed),
+                        "the reviewed service writes only its own pair files: " + json.dumps(changed))
+        # Resume of the existing stopped owner: admitted; a restart policy that could revive it outside admission: refused.
+        self.admission(name, existing=True)
+        ops.run(["docker", "update", "--restart", "always", name])
+        with self.assertRaises(RuntimeError) as restartable:
+            self.admission(name, existing=True)
+        self.assertEqual(str(restartable.exception), "State owner restart must pass launch admission")
+        ops.run(["docker", "update", "--restart", "no", name])
+        self.admission(name, existing=True)
+        print(json.dumps({"D1656-reviewed-sibling": {"image": self.image_id, "admitted_entry": [admitted["Path"], *admitted["Args"]],
+                                                     "served": True, "files_written_by_recovery": changed}}), flush=True)
+
+    def test_04_stale_owner_inventory_refuses_restartable_or_running_owners_until_quiesced(self):
+        """A retained old container of the same state volume (the former image, created with a restart policy; or any
+        running holder) keeps the new reviewed owner out of launch admission until it is quiesced (stopped, restart
+        policy `no`); then the reviewed owner is admitted. Nothing is started from the former image at any point."""
+        clone = self.clone()
+        before = self.inventory(clone)
+        stale = self.compose_create("stale-legacy", self.legacy["Id"], clone, restart="always")
+        fresh = self.compose_create("fresh-reviewed", self.image_id, clone)
+        with self.assertRaises(RuntimeError) as held:
+            self.admission(fresh)
+        self.assertEqual(str(held.exception), "A legacy state owner is running or eligible for restart")
+        ops.run(["docker", "update", "--restart", "no", stale])
+        self.admission(fresh)
+        # A running holder of the volume (a sleeper of the reviewed image; it executes nothing of the pair).
+        token = uuid.uuid4().hex
+        sleeper = "kin-rehearsal-" + token[:16] + "-holder"
+        self.addCleanup(ops.remove_owned_if_present, "container", sleeper, token)
+        ops.run(["docker", "run", "-d", "--name", sleeper, "--label", "kin.ops.run=" + token, "--network", "none", "--user", "1000:1000",
+                 "--mount", "type=volume,source=" + clone + ",target=" + ops.EMR_STATE, "--entrypoint", "sleep", self.image_id, "300"])
+        with self.assertRaises(RuntimeError) as running:
+            self.admission(fresh)
+        self.assertEqual(str(running.exception), "A legacy state owner is running or eligible for restart")
+        ops.run(["docker", "stop", "--time", "5", sleeper], timeout=60)
+        self.admission(fresh)
+        self.never_started(stale)
+        self.never_started(fresh)
+        self.assertEqual(self.inventory(clone), before, "owner-inventory refusals and quiescing change nothing")
+        print(json.dumps({"D1656-stale-owner": {"held": str(held.exception), "running_holder": str(running.exception), "admitted_after_quiesce": True}}), flush=True)
+
+    @classmethod
+    def legacy_database(cls):
+        """A second disposable database for the original-format control: the former image migrates it itself, so its
+        recovery entry can initialize and re-admit its own (v1/v2) pair without the v3 pair's chains."""
+        if getattr(cls, "legacy_db", None):
+            return cls.legacy_db
+        cls.legacy_db = cls.container("legacy-db", [
+            "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
+            "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+            "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
+        deadline = time.monotonic() + 60
+        while ops.run(["docker", "exec", cls.legacy_db, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], check=False).returncode:
+            if time.monotonic() > deadline:
+                raise RuntimeError("Disposable PostgreSQL (legacy) did not start")
+            time.sleep(0.5)
+        ops.run(["docker", "exec", "-u", "postgres", cls.legacy_db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
+        provisioned = subprocess.run(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex,
+                                      "-e", "KIN_EMR_READER_PASSWORD=" + uuid.uuid4().hex, cls.legacy_db, "psql", "-X", "-U", "postgres", "-d", "kin"],
+                                     input=emr_compose.PROVISION_SQL.encode(), capture_output=True, timeout=120)
+        if provisioned.returncode:
+            raise RuntimeError("EMR provisioning of the legacy disposable database failed")
+        migrated = subprocess.run(["docker", "run", "--rm", "--network", "container:" + cls.legacy_db, "-e", "DATABASE_URL=" + INSTALLER_URL,
+                                   "--entrypoint", "sh", cls.legacy["Id"], "/app/start-production.sh", "migrate"], capture_output=True, timeout=300)
+        if migrated.returncode:
+            raise RuntimeError("Legacy migration failed: " + migrated.stdout.decode(errors="replace")[-800:])
+        return cls.legacy_db
+
+    def test_05_original_format_copy_is_admitted_by_the_legacy_route_and_v3_is_refused_by_its_format_gate(self):
+        """The separately restored original-format sibling (positive control, reconstructed image): the former image's
+        own recovery entry initializes its v2 pair, and a private copy of it is admitted by that same entry; the
+        retained legacy copy route's format gate (ops_backup.admit_legacy_archive -> check_legacy_restore_format) admits
+        that copy's bytes and refuses the v3 pair's bytes. No v3 byte is executed by the former image."""
+        db = self.legacy_database()
+        own = self.fresh_volume("legacy-own")
+        code, logs = self._legacy_node(own, self.LEGACY_RECOVERY, db=db)
+        self.assertEqual(code, 3, logs[-1500:])
+        self.assertIn('"recovered":true', logs)
+        initialized = _hash_volume(self.image_id, own)
+        self.assertIn("seal/settlement.json", initialized)
+        copy = self.clone(own, self.fresh_volume("legacy-copy"))
+        code, logs = self._legacy_node(copy, self.LEGACY_RECOVERY, db=db)
+        self.assertEqual(code, 3, "the original-format private copy is admitted by the legacy recovery entry: " + logs[-1500:])
+        self.assertEqual(_hash_volume(self.image_id, own), initialized, "the copy's source is untouched")
+        import io
+        fingerprint = ops.admit_legacy_archive(io.BytesIO(_volume_archive(self.image_id, copy)))
+        self.assertTrue(fingerprint)
+        with self.assertRaises(RuntimeError) as refused:
+            ops.admit_legacy_archive(io.BytesIO(_volume_archive(self.image_id, self.volumes["state"])))
+        self.assertEqual(str(refused.exception), "Legacy restore refuses unknown/v3 state; verified state-service copy admission required")
+        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), self.pair_hashes)
+        print(json.dumps({"D1656-original-format-control": {"legacy_image": self.legacy["Id"], "reconstructed": True,
+                                                            "legacy_pair_files": sorted(initialized), "copy_fingerprint": fingerprint,
+                                                            "v3_refusal": str(refused.exception)}}), flush=True)
+
+    LEGACY_RECOVERY = ("const {AccessSeal}=require('/app/dist/emr-runtime/seal');const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');"
+                       "const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');const {PrismaClient}=require('@prisma/client');"
+                       "const db=new PrismaClient();const dir=process.env.KIN_EMR_STATE_DIR;"
+                       "new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart().then(r=>{console.log('KIN_RESULT '+JSON.stringify({recovered:true,r}));process.exit(3)},"
+                       "e=>{console.log('KIN_RESULT '+JSON.stringify({refused:String(e&&(e.code||e.name))}));process.exit(1)});")
+
+    def fresh_volume(self, suffix):
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16] + "-" + suffix
+        self.addCleanup(ops.remove_owned_if_present, "volume", name, token)
+        ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, name])
+        ops.run(["docker", "run", "--rm", "--network", "none", "--user", "0:0", "--mount", "type=volume,source=" + name + ",target=/state",
+                 "--entrypoint", "sh", self.image_id, "-c", "chown 1000:1000 /state && chmod 700 /state"])
+        return name
+
+    # ----- historical-behaviour diagnostics (retained counterexamples; not reject-before-mutation acceptance) ---------
+
+    def test_06_diagnostic_former_owner_serve_over_a_v3_clone(self):
+        """Diagnostic (D1656-T01 history): the former owner's `serve` over a private v3 clone. Its launcher has no
+        start-time recovery, so the server may open over a v3 pair (idle Nest startup) and its owner registry may add
+        files - recorded as facts; the acceptance boundary is test_01. The source pair volume is never mounted."""
         clone = self.clone()
         before = _hash_volume(self.image_id, clone)
-        self.assertEqual(before, self.pair_hashes)
         code, logs = self.legacy_run(self.legacy["Id"], "legacy-serve", [
             "--network", "container:" + self.db, "-e", "DATABASE_URL=" + RUNTIME_URL, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
             "-e", "DEPLOYMENT_MODE=production", "-e", "AUTH_REQUIRED=true", "-e", "KC_ISSUER=http://127.0.0.1:1/auth/realms/kin",
@@ -696,63 +959,54 @@ class LegacyImageTests(unittest.TestCase):
             "-e", "ORTHANC_PASS=" + uuid.uuid4().hex, "-e", "KC_ADMIN_URL=http://127.0.0.1:1/auth", "-e", "KC_REALM=kin", "-e", "KC_CLIENT_ID=kin-api",
             "-e", "KC_CLIENT_SECRET=" + uuid.uuid4().hex, "--stop-timeout", "20",
             "--mount", "type=volume,source=" + clone + ",target=" + ops.EMR_STATE])
-        # The B1 owner recovers its state lazily (its launcher has no start-time recovery): the server may open over a
-        # v3 pair without a start-time refusal, and its first recovery (test_02) refuses SealCorrupt. Whether it opened
-        # is recorded as a fact; what this cell judges is source preservation: no byte of the v3 pair's own files
-        # changes and the ledger is untouched. Files the legacy owner adds for itself (its owner registry) are
-        # reported, not hidden.
         after = _hash_volume(self.image_id, clone)
         added = sorted(name for name in after if name not in before)
         changed = sorted(name for name in before if before[name] != after.get(name))
-        self.assertEqual(changed, [], "the legacy owner changed bytes of the v3 pair's files: " + json.dumps(changed))
-        self.assertTrue(all(name == "owners.lock" or name.startswith("owners/") for name in added), "unexpected files added by the legacy owner: " + json.dumps(added))
+        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), self.pair_hashes, "the source pair volume is never mounted")
         self.assertEqual(self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker"), self.counts)
-        print(json.dumps({"D1656-T01": {"exit": code, "nest_started_over_v3_pair": "Nest application successfully started" in logs, "added_files": added,
-                                        "line": [line for line in logs.splitlines() if "기동 실패" in line or "Seal" in line][:3]}}), flush=True)
+        print(json.dumps({"D1656-T01-diagnostic": {"counterexample": True, "exit": code, "nest_started_over_v3_pair": "Nest application successfully started" in logs,
+                                                   "added_files": added, "changed_pair_files": changed,
+                                                   "line": [line for line in logs.splitlines() if "湲곕룞 ?ㅽ뙣" in line or "Seal" in line][:3]}}), flush=True)
 
-    def test_02_legacy_b1_restore_recovery_entry_over_a_v3_copy_refuses_before_any_mutation(self):
-        """D1656-T01 (restore route): the legacy copy launcher's recovery (AccessSeal.recoverAtStart of that image)."""
+    def test_07_diagnostic_former_owner_recovery_entry_over_a_v3_clone(self):
+        """Diagnostic (D1656-T01 restore route history): the former copy launcher's recovery (AccessSeal.recoverAtStart
+        of that image) over a private v3 clone refuses the format (SealCorrupt) but writes its owner registry first -
+        a counterexample to reject-before-mutation, which is why the supported route never reaches it (test_05 gate)."""
         clone = self.clone()
         before = _hash_volume(self.image_id, clone)
-        script = ("const {AccessSeal}=require('/app/dist/emr-runtime/seal');const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');"
-                  "const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');const {PrismaClient}=require('@prisma/client');"
-                  "const db=new PrismaClient();const dir=process.env.KIN_EMR_STATE_DIR;"
-                  "new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart().then(r=>{console.log('KIN_RESULT '+JSON.stringify({recovered:true,r}));process.exit(3)},"
-                  "e=>{console.log('KIN_RESULT '+JSON.stringify({refused:String(e&&(e.code||e.name))}));process.exit(1)});")
-        code, logs = self._legacy_node(clone, script)
+        code, logs = self._legacy_node(clone, self.LEGACY_RECOVERY)
         self.assertEqual(code, 1, logs[-1500:])
         self.assertIn('"refused"', logs)
         after = _hash_volume(self.image_id, clone)
         added = sorted(name for name in after if name not in before)
         changed = sorted(name for name in before if before[name] != after.get(name))
-        self.assertEqual(changed, [], "the legacy recovery changed bytes of the v3 pair's files: " + json.dumps(changed))
-        print(json.dumps({"D1656-T01-restore": {"exit": code, "added_files_before_refusal": added,
-                                                "result": [line for line in logs.splitlines() if line.startswith("KIN_RESULT")]}}), flush=True)
+        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), self.pair_hashes, "the source pair volume is never mounted")
+        print(json.dumps({"D1656-T01-restore-diagnostic": {"counterexample": True, "exit": code, "added_files_before_refusal": added, "changed_pair_files": changed,
+                                                           "result": [line for line in logs.splitlines() if line.startswith("KIN_RESULT")]}}), flush=True)
 
-    def _legacy_node(self, clone, script):
+    def _legacy_node(self, volume, script, db=None):
         token = uuid.uuid4().hex
         name = "kin-rehearsal-" + token[:16] + "-legacy-node"
         self.addCleanup(ops.remove_owned_if_present, "container", name, token)
-        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, "--network", "container:" + self.db,
+        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, "--network", "container:" + (db or self.db),
                  "-e", "DATABASE_URL=" + RUNTIME_URL, "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
-                 "--mount", "type=volume,source=" + clone + ",target=" + ops.EMR_STATE, "--entrypoint", "node", self.legacy["Id"], "-e", script])
+                 "--mount", "type=volume,source=" + volume + ",target=" + ops.EMR_STATE, "--entrypoint", "node", self.legacy["Id"], "-e", script])
         ops.run(["docker", "start", name])
         code = int(ops.text(["docker", "wait", name], timeout=180))
         result = ops.run(["docker", "logs", name])
         return code, (result.stdout + result.stderr).decode("utf-8", errors="replace")
 
-    def test_03_legacy_start_script_has_no_state_service_entry(self):
-        """D1656-T02: the legacy script refuses `state-serve-v3` (exit 64); the pre-EMR script takes no mode at all."""
+    def test_08_legacy_start_script_has_no_state_service_entry(self):
+        """D1656-T02 (script layer): the legacy script refuses `state-serve-v3` (exit 64); the pre-EMR script takes no mode
+        at all - one layer only; the launch boundary of test_02 is the image identity."""
         code, logs = self._entry_run(self.legacy["Id"], "legacy-entry")
         self.assertEqual(code, 64, logs)
         self.assertIn("expected migrate or serve", logs)
         if self.pre_emr:
-            # The pre-EMR script ignores its argument: it would migrate and serve. Only the current preflight excludes it
-            # (ops_deploy_preflight STATE_ENTRYPOINT/STATE_COMMAND); the image gives no refusal of its own.
             text = ops.text(["docker", "run", "--rm", "--network", "none", "--entrypoint", "cat", self.pre_emr["Id"], "/app/start-production.sh"])
             self.assertNotIn("state-serve-v3", text)
             self.assertNotIn('case "${1', text)
-            print(json.dumps({"D1656-T02-pre-emr": {"script_ignores_argument": True, "refusal_by": "ops_deploy_preflight only"}}), flush=True)
+            print(json.dumps({"D1656-T02-pre-emr": {"script_ignores_argument": True, "refusal_by": "launch admission image identity (test_02)"}}), flush=True)
         print(json.dumps({"D1656-T02": {"exit": code}}), flush=True)
 
     def _entry_run(self, image, suffix):
@@ -766,9 +1020,9 @@ class LegacyImageTests(unittest.TestCase):
         result = ops.run(["docker", "logs", name])
         return code, (result.stdout + result.stderr).decode("utf-8", errors="replace")
 
-    def test_04_legacy_b1_in_the_client_role_gets_no_state_and_cannot_serve(self):
+    def test_09_former_owner_in_the_client_shape_gets_no_state_and_is_refused_as_client(self):
         """D1656-T05: the former owner image started with the (c) client shape: no state mount, no reader secret, the
-        read-only API IPC volume only. It has no client; it exits without reaching the v3 pair."""
+        read-only API IPC volume only; the client admission (check_state_client) refuses it as the reviewed API."""
         before = _hash_volume(self.image_id, self.volumes["state"])
         code, logs = self.legacy_run(self.legacy["Id"], "legacy-client", [
             "--network", "container:" + self.db, "--group-add", "2001", "-e", "DATABASE_URL=" + RUNTIME_URL,
@@ -779,9 +1033,6 @@ class LegacyImageTests(unittest.TestCase):
             "-e", "ORTHANC_PASS=" + uuid.uuid4().hex, "-e", "KC_ADMIN_URL=http://127.0.0.1:1/auth", "-e", "KC_REALM=kin", "-e", "KC_CLIENT_ID=kin-api",
             "-e", "KC_CLIENT_SECRET=" + uuid.uuid4().hex, "--stop-timeout", "20",
             "--mount", "type=volume,source=" + self.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly"], timeout=60)
-        # The legacy owner has its own in-image state directory: in this shape it may run, but only over that private
-        # directory - it never receives the v3 pair, and the current preflight refuses it as the API client of a
-        # reviewed release (image differs). The pair and the ledger stay unchanged.
         mounts = [(m.get("Type"), m.get("Name"), m.get("Destination")) for m in self.legacy_inspect.get("Mounts") or []]
         self.assertEqual(mounts, [("volume", self.volumes["api-ipc"], API_IPC)], "the client shape mounts only the API IPC volume")
         self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), before, "the v3 pair is untouched")
@@ -793,7 +1044,7 @@ class LegacyImageTests(unittest.TestCase):
                                          api_ipc_volume=self.volumes["api-ipc"], instance_id=self.INSTANCE, database_host="127.0.0.1")
         self.assertIn("reviewed", str(refused.exception))
         print(json.dumps({"D1656-T05": {"exit": code, "running_after_60s": code is None, "preflight_refusal": str(refused.exception),
-                                        "line": [line for line in logs.splitlines() if "기동 실패" in line or "EMR" in line][:3]}}), flush=True)
+                                        "line": [line for line in logs.splitlines() if "湲곕룞 ?ㅽ뙣" in line or "EMR" in line][:3]}}), flush=True)
 
 
 if __name__ == "__main__":

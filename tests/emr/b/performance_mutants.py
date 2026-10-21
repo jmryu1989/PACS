@@ -49,8 +49,8 @@ _CONFIRM_END = ("    await Promise.all(appended.entries.map(p => this.seal.ackno
                 "    return receipt;")
 
 MUTANTS = {
-    "MP01": ("ledger", "seal.ts", "    const current = state.tail.streams[stream];\n    if (tail.chainId",
-             "    full = true;\n    const current = state.tail.streams[stream];\n    if (tail.chainId", "single receipt rereads the retained prefix"),
+    "MP01": ("ledger", "seal.ts", "    const current = view.tail!.streams[stream];\n    if (tail.chainId",
+             "    full = true;\n    const current = view.tail!.streams[stream];\n    if (tail.chainId", "single receipt rereads the retained prefix"),
     "MP02": ("sustained", "store.ts", _CONFIRM_END,
              _CONFIRM_END.replace("    return receipt;",
                                   f"    await new Promise(resolve => setTimeout(resolve, {MP02_DELAY_MS}));\n    return receipt;"),
@@ -59,8 +59,8 @@ MUTANTS = {
              "  const { directory, operation, value } = request, context = request.context ?? {};\n"
              "  if (operation === 'reserve') require('node:child_process').spawnSync(process.execPath, ['-e', '']);",
              "per-reservation process startup serializes concurrent receipts"),
-    "MP04": ("journal", "external-writer.ts", "    const journal = context.journal ??= new JournalFile(directory);",
-             "    const journal = new JournalFile(directory);", "each append rereads the full failure journal"),
+    "MP04": ("journal", "external-writer.ts", "      const journal = context.journal ??= new JournalFile(directory);",
+             "      const journal = new JournalFile(directory);", "each append rereads the full failure journal"),
 }
 
 # The case statistics a latency verdict needs; every one of them must be valid.

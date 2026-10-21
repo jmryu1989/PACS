@@ -390,23 +390,28 @@ class HistoryMap {
   get count(): number { return this.baseCount + this.added - this.removed; }
   /** Every live member in byte-sorted key order (region ∪ change set, change set wins). */
   *entries(): Generator<[string, any]> {
+    for (const [key, value] of this.rawEntries()) yield [key, typeof value === 'string' ? JSON.parse(value) : parseRaw(value)];
+  }
+  /** The same merge with each member's compact JSON bytes: checkpoint members are copied verbatim (no parse, no
+   * re-serialization), change-set members serialized once. What a compaction streams into the next checkpoint. */
+  *rawEntries(): Generator<[string, string | Buffer]> {
     const changed = [...this.delta.keys()].sort();
     let c = 0;
-    const emitChanged = (through?: string) => { const out: [string, any][] = []; while (c < changed.length && (through === undefined || changed[c] < through)) { const v = this.delta.get(changed[c]); if (v !== null) out.push([changed[c], v]); c++; } return out; };
+    const emitChanged = (through?: string) => { const out: [string, string][] = []; while (c < changed.length && (through === undefined || changed[c] < through)) { const v = this.delta.get(changed[c]); if (v !== null) out.push([changed[c], JSON.stringify(v)]); c++; } return out; };
     if (this.navigable) {
       const fd = fs.openSync(this.file, 'r');
       try {
-        for (const [key, value] of iterateRegion(fd, this.region!)) {
+        for (const [key, raw] of iterateRegionRaw(fd, this.region!)) {
           for (const item of emitChanged(key)) yield item;
-          if (c < changed.length && changed[c] === key) { const v = this.delta.get(key); c++; if (v !== null) yield [key, v]; }
-          else yield [key, value];
+          if (c < changed.length && changed[c] === key) { const v = this.delta.get(key); c++; if (v !== null) yield [key, JSON.stringify(v)]; }
+          else yield [key, raw];
         }
       } finally { fs.closeSync(fd); }
     }
     for (const item of emitChanged()) yield item;
   }
 }
-function* iterateRegion(fd: number, region: MapRegion): Generator<[string, any]> {
+function* iterateRegionRaw(fd: number, region: MapRegion): Generator<[string, Buffer]> {
   if (!region.count || fd < 0) return;
   const reader = new ByteScanner(fd, region.end, region.start);
   for (;;) {
@@ -416,11 +421,14 @@ function* iterateRegion(fd: number, region: MapRegion): Generator<[string, any]>
     if (keyRaw[0] !== QUOTE) fail('SealCorrupt');
     const key = parseRaw(keyRaw);
     reader.skipWhitespace(); reader.expect(COLON); reader.skipWhitespace();
-    yield [key, parseRaw(reader.readValue(16 * 1024 * 1024))];
+    yield [key, reader.readValue(16 * 1024 * 1024)];
     reader.skipWhitespace();
     if (reader.position >= region.end) return;
     if (reader.next() !== COMMA) fail('SealCorrupt');
   }
+}
+function* iterateRegion(fd: number, region: MapRegion): Generator<[string, any]> {
+  for (const [key, raw] of iterateRegionRaw(fd, region)) yield [key, parseRaw(raw)];
 }
 interface Pins { checkpoint: { ino: number; size: number } | null; log: { ino: number; size: number } | null; tail: { ino: number; size: number; mtimeMs: number } | null }
 /** The owner's verified view: admitted once per incarnation (full streaming validation), then advanced by validated
@@ -1088,13 +1096,23 @@ function* lineReader(file: string): Generator<string> {
  */
 export function writeNavigableCheckpoint(file: string, head: { version: 3; revision: number; generation: number; tail: any; lineage: StateLineage | null;
   retired: Record<string, number>; intents: Record<string, any>; slots: Record<string, any>; proofs: Record<string, any> },
-  members: (map: 'terminal' | 'bundles') => Iterable<[string, string]>, publishing: boolean,
-  beforeInstall: () => void = () => {}): { digest: string; bytes: number } {
+  members: (map: 'terminal' | 'bundles') => Iterable<[string, string | Buffer]>, publishing: boolean,
+  beforeInstall: () => void = () => {}, directoryEvery = 4096): { digest: string; bytes: number; regions: { terminal: MapRegion; bundles: MapRegion } } {
   const temporary = path.join(path.dirname(file), '.tmp-' + randomBytes(12).toString('hex'));
   const fd = fs.openSync(temporary, 'wx', 0o600);
   const digest = createHash('sha256');
-  let bytes = 0, buffer = '';
-  const write = (text: string, hashed: boolean) => { buffer += text; if (hashed) digest.update(text.replaceAll('\n', '')); if (buffer.length > 1 << 20) { bytes += Buffer.byteLength(buffer); fs.writeSync(fd, buffer); buffer = ''; } };
+  // `total` is the file offset of the next byte: the writer knows every member's offset, so the regions it returns are
+  // exactly what a scan of the written file would index (no second pass over the bytes just written).
+  let total = 0, pending: Buffer[] = [], pendingBytes = 0;
+  const flush = () => { if (pending.length) { fs.writeSync(fd, pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingBytes)); pending = []; pendingBytes = 0; } };
+  // Hashed pieces never contain a raw LF (compact JSON); the member separators' LF is written unhashed.
+  const write = (piece: string | Buffer, hashed: boolean) => {
+    const buffer = typeof piece === 'string' ? Buffer.from(piece, 'utf8') : piece;
+    pending.push(buffer); pendingBytes += buffer.length; total += buffer.length;
+    if (hashed) digest.update(buffer);
+    if (pendingBytes > 1 << 20) flush();
+  };
+  const regions: Record<string, MapRegion> = {};
   try {
     write('{"state":', false);
     const headText = JSON.stringify({ version: head.version, revision: head.revision, generation: head.generation, tail: head.tail, lineage: head.lineage,
@@ -1102,24 +1120,32 @@ export function writeNavigableCheckpoint(file: string, head: { version: 3; revis
     write(headText.slice(0, -1), true);
     for (const map of ['terminal', 'bundles'] as const) {
       write(',' + JSON.stringify(map) + ':{', true);
-      let firstMember = true, previous: string | null = null;
+      let count = 0, previous: string | null = null;
+      const directory: MemberDirectoryEntry[] = [];
       for (const [key, value] of members(map)) {
         if (previous !== null && !(key > previous)) fail('SealCorrupt');
         previous = key;
-        write((firstMember ? '\n' : ',\n') + JSON.stringify(key) + ':' + value, true);
-        firstMember = false;
+        if (count) write(',', true);
+        write('\n', false);
+        if (count % directoryEvery === 0) directory.push({ key, offset: total });
+        write(JSON.stringify(key) + ':', true);
+        write(value, true);
+        count++;
       }
-      write((firstMember ? '' : '\n') + '}', true);
+      if (count) write('\n', false);
+      const end = total, start = count ? directory[0].offset : end;
+      regions[map] = { start, end, count, bytes: end - start, sorted: true, navigable: true, directory };
+      write('}', true);
     }
     write('}', true);
     const hex = digest.digest('hex');
     write(',"publishing":' + String(publishing) + ',"digest":"' + hex + '"}', false);
-    if (buffer) { bytes += Buffer.byteLength(buffer); fs.writeSync(fd, buffer); buffer = ''; }
+    flush();
     fs.fsyncSync(fd); fs.closeSync(fd);
     // The caller releases its handles on the previous checkpoint here (a replaced file may not be open on every OS).
     beforeInstall();
     fs.renameSync(temporary, file); syncDirectory(path.dirname(file));
-    return { digest: hex, bytes };
+    return { digest: hex, bytes: total, regions: { terminal: regions.terminal, bundles: regions.bundles } };
   } catch (error) { try { fs.closeSync(fd); } catch { /* closed */ } try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ } throw error; }
 }
 
@@ -1246,24 +1272,24 @@ function compactionDue(engine: Engine): boolean {
   return engine.walOffset >= Math.max(COMPACTION_FLOOR, Math.floor((engine.checkpoint?.bytes ?? 0) / 4));
 }
 /** Streaming merge of the checkpoint region and the change set into a new navigable checkpoint, then the WAL reset
- * (checkpoint before WAL reset; the owner is single-threaded, so no append can interleave). */
+ * (checkpoint before WAL reset; the owner is single-threaded, so no append can interleave). One pass over the
+ * history: unchanged members are copied as their compact bytes, the writer returns the regions of what it wrote, and
+ * that checkpoint becomes the owner's base at once (the validated view it was streamed from is unchanged by it). */
 function compactEngine(engine: Engine, context: WriterContext): void {
   if (engine.publishing) fail('SealCorrupt');
   const head = { version: 3 as const, revision: engine.head.revision, generation: engine.head.generation, tail: engine.head.tail, lineage: engine.head.lineage,
     retired: engine.head.retired, intents: engine.intents, slots: engine.slots, proofs: engine.proofs };
-  const written = writeNavigableCheckpoint(engine.file, head, map => (function* () {
-    for (const [key, value] of (map === 'terminal' ? engine.terminal : engine.bundles).entries()) yield [key, JSON.stringify(value)] as [string, string];
-  })(), false, () => engine.close());
+  // Any failure from the installation on leaves the files the only authority: the view is re-admitted afresh.
+  engine.tainted = true;
+  const written = writeNavigableCheckpoint(engine.file, head, map => (map === 'terminal' ? engine.terminal : engine.bundles).rawEntries(), false, () => engine.close());
   if (context.log) { try { fs.closeSync(context.log.fd); } catch { /* reopened below */ } context.log = undefined; }
   const fd = fs.openSync(engine.log, 'w', 0o600);
   try { fs.fdatasyncSync(fd); } finally { fs.closeSync(fd); }
-  // The new checkpoint is the installed base: re-admit the view from it (one validated pass of the bytes just written).
-  const fresh = admitEngine(engine.directory, context.pair, true);
-  engine.head = fresh.head; engine.intents = fresh.intents; engine.slots = fresh.slots; engine.proofs = fresh.proofs;
-  engine.terminal = fresh.terminal; engine.bundles = fresh.bundles; engine.slotOf.clear(); for (const [k, v] of fresh.slotOf) engine.slotOf.set(k, v);
-  engine.notFound.clear(); for (const id of fresh.notFound) engine.notFound.add(id);
-  engine.checkpoint = fresh.checkpoint; engine.walOffset = fresh.walOffset; engine.publishing = fresh.publishing; engine.pins = fresh.pins; engine.tainted = false;
-  void written;
+  engine.terminal = new HistoryMap('terminal', engine.file, written.regions.terminal, written.regions.terminal.count);
+  engine.bundles = new HistoryMap('bundles', engine.file, written.regions.bundles, written.regions.bundles.count);
+  engine.checkpoint = { digest: written.digest, bytes: written.bytes, revision: engine.head.revision, publishing: false, navigable: true };
+  engine.walOffset = 0; engine.publishing = false;
+  engine.pin(); engine.tainted = false;
 }
 /** Commit one record: validate the touched closure on the view, append it durably, publish the tail if asked. The
  * view is reverted if validation or the append fails; an uncertain write taints the view (fresh admission next). */

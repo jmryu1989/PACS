@@ -959,7 +959,7 @@
           "D1641-T01": "exact full-proof acknowledgement must be accepted",
           "D1641-T05": "exact full-proof acknowledgement must be accepted"
         },
-        "assertion_note": "D1660 re-anchor to the live acknowledgement (seal.ts acknowledgeBundle; the local-owner acknowledge() is a no-op the service never calls). The stored-state identity validator (external-writer.ts validateAttemptIdentities, D1650) refuses the publication that would erase the terminal identities with their attestation, so the erasing acknowledgement itself is refused before any durable mutation: the mutant is observed as the refused exact acknowledgement, not as a later mutated durable state."
+        "assertion_note": "D1660 re-anchor to the live acknowledgement (seal.ts acknowledgeBundle; the local-owner acknowledge() is a no-op the service never calls). The engine's touched-closure validation (external-writer.ts validateTouched, D1684; previously validateAttemptIdentities, D1650) refuses the record that would erase the terminal identities with their attestation, so the erasing acknowledgement itself is refused before any durable mutation: the mutant is observed as the refused exact acknowledgement, not as a later mutated durable state."
       },
       {
         "id": "D1641-M02",
@@ -971,7 +971,7 @@
           "D1641-T01": "terminal refusal is a typed conflict",
           "D1641-T02": "terminal refusal is a typed conflict"
         },
-        "assertion_note": "D1660: the stored-state identity validator (external-writer.ts validateAttemptIdentities, D1650) refuses the bypassed reserve's publication before any protected byte changes, so the mutant is observed as the refusal class (DURABILITY instead of the typed CONFLICT) and the failed service, not as a mutated durable state."
+        "assertion_note": "D1660/D1684: the engine's touched-closure validation (external-writer.ts validateTouched; previously validateAttemptIdentities) refuses the bypassed reserve's record before any protected byte changes, so the mutant is observed as the refusal class (DURABILITY instead of the typed CONFLICT) and the failed service, not as a mutated durable state."
       },
       {
         "id": "D1641-M03",
@@ -1002,8 +1002,9 @@
           "D1641-T06"
         ],
         "assertions": {
-          "D1641-T06": "terminal replay must not mutate durable state"
-        }
+          "D1641-T06": "new complete event seals"
+        },
+        "assertion_note": "D1684: compaction streams the engine's member maps into the new checkpoint and that checkpoint becomes the owner's base at once. A compaction that drops the terminal identities is observed at the very publication that triggered it: its bundle attestation (the next durable record) is refused by the engine's touched-closure validation because the attested terminals are gone (attestedProofFrom), so the case fails at 'new complete event seals' before any replay can be attempted; no durable state is silently mutated."
       },
       {
         "id": "D1641-M06",
@@ -1037,11 +1038,12 @@
       {
         "id": "D1655-M02",
         "kill": [
-          "D1655-T08"
+          "D1655-T06"
         ],
         "assertions": {
-          "D1655-T08": "retry publishes the acknowledged checkpoint"
-        }
+          "D1655-T06": "exact ack reduces retained duplicate metadata"
+        },
+        "assertion_note": "D1684: the acknowledgement's durable record is its one patch (acknowledged attestation, owner-less terminals); an ack that returns without it leaves the full representation current, which D1655-T06's read of the owner view observes first."
       },
       {
         "id": "D1655-M03",
@@ -1049,8 +1051,9 @@
           "D1655-T08"
         ],
         "assertions": {
-          "D1655-T08": "failed ack or minimization never returns successful acknowledgement"
-        }
+          "D1655-T08": "failed ack never returns successful acknowledgement"
+        },
+        "assertion_note": "D1684: the ack's own storage cuts (its WAL record) are the kill; reclamation cuts are the amortized compaction's and no longer part of an acknowledgement."
       },
       {
         "id": "D1655-M04",

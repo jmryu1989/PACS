@@ -119,12 +119,12 @@ MUTANTS = {
     "M30": ("a second calendar owner at module scope goes undetected", [
         ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export const duplicateCalendar = civilPeriodEnd('2026-01-01T00:00:00.000Z', 2);\nexport interface ChainTail")]),
     "M31": ("stale prepared expiry proof supersedes the latest exact reservation", [
-        ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];",
-         "const core: ExpiryCore = Object.values(state.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
+        ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && view.proofs[key('viewing', q.attemptId)];",
+         "const core: ExpiryCore = Object.values(view.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
         ("api/src/emr-runtime/seal.ts", "    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;", "    if(entry.kind==='expiry')return;\n    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;")]),
     "M32": ("I1: prepared expiry proof is authoritative without marker/slot/generation binding (X-STALE)", [
-        ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];",
-         "const core: ExpiryCore = Object.values(state.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
+        ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && view.proofs[key('viewing', q.attemptId)];",
+         "const core: ExpiryCore = Object.values(view.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
         ("api/src/emr-runtime/seal.ts", "    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;", "    if(entry.kind==='expiry')return;\n    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;")]),
     "M33": ("I2: startup vetoes pending before negative settlement", [
         ("api/src/emr-runtime/seal.ts", "    return this.sql.withWriterFence(async sql => {", "    return this.sql.withWriterFence(async sql => {\n      if(Object.keys(this.load().intents).length)throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
@@ -136,15 +136,16 @@ MUTANTS = {
         ("api/src/emr-runtime/coordinator.ts", "      if (this.owner) return executeExternal({ ...request, context: this.owner.context });",
          "      if (operation === 'reserve') require('node:child_process').spawnSync(process.execPath, ['-e', '']);\n      if (this.owner) return executeExternal({ ...request, context: this.owner.context });")]),
     "M38": ("A7 replay trusts a sealed DB row without binding its bytes through the external seal", [
-        ("api/src/emr-runtime/seal.ts", "await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));", "void 0; /* missing sealed-target binding */")]),
+        ("api/src/emr-runtime/seal.ts", "await reader.snapshot(sql => this.bindSealedTarget(sql, view, stream, target));", "void 0; /* missing sealed-target binding */")]),
     "M39": ("head-lock waiters acquire every pool connection ahead of a committed request's verification", [
         ("api/src/emr-runtime/admission.ts", "if (pool.active >= capacity)", "if (false)")]),
     "M40": ("append lanes consume the verification reserve", [
         ("api/src/emr-runtime/limits.ts", "export const EMR_VERIFY_RESERVE = 2;", "export const EMR_VERIFY_RESERVE = 0;")]),
     "M41": ("a reservation is acknowledged without its durable merged WAL record", [
-        ("api/src/emr-runtime/external-writer.ts", "  cached.offset += append(log, body, context);", "  if (operation !== 'reserve') cached.offset += append(log, body, context);")]),
+        ("api/src/emr-runtime/external-writer.ts", "    engine.walOffset += append(engine.log, body, context);\n",
+         "    if (kind !== 'reserve') engine.walOffset += append(engine.log, body, context);\n")]),
     "M42": ("merged reservation omits its recovery intent", [
-        ("api/src/emr-runtime/seal.ts", "      if (!intent) this.addIntent", "      if (false) this.addIntent")]),
+        ("api/src/emr-runtime/seal.ts", "      if (!intent) changes.intents![id] = owned;", "      if (false) changes.intents![id] = owned;")]),
     "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
         ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
 
@@ -153,53 +154,48 @@ MUTANTS = {
 # D1641 uses the same isolated-copy/apply/restore and behavioral-verdict machinery.
 # Mutation strings locate the intentional changes; no acceptance assertion inspects
 # a private product name or source spelling. M08 awaits the legacy compatibility gate.
+# D1684 re-anchor: the seal now reads the owner's view (`view`, `get`, `slot-of`) and writes explicit `patch` records of
+# the changed members; the terminal lookup of reserve is `this.terminal(id)` and the live acknowledgement patches the
+# acknowledged attestation plus the owner-less terminals. Compaction streams the engine's member maps into a navigable
+# checkpoint. Each mutant keeps its original semantic fault at the same decision point of the rewritten code.
+_RESERVE_TERMINAL_CHECK = "    if (this.terminal(id)) refuse('AttemptAlreadySettled');\n    const pendingPosition"
+_ACK_PATCH = ("    changes.bundles!['bundle:' + id] = { version: 1, phase: 'acknowledged', serviceEpoch: previous.serviceEpoch, refs: previous.refs, proofSha256: digest(actual) };\n"
+              "    // Caller ownership is no longer required after exact full-proof delivery.\n"
+              "    for (const b of bindings) {\n"
+              "      const terminal = this.terminal(key(b.stream, b.attemptId));\n"
+              "      if (terminal && terminal.owner !== undefined) { const { owner: _, ...rest } = terminal; changes.terminal![key(b.stream, b.attemptId)] = rest; }\n"
+              "    }\n")
+_ACK_ERASES = ("    changes.bundles!['bundle:' + id] = null;\n"
+               "    for (const b of bindings) changes.terminal![key(b.stream, b.attemptId)] = null;\n")
 TERMINAL_MUTANTS = {
-    # D1660 re-anchor: in the (c) service the exact full-proof acknowledgement is acknowledgeBundle (the
-    # local-owner acknowledge() is a no-op the service never calls, so an edit there has no effect and is
-    # not a kill). The same semantic fault - the acknowledgement erases the durable terminal identity
-    # instead of only its caller ownership - at the live acknowledgement.
-    # The stored-state validator refuses an attestation whose terminals are gone, so the fault is the
-    # consistent erasure: the acknowledgement discards the attestation and the terminal identities.
+    # D1660: in the (c) service the exact full-proof acknowledgement is acknowledgeBundle (the local-owner acknowledge()
+    # is a no-op the service never calls). The fault: the acknowledgement erases the durable terminal identity instead
+    # of only its caller ownership; the engine refuses an attestation whose terminals are gone, so the fault is the
+    # consistent erasure of the attestation and the terminal identities.
     "D1641-M01": ("acknowledgement deletes the durable terminal identity", [
-        ("api/src/emr-runtime/seal.ts",
-         "      state.bundles['bundle:' + id] = { version: 1, phase: 'acknowledged', serviceEpoch: previous.serviceEpoch,\n"
-         "        refs: previous.refs, proofSha256: digest(actual) };\n"
-         "      // Caller ownership is no longer required after exact full-proof delivery.\n"
-         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)].owner;\n",
-         "      delete state.bundles['bundle:' + id];\n"
-         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)];\n")]),
+        ("api/src/emr-runtime/seal.ts", _ACK_PATCH, _ACK_ERASES)]),
     "D1641-M02": ("a new client instance bypasses another client's terminal exclusion", [
-        ("api/src/emr-runtime/seal.ts", "\n    if (state.terminal[id]) refuse('AttemptAlreadySettled');",
-         "\n    if (state.terminal[id]?.owner === owner) refuse('AttemptAlreadySettled');"),
-        ("api/src/emr-runtime/seal.ts", "\n      if (state.terminal[id]) refuse('AttemptAlreadySettled');",
-         "\n      if (state.terminal[id]?.owner === owner) refuse('AttemptAlreadySettled');"),
-    ]),
+        ("api/src/emr-runtime/seal.ts", _RESERVE_TERMINAL_CHECK,
+         "    if (this.terminal(id)?.owner === owner) refuse('AttemptAlreadySettled');\n    const pendingPosition")]),
     "D1641-M03": ("changed mutable binding fields evade the terminal identity check", [
-        ("api/src/emr-runtime/seal.ts", "\n    if (state.terminal[id]) refuse('AttemptAlreadySettled');",
-         "\n    if (state.terminal[id]?.binding?.bundleId === value.bundleId) refuse('AttemptAlreadySettled');"),
-        ("api/src/emr-runtime/seal.ts", "      if (state.terminal[id]) refuse('AttemptAlreadySettled');",
-         "      if (state.terminal[id] && same(state.terminal[id].binding, { ...binding, generation: state.terminal[id].generation, proofDigest: null })) refuse('AttemptAlreadySettled');"),
-    ]),
+        ("api/src/emr-runtime/seal.ts", _RESERVE_TERMINAL_CHECK,
+         "    { const settled = this.terminal(id); if (settled && same(settled.binding, { ...binding, generation: settled.generation, proofDigest: null })) refuse('AttemptAlreadySettled'); }\n    const pendingPosition")]),
     "D1641-M04": ("reserve persists a generation before refusing the terminal", [
-        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n",
-         "    if (this.load().terminal[key(binding.stream, binding.attemptId)]) this.change(state => { ++state.generation; });\n"
-         "    let superseded = false;\n")]),
-    # D1660 re-anchor: compaction now takes a force argument and writes the checkpoint through
-    # atomic(). Acknowledged attestations are derived from their terminals, so a checkpoint that
-    # drops terminal identities can only load if their attestations go with them; the semantic
-    # fault (durable exclusion lost at compaction) is unchanged and D1641-T06's restart replay
-    # observes it as a mutated durable state instead of a refused reserve.
+        ("api/src/emr-runtime/seal.ts", _RESERVE_TERMINAL_CHECK,
+         "    if (this.terminal(id)) { this.patch({}, { generation: view.generation + 1 }); refuse('AttemptAlreadySettled'); }\n    const pendingPosition")]),
+    # D1684: compaction streams the terminal and bundle maps into the new checkpoint; a checkpoint that drops the
+    # terminal identities can only load if their attestations go with them (unchanged semantic fault: durable exclusion
+    # lost at compaction; D1641-T06's restart replay observes it as a mutated durable state).
     "D1641-M05": ("checkpoint compaction drops terminal identities", [
         ("api/src/emr-runtime/external-writer.ts",
-         "    atomic(file, { state: envelope.state, publishing: false, digest: hash(envelope.state) });\n    const fd = fs.openSync(log, 'w', 0o600);\n",
-         "    envelope.state.terminal = {}; envelope.state.bundles = {};\n"
-         "    atomic(file, { state: envelope.state, publishing: false, digest: hash(envelope.state) });\n    const fd = fs.openSync(log, 'w', 0o600);\n")]),
+         "map => (map === 'terminal' ? engine.terminal : engine.bundles).rawEntries(), false, () => engine.close());",
+         "map => (map === 'terminal' ? [] : []) as [string, string][], false, () => engine.close());")]),
     "D1641-M06": ("terminal WAL success is returned without its flush barrier", [
         ("api/src/emr-runtime/external-writer.ts", "fs.writeFileSync(context.log.fd, line); fs.fdatasyncSync(context.log.fd);",
          "fs.writeFileSync(context.log.fd, line);")]),
     "D1641-M07": ("all valid new reservations are refused", [
-        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n",
-         "    refuse('AttemptAlreadySettled');\n    let superseded = false;\n")]),
+        ("api/src/emr-runtime/seal.ts", _RESERVE_TERMINAL_CHECK,
+         "    refuse('AttemptAlreadySettled');\n    const pendingPosition")]),
 }
 
 
@@ -310,55 +306,52 @@ IDENTITY_MUTANTS = {
     "D1655-M01": ("aggregate attestation returns before its WAL flush", [
         ("api/src/emr-runtime/external-writer.ts", "fs.writeFileSync(context.log.fd, line); fs.fdatasyncSync(context.log.fd);",
          "fs.writeFileSync(context.log.fd, line); if (!Object.values(body.patch?.bundles ?? {}).some((a:any) => a?.phase === 'published')) fs.fdatasyncSync(context.log.fd);")]),
-    "D1655-M02": ("ack returns without completing metadata minimization", [
-        ("api/src/emr-runtime/seal.ts", "    this.journal.coordinator.call('compact', { force: true });\n", "")]),
-    "D1655-M03": ("ack silently succeeds after failed compaction", [
-        ("api/src/emr-runtime/seal.ts", "    this.journal.coordinator.call('compact', { force: true });\n",
-         "    try { this.journal.coordinator.call('compact', { force: true }); } catch {}\n")]),
+    # D1684: the acknowledgement's durable record is its one `patch` (acknowledged attestation + owner-less terminals);
+    # minimization = that record, reclamation = the later amortized compaction (never forced by an ack).
+    "D1655-M02": ("ack returns without its durable minimized record", [
+        ("api/src/emr-runtime/seal.ts", "    this.patch(changes);\n    return 'acknowledged';\n", "    return 'acknowledged';\n")]),
+    "D1655-M03": ("ack silently succeeds after its durable record failed", [
+        ("api/src/emr-runtime/seal.ts", "    this.patch(changes);\n    return 'acknowledged';\n",
+         "    try { this.patch(changes); } catch { /* swallowed */ }\n    return 'acknowledged';\n")]),
     "D1655-M04": ("a retained proof is returned for a changed historical bundle", [
         ("api/src/emr-runtime/seal.ts", "    if (retained) return matches(retained);\n", "    if (retained) return retained;\n")]),
     "D1650-M01": ("requested-slot lookup accepts a moved pending attempt", [
-        ("api/src/emr-runtime/seal.ts", "this.attempts(state).get(id)",
-         "(this.attempts(state), state.slots[position]?.attemptId === binding.attemptId ? state.slots[position] : undefined)")]),
+        ("api/src/emr-runtime/seal.ts", "pending = pendingPosition ? view.slots[pendingPosition] : undefined",
+         "pending = (void pendingPosition, view.slots[position]?.attemptId === binding.attemptId ? view.slots[position] : undefined)")]),
     "D1650-M02": ("omitting entry hash accepts a changed body", [
         ("api/src/emr-runtime/seal.ts", "bindingFields.every(field => a[field] === b[field])",
          "bindingFields.filter(field => field !== 'hash').every(field => a[field] === b[field])")]),
     "D1650-M03": ("stored expiry prefix is ignored", [
-        ("api/src/emr-runtime/seal.ts", " || !samePrefix(state.proofs[id], prefix)", "")]),
+        ("api/src/emr-runtime/seal.ts", " || !samePrefix(view.proofs[id], prefix)", "")]),
     "D1650-M03-LATEST": ("latest issued prefix wrongly replaces original replay authority", [
         ("api/src/emr-runtime/seal.ts", "if (pending) {\n", "if (pending) {\n        if (prefix && admission && !samePrefix(admission.issuedPrefix, prefix)) refuse('AccessEventIdConflict');\n")]),
     "D1650-M04": ("persisting before conflict violates write-free refusal", [
-        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n",
-         "    if (this.load().intents[key(binding.stream, binding.attemptId)]) this.change(state => { ++state.generation; });\n    let superseded = false;\n")]),
+        ("api/src/emr-runtime/seal.ts", "    if (pending) {\n      if (!intent",
+         "    if (view.intents[id]) this.patch({}, { generation: view.generation + 1 });\n    if (pending) {\n      if (!intent")]),
     "D1650-M05": ("client identity alone adopts another live work", [
         ("api/src/emr-runtime/seal.ts", " || !this.origins.get(origin)?.has(id)", "")]),
-    # D1660 re-anchor (see D1641-M01): the live acknowledgement is acknowledgeBundle.
+    # D1660 (see D1641-M01): the live acknowledgement is acknowledgeBundle.
     "D1650-M06": ("ack erases permanent identity", [
-        ("api/src/emr-runtime/seal.ts",
-         "      state.bundles['bundle:' + id] = { version: 1, phase: 'acknowledged', serviceEpoch: previous.serviceEpoch,\n"
-         "        refs: previous.refs, proofSha256: digest(actual) };\n"
-         "      // Caller ownership is no longer required after exact full-proof delivery.\n"
-         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)].owner;\n",
-         "      delete state.bundles['bundle:' + id];\n"
-         "      for (const b of bindings) delete state.terminal[key(b.stream, b.attemptId)];\n")]),
-    # D1660 re-anchor: identity validation now runs twice at startup - in external-writer.ts on every
-    # stored-state admission (validateAttemptIdentities inside validate) and in seal.ts recoverAtStart
-    # (this.attempts). A startup that normalizes contradictory records instead of refusing them is the
-    # fault only when neither layer refuses; the mutant removes both calls (two edits, one fault).
+        ("api/src/emr-runtime/seal.ts", _ACK_PATCH, _ACK_ERASES)]),
+    # D1684: identity validation at startup is the streaming admission's identity closure of the small maps against
+    # the terminal map (external-writer.ts scanCheckpoint), the per-record closure of every settlement the recovering
+    # owner writes (Engine.validateTouched) and validateAttemptIdentities for the materialized whole-state operations.
+    # A startup that normalizes contradictory records instead of refusing them is the fault only when no layer refuses;
+    # the mutant silences the identity refusal of all three (three edits, one fault).
     "D1650-M07": ("startup normalizes contradictory attempt state", [
-        ("api/src/emr-runtime/seal.ts", "      this.attempts(this.load());\n", ""),
+        ("api/src/emr-runtime/external-writer.ts", "      const corrupt = (): never => fail('UnsealedEntryUnexplained');\n      const validBinding",
+         "      const corrupt = (): never => undefined as never;\n      const validBinding"),
+        ("api/src/emr-runtime/external-writer.ts", "    const corrupt = (): never => fail('UnsealedEntryUnexplained');\n    const tailStreams",
+         "    const corrupt = (): never => undefined as never;\n    const tailStreams"),
         ("api/src/emr-runtime/external-writer.ts", "  validateAttemptIdentities(state);\n", "")]),
-    # D1660 re-anchor: identity validation moved from seal.ts into external-writer.ts, where it runs on
-    # every stored-state admission (also the publication that creates the alias). Rejecting the alias
-    # inside validateAttemptIdentities would fail D1650-T08A at its publication step, not at the load
-    # the case judges, so the same fault (a retained sealed expiry alias treated as a contradictory
-    # live attempt) is injected where only a (re)starting owner reads the stored state: pair admission.
+    # D1660/D1684: rejecting the alias inside the admission closure would fail D1650-T08A at its publication step, not
+    # at the load the case judges, so the same fault (a retained sealed expiry alias treated as a contradictory live
+    # attempt) is injected where only a (re)starting owner reads the stored state: pair admission.
     "D1650-M07-ALIAS": ("valid historical expiry alias is rejected", [
         ("api/src/emr-runtime/external-writer.ts",
-         "    if (source) replay(log, { base: source.digest, offset: 0, envelope: clone(source) }, source.state.revision, false);\n    context.pair = clone(origin);\n",
-         "    if (source) { const admitted = { base: source.digest, offset: 0, envelope: clone(source) }; replay(log, admitted, source.state.revision, false);\n"
-         "      if (Object.values(admitted.envelope.state.slots).some((q: any) => admitted.envelope.state.terminal[q.stream + ':' + q.attemptId])) return fail('UnsealedEntryUnexplained'); }\n"
-         "    context.pair = clone(origin);\n")]),
+         "      context.pair = clone(origin);\n      context.copy = admission!.copy;\n",
+         "      if (Object.values(engine.slots).some((q: any) => engine.terminal.get(q.stream + ':' + q.attemptId))) return fail('UnsealedEntryUnexplained');\n"
+         "      context.pair = clone(origin);\n      context.copy = admission!.copy;\n")]),
     "D1650-M08": ("a committed tombstone is misclassified as fenced negative", [
         ("api/src/emr-runtime/state-service.ts", "terminal?.phase === 'aborted' && exactBinding(b, terminal.binding)",
          "terminal && exactBinding(b, terminal.binding)")]),
@@ -366,13 +359,13 @@ IDENTITY_MUTANTS = {
         ("api/src/emr-runtime/external-writer.ts", "fs.writeFileSync(context.log.fd, line); fs.fdatasyncSync(context.log.fd);",
          "fs.writeFileSync(context.log.fd, line);")]),
     "D1650-M12": ("rejecting all reserves breaks valid traffic", [
-        ("api/src/emr-runtime/seal.ts", "    let superseded = false;\n", "    refuse('AccessEventIdConflict');\n    let superseded = false;\n")]),
+        ("api/src/emr-runtime/seal.ts", _RESERVE_TERMINAL_CHECK, "    refuse('AccessEventIdConflict');\n" + _RESERVE_TERMINAL_CHECK)]),
     "D1650-M12-STREAM": ("global attempt identity rejects the legitimate second stream", [
-        ("api/src/emr-runtime/seal.ts", "this.attempts(state).get(id)",
-         "[...this.attempts(state).values()].find(q => q.attemptId === binding.attemptId)")]),
+        ("api/src/emr-runtime/seal.ts", "pending = pendingPosition ? view.slots[pendingPosition] : undefined",
+         "pending = (void pendingPosition, Object.values(view.slots).find(q => q.attemptId === binding.attemptId))")]),
     "D1650-M12-ERROR": ("ordinary conflicts stop the service", [
-        ("api/src/emr-runtime/seal.ts", "refuse('AccessEventIdConflict');\n        return { binding: pending, state };",
-         "throw new SealRefused('SealUnavailable');\n        return { binding: pending, state };")]),
+        ("api/src/emr-runtime/seal.ts", "refuse('AccessEventIdConflict');\n      result = pending;",
+         "throw new SealRefused('SealUnavailable');\n      result = pending;")]),
 }
 
 
@@ -485,9 +478,9 @@ def terminal_main(args):
                 original = control_file.read_bytes()
                 # These semantics-preserving edits deliberately alter private names,
                 # the imported symbol name and layout used by the exercised paths.
-                renamed = original.decode("utf-8").replace("reservationState", "reservedSnapshot").replace(
+                renamed = original.decode("utf-8").replace("proofOf", "retainedProofOf").replace(
                     "import { createHash", "import { createHash as hashFactory").replace("createHash(", "hashFactory(")
-                control_file.write_bytes(renamed.replace("  private load()", "\n  private load()").encode("utf-8"))
+                control_file.write_bytes(renamed.replace("  private view()", "\n  private view()").encode("utf-8"))
             control_sha = sha256(control_file)
             try:
                 control_log = out / "rename-alias-format.log"
