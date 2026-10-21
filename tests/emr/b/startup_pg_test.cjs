@@ -378,9 +378,9 @@ test('C-P07/P11 the service ends after the viewing seal and before the history s
         if (!seen.watching) {
           seen.watching = true;
           await waitServiceEvent(service.label, 'viewing-sealed', 90000);
+          await waitServiceEvent(service.label, 'history-held', 90000);
           seen.before = await persisted(observer, event.eventId);
           seen.stopped = await control({ action: 'service-stop', signal: 'KILL' });
-          await sleep(500);
           child.kill('SIGKILL');
         }
       }
@@ -390,7 +390,9 @@ test('C-P07/P11 the service ends after the viewing seal and before the history s
     // lost its session first, ends nonzero by itself - in both cases without a receipt.
     assert(result.signal === 'SIGKILL' || (result.code === 1 && !result.names.includes('receipt-ready')), JSON.stringify({ code: result.code, signal: result.signal, names: result.names }));
     await seen.http.done;
-    assert.equal(seen.http.bytes, '', 'no aggregate receipt or first body before both seals');
+    // No receipt and no first body: either no response at all, or the API's own refusal after the loss (never 200).
+    assert.notEqual(seen.http.status, 200, 'no aggregate receipt before both seals');
+    assert(!seen.http.bytes.includes(event.eventId) && !seen.http.bytes.includes('durableAt'), 'no first body before both seals: ' + seen.http.bytes.slice(0, 200));
     const before = await persisted(observer, event.eventId);
     assert.deepEqual(before.entries.map(r => r.stream).sort(), ['history', 'viewing'], 'the transaction committed both streams');
     const next = await startService(); serviceLabel = next.label;

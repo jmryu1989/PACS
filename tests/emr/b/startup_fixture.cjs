@@ -749,12 +749,15 @@ function serviceChild(scenario) {
   const advance = sealModule.AccessSeal.prototype.advanceReceipt;
   sealModule.AccessSeal.prototype.advanceReceipt = async function (stream, attemptId, eventId, entry) {
     if (scenario.storage && eventId === scenario.storage.eventId) faultArmed = true;
-    const value = await advance.call(this, stream, attemptId, eventId, entry);
-    send('advanced', { stream, eventId });
-    if (scenario.cut === 'viewing-sealed' && stream === 'viewing' && eventId === scenario.cutEvent) {
-      send('viewing-sealed', { eventId });
+    // The two streams of one bundle advance independently: the partial-seal cut holds the history advance before it
+    // writes, while the viewing advance completes and is reported durable (the observer then ends this process).
+    if (scenario.cut === 'viewing-sealed' && stream === 'history' && eventId === scenario.cutEvent) {
+      send('history-held', { eventId });
       await new Promise(() => {});
     }
+    const value = await advance.call(this, stream, attemptId, eventId, entry);
+    send('advanced', { stream, eventId });
+    if (scenario.cut === 'viewing-sealed' && stream === 'viewing' && eventId === scenario.cutEvent) send('viewing-sealed', { eventId });
     return value;
   };
   if (scenario.storage) {
