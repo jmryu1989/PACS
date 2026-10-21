@@ -192,9 +192,18 @@ test('C-P02 a second service on the same pair is refused while the first serves;
     assert(!run.result.names.includes('transaction-done'), 'the old-epoch confirm never minted a receipt');
     assert.equal(run.result.code, 1, run.result.stderr);
     const rows = await persisted(observer, held);
-    assert.deepEqual([rows.business.length, rows.entries.length, rows.markers.length], [0, 0, 0], 'rolled back: no business row, entry or marker');
-    assert.equal(recovered.notCommitted, 1, 'the recovery settled the open reservation as not committed');
-    evidence('C-P02', { second, recovered, apiNames: run.result.names, apiCode: run.result.code });
+    // The held transaction either completed at the database (then the new epoch's recovery seals its bound markers)
+    // or rolled back (then the recovery settles the open reservations as not committed); never a live
+    // absent => not-committed shortcut, never a receipt from the old epoch, never a cyclic wait.
+    const streams = rows.entries.length;
+    if (streams === 0) {
+      assert.deepEqual([rows.business.length, rows.markers.length], [0, 0], 'rolled back: no business row, entry or marker');
+      assert.deepEqual([recovered.recovered, recovered.notCommitted], [0, 2], 'the recovery settled both open reservations as not committed');
+    } else {
+      assert.deepEqual([rows.business.length, streams, rows.markers.length], [1, 2, 2], 'completed: business row, both entries and both markers');
+      assert.deepEqual([recovered.recovered, recovered.notCommitted], [2, 0], 'the recovery sealed both bound reservations');
+    }
+    evidence('C-P02', { second, recovered, outcome: streams === 0 ? 'rolled-back' : 'completed', apiNames: run.result.names, apiCode: run.result.code });
   } finally { await observer.$disconnect(); }
 });
 

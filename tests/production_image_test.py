@@ -576,7 +576,7 @@ class LegacyImageTests(unittest.TestCase):
         cls.legacy = json.loads(ops.text(["docker", "image", "inspect", os.environ["KIN_TEST_LEGACY_B1_IMAGE"]]))[0]
         pre = os.environ.get("KIN_TEST_LEGACY_PRE_EMR_IMAGE")
         cls.pre_emr = json.loads(ops.text(["docker", "image", "inspect", pre]))[0] if pre else None
-        cls.db = StateServiceCutpointTests.container.__func__(cls, "db", [
+        cls.db = cls.container("db", [
             "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
             "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
             "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
@@ -630,8 +630,21 @@ class LegacyImageTests(unittest.TestCase):
                           "pair_files": sorted(cls.pair_hashes)}), flush=True)
 
     @classmethod
+    def container(cls, suffix, arguments):
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16] + "-" + suffix
+        cls.addClassCleanup(ops.remove_owned_if_present, "container", name, token)
+        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, *arguments])
+        ops.run(["docker", "start", name])
+        return name
+
+    @classmethod
     def psql(cls, sql):
         return ops.text(["docker", "exec", cls.db, "psql", "-X", "-U", "postgres", "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql])
+
+    @staticmethod
+    def changed(before, after):
+        return sorted({name for name in set(before) | set(after) if before.get(name) != after.get(name)})
 
     def clone(self):
         """A private clone of the v3 state volume for one legacy start (the pair volume itself is never mounted)."""
@@ -666,7 +679,8 @@ class LegacyImageTests(unittest.TestCase):
             "--mount", "type=volume,source=" + clone + ",target=" + ops.EMR_STATE])
         self.assertNotEqual(code, 0, logs[-1500:])
         self.assertNotIn("Nest application successfully started", logs)
-        self.assertEqual(_hash_volume(self.image_id, clone), before, "the legacy owner changed a byte of the v3 copy")
+        after = _hash_volume(self.image_id, clone)
+        self.assertEqual(self.changed(before, after), [], "the legacy owner changed bytes of the v3 copy before refusing: " + json.dumps(self.changed(before, after)))
         self.assertEqual(self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker"), self.counts)
         print(json.dumps({"D1656-T01": {"exit": code, "line": [line for line in logs.splitlines() if "기동 실패" in line or "Seal" in line][:3]}}), flush=True)
 
@@ -682,7 +696,8 @@ class LegacyImageTests(unittest.TestCase):
         code, logs = self._legacy_node(clone, script)
         self.assertEqual(code, 1, logs[-1500:])
         self.assertIn('"refused"', logs)
-        self.assertEqual(_hash_volume(self.image_id, clone), before, "the legacy recovery changed a byte of the v3 copy")
+        after = _hash_volume(self.image_id, clone)
+        self.assertEqual(self.changed(before, after), [], "the legacy recovery changed bytes of the v3 copy before refusing: " + json.dumps(self.changed(before, after)))
         print(json.dumps({"D1656-T01-restore": {"exit": code, "result": [line for line in logs.splitlines() if line.startswith("KIN_RESULT")]}}), flush=True)
 
     def _legacy_node(self, clone, script):
