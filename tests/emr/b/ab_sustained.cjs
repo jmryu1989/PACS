@@ -67,6 +67,8 @@ function view(snap) {   // reads of committed facts (snap: a frozen copy for Rep
         entries:rows.map(entry=>({entry,marker:S0.markers.get(s+':'+entry.sequence)??null}))};
     },
     tail: async s => { await delay(SQL_MS); return { chainId: S0.s[s].chainId, ...S0.s[s].head }; },
+    // The (c) seal binds a pristine local-owner lineage to the database identity (one SELECT of current_database()).
+    identity: async () => { await delay(SQL_MS); return { database: 'ab-harness', oid: 1, address: '127.0.0.1', port: 5432 }; },
     entriesAfter: async (s, a, limit) => { await delay(SQL_MS); const rows = after(S0.s[s].entries, a, Math.min(limit, Math.max(0, S0.s[s].head.sequence - a))).map(stored); readRows += rows.length; return rows; },
     entryForEvent: async (s, id) => { await delay(SQL_MS); const e = S0.s[s].byEvent.get(id); return e && e.sequence <= S0.s[s].head.sequence ? stored(e) : null; },
     markerForSlot: async (s, q) => { await delay(SQL_MS); return q <= S0.s[s].head.sequence ? S0.markers.get(s + ':' + q) ?? null : null; },
@@ -81,7 +83,7 @@ const pooled = fn => async (...a) => { await pool.acquire(); try { return await 
 const live = view(null);
 const sql = {
   verificationPage: pooled(live.verificationPage), tail: pooled(live.tail), entriesAfter: pooled(live.entriesAfter), entryForEvent: pooled(live.entryForEvent),
-  markerForSlot: pooled(live.markerForSlot), markerForAttempt: pooled(live.markerForAttempt), placement: async () => [],
+  markerForSlot: pooled(live.markerForSlot), markerForAttempt: pooled(live.markerForAttempt), placement: async () => [], identity: pooled(live.identity),
   snapshot: async work => { await pool.acquire(); try { await delay(SQL_MS); const v = view(freeze()); const inner = { ...v, snapshot: w => w(inner), withWriterFence: w => w(inner) }; const r = await work(inner); await delay(COMMIT_MS); return r; } finally { pool.release(); } },
 };
 sql.withWriterFence = sql.snapshot;
