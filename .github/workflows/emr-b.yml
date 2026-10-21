@@ -64,6 +64,10 @@ jobs:
         timeout-minutes: 15
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/identity-mutants-run --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --identity --worktree --out tmp/emr-b-ci/identity-mutants
+      - name: EMR-B2c API-side behavioural mutants (C-M04/M07/M08/M09/M10/M13/M14/M15/M16) and the record-port rename-alias-format oracle control, each killed by its named (c) API case
+        timeout-minutes: 30
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/api-mutants-run --cwd . --tree api/src --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/contract_test.cjs --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --api --worktree --out tmp/emr-b-ci/api-mutants
       - name: D961 pool, JIT guard and estimator controls (NI is commander-only)
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/pool-plan --cwd . --tree api/src/emr-runtime --file api/src/prisma.service.ts --tree tests/emr/b -- node --test tests/emr/b/client_pool_test.cjs

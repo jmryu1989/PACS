@@ -1667,7 +1667,10 @@ function contractSuite() {
         const request = P.parseStateRequest({ v: 1, requestId: randomUUID(), serviceEpoch: session.serviceEpoch, session: session.session, workId, operation, value }, role);
         const response = await service.dispatch(role, request, socket);
         if (!response.ok) throw new P.StateProtocolError(response.error.code, response.error.outcome);
-        return response.result;
+        // `faults.tamper[operation]`: the transport hands this process a result the service never produced (a changed
+        // proof), so the process's own revalidation is what stands between it and a false receipt.
+        const tamper = faults.tamper?.[operation];
+        return tamper ? tamper(response.result) : response.result;
       }, lose() { loss.abort(new P.StateProtocolError('UNAVAILABLE', 'unavailable')); } };
       const remote = new RS.RemoteLedgerState(client, session, sql);
       return { client, session, remote, store: new MemoryStore(ledger, remote), socket };
@@ -1742,7 +1745,8 @@ function contractSuite() {
     const w = await serviceWorld(t), peer = await w.connect();
     const { port, control } = RP.createRecordPort(peer.store), work = port.begin();
     const event = changeEvent();
-    const receipt = await work.append(event);
+    let receipt;
+    await assert.doesNotReject(async () => { receipt = await work.append(event); }, 'the append over the actual service mints a receipt');
     assert.equal(C.isDurableReceipt(receipt), true, 'a genuine process-local receipt'); assert.equal(receipt.eventId, event.eventId);
     assert.deepEqual(peer.client.calls, ['begin', 'reserve', 'reserve', 'confirm-bundle', 'acknowledge'], 'append = scope, one reserve per stream, one complete proof, one exact ack');
     assert.equal(w.ledger.streams.viewing.entries.length, 1); assert.equal(w.ledger.streams.history.entries.length, 1);
@@ -1752,7 +1756,8 @@ function contractSuite() {
     assert.equal(Object.keys(state.terminal).length, 2, 'both stream attempts are terminal');
     assert.deepEqual(w.seal.read().streams.viewing, { chainId: w.ledger.chainId, sequence: 1, hash: w.ledger.head.hash }, 'the service sealed the committed row');
     // The same event again: the stored row is replayed, its original marker is the binding, no second attestation.
-    const again = await work.append(event);
+    let again;
+    await assert.doesNotReject(async () => { again = await work.append(event); }, 'the replay of a stored event takes its original binding and mints the same receipt');
     assert.equal(again.eventId, event.eventId); assert.equal(C.isDurableReceipt(again), true);
     assert.equal(w.ledger.streams.viewing.entries.length, 1, 'replay appends no row');
     state = w.state();
@@ -1772,7 +1777,8 @@ function contractSuite() {
     const first = RP.createRecordPort(lost.store), work = first.port.begin(), event = changeEvent();
     const receipt = await work.append(event);
     assert.equal(C.isDurableReceipt(receipt), true);
-    assert.deepEqual(lost.client.calls.filter(c => c !== 'reserve'), ['begin', 'confirm-bundle', 'lookup-outcome', 'acknowledge']);
+    assert.deepEqual(lost.client.calls.filter(c => c !== 'reserve'), ['begin', 'confirm-bundle', 'lookup-outcome', 'acknowledge'],
+      'a lost reply is resolved by one fenced lookup, never a resend');
     assert.equal(Object.values(w.state().bundles)[0].phase, 'acknowledged');
     // Lost reply and no fenced knowledge yet: unknown stays unknown - journaled, no receipt, no second attempt.
     const dark = await w.connect(randomUUID(), { 'confirm-bundle': ['UNAVAILABLE'], 'lookup-outcome': ['UNAVAILABLE'] });
@@ -1830,6 +1836,15 @@ function contractSuite() {
     const receipt = await scope.confirm(appended);
     assert.equal(C.isDurableReceipt(receipt), true);
     await scope.end(); await original.end();
+    // A proof the transport hands over that the service never produced (one sealed hash changed) is revalidated by
+    // this process against its exact bindings before any receipt: no receipt, whatever the service's reply said.
+    const tampered = await w.connect(randomUUID(), { tamper: { 'confirm-bundle': proof => ({ ...proof,
+      entries: [{ ...proof.entries[0], sealed: { ...proof.entries[0].sealed, hash: 'f'.repeat(64) } }, ...proof.entries.slice(1)] }) } });
+    const tamperedScope = await tampered.remote.begin(randomUUID()), tamperedWork = await tampered.store.begin(randomUUID());
+    let second;
+    await tamperedWork.withAppendTransaction(async tx => { second = await tamperedWork.appendInTransaction(tx, changeEvent()); });
+    await rejects(tamperedScope.confirm(second), 'DurableReceiptRefused');
+    await tamperedScope.end(); await tamperedWork.end();
     // Control loss: the state refuses new scopes; the launcher ends the process (application.ts onLoss).
     peer.client.lose();
     await rejects(peer.remote.begin(randomUUID()), 'SealUnavailable');
@@ -1932,7 +1947,8 @@ function contractSuite() {
       assert.equal(await exchange('GET /upgrade HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: synthetic\r\n\r\n'), '');
       assert.equal(await exchange('CONNECT localhost:1234 HTTP/1.1\r\nHost: localhost\r\n\r\n'), '');
       const stopped = await exchange('GET /fresh HTTP/1.1\r\nHost: localhost\r\n\r\n', () => latch.abort());
-      assert.match(stopped, /HTTP\/1\.1 503/); assert.match(stopped, /Connection: close/i); assert.match(stopped, /Cache-Control: no-store/i);
+      assert.match(stopped, /HTTP\/1\.1 503/, 'a request after the stop is refused before Nest');
+      assert.match(stopped, /Connection: close/i); assert.match(stopped, /Cache-Control: no-store/i);
       assert.deepEqual(entries, ['/continue'], 'no downstream entry after the stop');
       for (const event of ['request', 'checkContinue', 'checkExpectation', 'upgrade', 'connect']) {
         const foreign = () => {}; server.on(event, foreign);

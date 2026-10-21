@@ -376,11 +376,66 @@ IDENTITY_MUTANTS = {
 }
 
 
+# EMR-B2 (c) API-side behavioural mutants (frozen C-M04/M07/M08/M09/M10/M13/M14/M15/M16 mapping), killed by the
+# declared (c) API component cases (emr/units/b.json b2c.local_api_cases, selected by EMR_B2C_API_CASES; the real
+# launcher child cases among them). Each is one deliberate edit of the API-side runtime; the kill is the named
+# behavioural assertion of its case, never an import/setup/timeout failure.
+API_MUTANTS = {
+    "C-M04-LOST-SESSION": ("a lost control session still admits new recording scopes", [
+        ("api/src/emr-runtime/remote-state.ts",
+         "    if (this.client.unavailable.aborted) throw new SealRefused('SealUnavailable', 'state-service-lost');\n", "")]),
+    "C-M07-RESEND": ("a lost confirm reply is resolved by resending the confirmation instead of the service's fenced lookup", [
+        ("api/src/emr-runtime/remote-state.ts",
+         "      try { outcome = await this.call('lookup-outcome', bundle); } catch { outcome = null; }\n",
+         "      try { outcome = { outcome: 'committed-and-sealed', proof: await this.call('confirm-bundle', bundle) } as any; } catch { outcome = null; }\n")]),
+    "C-M08-NOT-COMMITTED": ("an unknown outcome (no fenced knowledge) is classified as not committed", [
+        ("api/src/emr-runtime/remote-state.ts",
+         "      else if (outcome?.outcome === 'fenced-not-committed') {",
+         "      else if (!outcome || outcome.outcome === 'fenced-not-committed') {")]),
+    "C-M08-CALLBACK-FAILED": ("the caller's callbackFailed claim is trusted over the observed rejection", [
+        ("api/src/emr-runtime/record-port.ts",
+         "          return run(() => entry.bound.settleTransaction(entry.raw, input, error, entry.callbackFailed, served));",
+         "          return run(() => entry.bound.settleTransaction(entry.raw, input, error, _callbackFailed, served));")]),
+    "C-M09-NO-BIND": ("the exact reservation is not bound in the business transaction before COMMIT", [
+        ("api/src/emr-runtime/store.ts", "        await this.bindCommit(tx, binding);\n", "")]),
+    "C-M09-REPLAY-RESERVES": ("a replay of a stored event takes a new reservation instead of its original binding", [
+        ("api/src/emr-runtime/store.ts", "      if (!result.replay) {\n        binding = await scope.reserve(", "      if (true) {\n        binding = await scope.reserve(")]),
+    "C-M10-UNVERIFIED-PROOF": ("the service's proof is accepted without local revalidation against the exact bindings", [
+        ("api/src/emr-runtime/remote-state.ts", "    verifyProof(appended, bundle, proof);\n", "")]),
+    "C-M13-UNTRACKED-IMPORT": ("the rights import runs outside the owned background registry", [
+        ("api/src/auth.service.ts",
+         "    this.background.tryRun('auth.importRights', signal => this.importRights(1, signal));",
+         "    void this.importRights(1, new AbortController().signal);")]),
+    "C-M14-RAW-CAPABILITY": ("the transaction projection exposes a raw client capability", [
+        ("api/src/emr-runtime/transaction-port.ts", "  return Object.freeze(projection);\n}",
+         "  projection.$queryRaw = (...args: unknown[]) => (raw as any).$queryRaw(...args);\n  return Object.freeze(projection);\n}")]),
+    "C-M14-EARLY-RETIREMENT": ("a work is retired from the drain before its remote scope ended", [
+        ("api/src/emr-runtime/record-port.ts",
+         "        void closing.then(() => { live--; settle(); }, () => { live--; settle(); });",
+         "        live--; settle(); void closing.catch(() => undefined);")]),
+    "C-M15-OBSERVER-ONLY": ("the raw HTTP admission observes the stop but dispatches a stopped request to Nest", [
+        ("api/src/emr-runtime/http-admission.ts",
+         "  function dispatch(request: IncomingMessage, response: ServerResponse) {\n    if (stopSignal.aborted) { rejectStopped(response); return; }\n    downstream.call(server, request, response);\n  }",
+         "  function dispatch(request: IncomingMessage, response: ServerResponse) {\n    downstream.call(server, request, response);\n  }")]),
+    "C-M15-NO-FORCE-CLOSE": ("sockets beyond the drain bound are never force closed", [
+        ("api/src/emr-runtime/http-admission.ts", "    destroyAll() { for (const socket of sockets) socket.destroy(); },", "    destroyAll() { },")]),
+    "C-M16-NO-SETTLEMENT": ("the drain omits the started background tasks' settlement", [
+        ("api/src/emr-runtime/background-work.ts",
+         "    drained(): Promise<void> { return tasks.size === 0 ? Promise.resolve() : new Promise<void>(resolve => waiting.push(() => resolve())); },",
+         "    drained(): Promise<void> { return Promise.resolve(); },")]),
+    "C-M16-RESET-DEADLINE": ("each cleanup step renews the shared fatal deadline", [
+        ("api/src/emr-runtime/launcher.ts",
+         "      const waited = await (fatal ??= budget(EMR_CLEANUP_TIMEOUT_MS)).race(release(entry));",
+         "      const waited = await (fatal = budget(EMR_CLEANUP_TIMEOUT_MS)).race(release(entry));")]),
+}
+
+
 def terminal_main(args):
     """A clean passing source copy is mandatory before any terminal mutant verdict."""
     declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))["b2c"]
-    mutations = IDENTITY_MUTANTS if args.identity else TERMINAL_MUTANTS
-    declared = {item["id"]: item for item in declaration["identity_mutants" if args.identity else "terminal_mutants"]}
+    api = bool(getattr(args, "api", False))
+    mutations = API_MUTANTS if api else IDENTITY_MUTANTS if args.identity else TERMINAL_MUTANTS
+    declared = {item["id"]: item for item in declaration["api_mutants" if api else "identity_mutants" if args.identity else "terminal_mutants"]}
     if set(declared) != set(mutations):
         raise RuntimeError("terminal mutant declaration differs from driver")
     chosen = [name for name in declared if not args.only or name in args.only.split(",")]
@@ -392,11 +447,15 @@ def terminal_main(args):
     # A caller's baseline source override must not bypass the isolated mutated copy.
     env.pop("EMR_B2C_SOURCE_ROOT", None)
     env.pop("EMR_SERVICE_CASES", None)
+    env.pop("EMR_B2C_API_CASES", None)
     rows = []
-    baseline_cases = [case for case in declaration["local_service_cases"]
-                      if any(case in declared[name]["kill"] for name in chosen)]
-    env["EMR_SERVICE_CASES"] = ",".join(baseline_cases)
-    with tempfile.TemporaryDirectory(prefix="kin-emrb-terminal-") as folder:
+    # The API set selects the (c) API cases of the contract file (the B1 cases are excluded by the name pattern, as in
+    # CI); the service sets select the state-service cases.
+    selection_variable = "EMR_B2C_API_CASES" if api else "EMR_SERVICE_CASES"
+    declared_cases = declaration["local_api_cases"] if api else declaration["local_service_cases"]
+    baseline_cases = [case for case in declared_cases if any(case in declared[name]["kill"] for name in chosen)]
+    env[selection_variable] = ",".join(baseline_cases)
+    with tempfile.TemporaryDirectory(prefix="kin-emrb-api-" if api else "kin-emrb-terminal-") as folder:
         copy = Path(folder) / "checkout"
         copy.mkdir()
         head, link = make_copy(copy, args.worktree, args.source_manifest)
@@ -404,34 +463,42 @@ def terminal_main(args):
             inputs = copy / "mutant-inputs.json"
             if inputs.exists():
                 shutil.copyfile(inputs, out / "mutant-inputs.json")
-            command = ["node", "--max-old-space-size=3072", "--test", "--test-concurrency=1",
-                       "--test-reporter=tap", "tests/emr/b/state_service_test.cjs"]
+            command = ["node", "--max-old-space-size=3072", "--test", "--test-concurrency=1", "--test-reporter=tap",
+                       *(["--test-name-pattern", "^C-A0", "tests/emr/b/contract_test.cjs"] if api else ["tests/emr/b/state_service_test.cjs"])]
             baseline_log = out / "baseline.log"
-            code, seconds = run(command, cwd=copy, env=env, timeout=900, log=baseline_log)
+            code, seconds = run(command, cwd=copy, env=env, timeout=1800, log=baseline_log)
             text = baseline_log.read_text(encoding="utf-8", errors="replace")
             passed = re.findall(r"^ok \d+ - ([\w.-]+) ", text, re.M)
             (out / "baseline.json").write_text(json.dumps({"head": head, "exit": code, "seconds": seconds,
                 "passed": passed, "expected": baseline_cases}, indent=2) + "\n", encoding="utf-8")
-            if code or passed != baseline_cases:
+            if code or sorted(passed) != sorted(baseline_cases):
                 raise RuntimeError("unmutated terminal copy did not pass exact selection; no mutant verdict")
-            control_file = copy / "api/src/emr-runtime/seal.ts"
-            original = control_file.read_bytes()
-            # These semantics-preserving edits deliberately alter private names,
-            # the imported symbol name and layout used by the exercised paths.
-            renamed = original.decode("utf-8").replace("reservationState", "reservedSnapshot").replace(
-                "import { createHash", "import { createHash as hashFactory").replace("createHash(", "hashFactory(")
-            control_file.write_bytes(renamed.replace("  private load()", "\n  private load()").encode("utf-8"))
+            if api:
+                # The API-side control renames a private, aliases an import and changes layout in the record port.
+                control_file = copy / "api/src/emr-runtime/record-port.ts"
+                original = control_file.read_bytes()
+                renamed = original.decode("utf-8").replace("scoping", "scopePromise").replace(
+                    "import { randomUUID } from 'node:crypto';", "import { randomUUID as makeId } from 'node:crypto';").replace("randomUUID(", "makeId(")
+                control_file.write_bytes(renamed.replace("export function createRecordPort", "\nexport function createRecordPort").encode("utf-8"))
+            else:
+                control_file = copy / "api/src/emr-runtime/seal.ts"
+                original = control_file.read_bytes()
+                # These semantics-preserving edits deliberately alter private names,
+                # the imported symbol name and layout used by the exercised paths.
+                renamed = original.decode("utf-8").replace("reservationState", "reservedSnapshot").replace(
+                    "import { createHash", "import { createHash as hashFactory").replace("createHash(", "hashFactory(")
+                control_file.write_bytes(renamed.replace("  private load()", "\n  private load()").encode("utf-8"))
             control_sha = sha256(control_file)
             try:
                 control_log = out / "rename-alias-format.log"
-                code, seconds = run(command, cwd=copy, env=env, timeout=900, log=control_log)
+                code, seconds = run(command, cwd=copy, env=env, timeout=1800, log=control_log)
                 passed = re.findall(r"^ok \d+ - ([\w.-]+) ", control_log.read_text(encoding="utf-8", errors="replace"), re.M)
             finally:
                 control_file.write_bytes(original)
             control = {"exit": code, "seconds": seconds, "passed": passed, "before_sha256": hashlib.sha256(original).hexdigest(),
                        "control_sha256": control_sha, "restored_sha256": sha256(control_file)}
             (out / "oracle-control.json").write_text(json.dumps(control, indent=2) + "\n", encoding="utf-8")
-            if code or passed != baseline_cases or control["before_sha256"] != control["restored_sha256"]:
+            if code or sorted(passed) != sorted(baseline_cases) or control["before_sha256"] != control["restored_sha256"]:
                 raise RuntimeError("rename/alias/format control failed; no terminal mutant verdict")
             for name in chosen:
                 expected, changes = mutations[name]
@@ -439,8 +506,8 @@ def terminal_main(args):
                 applied = apply(copy, changes)
                 log = out / (name + ".log")
                 try:
-                    code, seconds = run(command, cwd=copy, env={**env, "EMR_SERVICE_CASES": ",".join(kill)},
-                                        timeout=900, log=log)
+                    code, seconds = run(command, cwd=copy, env={**env, selection_variable: ",".join(kill)},
+                                        timeout=1800, log=log)
                     text = log.read_text(encoding="utf-8", errors="replace")
                     verdict = contract_verdict(text, kill, code)
                     # An unrelated assertion (including child startup) is not the intended kill.
@@ -690,6 +757,7 @@ def main(argv=None):
     parser.add_argument("--self-test", action="store_true", help="verify verdicts and baseline source without Docker")
     parser.add_argument("--terminal", action="store_true", help="run declared D1641 terminal component mutants in an isolated copy")
     parser.add_argument("--identity", action="store_true", help="run declared D1650 identity component mutants in an isolated copy")
+    parser.add_argument("--api", action="store_true", help="run declared EMR-B2c API-side behavioural mutants (C-M04..M16) in an isolated copy")
     parser.add_argument("--only", help="comma-separated mutant IDs")
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--source-manifest", type=Path, help="hash-bound LF source inventory for an isolated Linux copy")
@@ -699,7 +767,7 @@ def main(argv=None):
         return self_test()
     if args.out is None:
         parser.error("--out is required unless --self-test is selected")
-    if args.terminal or args.identity:
+    if args.terminal or args.identity or args.api:
         return terminal_main(args)
     declared = {m["id"]: m for m in json.loads(DECLARATION.read_text(encoding="utf-8"))["mutants"]}
     if set(declared) != set(MUTANTS):

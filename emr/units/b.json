@@ -1025,23 +1025,39 @@
     "identity_mutants": [
       {
         "id": "D1655-M01",
-        "kill": ["D1655-T07"],
-        "assertions": {"D1655-T07": "failed aggregate publication never returns a complete proof"}
+        "kill": [
+          "D1655-T07"
+        ],
+        "assertions": {
+          "D1655-T07": "failed aggregate publication never returns a complete proof"
+        }
       },
       {
         "id": "D1655-M02",
-        "kill": ["D1655-T08"],
-        "assertions": {"D1655-T08": "retry publishes the acknowledged checkpoint"}
+        "kill": [
+          "D1655-T08"
+        ],
+        "assertions": {
+          "D1655-T08": "retry publishes the acknowledged checkpoint"
+        }
       },
       {
         "id": "D1655-M03",
-        "kill": ["D1655-T08"],
-        "assertions": {"D1655-T08": "failed ack or minimization never returns successful acknowledgement"}
+        "kill": [
+          "D1655-T08"
+        ],
+        "assertions": {
+          "D1655-T08": "failed ack or minimization never returns successful acknowledgement"
+        }
       },
       {
         "id": "D1655-M04",
-        "kill": ["D1655-T09"],
-        "assertions": {"D1655-T09": "historical conflict remains a typed nonfatal refusal"}
+        "kill": [
+          "D1655-T09"
+        ],
+        "assertions": {
+          "D1655-T09": "historical conflict remains a typed nonfatal refusal"
+        }
       },
       {
         "id": "D1650-M01",
@@ -1173,6 +1189,134 @@
         ],
         "assertions": {
           "D1650-T03": "ordinary conflict must stay typed"
+        }
+      }
+    ],
+    "api_mutants": [
+      {
+        "id": "C-M04-LOST-SESSION",
+        "kill": [
+          "C-A03.R05"
+        ],
+        "assertions": {
+          "C-A03.R05": "SealUnavailable"
+        }
+      },
+      {
+        "id": "C-M07-RESEND",
+        "kill": [
+          "C-A03.R03"
+        ],
+        "assertions": {
+          "C-A03.R03": "a lost reply is resolved by one fenced lookup, never a resend"
+        }
+      },
+      {
+        "id": "C-M08-NOT-COMMITTED",
+        "kill": [
+          "C-A03.R03"
+        ],
+        "assertions": {
+          "C-A03.R03": "CommitUnknown"
+        }
+      },
+      {
+        "id": "C-M08-CALLBACK-FAILED",
+        "kill": [
+          "C-A03.R01"
+        ],
+        "assertions": {
+          "C-A03.R01": "caller-supplied callbackFailed=true is not trusted"
+        }
+      },
+      {
+        "id": "C-M09-NO-BIND",
+        "kill": [
+          "C-A03.R02"
+        ],
+        "assertions": {
+          "C-A03.R02": "the append over the actual service mints a receipt"
+        }
+      },
+      {
+        "id": "C-M09-REPLAY-RESERVES",
+        "kill": [
+          "C-A03.R02"
+        ],
+        "assertions": {
+          "C-A03.R02": "the replay of a stored event takes its original binding and mints the same receipt"
+        }
+      },
+      {
+        "id": "C-M10-UNVERIFIED-PROOF",
+        "kill": [
+          "C-A03.R05"
+        ],
+        "assertions": {
+          "C-A03.R05": "DurableReceiptRefused"
+        }
+      },
+      {
+        "id": "C-M13-UNTRACKED-IMPORT",
+        "kill": [
+          "C-A02.R07"
+        ],
+        "assertions": {
+          "C-A02.R07": "the import is an accounted task"
+        }
+      },
+      {
+        "id": "C-M14-RAW-CAPABILITY",
+        "kill": [
+          "C-A03.R01"
+        ],
+        "assertions": {
+          "C-A03.R01": "no raw client capability on the projection"
+        }
+      },
+      {
+        "id": "C-M14-EARLY-RETIREMENT",
+        "kill": [
+          "C-A03.R01"
+        ],
+        "assertions": {
+          "C-A03.R01": "the work stays live while its remote scope ends"
+        }
+      },
+      {
+        "id": "C-M15-OBSERVER-ONLY",
+        "kill": [
+          "C-A01.R08"
+        ],
+        "assertions": {
+          "C-A01.R08": "a request after the stop is refused before Nest"
+        }
+      },
+      {
+        "id": "C-M15-NO-FORCE-CLOSE",
+        "kill": [
+          "C-A01.R15"
+        ],
+        "assertions": {
+          "C-A01.R15": "socket deadline does not wait for provider cleanup or process exit"
+        }
+      },
+      {
+        "id": "C-M16-NO-SETTLEMENT",
+        "kill": [
+          "C-A02.R06"
+        ],
+        "assertions": {
+          "C-A02.R06": "the started task is still accounted"
+        }
+      },
+      {
+        "id": "C-M16-RESET-DEADLINE",
+        "kill": [
+          "C-A02.R14"
+        ],
+        "assertions": {
+          "C-A02.R14": "ledger wait cannot renew the expired fatal budget"
         }
       }
     ]
