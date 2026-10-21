@@ -714,11 +714,30 @@ function serviceChild(scenario) {
   };
   const load = name => require('/app/dist/' + name);
   const sealModule = load('emr-runtime/seal');
+  // Diagnostics of a start that the product closes silently: every coordinator operation but reads, the database
+  // connection, and a recovery that throws, with their error codes (never values).
+  const coordinatorModule = load('emr-runtime/coordinator');
+  const coordinatorCall = coordinatorModule.StateCoordinator.prototype.call;
+  coordinatorModule.StateCoordinator.prototype.call = function (operation, ...args) {
+    try {
+      const result = coordinatorCall.call(this, operation, ...args);
+      if (operation !== 'read') send('coordinator', { operation, ok: true });
+      return result;
+    } catch (error) { send('coordinator', { operation, ok: false, code: error?.code ?? error?.name ?? 'Error', outcome: error?.outcome ?? null }); throw error; }
+  };
+  const { PrismaClient } = require('/app/node_modules/@prisma/client');
+  const connect = PrismaClient.prototype.$connect;
+  PrismaClient.prototype.$connect = async function () {
+    try { const result = await connect.call(this); send('db-connect', { ok: true }); return result; }
+    catch (error) { send('db-connect', { ok: false, code: error?.code ?? error?.name ?? 'Error' }); throw error; }
+  };
   const recover = sealModule.AccessSeal.prototype.recoverAtStart;
   sealModule.AccessSeal.prototype.recoverAtStart = async function (...args) {
     send('recovery', { serviceEpoch: args[1] ?? null });
     await hold('recovery');
-    const result = await recover.apply(this, args);
+    let result;
+    try { result = await recover.apply(this, args); }
+    catch (error) { send('recovery-failed', { code: error?.code ?? error?.name ?? 'Error' }); throw error; }
     send('recovered', { recovered: result.recovered, notCommitted: result.notCommitted, streams: result.streams, serviceEpoch: args[1] ?? null });
     await hold('recovered');
     return result;

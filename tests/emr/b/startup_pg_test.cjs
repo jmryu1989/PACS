@@ -177,20 +177,27 @@ test('C-P02 a second service on the same pair is refused while the first serves;
   const observer = new PrismaClient({ datasources: { db: { url: INSTALLER } } });
   try {
     let restart = null;
+    const nextLabel = 'svc-' + String(++serviceGeneration).padStart(3, '0');
     const run = await apiOnce({ holdTransaction: true }, async (event, child) => {
       if (event.what === 'listening') child.send({ cmd: 'record-transaction', eventId: held, change: true });
       if (event.what === 'transaction-held') {
-        // The reservation is bound; the transaction (its shared writer fence) stays open. Restart the service now.
-        restart = control({ action: 'service-restart', label: 'svc-' + String(++serviceGeneration).padStart(3, '0'), scenario: {} });
-        await sleep(3000);
+        // The reservation is bound; the transaction (its shared writer fence) stays open across the service's
+        // drain (the open scope outlives the 10 s drain: the old epoch closes incomplete) and the new epoch's
+        // recovery, which cannot pass the fence until this transaction ends. Only then is it released.
+        restart = control({ action: 'service-restart', label: nextLabel, scenario: {} }, 300000);
+        await waitServiceEvent(nextLabel, 'recovery', 120000);
+        await sleep(2000);
         child.send({ cmd: 'release' });
       }
-    }, 180000);
-    const restarted = await restart; serviceLabel = restarted.label;
+    }, 240000);
+    const restarted = await restart; serviceLabel = nextLabel;
     assert.equal(restarted.ready, true, JSON.stringify(restarted));
-    const recovered = await waitServiceEvent(restarted.label, 'recovered');
+    const recovered = await waitServiceEvent(nextLabel, 'recovered');
+    const recoveryAt = serviceEvents(nextLabel).find(e => e.what === 'recovery').at, recoveredAt = recovered.at;
     assert(!run.result.names.includes('transaction-done'), 'the old-epoch confirm never minted a receipt');
     assert.equal(run.result.code, 1, run.result.stderr);
+    assert.equal(restarted.restarted.closed, false, 'the old epoch closed incomplete: its open scope outlived the drain');
+    assert(recoveredAt - recoveryAt >= 1500, 'the new epoch recovery waited on the held transaction: ' + (recoveredAt - recoveryAt) + ' ms');
     const rows = await persisted(observer, held);
     // The held transaction either completed at the database (then the new epoch's recovery seals its bound markers)
     // or rolled back (then the recovery settles the open reservations as not committed); never a live
@@ -217,11 +224,15 @@ test('C-P03 a service that dies during recovery publishes no readiness; the rest
   assert.equal(duringRecovery.code, 1, 'no API readiness while the recovery is incomplete');
   assert(!duringRecovery.names.includes('create'));
   const killed = await control({ action: 'service-stop', signal: 'KILL' });
-  await starting;
+  assert.equal(killed.stopped, (await starting).name, 'the held owner is what was terminated');
+  assert.equal(killed.exit, 137, JSON.stringify(killed));
   const after = await volumeHashes();
   assert.deepEqual(after.hashes, before.hashes, 'an interrupted recovery of nothing changed no byte');
-  const wrong = await control({ action: 'service-start', label: 'svc-wrong', scenario: { label: 'svc-wrong' }, instanceId: 'another-synthetic-pair' });
+  const wrong = await control({ action: 'service-start', label: 'svc-wrong', scenario: {}, instanceId: 'another-synthetic-pair' });
   assert.equal(wrong.ready, false, JSON.stringify(wrong));
+  const wrongEvents = serviceEvents('svc-wrong');
+  assert(wrongEvents.some(e => e.what === 'coordinator' && e.operation === 'admit-pair' && e.ok === false && e.code === 'CONFLICT'), 'refused at admit-pair: ' + JSON.stringify(wrongEvents.map(e => [e.what, e.operation, e.code])));
+  assert(!wrongEvents.some(e => e.what === 'recovery'), 'no recovery for the wrong pair');
   assert.deepEqual((await volumeHashes()).hashes, before.hashes, 'the wrong pair changed no byte');
   const next = await startService(); serviceLabel = next.label;
   assert.equal(next.ready, true);

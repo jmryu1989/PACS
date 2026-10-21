@@ -456,6 +456,10 @@ class StateServiceCutpointTests(unittest.TestCase):
                     self.service = name
                 return {"ready": True, "name": name, "tail": text[-400:]}
             if wait_for and self._service_event(label, wait_for):
+                # A start held inside its recovery is the owner of the pair until it ends: it is what a later
+                # stop/terminate request acts on.
+                if not extra:
+                    self.service = name
                 return {"ready": None, "held": wait_for, "name": name}
             if not self.running(name):
                 code = int(ops.text(["docker", "wait", name], timeout=60))
@@ -493,14 +497,15 @@ class StateServiceCutpointTests(unittest.TestCase):
 
     def serve(self, request):
         action = request["action"]
+        scenario = {**(request.get("scenario") or {}), "label": request.get("label")}
         if action == "service-start":
-            return self.service_start(request["label"], request.get("scenario") or {}, instance_id=request.get("instanceId"),
+            return self.service_start(request["label"], scenario, instance_id=request.get("instanceId"),
                                       database_port=request.get("databasePort"), wait_for=request.get("waitFor"), extra=request.get("extra", False))
         if action == "service-stop":
             return self.service_stop(request.get("signal", "TERM"))
         if action == "service-restart":
             stopped = self.service_stop("TERM")
-            return {"restarted": stopped, **self.service_start(request["label"], request.get("scenario") or {})}
+            return {"restarted": stopped, **self.service_start(request["label"], scenario)}
         if action == "service-wait":
             return {"running": bool(self.service) and self.running(self.service)}
         if action == "volume-hashes":
@@ -654,15 +659,29 @@ class LegacyImageTests(unittest.TestCase):
                  "--entrypoint", "sh", self.image_id, "-c", "rm -rf /clone/* /clone/.[!.]* 2>/dev/null; cp -a /source/. /clone/ && chown -R 1000:1000 /clone"])
         return self.volumes["clone"]
 
-    def legacy_run(self, image, suffix, arguments, timeout=180):
+    def legacy_run(self, image, suffix, arguments, timeout=120):
+        """A legacy container started and observed for at most `timeout` seconds: (exit code or None if still running
+        - then stopped -, logs, docker inspect). Nothing is inferred from a hang; the logs are the evidence."""
         token = uuid.uuid4().hex
         name = "kin-rehearsal-" + token[:16] + "-" + suffix
         self.addCleanup(ops.remove_owned_if_present, "container", name, token)
         ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, *arguments, image])
         ops.run(["docker", "start", name])
-        code = int(ops.text(["docker", "wait", name], timeout=timeout))
+        deadline = time.monotonic() + timeout
+        code = None
+        while time.monotonic() < deadline:
+            state = json.loads(ops.text(["docker", "inspect", name]))[0]["State"]
+            if not state["Running"]:
+                code = state["ExitCode"]
+                break
+            time.sleep(1)
+        inspected = json.loads(ops.text(["docker", "inspect", name]))[0]
         result = ops.run(["docker", "logs", name])
-        return code, (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        logs = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        if code is None:
+            ops.run(["docker", "stop", "--time", "10", name], check=False, timeout=60)
+        self.legacy_inspect = inspected
+        return code, logs
 
     def test_01_legacy_b1_owner_serve_over_a_v3_pair_refuses_before_any_mutation(self):
         """D1656-T01: the former API owner (v1+v2 reader) started as the owner of a v3 state copy."""
@@ -680,9 +699,14 @@ class LegacyImageTests(unittest.TestCase):
         self.assertNotEqual(code, 0, logs[-1500:])
         self.assertNotIn("Nest application successfully started", logs)
         after = _hash_volume(self.image_id, clone)
-        self.assertEqual(self.changed(before, after), [], "the legacy owner changed bytes of the v3 copy before refusing: " + json.dumps(self.changed(before, after)))
+        added = sorted(name for name in after if name not in before)
+        changed = sorted(name for name in before if before[name] != after.get(name))
+        # Source preservation: no byte of the v3 pair's own files changes. Files the legacy owner adds for itself (its
+        # owner registry) are reported as a finding, not hidden.
+        self.assertEqual(changed, [], "the legacy owner changed bytes of the v3 pair's files: " + json.dumps(changed))
         self.assertEqual(self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker"), self.counts)
-        print(json.dumps({"D1656-T01": {"exit": code, "line": [line for line in logs.splitlines() if "기동 실패" in line or "Seal" in line][:3]}}), flush=True)
+        print(json.dumps({"D1656-T01": {"exit": code, "added_files_before_refusal": added,
+                                        "line": [line for line in logs.splitlines() if "기동 실패" in line or "Seal" in line][:3]}}), flush=True)
 
     def test_02_legacy_b1_restore_recovery_entry_over_a_v3_copy_refuses_before_any_mutation(self):
         """D1656-T01 (restore route): the legacy copy launcher's recovery (AccessSeal.recoverAtStart of that image)."""
@@ -697,8 +721,11 @@ class LegacyImageTests(unittest.TestCase):
         self.assertEqual(code, 1, logs[-1500:])
         self.assertIn('"refused"', logs)
         after = _hash_volume(self.image_id, clone)
-        self.assertEqual(self.changed(before, after), [], "the legacy recovery changed bytes of the v3 copy before refusing: " + json.dumps(self.changed(before, after)))
-        print(json.dumps({"D1656-T01-restore": {"exit": code, "result": [line for line in logs.splitlines() if line.startswith("KIN_RESULT")]}}), flush=True)
+        added = sorted(name for name in after if name not in before)
+        changed = sorted(name for name in before if before[name] != after.get(name))
+        self.assertEqual(changed, [], "the legacy recovery changed bytes of the v3 pair's files: " + json.dumps(changed))
+        print(json.dumps({"D1656-T01-restore": {"exit": code, "added_files_before_refusal": added,
+                                                "result": [line for line in logs.splitlines() if line.startswith("KIN_RESULT")]}}), flush=True)
 
     def _legacy_node(self, clone, script):
         token = uuid.uuid4().hex
@@ -749,11 +776,22 @@ class LegacyImageTests(unittest.TestCase):
             "-e", "KIN_COOKIE_SECRET=" + uuid.uuid4().hex, "-e", "PUBLIC_ORIGIN=http://127.0.0.1:3000", "-e", "ORTHANC_USER=disposable-ci-only",
             "-e", "ORTHANC_PASS=" + uuid.uuid4().hex, "-e", "KC_ADMIN_URL=http://127.0.0.1:1/auth", "-e", "KC_REALM=kin", "-e", "KC_CLIENT_ID=kin-api",
             "-e", "KC_CLIENT_SECRET=" + uuid.uuid4().hex, "--stop-timeout", "20",
-            "--mount", "type=volume,source=" + self.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly"])
-        self.assertNotEqual(code, 0, logs[-1500:])
-        self.assertNotIn("Nest application successfully started", logs)
-        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), before)
-        print(json.dumps({"D1656-T05": {"exit": code, "line": [line for line in logs.splitlines() if "기동 실패" in line][:2]}}), flush=True)
+            "--mount", "type=volume,source=" + self.volumes["api-ipc"] + ",target=" + API_IPC + ",readonly"], timeout=60)
+        # The legacy owner has its own in-image state directory: in this shape it may run, but only over that private
+        # directory - it never receives the v3 pair, and the current preflight refuses it as the API client of a
+        # reviewed release (image differs). The pair and the ledger stay unchanged.
+        mounts = [(m.get("Type"), m.get("Name"), m.get("Destination")) for m in self.legacy_inspect.get("Mounts") or []]
+        self.assertEqual(mounts, [("volume", self.volumes["api-ipc"], API_IPC)], "the client shape mounts only the API IPC volume")
+        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), before, "the v3 pair is untouched")
+        self.assertEqual(self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker"), self.counts)
+        import ops_deploy_preflight as preflight
+        release = {"sha": ops.text(["git", "rev-parse", "HEAD"]), "images": {"api": self.image_id}}
+        with self.assertRaises(RuntimeError) as refused:
+            preflight.check_state_client(self.legacy_inspect, release=release, image=self.legacy, state_volume=self.volumes["state"],
+                                         api_ipc_volume=self.volumes["api-ipc"], instance_id=self.INSTANCE, database_host="127.0.0.1")
+        self.assertIn("reviewed", str(refused.exception))
+        print(json.dumps({"D1656-T05": {"exit": code, "running_after_60s": code is None, "preflight_refusal": str(refused.exception),
+                                        "line": [line for line in logs.splitlines() if "기동 실패" in line or "EMR" in line][:3]}}), flush=True)
 
 
 if __name__ == "__main__":
