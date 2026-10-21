@@ -1634,6 +1634,27 @@ class StateCopyAdmissionTests(unittest.TestCase):
                         commands.assert_not_called(); owners.assert_not_called()
                     self.assertEqual(archive_path.read_bytes(), before)
 
+    def test_unversioned_legacy_wal_records_belong_to_their_checkpoint_format(self):
+        """D1656 (A03 original-format route): the v1/v2 writer's WAL records carry no version field (B1 a86ecf1:
+        settlement records {revision, generation, patch, publishing, tail?, digest} and published markers {revision,
+        published, digest}); a legacy copy with such records is admitted as its checkpoint's format, while a versioned
+        record in it (v3) or a v3 checkpoint stays refused."""
+        def archive(version, wal):
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+                for name, data in (("seal/settlement.json", json.dumps({"state": {"version": version}}).encode()), ("seal/settlement.jsonl", wal)):
+                    entry = tarfile.TarInfo(name); entry.size = len(data)
+                    tar.addfile(entry, io.BytesIO(data))
+            buffer.seek(0)
+            return buffer
+        legacy_records = b'{"revision":2,"generation":3,"patch":{},"publishing":true,"tail":{},"digest":"a"}\n{"revision":2,"published":true,"digest":"b"}\n'
+        self.assertTrue(ops.admit_legacy_archive(archive(2, legacy_records)))
+        self.assertTrue(ops.admit_legacy_archive(archive(1, legacy_records + b'{"torn":')))
+        for version, wal in [(2, legacy_records + b'{"version":3,"revision":3}\n'), (3, legacy_records), (3, b'{"version":3}\n'), (None, legacy_records)]:
+            with self.subTest(version=version, wal=wal):
+                with self.assertRaises(RuntimeError):
+                    ops.admit_legacy_archive(archive(version, wal))
+
 
 class RetentionPurposeTests(unittest.TestCase):
     """A10 (retention purpose / end condition / dependent-copy rules): the approved classes RET-01..RET-12, the

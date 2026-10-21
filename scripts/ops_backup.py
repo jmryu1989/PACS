@@ -868,6 +868,9 @@ new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtSta
 .then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
 
 
+LEGACY_UNVERSIONED_WAL = object()
+
+
 def admit_legacy_archive(stream):
     """One format gate for read-only live observations and immutable legacy copies."""
     import ops_deploy_preflight as pre
@@ -896,7 +899,9 @@ def admit_legacy_archive(stream):
                         # Torn suffixes are not complete records and remain untouched.
                         if line.endswith(b"\n"):
                             document = json.loads(line, object_pairs_hook=pre.unique_object)
-                            wal_versions.add(document["version"])
+                            # The v1/v2 writer (B1, a86ecf1) records carry no version field: they belong to their
+                            # checkpoint's own format. A versioned (v3) record in a legacy copy is a mixed WAL.
+                            wal_versions.add(document.get("version", LEGACY_UNVERSIONED_WAL))
                 elif content is not None:
                     for block in iter(lambda: content.read(1024 * 1024), b""):
                         hashed.update(block)
@@ -904,6 +909,8 @@ def admit_legacy_archive(stream):
                                   entry.uid, entry.gid, entry.mtime, hashed.hexdigest()))
     except (ValueError, KeyError, TypeError, tarfile.TarError) as error:
         raise RuntimeError("State capture format is unavailable") from error
+    if checkpoint_version in (1, 2):
+        wal_versions = {checkpoint_version if version is LEGACY_UNVERSIONED_WAL else version for version in wal_versions}
     pre.check_legacy_restore_format(checkpoint_version, wal_versions)
     return hashlib.sha256(json.dumps(sorted(inventory), separators=(',', ':')).encode()).hexdigest()
 

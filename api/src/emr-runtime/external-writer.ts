@@ -1266,10 +1266,13 @@ export function inspectFingerprint(directory: string): string {
   }
   return hash([inventory, digests]);
 }
-const COMPACTION_FLOOR = 4 * 1024 * 1024;
-/** Size-proportional amortization: compact once the WAL has grown to a quarter of the checkpoint, never below 4 MiB. */
+const COMPACTION_FLOOR = 4 * 1024 * 1024, COMPACTION_CEILING = 128 * 1024 * 1024;
+/** Size-proportional amortization: compact once the WAL has grown to a quarter of the checkpoint, never below 4 MiB
+ * and never beyond 128 MiB - the change set the owner keeps in memory until the next compaction is bounded by the
+ * WAL it mirrors, not by the history's size (RSS stays bounded at any cardinality; each compaction remains one
+ * streaming pass over the whole checkpoint, O(S), which is the measured cost reported for the envelope). */
 function compactionDue(engine: Engine): boolean {
-  return engine.walOffset >= Math.max(COMPACTION_FLOOR, Math.floor((engine.checkpoint?.bytes ?? 0) / 4));
+  return engine.walOffset >= Math.min(COMPACTION_CEILING, Math.max(COMPACTION_FLOOR, Math.floor((engine.checkpoint?.bytes ?? 0) / 4)));
 }
 /** Streaming merge of the checkpoint region and the change set into a new navigable checkpoint, then the WAL reset
  * (checkpoint before WAL reset; the owner is single-threaded, so no append can interleave). One pass over the
