@@ -10,6 +10,7 @@ import re
 import time
 import unittest
 import uuid
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
@@ -186,7 +187,10 @@ class PriorSelectionE2E(base.WorklistE2E):
         self.wait_state(page, current, lambda s: (s.get("draft") or {}).get("findings") == draft, timeout=25000)
         related = page.locator(f'#relrows tr[data-uid="{future.uid}"]')
         expect(related).to_contain_text("2026-09-07")
-        self.viewer(page, related, [current, future])
+        # W5 PAGE-10 (D1520): a Related row's double click no longer opens images; its explicit Compare Images action does
+        # (viewer() drives its opener by dblclick(), which stays right for the worklist rows of the test above).
+        compare = page.locator(f'[data-related-open="{future.uid}"]')
+        self.viewer(page, SimpleNamespace(dblclick=compare.click), [current, future])
         expect(page.locator(f'#rows tr[data-uid="{current.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
         expect(page.locator("#findings")).to_have_value(draft)
         self.assertEqual(self.state(current)["findings"], current.secret)

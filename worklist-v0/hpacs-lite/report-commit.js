@@ -179,6 +179,9 @@
         toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다. 입력한 글은 화면에 그대로 있습니다.", "err");
         return;
       }
+      // W5: every decision waits for Back in Related Report mode, and for the receipt of an unsettled Related insert.
+      const related = relatedCommandBlock(action);
+      if (related) { toast(related, "err"); relatedInsertNotice(selectedUid); return; }
       /**
        * 이 검사에 결과를 모르는 확정이 남아 있으면, 같은 글을 또 확정하기 전에 서버가 무엇을 가졌는지부터 안다. 답을 잃은
        * 확정 뒤에 사람이 가장 먼저 하는 일이 같은 단추를 다시 누르는 것이다 — 그 확정이 서버에 있는데 옛 판을 기준으로
@@ -196,6 +199,8 @@
           wakeIdle();
         }
         if (learned.outcome === "landed" || uid !== selectedUid || seq !== selectionSeq) return;
+        // W5: the mode or an Insert may have started while that read was out; the decision is checked again before it leaves.
+        if (relatedCommandBlock(action)) return;
       }
       if(studyPriority?.get(selectedUid)){toast('응급 상태를 확인한 뒤 판독을 저장하세요. 저장 결과 미확인은 Technician 메뉴의 Refresh Status로 확인할 수 있습니다.','err');return;}
       // 서버가 죽었는데 로컬에 확정을 쌓으면, 그건 확정이 아니라 이 브라우저의 메모다.
@@ -433,12 +438,24 @@
      * 이동 관문)를 지니므로 W4가 까닭을 더하지 않는다.
      */
     function reportCommandBlocked(command) {
+      const related = relatedCommandBlock(command);
+      if (related) return related;
       if (!["finalize", "finalize-next"].includes(command)) return null;
       if (!selectedUid) return "검사를 선택하세요";
       if (pendingLeave) return "쓰던 글의 저장을 기다려 검사를 옮기는 중입니다";
       const button = $("#b-approve");
       if (button.disabled) return button.title || "지금은 승인할 수 없습니다";
       return null;
+    }
+    /**
+     * W5의 까닭(설계 v5 §1.6, D1423 R4). Related Report 모드에서는 모든 판독 명령이 Back까지 기다린다 — Approve & Next를 포함한다. Next·Prev만
+     * 예외다: 검사 이동의 관문(select)이 판독 대상이 깨끗하면 모드를 닫고 옮기고, 아니면 Notice로 머문다. 모드 밖에서도 저장 영수증이
+     * 확인되지 않은 Related 삽입이 있으면 그 글을 싣는 확정·버리기는 기다린다(Check·Retry가 먼저다). 환자 식별 불일치의 거절이 늘 먼저다.
+     */
+    function relatedCommandBlock(command) {
+      if (!selectedUid || appState[selectedUid]?.identityUnresolved || ["next", "prev"].includes(command)) return null;
+      if (relatedMode?.active()) return relatedMode.reason();
+      return relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
     }
     /**
      * 단축키 목록의 "Finalize (Approve)"(Ctrl+S). 명령을 실행했으면 true — 그때만 브라우저의 페이지 저장을 막는다.

@@ -1,0 +1,26 @@
+{
+  "purpose": "W5-UI Phase A: the main.html bytes Phase B adds (mode markup, the Notice's Discard Insert, the stylesheet and the classic script after report-editor-frame.js). Each text goes right after its anchor; every anchor must match the delivered main.html exactly once. Deleted in Phase B when main.html carries these bytes.",
+  "page": "worklist-v0/hpacs-lite/main.html",
+  "assets": [
+    "worklist-v0/hpacs-lite/related-report-mode.js",
+    "worklist-v0/hpacs-lite/related-report-mode.css"
+  ],
+  "insertions": [
+    {
+      "anchor": "  <link rel=\"stylesheet\" href=\"reading-workspace.css\">\n",
+      "text": "  <link rel=\"stylesheet\" href=\"related-report-mode.css\">\n"
+    },
+    {
+      "anchor": "          <button id=\"report-notice-check\" type=\"button\" style=\"display:none\" title=\"서버의 저장 상태를 다시 확인하고, 저장이 확인되면 고른 검사로 이동합니다\">Check</button>\n",
+      "text": "          <button id=\"report-notice-discard\" type=\"button\" style=\"display:none\" title=\"서버가 거절한 이 삽입을 취소합니다 — 서버에서 취소가 확인된 뒤에만 넣었던 글을 지웁니다\">Discard Insert</button>\n"
+    },
+    {
+      "anchor": "          <button id=\"report-notice-stay\" type=\"button\" title=\"이 검사에 머뭅니다 (안내만 닫습니다)\">Stay</button>\n        </div>\n",
+      "text": "        <!-- W5 (설계 v5 §1): Related Report 모드. 비교 중인 검사의 승인 판독문을 읽기 전용으로 보이고, 검토한 글만 Insert로 현재 초안\n             끝에 넣는다. 이 동안 편집기(.redit)는 숨겨지고(hidden+inert) 판독 명령은 Back to Current Draft까지 막힌다. -->\n        <section id=\"related-mode\" class=\"related-mode\" aria-labelledby=\"related-mode-title\" hidden>\n          <div class=\"related-mode-head\">\n            <h3 id=\"related-mode-title\" tabindex=\"-1\">Related Report</h3>\n            <span class=\"related-mode-role\" lang=\"ko\">비교 중인 검사의 판독문입니다 — 읽기 전용이며, 현재 초안에는 Insert로만 들어갑니다.</span>\n            <span class=\"spacer\"></span>\n            <button id=\"related-mode-back\" type=\"button\" aria-keyshortcuts=\"Control+Alt+4 Escape\" title=\"편집기로 돌아갑니다 (Esc)\">Back to Current Draft</button>\n          </div>\n          <div class=\"related-mode-cards\">\n            <div class=\"related-mode-card\" id=\"related-mode-target\" role=\"region\" aria-label=\"Reading Target\"></div>\n            <div class=\"related-mode-card related-mode-source\" id=\"related-mode-source\" role=\"region\" aria-label=\"Related Report (read only)\"></div>\n          </div>\n          <div class=\"related-mode-body\" role=\"document\" aria-label=\"Related Report text (read only)\">\n            <div class=\"related-mode-section\"><h4>Findings</h4><div class=\"related-mode-text\" data-related-source=\"findings\"></div></div>\n            <div class=\"related-mode-section\"><h4>Conclusion</h4><div class=\"related-mode-text\" data-related-source=\"conclusion\"></div></div>\n            <div class=\"related-mode-section\"><h4>Recommendation</h4><div class=\"related-mode-text\" data-related-source=\"recommendation\"></div></div>\n          </div>\n          <div class=\"related-mode-foot\">\n            <span id=\"related-mode-status\" role=\"status\" aria-live=\"polite\"></span>\n            <span class=\"spacer\"></span>\n            <button id=\"related-mode-insert\" type=\"button\">Insert into Current Draft…</button>\n          </div>\n          <dialog id=\"related-insert-dialog\" aria-labelledby=\"related-insert-title\" aria-describedby=\"related-insert-help\">\n            <h3 id=\"related-insert-title\">Insert into Current Draft</h3>\n            <p id=\"related-insert-help\" lang=\"ko\">아래 글을 현재 초안의 고른 칸 끝에 한 번 넣습니다. 넣은 뒤 서버 저장을 확인합니다.</p>\n            <p id=\"related-insert-target\"></p>\n            <p id=\"related-insert-source\"></p>\n            <fieldset>\n              <legend>Section</legend>\n              <label><input type=\"radio\" name=\"related-insert-section\" value=\"findings\" checked> Findings</label>\n              <label><input type=\"radio\" name=\"related-insert-section\" value=\"conclusion\"> Conclusion</label>\n            </fieldset>\n            <p id=\"related-insert-position\"></p>\n            <pre id=\"related-insert-text\" tabindex=\"0\" aria-label=\"넣을 글\"></pre>\n            <p id=\"related-insert-error\" role=\"alert\"></p>\n            <div class=\"related-insert-actions\">\n              <button id=\"related-insert-cancel\" type=\"button\">Cancel</button>\n              <button id=\"related-insert-confirm\" type=\"button\">Insert</button>\n            </div>\n          </dialog>\n        </section>\n"
+    },
+    {
+      "anchor": "  <script src=\"report-editor-frame.js\"></script>\n",
+      "text": "  <script src=\"related-report-mode.js\"></script>\n"
+    }
+  ]
+}

@@ -48,7 +48,9 @@ class CandidateCiTests(unittest.TestCase):
         # W2: + folder edit/save/reapply/relogin. W3: + drawer v3 save/relogin.
         # CN-N01-A: + 6 OrderCorrectionInvariantTests (invariants 95). W4-FLOW: + Approve & Next / Recommendation round trip.
         # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101). Union: 101 + 15 + 14 = 130.
+        # W5-UI Phase A adds no flow: its Related Report mode FLOW is deferred to Phase B (D1675), and is never selected here.
         self.assertEqual(len(selected), 130)
+        self.assertNotIn("tests/e2e/test_related_report_mode.py", {item["file"] for item in selected})
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
         self.assertEqual([item["case"] for item in selected[-14:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
