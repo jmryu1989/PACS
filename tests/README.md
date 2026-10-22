@@ -2782,9 +2782,9 @@ Windows 로컬 실행(F-ENV-02, LEDGER-CLEAN-1): 시험·하니스는 바꾸지 
 - 호출: `main_early_input_dom_test.py`를 단독으로 실행하지 않는다. CI처럼
   `python -B tests/main_split_historical.py -- python -B tests/main_early_input_dom_test.py -v`로 실행해야
   고정 landed 페이지(`KIN_PRE_PAGE`·`KIN_PRE_ASSETS`)와 previous parent(`KIN_SPLIT_PARENT=7bccdb6…`)가 주어진다.
-  단독 실행은 previous parent를 현재 HEAD로, 페이지를 현재 소스로 잡아 `main_split_harness.cjs actual`이
-  previous-source 배치에서 exit 1로 끝나고(ActualLayout·EarlyInputSplit·HarnessSelfChecks setUpClass ERROR)
-  ActualLayout 필드 단언이 실패한다. 이것은 호출 차이이며 시험 결함이 아니다.
+  단독 실행은 previous parent를 현재 HEAD로, 페이지를 현재 소스로 잡는다. 그러면 `Pages.layout(previous, actual)`이
+  부르는 `main_split_harness.cjs actual`이 previous-source 배치에서 exit 1로 끝나 과거 배치(layout)·필드 비교가
+  실패한다. 이것은 호출 차이이며 시험 결함이 아니다.
 - `node`가 PATH에 있어야 하고(하니스가 `node`를 직접 부른다), `api/node_modules`(TypeScript)가 있어야 한다.
   이 호스트는 `$env:PATH = 'C:\Users\norne\pacs-pcb\tools\node-v22.23.2-win-x64;' + $env:PATH`,
   `$env:NODE_OPTIONS = '--max-old-space-size=3072'`로 맞춘다.
@@ -2798,6 +2798,8 @@ Windows 로컬 실행(F-ENV-02, LEDGER-CLEAN-1): 시험·하니스는 바꾸지 
   기본 launch(headless shell)를 쓰는 나머지 class는 영향이 없다. Linux CI(`playwright install --with-deps chromium`)는 해당 없다.
   launch가 실패한 class는 시작한 Playwright를 멈추지 못하므로, 그 뒤 class들의 setUpClass가 모두
   "Playwright Sync API inside the asyncio loop"로 ERROR가 된다. 이 줄들은 첫 `spawn UNKNOWN`의 2차 결과다.
+  PreCase의 setUpClass(Playwright 시작·Chromium launch)를 물려받는 ActualLayout·EarlyInputSplit·HarnessSelfChecks의
+  setUpClass ERROR도 이 연쇄에서 나오며, 위 호출 차이와는 별개 원인이다.
 - LoadBudget의 기본 `hosted` 모드는 live gate·실스택이 필요하다(`KIN_PRE_LOAD_UNIT`, 지휘자 소유).
   스택 없는 로컬 실행에서는 그 한 case가 gate 거절로 실패하는 것이 정상이며, 진단만 필요하면
   `KIN_PRE_LOAD_MODE=route-diagnostic`을 준다(수용 증거가 아니다).
