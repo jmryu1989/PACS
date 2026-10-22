@@ -603,7 +603,7 @@ class Steps:
             index = next((i for i, (_, request) in enumerate(run.site.waiting)
                           if not self.is_held(request, holds)), None)
             if index is not None:
-                run.site.release(index)
+                self.release_in_turn(index, what)
                 continue
             state = self.ledger()
             waiting, flying = self.pending(state, holds)
@@ -621,6 +621,33 @@ class Steps:
                                      f"(held bodies {state['held']}, timers {state['timers'][:6]})")
             run.page.clock.run_for(step)
             self.virtual += step
+
+    def release_in_turn(self, index, what):
+        """Answers one waiting request, then waits in host time (the virtual clock stays where it is) until the page has
+        taken that answer - no fetch of its identity pending beyond those still waiting at the origin, and no answer body
+        being read - before `drive` may answer the next. Answers released back to back in one virtual instant were taken
+        in host I/O order instead: two session transports' finish() removed their abort listeners in either order on the
+        same page (S9U0A-STEP44-ABORT-SWAP, D1706). No comparison is relaxed for it; the release order is made fixed."""
+        run = self.run
+        identity = run.site.request_rows[run.site.waiting[index][1]]["key"][:3]
+        run.site.release(index)
+        # Its own bound (real host time): a phase's deadline stays drive()'s own check.
+        bound = time.monotonic() + self.HOST_S
+        while True:
+            run.delivery.pump()
+            try:
+                state = self.ledger()
+            except PlaywrightError:
+                state = None                          # a document is being replaced; its fetches went with it
+            if state is not None:
+                waiting = sum(run.site.request_rows[r]["key"][:3] == identity for _, r in run.site.waiting)
+                pending = sum(f["state"] == "pending" and request_key(f)[:3] == identity for f in state["fetches"])
+                if pending <= waiting and not any(f["body"] == "reading" for f in state["fetches"]):
+                    return
+            if time.monotonic() > bound:
+                raise AssertionError(f"PHASE {what}: the page did not take the answer to {identity[0]} {identity[1]} "
+                                     f"within {self.HOST_S:.0f} s of host time")
+            run.page.wait_for_timeout(5)
 
     def settled(self, holds=()):
         """Nothing waiting, in flight or held (asserted after every barrier)."""
@@ -2156,6 +2183,32 @@ class TraceOracle(PreCase):
         swapped=list(order);swapped[0],swapped[1]=swapped[1],swapped[0]
         self.assertTrue(sh.registration_comparison(order,swapped,(-1,-2))["difference"])
 
+    # S9U0A-STEP44-ABORT-SWAP (D1706): the hosted failure's class - two signals' abort listeners removed in the other
+    # order, each signal's own history unchanged - stays a registration difference with no allowed swap. The harness
+    # fixes the release order instead of the comparison forgiving it.
+    REMOVALS = """order => {
+      const made = {}, listeners = {};
+      for (const name of ['first', 'second']) {
+        made[name] = new AbortController();
+        listeners[name] = () => {};
+        made[name].signal.addEventListener('abort', listeners[name]);
+      }
+      for (const name of order) made[name].signal.removeEventListener('abort', listeners[name]);
+      return order;
+    }"""
+
+    def test_swapped_abort_listener_removals_on_two_signals_differ(self):
+        provenance = sh.Provenance({"statements": []}, [])
+        same, again, swapped = (sh.full_order(self.probe(self.REMOVALS, args=order)[1], provenance)
+                                for order in (["first", "second"], ["first", "second"], ["second", "first"]))
+        self.assertEqual([], sh.registration_comparison(same, again, (-1, -2))["difference"], "the same removals agree")
+        self.assertEqual([("remove", "abort")] * 2, [(row[0], row[2]) for row in swapped[-2:]], "two abort removals")
+        self.assertNotEqual(swapped[-2][1], swapped[-1][1], "on two signals")
+        result = sh.registration_comparison(same, swapped, (-1, -2))
+        self.assertEqual([], result["per_key_difference"], "each signal's own history is unchanged")
+        self.assertEqual([], result["allowed_swaps"], "no crossing of abort removals is allowed")
+        self.assertTrue(result["difference"], "swapped abort removals are a registration difference")
+
     def test_native_permission_objects_with_same_descriptor_keep_distinct_identity(self):
         body=r"""async chosen => {
           const values=[];
@@ -2233,6 +2286,41 @@ class HarnessSelfChecks(PreCase):
         self.assertEqual([1, 2], [row["occurrence"] for row in observed], "page ledger shares request occurrences")
         self.assertEqual([list(pair) for pair in canonical_query('b=&a=1&a=2')], observed[0]["canonicalQuery"])
         self.assertEqual(observed[0]["canonicalQuery"], observed[1]["canonicalQuery"])
+
+    def test_waiting_requests_are_answered_one_at_a_time_after_the_page_took_the_previous(self):
+        # S9U0A-STEP44-ABORT-SWAP (D1706): drive() answers the next waiting request only once the page has taken the
+        # previous answer and its body; answered back to back, the order the page takes them in is host I/O timing.
+        # The page notes, when each answer arrives, which bodies it has taken so far - observed in the page itself, so
+        # no driver round trip between two releases serialises them by accident. The page is busy for a while as each
+        # answer arrives, so an answer released back to back would arrive before the previous body was taken.
+        run = Run(self, Pages.current.layout("actual"), init_scripts=(sh.LEDGER_SCRIPT,))
+        try:
+            run.booted()
+            run.site.hold_all = True
+            steps = Steps(run)
+            run.page.evaluate("""() => {
+              window.__serialTaken = []; window.__serialArrived = [];
+              for (const i of [0, 1, 2])
+                fetch('/api/prefs?serial=' + i)
+                  .then(r => {
+                    window.__serialArrived.push([i, window.__serialTaken.slice()]);
+                    const end = performance.now() + 300;
+                    while (performance.now() < end) {}
+                    return r.text(); })
+                  .then(() => window.__serialTaken.push(i));
+            }""")
+            mine = lambda request: urlparse(request.url).query.startswith("serial=")  # noqa: E731
+            run.wait(lambda: sum(mine(q) for _, q in run.site.waiting) == 3, "three requests waiting")
+            steps.drive(lambda: run.page.evaluate("window.__serialTaken.length") == 3, "serial answers", 5000)
+            released = [int(row["query"].split("=")[1]) for row in run.site.ledger
+                        if row["query"].startswith("serial=") and "released_at" in row]
+            self.assertEqual([0, 1, 2], sorted(released), "three answers released")
+            self.assertEqual([[i, released[:k]] for k, i in enumerate(released)],
+                             run.page.evaluate("window.__serialArrived"),
+                             "each answer arrived after the page took every earlier one")
+            self.assertEqual(released, run.page.evaluate("window.__serialTaken"), "taken in release order")
+        finally:
+            run.close()
 
     def render_dispatch_counterexamples(self, event):
         body = TraceOracle.ORDER.replace("'click'", repr(event)).replace(
