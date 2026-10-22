@@ -76,6 +76,9 @@ jobs:
         timeout-minutes: 30
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/api-mutants-run --cwd . --tree api/src --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/contract_test.cjs --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --api --worktree --out tmp/emr-b-ci/api-mutants
+      - name: KIN-EMR-STATE-V4 semantic mutants V4-M01..M12 (checksum bypass, false absence, collision bucket, touched closure, selector barrier, WAL suffix adoption, pending work, witness anchor, check age, pinned/reachable reclamation, rollback export, entry-mode admission) and the codec rename-alias-format oracle control
+        timeout-minutes: 45
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/v4-mutants-run --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs --file tests/emr/b/checkpoint_v4_test.cjs --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --v4 --worktree --out tmp/emr-b-ci/v4-mutants
       - name: D961 pool, JIT guard and estimator controls (NI is commander-only)
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/pool-plan --cwd . --tree api/src/emr-runtime --file api/src/prisma.service.ts --tree tests/emr/b -- node --test tests/emr/b/client_pool_test.cjs
@@ -111,22 +114,23 @@ jobs:
           KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.sha }}
           KIN_TEST_RESOURCE_PREFIX: kin-emrbc-ci-
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/pg-cutpoints --cwd . --tree api/src/emr-runtime --file api/Dockerfile --file api/start-production.sh --file tests/emr/b/startup_fixture.cjs --file tests/emr/b/startup_pg_test.cjs --file tests/production_image_test.py -- python3 -B -m unittest -v tests.production_image_test.StateServiceCutpointTests
-      - name: A03 reconstructed legacy images (fixed sources a86ecf1 = IMG-B1 source, b9690cc = IMG-S5 source; labelled reconstructed, never the historic digest)
-        timeout-minutes: 30
+      - name: A03 reconstructed legacy images (fixed sources a86ecf1 = IMG-B1 source, b9690cc = IMG-S5 source, 5949aa5 = this lane's unchanged v3 reader before the v4 format; labelled reconstructed, never the historic digest)
+        timeout-minutes: 45
         run: |
           set -eu
-          for sha in a86ecf1655c8c587012cef5fd16e233e121ae7dc b9690cc9790d5360829cee861462aac14f5ab0c7; do
+          for sha in a86ecf1655c8c587012cef5fd16e233e121ae7dc b9690cc9790d5360829cee861462aac14f5ab0c7 5949aa5fce01fe3a413bf0846fe85c7e17731ce8; do
             git cat-file -e "$sha^{commit}" 2>/dev/null || git fetch --depth=1 origin "$sha"
             rm -rf "tmp/emr-b-ci/legacy-src-$sha" && mkdir -p "tmp/emr-b-ci/legacy-src-$sha"
             git archive --format=tar "$sha" api | tar -x -C "tmp/emr-b-ci/legacy-src-$sha"
             docker build --target production --build-arg "VCS_REF=$sha" -t "kin-legacy-recon:${sha:0:12}" "tmp/emr-b-ci/legacy-src-$sha/api"
           done
-      - name: A03 old-reader cells (D1656-T01/T02/T05) - the former owner image over a private clone of a v3 pair refuses before any mutation; legacy start script has no service entry; the former owner in the client shape gets no state
-        timeout-minutes: 30
+      - name: A03 old-reader cells (D1656-T01/T02/T05; V4-T09 old readers and the reviewed image's other entry mode over v4 clones, damaged v4 variants, the positive v4 sibling) - the former owner image over a private clone of a v3/v4 pair refuses before any mutation; legacy start script has no service entry; the former owner in the client shape gets no state
+        timeout-minutes: 45
         env:
           KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.sha }}
           KIN_TEST_LEGACY_B1_IMAGE: kin-legacy-recon:a86ecf1655c8
           KIN_TEST_LEGACY_PRE_EMR_IMAGE: kin-legacy-recon:b9690cc9790d
+          KIN_TEST_LEGACY_V3_IMAGE: kin-legacy-recon:5949aa5fce01
           KIN_TEST_RESOURCE_PREFIX: kin-emrbc-ci-
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/legacy-cells --cwd . --tree api/src/emr-runtime --file api/Dockerfile --file api/start-production.sh --file tests/production_image_test.py --file tests/emr/legacy_readers.json -- python3 -B -m unittest -v tests.production_image_test.LegacyImageTests
       - name: D931 lifetime fence (EMR-B2c) - one owner per state directory, second owner refused, death releases to the successor, peer CAS, crash cutpoints, flock cost

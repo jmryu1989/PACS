@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { executeExternal, inspectExternal, inspectFingerprint, WriterContext } from './external-writer';
+import { executeExternal, admitExternal, inspectFingerprint, WriterContext } from './external-writer';
 import { lockFile } from './file-lock';
 
 export interface WriterRequest { directory: string; operation: string; value?: any; context?: WriterContext }
@@ -24,8 +24,9 @@ export class StateCoordinator {
     if (!directory || !path.isAbsolute(directory) || directory.includes('\0')) this.refuse();
     this.directory = path.resolve(directory);
     this.context.format = options.format ?? 3;
-    // One validating admission of the directory's content; the re-checks across the fence compare bytes identities.
-    inspectExternal(this.directory, undefined, this.context.format);
+    // One validating admission of the directory's content (no materialization of the history: a v4 owner's startup
+    // reads its anchor and pending work only); the re-checks across the fence compare bytes identities.
+    admitExternal(this.directory, undefined, this.context.format);
     const inspected = { fingerprint: inspectFingerprint(this.directory) };
     const root = fs.lstatSync(this.directory);
     this.rootIdentity = `${root.dev}:${root.ino}`;

@@ -205,7 +205,7 @@ def check(root, declaration_path):
     wire = declaration["b2c"]
     wire_keys = {"status", "option", "protocol", "local_wire_cases", "local_wire_file", "local_service_cases", "local_service_file",
                  "local_api_cases", "local_api_file", "local_api_selection", "acceptance_note", "requirements", "terminal_mutants", "identity_mutants",
-                 "api_mutants"}
+                 "api_mutants", "v4_mutants"}
     if not isinstance(wire, dict) or set(wire) != wire_keys or wire.get("option") != "c":
         return ["b2c-declaration-invalid"]
     # EMR-B2 (c) API-side component cases live in the B1 contract file under their own selection variable, so the B1

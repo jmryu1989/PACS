@@ -746,12 +746,17 @@ class LegacyImageTests(unittest.TestCase):
     # own state) is compared before/after. Historical-behaviour diagnostics (test_06/test_07) are retained as
     # counterexamples, not as reject-before-mutation acceptance.
 
-    def compose_create(self, suffix, image_id, state_volume, *, restart="no", command=("state-serve-v3",)):
+    def shape_of(self, shape):
+        """The launch shape a cell binds: the v3 pair's (network, IPC volumes, database) by default, or the v4 pair's."""
+        return shape or {"network": self.network, "api_ipc": self.volumes["api-ipc"], "retention_ipc": self.volumes["retention-ipc"], "db": self.db}
+
+    def compose_create(self, suffix, image_id, state_volume, *, restart="no", command=("state-serve-v3",), shape=None):
         """The emr-state launch shape of docker-compose.yml, created by Docker Compose and never started here: the
         two-token entrypoint + command the launch admission binds (a CLI --entrypoint cannot express it), UID 1000 with
         the IPC groups, three RW volumes, the compose role label, the reader credential and the instance pair."""
         import shutil
         import tempfile
+        shape = self.shape_of(shape)
         token = uuid.uuid4().hex
         name = "kin-rehearsal-" + token[:16] + "-" + suffix
         project = "kinrehearsal" + token[:12]
@@ -760,42 +765,48 @@ class LegacyImageTests(unittest.TestCase):
         self.addCleanup(ops.remove_owned_if_present, "container", name, token)
         service = {"image": self.tags.get(image_id, image_id), "container_name": name, "user": "1000:1000", "group_add": ["2001", "2002"],
                    "entrypoint": ["sh", "/app/start-production.sh"], "command": list(command), "restart": restart,
-                   "stop_grace_period": "20s", "networks": [self.network], "labels": {"kin.ops.run": token},
+                   "stop_grace_period": "20s", "networks": [shape["network"]], "labels": {"kin.ops.run": token},
                    "environment": {"DATABASE_URL": "postgresql://kin_emr_reader@db:5432/kin", "KIN_EMR_STATE_DIR": ops.EMR_STATE, "KIN_EMR_INSTANCE_ID": self.INSTANCE,
                                    "KIN_EMR_API_SOCKET": API_IPC + "/writer.sock", "KIN_EMR_RETENTION_SOCKET": RETENTION_IPC + "/writer.sock"},
-                   "volumes": [state_volume + ":" + ops.EMR_STATE, self.volumes["api-ipc"] + ":" + API_IPC,
-                               self.volumes["retention-ipc"] + ":" + RETENTION_IPC]}
-        spec = {"services": {"emr-state": service}, "networks": {self.network: {"external": True}},
-                "volumes": {state_volume: {"external": True}, self.volumes["api-ipc"]: {"external": True}, self.volumes["retention-ipc"]: {"external": True}}}
+                   "volumes": [state_volume + ":" + ops.EMR_STATE, shape["api_ipc"] + ":" + API_IPC, shape["retention_ipc"] + ":" + RETENTION_IPC]}
+        spec = {"services": {"emr-state": service}, "networks": {shape["network"]: {"external": True}},
+                "volumes": {state_volume: {"external": True}, shape["api_ipc"]: {"external": True}, shape["retention_ipc"]: {"external": True}}}
         (folder / "compose.yaml").write_text(json.dumps(spec), encoding="utf-8")
         ops.run(["docker", "compose", "--project-directory", str(folder), "--project-name", project, "-f", str(folder / "compose.yaml"),
                  "create", "--no-build", "--pull", "never", "emr-state"], timeout=180)
         return name
 
-    def admission(self, name, *, existing=False):
+    def admission(self, name, *, existing=False, state_format=3, shape=None):
         """The launch consumer's checks over a created container, exactly as state_start_admission applies them: the
-        reviewed release (this checkout's HEAD, this candidate image) and the inventory of every container holding the
-        same state volume. Raises RuntimeError with the consumer's refusal; returns the observation on admission."""
+        reviewed release (this checkout's HEAD, this candidate image, the plan's stored format) and the inventory of
+        every container holding the same state volume. Raises RuntimeError with the consumer's refusal; returns the
+        observation on admission."""
         import ops_deploy_preflight as preflight
+        shape = self.shape_of(shape)
         container = json.loads(ops.text(["docker", "inspect", name]))[0]
         release = {"sha": ops.text(["git", "rev-parse", "HEAD"]), "images": {"api": self.image_id}}
         reviewed = json.loads(ops.text(["docker", "image", "inspect", self.image_id]))[0]
         state_volume = next(m["Name"] for m in container["Mounts"] if m.get("Destination") == ops.EMR_STATE)
         preflight.check_state_service(container, release=release, image=reviewed, state_volume=state_volume,
-                                      api_ipc_volume=self.volumes["api-ipc"], retention_ipc_volume=self.volumes["retention-ipc"],
-                                      instance_id=self.INSTANCE, database_host="db")
+                                      api_ipc_volume=shape["api_ipc"], retention_ipc_volume=shape["retention_ipc"],
+                                      instance_id=self.INSTANCE, database_host="db", state_format=state_format)
         names = ops.text(["docker", "container", "ls", "--all", "--filter", "volume=" + state_volume, "--format", "{{.Names}}"]).splitlines()
         owners = [json.loads(ops.text(["docker", "inspect", item]))[0] for item in names if item]
         preflight.check_state_owners(owners, state_volume, name if existing else "")
         return container
 
-    def inventory(self, state_volume):
+    @classmethod
+    def psql_in(cls, db, sql):
+        return ops.text(["docker", "exec", db, "psql", "-X", "-U", "postgres", "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql])
+
+    def inventory(self, state_volume, shape=None):
         """Everything the boundary must leave unchanged: every file's digest and every entry (files, directories,
         sockets) of the state volume and of both IPC volumes, and the ledger row counts."""
+        shape = self.shape_of(shape)
         return {"state_files": _hash_volume(self.image_id, state_volume), "state_entries": _volume_entries(self.image_id, state_volume),
-                "api_ipc": _volume_entries(self.image_id, self.volumes["api-ipc"]),
-                "retention_ipc": _volume_entries(self.image_id, self.volumes["retention-ipc"]),
-                "ledger": self.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql("SELECT count(*) FROM emr_access.commit_marker")}
+                "api_ipc": _volume_entries(self.image_id, shape["api_ipc"]),
+                "retention_ipc": _volume_entries(self.image_id, shape["retention_ipc"]),
+                "ledger": self.psql_in(shape["db"], "SELECT count(*) FROM emr_access.access_entry") + "/" + self.psql_in(shape["db"], "SELECT count(*) FROM emr_access.commit_marker")}
 
     def never_started(self, name):
         state = json.loads(ops.text(["docker", "inspect", name]))[0]["State"]
@@ -803,26 +814,43 @@ class LegacyImageTests(unittest.TestCase):
                          "the refused container must never have executed: " + json.dumps(state))
         return state
 
-    def refused_before_execution(self, label, image, cell):
-        clone = self.clone()
-        before = self.inventory(clone)
-        self.assertEqual(before["state_files"], self.pair_hashes, "the private clone starts byte-identical to the v3 pair")
-        name = self.compose_create(label, image["Id"], clone)
+    def refused_before_execution(self, label, image, cell, *, clone=None, pair_hashes=None, shape=None, state_format=3):
+        clone = clone or self.clone()
+        before = self.inventory(clone, shape)
+        self.assertEqual(before["state_files"], pair_hashes or self.pair_hashes, "the private clone starts byte-identical to the pair")
+        command = ("state-serve-v4",) if state_format == 4 else ("state-serve-v3",)
+        name = self.compose_create(label, image["Id"], clone, command=command, shape=shape)
         with self.assertRaises(RuntimeError) as refused:
-            self.admission(name)
+            self.admission(name, state_format=state_format, shape=shape)
         self.assertEqual(str(refused.exception), "State service image differs from the reviewed artifact",
                          "the supported launch refuses the former image by its immutable identity, before any other difference")
         state = self.never_started(name)
-        after = self.inventory(clone)
+        after = self.inventory(clone, shape)
         self.assertEqual(after, before, "a refused launch changes nothing: no file, no owner registry, no socket, no ledger row")
-        # Recreate under the same shape with the reviewed image: the same consumer admits it (the sibling is started in test_03).
+        # Recreate under the same shape with the reviewed image: the same consumer admits it (the sibling is started in test_03/test_10).
         ops.run(["docker", "rm", name])
-        sibling = self.compose_create(label + "-recreated", self.image_id, clone)
-        self.admission(sibling)
+        sibling = self.compose_create(label + "-recreated", self.image_id, clone, command=command, shape=shape)
+        self.admission(sibling, state_format=state_format, shape=shape)
         self.never_started(sibling)
-        self.assertEqual(self.inventory(clone), before)
-        print(json.dumps({cell: {"image": image["Id"], "labels": image["Config"].get("Labels"), "reconstructed": True,
+        self.assertEqual(self.inventory(clone, shape), before)
+        print(json.dumps({cell: {"image": image["Id"], "labels": image["Config"].get("Labels"), "reconstructed": True, "state_format": state_format,
                                  "refusal": str(refused.exception), "container_state": state, "recreated_reviewed_sibling_admitted": True}}), flush=True)
+
+    def start_until_exit(self, name, timeout=120):
+        """Start a created container and observe it for at most `timeout` seconds: (exit code or None if still running -
+        then stopped -, its logs). Nothing is inferred from a hang."""
+        ops.run(["docker", "start", name])
+        deadline = time.monotonic() + timeout
+        code = None
+        while time.monotonic() < deadline:
+            state = json.loads(ops.text(["docker", "inspect", name]))[0]["State"]
+            if not state["Running"]:
+                code = state["ExitCode"]
+                break
+            time.sleep(1)
+        if code is None:
+            ops.run(["docker", "stop", "--time", "10", name], check=False, timeout=60)
+        return code, ops.service_logs(name)
 
     def test_01_supported_launch_refuses_the_former_owner_image_before_execution(self):
         """D1656-T01 (acceptance): the former API owner (v1+v2 reader) in the exact emr-state launch shape over a private
@@ -1074,6 +1102,257 @@ class LegacyImageTests(unittest.TestCase):
         self.assertIn("reviewed", str(refused.exception))
         print(json.dumps({"D1656-T05": {"exit": code, "running_after_60s": code is None, "preflight_refusal": str(refused.exception),
                                         "line": [line for line in logs.splitlines() if "湲곕룞 ?ㅽ뙣" in line or "EMR" in line][:3]}}), flush=True)
+
+    # ----- V4-T09 (order section 6): the D1656 matrix over KIN-EMR-STATE-V4 pairs --------------------------------------
+    # A disposable v4 pair written by the reviewed image's own `state-serve-v4` over its own disposable database; every
+    # cell runs over a private clone of that volume. Old readers and the reviewed image's other entry mode are refused
+    # before any byte of the clone changes; damaged v4 variants are refused without repair; the positive v4 sibling
+    # enters the same checked path and serves. Reconstructed images stay labelled reconstructed.
+
+    @classmethod
+    def v4_shape(cls):
+        if getattr(cls, "_v4", None):
+            return cls._v4
+        token = uuid.uuid4().hex
+        network = "kin-rehearsal-" + token[:16] + "-v4net"
+        cls.addClassCleanup(ops.run, ["docker", "network", "rm", network], check=False)
+        ops.run(["docker", "network", "create", "--internal", "--label", "kin.ops.run=" + token, network])
+        db = cls.container("v4-db", [
+            "--network", network, "--network-alias", "db", "--tmpfs", "/var/lib/postgresql/data",
+            "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+            "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
+        deadline = time.monotonic() + 60
+        while ops.run(["docker", "exec", db, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], check=False).returncode:
+            if time.monotonic() > deadline:
+                raise RuntimeError("Disposable PostgreSQL (v4) did not start")
+            time.sleep(0.5)
+        ops.run(["docker", "exec", "-u", "postgres", db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
+        provisioned = subprocess.run(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex,
+                                      "-e", "KIN_EMR_READER_PASSWORD=" + uuid.uuid4().hex, db, "psql", "-X", "-U", "postgres", "-d", "kin"],
+                                     input=emr_compose.PROVISION_SQL.encode(), capture_output=True, timeout=120)
+        if provisioned.returncode:
+            raise RuntimeError("EMR provisioning of the disposable v4 database failed")
+        migrated = subprocess.run(["docker", "run", "--rm", "--network", "container:" + db, "-e", "DATABASE_URL=" + INSTALLER_URL,
+                                   cls.image_id, "sh", "/app/start-production.sh", "migrate"], capture_output=True, timeout=300)
+        if migrated.returncode:
+            raise RuntimeError("Migration (v4 pair) failed: " + migrated.stdout.decode(errors="replace")[-800:])
+        volumes = {}
+        for suffix in ("state", "api-ipc", "retention-ipc"):
+            vtoken = uuid.uuid4().hex
+            name = "kin-rehearsal-" + vtoken[:16] + "-v4-" + suffix
+            cls.addClassCleanup(ops.remove_owned_if_present, "volume", name, vtoken)
+            ops.run(["docker", "volume", "create", "--label", "kin.ops.run=" + vtoken, name])
+            volumes[suffix] = name
+        service = cls.container("v4-state-service", [
+            "--network", network, "--user", "1000:1000", "--group-add", "2001", "--group-add", "2002", "--stop-timeout", "20",
+            "-e", "DATABASE_URL=postgresql://kin_emr_reader@db:5432/kin", "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE, "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE,
+            "-e", "KIN_EMR_API_SOCKET=" + API_IPC + "/writer.sock", "-e", "KIN_EMR_RETENTION_SOCKET=" + RETENTION_IPC + "/writer.sock",
+            "--mount", "type=volume,source=" + volumes["state"] + ",target=" + ops.EMR_STATE,
+            "--mount", "type=volume,source=" + volumes["api-ipc"] + ",target=" + API_IPC,
+            "--mount", "type=volume,source=" + volumes["retention-ipc"] + ",target=" + RETENTION_IPC,
+            "--entrypoint", "sh", cls.image_id, "/app/start-production.sh", "state-serve-v4"])
+        try:
+            ops.wait_state_service(service, 0, timeout=120)
+        except RuntimeError as failure:
+            raise RuntimeError(str(failure) + "; v4 service log tail: " + ops.service_logs(service)[-1500:])
+        import ops_emr_probe as probe
+        event = probe.probe_event({"study": "SYNTHETIC-v4-cells", "event_id": str(uuid.uuid4()), "institution": "synthetic-institution"})
+        appended = subprocess.run(["docker", "run", "--rm", "--network", network, "--user", "1001:1001", "--group-add", "2001", "--read-only",
+                                   "-e", "DATABASE_URL=postgresql://kin_runtime@db:5432/kin", "-e", "KIN_EMR_INSTANCE_ID=" + cls.INSTANCE, "-e", "KIN_EMR_STATE_SOCKET=" + API_IPC + "/writer.sock",
+                                   "--mount", "type=volume,source=" + volumes["api-ipc"] + ",target=" + API_IPC + ",readonly",
+                                   "--entrypoint", "node", cls.image_id, "-e", probe.PROBE_SCRIPT, "append", json.dumps({"event": event})],
+                                  capture_output=True, timeout=180)
+        if appended.returncode:
+            raise RuntimeError("Synthetic v4 append failed: " + appended.stdout.decode(errors="replace")[-800:] + appended.stderr.decode(errors="replace")[-800:])
+        ops.run(["docker", "stop", "--time", "20", service], timeout=120)
+        ops.state_service_closed(service)
+        hashes = _hash_volume(cls.image_id, volumes["state"])
+        if "seal/settlement.json" not in hashes or not any(name.startswith("seal/v4/roots/") for name in hashes) or not any(name.startswith("seal/v4/pages/") for name in hashes):
+            raise RuntimeError("the v4 pair volume does not carry a v4 selector, root and pages: " + json.dumps(sorted(hashes)))
+        cls._v4 = {"network": network, "db": db, "api_ipc": volumes["api-ipc"], "retention_ipc": volumes["retention-ipc"], "state": volumes["state"],
+                   "hashes": hashes, "counts": cls.psql_in(db, "SELECT count(*) FROM emr_access.access_entry") + "/" + cls.psql_in(db, "SELECT count(*) FROM emr_access.commit_marker")}
+        print(json.dumps({"V4-T09-pair": {"image": cls.image_id, "entry": "state-serve-v4", "pair_files": sorted(hashes), "ledger": cls._v4["counts"]}}), flush=True)
+        return cls._v4
+
+    def v4_clone(self):
+        v4 = self.v4_shape()
+        return self.clone(v4["state"], self.fresh_volume("v4-clone"))
+
+    def damage(self, volume, script):
+        """A deliberate change of a clone's bytes by the pair's own identity (UID 1000) through the reviewed image's
+        node, before any owner sees it; returns the inventory after the damage."""
+        v4 = self.v4_shape()
+        ops.run(["docker", "run", "--rm", "--network", "none", "--user", "1000:1000", "-e", "KIN_EMR_STATE_DIR=" + ops.EMR_STATE,
+                 "--mount", "type=volume,source=" + volume + ",target=" + ops.EMR_STATE, "--entrypoint", "node", self.image_id, "-e", script])
+        return self.inventory(volume, v4)
+
+    def test_10_v4_reviewed_sibling_is_admitted_serves_and_resumes_over_a_v4_clone(self):
+        """V4-T09 positive sibling: the reviewed image in the v4 entry mode, in the launch shape over a private v4
+        clone, is admitted by the launch consumer (plan state_format 4), serves (EMR_STATE_READY), closes completely
+        writing only its own pair files, and is admitted again for resume."""
+        v4 = self.v4_shape()
+        clone = self.v4_clone()
+        before = self.inventory(clone, v4)
+        self.assertEqual(before["state_files"], v4["hashes"], "the private clone starts byte-identical to the v4 pair")
+        name = self.compose_create("v4-reviewed", self.image_id, clone, command=("state-serve-v4",), shape=v4)
+        admitted = self.admission(name, state_format=4, shape=v4)
+        self.never_started(name)
+        self.assertEqual(self.inventory(clone, v4), before, "admission itself changes nothing")
+        ops.run(["docker", "start", name])
+        try:
+            ops.wait_state_service(name, 0, timeout=120)
+        except RuntimeError as failure:
+            self.fail(str(failure) + "; service log tail: " + ops.service_logs(name)[-1500:])
+        ops.run(["docker", "stop", "--time", "20", name], timeout=120)
+        ops.state_service_closed(name)
+        after = self.inventory(clone, v4)
+        self.assertEqual(_hash_volume(self.image_id, v4["state"]), v4["hashes"], "the source v4 pair volume is never mounted")
+        self.assertEqual(after["ledger"], before["ledger"], "recovery of an already sealed v4 pair appends no ledger row")
+        changed = self.changed(before["state_files"], after["state_files"])
+        self.assertTrue(all(item.startswith("seal/") or item.startswith("journal/") for item in changed), "the reviewed v4 service writes only its own pair files: " + json.dumps(changed))
+        self.admission(name, existing=True, state_format=4, shape=v4)
+        print(json.dumps({"V4-T09-reviewed-v4-sibling": {"image": self.image_id, "admitted_entry": [admitted["Path"], *admitted["Args"]], "served": True, "files_written_by_recovery": changed}}), flush=True)
+
+    def test_11_the_other_entry_mode_refuses_the_pair_without_mutation(self):
+        """V4-T09: the reviewed image's v3 mode over a v4 clone and its v4 mode over a v3 clone both pass the shape
+        admission (the shape is right) and then refuse inside the compiled service before any journal, lock or
+        mutation: the process exits without EMR_STATE_READY and the complete inventory is unchanged."""
+        v4 = self.v4_shape()
+        results = {}
+        for label, clone, shape, command, state_format, hashes in (
+                ("v3-mode-over-v4", self.v4_clone(), v4, ("state-serve-v3",), 3, v4["hashes"]),
+                ("v4-mode-over-v3", self.clone(), None, ("state-serve-v4",), 4, self.pair_hashes)):
+            before = self.inventory(clone, shape)
+            self.assertEqual(before["state_files"], hashes)
+            name = self.compose_create(label, self.image_id, clone, command=command, shape=shape)
+            self.admission(name, state_format=state_format, shape=shape)
+            code, logs = self.start_until_exit(name)
+            self.assertIsNotNone(code, label + ": the other entry mode must exit, not serve: " + logs[-800:])
+            self.assertNotEqual(code, 0, label + ": " + logs[-800:])
+            self.assertNotIn("EMR_STATE_READY", logs, label + ": no readiness over the other format")
+            self.assertEqual(self.inventory(clone, shape), before, label + ": the refusal changes no file, entry, socket or ledger row")
+            results[label] = {"exit": code, "refusal": [line for line in logs.splitlines() if "Seal" in line or "EMR_STATE" in line][:3]}
+        print(json.dumps({"V4-T09-other-entry-mode": results}), flush=True)
+
+    def test_12_former_owner_and_pre_emr_images_are_refused_over_a_v4_clone_before_execution(self):
+        """V4-T09 old readers: the former API owner (B1 reader) and the pre-EMR image in the v4 launch shape over a
+        private v4 clone are refused by the launch consumer's identity binding before execution; nothing changes."""
+        v4 = self.v4_shape()
+        self.refused_before_execution("legacy-owner-v4", self.legacy, "V4-T09-former-owner", clone=self.v4_clone(), pair_hashes=v4["hashes"], shape=v4, state_format=4)
+        if self.pre_emr:
+            self.refused_before_execution("pre-emr-owner-v4", self.pre_emr, "V4-T09-pre-emr", clone=self.v4_clone(), pair_hashes=v4["hashes"], shape=v4, state_format=4)
+        # The former owner's own recovery entry over a v4 clone (diagnostic, the known counterexample path: raw node,
+        # outside the supported boundary) refuses the format; what it writes before refusing is recorded, never relied on.
+        clone = self.v4_clone()
+        before = _hash_volume(self.image_id, clone)
+        code, logs = self._legacy_node(clone, self.LEGACY_RECOVERY, db=self.legacy_database())
+        after = _hash_volume(self.image_id, clone)
+        self.assertEqual(code, 1, logs[-1500:])
+        self.assertIn('"refused"', logs)
+        self.assertEqual(_hash_volume(self.image_id, v4["state"]), v4["hashes"], "the source v4 pair volume is never mounted")
+        print(json.dumps({"V4-T09-former-owner-raw-recovery-diagnostic": {"counterexample": True, "exit": code,
+                                                                          "added_files_before_refusal": sorted(name for name in after if name not in before),
+                                                                          "changed_pair_files": sorted(name for name in before if before[name] != after.get(name)),
+                                                                          "result": [line for line in logs.splitlines() if line.startswith("KIN_RESULT")]}}), flush=True)
+
+    V4_SELECTED_ROOT = ("const fs=require('fs'),p=require('path');const V4=require('/app/dist/emr-runtime/checkpoint-v4');"
+                        "const dir=process.env.KIN_EMR_STATE_DIR;const sel=V4.readSelector(p.join(dir,'seal','settlement.json'));")
+
+    def test_13_damaged_v4_variants_refuse_without_repair_and_the_healthy_sibling_serves(self):
+        """V4-T09 damaged variants over private v4 clones under the reviewed v4 entry: a torn selector, the selected
+        root missing, and a lone WAL prepare naming a missing root are refused inside the service before any file,
+        entry or ledger row changes (no repair, no truncation, no initialization); a torn WAL suffix (an incomplete
+        last record) is the owner's own recovery: quarantined as exact evidence, the segment shortened to its complete
+        prefix, and the service serves; the untouched sibling serves through the same checked path."""
+        v4 = self.v4_shape()
+        refusing = {
+            "torn-selector": self.V4_SELECTED_ROOT + "const f=p.join(dir,'seal','settlement.json');fs.truncateSync(f,Math.floor(fs.statSync(f).size/2));",
+            "missing-root": self.V4_SELECTED_ROOT + "fs.unlinkSync(p.join(dir,'seal','v4','roots',sel.body.rootSha256+'.json'));",
+            "lone-prepare-missing-root": self.V4_SELECTED_ROOT + "const seg=new V4.WalSegment(p.join(dir,'seal','v4'),sel.body.wal.segment);"
+                "seg.append({format:'KIN-EMR-WAL',version:4,segment:sel.body.wal.segment,lsn:String(Number(sel.body.wal.lsn)+1),previousSha256:sel.body.wal.previousSha256,"
+                "type:'prepare',previousRoot:sel.body.rootSha256,nextRoot:'f'.repeat(64),transitionSha256:'e'.repeat(64),tailBefore:null,tailAfter:null});seg.close();",
+        }
+        results = {}
+        for label, script in refusing.items():
+            clone = self.v4_clone()
+            damaged = self.damage(clone, script)
+            self.assertNotEqual(damaged["state_files"], v4["hashes"], label + ": the variant differs from the pair")
+            name = self.compose_create("v4-" + label, self.image_id, clone, command=("state-serve-v4",), shape=v4)
+            self.admission(name, state_format=4, shape=v4)
+            code, logs = self.start_until_exit(name)
+            self.assertIsNotNone(code, label + ": the owner must refuse, not serve: " + logs[-800:])
+            self.assertNotEqual(code, 0, label + ": " + logs[-800:])
+            self.assertNotIn("EMR_STATE_READY", logs, label + ": no readiness over a damaged v4 variant")
+            self.assertEqual(self.inventory(clone, v4), damaged, label + ": the refusal repairs, truncates, initializes or writes nothing")
+            results[label] = {"exit": code, "refusal": [line for line in logs.splitlines() if "Seal" in line or "EMR_STATE" in line][:3]}
+        # The owner's own recovery of a torn (incomplete) last WAL record: evidence kept, prefix served.
+        clone = self.v4_clone()
+        damaged = self.damage(clone, self.V4_SELECTED_ROOT + "fs.appendFileSync(p.join(dir,'seal','v4','wal',sel.body.wal.segment+'.jsonl'),'{\"body\":{\"torn\":tru');")
+        segment = next(name for name in damaged["state_files"] if name.startswith("seal/v4/wal/") and name.endswith(".jsonl"))
+        self.assertNotEqual(damaged["state_files"][segment], v4["hashes"][segment], "the torn suffix changed the segment")
+        name = self.compose_create("v4-torn-wal", self.image_id, clone, command=("state-serve-v4",), shape=v4)
+        self.admission(name, state_format=4, shape=v4)
+        ops.run(["docker", "start", name])
+        try:
+            ops.wait_state_service(name, 0, timeout=120)
+        except RuntimeError as failure:
+            self.fail("torn-wal-suffix: " + str(failure) + "; service log tail: " + ops.service_logs(name)[-1500:])
+        ops.run(["docker", "stop", "--time", "20", name], timeout=120)
+        ops.state_service_closed(name)
+        recovered = self.inventory(clone, v4)
+        self.assertEqual(recovered["state_files"][segment], v4["hashes"][segment], "the segment is shortened to its complete prefix")
+        quarantine = sorted(item for item in recovered["state_files"] if item.startswith("seal/v4/quarantine/"))
+        self.assertTrue(quarantine, "the torn bytes are kept as exact evidence")
+        self.assertEqual(recovered["ledger"], damaged["ledger"])
+        results["torn-wal-suffix"] = {"served": True, "quarantine": quarantine, "changed": self.changed(damaged["state_files"], recovered["state_files"])}
+        # The healthy sibling through the same path.
+        clone = self.v4_clone()
+        name = self.compose_create("v4-healthy-sibling", self.image_id, clone, command=("state-serve-v4",), shape=v4)
+        self.admission(name, state_format=4, shape=v4)
+        ops.run(["docker", "start", name])
+        ops.wait_state_service(name, 0, timeout=120)
+        ops.run(["docker", "stop", "--time", "20", name], timeout=120)
+        ops.state_service_closed(name)
+        results["healthy-sibling"] = {"served": True}
+        self.assertEqual(_hash_volume(self.image_id, v4["state"]), v4["hashes"], "the source v4 pair volume is never mounted")
+        print(json.dumps({"V4-T09-damaged-variants": results}), flush=True)
+
+    def test_14_this_lanes_unchanged_v3_reader_over_v4_and_v3_clones(self):
+        """V4-T09: the lane's own v3 reader compiled before the v4 format (5949aa5, KIN_TEST_LEGACY_V3_IMAGE; never a
+        deployed artifact) is refused by the supported launch boundary over a v4 clone by identity before execution;
+        outside that boundary (diagnostic) its v3 entry refuses a v4 clone without readiness, and serves a v3 clone."""
+        reference = os.environ.get("KIN_TEST_LEGACY_V3_IMAGE")
+        if not reference:
+            self.skipTest("KIN_TEST_LEGACY_V3_IMAGE not given")
+        image = json.loads(ops.text(["docker", "image", "inspect", reference]))[0]
+        self.tags[image["Id"]] = reference
+        v4 = self.v4_shape()
+        self.refused_before_execution("wip-v3-reader-v4", image, "V4-T09-wip-v3-reader", clone=self.v4_clone(), pair_hashes=v4["hashes"], shape=v4, state_format=4)
+        results = {"revision": (image["Config"].get("Labels") or {}).get("org.opencontainers.image.revision"), "reconstructed": True, "deployed": False}
+        clone = self.v4_clone()
+        before = self.inventory(clone, v4)
+        name = self.compose_create("wip-v3-over-v4", image["Id"], clone, command=("state-serve-v3",), shape=v4)
+        code, logs = self.start_until_exit(name)
+        after = self.inventory(clone, v4)
+        self.assertIsNotNone(code, "the v3 reader must exit over a v4 clone: " + logs[-800:])
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("EMR_STATE_READY", logs)
+        results["v3-reader-over-v4-diagnostic"] = {"exit": code, "changed": self.changed(before["state_files"], after["state_files"]),
+                                                    "entries_changed": after["state_entries"] != before["state_entries"], "ledger_changed": after["ledger"] != before["ledger"],
+                                                    "refusal": [line for line in logs.splitlines() if "Seal" in line or "EMR_STATE" in line][:3]}
+        clone = self.clone()
+        name = self.compose_create("wip-v3-over-v3", image["Id"], clone, command=("state-serve-v3",))
+        ops.run(["docker", "start", name])
+        try:
+            ops.wait_state_service(name, 0, timeout=120)
+        except RuntimeError as failure:
+            self.fail("the v3 reader over its own format: " + str(failure) + "; log tail: " + ops.service_logs(name)[-1500:])
+        ops.run(["docker", "stop", "--time", "20", name], timeout=120)
+        ops.state_service_closed(name)
+        results["v3-reader-over-v3-positive"] = {"served": True}
+        self.assertEqual(_hash_volume(self.image_id, self.volumes["state"]), self.pair_hashes)
+        self.assertEqual(_hash_volume(self.image_id, v4["state"]), v4["hashes"])
+        print(json.dumps({"V4-T09-wip-v3-reader": results}), flush=True)
 
 
 if __name__ == "__main__":

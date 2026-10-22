@@ -1946,6 +1946,30 @@ class RetentionPurposeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ops.retirement("lineage-1", self.evidence(no_restorable_copy_remains={"copies": None}))
 
+    def test_d2_v4_set_copy_manifest_binds_the_v4_root_and_a_retained_v4_backup_keeps_retirement_false(self):
+        """V4-T11 (A10 over KIN-EMR-STATE-V4 copies): a captured v4 set's copy manifest binds its pair, format and the
+        v4 selector/root the capture carried; the same RETIRE-PREDICATE keeps retirement false while a restorable v4
+        copy remains, and a format change or a changed v4 root changes the pair digest (never silently the same copy)."""
+        v4 = self.daily_manifest()
+        v4["emr"]["format"] = 4
+        v4["emr"]["v4"] = {"selector_sha256": "c" * 64, "root_sha256": "d" * 64, "revision": "17"}
+        record = self.manifest_record(copy_id="COPY-V4", manifest=v4)
+        self.assertEqual(record["capture/restore lineage"]["state"]["format"], 4)
+        self.assertEqual(record["capture/restore lineage"]["state"]["lineage"], "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f")
+        self.assertEqual(record["capture/restore lineage"]["state"]["origin"], V3_ORIGIN)
+        self.assertEqual(record["capture/restore lineage"]["state"]["v4"], v4["emr"]["v4"], "the copy manifest carries the captured v4 root identity")
+        digest = record["DB+state pair digest"]["sha256"]
+        self.assertNotEqual(digest, self.manifest_record()["DB+state pair digest"]["sha256"], "a v4 capture is never the same pair digest as the v3 capture of the same lineage")
+        other_root = self.daily_manifest(); other_root["emr"]["format"] = 4; other_root["emr"]["v4"] = {**v4["emr"]["v4"], "root_sha256": "e" * 64}
+        self.assertNotEqual(self.manifest_record(copy_id="COPY-V4", manifest=other_root)["DB+state pair digest"]["sha256"], digest, "a different v4 root is a different pair digest")
+        retained = self.manifest_record(copy_id="COPY-V4-HELD", manifest=v4, restorable=True, hold={"basis": "rollback capture retained until the v4 handover is verified", "closure_evidence": None})
+        result = ops.retirement("3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f", self.evidence(copies=[retained]))
+        self.assertFalse(result["retire"], "a restorable v4 rollback capture keeps retirement false")
+        self.assertEqual(result["unmet"], ["no_restorable_copy_remains"])
+        self.assertIn("COPY-V4-HELD", result["why"]["no_restorable_copy_remains"])
+        closed = self.manifest_record(copy_id="COPY-V4-CLOSED", manifest=v4, restorable=False, disposition={"disposition": "retired after the verified handover", "verification": "receipt R9"})
+        self.assertTrue(ops.retirement("3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f", self.evidence(copies=[closed]))["retire"])
+
     def test_e_elapsed_time_or_silence_is_not_a_consumer_ending(self):
         for basis in ("timeout", "elapsed", "no-response", "silence", "Timeout", ""):
             with self.subTest(basis=basis):

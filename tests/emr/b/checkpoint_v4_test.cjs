@@ -157,6 +157,49 @@ test('V4-T02 copy-on-write B+ tree: membership, verified absence, ranges, splits
   w2.close(); writer.close(); store.close();
 });
 
+test('V4-T02 the bounded resumable walk visits every member and every page exactly once; copy-on-write reports the pages a new root drops', { skip: !only('V4-T02') }, t => {
+  const dir = scratch(t), store = new V4.PackStore(path.join(dir, 'v4'), lineageSha, { cacheBytes: 16 * 65536 });
+  const writer = new V4.PackWriter(store, 1);
+  const { tree, changes } = populate(store, writer, 5, 4000);
+  const bigKey = 'viewing:' + 'q'.repeat(70000);
+  const withBlob = tree.apply(writer, new Map([[bigKey, '{"big":true}']]));
+  writer.flush();
+  assert.ok(withBlob.level >= 1);
+  const reachable = [...withBlob.pages()].map(r => r.pack + ':' + r.page);
+  assert.equal(new Set(reachable).size, reachable.length, 'the reachable page set lists each page once');
+  // Walks of every budget see the same members in the same order and every reachable page exactly once.
+  for (const budget of [1, 3, 7, 4096]) {
+    const seen = [], visited = new Map();
+    let from = null, steps = 0, keys = 0;
+    for (;;) {
+      const step = withBlob.checkFrom(from, budget, (key, raw) => seen.push([key, raw]), ref => visited.set(ref.pack + ':' + ref.page, (visited.get(ref.pack + ':' + ref.page) ?? 0) + 1));
+      steps++; keys += step.keys;
+      if (step.done) { assert.equal(step.next, null); break; }
+      assert.ok(typeof step.next === 'string' && /^[0-9a-f]{64}$/.test(step.next), 'the cursor is a leaf boundary');
+      from = step.next;
+      assert.ok(steps < 10000);
+    }
+    assert.equal(keys, 4001, 'budget ' + budget + ': every member counted once');
+    assert.equal(seen.length, 4001);
+    assert.deepEqual(seen.map(([k]) => k), [...withBlob.entries()].map(([k]) => k), 'budget ' + budget + ': the walk order is the routing order');
+    assert.deepEqual([...visited].filter(([, n]) => n !== 1), [], 'budget ' + budget + ': no page is visited twice');
+    assert.deepEqual([...visited.keys()].sort(), [...reachable].sort(), 'budget ' + budget + ': the visited set is the reachable set');
+    if (budget === 1) assert.ok(steps > 10, 'one leaf per step takes many steps: ' + steps);
+  }
+  // Copy-on-write accounting: the pages the new root no longer references are exactly the old reachable set minus the
+  // new one (the replaced route, the replaced bucket's blob, nothing shared); the writer lists what it appended.
+  const w2 = new V4.PackWriter(store, 2), orphans = [];
+  const firstKey = [...changes.keys()][0];
+  const next = withBlob.apply(w2, new Map([[firstKey, null], [bigKey, '{"big":false}']]), orphans); w2.flush();
+  const before = new Set(reachable), after = new Set([...next.pages()].map(r => r.pack + ':' + r.page));
+  const dropped = [...before].filter(p => !after.has(p)).sort(), reported = orphans.map(r => r.pack + ':' + r.page).sort();
+  assert.deepEqual(reported, dropped, 'the orphans of a transition are exactly the pages the new root dropped');
+  const appended = new Set(w2.written.map(r => r.pack + ':' + r.page)), added = [...after].filter(p => !before.has(p));
+  assert.ok(added.every(p => appended.has(p)), 'every page the new root added was appended by this writer');
+  assert.equal(next.get(firstKey), undefined); assert.equal(next.get(bigKey), '{"big":false}'); assert.equal(next.count, 4000);
+  w2.close(); writer.close(); store.close();
+});
+
 test('V4-T02 collision buckets retain and compare the full key (isolated harness with a substituted routing hash)', { skip: !only('V4-T02') }, t => {
   // An isolated copy of the module whose routing digest depends only on the key's first character: distinct keys
   // collide deliberately; nothing in the product can select this behaviour.
@@ -193,12 +236,26 @@ test('V4-T03 a corrupt, missing or truncated page on the route is never absence 
   // Corrupt one leaf page byte: lookups routed through it refuse (SealCorrupt), others still answer.
   const victim = [...tree.pages()].find(r => { const node = store.page(r, {}, h => h); return node.kind === 1; });
   store.invalidate();
-  const file = store.packFile(victim.pack), fd = fs.openSync(file, 'r+');
-  fs.writeSync(fd, Buffer.from([0xff]), 0, 1, Number(victim.page) * 65536 + 300); fs.closeSync(fd);
+  const file = store.packFile(victim.pack), pageStart = Number(victim.page) * 65536;
+  const pristinePage = fs.readFileSync(file).subarray(pageStart, pageStart + 65536);
+  const writeAt = (offset, bytes) => { const fd = fs.openSync(file, 'r+'); try { fs.writeSync(fd, bytes, 0, bytes.length, offset); } finally { fs.closeSync(fd); } store.invalidate(); };
+  writeAt(pageStart + 300, Buffer.from([0xff]));
   let refused = 0, answered = 0;
   for (const key of keys) { try { assert.notEqual(tree.get(key), undefined); answered++; } catch (e) { assert.equal(e.code, 'SealCorrupt'); refused++; } }
   assert.ok(refused > 0 && answered > 0, 'refused ' + refused + ', answered ' + answered);
   assert.throws(() => tree.check(), { code: 'SealCorrupt' }, 'the full check refuses the tree');
+  // A structurally valid change (one digit of a stored member's generation; the leaf stays canonical JSON and the
+  // member stays a valid record) is refused by the page checksum alone: no lookup ever returns the altered value.
+  writeAt(pageStart, pristinePage);
+  for (const key of keys) assert.equal(tree.get(key), changes.get(key), 'the restored page answers again');
+  const payload = pristinePage.subarray(128, 65504).toString('latin1'), marker = '\\"generation\\":1';
+  const at = payload.indexOf(marker);
+  assert.ok(at > 0, 'the leaf holds an inline member whose generation starts with 1');
+  writeAt(pageStart + 128 + at + marker.length - 1, Buffer.from('2'));
+  let digitRefused = 0;
+  for (const key of keys) { try { assert.equal(tree.get(key), changes.get(key), 'no altered value is ever returned'); } catch (e) { assert.equal(e.code, 'SealCorrupt', String(e.message)); digitRefused++; } }
+  assert.ok(digitRefused > 0, 'the validly structured change is refused by the page checksum: refused ' + digitRefused);
+  writeAt(pageStart + 300, Buffer.from([0xff]));
   // Truncate the pack below the victim page: the same refusal class, never absence.
   fs.truncateSync(file, Number(victim.page) * 65536);
   store.invalidate();

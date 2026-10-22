@@ -236,6 +236,11 @@ export class PackStore {
     if (bytes <= this.cacheBudget) { this.cache.set(key, { bytes, value, header }); this.cacheBytes += bytes; }
     return value;
   }
+  /** Close the read descriptor of one pack (before it is unlinked); its cached pages stay valid (immutable bytes). */
+  release(pack: string): void {
+    const fd = this.fds.get(pack);
+    if (fd !== undefined) { this.fds.delete(pack); try { fs.closeSync(fd); } catch { /* closed */ } }
+  }
   /** Drop every cached page and descriptor (after uncertain I/O, a replaced target or a new owner incarnation). */
   invalidate(): void {
     this.cache.clear(); this.cacheBytes = 0;
@@ -254,7 +259,11 @@ export class PackWriter {
   private current: { pack: string; fd: number; pages: number } | null = null;
   private readonly dirty = new Map<string, number>();
   private newPacks = false;
-  constructor(readonly store: PackStore, readonly revision: number) {
+  /** Every page this writer appended (in order): the liveness accounting of the roots that reference them. */
+  readonly written: PageRef[] = [];
+  /** The pack the writer may still append to (never a reclamation candidate while this writer is open). */
+  get currentPack(): string | null { return this.current ? this.current.pack : null; }
+  constructor(readonly store: PackStore, public revision: number) {
     fs.mkdirSync(store.pagesDirectory, { recursive: true, mode: 0o700 });
   }
   append(kind: 1 | 2 | 3, tree: number, level: number, entryCount: number, payload: Buffer): PageRef {
@@ -266,7 +275,9 @@ export class PackWriter {
     while (written < PAGE_BYTES) { const n = fs.writeSync(fd, page, written, PAGE_BYTES - written, offset + written); if (n <= 0) corrupt('short-write'); written += n; }
     this.current!.pages++;
     this.dirty.set(pack, fd);
-    return { pack, page: String(pages), sha256: pageSha256(page) };
+    const ref = { pack, page: String(pages), sha256: pageSha256(page) };
+    this.written.push(ref);
+    return ref;
   }
   private open(): void {
     this.closeCurrent();
@@ -469,13 +480,15 @@ export class Tree {
     const ref = writer.append(KIND.leaf, id, 0, 0, Buffer.from(canonical({ low: null, high: null, count: '0', entries: [] })));
     return new Tree(writer.store, id, ref, 0, 0);
   }
-  /** Copy-on-write batch update: `changes` maps full keys to raw value JSON (set) or null (delete). */
-  apply(writer: PackWriter, changes: Map<string, string | null>): Tree {
+  /** Copy-on-write batch update: `changes` maps full keys to raw value JSON (set) or null (delete). The pages the new
+   * root no longer references (the replaced nodes, the replaced buckets' overflow chains and the collapsed one-child
+   * branches written here) are appended to `orphans`: the liveness accounting of pack reclamation. */
+  apply(writer: PackWriter, changes: Map<string, string | null>, orphans?: PageRef[]): Tree {
     if (!changes.size) return this;
     const byDigest = new Map<string, Map<string, string | null>>();
     for (const [key, value] of changes) { const d = routingDigest(this.id, key); let m = byDigest.get(d); if (!m) byDigest.set(d, m = new Map()); m.set(key, value); }
     const digests = [...byDigest.keys()].sort();
-    const descriptors = this.update(writer, this.root, this.level, null, null, digests, byDigest);
+    const descriptors = this.update(writer, this.root, this.level, null, null, digests, byDigest, orphans);
     let level = this.level, children = descriptors;
     while (children.length > 1) { children = this.writeBranches(writer, children, level + 1, null, null); level++; }
     let root = children[0];
@@ -483,17 +496,21 @@ export class Tree {
     while (level > 0) {
       const node = this.node(root.ref, level, null, null) as BranchNode;
       if (node.children.length !== 1) break;
+      orphans?.push(root.ref);
       root = node.children[0]; level--;
     }
     return new Tree(this.store, this.id, root.ref, root.count, level);
   }
-  private update(writer: PackWriter, ref: PageRef, level: number, low: string | null, high: string | null, digests: string[], byDigest: Map<string, Map<string, string | null>>): ChildDescriptor[] {
+  private update(writer: PackWriter, ref: PageRef, level: number, low: string | null, high: string | null, digests: string[], byDigest: Map<string, Map<string, string | null>>, orphans?: PageRef[]): ChildDescriptor[] {
     const node = this.node(ref, level, low, high);
+    orphans?.push(ref);
     if (node.kind === 1) {
       const entries = new Map(node.entries.map(e => [e.digest, e] as const));
       const buckets = new Map<string, [string, string][]>();
       for (const [digest, entry] of entries) buckets.set(digest, this.bucketPairs(entry));
       for (const digest of digests) {
+        const replaced = entries.get(digest);
+        if (replaced && orphans && 'overflow' in replaced.value) for (const p of blobPages(this.store, replaced.value.overflow, this.id)) orphans.push(p);
         const pairs = new Map(buckets.get(digest) ?? []);
         for (const [key, value] of byDigest.get(digest)!) { if (value === null) pairs.delete(key); else pairs.set(key, value); }
         if (pairs.size) buckets.set(digest, [...pairs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))); else buckets.delete(digest);
@@ -506,7 +523,7 @@ export class Tree {
       const mine: string[] = [];
       while (at < digests.length && below(digests[at], child.high)) { if (atLeast(digests[at], child.low)) mine.push(digests[at]); at++; }
       if (!mine.length) { next.push(child); continue; }
-      next.push(...this.update(writer, child.ref, node.level - 1, child.low, child.high, mine, byDigest));
+      next.push(...this.update(writer, child.ref, node.level - 1, child.low, child.high, mine, byDigest, orphans));
     }
     return this.writeBranches(writer, next, node.level, low, high);
   }
@@ -613,36 +630,42 @@ export class Tree {
     if (keys !== this.count) corrupt('tree:total');
     return { keys, pages };
   }
-  /** A bounded, resumable walk of the leaves in digest order after `from` (exclusive): at most `maxLeaves` leaf pages
-   * per call, every visited page verified on use (header, bounds, partition, counts), every bucket's count and routing
-   * checked, every overflow chain followed, and `member` applied to every key/value. Returns the digest to continue
-   * from; `done` when the walk reached the end of the tree. The caller sums `keys` against the root count. */
-  checkFrom(from: string | null, maxLeaves: number, member?: (key: string, raw: string) => void): { next: string | null; keys: number; pages: number; done: boolean } {
-    let keys = 0, pages = 0, leaves = 0, last: string | null = from, done = true;
+  /** A bounded, resumable walk of the leaves in digest order from the leaf boundary `from` (null: the first leaf): at
+   * most `maxLeaves` leaf pages per call, every visited page verified on use (header, bounds, partition, counts), every
+   * bucket's count and routing checked, every overflow chain followed, and `member` applied to every key/value. Returns
+   * the boundary (the completed leaf's `high`) to continue from; `done` when the walk reached the end of the tree. The
+   * caller sums `keys` against the root count. `visit` sees every reachable page exactly once over a complete walk
+   * (leaves and overflow pages when their leaf is processed, a branch in the step that starts at its lower bound), so
+   * a sweep can rebuild the per-pack liveness accounting. */
+  checkFrom(from: string | null, maxLeaves: number, member?: (key: string, raw: string) => void, visit?: (ref: PageRef) => void): { next: string | null; keys: number; pages: number; done: boolean } {
+    let keys = 0, pages = 0, leaves = 0, last: string | null = null, next: string | null = from, done = true;
     const walk = (ref: PageRef, level: number, low: string | null, high: string | null, expectedCount: number): boolean => {
-      if (high !== null && from !== null && !(high > from)) return true;   // entirely before the cursor: already checked
+      if (high !== null && from !== null && high <= from) return true;   // entirely before the cursor: already checked
       const node = this.node(ref, level, low, high); pages++;
       if (node.count !== expectedCount) corrupt('tree:count');
       if (node.kind === 1) {
         if (leaves >= maxLeaves) { done = false; return false; }
-        leaves++;
+        leaves++; visit?.(ref);
         for (const entry of node.entries) {
-          if (from !== null && !(entry.digest > from)) continue;
           if (last !== null && !(entry.digest > last)) corrupt('tree:global-order');
           const pairs = this.bucketPairs(entry);
           if (pairs.length !== entry.count) corrupt('tree:bucket-count');
           for (const [key, raw] of pairs) { if (routingDigest(this.id, key) !== entry.digest) corrupt('tree:bucket-digest'); member?.(key, raw); }
-          if ('overflow' in entry.value) for (const _p of blobPages(this.store, entry.value.overflow, this.id)) pages++;
+          if ('overflow' in entry.value) for (const p of blobPages(this.store, entry.value.overflow, this.id)) { pages++; visit?.(p); }
           keys += pairs.length; last = entry.digest;
         }
+        next = high;
         return true;
       }
       if (node.children.length < 2) corrupt('tree:branch-children');
+      // A branch is first entered in the step whose cursor is its lower bound (an earlier step that ran out of budget at
+      // its first leaf left the cursor there); that is its one counted visit.
+      if (low === null ? from === null : low === from) visit?.(ref);
       for (const child of node.children) if (!walk(child.ref, node.level - 1, child.low, child.high, child.count)) return false;
       return true;
     };
     walk(this.root, this.level, null, null, this.count);
-    return { next: done ? null : last, keys, pages, done };
+    return { next: done ? null : next, keys, pages, done };
   }
 }
 function* blobPages(store: PackStore, descriptor: BlobDescriptor, tree: number): Generator<PageRef> {

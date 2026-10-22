@@ -1119,11 +1119,11 @@ def admit_state_archive(stream):
     return admit_v4_archive(stream)
 
 
-# The v4 lineage/origin of a state volume, read by the image's own compiled admission (inspectExternal in mode 4 as a
-# non-owner over a read-only mount): no lock, no journal, no repair. Identifiers only.
-EMR_V4_INSPECT_SCRIPT = """const {inspectExternal}=require('/app/dist/emr-runtime/external-writer');
-const r=inspectExternal('/var/lib/kin-emr',undefined,4);
-if(!r.state||!r.state.lineage){process.exitCode=1}else console.log('KIN_RESULT '+JSON.stringify({format:r.format,lineage:r.state.lineage.id,origin:r.state.lineage.origin,revision:r.state.revision}));"""
+# The v4 lineage/origin of a state volume, read by the image's own compiled admission (admitExternal in mode 4 as a
+# non-owner over a read-only mount): no lock, no journal, no repair, no materialization of the history. Identifiers only.
+EMR_V4_INSPECT_SCRIPT = """const {admitExternal}=require('/app/dist/emr-runtime/external-writer');
+const r=admitExternal('/var/lib/kin-emr',undefined,4);
+if(!r.lineage){process.exitCode=1}else console.log('KIN_RESULT '+JSON.stringify({format:r.format,lineage:r.lineage.id,origin:r.lineage.origin,revision:r.revision}));"""
 
 
 def inspect_v4_volume(image, volume):
@@ -3389,6 +3389,10 @@ def copy_manifest(*, copy_id, location, custodian, manifest, directory=None, lin
         _nonempty_text(disposition["verification"], "disposition verification evidence")
     dependents = [_nonempty_text(item, "dependent copy id") for item in dependent_copies]
     images = manifest.get("running_images") if type(manifest.get("running_images")) is dict else {}
+    # EMR-B2 (c) v4 (D1691): a v4 capture carries its selector/root identity (emr.v4); the pair digest binds the stored
+    # format and that root, so a v4 capture of a lineage is never the digest of a v3 capture of the same lineage.
+    v4 = emr.get("v4") if type(emr.get("v4")) is dict else None
+    pair_binding = {"pair": pair, "sha256": manifest["sha256"], **({"format": emr.get("format"), "v4": v4} if emr.get("format") == 4 else {})}
     return {
         "copy_id": copy_id,
         "location": location,
@@ -3397,9 +3401,10 @@ def copy_manifest(*, copy_id, location, custodian, manifest, directory=None, lin
             "capture": {"set": Path(directory).name if directory is not None else None, "created_utc": manifest.get("created_utc"),
                         "format": manifest.get("format"), "kind": manifest.get("kind"), "shape": manifest.get("shape")},
             "state": None if pair is None else {"format": emr.get("format"), "instance_id": pair.get("instance_id"),
-                                                "lineage": pair.get("lineage"), "origin": pair.get("origin")},
+                                                "lineage": pair.get("lineage"), "origin": pair.get("origin"),
+                                                **({"v4": v4} if emr.get("format") == 4 else {})},
             "restore": lineage},
-        "DB+state pair digest": {"sha256": hashlib.sha256(_canonical_json({"pair": pair, "sha256": manifest["sha256"]})).hexdigest(),
+        "DB+state pair digest": {"sha256": hashlib.sha256(_canonical_json(pair_binding)).hexdigest(),
                                  "components": sorted(manifest["sha256"])},
         "source/image digest": {"git_sha": manifest.get("git_sha"), "git_dirty": manifest.get("git_dirty"),
                                 "running_images": {name: {"id": image.get("id"), "repo_digests": image.get("repo_digests")}

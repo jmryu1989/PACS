@@ -41,6 +41,9 @@ class MemFS {
   lstatSync(p, opt) { const n=this.nodes.get(this.key(p)); if(!n) { if(opt?.throwIfNoEntry===false)return; throw errno('ENOENT'); }
     if(!this.statVersions.has(n))this.statVersions.set(n,++this.statClock);
     return {dev:1,ino:this.key(p),nlink:1,uid:1000,gid:1000,mtimeMs:this.statVersions.get(n),ctimeMs:this.statVersions.get(n),isDirectory:()=>n.dir,isFile:()=>!n.dir,isSymbolicLink:()=>false,mode:n.dir?0o700:0o600,size:n.dir?0:Buffer.byteLength(n.data)}; }
+  // No symbolic links exist in this modeled filesystem: stat and lstat observe the same node (the format admission
+  // stats the selector before deciding v3/v4).
+  statSync(p, opt) { return this.lstatSync(p, opt); }
   mkdirSync(p) { p=this.key(p); if(this.nodes.has(p))throw errno('EEXIST'); this.nodes.set(p,{dir:true}); }
   existsSync(p) { return this.nodes.has(this.key(p)); }
   realpathSync = Object.assign(p=>path.resolve(p), {native:p=>path.resolve(p)});

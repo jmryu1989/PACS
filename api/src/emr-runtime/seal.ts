@@ -25,6 +25,10 @@ export interface ExpiryCore {
   format: 1; binding: Omit<CommitBinding, 'proofDigest'>; seal: StreamSeal; anchor: ChainPosition; count: number;
 }
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+/** A member-order-independent identity of a stored object (a binding read back from a J-encoded tree has sorted
+ * members; the database marker has the driver's). */
+const sortedMembers = (value: any): any => Array.isArray(value) ? value.map(sortedMembers) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, sortedMembers(value[k])])) : value;
+const sameMembers = (a: unknown, b: unknown) => digest(sortedMembers(a)) === digest(sortedMembers(b));
 const slot = (stream: AccessStream, sequence: number) => `${stream}:${sequence}`;
 const key = (stream: AccessStream, attempt: string) => `${stream}:${attempt}`;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -639,11 +643,12 @@ export class AccessSeal {
     return { dbWitness: { version: 1, pair: view.lineage.origin, lineageSha256: lineageSha256(view.lineage), validationRevision: String(view.revision), streams }, dbBindings };
   }
 
-  /** Whether the v4 owner's periodic complete check is due (overdue age, clock rollback) or in progress. */
+  /** Whether the v4 owner's periodic complete check is due (overdue age, clock rollback), in progress, or needed to
+   * rebuild the pack liveness accounting a crash left unknown (no reclamation until then). */
   fullCheckDue(now: Date = new Date()): boolean {
     if (this.view().format !== 4) return false;
     const status = this.call('v4-status', { now: now.toISOString() });
-    return status.sweep !== null || status.fullCheck.overdue === true;
+    return status.sweep !== null || status.fullCheck.overdue === true || status.accounting.known === false;
   }
   /**
    * One bounded step of the v4 complete check (order section 2/4, V4-T10): the owner's storage sweep (every page and
@@ -666,12 +671,14 @@ export class AccessSeal {
       for (const { entry, marker } of page.entries) {
         if (entry.sequence > w.verifiedThrough.sequence) break;
         const stored = this.call('db-binding', slot(stream, entry.sequence));
-        const disagreement = !marker || marker.sequence !== entry.sequence || !stored || stored.entrySha256 !== dbEntrySha256(stream, entry) ||
-          digest(stored.binding) !== digest(marker) || entryHash(entry.sequence, entry.previousHash, entry.payload) !== entry.hash ||
-          createHash('sha256').update(entry.payload).digest('hex') !== entry.contentSha256 ||
-          (previous !== null && (entry.sequence !== previous.sequence + 1 || entry.previousHash !== previous.hash)) ||
-          (previous === null && cursor.after > 0 && entry.sequence !== cursor.after + 1);
-        if (disagreement) { this.call('full-check', { now: at, latch: `${stream}:${entry.sequence}` }); }
+        // The disagreement names its clause (what the operator must look at), never the row's payload.
+        const disagreement = !marker ? 'marker-missing' : marker.sequence !== entry.sequence ? 'marker-slot' : !stored ? 'binding-missing' :
+          stored.entrySha256 !== dbEntrySha256(stream, entry) ? 'entry-digest' : !sameMembers(stored.binding, marker) ? 'binding' :
+          entryHash(entry.sequence, entry.previousHash, entry.payload) !== entry.hash ? 'entry-hash' :
+          createHash('sha256').update(entry.payload).digest('hex') !== entry.contentSha256 ? 'content' :
+          (previous !== null && (entry.sequence !== previous.sequence + 1 || entry.previousHash !== previous.hash)) ? 'chain' :
+          (previous === null && cursor.after > 0 && entry.sequence !== cursor.after + 1) ? 'chain-start' : null;
+        if (disagreement) { this.call('full-check', { now: at, latch: `${stream}:${entry.sequence}:${disagreement}` }); }
         previous = entry; last = entry.sequence;
       }
       const streamDone = last >= w.verifiedThrough.sequence || !page.entries.length || page.entries[page.entries.length - 1].entry.sequence > w.verifiedThrough.sequence;

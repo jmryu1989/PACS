@@ -1273,6 +1273,14 @@ test('D1684-T01 a compact whole-state v3 checkpoint with history is admitted, re
 
 // ───────────── KIN-EMR-STATE-V4 cells (D1693; EMR_STATE_FORMAT=4) ─────────────
 const v4Only = { skip: FORMAT !== 4 && 'v4 cell (EMR_STATE_FORMAT=4)' };
+/** Start an owner whose outcome the case judges through its state (a refused start is an observation, not a harness error). */
+const startObserved = async service => { try { await service.start(); } catch { /* judged through service.state */ } };
+/** The next incarnation over a directory: a refused admission (the coordinator's own read-only admission) is the case's
+ * observation `label` (never a harness error). */
+async function reopened(t, label, options) {
+  try { return await fixture(t, options); }
+  catch (error) { assert.fail(label + ' (admission refused: ' + String(error && (error.code || error.message)) + ')'); }
+}
 function countingModel(initial) {
   // The memory SQL model with every row read recorded: what a restart actually consulted.
   const m = model(initial), reads = [];
@@ -1302,8 +1310,8 @@ test('V4-T06 the v4 owner restarts from its DB witness: only the suffix after th
   pending.commit();
   const counting = countingModel(structuredClone(f.database.streams));
   const g = await fixture(t, { directory: f.directory, model: counting, cold: true });
-  await g.service.start();
-  assert.equal(g.service.state, 'ready');
+  await startObserved(g.service);
+  assert.equal(g.service.state, 'ready', 'the restart over the pending work is ready');
   for (const read of counting.reads) assert.ok((read.after === 0 && read.limit === 1) || read.after >= 6, 'restart read ' + JSON.stringify(read));
   assert.ok(counting.reads.some(r => r.after >= 6), 'the suffix after the verified anchor is consulted');
   const after = g.coordinator.call('v4-status');
@@ -1318,11 +1326,23 @@ test('V4-T06 the v4 owner restarts from its DB witness: only the suffix after th
   for (const b of done[0].bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
   await complete(g, gw);
   assert.equal(g.coordinator.call('view').dbWitness.streams.viewing.verifiedThrough.sequence, 8, 'the witness advances with the next publication');
+  // A contradictory record (a terminal settled for an attempt whose intent and slot are still live) is refused by the
+  // touched-closure validation before any page, root or WAL byte: the selected root is unchanged.
+  const live = await g.reserve(gw), liveBinding = live.bundle.bindings[0], liveKey = liveBinding.stream + ':' + liveBinding.attemptId;
+  const template = g.coordinator.call('get', { map: 'terminal', id: done[0].bundle.bindings[0].stream + ':' + done[0].bundle.bindings[0].attemptId });
+  const rootBefore = g.coordinator.call('v4-status');
+  let contradiction = null;
+  try { g.coordinator.call('patch', { changes: { terminal: { [liveKey]: { ...template, binding: liveBinding, generation: liveBinding.generation } } }, kind: 'update' }); }
+  catch (error) { contradiction = error; }
+  assert.ok(contradiction && contradiction.code === 'UnsealedEntryUnexplained', 'a validly checksummed contradictory record cannot publish: ' + String(contradiction && contradiction.code));
+  const rootAfter = g.coordinator.call('v4-status');
+  assert.deepEqual({ root: rootAfter.rootSha256, revision: rootAfter.revision }, { root: rootBefore.rootSha256, revision: rootBefore.revision }, 'the refusal published nothing');
+  live.commit(); assert.equal((await gw.call('confirm-bundle', live.bundle)).ok, true, 'the live attempt completes normally after the refused contradiction');
   // A restart with nothing to recover reads nothing beyond the bounded first-row anchor probe.
   g.service.close(); await g.service.drained(); g.coordinator.close();
   const idle = countingModel(structuredClone(g.database.streams));
   const h = await fixture(t, { directory: f.directory, model: idle, cold: true });
-  await h.service.start(); assert.equal(h.service.state, 'ready');
+  await startObserved(h.service); assert.equal(h.service.state, 'ready', 'the idle restart is ready');
   assert.ok(idle.reads.every(r => r.after === 0 && r.limit === 1), 'an idle restart consults no history: ' + JSON.stringify(idle.reads));
 });
 test('V4-T07 a witness that no longer describes the database refuses before any settlement; a changed retained anchor is revalidated', v4Only, async t => {
@@ -1434,8 +1454,8 @@ test('V4-T04 a syscall failure at every v4 publication barrier gives no success;
     assert.equal(JSON.stringify(f.database.streams), database, cut + ': committed rows and markers are preserved');
     // The failed owner view is retired; the files are the authority for the next incarnation.
     f.service.close(); await f.service.drained(); f.coordinator.close();
-    const g = await fixture(t, { directory: f.directory, model: model(structuredClone(f.database.streams)), cold: true });
-    await g.service.start();
+    const g = await reopened(t, cut + ': the restart recovers', { directory: f.directory, model: model(structuredClone(f.database.streams)), cold: true });
+    await startObserved(g.service);
     assert.equal(g.service.state, 'ready', cut + ': the restart recovers');
     const status = g.coordinator.call('v4-status');
     assert.ok(Number(status.revision) >= Number(beforeStatus.revision), cut + ': the accepted root is never older');
@@ -1455,23 +1475,279 @@ test('V4-T04 a syscall failure at every v4 publication barrier gives no success;
     assert.equal(h.coordinator.call('v4-status').revision, recovered);
   }
 });
-test('V4-T05 pack reclamation unlinks only packs unreachable from the selected root and the open segment; every proof and exclusion survives', v4Only, async t => {
+test('V4-T05 pack reclamation unlinks only packs unreachable from the selected root; retired segments and roots leave at rotation; every proof and exclusion survives', v4Only, async t => {
   const f = await fixture(t), work = await (await f.hello()).work(), done = [];
   for (let i = 0; i < 40; i++) done.push(await complete(f, work, i % 3 === 0));
   const before = f.coordinator.call('v4-status');
   assert.ok(before.packs >= 1);
+  // Ordinary operation reclaims as it goes (the maintained accounting, bounded slices): the pack population stays
+  // near the live pages, never one pack per transition, and nothing dead waits for an operator.
+  assert.equal(before.accounting.known, true, 'the liveness accounting is maintained by the owner');
+  assert.equal(before.accounting.dead, 0, 'dead packs are reclaimed in the transitions that killed them');
+  assert.ok(before.packs <= 6, 'packs are appended across transitions and reclaimed when dead: ' + before.packs);
   const reclaimed = f.coordinator.call('compact', { force: true });
   const after = f.coordinator.call('v4-status');
   assert.ok(after.packs <= before.packs, 'reclamation never adds packs');
   assert.equal(after.rootSha256, before.rootSha256, 'reclamation rewrites no root');
+  assert.equal(reclaimed.accounting, 'known', 'a forced reclamation proves reachability by traversal and rebuilds the accounting');
   for (const item of done) assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after reclamation');
   for (const b of done[5].bundle.bindings) assertExcluded(await replayObservation(f, work, b));
   f.service.close(); await f.service.drained(); f.coordinator.close();
-  const g = await fixture(t, { directory: f.directory, model: model(structuredClone(f.database.streams)), cold: true });
-  await g.service.start(); assert.equal(g.service.state, 'ready', 'restart after reclamation');
+  // The open segment is old enough to rotate at the next transition: the next owner retires it and the roots it
+  // absorbed after it published the new start record and selector; the selected root alone remains.
+  const segmentFile = path.join(f.directory, 'seal/v4/wal', before.wal.segment + '.jsonl'), past = new Date(Date.now() - 120_000);
+  fs.utimesSync(segmentFile, past, past);
+  const rootsDirectory = path.join(f.directory, 'seal/v4/roots'), absorbed = fs.readdirSync(rootsDirectory);
+  assert.ok(absorbed.length > 100, 'one immutable root per transition is on disk before the rotation: ' + absorbed.length);
+  const g = await reopened(t, 'restart after reclamation', { directory: f.directory, model: model(structuredClone(f.database.streams)), cold: true });
+  await startObserved(g.service); assert.equal(g.service.state, 'ready', 'restart after reclamation');
+  assert.equal(g.coordinator.call('v4-status').accounting.known, true, 'a clean close hands the exact accounting to the next incarnation');
   const gw = await (await g.hello()).work();
   for (const item of done) assert.equal(JSON.stringify((await gw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof));
-  void reclaimed;
+  await complete(g, gw);
+  const rotated = g.coordinator.call('v4-status');
+  assert.notEqual(rotated.wal.segment, before.wal.segment, 'the aged segment rotated');
+  assert.equal(fs.existsSync(segmentFile), false, 'the retired segment is unlinked after the selector names its successor');
+  const remaining = fs.readdirSync(rootsDirectory);
+  assert.ok(remaining.includes(rotated.rootSha256 + '.json'), 'the selected root remains');
+  assert.ok(absorbed.every(name => !remaining.includes(name)), 'every root the retired segment absorbed is gone');
+  assert.ok(remaining.length <= 1 + rotated.wal.transitions, 'only the open segment\'s roots remain: ' + remaining.length);
+  for (const item of done) assert.equal(JSON.stringify((await gw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after rotation');
+  for (const b of done[5].bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+});
+
+// ─── V4-T10: the periodic complete check (order sections 2/4.3; REQ-B2C-V4-05 / RISK-B2C-V4-UNDETECTED-CORRUPTION) ───
+const V4 = load('emr-runtime/checkpoint-v4');
+/** A leaf page below the root of tree `treeId` in the selected root (never the root page itself, which every
+ * admission verifies): bytes the fast restart does not consult. */
+function v4LeafBelowRoot(directory, treeId) {
+  const v4 = path.join(directory, 'seal/v4');
+  const selector = V4.readSelector(path.join(directory, 'seal/settlement.json'));
+  const root = V4.readRoot(v4, selector.body.rootSha256), d = root.trees[treeId - 1];
+  const store = new V4.PackStore(v4, root.lineageSha256);
+  try {
+    const tree = V4.Tree.open(store, treeId, d.ref, Number(d.count));
+    assert.ok(tree.level >= 1, 'tree ' + treeId + ' has leaves below its root (count ' + d.count + ')');
+    const refs = [...tree.pages()];
+    return { root: selector.body.rootSha256, ref: refs[1] };
+  } finally { store.close(); }
+}
+/** One payload byte of a stored page changed in place (its footer and the parent's reference no longer agree). */
+function flipPageByte(directory, ref) {
+  const file = path.join(directory, 'seal/v4/pages', ref.pack + '.pages'), offset = Number(ref.page) * 65536 + 128 + 16;
+  const fd = fs.openSync(file, 'r+'), byte = Buffer.alloc(1);
+  try { fs.readSync(fd, byte, 0, 1, offset); byte[0] ^= 0x01; fs.writeSync(fd, byte, 0, 1, offset); } finally { fs.closeSync(fd); }
+}
+const latchFile = directory => path.join(directory, 'seal/v4/tmp/latch.json');
+const hashesOutsideScratch = directory => Object.fromEntries(Object.entries(directoryHashes(directory)).filter(([name]) => !name.startsWith('seal/v4/tmp/')));
+const hoursLater = (iso, hours) => new Date(Date.parse(iso) + hours * 3600_000);
+/** The next owner incarnation over the same directory and the database as the previous incarnation left it. */
+async function reopen(t, previous) {
+  const g = await fixture(t, { directory: previous.directory, model: model(structuredClone(previous.database.streams)), cold: true });
+  await startObserved(g.service); assert.equal(g.service.state, 'ready', 'the next incarnation is ready');
+  return g;
+}
+const refusedAdmission = (t, previous) => fixture(t, { directory: previous.directory, model: model(structuredClone(previous.database.streams)), cold: true });
+async function closeOwner(f) { f.service.close(); await f.service.drained(); f.coordinator.close(); }
+/** Complete-check steps (one leaf per storage step) until `until(step)` holds; a refusing step is returned as
+ * `{ failed }` (the case judges it), never thrown. */
+async function sweepUntil(f, now, until) {
+  for (let i = 0; i < 20000; i++) {
+    let step;
+    try { step = await f.seal.fullCheckStep(now, f.database.sql, 1); } catch (error) { return { failed: error }; }
+    if (until(step)) return step;
+  }
+  throw new Error('the sweep did not reach the expected point');
+}
+async function sweepFails(f, now) {
+  const result = await sweepUntil(f, now, () => false);
+  return result.failed ?? null;
+}
+test('V4-T10 complete checking: resumable sweeps over a pinned root, no timestamp reset, overdue and clock rollback, on-use and sweep detection of untouched page and SQL row corruption, immediate latch', v4Only, async t => {
+  const f = await fixture(t), work = await (await f.hello()).work(), done = [];
+  for (let i = 0; i < 150; i++) done.push(await complete(f, work, i % 3 === 0));
+  const start = f.coordinator.call('v4-status');
+  assert.equal(start.accounting.known, true);
+  assert.equal(start.sweep, null, 'no sweep is running before the first due check');
+  assert.equal(start.fullCheck.checkedRoot, null, 'the initial root was fully checked at initialization');
+  const initialCompletedAt = start.fullCheck.completedAt;
+  // (1) A sweep pins the root it started on; closed and reopened mid-way, it resumes at the persisted cursor; the
+  // owner keeps serving (a transition and a forced reclamation during the sweep); completion publishes the fact.
+  const t1 = hoursLater(initialCompletedAt, 1);
+  const step1 = await f.seal.fullCheckStep(t1, f.database.sql, 1);
+  assert.equal(step1.done, false); assert.equal(step1.phase, 'storage'); assert.equal(step1.startedRoot, start.rootSha256, 'the sweep pins the selected root');
+  assert.equal((await sweepUntil(f, t1, s => s.tree >= 5)).failed, undefined);
+  const paused = f.coordinator.call('v4-status');
+  assert.ok(paused.sweep && paused.sweep.tree >= 5 && paused.sweep.startedRoot === start.rootSha256, 'the sweep is in progress: ' + JSON.stringify(paused.sweep));
+  assert.equal(paused.fullCheck.completedAt, initialCompletedAt, 'a partial sweep never moves the last-complete timestamp');
+  await closeOwner(f);
+  let g = await reopen(t, f);
+  const resumed = g.coordinator.call('v4-status');
+  assert.deepEqual({ root: resumed.sweep?.startedRoot, tree: resumed.sweep?.tree, phase: resumed.sweep?.phase }, { root: start.rootSha256, tree: paused.sweep.tree, phase: 'storage' }, 'the reopened owner resumes the sweep at the persisted cursor');
+  assert.equal(resumed.accounting.known, true);
+  let gw = await (await g.hello()).work();
+  // Concurrent work during the sweep: enough transitions to retire whole packs whose last live pages belonged to the
+  // pinned root (the sweep still reads them), plus a forced reclamation; neither may touch the pinned root's pages.
+  const during = await complete(g, gw);
+  for (let i = 0; i < 30; i++) await complete(g, gw, i % 2 === 0);
+  g.coordinator.call('compact', { force: true });
+  assert.ok(fs.existsSync(path.join(f.directory, 'seal/v4/roots', start.rootSha256 + '.json')), 'the sweep root stays while the sweep runs');
+  // The sweep is continued by the next incarnation (a fresh page cache: what the pinned root's pages are is decided by
+  // the files, never by what an earlier incarnation happened to keep in memory), with the accounting it was handed.
+  await closeOwner(g);
+  const g2 = await reopen(t, g), g2w = await (await g2.hello()).work();
+  assert.equal(g2.coordinator.call('v4-status').accounting.known, true);
+  const completedAt = hoursLater(initialCompletedAt, 2);
+  const finished = await sweepUntil(g2, completedAt, s => s.done === true);
+  assert.equal(finished.failed, undefined, 'the sweep completes over its pinned root while the owner serves and reclaims: ' + String(finished.failed && finished.failed.message));
+  assert.equal(finished.fullCheck.checkedRoot, start.rootSha256, 'the certificate names the checked snapshot, not the current root');
+  assert.equal(finished.fullCheck.completedAt, completedAt.toISOString());
+  assert.equal(finished.accountingRepaired, false, 'the sweep rebuilt the same liveness accounting the owner maintained');
+  const checked = g2.coordinator.call('v4-status');
+  assert.equal(checked.sweep, null); assert.equal(checked.fullCheck.completedAt, completedAt.toISOString()); assert.equal(checked.fullCheck.checkedRoot, start.rootSha256);
+  assert.notEqual(checked.rootSha256, start.rootSha256, 'the completed check is published as its own transition');
+  assert.equal(JSON.stringify((await g2w.call('confirm-bundle', during.bundle)).result), JSON.stringify(during.proof), 'work accepted during the sweep is served');
+  g = g2; gw = g2w;
+  // (2) Age is measured from completion: overdue after the period, overdue on a clock behind it, unchanged by restart.
+  assert.equal(g.coordinator.call('v4-status', { now: hoursLater(checked.fullCheck.completedAt, 23).toISOString() }).fullCheck.overdue, false);
+  const late = g.coordinator.call('v4-status', { now: hoursLater(checked.fullCheck.completedAt, 25).toISOString() }).fullCheck;
+  assert.deepEqual({ overdue: late.overdue, reason: late.reason }, { overdue: true, reason: 'age' }, 'the check is overdue after its period, measured from the last completion');
+  const behind = g.coordinator.call('v4-status', { now: hoursLater(checked.fullCheck.completedAt, -1).toISOString() }).fullCheck;
+  assert.deepEqual({ overdue: behind.overdue, reason: behind.reason }, { overdue: true, reason: 'clock-rollback' }, 'a wall clock behind the completion cannot make the check current');
+  assert.equal(g.seal.fullCheckDue(hoursLater(checked.fullCheck.completedAt, 1)), false);
+  assert.equal(g.seal.fullCheckDue(hoursLater(checked.fullCheck.completedAt, 25)), true);
+  assert.equal(await g.service.fullCheckTick(hoursLater(checked.fullCheck.completedAt, 25)), null, 'an open work scope: the owner is not idle, the tick does nothing');
+  assert.equal((await gw.call('end')).ok, true);
+  assert.equal(await g.service.fullCheckTick(hoursLater(checked.fullCheck.completedAt, 1)), null, 'nothing due: the idle tick does nothing');
+  const ticked = await g.service.fullCheckTick(hoursLater(checked.fullCheck.completedAt, 25));
+  assert.ok(ticked && ticked.phase === 'storage', 'an overdue check starts on the idle tick (one bounded step)');
+  await closeOwner(g);
+  const h = await reopen(t, g);
+  assert.equal(h.coordinator.call('v4-status').fullCheck.completedAt, completedAt.toISOString(), 'restart does not refresh the completion time');
+  assert.equal((await sweepUntil(h, hoursLater(completedAt, 26), s => s.done === true)).failed, undefined, 'the tick-started sweep completes after the restart');
+  await closeOwner(h);
+  // (3) An untouched terminal leaf changed on disk: the fast restart (anchor and pending work only) is ready; the
+  // first use that routes through the page refuses, fails the owner and latches the root; nothing is repaired.
+  const terminalLeaf = v4LeafBelowRoot(f.directory, 5);
+  flipPageByte(f.directory, terminalLeaf.ref);
+  const i = await reopen(t, h);
+  assert.equal(fs.existsSync(latchFile(f.directory)), false, 'unread corruption is not discovered by the fast path');
+  const corrupted = hashesOutsideScratch(f.directory);   // after the restart's own bounded reclamation of dead packs
+  const iw = await (await i.hello()).work();
+  let refused = null;
+  for (const item of done) { const reply = await iw.call('confirm-bundle', item.bundle); if (!reply.ok) { refused = reply; break; } }
+  assert.ok(refused, 'a lookup through the changed page is refused');
+  assert.deepEqual({ code: refused.error.code, outcome: refused.error.outcome }, { code: 'DURABILITY', outcome: 'unknown' }, 'the refusal is a durability fault, never a conflict or absence');
+  assert.deepEqual({ state: i.service.state, incomplete: i.service.incomplete }, { state: 'stopping', incomplete: true }, 'the owner fails on discovered corruption (quiesced, incomplete)');
+  assert.ok(fs.existsSync(latchFile(f.directory)), 'discovery latches the root');
+  const onUse = JSON.parse(fs.readFileSync(latchFile(f.directory), 'utf8'));
+  assert.deepEqual({ code: onUse.code, phase: onUse.phase, root: onUse.root }, { code: 'SealCorrupt', phase: 'on-use', root: terminalLeaf.root }, 'the latch records the on-use discovery against the selected root');
+  assert.equal(JSON.stringify(hashesOutsideScratch(f.directory)), JSON.stringify(corrupted), 'discovery writes nothing but the latch');
+  await assert.rejects(refusedAdmission(t, i), error => error.code === 'SealCorrupt' && String(error.detail).startsWith('latched:'), 'a latched root is not admitted again');
+  i.service.close(); await i.service.drained(); i.coordinator.close();
+  // The operator restores the page and removes the latch: the same bytes are admitted and served again.
+  flipPageByte(f.directory, terminalLeaf.ref); fs.rmSync(latchFile(f.directory));
+  const j = await reopen(t, i), jw = await (await j.hello()).work();
+  for (const item of done.slice(0, 20)) assert.equal(JSON.stringify((await jw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'restored page serves the original proofs');
+  // (4) An untouched bundle leaf changed on disk: ready, the complete check reaches it, latches at once (no partial
+  // completion, no timestamp change); a commit refuses; after the repair the sweep resumes at its cursor and completes.
+  await closeOwner(j);
+  const bundleLeaf = v4LeafBelowRoot(f.directory, 6);
+  flipPageByte(f.directory, bundleLeaf.ref);
+  const k = await reopen(t, j);
+  const beforeLatch = k.coordinator.call('v4-status').fullCheck.completedAt;
+  const failure = await sweepFails(k, hoursLater(completedAt, 30));
+  assert.ok(failure && failure.code === 'SealCorrupt' && String(failure.detail).startsWith('latched:'), 'the sweep refuses at the changed page: ' + String(failure && failure.message));
+  const latch = JSON.parse(fs.readFileSync(latchFile(f.directory), 'utf8'));
+  assert.deepEqual({ code: latch.code, phase: latch.phase, tree: latch.tree }, { code: 'SealCorrupt', phase: 'storage', tree: 6 }, 'the latch names the sweep position');
+  const kw = await (await k.hello()).work();
+  const input = event(), canonical = C.canonicalPayload(input, undefined, 'viewing'), tail = await k.database.sql.tail('viewing');
+  const commit = await kw.call('reserve', { binding: { stream: 'viewing', chainId: tail.chainId, attemptId: randomUUID(), bundleId: randomUUID(), kind: 'access', eventId: input.eventId,
+    sequence: tail.sequence + 1, previousHash: tail.hash, hash: C.entryHash(tail.sequence + 1, tail.hash, canonical.text), contentSha256: canonical.contentSha256 }, prefix: null });
+  assert.equal(commit.ok, false, 'no transition after the latch'); assert.equal(commit.error.code, 'DURABILITY');
+  assert.deepEqual({ state: k.service.state, incomplete: k.service.incomplete }, { state: 'stopping', incomplete: true });
+  await assert.rejects(refusedAdmission(t, k), error => error.code === 'SealCorrupt' && String(error.detail).startsWith('latched:'));
+  k.service.close(); await k.service.drained(); k.coordinator.close();
+  flipPageByte(f.directory, bundleLeaf.ref); fs.rmSync(latchFile(f.directory));
+  const l = await reopen(t, k);
+  const resumedAfterLatch = l.coordinator.call('v4-status');
+  assert.equal(resumedAfterLatch.fullCheck.completedAt, beforeLatch, 'the latched sweep moved no timestamp');
+  assert.ok(resumedAfterLatch.sweep && resumedAfterLatch.sweep.phase === 'storage' && resumedAfterLatch.sweep.tree === 6, 'the sweep resumes where it stopped: ' + JSON.stringify(resumedAfterLatch.sweep));
+  const repaired = await sweepUntil(l, hoursLater(completedAt, 31), s => s.done === true);
+  assert.equal(repaired.failed, undefined, 'the resumed sweep completes after the repair');
+  assert.equal(repaired.fullCheck.completedAt, hoursLater(completedAt, 31).toISOString());
+  // (5) A retained SQL row changed behind the verified anchor: ready (not consulted by the fast path), detected by the
+  // database phase of the complete check, latched; restored, the sweep resumes in the database phase and completes.
+  await closeOwner(l);
+  const row = l.database.streams.viewing.rows[4], originalPayload = row.payload;
+  row.payload = originalPayload.replace('"result":"succeeded"', '"result":"prepared"');
+  assert.notEqual(row.payload, originalPayload);
+  const m = await reopen(t, l);
+  const dbFailure = await sweepFails(m, hoursLater(completedAt, 60));
+  assert.ok(dbFailure && dbFailure.code === 'SealCorrupt', 'the database phase refuses the changed row: ' + String(dbFailure && dbFailure.message));
+  const dbLatch = JSON.parse(fs.readFileSync(latchFile(f.directory), 'utf8'));
+  assert.deepEqual({ phase: dbLatch.phase, detail: dbLatch.detail }, { phase: 'database', detail: 'viewing:' + row.sequence + ':entry-digest' }, 'the latch names the disagreeing row and clause');
+  m.service.close(); await m.service.drained(); m.coordinator.close();
+  row.payload = originalPayload; fs.rmSync(latchFile(f.directory));
+  const n = await reopen(t, l);
+  assert.equal(n.coordinator.call('v4-status').sweep?.phase, 'database', 'the sweep resumes in its database phase');
+  const final = await sweepUntil(n, hoursLater(completedAt, 61), s => s.done === true);
+  assert.equal(final.failed, undefined, 'the sweep completes after the row is restored');
+  assert.equal(final.fullCheck.completedAt, hoursLater(completedAt, 61).toISOString());
+  const nw = await (await n.hello()).work();
+  for (const item of done.slice(0, 20)) assert.equal(JSON.stringify((await nw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after the checks');
+  for (const b of done[0].bundle.bindings) assertExcluded(await replayObservation(n, nw, b));
+});
+
+// ─── V4-T11 (order section 7, A10 over v4; REQ-B2C-V4-06 / RISK-B2C-V4-PREMATURE-RETIREMENT-OR-STALL) ───
+test('V4-T11 A10 over a v4 pair: the expired event stays provable with its exact ack and exclusion before and after reclamation, in a private v4 copy and in the lossless v3 export; a dependent copy keeps the source unchanged', v4Only, async t => {
+  const EW = load('emr-runtime/external-writer');
+  const f = await fixture(t), work = await (await f.hello()).work();
+  const original = await complete(f, work, true), published = await complete(f, work);
+  for (let i = 0; i < 12; i++) await complete(f, work, i % 2 === 0);
+  await a10Expire(f, work);
+  assert.equal(f.database.streams.viewing.rows.some(r => r.eventId === original.bundle.eventId), false, 'the original viewing payload is actually absent (lawful expiry)');
+  const a10 = async (g, gw, label) => {
+    const confirmed = await gw.call('confirm-bundle', original.bundle);
+    assert.equal(confirmed.ok, true, label + ': the expired event remains provable');
+    assert.equal(JSON.stringify(confirmed.result), JSON.stringify(original.proof), label + ': the identical canonical proof after expiry');
+    const ack = await gw.call('acknowledge', { proof: original.proof, bindings: original.bundle.bindings });
+    assert.equal(ack.ok && ack.result.status, 'already-acknowledged', label + ': the exact earlier ack is repeated, never a new one');
+    const outcome = await gw.call('lookup-outcome', original.bundle);
+    assert.equal(outcome.ok && outcome.result.outcome, 'committed-and-sealed', label + ': the original bindings stay committed');
+    assert.equal(JSON.stringify((await gw.call('confirm-bundle', published.bundle)).result), JSON.stringify(published.proof), label + ': a never-acked full proof is not evicted');
+    for (const b of original.bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+    assert.equal(g.coordinator.call('view').retired.viewing >= 0, true);
+  };
+  await a10(f, work, 'before reclamation');
+  // Reclamation (pack GC) minimizes nothing the retention contract keeps: the same facts after a forced reclamation and a restart.
+  f.coordinator.call('compact', { force: true });
+  await a10(f, work, 'after reclamation');
+  await closeOwner(f);
+  const g = await reopen(t, f), gw = await (await g.hello()).work();
+  await a10(g, gw, 'after restart');
+  await closeOwner(g);
+  // A private v4 copy under the launch-scoped mapping (the restore route's shape): the same facts; the source bytes stay.
+  const sourceBytes = directoryHashes(f.directory), copy = f.directory + '-v4-private';
+  fs.cpSync(f.directory, copy, { recursive: true, errorOnExist: true });
+  const mapping = { source: f.pair, target: { ...a10Target, chains: f.pair.chains } };
+  const h = await fixture(t, { directory: copy, model: model(structuredClone(g.database.streams)), pair: a10Target, copy: mapping });
+  assert.equal(h.service.state, 'ready', 'the private v4 copy is admitted under the mapping');
+  assert.equal(h.coordinator.call('v4-status').format, 4);
+  const hw = await (await h.hello()).work();
+  await a10(h, hw, 'private v4 copy');
+  await complete(h, hw);                                               // the copy takes its own work; the source is a retained dependent copy
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(sourceBytes), 'the source directory bytes are unchanged by the copy');
+  await closeOwner(h);
+  // The lossless v3 export (rollback route) of the v4 pair keeps the same facts under the unchanged v3 reader.
+  const exported = f.directory + '-v3-export';
+  const back = EW.exportV4ToV3(f.directory, exported, f.pair);
+  assert.equal(back.target.format, 3);
+  const k = await fixture(t, { directory: exported, model: model(structuredClone(g.database.streams)), format: 3, cold: true });
+  await startObserved(k.service); assert.equal(k.service.state, 'ready', 'the unchanged v3 reader admits the export');
+  const kw = await (await k.hello()).work();
+  await a10(k, kw, 'v3 export');
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(sourceBytes), 'the export never writes its v4 source');
 });
 
 test('V4-T08 first conversion of a healthy v3 pair into a separate v4 root and its lossless export back to a new v3 copy', { skip: FORMAT === 4 && 'runs in the v3 pass (the source is a v3 pair)' }, async t => {
@@ -1498,6 +1774,16 @@ test('V4-T08 first conversion of a healthy v3 pair into a separate v4 root and i
   assert.ok(receipt.verified.members > 0 && Object.keys(receipt.verified.trees).length === 8);
   assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(sourceBytes), 'the v3 source is byte-for-byte unchanged');
   assert.throws(() => EW.importV3ToV4(f.directory, target, f.pair, facts), { code: 'SealUnavailable' }, 'an existing target is never overwritten');
+  // The entry mode names the stored format: the v3 mode refuses the v4 target and the v4 mode refuses the v3 source,
+  // each before any byte of the directory changes (no lock, no journal, no repair).
+  const targetBytes = directoryHashes(target);
+  for (const [directory, format, label] of [[target, 3, 'the v3 entry mode over the v4 target'], [f.directory, 4, 'the v4 entry mode over the v3 source']]) {
+    let refusal = null;
+    try { const c = new StateCoordinator(directory, executeExternal, { format }); c.close(); } catch (error) { refusal = error; }
+    assert.equal(refusal && refusal.code, 'SealUnsupportedFormat', label + ' refuses the other format');
+  }
+  assert.equal(JSON.stringify(directoryHashes(target)), JSON.stringify(targetBytes), 'the refused admissions changed no byte of the target');
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(sourceBytes), 'the refused admissions changed no byte of the source');
   // The target serves the same proofs, exclusions and pending work under the v4 owner (explicit mode 4).
   const EW4 = load('emr-runtime/external-writer');
   const v4Coordinator = new StateCoordinator(target, EW4.executeExternal, { format: 4 });
@@ -1519,8 +1805,11 @@ test('V4-T08 first conversion of a healthy v3 pair into a separate v4 root and i
   const current = g.coordinator.call('read');
   g.service.close(); await g.service.drained(); g.coordinator.close();
   const exported = f.directory + '-v3-export';
-  const back = EW.exportV4ToV3(target, exported, f.pair);
-  assert.equal(back.kind, 'export-v3'); assert.equal(back.target.format, 3); assert.equal(back.verified.members, Object.keys(current.terminal).length + Object.keys(current.bundles).length + Object.keys(current.intents).length + Object.keys(current.slots).length + Object.keys(current.proofs).length);
+  let back;
+  try { back = EW.exportV4ToV3(target, exported, f.pair); }
+  catch (error) { assert.fail('the export verifies every current member, including the work accepted after the conversion (the export refused its own receipt: ' + String(error && error.code) + ')'); }
+  assert.equal(back.kind, 'export-v3'); assert.equal(back.target.format, 3);
+  assert.equal(back.verified.members, Object.keys(current.terminal).length + Object.keys(current.bundles).length + Object.keys(current.intents).length + Object.keys(current.slots).length + Object.keys(current.proofs).length, 'the export verifies every current member, including the work accepted after the conversion');
   const h = await fixture(t, { directory: exported, model: model(structuredClone(g.database.streams)), cold: true });
   await h.service.start(); assert.equal(h.service.state, 'ready', 'the unchanged v3 reader admits the exported copy');
   const exportedState = h.coordinator.call('read');

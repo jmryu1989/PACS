@@ -230,9 +230,11 @@ function ladderEvent(A, change) {
     action: change ? 'approve-sign' : 'provide-prepared', result: change ? 'succeeded' : 'prepared', requestId: 'request-1',
     auditLinkId: A.newAuditLinkId(), relatedEventId: null };
 }
+/** The stored major format the ladder's owner serves (EMR_STATE_FORMAT=4: KIN-EMR-STATE-V4, V4-T12; default v3). */
+const LADDER_FORMAT = process.env.EMR_STATE_FORMAT === '4' ? 4 : 3;
 /** The suite's fixture() wiring without node:test; `cold` fixtures are started by the caller so startup can be timed. */
 async function ladderFixture(P, directory, database) {
-  const coordinator = new P.StateCoordinator(directory, P.executeExternal);
+  const coordinator = new P.StateCoordinator(directory, P.executeExternal, { format: LADDER_FORMAT });
   const journal = new P.FailureJournal(directory, coordinator), seal = new P.AccessSeal(directory, database.sql, journal);
   const pair = { instanceId: 'synthetic-copy', chains: Object.fromEntries(Object.entries(database.streams).map(([s, v]) => [s, v.chainId])),
     database: { database: 'isolated', oid: 10001, address: '127.0.0.1', port: 5432 } };
@@ -269,7 +271,7 @@ async function ladderChild(o) {
     envelope: ENVELOPE, envelope_source_file: ENVELOPE_SOURCE, envelope_source_file_sha256_observed: ENVELOPE_SOURCE && fs.existsSync(ENVELOPE_SOURCE) ? sha256(fs.readFileSync(ENVELOPE_SOURCE)) : null,
     host: { platform: process.platform, release: os.release(), arch: process.arch, node: process.version, logical_cpus: os.cpus().length,
       total_memory_bytes: os.totalmem(), free_memory_bytes_at_start: os.freemem(), v8_heap_size_limit_bytes: v8.getHeapStatistics().heap_size_limit, exec_argv: process.execArgv },
-    options: { rung_events_per_stream: o.rung, mix: o.mix, streams: o.streams, stream_list: streamList, budget_seconds: o.budgetSeconds, sample_every_ops: o.sampleEvery, state_directory: directory },
+    options: { rung_events_per_stream: o.rung, mix: o.mix, streams: o.streams, stream_list: streamList, budget_seconds: o.budgetSeconds, sample_every_ops: o.sampleEvery, state_directory: directory, state_format: LADDER_FORMAT },
     plan, method: {
       operations: 'reserve (per stream) -> model COMMIT -> confirm-bundle -> acknowledge (acked class only); orphan = reservation superseded by the next attempt on the same slot (product: terminal.superseded + commit-not-found journal); ' +
         'negative = reservations at free slots above the final frontier, settled aborted by recoverAtStart in the cold-recovery phase (product: terminal.aborted). The dispatcher has no settle-negative operation.',
@@ -409,6 +411,7 @@ async function ladderChild(o) {
       acknowledged_bundles: Object.values(state.bundles).filter(b => b.phase === 'acknowledged').length,
       terminal_phases: Object.values(state.terminal).reduce((acc, t) => { acc[t.phase] = (acc[t.phase] ?? 0) + 1; return acc; }, {}) };
     record.files.steady = directoryBytes(directory);
+    if (LADDER_FORMAT === 4) { try { record.v4_status_after_load = f.coordinator.call('v4-status'); } catch (error) { record.v4_status_after_load = { error: error.code ?? String(error) }; } }
     const k0 = performance.now(); let compactError = null;
     try { f.coordinator.call('compact', { force: true }); } catch (error) { compactError = error.code ?? String(error); }
     record.timings_ms.forced_compaction = +(performance.now() - k0).toFixed(1); record.files.after_forced_compaction = { ...directoryBytes(directory), error: compactError };
@@ -423,6 +426,7 @@ async function ladderChild(o) {
     const start_ms = performance.now() - r0;
     record.cold_recovery = { start_ms: +start_ms.toFixed(1), service_state: g.service.state, error: recoveryError, journal_records_after: g.journal.all().length, checks: [] };
     record.files.after_recovery = directoryBytes(directory);
+    if (LADDER_FORMAT === 4 && g.service.state === 'ready') { try { record.cold_recovery.v4_status = g.coordinator.call('v4-status'); } catch (error) { record.cold_recovery.v4_status = { error: error.code ?? String(error) }; } }
     gc(); record.memory.after_recovery = sampleMemory('after-recovery');
     if (g.service.state === 'ready') {
       const rs = performance.now(); const recovered = g.coordinator.call('read'); record.cold_recovery.read_ms_after = +(performance.now() - rs).toFixed(2);
@@ -465,7 +469,10 @@ function deriveAndJudge(record, streamCount) {
   const heapDelta = m.after_load && m.baseline ? m.after_load.heapUsed - m.baseline.heapUsed : null;
   const rssDelta = m.after_load && m.baseline ? m.after_load.rss - m.baseline.rss : null;
   const productHeap = heapDelta == null ? null : Math.max(0, heapDelta - record.model_estimate_bytes.estimate);
-  const steadyTotal = record.files.steady?.total ?? null, compactedCheckpoint = record.files.after_forced_compaction?.files?.['seal/settlement.json'] ?? null;
+  // The checkpoint bytes per key: the v3 checkpoint file, or the v4 root's pages, roots and WAL (seal/v4/, less scratch).
+  const v4Bytes = files => files ? Object.entries(files).filter(([name]) => name.startsWith('seal/v4/') && !name.startsWith('seal/v4/tmp/')).reduce((n, [, size]) => n + size, 0) : null;
+  const steadyTotal = record.files.steady?.total ?? null;
+  const compactedCheckpoint = LADDER_FORMAT === 4 ? v4Bytes(record.files.after_forced_compaction?.files) : record.files.after_forced_compaction?.files?.['seal/settlement.json'] ?? null;
   const per = {
     heap_bytes_per_attempt_key_total: div(heapDelta, keys), heap_bytes_per_attempt_key_product_estimate: div(productHeap, keys),
     rss_bytes_per_attempt_key_total: div(rssDelta, keys), state_json_bytes_per_attempt_key: div(clone?.json_bytes, keys),

@@ -109,7 +109,8 @@ MUTANTS = {
     "M25": ("expiry settles an in-flight append as absent and permanently loses its intent", [
         ("api/src/emr-runtime/store.ts", "  const rows: RetentionRow[] = [];\n", "  await seal.recoverAtStart();\n  const rows: RetentionRow[] = [];\n")]),
     "M26": ("a rolled-back expiry leaves reusable proof for a forged checkpoint", [
-        ("api/src/emr-runtime/store.ts", "    if (callbackFailed) seal.abort('viewing', attemptId);\n", "")]),
+        # D1700 re-anchor: the (c) retention scope settles the rolled-back expiry (localRetentionScope.failed).
+        ("api/src/emr-runtime/store.ts", "      if (rolledBack) seal.abort('viewing', attemptId);\n", "")]),
     "M27": ("a second calendar owner as a class method goes undetected", [
         ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export class DuplicateCalendar { end(at: string) { return civilPeriodEnd(at, 2); } }\nexport interface ChainTail")]),
     "M28": ("a second calendar owner as an exported arrow goes undetected", [
@@ -131,10 +132,13 @@ MUTANTS = {
     "M34": ("I3: a healthy own COMMIT waits for every unrelated pending event", [
         ("api/src/emr-runtime/seal.ts", "        const verifySnapshot = async (sql: PrismaLedgerSql, page?: VerificationPage) => {", "        const verifySnapshot = async (sql: PrismaLedgerSql, page?: VerificationPage) => {\n        for(const i of Object.values(this.load().intents))if(i.eventId&&!await sql.entryForEvent(i.stream,i.eventId))throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
     "M35": ("I4: job reports success before its own checkpoint seal", [
-        ("api/src/emr-runtime/store.ts", "  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });\n", "")]),
+        # D1700 re-anchor: the (c) retention scope seals the committed checkpoint (localRetentionScope.committed).
+        ("api/src/emr-runtime/store.ts", "    async committed(binding: CommitBinding) { await seal.reconcileCommitted('viewing', { sequence: binding.sequence, hash: binding.hash }); },\n",
+         "    async committed(binding: CommitBinding) { void binding; },\n")]),
     "M36": ("per-operation Node startup returns to the head-locked writer: concurrent receipt latency exceeds the round-3 budget", [
-        ("api/src/emr-runtime/coordinator.ts", "      if (this.owner) return executeExternal({ ...request, context: this.owner.context });",
-         "      if (operation === 'reserve') require('node:child_process').spawnSync(process.execPath, ['-e', '']);\n      if (this.owner) return executeExternal({ ...request, context: this.owner.context });")]),
+        # D1700 re-anchor: the (c) owner reserves through an explicit patch record (kind 'reserve') on the lock-owning writer.
+        ("api/src/emr-runtime/coordinator.ts", "    return executeExternal(request);\n",
+         "    if (operation === 'patch' && value?.kind === 'reserve') require('node:child_process').spawnSync(process.execPath, ['-e', '']);\n    return executeExternal(request);\n")]),
     "M38": ("A7 replay trusts a sealed DB row without binding its bytes through the external seal", [
         ("api/src/emr-runtime/seal.ts", "await reader.snapshot(sql => this.bindSealedTarget(sql, view, stream, target));", "void 0; /* missing sealed-target binding */")]),
     "M39": ("head-lock waiters acquire every pool connection ahead of a committed request's verification", [
@@ -421,6 +425,165 @@ API_MUTANTS = {
          "      const waited = await (fatal ??= budget(EMR_CLEANUP_TIMEOUT_MS)).race(release(entry));",
          "      const waited = await (fatal = budget(EMR_CLEANUP_TIMEOUT_MS)).race(release(entry));")]),
 }
+
+
+# KIN-EMR-STATE-V4 semantic mutants V4-M01..M12 (order section 8; emr/units/b.json b2c.v4_mutants). Each is one
+# deliberate fault of the v4 engine, codec, seal anchor or entry-mode admission; the kill is the named behavioural
+# assertion of a declared case run in its suite: `service-v4` (state_service_test.cjs under EMR_STATE_FORMAT=4),
+# `service-v3` (the v3 pass: V4-T08 conversion/export, entry modes) or `codec` (checkpoint_v4_test.cjs, EMR_V4_CASES).
+V4_MUTANTS = {
+    "V4-M01": ("page checksum bypassed: altered page bytes are consumed", [
+        ("api/src/emr-runtime/checkpoint-v4.ts",
+         "  if (!domainHashRaw(DOMAIN.page, bytes.subarray(0, FOOTER_OFFSET)).equals(bytes.subarray(FOOTER_OFFSET))) corrupt(d + ':footer');\n", ""),
+        ("api/src/emr-runtime/checkpoint-v4.ts",
+         "  if (createHash('sha256').update(bytes.subarray(0, FOOTER_OFFSET)).digest('hex') !== pageSha256FromFooter(bytes) || expect.ref.sha256 !== bytes.subarray(FOOTER_OFFSET).toString('hex')) corrupt(d + ':reference-checksum');\n", "")]),
+    "V4-M02": ("a missing/corrupt page on the route is answered as absence", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    try { raw = this.tree.get(key); } catch (error) { throw translateV4(error); }\n",
+         "    try { raw = this.tree.get(key); } catch { raw = undefined; }\n")]),
+    "V4-M03": ("a collision bucket answers by digest alone (the full key is ignored)", [
+        ("api/src/emr-runtime/checkpoint-v4.ts",
+         "        const pair = this.bucketPairs(entry).find(p => p[0] === key);\n",
+         "        const pair = this.bucketPairs(entry)[0];\n")]),
+    "V4-M04": ("the touched-closure validation of a transition is omitted", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    engine.apply(body, touched, undo);\n    engine.validateTouched(touched, body.publishing);\n  } catch (error) { revert(); throw error; }\n  const revision = body.revision, revisionText = String(revision);\n  const writer = v.writer",
+         "    engine.apply(body, touched, undo);\n  } catch (error) { revert(); throw error; }\n  const revision = body.revision, revisionText = String(revision);\n  const writer = v.writer")]),
+    "V4-M05": ("success is exposed without the durable selector publication", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    writeSelector(engine.file, { format: V4_FORMAT, version: 4, layout: 1, rootSha256: nextRoot, revision: revisionText, wal: { segment: v.segment.segment, offset: String(complete.end), lsn: String(v.lsn + 2), previousSha256: complete.sha256 } });\n    // The transition is the accepted root: advance the view.\n",
+         "    // The transition is the accepted root: advance the view.\n")]),
+    "V4-M06": ("admission keeps the selector's root and ignores completed transitions after it", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "        root = readRoot(v4, r.nextRoot); rootSha256 = r.nextRoot; outstanding = null; adoptedEnd = item.end;\n",
+         "        outstanding = null;\n")]),
+    "V4-M07": ("pending work is never recorded for a live attempt", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "      const attempt = engine.intents[id] && slot ? { kind: 'attempt', stateKey: id, slotKey: slot, proofKey: engine.proofs[id] ? id : null, revision: revisionText } : null;\n",
+         "      const attempt = null;\n")]),
+    "V4-M08": ("the fast path trusts the witness anchor without the chain's actual first retained row", [
+        ("api/src/emr-runtime/seal.ts",
+         "    if (!full && (this.anchors.get(stream) === anchorKey ||\n",
+         "    if (!full && (this.anchors.has(stream) ||\n")]),
+    "V4-M09": ("the complete-check age is never measured from the last completion", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "  const completedAt = Date.parse(v.root.fullCheck.completedAt), ageMs = at - completedAt;\n",
+         "  const completedAt = Date.parse(v.root.fullCheck.completedAt), ageMs = (void completedAt, 0);\n")]),
+    "V4-M10": ("a dead pack the running sweep's pinned root still reads is reclaimed", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    if ((v.packs.get(pack) ?? 0) !== 0 || pack === v.writer?.currentPack || (v.sweepOrphans && v.sweepOrphans.has(pack))) {",
+         "    if ((v.packs.get(pack) ?? 0) !== 0 || pack === v.writer?.currentPack) {")]),
+    "V4-M10-LIVE": ("a forced reclamation unlinks packs the selected root still references", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    if (live.has(pack) || pinned.has(pack) || pack === v.writer?.currentPack) { retained++; continue; }\n",
+         "    if (pinned.has(pack) || pack === v.writer?.currentPack) { retained++; continue; }\n")]),
+    "V4-M11": ("the rollback export reads the segment's base root, not the selected root (post-conversion work omitted)", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    const v = engine.v4!;\n    const head = { version: 3 as const,",
+         "    const v = (() => { const x = engine.v4!; const base = WalSegment.read(x.segment.file, 0).records[0].record; const old = base.type === 'start' ? readRoot(x.directory, base.baseRoot) : x.root; const trees: Record<number, Tree> = {}; for (const d of old.trees) trees[d.id] = Tree.open(x.store, d.id, d.ref, parseDecimal(d.count, 'root')); return { ...x, trees }; })();\n    const head = { version: 3 as const,")]),
+    "V4-M12": ("the entry mode's format admission is bypassed: a v3-mode process admits a v4 root", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    if (format !== 4) return fail('SealUnsupportedFormat');\n    return admitEngineV4(engine, selector, pair, repair, inventory);\n",
+         "    return admitEngineV4(engine, selector, pair, repair, inventory);\n")]),
+}
+V4_SUITES = {
+    "service-v4": {"command": ["tests/emr/b/state_service_test.cjs"], "variable": "EMR_SERVICE_CASES", "env": {"EMR_STATE_FORMAT": "4"}, "declared": "local_service_cases"},
+    "service-v3": {"command": ["tests/emr/b/state_service_test.cjs"], "variable": "EMR_SERVICE_CASES", "env": {}, "declared": "local_service_cases"},
+    "codec": {"command": ["tests/emr/b/checkpoint_v4_test.cjs"], "variable": "EMR_V4_CASES", "env": {}, "declared": None},
+}
+
+
+def v4_main(args):
+    """V4-M01..M12: per suite one unmutated baseline of the union of the declared kill cases and one rename/alias/
+    format control of the codec module, then each mutant in the isolated copy with exactly its kill cases."""
+    declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))["b2c"]
+    declared = {item["id"]: item for item in declaration["v4_mutants"]}
+    if set(declared) != set(V4_MUTANTS):
+        raise RuntimeError("v4 mutant declaration differs from driver: %s" % sorted(set(declared) ^ set(V4_MUTANTS)))
+    chosen = [name for name in declared if not args.only or name in args.only.split(",")]
+    if args.only and set(chosen) != set(args.only.split(",")):
+        raise RuntimeError("unknown v4 mutant selection")
+    out = args.out.resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k not in {"EMR_B2C_SOURCE_ROOT", "EMR_SERVICE_CASES", "EMR_V4_CASES", "EMR_STATE_FORMAT", "EMR_B2C_API_CASES"}}
+    env.update(KIN_EMR_PYTHON=os.environ.get("KIN_EMR_PYTHON", sys.executable), PYTHONIOENCODING="utf-8")
+    for name in chosen:
+        suite = declared[name]["suite"]
+        if suite not in V4_SUITES:
+            raise RuntimeError(name + ": unknown suite " + suite)
+        if V4_SUITES[suite]["declared"] and any(case not in declaration[V4_SUITES[suite]["declared"]] for case in declared[name]["kill"]):
+            raise RuntimeError(name + ": kill case not declared for " + suite)
+    rows = []
+    with tempfile.TemporaryDirectory(prefix="kin-emrb-v4-") as folder:
+        copy = Path(folder) / "checkout"
+        copy.mkdir()
+        head, link = make_copy(copy, args.worktree, args.source_manifest)
+        try:
+            if (copy / "mutant-inputs.json").exists():
+                shutil.copyfile(copy / "mutant-inputs.json", out / "mutant-inputs.json")
+            node = ["node", "--max-old-space-size=3072", "--test", "--test-concurrency=1", "--test-reporter=tap"]
+            def run_suite(suite, cases, log, extra_env=None):
+                spec = V4_SUITES[suite]
+                run_env = {**env, **spec["env"], spec["variable"]: ",".join(cases), **(extra_env or {})}
+                code, seconds = run(node + spec["command"], cwd=copy, env=run_env, timeout=1800, log=log)
+                text = log.read_text(encoding="utf-8", errors="replace")
+                return code, seconds, text
+            # Baselines: per suite, the union of the chosen mutants' kill cases must pass unmutated.
+            baselines = {}
+            for suite in V4_SUITES:
+                cases = sorted({case for name in chosen if declared[name]["suite"] == suite for case in declared[name]["kill"]})
+                if not cases:
+                    continue
+                code, seconds, text = run_suite(suite, cases, out / ("baseline-" + suite + ".log"))
+                passed = sorted(set(re.findall(r"^ok \d+ - (V4-T[0-9]{2}|[\w.-]+) ", text, re.M)) & set(cases))
+                failed = re.findall(r"^not ok \d+ - ([\w.-]+) ", text, re.M)
+                baselines[suite] = {"exit": code, "seconds": seconds, "cases": cases, "passed": passed, "failed": failed}
+                if code or passed != cases or failed:
+                    (out / "baselines.json").write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+                    raise RuntimeError("unmutated copy did not pass the %s selection; no v4 mutant verdict" % suite)
+            # Control: a semantics-preserving rename/alias/layout change of the codec module must still pass.
+            control_file = copy / "api/src/emr-runtime/checkpoint-v4.ts"
+            original = control_file.read_bytes()
+            renamed = original.decode("utf-8").replace("pageSha256FromFooter", "footerDigestOf").replace(
+                "import { createHash, randomBytes } from 'node:crypto';", "import { createHash as hashFactory, randomBytes } from 'node:crypto';").replace("createHash(", "hashFactory(")
+            control_file.write_bytes(renamed.replace("export class PackStore {", "\nexport class PackStore {").encode("utf-8"))
+            control_sha = sha256(control_file)
+            try:
+                controls = {}
+                for suite, baseline in baselines.items():
+                    code, seconds, text = run_suite(suite, baseline["cases"], out / ("control-" + suite + ".log"))
+                    passed = sorted(set(re.findall(r"^ok \d+ - ([\w.-]+) ", text, re.M)) & set(baseline["cases"]))
+                    controls[suite] = {"exit": code, "seconds": seconds, "passed": passed}
+            finally:
+                control_file.write_bytes(original)
+            control = {"before_sha256": hashlib.sha256(original).hexdigest(), "control_sha256": control_sha, "restored_sha256": sha256(control_file), "suites": controls}
+            (out / "baselines.json").write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+            (out / "oracle-control.json").write_text(json.dumps(control, indent=2) + "\n", encoding="utf-8")
+            if control["before_sha256"] != control["restored_sha256"] or any(c["exit"] or c["passed"] != baselines[s]["cases"] for s, c in controls.items()):
+                raise RuntimeError("rename/alias/format control failed; no v4 mutant verdict")
+            for name in chosen:
+                expected, changes = V4_MUTANTS[name]
+                suite, kill = declared[name]["suite"], declared[name]["kill"]
+                applied = apply(copy, changes)
+                log = out / (name + ".log")
+                try:
+                    code, seconds, text = run_suite(suite, kill, log)
+                    verdict = contract_verdict(text, kill, code)
+                    failures = dict(re.findall(r"^not ok \d+ - ([\w.-]+) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S))
+                    intended = set(declared[name]["assertions"]) == set(kill) and all(
+                        message in failures.get(case, "") for case, message in declared[name]["assertions"].items())
+                    row = {"id": name, "head": head, "suite": suite, "expected_failure": expected, "kill": kill, "exit": code, "seconds": seconds,
+                           "log": str(log), **verdict, "intended_assertions": intended, "killed": verdict["killed"] and intended}
+                finally:
+                    restore(copy, applied)
+                row["files"] = applied
+                rows.append(row)
+                (out / "mutants.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+                print("V4_MUTANT " + json.dumps({"id": name, "killed": row["killed"], "failed": row["failed"], "intended": intended}), flush=True)
+        finally:
+            unlink_modules(link)
+    print("V4_MUTANTS_RESULT " + json.dumps({"head_sha": head, "chosen": chosen, "survived": [r["id"] for r in rows if not r["killed"]]}))
+    return 0 if rows and all(row["killed"] for row in rows) else 1
 
 
 def terminal_main(args):
@@ -751,6 +914,7 @@ def main(argv=None):
     parser.add_argument("--terminal", action="store_true", help="run declared D1641 terminal component mutants in an isolated copy")
     parser.add_argument("--identity", action="store_true", help="run declared D1650 identity component mutants in an isolated copy")
     parser.add_argument("--api", action="store_true", help="run declared EMR-B2c API-side behavioural mutants (C-M04..M16) in an isolated copy")
+    parser.add_argument("--v4", action="store_true", help="run declared KIN-EMR-STATE-V4 semantic mutants (V4-M01..M12) in an isolated copy")
     parser.add_argument("--only", help="comma-separated mutant IDs")
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--source-manifest", type=Path, help="hash-bound LF source inventory for an isolated Linux copy")
@@ -760,6 +924,8 @@ def main(argv=None):
         return self_test()
     if args.out is None:
         parser.error("--out is required unless --self-test is selected")
+    if args.v4:
+        return v4_main(args)
     if args.terminal or args.identity or args.api:
         return terminal_main(args)
     declared = {m["id"]: m for m in json.loads(DECLARATION.read_text(encoding="utf-8"))["mutants"]}

@@ -929,6 +929,8 @@
       "V4-T07",
       "V4-T04",
       "V4-T05",
+      "V4-T10",
+      "V4-T11",
       "V4-T08",
       "D1656-T02",
       "A10-T01",
@@ -1329,6 +1331,99 @@
         "assertions": {
           "C-A02.R14": "ledger wait cannot renew the expired fatal budget"
         }
+      }
+    ],
+    "v4_mutants": [
+      {
+        "id": "V4-M01",
+        "suite": "codec",
+        "kill": ["V4-T03"],
+        "assertions": {"V4-T03": "no altered value is ever returned"},
+        "behaviour": "bypass page/root checksum: altered consumed bytes cause refusal, never success (a validly structured digit change inside a stored member is refused by the checksum alone)"
+      },
+      {
+        "id": "V4-M02",
+        "suite": "service-v4",
+        "kill": ["V4-T10"],
+        "assertions": {"V4-T10": "discovery latches the root"},
+        "behaviour": "treat missing/corrupt page as absent: an existing K behind a changed page cannot be answered as absence; the lookup refuses and the owner latches the root (a swallowed page refusal reaches a refusal elsewhere but never the latch)"
+      },
+      {
+        "id": "V4-M03",
+        "suite": "codec",
+        "kill": ["V4-T02"],
+        "assertions": {"V4-T02": "full-key identity inside a bucket"},
+        "behaviour": "ignore full key in collision bucket: distinct colliding keys retain distinct outcomes"
+      },
+      {
+        "id": "V4-M04",
+        "suite": "service-v4",
+        "kill": ["V4-T06"],
+        "assertions": {"V4-T06": "a validly checksummed contradictory record cannot publish"},
+        "behaviour": "omit changed/removal dependency validation: a contradictory terminal for a live attempt is refused before any page, root or WAL byte"
+      },
+      {
+        "id": "V4-M05",
+        "suite": "service-v4",
+        "kill": ["V4-T04"],
+        "assertions": {"V4-T04": "selector-write: the publication reaches the barrier"},
+        "behaviour": "early success before the durable selector: the selector barrier is part of every accepted transition (the owned selector cut must be reached)"
+      },
+      {
+        "id": "V4-M06",
+        "suite": "service-v4",
+        "kill": ["V4-T04"],
+        "assertions": {"V4-T04": "selector-write: the restart recovers"},
+        "behaviour": "select older root / ignore the completed WAL suffix: a transition completed before the selector cut is adopted at restart (its tail already advanced), never left behind"
+      },
+      {
+        "id": "V4-M07",
+        "suite": "service-v4",
+        "kill": ["V4-T06"],
+        "assertions": {"V4-T06": "the uncommitted reservation is pending work in both streams"},
+        "behaviour": "omit the pending entry of a live attempt: the real uncommitted attempt remains discoverable and exact"
+      },
+      {
+        "id": "V4-M08",
+        "suite": "service-v4",
+        "kill": ["V4-T07"],
+        "assertions": {"V4-T07": "a changed retained anchor is fully revalidated, not trusted: refused readiness"},
+        "behaviour": "trust the DB witness anchor without the chain's actual first retained row: a changed anchor refuses readiness"
+      },
+      {
+        "id": "V4-M09",
+        "suite": "service-v4",
+        "kill": ["V4-T10"],
+        "assertions": {"V4-T10": "the check is overdue after its period, measured from the last completion"},
+        "behaviour": "reset the full-check age: an unchecked period is reported overdue, never current"
+      },
+      {
+        "id": "V4-M10",
+        "suite": "service-v4",
+        "kill": ["V4-T10"],
+        "assertions": {"V4-T10": "the sweep completes over its pinned root while the owner serves and reclaims"},
+        "behaviour": "reclaim a pack the running sweep's pinned root still reads: concurrent reclamation retains every referenced page"
+      },
+      {
+        "id": "V4-M10-LIVE",
+        "suite": "service-v4",
+        "kill": ["V4-T05"],
+        "assertions": {"V4-T05": "restart after reclamation"},
+        "behaviour": "reclaim reachable packs of the selected root: the next incarnation (a fresh page cache) admits the selected root after a forced reclamation"
+      },
+      {
+        "id": "V4-M11",
+        "suite": "service-v3",
+        "kill": ["V4-T08"],
+        "assertions": {"V4-T08": "the export verifies every current member"},
+        "behaviour": "omit post-conversion work from the rollback export: the latest K/proof/ack set must be exported and compared"
+      },
+      {
+        "id": "V4-M12",
+        "suite": "service-v3",
+        "kill": ["V4-T08"],
+        "assertions": {"V4-T08": "the v3 entry mode over the v4 target refuses the other format"},
+        "behaviour": "bypass the entry mode's format admission: a v3-mode process over a v4 root is refused before any byte changes (the image-level launch boundary is V4-T09)"
       }
     ]
   }

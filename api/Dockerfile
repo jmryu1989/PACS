@@ -44,7 +44,13 @@ RUN install -d -m 700 /var/lib/kin-emr
 CMD ["npm", "run", "start:dev"]
 
 FROM development AS build
+# KIN-EMR-STATE-V4 (D1691): the validator manifest (SHA-256 of every emr-runtime/emr-contract source, the retention
+# contract and every migration, in the repository layout) is carried as image metadata next to the compiled code: a v4
+# root is admitted only by the exact validator sources it was published under; the source tree computes the same value.
 RUN npm run build \
+ && mkdir -p /manifest/api && cp -r src /manifest/api/src && cp -r prisma /manifest/api/prisma \
+ && node -e "const m=require('/app/dist/emr-runtime/checkpoint-v4.js').validatorManifest('/manifest');if(!m.files.length)throw new Error('empty validator manifest');require('fs').writeFileSync('/app/dist/emr-runtime/validator-manifest.json',JSON.stringify(m));console.log('validator-manifest '+m.validatorSha256+' files='+m.files.length)" \
+ && rm -rf /manifest \
  && npm prune --omit=dev --ignore-scripts \
  # 운영 checkout의 umask 077이 package/schema까지 600으로 만들 수 있다.
  # 이미지 내부 권한은 호스트에서 물려받지 않고, 실행 파일 비트만 보존한다.
