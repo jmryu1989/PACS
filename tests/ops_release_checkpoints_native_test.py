@@ -354,8 +354,11 @@ def lifecycle(ident, *steps):
     observed = []
     plain = rehearsal.CheckpointDocker(None, None)
     for step in steps:
-        verb = "start" if step == "restarting" else step
-        REAL_RUN(plain, ["docker", verb, ident], timeout=60)
+        verb = "kill" if step == "kill" else "start"
+        if verb == "kill":
+            REAL_RUN(plain, ["docker", "kill", ident], timeout=60)
+        else:
+            REAL_RUN(plain, ["docker", "start", ident], timeout=60)
         end = time.monotonic() + LIFECYCLE_SECONDS
         state = subject_state(ident)
         while not conditions[step](state):
