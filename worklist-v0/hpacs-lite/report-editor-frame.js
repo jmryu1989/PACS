@@ -218,7 +218,9 @@
       return at;
     }
 
-    function blocked(at) {
+    // `admission` (W5, D1423 R2) is the host's one-shot token for one reviewed edit; the host's canEdit alone judges it. Every
+    // guard here stays as it is for that edit too, and a caller without a token passes null exactly as before.
+    function blocked(at, admission = null) {
       if (ended) return 'ended';
       if (!at || !requests.has(at) || !opening || at.opening !== opening) return 'stale';
       const s = state(at.field);
@@ -226,7 +228,7 @@
       if (s.revision !== at.revision || s.el.value !== at.text) return 'changed';
       // Focusing a different field would commit its composition as a side effect.
       if (isComposing()) return 'composing';
-      if (s.el.readOnly || s.el.disabled || !canEdit(at.field)) return 'readonly';
+      if (s.el.readOnly || s.el.disabled || !canEdit(at.field, admission, at)) return 'readonly';
       return null;
     }
 
@@ -236,10 +238,10 @@
       return !['ended', 'stale', 'changed'].includes(blocked(at));
     }
 
-    function replace(at, text, start, end) {
+    function replace(at, text, start, end, admission = null) {
       if (typeof text !== 'string') throw new TypeError('Report text must be a string');
       if (writing) return refused('busy');
-      let why = blocked(at);
+      let why = blocked(at, admission);
       if (why) return refused(why);
       text = lf(text);
       const s = state(at.field), el = s.el;
@@ -252,7 +254,7 @@
       try {
         el.focus({ preventScroll: true });
         // Focus listeners can change edit permission. Check again immediately before the native edit.
-        why = blocked(at);
+        why = blocked(at, admission);
         if (why) return refused(why);
         // Hidden or inert controls cannot take focus; execCommand would edit the previous field.
         if (doc.activeElement !== el) return refused('unavailable');
@@ -271,7 +273,7 @@
       }
     }
 
-    function insert(at, text) { return replace(at, text, at?.start, at?.end); }
+    function insert(at, text, admission = null) { return replace(at, text, at?.start, at?.end, admission); }
 
     function insertMany(edits) {
       if (!Array.isArray(edits) || !edits.length || new Set(edits.map(e => e.at?.field)).size !== edits.length)

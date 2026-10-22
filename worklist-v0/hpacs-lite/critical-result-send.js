@@ -259,7 +259,8 @@
    *   owner()    [institution, sub]
    *   actorName(actor) 표시 이름
    */
-  function mount({ apiBase, current, study, report, online, radiologist, owner, actorName, onAccountChanged }) {
+  // `blocked()` (optional, W5): the page's reason the entry waits now (Related Report mode), or null.
+  function mount({ apiBase, current, study, report, online, radiologist, owner, actorName, onAccountChanged, blocked = () => null }) {
     const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
     // Capture at registration, not when a delayed callback runs.
     const guarded = (effect, scope = 'document') => {
@@ -298,6 +299,10 @@
     };
     const statusWord = make('p', 'cvr-word'), statusText = make('p', 'cvr-text'), statusDetail = make('p', 'cvr-detail');
     statusBox.append(statusWord, statusText, statusDetail);
+    const modeNote = make('p', 'cvr-note');
+    modeNote.id = 'cvr-sent-mode-reason';
+    modeNote.setAttribute('role', 'status');
+    panel.append(modeNote);
 
     let ended = false, lock = null, timer = null;
     const inflight = new Set();
@@ -305,7 +310,7 @@
     // 번호·대상·계정일 때만 쓴다.
     let target = null, targetKey = null, entrySeq = 0, entryView = { phase: 'idle' };
     // 발신 창: 열 때마다 dialogSeq가 오르고 #1을 새로 읽는다. dialogAttempt는 이 창이 보이는 요청의 requestId다.
-    let dialogSeq = 0, dialogUid = null, dialogView = null, dialogAttempt = null, dialogNote = '', dialogReturn = null;
+    let dialogSeq = 0, dialogUid = null, dialogView = null, dialogAttempt = null, dialogNote = '', dialogReturn = null, dialogOwner = null;
     // 요청별 기록(§8.1 규칙 2): requestId → 요청. 결과를 모르는 요청은 창을 닫아도 보낸 목록 위 줄(lined)로 남는다.
     const attempts = new Map();
     const lineNodes = new Map();
@@ -314,6 +319,7 @@
     let loadedOnce = false, paneOpen = false, staleRows = false;
     // 행 동작(Cancel Delivery·Supersede) 입력 칸: recordId → 칸. 열려 있는 동안 목록 행은 다시 그리지 않는다(쓰던 글·초점 보존).
     const forms = new Map();
+    const rowActionHints = new WeakMap();
 
     const who = () => {
       const value = owner();
@@ -331,17 +337,27 @@
       return name || id ? `${name || '—'} (${id || '—'})` : uid;
     };
     const sourceText = source => `Source: v${source.version} · ${ACTIONS[source.action] || source.action} · ${actorName(source.author)} · ${time(source.at)}`;
-    const unsettled = attempt => ['sending', 'checking', 'unknown'].includes(attempt.state);
+    const unsettled = attempt => ['sending', 'checking', 'unknown', 'not-sent'].includes(attempt.state);
+
+    // Admission precedes validation, ID allocation and removal of an existing form or attempt.
+    function refuseMode() {
+      if (!blocked()) return false;
+      paintEntry(); paintDialog(); paintPanel();
+      return true;
+    }
 
     /**
      * 중요 결과 route 요청(제한 시간 60초). 성공 응답은 HTTP 상태와 함께 돌려주고(쓰기는 201만 적용), 실패는 상태·code·JSON
      * 본문 여부를 싣는다. 연결 실패·제한 시간·세션 종료로 멈춘 요청은 status 0이다 — 쓰기라면 서버가 적용했는지 모르는 답이다.
      * Session termination belongs to the page transport and lifecycle gate.
      */
-    async function call(method, path, body, context = work.capture('document')) {
+    async function call(method, path, body, context = work.capture('document'), onDispatch = () => {}) {
       const controller = new AbortController(), stop = setTimeout(() => controller.abort(), TIMEOUT_MS);
       inflight.add(controller);
       try {
+        const waiting = method === 'POST' && blocked();
+        if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });
+        onDispatch();
         const response = await transport.request(apiBase + path, { context, deadlineMs: TIMEOUT_MS, method, signal: controller.signal,
           headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
         const data = response.incomplete ? undefined : response.body;
@@ -365,8 +381,10 @@
 
     function paintEntry() {
       let enabled = false, title;
+      const waiting = blocked();
       if (ended) title = TEXT.entry.ended;
       else if (lock !== null) title = lock.text;
+      else if (waiting) title = waiting;
       else if (!online()) title = TEXT.entry.offline;
       else if (!radiologist()) title = TEXT.entry.role;
       else if (target === null) title = TEXT.entry.none;
@@ -419,6 +437,7 @@
       }
       if (target !== null && keyOf(target) !== targetKey) readEntry();
       paintEntry();
+      paintDialog();
       if (sender() && !loadedOnce && listPhase !== 'loading') loadList(false);
       paintPanel();
     }
@@ -451,6 +470,7 @@
 
     function paintDialog() {
       if (dialogUid === null) return;
+      const waiting = blocked();
       const view = dialogView, attempt = dialogAttempt ? attempts.get(dialogAttempt) : null;
       const row = study(dialogUid);
       studyLine.textContent = row ? `Study: ${row.name || '—'} (${row.id || '—'}) · ${row.date || '—'}` : `Study: ${dialogUid}`;
@@ -486,19 +506,24 @@
       statusWord.textContent = word;
       statusWord.hidden = !word;
       statusText.textContent = line;
-      statusDetail.textContent = detail;
-      statusDetail.hidden = !detail;
-      const editable = lock === null && view && view.phase === 'ready' && (!attempt || attempt.state === 'rejected');
+      statusDetail.textContent = [detail, waiting].filter(Boolean).join('\n');
+      statusDetail.hidden = !detail && !waiting;
+      const editable = sender() && live(dialogOwner) && view && view.phase === 'ready' && (!attempt || attempt.state === 'rejected');
       recipientField.disabled = !editable;
       messageField.readOnly = !editable;
-      sendButton.disabled = !editable;
-      checkButton.hidden = !attempt || lock !== null || !['unknown', 'checking'].includes(attempt.state);
-      checkButton.disabled = !!attempt && attempt.state === 'checking';
+      sendButton.disabled = !editable || !!waiting;
+      sendButton.title = waiting || '';
+      checkButton.hidden = !attempt || lock !== null || !['unknown', 'checking', 'not-sent'].includes(attempt.state);
+      checkButton.disabled = !!waiting || !sender() || (!!attempt && attempt.state === 'checking');
+      checkButton.title = waiting || '';
+      checkButton.textContent = attempt?.state === 'not-sent' ? 'Send' : 'Check Again';
     }
 
     function openDialog() {
-      if (ended || lock !== null || target === null || entry.disabled) return;
+      if (refuseMode()) return;
+      if (!sender() || target === null || entry.disabled) return;
       dialogUid = target;
+      dialogOwner = who();
       dialogAttempt = null;
       dialogNote = '';
       dialogReturn = document.activeElement;
@@ -577,8 +602,9 @@
     }
 
     function send() {
+      if (refuseMode()) return;
       if (work.state() !== 'active') return;
-      if (ended || lock !== null || dialogUid === null || !dialogView || dialogView.phase !== 'ready') return;
+      if (!sender() || !live(dialogOwner) || dialogUid === null || !dialogView || dialogView.phase !== 'ready') return;
       const previous = dialogAttempt ? attempts.get(dialogAttempt) : null;
       if (previous && previous.state !== 'rejected') return;
       const read = dialogView.data, recipient = read.recipients.find(r => r.sub === recipientField.value);
@@ -597,20 +623,31 @@
         body: { requestId, expectedOwner: JSON.parse(sent), recipientSub: recipient.sub, sourceVersion: read.source.version, message },
         expect: { id: requestId, from: null, to: 'created', revision: 1, replacement: null },
         label: `${studyLabel(uid)} · ${recipient.name} · ${ROLES[recipient.role]}`,
-        state: 'sending', retried: false, reason: '', detail: '', later: '', replayed: false,
+        state: 'sending', dispatches: 0, retried: false, reason: '', detail: '', later: '', replayed: false,
       };
       attempts.set(requestId, attempt);
       dialogAttempt = requestId;
       dialogNote = '';
-      transmit(attempt, false);
+      transmit(attempt);
     }
 
     // ── 쓰기 답의 판별(§8.1) ──
 
-    function transmit(attempt, retry) {
+    function localRefusal(attempt, reason) {
+      // A blocked invocation says nothing about an earlier transport invocation of this same request.
+      attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';
+      attempt.detail = reason;
+      paintAttempt(attempt);
+    }
+
+    function transmit(attempt) {
+      const waiting = blocked();
+      if (waiting) { localRefusal(attempt, waiting); return; }
+      const retry = attempt.dispatches > 0;
       attempt.state = retry ? 'checking' : 'sending';
       paintAttempt(attempt);
-      call('POST', attempt.path, attempt.body).then(guarded(result => settle(attempt, retry, result, null)), guarded(error => settle(attempt, retry, null, error)));
+      call('POST', attempt.path, attempt.body, work.capture('document'), () => { attempt.dispatches++; })
+        .then(guarded(result => settle(attempt, retry, result, null)), guarded(error => settle(attempt, retry, null, error)));
     }
 
     /**
@@ -621,6 +658,7 @@
     function settle(attempt, retry, result, error) {
       if (attempts.get(attempt.requestId) !== attempt || !['sending', 'checking'].includes(attempt.state)) return;
       if (!live(attempt.sent)) return;
+      if (error?.outcome === 'not-sent') { localRefusal(attempt, error.message); return; }
       if (result) {
         const mine = ownerOf(result.data && result.data.owner, attempt.sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
@@ -720,6 +758,7 @@
       const cancel = attempt.action === 'cancel';
       const retryText = [attempt.later ? TEXT.later(attempt.later) : '', attempt.retried ? TEXT.guidance : ''].filter(Boolean).join('\n');
       switch (attempt.state) {
+        case 'not-sent': return { word: 'Not Sent', line: attempt.detail, detail: '' };
         case 'sending': return { word: '', line: attempt.lined ? TEXT.sending : TEXT.dialog.sending, detail: '' };
         case 'checking': return { word: cancel ? 'Cancellation status unknown' : 'Delivery status unknown', line: TEXT.checking, detail: retryText };
         case 'unknown': return { word: cancel ? 'Cancellation status unknown' : 'Delivery status unknown',
@@ -739,9 +778,10 @@
     }
 
     function check(attempt) {
-      if (ended || lock !== null || attempts.get(attempt.requestId) !== attempt || attempt.state !== 'unknown') return;
+      if (refuseMode()) return;
+      if (!sender() || attempts.get(attempt.requestId) !== attempt || !['unknown', 'not-sent'].includes(attempt.state)) return;
       if (!live(attempt.sent)) return;
-      transmit(attempt, true);
+      transmit(attempt);
     }
 
     // ── 보낸 목록(Sent Critical Results) ──
@@ -812,8 +852,11 @@
         extra.textContent = detail;
         extra.hidden = !detail;
         const again = element.querySelector('button');
-        again.hidden = !['unknown', 'checking'].includes(attempt.state);
-        again.disabled = attempt.state === 'checking';
+        again.hidden = !['unknown', 'checking', 'not-sent'].includes(attempt.state);
+        again.disabled = !!blocked() || !sender() || attempt.state === 'checking';
+        again.title = blocked() || '';
+        again.textContent = attempt.state === 'not-sent' ? 'Send' : 'Check Again';
+        again.setAttribute('aria-describedby', modeNote.id);
       }
       attemptList.hidden = shown.length === 0;
     }
@@ -854,6 +897,8 @@
         const actions = make('div', 'cvr-actions');
         const supersede = button('Supersede', () => openForm(item, 'supersede'));
         const cancel = button('Cancel Delivery', () => openForm(item, 'cancel'));
+        rowActionHints.set(supersede, TEXT.form.supersedeHint(item.recipient.name));
+        rowActionHints.set(cancel, TEXT.form.cancelHint);
         supersede.disabled = cancel.disabled = busy || forms.has(item.id);
         actions.append(supersede, cancel);
         stateCell.append(actions);
@@ -871,6 +916,32 @@
       if (forms.size || rows.contains(document.activeElement)) return;
       rows.replaceChildren(...items.flatMap(renderRow));
       staleRows = false;
+    }
+
+    function paintWriteControls() {
+      const waiting = blocked();
+      modeNote.textContent = waiting || '';
+      modeNote.hidden = !waiting;
+      // Focused rows and open forms deliberately survive list paints; update their actions in place.
+      for (const row of rows.querySelectorAll('tr[data-id]')) {
+        const id = row.dataset.id;
+        const item = items.find(value => value.id === id);
+        const busy = [...attempts.values()].some(attempt => attempt.recordId === id && attempt.action !== 'create' && unsettled(attempt));
+        for (const control of row.querySelectorAll('.cvr-actions button')) {
+          control.disabled = !!waiting || !sender() || !item || item.state !== 'created' || busy || forms.has(id);
+          // Back restores the action's explanation while the focused row stays mounted.
+          control.title = waiting || rowActionHints.get(control);
+          control.setAttribute('aria-describedby', modeNote.id);
+        }
+      }
+      for (const form of forms.values()) {
+        const current = items.find(value => value.id === form.item.id);
+        form.confirm.disabled = !!waiting || !sender() || !live(form.sent) || !current || current.state !== 'created'
+          || current.revision !== form.item.revision || (form.kind === 'supersede' && !form.source);
+        form.confirm.title = waiting || '';
+        form.modeNote.textContent = waiting || '';
+        form.modeNote.hidden = !waiting;
+      }
     }
 
     function paintPanel() {
@@ -897,6 +968,7 @@
       paintLines();
       if (lock !== null) attemptList.hidden = true;
       if (staleRows) paintRows();
+      paintWriteControls();
       listStatus.dataset.state = listPhase;
       listStatus.textContent = listPhase === 'loading' ? TEXT.list.loading
         : listPhase === 'failed' ? `${TEXT.list.failed}\n${listError}`
@@ -908,9 +980,11 @@
     // ── 행 동작: Cancel Delivery(#7)·Supersede(#8) ──
 
     function openForm(item, kind) {
-      if (ended || lock !== null || forms.has(item.id) || item.state !== 'created') return;
+      if (refuseMode()) return;
+      const current = items.find(value => value.id === item.id);
+      if (!sender() || forms.has(item.id) || !current || current.state !== 'created' || current.revision !== item.revision) return;
       const form = { kind, item, row: make('tr', 'cvr-form'), note: make('p', 'cvr-note'), field: make('textarea'),
-        confirm: null, source: null, seq: 0 };
+        modeNote: make('p', 'cvr-note'), sent: who(), confirm: null, source: null, seq: 0 };
       form.row.dataset.form = item.id;
       const cell = make('td');
       cell.colSpan = 5;
@@ -924,7 +998,10 @@
       actions.append(form.confirm, button('Close', () => closeForm(item.id)));
       cell.append(make('p', 'cvr-form-title', kind === 'cancel' ? 'Cancel Delivery' : 'Supersede'),
         make('p', 'cvr-muted', kind === 'cancel' ? TEXT.form.cancelHint : TEXT.form.supersedeHint(item.recipient.name)),
-        form.sourceLine, label, form.note, actions);
+        form.sourceLine, label, form.note, form.modeNote, actions);
+      form.modeNote.id = `cvr-form-mode-${item.id}`;
+      form.modeNote.setAttribute('role', 'status');
+      form.confirm.setAttribute('aria-describedby', form.modeNote.id);
       form.row.append(cell);
       forms.set(item.id, form);
       form.sourceLine.hidden = kind === 'cancel';
@@ -955,7 +1032,7 @@
         const listed = read.recipients.some(r => r.actor === form.item.recipient.actor);
         form.note.textContent = listed ? '' : TEXT.form.notCandidate;
         form.note.hidden = listed;
-        form.confirm.disabled = false;
+        paintWriteControls();
       }), guarded(error => {
         if (forms.get(form.item.id) !== form || seq !== form.seq || !live(sent)) return;
         form.sourceLine.textContent = `${TEXT.form.failed}\n${describe(error)}`;
@@ -975,7 +1052,10 @@
     }
 
     function submitForm(form) {
-      if (ended || lock !== null || forms.get(form.item.id) !== form) return;
+      if (refuseMode()) return;
+      const current = items.find(value => value.id === form.item.id);
+      if (!sender() || !live(form.sent) || forms.get(form.item.id) !== form || !current || current.state !== 'created'
+        || current.revision !== form.item.revision) return;
       const value = form.field.value, item = form.item;
       if (!textOk(value)) {
         form.note.textContent = TEXT.form.noText;
@@ -994,13 +1074,13 @@
         expect: { id: item.id, from: 'created', to: cancel ? 'cancelled' : 'superseded', revision: 2,
           replacement: cancel ? null : { id: requestId, sourceVersion: form.source.version } },
         label: `${studyLabel(item.studyUid, item.study)} · ${item.recipient.name} · ${ROLES[item.recipient.role]}`,
-        state: 'sending', retried: false, reason: '', detail: '', later: '', replayed: false,
+        state: 'sending', dispatches: 0, retried: false, reason: '', detail: '', later: '', replayed: false,
       };
       attempts.set(requestId, attempt);
       forms.delete(item.id);
       form.row.remove();
       staleRows = true;
-      transmit(attempt, false);
+      transmit(attempt);
     }
 
     // ── 세션 경계 ──
@@ -1100,7 +1180,8 @@
     moreButton.addEventListener('click', () => loadList(true));
     rows.addEventListener('focusout', () => {
       if (!staleRows) return;
-      setTimeout(guarded(() => { if (staleRows && !rows.contains(document.activeElement)) paintRows(); }), 0);
+      // The rebuilt rows take the current admission too (Related mode may have begun while the paint waited).
+      setTimeout(guarded(() => { if (staleRows && !rows.contains(document.activeElement)) { paintRows(); paintWriteControls(); } }), 0);
     });
     // 문서가 보이고 이 줄이 서 있는(보낼 수 있는 세션) 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다)
     // 알림도 띄우지 않는다.
