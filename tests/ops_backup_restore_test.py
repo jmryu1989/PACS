@@ -358,6 +358,8 @@ class StateCopyRestoreContainerTests(unittest.TestCase):
             ops.run(["docker", "exec", cls.private, "psql", "-X", "-U", "kin", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", statement])
         with (cls.directory / "kin.dump").open("rb") as handle:
             ops.run(["docker", "exec", "-i", cls.private, "pg_restore", "-U", "kin", "-d", "kin", "--exit-on-error"], input_file=handle)
+        # The set carries its manifest file as every written set does (a conversion binds the source manifest's digest).
+        ops.write_json(cls.directory / "manifest.json", cls.manifest)
 
     @classmethod
     def start_postgres(cls, name, superuser, database):
