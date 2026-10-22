@@ -1345,6 +1345,135 @@ test('V4-T07 a witness that no longer describes the database refuses before any 
   await attempt(s => { s.viewing.rows[2].hash = 'e'.repeat(64); }, 'LedgerChainBroken', 'a changed sealed tail row breaks the chain the witness vouches for');
 });
 
+/** One owned syscall failure at a v4 publication barrier (order section 3, V4-T04): page write/flush, root fsync/
+ * rename, WAL prepare/complete append and flush, tail publication, selector write/rename. Bytes that reached the OS
+ * stay readable; this is a syscall failure, not power loss. */
+async function v4StorageFailure(directory, cut, code, operation) {
+  const originals = Object.fromEntries(['openSync', 'writeSync', 'writeFileSync', 'fdatasyncSync', 'fsyncSync', 'renameSync'].map(k => [k, fs[k]]));
+  const files = new Map();
+  let hits = 0, walWrites = 0;
+  const fail = () => { hits++; throw Object.assign(new Error('synthetic storage interruption'), { code }); };
+  const kind = file => {
+    if (typeof file !== 'string') return null;
+    const f = file.replace(/\\/g, '/');
+    if (/\/seal\/v4\/pages\/[0-9a-f]{32}\.pages$/.test(f)) return 'pack';
+    if (/\/seal\/v4\/roots\/\.tmp-/.test(f)) return 'root';
+    if (/\/seal\/v4\/wal\/[0-9a-f]{32}\.jsonl$/.test(f)) return 'wal';
+    if (/\/seal\/tail\.json$/.test(f)) return 'tail';
+    if (/\/seal\/\.tmp-/.test(f)) return 'selector';
+    return null;
+  };
+  // Descriptors the owner opened before this cut (the current WAL segment, the open pack, the tail) are known by inode.
+  const inodes = new Map();
+  for (const [dir, k] of [['seal/v4/pages', 'pack'], ['seal/v4/wal', 'wal']]) {
+    const full = path.join(directory, dir);
+    if (fs.existsSync(full)) for (const name of fs.readdirSync(full)) inodes.set(fs.statSync(path.join(full, name)).ino, k);
+  }
+  if (fs.existsSync(path.join(directory, 'seal/tail.json'))) inodes.set(fs.statSync(path.join(directory, 'seal/tail.json')).ino, 'tail');
+  const kindOf = fd => {
+    if (typeof fd !== 'number') return kind(fd);
+    if (files.has(fd)) return files.get(fd);
+    try { return inodes.get(fs.fstatSync(fd).ino) ?? null; } catch { return null; }
+  };
+  fs.openSync = (file, flags, ...args) => { const fd = originals.openSync(file, flags, ...args); files.set(fd, kind(file)); return fd; };
+  fs.writeSync = (fd, buffer, ...args) => {
+    const k = kindOf(fd);
+    if (k === 'pack' && cut === 'page-write') fail();
+    if (k === 'pack' && cut === 'page-short-write') { originals.writeSync(fd, buffer, args[0] ?? 0, Math.floor((args[1] ?? buffer.length) / 2), args[2]); fail(); }
+    if (k === 'wal') { walWrites++; if (cut === 'prepare-append' && walWrites === 1) fail(); if (cut === 'complete-append' && walWrites === 2) fail();
+      if (cut === 'prepare-torn' && walWrites === 1) { originals.writeSync(fd, buffer, args[0] ?? 0, Math.floor((args[1] ?? buffer.length) / 2), args[2]); fail(); } }
+    return originals.writeSync(fd, buffer, ...args);
+  };
+  fs.writeFileSync = (file, data, ...args) => {
+    const k = kindOf(file);
+    if (k === 'root' && cut === 'root-write') fail();
+    if (k === 'selector' && cut === 'selector-write') fail();
+    if (k === 'tail' && cut === 'tail-write') fail();
+    return originals.writeFileSync(file, data, ...args);
+  };
+  fs.fdatasyncSync = fd => {
+    const k = kindOf(fd);
+    if (k === 'pack' && cut === 'page-flush') fail();
+    if (k === 'wal' && cut === 'prepare-flush' && walWrites === 1) fail();
+    if (k === 'wal' && cut === 'complete-flush' && walWrites === 2) fail();
+    if (k === 'tail' && cut === 'tail-flush') fail();
+    return originals.fdatasyncSync(fd);
+  };
+  fs.fsyncSync = fd => {
+    const k = kindOf(fd);
+    if (k === 'root' && cut === 'root-fsync') fail();
+    if (k === 'selector' && cut === 'selector-fsync') fail();
+    return originals.fsyncSync(fd);
+  };
+  fs.renameSync = (from, to) => {
+    const k = kind(from);
+    if (k === 'root' && cut === 'root-rename') fail();
+    if (k === 'selector' && cut === 'selector-rename') fail();
+    const result = originals.renameSync(from, to);
+    if (k === 'selector' && cut === 'selector-renamed') fail();
+    return result;
+  };
+  let reply;
+  try { reply = await operation(); }
+  finally { for (const [name, original] of Object.entries(originals)) fs[name] = original; }
+  return { reply, hits };
+}
+const V4_CUTS = ['page-write', 'page-short-write', 'page-flush', 'root-write', 'root-fsync', 'root-rename', 'prepare-append', 'prepare-torn', 'prepare-flush',
+  'tail-write', 'tail-flush', 'complete-append', 'complete-flush', 'selector-write', 'selector-fsync', 'selector-rename', 'selector-renamed'];
+test('V4-T04 a syscall failure at every v4 publication barrier gives no success; the restart preserves or recovers the transition exactly', v4Only, async t => {
+  for (const code of ['EIO', 'ENOSPC']) for (const cut of V4_CUTS) {
+    const f = await fixture(t), work = await (await f.hello()).work();
+    const earlier = await complete(f, work, true);
+    const item = await f.reserve(work); item.commit();
+    // The confirm publishes the sealed frontier (pages, root, prepare, tail, complete, selector) and then the attestation.
+    const database = JSON.stringify(f.database.streams), beforeStatus = f.coordinator.call('v4-status');
+    const failed = await v4StorageFailure(f.directory, cut, code, () => work.call('confirm-bundle', item.bundle));
+    assert.ok(failed.hits > 0, cut + ': the publication reaches the barrier');
+    assert.equal(failed.reply.ok, false, cut + ': no success before every durable barrier and the selector');
+    assert.equal(failed.reply.error.outcome, 'unknown', cut + ': a storage error cannot prove rollback');
+    assert.equal(JSON.stringify(f.database.streams), database, cut + ': committed rows and markers are preserved');
+    // The failed owner view is retired; the files are the authority for the next incarnation.
+    f.service.close(); await f.service.drained(); f.coordinator.close();
+    const g = await fixture(t, { directory: f.directory, model: model(structuredClone(f.database.streams)), cold: true });
+    await g.service.start();
+    assert.equal(g.service.state, 'ready', cut + ': the restart recovers');
+    const status = g.coordinator.call('v4-status');
+    assert.ok(Number(status.revision) >= Number(beforeStatus.revision), cut + ': the accepted root is never older');
+    const gw = await (await g.hello()).work();
+    assert.equal(JSON.stringify((await gw.call('confirm-bundle', earlier.bundle)).result), JSON.stringify(earlier.proof), cut + ': earlier acknowledged proof survives');
+    const confirmed = await gw.call('confirm-bundle', item.bundle);
+    assert.equal(confirmed.ok, true, cut + ': the interrupted bundle is provable after recovery');
+    assert.equal(confirmed.result.eventId, item.bundle.eventId);
+    for (const b of item.bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+    assert.equal((await gw.call('acknowledge', { proof: confirmed.result, bindings: item.bundle.bindings })).ok, true, cut + ': exact ack after recovery');
+    if (cut === 'prepare-torn') assert.ok(fs.existsSync(path.join(f.directory, 'seal/v4/quarantine')) && fs.readdirSync(path.join(f.directory, 'seal/v4/quarantine')).length > 0, 'the torn prefix is quarantined as exact evidence');
+    // A second incarnation over the recovered files is idempotent.
+    const recovered = g.coordinator.call('v4-status').revision;
+    g.service.close(); await g.service.drained(); g.coordinator.close();
+    const h = await fixture(t, { directory: f.directory, model: model(structuredClone(g.database.streams)), cold: true });
+    await h.service.start(); assert.equal(h.service.state, 'ready', cut + ': second restart');
+    assert.equal(h.coordinator.call('v4-status').revision, recovered);
+  }
+});
+test('V4-T05 pack reclamation unlinks only packs unreachable from the selected root and the open segment; every proof and exclusion survives', v4Only, async t => {
+  const f = await fixture(t), work = await (await f.hello()).work(), done = [];
+  for (let i = 0; i < 40; i++) done.push(await complete(f, work, i % 3 === 0));
+  const before = f.coordinator.call('v4-status');
+  assert.ok(before.packs >= 1);
+  const reclaimed = f.coordinator.call('compact', { force: true });
+  const after = f.coordinator.call('v4-status');
+  assert.ok(after.packs <= before.packs, 'reclamation never adds packs');
+  assert.equal(after.rootSha256, before.rootSha256, 'reclamation rewrites no root');
+  for (const item of done) assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after reclamation');
+  for (const b of done[5].bundle.bindings) assertExcluded(await replayObservation(f, work, b));
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const g = await fixture(t, { directory: f.directory, model: model(structuredClone(f.database.streams)), cold: true });
+  await g.service.start(); assert.equal(g.service.state, 'ready', 'restart after reclamation');
+  const gw = await (await g.hello()).work();
+  for (const item of done) assert.equal(JSON.stringify((await gw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof));
+  void reclaimed;
+});
+
 test('D1656-T02 closed shell dispatch rejects unchanged legacy scripts before Node', async t => {
   const shell = process.env.KIN_EMR_SHELL || 'sh';
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-entry-mode-'));

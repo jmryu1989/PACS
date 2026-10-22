@@ -1488,16 +1488,16 @@ function admitEngineV4(engine: Engine, selector: { body: V4.SelectorBody; sha256
       }
       lsn++; previous = item.sha256; walEnd = item.end;
     }
-    const tailFile = engine.tailFile, tailOnDisk = readTailFile(tailFile);
-    if (outstanding) {
-      // A durable prepare whose root exists: its tail (before or after) must agree; only the owner completes it.
+    const tailFile = engine.tailFile; let tailOnDisk = readTailFile(tailFile);
+    if (outstanding && repair) {
+      // A durable prepare whose root exists: its tail (before or after) must agree; only the owner completes it. A
+      // read-only inspection sees the selected (accepted) root and leaves the completion to the owner.
       const next = V4.readRoot(v4, outstanding.record.nextRoot);
       const tailHash = tailOnDisk ? hash(tailOnDisk) : null;
       if (next.transition.previousRoot !== rootSha256 || !(tailHash === outstanding.record.tailBefore || tailHash === outstanding.record.tailAfter)) refuse('prepare-tail');
-      if (!repair) fail('SealUnavailable');
       const nextMeta = V4.Tree.open(new V4.PackStore(v4, next.lineageSha256), 1, next.trees[0].ref, V4.parseDecimal(next.trees[0].count, 'root'));
       const nextTail = metaOf(nextMeta, 'tail');
-      if (outstanding.record.tailAfter !== null && tailHash !== outstanding.record.tailAfter) publishTail(tailFile, nextTail);
+      if (outstanding.record.tailAfter !== null && tailHash !== outstanding.record.tailAfter) { publishTail(tailFile, nextTail); tailOnDisk = readTailFile(tailFile); }
       const segment = new V4.WalSegment(v4, selector.body.wal.segment);
       const complete = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: String(lsn + 1), previousSha256: previous, type: 'complete', prepareLsn: outstanding.record.lsn, nextRoot: outstanding.record.nextRoot });
       segment.close();
@@ -1531,7 +1531,9 @@ function admitEngineV4(engine: Engine, selector: { body: V4.SelectorBody; sha256
     validateTail(meta.tail, generation, meta.lineage.origin);
     if (hash(meta.tail) !== root.stateTailSha256) refuse('tail-hash');
     if (!tailOnDisk) fail('SealMissing');
-    if (hash(tailOnDisk) !== hash(meta.tail)) fail('SealTailMismatch');
+    // An in-flight publication (a durable prepare the owner will complete) is the only authority for a tail ahead of
+    // the selected root; a read-only inspection accepts exactly that tail, nothing else.
+    if (hash(tailOnDisk) !== hash(meta.tail) && !(outstanding && hash(tailOnDisk) === outstanding.record.tailAfter)) fail('SealTailMismatch');
     if (!keys(meta.retired, ['viewing', 'history']) || !integer(meta.retired.viewing) || !integer(meta.retired.history)) refuse('retired');
     engine.format = 4;
     engine.head = { version: 3, revision, generation, tail: meta.tail, lineage: meta.lineage, retired: meta.retired };
