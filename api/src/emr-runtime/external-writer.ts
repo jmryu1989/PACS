@@ -460,6 +460,9 @@ export class Engine {
   readonly notFound = new Set<string>();
   checkpoint: { digest: string; bytes: number; revision: number; publishing: boolean; navigable: boolean } | null = null;
   walOffset = 0; publishing = false; tainted = false;
+  /** A read-only admission (an inspector, a conversion's source or produced copy): it writes nothing under the
+   * directory, not even scratch - its bytes are compared before and after. */
+  readOnly = false;
   pins: Pins = { checkpoint: null, log: null, tail: null };
   constructor(readonly directory: string) {
     this.file = path.join(directory, 'seal', 'settlement.json');
@@ -468,9 +471,9 @@ export class Engine {
   }
   close(): void {
     if (this.v4) {
-      // A clean close persists the exact accounting (the next incarnation reclaims without a rebuild).
+      // An owner's clean close persists the exact accounting (the next incarnation reclaims without a rebuild).
       try { this.v4.writer?.close(); } catch { /* the files are the authority */ } this.v4.writer = null;
-      if (!this.tainted) { try { persistPacks(this.v4); } catch { /* scratch */ } }
+      if (!this.tainted && !this.readOnly) { try { persistPacks(this.v4); } catch { /* scratch */ } }
       this.v4.store.close(); this.v4.segment.close();
     }
   }
@@ -1222,6 +1225,7 @@ function directoryInventory(directory: string): { root: string; inventory: unkno
 function admitEngine(directory: string, pair: PairIdentity | undefined, repair: boolean, format: 3 | 4 = 3): Engine {
   const { root, inventory, empty } = directoryInventory(directory);
   const engine = new Engine(root);
+  engine.readOnly = !repair;
   const file = engine.file, info = fs.lstatSync(file, { throwIfNoEntry: false });
   if (!info) {
     if (!empty) return fail('SealMissing');
@@ -1699,7 +1703,7 @@ function admitEngineV4(engine: Engine, selector: { body: SelectorBody; sha256: s
     // until the next complete check rebuilds it (a sweep resumed without it cannot rebuild: it starts over).
     const accounting = loadPacks(v4, rootSha256);
     let sweep = loadSweep(v4);
-    if (sweep && !accounting) { sweep = null; try { fs.rmSync(sweepFile(v4), { force: true }); } catch { /* scratch */ } }
+    if (sweep && !accounting) { sweep = null; if (repair) { try { fs.rmSync(sweepFile(v4), { force: true }); } catch { /* scratch */ } } }
     const sweepOrphans = sweep ? (accounting!.sweep && accounting!.sweep.root === sweep.startedRoot ? accounting!.sweep.orphans : new Map<string, number>()) : null;
     engine.v4 = { directory: v4, store, validatorSha256: manifest.validatorSha256, rootSha256, root, trees, meta, pending,
       segment: new WalSegment(v4, selector.body.wal.segment), lsn, previousSha256: previous, walEnd, segmentStart: 0, segmentTransitions: 0, segmentOpenedAt: stat.mtimeMs,

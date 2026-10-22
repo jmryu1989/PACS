@@ -1745,8 +1745,11 @@ test('V4-T11 A10 over a v4 pair: the expired event stays provable with its exact
   await closeOwner(h);
   // The lossless v3 export (rollback route) of the v4 pair keeps the same facts under the unchanged v3 reader.
   const exported = f.directory + '-v3-export';
+  const v4Bytes = directoryHashes(f.directory), v4Fingerprint = EW.inspectFingerprint(f.directory);
   const back = EW.exportV4ToV3(f.directory, exported, f.pair);
   assert.equal(back.target.format, 3);
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(v4Bytes), 'the v4 source bytes are unchanged by the export');
+  assert.equal(EW.inspectFingerprint(f.directory), v4Fingerprint, 'the export writes nothing under the v4 source, not even scratch');
   const k = await fixture(t, { directory: exported, model: model(structuredClone(g.database.streams)), format: 3, cold: true });
   await startObserved(k.service); assert.equal(k.service.state, 'ready', 'the unchanged v3 reader admits the export');
   const kw = await (await k.hello()).work();
@@ -1810,8 +1813,10 @@ test('V4-T08 first conversion of a healthy v3 pair into a separate v4 root and i
   g.service.close(); await g.service.drained(); g.coordinator.close();
   const exported = f.directory + '-v3-export';
   let back;
+  const targetFingerprint = EW.inspectFingerprint(target);
   try { back = EW.exportV4ToV3(target, exported, f.pair); }
   catch (error) { assert.fail('the export verifies every current member, including the work accepted after the conversion (the export refused its own receipt: ' + String(error && error.code) + ')'); }
+  assert.equal(EW.inspectFingerprint(target), targetFingerprint, 'the export writes nothing under the v4 source (the conversion root compares its bytes before and after)');
   assert.equal(back.kind, 'export-v3'); assert.equal(back.target.format, 3);
   assert.equal(back.verified.members, Object.keys(current.terminal).length + Object.keys(current.bundles).length + Object.keys(current.intents).length + Object.keys(current.slots).length + Object.keys(current.proofs).length, 'the export verifies every current member, including the work accepted after the conversion');
   const h = await fixture(t, { directory: exported, model: model(structuredClone(g.database.streams)), cold: true });
