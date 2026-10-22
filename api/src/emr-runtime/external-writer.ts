@@ -2180,7 +2180,20 @@ const newDirectory = (directory: string) => {
   if (info && (!info.isDirectory() || fs.readdirSync(directory).length)) fail('SealUnavailable');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 };
-const copyTree = (from: string, to: string) => { if (fs.existsSync(from)) fs.cpSync(from, to, { recursive: true, errorOnExist: true }); };
+/** The source's journal / expiry-evidence copied into the new target with the protected directory modes (cpSync
+ * creates directories under the process umask, which the owner's admission refuses as group/other-readable). */
+const copyTree = (from: string, to: string) => {
+  if (!fs.existsSync(from)) return;
+  fs.cpSync(from, to, { recursive: true, errorOnExist: true });
+  const protect = (directory: string) => {
+    fs.chmodSync(directory, 0o700);
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const child = path.join(directory, entry.name);
+      if (entry.isDirectory()) protect(child); else if (entry.isFile()) fs.chmodSync(child, 0o600);
+    }
+  };
+  protect(to);
+};
 /** Stream members sorted by routing digest (then full key) through a disposable spill sorter into a bulk-loaded tree. */
 function bulkTree(writer: PackWriter, id: number, scratch: string, members: Iterable<[string, string]>): Tree {
   const sorter = new SpillSorter(scratch, 'tree-' + id);
