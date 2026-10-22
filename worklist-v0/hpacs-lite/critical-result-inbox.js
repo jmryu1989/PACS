@@ -283,7 +283,7 @@
    *   eligible() 지금 이 세션이 받은 목록을 읽는가(호스트가 세션 종류·서버 연결·역할로 정한다)
    * 반환값의 end()는 세션 종료, lock(detail)은 다른 영역이 알아챈 계정 변경이다.
    */
-  function mount({ apiBase, root, prefix, fold, owner, eligible, onAccountChanged }) {
+  function mount({ apiBase, root, prefix, fold, owner, eligible, onAccountChanged, blocked = () => null }) {
     const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
     // Capture at registration, not when a delayed callback runs.
     const guarded = (effect, scope = 'document') => {
@@ -324,6 +324,29 @@
     const statusText = make('p', 'cvr-inbox-status-text'), statusDetail = make('p', 'cvr-inbox-status-detail');
     statusBox.replaceChildren(statusText, statusDetail);
     help.replaceChildren(...TEXT.help.map(line => make('p', null, line)));
+    // The worklist supplies its live mode reason; the independent clinician host has no such mode.
+    const modeNote = make('p', 'cvr-inbox-note');
+    modeNote.id = `${prefix}-mode-reason`;
+    modeNote.setAttribute('role', 'status');
+    statusBox.append(modeNote);
+    const writeControls = new Map();
+
+    function paintAdmission() {
+      const waiting = blocked();
+      setText(modeNote, waiting || '');
+      modeNote.hidden = !waiting;
+      for (const [control, normal] of writeControls) {
+        if (!control.isConnected) { writeControls.delete(control); continue; }
+        control.disabled = !!waiting || normal.disabled;
+        setTitle(control, waiting || normal.title);
+      }
+    }
+
+    function refuseMode() {
+      if (!blocked()) return false;
+      paintAdmission();
+      return true;
+    }
 
     let ended = false, lock = null, timer = null, watch = null, reading = false;
     const inflight = new Set();
@@ -462,11 +485,14 @@
  * Session termination belongs to the page transport and work-context lifecycle.
      * Session termination belongs to the page transport and lifecycle gate.
      */
-    async function call(method, path, raw, context = work.capture('document')) {
+    async function call(method, path, raw, context = work.capture('document'), onDispatch = () => {}) {
       const controller = new AbortController(), stop = setTimeout(() => controller.abort(), TIMEOUT_MS);
       inflight.add(controller);
       try {
         const headers = raw === undefined ? { 'X-KIN-CSRF': '1' } : { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' };
+        const waiting = method === 'POST' && blocked();
+        if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });
+        onDispatch();
         const response = await transport.request(apiBase + path, { context, deadlineMs: TIMEOUT_MS, method, signal: controller.signal, headers, body: raw });
         const data = response.incomplete ? undefined : response.body;
         if (!response.ok) {
@@ -635,6 +661,7 @@
       study: { name: item.study.name, id: item.study.id, birth: item.study.birth, date: item.study.date } });
 
     function acknowledge(id) {
+      if (refuseMode()) return;
       if (!allowed()) return;
       const slot = projections.get(id), shown = derive(id);
       if (!slot || !slot.item || !shown.row || shown.row.ack !== 'on') return;
@@ -643,18 +670,29 @@
       const raw = JSON.stringify({ requestId, expectedOwner: JSON.parse(sent), revision: item.revision });
       const attempt = { recordId: item.id, uid: item.studyUid, sent, epoch, path: `/critical-results/${encodeURIComponent(item.id)}/ack`,
         requestId, revision: item.revision, raw, label: labelOf(item), line: ++lineSeq, state: 'sending', gen: 0, retried: false,
-        detail: '', later: '' };
+        dispatches: 0, detail: '', later: '' };
       outcomes.delete(item.id);
       openNotes.delete(item.id);
       attempts.set(item.id, attempt);
-      transmit(attempt, false);
+      transmit(attempt);
     }
 
-    function transmit(attempt, retry) {
+    function localRefusal(attempt, reason) {
+      attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';
+      attempt.detail = reason;
+      bodyOpen = true;
+      paint();
+    }
+
+    function transmit(attempt) {
+      const waiting = blocked();
+      if (waiting) { localRefusal(attempt, waiting); return; }
+      const retry = attempt.dispatches > 0;
       attempt.state = retry ? 'checking' : 'sending';
       attempt.gen = ++gen;
       paint();
-      call('POST', attempt.path, attempt.raw).then(guarded(result => settle(attempt, retry, result, null)), guarded(error => settle(attempt, retry, null, error)));
+      call('POST', attempt.path, attempt.raw, work.capture('document'), () => { attempt.dispatches++; })
+        .then(guarded(result => settle(attempt, retry, result, null)), guarded(error => settle(attempt, retry, null, error)));
     }
 
     /**
@@ -664,6 +702,7 @@
      */
     function settle(attempt, retry, result, error) {
       if (!ownAttempt(attempt) || !['sending', 'checking'].includes(attempt.state)) return;
+      if (error?.outcome === 'not-sent') { localRefusal(attempt, error.message); return; }
       if (result) {
         const envelope = ownerOf(result.data && result.data.owner, attempt.sent);
         if (envelope === 'other') { accountChanged(TEXT.otherEnvelope); return; }
@@ -754,9 +793,10 @@
     }
 
     function check(recordId) {
+      if (refuseMode()) return;
       const attempt = attempts.get(recordId);
-      if (!attempt || !allowed() || attempt.state !== 'unknown' || !ownAttempt(attempt)) return;
-      transmit(attempt, true);
+      if (!attempt || !allowed() || !['unknown', 'not-sent'].includes(attempt.state) || !ownAttempt(attempt)) return;
+      transmit(attempt);
     }
 
     /**
@@ -858,8 +898,8 @@
     /** 결과를 모르는 시도(checking·unknown)의 줄: P의 유무·모양과 무관하게 같은 요청이 끝날 때까지 남는다. */
     function attemptLine(id, attempt, note) {
       return {
-        key: id, state: attempt.state, word: 'Acknowledgement status unknown', label: labelText(attempt.label),
-        text: attempt.state === 'checking' ? TEXT.checking : TEXT.unknown,
+        key: id, state: attempt.state, word: attempt.state === 'not-sent' ? 'Not Sent' : 'Acknowledgement status unknown', label: labelText(attempt.label),
+        text: attempt.state === 'not-sent' ? attempt.detail : attempt.state === 'checking' ? TEXT.checking : TEXT.unknown,
         detail: [attempt.later ? TEXT.later(attempt.later) : '', attempt.detail, note].filter(Boolean).join('\n'),
         check: true, checking: attempt.state === 'checking', replacement: null,
       };
@@ -902,6 +942,8 @@
       if (model.ack !== 'off') {
         const ack = button('Acknowledge', () => acknowledge(model.key), TEXT.ackTitle);
         ack.disabled = model.ack === 'busy';
+        writeControls.set(ack, { disabled: ack.disabled, title: TEXT.ackTitle });
+        ack.setAttribute('aria-describedby', modeNote.id);
         actions.append(ack);
       }
       if (model.replacement) actions.append(button('Open Replacement', () => openReplacement(model.key, model.replacement)));
@@ -925,8 +967,10 @@
       if (model.detail) line.append(make('p', 'cvr-inbox-detail', model.detail));
       const actions = make('div', 'cvr-inbox-actions');
       if (model.check) {
-        const again = button('Check Again', () => check(model.key));
+        const again = button(model.state === 'not-sent' ? 'Acknowledge' : 'Check Again', () => check(model.key));
         again.disabled = model.checking;
+        writeControls.set(again, { disabled: again.disabled, title: '' });
+        again.setAttribute('aria-describedby', modeNote.id);
         actions.append(again);
       }
       if (model.replacement) actions.append(button('Open Replacement', () => openReplacement(model.key, model.replacement)));
@@ -1008,6 +1052,7 @@
       const lineModels = derived.filter(item => item.line).sort((a, b) => a.seq - b.seq).map(item => item.line);
       const rows = reconcile(list, rowNodes, rowModels, buildRow, active);
       const lines = reconcile(attemptList, lineNodes, lineModels, buildLine, active);
+      paintAdmission();
       attemptList.hidden = lineModels.length === 0;
       const moreGone = !ready || !nextCursor || lock !== null;
       const moreLost = moreGone && !moreButton.hidden && moreButton.contains(active);
@@ -1073,6 +1118,7 @@
       if (work.state() !== 'active') return;
       if (ended) return;
       const now = allowed();
+      paintAdmission();
       if (now === reading) return;
       reading = now;
       if (now) loadList(false);
@@ -1127,7 +1173,7 @@
     window.addEventListener('pagehide', () => end());
     paint();
     sync();
-    return { end, lock: detail => lockArea(detail) };
+    return { sync, end, lock: detail => lockArea(detail) };
   }
 
   window.KinCriticalResultInbox = Object.freeze({ mount });
