@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   produce:
+    name: restore-product / produce
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
@@ -52,6 +53,7 @@ jobs:
           include-hidden-files: false
           overwrite: false
   consume:
+    name: restore-product / consume
     needs: produce
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -70,3 +72,17 @@ jobs:
           RECEIPT_SHA256: ${{ needs.produce.outputs.receipt_sha256 }}
           PRODUCT_SHA256: ${{ needs.produce.outputs.product_sha256 }}
         run: python3 -B tests/ops_product_transfer_fixture.py consume "$RUNNER_TEMP/kin-product-download" --receipt-sha256 "$RECEIPT_SHA256" --product-sha256 "$PRODUCT_SHA256"
+  legacy-produce:
+    name: produce
+    needs: produce
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: exit 0
+  legacy-consume:
+    name: consume
+    needs: consume
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: exit 0

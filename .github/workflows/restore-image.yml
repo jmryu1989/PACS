@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   produce:
+    name: restore-image / produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -43,6 +44,7 @@ jobs:
           include-hidden-files: false
           overwrite: false
   consume:
+    name: restore-image / consume
     needs: produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -60,3 +62,17 @@ jobs:
         env:
           RECEIPT_SHA256: ${{ needs.produce.outputs.receipt_sha256 }}
         run: python3 -B tests/ops_image_transfer_fixture.py consume "$RUNNER_TEMP/kin-image-download" --receipt-sha256 "$RECEIPT_SHA256"
+  legacy-produce:
+    name: produce
+    needs: produce
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: exit 0
+  legacy-consume:
+    name: consume
+    needs: consume
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: exit 0
