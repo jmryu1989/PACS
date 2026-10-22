@@ -967,18 +967,36 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
     R3_LINES = {'unknown': {'create': '전달되었을 수 있습니다', 'supersede': '전달되었을 수 있습니다', 'cancel': '취소되었을 수 있습니다'},
                 'delivered': '전달 기록이 저장되었습니다', 'cancelled': '전달을 취소했습니다',
                 'not-sent': 'Related Report 모드에서는 쓸 수 없습니다'}
+    # W5R5C-01: a confirmed refusal's Korean explanation (contract S7-U1p §8.1 reason wording, by code, else by HTTP status),
+    # fixed here as the expectation of each first-dispatch vector - never read back from the page or the module.
+    R3_REFUSAL_REASONS = {
+        'CRITICAL_RESULT_NOT_FOUND': '전달 기록을 찾을 수 없습니다. 접근 조건이 바뀌었을 수 있습니다.',
+        'CRITICAL_RESULT_SOURCE_MOVED': '그사이 판독 판이 바뀌었습니다. 보낼 판을 다시 확인하세요.',
+        'CRITICAL_RESULT_UNAVAILABLE': '서버가 계정 또는 원본 정보를 확인하지 못해 보내지 않았습니다.',
+        400: '서버가 입력을 거절했습니다.',
+        403: '서버가 이 요청을 거절했습니다.',
+    }
 
     def r3_retry(self, action):
         return self.page.locator('#cvr-send-check' if action == 'create' else '#cvr-sent-attempts li button')
 
-    def r3_expect_outcome(self, action, outcome):
-        """Wait until the visible outcome is `outcome`'s word, then require its explanation and retry control."""
+    def r3_expect_outcome(self, action, outcome, response=None):
+        """Wait until the displayed outcome is `outcome`'s word, then require its explanation and retry control.
+
+        `response` ({status, code, message}) is the answer the case gave this dispatch. Its own message is the response
+        barrier: an earlier Not Sent / status unknown paint of the same attempt cannot satisfy a later outcome.
+        W5R4A-02: the outcome region must be displayed - text of a hidden region is not what the reader sees.
+        W5R5C-01: a rejection must display its refusal's Korean explanation, the server's message, HTTP status and code.
+        """
         words = self.R3_WORDS[action]
         word = words[outcome]
         region = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts li')
         expect(region).to_have_count(1)
+        if response and response.get('message'):
+            expect(region).to_contain_text(response['message'])
         # Pending text never satisfies this: a dispatched request shows no word (dialog) or 'Sending' (line) until settled.
         expect(region).to_contain_text(re.compile(r'^\s*' + re.escape(word) + r'(\s·|\s*$)', re.M), use_inner_text=True)
+        expect(region).to_be_visible()
         text = region.inner_text()
         first = next(line.strip() for line in text.splitlines() if line.strip())
         self.assertRegex(first, r'^' + re.escape(word) + r'( · |$)', 'the status word is the first visible line')
@@ -987,8 +1005,18 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         expected = self.R3_LINES.get(outcome)
         if isinstance(expected, dict):
             expected = expected[action]
+        if outcome == 'rejected':
+            self.assertIsNotNone(response, 'a rejection is judged against the refusal the case gave')
+            expected = self.R3_REFUSAL_REASONS.get(response.get('code')) or self.R3_REFUSAL_REASONS[response['status']]
         if expected:
             self.assertIn(expected, text, f'{outcome}: its explanation is shown')
+            expect(region.get_by_text(expected).first, f'{outcome}: its explanation is displayed').to_be_visible()
+        if response and response.get('message'):
+            expect(region.get_by_text(response['message']), 'the response message is displayed').to_be_visible()
+        if outcome == 'rejected':
+            expect(region.get_by_text(f"HTTP {response['status']}"), 'the refusal HTTP status is displayed').to_be_visible()
+            if response.get('code'):
+                expect(region.get_by_text(response['code']), 'the refusal code is displayed').to_be_visible()
         for name, line in (('unknown', '되었을 수 있습니다'), ('delivered', self.R3_LINES['delivered']),
                            ('cancelled', self.R3_LINES['cancelled'])):
             if name != outcome:
@@ -1049,7 +1077,8 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
             # Response barrier: the retry's own refusal detail is displayed before the outcome is judged.
             outcome = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts li')
             expect(outcome).to_contain_text('SYN refused')
-            expect(self.r3_expect_outcome(action, 'unknown')).to_be_enabled()
+            refused = {'status': 404, 'code': 'CRITICAL_RESULT_NOT_FOUND', 'message': 'SYN refused'}
+            expect(self.r3_expect_outcome(action, 'unknown', refused)).to_be_enabled()
             self.assertEqual(first, self.requests(action)[1]['raw'])
 
     def r3_boundaries(self, boundary, prior=False):
@@ -1112,26 +1141,29 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
 
     def r3_first_dispatch(self, action):
         original = self.js
-        for status, code, state in [(201, None, 'cancelled' if action == 'cancel' else 'delivered'),
+        for vector, (status, code, state) in enumerate([(201, None, 'cancelled' if action == 'cancel' else 'delivered'),
                 (400, 'SYN_BAD_INPUT', 'rejected'), (403, 'SYN_FORBIDDEN', 'rejected'),
                 (404, 'CRITICAL_RESULT_NOT_FOUND', 'rejected'), (409, 'CRITICAL_RESULT_SOURCE_MOVED', 'rejected'),
-                (503, 'CRITICAL_RESULT_UNAVAILABLE', 'rejected'), (503, 'SYN_AMBIGUOUS', 'unknown'), (0, None, 'unknown')]:
+                (503, 'CRITICAL_RESULT_UNAVAILABLE', 'rejected'), (503, 'SYN_AMBIGUOUS', 'unknown'), (0, None, 'unknown')]):
             with self.subTest(action=action, status=status, code=code):
                 self.server = CvrServer()
                 self.log.clear()
                 self.js = original
                 self.r3_boundary(action, 'call')
                 self.r3_mode(False)
+                response = None
                 if status == 0:
                     self.fault(action, abort=True)
                 elif status != 201:
-                    self.fault(action, status=status, body={'code': code, 'message': 'SYN response'})
+                    # A message unique to this vector: the response barrier of r3_expect_outcome.
+                    response = {'status': status, 'code': code, 'message': f'SYN r5 answer {action} vector {vector}'}
+                    self.fault(action, status=status, body={'code': code, 'message': response['message']})
                 # The reader's Send on the Not Sent request is its first actual dispatch.
                 retry = self.r3_expect_outcome(action, 'not-sent')
                 expect(retry).to_be_enabled()
                 retry.click()
                 self.wait_until(lambda: len(self.requests(action)) == 1, 'first actual dispatch')
-                self.r3_expect_outcome(action, state)
+                self.r3_expect_outcome(action, state, response)
 
     def test_w5r3_create_first_actual_dispatch_classification(self):
         self.r3_first_dispatch('create')

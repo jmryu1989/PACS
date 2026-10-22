@@ -195,7 +195,7 @@ MUTANTS = [
 ]
 
 
-# D114 M1..M8/M10 execute the shipped CVR modules through their existing DOM hosts.
+# D114 M1..M8/M10 and r5 M11/M12 execute the shipped CVR modules through their existing DOM hosts.
 CVR_MUTANTS = [
     # W5R3B-01: the deferred focusout row repaint without the admission paint (the r3 defect itself).
     ('M4-focusout-repaint-without-admission', 'sender', [('{ paintRows(); paintWriteControls(); }', 'paintRows();')], 'test_w5r3_row_action_explanations_survive_mode_round_trip'),
@@ -218,6 +218,14 @@ CVR_MUTANTS = [
     ('M7-retry-refusal-is-final', 'sender', [('if (!retry && refused(error)) {', 'if (refused(error)) {')], 'test_w5r3_create_unknown_survives_mode_and_retry_404'),
     ('M8-transmit-backstop-removed', 'sender', [('if (waiting) { localRefusal(attempt, waiting); return; }', '')], 'test_w5r3_transmit_zero_dispatch_is_not_sent'),
     ('M8-call-backstop-removed', 'sender', [("if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });", '')], 'test_w5r3_call_zero_dispatch_is_typed_not_sent'),
+    # W5R4A-02 (Astra r4 F7, exact): every terminal Sent-list attempt line is hidden while its text stays in the DOM. Each
+    # action's first-dispatch matrix must judge the displayed outcome, not the text of a hidden line.
+    ('M11-hidden-terminal-cancel', 'sender', [('element.dataset.state = attempt.state;', "element.dataset.state = attempt.state; element.hidden = attempt.action !== 'create' && ['rejected','delivered','cancelled'].includes(attempt.state);")], 'test_w5r3_cancel_first_actual_dispatch_classification'),
+    ('M11-hidden-terminal-supersede', 'sender', [('element.dataset.state = attempt.state;', "element.dataset.state = attempt.state; element.hidden = attempt.action !== 'create' && ['rejected','delivered','cancelled'].includes(attempt.state);")], 'test_w5r3_supersede_first_actual_dispatch_classification'),
+    # W5R5C-01: a rejected cancel / supersede keeps its word but loses its Korean reason and the server's detail; create and
+    # every other outcome are unchanged, so only that action's rejection-explanation check can catch it.
+    ('M12-rejected-reason-cancel', 'sender', [("line: attempt.action === 'create' && !attempt.lined && lock === null ? `${attempt.reason} ${TEXT.newRequest}` : attempt.reason,\n          detail: attempt.detail };", "line: attempt.action === 'cancel' ? '' : attempt.action === 'create' && !attempt.lined && lock === null ? `${attempt.reason} ${TEXT.newRequest}` : attempt.reason,\n          detail: attempt.action === 'cancel' ? '' : attempt.detail };")], 'test_w5r3_cancel_first_actual_dispatch_classification'),
+    ('M12-rejected-reason-supersede', 'sender', [("line: attempt.action === 'create' && !attempt.lined && lock === null ? `${attempt.reason} ${TEXT.newRequest}` : attempt.reason,\n          detail: attempt.detail };", "line: attempt.action === 'supersede' ? '' : attempt.action === 'create' && !attempt.lined && lock === null ? `${attempt.reason} ${TEXT.newRequest}` : attempt.reason,\n          detail: attempt.action === 'supersede' ? '' : attempt.detail };")], 'test_w5r3_supersede_first_actual_dispatch_classification'),
     # W5R3B-02 (Opus OF9 / Astra AF5): mode entry no longer repaints an already-rendered row; only a click would.
     ('M10-entry-repaint-omitted', 'recipient', [('const now = allowed();\n      paintAdmission();', 'const now = allowed();\n      if (!blocked()) paintAdmission();')], 'test_w5r3_related_ack_is_refused_before_allocation'),
     ('M10-ack-before-admission', 'recipient', [('function acknowledge(id) {\n      if (refuseMode()) return;', 'function acknowledge(id) {')], 'test_w5r3_related_ack_is_refused_before_allocation'),
