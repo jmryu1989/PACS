@@ -101,11 +101,10 @@ REQ-RESTORE-JOB-NAMES → RISK-RESTORE-FAILURE-MASKED →
 job id `produce`·`consume`, `needs: produce`와 `needs.produce.outputs.*`는 그대로다.
 `ci_workflows.py`의 경로+job id 식별, `run-tests.py`, `execution_selection`,
 `candidate_ci`, `measurement_ci`의 시험 선택과 `candidate.yml`은 표시 이름을 선택 키로 쓰지 않는다.
-기존 10개 job은 두 공개 이름 `produce`·`consume`을 공유했다. 보호 API에서 삭제할 항목 수는
-실제 저장된 context/app 조합으로 확인하며 10개의 서로 다른 옛 context가 있다고 가정하지 않는다.
-사용자/지휘자는 새 10개 context를 기존 요구사항에 추가·재조회하고, main의 같은 SHA에서
-다섯 workflow의 최신 실행에 속한 새 10개 check가 모두 성공한 뒤에만 옛 항목을 제거한다.
-그 전에는 workflow별 지휘자 관문을 유지한다. 이름 변경 자체는 보호 설정 전환이나 병합 허가가 아니다.
+기존 10개 job은 두 공개 이름 `produce`·`consume`을 공유했다. 이 공유 이름은 한 workflow의 실패를
+다른 workflow의 성공이 가릴 수 있으므로 보호 요구사항에서 제거됐고, 전환용 임시 호환 job도 제거했다.
+restore workflow는 공유 이름 `produce`·`consume`을 다시 공개 check로 내보내지 않는다(같은 시험).
+이름 변경이나 이 정리 자체는 보호 설정 변경이나 병합 허가가 아니다.
 
 ## 공통 실행 증거 기록
 

@@ -400,6 +400,10 @@ class WorkflowConsumerTests(unittest.TestCase):
                 with self.subTest(workflow=workflow, job=job_id):
                     self.assertEqual(contexts.get(f'restore-{kind} / {job_id}'),
                                      [(workflow, job_id)])
+            # The shared bare names let one restore's success mask another's failure.
+            for shared in ('produce', 'consume'):
+                with self.subTest(workflow=workflow, shared=shared):
+                    self.assertNotIn(workflow, [path for path, _ in contexts.get(shared, [])])
 
     def test_audit_entry_points_report_gaps_without_failing_and_parse_errors_fail(self):
         # R5-DIAG-01: both public CLIs preserve diagnostics and exit semantics.
