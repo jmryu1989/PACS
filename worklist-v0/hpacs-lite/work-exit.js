@@ -38,8 +38,9 @@
           const context = work.capture("document");
           // WORKLIST-SPLIT-UID: an unresolved study's kept text is not sent on the way out either; it stays in the copy, and
           // the browser's own warning below still asks before the text is lost.
+          // W5: nor is the text of an unsettled explicit Related insert: an unload write would carry it without its receipt.
           for (const report of pending)
-            if (!appState[report.uid]?.identityUnresolved)
+            if (!appState[report.uid]?.identityUnresolved && !relatedInsertPending(report.uid))
               draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
         }
       }
@@ -215,6 +216,18 @@
         // WORKLIST-SPLIT-UID: an unresolved study's text is not preserved to the server; the logout stops with it named
         // (Retry, Back to Editing or an explicit discard) and the text stays on this page.
         if (appState[report.uid]?.identityUnresolved) { report.reason = "identity"; continue; }
+        /**
+         * W5 (D1423 R3): the text of an explicit Related insert whose receipt is not settled is never preserved as an ordinary
+         * draft — text equality without the receipt proves nothing. A lost answer is read once with this preparation (the
+         * receipt Check writes nothing); applied or discarded, the captured text continues on the ordinary path below. Still
+         * unsettled (or refused, which needs the reader's Retry or Discard Insert), the logout stops and names it.
+         */
+        const related = relatedInsertPending(report.uid);
+        if (related) {
+          await relatedInsertCheck(related, permit);
+          if (!mine()) return;
+          if (relatedInsertPending(report.uid)) { report.reason = "insert"; continue; }
+        }
         /**
          * 이 검사에 결과를 모르는 확정이 남아 있으면, 잡아 둔 글을 초안으로 보존하기 전에 서버의 판독 상태부터 읽는다
          * (준비 문맥으로). 그 글이 이미 판독문으로 확정돼 있으면 보존할 것이 없다 — 초안으로 다시 쓰면 다음 로그인에서
@@ -520,6 +533,14 @@
           if (!work.commit(at, () => { prep.uid = report.uid; prep.texts = report.texts; report.reason = null; })) return;
           // WORKLIST-SPLIT-UID: Recover Draft does not send an unresolved study's text either; it stays here with its reason.
           if (appState[report.uid]?.identityUnresolved) { if (!work.commit(at, () => { report.reason = "identity"; })) return; continue; }
+          // W5: an unsettled explicit Related insert is read once with the recovered session; it is never recovered as a draft.
+          const related = relatedInsertPending(report.uid);
+          if (related) {
+            say("Related Report 삽입의 저장 결과를 확인하는 중입니다…");
+            await relatedInsertCheck(related, at, binding.session);
+            if (!ended()) return;
+            if (relatedInsertPending(report.uid)) { if (!work.commit(at, () => { report.reason = "insert"; })) return; continue; }
+          }
           // 결과를 모르는 확정이 남은 검사는 그 글을 초안으로 쓰기 전에 판독 상태부터 읽는다(보존 저장과 같다).
           if (reportUnknownCommits.has(report.uid)) {
             say("서버의 판독 상태를 확인하는 중입니다…");
@@ -610,6 +631,7 @@
       unknown: "판독문 초안 저장의 결과를 확인하지 못했습니다. 저장됐을 수도 있고 아닐 수도 있습니다.",
       conflict: "서버에 이 화면과 다른 초안이 있어 판독문 초안을 저장하지 않았습니다. Overwrite Server Draft를 누르면 이 화면의 내용으로 덮어씁니다.",
       identity: "환자 식별 불일치로 이 검사의 판독문 초안을 저장하지 않았습니다. 원본 확인이 필요합니다.",
+      insert: "Related Report에서 넣은 글의 저장 결과를 확인하지 못해 판독문 초안을 저장하지 않았습니다. Back to Editing에서 Check·Retry 또는 Discard Insert로 확인하세요.",
     };
 
     function logoutStatus(prep, text) {

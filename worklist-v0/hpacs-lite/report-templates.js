@@ -65,8 +65,8 @@
      * 스크립트가 판독문 칸에 글을 넣어도 되는가. 상용구 삽입과 소견 인용이 **같은 관문
      * 하나**를 쓴다 — 둘이 각자 검사를 들고 있으면 언젠가 한쪽만 고쳐진다.
      */
-    function reportEditorBlock() {
-      const why = reportWriteBlock();
+    function reportEditorBlock(admission = null) {
+      const why = reportWriteBlock(admission);
       if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
       if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
