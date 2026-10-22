@@ -5153,3 +5153,32 @@ test('S9U4-B87 D1668 r6 the positive histories the page accepts, as the real ser
   const read = await h.request('GET', '/api/dicom-import/' + lost.id);
   assert.deepEqual(read.body.files, [row(again.body)], 'the status row is the same history');
 });
+
+test('S9U4-B88 D1691 /api/me names the login server exactly as the transfer service keys the owner: two configured issuers with the same institution and subject give two me.issuer values, each equal to the ownerIssuer of the operation it opens; none configured gives null and no operation', async () => {
+  const { PacsController } = require('/app/dist/pacs.controller');
+  // The product's own GET me handler over the request fields its guard sets (the TestGuard here sets the same ones).
+  const me = as => new PacsController(null, null).me({ sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution,
+    kind: as.kind, sessionId: 'SYN-SESSION' });
+  const h = await harness();
+  const saved = process.env.KC_ISSUER;
+  const seen = [];
+  try {
+    for (const issuer of ['https://syn-a.test/auth/realms/kin', 'https://syn-b.test/auth/realms/kin']) {
+      process.env.KC_ISSUER = issuer;
+      const answer = me(TECH);
+      assert.equal(answer.issuer, issuer, 'me.issuer is the configured login server as it is');
+      assert.deepEqual([answer.institution, answer.sub], [TECH.institution, TECH.sub], 'the same institution and subject');
+      const stored = await h.send(dicom({ study: uid() }));
+      assert.equal(stored.status, 200, JSON.stringify(stored.body));
+      assert.equal(h.s.op(stored.id).ownerIssuer, answer.issuer, 'the operation owner carries the login server me names');
+      seen.push(answer.issuer);
+    }
+    assert.notEqual(seen[0], seen[1], 'two login servers stay two owners for the page');
+    delete process.env.KC_ISSUER;
+    assert.equal(me(TECH).issuer, null, 'no configured login server: me names none');
+    const refused = await h.send(dicom({ study: uid() }));
+    assert.deepEqual([refused.status, refused.body.code], [503, 'IMPORT_ISSUER_UNCONFIGURED'], 'and the service opens no operation');
+  } finally {
+    if (saved === undefined) delete process.env.KC_ISSUER; else process.env.KC_ISSUER = saved;
+  }
+});

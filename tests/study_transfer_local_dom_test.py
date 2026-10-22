@@ -45,6 +45,12 @@ RAD_ONLY = {**h.RAD, "roles": ["radiologist"]}
 RAD_TECH = {**h.RAD, "roles": ["radiologist", "technician"]}
 ADMIN = {**h.RAD, "sub": "SYN-ADMIN-SUB", "actor": "syn-admin@synthetic.test", "user": "syn-admin@synthetic.test",
          "displayName": "SYN Admin Park", "roles": ["admin"]}
+# D1691: the transfer owner is [issuer, institution, sub]; /me names the login server (h.RAD's ISSUER for every account
+# here). History of that owner lives in its own v4 slot; history before D1691 (v1-v3 under LEGACY) is kept, never observed.
+ISSUER_A, ISSUER_B = h.ISSUER, "https://syn-b.test/auth/realms/kin"
+HISTORY, LEGACY = "kin-study-transfer-local.v4:", "kin-study-transfer-local"
+LEGACY_NOTICE = "이전 형식의 반입·다운로드 기록"
+IDENTITY_NOTICE = "로그인 서버를 포함한 계정 정보를 확인하지 못해"
 UID_A, UID_B, UID_C = h.UID, h.UID_B, rf.UID_C
 TELE_UID = UID_C
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -89,6 +95,22 @@ def file_result(op, index, outcome="stored", code=None, message=None, identity="
             "message": message or ("SYN-SERVER " + (code or outcome)), "identity": identity, "writeDisposition": disposition,
             "studyUid": uid, "seriesUid": uid + ".1", "sopUid": uid + ".1.%d" % index, "sha256": hashlib.sha256(dicom(index)).hexdigest(), "bytes": 64,
             "at": "2026-10-17T00:00:00.000Z", "generation": generation if attempts else 0, "attempts": attempts}
+
+
+def copy_status(op, index=0, code="ORTHANC_UNAVAILABLE"):
+    """A valid status answer for a copied tab's read: one stale no-write retryable row as the server writes it. Its code
+    appears in that row's reason only once the copy has applied this answer (distinguishable from the restore's text)."""
+    row = file_result(op, index, "retryable", code)
+    row["attempts"][0]["transport"] = "certain-no-write"
+    row.pop("operationId")
+    return 200, {"operationId": op, "status": "open", "files": [row]}
+
+
+def copy_applied(index=0, code="ORTHANC_UNAVAILABLE"):
+    def applied(box):
+        reason = box.locator(f'li[data-index="{index}"] .study-transfer-reason')
+        return reason.count() == 1 and code in reason.inner_text()
+    return applied
 
 
 def status_of(result):
@@ -825,7 +847,7 @@ class TransferPanelPage(rf.ReportFlowPage):
                 return new Response(JSON.stringify({...result,operationId:synRequests.at(-1)[0]}),{status:200,headers:{'Content-Type':'application/json'}});
               }});
               KinStudyTransferLocal({api:'/api',transport:{request:(url,init)=>transport.request(url,{...init,...(synBound?{}:{session:null})})},
-                allowed:()=>true,identity:()=>['SYN-INST','SYN-SUB'],can:()=>true,demo:()=>false,study:()=>null});
+                allowed:()=>true,identity:()=>['SYN-ISSUER','SYN-INST','SYN-SUB'],can:()=>true,demo:()=>false,study:()=>null});
             }''',file_result(str(uuid.uuid4()),0))
             with page.expect_file_chooser() as choice:page.locator('#t-import').click()
             choice.value.set_files(self.files(1)); page.wait_for_timeout(250)
@@ -903,12 +925,19 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.choose(self.files(2))
         self.observed(lambda:self.site.held_imports)
         op=self.site.imports[0]["operation"]
-        # Ordinary window.open copies the unmodified sessionStorage before the queued sibling dispatches. r6 (OPUS-03): the
-        # copy is observed after it restored this operation's two rows and read its status itself, before any absence.
-        other, box = self.copied_tab(op, 2)
+        # Ordinary window.open copies the unmodified sessionStorage before the queued sibling dispatches. r7 (U4C6-ASTRA-03):
+        # the copy's own status read is answered with a distinguishable stale retryable row, received in full and applied
+        # in the copy before any absence is asserted; a complete positive then shows the copy does not ignore its answers.
+        other, box, applied, posts = self.copied_tab(op, 2, copy_status(op), copy_applied())
         try:
             self.assertEqual(0,box.get_by_role("button",name="Retry",exact=True).count(),"R5-A04: copied unsent descriptor has no capability")
             self.assertEqual(0,box.get_by_role("button",name="Choose Files Again",exact=True).count(),"R5-A04: copied operation cannot reattach")
+            self.assertTrue(applied, "R5-A04-copy: the copy applied its own stale retryable status before these assertions")
+            self.assertEqual([], posts, "R5-A04-copy: the copy sends no payload")
+            self.site.import_state[op] = {0: file_result(op, 0)}
+            box.get_by_role("button", name="Check Again", exact=True).click()
+            expect(box.locator('li[data-index="0"] .study-transfer-state')).to_have_text("Stored")
+            self.site.import_state.pop(op)
             self.site.release_import(lambda r:file_result(op,0,"retryable","ORTHANC_UNAVAILABLE"))
             self.settle(300)
             self.assertEqual(1, len(self.site.imports), 'R5-A04: received negative pauses resident sibling')
@@ -919,24 +948,16 @@ class TransferPanelPage(rf.ReportFlowPage):
             choice.value.set_files(self.files(1)); self.observed(lambda:len(self.site.imports)>2)
             self.assertNotEqual(op,self.site.imports[-1]["operation"],"R5-A04: copied tab new selection has new UUID")
         finally: other.close()
-        saved=self.page.evaluate("JSON.parse(sessionStorage.getItem('kin-study-transfer-local'))")
-        for v in (1,2,3):
-            saved['v']=v
-            for f in saved['operations'][0]['files']: f.update(sent=False,canRetry=True,pending=None)
-            self.page.evaluate("s=>sessionStorage.setItem('kin-study-transfer-local',JSON.stringify(s))",saved)
-            before=len(self.site.imports); self.reload_transfers()
-            self.assertEqual(0,self.controls()["Retry"],"R5-A04: legacy snapshot read-only")
-            self.assertEqual(0,self.controls()["Choose Files Again"],"R5-A04: legacy no reattach")
-            self.assertEqual(before,len(self.site.imports),"R5-A04: legacy zero dispatch")
+        # D1691: the v1/v2/v3 legacy snapshots are the user-approved legacy contract of test_r7_a04 (kept, never observed).
 
     def test_r5_a05_storage_faults_cap_pressure_and_clear_preserve_uncertainty(self):
         self.open_as(TECH,"Technician")
         self.site.import_answers=["abort"]; self.choose(self.files(1))
         self.observed(lambda:self.site.import_reads)
         for methods in (["setItem"],["removeItem"],["getItem"],["setItem","removeItem","getItem"]):
-            self.page.evaluate("""methods=>{ window.synStorage={}; for(const m of methods){
+            self.page.evaluate("""([methods, prefix])=>{ window.synStorage={}; for(const m of methods){
               const original=Storage.prototype[m]; window.synStorage[m]=original;
-              Storage.prototype[m]=function(k,...rest){if(k==='kin-study-transfer-local')throw new Error('synthetic storage'); return original.call(this,k,...rest);};}}""",methods)
+              Storage.prototype[m]=function(k,...rest){if(String(k).startsWith(prefix))throw new Error('synthetic storage'); return original.call(this,k,...rest);};}}""",[methods, HISTORY])
             before=len(self.site.imports); self.site.import_answers=["abort"]; self.choose(self.files(1))
             self.settle(250)
             self.assertEqual(before + 1, len(self.site.imports), 'R5-A05: storage never governs fresh dispatch authority')
@@ -950,7 +971,7 @@ class TransferPanelPage(rf.ReportFlowPage):
             self.observed(lambda:len(self.site.imports)>before)
         ids=self.operations().evaluate_all("nodes=>nodes.map(n=>n.dataset.operation)")
         self.assertGreater(len(ids),20,"R5-A05: more than 20 unconfirmed rows")
-        stored=self.page.evaluate("JSON.parse(sessionStorage.getItem('kin-study-transfer-local')).operations.map(o=>o.id)")
+        stored=self.page.evaluate("k=>JSON.parse(sessionStorage.getItem(k)).operations.map(o=>o.id)", self.own_slot())
         self.assertEqual(set(ids),set(stored),"R5-A05: pending descriptors never pruned")
         self.assertTrue(self.panel().get_by_role("button",name="Clear Finished",exact=True).is_disabled(),"R5-A05: uncertainty not clearable")
         self.reload_transfers()
@@ -1265,7 +1286,7 @@ class TransferPanelPage(rf.ReportFlowPage):
                         page.add_script_tag(content=source)
                     page.evaluate('''view => {
                       const gate = KinWorkContext.create(); gate.follow({onLifecycle(fn){fn({state:'active',session:'SYN-SESSION'});}});
-                      window.KinWorkContext = gate; window.synOwner = ['SYN-INST','SYN-SUB']; window.synClicks = 0;
+                      window.KinWorkContext = gate; window.synOwner = ['SYN-ISSUER','SYN-INST','SYN-SUB']; window.synClicks = 0;
                       HTMLAnchorElement.prototype.click = function(){synClicks++;};
                       const transport = KinSessionTransport.create({gate, authFailure:()=>{}, fetch:async(url,init)=>{
                         if (url.endsWith('/grant')) return new Promise(resolve=>{window.synGrantRelease=()=>resolve(new Response(JSON.stringify({
@@ -1280,7 +1301,7 @@ class TransferPanelPage(rf.ReportFlowPage):
                     page.get_by_role('button', name='Download', exact=True).click()
                     page.wait_for_function('!!window.synGrantRelease')
                     page.evaluate('''boundary=>{
-                      if(boundary==='account-switch'){synOwner=['SYN-INST','SYN-OTHER'];synTransfer.sync();}
+                      if(boundary==='account-switch'){synOwner=['SYN-ISSUER','SYN-INST','SYN-OTHER'];synTransfer.sync();}
                       else window.dispatchEvent(new Event(boundary));
                       synGrantRelease();
                     }''', boundary)
@@ -1359,15 +1380,16 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.open_as(TECH,'Technician'); self.site.import_answers=['abort']; self.choose(self.files(1))
         self.observed(lambda:self.site.import_reads)
         original=self.site.imports[0]['operation']
-        self.page.evaluate("""() => { const s=JSON.parse(sessionStorage.getItem('kin-study-transfer-local'));
-          s.v=2; s.operations[0].files[0].sent=false; s.operations[0].files[0].canRetry=true;
-          s.operations[0].files[0].pending=null; sessionStorage.setItem('kin-study-transfer-local',JSON.stringify(s)); }""")
+        # The kept descriptor names capability fields of earlier formats; a restore reads none of them (D1606).
+        self.page.evaluate("""k => { const s=JSON.parse(sessionStorage.getItem(k));
+          s.operations[0].files[0].sent=false; s.operations[0].files[0].canRetry=true;
+          s.operations[0].files[0].pending=null; sessionStorage.setItem(k,JSON.stringify(s)); }""", self.own_slot())
         self.context.add_init_script("""(() => { const raw=Storage.prototype.getItem;
           const mode=raw.call(localStorage,'syn-transfer-storage-fault'); window.synStorageFaultCalls=[];
           if(mode) for(const method of JSON.parse(mode)){const original=Storage.prototype[method];
-            Storage.prototype[method]=function(key,...args){if(key==='kin-study-transfer-local'){
+            Storage.prototype[method]=function(key,...args){if(String(key).startsWith(%s)){
               window.synStorageFaultCalls.push(method);throw new Error('synthetic storage failure');}
-              return original.call(this,key,...args);};}})();""")
+              return original.call(this,key,...args);};}})();""" % json.dumps(HISTORY))
         for methods in (['getItem'],['getItem','setItem','removeItem']):
             self.page.evaluate("m=>localStorage.setItem('syn-transfer-storage-fault',JSON.stringify(m))",methods)
             self.reload_transfers()
@@ -1404,32 +1426,34 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.choose(self.files(1))
         self.observed(lambda: self.site.import_reads)
         original = self.site.imports[0]['operation']
-        snapshot = self.page.evaluate("sessionStorage.getItem('kin-study-transfer-local')")
+        slot = self.own_slot()
+        snapshot = self.page.evaluate("k => sessionStorage.getItem(k)", slot)
         self.context.add_init_script('''(() => {
+          const slot = %s;
           const get = Storage.prototype.getItem, set = Storage.prototype.setItem;
           const mode = get.call(localStorage, 'syn-transfer-fault');
           window.synTransferFaultCalls = [];
-          window.synSavedTransfer = () => get.call(sessionStorage, 'kin-study-transfer-local');
+          window.synSavedTransfer = () => get.call(sessionStorage, slot);
           window.synRecoverStorage = original => {
             Storage.prototype.getItem = get; Storage.prototype.setItem = set;
-            if (mode === 'corrupt' || mode === 'unverified') set.call(sessionStorage, 'kin-study-transfer-local', original);
+            if (mode === 'corrupt' || mode === 'unverified') set.call(sessionStorage, slot, original);
             localStorage.removeItem('syn-transfer-fault');
           };
           for (const method of ['getItem', 'setItem']) {
             const fn = Storage.prototype[method];
             Storage.prototype[method] = function(key, ...args) {
-              if (key === 'kin-study-transfer-local' && (mode === method || mode === 'unavailable')) {
+              if (key === slot && (mode === method || mode === 'unavailable')) {
                 synTransferFaultCalls.push(method); throw new Error('SYN storage unavailable');
               }
               return fn.call(this, key, ...args);
             };
           }
-        })();''')
+        })();''' % json.dumps(slot))
         self.page.evaluate("m => localStorage.setItem('syn-transfer-fault', m)", fault)
         if fault in ('corrupt', 'unverified'):
             # Simulate an unreadable persisted value, retaining its exact bytes until the fixture repairs it.
             damaged = snapshot + '!' if fault == 'corrupt' else json.dumps({**json.loads(snapshot), 'v': 999})
-            self.page.evaluate("s => sessionStorage.setItem('kin-study-transfer-local', s)", damaged)
+            self.page.evaluate("([k, s]) => sessionStorage.setItem(k, s)", [slot, damaged])
         self.reload_transfers()
         before_selection = self.page.evaluate('synSavedTransfer()')
         self.assertEqual(damaged if fault in ('corrupt', 'unverified') else snapshot, before_selection,
@@ -1540,6 +1564,11 @@ class TransferPanelPage(rf.ReportFlowPage):
 
     def slots(self):
         return self.page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage))")
+
+    def own_slot(self, account=None):
+        """The qualified (v4) slot of `account` (default: the signed-in one), named as the page names it (JSON.stringify)."""
+        account = account or self.site.account
+        return HISTORY + json.dumps([account["issuer"], account["institution"], account["sub"]], separators=(",", ":"))
 
     def shown(self, page=None):
         return (page or self.page).locator('#study-transfer section[data-operation]').evaluate_all('n => n.map(x => x.dataset.operation)')
@@ -1793,33 +1822,71 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertTrue(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_disabled(), 'R6-A03-bound: retained')
         self.assertEqual((1, 1), (len(self.site.grants), len(self.downloads)), 'R6-A03-bound: one grant and one native start')
 
-    def copied_tab(self, op, rows):
-        """A real window.open copy of this tab, observed after it restored `op` with its rows and read its status itself
-        (the popup shares this context's frozen clock, so its own timers are advanced until that milestone)."""
-        reads = []
+    def copied_tab(self, op, rows, answer, applied, apply_seconds=10):
+        """A real window.open copy of this tab (it shares this context's frozen clock, so its timers are advanced until it
+        restored `op` with `rows` rows). The copy's own status GET of `op` is held at the network until then and answered
+        with `answer`; the helper returns only after that response's body was received in full and then either
+        `applied(box)` saw it applied in the copy or `apply_seconds` passed - the returned flag, which the caller asserts
+        after its policy assertions (so a fault that keeps every row from applying any answer still fails at its own named
+        assertion). With `answer` None the read stays held and the helper never reports ready (its negative control).
+        r7 (U4C6-ASTRA-03): a request event, the rows or a timer alone are no readiness. Returns (copy, box, applied,
+        the copy's payload POSTs up to that point); held routes and listeners are released in finally."""
+        path = '/api/dicom-import/' + op
+        original, held, finished, posts, answered = self.page, [], [], [], []
 
-        def note(request):
-            try:
-                if request.method == 'GET' and request.url.endswith('/api/dicom-import/' + op):
-                    reads.append(request.frame.page)
-            except Exception:
-                pass
-        self.context.on('request', note)
-        with self.page.expect_popup() as opened:
-            self.page.evaluate("url => window.open(url, '_blank')", h.MAIN_URL)
-        copied = opened.value
-        expect(copied.locator('#rows')).to_contain_text(h.PATIENT)
-        copied.locator('[data-tab=Technician]').click()
-        box = copied.locator(f'#study-transfer section[data-operation="{op}"]')
-        deadline = time.monotonic() + 10
-        while not (copied in reads and box.count() == 1 and box.locator('li[data-index]').count() == rows):
-            if time.monotonic() > deadline:
-                self.fail(f'copied tab restoration: not observed (reads {len(reads)}, sections {box.count()})')
-            self.page.clock.run_for(1100)
-            copied.wait_for_timeout(50)
-        copied.wait_for_timeout(250)
-        expect(box).to_be_visible()
-        return copied, box
+        def hold(route):
+            if route.request.method != 'GET' or route.request.frame.page is original:
+                return route.fallback()
+            held.append(route)
+
+        def done(request):
+            if request.method == 'GET' and request.url.endswith(path) and request.frame.page is not original:
+                finished.append(request)
+
+        def post(request):
+            if request.method == 'POST' and '/api/dicom-import' in request.url and request.frame.page is not original:
+                posts.append(request.url)
+
+        def until(predicate, what, seconds, tick=0):
+            deadline = time.monotonic() + seconds
+            while not predicate():
+                if time.monotonic() > deadline:
+                    self.fail(f'copied tab: {what}: not observed')
+                if tick:
+                    self.page.clock.run_for(tick)
+                self.page.wait_for_timeout(50)
+
+        self.context.route('**' + path, hold)
+        self.context.on('requestfinished', done)
+        self.context.on('request', post)
+        try:
+            with self.page.expect_popup() as opened:
+                self.page.evaluate("url => window.open(url, '_blank')", h.MAIN_URL)
+            copied = opened.value
+            expect(copied.locator('#rows')).to_contain_text(h.PATIENT)
+            copied.locator('[data-tab=Technician]').click()
+            box = copied.locator(f'#study-transfer section[data-operation="{op}"]')
+            until(lambda: held and box.count() == 1 and box.locator('li[data-index]').count() == rows,
+                  'restoration with its own held status read', 10, 1100)
+            if answer is None:
+                until(lambda: False, 'an answer that was never released', 3)
+            held[0].fulfill(status=answer[0], json=answer[1])
+            answered.append(held[0])
+            until(lambda: finished, 'the whole status answer received', 10)
+            deadline = time.monotonic() + apply_seconds
+            while not applied(box) and time.monotonic() < deadline:
+                copied.wait_for_timeout(50)
+            return copied, box, applied(box), list(posts)
+        finally:
+            for route in held:
+                if route not in answered:
+                    try:
+                        route.fulfill(status=503, json={'message': 'SYN released copy read'})
+                    except Exception:
+                        pass
+            self.context.unroute('**' + path, hold)
+            self.context.remove_listener('requestfinished', done)
+            self.context.remove_listener('request', post)
 
     def test_r6_a07_a_second_person_in_the_same_tab_keeps_both_histories(self):
         self.open_as(TECH, 'Technician')
@@ -1845,10 +1912,12 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual([second], self.shown(), 'R6-A07: the second owner history survives a reload')
         self.assertNotIn(first, self.site.import_reads[reads:], 'R6-A07: the second owner never queries the first')
         self.assert_policy(row='R6-A07')
-        copied, box = self.copied_tab(second, 1)
+        copied, box, applied, posts = self.copied_tab(second, 1, copy_status(second), copy_applied())
         try:
             self.assertEqual([second], self.shown(copied), 'R6-A07-copy: the copy holds the second owner only')
             self.assertEqual(0, box.get_by_role('button', name='Retry', exact=True).count(), 'R6-A07-copy: copied history is read-only')
+            self.assertTrue(applied, 'R6-A07-copy: the copy applied its own status read')
+            self.assertEqual([], posts, 'R6-A07-copy: the copy sends no payload')
         finally:
             copied.close()
         self.site.account = TECH
@@ -1911,10 +1980,13 @@ class TransferPanelPage(rf.ReportFlowPage):
 
     def test_r6_a07_identity_vectors_keep_separate_histories(self):
         page = self.host()
-        a, issuer, third = ['SYN-INST', 'SYN-SUB-A'], ['SYN-INST-2', 'SYN-SUB-A'], ['SYN-INST', 'SYN-SUB-C']
+        # r7 (D1691): owners are [issuer, institution, sub]. The former `issuer` vector changed the institution only.
+        a = ['SYN-ISSUER-A', 'SYN-INST', 'SYN-SUB-A']
+        issuer_only, institution_only, third = (['SYN-ISSUER-B', 'SYN-INST', 'SYN-SUB-A'], ['SYN-ISSUER-A', 'SYN-INST-2', 'SYN-SUB-A'],
+                                                ['SYN-ISSUER-A', 'SYN-INST', 'SYN-SUB-C'])
         self.mount(page, a)
         ops = {tuple(a): self.host_import(page)}
-        for owner in (issuer, third):
+        for owner in (issuer_only, institution_only, third):
             with self.subTest(owner=owner):
                 kept = page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage))")
                 self.mount(page, owner)
@@ -1933,7 +2005,7 @@ class TransferPanelPage(rf.ReportFlowPage):
 
     def test_r6_a07_per_slot_storage_faults_recovery_clear_and_cap(self):
         page = self.host()
-        a, b = ['SYN-INST', 'SYN-SUB-A'], ['SYN-INST', 'SYN-SUB-B']
+        a, b = ['SYN-ISSUER-A', 'SYN-INST', 'SYN-SUB-A'], ['SYN-ISSUER-A', 'SYN-INST', 'SYN-SUB-B']
         self.mount(page, a)
         first = self.host_import(page)
         [first_slot] = page.evaluate("() => Object.keys(sessionStorage)")
@@ -2110,6 +2182,283 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.operations().first.get_by_role('button', name='Check Again', exact=True).click()
         expect(self.file_row(0).locator('.study-transfer-state')).to_have_text('Stored')
         self.assertEqual(1, len(self.site.imports), 'R6-F9: status reads never dispatch')
+
+    # ── r7 (D1691): automatic reads spent when sent, the issuer-qualified owner, the approved legacy contract and the
+    # copied-tab readiness. Preconditions carry no assertion ID; a wait that does not see its milestone is never a kill. ──
+    def test_r7_a01_twelve_poll_and_manual_overtakes_spend_the_automatic_reads_when_sent(self):
+        self.open_as(RAD_ONLY)
+        for poll_first in (False, True):
+            with self.subTest(order='poll answered first' if poll_first else 'manual answered first'):
+                op = self.prepare()
+                held, automatic, manual = [], 0, 0
+                pattern = '**/api/studies/' + UID_A + '/original-downloads/' + op
+                self.page.route(pattern, lambda route: held.append(route))
+                sending = lambda route: route.fulfill(status=200, json=download_view(op, UID_A, 'sending', complete=1))
+                try:
+                    with self.page.expect_download():
+                        self.operations().first.get_by_role('button', name='Download', exact=True).click()
+                    box = self.panel().locator(f'section[data-operation="{op}"]')
+                    for _ in range(12):
+                        before = len(held)
+                        self.page.clock.run_for(3100)
+                        self.settle(60)
+                        poll = held[before] if len(held) > before else None
+                        automatic += poll is not None
+                        box.get_by_role('button', name='Check Again', exact=True).click()
+                        self.observed(lambda: len(held) == before + (poll is not None) + 1, 'manual read held')
+                        manual += 1
+                        for route in ([poll, held[-1]] if poll_first else [held[-1], poll]):
+                            if route is not None:
+                                sending(route)
+                                self.settle(60)
+                    later = len(held)
+                    for _ in range(4):
+                        self.page.clock.run_for(3100)
+                        self.settle(40)
+                    automatic += len(held) - later
+                    for route in held[later:]:
+                        sending(route)
+                finally:
+                    self.page.unroute(pattern)
+                self.assertEqual(12, manual)
+                self.assertEqual(10, automatic, 'R7-A01-overtake: each automatic read is spent when sent, whichever answer wins')
+                self.assertEqual(0, box.get_by_role('button', name='Download', exact=True).count(), 'R7-A01-overtake: no capability restored')
+                self.assertEqual(1, box.get_by_role('button', name='Check Again', exact=True).count(), 'R7-A01-overtake: Check Again stays')
+        self.assertEqual((2, 2), (len(self.site.grants), len(self.downloads)), 'R7-A01-overtake: one grant and one native start each')
+
+    def test_r7_a01_a_manual_read_after_the_ten_never_gives_automatic_reads_back(self):
+        self.open_as(RAD_ONLY)
+        op = self.prepare()
+        self.site.download_state[op] = download_view(op, UID_A, 'sending', complete=1)
+        with self.page.expect_download():
+            self.operations().first.get_by_role('button', name='Download', exact=True).click()
+        self.assertEqual(10, self.automatic_reads(op, ticks=14), 'R7-A01-ten: an ordinary chain makes ten automatic reads')
+        box = self.panel().locator(f'section[data-operation="{op}"]')
+        for _ in range(3):
+            before = self.site.download_reads.count(op)
+            box.get_by_role('button', name='Check Again', exact=True).click()
+            self.observed(lambda: self.site.download_reads.count(op) == before + 1, 'manual read answered')
+            self.assertEqual(0, self.automatic_reads(op, ticks=12),
+                             'R7-A01-exhausted: a manual sending read never gives the automatic reads back')
+        self.assertEqual('Downloading', box.locator('.study-transfer-state').inner_text(), 'R7-A01-exhausted: the history stays')
+        self.assertIn('자동 상태 확인을 마쳤습니다', box.inner_text(), 'R7-A01-exhausted: the end of automatic reads is said')
+        self.assertEqual(1, box.get_by_role('button', name='Check Again', exact=True).count(), 'R7-A01-exhausted: Check Again stays')
+        self.assertTrue(self.panel().get_by_role('button', name='Clear Finished', exact=True).is_disabled(),
+                        'R7-A01-exhausted: an unfinished supply is retained')
+        self.assertEqual((1, 1), (len(self.site.grants), len(self.downloads)), 'R7-A01-exhausted: one grant and one native start')
+
+    def test_r7_a01_a_stale_poll_answered_after_a_terminal_manual_read_changes_nothing(self):
+        self.open_as(RAD_ONLY)
+        for terminal, name in (('sent', 'Sent'), ('incomplete', 'Incomplete'), ('unconfirmed', 'Unconfirmed')):
+            with self.subTest(terminal=terminal):
+                op = self.poll_race(terminal, 'sending')
+                box = self.panel().locator(f'section[data-operation="{op}"]')
+                self.assertEqual(name, box.locator('.study-transfer-state').inner_text(), 'R7-A01-stale: a stale poll never undoes the terminal state')
+                self.site.download_state[op] = download_view(op, UID_A, 'sending', complete=1)
+                self.assertEqual(0, self.automatic_reads(op), 'R7-A01-stale: a stale poll neither revives nor doubles the timer')
+        self.assertEqual((3, 3), (len(self.site.grants), len(self.downloads)), 'R7-A01-stale: one grant and one native start each')
+
+    def transfer_slots(self):
+        """Every kept transfer slot of this tab, legacy and qualified, exactly as stored."""
+        return {k: v for k, v in self.slots().items() if k.startswith(LEGACY)}
+
+    def read_mark(self):
+        return len(self.site.import_reads), len(self.site.download_reads)
+
+    def reads_since(self, mark):
+        return self.site.import_reads[mark[0]:] + self.site.download_reads[mark[1]:]
+
+    def chooser(self, page=None):
+        """Press Import DICOM: the file chooser the page opened, or None when none opened within 3 s."""
+        page = page or self.page
+        seen = []
+
+        def chosen(chooser):
+            seen.append(chooser)
+        page.on('filechooser', chosen)
+        try:
+            page.locator('#t-import').click()
+            deadline = time.monotonic() + 3
+            while not seen and time.monotonic() < deadline:
+                page.wait_for_timeout(50)
+        finally:
+            page.remove_listener('filechooser', chosen)
+        return seen[0] if seen else None
+
+    def test_r7_a02_another_login_server_with_the_same_institution_and_subject_is_another_owner(self):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = ['abort']
+        chooser = self.chooser()
+        self.assertIsNotNone(chooser, 'R7-A02-mount: a complete authenticated identity makes transfers available')
+        chooser.set_files(self.files(1))
+        self.observed(lambda: self.site.import_reads, 'first owner lost import read')
+        a_import = self.site.imports[-1]['operation']
+        self.site.prepare_answers = [('prepared-then', (502, {'code': 'SYN_PROXY_REPLACED', 'message': 'SYN lost preparation'}))]
+        a_download = self.prepare()
+        self.observed(lambda: a_download in self.site.download_reads, 'first owner lost preparation read')
+        a_ops = {a_import, a_download}
+        kept = self.transfer_slots()
+        self.site.account = {**TECH, 'issuer': ISSUER_B}          # the same institution and subject, another login server
+        mark = self.read_mark()
+        self.reload_transfers()
+        self.assertEqual([], self.shown(), 'R7-A02: another login server never sees the first owner history')
+        self.assertFalse(a_ops & set(self.reads_since(mark)), 'R7-A02: another login server never reads the first owner history')
+        self.assertEqual(kept, self.transfer_slots(), 'R7-A02: the first owner bytes are kept exactly')
+        self.site.import_answers = ['abort']
+        chooser = self.chooser()
+        self.assertIsNotNone(chooser, 'R7-A02-mount: a complete authenticated identity makes transfers available')
+        chooser.set_files(self.files(1))
+        self.observed(lambda: len(self.site.imports) == 2 and self.site.import_reads[-1] == self.site.imports[1]['operation'],
+                      'second owner lost import read')
+        b_import = self.site.imports[1]['operation']
+        self.assertNotIn('보존하지 못했습니다', self.panel().inner_text(), 'R7-A02: another login server keeps its own history beside the first')
+        now = self.transfer_slots()
+        self.assertTrue(all(now.get(k) == v for k, v in kept.items()), 'R7-A02: the first owner bytes are kept exactly')
+        mark = self.read_mark()
+        self.reload_transfers()
+        self.assertEqual([b_import], self.shown(), 'R7-A02: each owner restores only its own history')
+        self.assertFalse(a_ops & set(self.reads_since(mark)), 'R7-A02: another login server never reads the first owner history')
+        copied, box, applied, posts = self.copied_tab(b_import, 1, copy_status(b_import), copy_applied())
+        try:
+            self.assertEqual([b_import], self.shown(copied), 'R7-A02-copy: a copy holds its own owner history only')
+            self.assertTrue(applied, 'R7-A02-copy: the copy applied its own status read')
+            self.assertEqual([], posts, 'R7-A02-copy: the copy sends no payload')
+        finally:
+            copied.close()
+        self.site.account = TECH
+        mark = self.read_mark()
+        self.reload_transfers()
+        self.assertEqual(a_ops, set(self.shown()), 'R7-A02: each owner restores only its own history')
+        self.assertNotIn(b_import, self.reads_since(mark), 'R7-A02: the first owner never reads the other login server history')
+        copied, box, applied, posts = self.copied_tab(a_import, 1, copy_status(a_import), copy_applied())
+        try:
+            self.assertEqual(a_ops, set(self.shown(copied)), 'R7-A02-copy: a copy holds its own owner history only')
+            self.assertTrue(applied, 'R7-A02-copy: the copy applied its own status read')
+            self.assertEqual([], posts, 'R7-A02-copy: the copy sends no payload')
+        finally:
+            copied.close()
+        self.site.account = {**TECH, 'actor': 'renamed@synthetic.test', 'user': 'renamed@synthetic.test', 'displayName': 'Renamed'}
+        self.reload_transfers()
+        self.assertEqual(a_ops, set(self.shown()), 'R7-A02-actor: the same login server and subject under a renamed actor is the same owner')
+        # The institution-only vector runs on the public module host (test_r6_a07_identity_vectors_keep_separate_histories):
+        # this synthetic origin serves its worklist for one institution only.
+        for label, account in (('another subject with the first actor', {**TECH_OTHER, 'actor': TECH['actor'], 'user': TECH['user']}),):
+            with self.subTest(owner=label):
+                self.site.account = account
+                mark = self.read_mark()
+                self.reload_transfers()
+                self.assertEqual([], self.shown(), 'R7-A02-other: another owner never sees the history')
+                self.assertFalse((a_ops | {b_import}) & set(self.reads_since(mark)), 'R7-A02-other: another owner never reads it')
+        self.assertEqual(2, len(self.site.imports), 'R7-A02: restoration never sends')
+        self.assertEqual(([], []), (self.site.grants, self.downloads), 'R7-A02: restoration grants nothing')
+
+    def test_r7_a02_an_identity_without_its_login_server_restores_and_starts_nothing(self):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = ['abort']
+        self.choose(self.files(1))
+        self.observed(lambda: self.site.import_reads, 'lost import read')
+        op = self.site.imports[0]['operation']
+        kept = self.transfer_slots()
+        for label, account in (('missing', {k: v for k, v in TECH.items() if k != 'issuer'}), ('empty', {**TECH, 'issuer': ''}),
+                               ('not text', {**TECH, 'issuer': 17})):
+            with self.subTest(issuer=label):
+                self.site.account = account
+                mark, posts, prepares = self.read_mark(), len(self.site.imports), len(self.site.prepares)
+                self.reload_transfers()
+                self.assertEqual([], self.shown(), 'R7-A02-missing: nothing is restored without the login server')
+                self.assertEqual([], self.reads_since(mark), 'R7-A02-missing: nothing is read without the login server')
+                self.assertIsNone(self.chooser(), 'R7-A02-missing: an identity without its login server starts nothing')
+                self.assertIn(IDENTITY_NOTICE, self.panel().inner_text(), 'R7-A02-missing: why nothing starts is said')
+                self.row_menu(h.PATIENT)
+                self.menu_item('Download Originals').click()
+                self.settle(250)
+                self.assertEqual((posts, prepares), (len(self.site.imports), len(self.site.prepares)),
+                                 'R7-A02-missing: an identity without its login server starts nothing')
+                self.assertEqual(kept, self.transfer_slots(), 'R7-A02-missing: kept history is untouched')
+        self.site.account = TECH
+        self.reload_transfers()
+        self.assertEqual([op], self.shown(), 'R7-A02-missing: a later valid login restores its own history')
+        self.assert_policy(row='R7-A02-missing')
+
+    def legacy_snapshots(self):
+        """History as pages before D1691 wrote it (ed2cfa7 snapshot(): v1-v3, owner [institution, sub], no login server),
+        here for TECH's own institution and subject - the closest an unprovable record can come to looking like its own."""
+        owner = [TECH['institution'], TECH['sub']]
+        def imported(extra):
+            return {'kind': 'import', 'id': str(uuid.uuid4()), 'expect': None,
+                    'files': [{'index': 0, 'name': 'IM0000', 'size': 64, 'sha256': hashlib.sha256(dicom(0)).hexdigest(), **extra}]}
+        def downloaded():
+            return {'kind': 'download', 'id': str(uuid.uuid4()), 'uid': UID_A, 'manifestSha256': '2' * 64,
+                    'preparedAt': '2026-10-17T00:00:00.000Z', 'objects': 3, 'bytes': 3 * 1048576}
+        slot = LEGACY + ':' + json.dumps(owner, separators=(',', ':'))
+        return [('v1', LEGACY, {'v': 1, 'owner': owner, 'operations': [imported({'sent': False, 'canRetry': True})]}),
+                ('v2', LEGACY, {'v': 2, 'owner': owner, 'operations': [imported({'sent': False, 'canRetry': True, 'pending': None})]}),
+                ('v3', LEGACY, {'v': 3, 'observationOnly': True, 'owner': owner, 'operations': [imported({}), downloaded()]}),
+                ('v3 owner slot', slot, {'v': 3, 'observationOnly': True, 'owner': owner, 'operations': [imported({}), downloaded()]})]
+
+    def test_r7_a04_legacy_history_without_a_login_server_is_kept_and_never_observed(self):
+        self.open_as(TECH, 'Technician')
+        for label, key, saved in self.legacy_snapshots():
+            with self.subTest(legacy=label):
+                raw = json.dumps(saved)
+                ids = {o['id'] for o in saved['operations']}
+                self.page.evaluate('([k, v]) => sessionStorage.setItem(k, v)', [key, raw])
+                mark, posts, grants = self.read_mark(), len(self.site.imports), len(self.site.grants)
+                self.reload_transfers()
+                self.assertFalse(ids & set(self.reads_since(mark)), 'R7-A04-legacy: unprovable history is never read for status')
+                self.assertFalse(ids & set(self.shown()), 'R7-A04-legacy: unprovable history is never shown')
+                self.assertIn(LEGACY_NOTICE, self.panel().inner_text(), 'R7-A04-legacy: why it is not recovered is said')
+                self.assertEqual(raw, self.raw(self.page, key), 'R7-A04-legacy: the old bytes are kept exactly')
+                self.site.import_answers = ['abort']
+                self.choose(self.files(1))
+                self.observed(lambda: len(self.site.imports) == posts + 1 and self.site.import_reads[-1] == self.site.imports[-1]['operation'],
+                              'new import read')
+                fresh = self.site.imports[-1]['operation']
+                self.assertEqual(raw, self.raw(self.page, key), 'R7-A04-legacy: the old bytes are kept exactly')
+                own = json.loads(self.slots().get(self.own_slot()) or 'null')
+                self.assertTrue(own and own.get('v') == 4 and own.get('owner') == [ISSUER_A, TECH['institution'], TECH['sub']],
+                                'R7-A04-legacy: new history is kept qualified by its login server')
+                kept_ids = {o['id'] for o in own['operations']}
+                self.assertIn(fresh, kept_ids, 'R7-A04-legacy: new history is kept qualified by its login server')
+                self.assertFalse(ids & kept_ids, 'R7-A04-legacy: unprovable history is never merged or relabelled')
+                mark = self.read_mark()
+                self.reload_transfers()
+                self.assertIn(fresh, self.shown(), 'R7-A04-legacy: the qualified history is restored')
+                self.assertFalse(ids & set(self.shown()) or ids & set(self.reads_since(mark)),
+                                 'R7-A04-legacy: unprovable history is never read for status')
+                self.assertEqual(posts + 1, len(self.site.imports), 'R7-A04-legacy: unprovable history sends no payload')
+                self.assertEqual((grants, []), (len(self.site.grants), self.downloads), 'R7-A04-legacy: unprovable history grants nothing')
+                self.assertEqual(0, self.controls()['Retry'], 'R7-A04-legacy: unprovable history sends no payload')
+                self.page.evaluate('k => sessionStorage.removeItem(k)', key)
+
+    # A clock-independent delay (PBKDF2) of a copied tab's handling of its import status answer after the answer fully
+    # arrived: removing the helper's wait for the application is then seen, whatever the page does with the answer.
+    DELAY_COPY_APPLY = """(() => { if (!window.opener) return;
+      const text = Response.prototype.text;
+      Response.prototype.text = async function () {
+        if (/\\/api\\/dicom-import\\/[0-9a-f-]{36}$/.test(this.url)) {
+          const key = await crypto.subtle.importKey('raw', new Uint8Array(16), 'PBKDF2', false, ['deriveBits']);
+          await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: new Uint8Array(16), iterations: 1500000, hash: 'SHA-256' }, key, 256);
+        }
+        return text.call(this);
+      }; })();"""
+
+    def test_r7_a03_the_copied_tab_helper_is_ready_only_after_its_answer_arrived_and_was_applied(self):
+        self.open_as(TECH, 'Technician')
+        self.site.import_answers = ['abort']
+        self.choose(self.files(1))
+        self.observed(lambda: self.site.import_reads, 'lost import read')
+        op = self.site.imports[0]['operation']
+        with self.assertRaises(AssertionError, msg='R7-A03-helper: a held copy answer is never readiness'):
+            self.copied_tab(op, 1, None, copy_applied())
+        self.context.add_init_script(self.DELAY_COPY_APPLY)
+        copied, box, applied, posts = self.copied_tab(op, 1, copy_status(op), copy_applied())
+        try:
+            self.assertTrue(applied and copy_applied()(box), 'R7-A03-helper: ready only once the copy applied its whole answer')
+            self.assertEqual(0, box.get_by_role('button', name='Retry', exact=True).count(), 'R7-A03-helper: the copy stays read-only')
+            self.assertEqual([], posts, 'R7-A03-helper: the copy sends no payload')
+        finally:
+            copied.close()
 
 
 def own_cases():

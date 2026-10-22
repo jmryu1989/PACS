@@ -610,7 +610,7 @@ jobs:
       # C-row (one-off copies served in place of the shipped files; --tree shows the shipped files unchanged).
       - name: S9-U4b Import DICOM, Download Originals and Resolve Unconfirmed panel DOM
         if: ${{ !cancelled() }}
-        timeout-minutes: 6
+        timeout-minutes: 9
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-transfer-local-dom --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_transfer_local_dom_test.py
       - name: S9-U4b transfer panel page mutants killed by their named C-row
         if: ${{ !cancelled() }}

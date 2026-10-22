@@ -1393,6 +1393,20 @@ test('AUTH-01 entry asks the server once without a binding, then every request n
   assert.deepEqual(doc.posts.concat(second.posts), [], 'entering announces nothing');
 });
 
+test('AUTH-ISS D1691 the identity keeps /me\'s login server exactly as answered; an answer without a text one has none', async () => {
+  const account = { sub: 'SYN-SUB', actor: 'syn@synthetic.test', institution: 'SYN-INST', roles: ['technician'], kind: 'member' };
+  for (const [label, sent, kept] of [['configured', 'https://syn-a.test/realms/kin', 'https://syn-a.test/realms/kin'],
+    ['not trimmed or aliased', ' https://SYN-B.test/realms/kin/ ', ' https://SYN-B.test/realms/kin/ '],
+    ['missing', undefined, null], ['empty', '', null], ['not text', 17, null], ['null', null, null]]) {
+    const { server, open } = browser();
+    server.login(sent === undefined ? account : { ...account, issuer: sent });
+    const doc = open();
+    const identity = await doc.auth.init();
+    assert.deepEqual([doc.state(), identity.issuer, doc.auth.session().issuer, identity.institution, identity.sub],
+      ['active', kept, kept, 'SYN-INST', 'SYN-SUB'], label);
+  }
+});
+
 test('AUTH-02 no session in a document with reliable storage and no end record: the login starts by itself, once', async () => {
   const { server, open } = browser();
   const doc = open('/worklist/hpacs-lite/index.html');

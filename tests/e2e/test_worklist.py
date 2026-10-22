@@ -716,6 +716,8 @@ class WorklistE2E(unittest.TestCase):
         me = document_request(page, "GET", self.stack.api + "/me")
         self.assertEqual(me.status, 200, "the new owner's session answers")
         self.assertEqual(me.json().get("sub"), self.stack.user_ids[actor], "the page is the new owner's")
+        # D1691: the transfer owner includes the login server that verified this session (/me issuer = KC_ISSUER).
+        self.assertTrue(isinstance(me.json().get("issuer"), str) and me.json()["issuer"], "the session names its login server")
         expect(page.locator("#roles")).not_to_be_empty()
         return me.json()
 

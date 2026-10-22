@@ -10,7 +10,9 @@
  * preparation or a cleared panel leaves a late answer unwritten. The panel never opens a dialog, never moves focus and
  * never touches the viewer or the report editor.
  *
- * Mounted by feature-mounts.js: KinStudyTransferLocal({ api, transport, allowed, identity, can, demo, study }).
+ * Mounted by feature-mounts.js: KinStudyTransferLocal({ api, transport, allowed, identity, can, demo, study }). identity()
+ * is [issuer, institution, sub]: the login server that verified the person (/api/me issuer, the service's ownerIssuer), the
+ * institution and the immutable subject (D1691). Without all three the panel neither restores nor starts any transfer.
  */
 window.KinStudyTransferLocal = function (app) {
   'use strict';
@@ -28,13 +30,19 @@ window.KinStudyTransferLocal = function (app) {
   // status GET reconcile it, so an earlier read would not be a re-check.
   const RECHECK_AFTER_MS = 35000;
   const DOWNLOAD_POLL_MS = 3000;
+  // Automatic status reads of one download operation in this document, counted when each is sent (D1691): a read whose
+  // answer lost to a newer one was still sent, and a manual Check Again neither uses nor gives back any of them.
   const DOWNLOAD_START_POLLS = 10;
   // The page goes online (bootstrap) after the identity is known; operations kept for this tab are read only then.
   const ONLINE_WAIT_MS = 1000;
   const ONLINE_WAITS = 120;
-  // The first slot keeps the history of the owner it already holds (or takes the first owner of an empty one); every other
-  // owner keeps its own under its exact identity, so one person's kept history never stands in another's way (D1617).
-  const STORE_KEY = 'kin-study-transfer-local';
+  // Each owner keeps its history in its own slot of this tab, named and verified by the exact [issuer, institution, sub]
+  // (D1617, D1691), so one person's kept history never stands in another's way.
+  const HISTORY_KEY = 'kin-study-transfer-local.v4:';
+  const HISTORY_VERSION = 4;
+  // History written before D1691 (v1-v3, here and under LEGACY_KEY + ':' + owner) never recorded the login server, so whose
+  // it is cannot be proven. It stays exactly as it is: never shown, read for status, relabelled, merged, pruned or replaced.
+  const LEGACY_KEY = 'kin-study-transfer-local';
   const STORE_OPERATIONS = 20;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -60,6 +68,9 @@ window.KinStudyTransferLocal = function (app) {
     unread: '작업 상태를 읽지 못했습니다. Check Again으로 다시 확인하세요.',
     paused: '지금은 요청을 보낼 수 없어 이 파일을 보내지 않았습니다. Retry로 이어서 보낼 수 있습니다.',
     offline: '서버에 연결된 계정에서만 반입·원본 다운로드를 쓸 수 있습니다.',
+    identity: '로그인 서버를 포함한 계정 정보를 확인하지 못해 반입·원본 다운로드를 시작하지 않았습니다. 다시 로그인한 뒤 사용하세요.',
+    legacy: '이 탭에 이전 형식의 반입·다운로드 기록이 남아 있습니다. 어느 로그인 서버 계정의 기록인지 확인할 수 없어 자동으로 조회하거나 표시하지 않고 지우지 않은 채 보존합니다. 필요하면 관리자에게 확인을 요청하세요.',
+    pollsEnded: '자동 상태 확인을 마쳤습니다. 이후 상태는 Check Again으로 확인하세요.',
     sending: (done, n) => `파일을 보내는 중입니다 (${done}/${n}).`,
     summary: (kept, attention) => `반입 결과: 저장 확인 ${kept}개` + (attention ? `, 확인이 필요한 파일 ${attention}개` : '') + '.',
     sent: '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.',
@@ -89,7 +100,8 @@ window.KinStudyTransferLocal = function (app) {
   let ended = false;
   let restored = false;
   let onlineWaits = 0;
-  let owner = null;            // [institution, sub] of the identity whose operations the panel holds
+  let owner = null;            // [issuer, institution, sub] of the identity whose operations the panel holds
+  let legacy = false;          // this tab still holds history without a recorded login server (shown as a notice only)
   const operations = [];       // import and download operations, newest first
   // These capabilities never enter storage. Neither a response nor a descriptor can create one.
   const unsent = new WeakSet();
@@ -157,7 +169,14 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   // ── roles and identity (the server's checks are the authority; this only keeps the controls honest) ──
-  const usable = () => !ended && work.state() === 'active' && app.allowed();
+  // The owner as the service keys an operation (D1691): a login server, an institution and a subject, each a non-empty
+  // string taken exactly as given. Anything less is no identity - never the former [institution, sub] alone.
+  const field = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+  function currentOwner() {
+    const v = app.identity();
+    return Array.isArray(v) && v.length === 3 && field(v[0], 2048) && field(v[1], 256) && field(v[2], 256) ? [v[0], v[1], v[2]] : null;
+  }
+  const usable = () => !ended && !!owner && sameOwner(currentOwner()) && work.state() === 'active' && app.allowed();
   const canImport = () => !app.demo() && app.can('technician');
   const canDownload = () => !app.demo() && (app.can('radiologist') || app.can('technician'));
   const isAdmin = () => !app.demo() && app.can('admin');
@@ -168,14 +187,17 @@ window.KinStudyTransferLocal = function (app) {
     if (toolbarButton) toolbarButton.hidden = ended || !canImport();
     resolveOpen.hidden = !isAdmin();
     if (!isAdmin()) resolveForm.hidden = true;
-    const identity = app.identity();
+    const identity = currentOwner();
+    // Without a complete identity nothing is restored or started; a later valid one (a new login) restores then.
     if (ended || !identity || work.state() !== 'active') return;
-    if (owner && JSON.stringify(owner) !== JSON.stringify(identity)) { end(); return; }
+    if (owner && !sameOwner(identity)) { end(); return; }
     owner = owner || identity;
     if (restored) return;
     if (app.allowed()) { restored = true; restore(); }
     else if (onlineWaits++ < ONLINE_WAITS) later(sync, ONLINE_WAIT_MS);
   }
+  /** Why a transfer cannot start now: no complete identity, or no server connection. */
+  const unavailable = () => (currentOwner() ? TEXT.offline : TEXT.identity);
 
   /** The session ended, the account changed or the page is leaving: nothing of the panel survives into another one. */
   function end() {
@@ -391,37 +413,41 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   const sameOwner = value => JSON.stringify(value) === JSON.stringify(owner);
-  // The exact identity the panel was mounted with ([institution, sub]); a name or an actor never selects the slot.
-  const ownerKey = () => STORE_KEY + ':' + JSON.stringify(owner);
+  // The exact identity the panel was mounted with ([issuer, institution, sub]); a name or an actor never selects the slot.
+  const ownerKey = () => HISTORY_KEY + JSON.stringify(owner);
 
-  /** One slot's snapshot exactly in a kept format (v1-v3, a named owner, verified operations), or null when empty. */
+  /** The owner's slot exactly in the qualified format (v4, this exact owner, verified operations), or null when empty. */
   function snapshot(key) {
     const raw = sessionStorage.getItem(key);
     if (raw === null) return null;
     const saved = JSON.parse(raw);
     // A partial/unknown snapshot is not an empty history anybody may replace (D1617).
-    if (!isObject(saved) || ![1, 2, 3].includes(saved.v) || !Array.isArray(saved.owner) || saved.owner.length !== 2
-        || !(saved.owner[0] === null || (typeof saved.owner[0] === 'string' && saved.owner[0]))
-        || typeof saved.owner[1] !== 'string' || !saved.owner[1] || !Array.isArray(saved.operations)) throw new Error('Unverified history');
+    if (!isObject(saved) || saved.v !== HISTORY_VERSION || !Array.isArray(saved.operations)) throw new Error('Unverified history');
+    // Only this owner's own record is its history; the bytes of anybody else are never adopted or written over.
+    if (!sameOwner(saved.owner)) throw new Error('Foreign history');
     checkOperations(saved.operations);
     return saved;
   }
 
   /**
-   * This owner's kept history and the slot it is written back to, read again before every write. A verified snapshot of
-   * another owner stays exactly as it is - never shown, read for status, merged, pruned or given any capability - and
-   * this owner keeps its own slot beside it. An unreadable or unverifiable slot is never taken for an empty history.
+   * This owner's kept history and the slot it is written back to, read again before every write. Another owner's slot
+   * and legacy history stay exactly as they are - never shown, read for status, merged, pruned or given any capability.
+   * An unreadable or unverifiable slot is never taken for an empty history.
    */
   function readHistory() {
-    const first = snapshot(STORE_KEY), mine = ownerKey(), own = snapshot(mine);
-    if (own && !sameOwner(own.owner)) throw new Error('Unverified history');
-    if (first && sameOwner(first.owner)) {
-      // This page never writes both; if both exist neither is replaced (memory only, disclosed).
-      if (own) throw new Error('Two histories of one owner');
-      return { key: STORE_KEY, operations: ownHistory(first.operations) };
-    }
-    if (own) return { key: mine, operations: ownHistory(own.operations) };
-    return { key: first ? mine : STORE_KEY, operations: [] };
+    const key = ownerKey(), own = snapshot(key);
+    return { key, operations: own ? ownHistory(own.operations) : [] };
+  }
+
+  /** Whether this tab still holds history from before D1691 (no login server recorded). Only its presence is looked at. */
+  function legacyHistory() {
+    try {
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (key === LEGACY_KEY || (typeof key === 'string' && key.startsWith(LEGACY_KEY + ':'))) return true;
+      }
+    } catch (_) {}
+    return false;
   }
 
   function checkOperations(operations) {
@@ -476,16 +502,17 @@ window.KinStudyTransferLocal = function (app) {
       added = mergeHistory(history.operations);
       let confirmed = 0;
       const kept = operations.filter(op => !finished(op) || confirmed++ < STORE_OPERATIONS).map(descriptor);
-      sessionStorage.setItem(history.key, JSON.stringify({ v: 3, observationOnly: true, owner, operations: kept }));
+      sessionStorage.setItem(history.key, JSON.stringify({ v: HISTORY_VERSION, observationOnly: true, owner, operations: kept }));
       persistenceFailed = false;
     } catch (_) { persistenceFailed = true; }
     observeHistory(added);
   }
   function restore() {
+    legacy = legacyHistory();
     let added = [];
     try { added = mergeHistory(readHistory().operations); }
     catch (_) { persistenceFailed = true; openPanel(); render(); return; }
-    if (!operations.length) return;
+    if (!operations.length && !legacy) return;
     openPanel();
     observeHistory(added);
     render();
@@ -570,7 +597,7 @@ window.KinStudyTransferLocal = function (app) {
     sync();
     if (!canImport()) return;
     openPanel();
-    if (!usable()) { status.textContent = TEXT.offline; return; }
+    if (!usable()) { status.textContent = unavailable(); return; }
     pickFor = { expect };
     picker.value = '';
     picker.click();
@@ -650,7 +677,7 @@ window.KinStudyTransferLocal = function (app) {
       // current, the resident File keeps its single first send (Retry); a logout, an account change or the page's end
       // has already removed the operation, so nothing comes back after them (R5-I1).
       op.inFlight = false;
-      if (live(op) && op.gen === gen && entry.file && sameOwner(app.identity())) { unsent.add(entry); localUnsent(entry); }
+      if (live(op) && op.gen === gen && entry.file && sameOwner(currentOwner())) { unsent.add(entry); localUnsent(entry); }
       render();
       return 'stop';
     }
@@ -744,7 +771,7 @@ window.KinStudyTransferLocal = function (app) {
     sync();
     if (!canDownload()) return;
     openPanel();
-    if (!usable()) { status.textContent = TEXT.offline; return; }
+    if (!usable()) { status.textContent = unavailable(); return; }
     const op = downloadOperation(crypto.randomUUID(), uid);
     firstDownloads.add(op);
     operations.unshift(op);
@@ -840,7 +867,6 @@ window.KinStudyTransferLocal = function (app) {
       pendingClicks.delete(op);
       if (!started) { op.notice = TEXT.selectionMoved; render(); return; }
       op.notice = '';
-      op.polls = 0;
       poll(op);
     });
     grant = null;
@@ -848,9 +874,11 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   // An operation has at most one pending automatic read. Whichever read is accepted as current owns it: it ends the
-  // chain on a terminal state or leaves exactly one successor, so a manual Check Again never orphans or doubles it.
+  // chain on a terminal state or leaves exactly one successor, so a manual Check Again never orphans or doubles it. The
+  // successor is scheduled only while the operation's automatic reads are not used up; nothing gives them back.
   function poll(op) {
     if (op.pollTimer) { clearTimeout(op.pollTimer); timers.delete(op.pollTimer); }
+    if (op.polls >= DOWNLOAD_START_POLLS) { exhausted(op); render(); return; }
     op.polling = true;
     op.pollTimer = later(() => { op.pollTimer = null; readDownload(op, true); }, DOWNLOAD_POLL_MS);
     render();
@@ -860,11 +888,21 @@ window.KinStudyTransferLocal = function (app) {
     op.pollTimer = null;
     op.polling = false;
   }
+  // The automatic reads are used up: the history and Check Again stay. Neither a non-start nor a supply is concluded.
+  function exhausted(op) {
+    stopPolling(op);
+    op.notice = op.state === 'sending' ? TEXT.pollsEnded : TEXT.notStarted;
+  }
 
   /** GET .../original-downloads/:operationId: the state the server recorded. Sent is not a saved file (5.3). */
   async function readDownload(op, polled = false, keepNotice = false) {
     if (!live(op)) return;
     if (!usable()) { stopPolling(op); op.lost = true; return; }
+    if (polled) {
+      // An automatic read is charged here, before it is sent, whichever answer later wins (D1691).
+      if (op.polls >= DOWNLOAD_START_POLLS) { exhausted(op); render(); return; }
+      op.polls++;
+    }
     const gen = op.gen, seq = ++op.readSeq, at = work.capture('document');
     let answer = null;
     try {
@@ -877,14 +915,13 @@ window.KinStudyTransferLocal = function (app) {
       const view = downloadPositive(answer, op);
       if (view) adoptDownload(op, view);
       op.notice = view ? (keepNotice ? op.notice : '') : TEXT.unread;
-      if (polled) op.polls++;
       if (op.polling || polled) {
         // Sent, Incomplete and Unconfirmed are the server's last word on this attempt; Ready, Downloading or an unreadable
         // answer keep one bounded successor read.
         if (['sent', 'incomplete', 'unconfirmed'].includes(op.state)) stopPolling(op);
         else if (op.polls < DOWNLOAD_START_POLLS) poll(op);
-        else { stopPolling(op); op.notice = TEXT.notStarted; }
-      } else if (op.state === 'sending') { op.polls = 0; poll(op); }
+        else exhausted(op);
+      } else if (op.state === 'sending') poll(op);
       store();
       render();
     });
@@ -949,7 +986,7 @@ window.KinStudyTransferLocal = function (app) {
   // ── drawing (textContent only: file names, messages and study labels are data) ──
   function render() {
     if (!root || ended) return;
-    persistence.textContent = persistenceFailed ? TEXT.storeFailed : '';
+    persistence.textContent = [persistenceFailed ? TEXT.storeFailed : '', legacy ? TEXT.legacy : ''].filter(Boolean).join(' ');
     resolveOpen.hidden = !isAdmin();
     clear.disabled = !operations.some(finished);
     list.replaceChildren(...operations.map(op => op.kind === 'import' ? drawImport(op) : drawDownload(op)));
