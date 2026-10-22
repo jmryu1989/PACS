@@ -484,9 +484,9 @@ export class Engine {
       same(this.pins.tail, t && { ino: t.ino, size: t.size, mtimeMs: t.mtimeMs });
   }
   view(): { revision: number; generation: number; tail: any; lineage: StateLineage | null; retired: Record<string, number>;
-    intents: Record<string, any>; slots: Record<string, any>; proofs: Record<string, any> } {
+    intents: Record<string, any>; slots: Record<string, any>; proofs: Record<string, any>; format: 3 | 4; dbWitness: any } {
     return { revision: this.head.revision, generation: this.head.generation, tail: this.head.tail, lineage: this.head.lineage, retired: this.head.retired,
-      intents: this.intents, slots: this.slots, proofs: this.proofs };
+      intents: this.intents, slots: this.slots, proofs: this.proofs, format: this.format, dbWitness: this.v4 ? clone(this.v4.meta.dbWitness) : null };
   }
   /** The whole logical state as one object: reads of the full history, for inspectors and tests (O(history)). */
   materialize(): ExternalState {
@@ -1831,6 +1831,7 @@ export function executeExternal(request: WriterRequest): any {
       case 'slot-of': return engine.slotOf.get(value) ?? null;
       case 'not-found': return [...engine.notFound].map(id => [id, engine.terminal.get(id)?.notFound ?? null]).filter(([, v]) => v);
       case 'v4-status': return engine.format === 4 ? v4Status(engine) : null;
+      case 'pending': return engine.format === 4 ? [...engine.v4!.pending.entries()].map(([k, v]) => [k, clone(v)]) : null;
       case 'patch': {
         // An explicit patch: only the changed records (null deletes), the next revision, the generation the caller
         // claims, and optionally the new tail (a publication). A v4 owner also takes the verified DB facts

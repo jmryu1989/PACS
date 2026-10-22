@@ -1271,6 +1271,80 @@ test('D1684-T01 a compact whole-state v3 checkpoint with history is admitted, re
   assert.equal(JSON.stringify(inspector(f.directory).state), JSON.stringify(current), 'a fresh admission of the navigable rewrite reads the same history');
 });
 
+// ───────────── KIN-EMR-STATE-V4 cells (D1693; EMR_STATE_FORMAT=4) ─────────────
+const v4Only = { skip: FORMAT !== 4 && 'v4 cell (EMR_STATE_FORMAT=4)' };
+function countingModel(initial) {
+  // The memory SQL model with every row read recorded: what a restart actually consulted.
+  const m = model(initial), reads = [];
+  const entriesAfter = m.sql.entriesAfter;
+  m.sql.entriesAfter = async (s, n, limit) => { reads.push({ stream: s, after: n, limit }); return entriesAfter(s, n, limit); };
+  m.sql.verificationPage = async (s, n, count) => ({ tail: await m.sql.tail(s), first: (await m.sql.entriesAfter(s, 0, 1))[0] ?? null,
+    entries: await Promise.all((await m.sql.entriesAfter(s, n, count)).map(async entry => ({ entry, marker: await m.sql.markerForSlot(s, entry.sequence) }))) });
+  return { ...m, reads };
+}
+test('V4-T06 the v4 owner restarts from its DB witness: only the suffix after the verified anchor and the pending work are consulted', v4Only, async t => {
+  const f = await fixture(t), work = await (await f.hello()).work();
+  const done = [];
+  for (let i = 0; i < 6; i++) done.push(await complete(f, work, i % 2 === 0));
+  const pending = await f.reserve(work);          // reserved, never committed: pending work for the restart
+  const before = f.coordinator.call('v4-status');
+  assert.equal(before.format, 4);
+  const witness = f.coordinator.call('view').dbWitness;
+  assert.equal(witness.streams.viewing.verifiedThrough.sequence, 6, 'the witness names the verified sealed prefix');
+  assert.equal(witness.streams.history.verifiedThrough.sequence, 6);
+  assert.deepEqual(witness.streams.viewing.retainedStart, { sequence: 1, previousHash: '0'.repeat(64) });
+  assert.equal(before.trees.find(x => x.id === 8).count, '12', 'one verified DB binding per committed slot (both streams)');
+  assert.equal(before.pending, 2, 'the uncommitted reservation is pending work in both streams');
+  const snapshot = stateObservation(f);
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  // The reservation's transaction committed while the owner was down (its reply was lost): the restart finds the
+  // suffix after the witness and the markers of the pending attempt, never a row behind the verified anchor.
+  pending.commit();
+  const counting = countingModel(structuredClone(f.database.streams));
+  const g = await fixture(t, { directory: f.directory, model: counting, cold: true });
+  await g.service.start();
+  assert.equal(g.service.state, 'ready');
+  for (const read of counting.reads) assert.ok((read.after === 0 && read.limit === 1) || read.after >= 6, 'restart read ' + JSON.stringify(read));
+  assert.ok(counting.reads.some(r => r.after >= 6), 'the suffix after the verified anchor is consulted');
+  const after = g.coordinator.call('v4-status');
+  assert.equal(after.pending, 0, 'the restart settled the pending work');
+  for (const b of pending.bundle.bindings) assert.equal(g.coordinator.call('get', { map: 'terminal', id: b.stream + ':' + b.attemptId })?.phase, 'committed');
+  assert.equal(after.trees.find(x => x.id === 5).count, String(snapshot.terminals + 2), 'historical terminals are untouched; the recovered attempt added its two');
+  assert.equal(g.coordinator.call('view').dbWitness.streams.viewing.verifiedThrough.sequence, 7, 'the witness advanced over the recovered suffix');
+  assert.equal(after.trees.find(x => x.id === 8).count, '14', 'the recovered rows have their DB bindings');
+  const gw = await (await g.hello()).work();
+  for (const item of done) assert.equal(JSON.stringify((await gw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'historical proofs after the fast restart');
+  assert.equal((await gw.call('confirm-bundle', pending.bundle)).ok, true, 'the recovered attempt is provable');
+  for (const b of done[0].bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+  await complete(g, gw);
+  assert.equal(g.coordinator.call('view').dbWitness.streams.viewing.verifiedThrough.sequence, 8, 'the witness advances with the next publication');
+  // A restart with nothing to recover reads nothing beyond the bounded first-row anchor probe.
+  g.service.close(); await g.service.drained(); g.coordinator.close();
+  const idle = countingModel(structuredClone(g.database.streams));
+  const h = await fixture(t, { directory: f.directory, model: idle, cold: true });
+  await h.service.start(); assert.equal(h.service.state, 'ready');
+  assert.ok(idle.reads.every(r => r.after === 0 && r.limit === 1), 'an idle restart consults no history: ' + JSON.stringify(idle.reads));
+});
+test('V4-T07 a witness that no longer describes the database refuses before any settlement; a changed retained anchor is revalidated', v4Only, async t => {
+  const f = await fixture(t), work = await (await f.hello()).work();
+  for (let i = 0; i < 3; i++) await complete(f, work, true);
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const before = directoryHashes(f.directory);
+  const attempt = async (mutate, expected, label) => {
+    const streams = structuredClone(f.database.streams); mutate(streams);
+    const g = await fixture(t, { directory: f.directory, model: model(streams), cold: true });
+    let error = null;
+    try { await g.service.start(); } catch (failure) { error = failure; }
+    assert.equal(g.service.state, 'failed', label + ': refused readiness');
+    assert.equal(error?.code, expected, label + ': ' + String(error?.message));
+    assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), label + ': refusal wrote nothing');
+  };
+  await attempt(s => { s.viewing.chainId = randomUUID(); }, 'SealChainMismatch', 'another chain behind the same pair');
+  await attempt(s => { s.viewing.rows.pop(); s.viewing.markers.pop(); }, 'LedgerBehindSeal', 'the database behind the sealed frontier');
+  await attempt(s => { s.viewing.rows[0].previousHash = 'f'.repeat(64); }, 'LedgerChainBroken', 'a changed retained anchor is fully revalidated, not trusted');
+  await attempt(s => { s.viewing.rows[2].hash = 'e'.repeat(64); }, 'LedgerChainBroken', 'a changed sealed tail row breaks the chain the witness vouches for');
+});
+
 test('D1656-T02 closed shell dispatch rejects unchanged legacy scripts before Node', async t => {
   const shell = process.env.KIN_EMR_SHELL || 'sh';
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-entry-mode-'));

@@ -47,9 +47,25 @@ export interface ReservationAdmission {
 interface View {
   revision: number; generation: number; tail: SealState | null; lineage: StateLineage | null; retired: Record<string, number>;
   intents: Record<string, any>; slots: Record<string, CommitBinding>; proofs: Record<string, ExpiryCore>;
+  /** The stored major format (3 or 4) and, for a v4 root, its persisted DB witness (null otherwise). */
+  format: 3 | 4; dbWitness: DbWitness | null;
 }
-/** Only the changed records (null deletes) and, for a publication, the new tail. */
-interface Changes { intents?: Record<string, any>; slots?: Record<string, any>; proofs?: Record<string, any>; terminal?: Record<string, any>; bundles?: Record<string, any>; retired?: Record<string, number> }
+/** Only the changed records (null deletes) and, for a publication, the new tail. A v4 owner also carries the verified
+ * DB facts of the same transition: `dbBindings` (one per committed slot) and the advanced `dbWitness`. */
+interface Changes { intents?: Record<string, any>; slots?: Record<string, any>; proofs?: Record<string, any>; terminal?: Record<string, any>; bundles?: Record<string, any>; retired?: Record<string, number>;
+  dbBindings?: Record<string, { binding: CommitBinding; entrySha256: string | null } | null>; dbWitness?: DbWitness }
+/** meta.dbWitness (order section 4.1): the verified sealed prefix per stream, the retained start and the exact expiry
+ * anchor the owner validated; part of the same root/transition as its dbBindings, pending closure and tail. */
+export interface DbWitness {
+  version: 1; pair: PairIdentity; lineageSha256: string; validationRevision: string;
+  streams: Record<AccessStream, { chainId: string; verifiedThrough: ChainPosition; retainedStart: { sequence: number; previousHash: string } | null;
+    expiry: { attemptKey: string; binding: Omit<CommitBinding, 'proofDigest'>; coreSha256: string; deletedThrough: number; anchorHash: string } | null }>;
+}
+/** H(KIN-EMR-V4/db-entry, J([stream, sequence, previousHash, hash, kind, statutoryAct, eventId, payload, contentSha256, storedAt])). */
+export function dbEntrySha256(stream: AccessStream, entry: StoredEntry): string {
+  const canonicalArray = JSON.stringify([stream, entry.sequence, entry.previousHash, entry.hash, entry.kind, entry.statutoryAct, entry.eventId, entry.payload, entry.contentSha256, entry.storedAt]);
+  return createHash('sha256').update('KIN-EMR-V4/db-entry', 'ascii').update(Buffer.from([0])).update(canonicalArray, 'utf8').digest('hex');
+}
 
 /** DB finality is trusted for response-unknown recovery, never described as independent proof.
  * The protected settlement frontier authorizes exact reservations and detects tail-only rollback.
@@ -205,6 +221,7 @@ export class AccessSeal {
   }
   private readonly anchors = new Map<AccessStream, string>();
   private readonly retainedStarts = new Map<AccessStream, number>();
+  private readonly retainedFirst = new Map<AccessStream, { sequence: number; previousHash: string } | null>();
   private async verify(sql: PrismaLedgerSql, view: View, stream: AccessStream, tail: ChainTail,
     end: ChainPosition = tail, full = false, page?: VerificationPage): Promise<StoredEntry[]> {
     const current = view.tail!.streams[stream];
@@ -212,6 +229,7 @@ export class AccessSeal {
     if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);
     const first = page ? page.first : (await sql.entriesAfter(stream, 0, 1))[0];
     this.retainedStarts.set(stream, first?.sequence ?? 1);
+    this.retainedFirst.set(stream, first ? { sequence: first.sequence, previousHash: first.previousHash } : null);
     const anchorKey = JSON.stringify([tail.chainId, first?.sequence ?? 0, first?.previousHash ?? tail.hash]);
     if (!full && (this.anchors.get(stream) === anchorKey ||
         (current.sequence === 0 && first?.sequence === 1 && first.previousHash === current.hash))) {
@@ -336,11 +354,28 @@ export class AccessSeal {
         }
         const tail: SealState = { streams: { ...latest.tail!.streams, [stream]: { chainId: result.current.chainId, ...result.end } },
           sealedAt: new Date().toISOString(), generation: latest.generation + 1 };
+        let expiryWitness: DbWitness['streams'][AccessStream]['expiry'] | undefined;
         for (const entry of result.unsealed) {
           const position = slot(stream, entry.sequence), q = latest.slots[position], id = key(stream, q.attemptId);
           const owner = latest.intents[id]?.owner;
           changes.terminal![id] = { phase: 'committed', generation: q.generation, binding: q, ...(owner !== undefined ? { owner } : {}) };
           if (latest.intents[id]) changes.intents![id] = null;
+          if (latest.format === 4) {
+            // The verified DB fact of this committed slot and, for an expiry entry, the exact expiry anchor.
+            (changes.dbBindings ??= {})[position] = { binding: q, entrySha256: dbEntrySha256(stream, entry) };
+            if (q.kind === 'expiry') {
+              const core = latest.proofs[id];
+              if (!core) throw new SealRefused('UnsealedEntryUnexplained', position);
+              const { proofDigest: _, ...binding } = q;
+              expiryWitness = { attemptKey: id, binding, coreSha256: digest(core), deletedThrough: core.anchor.sequence, anchorHash: core.anchor.hash };
+            }
+          }
+        }
+        if (latest.format === 4) {
+          const witness = latest.dbWitness!;
+          changes.dbWitness = { ...witness, validationRevision: String(latest.revision + 1),
+            streams: { ...witness.streams, [stream]: { ...witness.streams[stream], verifiedThrough: { sequence: result.end.sequence, hash: result.end.hash },
+              retainedStart: this.retainedFirst.get(stream) ?? null, ...(expiryWitness ? { expiry: expiryWitness } : {}) } } };
         }
         let retired = latest.retired[stream];
         for (const [position, q] of Object.entries(latest.slots)) {
@@ -370,9 +405,9 @@ export class AccessSeal {
         // Each install plans against a staged view that already reflects the earlier installs of this turn; the
         // accepted plans then form one record, one tail publication and one completion flush.
         const live = this.view();
-        const staged: View = { ...live, tail: live.tail, retired: { ...live.retired }, intents: { ...live.intents }, slots: { ...live.slots }, proofs: { ...live.proofs } };
-        const merged: Changes = { terminal: {}, intents: {}, slots: {}, proofs: {}, bundles: {}, retired: {} };
-        let tail: SealState | undefined, generation = live.generation;
+        const staged: View = { ...live, tail: live.tail, retired: { ...live.retired }, intents: { ...live.intents }, slots: { ...live.slots }, proofs: { ...live.proofs }, dbWitness: live.dbWitness };
+        const merged: Changes = { terminal: {}, intents: {}, slots: {}, proofs: {}, bundles: {}, retired: {}, dbBindings: {} };
+        let tail: SealState | undefined, generation = live.generation, witness: DbWitness | undefined;
         const accepted: typeof group = [];
         for (const entry of group) {
           try {
@@ -382,14 +417,16 @@ export class AccessSeal {
               (merged[name] as any)[id] = value;
               if (name === 'retired') staged.retired[id] = value as number; else if (value === null) delete (staged as any)[name][id]; else (staged as any)[name][id] = value;
             }
-            for (const name of ['terminal', 'bundles'] as const) for (const [id, value] of Object.entries(plan.changes[name] ?? {})) (merged[name] as any)[id] = value;
+            for (const name of ['terminal', 'bundles', 'dbBindings'] as const) for (const [id, value] of Object.entries(plan.changes[name] ?? {})) (merged[name] as any)[id] = value;
+            if (plan.changes.dbWitness) { witness = plan.changes.dbWitness; staged.dbWitness = witness; }
             staged.tail = plan.tail; staged.generation = plan.generation; tail = plan.tail; generation = plan.generation;
             accepted.push(entry);
           } catch (error) { entry.reject(error); }
         }
         if (!accepted.length) return;
         try {
-          for (const name of Object.keys(merged) as (keyof Changes)[]) if (!Object.keys(merged[name]!).length) delete merged[name];
+          for (const name of Object.keys(merged) as (keyof Changes)[]) if (name !== 'dbWitness' && !Object.keys(merged[name]!).length) delete merged[name];
+          if (witness) merged.dbWitness = { ...witness, validationRevision: String(live.revision + 1) };
           this.patch(merged, { generation, tail });
           const after = this.view();
           for (const entry of accepted) entry.resolve(after);
@@ -590,9 +627,26 @@ export class AccessSeal {
         throw new SealRefused('SealChainMismatch', 'capture-lineage');
       const counts = {} as Record<AccessStream, RecoveryCount>;
       this.flushNotFound();
+      const admitted = this.view();
+      if (admitted.format === 4) {
+        // A v4 owner restarts from its persisted DB witness: the sealed prefix it names was verified when it was
+        // published, so only the DB suffix after it is verified here. A witness that names another pair or chain,
+        // or a retained start the chain no longer has, cannot enter the fast path: the full path (anchor change)
+        // applies through verify()'s own anchor rule.
+        const witness = admitted.dbWitness!;
+        if (!samePair(witness.pair, admitted.lineage!.origin)) throw new SealRefused('SealChainMismatch', 'witness-pair');
+        for (const stream of ACCESS_STREAMS) {
+          const w = witness.streams[stream], sealed = admitted.tail!.streams[stream];
+          if (w.chainId !== tails[stream].chainId || w.verifiedThrough.sequence !== sealed.sequence || w.verifiedThrough.hash !== sealed.hash)
+            throw new SealRefused('SealTailMismatch', 'witness-' + stream);
+          // The anchor the witness vouches for: the fast path reuses it only while the chain's first retained row is the same.
+          this.anchors.set(stream, JSON.stringify([w.chainId, w.retainedStart?.sequence ?? 0, w.retainedStart?.previousHash ?? '0'.repeat(64)]));
+          this.retainedStarts.set(stream, w.retainedStart?.sequence ?? 1);
+        }
+      }
       for (const stream of ACCESS_STREAMS) {
         const before = (this.read() as SealState).streams[stream].sequence;
-        await this.reconcileCommitted(stream, undefined, sql, true);
+        await this.reconcileCommitted(stream, undefined, sql, admitted.format !== 4);
         let notCommitted = 0;
         for (const intent of Object.values(this.view().intents).filter(i => i.stream === stream)) {
           const marker = await sql.markerForAttempt(stream, intent.attemptId);
@@ -605,12 +659,21 @@ export class AccessSeal {
       }
       // The exclusive PG fence proves transaction finality, not receipt delivery.
       // Preserve every terminal identity even after exact acknowledgement.
-      // BLOCKED_DECISION (D1684): one SQL probe per historical aborted terminal over the materialized history.
-      for (const terminal of Object.values(this.call('read').terminal) as any[]) {
-        if (terminal.phase !== 'aborted' || !terminal.binding) continue;
-        const binding: CommitBinding = terminal.binding;
-        if (await sql.markerForAttempt(binding.stream, binding.attemptId))
-          throw new SealRefused('UnsealedEntryUnexplained', 'aborted-marker');
+      if (admitted.format !== 4) {
+        // v3 (retained as it is): one SQL probe per historical aborted terminal over the materialized history.
+        for (const terminal of Object.values(this.call('read').terminal) as any[]) {
+          if (terminal.phase !== 'aborted' || !terminal.binding) continue;
+          const binding: CommitBinding = terminal.binding;
+          if (await sql.markerForAttempt(binding.stream, binding.attemptId))
+            throw new SealRefused('UnsealedEntryUnexplained', 'aborted-marker');
+        }
+      } else {
+        // v4: historic settled-negative keys are validated authority; only the pending work is resolved. Every
+        // intent was settled above (its pending entry leaves with it); what remains pending is a journal obligation.
+        for (const [pendingKey, work] of this.call('pending') as [string, any][]) {
+          if (pendingKey.startsWith('attempt:')) throw new SealRefused('UnsealedEntryUnexplained', 'pending-unsettled');
+          if (!this.journal.find(work.journalId)) throw new SealRefused('UnsealedEntryUnexplained', 'pending-journal');
+        }
       }
       // Startup holds the writer fence, never a stream head lock; compaction is amortized, never forced here.
       this.call('compact', { force: false });

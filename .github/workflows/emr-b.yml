@@ -50,6 +50,14 @@ jobs:
       - name: EMR-B2c service capability, scopes and protected storage components
         timeout-minutes: 15
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/state-service --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs -- node --max-old-space-size=3072 --test --test-concurrency=1 tests/emr/b/state_service_test.cjs
+      - name: KIN-EMR-STATE-V4 codec/index (V4-T01 roundtrip, V4-T02 index/collision/range, V4-T03 every-use integrity)
+        timeout-minutes: 10
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/checkpoint-v4 --cwd . --file api/src/emr-runtime/checkpoint-v4.ts --file api/package-lock.json --file tests/emr/b/checkpoint_v4_test.cjs -- node --max-old-space-size=3072 --test --test-concurrency=1 tests/emr/b/checkpoint_v4_test.cjs
+      - name: EMR-B2c service components over the v4 owner view (EMR_STATE_FORMAT=4; v3-layout cells reported skipped; V4-T06 witness restart, V4-T07 witness refusals)
+        timeout-minutes: 15
+        env:
+          EMR_STATE_FORMAT: "4"
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/state-service-v4 --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file emr/units/b.json --file tests/emr/b/state_service_test.cjs -- node --max-old-space-size=3072 --test --test-concurrency=1 tests/emr/b/state_service_test.cjs
       - name: EMR-B2c API-side components (record projection, remote scope lifetime, proofs, background work, raw HTTP admission, Nest lifecycle), exactly the declared cases each passed once
         timeout-minutes: 10
         run: |
