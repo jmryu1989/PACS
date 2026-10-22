@@ -7,7 +7,7 @@ import type { CommitBinding, ExpiryCore } from './seal';
 import type { PairIdentity, SealedBundleProof } from './state-protocol';
 import { parseCommitBinding, parseSealedBundleProof } from './state-protocol';
 import {
-  BlobDescriptor, CONTROL_MAX_BYTES, Change, DOMAIN, FullCheck, KIND, PackStore, PackWriter, PageRef, REF_BYTES, RootBody, SelectorBody, TREE_IDS, Transition, Tree, TreeDescriptor, TreeId, V4Error, V4_FORMAT, V4_VALIDATOR_ID, WalRecord, WalSegment, ZERO64, blobSha256, canonical, domainHash, lineageSha256 as lineageDigest, loadValidatorManifest, openEnvelope, parseCanonical, parseDecimal, readRoot, readSelector, refFromBinary, rootsDirectory, routingDigest, validFullCheck, validWalRecord, walDirectory, writeAtomic, writeBlob, writeRoot, writeSelector,
+  BlobDescriptor, CONTROL_MAX_BYTES, Change, DOMAIN, FullCheck, KIND, PACK_PAGES, PAGE_BYTES, PackStore, PackWriter, PageRef, REF_BYTES, RootBody, SelectorBody, TREE_IDS, Transition, Tree, TreeDescriptor, TreeId, V4Error, V4_FORMAT, V4_VALIDATOR_ID, WalRecord, WalSegment, ZERO64, blobSha256, canonical, domainHash, lineageSha256 as lineageDigest, loadValidatorManifest, openEnvelope, pageSha256, parseCanonical, parseDecimal, parsePage, readRoot, readSelector, refFromBinary, rootsDirectory, routingDigest, validFullCheck, validWalRecord, walDirectory, writeAtomic, writeBlob, writeRoot, writeSelector,
 } from './checkpoint-v4';
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -1930,6 +1930,7 @@ function v4Status(engine: Engine, now?: string): any {
   return { format: 4, rootSha256: v.rootSha256, revision: v.root.revision, trees: v.root.trees.map(t => ({ id: t.id, count: t.count })), pending: v.pending.size,
     wal: { segment: v.segment.segment, lsn: v.lsn, bytes: v.walEnd, transitions: v.segmentTransitions }, packs: v.store.listPacks().length,
     accounting: { known: v.packs !== null, live: v.packs ? [...v.packs.values()].filter(n => n > 0).length : null, dead: v.dead.size, repairs: v.accountingRepairs },
+    fragmentation: fragmentationV4(v),
     fullCheck: { ...v.root.fullCheck, ageMs, overdue: reason !== null, reason, periodMs: V4_FULL_CHECK_MS },
     sweep: v.sweep ? { startedRoot: v.sweep.startedRoot, startedAt: v.sweep.startedAt, phase: v.sweep.phase, tree: v.sweep.tree, keys: { ...v.sweep.keys }, pages: v.sweep.pages, db: v.sweep.db, dbDone: v.sweep.dbDone, rebuilding: v.sweepPacks !== null } : null,
     latched: v.latched, dbWitness: v.meta.dbWitness, cacheBytes: v.store.cachedBytes };
@@ -2038,6 +2039,8 @@ function fullCheckV4(engine: Engine, value: any): any {
     if (v.packs) for (const pack of v.store.listPacks()) if (!(v.packs.get(pack) ?? 0) && pack !== v.writer?.currentPack) { v.packs.set(pack, 0); v.dead.add(pack); }
     v.sweep = null; v.sweepOrphans = null; v.sweepAdded = null; v.sweepPacks = null;
     try { fs.rmSync(sweepFile(v.directory), { force: true }); } catch { /* scratch */ }
+    // The checked root is no longer pinned: the packs only it kept alive are reclaimed (one bounded slice now).
+    reclaimDeadV4(v, V4_RECLAIM_SLICE * 4);
     persistPacks(v);
     return { ...summary(), done: true, fullCheck, accountingRepaired: repaired };
   }
@@ -2068,14 +2071,76 @@ function publishScrubV4(engine: Engine, fullCheck: FullCheck): void {
   const writer = v.writer ??= new PackWriter(v.store, engine.head.revision);
   writer.revision = engine.head.revision; writer.written.length = 0;
   const orphans: PageRef[] = [];
+  const trees: Record<number, Tree> = { ...v.trees };
+  try { trees[1] = v.trees[1].apply(writer, new Map([['fullCheck', metaRaw('fullCheck', fullCheck)]]), orphans); }
+  catch (error) { engine.tainted = true; try { writer.close(); } catch { /* closing */ } v.writer = null; throw translateV4(error); }
+  publishNoChangeV4(engine, 'scrub', trees, { ...v.meta, fullCheck }, fullCheck, writer, orphans);
+}
+/** Relocation of live pages out of nearly empty packs (order section 3: reclamation relocates only live pages from
+ * selected packs, in bounded cooperative slices): at most `maxPages` live pages of the emptiest packs (whole packs, so
+ * each selected pack dies) are rewritten on their own routes by a logical no-change `compact` transition; the pages
+ * are verified on the read that locates them. Returns the pages relocated and the packs emptied. */
+const V4_RELOCATE_LIVE_MAX = Math.floor(PACK_PAGES / 4), V4_RELOCATE_PAGES = 64, V4_RELOCATE_PACKS = 4;
+function fragmentationV4(v: V4State): { livePages: number; packs: number; needed: number; due: boolean } {
+  if (!v.packs) return { livePages: 0, packs: 0, needed: 0, due: false };
+  let livePages = 0, packs = 0;
+  for (const n of v.packs.values()) if (n > 0) { livePages += n; packs++; }
+  const needed = Math.ceil(livePages / PACK_PAGES);
+  return { livePages, packs, needed, due: packs > 2 * needed + 2 };
+}
+function relocateV4(engine: Engine, maxPages: number): { relocated: number; packs: string[] } {
+  const v = engine.v4!;
+  if (v.latched) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'latched:' + v.latched.detail, latch: v.latched });
+  if (!v.packs) return { relocated: 0, packs: [] };
+  const candidates = [...v.packs].filter(([pack, n]) => n > 0 && n <= V4_RELOCATE_LIVE_MAX && pack !== v.writer?.currentPack).sort((a, b) => a[1] - b[1]).slice(0, V4_RELOCATE_PACKS);
+  const touches = new Map<number, string[]>(), emptied: string[] = [];
+  let budget = maxPages, relocated = 0;
+  for (const [pack, live] of candidates) {
+    if (live > budget) break;
+    const file = v.store.packFile(pack), info = fs.statSync(file, { throwIfNoEntry: false });
+    if (!info) continue;
+    const pages = Math.floor(info.size / PAGE_BYTES);
+    let found = 0;
+    for (let page = 0; page < pages && found < live; page++) {
+      // A page is live iff the current root's route to its own lower bound at its level reaches exactly this page.
+      let header: { kind: number; tree: number; level: number } | undefined, low: string | null | undefined;
+      try {
+        const bytes = v.store.readRaw({ pack, page: String(page), sha256: '0'.repeat(64) });
+        const parsed = parsePage(bytes, { ref: { pack, page: String(page), sha256: pageSha256(bytes) }, lineageSha256: v.root.lineageSha256 });
+        header = parsed.header;
+        if (header.kind !== KIND.overflow) { const body = parseCanonical(parsed.payload, 'relocate'); low = body.low === null ? null : String(body.low); }
+      } catch { continue; }   // a page the current root does not reference needs no relocation (dead, or another root's)
+      if (!header || header.kind === KIND.overflow || !(header.tree >= 1 && header.tree <= 8) || low === undefined) continue;
+      const tree = v.trees[header.tree];
+      if (header.level > tree.level) continue;
+      const digest = low ?? ZERO64;
+      let located: { ref: PageRef };
+      try { located = tree.locate(header.level, digest); } catch { continue; }
+      if (located.ref.pack !== pack || located.ref.page !== String(page)) continue;
+      let list = touches.get(header.tree); if (!list) touches.set(header.tree, list = []);
+      list.push(digest); found++;
+    }
+    if (found) { emptied.push(pack); relocated += found; budget -= found; }
+  }
+  if (!touches.size) return { relocated: 0, packs: [] };
+  const writer = v.writer ??= new PackWriter(v.store, engine.head.revision);
+  writer.revision = engine.head.revision; writer.written.length = 0;
+  const orphans: PageRef[] = [];
+  const trees: Record<number, Tree> = { ...v.trees };
+  try { for (const [id, digests] of touches) trees[id] = v.trees[id].touch(writer, digests, orphans); }
+  catch (error) { engine.tainted = true; try { writer.close(); } catch { /* closing */ } v.writer = null; throw translateV4(error); }
+  publishNoChangeV4(engine, 'compact', trees, v.meta, v.root.fullCheck, writer, orphans);
+  return { relocated, packs: emptied };
+}
+/** A logical no-change transition (`scrub`: a new fullCheck fact; `compact`: relocated pages): the same revision and
+ * generation, an empty change array, the ordinary barriers (pages, root, prepare, complete, selector). */
+function publishNoChangeV4(engine: Engine, kind: 'scrub' | 'compact', trees: Record<number, Tree>, metaAfter: V4State['meta'], fullCheck: FullCheck, writer: PackWriter, orphans: PageRef[]): void {
+  const v = engine.v4!;
   try {
-    const metaAfter = { ...v.meta, fullCheck };
-    const trees: Record<number, Tree> = { ...v.trees };
-    trees[1] = v.trees[1].apply(writer, new Map([['fullCheck', metaRaw('fullCheck', fullCheck)]]), orphans);
     for (const ref of transitionBlobPages(v.store, v.transitionBlob)) orphans.push(ref);
     writer.flush();
     const descriptors = TREE_IDS.map(id => ({ id, count: String(trees[id].count), ref: trees[id].root }));
-    const transition: Transition = { previousRoot: v.rootSha256, kind: 'scrub', changes: { inline: [] } };
+    const transition: Transition = { previousRoot: v.rootSha256, kind, changes: { inline: [] } };
     const root: RootBody = { ...v.root, trees: descriptors, transition, fullCheck };
     const nextRoot = writeRoot(v.directory, root);
     const tailHash = hash(v.meta.tail);
@@ -2088,6 +2153,7 @@ function publishScrubV4(engine: Engine, fullCheck: FullCheck): void {
     engine.checkpoint = { digest: nextRoot, bytes: 0, revision: engine.head.revision, publishing: false, navigable: true };
     engine.walOffset = complete.end;
     accountTransition(v, writer.written, orphans); writer.written.length = 0;
+    reclaimDeadV4(v, V4_RECLAIM_SLICE);
     rotateV4(engine);
     engine.pin();
   } catch (error) {
@@ -2306,7 +2372,16 @@ export function executeExternal(request: WriterRequest): any {
       engine.publishing = false; engine.pin();
     }
     switch (operation) {
-      case 'compact': if (engine.format === 4) return reclaimV4(engine, value?.force === true); if (value?.force === true || compactionDue(engine)) compactEngine(engine, context); return;
+      case 'compact': {
+        if (engine.format === 4) {
+          // force: relocate until the pack population is bounded, then prove reachability and unlink; slice: one bounded
+          // relocation slice when fragmentation is due plus the dead-pack slice; otherwise the dead-pack slice only.
+          if (value?.force === true) { for (let i = 0; i < 64 && fragmentationV4(engine.v4!).due; i++) if (!relocateV4(engine, V4_RELOCATE_PAGES * 4).relocated) break; return reclaimV4(engine, true); }
+          if (value?.slice === true) { const moved = fragmentationV4(engine.v4!).due ? relocateV4(engine, V4_RELOCATE_PAGES) : { relocated: 0, packs: [] }; return { ...moved, unlinked: reclaimDeadV4(engine.v4!, V4_RECLAIM_SLICE * 4) }; }
+          return reclaimV4(engine, false);
+        }
+        if (value?.force === true || compactionDue(engine)) compactEngine(engine, context); return;
+      }
       case 'read': return engine.materialize();
       case 'view': return engine.view();
       case 'get': return engine.lookup(value.map, value.id) ?? null;

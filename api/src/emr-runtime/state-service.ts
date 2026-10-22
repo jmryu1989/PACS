@@ -227,14 +227,16 @@ export class ProtectedStateService {
   async drained(): Promise<void> {
     while (this.operations.size || this.scopes.size) await new Promise<void>(resolve => this.changed.add(resolve));
   }
-  /** One bounded step of the v4 complete check when it is due or in progress and the owner is idle (no dispatched
-   * operation, no open scope): the serving lane is never held for longer than one step. A `SealCorrupt` here is the
-   * latch: the service fails and stays failed. Returns the owner's summary, or null when nothing was due. */
+  /** One bounded maintenance step when the owner is idle (no dispatched operation, no open scope): a step of the v4
+   * complete check when it is due or in progress, else one pack relocation slice when fragmentation is due. The
+   * serving lane is never held for longer than one step. A `SealCorrupt` here is the latch: the service fails and
+   * stays failed. Returns the owner's summary, or null when nothing was due. */
   async fullCheckTick(now: Date = new Date()): Promise<unknown> {
     if (this.phase !== 'ready' || this.operations.size || this.scopes.size) return null;
-    if (!this.resources.seal.fullCheckDue(now)) return null;
+    const check = this.resources.seal.fullCheckDue(now);
+    if (!check && !this.resources.seal.reclaimDue()) return null;
     const work = (async () => {
-      try { return await this.resources.seal.fullCheckStep(now); }
+      try { return check ? await this.resources.seal.fullCheckStep(now) : this.resources.seal.reclaimSlice(); }
       catch (error) { this.failed = true; this.quiesce(); this.onFailure(); throw error; }
     })();
     return this.track(work);

@@ -1373,8 +1373,8 @@
         "id": "V4-M06",
         "suite": "service-v4",
         "kill": ["V4-T04"],
-        "assertions": {"V4-T04": "selector-write: the restart recovers"},
-        "behaviour": "select older root / ignore the completed WAL suffix: a transition completed before the selector cut is adopted at restart (its tail already advanced), never left behind"
+        "assertions": {"V4-T04": "complete-flush: the restart recovers"},
+        "behaviour": "select older root / ignore the completed WAL suffix: a transition whose complete record reached the segment before the cut (complete-flush, selector cuts) is adopted at restart - its tail already advanced - never left behind; the first such cut in V4-T04's order is complete-flush"
       },
       {
         "id": "V4-M07",

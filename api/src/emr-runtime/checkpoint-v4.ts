@@ -352,6 +352,8 @@ export function routingDigest(tree: number, key: string): string {
   return domainHash(DOMAIN.key, Buffer.concat([id, Buffer.from(key, 'utf16le').swap16()]));
 }
 export interface Bucket { digest: string; count: number; pairs: [string, string][] }
+/** A bucket as a leaf stores it (its stored value, inline pairs or an overflow descriptor) with its encoded size. */
+interface LeafItem { digest: string; count: number; value: any; bytes: number }
 interface LeafNode { kind: 1; low: string | null; high: string | null; count: number; entries: { digest: string; count: number; value: any }[] }
 interface BranchNode { kind: 2; low: string | null; high: string | null; count: number; children: ChildDescriptor[]; level: number }
 export interface ChildDescriptor { low: string | null; high: string | null; count: number; ref: PageRef }
@@ -487,7 +489,29 @@ export class Tree {
     if (!changes.size) return this;
     const byDigest = new Map<string, Map<string, string | null>>();
     for (const [key, value] of changes) { const d = routingDigest(this.id, key); let m = byDigest.get(d); if (!m) byDigest.set(d, m = new Map()); m.set(key, value); }
-    const digests = [...byDigest.keys()].sort();
+    return this.rewrite(writer, [...byDigest.keys()].sort(), byDigest, orphans);
+  }
+  /** Copy-on-write rewrite of the routes to `digests` with no logical change: the same members, the same partition,
+   * the pages on those routes relocated into the writer's current pack; the replaced pages are the orphans. Unchanged
+   * overflow chains are reused, never rewritten. */
+  touch(writer: PackWriter, digests: string[], orphans?: PageRef[]): Tree {
+    const sorted = [...new Set(digests)].sort();
+    if (!sorted.length) return this;
+    return this.rewrite(writer, sorted, new Map(sorted.map(d => [d, new Map<string, string | null>()])), orphans);
+  }
+  /** The node at `level` whose interval contains `digest` (the route from the root), with its interval. */
+  locate(level: number, digest: string): { ref: PageRef; low: string | null; high: string | null } {
+    if (level > this.level || level < 0) corrupt('locate:level');
+    let ref = this.root, at = this.level, low: string | null = null, high: string | null = null;
+    while (at > level) {
+      const node = this.node(ref, at, low, high) as BranchNode;
+      const child = node.children.find(c => atLeast(digest, c.low) && below(digest, c.high));
+      if (!child) corrupt('branch:no-child');
+      ref = child.ref; at = node.level - 1; low = child.low; high = child.high;
+    }
+    return { ref, low, high };
+  }
+  private rewrite(writer: PackWriter, digests: string[], byDigest: Map<string, Map<string, string | null>>, orphans?: PageRef[]): Tree {
     const descriptors = this.update(writer, this.root, this.level, null, null, digests, byDigest, orphans);
     let level = this.level, children = descriptors;
     while (children.length > 1) { children = this.writeBranches(writer, children, level + 1, null, null); level++; }
@@ -505,17 +529,23 @@ export class Tree {
     const node = this.node(ref, level, low, high);
     orphans?.push(ref);
     if (node.kind === 1) {
-      const entries = new Map(node.entries.map(e => [e.digest, e] as const));
-      const buckets = new Map<string, [string, string][]>();
-      for (const [digest, entry] of entries) buckets.set(digest, this.bucketPairs(entry));
+      // Unchanged buckets keep their stored value (an overflow chain is reused, not read or rewritten); a changed
+      // bucket is re-encoded from its pairs, and its former overflow chain is orphaned.
+      const buckets = new Map<string, LeafItem>();
+      for (const entry of node.entries) buckets.set(entry.digest, { digest: entry.digest, count: entry.count, value: entry.value, bytes: Buffer.byteLength(canonical({ digest: entry.digest, count: String(entry.count), value: entry.value })) });
       for (const digest of digests) {
-        const replaced = entries.get(digest);
-        if (replaced && orphans && 'overflow' in replaced.value) for (const p of blobPages(this.store, replaced.value.overflow, this.id)) orphans.push(p);
-        const pairs = new Map(buckets.get(digest) ?? []);
-        for (const [key, value] of byDigest.get(digest)!) { if (value === null) pairs.delete(key); else pairs.set(key, value); }
-        if (pairs.size) buckets.set(digest, [...pairs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))); else buckets.delete(digest);
+        const existing = buckets.get(digest), edits = byDigest.get(digest)!;
+        const pairs = new Map(existing ? this.bucketPairs({ digest, value: existing.value }) : []);
+        if (!edits.size && existing) {
+          // A relocation touch of an existing bucket: re-encoded only when inline (an overflow chain stays where it is).
+          if ('overflow' in existing.value) continue;
+        }
+        if (existing && orphans && 'overflow' in existing.value && edits.size) for (const p of blobPages(this.store, existing.value.overflow, this.id)) orphans.push(p);
+        for (const [key, value] of edits) { if (value === null) pairs.delete(key); else pairs.set(key, value); }
+        if (!pairs.size) { buckets.delete(digest); continue; }
+        buckets.set(digest, this.encodeBucket(writer, digest, [...pairs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))));
       }
-      return this.writeLeaves(writer, [...buckets.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)), low, high);
+      return this.writeLeafItems(writer, [...buckets.values()].sort((a, b) => (a.digest < b.digest ? -1 : 1)), low, high);
     }
     const next: ChildDescriptor[] = [];
     let at = 0;
@@ -527,16 +557,20 @@ export class Tree {
     }
     return this.writeBranches(writer, next, node.level, low, high);
   }
+  /** One bucket's stored encoding: inline while the whole page could hold it, otherwise a new overflow chain. */
+  private encodeBucket(writer: PackWriter, digest: string, pairs: [string, string][]): LeafItem {
+    const inline = canonical({ digest, count: String(pairs.length), value: { inline: pairs } });
+    if (Buffer.byteLength(inline) <= BODY_CAPACITY - 160) return { digest, count: pairs.length, value: { inline: pairs }, bytes: Buffer.byteLength(inline) };
+    const descriptor = writeBlob(writer, this.id, Buffer.from(canonical(pairs)));
+    const text = canonical({ digest, count: String(pairs.length), value: { overflow: descriptor } });
+    return { digest, count: pairs.length, value: { overflow: descriptor }, bytes: Buffer.byteLength(text) };
+  }
   /** Leaves for sorted buckets within [low, high): inline values while the page fits, overflow for oversized buckets,
    * splits at bucket boundaries. */
   private writeLeaves(writer: PackWriter, buckets: [string, [string, string][]][], low: string | null, high: string | null): ChildDescriptor[] {
-    const items = buckets.map(([digest, pairs]) => {
-      const inline = canonical({ digest, count: String(pairs.length), value: { inline: pairs } });
-      if (Buffer.byteLength(inline) <= BODY_CAPACITY - 160) return { digest, count: pairs.length, value: { inline: pairs }, bytes: Buffer.byteLength(inline) };
-      const descriptor = writeBlob(writer, this.id, Buffer.from(canonical(pairs)));
-      const text = canonical({ digest, count: String(pairs.length), value: { overflow: descriptor } });
-      return { digest, count: pairs.length, value: { overflow: descriptor }, bytes: Buffer.byteLength(text) };
-    });
+    return this.writeLeafItems(writer, buckets.map(([digest, pairs]) => this.encodeBucket(writer, digest, pairs)), low, high);
+  }
+  private writeLeafItems(writer: PackWriter, items: LeafItem[], low: string | null, high: string | null): ChildDescriptor[] {
     const chunks: typeof items[] = [[]];
     let bytes = 0;
     for (const item of items) {

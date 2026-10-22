@@ -1351,7 +1351,10 @@ def convert_state(directory, manifest, output, name, token, mode):
         lines = [line for line in output_text.splitlines() if line.strip()]
         receipts = [line[len("EMR_STATE_CONVERSION_RECEIPT "):] for line in lines if line.startswith("EMR_STATE_CONVERSION_RECEIPT ")]
         if conversion.returncode != 0 or not lines or lines[-1].strip() != "EMR_STATE_CONVERTED" or len(receipts) != 1:
-            raise RuntimeError("State conversion did not complete: " + (lines[-1][:200] if lines else "no output"))
+            # The conversion root reports its refusal on stderr as one closed line (EMR_STATE_CONVERSION_FAILED <code>).
+            failure = [line for line in conversion.stderr.decode("utf-8", errors="replace").splitlines() if line.startswith("EMR_STATE_CONVERSION_FAILED")]
+            raise RuntimeError("State conversion did not complete: " + (lines[-1][:200] if lines else "no output") +
+                               (" (" + failure[-1][:120] + ")" if failure else " (exit %s)" % conversion.returncode))
         receipt = json.loads(receipts[0])
         if (type(receipt) is not dict or receipt.get("kind") != spec["kind"] or receipt.get("mode") != mode
                 or (receipt.get("target") or {}).get("format") != spec["target"] or (receipt.get("source") or {}).get("format") != spec["source"]

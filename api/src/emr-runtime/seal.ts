@@ -650,6 +650,16 @@ export class AccessSeal {
     const status = this.call('v4-status', { now: now.toISOString() });
     return status.sweep !== null || status.fullCheck.overdue === true || status.accounting.known === false;
   }
+  /** Whether the v4 owner's pack population is fragmented (more packs than the live pages justify) and a bounded
+   * relocation slice is due; `reclaimSlice` performs one (a logical no-change transition) plus the dead-pack slice. */
+  reclaimDue(): boolean {
+    if (this.view().format !== 4) return false;
+    return this.call('v4-status').fragmentation.due === true;
+  }
+  reclaimSlice(): any {
+    if (this.view().format !== 4) throw new SealRefused('SealUnsupportedFormat', 'reclaim');
+    return this.call('compact', { slice: true });
+  }
   /**
    * One bounded step of the v4 complete check (order section 2/4, V4-T10): the owner's storage sweep (every page and
    * member of the pinned root), then the database phase here - every retained committed row of both streams, read in

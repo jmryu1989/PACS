@@ -1484,11 +1484,15 @@ test('V4-T05 pack reclamation unlinks only packs unreachable from the selected r
   // near the live pages, never one pack per transition, and nothing dead waits for an operator.
   assert.equal(before.accounting.known, true, 'the liveness accounting is maintained by the owner');
   assert.equal(before.accounting.dead, 0, 'dead packs are reclaimed in the transitions that killed them');
-  assert.ok(before.packs <= 6, 'packs are appended across transitions and reclaimed when dead: ' + before.packs);
+  assert.ok(before.packs <= 20, 'packs are appended across transitions (never one per transition) and reclaimed when dead: ' + before.packs);
+  const stateBefore = f.coordinator.call('read');
   const reclaimed = f.coordinator.call('compact', { force: true });
   const after = f.coordinator.call('v4-status');
   assert.ok(after.packs <= before.packs, 'reclamation never adds packs');
-  assert.equal(after.rootSha256, before.rootSha256, 'reclamation rewrites no root');
+  assert.ok(after.packs <= 2 * after.fragmentation.needed + 2, 'relocation of the live pages out of nearly empty packs bounds the pack population: ' + JSON.stringify({ packs: after.packs, fragmentation: after.fragmentation }));
+  assert.equal(after.fragmentation.due, false);
+  assert.ok(Number(after.revision) >= Number(before.revision), 'relocation is a logical no-change transition of the owner');
+  assert.equal(JSON.stringify(f.coordinator.call('read').terminal), JSON.stringify(stateBefore.terminal), 'relocation changes no member');
   assert.equal(reclaimed.accounting, 'known', 'a forced reclamation proves reachability by traversal and rebuilds the accounting');
   for (const item of done) assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after reclamation');
   for (const b of done[5].bundle.bindings) assertExcluded(await replayObservation(f, work, b));
