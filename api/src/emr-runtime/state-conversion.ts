@@ -92,7 +92,10 @@ export async function runStateConversion(environment: NodeJS.ProcessEnv = proces
     process.stdout.write('EMR_STATE_CONVERTED\n');
     return 0;
   } catch (error: any) {
-    process.stderr.write('EMR_STATE_CONVERSION_FAILED ' + String(error?.code ?? error?.name ?? 'unknown') + '\n');
+    // One closed line: the refusal code and its detail (a code's own detail, or the first line of an unexpected
+    // error's message); never a path of the protected directories beyond what the detail already names.
+    const detail = typeof error?.detail === 'string' ? error.detail : String(error?.message ?? '').split('\n')[0].slice(0, 160);
+    process.stderr.write('EMR_STATE_CONVERSION_FAILED ' + String(error?.code ?? error?.name ?? 'unknown') + (detail ? ' ' + detail : '') + '\n');
     return 1;
   } finally {
     try { coordinator?.close(); } catch { /* the fence is released by exit */ }
