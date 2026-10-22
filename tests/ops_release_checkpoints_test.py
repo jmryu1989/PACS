@@ -22,8 +22,14 @@ unchecked, the native evidence taking the caller's descriptor, a fact kind looke
 M58-M59 by the r8 self-review (D1556: bundle_inputs' B0 type unchecked, the verified descriptor shared between reads);
 M60-M66 by round 9 (D1575 CKPT8-1/CKPT8-2 and the typed-read inventory: the loader's parent, phase_reached, identity and
 owned guards, parent_chain's link type, resolve_parent's checkpoint type, restore_boundary's stack type); M67-M79 by
-round 10 (D1600: the omission/type guards at the restore and verified native boundaries). Rounds 11 and 12 add no mutant
+round 10 (D1600: the omission/type guards at the restore and verified native boundaries). Rounds 11 to 13 add no mutant
 (their adapter faults run as separate executed variants outside this suite).
+
+Round 13 (consult-checkpoints-r13-plan-20261022, D1688): CheckpointStopDiffIdentityTests runs the real capture_checkpoint
+over the real CheckpointDocker stop and diff (a finite ContainerDaemon process table of the five roles) - the capture
+stops and observes exactly its inventoried containers by ID, refuses replacements and unstopped containers with no
+bundle, and leaves the native smoke's standalone diagnostics on their actual subject (CKPT12-01); the NUL containerd
+endpoint and the reason-wording contract are in CheckpointLayerStorageTests (CKPT12-02/04).
 
 Round 11 (consult-checkpoints-t16-host-20261021 option b, D1666/D1669): CheckpointLayerStorageTests runs the real
 CheckpointDocker.layer_facts over a fake process table (docker info/inspect, containerd's ctr) and a real upper folder:
@@ -1088,13 +1094,14 @@ class CheckpointClaimTests(unittest.TestCase):
 
 
 class CaptureFixture:
-    def captured(self, checkpoint_id, backend=None, *, running=None, descriptor=None, fixture=None, store_root=None, before=None, ids=None):
+    def captured(self, checkpoint_id, backend=None, *, running=None, descriptor=None, fixture=None, store_root=None, before=None, ids=None,
+                 absent=()):
         target = target_fixture()
         names = {role: target["containers"][role] for role in intro.ROLES}
         volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
         backend = backend or FakeBackend(names, volumes, running=running)
         fixture = fixture or self.tempdir()
-        made = realistic(fixture, checkpoint_id, layer=False, descriptor=descriptor, ids=ids)
+        made = realistic(fixture, checkpoint_id, layer=False, descriptor=descriptor, ids=ids, absent=absent)
         # r7: the containers run the boundary generation's pinned images unless a case gives another one, and the seal's
         # boundary facts are taken from the same daemon before the stop (seal_boundary).
         pins = cp.pinned_images(made.plan, made.state)
@@ -4913,7 +4920,11 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
                 except Exception as error:
                     self.fail("raised %s: %s" % (type(error).__name__, error))
                 self.assertIsNone(value)
-                self.assertEqual((records()[-1]["outcome"], records()[-1]["reason"]), ("unobservable", "a changed path could not be read"))
+                # r13 (CKPT12-04, D73): the contract is no facts, an unobservable outcome and a retained explanatory reason -
+                # not one free-form sentence.
+                record = records()[-1]
+                self.assertEqual(record["outcome"], "unobservable")
+                self.assertTrue(type(record.get("reason")) is str and record["reason"].strip(), record)
             for kind, error in (("info", cp.DeadlineExpired("cut", {"kind": "cut"})), ("inspect", cp.DeadlineExpired("cut", {"kind": "cut"})),
                                 ("inspect", TypeError("a programming error"))):
                 with self.subTest(backend=backend, stop=type(error).__name__, at=kind):
@@ -4921,6 +4932,65 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
                     with self.assertRaises(type(error)):
                         facts(self.NAME, self.PATHS)
                     self.assertEqual([(row["outcome"], row.get("interrupted")) for row in records()[-1:]], [("unobservable", type(error).__name__)])
+
+    def live_descriptor(self, tree):
+        """The descriptor of the live judgement's normal Orthanc start over `tree` (as test_the_live_judgement builds it)."""
+        read = self.adapter("overlay2", tree, name=PROJECT + "-orthanc")[0](PROJECT + "-orthanc", cp.regenerated_candidates(ORTHANC_START))
+        descriptor = regenerated_fixture(STORAGE_CONTAINER_ID)
+        descriptor["image"]["hostid"] = {**{key: read[cp.HOSTID][key] for key in ("type", "mode", "uid", "gid")}, "size": 14,
+                                         "sha256": hashlib.sha256(b"not-generated\n").hexdigest(), "text": "placeholder"}
+        descriptor["image"]["ancestors"] = {path: dict(read[path]) for path in cp.REGENERATED_ANCESTORS}
+        descriptor["generated"].update(hostid=dict(read[cp.HOSTID]), pycache_dir=dict(read[cp.PYCACHE]),
+                                       pycache={name: dict(read[cp.PYCACHE + "/" + name]) for name in PYC})
+        for name in ENABLED:
+            descriptor["generated"]["plugins"][name] = {**read[cp.PLUGINS + "/" + name], "link": "hard link"}
+            descriptor["image"]["available"][name] = dict(read[cp.PLUGINS + "/" + name])
+        return descriptor, read
+
+    def test_an_unnameable_containerd_endpoint_is_refused_before_any_process(self):
+        """r13 (CKPT12-02, TEST-CKPT-STORAGE-02 endpoint subcase): a Containerd.Address the OS cannot pass as an argument
+        (an embedded NUL) at the first or the second resolution gives no facts with its reason kept, and the live
+        judgement refuses WRITABLE_LAYER with no bundle - before any process is created. The ctr argv goes to this host's
+        real process-creation boundary (a local Python child with the same arguments; no ctr, no daemon). A local pathname
+        and a unix:/// endpoint still seal."""
+        import ops_deploy_host_container_test as rehearsal
+        tree = self.tree()
+        descriptor, _ = self.live_descriptor(tree)
+        normal = json.loads(self.answers("containerd", tree)["info"][1])
+
+        def info(first, second):
+            def answer(ordinal):
+                document = copy.deepcopy(normal)
+                document["Containerd"]["Address"] = first if ordinal == 0 else second
+                return 0, json.dumps(document).encode()
+            return answer
+        created, real_run = [], StorageDaemon.run
+
+        def run(daemon, args, **kwargs):
+            if args[0] == "ctr":
+                created.append(list(args))
+                subprocess.run([sys.executable, "-c", "pass", *args[1:]], capture_output=True, timeout=60)
+            return real_run(daemon, args, **kwargs)
+        good, nul = "/run/containerd/containerd.sock", "/run/containerd\x00.sock"
+        for label, first, second, expected in (("a local pathname", good, good, "SEALED"),
+                                               ("a unix:/// endpoint", "unix://" + good, "unix://" + good, "SEALED"),
+                                               ("a NUL at the first resolution", nul, good, "WRITABLE_LAYER"),
+                                               ("a NUL at the second resolution", good, nul, "WRITABLE_LAYER")):
+            with self.subTest(endpoint=label):
+                created.clear()
+                with patch.object(StorageDaemon, "run", run):
+                    code, record, stored = self.judged("containerd", tree, descriptor, raw={"info": info(first, second)})
+                self.assertEqual(code, expected)
+                self.assertFalse(any("\x00" in arg for args in created for arg in args), "no process was created with the NUL")
+                if expected == "SEALED":
+                    self.assertEqual((len(stored), record["roles"]["orthanc"]["layer_observable"]), (1, True))
+                    self.assertTrue(created and all(args[2] == first for args in created))
+                    continue
+                self.assertEqual((stored, record["outcome"], record["roles"]["orthanc"]["layer_observable"]), ([], "REFUSED", False))
+                observation = rehearsal.LAYER_RESOLUTIONS[-1]
+                reason = observation.get("reason") or (observation.get("before") or {}).get("reason")
+                self.assertEqual((observation["outcome"], observation.get("interrupted")), ("unobservable", None))
+                self.assertTrue(type(reason) is str and reason.strip(), observation)
 
     def judged(self, backend, tree, descriptor, **changes):
         """capture_checkpoint at INTRODUCED with the Orthanc role's normal start, its writable layer read by the real
@@ -5001,6 +5071,508 @@ class CheckpointLayerStorageTests(CaptureFixture, RefusalAssertions, TempCase):
                 reason = observation.get("reason") or observation["before"].get("reason")
                 self.assertEqual(observation["outcome"], "unobservable")
                 self.assertTrue(type(reason) is str and reason, observation)
+
+
+REPLACEMENT_IMAGE = image("e")   # another image than any role's pinned one
+
+
+class ContainerDaemon:
+    """r13 (CKPT12-01): a finite fake process table of one stack's five role containers for the real CheckpointDocker
+    capture path (inventory, stop, diff, the Orthanc layer read): each container has a full 64-hex ID, its image, state
+    and `docker diff` lines, and is found by its exact name or ID as the daemon finds it. `replace` recreates a role under
+    the same name as Compose does (the original is renamed and kept, its state unchanged; a new ID takes the name), so a
+    name stops resolving to the inventoried container. `hooks` (when, verb, role) -> function run once before or after
+    the daemon answers that call for the role (its name or any ID it had); `raw` verb -> an answer (exit, stdout), an
+    exception to raise or a function of the argv. Every call and every effect (stop) is recorded; any other command fails."""
+
+    VERBS = {("docker", "ps"): "ps", ("docker", "inspect"): "listed", ("docker", "stop"): "stop", ("docker", "diff"): "diff",
+             ("docker", "info"): "info"}
+
+    def __init__(self, backend, names, images, *, diffs=None, running=None, tree=None):
+        self.backend, self.names, self.tree = backend, dict(names), tree
+        self.calls, self.effects, self.hooks, self.raw, self.history = [], [], {}, {}, {}
+        self.containers = {}
+        running = set(intro.ROLES) if running is None else set(running)
+        for role in intro.ROLES:
+            if role not in names:
+                continue
+            ident = STORAGE_CONTAINER_ID if role == "orthanc" else hashlib.sha256(("ckpt12 " + role).encode()).hexdigest()
+            self.containers[ident] = {"name": names[role], "image": images[role], "running": role in running, "restarting": False,
+                                      "exit": 0, "oom": False, "diff": list((diffs or {}).get(role, []))}
+            self.history[role] = [ident]
+
+    def ident(self, role):
+        return next((ident for ident, item in self.containers.items() if item["name"] == self.names.get(role)), None)
+
+    def lookup(self, ref):
+        return ref if ref in self.containers else next((ident for ident, item in self.containers.items() if item["name"] == ref), None)
+
+    def replace(self, role, *, image=None, running=True, diff=()):
+        """Returns (original ID, replacement ID)."""
+        old = self.ident(role)
+        self.containers[old]["name"] = self.names[role] + "-old-" + old[:12]
+        new = hashlib.sha256(("ckpt12 replacement %s %d" % (role, len(self.containers))).encode()).hexdigest()
+        self.containers[new] = {"name": self.names[role], "image": image or self.containers[old]["image"], "running": running,
+                                "restarting": False, "exit": 0, "oom": False, "diff": list(diff)}
+        self.history[role].append(new)
+        return old, new
+
+    def verb(self, args):
+        if args[:3] == ["docker", "container", "inspect"]:
+            return "inspect"
+        if args[:3] in (["docker", "volume", "ls"], ["docker", "network", "ls"], ["docker", "image", "ls"]):
+            return {"volume": "volumes", "network": "networks", "image": "images"}[args[1]]
+        if args[:1] == ["ctr"] and "snapshots" in args:
+            return "snapshot" if args[-2:-1] == ["info"] else "mounts"
+        if tuple(args[:2]) in self.VERBS:
+            return self.VERBS[tuple(args[:2])]
+        raise AssertionError("not a command of the capture path: " + " ".join(args[:4]))
+
+    def inspected(self, ident):
+        item = self.containers[ident]
+        document = {"Id": ident, "Name": "/" + item["name"], "Image": item["image"], "Config": {"Labels": {"com.docker.compose.project": PROJECT}},
+                    "Mounts": [], "State": item.get("state", {"Status": "running" if item["running"] else "exited", "Running": item["running"],
+                                                              "Paused": False, "Restarting": item["restarting"], "ExitCode": item["exit"],
+                                                              "OOMKilled": item["oom"]})}
+        upper = self.tree.upper if self.tree is not None else Path("/nonexistent/kin-upper")
+        if self.backend == "overlay2":
+            document["GraphDriver"] = {"Name": "overlay2", "Data": {"UpperDir": str(upper), "WorkDir": str(upper.parent / "work"),
+                                                                    "LowerDir": str(upper.parent / "lower"), "MergedDir": str(upper.parent / "merged")}}
+        else:
+            document.update(GraphDriver=None, Storage={"RootFS": {"Snapshot": {"Name": "overlayfs"}}})
+        return document
+
+    def fire(self, when, verb, ref):
+        for (at, kind, role), action in list(self.hooks.items()):
+            if at == when and kind == verb and (ref == self.names[role] or ref in self.history[role]):
+                del self.hooks[(at, kind, role)]
+                action()
+
+    def run(self, args, **kwargs):
+        args = list(args)
+        verb = self.verb(args)
+        self.calls.append((verb, args))
+        ref = args[-1] if verb in ("inspect", "stop", "diff") else None
+        self.fire("before", verb, ref)
+        answer = self.raw.get(verb)
+        if callable(answer) and not isinstance(answer, BaseException):
+            answer = answer(args)
+        if isinstance(answer, BaseException):
+            raise answer
+        if answer is None:
+            answer = self.answer(verb, args)
+        self.fire("after", verb, ref)
+        return subprocess.CompletedProcess(args, answer[0], answer[1], b"")
+
+    def answer(self, verb, args):
+        if verb == "ps":
+            return 0, "".join(ident + "\n" for ident in self.containers).encode()
+        if verb == "listed":   # the inventory's `docker inspect <ids>` (and 458142a's stop, which inspected by name)
+            found = [self.lookup(ref) for ref in args[2:]]
+            return (0, json.dumps([self.inspected(ident) for ident in found]).encode()) if None not in found else (1, b"")
+        if verb in ("volumes", "networks", "images"):
+            return 0, b""
+        if verb == "info":
+            return 0, json.dumps(STORAGE_INFO[self.backend]).encode()
+        if verb == "snapshot":
+            known = args[-1] in self.containers
+            return (0, json.dumps({"Kind": "Active", "Name": args[-1], "Parent": "sha256:" + "6" * 64}).encode()) if known else (1, b"")
+        if verb == "mounts":
+            return 0, CheckpointLayerStorageTests.mount_line(self.tree)
+        ident = self.lookup(args[-1])
+        if ident is None:
+            return 1, b""
+        if verb == "inspect":
+            return 0, json.dumps([self.inspected(ident)]).encode()
+        if verb == "stop":
+            self.effects.append(("stop", ident))
+            item = self.containers[ident]
+            item.update(running=item.get("stays_running", False), exit=0 if not item.get("stays_running") else item["exit"])
+            return 0, (ident + "\n").encode()
+        return 0, "".join(line + "\n" for line in self.containers[ident]["diff"]).encode()
+
+
+class AdapterCaptureBackend(FakeBackend):
+    """FakeBackend for the volumes and exports; the capture's inventory, stop, diff and layer read are the real
+    CheckpointDocker over a ContainerDaemon (r13: FakeBackend's own stop and diff are not the paths under test). `at`
+    (verb, role) -> function runs when capture_checkpoint calls that adapter method for the role, before it runs."""
+
+    def attach(self, daemon, tree=None):
+        import ops_deploy_host_container_test as rehearsal
+        self.daemon, self.docker, self.at, self.rehearsal = daemon, rehearsal.CheckpointDocker(None, None), {}, rehearsal
+        self.given = dict(tree.given) if tree is not None else {}
+        for role, name in self.names.items():
+            if role in intro.ROLES and daemon.ident(role) is not None:
+                self.containers[name].update(id=daemon.ident(role), image=daemon.containers[daemon.ident(role)]["image"])
+            elif role in intro.ROLES:
+                self.containers.pop(name, None)
+        return self
+
+    def real(self, call):
+        real_lstat = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            fact = self.given.get(str(path))
+            return fact if fact is not None else real_lstat(path, *args, **kwargs)
+        with patch.object(self.rehearsal, "subprocess", SimpleNamespace(run=self.daemon.run, PIPE=subprocess.PIPE)), \
+                patch.object(Path, "lstat", lstat):
+            return call()
+
+    def fire(self, verb, name):
+        role = next(role for role, item in self.names.items() if item == name)
+        action = self.at.pop((verb, role), None)
+        if action is not None:
+            action()
+
+    def inventory(self):
+        listing = super().inventory()
+        listing["containers"] = self.real(self.docker.inventory)["containers"]
+        return listing
+
+    def stop(self, name):
+        self.calls.append(("stop", name))
+        self.fire("stop", name)
+        return self.real(lambda: self.docker.stop(name))
+
+    def writable_changes(self, name):
+        self.calls.append(("diff", name))
+        self.fire("diff", name)
+        return self.real(lambda: self.docker.writable_changes(name))
+
+    def layer_facts(self, name, paths):
+        self.calls.append(("layer_facts", name))
+        self.fire("layer_facts", name)
+        return self.real(lambda: self.docker.layer_facts(name, paths))
+
+
+TRANSIENT = ["C /run", "A /run/nginx.pid", "C /var", "C /var/cache", "A /var/cache/nginx/proxy_temp"]
+
+
+class CheckpointStopDiffIdentityTests(CaptureFixture, RefusalAssertions, TempCase):
+    """r13 (CKPT12-01, TEST-CKPT-STORAGE-01/02 stop/diff-identity subcases; consult-checkpoints-r13-plan-20261022): the
+    real capture_checkpoint over the real CheckpointDocker stop and diff (a ContainerDaemon process table, all five roles,
+    full 64-hex IDs, pinned images) stops and observes exactly the containers its inventory listed: a same- or
+    other-image replacement before the stop is never stopped (STOP_UNCONFIRMED, the original keeps running); a
+    replacement before or during the diff, a container that is not definitely stopped, failed metadata and a failed diff
+    refuse WRITABLE_LAYER - empty and transient-only diffs (Orthanc without a layer read) included - before store.begin,
+    any export or bundle, with the reason kept; a matching capture still seals. The native smoke's standalone stop and
+    diff observe their actual subject without the capture binding."""
+
+    BACKENDS = ("overlay2", "containerd")
+
+    def capture(self, backend, *, diffs=None, running=None, before=None, at=None, absent=(), descriptor=None, tree=None):
+        """capture_checkpoint at INTRODUCED. Returns a namespace: code, reason, the daemon, the stop effects, store.begin and
+        export counts, the bundles, the layer record and this capture's adapter observations."""
+        import ops_deploy_host_container_test as rehearsal
+        target = target_fixture()
+        names = {role: target["containers"][role] for role in intro.ROLES}
+        volumes = {**target["volumes"], "proxy_certs": PROJECT + "_proxy-certs"}
+        pins = cp.pinned_images(plan_fixture(), {"entry_checkout": "target"})
+        present = {role: name for role, name in names.items() if role not in absent}
+        daemon = ContainerDaemon(backend, present, pins, diffs={role: TRANSIENT for role in intro.ROLES} if diffs is None else diffs,
+                                 running=running, tree=tree)
+        layered = AdapterCaptureBackend(names, volumes, images=pins).attach(daemon, tree)
+        for key, action in (at or {}).items():
+            layered.at[key] = (lambda action=action: action(daemon))
+        if before is not None:
+            before(daemon)
+        ids = {role: daemon.ident(role) for role in present}
+        descriptor = descriptor or (absent_descriptor(target) if "orthanc" in absent else regenerated_fixture(ids["orthanc"]))
+        fixture, store_root = self.tempdir(), self.tempdir() / "bundles"
+        begun, start = [], len(rehearsal.LAYER_RESOLUTIONS)
+        real_begin = cp.BundleStore.begin
+
+        def begin(store, *args, **kwargs):
+            begun.append(args)
+            return real_begin(store, *args, **kwargs)
+        code, reason = "SEALED", None
+        with patch.object(cp.BundleStore, "begin", begin):
+            try:
+                self.captured("introduced", layered, descriptor=descriptor, fixture=fixture, store_root=store_root, ids=ids,
+                              absent=tuple(absent))
+            except cp.Refused as error:
+                code, reason = error.code, str(error)
+        layers = sorted(fixture.glob("*/records/" + cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE))
+        return SimpleNamespace(code=code, reason=reason, daemon=daemon, ids=ids, stops=[ident for kind, ident in daemon.effects if kind == "stop"],
+                               begun=len(begun), exports=sum(1 for call in layered.calls if call[0] == "export"),
+                               bundles=sorted(path.name for path in store_root.iterdir()) if store_root.exists() else [],
+                               layer=json.loads(layers[-1].read_bytes()) if len(layers) == 1 else None,
+                               observations=list(rehearsal.LAYER_RESOLUTIONS[start:]), calls=list(layered.calls))
+
+    def assertNothingSealed(self, result, code):
+        self.assertEqual((result.code, result.begun, result.exports, result.bundles), (code, 0, 0, []),
+                         "refused before store.begin, any export or bundle: " + str(result.reason))
+        refused = [row for row in result.observations if row.get("outcome") != "observed"]
+        reason = (refused[-1].get("reason") or (refused[-1].get("before") or {}).get("reason")) if refused else None
+        self.assertTrue(type(reason) is str and reason.strip(), "the reason is kept: %s" % result.observations)
+
+    def test_a_matching_capture_seals_and_acts_only_on_the_inventoried_ids(self):
+        """Positive controls: empty and transient-only diffs on both backends seal one bundle; every role was stopped by its
+        inventoried ID and diffed by it (stopped before and after); a persistent change is still refused by the judgement
+        (its REFUSED layer record kept); an absent role and source-b0 (no daemon side) stay as they were."""
+        for backend in self.BACKENDS:
+            for label, diffs in (("empty", {role: [] for role in intro.ROLES}), ("transient-only", None)):
+                with self.subTest(backend=backend, diffs=label):
+                    result = self.capture(backend, diffs=diffs)
+                    self.assertEqual((result.code, result.begun, len(result.bundles)), ("SEALED", 1, 1), result.reason)
+                    self.assertEqual(sorted(result.stops), sorted(result.ids.values()), "each running role stopped once, by its own ID")
+                    self.assertTrue(all(args[-1] in result.ids.values() for verb, args in result.daemon.calls if verb in ("stop", "diff")),
+                                    "stop and diff name the inventoried IDs, never a name")
+                    self.assertEqual([call for call in result.calls if call[0] == "layer_facts"], [], "no regenerated candidate: no layer read")
+                    diffs_seen = {row["container_name"]: row for row in result.observations if row.get("observation") == "diff"}
+                    self.assertEqual(sorted(diffs_seen), sorted(result.daemon.names.values()))
+                    for row in diffs_seen.values():
+                        self.assertEqual((row["outcome"], row["before"]["id"], row["after"]["id"]),
+                                         ("observed", row["capture_identity"]["id"], row["capture_identity"]["id"]))
+                    self.assertEqual(result.layer["outcome"], "ACCEPTED")
+            with self.subTest(backend=backend, case="a persistent change in each role"):
+                for role in intro.ROLES:
+                    result = self.capture(backend, diffs={**{item: [] for item in intro.ROLES}, role: ["A /opt/kin-persistent"]})
+                    self.assertEqual((result.code, result.begun, result.bundles, result.layer["outcome"]), ("WRITABLE_LAYER", 0, [], "REFUSED"))
+                    self.assertEqual(result.layer["refused"], [role + ": A /opt/kin-persistent"])
+            with self.subTest(backend=backend, case="an absent role is recorded, never stopped or diffed"):
+                result = self.capture(backend, absent=("api",))
+                self.assertEqual((result.code, result.layer["roles"]["api"]), ("SEALED", {"absent": True, "container_name": PROJECT + "-api"}))
+                self.assertNotIn(PROJECT + "-api", [args[-1] for verb, args in result.daemon.calls if verb in ("stop", "diff", "inspect")])
+        fixture = self.tempdir()
+        made = realistic(fixture, "source-b0")
+        store = cp.BundleStore(self.tempdir() / "bundles", forbidden=[fixture])
+        sealed = cp.capture_checkpoint(checkpoint_id="source-b0", store=store, backend=None,
+                                       boundary=cp.boundary_publishable("source-b0", state=made.state, result=made.result, result_raw=made.raw),
+                                       names={role: made.target["containers"][role] for role in intro.ROLES}, volumes={}, fixture_root=fixture,
+                                       bindings=made.bindings, identity=made.identity,
+                                       owned={"token": TOKEN, "projects": {PROJECT}, "networks": [], "stack": made.stack}, execution_kind="fresh")
+        self.assertTrue(Path(sealed).is_dir(), "source-b0 has no daemon side and seals as before")
+
+    def replacements(self):
+        """name -> (when, function of (daemon, role), the originals' diffs): every replacement and state change the capture
+        must refuse. `when`: before-stop / before-diff run as capture_checkpoint calls the adapter for the role; at-stop /
+        during-diff run inside the daemon's answer to that command (after the name was checked); running-during-diff
+        starts the original before the diff and stops it again right after the diff's answer."""
+        def replace(image=None, running=True, diff=()):
+            return lambda daemon, role: daemon.replace(role, image=image, running=running, diff=diff)
+
+        def restart(daemon, role):
+            daemon.containers[daemon.ident(role)]["running"] = True
+        empty = {role: [] for role in intro.ROLES}
+        return {
+            "a same-image replacement before the stop": ("before-stop", replace(), None),
+            "another-image replacement before the stop": ("before-stop", replace(image=REPLACEMENT_IMAGE), None),
+            "a same-image replacement at the stop call": ("at-stop", replace(), None),
+            "a stopped same-image replacement with an empty diff before the diff": ("before-diff", replace(running=False), None),
+            "a stopped other-image replacement with an empty diff before the diff": ("before-diff", replace(image=REPLACEMENT_IMAGE, running=False), None),
+            "a same-image replacement during the diff": ("during-diff", replace(running=False), None),
+            "another-image replacement during the diff": ("during-diff", replace(image=REPLACEMENT_IMAGE, running=False), None),
+            "a same-image replacement during an empty diff": ("during-diff", replace(running=False), empty),
+            "the captured container started again before the diff": ("before-diff", restart, None),
+            "the captured container running at its empty diff, stopped right after": ("running-during-diff", restart, empty),
+        }
+
+    def test_a_replaced_or_running_container_is_never_stopped_or_sealed_as_the_inventoried_one(self):
+        """CKPT12-01 (Astra's additional_probes and stop_and_consumer_probe as tests): each role on both backends; the
+        replacement's own diff is empty, so a name-based diff would seal it; the inventoried original's diff is
+        transient-only or empty, so only its identity and state decide. Before the stop: STOP_UNCONFIRMED, the replacement
+        not stopped and the original still running; at the stop call: the original stopped by its ID, never the
+        replacement; before or during the diff, or an original not stopped at its diff: WRITABLE_LAYER."""
+        for backend in self.BACKENDS:
+            for role in intro.ROLES:
+                for label, (when, change, diffs) in self.replacements().items():
+                    with self.subTest(backend=backend, role=role, case=label):
+                        holder = {}
+
+                        def act(daemon, role=role, change=change):
+                            holder["ids"] = change(daemon, role)
+
+                        def stop_again(daemon, role=role):
+                            daemon.containers[daemon.history[role][0]]["running"] = False
+                        if when == "before-stop":
+                            result = self.capture(backend, diffs=diffs, at={("stop", role): act})
+                        elif when == "at-stop":
+                            result = self.capture(backend, diffs=diffs, before=lambda daemon, role=role: daemon.hooks.update(
+                                {("before", "stop", role): lambda: act(daemon)}))
+                        elif when == "before-diff":
+                            result = self.capture(backend, diffs=diffs, at={("diff", role): act})
+                        elif when == "running-during-diff":
+                            result = self.capture(backend, diffs=diffs, at={("diff", role): act}, before=lambda daemon, role=role: daemon.hooks.update(
+                                {("after", "diff", role): lambda: stop_again(daemon)}))
+                        else:
+                            result = self.capture(backend, diffs=diffs, before=lambda daemon, role=role: daemon.hooks.update(
+                                {("after", "diff", role): lambda: act(daemon)}))
+                        self.assertNothingSealed(result, "STOP_UNCONFIRMED" if when in ("before-stop", "at-stop") else "WRITABLE_LAYER")
+                        original = result.ids[role]
+                        replacement = (holder.get("ids") or (None, None))[1]
+                        self.assertNotIn(replacement, result.stops, "the replacement is never stopped")
+                        if when == "before-stop":
+                            self.assertNotIn(original, result.stops)
+                            self.assertTrue(result.daemon.containers[original]["running"], "the inventoried original is left running")
+                        self.assertTrue(all(args[-1] != PROJECT + "-" + role for verb, args in result.daemon.calls if verb in ("stop", "diff")),
+                                        "no stop or diff by name")
+
+    def test_the_orthanc_layer_read_and_its_replacement_during_the_observation(self):
+        """The populated Orthanc start through the real stop, diff and layer read seals on both backends; a same-image
+        replacement during the layer read refuses WRITABLE_LAYER (the layer record kept unobservable)."""
+        storage = CheckpointLayerStorageTests()
+        storage.tempdir = self.tempdir
+        tree = storage.tree()
+        descriptor, read = storage.live_descriptor(tree)
+        diffs ={**{role: [] for role in intro.ROLES}, "orthanc": list(ORTHANC_START)}
+        for backend in self.BACKENDS:
+            with self.subTest(backend=backend, case="sealed"):
+                result = self.capture(backend, diffs=diffs, descriptor=descriptor, tree=tree)
+                self.assertEqual((result.code, len(result.bundles)), ("SEALED", 1), result.reason)
+                self.assertEqual(result.layer["roles"]["orthanc"]["facts"], read)
+            with self.subTest(backend=backend, case="a same-image replacement during the layer read"):
+                result = self.capture(backend, diffs=diffs, descriptor=descriptor, tree=tree,
+                                      at={("layer_facts", "orthanc"): lambda daemon: daemon.replace("orthanc", running=False)})
+                self.assertNothingSealed(result, "WRITABLE_LAYER")
+                self.assertEqual((result.layer["roles"]["orthanc"]["layer_observable"], result.layer["outcome"]), (False, "REFUSED"))
+
+    def adapter(self, backend="containerd", *, inventory=True, roles=None):
+        """(a real adapter over a ContainerDaemon of `roles` (default all), the daemon, call(fn) running fn with it)."""
+        import ops_deploy_host_container_test as rehearsal
+        names = {role: PROJECT + "-" + role for role in (roles or intro.ROLES)}
+        daemon = ContainerDaemon(backend, names, cp.pinned_images(plan_fixture(), {"entry_checkout": "target"}),
+                                 diffs={role: TRANSIENT for role in names}, running=set())
+        docker = rehearsal.CheckpointDocker(None, None)
+
+        def call(function):
+            with patch.object(rehearsal, "subprocess", SimpleNamespace(run=daemon.run, PIPE=subprocess.PIPE)):
+                return function()
+        if inventory:
+            call(docker.inventory)
+        return docker, daemon, call
+
+    def test_missing_identity_state_metadata_and_diff_failures_are_typed_refusals(self):
+        """Each is the typed refusal with its reason kept, never an exception or an empty list: no inventory taken, an
+        empty inventory, a name the inventory did not list (three distinct reasons); a running, restarting, malformed or
+        missing state; a failed, non-JSON or unavailable inspection; a failed, unavailable or non-text diff; a stop that
+        leaves the container running or restarting. A deadline cut, a call timeout, an interrupt and a programming error
+        propagate with their observation kept (interrupted)."""
+        import ops_deploy_host_container_test as rehearsal
+        name = PROJECT + "-db"
+        reasons = []
+        for label, setup in (("no inventory taken", dict(inventory=False)), ("an empty inventory", dict(roles=("api",))),
+                             ("a name the inventory did not list", dict(roles=("db", "api")))):
+            with self.subTest(case=label):
+                docker, daemon, call = self.adapter(**setup)
+                if label == "an empty inventory":
+                    daemon.containers.clear()
+                    call(docker.inventory)
+                    self.assertEqual(docker.listed, {}, "an empty inventory is not no inventory")
+                if label == "a name the inventory did not list":
+                    docker.listed.pop(name)
+                for method, code in ((docker.writable_changes, "WRITABLE_LAYER"), (docker.stop, "STOP_UNCONFIRMED")):
+                    self.assertRefused(code, call, lambda method=method: method(name))
+                    reasons.append(rehearsal.LAYER_RESOLUTIONS[-1]["reason"])
+        self.assertEqual(len(set(reasons[0::2])), 2, "no inventory and a missing identity are told apart: %s" % reasons)
+
+        def state(**fields):
+            return lambda daemon: daemon.containers[daemon.ident("db")].update(state=fields)
+
+        def field(**fields):
+            return lambda daemon: daemon.containers[daemon.ident("db")].update(**fields)
+        diff_cases = {
+            "a running container": field(running=True), "a restarting container": field(restarting=True),
+            "Restarting missing": state(Running=False), "Running is the string false": state(Running="false", Restarting=False),
+            "no state": lambda daemon: daemon.containers[daemon.ident("db")].update(state=None),
+            "a failed inspection": lambda daemon: daemon.raw.update(inspect=(1, b"")),
+            "an inspection that is not JSON": lambda daemon: daemon.raw.update(inspect=(0, b"{not json")),
+            "two inspections": lambda daemon: daemon.raw.update(inspect=lambda args: (0, json.dumps([daemon.inspected(daemon.ident("db"))] * 2).encode())),
+            "a short ID": lambda daemon: daemon.raw.update(inspect=lambda args: (0, json.dumps([{**daemon.inspected(daemon.ident("db")), "Id": "4" * 12}]).encode())),
+            "docker is not installed (inspect)": lambda daemon: daemon.raw.update(inspect=FileNotFoundError(2, "docker")),
+            "a failed diff": lambda daemon: daemon.raw.update(diff=(1, b"")),
+            "docker is not executable (diff)": lambda daemon: daemon.raw.update(diff=PermissionError(13, "docker")),
+            "a diff that is not text": lambda daemon: daemon.raw.update(diff=(0, b"A /etc/\xff\xfe\n")),
+            "the name moves after the diff": lambda daemon: daemon.hooks.update({("after", "diff", "db"): lambda: daemon.replace("db", running=False)}),
+        }
+        for backend in self.BACKENDS:
+            for label, setup in diff_cases.items():
+                with self.subTest(backend=backend, diff=label):
+                    docker, daemon, call = self.adapter(backend)
+                    setup(daemon)
+                    self.assertRefused("WRITABLE_LAYER", call, lambda: docker.writable_changes(name))
+                    record = rehearsal.LAYER_RESOLUTIONS[-1]
+                    self.assertEqual((record["observation"], record["scope"], record["outcome"]), ("diff", "capture", "refused"))
+                    self.assertTrue(type(record.get("reason")) is str and record["reason"].strip(), record)
+            for label, setup in (("the container keeps running", field(stays_running=True, running=True)),
+                                 ("the container is restarting after the stop", field(restarting=True, running=True)),
+                                 ("a failed inspection", lambda daemon: daemon.raw.update(inspect=(1, b""))),
+                                 ("the name moves at the stop", lambda daemon: daemon.hooks.update({("before", "stop", "db"): lambda: daemon.replace("db")}))):
+                with self.subTest(backend=backend, stop=label):
+                    docker, daemon, call = self.adapter(backend)
+                    setup(daemon)
+                    if label == "the container is restarting after the stop":
+                        daemon.hooks[("after", "stop", "db")] = lambda: daemon.containers[daemon.history["db"][0]].update(restarting=True)
+                    self.assertRefused("STOP_UNCONFIRMED", call, lambda: docker.stop(name))
+                    self.assertTrue(rehearsal.LAYER_RESOLUTIONS[-1]["reason"].strip())
+            for verb in ("inspect", "stop", "diff"):
+                for error in (cp.DeadlineExpired("cut", {"kind": "cut"}), subprocess.TimeoutExpired(["docker"], 1), KeyboardInterrupt(),
+                              TypeError("a programming error")):
+                    for method in ("stop", "writable_changes"):
+                        if verb == "stop" and method == "writable_changes" or verb == "diff" and method == "stop":
+                            continue
+                        with self.subTest(backend=backend, method=method, at=verb, stop=type(error).__name__):
+                            docker, daemon, call = self.adapter(backend)
+                            daemon.raw[verb] = error
+                            with self.assertRaises(type(error)):
+                                call(lambda: getattr(docker, method)(name))
+                            record = rehearsal.LAYER_RESOLUTIONS[-1]
+                            self.assertEqual((record["outcome"], record["interrupted"]), ("interrupted", type(error).__name__))
+
+    def test_standalone_diagnostics_observe_their_actual_subject_without_the_capture_binding(self):
+        """The native smoke's standalone consumers (Smoke.held/late_boundaries/failure_lineage stops, regenerated_negatives'
+        running-database diff, negative's diff before its capture): without any inventory, of a running container, and
+        after an inventory then an owned recreation, they observe and stop what the name names now - by that ID - and the
+        capture binding (`listed`) is neither read nor changed. A naive global stopped-only or stale-inventory diff would
+        refuse each of these; the capture methods on the same adapter still refuse the stale identity."""
+        name = PROJECT + "-db"
+        for backend in self.BACKENDS:
+            with self.subTest(backend=backend, case="no inventory, a running database"):
+                docker, daemon, call = self.adapter(backend, inventory=False)
+                daemon.containers[daemon.ident("db")].update(running=True, diff=["C /etc/hostid"])
+                # a refusal or an exception of the standalone path is a failure of this contract (admitted), not an error
+                self.assertEqual(self.admitted(call, lambda: docker.standalone_changes(name)), ["C /etc/hostid"])
+                self.assertIsNone(docker.listed, "a standalone call takes no capture inventory")
+                outcome = self.admitted(call, lambda: docker.standalone_stop(name))
+                self.assertEqual((outcome["running"], outcome["container_id"], daemon.effects), (False, daemon.ident("db"), [("stop", daemon.ident("db"))]))
+            with self.subTest(backend=backend, case="inventory, an owned recreation, then the diagnostic"):
+                docker, daemon, call = self.adapter(backend)
+                listed = copy.deepcopy(docker.listed)
+                original, new = daemon.replace("db", running=True, diff=["A /etc/hostid"])
+                self.assertEqual(self.admitted(call, lambda: docker.standalone_changes(name)), ["A /etc/hostid"], "the recreated container's own diff")
+                self.assertEqual(self.admitted(call, lambda: docker.standalone_stop(name))["container_id"], new)
+                self.assertEqual((daemon.effects, daemon.containers[original]["running"]), ([("stop", new)], False))
+                self.assertEqual(docker.listed, listed, "the capture binding is unchanged")
+                self.assertRefused("WRITABLE_LAYER", call, lambda: docker.writable_changes(name))
+                self.assertRefused("STOP_UNCONFIRMED", call, lambda: docker.stop(name))
+            with self.subTest(backend=backend, case="the standalone subject moves during its diff"):
+                docker, daemon, call = self.adapter(backend, inventory=False)
+                daemon.hooks[("after", "diff", "db")] = lambda: daemon.replace("db")
+                with self.assertRaises(RuntimeError):
+                    call(lambda: docker.standalone_changes(name))
+
+    def test_the_native_capture_evidence_names_exactly_the_sealed_containers(self):
+        """The native smoke's consumer of these observations (native capture_bound over layer-storage.json rows and the
+        verified layer record): a real matching capture's rows are bound; a diff row of another ID, a refused row, a
+        missing role and a stop of another container are not."""
+        import ops_release_checkpoints_native_test as native
+        result = self.capture("containerd")
+        rows = [row for row in result.observations if row.get("observation")]
+        bound, detail = native.capture_bound(rows, result.layer)
+        self.assertTrue(bound, detail)
+        self.assertEqual((len(detail["diffs"]), len(detail["stops"])), (5, 5))
+        other = "f" * 64
+        changed = {
+            "a diff of another ID": lambda rows: rows[next(i for i, row in enumerate(rows) if row["observation"] == "diff")]["after"].update(id=other),
+            "a refused diff": lambda rows: rows[next(i for i, row in enumerate(rows) if row["observation"] == "diff")].update(outcome="refused"),
+            "a missing role": lambda rows: rows.pop(next(i for i, row in enumerate(rows) if row["observation"] == "diff")),
+            "a stop of another container": lambda rows: rows[next(i for i, row in enumerate(rows) if row["observation"] == "stop")]["after"].update(id=other),
+        }
+        for label, change in changed.items():
+            with self.subTest(case=label):
+                copied = copy.deepcopy(rows)
+                change(copied)
+                self.assertFalse(native.capture_bound(copied, result.layer)[0])
 
 
 class CheckpointDeadlineTests(RefusalAssertions, TempCase):

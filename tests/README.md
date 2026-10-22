@@ -2231,6 +2231,45 @@ bundle byte), -03 (native: the smoke's seeded/held regeneration and cold restore
   then stops at M49 (its control is P8). This is pre-existing and unchanged; the assertion is not relaxed. C06 closes on
   the Linux CI run of the whole suite (all its tests and the 78 control/kill pairs).
 
+### Round 13: the capture's stop and diff are bound to its inventory (consult-checkpoints-r13-plan-20261022, CKPT12-01..04, D1688)
+
+- Capture versus standalone (CKPT12-01): `capture_checkpoint` runs inventory, `stop_for_checkpoint` and `judge_layer`
+  on one adapter object (`live.seal_boundary` makes a new one per capture). `CheckpointDocker.stop` and
+  `writable_changes` - the capture's calls - act on and observe exactly the container that inventory listed under the
+  name: the stop and the diff target its immutable ID; the name, ID and image are confirmed before and after, and the
+  diff needs a definitely stopped container (`Running` and `Restarting` false) on both sides. A replacement (same or
+  another image) before the stop is never stopped, and the inventoried original is left as it is: STOP_UNCONFIRMED. A
+  replacement before or during the diff or the layer read, a container that is running or restarting at its diff, a
+  name the inventory did not list, no inventory at all, unavailable or invalid metadata and a failed or non-text diff
+  are WRITABLE_LAYER - raised by the adapter through the typed refusal channel before `store.begin`, any export or
+  bundle byte, never an empty list or a made-up change; this covers every role and empty and transient-only diffs
+  (where Orthanc has no layer read). The shared judgement, record schema and `layer_valid` are unchanged. `listed` is
+  None until the adapter takes an inventory (an empty inventory is `{}`), so "no capture inventory" and "the inventory
+  did not list it" keep distinct reasons.
+- The native smoke's own stops and diffs (the HELD fence, the database stop of N03, the failure lineage's API stop and
+  diff, each regenerated negative's Orthanc stop, the running database's diff and the diff beside each negative
+  capture) are diagnostics outside any capture: `standalone_stop` and `standalone_changes` act on whatever the name
+  names at that call (a container the smoke has just recreated, a running database), by that ID, require the name to
+  still name it afterwards, and never read or change the capture binding. Their meaning is unchanged; a capture never
+  falls back to them.
+- Evidence: every capture and standalone stop and diff (scope, inventoried identity, the resolutions before and after,
+  outcome, reason or `interrupted`) joins `LAYER_RESOLUTIONS`, so the native smoke's `layer-storage.json` carries them;
+  the smoke now also checks (A05/A12) that each sealed capture's own stops and diffs acted on exactly the containers its
+  verified layer record seals (`capture_bound`).
+- Endpoint (CKPT12-02): a `Containerd.Address` with an embedded NUL (first or second resolution) is no local endpoint:
+  no facts with its reason, WRITABLE_LAYER, no bundle - refused before `ctr` is started. A deadline cut, a call timeout,
+  an interrupt and a programming error still propagate with the observation kept.
+- Reason wording (CKPT12-04, D73): the observation-failure test asserts no facts, the unobservable outcome and a
+  retained non-empty reason, not one sentence; refusal codes and identity/state facts stay asserted exactly.
+- Pure: `CheckpointStopDiffIdentityTests` (6 tests; the real capture over the real stop/diff, a finite process table of
+  the five roles with 64-hex IDs on both simulated backends: matching controls sealed, every replacement/state case
+  refused with its effects measured, the failure and propagation table, the standalone consumers, the native
+  `capture_bound`) and `CheckpointLayerStorageTests` (+1: the NUL endpoint through the real process-creation boundary).
+  The adapter fault pairs of rounds 12 and 13 run outside the suite (F15b survives by design); the 78 mutants are
+  unchanged. Native: the CI runner exercises its own backend (overlay2); the containerd path runs natively only on the
+  VM's normal smoke and T16/T17 after admission of the new SHA. The pre-existing untyped inventory parse (a malformed
+  listing raises KeyError before any stop, export or `store.begin`) remains an open deferred item, not a typed refusal.
+
 # 뷰어 반전 정밀도
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,

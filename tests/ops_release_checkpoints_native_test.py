@@ -142,6 +142,25 @@ class SmokeFailure(AssertionError):
     pass
 
 
+def capture_bound(rows, record):
+    """r13 (CKPT12-01): whether one sealed capture's own stop and diff observations (rows of layer-storage.json of
+    scope "capture"; the smoke's standalone stops and diffs are not the capture's) acted on exactly the containers its
+    verified layer record seals: one observed diff per present role, on its sealed ID before and after; every capture
+    stop observed, on a sealed ID, the same ID after the stop; nothing else. Returns (bound, detail)."""
+    own = [row for row in rows if row.get("scope") == "capture" and row.get("observation") in ("stop", "diff")]
+    sealed = {item.get("container_name"): item.get("container_id") for item in record["roles"].values() if not item.get("absent")}
+    ident = lambda row, key: (row.get(key) or {}).get("id")  # noqa: E731
+    diffs = [row for row in own if row["observation"] == "diff"]
+    stops = [row for row in own if row["observation"] == "stop"]
+    problems = [row.get("container_name") for row in diffs if row.get("outcome") != "observed" or row.get("container_name") not in sealed
+                or not ident(row, "capture_identity") == ident(row, "before") == ident(row, "after") == sealed[row["container_name"]]]
+    problems += ["stop " + str(row.get("container_name")) for row in stops if row.get("outcome") != "observed" or row.get("container_name") not in sealed
+                 or not ident(row, "capture_identity") == ident(row, "before") == ident(row, "after") == sealed[row["container_name"]]]
+    diffed = sorted(row.get("container_name") for row in diffs)
+    bound = not problems and diffed == sorted(sealed)
+    return bound, {"sealed": sealed, "diffs": diffed, "stops": sorted(row.get("container_name") for row in stops), "problems": problems}
+
+
 def residue_dir():
     """The smoke's own residue ledger, beside (never inside) the gate's state: a pending file per unfinished smoke."""
     return Path(gate.STATE).parent / "checkpoint-smoke"
@@ -788,6 +807,10 @@ class Smoke:
                    {name: (state["ExitCode"], state["OOMKilled"]) for name, state in exits.items()})
         sealed = {"bundle": bundle, "manifest": manifest, "observation": observation}
         sealed["regenerated"] = self.regenerated(checkpoint_id, sealed)
+        # r13 (CKPT12-01): the capture stopped and diffed exactly the containers it sealed, by ID (layer-storage.json).
+        bound, detail = capture_bound([row for row in self.layer_storage if row["capture"] == checkpoint_id], cp.verify_bundle(bundle).capture.layer)
+        self.check(["A05", "A12"], checkpoint_id + ": the capture's stops and diffs acted on exactly the sealed containers (by ID, stopped)",
+                   bound, detail)
         return sealed
 
     def regenerated(self, checkpoint_id, sealed):
@@ -950,7 +973,7 @@ class Smoke:
         """HELD: the fence's stop order (writers, then the database alone remains), the operations lock taken, capture's
         phase-end model; capture and the database-only roundtrip."""
         for role in intro.FENCE_ORDER:
-            outcome = stack.docker.stop(stack.target["containers"][role])
+            outcome = stack.docker.standalone_stop(stack.target["containers"][role])
             self.check(["A05"], "stop " + role + " normally", outcome["exit_code"] in (0, 143) and not outcome["forced"] and outcome["running"] is False,
                        outcome)
         token = intro.acquire_lock(stack.repo)
@@ -1006,7 +1029,7 @@ class Smoke:
         with stack.records.lease():
             self.refusal(["N04"], "the original state changed during the observation refuses it", "ORIGINAL_CHANGED", observe, "verified", probe=rewrite)
         state_path.write_bytes(model)
-        stack.docker.stop(stack.target["containers"]["db"])
+        stack.docker.standalone_stop(stack.target["containers"]["db"])
         with stack.records.lease():
             try:
                 observe("verified")
@@ -1083,13 +1106,13 @@ class Smoke:
         stack.sql_file(REALM_SQL, "keycloak")
         stack.docker.compose_start("api")
         stack.exec("api", "sh", "-c", "echo transient > /tmp/kin-smoke-transient && echo persistent > /etc/kin-smoke-persistent")
-        stack.docker.stop(stack.target["containers"]["api"])
+        stack.docker.standalone_stop(stack.target["containers"]["api"])
         token = intro.acquire_lock(stack.repo)
         stack.model_phase("capture", compose_entry=pointer, entry_checkout="previous", checkout="previous", lock_token=token,
                           fenced={"at": intro.utc_now().isoformat(), "model": True})
         with stack.records.lease():
             self.observed(stack, "failure-held", stack.docker.observe("failure-held", purpose="capture", leaf={"unit": "native-smoke"}), "capture")
-        changes = stack.docker.writable_changes(stack.target["containers"]["api"])
+        changes = stack.docker.standalone_changes(stack.target["containers"]["api"])
         self.check(["A05"], "docker diff of a stopped role lists its transient and its persistent change",
                    any("/tmp/kin-smoke-transient" in line for line in changes) and any("/etc/kin-smoke-persistent" in line for line in changes), changes)
         stored = sorted(path.name for path in self.store.root.iterdir())
@@ -1148,7 +1171,7 @@ class Smoke:
             path = cp.PLUGINS + "/" + name
             written = stack.exec("orthanc", "sh", "-c", "printf 'kin-smoke marker\\n' " + operation + " \"$1\" && sha256sum \"$1\" && stat -c '%F %s %u:%g %a' \"$1\"",
                                  "sh", path, user="0").stdout.decode()
-            stack.docker.stop(orthanc)
+            stack.docker.standalone_stop(orthanc)
             stack.docker.compose_start("db")
             stack.docker.wait_db_ready()
             changed = operation == ">>"
@@ -1160,7 +1183,7 @@ class Smoke:
         stack.docker.compose_start("db")
         stack.docker.wait_db_ready()
         written = stack.exec("db", "sh", "-c", "printf '0badc0de\\n' > /etc/hostid && sha256sum /etc/hostid", user="0").stdout.decode()
-        kind = next((line.split(" ", 1)[0] for line in stack.docker.writable_changes(stack.target["containers"]["db"])
+        kind = next((line.split(" ", 1)[0] for line in stack.docker.standalone_changes(stack.target["containers"]["db"])
                      if line.split(" ", 1)[-1].strip() == cp.HOSTID), None)
         self.negative(stack, "failure-held", "a hostid written in the database role (its actual change kind: %s)" % kind, role="db", target=cp.HOSTID,
                       written=written, extra={"db_hostid_kind": kind},
@@ -1170,7 +1193,7 @@ class Smoke:
     def negative(self, stack, checkpoint_id, label, *, role, target, written, expect, extra=None):
         """One native refusal on its own resources: the change read back, the real docker diff, the capture through the
         live consumer (seal_boundary) refused WRITABLE_LAYER before any bundle byte and its layer record kept."""
-        diff = stack.docker.writable_changes(stack.target["containers"][role])
+        diff = stack.docker.standalone_changes(stack.target["containers"][role])
         folder = stack.records.directory / cp.OBSERVATION_DIR
         layers = set(folder.glob("layer-*/" + cp.LAYER_FILE))
         stored = sorted(path.name for path in self.store.root.iterdir())

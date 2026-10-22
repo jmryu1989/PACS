@@ -885,8 +885,11 @@ class CheckpointDocker:
         self.stack, self.helper = stack, helper_image
         # r12 (CKPT11-01): name -> {"id", "image"} of every container in this adapter's last inventory. capture_checkpoint
         # takes its inventory here, seals those IDs and judges each role's layer against that very inventory, so a
-        # layer read is bound to this identity, never to whatever the name resolves to later.
-        self.listed = {}
+        # layer read is bound to this identity, never to whatever the name resolves to later. r13 (CKPT12-01): the
+        # capture's stop and diff are bound to it as well. None = this adapter has taken no inventory (an empty
+        # inventory is {}): its capture calls then refuse, while the standalone calls below never read or change it.
+        # Its lifetime is one adapter object: live.seal_boundary makes a new adapter for every capture.
+        self.listed = None
 
     def run(self, args, *, timeout=300, check=True, **kwargs):
         """Every Docker/Compose call of the adapter: `timeout` is a cap only; under an active deadline (r6, the native
@@ -921,14 +924,196 @@ class CheckpointDocker:
         self.listed = {item["name"]: {"id": item["id"], "image": item["image"]} for item in containers}
         return checkpoints.note_inventory({"containers": containers, "volumes": volumes, "networks": networks, "images": images})
 
+    # ── r13 (CKPT12-01): the capture's stop and diff act on and observe exactly the container of this adapter's inventory
+    # (capture_checkpoint: inventory -> stop_for_checkpoint -> judge_layer). A name is resolved only to compare it with
+    # that identity; every effect and diff targets the inventoried immutable ID, and the name, ID, image and stopped
+    # state are checked before and after it. A replacement (same or another image) before the stop is never stopped as
+    # the original (STOP_UNCONFIRMED); a replacement before or during the diff, a container that is not definitely
+    # stopped, unavailable or invalid metadata and a diff that cannot be observed refuse with WRITABLE_LAYER before any
+    # bundle byte or export - never an empty list. Every observation is kept in LAYER_RESOLUTIONS with its reason. The
+    # native smoke's own diagnostics (a running database's diff, a role it has just recreated) use standalone_stop and
+    # standalone_changes, whose subject is whatever the name names at that call; they never read or change `listed`. ──
+    def capture_identity(self, name):
+        """(the identity this adapter's inventory listed under `name`, or None with the reason)."""
+        if self.listed is None:
+            return None, "this adapter has taken no capture inventory"
+        identity = self.listed.get(name)
+        if type(identity) is not dict or type(identity.get("id")) is not str or type(identity.get("image")) is not str:
+            return None, "the capture's inventory did not list the container"
+        return identity, None
+
+    def resolve(self, ref):
+        """(the daemon's one inspection of `ref` - a name or an ID - as {"id", "name", "image", "running", "restarting",
+        "exit_code", "oom_killed"}, or None with the reason). Metadata only."""
+        items, unavailable = self.read_metadata(["docker", "container", "inspect", ref])
+        if unavailable:
+            return None, "the container's inspection is unavailable: " + unavailable
+        if type(items) is not list or len(items) != 1 or type(items[0]) is not dict:
+            return None, "the daemon gave no single inspection of the container"
+        item = items[0]
+        ident, state = item.get("Id"), item.get("State")
+        if (type(ident) is not str or re.fullmatch(r"[0-9a-f]{64}", ident) is None or type(item.get("Name")) is not str
+                or type(item.get("Image")) is not str or type(state) is not dict):
+            return None, "the inspection names no container ID, name, image and state"
+        return {"id": ident, "name": item["Name"].lstrip("/"), "image": item["Image"], "running": state.get("Running"),
+                "restarting": state.get("Restarting"), "exit_code": state.get("ExitCode"), "oom_killed": state.get("OOMKilled")}, None
+
+    @staticmethod
+    def same(found, identity, name=None):
+        """The reason `found` (resolve) is not exactly `identity` under `name`, or None."""
+        if found["id"] != identity["id"]:
+            return "the name resolves to another container than the capture's (replaced since its inventory)"
+        if found["image"] != identity["image"]:
+            return "the container's image is not the image of the capture's inventory"
+        if name is not None and found["name"] != name:
+            return "the inspection is not of the named container"
+        return None
+
+    @staticmethod
+    def stopped(found):
+        """Running and Restarting are always present in an Engine inspection: only a definite false/false is stopped."""
+        return found["running"] is False and found["restarting"] is False
+
+    def observed_call(self, record, body):
+        """Runs body() -> (value, reason), keeps `record` (its outcome, reason and an interruption) in LAYER_RESOLUTIONS
+        in every case, and returns (value, reason). A deadline cut, a timeout or another exception still propagates."""
+        value, reason = None, None
+        try:
+            value, reason = body()
+        except BaseException as error:
+            record.update(outcome="interrupted", interrupted=type(error).__name__)
+            raise
+        finally:
+            record.setdefault("outcome", "observed" if reason is None else "refused")
+            if reason is not None:
+                record["reason"] = reason
+            LAYER_RESOLUTIONS.append(record)
+        return value, reason
+
     def stop(self, name):
-        stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), name], timeout=self.STOP_SECONDS + 60, check=False)
-        state = json.loads(self.run(["docker", "inspect", name]).stdout)[0]["State"]
-        return {"exit_code": state.get("ExitCode"), "forced": stopped.returncode != 0 or state.get("ExitCode") == 137,
-                "oom_killed": state.get("OOMKilled"), "running": state.get("Running")}
+        """The capture's normal stop (stop_for_checkpoint) of exactly the container the capture inventoried under `name`:
+        by its ID, with the name, ID and image confirmed before and after, and a definite stopped state after. Anything
+        else is STOP_UNCONFIRMED, raised here with its reason kept (a replacement is never stopped)."""
+        identity, missing = self.capture_identity(name)
+        record = {"observation": "stop", "scope": "capture", "container_name": name, "capture_identity": identity}
+
+        def body():
+            if identity is None:
+                return None, missing
+            before, why = self.resolve(name)
+            record["before"] = before
+            if before is None:
+                return None, why
+            mismatch = self.same(before, identity, name)
+            if mismatch:
+                return None, mismatch + "; nothing was stopped"
+            stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), identity["id"]], timeout=self.STOP_SECONDS + 60, check=False)
+            record["stop_exit"] = stopped.returncode
+            after, why = self.resolve(identity["id"])
+            named, why_named = self.resolve(name)
+            record.update(after=after, named_after=named)
+            if after is None or named is None:
+                return None, why or why_named
+            mismatch = self.same(after, identity) or self.same(named, identity, name)
+            if mismatch:
+                return None, mismatch + " after the stop"
+            outcome = {"exit_code": after["exit_code"], "forced": stopped.returncode != 0 or after["exit_code"] == 137,
+                       "oom_killed": after["oom_killed"], "running": after["running"], "container_id": identity["id"]}
+            if not self.stopped(after):
+                return outcome, "the container is not definitely stopped after the stop"
+            return outcome, None
+        outcome, reason = self.observed_call(record, body)
+        checkpoints.require(reason is None, "STOP_UNCONFIRMED", name + ": " + str(reason))
+        return outcome
 
     def writable_changes(self, name):
-        return [line for line in self.run(["docker", "diff", name]).stdout.decode().splitlines() if line.strip()]
+        """The capture's `docker diff` (judge_layer) of exactly the container the capture inventoried under `name`, by
+        its ID, stopped before and after, with the name, ID and image unchanged across it. Returns the changed lines (an
+        empty list only for an observed empty diff); anything else is WRITABLE_LAYER, raised here with its reason kept."""
+        identity, missing = self.capture_identity(name)
+        record = {"observation": "diff", "scope": "capture", "container_name": name, "capture_identity": identity}
+
+        def body():
+            if identity is None:
+                return None, missing
+            before, why = self.resolve(name)
+            record["before"] = before
+            if before is None:
+                return None, why
+            mismatch = self.same(before, identity, name) or (None if self.stopped(before) else "the container is not definitely stopped")
+            if mismatch:
+                return None, mismatch + " before the diff"
+            try:
+                diff = self.run(["docker", "diff", identity["id"]], check=False)
+            except OSError as error:
+                return None, "docker diff could not be run: " + type(error).__name__
+            record["diff_exit"] = diff.returncode
+            if diff.returncode:
+                return None, "docker diff failed (exit %d)" % diff.returncode
+            try:
+                lines = [line for line in diff.stdout.decode().splitlines() if line.strip()]
+            except UnicodeDecodeError:
+                return None, "docker diff's answer is not text"
+            after, why = self.resolve(name)
+            record.update(after=after, changes=len(lines))
+            if after is None:
+                return None, why
+            mismatch = self.same(after, identity, name) or (None if self.stopped(after) else "the container is not definitely stopped")
+            if mismatch:
+                return None, mismatch + " after the diff"
+            return lines, None
+        lines, reason = self.observed_call(record, body)
+        checkpoints.require(reason is None, "WRITABLE_LAYER", name + ": the capture's writable layer is not observable: " + str(reason))
+        return lines
+
+    def standalone_stop(self, name):
+        """A stop outside any capture (the native smoke's own fence and diagnostics): the container `name` names at this
+        call, stopped by that ID and confirmed by it; the name must still name it afterwards. Returns the outcome
+        (stop_for_checkpoint's keys and the container ID); an unresolvable subject is an error of the caller."""
+        record = {"observation": "stop", "scope": "standalone", "container_name": name}
+
+        def body():
+            subject, why = self.resolve(name)
+            record["before"] = subject
+            if subject is None:
+                return None, why
+            stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), subject["id"]], timeout=self.STOP_SECONDS + 60, check=False)
+            after, why = self.resolve(subject["id"])
+            named, why_named = self.resolve(name)
+            record.update(stop_exit=stopped.returncode, after=after, named_after=named)
+            if after is None or named is None:
+                return None, why or why_named
+            if named["id"] != subject["id"]:
+                return None, "the name names another container after the stop"
+            return {"exit_code": after["exit_code"], "forced": stopped.returncode != 0 or after["exit_code"] == 137,
+                    "oom_killed": after["oom_killed"], "running": after["running"], "container_id": subject["id"]}, None
+        outcome, reason = self.observed_call(record, body)
+        if reason is not None:
+            raise RuntimeError("standalone stop of " + name + ": " + reason)
+        return outcome
+
+    def standalone_changes(self, name):
+        """`docker diff` outside any capture (the native smoke's diagnostics, a running database included): of the
+        container `name` names at this call, by that ID; the name must still name it afterwards. Never judged here."""
+        record = {"observation": "diff", "scope": "standalone", "container_name": name}
+
+        def body():
+            subject, why = self.resolve(name)
+            record["before"] = subject
+            if subject is None:
+                return None, why
+            lines = [line for line in self.run(["docker", "diff", subject["id"]]).stdout.decode().splitlines() if line.strip()]
+            after, why = self.resolve(name)
+            record.update(after=after, changes=len(lines))
+            if after is None:
+                return None, why
+            if after["id"] != subject["id"]:
+                return None, "the name names another container after the diff"
+            return lines, None
+        lines, reason = self.observed_call(record, body)
+        if reason is not None:
+            raise RuntimeError("standalone diff of " + name + ": " + reason)
+        return lines
 
     def export_volume(self, name, destination):
         with open(destination, "xb") as out:
@@ -1176,6 +1361,10 @@ class CheckpointDocker:
             if (type(address) is not str or not address.startswith(("/", "unix:///")) or type(namespace) is not str
                     or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", namespace) is None):
                 return {**facts, "backend": None, "reason": "the daemon names no local containerd endpoint and namespace"}
+            # r13 (CKPT12-02): the endpoint becomes a ctr argument; one the OS cannot pass (an embedded NUL) is no local
+            # endpoint and is refused here, before any process is created.
+            if "\x00" in address:
+                return {**facts, "backend": None, "reason": "the daemon's containerd endpoint is not a nameable local path"}
             return {**facts, "backend": "containerd", "snapshotter": driver, "address": address, "namespace": namespace}
         return {**facts, "backend": None, "reason": "an unsupported storage driver: " + driver + "".join(" " + item for item in types)}
 
@@ -1303,7 +1492,7 @@ class CheckpointDocker:
         `name` (its ID and image: the capture's identity) is established, the read fails or the mapping is not the same
         after the read (the typed exception then refuses). /etc/hostid's content class is recorded, never its value. The
         observation is recorded in every case, also when a deadline cut or another error ends it."""
-        identity = self.listed.get(name)
+        identity, _ = self.capture_identity(name)
         record = {"container_name": name, "paths": len(paths), "capture_identity": identity}
         out = None
         try:
