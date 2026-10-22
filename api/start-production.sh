@@ -24,8 +24,17 @@ case "$1" in
     # serves. A v3 pair is refused by the v4 mode and a v4 pair by the v3 mode, before any journal or lock exists.
     KIN_EMR_STATE_FORMAT=4 exec node dist/emr-runtime/state-service-main.js
     ;;
+  state-convert-v4)
+    # One-shot conversion root (same identity, reader credential and fence as the serving root): the quiesced v3
+    # source under KIN_EMR_STATE_DIR is streamed into the empty v4 target under KIN_EMR_STATE_TARGET; it exits.
+    KIN_EMR_STATE_MODE=convert-v4 exec node dist/emr-runtime/state-service-main.js
+    ;;
+  state-export-v3)
+    # One-shot lossless export (rollback) of a v4 source into a new v3 target; the unchanged v3 reader admits it.
+    KIN_EMR_STATE_MODE=export-v3 exec node dist/emr-runtime/state-service-main.js
+    ;;
   *)
-    echo "start-production.sh: expected migrate, serve, state-serve-v3 or state-serve-v4" >&2
+    echo "start-production.sh: expected migrate, serve, state-serve-v3, state-serve-v4, state-convert-v4 or state-export-v3" >&2
     exit 64
     ;;
 esac

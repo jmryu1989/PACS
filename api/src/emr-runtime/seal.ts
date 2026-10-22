@@ -3,7 +3,8 @@ import { ACCESS_STREAMS, AccessStream, ChainPosition, accessStreams, parseAccess
 import { integer, refuse } from '../emr-contract/validation';
 import { ChainTail, StoredEntry, chainViolation, retainedAnchor, canonicalPayload, entryHash } from './contract';
 import { FailureJournal } from './failure-journal';
-import { CopyMapping, StateLineage, attestedProofFrom, samePair } from './external-writer';
+import { ConversionFacts, CopyMapping, StateLineage, attestedProofFrom, samePair } from './external-writer';
+import { lineageSha256 } from './checkpoint-v4';
 import { BundleIdentity, PairIdentity, SealedBundleProof, StateProtocolError } from './state-protocol';
 import type { PrismaLedgerSql, VerificationPage } from './store';
 import { EMR_REPLAY_VERIFY_ROWS } from './limits';
@@ -592,6 +593,50 @@ export class AccessSeal {
       await this.confirmBundle({ eventId: row.eventId, requiredStreams: [...required], bindings });
     }
     return { seal: view.tail!.streams.viewing, anchor: { sequence: through, hash: last.hash }, count: through - first.sequence + 1 };
+  }
+
+  /** The DB facts of a quiesced, fully recovered state for its first v3 -> v4 conversion (order section 5.3): the
+   * witness (the sealed prefixes as the database shows them, the retained starts, the exact expiry anchors) and one
+   * verified binding per retained committed row, read in pages with their markers, every row's chain and content
+   * rechecked. The database must show exactly the sealed frontier: a source that is not quiesced is refused. */
+  async conversionFacts(sql: PrismaLedgerSql = this.sql): Promise<ConversionFacts> {
+    const view = this.view();
+    if (!view.tail || !view.lineage) throw new SealRefused('SealMissing');
+    const streams = {} as DbWitness['streams'];
+    const dbBindings: [string, { binding: CommitBinding; entrySha256: string | null }][] = [];
+    for (const stream of ACCESS_STREAMS) {
+      const tail = await sql.tail(stream), sealed = view.tail.streams[stream];
+      if (tail.chainId !== sealed.chainId) throw new SealRefused('SealChainMismatch', stream);
+      if (tail.sequence !== sealed.sequence || tail.hash !== sealed.hash) throw new SealRefused('SealTailMismatch', 'conversion-' + stream);
+      const first = (await sql.entriesAfter(stream, 0, 1))[0];
+      const expirySlots = Object.entries(view.slots).filter(([, q]) => q.stream === stream && q.kind === 'expiry').map(([, q]) => q).sort((a, b) => b.sequence - a.sequence);
+      let expiry: DbWitness['streams'][AccessStream]['expiry'] = null;
+      if (expirySlots.length) {
+        const q = expirySlots[0], core = view.proofs[key(stream, q.attemptId)];
+        if (!core) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-core');
+        const { proofDigest: _, ...binding } = q;
+        expiry = { attemptKey: key(stream, q.attemptId), binding, coreSha256: digest(core), deletedThrough: core.anchor.sequence, anchorHash: core.anchor.hash };
+      }
+      streams[stream] = { chainId: tail.chainId, verifiedThrough: { sequence: sealed.sequence, hash: sealed.hash },
+        retainedStart: first ? { sequence: first.sequence, previousHash: first.previousHash } : null, expiry };
+      let after = first ? first.sequence - 1 : sealed.sequence, previous: StoredEntry | null = null;
+      while (after < sealed.sequence) {
+        const page = await sql.verificationPage(stream, after, 1000);
+        if (!page.entries.length) throw new SealRefused('LedgerChainBroken', 'conversion-page');
+        for (const { entry, marker } of page.entries) {
+          if (entry.sequence > sealed.sequence) break;
+          if (!marker || marker.sequence !== entry.sequence || entryHash(entry.sequence, entry.previousHash, entry.payload) !== entry.hash ||
+            createHash('sha256').update(entry.payload).digest('hex') !== entry.contentSha256 || (previous && (entry.sequence !== previous.sequence + 1 || entry.previousHash !== previous.hash)))
+            throw new SealRefused('UnsealedEntryUnexplained', `${stream}:${entry.sequence}`);
+          dbBindings.push([slot(stream, entry.sequence), { binding: marker, entrySha256: dbEntrySha256(stream, entry) }]);
+          previous = entry;
+        }
+        const last = page.entries[page.entries.length - 1].entry.sequence;
+        if (last <= after) throw new SealRefused('LedgerChainBroken', 'conversion-page');
+        after = last;
+      }
+    }
+    return { dbWitness: { version: 1, pair: view.lineage.origin, lineageSha256: lineageSha256(view.lineage), validationRevision: String(view.revision), streams }, dbBindings };
   }
 
   /** The DB exclusive writer fence is held through both positive verification and negative settlement.

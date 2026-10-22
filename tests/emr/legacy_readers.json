@@ -1,0 +1,88 @@
+{
+ "purpose": "The bound registry of every api image that ever ran or is cached on the deployed hosts (A03 old-reader matrix, D1656). Facts only: nothing here was inferred from a rebuild. A reconstructed image authenticates its reconstruction; the historic image id below is the deployed artifact the reconstruction's source revision was built into.",
+ "bound": {
+  "decision": "D1696 read-only inventory RO-01..RO-06, bound by D1698",
+  "packet": "tmp/astra-control/evidence/b2c-ro-inventory-20261022/",
+  "report_json_sha256": "c699855876b5b0dcc2b73691656634263700b94a302a689d1090a44c23a13a89",
+  "sha256sums_sha256": "1a8c47bd49d67f340570420bcf6d56c176aab6f05341574aa92cea1dcf58ae39",
+  "collected_utc": "2026-10-22T00:36:51Z..00:38:38Z",
+  "hosts": {"production": "61.109.239.207", "vm": "210.109.80.52"}
+ },
+ "state_mount": "/var/lib/kin-emr",
+ "deployed_launch": {"entrypoint": ["docker-entrypoint.sh"], "cmd": ["sh", "/app/start-production.sh", "serve"], "container": "kin-api", "state_volume": "pacs-starter-kit_emr-state"},
+ "readers": [
+  {
+   "revision": "a86ecf1655c8c587012cef5fd16e233e121ae7dc",
+   "class": "B1 (v1+v2 reader, former API owner)",
+   "emr_capable": true,
+   "historic_image_id": "sha256:9e438f1cf430db27bb156523e86316b674106bca22ba42d31750d66459cf319e",
+   "tags": ["kin-api:candidate-a86ecf1"],
+   "cmd": ["sh", "/app/start-production.sh", "serve"],
+   "created": "2026-10-15T01:36:11.370105313Z",
+   "hosts": {
+    "production": "running as kin-api since 2026-10-21T20:01:30Z; mounts pacs-starter-kit_emr-state -> /var/lib/kin-emr (RW)",
+    "vm": "cached (same id); 0 containers; the EMR volumes are mounted by no container"
+   },
+   "archives": ["production:/home/ubuntu/kin-release/target-images-a86ecf1.tar (sha256 7208f1b2...)", "vm:/srv/kin-rehearsal/seed/images/target-images-a86ecf1.tar (identical)"],
+   "reconstructed_tag": "kin-legacy-recon:a86ecf1655c8"
+  },
+  {
+   "revision": "b9690cc9790d5360829cee861462aac14f5ab0c7",
+   "class": "pre-EMR (migrate-then-serve, no reader; 0 api/src/emr-* paths)",
+   "emr_capable": false,
+   "historic_image_id": "sha256:23c44adce89ce289a11f6279f7a16bc74b5ae8fcb93a81cdb83323971a6d4142",
+   "tags": ["kin-api:candidate-b9690cc", "pacs-starter-kit-api:latest"],
+   "cmd": ["sh", "/app/start-production.sh"],
+   "created": "2026-09-27T10:59:53.93615351Z",
+   "hosts": {"production": "cached, not running", "vm": "cached, not running"},
+   "archives": ["vm:/srv/kin-rehearsal/seed/images/previous-images-b9690cc.tar (sha256 f3ea3320...)"],
+   "reconstructed_tag": "kin-legacy-recon:b9690cc9790d"
+  },
+  {
+   "revision": "489c326478d1e2ffdfe556803cb3c3ea5eff3862",
+   "class": "pre-EMR (migrate-then-serve, no reader; 0 api/src/emr-* paths)",
+   "emr_capable": false,
+   "historic_image_id": "sha256:5169211fb07c642f08b2cb71a8f3ad228d8e10865b574ab0c53aac2d3e2a4ebc",
+   "tags": ["kin-api:before-b9690cc", "kin-api:candidate-489c326"],
+   "cmd": ["sh", "/app/start-production.sh"],
+   "created": "2026-09-26T05:22:55.576363103Z",
+   "hosts": {"production": "cached, not running", "vm": "absent"},
+   "archives": [],
+   "reconstructed_tag": null,
+   "coverage": "same class as b9690cc (no EMR code, same two-token cmd); the pre-EMR cell executes b9690cc; this image is not executed (recorded, not inferred)"
+  }
+ ],
+ "absent_images": [
+  {
+   "historic_image_id": "sha256:24380d3d02423824345ceac12ea3b3d2f76568bb437d319ef748b8773cc3a131",
+   "referenced_by": ["production:/home/ubuntu/backups/kin-pacs/s4-489c326-20260926T051901Z/20260926-075842-0f4f8fad/manifest.json"],
+   "present": "absent from both image stores; not recoverable read-only"
+  }
+ ],
+ "source_only": [
+  {"revision": "8e74ebb86b9bb268e967429f09f52a4993bba246", "location": "vm:/home/ubuntu/kin-ckpt/candidate (CKPT r3)", "emr_capable_source": true, "image": "none in either store"},
+  {"revision": "1bc260663f04ec68199a97fe70c9483a82715ceb", "location": "vm:/srv/kin-ckpt/candidate (CKPT r10)", "emr_capable_source": true, "image": "none in either store"},
+  {"revision": "59fc5a556485ed6a3b35a95c81aafd1f4cdcbd5e", "location": "vm:/srv/kin-rot/checkout (ROT17)", "emr_capable_source": true, "image": "none in either store"},
+  {"revision": "48a28dd", "location": "vm:/srv/kin-ckpt/ledger-48a28dd-20261021T101615Z (CKPT r4 ledger)", "emr_capable_source": true, "image": "none in either store"},
+  {"revision": "17980d522b260b59fa97c96924f96038b63551ae", "location": "production:/home/ubuntu/pacs-candidate-17980d5-stage1", "emr_capable_source": false, "image": "none"},
+  {"revision": "c68077da396b99cf74f5a7739fda84c7733c9d3a", "location": "production s4 backup manifest git_sha", "emr_capable_source": false, "image": "none"}
+ ],
+ "emr_state_copies": {
+  "production": {
+   "volumes": ["pacs-starter-kit_emr-state (kin-api 9e438f1c, RW)", "pacs-starter-kit_emr-access (kin-db cf78e766, RW)"],
+   "backup_sets_with_emr_state": "emr-b1 + 7 daily 20261015..20261021 (git a86ecf1, api 9e438f1c, manifest key emr present, emr-state.tgz 1312 B each)",
+   "other_sets": "11 b9690cc daily (api 23c44adc, pre-EMR), emr-b0 (b9690cc), s4 (git c68077d, api 24380d3d absent), s5 (git 489c326, api 5169211f); 9 older dirs without manifest metadata",
+   "writers": "every EMR-state copy was written by the a86ecf1 image (9e438f1c); no other EMR-capable image ever ran on the hosts"
+  },
+  "vm": {
+   "volumes": ["pacs-starter-kit_emr-state", "pacs-starter-kit_emr-access", "anonymous 647ccad8...", "(mounted by no container)"],
+   "backup_sets_with_emr_state": "20 a86ecf1 rehearsal sets + 30 kin-pcron a86ecf1 sets (api 9e438f1c); /srv/kin-rot/sets/20261016-200006-fca09490 = production night-1 set copy (manifest sha256 45c8643c identical)",
+   "writers": "a86ecf1 image (9e438f1c) only"
+  },
+  "not_decidable_read_only": "restore eligibility / dependency closure per set (lineage_id and capture_id are absent from every manifest; archive contents were not read)"
+ },
+ "not_done": [
+  {"ro": "RO-03", "item": "TOOLS15 record-hash comparison", "effect": "deployed tool pins are compared by git blob and CRON pin only"},
+  {"ro": "RO-05", "item": "restore eligibility / dependency closure per set (lineage_id, capture_id)", "effect": "no real legacy capture is eligible for a positive restore cell"}
+ ]
+}

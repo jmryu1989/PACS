@@ -603,6 +603,23 @@ class LegacyImageTests(unittest.TestCase):
         cls.legacy = json.loads(ops.text(["docker", "image", "inspect", os.environ["KIN_TEST_LEGACY_B1_IMAGE"]]))[0]
         pre = os.environ.get("KIN_TEST_LEGACY_PRE_EMR_IMAGE")
         cls.pre_emr = json.loads(ops.text(["docker", "image", "inspect", pre]))[0] if pre else None
+        # The bound reader registry (RO-01/RO-02 facts, D1698): every reconstructed image must be the rebuild of a
+        # registered revision, in the registered class, with the recorded launch command; the cells report the
+        # historic image id that revision was deployed as next to the reconstruction's own id (never as it).
+        cls.registry = json.loads((ROOT / "tests" / "emr" / "legacy_readers.json").read_text(encoding="utf-8"))
+        cls.bound = {}
+        for label, image, capable in (("b1", cls.legacy, True), ("pre_emr", cls.pre_emr, False)):
+            if image is None:
+                continue
+            revision = (image["Config"].get("Labels") or {}).get("org.opencontainers.image.revision")
+            reader = next((r for r in cls.registry["readers"] if r["revision"] == revision), None)
+            if reader is None:
+                raise RuntimeError("legacy image %s revision %r is not a registered reader" % (label, revision))
+            if reader["emr_capable"] is not capable or image["Config"]["Cmd"] != reader["cmd"]:
+                raise RuntimeError("legacy image %s does not match its registry entry: %s" % (label, json.dumps({"class": reader["class"], "cmd": image["Config"]["Cmd"]})))
+            cls.bound[label] = {"revision": revision, "historic_image_id": reader["historic_image_id"], "class": reader["class"], "reconstructed_id": image["Id"]}
+        if ops.EMR_STATE != cls.registry["state_mount"]:
+            raise RuntimeError("the launch shape's state mount differs from the deployed one")
         # Compose binds images by reference; the consumers compare the resolved immutable IDs.
         cls.tags = {cls.image_id: os.environ["KIN_TEST_API_IMAGE"], cls.legacy["Id"]: os.environ["KIN_TEST_LEGACY_B1_IMAGE"]}
         if pre:
@@ -665,8 +682,9 @@ class LegacyImageTests(unittest.TestCase):
         ops.state_service_closed(service)
         cls.pair_hashes = _hash_volume(cls.image_id, cls.volumes["state"])
         cls.counts = cls.psql("SELECT count(*) FROM emr_access.access_entry") + "/" + cls.psql("SELECT count(*) FROM emr_access.commit_marker")
-        print(json.dumps({"legacy_images": {"b1": {"id": cls.legacy["Id"], "labels": cls.legacy["Config"].get("Labels"), "reconstructed": True},
-                                            "pre_emr": cls.pre_emr and {"id": cls.pre_emr["Id"], "labels": cls.pre_emr["Config"].get("Labels"), "reconstructed": True}},
+        print(json.dumps({"legacy_images": {"b1": {"id": cls.legacy["Id"], "labels": cls.legacy["Config"].get("Labels"), "reconstructed": True, "bound": cls.bound.get("b1")},
+                                            "pre_emr": cls.pre_emr and {"id": cls.pre_emr["Id"], "labels": cls.pre_emr["Config"].get("Labels"), "reconstructed": True, "bound": cls.bound.get("pre_emr")}},
+                          "registry": cls.registry["bound"], "deployed_launch": cls.registry["deployed_launch"],
                           "pair_files": sorted(cls.pair_hashes)}), flush=True)
 
     @classmethod

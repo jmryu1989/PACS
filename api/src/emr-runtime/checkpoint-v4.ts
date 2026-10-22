@@ -554,6 +554,38 @@ export class Tree {
       return { low: gl, high: gh, count, ref: writer.append(KIND.branch, this.id, level, group.length, payload) };
     });
   }
+  /** Bulk load from members sorted by routing digest (then full key): one streaming pass writes the leaves in order and
+   * the branches bottom-up; a conversion's way to build a tree of any size without a change map in memory. */
+  static bulk(writer: PackWriter, id: number, members: Iterable<[string, string, string]>): Tree {
+    const builder = new Tree(writer.store, id, { pack: 'f'.repeat(32), page: '0', sha256: 'f'.repeat(64) }, 0, 0);
+    let chunk: [string, [string, string][]][] = [], chunkBytes = 0, low: string | null = null;
+    let bucket: [string, [string, string][]] | null = null;
+    const leaves: ChildDescriptor[] = [];
+    const flush = (high: string | null) => {
+      if (!chunk.length && leaves.length) return;
+      leaves.push(...builder.writeLeaves(writer, chunk, low, high));
+      low = high; chunk = []; chunkBytes = 0;
+    };
+    const take = (b: [string, [string, string][]]) => {
+      const bytes = Buffer.byteLength(canonical({ digest: b[0], count: String(b[1].length), value: { inline: b[1] } }));
+      if (chunk.length && chunkBytes + bytes + 1 > BODY_CAPACITY - 200) flush(b[0]);
+      chunk.push(b); chunkBytes += Math.min(bytes, 512) + 1;
+    };
+    let previousKey: string | null = null, previousDigest: string | null = null;
+    for (const [digest, key, raw] of members) {
+      if (previousDigest !== null && (digest < previousDigest || (digest === previousDigest && !(key > previousKey!)))) corrupt('bulk:order');
+      previousDigest = digest; previousKey = key;
+      if (bucket && bucket[0] === digest) { bucket[1].push([key, raw]); continue; }
+      if (bucket) take(bucket);
+      bucket = [digest, [[key, raw]]];
+    }
+    if (bucket) take(bucket);
+    flush(null);
+    if (!leaves.length) return Tree.empty(writer, id);
+    let level = 0, children = leaves;
+    while (children.length > 1) { children = builder.writeBranches(writer, children, level + 1, null, null); level++; }
+    return new Tree(writer.store, id, children[0].ref, children[0].count, level);
+  }
   /** Full structural check of the tree: every page, global partition, counts, uniqueness, buckets and blobs. Returns
    * the verified key count and page count. */
   check(): { keys: number; pages: number } {

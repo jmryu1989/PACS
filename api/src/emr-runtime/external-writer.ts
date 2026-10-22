@@ -492,8 +492,10 @@ export class Engine {
   materialize(): ExternalState {
     const state: ExternalState = { version: 3, revision: this.head.revision, generation: this.head.generation, tail: clone(this.head.tail), lineage: clone(this.head.lineage),
       bundles: {}, intents: clone(this.intents), slots: clone(this.slots), proofs: clone(this.proofs), terminal: {}, retired: clone(this.head.retired) };
-    for (const [key, value] of this.terminal.entries()) state.terminal[key] = clone(value);
-    for (const [key, value] of this.bundles.entries()) state.bundles[key] = clone(value);
+    // The whole-state object keeps v3's byte-sorted member order whatever the physical order of the map.
+    const sorted = (map: MemberMap) => { const items = [...map.entries()]; if (this.format === 4) items.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); return items; };
+    for (const [key, value] of sorted(this.terminal)) state.terminal[key] = clone(value);
+    for (const [key, value] of sorted(this.bundles)) state.bundles[key] = clone(value);
     return state;
   }
   lookup(map: string, id: string): any {
@@ -1536,10 +1538,13 @@ function admitEngineV4(engine: Engine, selector: { body: V4.SelectorBody; sha256
     if (hash(tailOnDisk) !== hash(meta.tail) && !(outstanding && hash(tailOnDisk) === outstanding.record.tailAfter)) fail('SealTailMismatch');
     if (!keys(meta.retired, ['viewing', 'history']) || !integer(meta.retired.viewing) || !integer(meta.retired.history)) refuse('retired');
     engine.format = 4;
-    engine.head = { version: 3, revision, generation, tail: meta.tail, lineage: meta.lineage, retired: meta.retired };
+    // The stored meta members stay immutable (the before/after comparison of a commit depends on it); the owner's head
+    // works on its own copy of the retired frontiers.
+    engine.head = { version: 3, revision, generation, tail: meta.tail, lineage: meta.lineage, retired: { ...meta.retired } };
     for (const [name, id] of [['intents', 2], ['slots', 3], ['proofs', 4]] as const) {
       const target: Record<string, any> = {};
-      for (const [key, raw] of trees[id].entries()) { const value = JSON.parse(raw); validateMapValue(name, key, value, generation, meta.lineage.origin); target[key] = value; }
+      const items = [...trees[id].entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      for (const [key, raw] of items) { const value = JSON.parse(raw); validateMapValue(name, key, value, generation, meta.lineage.origin); target[key] = value; }
       (engine as any)[name] = target;
     }
     for (const [position, q] of Object.entries(engine.slots) as [string, CommitBinding][]) engine.slotOf.set(q.stream + ':' + q.attemptId, position);
@@ -1638,7 +1643,7 @@ function commitRecordV4(engine: Engine, body: any, kind: 'update' | 'reserve'): 
     for (const [key, value] of Object.entries(dbBindings)) change(8, key, v.trees[8].get(key), value === null ? null : V4.canonical(value), [{ tree: 3, key }]);
     const metaAfter: any = { ...v.meta };
     if (body.publishing) metaAfter.tail = body.tail;
-    if (body.patch.retired) metaAfter.retired = engine.head.retired;
+    if (body.patch.retired) metaAfter.retired = { ...engine.head.retired };
     if (dbWitness !== undefined) metaAfter.dbWitness = dbWitness;
     for (const key of ['tail', 'retired', 'dbWitness'] as const) {
       const before = metaRaw(key, v.meta[key]), after = metaRaw(key, metaAfter[key]);
@@ -1764,6 +1769,154 @@ function v4Status(engine: Engine): any {
   const v = engine.v4!;
   return { format: 4, rootSha256: v.rootSha256, revision: v.root.revision, trees: v.root.trees.map(t => ({ id: t.id, count: t.count })), pending: v.pending.size,
     wal: { segment: v.segment.segment, lsn: v.lsn, bytes: v.walEnd, transitions: v.segmentTransitions }, packs: v.store.listPacks().length, fullCheck: v.root.fullCheck, dbWitness: v.meta.dbWitness, cacheBytes: v.store.cachedBytes };
+}
+// ───────────────────────── first conversion v3 -> v4 and lossless export v4 -> v3 (order section 5) ─────────────────────────
+export interface ConversionFacts {
+  /** The DB witness the caller verified against the database (the pair, the sealed prefixes, the retained starts, the expiry anchors). */
+  dbWitness: any;
+  /** One verified fact per committed slot `<stream>:<sequence>`: the exact marker binding and the stored entry's digest. */
+  dbBindings: Iterable<[string, { binding: CommitBinding; entrySha256: string | null }]>;
+}
+export interface ConversionReceipt {
+  kind: 'import-v3' | 'export-v3'; completedAt: string; validatorSha256: string; lineageSha256: string;
+  source: { directory: string; format: 3 | 4; revision: number; generation: number; identity: string; counts: Record<string, number> };
+  target: { directory: string; format: 3 | 4; revision: number; identity: string; counts: Record<string, number>; bytes: number };
+  verified: { members: number; trees?: Record<string, { keys: number; pages: number }> };
+}
+const newDirectory = (directory: string) => {
+  const info = fs.statSync(directory, { throwIfNoEntry: false });
+  if (info && (!info.isDirectory() || fs.readdirSync(directory).length)) fail('SealUnavailable');
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+};
+const copyTree = (from: string, to: string) => { if (fs.existsSync(from)) fs.cpSync(from, to, { recursive: true, errorOnExist: true }); };
+/** Stream members sorted by routing digest (then full key) through a disposable spill sorter into a bulk-loaded tree. */
+function bulkTree(writer: V4.PackWriter, id: number, scratch: string, members: Iterable<[string, string]>): V4.Tree {
+  const sorter = new SpillSorter(scratch, 'tree-' + id);
+  try {
+    for (const [key, raw] of members) sorter.add(V4.routingDigest(id, key) + '\u0000' + key, raw);
+    return V4.Tree.bulk(writer, id, (function* () { for (const item of sorter.iterate()) { const at = item.key.indexOf('\u0000'); yield [item.key.slice(0, at), item.key.slice(at + 1), item.value] as [string, string, string]; } })());
+  } finally { sorter.close(); }
+}
+/** First conversion: a fully validated, quiesced v3 directory streamed into a separate v4 target root with the
+ * caller-verified DB facts; the target is fully revalidated (every tree, every source member) before the receipt.
+ * The source is never written. */
+export function importV3ToV4(source: string, target: string, pair: PairIdentity | undefined, facts: ConversionFacts): ConversionReceipt {
+  const engine = admitEngine(source, pair, false, 3);
+  try {
+    if (engine.pristine) fail('SealMissing');
+    if (engine.publishing) fail('SealCorrupt');
+    validDbWitness(facts.dbWitness);
+    const lineage = engine.head.lineage!, lineageSha256 = V4.lineageSha256(lineage);
+    if (!samePair(facts.dbWitness.pair, lineage.origin) || facts.dbWitness.lineageSha256 !== lineageSha256) fail('SealChainMismatch');
+    newDirectory(target);
+    const v4 = v4Directory(target);
+    fs.mkdirSync(path.join(target, 'seal'), { mode: 0o700 });
+    for (const name of ['roots', 'pages', 'wal', 'quarantine', 'tmp']) fs.mkdirSync(path.join(v4, name), { recursive: true, mode: 0o700 });
+    copyTree(path.join(source, 'journal'), path.join(target, 'journal'));
+    copyTree(path.join(source, 'expiry-evidence'), path.join(target, 'expiry-evidence'));
+    const manifest = V4.loadValidatorManifest(appRoot());
+    const revision = engine.head.revision, revisionText = String(revision);
+    const store = new V4.PackStore(v4, lineageSha256), writer = new V4.PackWriter(store, revision), scratch = path.join(v4, 'tmp');
+    const trees: Record<number, V4.Tree> = {};
+    const small = (map: Record<string, any>): [string, string][] => Object.keys(map).sort().map(k => [k, JSON.stringify(map[k])]);
+    trees[2] = bulkTree(writer, 2, scratch, small(engine.intents));
+    trees[3] = bulkTree(writer, 3, scratch, small(engine.slots));
+    trees[4] = bulkTree(writer, 4, scratch, small(engine.proofs));
+    trees[5] = bulkTree(writer, 5, scratch, (function* () { for (const [k, raw] of engine.terminal.rawEntries()) yield [k, typeof raw === 'string' ? raw : raw.toString('utf8')] as [string, string]; })());
+    trees[6] = bulkTree(writer, 6, scratch, (function* () { for (const [k, raw] of engine.bundles.rawEntries()) yield [k, typeof raw === 'string' ? raw : raw.toString('utf8')] as [string, string]; })());
+    const pending: [string, string][] = [];
+    for (const id of Object.keys(engine.intents)) {
+      const slotKey = engine.slotOf.get(id); if (!slotKey) fail('UnsealedEntryUnexplained');
+      pending.push(['attempt:' + id, V4.canonical({ kind: 'attempt', stateKey: id, slotKey, proofKey: engine.proofs[id] ? id : null, revision: revisionText })]);
+    }
+    for (const id of engine.notFound) {
+      const terminal = engine.terminal.get(id); if (!terminal?.notFound) fail('UnsealedEntryUnexplained');
+      pending.push(['journal:' + id, V4.canonical({ kind: 'journal-not-found', stateKey: id, journalId: 'commit-not-found:' + id, eventId: terminal.notFound.eventId, contentSha256: terminal.notFound.contentSha256, revision: revisionText })]);
+    }
+    trees[7] = bulkTree(writer, 7, scratch, pending);
+    trees[8] = bulkTree(writer, 8, scratch, (function* () { for (const [key, value] of facts.dbBindings) { validDbBindingValue(key, value); yield [key, V4.canonical(value)] as [string, string]; } })());
+    const meta: any = { lineage, tail: engine.head.tail, retired: engine.head.retired, dbWitness: facts.dbWitness, copyProvenance: null,
+      validator: { id: V4.V4_VALIDATOR_ID, sha256: manifest.validatorSha256, mode: 'full', predecessorRoot: null, changedDependencySha256: null } };
+    const partial = V4.TREE_IDS.map(id => ({ id, count: id === 1 ? '0' : String(trees[id].count), ref: id === 1 ? trees[2].root : trees[id].root }));
+    const fullCheck: V4.FullCheck = { checkedRoot: null, coverageSha256: coverageSha256(partial, meta), checkedRevision: revisionText, validatorSha256: manifest.validatorSha256,
+      completedAt: new Date().toISOString(), dbWitnessSha256: V4.domainHash(V4.DOMAIN.witness, V4.canonical(facts.dbWitness)) };
+    meta.fullCheck = fullCheck;
+    trees[1] = bulkTree(writer, 1, scratch, V4_META_KEYS.map(k => [k, metaRaw(k, meta[k])] as [string, string]));
+    writer.close();
+    const descriptors = V4.TREE_IDS.map(id => ({ id, count: String(trees[id].count), ref: trees[id].root }));
+    const root: V4.RootBody = { format: V4.V4_FORMAT, version: 4, layout: 1, validatorId: V4.V4_VALIDATOR_ID, validatorSha256: manifest.validatorSha256, revision: revisionText,
+      generation: String(engine.head.generation), lineageSha256, trees: descriptors, stateTailSha256: hash(engine.head.tail), transition: { previousRoot: null, kind: 'import-v3', changes: null }, fullCheck };
+    const rootSha256 = V4.writeRoot(v4, root);
+    const segment = V4.WalSegment.create(v4);
+    const start = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '1', previousSha256: V4.ZERO64, type: 'start', baseRoot: rootSha256, previousSegment: null });
+    const prepare = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '2', previousSha256: start.sha256, type: 'prepare', previousRoot: null, nextRoot: rootSha256, transitionSha256: V4.domainHash(V4.DOMAIN.changes, V4.canonical(root.transition)), tailBefore: null, tailAfter: hash(engine.head.tail) });
+    V4.writeAtomic(path.join(target, 'seal', 'tail.json'), JSON.stringify(engine.head.tail));
+    const complete = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '3', previousSha256: prepare.sha256, type: 'complete', prepareLsn: '2', nextRoot: rootSha256 });
+    segment.close(); syncDirectory(V4.walDirectory(v4));
+    V4.writeSelector(path.join(target, 'seal', 'settlement.json'), { format: V4.V4_FORMAT, version: 4, layout: 1, rootSha256, revision: revisionText, wal: { segment: segment.segment, offset: String(complete.end), lsn: '3', previousSha256: complete.sha256 } });
+    store.close();
+    // Full revalidation of the produced target against the source: every tree, every member, every count.
+    const produced = admitEngine(target, pair, false, 4);
+    try {
+      const checked: Record<string, { keys: number; pages: number }> = {};
+      for (const id of V4.TREE_IDS) checked[String(id)] = produced.v4!.trees[id].check();
+      let members = 0;
+      const same = (a: string, b: string | undefined) => b !== undefined && hash(JSON.parse(a)) === hash(JSON.parse(b));
+      for (const [map, id] of [['intents', 2], ['slots', 3], ['proofs', 4]] as const) for (const [k, raw] of small((engine as any)[map])) { if (!same(raw, produced.v4!.trees[id].get(k))) fail('SealCorrupt'); members++; }
+      for (const [k, raw] of engine.terminal.rawEntries()) { if (!same(typeof raw === 'string' ? raw : raw.toString('utf8'), produced.v4!.trees[5].get(k))) fail('SealCorrupt'); members++; }
+      for (const [k, raw] of engine.bundles.rawEntries()) { if (!same(typeof raw === 'string' ? raw : raw.toString('utf8'), produced.v4!.trees[6].get(k))) fail('SealCorrupt'); members++; }
+      if (produced.v4!.trees[5].count !== engine.terminal.count || produced.v4!.trees[6].count !== engine.bundles.count || produced.v4!.trees[7].count !== pending.length) fail('SealCorrupt');
+      if (produced.head.revision !== revision || produced.head.generation !== engine.head.generation || hash(produced.head.tail) !== hash(engine.head.tail)) fail('SealCorrupt');
+      const bytes = fs.readdirSync(store.pagesDirectory).reduce((n, f) => n + fs.statSync(path.join(store.pagesDirectory, f)).size, 0);
+      return { kind: 'import-v3', completedAt: fullCheck.completedAt, validatorSha256: manifest.validatorSha256, lineageSha256,
+        source: { directory: source, format: 3, revision, generation: engine.head.generation, identity: engine.checkpoint!.digest, counts: { terminal: engine.terminal.count, bundles: engine.bundles.count, intents: Object.keys(engine.intents).length, slots: Object.keys(engine.slots).length, proofs: Object.keys(engine.proofs).length } },
+        target: { directory: target, format: 4, revision, identity: rootSha256, counts: Object.fromEntries(descriptors.map(d => [String(d.id), Number(d.count)])), bytes },
+        verified: { members, trees: checked } };
+    } finally { produced.close(); }
+  } catch (error) { throw translateV4(error); } finally { engine.close(); }
+}
+/** Lossless export of a v4 root's current logical state into a NEW v3 target (navigable checkpoint, tail, empty WAL),
+ * verified with the unchanged v3 reader member by member before the receipt. The v4 source is never written. */
+export function exportV4ToV3(source: string, target: string, pair?: PairIdentity): ConversionReceipt {
+  const engine = admitEngine(source, pair, false, 4);
+  try {
+    if (engine.pristine) fail('SealMissing');
+    newDirectory(target);
+    fs.mkdirSync(path.join(target, 'seal'), { mode: 0o700 });
+    copyTree(path.join(source, 'journal'), path.join(target, 'journal'));
+    copyTree(path.join(source, 'expiry-evidence'), path.join(target, 'expiry-evidence'));
+    const v = engine.v4!;
+    const head = { version: 3 as const, revision: engine.head.revision, generation: engine.head.generation, tail: engine.head.tail, lineage: engine.head.lineage,
+      retired: engine.head.retired, intents: engine.intents, slots: engine.slots, proofs: engine.proofs };
+    // The sort scratch lives beside the target (a protected directory holds only regular files under seal/) and is
+    // gone before the produced copy is admitted.
+    const scratch = fs.mkdtempSync(target + '.export-');
+    const sorted = (id: 5 | 6) => { const s = new SpillSorter(scratch, 'export-' + id); for (const [k, raw] of v.trees[id].entries()) s.add(k, raw); return s; };
+    const sorters = { terminal: sorted(5), bundles: sorted(6) };
+    let written: { digest: string; bytes: number };
+    try {
+      const file = path.join(target, 'seal', 'settlement.json');
+      written = writeNavigableCheckpoint(file, head, map => (function* () { for (const item of sorters[map].iterate()) yield [item.key, item.value] as [string, string]; })(), false);
+    } finally { sorters.terminal.close(); sorters.bundles.close(); try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { /* disposable */ } }
+    {
+      V4.writeAtomic(path.join(target, 'seal', 'tail.json'), JSON.stringify(engine.head.tail));
+      const fd = fs.openSync(path.join(target, 'seal', 'settlement.jsonl'), 'wx', 0o600); try { fs.fdatasyncSync(fd); } finally { fs.closeSync(fd); }
+      syncDirectory(path.join(target, 'seal'));
+      const produced = admitEngine(target, pair, false, 3);
+      try {
+        let members = 0;
+        const same = (a: string, b: any) => b !== undefined && hash(JSON.parse(a)) === hash(b);
+        for (const id of [2, 3, 4] as const) for (const [k, raw] of v.trees[id].entries()) { if (!same(raw, (produced as any)[({ 2: 'intents', 3: 'slots', 4: 'proofs' })[id]][k])) fail('SealCorrupt'); members++; }
+        for (const [k, raw] of v.trees[5].entries()) { if (!same(raw, produced.terminal.get(k))) fail('SealCorrupt'); members++; }
+        for (const [k, raw] of v.trees[6].entries()) { if (!same(raw, produced.bundles.get(k))) fail('SealCorrupt'); members++; }
+        if (produced.terminal.count !== v.trees[5].count || produced.bundles.count !== v.trees[6].count || produced.head.revision !== engine.head.revision || hash(produced.head.tail) !== hash(engine.head.tail)) fail('SealCorrupt');
+        return { kind: 'export-v3', completedAt: new Date().toISOString(), validatorSha256: v.validatorSha256, lineageSha256: v.root.lineageSha256,
+          source: { directory: source, format: 4, revision: engine.head.revision, generation: engine.head.generation, identity: v.rootSha256, counts: Object.fromEntries(v.root.trees.map(d => [String(d.id), Number(d.count)])) },
+          target: { directory: target, format: 3, revision: engine.head.revision, identity: written.digest, counts: { terminal: produced.terminal.count, bundles: produced.bundles.count, intents: Object.keys(produced.intents).length, slots: Object.keys(produced.slots).length, proofs: Object.keys(produced.proofs).length }, bytes: written.bytes },
+          verified: { members } };
+      } finally { produced.close(); }
+    }
+  } catch (error) { throw translateV4(error); } finally { engine.close(); }
 }
 /** Called only by the lock-owning writer. Tests substitute OS/FS transport, not state transitions. */
 export function executeExternal(request: WriterRequest): any {

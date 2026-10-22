@@ -128,7 +128,7 @@ jobs:
           KIN_TEST_LEGACY_B1_IMAGE: kin-legacy-recon:a86ecf1655c8
           KIN_TEST_LEGACY_PRE_EMR_IMAGE: kin-legacy-recon:b9690cc9790d
           KIN_TEST_RESOURCE_PREFIX: kin-emrbc-ci-
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/legacy-cells --cwd . --tree api/src/emr-runtime --file api/Dockerfile --file api/start-production.sh --file tests/production_image_test.py -- python3 -B -m unittest -v tests.production_image_test.LegacyImageTests
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/legacy-cells --cwd . --tree api/src/emr-runtime --file api/Dockerfile --file api/start-production.sh --file tests/production_image_test.py --file tests/emr/legacy_readers.json -- python3 -B -m unittest -v tests.production_image_test.LegacyImageTests
       - name: D931 lifetime fence (EMR-B2c) - one owner per state directory, second owner refused, death releases to the successor, peer CAS, crash cutpoints, flock cost
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/lock --cwd . --file api/src/emr-runtime/file-lock.ts --file api/src/emr-runtime/coordinator.ts --file api/src/emr-runtime/state-client.ts --file api/src/emr-runtime/state-client-worker.ts --file tests/emr/b/lock_test.cjs -- docker run --rm --network none --mount "type=bind,source=$PWD/tests/emr/b,target=/emr-b,readonly" "kin-emrb-ci:${{ github.sha }}" node /emr-b/lock_test.cjs
       - name: D878 developer smoke only (fixed-delay SQL model; live D961 acceptance is commander-only)

@@ -78,7 +78,7 @@ async function fixture(t, options = {}) {
   const directory = options.directory ?? fs.mkdtempSync(path.join(stateRoot, 'state-'));
   fs.chmodSync(directory, 0o700);
   const database = options.model ?? model();
-  const coordinator = new StateCoordinator(directory, executeExternal, { format: FORMAT });
+  const coordinator = new StateCoordinator(directory, executeExternal, { format: options.format ?? FORMAT });
   const journal = new FailureJournal(directory, coordinator), seal = new AccessSeal(directory, database.sql, journal);
   const pair = { instanceId: options.pair?.instanceId ?? 'synthetic-copy', chains: Object.fromEntries(Object.entries(database.streams).map(([s, v]) => [s, v.chainId])),
     database: options.pair?.database ?? { database: 'isolated', oid: 10001, address: '127.0.0.1', port: 5432 } };
@@ -1474,6 +1474,63 @@ test('V4-T05 pack reclamation unlinks only packs unreachable from the selected r
   void reclaimed;
 });
 
+test('V4-T08 first conversion of a healthy v3 pair into a separate v4 root and its lossless export back to a new v3 copy', { skip: FORMAT === 4 && 'runs in the v3 pass (the source is a v3 pair)' }, async t => {
+  const EW = load('emr-runtime/external-writer');
+  const f = await fixture(t), work = await (await f.hello()).work();
+  const acked = await complete(f, work, true), published = await complete(f, work);
+  await complete(f, work, true);
+  await a10Expire(f, work);                       // an expiry anchor with its retained-start change
+  const pending = await f.reserve(work);         // pending work travels with the conversion
+  // A superseded reservation leaves a journal obligation (terminal.superseded + commit-not-found).
+  const facts = await f.seal.conversionFacts(f.database.sql);
+  assert.equal(facts.dbWitness.streams.viewing.verifiedThrough.sequence, f.coordinator.call('view').tail.streams.viewing.sequence);
+  assert.ok(facts.dbWitness.streams.viewing.expiry, 'the expiry anchor is part of the witness');
+  assert.deepEqual(facts.dbWitness.streams.viewing.retainedStart, { sequence: 2, previousHash: f.database.streams.viewing.rows[0].previousHash });
+  const before = f.coordinator.call('read'), pendingKeys = pending.bundle.bindings.map(b => b.stream + ':' + b.attemptId);
+  f.service.close(); await f.service.drained(); f.coordinator.close();
+  const sourceBytes = directoryHashes(f.directory), target = f.directory + '-v4';
+  // The target is built from the quiesced source and fully revalidated; the source is never written.
+  const receipt = EW.importV3ToV4(f.directory, target, f.pair, facts);
+  assert.equal(receipt.kind, 'import-v3'); assert.equal(receipt.target.format, 4); assert.equal(receipt.source.revision, before.revision);
+  assert.equal(receipt.target.counts['5'], Object.keys(before.terminal).length); assert.equal(receipt.target.counts['6'], Object.keys(before.bundles).length);
+  assert.equal(receipt.target.counts['7'], pendingKeys.length, 'the pending attempts are the only pending work');
+  assert.equal(receipt.target.counts['8'], facts.dbBindings.length);
+  assert.ok(receipt.verified.members > 0 && Object.keys(receipt.verified.trees).length === 8);
+  assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(sourceBytes), 'the v3 source is byte-for-byte unchanged');
+  assert.throws(() => EW.importV3ToV4(f.directory, target, f.pair, facts), { code: 'SealUnavailable' }, 'an existing target is never overwritten');
+  // The target serves the same proofs, exclusions and pending work under the v4 owner (explicit mode 4).
+  const EW4 = load('emr-runtime/external-writer');
+  const v4Coordinator = new StateCoordinator(target, EW4.executeExternal, { format: 4 });
+  t.after(() => v4Coordinator.close());
+  const read = v4Coordinator.call('read');
+  // Map key order is not state (v3 keeps insertion order, v4 sorts); members and values must be identical.
+  for (const name of ['terminal', 'bundles', 'intents', 'slots', 'proofs']) assert.deepStrictEqual(read[name], before[name], 'conversion preserves ' + name);
+  assert.deepStrictEqual(read.tail, before.tail); assert.deepStrictEqual(read.lineage, before.lineage);
+  v4Coordinator.close();
+  const g = await fixture(t, { directory: target, model: model(structuredClone(f.database.streams)), cold: true, format: 4 });
+  await g.service.start(); assert.equal(g.service.state, 'ready', 'the converted target is admitted by the v4 owner');
+  const gw = await (await g.hello()).work();
+  for (const item of [acked, published]) assert.equal(JSON.stringify((await gw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs survive the conversion');
+  assert.equal((await gw.call('acknowledge', { proof: acked.proof, bindings: acked.bundle.bindings })).result.status, 'already-acknowledged', 'the exact ack survives');
+  for (const b of acked.bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+  assert.equal(g.coordinator.call('v4-status').pending, 0, 'the restart settled the carried pending reservation');
+  await complete(g, gw);
+  // Lossless export of the current logical state (including the work accepted in v4) into a NEW v3 copy.
+  const current = g.coordinator.call('read');
+  g.service.close(); await g.service.drained(); g.coordinator.close();
+  const exported = f.directory + '-v3-export';
+  const back = EW.exportV4ToV3(target, exported, f.pair);
+  assert.equal(back.kind, 'export-v3'); assert.equal(back.target.format, 3); assert.equal(back.verified.members, Object.keys(current.terminal).length + Object.keys(current.bundles).length + Object.keys(current.intents).length + Object.keys(current.slots).length + Object.keys(current.proofs).length);
+  const h = await fixture(t, { directory: exported, model: model(structuredClone(g.database.streams)), cold: true });
+  await h.service.start(); assert.equal(h.service.state, 'ready', 'the unchanged v3 reader admits the exported copy');
+  const exportedState = h.coordinator.call('read');
+  for (const name of ['terminal', 'bundles', 'intents', 'slots', 'proofs', 'retired']) assert.deepStrictEqual(exportedState[name], current[name], 'export preserves ' + name);
+  assert.deepStrictEqual(exportedState.tail, current.tail);
+  const hw = await (await h.hello()).work();
+  for (const item of [acked, published]) assert.equal(JSON.stringify((await hw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs survive the export');
+  for (const b of acked.bundle.bindings) assertExcluded(await replayObservation(h, hw, b));
+});
+
 test('D1656-T02 closed shell dispatch rejects unchanged legacy scripts before Node', async t => {
   const shell = process.env.KIN_EMR_SHELL || 'sh';
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-entry-mode-'));
@@ -1501,7 +1558,8 @@ test('D1656-T02 closed shell dispatch rejects unchanged legacy scripts before No
     assert.equal(result.status, 64, 'missing, unknown and extra arguments must refuse');
     assert.equal(fs.existsSync(path.join(base, 'invoked.txt')), false);
   }
-  for (const [mode, target] of [['state-serve-v3', 'dist/emr-runtime/state-service-main.js'], ['serve', 'dist/main.js']]) {
+  for (const [mode, target] of [['state-serve-v3', 'dist/emr-runtime/state-service-main.js'], ['state-serve-v4', 'dist/emr-runtime/state-service-main.js'],
+    ['state-convert-v4', 'dist/emr-runtime/state-service-main.js'], ['state-export-v3', 'dist/emr-runtime/state-service-main.js'], ['serve', 'dist/main.js']]) {
     const result = spawnSync(shell, [script, mode], { cwd: base, env, timeout: 10000 });
     assert.equal(result.status, 0, 'supported entry mode dispatches');
     assert.equal(fs.readFileSync(path.join(base, 'invoked.txt'), 'utf8').trim(), target);
