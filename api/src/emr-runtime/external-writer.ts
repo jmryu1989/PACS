@@ -2294,9 +2294,10 @@ export function exportV4ToV3(source: string, target: string, pair?: PairIdentity
     const v = engine.v4!;
     const head = { version: 3 as const, revision: engine.head.revision, generation: engine.head.generation, tail: engine.head.tail, lineage: engine.head.lineage,
       retired: engine.head.retired, intents: engine.intents, slots: engine.slots, proofs: engine.proofs };
-    // The sort scratch lives beside the target (a protected directory holds only regular files under seal/) and is
-    // gone before the produced copy is admitted.
-    const scratch = fs.mkdtempSync(target + '.export-');
+    // The sort scratch lives inside the (empty, owned) target - the only directory this root may write - and is gone
+    // before the produced copy is admitted (a protected directory holds only seal/, journal/ and expiry-evidence/).
+    const scratch = path.join(target, '.export-scratch');
+    fs.mkdirSync(scratch, { mode: 0o700 });
     const sorted = (id: 5 | 6) => { const s = new SpillSorter(scratch, 'export-' + id); for (const [k, raw] of v.trees[id].entries()) s.add(k, raw); return s; };
     const sorters = { terminal: sorted(5), bundles: sorted(6) };
     let written: { digest: string; bytes: number };
