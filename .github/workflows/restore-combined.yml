@@ -70,17 +70,3 @@ jobs:
           RECEIPT_SHA256: ${{ needs.produce.outputs.receipt_sha256 }}
           RELATION_SHA256: ${{ needs.produce.outputs.relation_sha256 }}
         run: python3 -B tests/ops_combined_transfer_fixture.py consume "$RUNNER_TEMP/kin-combined-download" --receipt-sha256 "$RECEIPT_SHA256" --relation-sha256 "$RELATION_SHA256"
-  legacy-produce:
-    name: produce
-    needs: produce
-    runs-on: ubuntu-24.04
-    timeout-minutes: 1
-    steps:
-      - run: exit 0
-  legacy-consume:
-    name: consume
-    needs: consume
-    runs-on: ubuntu-24.04
-    timeout-minutes: 1
-    steps:
-      - run: exit 0
