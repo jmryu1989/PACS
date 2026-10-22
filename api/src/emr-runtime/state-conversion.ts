@@ -96,6 +96,9 @@ export async function runStateConversion(environment: NodeJS.ProcessEnv = proces
     // error's message); never a path of the protected directories beyond what the detail already names.
     const detail = typeof error?.detail === 'string' ? error.detail : String(error?.message ?? '').split('\n')[0].slice(0, 160);
     process.stderr.write('EMR_STATE_CONVERSION_FAILED ' + String(error?.code ?? error?.name ?? 'unknown') + (detail ? ' ' + detail : '') + '\n');
+    // The refusing frames (compiled file:line inside the image, no data) so an operator can name the refused check.
+    const frames = String(error?.stack ?? '').split('\n').slice(1, 5).map(line => line.trim().replace(/^at /, '')).filter(Boolean);
+    if (frames.length) process.stderr.write('EMR_STATE_CONVERSION_TRACE ' + frames.join(' <- ') + '\n');
     return 1;
   } finally {
     try { coordinator?.close(); } catch { /* the fence is released by exit */ }
