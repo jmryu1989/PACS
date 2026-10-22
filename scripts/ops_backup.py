@@ -1127,7 +1127,10 @@ if(!r.lineage){process.exitCode=1}else console.log('KIN_RESULT '+JSON.stringify(
 
 
 def inspect_v4_volume(image, volume):
-    observed = _kin_result(temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={volume},target={EMR_STATE},readonly",
+    # The protected directory is the service identity's (0700, UID 1000): the read-only inspection runs as that identity
+    # over a read-only mount (it can read; it cannot own: no fence, no journal, nothing writable).
+    observed = _kin_result(temporary_run(["--network", "none", "--read-only", "--user", "1000:1000",
+                                          "--mount", f"type=volume,source={volume},target={EMR_STATE},readonly",
                                           "--entrypoint", "node", image, "--max-old-space-size=3072", "-e", EMR_V4_INSPECT_SCRIPT], timeout=1800))
     if (type(observed) is not dict or set(observed) != {"format", "lineage", "origin", "revision"} or observed["format"] != 4
             or type(observed["lineage"]) is not str or not observed["lineage"] or type(observed["origin"]) is not dict
