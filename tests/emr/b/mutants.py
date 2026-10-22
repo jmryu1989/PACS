@@ -489,6 +489,10 @@ V4_MUTANTS = {
         ("api/src/emr-runtime/checkpoint-v4.ts",
          "  const k = greedy.length;\n  if (k === 1) return greedy;\n",
          "  const k = greedy.length;\n  if (k >= 1) return folded();\n")]),
+    "V4-M14": ("a relocation leaves the owner's large maps on the superseded root (its pages are orphans, their packs reclaimed)", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    (engine.terminal as V4Map).rebind(trees[5]); (engine.bundles as V4Map).rebind(trees[6]);\n",
+         "")]),
 }
 V4_SUITES = {
     "service-v4": {"command": ["tests/emr/b/state_service_test.cjs"], "variable": "EMR_SERVICE_CASES", "env": {"EMR_STATE_FORMAT": "4"}, "declared": "local_service_cases"},

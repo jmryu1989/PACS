@@ -1552,6 +1552,10 @@ class V4Map implements MemberMap {
     for (const [key, raw] of this.rawEntries()) yield [key, typeof raw === 'string' ? JSON.parse(raw) : parseRaw(raw)];
   }
   committed(tree: Tree): void { this.tree = tree; this.delta.clear(); this.added = 0; this.removed = 0; }
+  /** The same members under a new root (a relocation or a scrub published between records): the change set, if any,
+   * stays as it is. Reads must follow the published root - the pages of the superseded one are orphans, their packs
+   * reclaimable at once. */
+  rebind(tree: Tree): void { if (tree.count !== this.tree.count) fail('SealCorrupt'); this.tree = tree; }
 }
 /** Meta values: the v3 objects (lineage, tail, retired) keep their v3 member JSON (so the existing tail digest and
  * lineage hash are over the same bytes); the v4 facts (validator, dbWitness, fullCheck, copyProvenance) are J-encoded. */
@@ -1907,6 +1911,9 @@ function initializeV4(engine: Engine, initialized: ExternalState): void {
 function reclaimV4(engine: Engine, force: boolean): { unlinked: number; retained: number; accounting: 'known' | 'unknown' } {
   const v = engine.v4!;
   if (!force) { const unlinked = reclaimDeadV4(v, V4_RECLAIM_SLICE * 4); return { unlinked, retained: v.packs ? v.packs.size : 0, accounting: v.packs ? 'known' : 'unknown' }; }
+  // The traversal alone decides what stays: the incarnation's writer is closed first (its pack is retained only by
+  // the pages the selected root references in it; the next transition opens a fresh pack).
+  try { v.writer?.close(); } catch { /* the files are the authority */ } v.writer = null;
   const live = traverseLive(v);
   const pinned = new Set<string>();
   if (v.sweep && v.sweep.startedRoot !== v.rootSha256) {
@@ -2156,6 +2163,8 @@ function publishNoChangeV4(engine: Engine, kind: 'scrub' | 'compact', trees: Rec
     const complete = v.segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: v.segment.segment, lsn: String(v.lsn + 2), previousSha256: prepare.sha256, type: 'complete', prepareLsn: String(v.lsn + 1), nextRoot });
     writeSelector(engine.file, { format: V4_FORMAT, version: 4, layout: 1, rootSha256: nextRoot, revision: root.revision, wal: { segment: v.segment.segment, offset: String(complete.end), lsn: String(v.lsn + 2), previousSha256: complete.sha256 } });
     v.rootSha256 = nextRoot; v.root = root; v.trees = trees; v.meta = metaAfter; v.transitionBlob = null;
+    // The owner's large maps read through the published root from now on (the superseded root's pages are orphans).
+    (engine.terminal as V4Map).rebind(trees[5]); (engine.bundles as V4Map).rebind(trees[6]);
     v.lsn += 2; v.previousSha256 = complete.sha256; v.walEnd = complete.end; v.segmentTransitions++;
     engine.checkpoint = { digest: nextRoot, bytes: 0, revision: engine.head.revision, publishing: false, navigable: true };
     engine.walOffset = complete.end;
@@ -2397,7 +2406,15 @@ export function executeExternal(request: WriterRequest): any {
         if (engine.format === 4) {
           // force: relocate until the pack population is bounded, then prove reachability and unlink; slice: one bounded
           // relocation slice when fragmentation is due plus the dead-pack slice; otherwise the dead-pack slice only.
-          if (value?.force === true) { for (let i = 0; i < 64 && fragmentationV4(engine.v4!).due; i++) if (!relocateV4(engine, V4_RELOCATE_PAGES * 4).relocated) break; return reclaimV4(engine, true); }
+          // An operator's forced compaction defragments: the pack being appended to is sealed first, every nearly
+          // empty pack's live pages are relocated into fresh packs (bounded rounds), then reachability is proven by
+          // traversal and every unreachable pack unlinked.
+          if (value?.force === true) {
+            const v = engine.v4!;
+            try { v.writer?.close(); } catch { /* the files are the authority */ } v.writer = null;
+            for (let i = 0; i < 64; i++) if (!relocateV4(engine, V4_RELOCATE_PAGES * 4).relocated) break;
+            return reclaimV4(engine, true);
+          }
           if (value?.slice === true) { const moved = fragmentationV4(engine.v4!).due ? relocateV4(engine, V4_RELOCATE_PAGES) : { relocated: 0, packs: [] }; return { ...moved, unlinked: reclaimDeadV4(engine.v4!, V4_RECLAIM_SLICE * 4) }; }
           return reclaimV4(engine, false);
         }

@@ -1497,7 +1497,11 @@ test('V4-T05 pack reclamation unlinks only packs unreachable from the selected r
   assert.ok(after.packs <= 2 * after.fragmentation.needed + 2, 'relocation of the live pages out of nearly empty packs bounds the pack population: ' + JSON.stringify({ packs: after.packs, fragmentation: after.fragmentation }));
   assert.equal(after.fragmentation.due, false);
   assert.ok(Number(after.revision) >= Number(before.revision), 'relocation is a logical no-change transition of the owner');
-  assert.equal(JSON.stringify(f.coordinator.call('read').terminal), JSON.stringify(stateBefore.terminal), 'relocation changes no member');
+  // The owner reads through the published root after the relocation (the superseded root's packs are gone).
+  let stateAfter = null, readRefusal = null;
+  try { stateAfter = f.coordinator.call('read'); } catch (error) { readRefusal = error; }
+  assert.equal(readRefusal, null, 'relocation changes no member (the read after the forced compaction was refused: ' + String(readRefusal && (readRefusal.detail || readRefusal.message)) + ')');
+  assert.equal(JSON.stringify(stateAfter.terminal), JSON.stringify(stateBefore.terminal), 'relocation changes no member');
   assert.equal(reclaimed.accounting, 'known', 'a forced reclamation proves reachability by traversal and rebuilds the accounting');
   for (const item of done) assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after reclamation');
   for (const b of done[5].bundle.bindings) assertExcluded(await replayObservation(f, work, b));
@@ -1599,7 +1603,11 @@ test('V4-T10 complete checking: resumable sweeps over a pinned root, no timestam
   // pinned root (the sweep still reads them), plus a forced reclamation; neither may touch the pinned root's pages.
   const during = await complete(g, gw);
   for (let i = 0; i < 30; i++) await complete(g, gw, i % 2 === 0);
-  g.coordinator.call('compact', { force: true });
+  // The forced reclamation proves reachability by traversing the pinned root too: a page of it already unlinked by
+  // an earlier slice is the sweep's failure surfacing here.
+  let forced = null;
+  try { g.coordinator.call('compact', { force: true }); } catch (error) { forced = error; }
+  assert.equal(forced, null, 'the sweep completes over its pinned root while the owner serves and reclaims (forced reclamation during the sweep: ' + String(forced && (forced.detail || forced.message)) + ')');
   assert.ok(fs.existsSync(path.join(f.directory, 'seal/v4/roots', start.rootSha256 + '.json')), 'the sweep root stays while the sweep runs');
   // The sweep is continued by the next incarnation (a fresh page cache: what the pinned root's pages are is decided by
   // the files, never by what an earlier incarnation happened to keep in memory), with the accounting it was handed.

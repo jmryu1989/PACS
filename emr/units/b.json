@@ -1431,6 +1431,13 @@
         "kill": ["V4-T02"],
         "assertions": {"V4-T02": "a growing tree accepts every insert"},
         "behaviour": "split a full page into a full page and a one-member remainder: the fan-out grows with the member count and the parent branch overflows (V4-T12 ladder: branch-overflow-internal at ~700 attempts)"
+      },
+      {
+        "id": "V4-M14",
+        "suite": "service-v4",
+        "kill": ["V4-T05"],
+        "assertions": {"V4-T05": "relocation changes no member"},
+        "behaviour": "leave the owner's terminal/bundle maps on the superseded root after a relocation: the next read walks orphaned pages whose pack is already reclaimed (V4-T12 ladder: missing-pack latch at ~250 attempts once the cache no longer masked it)"
       }
     ]
   }
