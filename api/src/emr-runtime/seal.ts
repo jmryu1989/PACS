@@ -639,6 +639,53 @@ export class AccessSeal {
     return { dbWitness: { version: 1, pair: view.lineage.origin, lineageSha256: lineageSha256(view.lineage), validationRevision: String(view.revision), streams }, dbBindings };
   }
 
+  /** Whether the v4 owner's periodic complete check is due (overdue age, clock rollback) or in progress. */
+  fullCheckDue(now: Date = new Date()): boolean {
+    if (this.view().format !== 4) return false;
+    const status = this.call('v4-status', { now: now.toISOString() });
+    return status.sweep !== null || status.fullCheck.overdue === true;
+  }
+  /**
+   * One bounded step of the v4 complete check (order section 2/4, V4-T10): the owner's storage sweep (every page and
+   * member of the pinned root), then the database phase here - every retained committed row of both streams, read in
+   * pages with its marker, compared with its stored verified binding (tree 8: the exact marker and the entry digest)
+   * and the chain continuity - then the owner publishes the new fullCheck fact. A disagreement latches the owner at
+   * once (`SealCorrupt`); no partial sweep ever moves the last-complete timestamp. Returns the owner's sweep summary.
+   */
+  async fullCheckStep(now: Date = new Date(), sql: PrismaLedgerSql = this.sql, budget?: number): Promise<any> {
+    if (this.view().format !== 4) throw new SealRefused('SealUnsupportedFormat', 'full-check');
+    const at = now.toISOString();
+    let step = this.call('full-check', { now: at, ...(budget !== undefined ? { budget } : {}) });
+    if (step.phase !== 'database') return step;
+    if (!step.dbDone) {
+      const witness = this.view().dbWitness;
+      const cursor: { stream: AccessStream; after: number } = step.db ?? { stream: 'viewing', after: (witness.streams.viewing.retainedStart?.sequence ?? 1) - 1 };
+      const stream = cursor.stream, w = witness.streams[stream];
+      const page = await sql.verificationPage(stream, cursor.after, EMR_REPLAY_VERIFY_ROWS);
+      let previous: StoredEntry | null = null, last = cursor.after;
+      for (const { entry, marker } of page.entries) {
+        if (entry.sequence > w.verifiedThrough.sequence) break;
+        const stored = this.call('db-binding', slot(stream, entry.sequence));
+        const disagreement = !marker || marker.sequence !== entry.sequence || !stored || stored.entrySha256 !== dbEntrySha256(stream, entry) ||
+          digest(stored.binding) !== digest(marker) || entryHash(entry.sequence, entry.previousHash, entry.payload) !== entry.hash ||
+          createHash('sha256').update(entry.payload).digest('hex') !== entry.contentSha256 ||
+          (previous !== null && (entry.sequence !== previous.sequence + 1 || entry.previousHash !== previous.hash)) ||
+          (previous === null && cursor.after > 0 && entry.sequence !== cursor.after + 1);
+        if (disagreement) { this.call('full-check', { now: at, latch: `${stream}:${entry.sequence}` }); }
+        previous = entry; last = entry.sequence;
+      }
+      const streamDone = last >= w.verifiedThrough.sequence || !page.entries.length || page.entries[page.entries.length - 1].entry.sequence > w.verifiedThrough.sequence;
+      if (streamDone && last < w.verifiedThrough.sequence) this.call('full-check', { now: at, latch: `${stream}:missing-rows` });
+      if (streamDone && stream === 'viewing') {
+        const h = witness.streams.history;
+        step = this.call('full-check', { now: at, db: { stream: 'history', after: (h.retainedStart?.sequence ?? 1) - 1 } });
+      } else if (streamDone) step = this.call('full-check', { now: at, db: 'done' });
+      else step = this.call('full-check', { now: at, db: { stream, after: last } });
+      if (!step.dbDone) return step;
+    }
+    return this.call('full-check', { now: at, complete: true });
+  }
+
   /** The DB exclusive writer fence is held through both positive verification and negative settlement.
    * Every append/expiry must take its shared transaction fence before publishing an intent.
    * (Full-restart recovery cost at the envelope is BLOCKED_DECISION per D1684: this path keeps its original passes.)

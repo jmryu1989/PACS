@@ -1611,6 +1611,178 @@ class StateServiceDailyTests(unittest.TestCase):
             self.assertEqual(archive_path.read_bytes(), orthanc_archive(state=True, version=2))
 
 
+V4_ROOT = "1" * 64
+V4_SEGMENT = "2" * 32
+
+
+def v4_archive(*, root=V4_ROOT, revision="7", segment=V4_SEGMENT, root_revision=None, with_root=True, with_segment=True,
+               selector=None, extra=(), omit=()):
+    """A v4 state capture as the service leaves it (identifiers only): selector envelope, the selected root envelope,
+    one pack, the current WAL segment, the independent tail, the journal. Domain hashes are not recomputed here (the
+    structural gate binds names and fields; the image's validator checks the bytes)."""
+    body = selector or {"format": ops.V4_SELECTOR_FORMAT, "version": 4, "layout": 1, "rootSha256": root, "revision": revision,
+                        "wal": {"segment": segment, "offset": "512", "lsn": "9", "previousSha256": "3" * 64}}
+    root_body = {"format": ops.V4_SELECTOR_FORMAT, "version": 4, "layout": 1, "validatorId": "b2c-v4.1", "validatorSha256": "4" * 64,
+                 "revision": root_revision if root_revision is not None else revision, "generation": "2", "lineageSha256": "5" * 64, "trees": []}
+    entries = [("./seal/settlement.json", json.dumps({"body": body, "sha256": "6" * 64}).encode()),
+               ("./seal/tail.json", b'{"streams":{}}'),
+               ("./seal/v4/pages/" + "7" * 32 + ".pages", b"KEMRP004" + b"\0" * 56),
+               ("./journal/failure-journal.jsonl", b"")]
+    if with_root:
+        entries.append(("./seal/v4/roots/" + root + ".json", json.dumps({"body": root_body, "sha256": root}).encode()))
+    if with_segment:
+        entries.append(("./seal/v4/wal/" + segment + ".jsonl", b'{"body":{},"sha256":"' + b"8" * 64 + b'"}\n'))
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        for name, data in [e for e in entries if e[0] not in omit] + list(extra):
+            entry = tarfile.TarInfo(name)
+            entry.size, entry.uid, entry.gid, entry.mode = len(data), 1000, 1000, 0o600
+            archive.addfile(entry, io.BytesIO(data))
+    return stream.getvalue()
+
+
+V4_INSPECTION = {"format": 4, "lineage": "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f", "origin": V3_ORIGIN, "revision": 7}
+
+
+class V4ServiceHost(ServiceHost):
+    """The fake (c) host serving a v4 pair: the service's entry mode is state-serve-v4, the state volume is a v4 root and
+    the image's read-only admission (inspect_v4_volume) answers the lineage and origin."""
+
+    def __init__(self, temporary):
+        super().__init__(temporary)
+        next(row for row in self.info if row["Name"] == "/" + ops.STATE_SERVICE)["Args"] = ["/app/start-production.sh", "state-serve-v4"]
+        self.state_archive = v4_archive()
+        self.inspections = []
+
+    def fake_archive(self, args, **kwargs):
+        if ops.EMR_V4_INSPECT_SCRIPT in args:
+            self.inspections.append(list(args))
+            return "KIN_RESULT " + json.dumps(V4_INSPECTION)
+        return super().fake_archive(args, **kwargs)
+
+
+class StateServiceV4Tests(unittest.TestCase):
+    """EMR-B2 (c) v4 (D1691): the capture/copy machinery extended with the v4 root (order section 5): the structural
+    gate of a v4 archive, the format decided by the capture's own bytes, the copy bound to its selector/root/pair, the
+    daily capture of a v4 deployment recording format 4 with the image-read lineage, and the entry mode per format."""
+
+    def test_v4_archive_gate_admits_a_complete_root_and_refuses_each_structural_defect(self):
+        admitted = ops.admit_v4_archive(io.BytesIO(v4_archive()))
+        self.assertEqual(admitted["format"], 4)
+        self.assertEqual(admitted["v4"], {"selectorSha256": "6" * 64, "rootSha256": V4_ROOT, "revision": 7, "lineageSha256": "5" * 64,
+                                          "validatorSha256": "4" * 64, "roots": 1})
+        self.assertEqual(len(admitted["fingerprint"]), 64)
+        self.assertNotIn("lineage", admitted, "the lineage is the image's to read, never inferred by the gate")
+        cases = {
+            "no selected root": v4_archive(with_root=False),
+            "root under another name": v4_archive(extra=[("./seal/v4/roots/" + "9" * 64 + ".json", json.dumps({"body": {"format": ops.V4_SELECTOR_FORMAT, "revision": "7"}, "sha256": V4_ROOT}).encode())], with_root=False),
+            "root of another revision": v4_archive(root_revision="6"),
+            "no current WAL segment": v4_archive(with_segment=False),
+            "a v3 WAL beside the selector": v4_archive(extra=[("./seal/settlement.jsonl", b'{"version":3}\n')]),
+            "an entry outside the layout": v4_archive(extra=[("./seal/v4/other/x", b"x")]),
+            "a nested pack": v4_archive(extra=[("./seal/v4/pages/sub/x.pages", b"x")]),
+            "malformed segment name": v4_archive(segment="zz"),
+            "malformed selector": v4_archive(selector={"format": "other"}),
+            "v3 checkpoint": v3_archive(),
+            "unsafe path": v4_archive(extra=[("../outside", b"x")]),
+            "duplicate path": v4_archive(extra=[("seal/tail.json", b"{}")]),
+        }
+        for label, raw in cases.items():
+            with self.subTest(case=label), self.assertRaises(RuntimeError):
+                ops.admit_v4_archive(io.BytesIO(raw))
+
+    def test_the_capture_format_is_decided_by_its_own_bytes(self):
+        v3 = ops.admit_state_archive(io.BytesIO(v3_archive()))
+        self.assertEqual((v3["format"], v3["lineage"], v3["origin"]), (3, "3b1c9d4e-0b7a-4c1d-9e8f-0a1b2c3d4e5f", V3_ORIGIN))
+        v4 = ops.admit_state_archive(io.BytesIO(v4_archive()))
+        self.assertEqual((v4["format"], v4["v4"]["rootSha256"]), (4, V4_ROOT))
+        for raw in (orthanc_archive(state=True, version=2), b"not a capture", orthanc_archive()):
+            with self.subTest(raw=raw[:8]), self.assertRaises(RuntimeError):
+                ops.admit_state_archive(io.BytesIO(raw))
+
+    def test_v4_copy_admission_binds_the_archive_to_its_selector_root_and_pair(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            archive_path = directory / "emr-state.tgz"
+            archive_path.write_bytes(v4_archive())
+            with archive_path.open("rb") as stream:
+                admitted = ops.admit_v4_archive(stream)
+            manifest = {"sha256": {"emr-state.tgz": ops.digest(archive_path)}, "emr": {"format": 4, "v4": admitted["v4"], "pair": {
+                "instance_id": "fixture-pair", "lineage": V4_INSPECTION["lineage"], "origin": V3_ORIGIN, "fingerprint": admitted["fingerprint"]}}}
+            copied = ops.admit_v4_copy(directory, manifest)
+            self.assertEqual((copied["format"], copied["lineage"], copied["origin"]), (4, V4_INSPECTION["lineage"], V3_ORIGIN))
+            self.assertEqual(ops.admit_state_copy(directory, manifest, 4), copied)
+            for label, change in (("another root", lambda m: m["emr"]["v4"].update(rootSha256="9" * 64)),
+                                  ("another revision", lambda m: m["emr"]["v4"].update(revision=8)),
+                                  ("another selector", lambda m: m["emr"]["v4"].update(selectorSha256="9" * 64)),
+                                  ("another fingerprint", lambda m: m["emr"]["pair"].update(fingerprint="0" * 64)),
+                                  ("no lineage", lambda m: m["emr"]["pair"].update(lineage=None)),
+                                  ("no v4 facts", lambda m: m["emr"].pop("v4")),
+                                  ("declared as v3", lambda m: m["emr"].update(format=3)),
+                                  ("another digest", lambda m: m["sha256"].update({"emr-state.tgz": "0" * 64}))):
+                with self.subTest(case=label):
+                    changed = copy.deepcopy(manifest)
+                    change(changed)
+                    with self.assertRaises(RuntimeError):
+                        ops.admit_v4_copy(directory, changed)
+            # the routes never cross: a v4 copy is not a v3 one, nor a legacy one
+            with self.assertRaises(RuntimeError):
+                ops.admit_v3_copy(directory, {**manifest, "emr": {**manifest["emr"], "format": 3}})
+            with self.assertRaises(RuntimeError):
+                ops.admit_legacy_copy(directory, manifest)
+            self.assertEqual(archive_path.read_bytes(), v4_archive())
+
+    def test_v4_daily_capture_records_format_4_with_the_image_read_lineage(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        host = V4ServiceHost(temporary.name)
+        host.init_ledger()
+        before = host.state_archive
+        folder, manifest, error = host.backup(rows_stream({1: "synthetic-audit"}))
+        self.assertIsNone(error)
+        self.assertTrue(manifest["complete"])
+        emr = manifest["emr"]
+        self.assertEqual(emr["format"], 4)
+        self.assertEqual(emr["service"]["entry"], ["sh", "/app/start-production.sh", "state-serve-v4"])
+        self.assertEqual(emr["pair"]["lineage"], V4_INSPECTION["lineage"])
+        self.assertEqual(emr["pair"]["origin"], V3_ORIGIN)
+        self.assertEqual(emr["v4"]["rootSha256"], V4_ROOT)
+        self.assertEqual(emr["v4"]["revision"], 7)
+        self.assertEqual((folder / "emr-state.tgz").read_bytes(), before)
+        self.assertGreaterEqual(len(host.inspections), 2, "the lineage is read at admission and before resume")
+        for inspection in host.inspections:
+            self.assertIn("--read-only", inspection)
+            self.assertTrue(any(word.endswith(",readonly") and "fixture-emr-state" in word for word in inspection), "the volume is mounted read-only")
+            self.assertIn("none", inspection)
+        self.assertEqual(host.state_archive, before)
+
+    def test_a_v4_service_over_a_v3_volume_or_a_v3_service_over_a_v4_volume_refuses_before_any_pause(self):
+        for label, service_mode, raw in (("v4 service over a v3 volume", "state-serve-v4", v3_archive()),
+                                         ("v3 service over a v4 volume", "state-serve-v3", v4_archive())):
+            with self.subTest(case=label):
+                temporary = tempfile.TemporaryDirectory()
+                self.addCleanup(temporary.cleanup)
+                host = V4ServiceHost(temporary.name)
+                host.init_ledger()
+                next(row for row in host.info if row["Name"] == "/" + ops.STATE_SERVICE)["Args"] = ["/app/start-production.sh", service_mode]
+                host.state_archive = raw
+                folder, manifest, error = host.backup(rows_stream({1: "synthetic-audit"}))
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIsNone(folder)
+                commands = [event[1] for event in host.events if event[0] == "command"]
+                self.assertFalse(any(cmd[:2] in (["docker", "stop"], ["docker", "start"]) or "pg_dump" in cmd for cmd in commands))
+                self.assertEqual(host.state_archive, raw)
+
+    def test_conversion_modes_name_the_launcher_entries_and_the_formats(self):
+        self.assertEqual(ops.CONVERSION_MODES["convert-v4"], {"source": 3, "target": 4, "entry": "state-convert-v4", "kind": "import-v3"})
+        self.assertEqual(ops.CONVERSION_MODES["export-v3"], {"source": 4, "target": 3, "entry": "state-export-v3", "kind": "export-v3"})
+        import ops_deploy_preflight as pre
+        self.assertEqual(pre.STATE_COMMANDS, {3: ["state-serve-v3"], 4: ["state-serve-v4"]})
+        self.assertEqual(pre.state_format_of(["/app/start-production.sh", "state-serve-v4"]), 4)
+        self.assertIsNone(pre.state_format_of(["/app/start-production.sh", "state-convert-v4"]), "a conversion root is never a serving owner")
+        self.assertIsNone(pre.state_format_of(["/app/start-production.sh", "serve"]))
+
+
 class StateCopyAdmissionTests(unittest.TestCase):
     def test_v3_unknown_mixed_and_changed_capture_refuse_before_any_copy_command(self):
         """D1656-T03/T07: actual legacy restore consumers reject v3 before granting a mount."""

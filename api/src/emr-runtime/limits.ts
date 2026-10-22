@@ -35,3 +35,7 @@ export const EMR_APPEND_POOL_SIZE = EMR_APPEND_LANES + EMR_VERIFY_RESERVE;
  * This cap never affects a new committed append or startup recovery.
  */
 export const EMR_REPLAY_VERIFY_ROWS = 1000;
+
+/** EMR-B2 (c) v4: how often an idle v4 owner looks at its periodic complete check (one bounded step per tick when
+ * the check is due or in progress; the 24-hour period itself is the format's V4_FULL_CHECK_MS). */
+export const EMR_FULL_CHECK_TICK_MS = 60_000;

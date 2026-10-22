@@ -336,6 +336,12 @@ class StateCopyRestoreContainerTests(unittest.TestCase):
                                 "pair": {"instance_id": admitted["origin"]["instanceId"], "lineage": admitted["lineage"],
                                          "origin": admitted["origin"], "fingerprint": admitted["fingerprint"]}}}
         cls.source_bytes = (cls.directory / "emr-state.tgz").read_bytes()
+        # The other components a complete set carries (copied unchanged by a conversion): placeholders here, the
+        # database of this cell being the private cluster restored below.
+        for component in ops.backup_components(cls.manifest):
+            if component != "emr-state.tgz":
+                (cls.directory / component).write_bytes(b"placeholder " + component.encode())
+        cls.manifest["sha256"].update({component: ops.digest(cls.directory / component) for component in ops.backup_components(cls.manifest)})
         with (cls.directory / "roles.sql").open("wb") as handle:
             ops.run(["docker", "exec", cls.db, "pg_dumpall", "-U", "postgres", "--roles-only", "--no-role-passwords"], output=handle)
         with (cls.directory / "kin.dump").open("wb") as handle:
@@ -396,6 +402,66 @@ class StateCopyRestoreContainerTests(unittest.TestCase):
                                                       "SELECT count(*) FROM emr_access.access_entry"])))
         self.assertGreaterEqual(int(counted), 1)
         print(json.dumps({"v3_private_restore": True, "image": self.image, "result": result}), flush=True)
+
+    def test_03_first_conversion_produces_a_verified_v4_set_and_leaves_the_v3_source_unchanged(self):
+        """V4-T08 (ops route, order section 5.3/5.4): the captured v3 set converted on private resources by the image's
+        own `state-convert-v4` root into a NEW v4 set, verified by the private restore route under `state-serve-v4`
+        (IPC ready, second owner refused, complete close); the source set's bytes never change."""
+        output = Path(self.temporary.name) / "produced"
+        output.mkdir(mode=0o700)
+        result = ops.convert_state(self.directory, self.manifest, output, self.private, self.token, "convert-v4")
+        self.assertEqual((self.directory / "emr-state.tgz").read_bytes(), self.source_bytes, "the source capture is never written")
+        self.assertTrue(result["source_bytes_unchanged"])
+        receipt = result["receipt"]
+        self.assertEqual((receipt["kind"], receipt["mode"], receipt["source"]["format"], receipt["target"]["format"]), ("import-v3", "convert-v4", 3, 4))
+        self.assertEqual(receipt["sourceFingerprintBefore"], receipt["sourceFingerprintAfter"])
+        self.assertTrue(receipt["copyMapping"], "the private database is another physical pair")
+        self.assertEqual(receipt["pair"], self.manifest["emr"]["pair"]["origin"])
+        self.assertGreater(receipt["verified"]["members"], 0)
+        produced = Path(result["produced_set"])
+        manifest = json.loads((produced / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["emr"]["format"], 4)
+        self.assertEqual(manifest["emr"]["pair"]["lineage"], self.manifest["emr"]["pair"]["lineage"], "the lineage is preserved")
+        self.assertEqual(manifest["emr"]["pair"]["origin"], self.manifest["emr"]["pair"]["origin"])
+        self.assertEqual(manifest["emr"]["v4"]["rootSha256"], receipt["target"]["identity"])
+        self.assertEqual(manifest["emr"]["conversion"]["source_state_sha256"], self.manifest["sha256"]["emr-state.tgz"])
+        for component in ops.backup_components(manifest):
+            self.assertEqual(ops.digest(produced / component), manifest["sha256"][component])
+            if component != "emr-state.tgz":
+                self.assertEqual((produced / component).read_bytes(), (self.directory / component).read_bytes())
+        verified = result["verified"]
+        self.assertEqual(verified["format"], 4)
+        self.assertTrue(verified["ipc_ready"] and verified["second_owner_refused"] and verified["service_closed"])
+        self.assertEqual(verified["cleanup_failures"], [])
+        type(self).produced_v4 = (produced, manifest)
+        print(json.dumps({"v4_first_conversion": True, "image": self.image, "result": result}), flush=True)
+
+    def test_04_rollback_export_produces_a_verified_v3_set_the_unchanged_v3_route_admits(self):
+        """V4-T08 (ops route, order section 5.6): the produced v4 set exported losslessly by `state-export-v3` into a
+        NEW v3 set, admitted and recovered by the v3 route (`state-serve-v3`) with the same lineage and origin."""
+        produced, manifest = getattr(type(self), "produced_v4", (None, None))
+        if produced is None:
+            self.skipTest("test_03 did not produce a v4 set")
+        output = Path(self.temporary.name) / "exported"
+        output.mkdir(mode=0o700)
+        before = (produced / "emr-state.tgz").read_bytes()
+        result = ops.convert_state(produced, manifest, output, self.private, self.token, "export-v3")
+        self.assertEqual((produced / "emr-state.tgz").read_bytes(), before, "the v4 source is never written")
+        receipt = result["receipt"]
+        self.assertEqual((receipt["kind"], receipt["mode"], receipt["source"]["format"], receipt["target"]["format"]), ("export-v3", "export-v3", 4, 3))
+        exported = Path(result["produced_set"])
+        exported_manifest = json.loads((exported / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(exported_manifest["emr"]["format"], 3)
+        self.assertNotIn("v4", exported_manifest["emr"])
+        self.assertEqual(exported_manifest["emr"]["pair"]["lineage"], self.manifest["emr"]["pair"]["lineage"])
+        self.assertEqual(exported_manifest["emr"]["pair"]["origin"], self.manifest["emr"]["pair"]["origin"])
+        with (exported / "emr-state.tgz").open("rb") as handle:
+            admitted = ops.admit_v3_archive(handle)
+        self.assertEqual((admitted["lineage"], admitted["origin"]), (self.manifest["emr"]["pair"]["lineage"], self.manifest["emr"]["pair"]["origin"]))
+        verified = result["verified"]
+        self.assertEqual(verified["format"], 3)
+        self.assertTrue(verified["ipc_ready"] and verified["second_owner_refused"] and verified["service_closed"])
+        print(json.dumps({"v4_rollback_export": True, "image": self.image, "result": result}), flush=True)
 
 
 if __name__ == "__main__":

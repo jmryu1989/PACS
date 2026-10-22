@@ -24,7 +24,18 @@ PROTECTED = ["api/prisma", "api/Dockerfile", "api/start-production.sh", "keycloa
 EMR_MIGRATION = "api/prisma/migrations/20261008120000_emr_b/migration.sql"
 EMR_STATE = "/var/lib/kin-emr"
 STATE_ENTRYPOINT = ["sh", "/app/start-production.sh"]
-STATE_COMMAND = ["state-serve-v3"]
+# EMR-B2 (c) v4 (D1691): the stored major format a deployment serves is fixed by its reviewed plan (release.state_format,
+# default 3); the entry mode names it and the compiled root refuses the other format before any journal or lock.
+STATE_COMMANDS = {3: ["state-serve-v3"], 4: ["state-serve-v4"]}
+STATE_COMMAND = STATE_COMMANDS[3]
+
+
+def state_format_of(args):
+    """The stored format a state-service argv serves (3 or 4), or None for anything that is not a serving mode."""
+    for state_format, command in STATE_COMMANDS.items():
+        if args == [*STATE_ENTRYPOINT[1:], *command]:
+            return state_format
+    return None
 STATE_API_IPC = "/run/kin-emr-api"
 STATE_RETENTION_IPC = "/run/kin-emr-retention"
 # Executed from the reviewed immutable artifact, with a read-only state mount.
@@ -504,7 +515,7 @@ def check_state_client(container, *, release, image, state_volume, api_ipc_volum
 
 
 def check_state_service(container, *, release, image, state_volume, api_ipc_volume, retention_ipc_volume,
-                        instance_id, database_host):
+                        instance_id, database_host, state_format=3):
     """Admission for a writable state mount, including stopped containers.
 
     release is the immutable artifact selection from the protected reviewed release/copy
@@ -512,14 +523,17 @@ def check_state_service(container, *, release, image, state_volume, api_ipc_volu
     installation. Image labels only cross-check that selection; they cannot select it.
     The launcher owns the operations lock and repeats observations at the launch handoff.
     This function issues no reusable admission token and performs no repair.
+    state_format is the plan's stored format (3 or 4): the entry mode must name exactly it.
     """
     check_reviewed_state_image(container, release, image)
     check_state_execution(container, image)
+    require(state_format in STATE_COMMANDS, "State format is not a supported stored format")
+    command = STATE_COMMANDS[state_format]
     config, host = container.get("Config") or {}, container.get("HostConfig") or {}
-    require(config.get("Entrypoint") == STATE_ENTRYPOINT and config.get("Cmd") == STATE_COMMAND,
+    require(config.get("Entrypoint") == STATE_ENTRYPOINT and config.get("Cmd") == command,
             "State service entry mode differs")
     require(container.get("Path") == STATE_ENTRYPOINT[0]
-            and container.get("Args") == [*STATE_ENTRYPOINT[1:], *STATE_COMMAND], "Stale state service command")
+            and container.get("Args") == [*STATE_ENTRYPOINT[1:], *command], "Stale state service command")
     require((config.get("Labels") or {}).get("com.docker.compose.service") == "emr-state",
             "Only the state service may receive protected storage")
     require(config.get("User") == "1000:1000" and sorted(host.get("GroupAdd") or []) == ["2001", "2002"],

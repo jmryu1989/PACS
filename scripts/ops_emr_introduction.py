@@ -309,6 +309,11 @@ PLAN_KEYS = ("schema", "mode", "unit", "target_kind", "target_manifest_sha256", 
 FRAME_PATH = re.compile(r"/dicom-web/studies/([0-9.]{1,64})/series/[0-9.]{1,64}/instances/[0-9.]{1,64}/frames/[1-9][0-9]{0,7}")
 
 
+def state_format(plan):
+    """The stored state format the plan's release serves (3 unless the reviewed plan fixes 4)."""
+    return plan["release"].get("state_format", 3)
+
+
 def plan_valid(plan):
     """The protected plan document: everything this release binds, and nothing the request could choose."""
     _keys(plan, PLAN_KEYS, "plan")
@@ -317,9 +322,13 @@ def plan_valid(plan):
     require(plan["target_kind"] in ("production", "rehearsal"), "Invalid target kind")
     _str(plan["target_manifest_sha256"], HASH, "target manifest hash")
     for key in ("previous", "release"):
-        _keys(plan[key], ("sha", "images"), key)
+        # EMR-B2 (c) v4: the release may fix the stored state format it serves (3 or 4; absent = 3). Only the plan
+        # selects it; a Compose command or a container never does.
+        _keys(plan[key], ("sha", "images", *(("state_format",) if "state_format" in plan[key] else ())), key)
         _str(plan[key]["sha"], SHA, key + " SHA")
         _images(plan[key]["images"], key)
+        require(type(plan[key].get("state_format", 3)) is int and plan[key].get("state_format", 3) in pre.STATE_COMMANDS,
+                "Unsupported state format in " + key)
     previous, release = plan["previous"], plan["release"]
     require(previous["sha"] != release["sha"] and previous["images"]["api"] != release["images"]["api"], "Target is already selected")
     require(all(previous["images"][key] == release["images"][key] for key in ("db", "keycloak", "orthanc")),
@@ -3881,7 +3890,7 @@ class HostOps:
             services["api-migrate"] = {"image": images["api"], "container_name": self.names["api-migrate"]}
             services["emr-provision"] = {"image": images["db"], "container_name": self.names["emr-provision"]}
             services["emr-state"] = {"image": images["api"], "container_name": state_service_name(self.t),
-                "entrypoint": pre.STATE_ENTRYPOINT, "command": pre.STATE_COMMAND, "user": "1000:1000",
+                "entrypoint": pre.STATE_ENTRYPOINT, "command": pre.STATE_COMMANDS[state_format(intro.plan)], "user": "1000:1000",
                 "group_add": ["2001", "2002"], "restart": "no", "environment": {"KIN_EMR_INSTANCE_ID": self.t["project"]}}
             services["api"]["environment"] = {"KIN_EMR_INSTANCE_ID": self.t["project"]}
         if maintenance:
@@ -4444,7 +4453,7 @@ class HostOps:
             require((not protected or role == "emr-state") and arguments[0] != "run",
                     "State roles require their fixed service launch, not a helper override")
             entrypoint, command = service.get("entrypoint"), service.get("command")
-            require(entrypoint == pre.STATE_ENTRYPOINT and command == (pre.STATE_COMMAND if role == "emr-state" else ["serve"]),
+            require(entrypoint == pre.STATE_ENTRYPOINT and command == (pre.STATE_COMMANDS[state_format(self.plan)] if role == "emr-state" else ["serve"]),
                     "Compose state role entry mode differs")
             image = decode(self.cmd(["docker", "image", "inspect", self.plan["release"]["images"]["api"]]).stdout)[0]
             execution = pre.state_compose_execution(service, image, (model.get("networks", {}).get("default") or {}).get("name"))
@@ -4566,7 +4575,7 @@ class HostOps:
         pre.check_state_service(container, release=self.plan["release"], image=image, state_volume=state_volume,
                                 api_ipc_volume=project + "_emr-state-api-ipc",
                                 retention_ipc_volume=project + "_emr-state-retention-ipc",
-                                instance_id=project, database_host="db")
+                                instance_id=project, database_host="db", state_format=state_format(self.plan))
         names = self.text(["docker", "container", "ls", "--all", "--filter", "volume=" + state_volume,
                            "--format", "{{.Names}}"]).splitlines()
         owners = [self.inspect_container(name) for name in names]

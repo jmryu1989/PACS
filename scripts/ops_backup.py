@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import copy
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -50,6 +51,13 @@ EMR_TABLESPACE = "/var/lib/postgresql/emr-access/ts"
 # process with the state volume; the API is its client. A daily set of this topology records format 3.
 STATE_SERVICE = "kin-emr-state"
 STATE_FORMAT = 3
+# EMR-B2 (c) v4 (D1691): a daily set of a v4 deployment records format 4; the archive is the same state volume (selector,
+# immutable roots and packs, WAL segments, independent tail, journal). Both formats take the private-copy restore route
+# with the matching entry mode of the same compiled service root.
+STATE_FORMATS = (3, 4)
+V4_SELECTOR_FORMAT = "KIN-EMR-STATE-V4"
+V4_HEX64 = re.compile(r"[0-9a-f]{64}")
+V4_HEX32 = re.compile(r"[0-9a-f]{32}")
 
 
 _resource_prefix = ContextVar("backup_resource_prefix", default="kin-rehearsal-")
@@ -412,10 +420,12 @@ class StateServiceBackupBoundary(LegacyBackupBoundary):
         env = pre.container_environment(api.get("Config") or {})
         if "KIN_EMR_STATE_DIR" in env or "KIN_EMR_READER_PASSWORD" in env or "KIN_EMR_STATE_SOCKET" not in env:
             raise RuntimeError("The API is not configured as a state-service client")
-        if service.get("Path") != pre.STATE_ENTRYPOINT[0] or service.get("Args") != [*pre.STATE_ENTRYPOINT[1:], *pre.STATE_COMMAND]:
+        self.format = pre.state_format_of(service.get("Args")) if service.get("Path") == pre.STATE_ENTRYPOINT[0] else None
+        if self.format is None:
             raise RuntimeError("State service entry mode differs")
         if service["Image"] != api["Image"]:
             raise RuntimeError("State service and API run different images")
+        self.image = service["Image"]
         super().__init__(containers, state_volume)
 
     def check_owners(self):
@@ -437,7 +447,14 @@ class StateServiceBackupBoundary(LegacyBackupBoundary):
                 self.containers["kin-db"]["Image"], "-czf", "-", "-C", "/source", "."],
                 timeout=1800, output=captured)
             captured.seek(0)
-            return admit_v3_archive(captured)
+            admitted = admit_state_archive(captured)
+        if admitted["format"] != self.format:
+            raise RuntimeError("State volume format differs from the service entry mode")
+        if admitted["format"] == 4:
+            # The v4 lineage and origin live inside the validated meta tree: the image's own read-only admission
+            # (the same compiled validator the service uses) reads them over a read-only mount, as a non-owner.
+            admitted.update(inspect_v4_volume(self.image, self.volume))
+        return admitted
 
 
 def state_service_closed(name):
@@ -597,7 +614,7 @@ def backup(output, ready_timeout=120):
     if service is not None:
         # The derived service identity and the captured pair (no secret: the instance, lineage and chain identifiers and
         # the database identity the checkpoint carries); the archive is admitted against them after the capture.
-        manifest["emr"].update(format=STATE_FORMAT, service={"container": STATE_SERVICE, "image": service["Image"],
+        manifest["emr"].update(format=boundary.format, service={"container": STATE_SERVICE, "image": service["Image"],
                                "entry": [service["Path"], *service["Args"]], "running_before": service_running,
                                "exit_code": None, "closed": None},
                                pair=None)
@@ -630,6 +647,8 @@ def backup(output, ready_timeout=120):
             admitted = boundary.inspect_state()
             manifest["emr"]["pair"] = {"instance_id": admitted["origin"]["instanceId"], "lineage": admitted["lineage"],
                                        "origin": admitted["origin"], "fingerprint": admitted["fingerprint"]}
+            if admitted["format"] == 4:
+                manifest["emr"]["v4"] = admitted["v4"]
         active = text(["docker", "exec", "kin-db", "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
                        "SELECT count(*) FROM pg_stat_activity WHERE datname='kin' AND backend_type='client backend' AND pid<>pg_backend_pid();"])
         if active != "0":
@@ -663,9 +682,13 @@ def backup(output, ready_timeout=120):
             if service is None:
                 admit_legacy_archive(handle)
             else:
-                captured = admit_v3_archive(handle)
+                captured = admit_state_archive(handle)
                 pair = manifest["emr"]["pair"]
-                if (captured["lineage"], captured["origin"], captured["fingerprint"]) != (pair["lineage"], pair["origin"], pair["fingerprint"]):
+                if captured["format"] != boundary.format or captured["fingerprint"] != pair["fingerprint"]:
+                    raise RuntimeError("Backup protected state changed during capture")
+                if captured["format"] == 3 and (captured["lineage"], captured["origin"]) != (pair["lineage"], pair["origin"]):
+                    raise RuntimeError("Backup protected state changed during capture")
+                if captured["format"] == 4 and captured["v4"] != manifest["emr"]["v4"]:
                     raise RuntimeError("Backup protected state changed during capture")
         stage = "copy configuration and checksum"
         for name in FILES[3:]:
@@ -986,23 +1009,168 @@ def admit_v3_archive(stream):
             or any(type(value) is not str or not value for value in origin["chains"].values())
             or type(origin["database"]) is not dict or set(origin["database"]) != {"database", "oid", "address", "port"}):
         raise RuntimeError("v3 state capture has no origin lineage")
-    return {"fingerprint": hashlib.sha256(json.dumps(sorted(inventory), separators=(',', ':')).encode()).hexdigest(),
+    return {"format": STATE_FORMAT, "fingerprint": hashlib.sha256(json.dumps(sorted(inventory), separators=(',', ':')).encode()).hexdigest(),
             "lineage": lineage["id"], "origin": origin}
+
+
+def _v4_selector(raw):
+    """The selector envelope {body, sha256} of a v4 root: its shape and the fields the capture binds; the domain hash
+    is the compiled validator's to verify (inspect_v4_volume / the service's own admission), never recomputed here."""
+    import ops_deploy_preflight as pre
+    envelope = json.loads(raw, object_pairs_hook=pre.unique_object)
+    body = envelope.get("body") if type(envelope) is dict and set(envelope) == {"body", "sha256"} else None
+    if (type(body) is not dict or body.get("format") != V4_SELECTOR_FORMAT or body.get("version") != 4 or body.get("layout") != 1
+            or type(body.get("rootSha256")) is not str or V4_HEX64.fullmatch(body["rootSha256"]) is None
+            or type(body.get("revision")) is not str or not body["revision"].isdigit() or type(body.get("wal")) is not dict
+            or type(body["wal"].get("segment")) is not str or V4_HEX32.fullmatch(body["wal"]["segment"]) is None
+            or type(envelope["sha256"]) is not str or V4_HEX64.fullmatch(envelope["sha256"]) is None):
+        raise RuntimeError("v4 state capture has no valid selector")
+    return body, envelope["sha256"]
+
+
+def admit_v4_archive(stream):
+    """EMR-B2 (c) v4: the read-only structural gate of a v4 state capture (live volume observation or immutable copy).
+
+    Reads the selector (seal/settlement.json: KIN-EMR-STATE-V4 envelope naming the current root, revision and WAL
+    segment), requires the named root envelope and WAL segment to be present as regular files under seal/v4/, admits
+    only the v4 layout (roots, pages, wal, quarantine, tmp; no v3 WAL) and hashes every entry; nothing is extracted,
+    repaired or executed. Lineage and origin come from the image's own admission (inspect_v4_volume). Returns the
+    inventory fingerprint and the selector facts (identifiers only)."""
+    selector, seen, inventory, roots, segments = None, set(), [], {}, set()
+    try:
+        with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+            for entry in archive:
+                member = PurePosixPath(entry.name)
+                if member.is_absolute() or ".." in member.parts or not (entry.isfile() or entry.isdir()) or str(member) in seen:
+                    raise RuntimeError("Unsafe or duplicate state capture entry")
+                seen.add(str(member))
+                content = archive.extractfile(entry) if entry.isfile() else None
+                hashed = hashlib.sha256()
+                name = str(member)
+                if name == "seal/settlement.json":
+                    if not entry.isfile():
+                        raise RuntimeError("State selector is not a file")
+                    raw = content.read()
+                    hashed.update(raw)
+                    selector = _v4_selector(raw)
+                elif name == "seal/settlement.jsonl":
+                    raise RuntimeError("v4 state capture carries a v3 WAL")
+                elif name.startswith("seal/v4/roots/") and entry.isfile():
+                    raw = content.read()
+                    hashed.update(raw)
+                    envelope = json.loads(raw)
+                    if (member.suffix != ".json" or type(envelope) is not dict or set(envelope) != {"body", "sha256"}
+                            or envelope["sha256"] != member.stem or type(envelope["body"]) is not dict):
+                        raise RuntimeError("v4 state capture has a malformed root")
+                    roots[member.stem] = envelope["body"]
+                elif name.startswith("seal/v4/wal/") and entry.isfile():
+                    if member.suffix != ".jsonl" or V4_HEX32.fullmatch(member.stem) is None:
+                        raise RuntimeError("v4 state capture has a malformed WAL segment name")
+                    segments.add(member.stem)
+                    for block in iter(lambda: content.read(1024 * 1024), b""):
+                        hashed.update(block)
+                elif name.startswith("seal/v4/") and entry.isfile():
+                    parent = member.parts[2] if len(member.parts) > 3 else None
+                    if parent not in ("pages", "quarantine", "tmp") or len(member.parts) != 4:
+                        raise RuntimeError("v4 state capture has an entry outside its layout")
+                    for block in iter(lambda: content.read(1024 * 1024), b""):
+                        hashed.update(block)
+                elif content is not None:
+                    for block in iter(lambda: content.read(1024 * 1024), b""):
+                        hashed.update(block)
+                inventory.append((name, entry.type.decode('ascii'), entry.size, entry.mode,
+                                  entry.uid, entry.gid, entry.mtime, hashed.hexdigest()))
+    except (ValueError, KeyError, TypeError, AttributeError, tarfile.TarError) as error:
+        raise RuntimeError("State capture format is unavailable") from error
+    if selector is None:
+        raise RuntimeError("v4 state capture has no selector")
+    body, selector_sha256 = selector
+    root = roots.get(body["rootSha256"])
+    if root is None or root.get("format") != V4_SELECTOR_FORMAT or root.get("revision") != body["revision"]:
+        raise RuntimeError("v4 state capture does not carry its selected root")
+    if body["wal"]["segment"] not in segments:
+        raise RuntimeError("v4 state capture does not carry its current WAL segment")
+    return {"format": 4, "fingerprint": hashlib.sha256(json.dumps(sorted(inventory), separators=(',', ':')).encode()).hexdigest(),
+            "v4": {"selectorSha256": selector_sha256, "rootSha256": body["rootSha256"], "revision": int(body["revision"]),
+                   "lineageSha256": root.get("lineageSha256"), "validatorSha256": root.get("validatorSha256"), "roots": len(roots)}}
+
+
+def admit_state_archive(stream):
+    """The format gate of a protected-state capture: a v3 checkpoint or a v4 selector, decided by the capture's own
+    first bytes (never by a caller's claim); each format's own gate then applies. Legacy (v1/v2) captures are not
+    admitted here (admit_legacy_archive is their separate route)."""
+    head = stream.read(2)
+    stream.seek(0)
+    if head != b"\x1f\x8b":
+        raise RuntimeError("State capture format is unavailable")
+    try:
+        with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+            for entry in archive:
+                if str(PurePosixPath(entry.name)) == "seal/settlement.json" and entry.isfile():
+                    first = archive.extractfile(entry).read(9)
+                    break
+            else:
+                first = b""
+    except tarfile.TarError as error:
+        raise RuntimeError("State capture format is unavailable") from error
+    stream.seek(0)
+    if first == b'{"state":':
+        return admit_v3_archive(stream)
+    return admit_v4_archive(stream)
+
+
+# The v4 lineage/origin of a state volume, read by the image's own compiled admission (inspectExternal in mode 4 as a
+# non-owner over a read-only mount): no lock, no journal, no repair. Identifiers only.
+EMR_V4_INSPECT_SCRIPT = """const {inspectExternal}=require('/app/dist/emr-runtime/external-writer');
+const r=inspectExternal('/var/lib/kin-emr',undefined,4);
+if(!r.state||!r.state.lineage){process.exitCode=1}else console.log('KIN_RESULT '+JSON.stringify({format:r.format,lineage:r.state.lineage.id,origin:r.state.lineage.origin,revision:r.state.revision}));"""
+
+
+def inspect_v4_volume(image, volume):
+    observed = _kin_result(temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={volume},target={EMR_STATE},readonly",
+                                          "--entrypoint", "node", image, "--max-old-space-size=3072", "-e", EMR_V4_INSPECT_SCRIPT], timeout=1800))
+    if (type(observed) is not dict or set(observed) != {"format", "lineage", "origin", "revision"} or observed["format"] != 4
+            or type(observed["lineage"]) is not str or not observed["lineage"] or type(observed["origin"]) is not dict
+            or set(observed["origin"]) != {"instanceId", "chains", "database"}):
+        raise RuntimeError("v4 state volume is not admitted by its image")
+    return {"lineage": observed["lineage"], "origin": observed["origin"], "revision": observed["revision"]}
 
 
 def admit_v3_copy(directory, manifest):
     """The immutable v3 copy: its bytes are the manifest's, its checkpoint lineage/origin are the captured pair's.
     Recheck at the executable handoff as well as before the first copy mutation."""
+    return admit_state_copy(directory, manifest, STATE_FORMAT)
+
+
+def admit_v4_copy(directory, manifest):
+    """The immutable v4 copy: its bytes are the manifest's, its selector/root are the captured ones; the lineage and
+    origin the manifest records were read by the image at capture and are rechecked by the service's own admission
+    on the private copy (verify_state_copy)."""
+    return admit_state_copy(directory, manifest, 4)
+
+
+def admit_state_copy(directory, manifest, state_format):
     archive_path = Path(directory) / "emr-state.tgz"
     expected = manifest.get("sha256", {}).get("emr-state.tgz")
-    pair = (manifest.get("emr") or {}).get("pair")
+    emr = manifest.get("emr") or {}
+    pair = emr.get("pair")
+    if state_format not in STATE_FORMATS or emr.get("format") != state_format:
+        raise RuntimeError("State capture format differs from the copy route")
     if not expected or archive_path.is_symlink() or digest(archive_path) != expected:
         raise RuntimeError("State capture changed before copy admission")
     with archive_path.open("rb") as stream:
-        admitted = admit_v3_archive(stream)
-    if (type(pair) is not dict or admitted["lineage"] != pair.get("lineage") or admitted["origin"] != pair.get("origin")
-            or admitted["fingerprint"] != pair.get("fingerprint")):
+        admitted = admit_state_archive(stream)
+    if admitted["format"] != state_format or type(pair) is not dict or admitted["fingerprint"] != pair.get("fingerprint"):
         raise RuntimeError("State capture does not carry its captured pair")
+    if state_format == 3:
+        if admitted["lineage"] != pair.get("lineage") or admitted["origin"] != pair.get("origin"):
+            raise RuntimeError("State capture does not carry its captured pair")
+    else:
+        recorded = emr.get("v4")
+        if (type(recorded) is not dict or type(pair.get("lineage")) is not str or type(pair.get("origin")) is not dict
+                or any(admitted["v4"].get(key) != recorded.get(key) for key in ("selectorSha256", "rootSha256", "revision", "lineageSha256"))):
+            raise RuntimeError("State capture does not carry its captured v4 root")
+        admitted.update(lineage=pair["lineage"], origin=pair["origin"])
     if digest(archive_path) != expected:
         raise RuntimeError("State capture changed during copy admission")
     return admitted
@@ -1029,17 +1197,30 @@ def _kin_result(output):
 
 
 def verify_v3_copy(directory, manifest, name, token, state_volume):
-    """EMR-B2 (c) positive v3 private restore (D1656-T07, C-O02): the captured state on a labelled private state volume,
-    paired with the privately restored database through the launch-scoped source->target mapping, recovered by the
-    same compiled service root (the capture's API image, state-serve-v3 as UID 1000), observed ready by an independent
-    non-promoting IPC client, with a second owner of the same private copy refused while the first lives, and closed
-    completely. The copy's origin lineage is never rewritten; the source set's bytes are rechecked at every handoff."""
+    """EMR-B2 (c) positive v3 private restore (D1656-T07, C-O02): see verify_state_copy."""
+    return verify_state_copy(directory, manifest, name, token, state_volume, STATE_FORMAT)
+
+
+def verify_v4_copy(directory, manifest, name, token, state_volume):
+    """EMR-B2 (c) v4 positive private restore: the same route under the v4 entry mode (state-serve-v4)."""
+    return verify_state_copy(directory, manifest, name, token, state_volume, 4)
+
+
+def verify_state_copy(directory, manifest, name, token, state_volume, state_format):
+    """EMR-B2 (c) positive private restore (D1656-T07, C-O02; v4: the same route): the captured state on a labelled
+    private state volume, paired with the privately restored database through the launch-scoped source->target mapping,
+    recovered by the same compiled service root (the capture's API image, the capture format's entry mode as UID 1000),
+    observed ready by an independent non-promoting IPC client, with a second owner of the same private copy refused while
+    the first lives, and closed completely. The copy's origin lineage is never rewritten; the source set's bytes are
+    rechecked at every handoff."""
     import ops_deploy_preflight as pre
-    admitted = admit_v3_copy(directory, manifest)
+    if state_format not in pre.STATE_COMMANDS:
+        raise RuntimeError("State capture format is not a supported stored format")
+    admitted = admit_state_copy(directory, manifest, state_format)
     origin = admitted["origin"]
     api_image = manifest["running_images"]["kin-api"]["id"]
     api_ipc, retention_ipc, service = name + "-emr-api-ipc", name + "-emr-retention-ipc", name + "-emr-state"
-    result = {"format": STATE_FORMAT, "lineage": admitted["lineage"], "copy_mapping": None, "ipc_ready": False,
+    result = {"format": state_format, "lineage": admitted["lineage"], "copy_mapping": None, "ipc_ready": False,
               "second_owner_refused": False, "service_closed": False}
     try:
         for volume in (api_ipc, retention_ipc):
@@ -1047,7 +1228,7 @@ def verify_v3_copy(directory, manifest, name, token, state_volume):
         temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
                        "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
                        manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
-        admit_v3_copy(directory, manifest)
+        admit_state_copy(directory, manifest, state_format)
         # The target pair: the private database's own identity and the restored chains (which must be the origin's).
         observed = _kin_result(temporary_run(["--network", "container:" + name, "--read-only",
                                               "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
@@ -1072,7 +1253,7 @@ def verify_v3_copy(directory, manifest, name, token, state_volume):
                         "--mount", f"type=volume,source={state_volume},target={EMR_STATE}",
                         "--mount", f"type=volume,source={api_ipc},target={pre.STATE_API_IPC}",
                         "--mount", f"type=volume,source={retention_ipc},target={pre.STATE_RETENTION_IPC}",
-                        "--entrypoint", "sh", api_image, "/app/start-production.sh", "state-serve-v3"]
+                        "--entrypoint", "sh", api_image, "/app/start-production.sh", *pre.STATE_COMMANDS[state_format]]
         run(["docker", "run", "-d", "--name", service, *service_args])
         wait_state_service(service, 0, timeout=120)
         client = ["--network", "container:" + name, "--read-only", "--user", "1001:1001", "--group-add", "2001",
@@ -1095,7 +1276,7 @@ def verify_v3_copy(directory, manifest, name, token, state_volume):
         run(["docker", "stop", "--time", "20", service], timeout=120)
         state_service_closed(service)
         result["service_closed"] = True
-        admit_v3_copy(directory, manifest)
+        admit_state_copy(directory, manifest, state_format)
     finally:
         failures = []
         for kind, resource in (("container", service + "-second"), ("container", service), ("volume", api_ipc), ("volume", retention_ipc)):
@@ -1106,6 +1287,179 @@ def verify_v3_copy(directory, manifest, name, token, state_volume):
         result["cleanup_failures"] = failures
     if result["cleanup_failures"]:
         raise RuntimeError("Private copy cleanup failed: " + ", ".join(result["cleanup_failures"]))
+    return result
+
+
+CONVERSION_MODES = {"convert-v4": {"source": 3, "target": 4, "entry": "state-convert-v4", "kind": "import-v3"},
+                    "export-v3": {"source": 4, "target": 3, "entry": "state-export-v3", "kind": "export-v3"}}
+
+
+def convert_state(directory, manifest, output, name, token, mode):
+    """EMR-B2 (c) v4 (order section 5.3/5.6): the first conversion of a captured v3 set into a NEW v4 set
+    (`convert-v4`), or the lossless export of a captured v4 set into a NEW v3 set (`export-v3`), on private resources:
+    the captured state restored into a labelled private source volume, the database privately restored by the caller
+    into `name` (the pair the conversion observes), the image's own one-shot conversion root (`state-convert-v4` /
+    `state-export-v3`: the service identity, the reader credential, the source's ordinary fence) streaming the logical
+    state into a labelled empty private target volume, and the target captured as a new set beside the source set:
+    every component of the source set copied unchanged except emr-state.tgz, the manifest's `emr` section rebound to the
+    produced format with the conversion receipt. The source set's bytes are never written and are rechecked at every
+    handoff; the produced set is then verified exactly as a restore is (verify_state_copy under its own entry mode).
+    Nothing here enacts a cutover: the produced set is a private copy under its existing purpose and copy rules."""
+    import ops_deploy_preflight as pre
+    spec = CONVERSION_MODES[mode]
+    admitted = admit_state_copy(directory, manifest, spec["source"])
+    origin = admitted["origin"]
+    api_image = manifest["running_images"]["kin-api"]["id"]
+    source_volume, target_volume = name + "-emr-source", name + "-emr-target"
+    source_bytes = digest(Path(directory) / "emr-state.tgz")
+    parent = Path(output).resolve()
+    if parent == ROOT or ROOT in parent.parents:
+        raise RuntimeError("Converted sets containing secrets must be outside the Git repository")
+    produced = parent / (Path(directory).name + "-v" + str(spec["target"]) + "-" + uuid.uuid4().hex[:8])
+    result = {"mode": mode, "source_set": str(directory), "source_format": spec["source"], "target_format": spec["target"],
+              "produced_set": None, "receipt": None, "verified": None, "source_bytes_unchanged": None}
+    try:
+        for volume in (source_volume, target_volume):
+            run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, volume])
+        temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={source_volume},target=/restore",
+                       "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
+                       manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
+        # The empty target belongs to the service identity (the conversion root refuses any other owner or mode).
+        temporary_run(["--network", "none", "--mount", f"type=volume,source={target_volume},target=/target", "--user", "0:0",
+                       "--entrypoint", "sh", api_image, "-c", "chown 1000:1000 /target && chmod 700 /target"], timeout=120)
+        admit_state_copy(directory, manifest, spec["source"])
+        observed = _kin_result(temporary_run(["--network", "container:" + name, "--read-only",
+                                              "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
+                                              "--entrypoint", "node", api_image, "-e", EMR_PAIR_SCRIPT], timeout=120))
+        if (type(observed) is not dict or set(observed) != {"database", "chains"} or type(observed["database"]) is not dict
+                or set(observed["database"]) != {"database", "oid", "address", "port"} or observed["chains"] != origin["chains"]):
+            raise RuntimeError("Restored ledger chains or database identity differ from the captured pair")
+        target = {"instanceId": origin["instanceId"], "chains": observed["chains"], "database": observed["database"]}
+        mapping = None if target == origin else {"source": origin, "target": target}
+        run(["docker", "exec", name, "psql", "-X", "-U", "kin", "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
+             "ALTER ROLE kin_emr_reader LOGIN; ALTER ROLE kin_runtime LOGIN;"])
+        conversion = run(["docker", "run", "--rm", "--network", "container:" + name, "--label", "kin.ops.run=" + token,
+                          "--user", "1000:1000", "--group-add", "2001", "--group-add", "2002",
+                          "-e", "DATABASE_URL=postgresql://kin_emr_reader@127.0.0.1:5432/kin",
+                          "-e", "KIN_EMR_STATE_DIR=" + EMR_STATE, "-e", "KIN_EMR_STATE_TARGET=/var/lib/kin-emr-target",
+                          "-e", "KIN_EMR_INSTANCE_ID=" + origin["instanceId"], "-e", "NODE_OPTIONS=--max-old-space-size=3072",
+                          *(["-e", "KIN_EMR_COPY_MAPPING=" + json.dumps(mapping, separators=(",", ":"))] if mapping else []),
+                          "--mount", f"type=volume,source={source_volume},target={EMR_STATE}",
+                          "--mount", f"type=volume,source={target_volume},target=/var/lib/kin-emr-target",
+                          "--entrypoint", "sh", api_image, "/app/start-production.sh", spec["entry"]], check=False, timeout=7200)
+        output_text = conversion.stdout.decode("utf-8", errors="replace")
+        lines = [line for line in output_text.splitlines() if line.strip()]
+        receipts = [line[len("EMR_STATE_CONVERSION_RECEIPT "):] for line in lines if line.startswith("EMR_STATE_CONVERSION_RECEIPT ")]
+        if conversion.returncode != 0 or not lines or lines[-1].strip() != "EMR_STATE_CONVERTED" or len(receipts) != 1:
+            raise RuntimeError("State conversion did not complete: " + (lines[-1][:200] if lines else "no output"))
+        receipt = json.loads(receipts[0])
+        if (type(receipt) is not dict or receipt.get("kind") != spec["kind"] or receipt.get("mode") != mode
+                or (receipt.get("target") or {}).get("format") != spec["target"] or (receipt.get("source") or {}).get("format") != spec["source"]
+                or receipt.get("sourceFingerprintBefore") != receipt.get("sourceFingerprintAfter")):
+            raise RuntimeError("State conversion receipt is not the expected one")
+        result["receipt"] = receipt
+        # The source set is byte-for-byte what it was; the source volume is a disposable private copy.
+        admit_state_copy(directory, manifest, spec["source"])
+        result["source_bytes_unchanged"] = digest(Path(directory) / "emr-state.tgz") == source_bytes
+        if not result["source_bytes_unchanged"]:
+            raise RuntimeError("Source set changed during conversion")
+        # The produced set: the target volume archived, admitted by the target format's gate, bound to its pair by the
+        # image's own admission (v4) or the checkpoint (v3); every other component copied from the source set.
+        produced.mkdir(mode=0o700, parents=True)
+        with (produced / "emr-state.tgz").open("wb") as handle:
+            temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={target_volume},target=/source,readonly",
+                           "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
+        with (produced / "emr-state.tgz").open("rb") as handle:
+            captured = admit_state_archive(handle)
+        if captured["format"] != spec["target"]:
+            raise RuntimeError("Produced state is not of the target format")
+        if captured["format"] == 4:
+            captured.update(inspect_v4_volume(api_image, target_volume))
+        if captured["lineage"] != admitted["lineage"] or captured["origin"] != origin:
+            raise RuntimeError("Produced state does not carry the source lineage and origin")
+        for component in backup_components(manifest):
+            if component != "emr-state.tgz":
+                shutil.copyfile(Path(directory) / component, produced / component)
+        new_manifest = copy.deepcopy(manifest)
+        new_manifest["emr"] = {**{k: v for k, v in manifest["emr"].items() if k != "v4"}, "format": spec["target"],
+                               "pair": {"instance_id": origin["instanceId"], "lineage": captured["lineage"], "origin": origin,
+                                        "fingerprint": captured["fingerprint"]},
+                               **({"v4": captured["v4"]} if captured["format"] == 4 else {}),
+                               "conversion": {"mode": mode, "receipt": receipt, "source_set": Path(directory).name,
+                                              "source_manifest_sha256": digest(Path(directory) / "manifest.json"),
+                                              "source_state_sha256": source_bytes, "converted_utc": datetime.now(timezone.utc).isoformat()}}
+        new_manifest["sha256"] = {name_: digest(produced / name_) for name_ in backup_components(new_manifest)}
+        new_manifest["bytes"] = {name_: (produced / name_).stat().st_size for name_ in backup_components(new_manifest)}
+        for component in backup_components(new_manifest):
+            (produced / component).chmod(0o600)
+        write_json(produced / "manifest.json", new_manifest)
+        result["produced_set"] = str(produced)
+        # The produced set is verified exactly as a restored copy is, under its own entry mode, on fresh private volumes.
+        verify_volume = name + "-emr-verify"
+        run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, verify_volume])
+        try:
+            result["verified"] = verify_state_copy(produced, new_manifest, name, token, verify_volume, spec["target"])
+        finally:
+            remove_owned_if_present("volume", verify_volume, token)
+    finally:
+        failures = []
+        for kind, resource in (("volume", source_volume), ("volume", target_volume)):
+            try:
+                remove_owned_if_present(kind, resource, token)
+            except Exception:
+                failures.append(resource)
+        result["cleanup_failures"] = failures
+    if result["cleanup_failures"]:
+        raise RuntimeError("Conversion cleanup failed: " + ", ".join(result["cleanup_failures"]))
+    return result
+
+
+def convert_set(source, output, mode):
+    """The CLI route: a complete captured set (daily or held, post-EMR shape) is restored privately as a rehearsal
+    restores it (fresh networkless cluster, catalog replay), then convert_state produces and verifies the new set."""
+    directory, manifest = validate_backup(source)
+    spec = CONVERSION_MODES[mode]
+    daily = manifest.get("kind") != HELD_KIND
+    shape = "post" if daily else manifest["shape"]
+    if shape != "post" or (manifest.get("emr") or {}).get("format") != spec["source"]:
+        raise RuntimeError("The set is not a format-%d protected-state capture" % spec["source"])
+    if daily and manifest.get("role_catalog") is None:
+        raise RuntimeError("The daily set carries no role catalog (D23); it cannot be restored privately")
+    admit_state_copy(directory, manifest, spec["source"])
+    token = uuid.uuid4().hex
+    name = resource_name(token)
+    started = time.monotonic()
+    result = {"backup": directory.name, "git_sha": manifest["git_sha"], "success": False, "mode": mode}
+    try:
+        run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token, "--network", "none",
+             "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+             "-e", "POSTGRES_USER=kin", "-e", "POSTGRES_DB=kin", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", manifest["postgres_image"]])
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "kin"], check=False).returncode == 0:
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("Isolated PostgreSQL did not become ready")
+        run(["docker", "exec", "-u", "postgres", name, "mkdir", "-m", "700", EMR_TABLESPACE])
+        catalog_source = daily_set_catalog(manifest["role_catalog"])[0] if daily else None
+        result["catalog"] = restore_snapshot(name, directory, "kin", "post", source=catalog_source)
+        if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
+            raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
+        result["conversion"] = convert_state(directory, manifest, output, name, token, mode)
+        result["success"] = True
+    finally:
+        failures = []
+        try:
+            remove_owned_if_present("container", name, token)
+        except Exception:
+            failures.append(name)
+        result["cleanup_failures"] = failures
+        result["seconds"] = round(time.monotonic() - started, 3)
+        write_json(directory / ("conversion-" + token[:16] + ".json"), result)
+        if failures:
+            raise RuntimeError("Conversion cleanup failed: " + ", ".join(failures))
+    print(json.dumps(result))
     return result
 
 
@@ -1120,11 +1474,16 @@ def rehearse_held(directory, manifest, *, daily=False):
     role catalog compared with the manifest's within the set (R5-02: daily_set_catalog; a source database outside the
     set is named in the result), the AuditLog seal verified as kin (no projection: a daily set has none)."""
     shape = "post" if daily else manifest["shape"]
-    # EMR-B2 (c): a format-3 set (captured from the protected-state service) takes the private-copy route with the same
-    # compiled service root; everything else keeps the original-format legacy reader route.
-    v3 = shape == "post" and (manifest.get("emr") or {}).get("format") == STATE_FORMAT
+    # EMR-B2 (c): a format-3 or format-4 set (captured from the protected-state service) takes the private-copy route
+    # with the same compiled service root in that format's entry mode; everything else keeps the original-format legacy
+    # reader route.
+    state_format = (manifest.get("emr") or {}).get("format") if shape == "post" else None
+    v3 = state_format in STATE_FORMATS
     if shape == "post":
-        (admit_v3_copy if v3 else admit_legacy_copy)(directory, manifest)
+        if v3:
+            admit_state_copy(directory, manifest, state_format)
+        else:
+            admit_legacy_copy(directory, manifest)
     token = uuid.uuid4().hex
     name = resource_name(token)
     volume, state_volume = name + "-orthanc", name + "-emr-state"
@@ -1170,7 +1529,7 @@ def rehearse_held(directory, manifest, *, daily=False):
                 raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
             if v3:
                 result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True,
-                                 **verify_v3_copy(directory, manifest, name, token, state_volume)}
+                                 **verify_state_copy(directory, manifest, name, token, state_volume, state_format)}
             else:
                 temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
                                "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
@@ -2357,7 +2716,8 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
         import ops_deploy_preflight as pre
         if any(m.get("Destination") == EMR_STATE for m in by_role["api"].get("Mounts") or []):
             raise RuntimeError("The API client carries a protected state mount")
-        if service.get("Path") != pre.STATE_ENTRYPOINT[0] or service.get("Args") != [*pre.STATE_ENTRYPOINT[1:], *pre.STATE_COMMAND]:
+        held_format = pre.state_format_of(service.get("Args")) if service.get("Path") == pre.STATE_ENTRYPOINT[0] else None
+        if held_format is None:
             raise RuntimeError("State service entry mode differs")
         state_volume = _volume_of(service, EMR_STATE)
         if state_volume != volumes["emr_state"] or present != set(EMR_ROLES):
@@ -2402,7 +2762,7 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
     if shape == "post":
         manifest["emr"] = {"state_volume": state_volume, "tablespace": "kin_emr_access", "same_pause": True}
         if service is not None:
-            manifest["emr"].update(format=STATE_FORMAT, service={"container": containers["state"], "image": service["Image"],
+            manifest["emr"].update(format=held_format, service={"container": containers["state"], "image": service["Image"],
                                    "entry": [service["Path"], *service["Args"]], "running_before": False, "exit_code": 0, "closed": True},
                                    pair=None)
     write_json(directory / "manifest.json", manifest)
@@ -2434,9 +2794,14 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
                 temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
                                "--entrypoint", "tar", db["Image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
             if service is not None:
-                # The captured v3 state admitted read-only and bound to its pair (identifiers only) for the restore route.
+                # The captured state admitted read-only and bound to its pair (identifiers only) for the restore route.
                 with (directory / "emr-state.tgz").open("rb") as handle:
-                    admitted = admit_v3_archive(handle)
+                    admitted = admit_state_archive(handle)
+                if admitted["format"] != held_format:
+                    raise RuntimeError("State volume format differs from the service entry mode")
+                if admitted["format"] == 4:
+                    admitted.update(inspect_v4_volume(service["Image"], state_volume))
+                    manifest["emr"]["v4"] = admitted["v4"]
                 manifest["emr"]["pair"] = {"instance_id": admitted["origin"]["instanceId"], "lineage": admitted["lineage"],
                                            "origin": admitted["origin"], "fingerprint": admitted["fingerprint"]}
         stage = "copy configuration and metadata"
@@ -3114,6 +3479,11 @@ def main():
     retire_parser = commands.add_parser("retirement", help="Evaluate RETIRE-PREDICATE for a lineage from explicit evidence; reports only")
     retire_parser.add_argument("--lineage", required=True)
     retire_parser.add_argument("--evidence", required=True, help="JSON file: the five conditions, each {met, evidence, ...}")
+    for mode, help_text in (("convert-v4", "First conversion of a captured v3 set into a NEW v4 set on private resources (no cutover)"),
+                            ("export-v3", "Lossless export of a captured v4 set into a NEW v3 set on private resources (rollback copy)")):
+        conversion_parser = commands.add_parser(mode, help=help_text)
+        conversion_parser.add_argument("--set", dest="source_set", required=True, help="The complete captured set directory")
+        conversion_parser.add_argument("--output", required=True, help="Parent directory for the produced set, outside the repository")
     args = parser.parse_args()
     if args.action == "copy-manifest":
         # A description of an existing manifest: no Docker, no lock, no write.
@@ -3140,7 +3510,9 @@ def main():
         return
     require_local_docker()
     with lock():
-        if args.action == "backup":
+        if args.action in CONVERSION_MODES:
+            convert_set(args.source_set, args.output, args.action)
+        elif args.action == "backup":
             if not 1 <= args.rotate_keep <= 365:
                 raise RuntimeError("Rotation keeps between 1 and 365 generations")
             # backup() raises on any incomplete set, resume/readiness failure or backup_error: rotation follows only a

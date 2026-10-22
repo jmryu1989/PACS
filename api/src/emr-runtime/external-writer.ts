@@ -1386,10 +1386,32 @@ export interface V4State {
   meta: { lineage: StateLineage; tail: any; retired: Record<string, number>; validator: any; dbWitness: any; fullCheck: V4.FullCheck; copyProvenance: any };
   pending: Map<string, any>;
   segment: V4.WalSegment; lsn: number; previousSha256: string; walEnd: number; segmentStart: number; segmentTransitions: number; segmentOpenedAt: number;
+  /** The periodic complete check in progress (resumable across restarts through its scratch file), if any. */
+  sweep: V4Sweep | null;
+  /** Discovered corruption: the owner is latched (no further transition) until the operator restores/repairs. */
+  latched: V4Latch | null;
 }
+/** The complete check's progress: the pinned root it checks, the storage cursor (tree, digest) and the DB cursor. */
+export interface V4Sweep {
+  startedRoot: string; startedAt: string; phase: 'storage' | 'database'; tree: number; from: string | null;
+  keys: Record<string, number>; pages: number; db: { stream: string; after: number } | null; dbDone: boolean;
+}
+export interface V4Latch { code: string; detail: string; at: string; root: string; phase: string; tree: number | null; from: string | null }
 const V4_META_KEYS = ['lineage', 'tail', 'retired', 'validator', 'dbWitness', 'fullCheck', 'copyProvenance'] as const;
 const V4_ROTATE_BYTES = 64 * 1024 * 1024, V4_ROTATE_TRANSITIONS = 2048, V4_ROTATE_MS = 30_000;
+/** The complete-check period (order section 2: a periodic full check within 24 h) and the leaves one step may visit. */
+export const V4_FULL_CHECK_MS = 24 * 60 * 60 * 1000, V4_FULL_CHECK_STEP_LEAVES = 256;
 const v4Directory = (directory: string) => path.join(directory, 'seal', 'v4');
+const sweepFile = (v4: string) => path.join(v4, 'tmp', 'full-check.json');
+const latchFile = (v4: string) => path.join(v4, 'tmp', 'latch.json');
+function readScratch(file: string): any {
+  if (!fs.existsSync(file)) return null;
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+function writeScratch(file: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  V4.writeAtomic(file, JSON.stringify(value));
+}
 /** The repository/image root the validator manifest is read from (dist/emr-runtime in the image, api/src here). */
 const appRoot = () => __dirname.split(path.sep).includes('dist') ? path.resolve(__dirname, '..', '..') : path.resolve(__dirname, '..', '..', '..');
 function translateV4(error: any): any {
@@ -1469,6 +1491,10 @@ function admitEngineV4(engine: Engine, selector: { body: V4.SelectorBody; sha256
   const refuse = (detail: string): never => { throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail }); };
   try {
     const v4 = v4Directory(engine.directory);
+    // A latched root (corruption discovered by a complete check or an on-use validation) is never admitted again
+    // until the operator restores or repairs it and removes the latch: no fast path, no silent return to ready.
+    const latch = readScratch(latchFile(v4));
+    if (latch) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'latched:' + String(latch.detail ?? ''), latch });
     let rootSha256 = selector.body.rootSha256, root = V4.readRoot(v4, rootSha256);
     if (root.revision !== selector.body.revision) refuse('selector-revision');
     const segmentFile = path.join(V4.walDirectory(v4), selector.body.wal.segment + '.jsonl');
@@ -1569,7 +1595,8 @@ function admitEngineV4(engine: Engine, selector: { body: V4.SelectorBody; sha256
     engine.validateTouched(touched, false);
     const stat = fs.statSync(segmentFile);
     engine.v4 = { directory: v4, store, validatorSha256: manifest.validatorSha256, rootSha256, root, trees, meta, pending,
-      segment: new V4.WalSegment(v4, selector.body.wal.segment), lsn, previousSha256: previous, walEnd, segmentStart: 0, segmentTransitions: 0, segmentOpenedAt: stat.mtimeMs };
+      segment: new V4.WalSegment(v4, selector.body.wal.segment), lsn, previousSha256: previous, walEnd, segmentStart: 0, segmentTransitions: 0, segmentOpenedAt: stat.mtimeMs,
+      sweep: loadSweep(v4), latched: null };
     engine.log = segmentFile;
     engine.checkpoint = { digest: rootSha256, bytes: 0, revision, publishing: false, navigable: true };
     engine.walOffset = walEnd;
@@ -1585,6 +1612,7 @@ function coverageSha256(descriptors: V4.TreeDescriptor[], meta: any): string {
  * independent tail when it advances, WAL complete, then the selector; only then is the view advanced. */
 function commitRecordV4(engine: Engine, body: any, kind: 'update' | 'reserve'): void {
   const v = engine.v4!;
+  if (v.latched) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'latched:' + v.latched.detail, latch: v.latched });
   validateRecordShape(body, engine.head.lineage?.origin);
   if (body.revision !== engine.head.revision + 1 || body.generation < engine.head.generation) fail('SealCorrupt');
   if (kind === 'reserve' && (body.publishing || body.generation !== engine.head.generation + 1)) fail('SealCorrupt');
@@ -1749,6 +1777,8 @@ function reclaimV4(engine: Engine, force: boolean): { unlinked: number; retained
   const read = V4.WalSegment.read(v.segment.file, 0);
   const pinnedRoots = new Set<string>();
   for (const item of read.records) { const r = item.record; if (r.type === 'start') pinnedRoots.add(r.baseRoot); else if (r.type === 'prepare') { if (r.previousRoot) pinnedRoots.add(r.previousRoot); pinnedRoots.add(r.nextRoot); } else pinnedRoots.add(r.nextRoot); }
+  // A complete check in progress pins the root it is checking (its pages stay until the sweep ends).
+  if (v.sweep) pinnedRoots.add(v.sweep.startedRoot);
   for (const sha of pinnedRoots) {
     if (sha === v.rootSha256) continue;
     let root: V4.RootBody; try { root = V4.readRoot(v.directory, sha); } catch { continue; }
@@ -1765,10 +1795,150 @@ function reclaimV4(engine: Engine, force: boolean): { unlinked: number; retained
   if (unlinked) { syncDirectory(v.store.pagesDirectory); v.store.invalidate(); }
   return { unlinked, retained };
 }
-function v4Status(engine: Engine): any {
+function v4Status(engine: Engine, now?: string): any {
   const v = engine.v4!;
+  // The complete check's age: measured from the last complete sweep; a clock behind that time (rollback) is not
+  // a fresh check, it is reported overdue with its reason (no timestamp is ever reset by a partial sweep).
+  const at = now !== undefined ? Date.parse(now) : Date.now();
+  if (!Number.isFinite(at)) fail('SealCorrupt');
+  const completedAt = Date.parse(v.root.fullCheck.completedAt), ageMs = at - completedAt;
+  const reason = ageMs < 0 ? 'clock-rollback' : ageMs > V4_FULL_CHECK_MS ? 'age' : null;
   return { format: 4, rootSha256: v.rootSha256, revision: v.root.revision, trees: v.root.trees.map(t => ({ id: t.id, count: t.count })), pending: v.pending.size,
-    wal: { segment: v.segment.segment, lsn: v.lsn, bytes: v.walEnd, transitions: v.segmentTransitions }, packs: v.store.listPacks().length, fullCheck: v.root.fullCheck, dbWitness: v.meta.dbWitness, cacheBytes: v.store.cachedBytes };
+    wal: { segment: v.segment.segment, lsn: v.lsn, bytes: v.walEnd, transitions: v.segmentTransitions }, packs: v.store.listPacks().length,
+    fullCheck: { ...v.root.fullCheck, ageMs, overdue: reason !== null, reason, periodMs: V4_FULL_CHECK_MS },
+    sweep: v.sweep ? { startedRoot: v.sweep.startedRoot, startedAt: v.sweep.startedAt, phase: v.sweep.phase, tree: v.sweep.tree, keys: { ...v.sweep.keys }, pages: v.sweep.pages, db: v.sweep.db, dbDone: v.sweep.dbDone } : null,
+    latched: v.latched, dbWitness: v.meta.dbWitness, cacheBytes: v.store.cachedBytes };
+}
+// ───────────────────────── periodic complete check (order section 2/4, V4-T10) ─────────────────────────
+function loadSweep(v4: string): V4Sweep | null {
+  const s = readScratch(sweepFile(v4));
+  if (!s || !keys(s, ['startedRoot', 'startedAt', 'phase', 'tree', 'from', 'keys', 'pages', 'db', 'dbDone']) || !sha(s.startedRoot) ||
+    !['storage', 'database'].includes(s.phase) || !integer(s.tree, 1) || s.tree > 9 || !(s.from === null || text(s.from)) || !isRecord(s.keys)) return null;
+  try { V4.readRoot(v4, s.startedRoot); } catch { return null; }    // the pinned root is gone (never: GC keeps it) -> start over
+  return s as V4Sweep;
+}
+function persistSweep(v: V4State): void { writeScratch(sweepFile(v.directory), v.sweep); }
+/** Discovered corruption: persist the latch (the next admission refuses), taint the engine (every later operation
+ * re-admits and refuses), and refuse this operation. */
+function latchV4(engine: Engine, code: string, detail: string, phase: string, tree: number | null, from: string | null): never {
+  const v = engine.v4!;
+  const latch: V4Latch = { code, detail, at: new Date().toISOString(), root: v.rootSha256, phase, tree, from };
+  try { writeScratch(latchFile(v.directory), latch); } catch { /* the in-memory latch still refuses */ }
+  v.latched = latch; engine.tainted = true;
+  throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'latched:' + detail, latch });
+}
+/** The semantic validation of one stored member of tree `id` (what the on-use path validates when it consults it). */
+function checkMemberV4(engine: Engine, id: number, key: string, raw: string): void {
+  const generation = engine.head.generation, origin = engine.head.lineage?.origin;
+  switch (id) {
+    case 1: if (!(V4_META_KEYS as readonly string[]).includes(key)) fail('SealCorrupt'); JSON.parse(raw); return;
+    case 2: validateMapValue('intents', key, JSON.parse(raw), generation, origin); return;
+    case 3: validateMapValue('slots', key, JSON.parse(raw), generation, origin); return;
+    case 4: validateMapValue('proofs', key, JSON.parse(raw), generation, origin); return;
+    case 5: validateMapValue('terminal', key, JSON.parse(raw), generation, origin); return;
+    case 6: validateMapValue('bundles', key, JSON.parse(raw), generation, origin); return;
+    case 7: {
+      const value = V4.parseCanonical(raw, 'pending');
+      if (key.startsWith('attempt:')) { if (!keys(value, ['kind', 'stateKey', 'slotKey', 'proofKey', 'revision']) || value.kind !== 'attempt' || key !== 'attempt:' + value.stateKey) fail('SealCorrupt'); }
+      else if (key.startsWith('journal:')) { if (!keys(value, ['kind', 'stateKey', 'journalId', 'eventId', 'contentSha256', 'revision']) || value.kind !== 'journal-not-found' || key !== 'journal:' + value.stateKey) fail('SealCorrupt'); }
+      else fail('SealCorrupt');
+      return;
+    }
+    case 8: validDbBindingValue(key, V4.parseCanonical(raw, 'db-binding')); return;
+    default: fail('SealCorrupt');
+  }
+}
+/**
+ * One bounded step of the complete check (`full-check`): the storage phase walks every tree of the pinned root in
+ * digest order (every page verified on use, every member semantically validated, counts reconciled per tree), then the
+ * database phase (driven by the seal, which verifies the DB rows against tree 8 and reports its cursor here), then
+ * `complete` publishes the new fullCheck fact in a `scrub` transition. Any failure latches the owner at once. The cursor
+ * is persisted after every step so an interrupted sweep resumes where it stopped, also across restarts.
+ */
+function fullCheckV4(engine: Engine, value: any): any {
+  const v = engine.v4!;
+  if (v.latched) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'latched:' + v.latched.detail, latch: v.latched });
+  const now = typeof value?.now === 'string' ? value.now : new Date().toISOString();
+  if (!Number.isFinite(Date.parse(now))) fail('SealCorrupt');
+  if (!v.sweep) {
+    v.sweep = { startedRoot: v.rootSha256, startedAt: now, phase: 'storage', tree: 1, from: null, keys: {}, pages: 0, db: null, dbDone: false };
+    persistSweep(v);
+  }
+  const sweep = v.sweep;
+  const summary = () => ({ phase: sweep.phase, tree: sweep.tree, from: sweep.from, keys: { ...sweep.keys }, pages: sweep.pages, db: sweep.db, dbDone: sweep.dbDone, startedRoot: sweep.startedRoot, done: false });
+  if (value?.db !== undefined) {
+    // The seal's DB cursor (or its completion): recorded, never trusted as a storage result.
+    if (sweep.phase !== 'database') fail('SealCorrupt');
+    if (value.db === 'done') sweep.dbDone = true;
+    else { if (!keys(value.db, ['stream', 'after']) || !['viewing', 'history'].includes(value.db.stream) || !integer(value.db.after, 0)) fail('SealCorrupt'); sweep.db = { stream: value.db.stream, after: value.db.after }; }
+    persistSweep(v); return summary();
+  }
+  if (value?.latch !== undefined) {
+    // The seal discovered a DB-side disagreement (a stored row that no longer matches its verified binding).
+    latchV4(engine, 'SealCorrupt', String(value.latch), sweep.phase, null, null);
+  }
+  if (value?.complete === true) {
+    if (sweep.phase !== 'database' || !sweep.dbDone) fail('SealCorrupt');
+    const checked = V4.readRoot(v.directory, sweep.startedRoot);
+    const checkedMeta = V4.Tree.open(v.store, 1, checked.trees[0].ref, V4.parseDecimal(checked.trees[0].count, 'root'));
+    const meta: any = {}; for (const key of V4_META_KEYS) meta[key] = metaOf(checkedMeta, key);
+    const fullCheck: V4.FullCheck = { checkedRoot: sweep.startedRoot, coverageSha256: coverageSha256(checked.trees, meta), checkedRevision: checked.revision,
+      validatorSha256: v.validatorSha256, completedAt: now, dbWitnessSha256: V4.domainHash(V4.DOMAIN.witness, V4.canonical(v.meta.dbWitness)) };
+    publishScrubV4(engine, fullCheck);
+    v.sweep = null; try { fs.rmSync(sweepFile(v.directory), { force: true }); } catch { /* scratch */ }
+    return { ...summary(), done: true, fullCheck };
+  }
+  if (sweep.phase !== 'storage') return summary();
+  const budget = integer(value?.budget, 1) ? Math.min(value.budget, 4096) : V4_FULL_CHECK_STEP_LEAVES;
+  const id = sweep.tree;
+  try {
+    const checked = V4.readRoot(v.directory, sweep.startedRoot);
+    const descriptor = checked.trees[id - 1];
+    const tree = V4.Tree.open(v.store, id, descriptor.ref, V4.parseDecimal(descriptor.count, 'root'));
+    const result = tree.checkFrom(sweep.from, budget, (key, raw) => checkMemberV4(engine, id, key, raw));
+    sweep.keys[String(id)] = (sweep.keys[String(id)] ?? 0) + result.keys; sweep.pages += result.pages;
+    if (result.done) {
+      if (sweep.keys[String(id)] !== tree.count) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'tree:total' });
+      sweep.tree = id + 1; sweep.from = null;
+      if (sweep.tree > 8) { sweep.phase = 'database'; sweep.db = null; sweep.dbDone = false; }
+    } else sweep.from = result.next;
+  } catch (error: any) {
+    const translated = translateV4(error);
+    latchV4(engine, String(translated?.code ?? 'SealCorrupt'), String(translated?.detail ?? translated?.message ?? 'full-check'), 'storage', id, sweep.from);
+  }
+  persistSweep(v);
+  return summary();
+}
+/** The fullCheck fact published as its own `scrub` transition (no state change; same revision; the ordinary barriers). */
+function publishScrubV4(engine: Engine, fullCheck: V4.FullCheck): void {
+  const v = engine.v4!;
+  const writer = new V4.PackWriter(v.store, engine.head.revision);
+  try {
+    const metaAfter = { ...v.meta, fullCheck };
+    const trees: Record<number, V4.Tree> = { ...v.trees };
+    trees[1] = v.trees[1].apply(writer, new Map([['fullCheck', metaRaw('fullCheck', fullCheck)]]));
+    writer.flush();
+    const descriptors = V4.TREE_IDS.map(id => ({ id, count: String(trees[id].count), ref: trees[id].root }));
+    const transition: V4.Transition = { previousRoot: v.rootSha256, kind: 'scrub', changes: { inline: [] } };
+    const root: V4.RootBody = { ...v.root, trees: descriptors, transition, fullCheck };
+    const nextRoot = V4.writeRoot(v.directory, root);
+    const tailHash = hash(v.meta.tail);
+    const prepare = v.segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: v.segment.segment, lsn: String(v.lsn + 1), previousSha256: v.previousSha256, type: 'prepare',
+      previousRoot: v.rootSha256, nextRoot, transitionSha256: V4.domainHash(V4.DOMAIN.changes, V4.canonical(transition)), tailBefore: tailHash, tailAfter: tailHash });
+    const complete = v.segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: v.segment.segment, lsn: String(v.lsn + 2), previousSha256: prepare.sha256, type: 'complete', prepareLsn: String(v.lsn + 1), nextRoot });
+    V4.writeSelector(engine.file, { format: V4.V4_FORMAT, version: 4, layout: 1, rootSha256: nextRoot, revision: root.revision, wal: { segment: v.segment.segment, offset: String(complete.end), lsn: String(v.lsn + 2), previousSha256: complete.sha256 } });
+    v.rootSha256 = nextRoot; v.root = root; v.trees = trees; v.meta = metaAfter;
+    v.lsn += 2; v.previousSha256 = complete.sha256; v.walEnd = complete.end; v.segmentTransitions++;
+    engine.checkpoint = { digest: nextRoot, bytes: 0, revision: engine.head.revision, publishing: false, navigable: true };
+    engine.walOffset = complete.end;
+    rotateV4(engine);
+    engine.pin();
+  } catch (error) {
+    engine.tainted = true;
+    try { writer.close(); } catch { /* closing */ }
+    throw translateV4(error);
+  }
+  writer.close();
 }
 // ───────────────────────── first conversion v3 -> v4 and lossless export v4 -> v3 (order section 5) ─────────────────────────
 export interface ConversionFacts {
@@ -1985,8 +2155,10 @@ export function executeExternal(request: WriterRequest): any {
       case 'get': return engine.lookup(value.map, value.id) ?? null;
       case 'slot-of': return engine.slotOf.get(value) ?? null;
       case 'not-found': return [...engine.notFound].map(id => [id, engine.terminal.get(id)?.notFound ?? null]).filter(([, v]) => v);
-      case 'v4-status': return engine.format === 4 ? v4Status(engine) : null;
+      case 'v4-status': return engine.format === 4 ? v4Status(engine, value?.now) : null;
       case 'pending': return engine.format === 4 ? [...engine.v4!.pending.entries()].map(([k, v]) => [k, clone(v)]) : null;
+      case 'full-check': if (engine.format !== 4) fail('SealUnsupportedFormat'); return fullCheckV4(engine, value);
+      case 'db-binding': { if (engine.format !== 4) fail('SealUnsupportedFormat'); const raw = engine.v4!.trees[8].get(String(value)); return raw === undefined ? null : V4.parseCanonical(raw, 'db-binding'); }
       case 'patch': {
         // An explicit patch: only the changed records (null deletes), the next revision, the generation the caller
         // claims, and optionally the new tail (a publication). A v4 owner also takes the verified DB facts

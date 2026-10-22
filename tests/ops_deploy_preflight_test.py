@@ -255,6 +255,32 @@ class StateLaunchTests(unittest.TestCase):
         for change in ({"Id": "kin-api:latest"}, {"Config": {"Labels": {"org.opencontainers.image.revision": "a" * 40}}}):
             with self.assertRaises(RuntimeError): deploy.check_state_service(item, **{**args, "image": {**args["image"], **change}})
 
+    def test_10b_the_plan_state_format_selects_the_entry_mode_and_nothing_else_does(self):
+        """EMR-B2 (c) v4: a v4 deployment's owner is the same image in `state-serve-v4`; the plan's state_format alone
+        decides which entry mode the admission binds (a container's own command never selects it)."""
+        item, args = self.fixture()
+        deploy.check_state_service(item, **args)
+        deploy.check_state_service(item, **{**args, "state_format": 3})
+        with self.assertRaises(RuntimeError):
+            deploy.check_state_service(item, **{**args, "state_format": 4})
+        v4 = copy.deepcopy(item)
+        v4["Args"] = ["/app/start-production.sh", "state-serve-v4"]
+        v4["Config"]["Cmd"] = ["state-serve-v4"]
+        deploy.check_state_service(v4, **{**args, "state_format": 4})
+        with self.assertRaises(RuntimeError):
+            deploy.check_state_service(v4, **args)
+        for stale in (["state-serve-v3"], ["state-convert-v4"], ["state-export-v3"], ["serve"]):
+            bad = copy.deepcopy(v4)
+            bad["Args"] = ["/app/start-production.sh", *stale]
+            with self.subTest(args=stale), self.assertRaises(RuntimeError):
+                deploy.check_state_service(bad, **{**args, "state_format": 4})
+        for unsupported in (2, 5, "4", None):
+            with self.subTest(state_format=unsupported), self.assertRaises(RuntimeError):
+                deploy.check_state_service(v4, **{**args, "state_format": unsupported})
+        self.assertEqual(deploy.state_format_of(v4["Args"]), 4)
+        self.assertEqual(deploy.state_format_of(item["Args"]), 3)
+        self.assertIsNone(deploy.state_format_of(["/app/start-production.sh", "state-convert-v4"]))
+
     def test_11_legacy_restart_eligibility_is_an_owner(self):
         item, args = self.fixture(); item["Name"] = "/retained-api"
         deploy.check_state_owners([item], args["state_volume"], "new-service")

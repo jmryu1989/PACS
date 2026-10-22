@@ -9,7 +9,7 @@ import { FailureJournal } from './failure-journal';
 import { AccessSeal, CommitBinding } from './seal';
 import { PrismaLedgerSql } from './store';
 import { EMR_STATE_IPC_TIMEOUT_MS, EMR_STATE_MAX_OPERATIONS, EMR_STATE_MAX_SCOPES,
-  EMR_STATE_MAX_SESSIONS, EMR_STATE_VERIFY_CONCURRENCY, EMR_DRAIN_TIMEOUT_MS, EMR_CLEANUP_TIMEOUT_MS } from './limits';
+  EMR_STATE_MAX_SESSIONS, EMR_STATE_VERIFY_CONCURRENCY, EMR_DRAIN_TIMEOUT_MS, EMR_CLEANUP_TIMEOUT_MS, EMR_FULL_CHECK_TICK_MS } from './limits';
 import { databaseIdentity, EMR_STATE_IDENTITIES, verifyStateServiceConnection } from './manifest';
 import { BundleIdentity, encodeStateFrame, PairIdentity, parseStateRequest, parseStateResponse,
   ExpiryPrefix, SealedBundleProof, StateFrameReader, StateProtocolError, StateRequest, StateResponse, StateRole } from './state-protocol';
@@ -124,6 +124,16 @@ export async function launchStateService(environment: NodeJS.ProcessEnv = proces
     }
     await service.start(); check(); ready = true;
     process.stdout.write('EMR_STATE_READY\n');
+    // A v4 owner runs its periodic complete check in bounded steps whenever it is idle and the check is due or in
+    // progress (one step per tick); discovered corruption fails the root (the latch persists for the operator).
+    if (format === 4) {
+      const tick = setInterval(() => {
+        if (stopped || !ready || service!.incomplete) return;
+        void own(() => service!.fullCheckTick()).catch(() => { failed = true; latch(); });
+      }, EMR_FULL_CHECK_TICK_MS);
+      tick.unref();
+      void stoppedSignal.then(() => clearInterval(tick));
+    }
   });
   void startup.catch(() => { failed = true; latch(); });
   await Promise.race([startup.catch(() => undefined), stoppedSignal]);
@@ -216,6 +226,18 @@ export class ProtectedStateService {
   }
   async drained(): Promise<void> {
     while (this.operations.size || this.scopes.size) await new Promise<void>(resolve => this.changed.add(resolve));
+  }
+  /** One bounded step of the v4 complete check when it is due or in progress and the owner is idle (no dispatched
+   * operation, no open scope): the serving lane is never held for longer than one step. A `SealCorrupt` here is the
+   * latch: the service fails and stays failed. Returns the owner's summary, or null when nothing was due. */
+  async fullCheckTick(now: Date = new Date()): Promise<unknown> {
+    if (this.phase !== 'ready' || this.operations.size || this.scopes.size) return null;
+    if (!this.resources.seal.fullCheckDue(now)) return null;
+    const work = (async () => {
+      try { return await this.resources.seal.fullCheckStep(now); }
+      catch (error) { this.failed = true; this.quiesce(); this.onFailure(); throw error; }
+    })();
+    return this.track(work);
   }
   /** Called at the common cleanup boundary. Revocation precedes IO handle closure.
    * The root still owns unfinished tasks and the lifetime fence until process exit. */

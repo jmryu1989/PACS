@@ -251,6 +251,22 @@ class PlanTests(unittest.TestCase):
         changed["migrations"]["after"][-1][1] = "0" * 64
         self.assertNotEqual(intro.plan_core(production), intro.plan_core(changed))
 
+    def test_01b_the_release_may_fix_the_stored_state_format(self):
+        """EMR-B2 (c) v4: release.state_format (3 or 4; absent = 3) is the plan's selection of the entry mode."""
+        plan = plan_fixture()
+        self.assertEqual(intro.state_format(plan), 3)
+        plan["release"]["state_format"] = 4
+        self.assertIs(intro.plan_valid(plan), plan)
+        self.assertEqual(intro.state_format(plan), 4)
+        for unsupported in (2, 5, "4", None, True):
+            plan = plan_fixture()
+            plan["release"]["state_format"] = unsupported
+            with self.subTest(state_format=unsupported):
+                refuses(self, intro.plan_valid, plan)
+        plan = plan_fixture()
+        plan["release"]["entry"] = "state-serve-v4"
+        refuses(self, intro.plan_valid, plan)
+
     def test_02_every_field_is_closed(self):
         for key in intro.PLAN_KEYS:
             plan = plan_fixture()

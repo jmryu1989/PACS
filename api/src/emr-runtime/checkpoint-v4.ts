@@ -613,6 +613,37 @@ export class Tree {
     if (keys !== this.count) corrupt('tree:total');
     return { keys, pages };
   }
+  /** A bounded, resumable walk of the leaves in digest order after `from` (exclusive): at most `maxLeaves` leaf pages
+   * per call, every visited page verified on use (header, bounds, partition, counts), every bucket's count and routing
+   * checked, every overflow chain followed, and `member` applied to every key/value. Returns the digest to continue
+   * from; `done` when the walk reached the end of the tree. The caller sums `keys` against the root count. */
+  checkFrom(from: string | null, maxLeaves: number, member?: (key: string, raw: string) => void): { next: string | null; keys: number; pages: number; done: boolean } {
+    let keys = 0, pages = 0, leaves = 0, last: string | null = from, done = true;
+    const walk = (ref: PageRef, level: number, low: string | null, high: string | null, expectedCount: number): boolean => {
+      if (high !== null && from !== null && !(high > from)) return true;   // entirely before the cursor: already checked
+      const node = this.node(ref, level, low, high); pages++;
+      if (node.count !== expectedCount) corrupt('tree:count');
+      if (node.kind === 1) {
+        if (leaves >= maxLeaves) { done = false; return false; }
+        leaves++;
+        for (const entry of node.entries) {
+          if (from !== null && !(entry.digest > from)) continue;
+          if (last !== null && !(entry.digest > last)) corrupt('tree:global-order');
+          const pairs = this.bucketPairs(entry);
+          if (pairs.length !== entry.count) corrupt('tree:bucket-count');
+          for (const [key, raw] of pairs) { if (routingDigest(this.id, key) !== entry.digest) corrupt('tree:bucket-digest'); member?.(key, raw); }
+          if ('overflow' in entry.value) for (const _p of blobPages(this.store, entry.value.overflow, this.id)) pages++;
+          keys += pairs.length; last = entry.digest;
+        }
+        return true;
+      }
+      if (node.children.length < 2) corrupt('tree:branch-children');
+      for (const child of node.children) if (!walk(child.ref, node.level - 1, child.low, child.high, child.count)) return false;
+      return true;
+    };
+    walk(this.root, this.level, null, null, this.count);
+    return { next: done ? null : last, keys, pages, done };
+  }
 }
 function* blobPages(store: PackStore, descriptor: BlobDescriptor, tree: number): Generator<PageRef> {
   const pages = parseDecimal(descriptor.pages, 'blob');
