@@ -88,7 +88,8 @@ class ViewerOpeningE2E(ReadingWorkspaceE2E):
         self.settings(p, 'window', False)
         self.close_settings(p)
         # Explicit comparison remains explicit even when automatic prior is off.
-        p.locator(f'#relrows tr[data-uid="{b.uid}"]').dblclick()
+        # W5 PAGE-10 (D1520): the Related row's explicit Compare Images action (its double click no longer opens images).
+        p.locator(f'[data-related-open="{b.uid}"]').click()
         self.assertEqual(self.ids(self.ready(p, 2)), [a.uid, b.uid])
         self.choose(p, b)
         self.assertEqual(self.ids(self.ready(p, 1)), [b.uid])
