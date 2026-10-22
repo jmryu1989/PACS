@@ -2269,6 +2269,50 @@ bundle byte), -03 (native: the smoke's seeded/held regeneration and cold restore
   unchanged. Native: the CI runner exercises its own backend (overlay2); the containerd path runs natively only on the
   VM's normal smoke and T16/T17 after admission of the new SHA. The pre-existing untyped inventory parse (a malformed
   listing raises KeyError before any stop, export or `store.begin`) remains an open deferred item, not a typed refusal.
+  (r14: the `capture_bound` check of this round validated only the rows present; see round 14.)
+
+### Round 14: the stop's OS error and final inspection, complete capture evidence (consult-checkpoints-r14-plan-20261023, CKPT13-01/02/P3-01, D1711)
+
+- Supported contract: the checkpoint is a cold, owned, synthetic rehearsal fixture under the phase lease and the live
+  slot, with one controller, no foreign fixture and quiet workers through the export. Every observed identity or state
+  contradiction and every stop or diff that cannot be observed refuses before a bundle or export. The capture samples the
+  daemon from outside: this is no atomic lifecycle lock, and nothing here proves that another controller could not start
+  the same ID between two inspections or after the last one; a controller or daemon restart that violates the
+  prerequisites invalidates the run (it is not a supported concurrent capture).
+- Stop OS error (CKPT13-01): a `docker stop` that cannot be started (an `OSError` of process creation - the client
+  missing or not executable) is STOP_UNCONFIRMED in the capture, with the OS cause (`stop_error`: class, errno) and a
+  reason kept and the subject's state observed; nothing is stopped, judged, begun, exported or sealed. Only `OSError` is
+  classified: a deadline cut, a call timeout, an interrupt and a programming error propagate as before. The standalone
+  stop reports the same case through its own error channel (`RuntimeError`), never as the capture's code.
+- Final inspection (CKPT13-02): after the stop, the inspection by ID and the later inspection by name must both name the
+  inventoried ID, image and name, be definitely stopped (`Running` and `Restarting` exactly false) and carry a concrete
+  termination (integer `ExitCode`, boolean `OOMKilled`) that is the same in both; the returned outcome is the final
+  inspection's, so a start, restart, kill (exit 137) or OOM flag seen only by the final inspection refuses
+  STOP_UNCONFIRMED and is never reported from the earlier lookup. The normal-termination rule (exit 0/143, not forced,
+  no OOM kill) stays in the shared `stop_for_checkpoint`. The standalone stop applies the same final-inspection rule
+  through its error channel; `standalone_changes` (the running database's diff, the recreated subject) is unchanged.
+- Evidence (CKPT13-P3-01): `Smoke.capture` freezes the capture's context from a real inventory before the capture runs
+  (`capture_context`: the present containers and the running ones it must stop, kept as `capture-context-<id>.json`).
+  `capture_bound(rows, record, context)` requires the context to be the verified record's own containers, exactly the
+  expected stops and one diff per sealed role (no missing, duplicate or unrelated row), every row on the inventoried ID,
+  image and name, both post-stop inspections stopped with the same normal termination, the diff stopped before and after,
+  and no refused or interrupted row; the smoke then requires every damaged copy of those very rows
+  (`evidence_damage`, `capture-evidence-<id>.json`) to fail. It is evidence validation, not an atomicity proof.
+- Native process boundary: `stop_boundary_cases` (smoke stage "stop boundaries", A05/N05) runs the capture's stop step
+  (a real inventory, then `stop_for_checkpoint`) and the standalone stop on owned throwaway subjects of the helper image
+  through the real client and daemon: stable controls; the stop started from a task-owned copy of the client that was
+  removed (ENOENT) or has no execute bit (EACCES), each on the plain and the deadline route; the subject started again,
+  started and killed (exit 137), or restarting by its own on-failure policy right after the stop's inspection by ID
+  (`RealCalls`: a recording wrapper that delegates every call to the real client and runs real lifecycle calls at an
+  observed barrier; it never answers for the daemon). `capture_race` repeats the start and the start+kill race through
+  `seal_boundary` on the failure lineage's database: STOP_UNCONFIRMED with `store.begin` and exports at 0.
+- Pure: `CheckpointStopDiffIdentityTests` (+3: the stop's OS error through real process creation for every role on both
+  simulated backends and the standalone stop; 23 final-inspection substitutions plus a failed and an unavailable final
+  inspection for every role on both backends; the standalone final inspection) and the extended `capture_bound` test
+  (all-running, database-only, none-running and absent-role contexts; every `evidence_damage` copy; contradicting and
+  missing contexts). Native: the CI runner runs it on its own backend (overlay2); containerd runs natively only on the
+  VM's normal smoke after admission. Not covered: malformed inventory (CKPT12-P3-01, deferred), failure-held restore,
+  DB/role-absent native `boundary_facts` and the CKPT2-06 retry stay UNVERIFIED.
 
 # 뷰어 반전 정밀도
 

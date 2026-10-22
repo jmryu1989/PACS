@@ -5277,6 +5277,10 @@ class CheckpointStopDiffIdentityTests(CaptureFixture, RefusalAssertions, TempCas
         if before is not None:
             before(daemon)
         ids = {role: daemon.ident(role) for role in present}
+        # r14: the pre-capture context (capture_context's shape) as the daemon holds it before the capture runs.
+        context = {"stops": {daemon.names[role]: {"id": ident, "image": daemon.containers[ident]["image"]} for role, ident in sorted(ids.items())
+                             if daemon.containers[ident]["running"]},
+                   "present": {daemon.names[role]: {"id": ident, "image": daemon.containers[ident]["image"]} for role, ident in sorted(ids.items())}}
         descriptor = descriptor or (absent_descriptor(target) if "orthanc" in absent else regenerated_fixture(ids["orthanc"]))
         fixture, store_root = self.tempdir(), self.tempdir() / "bundles"
         begun, start = [], len(rehearsal.LAYER_RESOLUTIONS)
@@ -5292,12 +5296,15 @@ class CheckpointStopDiffIdentityTests(CaptureFixture, RefusalAssertions, TempCas
                               absent=tuple(absent))
             except cp.Refused as error:
                 code, reason = error.code, str(error)
+            except OSError as error:
+                # r14: an escaped OS error is this capture's outcome (never a sealed or refused one), judged by the caller
+                code, reason = "RAISED " + type(error).__name__, str(error)
         layers = sorted(fixture.glob("*/records/" + cp.OBSERVATION_DIR + "/layer-*/" + cp.LAYER_FILE))
         return SimpleNamespace(code=code, reason=reason, daemon=daemon, ids=ids, stops=[ident for kind, ident in daemon.effects if kind == "stop"],
                                begun=len(begun), exports=sum(1 for call in layered.calls if call[0] == "export"),
                                bundles=sorted(path.name for path in store_root.iterdir()) if store_root.exists() else [],
                                layer=json.loads(layers[-1].read_bytes()) if len(layers) == 1 else None,
-                               observations=list(rehearsal.LAYER_RESOLUTIONS[start:]), calls=list(layered.calls))
+                               observations=list(rehearsal.LAYER_RESOLUTIONS[start:]), calls=list(layered.calls), context=context)
 
     def assertNothingSealed(self, result, code):
         self.assertEqual((result.code, result.begun, result.exports, result.bundles), (code, 0, 0, []),
@@ -5552,27 +5559,176 @@ class CheckpointStopDiffIdentityTests(CaptureFixture, RefusalAssertions, TempCas
                     call(lambda: docker.standalone_changes(name))
 
     def test_the_native_capture_evidence_names_exactly_the_sealed_containers(self):
-        """The native smoke's consumer of these observations (native capture_bound over layer-storage.json rows and the
-        verified layer record): a real matching capture's rows are bound; a diff row of another ID, a refused row, a
-        missing role and a stop of another container are not."""
+        """The native smoke's consumer of these observations (native capture_bound over layer-storage.json rows, the
+        verified layer record and the pre-capture context frozen before the capture): a real matching capture's rows are
+        complete for every supported context - all roles running, the database alone (HELD), none running (no stop
+        expected) and an absent role - on both backends; each omitted, duplicated, unrelated or contradicting copy
+        (native.evidence_damage), a context that is not the record's and a missing context are not."""
         import ops_release_checkpoints_native_test as native
-        result = self.capture("containerd")
-        rows = [row for row in result.observations if row.get("observation")]
-        bound, detail = native.capture_bound(rows, result.layer)
-        self.assertTrue(bound, detail)
-        self.assertEqual((len(detail["diffs"]), len(detail["stops"])), (5, 5))
-        other = "f" * 64
-        changed = {
-            "a diff of another ID": lambda rows: rows[next(i for i, row in enumerate(rows) if row["observation"] == "diff")]["after"].update(id=other),
-            "a refused diff": lambda rows: rows[next(i for i, row in enumerate(rows) if row["observation"] == "diff")].update(outcome="refused"),
-            "a missing role": lambda rows: rows.pop(next(i for i, row in enumerate(rows) if row["observation"] == "diff")),
-            "a stop of another container": lambda rows: rows[next(i for i, row in enumerate(rows) if row["observation"] == "stop")]["after"].update(id=other),
+        for backend in self.BACKENDS:
+            for label, kwargs, stops in (("all running", {}, 5), ("the database alone running", {"running": {"db"}}, 1),
+                                         ("none running", {"running": set()}, 0), ("an absent role", {"absent": ("api",)}, 4)):
+                with self.subTest(backend=backend, context=label):
+                    result = self.capture(backend, **kwargs)
+                    self.assertEqual(result.code, "SEALED", result.reason)
+                    rows = [row for row in result.observations if row.get("observation")]
+                    bound, detail = native.capture_bound(rows, result.layer, result.context)
+                    self.assertTrue(bound, detail)
+                    self.assertEqual((len(detail["diffs"]), len(detail["stops"])), (4 if "absent" in kwargs else 5, stops))
+                    for damage, change in native.evidence_damage(rows).items():
+                        with self.subTest(damage=damage):
+                            self.assertFalse(native.capture_bound(change(copy.deepcopy(rows)), result.layer, result.context)[0], damage)
+                    other = copy.deepcopy(result.context)
+                    name = sorted(other["present"])[0]
+                    other["present"][name] = {**other["present"][name], "id": "f" * 64}
+                    self.assertFalse(native.capture_bound(rows, result.layer, other)[0], "a context of another container")
+                    extra = copy.deepcopy(result.context)
+                    extra["stops"]["kin-unrelated"] = {"id": "f" * 64, "image": "sha256:" + "f" * 64}
+                    self.assertFalse(native.capture_bound(rows, result.layer, extra)[0], "an expected stop that is not present")
+                    self.assertFalse(native.capture_bound(rows, result.layer, None)[0], "no pre-capture context")
+                    if stops:
+                        fewer = copy.deepcopy(result.context)
+                        fewer["stops"].pop(sorted(fewer["stops"])[0])
+                        self.assertFalse(native.capture_bound(rows, result.layer, fewer)[0], "a stop the context did not expect")
+
+    # ── r14 (CKPT13-01/02; consult-checkpoints-r14-plan-20261023): the stop's OS error and its final inspection ──
+    @staticmethod
+    def unstartable(kind, holder):
+        """A real process creation that fails: the stop's argv started from a path that does not exist, or from a
+        directory (not executable). The OSError is the operating system's own (CreateProcess / execve), not a double."""
+        def start(args):
+            path = holder / ("absent-docker" if kind == "absent" else "")
+            return subprocess.run([str(path), *args[1:]], capture_output=True, timeout=30)
+        return start
+
+    def test_a_docker_stop_that_cannot_be_started_is_stop_unconfirmed(self):
+        """CKPT13-01: the capture's `docker stop` started from a missing or non-executable client (a real OS error of
+        process creation) refuses STOP_UNCONFIRMED with its OS cause and reason kept, before store.begin, any export or
+        bundle, and nothing is stopped (the subject keeps running) - every role on both backends. The standalone stop
+        refuses through its own error channel (RuntimeError, not the capture's code) with the same evidence. A deadline
+        cut, a timeout, an interrupt and a programming error at the stop still propagate (the existing table)."""
+        import ops_deploy_host_container_test as rehearsal
+        holder = self.tempdir()
+        for backend in self.BACKENDS:
+            for kind, error in (("absent", "FileNotFoundError"), ("directory", "PermissionError")):
+                for role in intro.ROLES:
+                    with self.subTest(backend=backend, client=kind, role=role):
+                        result = self.capture(backend, before=lambda daemon, role=role, kind=kind: daemon.hooks.update(
+                            {("before", "stop", role): lambda: daemon.raw.update(stop=self.unstartable(kind, holder))}))
+                        self.assertNothingSealed(result, "STOP_UNCONFIRMED")
+                        record = [row for row in result.observations if row.get("observation") == "stop"][-1]
+                        self.assertEqual((record["container_name"], record["outcome"], record["stop_error"]["class"]),
+                                         (result.daemon.names[role], "refused", error))
+                        self.assertNotIn(result.ids[role], result.stops, "no stop of the subject was started")
+                        self.assertTrue(result.daemon.containers[result.ids[role]]["running"], "the subject keeps running")
+                with self.subTest(backend=backend, client=kind, consumer="standalone"):
+                    docker, daemon, call = self.adapter(backend, inventory=False)
+                    daemon.containers[daemon.ident("db")]["running"] = True
+                    daemon.raw["stop"] = self.unstartable(kind, holder)
+                    try:
+                        call(lambda: docker.standalone_stop(PROJECT + "-db"))
+                        raised = None
+                    except (OSError, RuntimeError) as exception:
+                        raised = type(exception).__name__
+                    self.assertEqual(raised, "RuntimeError", "the standalone stop's own error channel, not an escaped OS error")
+                    record = rehearsal.LAYER_RESOLUTIONS[-1]
+                    self.assertEqual((record["scope"], record["outcome"], record["stop_error"]["class"]), ("standalone", "refused", error))
+                    self.assertTrue(type(record.get("reason")) is str and record["reason"].strip())
+                    self.assertEqual((daemon.effects, daemon.containers[daemon.ident("db")]["running"]), ([], True))
+
+    @staticmethod
+    def final_inspections():
+        """label -> change(document) of the inspection by name after the stop (the inspection by ID is the daemon's
+        own normal answer): each leaves the stop unconfirmed."""
+        def state(**fields):
+            def change(document):
+                document["State"].update(fields)
+            return change
+
+        def drop(*keys):
+            def change(document):
+                for key in keys:
+                    document["State"].pop(key, None)
+            return change
+
+        def field(**fields):
+            return lambda document: document.update(fields)
+        return {
+            "running": state(Running=True, Status="running"), "restarting": state(Restarting=True, Status="restarting"),
+            "Running missing": drop("Running"), "Running null": state(Running=None), "Running the string false": state(Running="false"),
+            "Running 0": state(Running=0), "Restarting missing": drop("Restarting"), "Restarting null": state(Restarting=None),
+            "Restarting the string false": state(Restarting="false"), "Restarting 0": state(Restarting=0),
+            "ExitCode 137 (the inspection by ID said 0)": state(ExitCode=137), "OOMKilled true (the inspection by ID said false)": state(OOMKilled=True),
+            "ExitCode missing": drop("ExitCode"), "ExitCode null": state(ExitCode=None), "ExitCode the string 0": state(ExitCode="0"),
+            "ExitCode false": state(ExitCode=False), "OOMKilled missing": drop("OOMKilled"), "OOMKilled the string false": state(OOMKilled="false"),
+            "OOMKilled 0": state(OOMKilled=0), "no State": lambda document: document.pop("State"),
+            "another ID": field(Id="f" * 64), "another image": field(Image=REPLACEMENT_IMAGE), "another name": field(Name="/kin-unrelated"),
         }
-        for label, change in changed.items():
-            with self.subTest(case=label):
-                copied = copy.deepcopy(rows)
-                change(copied)
-                self.assertFalse(native.capture_bound(copied, result.layer)[0])
+
+    def final_answer(self, daemon, role, change=None, failure=None):
+        """The daemon's inspect answer with the inspection by `role`'s name after its stop changed (`change`) or failed
+        (`failure`: an (exit, stdout) answer or an exception); every other inspection is the daemon's own."""
+        def answer(args):
+            ident = daemon.ident(role)
+            if args[-1] == daemon.names[role] and ("stop", ident) in daemon.effects:
+                if isinstance(failure, BaseException):
+                    raise failure
+                if failure is not None:
+                    return failure
+                document = daemon.inspected(ident)
+                change(document)
+                return 0, json.dumps([document]).encode()
+            return daemon.answer("inspect", args)
+        return answer
+
+    def test_the_final_inspection_by_name_must_confirm_the_stop(self):
+        """CKPT13-02: the capture's stop consumes its final inspection (by name, after the inspection by ID): a running or
+        restarting subject, a missing or non-boolean Running/Restarting, a missing or non-integer ExitCode, a missing or
+        non-boolean OOMKilled, an exit 137 or an OOM kill the inspection by ID did not show, no State, another ID, image
+        or name, and a failed or unavailable final inspection are each STOP_UNCONFIRMED before store.begin, any export or
+        bundle, with that inspection kept - every role on both backends; the unchanged answer through the same hook seals."""
+        cases = {label: {"change": change} for label, change in self.final_inspections().items()}
+        cases.update({"a failed final inspection": {"failure": (1, b"")},
+                      "an unavailable final inspection": {"failure": FileNotFoundError(2, "docker")}})
+        for backend in self.BACKENDS:
+            with self.subTest(backend=backend, case="the unchanged final inspection"):
+                result = self.capture(backend, before=lambda daemon: daemon.raw.update(inspect=self.final_answer(daemon, "db", change=lambda document: None)))
+                self.assertEqual((result.code, result.begun, len(result.bundles)), ("SEALED", 1, 1), result.reason)
+            for role in intro.ROLES:
+                for label, setup in cases.items():
+                    with self.subTest(backend=backend, role=role, final=label):
+                        result = self.capture(backend, before=lambda daemon, role=role, setup=setup: daemon.raw.update(
+                            inspect=self.final_answer(daemon, role, **setup)))
+                        self.assertNothingSealed(result, "STOP_UNCONFIRMED")
+                        record = [row for row in result.observations if row.get("observation") == "stop"][-1]
+                        self.assertEqual((record["container_name"], record["after"]["id"]), (result.daemon.names[role], result.ids[role]))
+                        self.assertIn("named_after", record, "the final inspection is kept")
+
+    def test_the_standalone_stop_reports_its_final_inspection(self):
+        """CKPT13-02 for the native smoke's standalone stop: a final inspection by name that is running, restarting,
+        indefinite or of another termination than the inspection by ID is its own error (RuntimeError) with the record
+        kept, never the earlier inspection's running=false; an undisturbed stop returns the final inspection's outcome. The
+        running-database diff and the owned-recreation diagnostic are unchanged (the standalone diagnostics test)."""
+        import ops_deploy_host_container_test as rehearsal
+        name = PROJECT + "-db"
+        for backend in self.BACKENDS:
+            with self.subTest(backend=backend, final="unchanged"):
+                docker, daemon, call = self.adapter(backend, inventory=False)
+                daemon.containers[daemon.ident("db")]["running"] = True
+                daemon.raw["inspect"] = self.final_answer(daemon, "db", change=lambda document: None)
+                outcome = self.admitted(call, lambda: docker.standalone_stop(name))
+                self.assertEqual((outcome["running"], outcome["exit_code"], outcome["forced"], outcome["container_id"]), (False, 0, False, daemon.ident("db")))
+            for label in ("running", "restarting", "Running missing", "Restarting the string false", "ExitCode 137 (the inspection by ID said 0)",
+                          "OOMKilled true (the inspection by ID said false)", "ExitCode missing", "no State"):
+                with self.subTest(backend=backend, final=label):
+                    docker, daemon, call = self.adapter(backend, inventory=False)
+                    daemon.containers[daemon.ident("db")]["running"] = True
+                    daemon.raw["inspect"] = self.final_answer(daemon, "db", change=self.final_inspections()[label])
+                    with self.assertRaises(RuntimeError):
+                        call(lambda: docker.standalone_stop(name))
+                    record = rehearsal.LAYER_RESOLUTIONS[-1]
+                    self.assertEqual((record["scope"], record["outcome"]), ("standalone", "refused"))
+                    self.assertTrue(type(record.get("reason")) is str and record["reason"].strip())
 
 
 class CheckpointDeadlineTests(RefusalAssertions, TempCase):

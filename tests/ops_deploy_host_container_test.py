@@ -974,6 +974,38 @@ class CheckpointDocker:
         """Running and Restarting are always present in an Engine inspection: only a definite false/false is stopped."""
         return found["running"] is False and found["restarting"] is False
 
+    @staticmethod
+    def terminated(found):
+        """The reason a stopped container's inspection gives no concrete termination (an integer ExitCode and a boolean
+        OOMKilled), or None. A missing, null, string or boolean substitute is not a termination the stop can report."""
+        if type(found.get("exit_code")) is not int or type(found.get("oom_killed")) is not bool:
+            return "the inspection gives no concrete exit code and OOM flag"
+        return None
+
+    @classmethod
+    def after_stop(cls, subject, name, after, named):
+        """r14 (CKPT13-02): the reason the two inspections after a stop - by the stopped ID, then by the name (the later
+        one) - do not both confirm that `subject` ({"id", "image"}) under `name` is definitely stopped with one concrete
+        termination, or None. A start, a restart or a second exit of the container between them is a contradiction the
+        stop must not report as its own outcome (no later lookup proves the container stays stopped afterwards)."""
+        for found, lookup in ((after, "by its ID"), (named, "by its name")):
+            mismatch = cls.same(found, subject, name)
+            if mismatch:
+                return mismatch + " after the stop (" + lookup + ")"
+            if not cls.stopped(found):
+                return "the container is not definitely stopped after the stop (" + lookup + ")"
+            unconcrete = cls.terminated(found)
+            if unconcrete:
+                return unconcrete + " after the stop (" + lookup + ")"
+        if (after["exit_code"], after["oom_killed"]) != (named["exit_code"], named["oom_killed"]):
+            return "the container's termination changed between the two inspections after the stop"
+        return None
+
+    @staticmethod
+    def launch_failure(error):
+        """What an OSError starting a client process names (its class and OS cause), kept in the observation."""
+        return {"class": type(error).__name__, "errno": error.errno, "strerror": error.strerror}
+
     def observed_call(self, record, body):
         """Runs body() -> (value, reason), keeps `record` (its outcome, reason and an interruption) in LAYER_RESOLUTIONS
         in every case, and returns (value, reason). A deadline cut, a timeout or another exception still propagates."""
@@ -993,7 +1025,11 @@ class CheckpointDocker:
     def stop(self, name):
         """The capture's normal stop (stop_for_checkpoint) of exactly the container the capture inventoried under `name`:
         by its ID, with the name, ID and image confirmed before and after, and a definite stopped state after. Anything
-        else is STOP_UNCONFIRMED, raised here with its reason kept (a replacement is never stopped)."""
+        else is STOP_UNCONFIRMED, raised here with its reason kept (a replacement is never stopped). r14 (CKPT13-01/02):
+        a `docker stop` that cannot be started (an OSError: the client missing or not executable) is STOP_UNCONFIRMED with
+        its OS cause kept - the container's state is then only observed, never reported stopped; both inspections after
+        the stop must confirm it (after_stop) and the outcome is the later one's, so a judgement never rests on the
+        earlier lookup alone. The normal-termination rule (exit 0/143, not forced, no OOM kill) stays stop_for_checkpoint's."""
         identity, missing = self.capture_identity(name)
         record = {"observation": "stop", "scope": "capture", "container_name": name, "capture_identity": identity}
 
@@ -1007,21 +1043,23 @@ class CheckpointDocker:
             mismatch = self.same(before, identity, name)
             if mismatch:
                 return None, mismatch + "; nothing was stopped"
-            stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), identity["id"]], timeout=self.STOP_SECONDS + 60, check=False)
+            try:
+                stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), identity["id"]], timeout=self.STOP_SECONDS + 60, check=False)
+            except OSError as error:
+                record["stop_error"] = self.launch_failure(error)
+                record["after"] = self.resolve(identity["id"])[0]
+                return None, "docker stop could not be started (" + type(error).__name__ + "), so no stop of the container is confirmed"
             record["stop_exit"] = stopped.returncode
             after, why = self.resolve(identity["id"])
             named, why_named = self.resolve(name)
             record.update(after=after, named_after=named)
             if after is None or named is None:
                 return None, why or why_named
-            mismatch = self.same(after, identity) or self.same(named, identity, name)
-            if mismatch:
-                return None, mismatch + " after the stop"
-            outcome = {"exit_code": after["exit_code"], "forced": stopped.returncode != 0 or after["exit_code"] == 137,
-                       "oom_killed": after["oom_killed"], "running": after["running"], "container_id": identity["id"]}
-            if not self.stopped(after):
-                return outcome, "the container is not definitely stopped after the stop"
-            return outcome, None
+            contradiction = self.after_stop(identity, name, after, named)
+            if contradiction:
+                return None, contradiction
+            return {"exit_code": named["exit_code"], "forced": stopped.returncode != 0 or named["exit_code"] == 137,
+                    "oom_killed": named["oom_killed"], "running": named["running"], "container_id": identity["id"]}, None
         outcome, reason = self.observed_call(record, body)
         checkpoints.require(reason is None, "STOP_UNCONFIRMED", name + ": " + str(reason))
         return outcome
@@ -1069,7 +1107,11 @@ class CheckpointDocker:
     def standalone_stop(self, name):
         """A stop outside any capture (the native smoke's own fence and diagnostics): the container `name` names at this
         call, stopped by that ID and confirmed by it; the name must still name it afterwards. Returns the outcome
-        (stop_for_checkpoint's keys and the container ID); an unresolvable subject is an error of the caller."""
+        (stop_for_checkpoint's keys and the container ID); an unresolvable subject is an error of the caller. r14
+        (CKPT13-01/02): a client that cannot be started and a final inspection that does not confirm the stop (running,
+        restarting, an indefinite state or another termination than the inspection by ID) are that error too (with the
+        observation and the OS cause kept), never an outcome of an earlier lookup; the outcome is the final inspection's.
+        It is not the capture's STOP_UNCONFIRMED: no inventory binds the subject here."""
         record = {"observation": "stop", "scope": "standalone", "container_name": name}
 
         def body():
@@ -1077,7 +1119,12 @@ class CheckpointDocker:
             record["before"] = subject
             if subject is None:
                 return None, why
-            stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), subject["id"]], timeout=self.STOP_SECONDS + 60, check=False)
+            try:
+                stopped = self.run(["docker", "stop", "-t", str(self.STOP_SECONDS), subject["id"]], timeout=self.STOP_SECONDS + 60, check=False)
+            except OSError as error:
+                record["stop_error"] = self.launch_failure(error)
+                record["after"] = self.resolve(subject["id"])[0]
+                return None, "docker stop could not be started (" + type(error).__name__ + ")"
             after, why = self.resolve(subject["id"])
             named, why_named = self.resolve(name)
             record.update(stop_exit=stopped.returncode, after=after, named_after=named)
@@ -1085,8 +1132,11 @@ class CheckpointDocker:
                 return None, why or why_named
             if named["id"] != subject["id"]:
                 return None, "the name names another container after the stop"
-            return {"exit_code": after["exit_code"], "forced": stopped.returncode != 0 or after["exit_code"] == 137,
-                    "oom_killed": after["oom_killed"], "running": after["running"], "container_id": subject["id"]}, None
+            contradiction = self.after_stop(subject, name, after, named)
+            if contradiction:
+                return None, contradiction
+            return {"exit_code": named["exit_code"], "forced": stopped.returncode != 0 or named["exit_code"] == 137,
+                    "oom_killed": named["oom_killed"], "running": named["running"], "container_id": subject["id"]}, None
         outcome, reason = self.observed_call(record, body)
         if reason is not None:
             raise RuntimeError("standalone stop of " + name + ": " + reason)

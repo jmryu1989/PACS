@@ -37,6 +37,15 @@ other bytes, the same image ID under another role and the database role (A05/N05
 Round 8 (consult-checkpoints-r8-20261017, CKPT7-01): every row that reads a sealed bundle (the A05/A12 regenerated
 evidence, the roundtrip's boundary facts and sealed volume exports) reads only what ops_release_checkpoints.verify_bundle
 verified at the start of that call, never the manifest or descriptor of an earlier load.
+
+Round 14 (consult-checkpoints-r14-plan-20261023, CKPT13-01/02/P3-01): the capture's and the standalone stop are exercised
+at the real process boundary on owned throwaway subjects (stop_boundary_cases): a docker client that cannot be started
+(a removed or non-executable copy of the real client, on both subprocess routes), and the subject started again, killed
+with exit 137 or restarting by its own policy between the stop's inspection by ID and its inspection by name (RealCalls:
+a recording wrapper that delegates every call to the real client and runs real lifecycle calls at an observed barrier;
+it never answers for the daemon). The same race refuses a full capture through seal_boundary before store.begin
+(capture_race). Every sealed capture's evidence is judged against a pre-capture context frozen from a real inventory
+(capture_context, capture_bound), and copies of its rows with one omission or contradiction each must not pass.
 """
 import argparse
 import copy
@@ -142,23 +151,350 @@ class SmokeFailure(AssertionError):
     pass
 
 
-def capture_bound(rows, record):
-    """r13 (CKPT12-01): whether one sealed capture's own stop and diff observations (rows of layer-storage.json of
-    scope "capture"; the smoke's standalone stops and diffs are not the capture's) acted on exactly the containers its
-    verified layer record seals: one observed diff per present role, on its sealed ID before and after; every capture
-    stop observed, on a sealed ID, the same ID after the stop; nothing else. Returns (bound, detail)."""
-    own = [row for row in rows if row.get("scope") == "capture" and row.get("observation") in ("stop", "diff")]
-    sealed = {item.get("container_name"): item.get("container_id") for item in record["roles"].values() if not item.get("absent")}
-    ident = lambda row, key: (row.get(key) or {}).get("id")  # noqa: E731
-    diffs = [row for row in own if row["observation"] == "diff"]
-    stops = [row for row in own if row["observation"] == "stop"]
-    problems = [row.get("container_name") for row in diffs if row.get("outcome") != "observed" or row.get("container_name") not in sealed
-                or not ident(row, "capture_identity") == ident(row, "before") == ident(row, "after") == sealed[row["container_name"]]]
-    problems += ["stop " + str(row.get("container_name")) for row in stops if row.get("outcome") != "observed" or row.get("container_name") not in sealed
-                 or not ident(row, "capture_identity") == ident(row, "before") == ident(row, "after") == sealed[row["container_name"]]]
-    diffed = sorted(row.get("container_name") for row in diffs)
-    bound = not problems and diffed == sorted(sealed)
-    return bound, {"sealed": sealed, "diffs": diffed, "stops": sorted(row.get("container_name") for row in stops), "problems": problems}
+def capture_context(inventory, names):
+    """r14 (CKPT13-P3-01): the stop and diff subjects one capture must act on, frozen by its caller from a real inventory
+    taken before the capture runs (never from the capture's own observation rows): every present container of the
+    stack's role names with its ID and image, and the running ones among them, which the capture must stop."""
+    present = {item["name"]: item for item in inventory["containers"] if item["name"] in set(names.values())}
+    return {"stops": {name: {"id": item["id"], "image": item["image"]} for name, item in sorted(present.items()) if item["running"] is True},
+            "present": {name: {"id": item["id"], "image": item["image"]} for name, item in sorted(present.items())}}
+
+
+def capture_bound(rows, record, expected):
+    """r13 (CKPT12-01), r14 (CKPT13-P3-01): whether one sealed capture's own evidence (its rows of layer-storage.json; the
+    smoke's standalone stops and diffs are not the capture's) is complete for the verified layer record and the
+    pre-capture context `expected` (capture_context, frozen before the capture by its caller and independent of the rows
+    judged here). The context must be the record's own present containers (ID and image) and its expected stops among
+    them. Then exactly one observed stop per expected stop and no other, exactly one observed diff per present sealed
+    role and no other; each names its container's inventoried ID, image and name in its capture identity and in every
+    inspection; a stop exited 0 and both of its inspections after the stop (by ID, then by name) are definitely stopped
+    with the same concrete normal termination (exit 0/143, no OOM kill); a diff's inspections before and after are
+    definitely stopped; no row of the capture is refused or interrupted. Evidence validation only: it proves nothing
+    about lifecycle changes outside the observed calls. Returns (bound, detail)."""
+    problems = []
+    roles = record.get("roles") if type(record) is dict else None
+    sealed = {item.get("container_name"): {"id": item.get("container_id"), "image": item.get("image")}
+              for item in (roles.values() if type(roles) is dict else []) if type(item) is dict and not item.get("absent")}
+    stops_expected = expected.get("stops") if type(expected) is dict else None
+    present = expected.get("present") if type(expected) is dict else None
+    if type(stops_expected) is not dict or type(present) is not dict:
+        return False, {"sealed": sealed, "expected": expected, "problems": ["context: no pre-capture context of the capture"]}
+    if present != sealed:
+        problems.append("context: the pre-capture containers are not the containers the record seals")
+    if any(present.get(name) != subject for name, subject in stops_expected.items()):
+        problems.append("context: an expected stop is not a present container")
+    own = [row for row in rows if type(row) is dict and row.get("scope") != "standalone"]
+    problems += ["refused or interrupted: " + str(row.get("observation")) + " " + str(row.get("container_name")) for row in own
+                 if row.get("outcome") != "observed" or "interrupted" in row or row.get("reason") is not None]
+    stops = [row for row in own if row.get("scope") == "capture" and row.get("observation") == "stop"]
+    diffs = [row for row in own if row.get("scope") == "capture" and row.get("observation") == "diff"]
+
+    def names(found, subject, name):
+        return type(found) is dict and found.get("id") == subject["id"] and found.get("image") == subject["image"] and found.get("name") == name
+
+    def still(found):
+        return type(found) is dict and found.get("running") is False and found.get("restarting") is False
+
+    def normal(found):
+        return still(found) and type(found.get("exit_code")) is int and found["exit_code"] in (0, 143) and found.get("oom_killed") is False
+    stopped = sorted(str(row.get("container_name")) for row in stops)
+    if stopped != sorted(stops_expected):
+        problems.append("stop coverage: " + json.dumps(stopped) + " is not exactly the expected stops " + json.dumps(sorted(stops_expected)))
+    for row in stops:
+        name, subject = row.get("container_name"), stops_expected.get(row.get("container_name"))
+        after, named = row.get("after"), row.get("named_after")
+        if (subject is None or (row.get("capture_identity") or {}) != subject or not names(row.get("before"), subject, name)
+                or not names(after, subject, name) or not names(named, subject, name) or row.get("stop_exit") != 0
+                or not normal(after) or not normal(named) or (after["exit_code"], after["oom_killed"]) != (named["exit_code"], named["oom_killed"])):
+            problems.append("stop " + str(name) + ": not a confirmed normal stop of the expected container")
+    diffed = sorted(str(row.get("container_name")) for row in diffs)
+    if diffed != sorted(sealed):
+        problems.append("diff coverage: " + json.dumps(diffed) + " is not one diff per sealed role " + json.dumps(sorted(sealed)))
+    for row in diffs:
+        name, subject = row.get("container_name"), sealed.get(row.get("container_name"))
+        if (subject is None or (row.get("capture_identity") or {}) != subject or row.get("diff_exit") != 0
+                or not names(row.get("before"), subject, name) or not names(row.get("after"), subject, name)
+                or not still(row.get("before")) or not still(row.get("after"))):
+            problems.append("diff " + str(name) + ": not an observed diff of the sealed, stopped container")
+    return not problems, {"expected": expected, "sealed": sealed, "diffs": diffed, "stops": stopped, "problems": problems}
+
+
+def evidence_damage(rows):
+    """r14 (CKPT13-P3-01): label -> function(copy of one capture's rows) giving that copy with one omission, duplicate or
+    contradiction - the capture_bound oracle must find each incomplete. Only evidence copies are changed."""
+    def first(kind):
+        return lambda copied: next(row for row in copied if row.get("scope") == "capture" and row.get("observation") == kind)
+
+    def edit(kind, *path, value):
+        def change(copied):
+            target = first(kind)(copied)
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            return copied
+        return change
+
+    def drop(kind, every=False):
+        def change(copied):
+            target = first(kind)(copied)
+            return [row for row in copied if not (row is target or every and row.get("scope") == "capture" and row.get("observation") == kind)]
+        return change
+
+    def duplicate(kind):
+        return lambda copied: copied + [copy.deepcopy(first(kind)(copied))]
+
+    def unrelated(kind):
+        def change(copied):
+            extra = copy.deepcopy(first(kind)(copied))
+            extra["container_name"] = extra["container_name"] + "-unrelated"
+            return copied + [extra]
+        return change
+    other_id, other_image = "e" * 64, "sha256:" + "e" * 64
+    damage = {
+        "one diff deleted": drop("diff"), "a diff duplicated": duplicate("diff"), "an unrelated diff": unrelated("diff"),
+        "a diff's post-state running": edit("diff", "after", "running", value=True),
+        "a diff's post-state restarting": edit("diff", "after", "restarting", value=True),
+        "a diff's post-image another image": edit("diff", "after", "image", value=other_image),
+        "a diff's post-ID another container": edit("diff", "after", "id", value=other_id),
+        "a diff refused": edit("diff", "outcome", value="refused"),
+    }
+    if any(row.get("scope") == "capture" and row.get("observation") == "stop" for row in rows):
+        damage.update({
+            "every stop deleted": drop("stop", every=True), "one stop deleted": drop("stop"), "a stop duplicated": duplicate("stop"),
+            "an unrelated stop": unrelated("stop"),
+            "the final name lookup of another ID": edit("stop", "named_after", "id", value=other_id),
+            "the final name lookup of another image": edit("stop", "named_after", "image", value=other_image),
+            "the final name lookup of another name": edit("stop", "named_after", "name", value="kin-unrelated"),
+            "the final state running": edit("stop", "named_after", "running", value=True),
+            "the final state restarting": edit("stop", "named_after", "restarting", value=True),
+            "the final state missing": edit("stop", "named_after", "running", value=None),
+            "the final exit code 137": edit("stop", "named_after", "exit_code", value=137),
+            "the final exit code not an integer": edit("stop", "named_after", "exit_code", value="0"),
+            "the final OOM kill": edit("stop", "named_after", "oom_killed", value=True),
+            "the ID lookup after the stop of another ID": edit("stop", "after", "id", value=other_id),
+            "the ID lookup after the stop running": edit("stop", "after", "running", value=True),
+            "a nonzero docker stop exit": edit("stop", "stop_exit", value=1),
+            "a stop interrupted": edit("stop", "interrupted", value="KeyboardInterrupt"),
+        })
+    return damage
+
+
+# ── r14 (CKPT13-01/02): the stop at the real process boundary ──
+# The owned throwaway subjects (the helper image's shell): one that ends with exit 0 on the stop signal, and one with its
+# own on-failure restart policy that ends with exit 0 on its first run's stop and exits 3 on every later start.
+STOP_SUBJECT = ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 1 & wait $!; done"]
+RESTARTING_SUBJECT = ["sh", "-c", "if [ -e /kin-smoke-ran ]; then exit 3; fi; touch /kin-smoke-ran; "
+                                  "trap 'exit 0' TERM INT; while :; do sleep 1 & wait $!; done"]
+LIFECYCLE_SECONDS = 30
+REAL_RUN = rehearsal.CheckpointDocker.run   # the adapter's own call, as imported (a case's wrapper delegates to it)
+
+
+class RealCalls:
+    """r14 test-only scheduling and recording wrapper over CheckpointDocker.run for one case (installed with
+    patch.object(rehearsal.CheckpointDocker, "run", calls.method())): every call is the adapter's own real call - a real
+    docker process with its argv untouched - recorded with its exit and output digests. `fault(argv)` names another
+    executable path (a task-owned copy of the docker client, removed or without an execute bit) from which exactly that
+    call is started, on `route` ("plain": subprocess.run with no active deadline; "deadline": Deadline.run's Popen);
+    `barrier(argv, calls)` selects the one real call after whose completion `effect()` (real docker lifecycle calls on the
+    owned subject, waiting for their observed state) runs before the adapter's next call. It never answers for the daemon."""
+
+    def __init__(self, *, fault=None, route=None, barrier=None, effect=None):
+        self.original = REAL_RUN
+        self.calls, self.fault, self.route, self.barrier, self.effect, self.fired = [], fault, route, barrier, effect, None
+
+    def method(self):
+        def run(adapter, args, **kwargs):
+            return self.call(adapter, args, **kwargs)
+        return run
+
+    def call(self, adapter, args, **kwargs):
+        args = list(args)
+        row = {"argv": cp.command_head(args), "route": "deadline" if cp.active_deadline() is not None else "plain"}
+        self.calls.append(row)
+        path = self.fault(args) if self.fault is not None else None
+        try:
+            if path is None:
+                result = self.original(adapter, args, **kwargs)
+            else:
+                scope = None
+                if self.route == "deadline":
+                    scope = cp.active_deadline() or cp.Deadline(LIFECYCLE_SECONDS * 4, label="r14-route")
+                row.update(executable=path, route=self.route)
+                with cp.deadline_scope(scope):
+                    result = self.original(adapter, [path, *args[1:]], **kwargs)
+        except BaseException as error:
+            row["raised"] = {"class": type(error).__name__, "errno": getattr(error, "errno", None)}
+            raise
+        row.update(exit=result.returncode, stdout=cp._output_fact(result.stdout), stderr=cp._output_fact(result.stderr))
+        if self.fired is None and self.barrier is not None and self.barrier(args, self.calls):
+            self.fired = {"after": cp.command_head(args), **self.effect()}
+        return result
+
+
+def after_id_inspection(ident):
+    """The barrier: the first inspection by `ident` after a `docker stop` of `ident` (the stop's inspection by ID)."""
+    def hit(args, calls):
+        return args[:3] == ["docker", "container", "inspect"] and args[-1] == ident and any(
+            row["argv"][:2] == ["docker", "stop"] and row["argv"][-1:] == [ident] for row in calls[:-1])
+    return hit
+
+
+def subject_state(ident):
+    """The subject's State as the daemon reports it now (a real inspection outside any wrapper)."""
+    answer = REAL_RUN(rehearsal.CheckpointDocker(None, None), ["docker", "container", "inspect", ident], timeout=60)
+    state = json.loads(answer.stdout)[0]["State"]
+    return {key: state.get(key) for key in ("Status", "Running", "Restarting", "ExitCode", "OOMKilled", "StartedAt", "FinishedAt")}
+
+
+def lifecycle(ident, *steps):
+    """Real `docker <verb> <ident>` calls on the owned subject, each followed by polling its real state until the
+    named condition is observed (the barrier is the observed state, never a sleep chosen to make a race likely)."""
+    conditions = {"start": lambda state: state["Running"] is True, "kill": lambda state: state["Running"] is False and state["ExitCode"] == 137,
+                  "restarting": lambda state: state["Restarting"] is True}
+    observed = []
+    plain = rehearsal.CheckpointDocker(None, None)
+    for step in steps:
+        verb = "start" if step == "restarting" else step
+        REAL_RUN(plain, ["docker", verb, ident], timeout=60)
+        end = time.monotonic() + LIFECYCLE_SECONDS
+        state = subject_state(ident)
+        while not conditions[step](state):
+            if time.monotonic() > end:
+                raise SmokeFailure("the owned subject did not reach the state after docker %s: %s" % (verb, json.dumps(state)))
+            cp.pause(0.1)
+            state = subject_state(ident)
+        observed.append({"step": step, "state": state})
+    return {"effect": observed}
+
+
+def attempt(call):
+    """('returned', value) | ('refused', code, message) | ('raised', class, message) for the outcome kinds a stop's
+    contract distinguishes; a deadline cut, an interrupt and any other exception propagate."""
+    try:
+        return ("returned", call())
+    except cp.DeadlineExpired:
+        raise
+    except cp.Refused as error:
+        return ("refused", error.code, str(error)[:400])
+    except (OSError, RuntimeError) as error:
+        return ("raised", type(error).__name__, str(error)[:400])
+
+
+def stop_boundary_cases(helper, token, workdir, check, *, track=lambda kind, name: None):
+    """r14 (CKPT13-01/02, implementer-order fixes 1 and 2) on owned throwaway subjects of the helper image (label
+    kin.ops.run=<token>, no network): the capture's stop - a real inventory, then stop_for_checkpoint, the capture's own
+    stop step before any layer judgement, store.begin or export - and the standalone stop, through the real docker client
+    and daemon. `check(ids, name, condition, detail)` judges each case (the smoke's check; an evidence driver may collect
+    instead). Each subject is removed by its owner here. Returns the raw rows."""
+    rows, runner = [], rehearsal.CheckpointDocker(None, helper)
+    client = shutil.which("docker")
+
+    def subject(label, command=STOP_SUBJECT, restart=None):
+        name = "kin-ckptsmoke-stop-" + token[:10] + "-" + label
+        track("stop subject", name)
+        runner.run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token, "--network", "none",
+                    *(["--restart", restart] if restart else []), "--entrypoint", command[0], helper, *command[1:]], timeout=120)
+        ident = json.loads(runner.run(["docker", "container", "inspect", name], timeout=60).stdout)[0]["Id"]
+        lifecycle_wait = time.monotonic() + LIFECYCLE_SECONDS
+        while subject_state(ident)["Running"] is not True:
+            if time.monotonic() > lifecycle_wait:
+                raise SmokeFailure("the owned stop subject did not start: " + name)
+            cp.pause(0.1)
+        return name, ident
+
+    def client_copy(label, mode):
+        """A task-owned byte-identical copy of the docker client: removed ('absent') or without an execute bit."""
+        path = Path(workdir) / ("docker-client-" + label)
+        shutil.copyfile(client, path)
+        facts = {"source": client, "copy": str(path), "sha256": cp.sha256(path.read_bytes()), "source_sha256": cp.sha256(Path(client).read_bytes())}
+        if mode == "absent":
+            path.unlink()
+        else:
+            path.chmod(0o644)
+        facts.update(mode=mode, exists=path.exists(), executable=path.exists() and os.access(path, os.X_OK))
+        return str(path), facts
+
+    def case(label, ids, *, capture, expect, calls=None, command=STOP_SUBJECT, restart=None, extra=None):
+        name, ident = subject(label, command, restart)
+        adapter = rehearsal.CheckpointDocker(None, helper)
+        calls = calls(ident) if calls is not None else RealCalls()
+        start = len(rehearsal.LAYER_RESOLUTIONS)
+        try:
+            with patch.object(rehearsal.CheckpointDocker, "run", calls.method()):
+                if capture:
+                    adapter.inventory()
+                    outcome = attempt(lambda: cp.stop_for_checkpoint(adapter, {"db": name}, {"db"}))
+                else:
+                    outcome = attempt(lambda: adapter.standalone_stop(name))
+            records = [row for row in rehearsal.LAYER_RESOLUTIONS[start:] if row.get("container_name") == name]
+            record = records[-1] if records else {}
+            state = subject_state(ident)
+            row = {"case": label, "subject": {"name": name, "id": ident},
+                   "outcome": [outcome[0], None, None] if outcome[0] == "returned" else list(outcome),
+                   "returned": outcome[1] if outcome[0] == "returned" else None, "record": record, "state_after": state,
+                   "calls": calls.calls, "barrier": calls.fired, **(extra or {})}
+            rows.append(row)
+            check(ids, "r14 stop boundary: " + label, expect(outcome, record, state, calls), {key: row[key] for key in ("outcome", "state_after", "barrier")}
+                  | {"record_outcome": record.get("outcome"), "reason": record.get("reason"), "stop_error": record.get("stop_error")})
+        finally:
+            runner.run(["docker", "rm", "-f", ident], check=False, timeout=120)
+
+    def refused(code):
+        return lambda outcome, record, state, calls: (outcome[:2] == ("refused", code) and record.get("outcome") == "refused"
+                                                      and type(record.get("reason")) is str and bool(record["reason"].strip()))
+
+    def standalone_refused(outcome, record, state, calls):
+        return (outcome[:2] == ("raised", "RuntimeError") and record.get("scope") == "standalone" and record.get("outcome") == "refused"
+                and type(record.get("reason")) is str and bool(record["reason"].strip()))
+
+    def not_started(error_class, errno_value):
+        def judged(outcome, record, state, calls):
+            started = [row for row in calls.calls if "executable" in row]
+            return (len(started) == 1 and started[0].get("raised") == {"class": error_class, "errno": errno_value}
+                    and (record.get("stop_error") or {}).get("class") == error_class and state["Running"] is True)
+        return judged
+
+    def faulted(path, route):
+        return lambda ident: RealCalls(fault=lambda args: path if args[:2] == ["docker", "stop"] and args[-1] == ident else None, route=route)
+
+    def raced(*steps):
+        return lambda ident: RealCalls(barrier=after_id_inspection(ident), effect=lambda: lifecycle(ident, *steps))
+
+    # Stable controls: the same real client, an undisturbed subject.
+    case("stable-capture", ["A05"], capture=True,
+         expect=lambda outcome, record, state, calls: (outcome[0] == "returned" and record.get("outcome") == "observed" and state["Running"] is False
+                                                      and state["ExitCode"] == 0 and (record.get("named_after") or {}).get("exit_code") == 0))
+    case("stable-standalone", ["A05"], capture=False,
+         expect=lambda outcome, record, state, calls: (outcome[0] == "returned" and outcome[1]["running"] is False and outcome[1]["exit_code"] == 0
+                                                      and not outcome[1]["forced"] and state["Running"] is False))
+    # Fix 1: the capture's (and the standalone) docker stop cannot be started; no stop child exists, the subject keeps running.
+    for mode, error_class, errno_value in (("absent", "FileNotFoundError", 2), ("not-executable", "PermissionError", 13)):
+        for route in ("plain", "deadline"):
+            path, facts = client_copy(mode + "-" + route, mode)
+            case("exec-" + mode + "-" + route, ["A05", "N05"], capture=True, calls=faulted(path, route), extra={"client": facts},
+                 expect=lambda outcome, record, state, calls, e=error_class, n=errno_value: (refused("STOP_UNCONFIRMED")(outcome, record, state, calls)
+                                                                                            and not_started(e, n)(outcome, record, state, calls)))
+        path, facts = client_copy(mode + "-standalone", mode)
+        case("standalone-exec-" + mode, ["A05", "N05"], capture=False, calls=faulted(path, "deadline"), extra={"client": facts},
+             expect=lambda outcome, record, state, calls, e=error_class, n=errno_value: (standalone_refused(outcome, record, state, calls)
+                                                                                        and not_started(e, n)(outcome, record, state, calls)))
+    # Fix 2: the subject started again (then killed with exit 137, or restarting by its own policy) after the inspection by
+    # ID and before the inspection by name.
+    started = lambda outcome, record, state, calls: calls.fired is not None and (record.get("after") or {}).get("running") is False  # noqa: E731
+    case("race-started", ["A05", "N05"], capture=True, calls=raced("start"),
+         expect=lambda outcome, record, state, calls: refused("STOP_UNCONFIRMED")(outcome, record, state, calls) and started(outcome, record, state, calls)
+         and (record.get("named_after") or {}).get("running") is True)
+    case("race-killed-137", ["A05", "N05"], capture=True, calls=raced("start", "kill"),
+         expect=lambda outcome, record, state, calls: refused("STOP_UNCONFIRMED")(outcome, record, state, calls) and started(outcome, record, state, calls)
+         and (record.get("after") or {}).get("exit_code") == 0 and (record.get("named_after") or {}).get("exit_code") == 137)
+    case("race-restarting", ["A05", "N05"], capture=True, calls=raced("restarting"), command=RESTARTING_SUBJECT, restart="on-failure",
+         expect=lambda outcome, record, state, calls: refused("STOP_UNCONFIRMED")(outcome, record, state, calls) and started(outcome, record, state, calls)
+         and calls.fired["effect"][-1]["state"]["Restarting"] is True)
+    case("standalone-race-started", ["A05", "N05"], capture=False, calls=raced("start"),
+         expect=lambda outcome, record, state, calls: standalone_refused(outcome, record, state, calls) and started(outcome, record, state, calls))
+    case("standalone-race-killed-137", ["A05", "N05"], capture=False, calls=raced("start", "kill"),
+         expect=lambda outcome, record, state, calls: standalone_refused(outcome, record, state, calls) and started(outcome, record, state, calls))
+    return rows
 
 
 def residue_dir():
@@ -781,6 +1117,9 @@ class Smoke:
         records_before = cp.original_records(stack.records.directory, entry_root=stack.root / "compose-entries",
                                              lock_path=intro.lock_path(stack.repo))
         state_raw = (stack.records.directory / "state.json").read_bytes()
+        # r14 (CKPT13-P3-01): the subjects the capture must stop and diff, frozen from a real inventory before it runs.
+        expected = capture_context(self.docker().inventory(), stack.names())
+        self.raw("capture-context-" + checkpoint_id + ".json", expected)
         try:
             bundle, observation = live.seal_boundary(checkpoint_id, stack, store=self.store, fixture_root=self.fixture_root, helper=self.helper,
                                                      identity=self.identity(stack, checkpoint_id), owned=owned, execution_kind="fresh",
@@ -807,10 +1146,18 @@ class Smoke:
                    {name: (state["ExitCode"], state["OOMKilled"]) for name, state in exits.items()})
         sealed = {"bundle": bundle, "manifest": manifest, "observation": observation}
         sealed["regenerated"] = self.regenerated(checkpoint_id, sealed)
-        # r13 (CKPT12-01): the capture stopped and diffed exactly the containers it sealed, by ID (layer-storage.json).
-        bound, detail = capture_bound([row for row in self.layer_storage if row["capture"] == checkpoint_id], cp.verify_bundle(bundle).capture.layer)
-        self.check(["A05", "A12"], checkpoint_id + ": the capture's stops and diffs acted on exactly the sealed containers (by ID, stopped)",
-                   bound, detail)
+        # r13 (CKPT12-01), r14 (CKPT13-P3-01): the capture's own evidence in layer-storage.json is complete for its
+        # pre-capture context and the verified record; copies of those very rows with one omission or contradiction each
+        # are not (the rows the capture wrote are never changed).
+        rows = [row for row in self.layer_storage if row["capture"] == checkpoint_id]
+        record = cp.verify_bundle(bundle).capture.layer
+        bound, detail = capture_bound(rows, record, expected)
+        self.check(["A05", "A12"], checkpoint_id + ": the capture's evidence is complete: exactly the expected stops and one diff per sealed "
+                   "role, each by the inventoried ID, image and name, confirmed stopped with a normal termination", bound, detail)
+        damaged = {label: capture_bound(change(copy.deepcopy(rows)), record, expected)[0] for label, change in evidence_damage(rows).items()}
+        self.raw("capture-evidence-" + checkpoint_id + ".json", {"rows": rows, "expected": expected, "detail": detail, "damaged_bound": damaged})
+        self.check(["A05", "A12"], checkpoint_id + ": each omitted, duplicated or contradicting copy of the capture's evidence is not complete",
+                   damaged and not any(damaged.values()), damaged)
         return sealed
 
     def regenerated(self, checkpoint_id, sealed):
@@ -1112,6 +1459,8 @@ class Smoke:
                           fenced={"at": intro.utc_now().isoformat(), "model": True})
         with stack.records.lease():
             self.observed(stack, "failure-held", stack.docker.observe("failure-held", purpose="capture", leaf={"unit": "native-smoke"}), "capture")
+        for steps in (("start",), ("start", "kill")):
+            self.capture_race(stack, "failure-held", steps)
         changes = stack.docker.standalone_changes(stack.target["containers"]["api"])
         self.check(["A05"], "docker diff of a stopped role lists its transient and its persistent change",
                    any("/tmp/kin-smoke-transient" in line for line in changes) and any("/etc/kin-smoke-persistent" in line for line in changes), changes)
@@ -1150,6 +1499,55 @@ class Smoke:
         self.check(["A11"], "nothing of the failure stack remains", not cp.owned_remaining(self.docker().inventory(), stack.owned()))
         cp.preserve_records({stack.label: stack.records.directory}, self.evidence)
         del self.stacks["failure"]
+
+    def capture_race(self, stack, checkpoint_id, steps):
+        """r14 (CKPT13-02) through the live consumer: the capture's database (its only running role here) is started again
+        by its ID - and with ("start", "kill") then killed (exit 137) - by real docker calls right after the capture's real
+        inspection by ID and before its inspection by name; the capture refuses STOP_UNCONFIRMED before store.begin, any
+        export or bundle. The database is then started again by its owner for the lineage's next capture."""
+        db = stack.target["containers"]["db"]
+        ident = json.loads(stack.docker.run(["docker", "container", "inspect", db]).stdout)[0]["Id"]
+        stored = sorted(path.name for path in self.store.root.iterdir())
+        calls = RealCalls(barrier=after_id_inspection(ident), effect=lambda: lifecycle(ident, *steps))
+        begun, exported, real_begin, real_export = [], [], cp.BundleStore.begin, rehearsal.CheckpointDocker.export_volume
+
+        def begin(store, *args, **kwargs):
+            begun.append(args)
+            return real_begin(store, *args, **kwargs)
+
+        def export_volume(adapter, name, destination):
+            exported.append(name)
+            return real_export(adapter, name, destination)
+        owned = {"token": stack.token, "projects": {stack.project}, "networks": [], "stack": {"root": str(stack.root), "containers": stack.names()}}
+        label = checkpoint_id + ": the capture's database " + " then ".join(steps) + " between its two inspections after the stop"
+        try:
+            with patch.object(rehearsal.CheckpointDocker, "run", calls.method()), patch.object(cp.BundleStore, "begin", begin), \
+                    patch.object(rehearsal.CheckpointDocker, "export_volume", export_volume):
+                outcome = attempt(lambda: live.seal_boundary(checkpoint_id, stack, store=self.store, fixture_root=self.fixture_root, helper=self.helper,
+                                                             identity=self.identity(stack, checkpoint_id), owned=owned, execution_kind="fresh",
+                                                             tls_not_after=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+                                                             before_seal=self.write_context))
+        finally:
+            self.storage_evidence(label)
+        record = next((row for row in reversed(self.layer_storage) if row["capture"] == label and row.get("observation") == "stop"
+                       and row.get("scope") == "capture"), {})
+        row = {"outcome": list(outcome[:2]) if outcome[0] != "returned" else ["returned"], "begun": len(begun), "barrier": calls.fired,
+               "exports": len(exported),
+               "store_unchanged": sorted(path.name for path in self.store.root.iterdir()) == stored,
+               "after": record.get("after"), "named_after": record.get("named_after"), "reason": record.get("reason")}
+        self.check(["A05", "N05"], label + ": STOP_UNCONFIRMED before store.begin, any export or bundle",
+                   outcome[:2] == ("refused", "STOP_UNCONFIRMED") and calls.fired is not None and row["begun"] == 0 and row["exports"] == 0
+                   and row["store_unchanged"] and type(row["reason"]) is str and bool(row["reason"].strip()), row)
+        if steps[-1] == "kill":
+            stack.docker.compose_start("db")
+        stack.docker.wait_db_ready()
+
+    def stop_boundaries(self):
+        """r14 (CKPT13-01/02): stop_boundary_cases on this smoke's own throwaway subjects (A05, N05)."""
+        self.extra_cleanup.append(("stop boundary subjects", {"token": self.token, "projects": set()}))
+        rows = stop_boundary_cases(self.helper, self.token, self.private, self.check, track=self.track)
+        self.storage_evidence("stop boundaries")
+        self.raw("stop-boundaries.json", rows)
 
     def regenerated_negatives(self, stack):
         """r6 (CKPT5-01, consultation native_negative) on the forced lineage at HELD, each on a fresh container of its
@@ -1588,6 +1986,8 @@ def smoke_run(smoke, facts):
     smoke.budget("introduced/verified")
     smoke.failure_lineage()
     smoke.budget("failure-held")
+    smoke.stop_boundaries()
+    smoke.budget("stop boundaries")
     smoke.git_closure()
     smoke.budget("git closure")
 
