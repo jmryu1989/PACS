@@ -485,6 +485,10 @@ V4_MUTANTS = {
         ("api/src/emr-runtime/external-writer.ts",
          "    if (format !== 4) return fail('SealUnsupportedFormat');\n    return admitEngineV4(engine, selector, pair, repair, inventory);\n",
          "    return admitEngineV4(engine, selector, pair, repair, inventory);\n")]),
+    "V4-M13": ("a page split fills one page and leaves a one-member remainder (fan-out grows with the member count; the parent overflows)", [
+        ("api/src/emr-runtime/checkpoint-v4.ts",
+         "  const k = greedy.length;\n  if (k === 1) return greedy;\n",
+         "  const k = greedy.length;\n  if (k >= 1) return folded();\n")]),
 }
 V4_SUITES = {
     "service-v4": {"command": ["tests/emr/b/state_service_test.cjs"], "variable": "EMR_SERVICE_CASES", "env": {"EMR_STATE_FORMAT": "4"}, "declared": "local_service_cases"},

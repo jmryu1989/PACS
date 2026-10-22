@@ -157,6 +157,54 @@ test('V4-T02 copy-on-write B+ tree: membership, verified absence, ranges, splits
   w2.close(); writer.close(); store.close();
 });
 
+test('V4-T02 splits are even: a growing tree keeps every non-root page at least half full (never a full page and a one-member remainder)', { skip: !only('V4-T02') }, t => {
+  // A tree grown by small random batches (the owner's transitions): members route by digest, so inserts land anywhere.
+  const dir = scratch(t), store = new V4.PackStore(path.join(dir, 'v4'), lineageSha, { cacheBytes: 64 * 65536 });
+  const writer = new V4.PackWriter(store, 1);
+  let tree = V4.Tree.empty(writer, 3);
+  const members = new Map();
+  const value = i => JSON.stringify({ stream: 'viewing', attemptId: 'a'.repeat(36), sequence: i, hash: 'h'.repeat(64) });
+  try {
+    for (let i = 0; i < 1500; i += 3) {
+      const changes = new Map();
+      for (let j = i; j < i + 3; j++) { const key = 'slot:' + sha256(String(j)); changes.set(key, value(j)); members.set(key, value(j)); }
+      writer.revision = i + 2; tree = tree.apply(writer, changes);
+    }
+  } catch (error) {
+    // A full page plus a one-member remainder per split multiplies tiny leaves until their parent cannot hold them.
+    assert.fail('a growing tree accepts every insert (a split never overflows a page): ' + String(error && (error.detail || error.message)));
+  }
+  writer.flush();
+  assert.equal(tree.count, 1500); assert.ok(tree.level >= 1, 'the members split into several leaves');
+  for (const [key, raw] of members) assert.equal(tree.get(key), raw);
+  assert.equal(tree.check().keys, 1500);
+  // Every page but the root holds at least half a page less one member: a split yields halves and a page only grows
+  // afterwards. A full page plus a remainder would leave one-member pages whose intervals almost never fill.
+  const fills = []; let pages = 0;
+  for (const ref of tree.pages()) {
+    const { header, payload } = V4.parsePage(store.readRaw(ref), { ref, lineageSha256: lineageSha });
+    pages++;
+    if (header.kind === V4.KIND.overflow || (ref.pack === tree.root.pack && ref.page === tree.root.page)) continue;
+    fills.push({ level: header.level, entries: header.entryCount, bytes: payload.length });
+  }
+  const half = Math.floor(V4.BODY_CAPACITY / 2) - 2 * 400;
+  assert.ok(fills.length >= 4, 'several non-root pages: ' + fills.length);
+  for (const fill of fills) assert.ok(fill.bytes >= half, 'every non-root page is at least half full: ' + JSON.stringify(fill));
+  assert.ok(pages <= 2 * Math.ceil(1500 * 300 / half) + 2, 'the page count follows the member bytes: ' + pages);
+  writer.close(); store.close();
+  // The partition itself: the fewest capacity-bounded groups, evened out, the minimum per group kept.
+  const even = V4.partitionSizes(new Array(218).fill(300), 65176, 2);
+  assert.deepEqual(even, [109, 218], 'two halves, not a full page and a one-child remainder');
+  assert.deepEqual(V4.partitionSizes([300, 300, 300], 65176, 2), [3]);
+  assert.deepEqual(V4.partitionSizes([], 65176, 1), [0]);
+  const sizes = Array.from({ length: 700 }, (_, i) => 100 + ((i * 7919) % 900));
+  const ends = V4.partitionSizes(sizes, 65176, 1);
+  let start = 0; const totals = [];
+  for (const end of ends) { totals.push(sizes.slice(start, end).reduce((a, b) => a + b, 0)); start = end; }
+  assert.equal(ends[ends.length - 1], 700); assert.ok(totals.every(b => b <= 65176), 'no group over capacity');
+  assert.ok(Math.max(...totals) - Math.min(...totals) <= 2 * 1000, 'groups are even: ' + JSON.stringify(totals));
+});
+
 test('V4-T02 the bounded resumable walk visits every member and every page exactly once; copy-on-write reports the pages a new root drops', { skip: !only('V4-T02') }, t => {
   const dir = scratch(t), store = new V4.PackStore(path.join(dir, 'v4'), lineageSha, { cacheBytes: 16 * 65536 });
   const writer = new V4.PackWriter(store, 1);

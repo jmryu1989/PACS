@@ -1477,14 +1477,19 @@ test('V4-T04 a syscall failure at every v4 publication barrier gives no success;
 });
 test('V4-T05 pack reclamation unlinks only packs unreachable from the selected root; retired segments and roots leave at rotation; every proof and exclusion survives', v4Only, async t => {
   const f = await fixture(t), work = await (await f.hello()).work(), done = [];
-  for (let i = 0; i < 40; i++) done.push(await complete(f, work, i % 3 === 0));
+  for (let i = 0; i < 64; i++) done.push(await complete(f, work, i % 3 === 0));
   const before = f.coordinator.call('v4-status');
+  t.diagnostic('after 64 completes under an open scope: ' + JSON.stringify({ packs: before.packs, accounting: before.accounting, fragmentation: before.fragmentation, revision: before.revision }));
   assert.ok(before.packs >= 1);
   // Ordinary operation reclaims as it goes (the maintained accounting, bounded slices): the pack population stays
   // near the live pages, never one pack per transition, and nothing dead waits for an operator.
   assert.equal(before.accounting.known, true, 'the liveness accounting is maintained by the owner');
   assert.equal(before.accounting.dead, 0, 'dead packs are reclaimed in the transitions that killed them');
   assert.ok(before.packs <= 20, 'packs are appended across transitions (never one per transition) and reclaimed when dead: ' + before.packs);
+  // Sustained load with the scope open all along (no idle tick ever ran here): relocation runs in the transitions
+  // themselves, so the pack population stays within its bound instead of growing until the load stops.
+  assert.equal(before.fragmentation.due, false, 'relocation runs in the transitions themselves: ' + JSON.stringify({ packs: before.packs, fragmentation: before.fragmentation }));
+  assert.ok(before.packs <= 2 * before.fragmentation.needed + 2, 'the pack population is bounded under sustained load: ' + JSON.stringify({ packs: before.packs, fragmentation: before.fragmentation }));
   const stateBefore = f.coordinator.call('read');
   const reclaimed = f.coordinator.call('compact', { force: true });
   const after = f.coordinator.call('v4-status');

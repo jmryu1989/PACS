@@ -1424,6 +1424,13 @@
         "kill": ["V4-T08"],
         "assertions": {"V4-T08": "the v3 entry mode over the v4 target refuses the other format"},
         "behaviour": "bypass the entry mode's format admission: a v3-mode process over a v4 root is refused before any byte changes (the image-level launch boundary is V4-T09)"
+      },
+      {
+        "id": "V4-M13",
+        "suite": "codec",
+        "kill": ["V4-T02"],
+        "assertions": {"V4-T02": "a growing tree accepts every insert"},
+        "behaviour": "split a full page into a full page and a one-member remainder: the fan-out grows with the member count and the parent branch overflows (V4-T12 ladder: branch-overflow-internal at ~700 attempts)"
       }
     ]
   }

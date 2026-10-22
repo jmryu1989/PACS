@@ -1490,6 +1490,9 @@ function accountTransition(v: V4State, written: PageRef[], orphans: PageRef[]): 
   for (const ref of orphans) {
     if (v.packs && countInto(v.packs, ref.pack, -1) === 0) v.dead.add(ref.pack);
     if (v.sweepOrphans) countInto(v.sweepOrphans, ref.pack, 1);
+    // The page cache keeps the live pages, not every page this incarnation ever decoded (a running sweep re-reads its
+    // pinned root's pages from the files: the bytes are the authority, the cache only a memo).
+    v.store.forget(ref);
   }
 }
 /** Unlink up to `limit` dead packs: never the writer's current pack, never a pack the running sweep's pinned root may
@@ -2421,6 +2424,12 @@ export function executeExternal(request: WriterRequest): any {
         const body: any = { version: 3, revision: engine.head.revision + 1, generation, patch: changes, publishing, ...(publishing ? { tail: value.tail } : {}) };
         commitRecord(engine, context, body, value.kind === 'reserve' ? 'reserve' : 'update');
         if (engine.format !== 4 && publishing && compactionDue(engine)) compactEngine(engine, context);
+        // Space reclamation runs in bounded cooperative slices while ordinary operations continue (order section 3):
+        // a transition that leaves the pack population over its bound is followed by one relocation slice (at most
+        // V4_RELOCATE_PAGES live pages out of the emptiest packs), not deferred to an idle moment that sustained load
+        // never offers. A slice only happens while the bound is exceeded, so its cost is amortized over the pack that
+        // was filled since the last one.
+        if (engine.format === 4 && !engine.v4!.latched && fragmentationV4(engine.v4!).due) relocateV4(engine, V4_RELOCATE_PAGES);
         return { changed: true, revision: engine.head.revision, generation: engine.head.generation };
       }
       case 'update': case 'reserve': case 'compare-and-set': {

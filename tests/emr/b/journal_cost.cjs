@@ -528,6 +528,15 @@ function deriveAndJudge(record, streamCount) {
     check('simultaneously unresolved attempts (tool load, informational)', E.cardinality.simultaneously_unresolved_attempts_both_streams, c.max_simultaneously_unresolved),
     { criterion: 'cold recovery settles the sample classes as expected', limit: 'acked/unacked committed-and-sealed, negative fenced-not-committed, orphan unresolved', measured: record.cold_recovery?.checks ?? null,
       result: !record.cold_recovery ? 'UNMEASURED' : record.cold_recovery.service_state !== 'ready' ? 'FAIL' : record.cold_recovery.checks.every(k => k.outcome === k.expected) ? 'PASS' : 'FAIL' },
+    ...(LADDER_FORMAT === 4 ? [(() => {
+      // V4 (order section 3): the pack population at the end of the sustained load (one scope open all along, no idle
+      // tick) stays within its bound - relocation runs in the transitions themselves - and the accounting is maintained.
+      const v = record.v4_status_after_load, fr = v?.fragmentation;
+      const bound = fr ? 2 * fr.needed + 2 : null;
+      return { criterion: 'v4 pack population bounded under sustained load (packs <= 2 * needed + 2 at the end of the load loop; accounting known)', limit: bound,
+        measured: v?.packs ?? null, result: !v || !fr || v.error ? 'UNMEASURED' : v.packs <= bound && fr.due === false && v.accounting?.known === true ? 'PASS' : 'FAIL',
+        note: v ? JSON.stringify({ fragmentation: fr, accounting: v.accounting }) : 'no v4 status' };
+    })()] : []),
   ];
   record.not_measured = ['operational ladder 10M and 100M events per stream', '600M attempt keys', 'real PostgreSQL topology (memory SQL model here)', 'CPU and physical read/write/fsync counts', '24/48 concurrent clients (one client, one scope)'];
   delete record._receiptWindow;

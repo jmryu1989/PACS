@@ -231,10 +231,20 @@ export class PackStore {
     }
     const { header, payload } = parsePage(this.readRaw(ref), { ref, lineageSha256: this.lineageSha256, ...expect });
     const value = decode(header, payload);
-    const bytes = PAGE_BYTES;
+    // The decoded representation of a page (entries, strings, descriptors) weighs about the page plus its payload again;
+    // the budget is charged that way so the owner's heap, not only the page count, stays bounded.
+    const bytes = PAGE_BYTES + payload.length;
     while (this.cacheBytes + bytes > this.cacheBudget && this.cache.size) { const first = this.cache.keys().next().value!; this.cacheBytes -= this.cache.get(first)!.bytes; this.cache.delete(first); }
     if (bytes <= this.cacheBudget) { this.cache.set(key, { bytes, value, header }); this.cacheBytes += bytes; }
     return value;
+  }
+  /** Drop one page's cached representations (a page no current root references: an orphan of a transition). The cache
+   * then holds about the live pages, not every page the writer ever decoded up to the budget. */
+  forget(ref: PageRef): void {
+    for (const tag of ['leaf', 'branch', 'header', 'blob', 'blob-next', 'node']) {
+      const key = tag + ':' + ref.pack + ':' + ref.page + ':' + ref.sha256, cached = this.cache.get(key);
+      if (cached) { this.cacheBytes -= cached.bytes; this.cache.delete(key); }
+    }
   }
   /** Close the read descriptor of one pack (before it is unlinked); its cached pages stay valid (immutable bytes). */
   release(pack: string): void {
@@ -419,9 +429,37 @@ function decodeBranch(header: PageHeader, payload: Buffer, low: string | null, h
   if (total !== count) corrupt(d + ':count');
   return { kind: 2, low, high, count, children, level: header.level };
 }
+/** Contiguous groups of items (their encoded sizes, separators included) within `capacity` bytes each: the fewest
+ * groups a greedy fill needs, then evened out so that every group holds about the same bytes. A split therefore
+ * yields halves - never a full page and a one-item remainder, whose tiny interval almost never receives another
+ * member while the full page splits again at the next insert (one more tiny sibling per split, a fan-out that grows
+ * with the member count and overflows the parent). Groups keep `minimum` items whenever the item count allows.
+ * Returns the end index of each group. */
+export function partitionSizes(sizes: number[], capacity: number, minimum: number): number[] {
+  const n = sizes.length;
+  const greedy: number[] = [];
+  { let bytes = 0, count = 0; for (let i = 0; i < n; i++) { if (count >= minimum && bytes + sizes[i] > capacity) { greedy.push(i); bytes = 0; count = 0; } bytes += sizes[i]; count++; } greedy.push(n); }
+  // The greedy fill with a too-small last group folded into its predecessor: the fallback only (a pathological item
+  // mix no even partition can respect); the fold is what overflowed a 218-child branch split (217 + 1 -> 218).
+  const folded = () => { if (greedy.length > 1 && n - greedy[greedy.length - 2] < minimum) greedy.splice(greedy.length - 2, 1); return greedy; };
+  const k = greedy.length;
+  if (k === 1) return greedy;
+  const ends: number[] = [];
+  let bytes = 0, count = 0, unplaced = sizes.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < n; i++) {
+    const groupsLeft = k - ends.length - 1, target = Math.ceil((bytes + unplaced) / (groupsLeft + 1));
+    if (groupsLeft > 0 && count >= minimum && n - i >= groupsLeft * minimum && (bytes + sizes[i] > capacity || bytes >= target)) { ends.push(i); bytes = 0; count = 0; }
+    bytes += sizes[i]; count++; unplaced -= sizes[i];
+  }
+  ends.push(n);
+  // The evened-out groups must respect the capacity exactly as the greedy ones do; otherwise the greedy ones stand.
+  let start = 0;
+  for (const end of ends) { let b = 0; for (let i = start; i < end; i++) b += sizes[i]; if (b > capacity) return folded(); start = end; }
+  return ends;
+}
 /** One logical tree of the checkpoint: lookups verify the whole route; `apply` builds the copy-on-write replacement
  * pages for a batch of changes and returns the new root descriptor. Leaves are never merged (an emptied leaf keeps its
- * interval); splits keep the partition exact; a one-child root is collapsed. */
+ * interval); splits keep the partition exact and even (`partitionSizes`); a one-child root is collapsed. */
 export class Tree {
   constructor(readonly store: PackStore, readonly id: number, readonly root: PageRef, readonly count: number, readonly level: number) {}
   private node(ref: PageRef, level: number, low: string | null, high: string | null): LeafNode | BranchNode {
@@ -571,12 +609,9 @@ export class Tree {
     return this.writeLeafItems(writer, buckets.map(([digest, pairs]) => this.encodeBucket(writer, digest, pairs)), low, high);
   }
   private writeLeafItems(writer: PackWriter, items: LeafItem[], low: string | null, high: string | null): ChildDescriptor[] {
-    const chunks: typeof items[] = [[]];
-    let bytes = 0;
-    for (const item of items) {
-      if (chunks[chunks.length - 1].length && bytes + item.bytes + 1 > BODY_CAPACITY - 200) { chunks.push([]); bytes = 0; }
-      chunks[chunks.length - 1].push(item); bytes += item.bytes + 1;
-    }
+    const chunks: typeof items[] = [];
+    let start = 0;
+    for (const end of partitionSizes(items.map(item => item.bytes + 1), BODY_CAPACITY - 200, 1)) { chunks.push(items.slice(start, end)); start = end; }
     const out: ChildDescriptor[] = [];
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
@@ -591,13 +626,9 @@ export class Tree {
   private writeBranches(writer: PackWriter, children: ChildDescriptor[], level: number, low: string | null, high: string | null): ChildDescriptor[] {
     const encode = (c: ChildDescriptor) => ({ low: c.low, high: c.high, count: String(c.count), ref: c.ref });
     const sizes = children.map(c => Buffer.byteLength(canonical(encode(c))) + 1);
-    const groups: ChildDescriptor[][] = [[]];
-    let bytes = 0;
-    for (let i = 0; i < children.length; i++) {
-      if (groups[groups.length - 1].length >= 2 && bytes + sizes[i] > BODY_CAPACITY - 200) { groups.push([]); bytes = 0; }
-      groups[groups.length - 1].push(children[i]); bytes += sizes[i];
-    }
-    if (groups.length > 1 && groups[groups.length - 1].length < 2) { const last = groups.pop()!; groups[groups.length - 1].push(...last); }
+    const groups: ChildDescriptor[][] = [];
+    let start = 0;
+    for (const end of partitionSizes(sizes, BODY_CAPACITY - 200, 2)) { groups.push(children.slice(start, end)); start = end; }
     return groups.map(group => {
       const gl = group[0].low, gh = group[group.length - 1].high, count = group.reduce((n, c) => n + c.count, 0);
       const payload = Buffer.from(canonical({ low: gl, high: gh, count: String(count), children: group.map(encode) }));
