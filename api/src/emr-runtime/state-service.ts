@@ -70,7 +70,12 @@ export async function launchStateService(environment: NodeJS.ProcessEnv = proces
         info.uid !== EMR_STATE_IDENTITIES.serviceUid || info.gid !== endpoint.group || (info.mode & 0o777) !== 0o750 ||
         parent === path.resolve(directory) || parent.startsWith(path.resolve(directory) + path.sep)) refuse('FORBIDDEN');
     }
-    check(); coordinator = new StateCoordinator(directory); check();
+    // The entry mode names the stored major format it serves (start-production.sh state-serve-v3 / state-serve-v4):
+    // a pair of the other format is refused by admission before any journal, lock or mutation.
+    const formatValue = environment.KIN_EMR_STATE_FORMAT ?? '3';
+    if (formatValue !== '3' && formatValue !== '4') refuse('PROTOCOL');
+    const format: 3 | 4 = formatValue === '4' ? 4 : 3;
+    check(); coordinator = new StateCoordinator(directory, undefined, { format }); check();
     const url = new URL(environment.DATABASE_URL);
     if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.username !== 'kin_emr_reader') refuse('FORBIDDEN');
     url.searchParams.set('connection_limit', String(EMR_STATE_VERIFY_CONCURRENCY));

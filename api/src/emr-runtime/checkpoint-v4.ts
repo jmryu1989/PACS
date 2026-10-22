@@ -460,6 +460,11 @@ export class Tree {
     }.bind(this);
     yield* walk(this.root, this.level, null, null);
   }
+  /** Open a tree from its root descriptor: the root page's verified header supplies the level. */
+  static open(store: PackStore, id: number, ref: PageRef, count: number): Tree {
+    const level = store.page(ref, { tree: id }, h => h.level, 'header');
+    return new Tree(store, id, ref, count, level);
+  }
   static empty(writer: PackWriter, id: number): Tree {
     const ref = writer.append(KIND.leaf, id, 0, 0, Buffer.from(canonical({ low: null, high: null, count: '0', entries: [] })));
     return new Tree(writer.store, id, ref, 0, 0);

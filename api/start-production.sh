@@ -17,10 +17,15 @@ case "$1" in
     exec node dist/main.js
     ;;
   state-serve-v3)
-    exec node dist/emr-runtime/state-service-main.js
+    KIN_EMR_STATE_FORMAT=3 exec node dist/emr-runtime/state-service-main.js
+    ;;
+  state-serve-v4)
+    # The same compiled state-service main (Node PID 1); the explicit entry mode names the stored major format it
+    # serves. A v3 pair is refused by the v4 mode and a v4 pair by the v3 mode, before any journal or lock exists.
+    KIN_EMR_STATE_FORMAT=4 exec node dist/emr-runtime/state-service-main.js
     ;;
   *)
-    echo "start-production.sh: expected migrate, serve or state-serve-v3" >&2
+    echo "start-production.sh: expected migrate, serve, state-serve-v3 or state-serve-v4" >&2
     exit 64
     ;;
 esac

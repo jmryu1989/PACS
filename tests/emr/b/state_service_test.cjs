@@ -9,6 +9,8 @@ const fs = require('node:fs'), path = require('node:path'), net = require('node:
 const { randomUUID, createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '../../..');
+// EMR_STATE_FORMAT=4 runs the same service cases over the v4 owner view (KIN-EMR-STATE-V4); v3 is the default.
+const FORMAT = process.env.EMR_STATE_FORMAT === '4' ? 4 : 3;
 const sourceRoot = process.env.EMR_B2C_SOURCE_ROOT || root;
 const ts = require(path.join(root, 'api/node_modules/typescript'));
 require.extensions['.ts'] = (module, file) => module._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
@@ -25,15 +27,23 @@ const C = load('emr-runtime/contract'), A = load('emr-contract/access-event');
 const P = load('emr-runtime/state-protocol'), L = load('emr-runtime/limits');
 const declaration = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/b.json'))).b2c;
 const selectedCases = process.env.EMR_SERVICE_CASES ? process.env.EMR_SERVICE_CASES.split(',') : declaration.local_service_cases;
-const test = (name, body) => { if (selectedCases.includes(name.split(' ')[0])) nodeTest(name, body); };
+// A cell may carry `{ skip: reason }` (a v3-layout cell under EMR_STATE_FORMAT=4): it is reported skipped, never run.
+const skipped = new Set();
+const test = (name, options, body) => {
+  if (typeof options === 'function') { body = options; options = {}; }
+  const id = name.split(' ')[0];
+  if (!selectedCases.includes(id)) return;
+  if (options.skip) { skipped.add(id); nodeTest(name, { skip: options.skip }, body); return; }
+  nodeTest(name, body);
+};
 const executed = [];
 const childInput = process.argv.indexOf('--terminal-child');
 if (childInput === -1) {
   beforeEach(t => executed.push(t.name.split(' ')[0]));
   assert.equal(new Set(selectedCases).size, selectedCases.length);
   assert.equal(selectedCases.every(id => declaration.local_service_cases.includes(id)), true);
-  after(() => assert.deepEqual(executed, declaration.local_service_cases.filter(id => selectedCases.includes(id))));
-  console.log('SERVICE_SELECTION ' + JSON.stringify(selectedCases));
+  after(() => assert.deepEqual(executed, declaration.local_service_cases.filter(id => selectedCases.includes(id) && !skipped.has(id))));
+  console.log('SERVICE_SELECTION ' + JSON.stringify(selectedCases) + (process.env.EMR_STATE_FORMAT === '4' ? ' FORMAT 4' : ''));
 }
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -68,7 +78,7 @@ async function fixture(t, options = {}) {
   const directory = options.directory ?? fs.mkdtempSync(path.join(stateRoot, 'state-'));
   fs.chmodSync(directory, 0o700);
   const database = options.model ?? model();
-  const coordinator = new StateCoordinator(directory, executeExternal);
+  const coordinator = new StateCoordinator(directory, executeExternal, { format: FORMAT });
   const journal = new FailureJournal(directory, coordinator), seal = new AccessSeal(directory, database.sql, journal);
   const pair = { instanceId: options.pair?.instanceId ?? 'synthetic-copy', chains: Object.fromEntries(Object.entries(database.streams).map(([s, v]) => [s, v.chainId])),
     database: options.pair?.database ?? { database: 'isolated', oid: 10001, address: '127.0.0.1', port: 5432 } };
@@ -543,7 +553,7 @@ test('D1641-T05 missing lost duplicate and invalid acknowledgements never erase 
   }
 });
 
-test('D1641-T06 actual WAL checkpoint compaction preserves exclusion through a new process', async t => {
+test('D1641-T06 actual WAL checkpoint compaction preserves exclusion through a new process', { skip: FORMAT === 4 && 'v3 checkpoint/WAL bytes (compaction); v4: V4-T05' }, async t => {
   const f = await fixture(t), work = await (await f.hello()).work(), original = await complete(f, work, true);
   const checkpoint = path.join(f.directory, 'seal/settlement.json');
   const firstRevision = JSON.parse(fs.readFileSync(checkpoint)).state.revision;
@@ -573,7 +583,7 @@ test('D1641-T06 actual WAL checkpoint compaction preserves exclusion through a n
   assert.equal(next.observation.terminals, 2 * (count + 1) + 1, 'compaction retains every acknowledged and settled stream identity');
 });
 
-test('D1641-T06F publication flush failures never acknowledge success or erase terminal exclusion', async t => {
+test('D1641-T06F publication flush failures never acknowledge success or erase terminal exclusion', { skip: FORMAT === 4 && 'v3 WAL/tail inode fault injection; v4: V4-T04' }, async t => {
   // Inject at the real write/flush boundary. A missing flush makes the failure injection
   // ineffective and wrongly permits confirmation, which is the mutant's behavioral kill.
   for (const target of ['wal', 'tail']) {
@@ -611,7 +621,7 @@ test('D1641-T08 a quiesced paired component copy retains terminal exclusion with
   assert.equal(next.proof.result.outcome, 'committed-and-sealed');
 });
 
-test('D1641-T09 acknowledged identity accumulation survives capacity refusal and recovery', async t => {
+test('D1641-T09 acknowledged identity accumulation survives capacity refusal and recovery', { skip: FORMAT === 4 && 'v3 WAL inode fault injection; v4: V4-T04' }, async t => {
   const f = await fixture(t), work = await (await f.hello()).work(), originals = [];
   for (let i = 0; i < 32; i++) originals.push(await complete(f, work, true));
   assert.equal(stateObservation(f).terminals, 64, 'acknowledged identities are never count-evicted');
@@ -745,7 +755,7 @@ test('D1650-D17-V3 pending replay is pinned to original live work session and ep
     }
   }
 });
-test('D1650-T08 contradictory identity records refuse startup before recovery writes', async t => {
+test('D1650-T08 contradictory identity records refuse startup before recovery writes', { skip: FORMAT === 4 && 'v3 checkpoint envelope tampering; v4: V4-T03/V4-T06' }, async t => {
   for (const mode of ['duplicate-slot', 'orphan-intent', 'orphan-slot', 'wrong-intent', 'wrong-proof', 'terminal-conflict']) {
     const { f, binding } = await expiryFixture(t);
     const id = 'viewing:' + binding.attemptId;
@@ -823,7 +833,7 @@ test('D1655-T02 concurrent first publication and later coverage agree on one ful
   assert.equal((await work.call('acknowledge', { proof: original, bindings: item.bundle.bindings })).ok, true);
 });
 
-test('D1655-T03 expiry refuses before deletion when bundle publication cannot become durable', async t => {
+test('D1655-T03 expiry refuses before deletion when bundle publication cannot become durable', { skip: FORMAT === 4 && 'v3 WAL storage cuts; v4: V4-T04' }, async t => {
   for (const fault of ['EIO', 'ENOSPC']) {
     const f = await fixture(t), work = await (await f.hello()).work(), item = await f.reserve(work); item.commit();
     // Both stream seals complete but no aggregate proof has ever been requested.
@@ -846,7 +856,7 @@ test('D1655-T03 expiry refuses before deletion when bundle publication cannot be
   }
 });
 
-test('D1655-T04 unsupported formats and missing initialization provenance refuse without repair', async t => {
+test('D1655-T04 unsupported formats and missing initialization provenance refuse without repair', { skip: FORMAT === 4 && 'v3 checkpoint envelope versions; v4: V4-T01/V4-T09' }, async t => {
   for (const mode of ['v1', 'v2-pruned', 'future', 'missing', 'mixed-wal']) {
     const f = await fixture(t);
     f.coordinator.call('compact', { force: true });
@@ -872,7 +882,7 @@ test('D1655-T04 unsupported formats and missing initialization provenance refuse
   }
 });
 
-test('D1655-T05 missing references and contradictory publication refuse before recovery mutation', async t => {
+test('D1655-T05 missing references and contradictory publication refuse before recovery mutation', { skip: FORMAT === 4 && 'v3 checkpoint envelope tampering; v4: V4-T03' }, async t => {
   for (const mode of ['missing-terminal', 'wrong-bundle', 'missing-lineage', 'wrong-ack-digest']) {
     const f = await fixture(t), work = await (await f.hello()).work(), item = await complete(f, work, mode === 'wrong-ack-digest');
     f.coordinator.call('compact', { force: true });
@@ -907,17 +917,24 @@ test('D1655-T06 exact ack minimizes duplicates and preserves proof lookup and ex
   // admission of the files reads (checkpoint plus WAL), the full published attestation is no longer the current
   // record, and the superseded bytes leave the active WAL/checkpoint at the amortized reclamation - never by a
   // whole-checkpoint rewrite per acknowledgement.
-  const inspector = load('emr-runtime/external-writer').inspectExternal;
+  const inspector = (directory) => load('emr-runtime/external-writer').inspectExternal(directory, undefined, FORMAT);
   const admitted = inspector(f.directory).state;
   assert.equal(admitted.version, 3);
   assert.equal(JSON.stringify(admitted.bundles), JSON.stringify(after.bundles), 'a fresh admission of the files reads the minimized representation');
-  const walBefore = fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size;
-  f.coordinator.call('compact', { force: true });
-  const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
-  assert.equal(checkpoint.state.version, 3);
-  assert.equal(JSON.stringify(checkpoint.state.bundles), JSON.stringify(after.bundles), 'reclamation installs the minimized representation in the checkpoint');
-  assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'reclamation removes the superseded full representation from the active WAL');
-  assert.ok(walBefore >= 0, 'the WAL before reclamation is measured, not prescribed');
+  if (FORMAT === 4) {
+    // The v4 root is the acknowledged representation at once (copy-on-write): a fresh admission of the selected root
+    // reads it; reclamation is pack GC, never a rewrite.
+    f.coordinator.call('compact', { force: true });
+    assert.equal(JSON.stringify(inspector(f.directory).state.bundles), JSON.stringify(after.bundles), 'reclamation keeps the acknowledged representation in the selected root');
+  } else {
+    const walBefore = fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size;
+    f.coordinator.call('compact', { force: true });
+    const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
+    assert.equal(checkpoint.state.version, 3);
+    assert.equal(JSON.stringify(checkpoint.state.bundles), JSON.stringify(after.bundles), 'reclamation installs the minimized representation in the checkpoint');
+    assert.equal(fs.statSync(path.join(f.directory, 'seal/settlement.jsonl')).size, 0, 'reclamation removes the superseded full representation from the active WAL');
+    assert.ok(walBefore >= 0, 'the WAL before reclamation is measured, not prescribed');
+  }
   assert.equal(JSON.stringify((await work.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'post-reclamation confirm preserves its full proof contract');
   assert.equal((await work.call('acknowledge', value)).result.status, 'already-acknowledged', 'post-reclamation exact ack retry is repeatable');
 });
@@ -970,7 +987,7 @@ async function storageFailure(directory, cut, code, operation) {
   return { reply, hits };
 }
 
-test('D1655-T07 aggregate proof storage failures preserve unknown outcome and exact restart recovery', async t => {
+test('D1655-T07 aggregate proof storage failures preserve unknown outcome and exact restart recovery', { skip: FORMAT === 4 && 'v3 WAL storage cuts; v4: V4-T04' }, async t => {
   for (const twoStreams of [false, true]) for (const code of ['EIO', 'ENOSPC'])
     for (const cut of ['wal-write', 'wal-torn-write', 'wal-flush', 'wal-flushed']) {
       const f = await fixture(t), work = await (await f.hello()).work();
@@ -1002,7 +1019,7 @@ test('D1655-T07 aggregate proof storage failures preserve unknown outcome and ex
     }
 });
 
-test('D1655-T08 interrupted full-proof ack compaction preserves exact retry and permanent exclusion', async t => {
+test('D1655-T08 interrupted full-proof ack compaction preserves exact retry and permanent exclusion', { skip: FORMAT === 4 && 'v3 WAL/checkpoint cuts and reclamation; v4: V4-T04/V4-T05' }, async t => {
   // The acknowledgement's own barriers (its WAL record) and the reclamation's barriers (the amortized compaction that
   // later removes the superseded representation) are separate durable steps (D1682 item 4); each is cut in turn.
   const ackCuts = ['wal-write', 'wal-torn-write', 'wal-flush', 'wal-flushed'];
@@ -1044,7 +1061,7 @@ test('D1655-T08 interrupted full-proof ack compaction preserves exact retry and 
     const inspector = load('emr-runtime/external-writer').inspectExternal;
     assert.equal(inspector(f.directory).state.bundles['bundle:' + item.bundle.bindings[0].bundleId]?.phase, 'acknowledged',
       'retry leaves the acknowledged representation durable');
-    const owner = new StateCoordinator(f.directory, executeExternal);
+    const owner = new StateCoordinator(f.directory, executeExternal, { format: FORMAT });
     try {
       owner.call('compact', { force: true });
       const checkpoint = JSON.parse(fs.readFileSync(path.join(f.directory, 'seal/settlement.json')));
@@ -1110,14 +1127,14 @@ test('D1655-T09 historical evidence rejects changed identity and incomplete stre
 
 // D1656-T01/T04/T06: read-only format admission precedes any journal owner.
 // Linux image/mount/fence and initialization-provenance acceptance remain separate.
-test('D1656-T01 complete incompatible WAL and wrong pairs refuse before torn journal repair', async t => {
+test('D1656-T01 complete incompatible WAL and wrong pairs refuse before torn journal repair', { skip: FORMAT === 4 && 'v3 WAL record tampering; v4: V4-T04/V4-T06' }, async t => {
   for (const mode of ['mixed-wal', 'malformed-old-wal', 'invalid-old-value', 'invalid-old-tail',
     'foreign-old-binding', 'future-old-generation', 'invalid-deletion-key',
     'invalid-identity', 'wrong-pair', 'missing-lineage', 'invalid-checkpoint-tail', 'invalid-checkpoint-revision']) {
     const f = await fixture(t), work = await (await f.hello()).work();
     await complete(f, work); f.coordinator.call('compact', { force: true });
     f.service.close(); await f.service.drained(); f.coordinator.close();
-    const admitted = new StateCoordinator(f.directory, executeExternal);
+    const admitted = new StateCoordinator(f.directory, executeExternal, { format: FORMAT });
     t.after(() => admitted.close());
     const file = path.join(f.directory, 'seal/settlement.json'), envelope = JSON.parse(fs.readFileSync(file));
     const journal = path.join(f.directory, 'journal'); fs.mkdirSync(journal, { recursive: true, mode: 0o700 });
@@ -1151,7 +1168,7 @@ test('D1656-T01 complete incompatible WAL and wrong pairs refuse before torn jou
     try {
       const inspector = load('emr-runtime/external-writer').inspectExternal;
       inspector(f.directory, mode === 'wrong-pair' ? { ...f.pair, instanceId: 'other-copy' } : f.pair);
-      new FailureJournal(f.directory, new StateCoordinator(f.directory, executeExternal));
+      new FailureJournal(f.directory, new StateCoordinator(f.directory, executeExternal, { format: FORMAT }));
     } catch (e) { error = e.code; }
     assert.ok(error, 'incompatible pair must refuse before an owner operation');
     assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'admission must preserve all protected bytes and entries');
@@ -1210,7 +1227,7 @@ test('D1656-T07 a v3 private copy paired with another physical database is admit
 test('D1656-T04 a changed physical root cannot reuse a prior coordinator admission', async t => {
   const f = await fixture(t); f.coordinator.call('compact', { force: true });
   f.service.close(); await f.service.drained(); f.coordinator.close();
-  const coordinator = new StateCoordinator(f.directory, executeExternal);
+  const coordinator = new StateCoordinator(f.directory, executeExternal, { format: FORMAT });
   t.after(() => coordinator.close());
   const moved = f.directory + '-preserved'; fs.renameSync(f.directory, moved);
   t.after(() => fs.rmSync(moved, { recursive: true, force: true }));
@@ -1221,7 +1238,7 @@ test('D1656-T04 a changed physical root cannot reuse a prior coordinator admissi
   assert.equal(JSON.stringify(directoryHashes(moved)), JSON.stringify(original));
 });
 
-test('D1684-T01 a compact whole-state v3 checkpoint with history is admitted, read identically and compacted navigably', async t => {
+test('D1684-T01 a compact whole-state v3 checkpoint with history is admitted, read identically and compacted navigably', { skip: FORMAT === 4 && 'v3 compact layout admission' }, async t => {
   // The same v3 envelope written as one JSON.stringify (what initialization, older writers and inspectors produce):
   // the line-separated navigable layout is only whitespace, so an owner must admit the compact layout with its terminals
   // and bundles, serve the same proofs and exclusions, and write the navigable layout at its next compaction.
@@ -1339,7 +1356,7 @@ test('A10-T01 private copy replay after payload expiry preserves canonical proof
   for (const b of original.bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
   assert.equal(JSON.stringify(directoryHashes(f.directory)), JSON.stringify(before), 'the source directory bytes are unchanged');
 });
-test('A10-T02 a copy with the wrong pair or a missing dependency is refused before any mutation', async t => {
+test('A10-T02 a copy with the wrong pair or a missing dependency is refused before any mutation', { skip: FORMAT === 4 && 'v3 checkpoint envelope tampering of the copy; v4: V4-T08' }, async t => {
   const f = await fixture(t), work = await (await f.hello()).work();
   await complete(f, work, true);
   await complete(f, work);

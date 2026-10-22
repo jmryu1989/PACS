@@ -18,11 +18,14 @@ export class StateCoordinator {
   private fd: number | undefined;
   private readonly rootIdentity: string;
   private closed = false;
-  constructor(directory: string, private readonly transport?: WriterTransport) {
+  /** `options.format` is the owner's explicit entry mode (state-serve-v3 = 3, state-serve-v4 = 4; default 3): the
+   * stored format must be exactly that one, or admission refuses before the fence is taken. */
+  constructor(directory: string, private readonly transport?: WriterTransport, options: { format?: 3 | 4 } = {}) {
     if (!directory || !path.isAbsolute(directory) || directory.includes('\0')) this.refuse();
     this.directory = path.resolve(directory);
+    this.context.format = options.format ?? 3;
     // One validating admission of the directory's content; the re-checks across the fence compare bytes identities.
-    inspectExternal(this.directory);
+    inspectExternal(this.directory, undefined, this.context.format);
     const inspected = { fingerprint: inspectFingerprint(this.directory) };
     const root = fs.lstatSync(this.directory);
     this.rootIdentity = `${root.dev}:${root.ino}`;
@@ -53,6 +56,7 @@ export class StateCoordinator {
   }
   private refuse(): never { throw Object.assign(new Error('StateOwnerRefused'), { code: 'SealUnavailable' }); }
   get holdsWriterFence(): boolean { return !this.closed && this.fd !== undefined; }
+  get format(): 3 | 4 { return this.context.format ?? 3; }
   call<T = any>(operation: string, value?: any): T {
     if (this.closed) return this.refuse();
     const root = fs.lstatSync(this.directory, { throwIfNoEntry: false });

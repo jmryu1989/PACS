@@ -7,6 +7,7 @@ import type { WriterRequest } from './coordinator';
 import type { CommitBinding, ExpiryCore } from './seal';
 import type { PairIdentity, SealedBundleProof } from './state-protocol';
 import { parseCommitBinding, parseSealedBundleProof } from './state-protocol';
+import * as V4 from './checkpoint-v4';
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sameLegacy = (a: unknown, b: unknown) => hash(a) === hash(b);
@@ -274,7 +275,9 @@ function validate(state: ExternalState): void {
   }
 }
 interface Envelope { state: ExternalState; publishing: boolean; digest: string }
-export interface WriterContext { pair?: PairIdentity; copy?: CopyMapping | null; journal?: JournalFile; engine?: Engine; log?: { file: string; ino: number; fd: number } }
+/** `format` is the explicit entry mode of the owner (state-serve-v3 = 3, state-serve-v4 = 4; default 3): a stored
+ * state of the other major format is refused as SealUnsupportedFormat before any journal or lock is created. */
+export interface WriterContext { pair?: PairIdentity; copy?: CopyMapping | null; journal?: JournalFile; engine?: Engine; log?: { file: string; ino: number; fd: number }; format?: 3 | 4 }
 function readTailFile(file: string): any {
   const info = fs.lstatSync(file, { throwIfNoEntry: false });
   if (!info) return null;
@@ -337,6 +340,11 @@ function quarantineTorn(file: string, raw: Buffer, good: number, offset: number)
 }
 /** One WAL patch record's structure and the independent validity of every member it carries (no state applied). */
 function validateRecordShape(body: any, origin: PairIdentity | undefined): void {
+  if (body && isRecord(body.patch) && ('dbBindings' in body.patch || 'dbWitness' in body.patch)) {
+    // v4-only facts travel with the record; their own shapes are checked by the v4 commit, the v3 part here.
+    const { dbBindings: _b, dbWitness: _w, ...rest } = body.patch;
+    return validateRecordShape({ ...body, patch: rest }, origin);
+  }
   if (body.published) {
     if (!keys(body, ['version', 'revision', 'published']) || body.published !== true || !integer(body.revision, 1)) fail('SealCorrupt');
     return;
@@ -433,11 +441,20 @@ function* iterateRegion(fd: number, region: MapRegion): Generator<[string, any]>
 interface Pins { checkpoint: { ino: number; size: number } | null; log: { ino: number; size: number } | null; tail: { ino: number; size: number; mtimeMs: number } | null }
 /** The owner's verified view: admitted once per incarnation (full streaming validation), then advanced by validated
  * patches; pinned file identities detect any foreign change, which closes admission until a fresh full admission. */
+/** The surface the engine needs of a large map: v3 HistoryMap (checkpoint region + change set) or the v4 tree map. */
+export interface MemberMap {
+  readonly name: 'terminal' | 'bundles'; readonly delta: Map<string, any>; added: number; removed: number;
+  get(key: string): any; set(key: string, value: any): void; readonly count: number;
+  entries(): Generator<[string, any]>; rawEntries(): Generator<[string, string | Buffer]>;
+}
 export class Engine {
-  readonly file: string; readonly log: string; readonly tailFile: string;
+  readonly file: string; log: string; readonly tailFile: string;
+  /** The stored major format this view was admitted from (3: checkpoint + WAL; 4: validated paged root). */
+  format: 3 | 4 = 3;
+  v4: V4State | null = null;
   head!: { version: 3; revision: number; generation: number; tail: any; lineage: StateLineage | null; retired: Record<string, number> };
   intents: Record<string, any> = {}; slots: Record<string, any> = {}; proofs: Record<string, any> = {};
-  terminal!: HistoryMap; bundles!: HistoryMap;
+  terminal!: MemberMap; bundles!: MemberMap;
   readonly slotOf = new Map<string, string>();
   readonly notFound = new Set<string>();
   checkpoint: { digest: string; bytes: number; revision: number; publishing: boolean; navigable: boolean } | null = null;
@@ -448,7 +465,7 @@ export class Engine {
     this.log = path.join(directory, 'seal', 'settlement.jsonl');
     this.tailFile = path.join(directory, 'seal', 'tail.json');
   }
-  close(): void { /* no descriptor outlives an operation */ }
+  close(): void { this.v4?.store.close(); this.v4?.segment.close(); }
   get pristine(): boolean { return !this.head.lineage; }
   pin(): void {
     const stat = (file: string) => fs.lstatSync(file, { throwIfNoEntry: false });
@@ -1164,19 +1181,26 @@ function directoryInventory(directory: string): { root: string; inventory: unkno
   if (!info?.isDirectory() || info.isSymbolicLink() || !samePath(fs.realpathSync.native(root), root)) return fail('SealUnavailable');
   const inventory: unknown[] = [[info.dev, info.ino, info.uid, info.gid, info.mode]];
   let empty = true;
-  for (const entry of fs.readdirSync(root).sort()) {
-    if (entry === 'writer.lock') continue;
-    if (!['seal', 'journal', 'expiry-evidence'].includes(entry)) return fail('SealUnsupportedFormat');
-    const child = path.join(root, entry), childInfo = fs.lstatSync(child);
+  // The v4 root keeps its immutable roots, packs, WAL segments, quarantine and scratch under seal/v4/<kind>/ (one
+  // level); every other entry of a protected directory is a regular file.
+  const walk = (entry: string, child: string, depth: number) => {
+    const childInfo = fs.lstatSync(child);
     if (!childInfo.isDirectory() || childInfo.isSymbolicLink() || process.platform === 'linux' &&
       (childInfo.uid !== info.uid || (childInfo.mode & 0o077) !== 0)) return fail('SealUnavailable');
     inventory.push([entry, childInfo.dev, childInfo.ino, childInfo.uid, childInfo.gid, childInfo.mode]);
     for (const name of fs.readdirSync(child).sort()) {
       const file = path.join(child, name), stat = fs.lstatSync(file);
+      if (stat.isDirectory() && !stat.isSymbolicLink() && ((entry === 'seal' && name === 'v4') ||
+        (entry === 'seal/v4' && ['roots', 'pages', 'wal', 'quarantine', 'tmp'].includes(name)))) { walk(entry + '/' + name, file, depth + 1); continue; }
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) return fail('SealUnavailable');
       inventory.push([entry, name, stat.dev, stat.ino, stat.uid, stat.gid, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs]);
-      empty = false;
+      if (entry !== 'seal/v4/tmp') empty = false;
     }
+  };
+  for (const entry of fs.readdirSync(root).sort()) {
+    if (entry === 'writer.lock') continue;
+    if (!['seal', 'journal', 'expiry-evidence'].includes(entry)) return fail('SealUnsupportedFormat');
+    walk(entry, path.join(root, entry), 0);
   }
   return { root, inventory, empty };
 }
@@ -1185,17 +1209,30 @@ function directoryInventory(directory: string): { root: string; inventory: unkno
  * member once, digest), every complete WAL record validated once and replayed once, the tail checked. `repair`
  * (writer only, under the lifetime fence) quarantines a torn WAL suffix and completes an in-flight tail publication.
  */
-function admitEngine(directory: string, pair: PairIdentity | undefined, repair: boolean): Engine {
+function admitEngine(directory: string, pair: PairIdentity | undefined, repair: boolean, format: 3 | 4 = 3): Engine {
   const { root, inventory, empty } = directoryInventory(directory);
   const engine = new Engine(root);
   const file = engine.file, info = fs.lstatSync(file, { throwIfNoEntry: false });
   if (!info) {
     if (!empty) return fail('SealMissing');
+    engine.format = format;
     engine.head = { version: 3, revision: 0, generation: 0, tail: null, lineage: null, retired: { viewing: 0, history: 0 } };
     engine.terminal = new HistoryMap('terminal', file, null, 0); engine.bundles = new HistoryMap('bundles', file, null, 0);
     engine.pin(); (engine as any).inventory = inventory;
     return engine;
   }
+  // The stored major format is read from the selector/checkpoint bytes themselves (never inferred from a name, a
+  // stamp or the environment); the owner's entry mode must name that format, or admission refuses before anything.
+  let selector: { body: V4.SelectorBody; sha256: string } | null = null;
+  try { selector = V4.readSelector(file); }
+  catch (error: any) {
+    if (!(error instanceof V4.V4Error) || error.code !== 'SealUnsupportedFormat' || !/^(v3-checkpoint|selector-size)$/.test(error.detail)) throw translateV4(error);
+  }
+  if (selector) {
+    if (format !== 4) return fail('SealUnsupportedFormat');
+    return admitEngineV4(engine, selector, pair, repair, inventory);
+  }
+  if (format !== 3) return fail('SealUnsupportedFormat');
   // Admission of an unsupported or corrupt checkpoint never repairs anything.
   const scanned = scanCheckpoint(file, { pair, join: info.size < 64 * 1024 * 1024 ? 'lookup' : 'merge' });
   if (!scanned.lineage) return fail('SealMissing');
@@ -1250,20 +1287,30 @@ function admitEngine(directory: string, pair: PairIdentity | undefined, repair: 
 /** Read-only admission, also usable by a trusted inspector on a read-only copy: the whole state as one object.
  * Never instantiate the physical journal here: its constructor repairs torn bytes.
  * The caller repeats this check under the lifetime fence before opening any writer. */
-export function inspectExternal(directory: string, pair?: PairIdentity): { state: ExternalState | null; fingerprint: string } {
-  const engine = admitEngine(directory, pair, false);
+export function inspectExternal(directory: string, pair?: PairIdentity, format: 3 | 4 = 3): { state: ExternalState | null; fingerprint: string; format: 3 | 4 } {
+  const engine = admitEngine(directory, pair, false, format);
   try {
-    if (engine.pristine) return { state: null, fingerprint: hash((engine as any).inventory) };
+    if (engine.pristine) return { state: null, fingerprint: hash((engine as any).inventory), format: engine.format };
     const state = engine.materialize();
-    return { state, fingerprint: hash([(engine as any).inventory, engine.checkpoint, engine.walOffset, state.revision, state.tail]) };
+    return { state, fingerprint: hash([(engine as any).inventory, engine.checkpoint, engine.walOffset, state.revision, state.tail]), format: engine.format };
   } finally { engine.close(); }
+}
+/** The stored major format of a protected directory from its bytes (null when pristine); refuses nothing else. */
+export function storedFormat(directory: string): 3 | 4 | null {
+  const file = path.join(path.resolve(directory), 'seal', 'settlement.json');
+  if (!fs.existsSync(file)) return null;
+  try { return V4.readSelector(file) ? 4 : null; }
+  catch (error: any) { if (error instanceof V4.V4Error && error.code === 'SealUnsupportedFormat' && /^(v3-checkpoint|selector-size)$/.test(error.detail)) return 3; throw translateV4(error); }
 }
 /** The bytes-level identity of a protected directory (inventory, file digests): what an owner compares across the
  * fence acquisition after its one validating admission. */
 export function inspectFingerprint(directory: string): string {
   const { root, inventory } = directoryInventory(directory);
   const digests: string[] = [];
-  for (const name of ['settlement.json', 'settlement.jsonl', 'tail.json']) {
+  const names = ['settlement.json', 'settlement.jsonl', 'tail.json'];
+  // A v4 root: its current WAL segment (named by the selector) is the mutable file an owner compares.
+  try { const selector = V4.readSelector(path.join(root, 'seal', 'settlement.json')); if (selector) names.push('v4/wal/' + selector.body.wal.segment + '.jsonl'); } catch { /* not a selector: the v3 files above */ }
+  for (const name of names) {
     const file = path.join(root, 'seal', name);
     if (!fs.existsSync(file)) { digests.push('absent'); continue; }
     const h = createHash('sha256'), fd = fs.openSync(file, 'r'), chunk = Buffer.allocUnsafe(SCAN_CHUNK);
@@ -1304,6 +1351,7 @@ function compactEngine(engine: Engine, context: WriterContext): void {
 /** Commit one record: validate the touched closure on the view, append it durably, publish the tail if asked. The
  * view is reverted if validation or the append fails; an uncertain write taints the view (fresh admission next). */
 function commitRecord(engine: Engine, context: WriterContext, body: any, kind: 'update' | 'reserve'): void {
+  if (engine.format === 4) return commitRecordV4(engine, body, kind);
   if (engine.publishing) fail('SealCorrupt');
   validateRecordShape(body, engine.head.lineage?.origin);
   if (body.revision !== engine.head.revision + 1 || body.generation < engine.head.generation) fail('SealCorrupt');
@@ -1327,6 +1375,394 @@ function commitRecord(engine: Engine, context: WriterContext, body: any, kind: '
   }
   engine.pin();
 }
+// ───────────────────────── KIN-EMR-STATE-V4 owner view (D1691 approval, D1693 order) ─────────────────────────
+/** The v4 owner state behind the same Engine view: the admitted validated root, its eight trees, the meta facts, the
+ * in-memory pending work and the WAL position the next transition continues from. */
+export interface V4State {
+  directory: string; store: V4.PackStore; validatorSha256: string;
+  rootSha256: string; root: V4.RootBody; trees: Record<number, V4.Tree>;
+  meta: { lineage: StateLineage; tail: any; retired: Record<string, number>; validator: any; dbWitness: any; fullCheck: V4.FullCheck; copyProvenance: any };
+  pending: Map<string, any>;
+  segment: V4.WalSegment; lsn: number; previousSha256: string; walEnd: number; segmentStart: number; segmentTransitions: number; segmentOpenedAt: number;
+}
+const V4_META_KEYS = ['lineage', 'tail', 'retired', 'validator', 'dbWitness', 'fullCheck', 'copyProvenance'] as const;
+const V4_ROTATE_BYTES = 64 * 1024 * 1024, V4_ROTATE_TRANSITIONS = 2048, V4_ROTATE_MS = 30_000;
+const v4Directory = (directory: string) => path.join(directory, 'seal', 'v4');
+/** The repository/image root the validator manifest is read from (dist/emr-runtime in the image, api/src here). */
+const appRoot = () => __dirname.split(path.sep).includes('dist') ? path.resolve(__dirname, '..', '..') : path.resolve(__dirname, '..', '..', '..');
+function translateV4(error: any): any {
+  if (error instanceof V4.V4Error) return Object.assign(new Error(error.code), { code: error.code, detail: error.detail });
+  return error;
+}
+/** A large map backed by a v4 tree: the change set holds this record's members until the transition is durable. */
+class V4Map implements MemberMap {
+  readonly delta = new Map<string, any>();
+  added = 0; removed = 0;
+  constructor(readonly name: 'terminal' | 'bundles', public tree: V4.Tree) {}
+  get(key: string): any {
+    if (this.delta.has(key)) { const v = this.delta.get(key); return v === null ? undefined : v; }
+    let raw: string | undefined;
+    try { raw = this.tree.get(key); } catch (error) { throw translateV4(error); }
+    return raw === undefined ? undefined : JSON.parse(raw);
+  }
+  set(key: string, value: any): void {
+    const before = this.get(key);
+    if (value === null) { if (before !== undefined) this.removed++; }
+    else if (before === undefined) this.added++;
+    this.delta.set(key, value);
+  }
+  get count(): number { return this.tree.count + this.added - this.removed; }
+  *rawEntries(): Generator<[string, string | Buffer]> {
+    for (const [key, raw] of this.tree.entries()) { if (this.delta.has(key)) continue; yield [key, raw]; }
+    for (const [key, value] of this.delta) if (value !== null) yield [key, JSON.stringify(value)];
+  }
+  *entries(): Generator<[string, any]> {
+    for (const [key, raw] of this.rawEntries()) yield [key, typeof raw === 'string' ? JSON.parse(raw) : parseRaw(raw)];
+  }
+  committed(tree: V4.Tree): void { this.tree = tree; this.delta.clear(); this.added = 0; this.removed = 0; }
+}
+/** Meta values: the v3 objects (lineage, tail, retired) keep their v3 member JSON (so the existing tail digest and
+ * lineage hash are over the same bytes); the v4 facts (validator, dbWitness, fullCheck, copyProvenance) are J-encoded. */
+const V4_META_V3 = new Set(['lineage', 'tail', 'retired']);
+const metaRaw = (key: string, value: unknown): string => V4_META_V3.has(key) ? JSON.stringify(value) : V4.canonical(value);
+function metaOf(tree: V4.Tree, key: string): any {
+  const raw = tree.get(key);
+  if (raw === undefined) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'meta-missing:' + key });
+  if (V4_META_V3.has(key)) { try { return JSON.parse(raw); } catch { return fail('SealCorrupt'); } }
+  return V4.parseCanonical(raw, 'meta ' + key);
+}
+function readPrecedingRecord(file: string, offset: number): { sha256: string; lsn: number; record: V4.WalRecord } {
+  // The record ending exactly at `offset` (bounded read of at most one control line before it).
+  const size = fs.statSync(file).size;
+  if (offset < 1 || offset > size) fail('SealCorrupt');
+  const start = Math.max(0, offset - V4.CONTROL_MAX_BYTES), fd = fs.openSync(file, 'r'), bytes = Buffer.alloc(offset - start);
+  try { let read = 0; while (read < bytes.length) { const n = fs.readSync(fd, bytes, read, bytes.length - read, start + read); if (!n) fail('SealCorrupt'); read += n; } }
+  finally { fs.closeSync(fd); }
+  if (bytes[bytes.length - 1] !== 10) fail('SealCorrupt');
+  const lineStart = bytes.lastIndexOf(10, bytes.length - 2) + 1;
+  if (lineStart === 0 && start > 0) fail('SealCorrupt');
+  const opened = V4.openEnvelope(V4.DOMAIN.wal, bytes.subarray(lineStart), 'wal');
+  const record = V4.validWalRecord(opened.body);
+  return { sha256: opened.sha256, lsn: V4.parseDecimal(record.lsn, 'wal'), record };
+}
+function validDbWitness(value: any): void {
+  const ok = isRecord(value) && keys(value, ['version', 'pair', 'lineageSha256', 'streams', 'validationRevision']) && value.version === 1 && validPair(value.pair) &&
+    sha(value.lineageSha256) && typeof value.validationRevision === 'string' && /^(0|[1-9][0-9]*)$/.test(value.validationRevision) &&
+    keys(value.streams, ['viewing', 'history']) && ['viewing', 'history'].every(s => { const w = value.streams[s];
+      return keys(w, ['chainId', 'verifiedThrough', 'retainedStart', 'expiry']) && uuid(w.chainId) && position(w.verifiedThrough) &&
+        (w.retainedStart === null || keys(w.retainedStart, ['sequence', 'previousHash']) && integer(w.retainedStart.sequence, 1) && sha(w.retainedStart.previousHash)) &&
+        (w.expiry === null || keys(w.expiry, ['attemptKey', 'binding', 'coreSha256', 'deletedThrough', 'anchorHash']) && text(w.expiry.attemptKey) && isRecord(w.expiry.binding) && sha(w.expiry.coreSha256) && integer(w.expiry.deletedThrough, 1) && sha(w.expiry.anchorHash)); });
+  if (!ok) fail('SealCorrupt');
+}
+function validDbBindingValue(key: string, value: any): void {
+  if (!keys(value, ['binding', 'entrySha256']) || !(value.entrySha256 === null || sha(value.entrySha256))) fail('SealCorrupt');
+  let q: CommitBinding;
+  try { q = parseCommitBinding(value.binding); } catch { return fail('SealCorrupt'); }
+  if (key !== q.stream + ':' + q.sequence) fail('SealCorrupt');
+}
+/** Admission of a v4 root: the selector, its root, the WAL suffix after the selector, the meta facts, the validator,
+ * the lineage/pair, the tail barrier, the small maps and the pending work; `repair` (the owner) finishes a durable but
+ * unselected transition and quarantines a torn suffix. The history itself is not scanned. */
+function admitEngineV4(engine: Engine, selector: { body: V4.SelectorBody; sha256: string }, pair: PairIdentity | undefined, repair: boolean, inventory: unknown[]): Engine {
+  const refuse = (detail: string): never => { throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail }); };
+  try {
+    const v4 = v4Directory(engine.directory);
+    let rootSha256 = selector.body.rootSha256, root = V4.readRoot(v4, rootSha256);
+    if (root.revision !== selector.body.revision) refuse('selector-revision');
+    const segmentFile = path.join(V4.walDirectory(v4), selector.body.wal.segment + '.jsonl');
+    const offset = V4.parseDecimal(selector.body.wal.offset, 'selector');
+    let lsn = V4.parseDecimal(selector.body.wal.lsn, 'selector'), previous = selector.body.wal.previousSha256;
+    const preceding = readPrecedingRecord(segmentFile, offset);
+    if (preceding.sha256 !== previous || preceding.lsn !== lsn || preceding.record.segment !== selector.body.wal.segment) refuse('wal-preceding');
+    const suffix = V4.WalSegment.read(segmentFile, offset);
+    let walEnd = offset, outstanding: { record: Extract<V4.WalRecord, { type: 'prepare' }>; sha256: string; lsn: number } | null = null, adoptedEnd: number | null = null;
+    for (const item of suffix.records) {
+      const r = item.record;
+      if (V4.parseDecimal(r.lsn, 'wal') !== lsn + 1 || r.previousSha256 !== previous || r.segment !== selector.body.wal.segment || r.type === 'start') refuse('wal-chain');
+      if (r.type === 'prepare') {
+        if (outstanding || r.previousRoot !== rootSha256) refuse('wal-prepare');
+        outstanding = { record: r, sha256: item.sha256, lsn: lsn + 1 };
+      } else if (r.type === 'complete') {
+        if (!outstanding || r.prepareLsn !== outstanding.record.lsn || r.nextRoot !== outstanding.record.nextRoot) refuse('wal-complete');
+        root = V4.readRoot(v4, r.nextRoot); rootSha256 = r.nextRoot; outstanding = null; adoptedEnd = item.end;
+      }
+      lsn++; previous = item.sha256; walEnd = item.end;
+    }
+    const tailFile = engine.tailFile, tailOnDisk = readTailFile(tailFile);
+    if (outstanding) {
+      // A durable prepare whose root exists: its tail (before or after) must agree; only the owner completes it.
+      const next = V4.readRoot(v4, outstanding.record.nextRoot);
+      const tailHash = tailOnDisk ? hash(tailOnDisk) : null;
+      if (next.transition.previousRoot !== rootSha256 || !(tailHash === outstanding.record.tailBefore || tailHash === outstanding.record.tailAfter)) refuse('prepare-tail');
+      if (!repair) fail('SealUnavailable');
+      const nextMeta = V4.Tree.open(new V4.PackStore(v4, next.lineageSha256), 1, next.trees[0].ref, V4.parseDecimal(next.trees[0].count, 'root'));
+      const nextTail = metaOf(nextMeta, 'tail');
+      if (outstanding.record.tailAfter !== null && tailHash !== outstanding.record.tailAfter) publishTail(tailFile, nextTail);
+      const segment = new V4.WalSegment(v4, selector.body.wal.segment);
+      const complete = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: String(lsn + 1), previousSha256: previous, type: 'complete', prepareLsn: outstanding.record.lsn, nextRoot: outstanding.record.nextRoot });
+      segment.close();
+      lsn++; previous = complete.sha256; walEnd = complete.end; root = next; rootSha256 = outstanding.record.nextRoot; adoptedEnd = complete.end;
+    }
+    if (suffix.torn && repair) {
+      const quarantine = path.join(v4, 'quarantine'); fs.mkdirSync(quarantine, { recursive: true, mode: 0o700 });
+      const evidence = path.join(quarantine, selector.body.wal.segment + '-' + walEnd + '.bin');
+      const fd = fs.openSync(evidence, 'wx', 0o600); try { fs.writeFileSync(fd, suffix.torn); fs.fsyncSync(fd); } finally { fs.closeSync(fd); } syncDirectory(quarantine);
+      fs.truncateSync(segmentFile, walEnd);
+    }
+    if (adoptedEnd !== null && repair) {
+      V4.writeSelector(engine.file, { format: V4.V4_FORMAT, version: 4, layout: 1, rootSha256, revision: root.revision, wal: { segment: selector.body.wal.segment, offset: String(walEnd), lsn: String(lsn), previousSha256: previous } });
+    }
+    // The root's facts.
+    const manifest = V4.loadValidatorManifest(appRoot());
+    if (root.validatorSha256 !== manifest.validatorSha256 || root.validatorId !== V4.V4_VALIDATOR_ID) fail('SealUnsupportedFormat');
+    const store = new V4.PackStore(v4, root.lineageSha256);
+    const trees: Record<number, V4.Tree> = {};
+    for (const descriptor of root.trees) trees[descriptor.id] = V4.Tree.open(store, descriptor.id, descriptor.ref, V4.parseDecimal(descriptor.count, 'root'));
+    const meta: any = {};
+    for (const key of V4_META_KEYS) meta[key] = metaOf(trees[1], key);
+    if (trees[1].count !== V4_META_KEYS.length) refuse('meta-count');
+    if (V4.lineageSha256(meta.lineage) !== root.lineageSha256 || !isRecord(meta.lineage) || !validPair(meta.lineage.origin)) refuse('lineage');
+    if (pair && !samePair(meta.lineage.origin, pair)) fail('SealChainMismatch');
+    if (!keys(meta.validator, ['id', 'sha256', 'mode', 'predecessorRoot', 'changedDependencySha256']) || meta.validator.sha256 !== root.validatorSha256 || !['full', 'incremental'].includes(meta.validator.mode)) refuse('meta-validator');
+    V4.validFullCheck(meta.fullCheck, 'meta'); if (hash(meta.fullCheck) !== hash(root.fullCheck)) refuse('fullCheck');
+    validDbWitness(meta.dbWitness);
+    if (!(meta.copyProvenance === null || keys(meta.copyProvenance, ['captureSha256', 'verificationReceiptSha256']))) refuse('copyProvenance');
+    const generation = V4.parseDecimal(root.generation, 'root'), revision = V4.parseDecimal(root.revision, 'root');
+    validateTail(meta.tail, generation, meta.lineage.origin);
+    if (hash(meta.tail) !== root.stateTailSha256) refuse('tail-hash');
+    if (!tailOnDisk) fail('SealMissing');
+    if (hash(tailOnDisk) !== hash(meta.tail)) fail('SealTailMismatch');
+    if (!keys(meta.retired, ['viewing', 'history']) || !integer(meta.retired.viewing) || !integer(meta.retired.history)) refuse('retired');
+    engine.format = 4;
+    engine.head = { version: 3, revision, generation, tail: meta.tail, lineage: meta.lineage, retired: meta.retired };
+    for (const [name, id] of [['intents', 2], ['slots', 3], ['proofs', 4]] as const) {
+      const target: Record<string, any> = {};
+      for (const [key, raw] of trees[id].entries()) { const value = JSON.parse(raw); validateMapValue(name, key, value, generation, meta.lineage.origin); target[key] = value; }
+      (engine as any)[name] = target;
+    }
+    for (const [position, q] of Object.entries(engine.slots) as [string, CommitBinding][]) engine.slotOf.set(q.stream + ':' + q.attemptId, position);
+    engine.terminal = new V4Map('terminal', trees[5]); engine.bundles = new V4Map('bundles', trees[6]);
+    const pending = new Map<string, any>();
+    for (const [key, raw] of trees[7].entries()) {
+      const value = V4.parseCanonical(raw, 'pending');
+      if (key.startsWith('attempt:')) {
+        if (!keys(value, ['kind', 'stateKey', 'slotKey', 'proofKey', 'revision']) || value.kind !== 'attempt' || key !== 'attempt:' + value.stateKey ||
+          !engine.intents[value.stateKey] || engine.slotOf.get(value.stateKey) !== value.slotKey) fail('UnsealedEntryUnexplained');
+      } else if (key.startsWith('journal:')) {
+        if (!keys(value, ['kind', 'stateKey', 'journalId', 'eventId', 'contentSha256', 'revision']) || value.kind !== 'journal-not-found' || key !== 'journal:' + value.stateKey) fail('UnsealedEntryUnexplained');
+        engine.notFound.add(value.stateKey);
+      } else refuse('pending-key');
+      pending.set(key, value);
+    }
+    // Every live intent has its pending entry (omitted work is a refusal, never derived from the client's map).
+    for (const id of Object.keys(engine.intents)) if (!pending.has('attempt:' + id)) fail('UnsealedEntryUnexplained');
+    // The identity closure of the small maps against the (large) terminal tree, as every v3 admission performs it.
+    const touched = new Map<string, Set<string>>();
+    touched.set('slots', new Set(Object.keys(engine.slots))); touched.set('intents', new Set(Object.keys(engine.intents))); touched.set('proofs', new Set(Object.keys(engine.proofs)));
+    engine.validateTouched(touched, false);
+    const stat = fs.statSync(segmentFile);
+    engine.v4 = { directory: v4, store, validatorSha256: manifest.validatorSha256, rootSha256, root, trees, meta, pending,
+      segment: new V4.WalSegment(v4, selector.body.wal.segment), lsn, previousSha256: previous, walEnd, segmentStart: 0, segmentTransitions: 0, segmentOpenedAt: stat.mtimeMs };
+    engine.log = segmentFile;
+    engine.checkpoint = { digest: rootSha256, bytes: 0, revision, publishing: false, navigable: true };
+    engine.walOffset = walEnd;
+    engine.pin(); (engine as any).inventory = inventory;
+    return engine;
+  } catch (error) { throw translateV4(error); }
+}
+const treeKeyOrder = (a: { tree: number; key: string }, b: { tree: number; key: string }) => a.tree - b.tree || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+function coverageSha256(descriptors: V4.TreeDescriptor[], meta: any): string {
+  return V4.domainHash(V4.DOMAIN.coverage, V4.canonical({ trees: descriptors.filter(d => d.id !== 1), meta: { lineage: meta.lineage, tail: meta.tail, retired: meta.retired, dbWitness: meta.dbWitness, copyProvenance: meta.copyProvenance } }));
+}
+/** One v4 transition for a validated record: new pages (copy-on-write), the immutable root, WAL prepare, the
+ * independent tail when it advances, WAL complete, then the selector; only then is the view advanced. */
+function commitRecordV4(engine: Engine, body: any, kind: 'update' | 'reserve'): void {
+  const v = engine.v4!;
+  validateRecordShape(body, engine.head.lineage?.origin);
+  if (body.revision !== engine.head.revision + 1 || body.generation < engine.head.generation) fail('SealCorrupt');
+  if (kind === 'reserve' && (body.publishing || body.generation !== engine.head.generation + 1)) fail('SealCorrupt');
+  const dbBindings: Record<string, any> = body.patch.dbBindings ?? {}, dbWitness = body.patch.dbWitness;
+  for (const [key, value] of Object.entries(dbBindings)) if (value !== null) validDbBindingValue(key, value);
+  if (dbWitness !== undefined) validDbWitness(dbWitness);
+  const touched = new Map<string, Set<string>>(), undo: (() => void)[] = [];
+  const revert = () => { for (const step of undo.reverse()) step(); undo.length = 0; };
+  try {
+    engine.apply(body, touched, undo);
+    engine.validateTouched(touched, body.publishing);
+  } catch (error) { revert(); throw error; }
+  const revision = body.revision, revisionText = String(revision);
+  const writer = new V4.PackWriter(v.store, revision);
+  try {
+    const treeChanges = new Map<number, Map<string, string | null>>();
+    const changeArray: V4.Change[] = [];
+    const change = (tree: number, key: string, before: string | undefined, after: string | null, dependencies: { tree: number; key: string }[]) => {
+      if (before === undefined && after === null) return;
+      if (before !== undefined && after !== null && before === after) return;
+      let m = treeChanges.get(tree); if (!m) treeChanges.set(tree, m = new Map()); m.set(key, after);
+      const unique = new Map<string, { tree: number; key: string }>(); for (const d of dependencies) unique.set(d.tree + ':' + d.key, d);
+      changeArray.push({ tree: tree as V4.TreeId, key, beforeSha256: before === undefined ? null : V4.blobSha256(before), afterSha256: after === null ? null : V4.blobSha256(after), dependencies: [...unique.values()].sort(treeKeyOrder) as { tree: V4.TreeId; key: string }[] });
+    };
+    const smallBefore = (tree: number, key: string) => v.trees[tree].get(key);
+    const slotDeps = (id: string) => { const d: { tree: number; key: string }[] = []; const pos = engine.slotOf.get(id); if (pos) d.push({ tree: 3, key: pos }); if (engine.terminal.get(id)) d.push({ tree: 5, key: id }); return d; };
+    for (const [name, tree] of [['intents', 2], ['slots', 3], ['proofs', 4]] as const) {
+      for (const id of touched.get(name) ?? []) {
+        const after = (engine as any)[name][id] === undefined ? null : JSON.stringify((engine as any)[name][id]);
+        const deps = name === 'slots' ? (() => { const stored = v.trees[3].get(id); const q = (engine.slots[id] ?? (stored ? JSON.parse(stored) : undefined)) as CommitBinding | undefined; const k = q ? q.stream + ':' + q.attemptId : null; return k ? [{ tree: 2, key: k }, ...(engine.proofs[k] ? [{ tree: 4, key: k }] : []), ...(engine.terminal.get(k) ? [{ tree: 5, key: k }] : [])] : []; })() : slotDeps(id);
+        change(tree, id, smallBefore(tree, id), after, deps);
+      }
+    }
+    for (const [map, tree] of [[engine.terminal, 5], [engine.bundles, 6]] as const) {
+      for (const [key, value] of map.delta) {
+        const before = v.trees[tree].get(key), after = value === null ? null : JSON.stringify(value);
+        const deps = tree === 6 && value ? (value.refs ?? []).map((r: any) => ({ tree: 5, key: r.stream + ':' + r.attemptId })) : slotDeps(key).filter(d => d.tree !== 5);
+        change(tree, key, before, after, deps);
+      }
+    }
+    // Pending work: exact and exhaustive for every touched attempt key.
+    const ids = new Set<string>();
+    for (const position of touched.get('slots') ?? []) { const q = engine.slots[position] ?? (() => { const raw = v.trees[3].get(position); return raw ? JSON.parse(raw) : undefined; })(); if (q) ids.add(q.stream + ':' + q.attemptId); }
+    for (const name of ['intents', 'proofs', 'terminal'] as const) for (const id of touched.get(name) ?? []) ids.add(id);
+    for (const id of ids) {
+      const attemptKey = 'attempt:' + id, journalKey = 'journal:' + id;
+      const slot = engine.slotOf.get(id);
+      const attempt = engine.intents[id] && slot ? { kind: 'attempt', stateKey: id, slotKey: slot, proofKey: engine.proofs[id] ? id : null, revision: revisionText } : null;
+      const before = v.pending.get(attemptKey);
+      if (!!attempt !== !!before || (attempt && before && (before.slotKey !== attempt.slotKey || before.proofKey !== attempt.proofKey))) change(7, attemptKey, before ? V4.canonical(before) : undefined, attempt ? V4.canonical(attempt) : null, [{ tree: 2, key: id }, ...(slot ? [{ tree: 3, key: slot }] : [])]);
+      const terminal = engine.terminal.get(id);
+      const journal = terminal?.notFound ? { kind: 'journal-not-found', stateKey: id, journalId: 'commit-not-found:' + id, eventId: terminal.notFound.eventId, contentSha256: terminal.notFound.contentSha256, revision: revisionText } : null;
+      const beforeJournal = v.pending.get(journalKey);
+      if (!!journal !== !!beforeJournal || (journal && beforeJournal && hash({ ...beforeJournal, revision: null }) !== hash({ ...journal, revision: null }))) change(7, journalKey, beforeJournal ? V4.canonical(beforeJournal) : undefined, journal ? V4.canonical(journal) : null, [{ tree: 5, key: id }]);
+    }
+    for (const [key, value] of Object.entries(dbBindings)) change(8, key, v.trees[8].get(key), value === null ? null : V4.canonical(value), [{ tree: 3, key }]);
+    const metaAfter: any = { ...v.meta };
+    if (body.publishing) metaAfter.tail = body.tail;
+    if (body.patch.retired) metaAfter.retired = engine.head.retired;
+    if (dbWitness !== undefined) metaAfter.dbWitness = dbWitness;
+    for (const key of ['tail', 'retired', 'dbWitness'] as const) {
+      const before = metaRaw(key, v.meta[key]), after = metaRaw(key, metaAfter[key]);
+      if (before !== after) change(1, key, before, after, []);
+    }
+    changeArray.sort(treeKeyOrder);
+    const changedDependencySha256 = V4.domainHash(V4.DOMAIN.changes, V4.canonical(changeArray));
+    metaAfter.validator = { id: V4.V4_VALIDATOR_ID, sha256: v.validatorSha256, mode: 'incremental', predecessorRoot: v.rootSha256, changedDependencySha256 };
+    let m1 = treeChanges.get(1); if (!m1) treeChanges.set(1, m1 = new Map());
+    m1.set('validator', metaRaw('validator', metaAfter.validator));
+    // New pages for every changed tree, then the root naming them.
+    const trees: Record<number, V4.Tree> = { ...v.trees };
+    for (const [tree, changes] of treeChanges) trees[tree] = v.trees[tree].apply(writer, changes);
+    const changesText = V4.canonical(changeArray);
+    const transition: V4.Transition = { previousRoot: v.rootSha256, kind: 'patch', changes: Buffer.byteLength(changesText) <= 32768 ? { inline: changeArray } : { overflow: V4.writeBlob(writer, 0, Buffer.from(changesText)) } };
+    writer.flush();
+    const descriptors = V4.TREE_IDS.map(id => ({ id, count: String(trees[id].count), ref: trees[id].root }));
+    const root: V4.RootBody = { format: V4.V4_FORMAT, version: 4, layout: 1, validatorId: V4.V4_VALIDATOR_ID, validatorSha256: v.validatorSha256, revision: revisionText,
+      generation: String(body.generation), lineageSha256: v.root.lineageSha256, trees: descriptors, stateTailSha256: hash(metaAfter.tail), transition, fullCheck: v.root.fullCheck };
+    const nextRoot = V4.writeRoot(v.directory, root);
+    const tailBefore = hash(v.meta.tail), tailAfter = hash(metaAfter.tail);
+    const prepare = v.segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: v.segment.segment, lsn: String(v.lsn + 1), previousSha256: v.previousSha256, type: 'prepare',
+      previousRoot: v.rootSha256, nextRoot, transitionSha256: V4.domainHash(V4.DOMAIN.changes, V4.canonical(transition)), tailBefore, tailAfter });
+    if (body.publishing) publishTail(engine.tailFile, body.tail);
+    const complete = v.segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: v.segment.segment, lsn: String(v.lsn + 2), previousSha256: prepare.sha256, type: 'complete', prepareLsn: String(v.lsn + 1), nextRoot });
+    V4.writeSelector(engine.file, { format: V4.V4_FORMAT, version: 4, layout: 1, rootSha256: nextRoot, revision: revisionText, wal: { segment: v.segment.segment, offset: String(complete.end), lsn: String(v.lsn + 2), previousSha256: complete.sha256 } });
+    // The transition is the accepted root: advance the view.
+    v.rootSha256 = nextRoot; v.root = root; v.trees = trees; v.meta = metaAfter;
+    for (const [key, raw] of treeChanges.get(7) ?? []) { if (raw === null) v.pending.delete(key); else v.pending.set(key, V4.parseCanonical(raw, 'pending')); }
+    (engine.terminal as V4Map).committed(trees[5]); (engine.bundles as V4Map).committed(trees[6]);
+    v.lsn += 2; v.previousSha256 = complete.sha256; v.walEnd = complete.end; v.segmentTransitions++;
+    engine.checkpoint = { digest: nextRoot, bytes: 0, revision, publishing: false, navigable: true };
+    engine.walOffset = complete.end;
+    rotateV4(engine);
+    engine.pin();
+  } catch (error) {
+    // Pages, a root or WAL bytes may have reached disk: the files are the only authority until a fresh admission.
+    engine.tainted = true; revert();
+    try { writer.close(); } catch { /* closing */ }
+    throw translateV4(error);
+  }
+  writer.close();
+}
+/** Segment retirement: a new segment starts with `start` (its base root), the selector moves to it, the previous
+ * segment is closed (retained until its transitions are absorbed by a later full check / GC accounting). */
+function rotateV4(engine: Engine): void {
+  const v = engine.v4!;
+  const bytes = v.walEnd - v.segmentStart, age = Date.now() - v.segmentOpenedAt;
+  if (bytes < V4_ROTATE_BYTES && v.segmentTransitions < V4_ROTATE_TRANSITIONS && age < V4_ROTATE_MS) return;
+  if (v.segmentTransitions === 0) return;
+  const previous = v.segment; previous.close();
+  const next = V4.WalSegment.create(v.directory);
+  const start = next.append({ format: 'KIN-EMR-WAL', version: 4, segment: next.segment, lsn: String(v.lsn + 1), previousSha256: v.previousSha256, type: 'start', baseRoot: v.rootSha256, previousSegment: { segment: previous.segment, finalSha256: v.previousSha256 } });
+  syncDirectory(V4.walDirectory(v.directory));
+  V4.writeSelector(engine.file, { format: V4.V4_FORMAT, version: 4, layout: 1, rootSha256: v.rootSha256, revision: v.root.revision, wal: { segment: next.segment, offset: String(start.end), lsn: String(v.lsn + 1), previousSha256: start.sha256 } });
+  v.segment = next; v.lsn += 1; v.previousSha256 = start.sha256; v.walEnd = start.end; v.segmentStart = 0; v.segmentTransitions = 0; v.segmentOpenedAt = Date.now();
+  engine.log = next.file; engine.walOffset = start.end;
+}
+/** The fully validated initial root of a pristine v4 pair (empty trees, initial witness, complete coverage). */
+function initializeV4(engine: Engine, initialized: ExternalState): void {
+  const v4 = v4Directory(engine.directory);
+  try {
+    for (const name of ['roots', 'pages', 'wal', 'quarantine', 'tmp']) fs.mkdirSync(path.join(v4, name), { recursive: true, mode: 0o700 });
+    const lineageSha256 = V4.lineageSha256(initialized.lineage);
+    const manifest = V4.loadValidatorManifest(appRoot());
+    const store = new V4.PackStore(v4, lineageSha256);
+    const writer = new V4.PackWriter(store, 1);
+    const trees: Record<number, V4.Tree> = {};
+    for (const id of V4.TREE_IDS) trees[id] = V4.Tree.empty(writer, id);
+    const origin = initialized.lineage!.origin;
+    const dbWitness = { version: 1, pair: origin, lineageSha256, validationRevision: '1',
+      streams: Object.fromEntries((['viewing', 'history'] as const).map(s => [s, { chainId: origin.chains[s], verifiedThrough: { sequence: 0, hash: '0'.repeat(64) }, retainedStart: null, expiry: null }])) };
+    const meta: any = { lineage: initialized.lineage, tail: initialized.tail, retired: initialized.retired, dbWitness, copyProvenance: null,
+      validator: { id: V4.V4_VALIDATOR_ID, sha256: manifest.validatorSha256, mode: 'full', predecessorRoot: null, changedDependencySha256: null } };
+    const partial = V4.TREE_IDS.map(id => ({ id, count: '0', ref: trees[id].root }));
+    const fullCheck: V4.FullCheck = { checkedRoot: null, coverageSha256: coverageSha256(partial, meta), checkedRevision: '1', validatorSha256: manifest.validatorSha256,
+      completedAt: new Date().toISOString(), dbWitnessSha256: V4.domainHash(V4.DOMAIN.witness, V4.canonical(dbWitness)) };
+    meta.fullCheck = fullCheck;
+    trees[1] = trees[1].apply(writer, new Map(V4_META_KEYS.map(k => [k, metaRaw(k, meta[k])] as [string, string])));
+    writer.close();
+    const descriptors = V4.TREE_IDS.map(id => ({ id, count: String(trees[id].count), ref: trees[id].root }));
+    const root: V4.RootBody = { format: V4.V4_FORMAT, version: 4, layout: 1, validatorId: V4.V4_VALIDATOR_ID, validatorSha256: manifest.validatorSha256, revision: '1', generation: '1',
+      lineageSha256, trees: descriptors, stateTailSha256: hash(initialized.tail), transition: { previousRoot: null, kind: 'initialize', changes: null }, fullCheck };
+    const rootSha256 = V4.writeRoot(v4, root);
+    const segment = V4.WalSegment.create(v4);
+    const start = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '1', previousSha256: V4.ZERO64, type: 'start', baseRoot: rootSha256, previousSegment: null });
+    const prepare = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '2', previousSha256: start.sha256, type: 'prepare', previousRoot: null, nextRoot: rootSha256, transitionSha256: V4.domainHash(V4.DOMAIN.changes, V4.canonical(root.transition)), tailBefore: null, tailAfter: hash(initialized.tail) });
+    publishTail(engine.tailFile, initialized.tail);
+    const complete = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '3', previousSha256: prepare.sha256, type: 'complete', prepareLsn: '2', nextRoot: rootSha256 });
+    segment.close(); syncDirectory(V4.walDirectory(v4));
+    V4.writeSelector(engine.file, { format: V4.V4_FORMAT, version: 4, layout: 1, rootSha256, revision: '1', wal: { segment: segment.segment, offset: String(complete.end), lsn: '3', previousSha256: complete.sha256 } });
+    store.close();
+  } catch (error) { throw translateV4(error); }
+}
+/** Bounded reclamation of packs no longer reachable from the selected root (a cooperative slice; the current root,
+ * selector root and every page of the open WAL segment's transitions stay pinned). Nothing is rewritten. */
+function reclaimV4(engine: Engine, force: boolean): { unlinked: number; retained: number } {
+  const v = engine.v4!;
+  void force;
+  const live = new Set<string>();
+  for (const id of V4.TREE_IDS) for (const ref of v.trees[id].pages()) live.add(ref.pack);
+  // The previous roots named by the open WAL segment's transitions keep their packs (replay dependencies).
+  const read = V4.WalSegment.read(v.segment.file, 0);
+  const pinnedRoots = new Set<string>();
+  for (const item of read.records) { const r = item.record; if (r.type === 'start') pinnedRoots.add(r.baseRoot); else if (r.type === 'prepare') { if (r.previousRoot) pinnedRoots.add(r.previousRoot); pinnedRoots.add(r.nextRoot); } else pinnedRoots.add(r.nextRoot); }
+  for (const sha of pinnedRoots) {
+    if (sha === v.rootSha256) continue;
+    let root: V4.RootBody; try { root = V4.readRoot(v.directory, sha); } catch { continue; }
+    for (const d of root.trees) for (const ref of V4.Tree.open(v.store, d.id, d.ref, V4.parseDecimal(d.count, 'root')).pages()) live.add(ref.pack);
+  }
+  let unlinked = 0, retained = 0;
+  for (const pack of v.store.listPacks()) {
+    if (live.has(pack)) { retained++; continue; }
+    const file = v.store.packFile(pack);
+    // A pack the current writer may still append to is never a candidate (its last page could be referenced next).
+    if (fs.statSync(file).size < V4.PACK_PAGES * V4.PAGE_BYTES && fs.statSync(file).mtimeMs > Date.now() - V4_ROTATE_MS) { retained++; continue; }
+    fs.unlinkSync(file); unlinked++;
+  }
+  if (unlinked) { syncDirectory(v.store.pagesDirectory); v.store.invalidate(); }
+  return { unlinked, retained };
+}
+function v4Status(engine: Engine): any {
+  const v = engine.v4!;
+  return { format: 4, rootSha256: v.rootSha256, revision: v.root.revision, trees: v.root.trees.map(t => ({ id: t.id, count: t.count })), pending: v.pending.size,
+    wal: { segment: v.segment.segment, lsn: v.lsn, bytes: v.walEnd, transitions: v.segmentTransitions }, packs: v.store.listPacks().length, fullCheck: v.root.fullCheck, dbWitness: v.meta.dbWitness, cacheBytes: v.store.cachedBytes };
+}
 /** Called only by the lock-owning writer. Tests substitute OS/FS transport, not state transitions. */
 export function executeExternal(request: WriterRequest): any {
   const { directory, operation, value } = request, context = request.context ?? {};
@@ -1334,7 +1770,7 @@ export function executeExternal(request: WriterRequest): any {
   const admission = operation === 'admit-pair' ? pairAdmission(value) : null;
   let engine = context.engine;
   if (engine && !engine.unchanged()) { engine.close(); engine = context.engine = undefined; }
-  if (!engine) engine = context.engine = admitEngine(directory, admission ? admission.copy?.source ?? admission.pair : context.pair, true);
+  if (!engine) engine = context.engine = admitEngine(directory, admission ? admission.copy?.source ?? admission.pair : context.pair, true, context.format ?? 3);
   try {
     const file = engine.file, tailFile = engine.tailFile, log = engine.log;
     if (operation === 'admit-pair') {
@@ -1373,6 +1809,7 @@ export function executeExternal(request: WriterRequest): any {
       // The caller holds the exclusive DB fence and has checked both empty chains.
       // Initialization is itself a recoverable tail publication, never an empty-map upgrade.
       protectedDirectory(directory, 'seal');
+      if (engine.format === 4) { initializeV4(engine, initialized); engine.close(); context.engine = undefined; return; }
       atomic(file, { state: initialized, publishing: true, digest: hash(initialized) });
       publishTail(tailFile, initialized.tail);
       atomic(file, { state: initialized, publishing: false, digest: hash(initialized) });
@@ -1387,22 +1824,25 @@ export function executeExternal(request: WriterRequest): any {
       engine.publishing = false; engine.pin();
     }
     switch (operation) {
-      case 'compact': if (value?.force === true || compactionDue(engine)) compactEngine(engine, context); return;
+      case 'compact': if (engine.format === 4) { reclaimV4(engine, value?.force === true); return; } if (value?.force === true || compactionDue(engine)) compactEngine(engine, context); return;
       case 'read': return engine.materialize();
       case 'view': return engine.view();
       case 'get': return engine.lookup(value.map, value.id) ?? null;
       case 'slot-of': return engine.slotOf.get(value) ?? null;
       case 'not-found': return [...engine.notFound].map(id => [id, engine.terminal.get(id)?.notFound ?? null]).filter(([, v]) => v);
+      case 'v4-status': return engine.format === 4 ? v4Status(engine) : null;
       case 'patch': {
         // An explicit patch: only the changed records (null deletes), the next revision, the generation the caller
-        // claims, and optionally the new tail (a publication).
+        // claims, and optionally the new tail (a publication). A v4 owner also takes the verified DB facts
+        // (`dbBindings`, `dbWitness`) that belong to the same transition.
         const changes = value.changes ?? {};
-        if (!isRecord(changes) || Object.keys(changes).some(n => !maps.includes(n as any) || !isRecord(changes[n]))) return fail('SealCorrupt');
+        const admitted = engine.format === 4 ? [...maps, 'dbBindings', 'dbWitness'] : [...maps];
+        if (!isRecord(changes) || Object.keys(changes).some(n => !admitted.includes(n) || (n === 'dbWitness' ? !isRecord(changes[n]) : !isRecord(changes[n])))) return fail('SealCorrupt');
         const generation = value.generation ?? engine.head.generation;
         const publishing = value.tail !== undefined && value.tail !== null;
         const body: any = { version: 3, revision: engine.head.revision + 1, generation, patch: changes, publishing, ...(publishing ? { tail: value.tail } : {}) };
         commitRecord(engine, context, body, value.kind === 'reserve' ? 'reserve' : 'update');
-        if (publishing && compactionDue(engine)) compactEngine(engine, context);
+        if (engine.format !== 4 && publishing && compactionDue(engine)) compactEngine(engine, context);
         return { changed: true, revision: engine.head.revision, generation: engine.head.generation };
       }
       case 'update': case 'reserve': case 'compare-and-set': {
@@ -1425,7 +1865,7 @@ export function executeExternal(request: WriterRequest): any {
         const body = delta(prior, state);
         const reserveKind = operation === 'reserve' || operation === 'compare-and-set' && value.operation === 'reserve';
         commitRecord(engine, context, body, reserveKind ? 'reserve' : 'update');
-        if (body.publishing && compactionDue(engine)) compactEngine(engine, context);
+        if (engine.format !== 4 && body.publishing && compactionDue(engine)) compactEngine(engine, context);
         return { changed: true, result: clone(result) };
       }
       default: return fail('SealCorrupt');
