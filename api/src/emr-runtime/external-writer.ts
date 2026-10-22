@@ -2094,7 +2094,10 @@ function publishScrubV4(engine: Engine, fullCheck: FullCheck): void {
  * selected packs, in bounded cooperative slices): at most `maxPages` live pages of the emptiest packs (whole packs, so
  * each selected pack dies) are rewritten on their own routes by a logical no-change `compact` transition; the pages
  * are verified on the read that locates them. Returns the pages relocated and the packs emptied. */
-const V4_RELOCATE_LIVE_MAX = Math.floor(PACK_PAGES / 4), V4_RELOCATE_PAGES = 64, V4_RELOCATE_PACKS = 4;
+/** Relocation candidates are packs at most half live (the bound packs <= 2 * needed + 2 needs every retained pack at
+ * least half full in the steady state); one slice moves at most V4_RELOCATE_PAGES live pages, a larger pack over
+ * consecutive slices. */
+const V4_RELOCATE_LIVE_MAX = Math.floor(PACK_PAGES / 2), V4_RELOCATE_PAGES = 64, V4_RELOCATE_PACKS = 4;
 function fragmentationV4(v: V4State): { livePages: number; packs: number; needed: number; due: boolean } {
   if (!v.packs) return { livePages: 0, packs: 0, needed: 0, due: false };
   let livePages = 0, packs = 0;
@@ -2110,12 +2113,12 @@ function relocateV4(engine: Engine, maxPages: number): { relocated: number; pack
   const touches = new Map<number, string[]>(), emptied: string[] = [];
   let budget = maxPages, relocated = 0;
   for (const [pack, live] of candidates) {
-    if (live > budget) break;
+    if (budget <= 0) break;
     const file = v.store.packFile(pack), info = fs.statSync(file, { throwIfNoEntry: false });
     if (!info) continue;
-    const pages = Math.floor(info.size / PAGE_BYTES);
+    const pages = Math.floor(info.size / PAGE_BYTES), want = Math.min(live, budget);
     let found = 0;
-    for (let page = 0; page < pages && found < live; page++) {
+    for (let page = 0; page < pages && found < want; page++) {
       // A page is live iff the current root's route to its own lower bound at its level reaches exactly this page.
       let header: { kind: number; tree: number; level: number } | undefined, low: string | null | undefined;
       try {
@@ -2134,7 +2137,7 @@ function relocateV4(engine: Engine, maxPages: number): { relocated: number; pack
       let list = touches.get(header.tree); if (!list) touches.set(header.tree, list = []);
       list.push(digest); found++;
     }
-    if (found) { emptied.push(pack); relocated += found; budget -= found; }
+    if (found) { if (found >= live) emptied.push(pack); relocated += found; budget -= found; }
   }
   if (!touches.size) return { relocated: 0, packs: [] };
   const writer = v.writer ??= new PackWriter(v.store, engine.head.revision);
