@@ -1174,6 +1174,98 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
     def test_w5r3_supersede_first_actual_dispatch_classification(self):
         self.r3_first_dispatch('supersede')
 
+    # W5R3B-05 (ADMIT-03, Astra review-w5-ui-r3-20261021, promoted from the external driver): what changed on the server
+    # while Related Report mode held a preopened input decides the reader's explicit confirmation after Back - Back alone
+    # never sends, a stale source/record/recipient is refused or blocked by the current answer, never silently re-sent.
+    def test_w5r3b05_back_with_source_moved(self):
+        for action in ('create', 'supersede'):
+            with self.subTest(action=action):
+                self.server = CvrServer()
+                self.log.clear()
+                box, field, confirm = self.r3_prepare(action)
+                uid = A if action == 'create' else B
+                old_version = self.server.heads[uid]['version']
+                self.r3_mode(True)
+                confirm.dispatch_event('click')
+                self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+                self.server.heads[uid] = {**self.server.heads[uid], 'version': old_version + 1}
+                self.r3_mode(False)
+                self.settle()
+                expect(field).to_have_value('SYN retained input')
+                self.assertEqual([], self.requests(action), 'Back alone never sends stale input')
+                self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+                # The source moved only on the server: its authoritative refusal drives the ordinary recovery.
+                confirm.click()
+                self.wait_until(lambda: len(self.requests(action)) == 1, 'explicit stale-source confirmation')
+                outcome = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts')
+                expect(outcome).to_contain_text('Not delivered')
+                expect(outcome).to_contain_text('CRITICAL_RESULT_SOURCE_MOVED')
+                self.assertEqual(old_version, self.requests(action)[0]['body']['sourceVersion'])
+                self.settle()
+                self.assertEqual(1, len(self.requests(action)), 'a source refresh never sends by itself')
+                if action == 'create':
+                    expect(self.page.locator('#cvr-send-source')).to_contain_text(f'Source: v{old_version + 1}')
+                    expect(field).to_have_value('SYN retained input')
+                else:
+                    self.page.locator('#cvr-sent-rows').get_by_role('button', name='Supersede', exact=True).click()
+                    box = self.page.locator('tr[data-form]')
+                    field = box.locator('textarea')
+                    field.fill('SYN retained input')
+                    confirm = box.get_by_role('button', name='Supersede', exact=True)
+                expect(confirm).to_be_enabled()
+                confirm.click()
+                self.wait_until(lambda: len(self.requests(action)) == 2, 'explicit confirmation on the current source')
+                expect(outcome).to_contain_text('Delivered')
+                self.assertEqual(old_version + 1, self.requests(action)[1]['body']['sourceVersion'])
+                self.assertNotEqual(self.requests(action)[0]['body']['requestId'], self.requests(action)[1]['body']['requestId'])
+
+    def test_w5r3b05_back_with_changed_record_eligibility(self):
+        for action in ('cancel', 'supersede'):
+            with self.subTest(action=action):
+                self.server = CvrServer()
+                self.log.clear()
+                box, field, confirm = self.r3_prepare(action)
+                self.r3_mode(True)
+                confirm.dispatch_event('click')
+                self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+                record = next(iter(self.server.records.values()))
+                record.update(state='acknowledged', revision=2, acknowledgedAt=iso(58))
+                reads = len(self.requests('list'))
+                self.page.locator('#cvr-sent-refresh').dispatch_event('click')
+                self.wait_until(lambda: len(self.requests('list')) > reads, 'the authoritative changed record')
+                self.settle()
+                self.r3_mode(False)
+                expect(field).to_have_value('SYN retained input')
+                expect(confirm).to_be_disabled()
+                self.assertEqual([], self.requests(action), 'Back does not send a now-ineligible action')
+                confirm.dispatch_event('click')
+                self.settle()
+                self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+                self.assertEqual([], self.requests(action), 'a stale callback still checks the current record')
+
+    def test_w5r3b05_back_with_changed_recipient_eligibility(self):
+        box, field, confirm = self.r3_prepare('create')
+        self.r3_mode(True)
+        confirm.dispatch_event('click')
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+        self.server.candidates[A] = []
+        self.server.reasons[A] = 'NO_ELIGIBLE_RECIPIENT'
+        self.r3_mode(False)
+        expect(field).to_have_value('SYN retained input')
+        self.assertEqual([], self.requests('create'))
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+        confirm.click()
+        status = self.page.locator('#cvr-send-status')
+        expect(status).to_contain_text('CRITICAL_RESULT_RECIPIENT_CANNOT_READ')
+        expect(status).to_contain_text('Not delivered')
+        self.assertEqual(1, len(self.requests('create')))
+        self.assertEqual({}, self.server.records, 'the server refuses a recipient whose eligibility changed')
+        self.close_dialog()
+        self.page.evaluate("([u, n]) => window.synReport(u, n, 'A', true)", [A, 4])
+        expect(self.page.locator('#b-mark-cvr')).to_be_disabled()
+        expect(self.page.locator('#b-mark-cvr')).to_have_attribute('title', REASONS['NO_ELIGIBLE_RECIPIENT'])
+        self.assertEqual(1, len(self.requests('create')))
+
     def test_u5_cancel_delivery_survives_cancelled_preparation_without_source_read(self):
         record = self.server.add(B, X)
         self.ready_reader()

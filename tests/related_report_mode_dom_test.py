@@ -25,7 +25,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import auth_logout_dom_test as h
 import report_flow_dom_test as rf
@@ -1830,6 +1830,540 @@ class RelatedModePage(unittest.TestCase):
     def test_w5r3_late_reload_reading(self):
         self.r3_reading = True
         self.test_w5r3_reload_started_before_mode_cannot_replace_target_in_mode()
+
+    # ── W5R3B-05: the W5-UI r3 supplemental cases (Astra review-w5-ui-r3-20261021, D1672), promoted from the external
+    # drivers into this suite: ADMIT-07 auxiliary/conflict 4, ADMIT-08 recovery/lease 6, ADMIT-09 recipient page 4 and the
+    # complete-page sender 8, each in the default Workspace and in body.reading. Oracles are what reaches the synthetic
+    # wire (requests, bodies, lease hold/release paths, receipts) and what the reader sees (field values, the selected
+    # worklist row, notices, statuses, titles). Private page state is used only to open a pane through its own callback,
+    # to enter the mode the way the row/key paths do, to wait for the page's own convergence before the next step, and for
+    # the one D1656 synthetic retained-nonselected boundary (labelled below); it is never what a case judges.
+    B05_REASON_WITH_BACK = "Related Report 모드에서는 쓸 수 없습니다 — Back to Current Draft로 돌아간 뒤 사용하세요."
+    B05_RID = "87654321-0000-4000-8000-123456789012"
+    B05_RECIPIENT = {"sub": "12345678-0000-4000-8000-123456789012", "actor": "syn-cvr@synthetic.test",
+                     "name": "SYN Recipient", "role": "clinician"}
+
+    def b05_worklist(self, reading):
+        """In body.reading the worklist is an overlay the reader opens from the reading bar."""
+        if reading:
+            toggle = self.page.locator("#reading-bar").get_by_role("button", name="Worklist", exact=True)
+            if toggle.get_attribute("aria-expanded") == "false":
+                toggle.click()
+
+    def b05_selected(self):
+        return self.page.locator("#rows tr.sel").get_attribute("data-uid")
+
+    def b05_autosaved(self, uid, text, what):
+        self.page.clock.run_for(20001)
+        self.wait(lambda: (self.site.stored_of(uid) or {}).get("findings") == text
+                  and not self.js("u => reportConverge.has(u)", uid), what)
+
+    def b05_holds(self, uid=UID_A):
+        return sum(path.endswith("/" + uid + "/hold") for path in self.site.holds)
+
+    def b05_releases(self, uid=UID_A):
+        return sum(path.endswith("/" + uid + "/release") for path, _ in self.site.releases)
+
+    def b05_writes(self, start):
+        return [c for c in self.site.calls[start:] if c[0] != "GET"]
+
+    # ADMIT-07: report auxiliaries opened before the mode refuse their write with the mode's reason, nothing is written.
+    def b05_auxiliary(self, reading):
+        self.site.templates = [rf.TEMPLATE]
+        self.site.store[UID_A]["report"] = {"version": 1, "rs": "T", "findings": "SYN retained Target",
+                                            "conclusion": "", "recommendation": ""}
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+        # Setup: each pane opened through the page's own entry callback with a valid input.
+        request = {"uid": UID_A, "findingId": "f-1", "findingRevision": 2, "sourceIndex": 0, "sourceLabel": "SYN source",
+                   "linkState": "current", "headRevision": None, "block": "SYN citation text"}
+        self.js("r => openCitePreview(r)", request)
+        expect(self.page.locator("#cite-preview-insert")).to_be_enabled()
+        self.page.locator("#tplrows [data-tpl-preview]").first.dispatch_event("click")
+        expect(self.page.locator("#tpl-preview-insert")).to_be_enabled()
+        self.js("openStructure()")
+        self.page.locator("#struct-value-text").fill("SYN acquisition note")
+        expect(self.page.locator("#struct-apply")).to_be_enabled()
+        self.js("""() => openStaleRebase(selectedUid, selectionSeq, {status:409, body:{
+            code:'REPORT_DRAFT_STALE',draftBaseVersion:1,head:{version:2,updatedBy:'SYN reader',
+            findings:'SYN approved text',conclusion:'',recommendation:''}}})""")
+        expect(self.page.locator("#stale-rebase")).to_be_enabled()
+        self.js("uid => enterRelatedMode(uid)", UID_B)
+        expect(self.mode()).to_be_visible()
+        before = {k: self.value(k) for k in FIELDS}
+        start = len(self.site.calls)
+        for button, status in (("#cite-preview-insert", "#cite-preview-status"), ("#tpl-preview-insert", "#tpl-preview-status"),
+                               ("#struct-apply", "#struct-status"), ("#stale-rebase", "#stale-status")):
+            with self.subTest(button=button, reading=reading):
+                self.page.locator(button).dispatch_event("click")
+                self.settle(50)
+                expect(self.page.locator(status)).to_contain_text(MODE_REASON)
+                self.assertEqual(before, {k: self.value(k) for k in FIELDS})
+        self.assertEqual([], self.b05_writes(start), "no auxiliary write in the mode")
+        self.js("() => { closeCitePreview(false); closeTemplatePreview(false); closeStructure(); closeStaleRebase(); }")
+        self.back()
+        self.assertEqual(before, {k: self.value(k) for k in FIELDS})
+        self.assertEqual([], self.b05_writes(start), "Back writes nothing by itself")
+
+    def test_w5r3b05_auxiliary_normal(self):
+        self.b05_auxiliary(False)
+
+    def test_w5r3b05_auxiliary_reading(self):
+        self.b05_auxiliary(True)
+
+    # ADMIT-07: a superseded insert's explicit conflict review cannot be decided inside the mode; after Back it can.
+    def b05_conflict(self, reading):
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+            self.js("uid => enterRelatedMode(uid)", UID_B)
+            expect(self.mode()).to_be_visible()
+            self.wait(lambda: self.source_text("findings") == PRIOR_B["findings"], "the Source text")
+        else:
+            self.enter()
+        self.site.related_answers = ["lost"]
+        self.insert()
+        expect(self.notice()).to_contain_text("Result Unknown")
+        rf.ReportFlowPage.another_window_writes(self, UID_A, "SYN other window", base_version=0)
+        self.page.locator("#report-notice-check").click()
+        keep, load = self.page.locator("#b-draft-keep"), self.page.locator("#b-draft-load")
+        expect(keep).to_be_visible()
+        expect(load).to_be_visible()
+        self.assertEqual(1, len(self.site.related_puts), "never re-applied")
+        before, start = self.value(), len(self.site.calls)
+        stored = self.stored()
+        for button in ("#b-draft-keep", "#b-draft-load", "#b-report-reload"):
+            with self.subTest(button=button, reading=reading):
+                self.page.locator(button).dispatch_event("click")
+                self.settle(80)
+                self.assertEqual(before, self.value())
+                expect(keep).to_be_visible()
+                expect(load).to_be_visible()
+        # The reload command explains itself with the mode's reason and its Back guidance (§4 wording, whole sentence).
+        expect(self.page.locator("#toast")).to_have_text(self.B05_REASON_WITH_BACK)
+        self.assertEqual([], self.b05_writes(start), "no conflict decision is written in the mode")
+        self.assertEqual(stored, self.stored())
+        self.back()
+        keep.click()
+        self.wait(lambda: self.stored() == {"findings": self.whole(), "conclusion": "", "recommendation": ""},
+                  "the explicit Keep This Text write after Back")
+        self.assertEqual(1, len(self.site.related_puts), "the explicit choice is an ordinary write, not the insert")
+
+    def test_w5r3b05_conflict_normal(self):
+        self.b05_conflict(False)
+
+    def test_w5r3b05_conflict_reading(self):
+        self.b05_conflict(True)
+
+    # ADMIT-08: an off-target edit retained through an outage is recovered on the selected study after reconnect.
+    def b05_current_recovery(self, reading):
+        self.open()
+        self.open_target()
+        self.open_target(UID_D)
+        if reading:
+            self.enter_reading()
+        self.page.locator("#findings").fill("SYN original other-study text")
+        self.b05_autosaved(UID_D, "SYN original other-study text", "ordinary other-study autosave")
+        # Two failed polls are not an outage lifetime: the reconnect bootstrap also fails until released.
+        outage = {"active": True, "bootstrap_refused": 0}
+        original_api = self.site.api
+
+        def api(route, request, method, path, query):
+            if outage["active"] and method == "GET" and path == "/api/bootstrap":
+                outage["bootstrap_refused"] += 1
+                return self.site.answer(route, 503, {"code": "SYN_OUTAGE"})
+            return original_api(route, request, method, path, query)
+
+        self.site.api = api
+        self.site.list_answers = [(500, {"code": "SYN_OUTAGE"})] * 2
+        self.page.clock.run_for(61000)
+        expect(self.page.locator("#dbstat")).to_contain_text("서버 연결 끊김")
+        self.assertEqual([], self.site.list_answers)
+        self.assertGreaterEqual(outage["bootstrap_refused"], 1)
+        self.page.locator("#findings").fill("SYN retained off-target edit")
+        puts_before = len(self.site.flow_puts)
+        self.b05_worklist(reading)
+        self.page.locator(f'#rows tr[data-uid="{UID_A}"]').click()
+        expect(self.notice()).to_contain_text("서버 연결이 끊겨 저장할 수 없습니다")
+        self.assertEqual(UID_D, self.b05_selected(), "the move waits; the edited study stays selected")
+        self.assertEqual("SYN retained off-target edit", self.value())
+        self.assertEqual(puts_before, len(self.site.flow_puts), "nothing is written during the outage")
+        self.site.put_answers = ["hold"]
+        outage["active"] = False
+        self.page.clock.run_for(16000)
+        expect(self.page.locator("#dbstat")).to_contain_text("DB Connected")
+        self.wait(lambda: bool(self.site.held_flow_puts), "the selected study's reconnect write")
+        route, uid, body, account = self.site.held_flow_puts.pop(0)
+        self.assertEqual((UID_D, "SYN retained off-target edit"), (uid, body["findings"]))
+        self.site.answer(route, *self.site.write_of(uid, body, account))
+        self.wait(lambda: not self.js("u => reportConverge.has(u)", UID_D), "the recovery's answer")
+        self.assertEqual("SYN retained off-target edit", self.site.stored_of(UID_D)["findings"])
+        self.assertEqual([], [p for p in self.site.flow_puts if p[0] == UID_A], "the other study is never written")
+        self.b05_worklist(reading)
+        self.open_target(UID_A)
+        self.assertEqual(UID_A, self.b05_selected())
+
+    def test_w5r3b05_current_study_recovery_normal(self):
+        self.b05_current_recovery(False)
+
+    def test_w5r3b05_current_study_recovery_reading(self):
+        self.b05_current_recovery(True)
+
+    # ADMIT-08 boundary (D1656): a retained nonselected draft is recovered while Related mode stays on its Target; the
+    # Related insertion, receipt Check, lease and explicit save behave as usual. UI reachability is NOT claimed.
+    def b05_retained_boundary(self, reading):
+        self.open()
+        self.open_target(UID_D)
+        self.page.locator("#findings").fill("SYN original other-study text")
+        self.b05_autosaved(UID_D, "SYN original other-study text", "ordinary other-study autosave")
+        self.open_target(UID_A)
+        if reading:
+            self.enter_reading()
+        self.js("uid => enterRelatedMode(uid)", UID_B)
+        expect(self.mode()).to_be_visible()
+        self.wait(lambda: self.source_text("findings") == PRIOR_B["findings"], "the Source text")
+        before = {k: self.value(k) for k in FIELDS}
+        # Synthetic boundary state (D1656 fixture; setup only): D carries a retained, not yet converged draft.
+        self.js("""uid => {
+            const draft = {...appState[uid].draft, findings:'SYN retained off-target edit'};
+            appState[uid] = {...appState[uid], draft};
+            draftClient.keep(uid, draft);
+            reportConverge.add(uid);
+        }""", UID_D)
+        self.site.put_answers = ["hold"]
+        self.js("window.dispatchEvent(new Event('online'))")
+        self.page.clock.run_for(21000)
+        self.wait(lambda: bool(self.site.held_flow_puts), "the retained nonselected write in the mode")
+        self.assertEqual(UID_A, self.b05_selected())
+        expect(self.mode()).to_be_visible()
+        route, uid, body, account = self.site.held_flow_puts.pop(0)
+        self.assertEqual((UID_D, "SYN retained off-target edit"), (uid, body["findings"]))
+        self.site.answer(route, *self.site.write_of(uid, body, account))
+        self.wait(lambda: not self.js("u => reportConverge.has(u)", UID_D), "the off-target recovery's answer")
+        self.assertEqual("SYN retained off-target edit", self.site.stored_of(UID_D)["findings"])
+        self.js("() => { void stashReport(); window.dispatchEvent(new Event('online')); }")
+        self.page.clock.run_for(21000)
+        self.settle()
+        self.assertEqual([], [p for p in self.site.flow_puts if p[0] == UID_A], "the Related Target has no ordinary draft write")
+        self.assertEqual(before, {k: self.value(k) for k in FIELDS})
+        self.site.related_answers = ["lost"]
+        self.insert()
+        expect(self.notice()).to_contain_text("Result Unknown")
+        self.assertEqual(1, len(self.site.related_puts))
+        proposal = self.site.related_puts[0][1]
+        request_id = proposal["relatedInsert"]["insertRequestId"]
+        self.page.locator("#report-notice-check").click()
+        expect(self.page.locator("#related-mode-target")).to_contain_text("Draft Saved")
+        expect(self.notice()).to_be_hidden()
+        self.assertEqual("applied", self.site.receipts[request_id]["state"])
+        self.assertEqual(1, len(self.site.related_puts), "the receipt Check never repeats the insertion")
+        self.assertEqual({k: proposal[k] for k in FIELDS}, self.stored())
+        self.assertEqual([], [p for p in self.site.flow_puts if p[0] == UID_A])
+        holds = self.b05_holds()
+        self.page.clock.run_for(61000)
+        self.wait(lambda: self.b05_holds() > holds, "the insertion's reading lease keeps renewing")
+        self.back()
+        self.page.locator("#b-save").dispatch_event("click")
+        self.wait(lambda: len(self.site.flow_commits) == 1, "the explicit report save after Back")
+        self.assertEqual(UID_A, self.site.flow_commits[0][0])
+        self.wait(lambda: {k: self.site.store[UID_A]["report"][k] for k in FIELDS} == {k: proposal[k] for k in FIELDS},
+                  "the saved report")
+        self.wait(lambda: not self.js("commitInFlight"), "the save's answer")
+        # A successful commit is a terminal lease boundary: no renewal before or after leaving.
+        holds = self.b05_holds()
+        self.page.clock.run_for(61000)
+        self.settle()
+        self.assertEqual(holds, self.b05_holds(), "a committed Target's lease is not renewed")
+        self.b05_worklist(reading)
+        self.open_target(UID_D)
+        self.assertEqual("SYN retained off-target edit", self.value())
+        self.page.clock.run_for(61000)
+        self.settle()
+        self.assertEqual(holds, self.b05_holds(), "leaving a committed Target cannot renew its completed lease")
+        self.assertEqual({k: proposal[k] for k in FIELDS}, {k: self.site.store[UID_A]["report"][k] for k in FIELDS})
+
+    def test_w5r3b05_synthetic_retained_nonselected_boundary_normal(self):
+        self.b05_retained_boundary(False)
+
+    def test_w5r3b05_synthetic_retained_nonselected_boundary_reading(self):
+        self.b05_retained_boundary(True)
+
+    # ADMIT-08: an uncommitted Target lease renews through the mode and is released once when the reader leaves.
+    def b05_uncommitted_lease(self, reading):
+        self.open()
+        self.open_target(UID_A)
+        if reading:
+            self.enter_reading()
+        self.page.locator("#findings").fill("SYN autosaved lease-preservation text")
+        self.b05_autosaved(UID_A, "SYN autosaved lease-preservation text", "the ordinary autosave")
+        self.wait(lambda: self.b05_holds() >= 1, "editing claims the Target lease")
+        self.js("uid => enterRelatedMode(uid)", UID_B)
+        expect(self.mode()).to_be_visible()
+        self.wait(lambda: self.source_text("findings") == PRIOR_B["findings"], "the Source text")
+        writes, holds = len(self.site.flow_puts), self.b05_holds()
+        self.page.clock.run_for(61000)
+        self.wait(lambda: self.b05_holds() > holds, "the uncommitted lease keeps renewing in the mode")
+        self.assertEqual(writes, len(self.site.flow_puts), "the mode makes no ordinary Target write")
+        self.assertEqual([], self.site.flow_commits, "an ordinary autosave is not a report commit")
+        releases = self.b05_releases()
+        self.back()
+        self.b05_worklist(reading)
+        self.open_target(UID_D)
+        self.wait(lambda: self.b05_releases() == releases + 1, "leaving the uncommitted Target releases its lease once")
+        holds = self.b05_holds()
+        self.page.clock.run_for(61000)
+        self.settle()
+        self.assertEqual(holds, self.b05_holds(), "navigation stops the old Target's renewal")
+        self.assertEqual(releases + 1, self.b05_releases())
+        self.assertEqual("SYN autosaved lease-preservation text", self.site.stored_of(UID_A)["findings"])
+        self.assertEqual([], self.site.flow_commits)
+
+    def test_w5r3b05_uncommitted_lease_navigation_normal(self):
+        self.b05_uncommitted_lease(False)
+
+    def test_w5r3b05_uncommitted_lease_navigation_reading(self):
+        self.b05_uncommitted_lease(True)
+
+    # ADMIT-09: a received critical result's Acknowledge / Check Again kept from before the mode refuses in it, Back sends
+    # nothing, and the reader's explicit click after Back acknowledges (or retries the same unknown request).
+    def b05_received(self, reading, unknown=False):
+        import critical_result_recipient_dom_test as recipient
+        owner = [h.INSTITUTION, h.RAD["sub"]]
+        server = recipient.RecipientServer(owner)
+        record = server.add(recipient.rec(141, case="R2"))
+        posts, held_retries = [], []
+
+        def route(route, request):
+            url = urlparse(request.url)
+            query = parse_qs(url.query)
+            if request.method == "POST":
+                posts.append(request.post_data_json)
+                if unknown:
+                    if len(posts) == 1:
+                        route.abort("connectionreset")
+                        return
+                    status, body = server.refuse(404, "CRITICAL_RESULT_NOT_FOUND")
+                    held_retries.append((route, status, {**body, "message": "SYN ACK retry refused"}))
+                    return
+                status, body = server.ack(record["id"], request.post_data_json)
+            elif query.get("view") == ["sent"]:
+                status, body = 200, {"owner": owner, "view": "sent", "items": [], "nextCursor": None, "pending": 0}
+            else:
+                status, body = server.handle(recipient.kind_of(request.method, url.path), url.path, query, None)
+            route.fulfill(status=status, json=body)
+
+        self.context.route(re.compile(r".*/api/critical-results(?:[/?].*)?$"), route)
+        self.open()
+        self.open_target()
+        pane = self.page.locator("#cvr-inbox-p")
+        self.page.locator("#cvr-inbox-toggle").dispatch_event("click")
+        ack = pane.get_by_role("button", name="Acknowledge", exact=True)
+        expect(ack).to_be_visible()
+        if unknown:
+            ack.click()
+            self.wait(lambda: len(posts) == 1, "the original ACK reached transport")
+            control = pane.get_by_role("button", name="Check Again", exact=True)
+            expect(control).to_be_visible()
+        else:
+            control = ack
+        retained = control.element_handle()
+        try:
+            if reading:
+                self.enter_reading()
+            self.js("uid => enterRelatedMode(uid)", UID_B)
+            expect(self.mode()).to_be_visible()
+            self.js("""() => { window.b05Allocations = 0; const uuid = crypto.randomUUID.bind(crypto);
+                crypto.randomUUID = () => { window.b05Allocations++; return uuid(); }; }""")
+            retained.dispatch_event("click")
+            self.settle(100)
+            self.assertEqual(1 if unknown else 0, len(posts), "the mode sends no acknowledgement")
+            self.assertEqual(0, self.js("window.b05Allocations"), "the mode allocates no request ID")
+            self.assertTrue(retained.evaluate("e => e.disabled"))
+            self.assertIn("Related Report", retained.get_attribute("title"))
+            expect(pane).to_contain_text(MODE_REASON)
+            self.back()
+            self.settle(100)
+            self.assertEqual(1 if unknown else 0, len(posts), "Back does not acknowledge")
+            retained.dispatch_event("click")
+            self.wait(lambda: len(posts) == (2 if unknown else 1), "the explicit ACK after Back")
+            if unknown:
+                self.assertEqual(posts[0], posts[1], "Check Again resends the same request")
+                self.assertEqual(1, len(held_retries))
+                expect(pane.get_by_role("button", name="Check Again", exact=True)).to_be_disabled()
+                held_route, held_status, held_body = held_retries.pop()
+                held_route.fulfill(status=held_status, json=held_body)
+                expect(pane).to_contain_text("SYN ACK retry refused")
+                expect(pane).to_contain_text("Acknowledgement status unknown")
+                expect(pane.get_by_role("button", name="Check Again", exact=True)).to_be_enabled()
+            else:
+                self.assertEqual(1, posts[0]["revision"], "the ACK names the revision the row showed")
+                expect(pane).to_contain_text("Acknowledged")
+        finally:
+            retained.dispose()
+
+    def test_w5r3b05_received_normal(self):
+        self.b05_received(False)
+
+    def test_w5r3b05_received_reading(self):
+        self.b05_received(True)
+
+    def test_w5r3b05_received_unknown_normal(self):
+        self.b05_received(False, True)
+
+    def test_w5r3b05_received_unknown_reading(self):
+        self.b05_received(True, True)
+
+    # Complete-page sender parity: a send/cancel/supersede input opened before the mode survives the mode's repaints,
+    # its confirmation refuses before any request ID, Back sends nothing, and the explicit confirmation after Back sends
+    # the retained input once (the synthetic server refuses it, so the outcome is a displayed refusal).
+    def b05_cvr_page(self):
+        self.b05_posts, self.b05_hold_candidates, self.b05_held_candidates = [], False, []
+        self.context.add_init_script("""(() => {
+          const old = crypto.randomUUID.bind(crypto);
+          window.b05UuidCount = 0;
+          crypto.randomUUID = () => { window.b05UuidCount++; return old(); };
+        })();""")
+        self.site.store[UID_A]["report"] = {"version": 1, "rs": "T", "findings": "SYN Target report",
+                                            "conclusion": "", "recommendation": ""}
+        owner = [h.INSTITUTION, h.RAD["sub"]]
+        source = {"version": 1, "action": "save", "author": h.RAD["actor"], "at": "2026-09-01T10:00:00.000Z", "final": False}
+        item = {"id": self.B05_RID, "studyUid": UID_A, "state": "created", "revision": 1, "createdAt": source["at"],
+                "replacedBy": None, "supersedes": None, "view": "sender",
+                "recipient": {k: self.B05_RECIPIENT[k] for k in ("actor", "name", "role")},
+                "study": {"uid": UID_A, "name": ALPHA, "id": "SYN-P-001", "birth": "19600101", "date": "20261003"},
+                "message": "SYN earlier message", "source": {**source, "current": True, "reason": None},
+                "delivery": "readable", "acknowledgedAt": None, "cancelledAt": None, "supersededAt": None, "cancelReason": None}
+
+        def cvr(route, request):
+            parsed = urlparse(request.url)
+            if request.method == "POST":
+                self.b05_posts.append({"path": parsed.path, "body": request.post_data_json})
+                return route.fulfill(status=404, json={"code": "CRITICAL_RESULT_NOT_FOUND", "message": "SYN definitive refusal"})
+            if parsed.path.endswith("/critical-result-recipients"):
+                answer = {"owner": owner, "uid": parsed.path.split("/")[-2], "sendable": True, "reason": None,
+                          "source": source, "recipients": [self.B05_RECIPIENT]}
+                if self.b05_hold_candidates:
+                    self.b05_held_candidates.append((route, answer))
+                    return
+                return route.fulfill(json=answer)
+            if parsed.path.endswith("/critical-results"):
+                received = parse_qs(parsed.query).get("view") == ["received"]
+                return route.fulfill(json={"owner": owner, "view": "received" if received else "sent",
+                                           "items": [] if received else [item], "nextCursor": None,
+                                           "pending": 0 if received else 1})
+            return route.fulfill(status=404, json={"code": "CRITICAL_RESULT_NOT_FOUND", "message": "SYN absent read"})
+
+        self.context.route(re.compile(r".*/api/(?:studies/[^/]+/critical-result(?:-recipients|s)|critical-results)(?:[/?].*)?$"), cvr)
+
+    def b05_sender_parity(self, action, reading=False, held=False):
+        self.b05_cvr_page()
+        self.open()
+        self.open_target()
+        self.wait(lambda: not self.page.locator("#b-mark-cvr").is_disabled(), "Mark CVR ready")
+        if reading:
+            self.enter_reading()
+        row = self.page.locator(f'#cvr-sent-rows tr[data-id="{self.B05_RID}"]')
+        form = self.page.locator(f'#cvr-sent-rows tr[data-form="{self.B05_RID}"]')
+        label = {"create": "Send", "cancel": "Cancel Delivery", "supersede": "Supersede"}[action]
+        if action == "create":
+            self.page.locator("#report-more").click()
+            self.page.locator("#b-mark-cvr").click()
+            self.page.locator("#cvr-send-recipient").select_option(self.B05_RECIPIENT["sub"])
+            field, confirm = self.page.locator("#cvr-send-message"), self.page.locator("#cvr-send-submit")
+        else:
+            self.page.get_by_role("button", name="Show Sent", exact=True).click()
+            expect(row).to_be_visible()
+            self.b05_hold_candidates = held
+            row.get_by_role("button", name=label, exact=True).click()
+            field, confirm = form.locator("textarea"), form.get_by_role("button", name=label, exact=True)
+            if held:
+                self.wait(lambda: bool(self.b05_held_candidates), "the candidate read held before the mode")
+        field.fill("SYN retained full-page input")
+        retained = field.element_handle()
+        try:
+            if not held:
+                expect(confirm).to_be_enabled()
+            before = self.js("window.b05UuidCount")
+            self.js("uid => enterRelatedMode(uid)", UID_B)
+            expect(self.mode()).to_be_visible()
+            # The mode's deliberate title focus is PAGE-01's; a repaint after this explicit focus must keep it.
+            field.focus()
+            for route, answer in self.b05_held_candidates:
+                route.fulfill(json=answer)
+            self.b05_held_candidates.clear()
+            self.b05_hold_candidates = False
+            if held:
+                # The late Source answer lands inside the mode: it must not enable the confirmation by itself (before any
+                # later list repaint could hide that).
+                self.settle(100)
+                expect(confirm).to_be_disabled()
+                self.assertEqual(self.B05_REASON_WITH_BACK, confirm.get_attribute("title"))
+            if action != "create":
+                self.page.locator("#cvr-sent-refresh").dispatch_event("click")
+            self.settle(100)
+            self.assertTrue(retained.evaluate("e => e.isConnected"), "the preopened input survives the mode/read repaint")
+            self.assertTrue(retained.evaluate("e => document.activeElement === e"), "the repaint keeps the focused input")
+            confirm.dispatch_event("click")
+            self.settle(100)
+            self.assertEqual(before, self.js("window.b05UuidCount"), "a blocked confirmation creates no attempt ID")
+            self.assertEqual([], self.b05_posts, "a blocked confirmation never transmits")
+            expect(field).to_have_value("SYN retained full-page input")
+            expect(confirm).to_be_disabled()
+            self.assertEqual(self.B05_REASON_WITH_BACK, confirm.get_attribute("title"))
+            box = self.page.locator("#cvr-send" if action == "create" else "#cvr-sent-p")
+            expect(box.get_by_text(self.B05_REASON_WITH_BACK, exact=True).first).to_be_visible()
+            outcome = self.page.locator("#cvr-send-status" if action == "create" else "#cvr-sent-attempts")
+            for word in ("Delivered", "Not delivered", "Not cancelled", "status unknown", "Cancelled"):
+                self.assertNotIn(word, outcome.inner_text(), "a blocked confirmation shows no outcome")
+            # Back is the mode's own control; the modal Send dialog covers it, so it is activated as a DOM click.
+            self.page.locator("#related-mode-back").dispatch_event("click")
+            expect(self.mode()).to_be_hidden()
+            self.settle(50)
+            self.assertEqual([], self.b05_posts, "Back never sends")
+            self.assertEqual(before, self.js("window.b05UuidCount"), "Back never allocates a request")
+            expect(confirm).to_be_enabled()
+            confirm.click()
+            self.wait(lambda: len(self.b05_posts) == 1, "the explicit confirmation after Back")
+            post = self.b05_posts[0]
+            path = (f"/api/studies/{UID_A}/critical-results" if action == "create"
+                    else f"/api/critical-results/{self.B05_RID}/{action}")
+            self.assertEqual(path, post["path"])
+            self.assertEqual("SYN retained full-page input", post["body"]["reason" if action == "cancel" else "message"])
+            self.assertTrue(UUID.match(post["body"]["requestId"]))
+            refused = self.page.locator("#cvr-send-status" if action == "create" else "#cvr-sent-attempts li")
+            expect(refused).to_be_visible()
+            expect(refused).to_contain_text("Not cancelled" if action == "cancel" else "Not delivered")
+            expect(refused).to_contain_text("SYN definitive refusal")
+            expect(refused).to_contain_text("CRITICAL_RESULT_NOT_FOUND")
+        finally:
+            retained.dispose()
+
+    def test_w5r3b05_sender_create_normal(self):
+        self.b05_sender_parity("create")
+
+    def test_w5r3b05_sender_create_reading(self):
+        self.b05_sender_parity("create", reading=True)
+
+    def test_w5r3b05_sender_cancel_normal(self):
+        self.b05_sender_parity("cancel")
+
+    def test_w5r3b05_sender_cancel_reading(self):
+        self.b05_sender_parity("cancel", reading=True)
+
+    def test_w5r3b05_sender_supersede_normal(self):
+        self.b05_sender_parity("supersede")
+
+    def test_w5r3b05_sender_supersede_reading(self):
+        self.b05_sender_parity("supersede", reading=True)
+
+    def test_w5r3b05_sender_supersede_late_source_normal(self):
+        self.b05_sender_parity("supersede", held=True)
+
+    def test_w5r3b05_sender_supersede_late_source_reading(self):
+        self.b05_sender_parity("supersede", reading=True, held=True)
 
 
 def run_mutants():
