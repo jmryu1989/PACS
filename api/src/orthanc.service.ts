@@ -10,6 +10,9 @@ function isStudyLookupKey(value: unknown): value is string {
     && !reservedStudyKeys.has(value);
 }
 
+/** What a source consumer may do with the owned body: read it. The owner keeps the reader itself. */
+type SourceReader = { read(): Promise<ReadableStreamReadResult<Uint8Array>> };
+
 // S7-U4a header reads put an Orthanc resource id into a path: only Orthanc's own id shape passes.
 const ORTHANC_RESOURCE_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
 function orthancResourceId(value: unknown): string {
@@ -47,54 +50,111 @@ export class OrthancService {
   }
 
   /**
+   * W9A2-1 (D1562/D1564): the one owner of a source request's I/O. It owns a per-request controller that follows the
+   * caller's signal from before dispatch until the consumer has materialised its answer, the Response and any reader the
+   * consumer takes through `read()`. On every exit - answer, refusal, throw, early return, abort - it aborts first (so
+   * cleanup never waits for the remote end), then cancels the tracked reader or the unlocked body, releases the reader
+   * lock and detaches from the caller's signal. It drains nothing and has no clock: the callers keep their own limits.
+   * `transport` maps a failure to obtain the response (connection, already-aborted signal) for callers that name it.
+   * An abort while the body is pending also cancels the reader (or the unlocked body) at once: after the headers, native
+   * fetch follows its signal only weakly, and an abort alone was observed not to reach the connection
+   * (tmp/w9-api/runs/r9-counterexample-signal-only). A consumer reads only through `read()` and calls
+   * `signal.throwIfAborted()` after its read loop, since a cancelled reader ends like a finished body.
+   * A body read to its end (or a response without one) is complete and is not aborted afterwards: its connection may go
+   * back to the pool (D1562: returning a fully consumed connection is valid).
+   */
+  private async withSourceResponse<T>(path: string, init: RequestInit, signal: AbortSignal | undefined,
+      consume: (response: Response, read: () => SourceReader, signal: AbortSignal) => Promise<T>,
+      transport?: (error: any) => Error): Promise<T> {
+    const controller = new AbortController();
+    let response: Response | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined, drained = false;
+    const stop = () => {
+      controller.abort();
+      const cancelling = reader ? reader.cancel() : response?.body && !response.body.locked ? response.body.cancel() : undefined;
+      void cancelling?.catch(() => {});
+    };
+    const read = (): SourceReader => {
+      const owned = (reader = response!.body!.getReader());
+      return { read: async () => { const part = await owned.read(); if (part.done) drained = true; return part; } };
+    };
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener('abort', stop, { once: true });
+    try {
+      try {
+        controller.signal.throwIfAborted();
+        response = await fetch(this.base + path, { ...init, signal: controller.signal });
+      } catch (error) { throw transport ? transport(error) : error; }
+      controller.signal.throwIfAborted();
+      return await consume(response, read, controller.signal);
+    } finally {
+      signal?.removeEventListener('abort', stop);
+      const complete = !controller.signal.aborted && (drained || (response !== undefined && !response.body));
+      if (!complete) stop();
+      if (reader) {
+        if (!complete) await reader.cancel().catch(() => {});
+        try { reader.releaseLock(); } catch { /* already released */ }
+      }
+    }
+  }
+
+  /** The whole body through the owner's reader, decoded by native Response.json (the same JSON semantics as before). */
+  private static async jsonBody(response: Response, read: () => SourceReader, signal: AbortSignal) {
+    if (!response.body) return response.json();
+    const reader = read(), chunks: Uint8Array[] = [];
+    for (let part = await reader.read(); !part.done; part = await reader.read()) chunks.push(part.value);
+    signal.throwIfAborted();
+    return new Response(Buffer.concat(chunks), { headers: response.headers }).json();
+  }
+
+  /**
    * New persistence validates original tags without holding a database lock or buffering an unbounded response.
    * `limit` stays 256 KiB for every viewer read; only the S7-U4a header reads below pass a larger bound.
    */
   private async viewerJson(path: string, body?: string, signal?: AbortSignal, limit = 262144): Promise<any> {
-    let response: Response, reader: ReadableStreamDefaultReader<Uint8Array>;
     let failure: ViewerSourceFailure = 'unexpected', timedOut = false;
-    // Keep cancellation wired for the entire streamed body, not just until
-    // response headers arrive. The page deadline and per-fetch limit both own
-    // this controller; completion releases their listener/timer explicitly.
-    const controller = new AbortController(), abort = () => {
-      controller.abort();
-      void reader?.cancel().catch(() => {});
-    };
-    const timer = setTimeout(() => { timedOut = true; abort(); }, 5000);
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
+    // The per-fetch limit and the caller's deadline both end the request; withSourceResponse owns its I/O.
+    const bounds = OrthancService.readLimit(signal, () => { timedOut = true; }), bound = bounds.signal;
     try {
       failure = 'transport';
-      response = await fetch(this.base + path, {
-        method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: controller.signal,
+      return await this.withSourceResponse(path, {
+        method: body === undefined ? 'GET' : 'POST', redirect: 'error',
         headers: { Authorization: this.auth, 'Content-Type': 'text/plain' }, body,
-      });
-      if (!response.ok || !response.body) {
-        failure = !response.ok ? response.status === 401 ? 'http_401' : response.status === 404 ? 'http_404' : 'http_other' : 'missing_body';
-        await response.body?.cancel().catch(() => {});
-        throw new Error('response');
-      }
-      reader = response.body.getReader();
-      const chunks: Uint8Array[] = []; let total = 0;
-      try {
+      }, bound, async (response, read, owned) => {
+        if (!response.ok || !response.body) {
+          failure = !response.ok ? response.status === 401 ? 'http_401' : response.status === 404 ? 'http_404' : 'http_other' : 'missing_body';
+          throw new Error('response');
+        }
+        const reader = read();
+        const chunks: Uint8Array[] = []; let total = 0;
         while (true) {
           const { done, value } = await reader.read(); if (done) break;
           total += value.byteLength;
           if (total > limit) { failure = 'size_limit'; throw new Error('limit'); }
           chunks.push(value);
         }
-        controller.signal.throwIfAborted();
+        owned.throwIfAborted();
         failure = 'decode';
         const decoded = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
         failure = 'parse';
         return JSON.parse(decoded);
-      } finally { await reader.cancel().catch(() => {}); }
+      });
     } catch (error) {
       // Never echo tag values or Basic credentials in an error response.
       warnViewerSource(signal?.aborted ? 'parent_abort' : timedOut ? 'timeout' :
         failure === 'transport' && !(error instanceof TypeError) && error?.name !== 'AbortError' ? 'unexpected' : failure);
       throw new ViewerSourceUnavailable();
-    } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+    } finally { bounds.release(); }
+  }
+
+  /**
+   * The existing 5 s per-read limit joined with the caller's signal into the one signal the source owner follows; a
+   * plain controller whose listener on the caller's signal is removed when the read ends.
+   */
+  private static readLimit(signal: AbortSignal | undefined, onTimeout?: () => void) {
+    const bound = new AbortController(), follow = () => bound.abort();
+    const timer = setTimeout(() => { onTimeout?.(); bound.abort(); }, 5000);
+    if (signal?.aborted) bound.abort(); else signal?.addEventListener('abort', follow, { once: true });
+    return { signal: bound.signal, release: () => { clearTimeout(timer); signal?.removeEventListener('abort', follow); } };
   }
 
   async viewerReference(sopUid: string, measurement = false, signal?: AbortSignal): Promise<any> {
@@ -124,19 +184,18 @@ export class OrthancService {
   }
 
   private async srBytes(path: string, limit: number, body?: Buffer, accept = 'application/octet-stream', signal?: AbortSignal): Promise<Buffer> {
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5000);
-    let reader: ReadableStreamDefaultReader<Uint8Array>;
-    const abort = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
-    signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+    const bounds = OrthancService.readLimit(signal), bound = bounds.signal;
     try {
-      const res = await fetch(this.base + path, { method: body ? 'POST' : 'GET', redirect: 'error', signal: controller.signal,
-        headers: { Authorization: this.auth, Accept: accept, 'Content-Type': 'application/dicom' }, body: body ? new Uint8Array(body).buffer : undefined });
-      if (!res.ok || !res.body) throw new Error('response');
-      reader = res.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
-      while (true) { const part = await reader.read(); if (part.done) break; bytes += part.value.length; if (bytes > limit) throw new Error('limit'); chunks.push(part.value); }
-      controller.signal.throwIfAborted(); return Buffer.concat(chunks);
+      return await this.withSourceResponse(path, { method: body ? 'POST' : 'GET', redirect: 'error',
+        headers: { Authorization: this.auth, Accept: accept, 'Content-Type': 'application/dicom' }, body: body ? new Uint8Array(body).buffer : undefined },
+      bound, async (res, read, owned) => {
+        if (!res.ok || !res.body) throw new Error('response');
+        const reader = read(); const chunks: Uint8Array[] = []; let bytes = 0;
+        while (true) { const part = await reader.read(); if (part.done) break; bytes += part.value.length; if (bytes > limit) throw new Error('limit'); chunks.push(part.value); }
+        owned.throwIfAborted(); return Buffer.concat(chunks);
+      });
     } catch { throw new ServiceUnavailableException('SR 원본 조회 또는 저장을 확인할 수 없습니다. 같은 요청으로 다시 시도하세요'); }
-    finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); await reader?.cancel().catch(() => {}); }
+    finally { bounds.release(); }
   }
 
   async manualSrPixels(sopUid: string, signal?: AbortSignal): Promise<Buffer> {
@@ -185,17 +244,15 @@ export class OrthancService {
     return { patientId };
   }
 
-  private async get(path: string, body?: unknown) {
-    let res: Response;
-    try {
-      res = await fetch(this.base + path, { method: body === undefined ? 'GET' : 'POST',
-        headers: { Authorization: this.auth, 'Content-Type':'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body) });
-    } catch (e: any) {
-      throw new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e.message}`);
-    }
-    if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);
-    return res.json();
+  /** `signal` (optional) is the caller's deadline: it cancels the fetch and, after the headers, the body read. */
+  private get(path: string, body?: unknown, signal?: AbortSignal): Promise<any> {
+    return this.withSourceResponse(path, { method: body === undefined ? 'GET' : 'POST',
+      headers: { Authorization: this.auth, 'Content-Type':'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body) }, signal, async (res, read, owned) => {
+      // A refusal leaves its body to the owner, which cancels it: an error body is never read to its end.
+      if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);
+      return OrthancService.jsonBody(res, read, owned);
+    }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));
   }
 
   /**
@@ -229,11 +286,12 @@ export class OrthancService {
    * WORKLIST-SPLIT-UID: one row per original Study resource. Two resources that share a Study UID (two
    * patients) are both returned; a repeat is an observation for the consumer to group, never a reason to
    * fail the whole institution's list or to keep one of them.
+   * `signal`: a caller with a deadline (the W9 viewing-set resolve's StudyAccess preparation) cancels the find and its body.
    */
-  async studyIdentities(accessMetadata = false, accession = false): Promise<any[]> {
+  async studyIdentities(accessMetadata = false, accession = false, signal?: AbortSignal): Promise<any[]> {
     const rows = await this.get('/tools/find', { Level:'Study', Query:{},
       ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName',
-        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] });
+        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] }, signal);
     if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
     return rows.map(row => {
       const uid = row?.RequestedTags?.StudyInstanceUID;
@@ -351,19 +409,16 @@ export class OrthancService {
   }
 
   /** SOP Instance UID를 Orthanc 내부 ID로 찾는다. 기관 판정은 호출자가 Study로 환원한 뒤 한다. */
-  async lookupInstance(sopUid: string): Promise<any[]> {
-    let res: Response;
-    try {
-      res = await fetch(this.base + '/tools/lookup', {
-        method: 'POST',
-        headers: { Authorization: this.auth, 'Content-Type': 'text/plain' },
-        body: sopUid,
-      });
-    } catch (e: any) {
-      throw new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e.message}`);
-    }
-    if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);
-    return res.json();
+  /** `signal` (optional): a caller-owned cancellation; the current caller (PacsDicomGateway) passes none and keeps no deadline. */
+  lookupInstance(sopUid: string, signal?: AbortSignal): Promise<any[]> {
+    return this.withSourceResponse('/tools/lookup', {
+      method: 'POST',
+      headers: { Authorization: this.auth, 'Content-Type': 'text/plain' },
+      body: sopUid,
+    }, signal, async (res, read, owned) => {
+      if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);
+      return OrthancService.jsonBody(res, read, owned);
+    }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));
   }
 
   /** 썸네일 경로(/instances/{id})의 기관 관문용. 실패는 던진다 — 관문에서 403이 된다. */
@@ -376,6 +431,21 @@ export class OrthancService {
     if (this.instanceStudy.size > 50000) this.instanceStudy.clear();   // 단순 상한
     this.instanceStudy.set(id, uid);
     return uid;
+  }
+
+  /**
+   * W9-LITE viewing set: every original Study resource that answers one UID, with the member's minimal display tags named
+   * explicitly (PatientName, PatientID, InstitutionName, StudyDate, ModalitiesInStudy, StudyDescription, AccessionNumber).
+   * Like studyIdentityResources(): one row for a normal study, two or more for a UID two patient resources share, [] for
+   * none; a row naming another UID or a malformed answer is a failed read (503), never a smaller array. The caller's
+   * signal cancels the fetch and its body.
+   */
+  async viewingSetStudy(uid: string, signal: AbortSignal): Promise<any[]> {
+    const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
+      '&includefield=00100010,00100020,00080080,00080020,00080061,00081030,00080050', undefined, signal);
+    if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || OrthancService.tag(row, '0020000D') !== uid))
+      throw new ServiceUnavailableException('원본 검사의 소속을 확인할 수 없습니다');
+    return rows;
   }
 
   /** DICOM 태그 한 칸 꺼내기 (PN 타입은 {Alphabetic: "..."} 로 온다) */

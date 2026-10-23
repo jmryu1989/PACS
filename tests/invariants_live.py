@@ -133,6 +133,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "transfers/:id/revoke"): Route(Kind.TENANT),
     ("GET", "studies/:uid/viewer-items"): Route(Kind.TENANT),
     ("POST", "studies/:uid/viewer-context-events"): Route(Kind.TENANT),
+    # W9-LITE (W9-API): the same-patient viewing set's admission read; every member's institution, tele and StudyAccess
+    # boundary is the service's (tests/multi_study_view_service_test.cjs). No report state or body is in the answer.
+    ("POST", "studies/viewing-set/resolve"): Route(Kind.TENANT),
     ("GET", "studies/:uid/report-preview"): Route(Kind.TENANT),
     ("GET", "studies/:uid/viewer-jobs"): Route(Kind.TENANT),
     ("POST", "studies/:uid/viewer-jobs"): Route(Kind.TENANT),
