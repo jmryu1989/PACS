@@ -278,12 +278,20 @@
      * 그래서 Clear·Paste 같은 버튼은 잠금을 스스로 확인해야 한다 —
      * 예비 판독 잠금이 이 두 버튼에서만 열려 있었다.
      * 막는 이유를 문자열로 돌려준다. 통과면 null.
+     *
+     * W5(설계 v5 §1.6, D1423 R2): Related Report 모드와, 저장 영수증이 확인되지 않은 Related 삽입도 쓰기를 막는다. 예외는 모드가 연
+     * 일회용 허가(`admission`) 하나뿐이다 — 검토한 Insert의 그 칸, 그 한 번의 native 편집. `RELATED_BASE`는 모드가 "Target이 그
+     * 삽입을 받을 수 있는가"를 물을 때 W5 사유를 빼고 기존 규칙만 묻는 표시이고, 편집을 열지 않는다(편집기의 canEdit은 모드가
+     * 직접 확인한 허가만 넘긴다). `relatedMode`는 page-boot가 올린 모드이며, 그보다 앞의 소비자가 읽으므로 여기서 선언한다(S9-U0a-PRE).
      */
-    function reportWriteBlock() {
+    let relatedMode = null;
+    const RELATED_BASE = Object.freeze({ base: true });
+    function reportWriteBlock(admission = null) {
       if (!selectedUid) return "검사를 선택하세요";
       if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
       if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
-      return null;
+      if (admission === RELATED_BASE) return null;
+      return relatedMode?.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);
     }
 
     // ── Reading Template ──
@@ -351,8 +359,8 @@
      * 스크립트가 판독문 칸에 글을 넣어도 되는가. 상용구 삽입과 소견 인용이 **같은 관문
      * 하나**를 쓴다 — 둘이 각자 검사를 들고 있으면 언젠가 한쪽만 고쳐진다.
      */
-    function reportEditorBlock() {
-      const why = reportWriteBlock();
+    function reportEditorBlock(admission = null) {
+      const why = reportWriteBlock(admission);
       if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
       if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
@@ -590,8 +598,9 @@
     // 단축어 Tab(아래 등록)이 부르는 편집기의 한 자리다. 분할된 script 사이의 Tab이 미정의를 만나지 않게 등록보다 앞에 둔다(S9-U0a-PRE).
     // All application edits use the frame's native undo transaction. Its input event owns dirty/hold
     // accounting; this adapter only retains the final multi-field snapshot. Delayed callers pass
-    // their captured request so later input or another opening cannot accept an old insertion.
-    function editReport(edits) {
+    // their captured request so later input or another opening cannot accept an old insertion. `admission` (W5, D1423 R2)
+    // is Related Report mode's one-shot token for its single reviewed edit; it reaches only a single-field native insert.
+    function editReport(edits, { admission = null } = {}) {
       if (work.state() !== "active" || !selectedUid) return false;
       const frame = mountReportFrame();
       if (!frame) return false;
@@ -604,7 +613,7 @@
       if (waiting && !frame.isComposing()) waiting.close();
       let result;
       try {
-        result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);
+        result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text, admission) : frame.insertMany(changes);
       } finally {
         if (waiting?.isConnected && !waiting.open && work.state() === "active") {
           waiting.showModal();
@@ -1569,6 +1578,16 @@
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
+      // W5 (설계 v5 §1.6): in Related Report mode the report commands wait for Back, with the reason said on each control;
+      // an unsettled explicit Related insert holds the decisions that would carry its text. Prev/Next stay: they leave through
+      // the move gate. Placed before the identity rule below, whose titles then stand.
+      const relatedWhy = relatedMode?.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
+      if (relatedWhy)
+        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+          "#b-prelim"]) {
+          const el = $(id);
+          if (el) { el.disabled = true; el.title = relatedWhy; }
+        }
       // WORKLIST-SPLIT-UID: the selected UID was excluded as unresolved. Its text stays (loadReport keeps it) and is read-only;
       // every write and the paste/clear editors are off. The server refuses the same actions on its own.
       const unresolved = !!appState[selectedUid]?.identityUnresolved;
@@ -2310,12 +2329,19 @@
       // WORKLIST-SPLIT-UID: an unresolved study's kept text is never sent. It is a refused save, answered like the others
       // (Retry/Check/Stay, no target switch, nothing written); the text stays in the editor.
       if (a.identityUnresolved) return { status: "refused", reason: "환자 식별 불일치로 이 검사의 글을 저장할 수 없습니다. 원본 확인이 필요합니다" };
+      // W5: an explicit Related insert whose receipt is not settled keeps the Target (D1423 R3): the move waits for its Check or
+      // same-ID Retry; the Notice speaks for that operation (its own action), and no ordinary write is sent for its text.
+      const related = relatedInsertPending(uid);
+      if (related) return { status: related.state === "refused" ? "refused" : "unknown", reason: RELATED_PENDING_REASON };
       const held = heldByOther(studies.find(s => s.uid === uid));
       if (held) return { status: "refused", reason: `${displayActor(held)} 님이 판독 중입니다` };
       return null;
     }
 
     function enterStudy(uid, { deferViewer = false, openSelected = false } = {}) {
+      // W5: a move closes Related Report mode first (the move gate already confirmed the Target clean); its return point
+      // belongs to the study being left.
+      relatedMode?.exit();
       clearReportNotice();
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);
@@ -2563,6 +2589,26 @@
     }
     function relatedReportMeta(s) {
       return `${relatedDateLabel(s)} · ${s.name} (${s.id}) · ${s.date || "날짜 없음"} · ${s.modality} · ${shownStudyDesc(s)}`;
+    }
+    /**
+     * W5 Related Report mode의 두 식별 카드(설계 v5 §1.4): 같은 환자의 다른 검사를 헷갈리지 않게 두 검사를 같은 항목으로 나란히 보인다.
+     * 값은 목록 행과 판독 상태에서만 온다. 없는 값은 null로 두고 화면이 "확인할 수 없음"이라 쓴다 — 지어내지 않는다.
+     */
+    function relatedIdentity(s) {
+      return { uid: s.uid, name: s.name || null, id: s.id || null, institution: s.institutionName || null,
+        date: s.date || null, desc: String(s.desc ?? "").trim() || null, acc: s.acc || null };
+    }
+    function relatedTargetCard() {
+      const s = cur();
+      if (!s) return null;
+      const a = appState[s.uid] ?? {};
+      return { ...relatedIdentity(s), version: Number.isSafeInteger(a.version) ? a.version : null, rs: s.rs || null,
+        draft: relatedDraftStatus(s.uid) };
+    }
+    function relatedSourceCard() {
+      const s = relatedStudy();
+      if (!s) return null;
+      return { ...relatedIdentity(s), unresolved: appState[s.uid]?.identityUnresolved ? RELATED_IDENTITY : null };
     }
 
     // Related Exam: 서버가 원본 기관+PatientID로 만든 키가 같은 "다른" 검사만.
@@ -4096,6 +4142,17 @@
       $("#prior-report-content").style.display = "none";
       for (const id of ["#prior-findings", "#prior-conclusion", "#prior-recommendation"])
         $(id).textContent = "";
+      // W5: the Source display context follows (an empty Source never keeps an older read's text).
+      relatedMode?.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
+    }
+
+    /**
+     * 지금의 승인 판독문: 폐기 기록을 뺀 가장 새 판이 approve/addendum일 때만 그 판이다(W5 Source는 승인/추가기재 ReportVersion뿐).
+     * 그 뒤에 취소(reset) 같은 판이 섰으면 예전 승인을 지금의 승인본으로 보이지 않는다 — 서버도 그런 Source의 삽입을 받지 않는다.
+     */
+    function relatedReportHead(list) {
+      const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
+      return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
     }
 
     /**
@@ -4104,6 +4161,9 @@
      * 목록 응답의 `state`에도 현재 Report가 있지만 내 초안이 함께 올 수 있다. 그 값을 그대로
      * 그리면 prior의 미확정 초안이 "이전 판독문"으로 보인다. 이미 쓰는 이력 조회 경로에서
      * approve/addendum 판만 골라 읽어야 읽기 전용의 의미가 맞는다.
+     *
+     * W5(설계 v5 §1.5): 읽기마다 요청 번호가 있고, 답은 그 번호·검사·판독 대상·선택이 그대로일 때만 쓴다(A→B→A의 늦은 답 포함).
+     * Load Failed(다시 읽기)와 Access Restricted(403/404: 권한·범위)를 가르고, 승인본이 없는 것은 실패가 아니다.
      */
     async function loadRelatedReport() {
       const s = relatedStudy();
@@ -4114,18 +4174,20 @@
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
+      const shown = view => relatedMode?.showSource({ seq, uid, ...view });
       $("#prior-report-meta").textContent = relatedReportMeta(s);
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
       $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
       $("#prior-report-status").style.display = "";
       $("#prior-report-content").style.display = "none";
+      shown({ state: s.rs === "A" ? "loading" : "none" });
 
       let report = null;
       try {
         if (serverMode && s.rs === "A") {
           const list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at);
           if (stale()) return;
-          report = list.find(v => v.action === "addendum" || v.action === "approve") ?? null;
+          report = relatedReportHead(list);
         } else if (!serverMode && s.rs === "A") {
           // 서버가 없는 데모에서는 이력 API가 없으므로 확정본만 사용한다. draft는 절대 고르지 않는다.
           const r = appState[uid] ?? {};
@@ -4136,11 +4198,14 @@
         }
       } catch (e) {
         if (stale()) return;
-        $("#prior-report-status").textContent = `판독문 조회 실패: ${e.message}`;
+        const restricted = e?.status === 403 || e?.status === 404;
+        $("#prior-report-status").textContent = restricted
+          ? "이 판독문을 볼 권한이 없습니다 (Access Restricted)" : `판독문 조회 실패: ${e.message}`;
+        shown({ state: restricted ? "restricted" : "failed" });
         return;
       }
       if (stale()) return;
-      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; return; }
+      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return; }
       $("#prior-report-meta").textContent =
         `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
@@ -4149,16 +4214,38 @@
       $("#prior-recommendation").textContent = report.recommendation ?? "";
       $("#prior-report-status").style.display = "none";
       $("#prior-report-content").style.display = "";
+      shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
+        author: displayActor(report.author) || null, at: typeof report.at === "string" ? report.at.replace("T", " ").slice(0, 16) : null,
+        texts: { findings: report.findings ?? "", conclusion: report.conclusion ?? "", recommendation: report.recommendation ?? "" } });
     }
 
     function returnToReportStudy() {
       if (!cur() || !relatedUid) return;
+      // W5: in Related Report mode, Return to Current also leaves the mode — the editor comes back with its caret, selection
+      // and scroll (Back to Current Draft alone keeps the Related study viewed: backToCurrentDraft).
+      const left = relatedMode?.exit() ?? null;
       // 같은 판독 행 재선택은 의도적으로 무동작이다. 영상만 돌아가려다 판독문을 재로딩하거나 점유를 풀면 안 된다.
       relatedUid = null;
       ++relatedReportSeq;
       clearRelatedReport();
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
+      if (left) { criticalInbox?.sync(); updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
       $("#related-current").focus({ preventScroll: true });
+    }
+
+    /**
+     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4): leaves the mode and gives the editor back with its caret,
+     * selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source, so its report stays in the
+     * Related Report pane beside the editor (reading while writing, D1244); Return to Current (#related-return) is the separate
+     * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
+     */
+    function backToCurrentDraft() {
+      const left = relatedMode?.exit() ?? null;
+      if (!left) return false;
+      renderClinical(); updateReportButtons(); renderDraftBar();
+      criticalInbox?.sync();
+      relatedMode.restore(left);
+      return true;
     }
 
     function previewRelated(uid) {
@@ -4171,6 +4258,91 @@
       if (uid === relatedUid) return;
       relatedUid = uid;
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadRelatedReport();
+    }
+
+    /**
+     * W5 Related Report mode entry (설계 v5 §1.2, D1423 R2/R4/R6). A row click, Enter or the Related Report key opens the mode on
+     * that Source — but only from a Target whose text the server has confirmed: the W4 move gate (leaveStudyGate) must answer
+     * clear or saved, and nothing that decides the Target's text may be out (a commit, a citation/structure insert, a discard,
+     * a draft command), within the same bounded wait. Otherwise the reader stays where they are and the one Notice says why
+     * (its Retry/Check continue this entry; the Source is never selected as the Target). Inside the mode a new Source is a
+     * Source move: no gate (the Source is read-only), a pending Insert stays as it is.
+     */
+    let relatedEntrySeq = 0;
+    async function enterRelatedMode(uid, { focus = true } = {}) {
+      if (!relatedMode || work.state() !== "active") return;
+      if (relatedMode.active()) {
+        if (uid !== relatedUid) previewRelated(uid);
+        if (focus) relatedMode.focus();
+        return;
+      }
+      const current = cur(), source = studies.find(s => s.uid === uid);
+      if (!current || !source || source.uid === current.uid || !current.sourcePatientKey
+          || source.sourcePatientKey !== current.sourcePatientKey) return;
+      const target = selectedUid, seq = selectionSeq, owner = draftOwner, opening = reportOpening, ticket = ++relatedEntrySeq;
+      const refuse = (status, reason) => showReportNotice({ status, uid: target, seq, reason, action: { kind: "related-enter", source: uid } });
+      // WORKLIST-SPLIT-UID: neither the Target nor the Source may be a study two patient resources answer.
+      if (appState[target]?.identityUnresolved || appState[uid]?.identityUnresolved) {
+        toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
+        return;
+      }
+      if (!opening || opening.uid !== target || opening.selectionSeq !== seq) return;
+      if (relatedInsertPending(target)) { relatedInsertNotice(target); return; }
+      if (reportFrame?.isComposing()) { refuse("composing"); return; }
+      // The same Target opening (a re-render of the same opening keeps it; another selection, even of the same study, does not).
+      const same = () => ticket === relatedEntrySeq && selectedUid === target && selectionSeq === seq && reportOpening?.uid === target
+        && reportOpening?.selectionSeq === seq && draftOwner === owner && work.state() === "active" && !relatedMode.active();
+      const deadline = Date.now() + LEAVE_WAIT_MS;
+      for (;;) {
+        if (workBusy() || draftClient.busy(target)) {
+          const left = deadline - Date.now();
+          if (left <= 0) { if (same()) refuse("unknown"); return; }
+          await leaveWithin(Promise.all([workIdle(), draftClient.settled(target)]), left);
+          if (!same()) return;
+          continue;
+        }
+        let pass = leaveStudyGate("related");
+        if (pass instanceof Promise) pass = await pass;
+        if (!same()) return;
+        // An answer for no Target is not an entry permission (R4); a stale one belongs to a move that no longer stands.
+        if (pass.uid !== target || pass.status === "stale") return;
+        if (pass.status !== "clear" && pass.status !== "saved") { refuse(pass.status, pass.reason); return; }
+        if (workBusy() || draftClient.busy(target) || reportConverge.has(target)) {
+          if (Date.now() >= deadline) { refuse("unknown"); return; }
+          continue;
+        }
+        break;
+      }
+      if (appState[target]?.identityUnresolved || appState[uid]?.identityUnresolved || relatedInsertPending(target)) return;
+      if (uid !== relatedUid) previewRelated(uid);
+      if (relatedUid !== uid) return;
+      relatedMode.enter({ target, selectionSeq: seq, owner, opening, focus });
+      // The controls that wait for Back say so now (report buttons, Send CVR, the draft line).
+      renderClinical(); updateReportButtons(); renderDraftBar();
+      criticalInbox?.sync();
+    }
+
+    /**
+     * The Related row's own action (click, Enter): the mode's entry. W5-PHASE-A-INTERIM: a page that does not serve the mode's
+     * asset keeps the row's preview; Phase B serves the asset and deletes this guard with the mount guard in page-boot.js.
+     */
+    function relatedActivate(uid, options) {
+      if (!relatedMode) { previewRelated(uid); return; }
+      enterRelatedMode(uid, options);
+    }
+
+    /**
+     * The Related Report and Report Editor keys (Ctrl+Alt+3/4 or their remaps) and the reading workspace buttons: the mode's
+     * entry for the viewed Related study and its Back. True when the mode took the key; otherwise the caller's focus action runs.
+     */
+    function relatedModeCommand(which) {
+      if (!relatedMode) return false;
+      if (which === "report") return backToCurrentDraft();
+      if (which !== "prior" || work.state() !== "active") return false;
+      if (relatedMode.active()) { relatedMode.focus(); return true; }
+      if (!relatedUid || relatedUid === selectedUid) return false;
+      enterRelatedMode(relatedUid, { focus: true });
+      return true;
     }
 
     /**
@@ -4200,7 +4372,10 @@
       if (!reportFrame) reportFrame = KinReportEditorFrame.create({
         fields: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k)])),
         host: document.querySelector(".redit"),
-        canEdit: () => work.state() === "active" && !!selectedUid && !reportEditorBlock(),
+        // W5 (D1423 R2): every existing rule holds for every edit; Related Report mode lets through only the admission it
+        // issued itself for exactly this field and request (the mode checks and consumes it here, once per edit span).
+        canEdit: (field, admission = null, at = null) => work.state() === "active" && !!selectedUid
+          && !reportEditorBlock(admission && relatedMode?.admits(admission, field, at) ? admission : null),
       });
       return reportFrame;
     }
@@ -4390,6 +4565,8 @@
       // 숨긴 Recommendation의 안내와 이동하지 않은 까닭의 Notice도 초안과 별개로 그 검사의 지금 상태를 따른다.
       renderRecommendationNotice();
       if (reportNotice || reportNoticeShown) renderReportNotice();
+      // W5: the Reading Target card of Related Report mode shows this same draft state.
+      relatedMode?.refresh();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -4416,6 +4593,15 @@
         $("#draftmsg").innerHTML = `<b>● 서버의 초안이 이 화면과 다릅니다</b> — 입력한 내용은 그대로 있습니다 · ` +
           (conflict.latest ? `이 화면의 글을 남기려면 Keep This Text, 서버의 초안으로 바꾸려면 Load Server Draft`
                            : `서버의 초안을 확인하지 못했습니다 — 연결되면 다시 확인합니다`);
+        return;
+      }
+      // W5: an explicit Related insert whose receipt is not settled. Its actions are on the Notice; the text is not "saved".
+      const related = relatedInsertPending(selectedUid);
+      if (related) {
+        bar.style.display = "flex";
+        $("#b-draft-discard").style.display = $("#b-report-reload").style.display = "none";
+        $("#draftmsg").innerHTML = `<b>● ${esc(relatedInsertLabel(related))}</b> — Related Report에서 넣은 글의 서버 저장을 아직 확인하지 ` +
+          `못했습니다 · 입력한 내용은 그대로 있습니다 · 안내줄에서 확인하세요`;
         return;
       }
       if (!d && !pending && !reportConverge.has(selectedUid)) { bar.style.display = "none"; return; }
@@ -4488,7 +4674,16 @@
      * 저장이 뒤늦게 확인되면 같은 줄이 그 사실을 말한다(Check가 서버의 초안을 읽어 확인한 뒤 그 이동을 이어 간다).
      */
     let reportNotice = null, reportNoticeShown = false;
+    /**
+     * W5 (D1423 R4): a notice may carry an action — `related-enter` (the Related Report mode entry the gate refused: Retry and
+     * Check continue that entry, never select the Source) or `related-insert` (an explicit Related insert of this Target:
+     * Retry resends that operation's frozen request, Check reads its receipt, Discard Insert fences it; Stay closes the line
+     * and never ends the operation). Without an action it is W4's notice exactly. A Target whose insert is not settled speaks
+     * for that operation whatever refused the move.
+     */
     function showReportNotice(notice) {
+      const op = !notice.action && notice.status !== "composing" ? relatedInsertPending(notice.uid) : null;
+      if (op) notice = { ...notice, status: op.state === "refused" ? "refused" : "unknown", action: { kind: "related-insert", op } };
       if (!["composing", "refused", "unknown", "conflict", "owner"].includes(notice.status)) return;
       reportNotice = notice;
       renderReportNotice();
@@ -4498,11 +4693,39 @@
       reportNotice = null;
       renderReportNotice();
     }
+    function renderRelatedInsertNotice(n) {
+      const op = n.action.op, s = op.state, busy = ["editing", "sending", "checking", "discarding"].includes(s);
+      const unresolved = !relatedInsertIdentityResolved(op);
+      const toward = n.target ? ` ${studyLabel(n.target.uid)}(으)로 가려던 이동은 이 삽입이 확인된 뒤에 이어 갑니다.` : "";
+      const review = "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고르세요.";
+      const text = busy ? "Related Report에서 넣은 글의 서버 저장을 확인하는 중입니다 — 입력한 내용은 그대로 있습니다."
+        : s === "refused" ? "서버가 Related Report에서 넣은 글을 받지 않았습니다 — 넣은 글은 편집기에 그대로 있습니다. 원인을 해결한 뒤 Retry(같은 삽입을 " +
+          "다시 보냅니다)를 누르거나 Discard Insert로 이 삽입을 취소하세요." + toward
+        : s === "unknown" ? "Related Report에서 넣은 글의 저장 결과를 확인하지 못했습니다 — 넣은 글은 편집기에 그대로 있습니다. Check는 서버의 기록을 " +
+          "읽고, Retry는 같은 삽입을 다시 보냅니다(두 번 들어가지 않습니다)." + toward
+        : s === "discard-unknown" ? "삽입 취소의 결과를 확인하지 못했습니다 — 글은 그대로 있습니다. Check로 서버의 기록을 읽거나 Discard Insert를 다시 " +
+          "누르세요." + toward
+        : s === "superseded" ? "이 삽입은 서버에 저장됐지만 그 뒤 초안이 바뀌었습니다 — 같은 삽입을 다시 넣지 않습니다. " + review
+        : s === "discarded" ? "삽입은 취소됐지만 그 뒤에 고친 글이 있어 넣었던 글을 자동으로 지우지 않았습니다. " + review
+        : "서버가 이 삽입 요청을 받을 수 없다고 답했습니다 — 넣은 글은 그대로 있습니다. " + review;
+      const strong = document.createElement("b");
+      strong.textContent = "● " + relatedInsertLabel(op) + (s === "refused" ? " — " + relatedRefusal(op.reason) : "");
+      $("#report-notice-msg").replaceChildren(strong, " — " + text);
+      $("#report-notice-retry").style.display = ["unknown", "refused"].includes(s) && !unresolved ? "" : "none";
+      $("#report-notice-check").style.display = ["unknown", "discard-unknown"].includes(s) || (busy && s === "checking") ? "" : "none";
+      $("#report-notice-check").disabled = busy || unresolved;
+      $("#report-notice-retry").disabled = busy || unresolved;
+      relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
+        ? op : null, busy);
+    }
     function renderReportNotice() {
       if (reportNotice && (reportNotice.uid !== selectedUid || reportNotice.seq !== selectionSeq)) reportNotice = null;
       const n = reportNotice;
       reportNoticeShown = !!n;
       $("#report-notice").style.display = n ? "flex" : "none";
+      $("#report-notice-retry").disabled = false;
+      if (n?.action?.kind === "related-insert") { renderRelatedInsertNotice(n); return; }
+      relatedMode?.noticeDiscard(null);
       if (!n) return;
       const unconfirmed = reportConverge.has(n.uid);
       // Check가 서버의 지금 초안을 읽고 알게 된 것(checkReportNotice). 그 뒤 이 글의 확인 여부가 바뀌었으면(늦게 닿은 저장, 새로
@@ -4516,38 +4739,51 @@
         : n.status === "composing" ? "Not Moved"
         : n.status === "conflict" ? "Save Failed — 서버의 초안이 이 화면과 다릅니다"
         : `Save Failed — ${n.reason ?? "서버가 저장을 받지 않았습니다"}`;
-      const toward = n.target ? ` (${studyLabel(n.target.uid)}(으)로 가려던 이동)` : "";
+      // W5: the same notice for a Related Report mode entry the gate held (its Retry/Check continue that entry).
+      const entry = n.action?.kind === "related-enter";
+      const toward = n.target ? ` (${studyLabel(n.target.uid)}(으)로 가려던 이동)`
+        : entry ? ` (${studyLabel(n.action.source)}의 이전 판독문을 보려던 이동)` : "";
+      const notMoved = entry ? "Related Report 모드로 들어가지 않았습니다" : "검사를 옮기지 않았습니다";
+      const thenMove = entry ? "들어갑니다" : "이동합니다";
       // 서버의 초안에 이 화면의 글이 없다는 것을 읽어서 알았다: 다시 보내는 길(Retry, 쓰기 경로)을 함께 준다.
       const resend = checked === "different" && unconfirmed;
-      const text = checked === "unread" ? `서버의 저장 상태를 확인하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 ` +
+      const text = checked === "unread" ? `서버의 저장 상태를 확인하지 못해 ${notMoved}${toward} — 입력한 내용은 그대로 ` +
           "있습니다. 다시 확인하려면 Check를 누르세요."
-        : checked === "changed" ? `확인하는 사이 글이나 선택이 바뀌어 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+        : checked === "changed" ? `확인하는 사이 글이나 선택이 바뀌어 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
           "다시 확인하려면 Check를 누르세요."
-        : resend ? `서버의 초안에 이 화면의 글이 없어 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
-          "Retry를 누르면 이 글을 다시 저장하고, 저장이 확인되면 이동합니다."
-        : checked === "different" ? `서버에 있는 이 검사의 초안이 이 화면의 글과 달라 검사를 옮기지 않았습니다${toward} — 이 화면의 글은 ` +
+        : resend ? `서버의 초안에 이 화면의 글이 없어 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
+          `Retry를 누르면 이 글을 다시 저장하고, 저장이 확인되면 ${thenMove}.`
+        : checked === "different" ? `서버에 있는 이 검사의 초안이 이 화면의 글과 달라 ${notMoved}${toward} — 이 화면의 글은 ` +
           "그대로 있습니다. 다른 창에서 그 뒤에 저장했을 수 있습니다. 다시 확인하려면 Check를 누르세요."
-        : saved ? `쓰던 글의 저장이 확인됐습니다. Check를 누르면 서버의 초안을 한 번 더 읽어 이 화면의 글과 견주고 이동합니다${toward}.`
-        : n.status === "composing" ? "글자 조합(한글 입력)이 끝나지 않아 검사를 옮기지 않았습니다 — 입력을 마친 뒤 다시 누르세요."
-        : n.status === "unknown" ? `쓰던 글의 저장을 확인하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
-          "Check를 누르면 서버의 초안을 읽어 이 화면의 글과 견주고, 같으면 이동합니다."
-        : n.status === "conflict" ? `검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+        : saved ? `쓰던 글의 저장이 확인됐습니다. Check를 누르면 서버의 초안을 한 번 더 읽어 이 화면의 글과 견주고 ${thenMove}${toward}.`
+        : n.status === "composing" ? `글자 조합(한글 입력)이 끝나지 않아 ${notMoved} — 입력을 마친 뒤 다시 누르세요.`
+        : n.status === "unknown" ? `쓰던 글의 저장을 확인하지 못해 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
+          `Check를 누르면 서버의 초안을 읽어 이 화면의 글과 견주고, 같으면 ${thenMove}.`
+        : n.status === "conflict" ? `${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
           "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고른 뒤 다시 누르세요."
-        : `쓰던 글을 저장하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. 원인을 해결한 뒤 Retry를 누르세요.`;
+        : `쓰던 글을 저장하지 못해 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. 원인을 해결한 뒤 Retry를 누르세요.`;
       const strong = document.createElement("b");
       strong.textContent = "● " + label;
       $("#report-notice-msg").replaceChildren(strong, " — " + text);
+      const intent = !!n.target || entry;
       $("#report-notice-retry").style.display =
-        n.target && (resend || (!checked && !saved && ["refused", "owner"].includes(n.status))) ? "" : "none";
-      $("#report-notice-check").style.display = n.target && (saved || checked || n.status === "unknown") ? "" : "none";
+        intent && (resend || (!checked && !saved && ["refused", "owner"].includes(n.status))) ? "" : "none";
+      $("#report-notice-check").style.display = intent && (saved || checked || n.status === "unknown") ? "" : "none";
       $("#report-notice-check").disabled = !!n.checking;
+    }
+    /** The intent a notice holds: W4's move, or W5's Related Report entry (the same gate, the same Retry/Check rules). */
+    function continueReportNotice(n) {
+      if (n.action?.kind === "related-enter") enterRelatedMode(n.action.source, { focus: true });
+      else select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
     }
     /** Retry: 같은 이동을 같은 관문으로 다시 한다 — 쓰기 경로다(관문이 쓰던 글을 저장하고, 저장이 확인될 때만 옮긴다). */
     function retryReportNotice() {
       const n = reportNotice;
-      if (!n?.target || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
+      // W5: an explicit Related insert's Retry resends that operation's own frozen request (same ID, same CAS).
+      if (n?.action?.kind === "related-insert") { relatedInsertRetry(n.action.op); return; }
+      if (!(n?.target || n?.action) || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
       clearReportNotice();
-      select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
+      continueReportNotice(n);
     }
     /** 서버가 읽어 준 초안의 작성자가 이 페이지의 계정인가(기관·사용자 ID·작성자 셋 다 같아야 한다). */
     function sameDraftOwner(owner, mine) {
@@ -4564,7 +4800,9 @@
      */
     async function checkReportNotice() {
       const n = reportNotice;
-      if (!n?.target || n.checking || n.uid !== selectedUid || n.seq !== selectionSeq) return;
+      // W5: an explicit Related insert's Check reads that operation's receipt and the whole current draft, nothing else.
+      if (n?.action?.kind === "related-insert") { relatedInsertCheck(n.action.op); return; }
+      if (!(n?.target || n?.action) || n.checking || n.uid !== selectedUid || n.seq !== selectionSeq) return;
       const mine = reportDraftSnapshot(n.uid), at = work.capture("editor");
       n.checking = true;
       renderReportNotice();
@@ -4602,7 +4840,7 @@
           renderDraftBar();
         }
         clearReportNotice();
-        select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
+        continueReportNotice(n);
       });
       // 확인하는 사이 글을 더 쳤거나 선택·작업 문맥이 바뀌었다: 이 읽기로는 정하지 않는다(보낸 것도 없다).
       if (!decided) work.commit(work.capture("document"), () => {
@@ -4654,6 +4892,9 @@
     async function discardDraft() {
       const uid = selectedUid;
       if (!uid || !appState[uid]?.draft) return;
+      // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
+      const related = relatedCommandBlock("discard");
+      if (related) { toast(related, "err"); relatedInsertNotice(uid); return; }
       if (!confirm("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?")) return;
       const at = work.capture("document");
       // 버리기를 누른 때까지의 편집 차례(버리기 표시). 답이 올 때 "누른 뒤에 고친 글이 있는가"를 이것으로 안다 — 글을 견주지
@@ -4807,11 +5048,15 @@
     async function reloadServerReport() {
       const uid = selectedUid, at = work.capture("editor");
       if (!uid || appState[uid]?.prelimHidden) return;
+      // W5: replacing the editor's text is a report command; in Related Report mode it waits for Back.
+      if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
       try {
         await draftClient.settled(uid);
         if (!work.admits(at)) return;
         const b = await api("GET", "/bootstrap", undefined, undefined, at);
         work.commit(at, () => {
+          // Related can open while the read is pending; its Target must keep the opening text.
+          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
           appState[uid] = replaceReportState(uid, b.states?.[uid]);
           syncStudy(uid);
           loadReport({ force: true });
@@ -5113,12 +5358,338 @@
      * 다시 누르라"고 하지 않는다. 그 표시들이 내려가는 자리(자기 것만 내린다)가 기다리는 쪽을 깨운다.
      */
     const idleWaiters = [];
-    function workBusy() { return commitInFlight || insertInFlight || discardsOut > 0; }
+    // W5: requests of explicit Related inserts on the wire (an apply, a Retry, a Discard). Log out and the mode's entry wait
+    // for their answers like a commit's: the answer decides what the editor's text is.
+    let relatedInsertsOut = 0;
+    function workBusy() { return commitInFlight || insertInFlight || discardsOut > 0 || relatedInsertsOut > 0; }
     function workIdle() {
       return workBusy() ? new Promise(resolve => idleWaiters.push(resolve)) : Promise.resolve();
     }
     function wakeIdle() {
       if (!workBusy()) for (const wake of idleWaiters.splice(0)) wake();
+    }
+
+    /**
+     * ── W5 Related Report insert: the operation in the Target's Draft command state (D1423 R1/R3/R6) ──
+     *
+     * One explicit Insert is one operation of its Target (owner, uid, editor opening), not of Related Report mode: Back, a
+     * Source move or a new mode never ends it. Its request is frozen at the click (relatedInsertFreeze) and is the only body
+     * every Retry resends; nothing here builds a new ID, a new expectedRevision or an ordinary PUT for it. While it is pending
+     * the Target's ordinary writes, preservation, unload write, discard and commit stay out of the way (here, in the save
+     * paths, in work-exit and in the draft client's own hold): they would carry the inserted text without its receipt.
+     * It ends only on evidence: applied (the receipt and the whole current draft equal the frozen proposal), discarded
+     * (the tombstone came first, then the exact inverse native edit), or handed to the existing draft conflict review for an
+     * explicit choice (SUPERSEDED, ID_REUSED, a refused request shape, or a discarded insert whose text was edited since).
+     */
+    const relatedInserts = new Map();
+    const RELATED_PENDING = ["editing", "sending", "unknown", "refused", "checking", "discarding", "discard-unknown"];
+    const RELATED_REVIEW = ["superseded", "id-reused", "invalid"];
+    const RELATED_PENDING_REASON = "Related Report에서 넣은 글의 저장 결과를 아직 확인하지 못했습니다 — 안내줄의 Check 또는 Retry로 먼저 확인하세요";
+    const RELATED_IDENTITY = "환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.";
+    const RELATED_REFUSALS = {
+      DRAFT_CONFLICT: "그 사이 이 초안이 바뀌었습니다(다른 창의 저장 등)",
+      TARGET_UNVERIFIED: "촬영 확인 전(Unverified) 검사라 넣을 수 없습니다",
+      TARGET_HELD: "다른 판독의가 이 검사를 판독 중입니다",
+      SOURCE_UNAVAILABLE: "이전 판독문을 지금 읽을 수 없습니다(권한·상태)",
+      SOURCE_CHANGED: "이전 판독문이 그 사이 바뀌었습니다 — 다시 열어 확인하세요",
+      SEED_CHANGED: "판독문이 그 사이 바뀌었습니다",
+    };
+    const relatedRefusal = reason => RELATED_REFUSALS[reason] || "서버가 이 삽입을 받지 않았습니다";
+    /** The Target's operation that is not settled yet (it holds the Target's writes and moves), or null. */
+    function relatedInsertPending(uid) {
+      const op = uid ? relatedInserts.get(uid) : null;
+      return op && RELATED_PENDING.includes(op.state) ? op : null;
+    }
+    /** reportWriteBlock's W5 part outside the mode: a pending operation blocks writes, except its own admitted native edit. */
+    function relatedInsertWriteBlock(uid, admission) {
+      const op = admission?.op ?? relatedInsertPending(uid);
+      if (op && !relatedInsertIdentityResolved(op)) return RELATED_IDENTITY;
+      return op && !(admission && admission.op === op) ? RELATED_PENDING_REASON : null;
+    }
+    // The pending Source can differ from the Source now being viewed. A complete list alone clears these flags.
+    function relatedInsertIdentityResolved(op) {
+      return !appState[op.uid]?.identityUnresolved && !appState[op.source.uid]?.identityUnresolved;
+    }
+    function relatedInsertLabel(op) {
+      return op.state === "applied" ? "Draft Saved" + (draftTime(op.at) ? " " + draftTime(op.at) : "")
+        : op.state === "refused" ? "Save Failed" : ["unknown", "discard-unknown"].includes(op.state) ? "Result Unknown"
+        : op.state === "checking" ? "Checking" : op.state === "discarding" ? "Discarding Insert"
+        : op.state === "discarded" ? "Insert Discarded" : RELATED_REVIEW.includes(op.state) ? "Draft Conflict" : "Saving Insert";
+    }
+    /** The Target card's draft line (design v5 section 1.4): what the server has confirmed, never a guess. */
+    function relatedDraftStatus(uid) {
+      const op = relatedInsertPending(uid);
+      if (op) return relatedInsertLabel(op);
+      if (draftClient.conflict(uid)) return "Draft Conflict";
+      if (reportConverge.has(uid)) return !reportSaveFailures.has(uid) ? "Unsaved Draft"
+        : reportSaveOutcome.get(uid)?.outcome === "unknown" ? "Result Unknown" : "Save Failed";
+      const draft = appState[uid]?.draft;
+      return draft ? "Draft Saved" + (draftTime(draft.at) ? " " + draftTime(draft.at) : "") : "No Draft";
+    }
+    /** Why the explicit Insert cannot be offered now (page side; the mode adds its own Source checks). */
+    function relatedInsertBlock() {
+      const uid = selectedUid, source = relatedStudy();
+      if (!uid || !cur() || !source) return "판독 대상과 이전 판독문을 확인할 수 없습니다";
+      // WORKLIST-SPLIT-UID: a study two patient resources answer is never a Target or a Source.
+      if (appState[uid]?.identityUnresolved || appState[source.uid]?.identityUnresolved) return RELATED_IDENTITY;
+      if (!serverMode || offline || demoMode) return "서버에 연결돼 있을 때만 넣을 수 있습니다";
+      if (relatedInsertPending(uid)) return RELATED_PENDING_REASON;
+      const why = reportEditorBlock(RELATED_BASE);
+      if (why) return why;
+      if (work.state() !== "active" || workBusy() || draftClient.busy(uid)) return "진행 중인 저장·확정이 끝난 뒤 다시 누르세요";
+      if (reportConverge.has(uid) || draftClient.conflict(uid) || draftClient.uncertain(uid))
+        return "현재 초안의 저장이 확인되지 않았습니다 — Back to Current Draft로 돌아가 저장을 확인한 뒤 다시 시도하세요";
+      if (reportFrame?.isComposing()) return "글자 조합(한글 입력)이 끝난 뒤 다시 누르세요";
+      if (reportOpening?.uid !== uid || reportOpening?.selectionSeq !== selectionSeq) return "판독 대상의 편집기가 아직 열리지 않았습니다";
+      return null;
+    }
+    /**
+     * The seed of an Insert: the draft the server holds at this line's revision ('private-draft'), or, with no draft, the
+     * Target's report head at its version ('report-head', or 'empty' when all three head texts are empty).
+     */
+    function relatedInsertSeedOf(uid) {
+      const stored = draftClient.stored(uid), a = appState[uid] ?? {};
+      if (!stored) return { reason: "현재 초안의 저장 상태를 확인하지 못했습니다 — 잠시 뒤 다시 누르세요" };
+      const draft = stored.snapshot;
+      const texts = Object.fromEntries(RFIELDS.map(k => [k, String((draft ? draft[k] : a[k]) ?? "")]));
+      // The editor shows LF; a stored CR would make the seed the server checks differ from the text the reader sees.
+      if (RFIELDS.some(k => texts[k].includes("\r")))
+        return { reason: "이 판독문에는 다른 줄바꿈 형식의 글이 있어 넣지 않았습니다 — 한 번 저장한 뒤 다시 시도하세요" };
+      return { revision: stored.revision, texts, kind: draft ? "private-draft" : RFIELDS.some(k => texts[k]) ? "report-head" : "empty",
+        baseVersion: draft ? draft.baseVersion : (Number.isSafeInteger(a.version) ? a.version : 0),
+        citations: draft ? [...draft.citations] : [], structured: draft ? [...draft.structured] : [] };
+    }
+    /** Before the confirmation enables Insert (R2): the Target's draft line settled and its stored draft known. */
+    async function relatedInsertPrepare() {
+      const uid = selectedUid, seq = selectionSeq, why = relatedInsertBlock();
+      if (why) return why;
+      const at = work.capture("study");
+      if (!draftClient.stored(uid)) await draftClient.prime(uid, { owner: draftOwner, context: at });
+      await draftClient.settled(uid);
+      if (!work.admits(at) || selectedUid !== uid || selectionSeq !== seq) return "판독 대상이 바뀌어 넣지 않았습니다";
+      return relatedInsertBlock() || relatedInsertSeedOf(uid).reason || null;
+    }
+    /** The confirmation's preview: the seed texts the Insert would append to, and the Target named as the reader knows it. */
+    function relatedInsertSeed() {
+      const uid = selectedUid, s = cur();
+      const label = s ? [s.name, s.id, s.date, shownStudyDesc(s), s.acc ? "AccNo " + s.acc : ""].filter(Boolean).join(" · ") : String(uid ?? "");
+      const seed = uid && s ? relatedInsertSeedOf(uid) : { reason: "판독 대상을 확인할 수 없습니다" };
+      return seed.reason ? { reason: seed.reason, label } : { texts: seed.texts, label };
+    }
+    const relatedFreeze = value => {
+      if (value && typeof value === "object" && !Object.isFrozen(value)) { Object.values(value).forEach(relatedFreeze); Object.freeze(value); }
+      return value;
+    };
+    /**
+     * The click (R1, R2): every condition again, synchronously, then one immutable request (one insertRequestId, owner,
+     * Target, the original CAS, the Source parts, the whole proposal) and the operation registered before the native edit
+     * runs, so no reentrant listener can send an ordinary write of the edited text. Nothing is sent here.
+     */
+    function relatedInsertFreeze({ section, parts, source, admission }) {
+      const uid = selectedUid, owner = draftOwner, related = relatedStudy();
+      if (!["findings", "conclusion"].includes(section) || !relatedMode) return { refused: "넣을 칸을 확인할 수 없습니다" };
+      const why = relatedInsertBlock() || reportEditorBlock(admission);
+      if (why) return { refused: why };
+      if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
+          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "addendum"].includes(source.action))
+        return { refused: "표시된 이전 판독문이 바뀌었습니다 — 다시 확인한 뒤 누르세요" };
+      const seed = relatedInsertSeedOf(uid);
+      if (seed.reason) return { refused: seed.reason };
+      if (!RFIELDS.every(k => reportFrame.read(k) === seed.texts[k]))
+        return { refused: "편집기의 글이 서버에 저장된 초안과 달라 넣지 않았습니다 — Back to Current Draft로 돌아가 저장을 확인하세요" };
+      if (reportBaseVersion(uid, seed.baseVersion) !== seed.baseVersion)
+        return { refused: "편집기가 보이는 판과 서버의 판이 달라 넣지 않았습니다 — 목록을 새로 고친 뒤 다시 시도하세요" };
+      const planned = relatedMode.insertion(seed.texts[section], parts, source.texts);
+      if (!planned.text.replace(/\n/g, "")) return { refused: "넣을 글이 없습니다" };
+      const at = reportFrame.capture(section, { start: planned.offset, end: planned.offset });
+      const proposal = { ...seed.texts, [section]: seed.texts[section] + planned.text };
+      const id = crypto.randomUUID();
+      const request = relatedFreeze({
+        expectedOwner: { institution: owner.institution ?? null, sub: owner.sub, author: owner.author },
+        expectedRevision: seed.revision,
+        findings: proposal.findings, conclusion: proposal.conclusion, recommendation: proposal.recommendation,
+        baseVersion: seed.baseVersion, citationIds: seed.citations, structureIds: seed.structured,
+        relatedInsert: {
+          intent: "apply", insertRequestId: id,
+          source: { uid: source.uid, version: source.version, action: source.action,
+            parts: parts.map(part => ({ field: part.field, start: part.start, end: part.end })) },
+          targetUid: uid, targetBaseVersion: seed.baseVersion, section, position: "end", offset: planned.offset, text: planned.text,
+          selectionSeq, contentRevision: at.revision + 1, sourceGeneration: source.seq, seedKind: seed.kind,
+        },
+      });
+      const op = { id, uid, owner, opening: reportOpening, selectionSeq, field: section, offset: planned.offset, text: planned.text,
+        before: seed.texts[section], after: proposal[section], request,
+        proposal: relatedFreeze({ ...proposal, baseVersion: seed.baseVersion, citations: [...seed.citations], structured: [...seed.structured] }),
+        source: relatedFreeze({ uid: source.uid, version: source.version, action: source.action }),
+        state: "editing", turn: null, receiptRevision: null, reason: null, at: null, reverted: null };
+      relatedInserts.set(uid, op);
+      return { op, at, text: planned.text };
+    }
+    /** The one native edit (R2), inside the mode's synchronous admission span. */
+    function relatedInsertEdit(frozen, admission) {
+      const op = frozen.op;
+      if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return false;
+      return editReport([{ field: op.field, at: frozen.at, text: frozen.text }], { admission }) && reportFrame.read(op.field) === op.after;
+    }
+    /** A native edit that did not happen: nothing was sent, so there is nothing to answer for; any changed text stays. */
+    function relatedInsertAbandon(op) {
+      if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return;
+      relatedInserts.delete(op.uid);
+      if (reportFrame && reportFrame.read(op.field) !== op.before)
+        toast("Related Report 글을 넣지 못했습니다 — 편집기의 글이 바뀌었을 수 있으니 확인하세요. 서버에는 보내지 않았습니다.", "err");
+    }
+    /** After an applied native edit only: the frozen request leaves through the Target's own draft command line. */
+    function relatedInsertSubmit(op) {
+      if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return;
+      op.turn = reportEditedAt.get(op.uid) ?? reportEdits;
+      relatedInsertSend(op, "apply");
+    }
+    async function relatedInsertSend(op, kind, context = work.capture("document"), session = undefined) {
+      const admit = () => relatedInserts.get(op.uid) === op && relatedInsertIdentityResolved(op);
+      if (!admit()) {
+        if (op.state === "editing") op.state = "unknown";
+        relatedInsertShow(op);
+        return { outcome: "unsent" };
+      }
+      const before = op.state, writes = kind !== "check";
+      op.state = kind === "check" ? "checking" : kind === "discard" ? "discarding" : "sending";
+      relatedInsertShow(op);
+      if (writes) relatedInsertsOut += 1;
+      let got;
+      try {
+        got = kind === "check" ? await draftClient.checkInsert(op.uid, op.request, { context, session, admit })
+          : kind === "discard" ? await draftClient.discardInsert(op.uid, op.request, op.receiptRevision, { context, session, admit })
+          : await draftClient.relatedInsert(op.uid, op.request, { context, session, admit });
+      } catch (error) { got = { outcome: "unknown", error }; }
+      finally {
+        if (writes) { relatedInsertsOut -= 1; wakeIdle(); }
+      }
+      relatedInsertSettle(op, got, kind, before);
+      return got;
+    }
+    /**
+     * An answer settles its own operation, whatever the mode or the Source shows now (R6); the screen follows only for the
+     * same Target opening. Absence of evidence is never success: unknown keeps the original request for Check or a same-ID
+     * Retry, and Discard is offered only for a durable refused receipt.
+     */
+    function relatedInsertSettle(op, got, kind, before) {
+      if (relatedInserts.get(op.uid) !== op) return;
+      if (!relatedInsertIdentityResolved(op)) {
+        op.state = kind === "discard" || before === "discard-unknown" ? "discard-unknown" : "unknown";
+        relatedInsertShow(op);
+        return;
+      }
+      switch (got?.outcome) {
+        case "applied": relatedInsertApplied(op, got.envelope); break;
+        case "refused": case "receipt-changed":
+          op.state = "refused"; op.receiptRevision = got.receiptRevision; op.reason = got.reason ?? op.reason; break;
+        case "discarded": relatedInsertReverted(op, got.envelope); break;
+        case "superseded": case "id-reused": case "invalid": relatedInsertHandoff(op, got); break;
+        case "unsent": op.state = before === "editing" ? "unknown" : before; break;
+        case "absent": op.state = before === "discard-unknown" ? before : "unknown"; op.reason = "RECEIPT_ABSENT"; break;
+        default: op.state = kind === "discard" || before === "discard-unknown" ? "discard-unknown" : "unknown";
+      }
+      relatedInsertShow(op);
+    }
+    function relatedInsertApplied(op, envelope) {
+      const uid = op.uid, later = reportEditedSince(uid, op.turn ?? 0), a = appState[uid] ?? {};
+      op.state = "applied";
+      op.at = envelope.updatedAt ?? new Date().toISOString();
+      draftClient.retireInsert(uid, op.id);
+      reportSaveFailures.delete(uid);
+      reportSaveOutcome.delete(uid);
+      // Text typed after the Insert stays this document's unconfirmed text, now on the applied revision.
+      if (later) { appState[uid] = { ...a, draftRevision: envelope.revision }; return; }
+      appState[uid] = { ...a, draftRevision: envelope.revision, draft: { findings: op.proposal.findings, conclusion: op.proposal.conclusion,
+        recommendation: op.proposal.recommendation, baseVersion: op.proposal.baseVersion, at: op.at } };
+      const local = uid === selectedUid && reportFrame ? reportFrame.read() : a.draft;
+      if (local && RFIELDS.every(k => (local[k] ?? "") === op.proposal[k])) reportConverge.delete(uid);
+    }
+    /**
+     * The tombstone is confirmed: the server will never apply this request. Only then, and only while the editor still holds
+     * exactly the inserted text in the same opening with nothing edited since, one native edit removes that span (under the
+     * mode's admission while the mode holds the editor). Otherwise the text stays for an explicit choice.
+     */
+    function relatedInsertReverted(op, envelope = null) {
+      const uid = op.uid;
+      op.state = "discarding";
+      const exact = uid === selectedUid && reportOpening?.uid === uid && reportOpening?.selectionSeq === op.selectionSeq
+        && selectionSeq === op.selectionSeq && !!reportFrame && reportFrame.read(op.field) === op.after
+        && !reportEditedSince(uid, op.turn ?? 0) && work.state() === "active";
+      let reverted = false;
+      if (exact) {
+        const at = reportFrame.capture(op.field, { start: op.offset, end: op.offset + op.text.length });
+        const edit = admission => editReport([{ field: op.field, at, text: "" }], { admission });
+        const removed = relatedMode ? relatedMode.admit({ field: op.field, at, text: "", op }, edit) : edit(null);
+        reverted = !!removed && reportFrame.read(op.field) === op.before;
+      }
+      if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }
+      op.state = "discarded";
+      draftClient.retireInsert(uid, op.id, reverted ? undefined : { conflict: envelope ?? null });
+      if (reverted) {
+        op.reverted = true;
+        // The editor holds the seed again; it is saved text only when the server's draft at this line's revision is it.
+        const stored = draftClient.stored(uid), texts = reportFrame.read();
+        const kept = stored && RFIELDS.every(k => texts[k] === String((stored.snapshot ? stored.snapshot[k] : appState[uid]?.[k]) ?? ""));
+        if (kept) { reportConverge.delete(uid); reportSaveFailures.delete(uid); }
+        return;
+      }
+      op.reverted = false;
+      reportConverge.add(uid);
+      if (uid === selectedUid && work.state() === "active") {
+        keepReportEditor();
+        if (!draftClient.conflict(uid)?.latest) readDraftConflict(uid);
+      }
+    }
+    /** SUPERSEDED, ID_REUSED or a refused request shape: never re-applied, never a new ID; an explicit choice decides. */
+    function relatedInsertHandoff(op, got) {
+      op.state = got.outcome;
+      draftClient.retireInsert(op.uid, op.id, { conflict: got.envelope ?? null });
+      reportConverge.add(op.uid);
+      if (op.uid === selectedUid && work.state() === "active") {
+        keepReportEditor();
+        if (!draftClient.conflict(op.uid)?.latest) readDraftConflict(op.uid);
+      }
+    }
+    function relatedInsertRetry(op) {
+      if (relatedInserts.get(op.uid) !== op || !["unknown", "refused"].includes(op.state)) return;
+      if (!relatedInsertIdentityResolved(op)) { toast(RELATED_IDENTITY, "err"); return; }
+      relatedInsertSend(op, "apply");
+    }
+    function relatedInsertCheck(op, context = undefined, session = undefined) {
+      if (relatedInserts.get(op.uid) !== op || !["unknown", "discard-unknown"].includes(op.state)) return Promise.resolve(null);
+      return relatedInsertSend(op, "check", context, session);
+    }
+    function relatedInsertDiscard(op) {
+      if (relatedInserts.get(op.uid) !== op || !["refused", "discard-unknown"].includes(op.state) || !Number.isSafeInteger(op.receiptRevision)) return;
+      if (!relatedInsertIdentityResolved(op)) { toast(RELATED_IDENTITY, "err"); return; }
+      relatedInsertSend(op, "discard");
+    }
+    /** The one Notice speaks for an operation that needs the reader (its own action: Retry/Check/Discard Insert); the rest follows. */
+    function relatedInsertShow(op) {
+      if (work.state() !== "active") return;
+      if (op.uid === selectedUid && op.selectionSeq === selectionSeq) {
+        const n = reportNotice, mine = n?.action?.kind === "related-insert" && n.action.op === op;
+        if (RELATED_PENDING.includes(op.state) || RELATED_REVIEW.includes(op.state) || (op.state === "discarded" && !op.reverted)) {
+          showReportNotice({ status: op.state === "refused" ? "refused" : RELATED_PENDING.includes(op.state) ? "unknown" : "conflict",
+            uid: op.uid, seq: op.selectionSeq, action: { kind: "related-insert", op }, ...(mine && n.target ? { target: n.target } : {}) });
+        } else if (mine) {
+          // Settled. A move the reader asked for continues when nothing is unconfirmed now (as W4's Check does).
+          const target = n.target;
+          clearReportNotice();
+          if (target && !reportConverge.has(op.uid)) select(target.uid, { ...target.options, revalidate: target.revalidate });
+        }
+        renderDraftBar();
+        updateReportButtons();
+      }
+      if (op.state === "applied") relatedMode?.announce("삽입됨 · " + relatedInsertLabel(op));
+      else if (op.state === "discarded" && op.reverted) relatedMode?.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
+      relatedMode?.refresh();
+    }
+    /** Shows the pending operation's Notice again (a refused command or entry names it). */
+    function relatedInsertNotice(uid) {
+      const op = relatedInsertPending(uid);
+      if (op) relatedInsertShow(op);
     }
     /**
      * 초안의 명령 프로토콜(S7-U5 U5S-REQ-15·17, report-draft-client.js). 이 문서가 초안을 바꾸는 모든 길 — 자동 저장·검사
@@ -6100,7 +6671,9 @@
       if (selectedUid === uid) renderDraftBar();
       draftClient.keep(uid, { ...next, baseVersion });
       // WORKLIST-SPLIT-UID: a study the last list excluded as unresolved keeps its text here and sends nothing (not "saved").
-      if (deferWrite || offline || a.prelimHidden || a.identityUnresolved || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
+      // W5: neither does a study whose explicit Related insert is not settled: its text goes only with that operation's request.
+      if (deferWrite || offline || a.prelimHidden || a.identityUnresolved || relatedInsertPending(uid) || heldByOther(cur())
+          || (serverMode && draftClient.conflict(uid))) return;
       if (!serverMode) { if (empty) appState[uid].draft = null; saveApp(); reportConverge.delete(uid); return "saved"; }
 
       return saveReportDraft(uid, { keepalive });
@@ -6124,7 +6697,8 @@
     async function reportTextToSend(uid, at) {
       if (!work.admits(at)) return null;
       if (reportUnknownCommits.has(uid) && (await learnCommitOutcome(uid, at)).outcome === "unknown") return null;
-      if (!work.admits(at) || !reportConverge.has(uid)) return null;
+      // W5: a Related insert that became pending while this write waited holds the text for its own request.
+      if (!work.admits(at) || !reportConverge.has(uid) || relatedInsertPending(uid)) return null;
       return unconfirmedReport(uid);
     }
 
@@ -6214,7 +6788,7 @@
         const draft = unconfirmedReport(uid);
         if (!draft) continue;
         const a = appState[uid];
-        if (a.prelimHidden || a.identityUnresolved || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
+        if (a.prelimHidden || a.identityUnresolved || relatedInsertPending(uid) || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
         const conflict = draftClient.conflict(uid);
         if (conflict) {
           draftClient.keep(uid, draft);
@@ -6447,6 +7021,9 @@
         toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다. 입력한 글은 화면에 그대로 있습니다.", "err");
         return;
       }
+      // W5: every decision waits for Back in Related Report mode, and for the receipt of an unsettled Related insert.
+      const related = relatedCommandBlock(action);
+      if (related) { toast(related, "err"); relatedInsertNotice(selectedUid); return; }
       /**
        * 이 검사에 결과를 모르는 확정이 남아 있으면, 같은 글을 또 확정하기 전에 서버가 무엇을 가졌는지부터 안다. 답을 잃은
        * 확정 뒤에 사람이 가장 먼저 하는 일이 같은 단추를 다시 누르는 것이다 — 그 확정이 서버에 있는데 옛 판을 기준으로
@@ -6464,6 +7041,8 @@
           wakeIdle();
         }
         if (learned.outcome === "landed" || uid !== selectedUid || seq !== selectionSeq) return;
+        // W5: the mode or an Insert may have started while that read was out; the decision is checked again before it leaves.
+        if (relatedCommandBlock(action)) return;
       }
       if(studyPriority?.get(selectedUid)){toast('응급 상태를 확인한 뒤 판독을 저장하세요. 저장 결과 미확인은 Technician 메뉴의 Refresh Status로 확인할 수 있습니다.','err');return;}
       // 서버가 죽었는데 로컬에 확정을 쌓으면, 그건 확정이 아니라 이 브라우저의 메모다.
@@ -6701,12 +7280,24 @@
      * 이동 관문)를 지니므로 W4가 까닭을 더하지 않는다.
      */
     function reportCommandBlocked(command) {
+      const related = relatedCommandBlock(command);
+      if (related) return related;
       if (!["finalize", "finalize-next"].includes(command)) return null;
       if (!selectedUid) return "검사를 선택하세요";
       if (pendingLeave) return "쓰던 글의 저장을 기다려 검사를 옮기는 중입니다";
       const button = $("#b-approve");
       if (button.disabled) return button.title || "지금은 승인할 수 없습니다";
       return null;
+    }
+    /**
+     * W5의 까닭(설계 v5 §1.6, D1423 R4). Related Report 모드에서는 모든 판독 명령이 Back까지 기다린다 — Approve & Next를 포함한다. Next·Prev만
+     * 예외다: 검사 이동의 관문(select)이 판독 대상이 깨끗하면 모드를 닫고 옮기고, 아니면 Notice로 머문다. 모드 밖에서도 저장 영수증이
+     * 확인되지 않은 Related 삽입이 있으면 그 글을 싣는 확정·버리기는 기다린다(Check·Retry가 먼저다). 환자 식별 불일치의 거절이 늘 먼저다.
+     */
+    function relatedCommandBlock(command) {
+      if (!selectedUid || appState[selectedUid]?.identityUnresolved || ["next", "prev"].includes(command)) return null;
+      if (relatedMode?.active()) return relatedMode.reason();
+      return relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
     }
     /**
      * 단축키 목록의 "Finalize (Approve)"(Ctrl+S). 명령을 실행했으면 true — 그때만 브라우저의 페이지 저장을 막는다.
@@ -6984,8 +7575,9 @@
           const context = work.capture("document");
           // WORKLIST-SPLIT-UID: an unresolved study's kept text is not sent on the way out either; it stays in the copy, and
           // the browser's own warning below still asks before the text is lost.
+          // W5: nor is the text of an unsettled explicit Related insert: an unload write would carry it without its receipt.
           for (const report of pending)
-            if (!appState[report.uid]?.identityUnresolved)
+            if (!appState[report.uid]?.identityUnresolved && !relatedInsertPending(report.uid))
               draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
         }
       }
@@ -7161,6 +7753,18 @@
         // WORKLIST-SPLIT-UID: an unresolved study's text is not preserved to the server; the logout stops with it named
         // (Retry, Back to Editing or an explicit discard) and the text stays on this page.
         if (appState[report.uid]?.identityUnresolved) { report.reason = "identity"; continue; }
+        /**
+         * W5 (D1423 R3): the text of an explicit Related insert whose receipt is not settled is never preserved as an ordinary
+         * draft — text equality without the receipt proves nothing. A lost answer is read once with this preparation (the
+         * receipt Check writes nothing); applied or discarded, the captured text continues on the ordinary path below. Still
+         * unsettled (or refused, which needs the reader's Retry or Discard Insert), the logout stops and names it.
+         */
+        const related = relatedInsertPending(report.uid);
+        if (related) {
+          await relatedInsertCheck(related, permit);
+          if (!mine()) return;
+          if (relatedInsertPending(report.uid)) { report.reason = "insert"; continue; }
+        }
         /**
          * 이 검사에 결과를 모르는 확정이 남아 있으면, 잡아 둔 글을 초안으로 보존하기 전에 서버의 판독 상태부터 읽는다
          * (준비 문맥으로). 그 글이 이미 판독문으로 확정돼 있으면 보존할 것이 없다 — 초안으로 다시 쓰면 다음 로그인에서
@@ -7466,6 +8070,14 @@
           if (!work.commit(at, () => { prep.uid = report.uid; prep.texts = report.texts; report.reason = null; })) return;
           // WORKLIST-SPLIT-UID: Recover Draft does not send an unresolved study's text either; it stays here with its reason.
           if (appState[report.uid]?.identityUnresolved) { if (!work.commit(at, () => { report.reason = "identity"; })) return; continue; }
+          // W5: an unsettled explicit Related insert is read once with the recovered session; it is never recovered as a draft.
+          const related = relatedInsertPending(report.uid);
+          if (related) {
+            say("Related Report 삽입의 저장 결과를 확인하는 중입니다…");
+            await relatedInsertCheck(related, at, binding.session);
+            if (!ended()) return;
+            if (relatedInsertPending(report.uid)) { if (!work.commit(at, () => { report.reason = "insert"; })) return; continue; }
+          }
           // 결과를 모르는 확정이 남은 검사는 그 글을 초안으로 쓰기 전에 판독 상태부터 읽는다(보존 저장과 같다).
           if (reportUnknownCommits.has(report.uid)) {
             say("서버의 판독 상태를 확인하는 중입니다…");
@@ -7556,6 +8168,7 @@
       unknown: "판독문 초안 저장의 결과를 확인하지 못했습니다. 저장됐을 수도 있고 아닐 수도 있습니다.",
       conflict: "서버에 이 화면과 다른 초안이 있어 판독문 초안을 저장하지 않았습니다. Overwrite Server Draft를 누르면 이 화면의 내용으로 덮어씁니다.",
       identity: "환자 식별 불일치로 이 검사의 판독문 초안을 저장하지 않았습니다. 원본 확인이 필요합니다.",
+      insert: "Related Report에서 넣은 글의 저장 결과를 확인하지 못해 판독문 초안을 저장하지 않았습니다. Back to Editing에서 Check·Retry 또는 Discard Insert로 확인하세요.",
     };
 
     function logoutStatus(prep, text) {
@@ -7743,6 +8356,8 @@
           if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
           // The first failure already says 관측 불가 beside the kept list; going offline waits for two.
           markObservationUnavailable();
+          // The kept identity notice is from the last observation too (spec §3.1), as after a failed manual load.
+          renderIdentityIssues(true);
           /**
            * **일하는 도중에 서버가 죽는 경우.**
            *
@@ -8734,6 +9349,12 @@
       changed:(uid,value)=>{updateReaderAssignment(uid,value);render();},
     });
     $('#rows').addEventListener('click',event=>{const button=event.target.closest('[data-reader-assignment]');if(!button)return;event.stopPropagation();readerAssignment.open(studies.find(s=>s.uid===button.dataset.readerAssignment));},true);
+    // S9-U4b: Import DICOM (toolbar, Technician rows), Download Originals (rows) and their non-modal result panel.
+    // D1691: the transfer owner is the login server, the institution and the subject, as the service keys an operation.
+    const studyTransfer=KinStudyTransferLocal({api:API,transport,allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,
+      identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.issuer,s.institution,s.sub]:null;},
+      can:role=>KinAuth.has(role),demo:()=>!!KinAuth.session()?.demo,study:uid=>studies.find(s=>s.uid===uid),
+    });
 
 
     const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
@@ -9372,6 +9993,7 @@
     try {
       criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'cvr-inbox-p', prefix: 'cvr-inbox', fold: true,
         onAccountChanged: notifyAccountChanged,
+        blocked: () => relatedMode?.active() ? relatedMode.reason() : null,
         eligible: () => { const s = KinAuth.session(); return !!sess && serverMode && !demoMode && !offline && s?.state === 'approved'
           && Array.isArray(s.roles) && (s.roles.includes('clinician') || s.roles.includes('radiologist')); },
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; } });
@@ -9392,7 +10014,9 @@
         online: () => !!sess && serverMode && !demoMode && !offline,
         radiologist: () => { const s = KinAuth.session(); return s?.state === 'approved' && Array.isArray(s.roles) && s.roles.includes('radiologist'); },
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
-        actorName: value => displayActor(value) });
+        actorName: value => displayActor(value),
+        // W5 (설계 v5 §1.6): Send CVR waits for Back in Related Report mode; the reason is said on the control.
+        blocked: () => relatedMode?.active() ? relatedMode.reason() : null });
       accountChangeHooks.push((reason, detail) => criticalResults.lock(detail));
     } catch (_) { toast('중요 결과 발신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
@@ -11234,6 +11858,8 @@
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
           { sep: 1 },
           { label: "판독 시작 (수신 기관)", dis: mine || ts !== "sent", act: () => setTs(uid, "inReading") },
+          // 원본 다운로드는 자기 기관 검사만이다(S9-U4p §3·§6) — 원격판독으로 받은 행은 회색, 서버도 404로 막는다.
+          ...(studyTransfer.canDownload() ? [{ sep: 1 }, { label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }] : []),
           ...forceReleaseItems,
         ], null, opened);
       } else {
@@ -11257,6 +11883,10 @@
           { label: "Merge / Split Exam", dis: 1, act: () => {} },
           { sep: 1 },
           { label: "Delete", dis: s.rs !== "W", act: () => doDelete(uid) },
+          // 이 행의 검사로 반입(X-KIN-Expect-Study)과 원본 다운로드(S9-U4p §6). 둘 다 메뉴를 연 그 선택(opened)에 묶인다.
+          ...(studyTransfer.canImport() || studyTransfer.canDownload() ? [{ sep: 1 }] : []),
+          ...(studyTransfer.canImport() ? [{ label: "Import DICOM", act: () => studyTransfer.importInto(opened.uid) }] : []),
+          ...(studyTransfer.canDownload() ? [{ label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }] : []),
           ...forceReleaseItems,
         ], null, opened);
       }
@@ -11296,16 +11926,13 @@
       relatedModality = e.target.value;
       renderRelated();
     });
+    // W5 (설계 v5 §1.2, slicing W5): a row click opens Related Report mode on that study; images open only by the row's
+    // explicit Open/Compare Images button. A double click no longer opens a viewer (two clicks are two row actions).
     $("#relrows").addEventListener("click", e => {
       const open = e.target.closest('[data-related-open]');
       if (open) { openRelatedImages(open.dataset.relatedOpen); return; }
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) { if(tr.dataset.uid === selectedUid)returnToReportStudy();else previewRelated(tr.dataset.uid); }
-    });
-    $("#relrows").addEventListener("dblclick", e => {
-      if (e.target.closest('button')) return;
-      const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) openRelatedImages(tr.dataset.uid);
+      if (tr?.dataset.uid) { if(tr.dataset.uid === selectedUid)returnToReportStudy();else relatedActivate(tr.dataset.uid, { focus: true }); }
     });
     function openRelatedImages(uid) {
       if (!cur() || !relatedRows.some(row=>row.uid===uid)) return;
@@ -11747,7 +12374,7 @@
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
         current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
-        activate:uid=>uid===selectedUid?returnToReportStudy():previewRelated(uid)});
+        activate:uid=>uid===selectedUid?returnToReportStudy():relatedActivate(uid,{focus:true})});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
@@ -11861,7 +12488,18 @@
     // Finalize (Approve) as a command another document can run (D1371): a bound viewer frame's keydown never reaches this
     // window, so the frame forwards its Finalize key here, and the dispatcher below uses the same hook. It answers true only
     // when the command ran; only then may the caller keep the browser's own Ctrl+S (Save Page) from happening.
-    window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand() });
+    // W5 Related Report mode (design v5 section 1; D1423 R2/R3/R6). W5-PHASE-A-INTERIM: mounted only where the page serves the
+    // mode's asset and markup (the Phase A branch's pages do not yet); Phase B serves both, mounts it unconditionally and
+    // deletes this guard.
+    relatedMode = window.KinRelatedReportMode?.({
+      editor: () => document.querySelector('.redit'), field: name => $('#' + name),
+      target: relatedTargetCard, source: relatedSourceCard,
+      insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
+      freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
+      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
+    }) ?? null;
+    // `related` (W5): the Related Report / Report Editor keys of another document (the viewer frame) and the workspace buttons.
+    window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which) });
     window.addEventListener('keydown', event => {
       if (!workspaceEditable() || event.defaultPrevented || event.isComposing || studyPanelComposing || event.keyCode === 229
           || document.querySelector('dialog[open], .modal.show, [popover]:popover-open')) return;
@@ -11879,6 +12517,11 @@
       if (command === 'finalize') {
         if (KinReportCommands.finalize() === true) { event.preventDefault(); event.stopImmediatePropagation(); }
         return;
+      }
+      // W5: Related Report (Ctrl+Alt+3) opens the mode for the viewed Related study; Report Editor (Ctrl+Alt+4) is its Back.
+      // In the reading workspace its own keys run the same command through its panes (KinReportCommands.related).
+      if ((command === 'prior' || command === 'report') && !readingWorkspace.active() && relatedModeCommand(command)) {
+        event.preventDefault(); event.stopImmediatePropagation(); return;
       }
       // Ctrl+Alt+T, unless the reader gave that chord to another action. A one-action map in the v1 form names the same
       // chord to either model version (a v2 map holds whole chords, so 'KeyT' merged into it would never match).

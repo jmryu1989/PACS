@@ -2422,6 +2422,7 @@ test('U5S-REQ-09 entry proof: a login is entered once, by the document that hold
   // The id it answers is the session's id: a bound `me` answers the same, and requests bound with it work.
   const me = await w.call(w.I1, 'me', { sid, binding: entered.body.sessionId });
   assert.deepEqual([me.status, me.body.sessionId, (await w.call(w.I2, 'get', { sid, binding: entered.body.sessionId })).status], [200, entered.body.sessionId, 200]);
+  assert.equal(me.body.issuer, ISSUER, 'D1691: me names the login server that verified the session, exactly KC_ISSUER');
   // Replay, on any instance: refused with the same answer as any other unusable proof; no second record.
   for (const inst of [w.I1, w.I2])
     assert.deepEqual(coded(await w.call(inst, 'entry', { sid, body: { proof } })), [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED']);

@@ -63,7 +63,7 @@ jobs:
       - name: Candidate runner guards and exact sequence
         run: |
           "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci_test.py
-      # Exact collection: 101 invariants + 15 worklist + 14 flows = 130 (retained 10, W2, W3, EMR-B1, W4-FLOW, WORKLIST-SPLIT-UID).
+      # Exact collection: 108 invariants + 17 worklist + 14 flows = 139 (retained 10, W2, W3, EMR-B1, W4-FLOW, WORKLIST-SPLIT-UID, S9-U4b).
       - name: Final candidate invariants, worklist and cumulative workflows
         timeout-minutes: 26
         run: |

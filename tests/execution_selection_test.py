@@ -714,9 +714,13 @@ class ExecutionSelectionTests(unittest.TestCase):
         # identity case. 83 -> 89: S7-U1a added the six live critical result cases
         # (CriticalResultInvariantTests). The worklist contract is untouched at 15,
         # and neither number may move without the test that moved it.
-        # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests. 95 -> 101: WORKLIST-SPLIT-UID added the
-        # six WorklistSplitUidInvariantTests (TEST-WSU-10).
-        for filename, count in [('tests/invariants_live.py', 101), ('tests/e2e/test_worklist.py', 15)]:
+        # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests
+        # 95 -> 100: S9-U4b added the five LiveInvariantTests.test_s9_u4_* cases (REQ-S9-U4-02/03/05/06/12); 100 -> 101: S9U4CleanupTests;
+        # 101 -> 102: S9U4RegisterTests (S9-U4b round 6, U4BL-03)
+        # Worklist 15 -> 17: S9-U4b part (c) WorklistE2E.test_s9_u4_download_states / _import_retry_and_account_change.
+        # 95 -> 101 on main: WORKLIST-SPLIT-UID added the six WorklistSplitUidInvariantTests (TEST-WSU-10); the union with
+        # S9-U4b: 102 + 6 = 108.
+        for filename, count in [('tests/invariants_live.py', 108), ('tests/e2e/test_worklist.py', 17)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
         plan = runner.module_plan('tests/invariants_live.py', 'selection-check', 'live', 600)
@@ -892,7 +896,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
             self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
-            if index<2:self.assertEqual(len(plan['tests']),[101,15][index])  # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 101: WORKLIST-SPLIT-UID
+            if index<2:self.assertEqual(len(plan['tests']),[108,17][index])  # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 102: S9-U4b; worklist 15 -> 17: S9-U4b part (c); + 6 WORKLIST-SPLIT-UID = 108
             if class_name:
                 self.assertTrue(all(row['case'].startswith(class_name+'.')
                                     for row in plan['tests']))

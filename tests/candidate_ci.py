@@ -18,9 +18,15 @@ SHA = re.compile(r"[0-9a-f]{40}")
 BASE = (
     # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (and the selection 105 -> 112).
     # CN-N01-A: OrderCorrectionInvariantTests added six live cases, 89 -> 95 (and the selection 116 -> 122).
-    # WORKLIST-SPLIT-UID: WorklistSplitUidInvariantTests added six live cases, 95 -> 101 (and the selection 124 -> 130 after W4-FLOW's 123 -> 124).
-    ("invariants_live.py", None, "candidate-invariants", 101),
-    ("e2e/test_worklist.py", None, "candidate-worklist", 15),
+    # S9-U4b: five LiveInvariantTests.test_s9_u4_* cases (REQ-S9-U4-02/03/05/06/12), 95 -> 100 (the selection 123 -> 128);
+    # round 2: the pure S9U4CleanupTests fault control of their cleanup (U4BB-15), 100 -> 101 (the selection 128 -> 129);
+    # round 6: the pure S9U4RegisterTests control of the identity case's registration check (U4BL-03), 101 -> 102 (129 -> 130).
+    # WORKLIST-SPLIT-UID: WorklistSplitUidInvariantTests added six live cases, 95 -> 101 on main (and the selection 124 -> 130
+    # after W4-FLOW's 123 -> 124); merged into S9-U4b: 102 + 6 = 108 (the selection 133 -> 139).
+    ("invariants_live.py", None, "candidate-invariants", 108),
+    # S9-U4b part (c): WorklistE2E.test_s9_u4_download_states and .test_s9_u4_import_retry_and_account_change
+    # (REQ-S9-U4-09/10), 15 -> 17 (the selection 131 -> 133).
+    ("e2e/test_worklist.py", None, "candidate-worklist", 17),
 )
 FLOWS = (
     ("e2e/test_document_session.py", "DocumentSessionE2E", "test_binding_stays_with_its_document_when_cookie_is_replaced", "test_binding_"),
@@ -40,6 +46,9 @@ FLOWS = (
     # W4-FLOW: Approve & Next under the RS=W filter moves to the row after the approved study, and a template's hidden
     # Recommendation is announced, approved and shown again (the selection 123 -> 124).
     ("e2e/test_report_flow.py", "W4ReportFlowE2E", "test_w4_01_approve_next_anchor_recommendation_roundtrip", "test_w4_01_"),
+    # W5-UI Related Report mode FLOW (e2e/test_related_report_mode.py RelatedReportModeE2E.test_w5_01_...): deferred to
+    # W5-UI Phase B by D1675, not deleted. Phase A serves no mode markup on the live page (W5-PHASE-A-INTERIM), so the flow
+    # cannot run before Phase B; Phase B adds this row back with main.html's mode markup (the selection 130 -> 131).
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
@@ -109,8 +118,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 130 and len({(x["file"], x["case"]) for x in selected}) == 130,
-            "Candidate selection must contain 130 unique exact cases")
+    require(len(selected) == 139 and len({(x["file"], x["case"]) for x in selected}) == 139,
+            "Candidate selection must contain 139 unique exact cases")
     return rows, selected
 
 

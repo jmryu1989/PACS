@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   produce:
+    name: restore-image / produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -43,6 +44,7 @@ jobs:
           include-hidden-files: false
           overwrite: false
   consume:
+    name: restore-image / consume
     needs: produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10

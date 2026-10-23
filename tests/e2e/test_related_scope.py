@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 import uuid
+from types import SimpleNamespace
 from playwright.sync_api import expect
 from test_related_filter import RelatedFilterE2E
 from test_prior_selection import synthetic_ct
@@ -36,7 +37,8 @@ class RelatedScopeE2E(RelatedFilterE2E):
         expect(p.locator('#related-filter-hidden')).to_be_visible();self.assertEqual(p.evaluate('relatedUid'),prior.uid)
         self.related(p,current).click();self.thumbnail_ready(p);self.assertIsNone(p.evaluate('relatedUid'))
         expect(self.related(p,current)).to_contain_text('Reading Target');expect(p.locator('#findings')).to_have_value('unsaved related scope')
-        self.viewer(p,self.related(p,current),[current])
+        # W5 PAGE-10 (D1520): the row's explicit Open Images action opens the Target alone (a double click no longer opens images).
+        self.viewer(p,SimpleNamespace(dblclick=p.locator(f'[data-related-open="{current.uid}"]').click),[current])
         p.locator('#related-body-part').select_option(json.dumps(''));self.shown(p,[empty])
         p.locator('#related-body-part').select_option('?');self.shown(p,[])
         p.locator('#related-body-part').select_option('');self.shown(p,[current,prior,empty])

@@ -58,11 +58,16 @@ export class PacsController {
   /**
    * `sessionId`는 이 로그인 세션의 비밀 아닌 식별값이다(S7-U5, U5S-REQ-08). 화면은 이 값을 받아 둔 뒤 그 세션으로 보내는
    * 모든 요청에 `X-KIN-Session`으로 싣는다. Bearer 호출에는 세션이 없어 null이다.
+   *
+   * `issuer`는 이 신원을 검증한 로그인 서버(KC_ISSUER) 값 그대로다(S9-U4b D1691). 반입·원본 다운로드 서비스가 작업 소유자
+   * (ownerIssuer)로 쓰는 값과 같은 곳에서 읽으며, 기관·actor·브라우저 주소나 요청 값에서 만들지 않는다. 설정이 없으면 null이고,
+   * 화면은 그때 반입·다운로드 작업을 열지 않는다(서비스도 IMPORT_ISSUER_UNCONFIGURED로 거절한다).
    */
   @Get('me')
   @Header('Cache-Control', 'no-store')
   me(@Req() req: any) {
-    return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor, sessionId: req.sessionId ?? null };
+    return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor, sessionId: req.sessionId ?? null,
+      issuer: process.env.KC_ISSUER || null };
   }
 
   /** nginx auth_request 전용. 204=통과, 403=기관 경계 밖. PHI 본문은 싣지 않는다. */

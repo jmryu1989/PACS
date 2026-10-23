@@ -35,6 +35,24 @@ BOOT = """() => {
     canEdit: () => allowed
   });
 }"""
+# A report field's visible height inside its parent (the shared scroller) and, read in the same moment, what explains it:
+# both rects, every scrolled ancestor, the window scroll, focus, the field's editability, the selected study, document
+# and font readiness, open dialogs and busy regions, and which ancillary notices are laid out.
+FIELD_VISIBILITY = """e => {
+  const box = n => { const r = n.getBoundingClientRect(); return [r.top, r.bottom, r.height]; };
+  const h = e.parentElement.getBoundingClientRect(), r = e.getBoundingClientRect();
+  const scrolled = [];
+  for (let n = e.parentElement; n; n = n.parentElement)
+    if (n.scrollTop || n.scrollHeight > n.clientHeight + 1)
+      scrolled.push([n.id || n.tagName + '.' + n.classList[0], n.scrollTop, n.scrollHeight, n.clientHeight]);
+  const ids = s => [...document.querySelectorAll(s)].map(n => n.id || n.tagName);
+  return {visible: Math.min(h.bottom, r.bottom) - Math.max(h.top, r.top), field: box(e), parent: box(e.parentElement),
+    scrolled, scrollY: window.scrollY, viewport: [innerWidth, innerHeight],
+    active: document.activeElement && (document.activeElement.id || document.activeElement.tagName),
+    readOnly: e.readOnly, selected: typeof selectedUid === 'undefined' ? null : selectedUid,
+    ready: document.readyState, fonts: document.fonts.status, dialogs: ids('dialog[open]'), busy: ids('[aria-busy="true"]'),
+    notices: ['#question-p', '#image-request-p', '#cvr-sent-p'].filter(s => document.querySelector(s)?.getClientRects().length)};
+}"""
 
 
 class ReportEditorFrameDOM(unittest.TestCase):
@@ -1487,9 +1505,12 @@ class ReportEditorFramePageDOM(unittest.TestCase):
 
     def test_page_single_scroll_tab_shortcut_and_thousand_lines(self):
         # Even with unavailable ancillary services, both empty sections remain readable.
+        # W4X-04: one shared-host run saw -92 here and no later run did (not reproduced in 10 runs of the original
+        # 20-case order). The same reading also returns the frame's geometry and readiness at that moment, so a failure
+        # carries the facts that tell a pre-ready read from a steady-state defect; the 40 px bound is unchanged.
         for field in ('findings', 'conclusion'):
-            visible = self.page.locator('#' + field).evaluate("e=>{const h=e.parentElement.getBoundingClientRect(),r=e.getBoundingClientRect();return Math.min(h.bottom,r.bottom)-Math.max(h.top,r.top);}")
-            self.assertGreaterEqual(visible, 40)
+            fact = self.page.locator('#' + field).evaluate(FIELD_VISIBILITY)
+            self.assertGreaterEqual(fact['visible'], 40, fact)
         self.page.locator('#findings').focus()
         self.page.keyboard.press('Tab')
         self.assertTrue(self.page.locator('#conclusion').evaluate('e=>e===document.activeElement'))
@@ -1735,6 +1756,9 @@ class ReportEditorFramePageDOM(unittest.TestCase):
                         self.page.locator('#' + field).evaluate('e => e.focus()')
                         self.page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
                         fact = self.page.evaluate(measure)
+                        if not fact[field] > 0:
+                            # W4X-04 family (seen once here: scroller at its padding, conclusion -92): keep what explains it.
+                            fact = {**fact, 'geometry': self.page.locator('#' + field).evaluate(FIELD_VISIBILITY)}
                         self.assertFalse(fact['covered'], fact)
                         self.assertGreater(fact[field], 0, fact)
                         assert_w6_reachable(self, w6_facts(self.page), where + ' ' + field)
@@ -1915,9 +1939,9 @@ MUTANTS = [
         "test_t6_ts08_later_typing_and_edit_then_undo"]),
     ("M11-ignore-sent", "if (typeof sent !== 'string' || (sent !== at?.text && sent !== text)) return refused('sent-mismatch');", "// Trust a mismatched sent snapshot.", [
         "test_t6_server_requires_the_actual_sent_text"]),
-    ("M12-ignore-permission", " || !canEdit(at.field)", "", [
+    ("M12-ignore-permission", " || !canEdit(at.field, admission, at)", "", [
         "test_t3_readonly_disabled_and_policy_at_apply_time"]),
-    ("M13-no-focus-recheck", "        why = blocked(at);", "        why = null;", [
+    ("M13-no-focus-recheck", "        why = blocked(at, admission);", "        why = null;", [
         "test_t3_permission_changes_on_focus_and_native_failure"]),
     ("M14-reset-scroll", "for (const [el, top, left] of positions) { el.scrollTop = top; el.scrollLeft = left; }", "for (const [el] of positions) { el.scrollTop = 0; el.scrollLeft = 0; }", [
         "test_ordinary_insert_keeps_scroll_and_has_no_extra_focus_cycle"]),
@@ -1997,7 +2021,7 @@ PAGE_MUTANTS = [
      'if (field === undefined && !editorCapture) editorCapture = live?.capture ?? null;',
      'test_page_record_explicit_repin_accepts_new_capture'),
     ('W6-PAGE-03', 'report-templates-ui.js',
-     'result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);',
+     'result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text, admission) : frame.insertMany(changes);',
      "result = {status:'unchanged'};", 'test_page_native_input_once_final_three_field_payload_and_hold'),
     ('W6-PAGE-04', 'report-templates.js', 'caretAt(k), citationGuards(k)', 'null, citationGuards(k)',
      'test_page_native_input_once_final_three_field_payload_and_hold'),
