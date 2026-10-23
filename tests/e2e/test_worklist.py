@@ -347,7 +347,7 @@ class WorklistE2E(unittest.TestCase):
         self.locked(doctor)
 
     def test_06_prior_preview_and_comparison_viewer(self):
-        """E2E-B2-06: prior double-click loads both studies without changing report target."""
+        """E2E-B2-06: the prior's Compare Images loads both studies without changing report target."""
         patient = "E2E-" + uuid.uuid4().hex[:16]
         current, prior = self.fixture(patient_id=patient), self.fixture(patient_id=patient)
         self.seed_report(current)
@@ -367,8 +367,10 @@ class WorklistE2E(unittest.TestCase):
                         frames_loaded.add(fixture.uid)
 
         page.context.on("response", record_frame)
+        # W5 PAGE-10 (D1520): a Related row's double click no longer opens images; the row's explicit Compare Images
+        # action opens the Target and the prior.
         with page.context.expect_page() as opened:
-            related.dblclick()
+            page.locator(f'[data-related-open="{prior.uid}"]').click()
         viewer = opened.value
         viewer.wait_for_url("**/ohif/viewer?**", timeout=30000)
         query = parse_qs(urlsplit(viewer.url).query)

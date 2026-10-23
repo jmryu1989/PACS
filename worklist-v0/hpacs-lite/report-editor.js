@@ -27,7 +27,10 @@
       if (!reportFrame) reportFrame = KinReportEditorFrame.create({
         fields: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k)])),
         host: document.querySelector(".redit"),
-        canEdit: () => work.state() === "active" && !!selectedUid && !reportEditorBlock(),
+        // W5 (D1423 R2): every existing rule holds for every edit; Related Report mode lets through only the admission it
+        // issued itself for exactly this field and request (the mode checks and consumes it here, once per edit span).
+        canEdit: (field, admission = null, at = null) => work.state() === "active" && !!selectedUid
+          && !reportEditorBlock(admission && relatedMode?.admits(admission, field, at) ? admission : null),
       });
       return reportFrame;
     }
@@ -217,6 +220,8 @@
       // 숨긴 Recommendation의 안내와 이동하지 않은 까닭의 Notice도 초안과 별개로 그 검사의 지금 상태를 따른다.
       renderRecommendationNotice();
       if (reportNotice || reportNoticeShown) renderReportNotice();
+      // W5: the Reading Target card of Related Report mode shows this same draft state.
+      relatedMode?.refresh();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -243,6 +248,15 @@
         $("#draftmsg").innerHTML = `<b>● 서버의 초안이 이 화면과 다릅니다</b> — 입력한 내용은 그대로 있습니다 · ` +
           (conflict.latest ? `이 화면의 글을 남기려면 Keep This Text, 서버의 초안으로 바꾸려면 Load Server Draft`
                            : `서버의 초안을 확인하지 못했습니다 — 연결되면 다시 확인합니다`);
+        return;
+      }
+      // W5: an explicit Related insert whose receipt is not settled. Its actions are on the Notice; the text is not "saved".
+      const related = relatedInsertPending(selectedUid);
+      if (related) {
+        bar.style.display = "flex";
+        $("#b-draft-discard").style.display = $("#b-report-reload").style.display = "none";
+        $("#draftmsg").innerHTML = `<b>● ${esc(relatedInsertLabel(related))}</b> — Related Report에서 넣은 글의 서버 저장을 아직 확인하지 ` +
+          `못했습니다 · 입력한 내용은 그대로 있습니다 · 안내줄에서 확인하세요`;
         return;
       }
       if (!d && !pending && !reportConverge.has(selectedUid)) { bar.style.display = "none"; return; }
@@ -315,7 +329,16 @@
      * 저장이 뒤늦게 확인되면 같은 줄이 그 사실을 말한다(Check가 서버의 초안을 읽어 확인한 뒤 그 이동을 이어 간다).
      */
     let reportNotice = null, reportNoticeShown = false;
+    /**
+     * W5 (D1423 R4): a notice may carry an action — `related-enter` (the Related Report mode entry the gate refused: Retry and
+     * Check continue that entry, never select the Source) or `related-insert` (an explicit Related insert of this Target:
+     * Retry resends that operation's frozen request, Check reads its receipt, Discard Insert fences it; Stay closes the line
+     * and never ends the operation). Without an action it is W4's notice exactly. A Target whose insert is not settled speaks
+     * for that operation whatever refused the move.
+     */
     function showReportNotice(notice) {
+      const op = !notice.action && notice.status !== "composing" ? relatedInsertPending(notice.uid) : null;
+      if (op) notice = { ...notice, status: op.state === "refused" ? "refused" : "unknown", action: { kind: "related-insert", op } };
       if (!["composing", "refused", "unknown", "conflict", "owner"].includes(notice.status)) return;
       reportNotice = notice;
       renderReportNotice();
@@ -325,11 +348,39 @@
       reportNotice = null;
       renderReportNotice();
     }
+    function renderRelatedInsertNotice(n) {
+      const op = n.action.op, s = op.state, busy = ["editing", "sending", "checking", "discarding"].includes(s);
+      const unresolved = !relatedInsertIdentityResolved(op);
+      const toward = n.target ? ` ${studyLabel(n.target.uid)}(으)로 가려던 이동은 이 삽입이 확인된 뒤에 이어 갑니다.` : "";
+      const review = "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고르세요.";
+      const text = busy ? "Related Report에서 넣은 글의 서버 저장을 확인하는 중입니다 — 입력한 내용은 그대로 있습니다."
+        : s === "refused" ? "서버가 Related Report에서 넣은 글을 받지 않았습니다 — 넣은 글은 편집기에 그대로 있습니다. 원인을 해결한 뒤 Retry(같은 삽입을 " +
+          "다시 보냅니다)를 누르거나 Discard Insert로 이 삽입을 취소하세요." + toward
+        : s === "unknown" ? "Related Report에서 넣은 글의 저장 결과를 확인하지 못했습니다 — 넣은 글은 편집기에 그대로 있습니다. Check는 서버의 기록을 " +
+          "읽고, Retry는 같은 삽입을 다시 보냅니다(두 번 들어가지 않습니다)." + toward
+        : s === "discard-unknown" ? "삽입 취소의 결과를 확인하지 못했습니다 — 글은 그대로 있습니다. Check로 서버의 기록을 읽거나 Discard Insert를 다시 " +
+          "누르세요." + toward
+        : s === "superseded" ? "이 삽입은 서버에 저장됐지만 그 뒤 초안이 바뀌었습니다 — 같은 삽입을 다시 넣지 않습니다. " + review
+        : s === "discarded" ? "삽입은 취소됐지만 그 뒤에 고친 글이 있어 넣었던 글을 자동으로 지우지 않았습니다. " + review
+        : "서버가 이 삽입 요청을 받을 수 없다고 답했습니다 — 넣은 글은 그대로 있습니다. " + review;
+      const strong = document.createElement("b");
+      strong.textContent = "● " + relatedInsertLabel(op) + (s === "refused" ? " — " + relatedRefusal(op.reason) : "");
+      $("#report-notice-msg").replaceChildren(strong, " — " + text);
+      $("#report-notice-retry").style.display = ["unknown", "refused"].includes(s) && !unresolved ? "" : "none";
+      $("#report-notice-check").style.display = ["unknown", "discard-unknown"].includes(s) || (busy && s === "checking") ? "" : "none";
+      $("#report-notice-check").disabled = busy || unresolved;
+      $("#report-notice-retry").disabled = busy || unresolved;
+      relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
+        ? op : null, busy);
+    }
     function renderReportNotice() {
       if (reportNotice && (reportNotice.uid !== selectedUid || reportNotice.seq !== selectionSeq)) reportNotice = null;
       const n = reportNotice;
       reportNoticeShown = !!n;
       $("#report-notice").style.display = n ? "flex" : "none";
+      $("#report-notice-retry").disabled = false;
+      if (n?.action?.kind === "related-insert") { renderRelatedInsertNotice(n); return; }
+      relatedMode?.noticeDiscard(null);
       if (!n) return;
       const unconfirmed = reportConverge.has(n.uid);
       // Check가 서버의 지금 초안을 읽고 알게 된 것(checkReportNotice). 그 뒤 이 글의 확인 여부가 바뀌었으면(늦게 닿은 저장, 새로
@@ -343,38 +394,51 @@
         : n.status === "composing" ? "Not Moved"
         : n.status === "conflict" ? "Save Failed — 서버의 초안이 이 화면과 다릅니다"
         : `Save Failed — ${n.reason ?? "서버가 저장을 받지 않았습니다"}`;
-      const toward = n.target ? ` (${studyLabel(n.target.uid)}(으)로 가려던 이동)` : "";
+      // W5: the same notice for a Related Report mode entry the gate held (its Retry/Check continue that entry).
+      const entry = n.action?.kind === "related-enter";
+      const toward = n.target ? ` (${studyLabel(n.target.uid)}(으)로 가려던 이동)`
+        : entry ? ` (${studyLabel(n.action.source)}의 이전 판독문을 보려던 이동)` : "";
+      const notMoved = entry ? "Related Report 모드로 들어가지 않았습니다" : "검사를 옮기지 않았습니다";
+      const thenMove = entry ? "들어갑니다" : "이동합니다";
       // 서버의 초안에 이 화면의 글이 없다는 것을 읽어서 알았다: 다시 보내는 길(Retry, 쓰기 경로)을 함께 준다.
       const resend = checked === "different" && unconfirmed;
-      const text = checked === "unread" ? `서버의 저장 상태를 확인하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 ` +
+      const text = checked === "unread" ? `서버의 저장 상태를 확인하지 못해 ${notMoved}${toward} — 입력한 내용은 그대로 ` +
           "있습니다. 다시 확인하려면 Check를 누르세요."
-        : checked === "changed" ? `확인하는 사이 글이나 선택이 바뀌어 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+        : checked === "changed" ? `확인하는 사이 글이나 선택이 바뀌어 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
           "다시 확인하려면 Check를 누르세요."
-        : resend ? `서버의 초안에 이 화면의 글이 없어 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
-          "Retry를 누르면 이 글을 다시 저장하고, 저장이 확인되면 이동합니다."
-        : checked === "different" ? `서버에 있는 이 검사의 초안이 이 화면의 글과 달라 검사를 옮기지 않았습니다${toward} — 이 화면의 글은 ` +
+        : resend ? `서버의 초안에 이 화면의 글이 없어 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
+          `Retry를 누르면 이 글을 다시 저장하고, 저장이 확인되면 ${thenMove}.`
+        : checked === "different" ? `서버에 있는 이 검사의 초안이 이 화면의 글과 달라 ${notMoved}${toward} — 이 화면의 글은 ` +
           "그대로 있습니다. 다른 창에서 그 뒤에 저장했을 수 있습니다. 다시 확인하려면 Check를 누르세요."
-        : saved ? `쓰던 글의 저장이 확인됐습니다. Check를 누르면 서버의 초안을 한 번 더 읽어 이 화면의 글과 견주고 이동합니다${toward}.`
-        : n.status === "composing" ? "글자 조합(한글 입력)이 끝나지 않아 검사를 옮기지 않았습니다 — 입력을 마친 뒤 다시 누르세요."
-        : n.status === "unknown" ? `쓰던 글의 저장을 확인하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
-          "Check를 누르면 서버의 초안을 읽어 이 화면의 글과 견주고, 같으면 이동합니다."
-        : n.status === "conflict" ? `검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. ` +
+        : saved ? `쓰던 글의 저장이 확인됐습니다. Check를 누르면 서버의 초안을 한 번 더 읽어 이 화면의 글과 견주고 ${thenMove}${toward}.`
+        : n.status === "composing" ? `글자 조합(한글 입력)이 끝나지 않아 ${notMoved} — 입력을 마친 뒤 다시 누르세요.`
+        : n.status === "unknown" ? `쓰던 글의 저장을 확인하지 못해 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
+          `Check를 누르면 서버의 초안을 읽어 이 화면의 글과 견주고, 같으면 ${thenMove}.`
+        : n.status === "conflict" ? `${notMoved}${toward} — 입력한 내용은 그대로 있습니다. ` +
           "초안 표시줄에서 Keep This Text 또는 Load Server Draft를 고른 뒤 다시 누르세요."
-        : `쓰던 글을 저장하지 못해 검사를 옮기지 않았습니다${toward} — 입력한 내용은 그대로 있습니다. 원인을 해결한 뒤 Retry를 누르세요.`;
+        : `쓰던 글을 저장하지 못해 ${notMoved}${toward} — 입력한 내용은 그대로 있습니다. 원인을 해결한 뒤 Retry를 누르세요.`;
       const strong = document.createElement("b");
       strong.textContent = "● " + label;
       $("#report-notice-msg").replaceChildren(strong, " — " + text);
+      const intent = !!n.target || entry;
       $("#report-notice-retry").style.display =
-        n.target && (resend || (!checked && !saved && ["refused", "owner"].includes(n.status))) ? "" : "none";
-      $("#report-notice-check").style.display = n.target && (saved || checked || n.status === "unknown") ? "" : "none";
+        intent && (resend || (!checked && !saved && ["refused", "owner"].includes(n.status))) ? "" : "none";
+      $("#report-notice-check").style.display = intent && (saved || checked || n.status === "unknown") ? "" : "none";
       $("#report-notice-check").disabled = !!n.checking;
+    }
+    /** The intent a notice holds: W4's move, or W5's Related Report entry (the same gate, the same Retry/Check rules). */
+    function continueReportNotice(n) {
+      if (n.action?.kind === "related-enter") enterRelatedMode(n.action.source, { focus: true });
+      else select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
     }
     /** Retry: 같은 이동을 같은 관문으로 다시 한다 — 쓰기 경로다(관문이 쓰던 글을 저장하고, 저장이 확인될 때만 옮긴다). */
     function retryReportNotice() {
       const n = reportNotice;
-      if (!n?.target || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
+      // W5: an explicit Related insert's Retry resends that operation's own frozen request (same ID, same CAS).
+      if (n?.action?.kind === "related-insert") { relatedInsertRetry(n.action.op); return; }
+      if (!(n?.target || n?.action) || n.uid !== selectedUid || n.seq !== selectionSeq) { clearReportNotice(); return; }
       clearReportNotice();
-      select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
+      continueReportNotice(n);
     }
     /** 서버가 읽어 준 초안의 작성자가 이 페이지의 계정인가(기관·사용자 ID·작성자 셋 다 같아야 한다). */
     function sameDraftOwner(owner, mine) {
@@ -391,7 +455,9 @@
      */
     async function checkReportNotice() {
       const n = reportNotice;
-      if (!n?.target || n.checking || n.uid !== selectedUid || n.seq !== selectionSeq) return;
+      // W5: an explicit Related insert's Check reads that operation's receipt and the whole current draft, nothing else.
+      if (n?.action?.kind === "related-insert") { relatedInsertCheck(n.action.op); return; }
+      if (!(n?.target || n?.action) || n.checking || n.uid !== selectedUid || n.seq !== selectionSeq) return;
       const mine = reportDraftSnapshot(n.uid), at = work.capture("editor");
       n.checking = true;
       renderReportNotice();
@@ -429,7 +495,7 @@
           renderDraftBar();
         }
         clearReportNotice();
-        select(n.target.uid, { ...n.target.options, revalidate: n.target.revalidate });
+        continueReportNotice(n);
       });
       // 확인하는 사이 글을 더 쳤거나 선택·작업 문맥이 바뀌었다: 이 읽기로는 정하지 않는다(보낸 것도 없다).
       if (!decided) work.commit(work.capture("document"), () => {
@@ -481,6 +547,9 @@
     async function discardDraft() {
       const uid = selectedUid;
       if (!uid || !appState[uid]?.draft) return;
+      // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
+      const related = relatedCommandBlock("discard");
+      if (related) { toast(related, "err"); relatedInsertNotice(uid); return; }
       if (!confirm("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?")) return;
       const at = work.capture("document");
       // 버리기를 누른 때까지의 편집 차례(버리기 표시). 답이 올 때 "누른 뒤에 고친 글이 있는가"를 이것으로 안다 — 글을 견주지
@@ -634,11 +703,15 @@
     async function reloadServerReport() {
       const uid = selectedUid, at = work.capture("editor");
       if (!uid || appState[uid]?.prelimHidden) return;
+      // W5: replacing the editor's text is a report command; in Related Report mode it waits for Back.
+      if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
       try {
         await draftClient.settled(uid);
         if (!work.admits(at)) return;
         const b = await api("GET", "/bootstrap", undefined, undefined, at);
         work.commit(at, () => {
+          // Related can open while the read is pending; its Target must keep the opening text.
+          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
           appState[uid] = replaceReportState(uid, b.states?.[uid]);
           syncStudy(uid);
           loadReport({ force: true });

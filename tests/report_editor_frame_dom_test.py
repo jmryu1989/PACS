@@ -1939,9 +1939,9 @@ MUTANTS = [
         "test_t6_ts08_later_typing_and_edit_then_undo"]),
     ("M11-ignore-sent", "if (typeof sent !== 'string' || (sent !== at?.text && sent !== text)) return refused('sent-mismatch');", "// Trust a mismatched sent snapshot.", [
         "test_t6_server_requires_the_actual_sent_text"]),
-    ("M12-ignore-permission", " || !canEdit(at.field)", "", [
+    ("M12-ignore-permission", " || !canEdit(at.field, admission, at)", "", [
         "test_t3_readonly_disabled_and_policy_at_apply_time"]),
-    ("M13-no-focus-recheck", "        why = blocked(at);", "        why = null;", [
+    ("M13-no-focus-recheck", "        why = blocked(at, admission);", "        why = null;", [
         "test_t3_permission_changes_on_focus_and_native_failure"]),
     ("M14-reset-scroll", "for (const [el, top, left] of positions) { el.scrollTop = top; el.scrollLeft = left; }", "for (const [el] of positions) { el.scrollTop = 0; el.scrollLeft = 0; }", [
         "test_ordinary_insert_keeps_scroll_and_has_no_extra_focus_cycle"]),
@@ -2021,7 +2021,7 @@ PAGE_MUTANTS = [
      'if (field === undefined && !editorCapture) editorCapture = live?.capture ?? null;',
      'test_page_record_explicit_repin_accepts_new_capture'),
     ('W6-PAGE-03', 'report-templates-ui.js',
-     'result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);',
+     'result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text, admission) : frame.insertMany(changes);',
      "result = {status:'unchanged'};", 'test_page_native_input_once_final_three_field_payload_and_hold'),
     ('W6-PAGE-04', 'report-templates.js', 'caretAt(k), citationGuards(k)', 'null, citationGuards(k)',
      'test_page_native_input_once_final_three_field_payload_and_hold'),

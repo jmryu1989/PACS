@@ -54,7 +54,10 @@ class CandidateCiTests(unittest.TestCase):
         # S9-U4b part (c): + WorklistE2E.test_s9_u4_download_states / _import_retry_and_account_change. 102 + 17 + 14 = 133.
         # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101 on main: 101 + 15 + 14 = 130).
         # Merge of main 848b7e5 into S9-U4b: 108 + 17 + 14 = 139.
+        # W5-UI Phase A adds no flow: its Related Report mode FLOW is deferred to Phase B (D1675), and is never selected here.
+        # Merge of main 3649a70 (W5-UI Phase A) into S9-U4b: still 108 + 17 + 14 = 139.
         self.assertEqual(len(selected), 139)
+        self.assertNotIn("tests/e2e/test_related_report_mode.py", {item["file"] for item in selected})
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
         self.assertEqual([item["case"] for item in selected[-14:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])

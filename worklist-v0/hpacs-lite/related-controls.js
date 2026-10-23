@@ -11,16 +11,13 @@
       relatedModality = e.target.value;
       renderRelated();
     });
+    // W5 (설계 v5 §1.2, slicing W5): a row click opens Related Report mode on that study; images open only by the row's
+    // explicit Open/Compare Images button. A double click no longer opens a viewer (two clicks are two row actions).
     $("#relrows").addEventListener("click", e => {
       const open = e.target.closest('[data-related-open]');
       if (open) { openRelatedImages(open.dataset.relatedOpen); return; }
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) { if(tr.dataset.uid === selectedUid)returnToReportStudy();else previewRelated(tr.dataset.uid); }
-    });
-    $("#relrows").addEventListener("dblclick", e => {
-      if (e.target.closest('button')) return;
-      const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) openRelatedImages(tr.dataset.uid);
+      if (tr?.dataset.uid) { if(tr.dataset.uid === selectedUid)returnToReportStudy();else relatedActivate(tr.dataset.uid, { focus: true }); }
     });
     function openRelatedImages(uid) {
       if (!cur() || !relatedRows.some(row=>row.uid===uid)) return;

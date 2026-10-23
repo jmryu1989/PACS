@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   produce:
+    name: restore-combined / produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -50,6 +51,7 @@ jobs:
           include-hidden-files: false
           overwrite: false
   consume:
+    name: restore-combined / consume
     needs: produce
     runs-on: ubuntu-24.04
     timeout-minutes: 10
