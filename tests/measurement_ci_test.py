@@ -562,6 +562,37 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['out'], other['out'])
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
 
+    def test_s9_u0e_served_profile_is_exact_and_separate(self):
+        profile = ci.PROFILES['s9-u0e-served']
+        self.assertEqual(profile['suites'], (('e2e/test_s9_u0e_equivalence.py', 'OHIFSourceEquivalenceE2E',
+                                              'ci-s9-u0e-served'),))
+        self.assertEqual(profile['out'].name, 's9-u0e-served-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-s9-u0e-ci-')
+        self.assertNotIn('suite_budgets', profile)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_s9_u0e_equivalence.py')
+        self.assertEqual(command[command.index('--class')+1], 'OHIFSourceEquivalenceE2E')
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name == 's9-u0e-served':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
+
+    def test_validate_workflow_runs_s9_u0e_served_in_its_own_bounded_job(self):
+        job = self.assert_profile_job('s9-u0e-served',
+            ['tests/measurement_ci.py --profile s9-u0e-served', 'tests/execution_selection_test.py',
+             'scripts/build-ohif-config.py --check', 'name: synthetic-s9-u0e-served-results'],
+            ['tests/e2e/artifacts/s9-u0e-served-ci/', 'tmp/s9-u0e/served/'])
+        self.assertEqual(self.catalog.text().count('--profile s9-u0e-served'), 1)
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertNotIn('- s9-u0e-served', dispatch)
+
     def test_validate_attribution_record_binds_exact_scanner_inputs(self):
         import argparse
         import shlex
@@ -1107,6 +1138,8 @@ class MeasurementCiTests(unittest.TestCase):
                          {'context-loss', 'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
+                          # S9-U0E: the served generated OHIF config, in its own validate.yml job.
+                          's9-u0e-served',
                           'gateway-e2e', 'critical-result-screens',
                           # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
                           'emr-b',
