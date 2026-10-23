@@ -738,6 +738,7 @@
       "tests/reading*",
       "tests/related*",
       "tests/report*",
+      "tests/s9_a11y_dom_test.py",
       "tests/service_test_loader.cjs",
       "tests/study*",
       "tests/worklist*",

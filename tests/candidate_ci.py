@@ -27,6 +27,8 @@ BASE = (
     # S9-U4b part (c): WorklistE2E.test_s9_u4_download_states and .test_s9_u4_import_retry_and_account_change
     # (REQ-S9-U4-09/10), 15 -> 17 (the selection 131 -> 133).
     ("e2e/test_worklist.py", None, "candidate-worklist", 17),
+    # S9-U4A-SET: SWEEP-05 role change / institution move on the real pages (the selection 139 -> 141).
+    ("e2e/test_s9_role_sweep.py", "S9RoleSweepE2E", "s9-u4a-set", 2),
 )
 FLOWS = (
     ("e2e/test_document_session.py", "DocumentSessionE2E", "test_binding_stays_with_its_document_when_cookie_is_replaced", "test_binding_"),
@@ -118,8 +120,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 139 and len({(x["file"], x["case"]) for x in selected}) == 139,
-            "Candidate selection must contain 139 unique exact cases")
+    require(len(selected) == 141 and len({(x["file"], x["case"]) for x in selected}) == 141,
+            "Candidate selection must contain 141 unique exact cases")
     return rows, selected
 
 

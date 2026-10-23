@@ -56,7 +56,11 @@ class CandidateCiTests(unittest.TestCase):
         # Merge of main 848b7e5 into S9-U4b: 108 + 17 + 14 = 139.
         # W5-UI Phase A adds no flow: its Related Report mode FLOW is deferred to Phase B (D1675), and is never selected here.
         # Merge of main 3649a70 (W5-UI Phase A) into S9-U4b: still 108 + 17 + 14 = 139.
-        self.assertEqual(len(selected), 139)
+        # S9-U4A-SET: + 2 S9RoleSweepE2E cases. 108 + 17 + 2 + 14 = 141.
+        self.assertEqual(len(selected), 141)
+        self.assertEqual([item["case"] for item in selected if item["file"] == "tests/e2e/test_s9_role_sweep.py"], [
+            "S9RoleSweepE2E.test_sweep_05_admin_role_change_old_document_and_fresh_login",
+            "S9RoleSweepE2E.test_sweep_05_institution_move_requires_new_scope_on_real_page"])
         self.assertNotIn("tests/e2e/test_related_report_mode.py", {item["file"] for item in selected})
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
         self.assertEqual([item["case"] for item in selected[-14:]],
@@ -69,7 +73,8 @@ class CandidateCiTests(unittest.TestCase):
             self.assertIn(method, getattr(module, class_name).__dict__)
         # Every runner unit is its own; the earlier e2e flow units keep their names.
         self.assertEqual(len({row[2] for row in rows}), len(rows))
-        self.assertEqual(rows[2][2], "candidate-flow-document-session")
+        self.assertEqual(rows[2], ("e2e/test_s9_role_sweep.py", "S9RoleSweepE2E", "s9-u4a-set"))
+        self.assertEqual(rows[3][2], "candidate-flow-document-session")
         self.assertEqual(rows[-1], ("emr/b/live.py", "EmrBLedgerLive", "candidate-flow-emr-b-live"))
         # Two flows that would share a unit are refused, never run under one plan.
         doubled = candidate.FLOWS + (("emr/b/live.py", "EmrBLedgerLive", "test_b02_business_commit_and_failure_journal", "test_b02_"),)
@@ -79,7 +84,7 @@ class CandidateCiTests(unittest.TestCase):
     def test_configuration_uses_target_runner_plans_evidence_and_540_seconds(self):
         class FakeRunner:
             def module_plan(self, filename, unit, mode, timeout, class_name):
-                count = 108 if unit == "candidate-invariants" else 17
+                count = {"candidate-invariants": 108, "candidate-worklist": 17, "s9-u4a-set": 2}[unit]
                 return {"tests": [{"file": filename, "case": "Local.test_" + str(i)} for i in range(count)]}
             def load_module(self, path):
                 filename = path.relative_to(candidate.TOOLS_ROOT / "tests").as_posix()
@@ -101,14 +106,14 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 16)
-            command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][2], 1000)
+            self.assertEqual(len(profile["suites"]), 17)
+            command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][3], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 139)   # S9-U4b (c) + W4-FLOW + WORKLIST-SPLIT-UID: 108 + 17 + 14
+            self.assertEqual(len(selected), 141)   # 108 + 17 + 2 + 14
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.
