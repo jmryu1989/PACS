@@ -6,8 +6,8 @@ Pure stdlib, no browser, no stack; Node only through tests/page_source.py, which
      (session-local change, resets, departure, failure keeps, cold start, label table, reasons,
      IF-W09 phrases). The shipped JS is judged against the SAME file by tests/study_arrivals_test.cjs
      in the CI runtime job; a green run here is a spec check, not runtime proof of the JS or TS.
-  2. Source pins that the shipped files still carry the decisions the model describes (server
-     absence surface, failure paths in main.html, the page client hand-off).
+  2. Source pins for failure paths in main.html, compiled server behaviour, and the shipped
+     page client's public result after completing the list.
   3. The first S4 touch of main.html keeps every Stage 3 anchor: the id, top-level function and
      $('#...') selector inventories of the pre-S4 blob (e15c69c) are pinned by digest, and only the
      named additions may appear in the fixed landed split. D73: this inventory proves historical
@@ -313,7 +313,6 @@ class SourcePins(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.arrivals = ARRIVALS.read_text(encoding="utf-8").replace("\r\n", "\n")
-        cls.pages = PAGES.read_text(encoding="utf-8").replace("\r\n", "\n")
         cls.main = read_page_source(MAIN).replace("\r\n", "\n")
 
     def test_module_carries_the_rules_the_model_mirrors(self):
@@ -340,8 +339,52 @@ class SourcePins(unittest.TestCase):
         assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-(COUNTS|OBSERVATION)')
 
     def test_page_client_hands_over_only_the_completing_page_observation(self):
-        self.assertIn("if (page.next === null) draft.observation = { observedAt: data.observedAt, notObserved: data.notObserved };", self.pages)
-        self.assertIn("const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null };", self.pages)
+        # Exercise the shipped client with the real session gate. Conflicting middle-page
+        # answers must not leak into the completed batch, even when final fields are absent.
+        script = r"""
+const { create } = require('./worklist-v0/hpacs-lite/study-pages.js');
+const { install } = require('./tests/module_session_harness.cjs');
+const owner = ['synthetic-institution', 'synthetic-reader'];
+const rows = Array.from({length: 101}, (_, i) => ({uid: `1.2.${1000 + i}`, state: {}}));
+const absence = [{uid: '1.2.9999', origin: 'synthetic', createdAt: '2026-10-01T00:00:00Z'}];
+const issue = {uid: '1.2.8888', code: 'STUDY_IDENTITY_UNRESOLVED'};
+const finals = [
+  {observedAt: '2026-10-02T00:00:00Z', notObserved: absence, identityIssues: [issue], orderReconciliation: []},
+  {observedAt: '2026-10-03T00:00:00Z', notObserved: [], identityIssues: []},
+  {}
+];
+(async () => {
+  const results = [];
+  for (const final of finals) {
+    install();
+    const client = create({identity: () => owner, changed: () => {}, request: async path => {
+      if (path === '/me') return {kind: 'member', institution: owner[0], sub: owner[1]};
+      const offset = new URL('https://synthetic.invalid' + path).searchParams.has('after') ? 100 : 0;
+      return {studies: rows.slice(offset, offset + 100),
+        pagination: {owner, limit: 100, offset, total: rows.length, next: offset === 0 ? 'next-page' : null},
+        ...(offset === 0 ? {observedAt: '2026-10-01T00:00:00Z', notObserved: absence,
+          identityIssues: [issue], orderReconciliation: [{uid: 'middle-page-only'}]} : final)};
+    }});
+    results.push(await client.read());
+  }
+  process.stdout.write(JSON.stringify(results));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run(['node', '--max-old-space-size=3072', '-e', script],
+                                cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=30)
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = [{'uid': f'1.2.{1000 + i}', 'state': {}} for i in range(101)]
+        owner = ['synthetic-institution', 'synthetic-reader']
+        observations = [
+            {'observedAt': '2026-10-02T00:00:00Z',
+             'notObserved': [{'uid': '1.2.9999', 'origin': 'synthetic', 'createdAt': '2026-10-01T00:00:00Z'}],
+             'orderReconciliation': []},
+            {'observedAt': '2026-10-03T00:00:00Z', 'notObserved': []},
+            {},
+        ]
+        issues = [[{'uid': '1.2.8888', 'code': 'STUDY_IDENTITY_UNRESOLVED'}], [], None]
+        self.assertEqual([{'studies': rows, 'owner': owner, 'observation': observation, 'identityIssues': issue}
+                          for observation, issue in zip(observations, issues)], json.loads(result.stdout))
 
     def test_main_reports_observations_only_after_the_generation_checks_and_failures_empty_nothing(self):
         self.assertEqual(3, self.main.count("applyObservation("))              # definition + load + poll
