@@ -196,6 +196,10 @@ let studies = [{uid: "UIDVALUE", name: "HONG GILDONG", id: "P-1", date: "2026-09
 let calls = [], holdCalls = [], citeCalls = [], structCalls = [], dictCalls = [];
 let replies = [], toasts = [], confirms = [], logouts = 0;
 const studyPriority = { get: () => false };
+// W5 (order-list-store.js): the page's Related Report mode binding and the base-rule marker, declared as the page
+// declares them (as report_dictation_host_dom_test.py does); null = no mode asset (the sliced region holds no mode).
+let relatedMode = null;
+const RELATED_BASE = Object.freeze({ base: true });
 const KinAuth = { authFailure: () => {}, has: () => true, logout: async () => { logouts += 1; } };
 const reportPreview = { close() {} };
 const displayActor = value => String(value ?? "").split("@")[0];

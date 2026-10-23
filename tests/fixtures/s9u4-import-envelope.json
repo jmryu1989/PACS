@@ -1,0 +1,9 @@
+{
+  "about": "S9-U4b real public import wire contract (importFile/importStatus/publicFile), pinned by S9U4-B86. D1606: the DOM oracle captures actual POST and GET responses, without projecting away fixture-only keys. Complete positive validation never grants resend permission.",
+  "post_file": ["at", "attempts", "bytes", "code", "generation", "identity", "index", "message", "operationId", "outcome", "seriesUid", "sha256", "sopUid", "studyUid", "writeDisposition"],
+  "status_envelope": ["files", "operationId", "status"],
+  "status_file": ["at", "attempts", "bytes", "code", "generation", "identity", "index", "message", "outcome", "seriesUid", "sha256", "sopUid", "studyUid", "writeDisposition"],
+  "attempt": ["attemptId", "autoRecheckedAt", "code", "finishedAt", "generation", "outcome", "phase", "recovery", "startedAt", "transport"],
+  "request_refusal": ["code", "message"],
+  "before_attempt": {"outcome": "retryable", "code": "STUDY_WRITE_PENDING", "generation": 0, "attempts": [], "identity": null, "writeDisposition": null}
+}

@@ -43,6 +43,9 @@ import { StudyTagsController } from './study-tags.controller';
 import { StudyTagsService } from './study-tags.service';
 import { ClinicalContextController } from './clinical-context.controller';
 import { ClinicalContextService } from './clinical-context.service';
+import { StudyTransferLocalController } from './study-transfer-local.controller';
+import { StudyTransferLocalService } from './study-transfer-local.service';
+import { DicomImportGateService } from './dicom-import-gate.service';
 
 function adminNoStore(_req: any, res: any, next: () => void) {
   res.setHeader('Cache-Control', 'no-store');
@@ -50,10 +53,11 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 }
 
 @Module({
-  controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController],
+  controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
   providers: [
     ViewerContextEventService,
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
+    StudyTransferLocalService, DicomImportGateService,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
   ],

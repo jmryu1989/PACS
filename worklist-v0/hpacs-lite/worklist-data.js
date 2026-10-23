@@ -527,6 +527,16 @@
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
+      // W5 (설계 v5 §1.6): in Related Report mode the report commands wait for Back, with the reason said on each control;
+      // an unsettled explicit Related insert holds the decisions that would carry its text. Prev/Next stay: they leave through
+      // the move gate. Placed before the identity rule below, whose titles then stand.
+      const relatedWhy = relatedMode?.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
+      if (relatedWhy)
+        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+          "#b-prelim"]) {
+          const el = $(id);
+          if (el) { el.disabled = true; el.title = relatedWhy; }
+        }
       // WORKLIST-SPLIT-UID: the selected UID was excluded as unresolved. Its text stays (loadReport keeps it) and is read-only;
       // every write and the paste/clear editors are off. The server refuses the same actions on its own.
       const unresolved = !!appState[selectedUid]?.identityUnresolved;

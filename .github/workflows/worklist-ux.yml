@@ -114,6 +114,12 @@ jobs:
       - name: W4 report flow mutation counterexamples
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-flow-mutants --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_flow_dom_test.py --mutants
+      - name: W5 related report mode on the delivered split page
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/related-report-mode-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/related_report_mode_dom_test.py
+      - name: W5 related report mode counterexamples
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/related-report-mode-mutants --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/related_report_mode_mutants.py
       - name: Synthetic workspace DOM evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

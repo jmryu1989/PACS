@@ -23,5 +23,6 @@
   "DicomPort": 4242,
 
   "StableAge": 10,
-  "StorageCompression": false
+  "StorageCompression": false,
+  "OverwriteInstances": false
 }

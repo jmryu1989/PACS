@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unittest
 import uuid
+from types import SimpleNamespace
 
 from playwright.sync_api import expect
 import test_prior_selection as previous
@@ -66,7 +67,10 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
             expect(page.locator("#related-current")).to_have_text(expected_current)
             expect(page.locator("#findings")).to_have_value(draft)
         expect(page.locator(".prior-report-head b")).to_have_text("Related Report")
-        self.viewer(page, self.related(page, future), [current, future])
+        # W5 PAGE-10 (D1520, Phase A related-controls.js): a Related row's double click no longer opens images; the explicit
+        # Compare Images action opens the Target and the Source (the shared helper drives its opener by dblclick()).
+        compare = page.locator(f'[data-related-open="{future.uid}"]')
+        self.viewer(page, SimpleNamespace(dblclick=compare.click), [current, future])
         expect(page.locator(f'#rows tr[data-uid="{current.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
         expect(page.locator("#related-current")).to_have_text(expected_current)
         expect(page.locator("#findings")).to_have_value(draft)

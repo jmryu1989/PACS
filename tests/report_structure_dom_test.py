@@ -167,6 +167,10 @@ let studies = [{uid: "UIDVALUE", name: "SYNTHETIC ONE", id: "P-1", date: "2026-0
 let calls = [], structCalls = [], citeCalls = [], replies = [], structReplies = [], citeReplies = [];
 let toasts = [], confirms = [], confirmAnswer = false;
 const studyPriority = { get: () => false };
+// W5 (order-list-store.js): the page's Related Report mode binding and the base-rule marker, declared as the page
+// declares them; null = no mode asset (the sliced region holds no Related Report mode).
+let relatedMode = null;
+const RELATED_BASE = Object.freeze({ base: true });
 const KinAuth = { has: () => true, logout: async () => {} };
 const reportPreview = { close() {} };
 const displayActor = value => String(value ?? "").split("@")[0];

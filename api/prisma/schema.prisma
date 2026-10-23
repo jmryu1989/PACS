@@ -154,7 +154,7 @@ model StudyState {
   /// 원격판독을 받은 기관. **이 컬럼 하나만이 기관 경계를 넘게 해주는 통로다.**
   /// TS 상태머신이 wait 이상으로 갈 때 채워지고, 취소하면 비워진다.
   teleInstitutionId String?
-  /// 최초 등록 경로. 기존·DICOM lazy 등록은 dicom, Gateway announce만 gateway.
+  /// 최초 등록 경로. 기존·DICOM lazy 등록은 dicom, Gateway announce만 gateway, 자기 기관 member 반입(S9-U4b)의 새 검사 선점만 local-import.
   origin    String   @default("dicom")
   rs        String   @default("W")            // Reading Status: W(대기) T(임시저장) A(승인)
   holdReason String?
@@ -1058,4 +1058,32 @@ model StudyAccessRevision {
 
   @@id([institution,subject,revision])
   @@unique([institution,subject,requestId], map:"StudyAccessRevision_request_key")
+}
+
+/// S9-U4b 자기 기관 DICOM 반입·원본 다운로드 작업과 member 반입 관문의 내부 예약 한 표(계약 S9-U4p §4.4, §5.2, §7).
+/// 공개 kind는 import·download, 내부 kind는 study-claim·sop-claim이다. 공개 행의 소유는 검증된 issuer·불변 sub·기관·kind이고
+/// actor는 표시값일 뿐이다(actor에서 소유 subject를 거꾸로 만들지 않는다). import 행의 results는 파일별 UID·hash·결과와
+/// 추가 전용 attempts이고 환자 식별값이 없다. download 행은 고정 manifest 원문과 그 hash, 시도마다의 공급 기록이다.
+/// 내부 예약 행(claimKey·claim)은 환자 식별값을 담으므로 공개 결과·감사·로그에 내보내지 않으며, 그 검사 원본을 H가 파기할 때
+/// disposeImportClaims로만 지운다. kind별 필수·null 조합과 상태 값은 migration의 CHECK가, JSON 안의 모양은 서버가 닫는다.
+model ImportOperation {
+  id             String   @id @db.Uuid
+  institutionId  String   @db.VarChar(256)
+  ownerIssuer    String   @db.VarChar(1024)
+  ownerSubject   String   @db.VarChar(256)
+  actor          String   @db.VarChar(256)
+  kind           String   @db.VarChar(16)
+  studyUid       String?  @db.VarChar(64)
+  status         String   @db.VarChar(16)
+  results        Json     @default("[]")
+  manifestSha256 String?  @db.VarChar(64)
+  download       Json?
+  claimKey       String?  @unique
+  claim          Json?
+  createdAt      DateTime @default(now())
+  /// DB 시각. 서버가 같은 트랜잭션에서 읽은 DB 현재 시각으로 쓴다(앱 시계가 아니다).
+  updatedAt      DateTime @default(now())
+
+  @@index([kind, status])
+  @@index([kind, studyUid])
 }

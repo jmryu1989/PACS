@@ -526,8 +526,9 @@ class MigrationPins(unittest.TestCase):
         # 38 -> 39, one table: S7-U5 D600 added 20261007120000_provider_change (ProviderChange; the in-flight columns dropped).
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
         self.assertIn("api/prisma/migrations/20261008120000_emr_b/migration.sql", restore_fixture.MIGRATIONS)
-        # 46 -> 47 migrations and 51 -> 52 tables: W5-API added 20261016120000_related_report_insert_receipt (ReportDraftInsertReceipt).
-        self.assertEqual(len(restore_fixture.TABLES), 52)
+        # 46 -> 47 migrations and 51 -> 52 tables: S9-U4b added 20261015013945_import_operation (ImportOperation).
+        # 47 -> 48 migrations and 52 -> 53 tables: W5-API added 20261016120000_related_report_insert_receipt (ReportDraftInsertReceipt).
+        self.assertEqual(len(restore_fixture.TABLES), 53)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 
