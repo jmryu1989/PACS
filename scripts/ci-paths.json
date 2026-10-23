@@ -737,6 +737,7 @@
       "tests/multi_study_view_service_test.cjs",
       "tests/reading*",
       "tests/related*",
+      "tests/related_report_insert_service_test.cjs",
       "tests/report*",
       "tests/s9_a11y_dom_test.py",
       "tests/service_test_loader.cjs",

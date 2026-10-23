@@ -293,11 +293,14 @@ export class PacsController {
     return this.svc.putReport(uid, body, caller(req), draftSession(req));
   }
 
-  /** 내 초안의 권위 있는 읽기 — 충돌이나 답을 받지 못한 저장 뒤에 무엇이 저장돼 있는지 확인한다 */
+  /**
+   * 내 초안의 권위 있는 읽기 — 충돌이나 답을 받지 못한 저장 뒤에 무엇이 저장돼 있는지 확인한다.
+   * `?insertRequestId=`는 W5 관련 판독문 삽입의 Check다: 같은 스냅숏의 그 삽입 영수증을 함께 답한다(쓰기 없음).
+   */
   @Get('studies/:uid/draft')
   @Header('Cache-Control', 'no-store')
-  draft(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.readDraft(uid, caller(req));
+  draft(@Param('uid') uid: string, @Req() req: any, @Query('insertRequestId') insertRequestId?: string) {
+    return this.svc.readDraft(uid, caller(req), insertRequestId);
   }
 
   /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 비운다 */
