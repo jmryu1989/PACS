@@ -330,6 +330,9 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   StudyImageRequest: ['image-request'], StudyImageRequestReceipt: ['delivery-receipt', 'image-request'],
   CriticalResult: ['critical-result', 'report-version'], CriticalResultEvent: ['critical-result', 'critical-result-ack'], CriticalResultReceipt: ['delivery-receipt', 'critical-result-ack'],
   HangingProtocolPreference: ['preferences'], StudyAccessPolicy: ['identity-access'], StudyAccessRevision: ['identity-access'],
+  // S9-U4b: import rows are per-file delivery results, download rows the copy record of a fixed manifest, and the gate's
+  // Study/SOP reservations hold study metadata from the DICOM producer (their lifetime follows the study's originals).
+  ImportOperation: ['delivery-receipt', 'download', 'study-metadata'],
 });
 
 export function classifyModel(name: string): readonly RecordKind[] {
@@ -410,6 +413,12 @@ function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): 
       }
       return [choice(row.event, ['created', 'replaced', 'ack']) === 'ack' ? 'critical-result-ack' : 'critical-result'];
     case 'StudyImageRequestReceipt': case 'CriticalResultReceipt': return ['delivery-receipt'];
+    // S9-U4b (contract S9-U4p 6): the stored row's own kind decides - an import's file results, a download's copy record,
+    // the gate's Study/SOP reservation of producer metadata.
+    case 'ImportOperation': {
+      const kind = choice(row.kind, ['import', 'download', 'study-claim', 'sop-claim']);
+      return [kind === 'import' ? 'delivery-receipt' : kind === 'download' ? 'download' : 'study-metadata'];
+    }
     default: return possible.filter(k => RECORD_CLASSIFICATION[k].retention.mode !== 'source-record');
   }
   return refuse('RowFactsRequired');

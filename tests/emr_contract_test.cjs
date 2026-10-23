@@ -1149,11 +1149,12 @@ if (process.argv.includes('--emr-inventory-generator')) {
       ViewerItem: { snapshot: { type: 'measurement' } }, ViewerRevision: { snapshot: { type: 'key-image' } },
       ViewerJob: { title: '', description: '', clinicalEntry: false }, ViewerJobRevision: { title: 'followup', description: 'clinical', clinicalEntry: true },
       StudyQuestionEntry: { kind: 'answer' }, CriticalResultEvent: { recordId: 'model-row', event: 'created' }, TechNoteRevision: { authorRole: 'radiographer' },
+      ImportOperation: { kind: 'import' },
     };
     for (const model of Object.keys(C.MODEL_CLASSIFICATION)) {
       const clinicalModels = ['Report', 'ReportVersion', 'Order', 'Finding', 'FindingRevision', 'ManualSr', 'ViewerJobRevision',
         'StudyConsultation', 'StudyQuestion', 'StudyQuestionEntry', 'CriticalResult', 'CriticalResultEvent', 'TechNoteRevision'];
-      const deliveries = ['GatewayReceipt', 'GatewayRetryRequest', 'ViewerRequest', 'StudyImageRequestReceipt', 'CriticalResultReceipt'];
+      const deliveries = ['GatewayReceipt', 'GatewayRetryRequest', 'ViewerRequest', 'StudyImageRequestReceipt', 'CriticalResultReceipt', 'ImportOperation'];
       const act = clinicalModels.includes(model) ? 'entry' : deliveries.includes(model) ? 'delivery' : model === 'AuditLog' ? 'access' : model === 'StudyState' ? 'acquisition' : 'creation';
       const source = modelSource(model, model === 'Order' ? rows.Order : { ownerId: 'owner', draftBinding: { reportId: 'parent', intentId: 'intent', action: 'approve' }, ...rows[model] }, act);
       const disposition = C.retentionDisposition(source);

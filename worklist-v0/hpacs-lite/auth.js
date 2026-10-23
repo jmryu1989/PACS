@@ -505,6 +505,8 @@ const KinAuth = (() => {
       displayName: body.displayName ?? body.user ?? body.actor ?? '',
       roles: Array.isArray(body.roles) ? body.roles : [],
       institution: body.institution ?? null,
+      // 이 신원을 검증한 로그인 서버(/api/me의 issuer) 그대로: 반입·다운로드 작업 기록의 소유자를 가른다(S9-U4b D1691).
+      issuer: typeof body.issuer === 'string' && body.issuer ? body.issuer : null,
     };
   }
 
