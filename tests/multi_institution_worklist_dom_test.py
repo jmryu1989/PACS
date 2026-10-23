@@ -1164,6 +1164,15 @@ class MultiInstitutionWorklist(unittest.TestCase):
     def legend_text(self, screen):
         legend = screen.legend()
         expect(legend).to_have_count(1)
+        # U4BL6-03: the page's own start is over before the legend is measured. A reader's page asks once, after it goes
+        # online, for its two Critical Results lists (received, and sent pending; critical-result-mounts.js); "first list
+        # drawn" does not wait for them. Each answered is the explicit boundary: from here a request in the window is the
+        # legend's own (or a later poll, 60 s apart), never the start's - no fixed wait, no critical-results request ignored.
+        def started():
+            views = [parse_qs(e["query"]).get("view", [None])[0] for e in screen.server.ledger
+                     if e["path"] == "/api/critical-results" and e["status"] is not None]
+            return views.count("received") >= 1 and views.count("sent") >= 1
+        until(started, 15, "the start's Critical Results reads answered")
         before_ledger, before_writes = len(screen.server.ledger), len(screen.storage_writes())
         legend.locator("summary").click()
         expect(legend).to_have_attribute("open", "")

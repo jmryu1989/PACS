@@ -1,5 +1,6 @@
 """REQ/RISK/TEST-C12M-01..05: product bindings and fail-closed restore paths."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,7 +54,9 @@ def check(body, product_sha=None):
 class Pure(unittest.TestCase):
     def test_catalog_column_budget_supports_current_schema_and_stays_bounded(self):
         catalog=fixture()[0]['product']['catalog']
-        catalog['columns']=[dict(column_name='synthetic') for _ in range(260)]
+        # S9-U4b: the product has 521 columns with ImportOperation (506 before it); 525 must pass and the doubled list
+        # (1,050) is still refused, so the bound grew with the schema and stays a bound.
+        catalog['columns']=[dict(column_name='synthetic') for _ in range(525)]
         transfer.catalog_contract(catalog)
         catalog['columns']*=2
         with self.assertRaises(ValueError):transfer.catalog_contract(catalog)
@@ -73,6 +76,93 @@ class Pure(unittest.TestCase):
             with self.subTest(table=table, field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
 
+    def assert_import_operation_rows(self, rows):
+        """S9-U4b (REQ-S9-U4-13, contract 4.4 restore/maintenance): the rows a restore must keep carry every phase with real
+        values and valid reservation relations - each holder is an attempt of a file of that very Study/SOP, one per Study."""
+        by_kind = {}
+        for row in rows: by_kind.setdefault(row['kind'], []).append(row)
+        self.assertEqual({kind: len(value) for kind, value in by_kind.items()}, {'import': 1, 'download': 3, 'study-claim': 4, 'sop-claim': 4})
+        [member] = by_kind['import']
+        self.assertEqual((member['ownerIssuer'], member['ownerSubject'], member['actor']),
+                         ('https://synthetic.test/auth/realms/kin', 'SYNTHETIC-tech-sub', 'SYNTHETIC-tech'))
+        self.assertNotEqual(member['ownerSubject'], member['actor'], 'the owner is the verified subject, never the actor label')
+        entries = member['results']
+        attempts = {attempt['attemptId']: (entry, attempt) for entry in entries for attempt in entry['attempts']}
+        # Import phases: prepared, dispatching (an expired one and another instance's live one), unknown and finished.
+        last_phases = sorted(entry['attempts'][-1]['phase'] for entry in entries if entry['attempts'])
+        self.assertEqual(last_phases, ['dispatching', 'dispatching', 'finished', 'prepared', 'unknown'])
+        live = [a for _, a in attempts.values() if a['leaseUntil'] > '2098']
+        self.assertEqual(len(live), 1)
+        self.assertNotEqual(live[0]['ownerInstance'], entries[0]['attempts'][0]['ownerInstance'], 'the live attempt is another instance\'s')
+        unknown = entries[1]['attempts'][1]
+        self.assertEqual([a['generation'] for a in entries[1]['attempts']], [1, 2])
+        self.assertEqual((entries[1]['attempts'][0]['transport'], unknown['transport']), ('certain-no-write', 'unknown'))
+        self.assertTrue(unknown['autoRecheckedAt'] and unknown['recovery']['basis'] == 'orthanc-restarted' and unknown['recovery']['resolvedAt'] is None)
+        refused = entries[5]
+        self.assertEqual((refused['code'], refused['attempts'], bool(refused['studyUid'] and refused['sopUid'])), ('MODALITY_NOT_IMPORTABLE', [], True))
+        self.assertFalse({'patientId', 'patientName', 'nameKey', 'birthKey'} & {key for entry in entries for key in entry},
+                         'import results hold no patient identity value')
+        # Every holder names an attempt of a file of its own Study (and SOP); a Study has one holder; the initializing
+        # claim's holder is the prepared attempt, the free SOP claim is the stored file's.
+        for row in by_kind['study-claim'] + by_kind['sop-claim']:
+            self.assertEqual((row['ownerIssuer'], row['ownerSubject'], row['actor'], row['results'], row['download']),
+                             ('kin-internal', 'dicom-import-gate', 'dicom-import-gate', [], None))
+            holder = row['claim']['heldByAttemptId']
+            if holder is None: continue
+            entry, attempt = attempts[holder]
+            self.assertEqual(entry['studyUid'], row['studyUid'], row['claimKey'])
+            if row['kind'] == 'sop-claim':
+                self.assertEqual((row['claimKey'], row['claim']['sha256'], row['claim']['bytes']), ('sop:' + entry['sopUid'], entry['sha256'], entry['bytes']))
+            self.assertEqual(entry['attempts'][-1]['attemptId'], holder, 'a holder is the file\'s last attempt')
+        self.assertEqual(sorted(row['claim']['phase'] for row in by_kind['study-claim']), ['bound', 'bound', 'bound', 'initializing'])
+        initializing = next(row for row in by_kind['study-claim'] if row['claim']['phase'] == 'initializing')
+        self.assertEqual(attempts[initializing['claim']['heldByAttemptId']][1]['phase'], 'prepared')
+        self.assertEqual(len({row['claimKey'] for row in rows if row['claimKey']}), 8)
+        # Download states: prepared, sending (expired), sent, incomplete and unconfirmed, with the sent hashes and finish and
+        # a partial checkpoint (counters, no hash).
+        for row in by_kind['download']:
+            self.assertEqual(hashlib.sha256(row['download']['manifestCanonical'].encode()).hexdigest(), row['manifestSha256'])
+            self.assertEqual(row['download']['targetStudyUid'], row['studyUid'])
+        self.assertEqual(sorted(row['status'] for row in by_kind['download']), ['prepared', 'sending', 'sent'])
+        self.assertEqual(sorted(a['state'] for row in by_kind['download'] for a in row['download']['attempts']),
+                         ['incomplete', 'sending', 'sent', 'unconfirmed'])
+        sent = next(a for row in by_kind['download'] for a in row['download']['attempts'] if a['state'] == 'sent')
+        self.assertTrue(sent['archiveSha256'] and sent['responseFinished'] and all(o['complete'] and o['sha256'] for o in sent['objects']))
+        partial = next(a for row in by_kind['download'] for a in row['download']['attempts'] if a['state'] == 'incomplete')['objects']
+        self.assertEqual([(o['complete'], o['sha256'] is None, o['bytesSupplied'] <= o['bytesRead']) for o in partial], [(True, False, True), (False, True, True)])
+
+    def test_import_operation_restore_keeps_owner_attempt_manifest_and_claim_fields(self):
+        """S9-U4b (REQ-S9-U4-13): a restore that loses or changes any of these fields is a product mismatch."""
+        body, _, _, _ = fixture(); expected = body['product']
+        self.assert_import_operation_rows(expected['rows']['ImportOperation'])
+        def find(rows, kind, pick=0): return [row for row in rows if row['kind'] == kind][pick]
+        def entry(rows, index): return find(rows, 'import')['results'][index]
+        changes = [
+            ('ownerSubject from actor', lambda rows: find(rows, 'import').__setitem__('ownerSubject', find(rows, 'import')['actor'])),
+            ('owner issuer', lambda rows: find(rows, 'import').__setitem__('ownerIssuer', 'https://other.test')),
+            ('attempt generation', lambda rows: entry(rows, 1)['attempts'][1].__setitem__('generation', 1)),
+            ('expired lease', lambda rows: entry(rows, 2)['attempts'][0].__setitem__('leaseUntil', None)),
+            ('live lease', lambda rows: entry(rows, 4)['attempts'][0].__setitem__('leaseUntil', '2026-09-06T00:00:30.123Z')),
+            ('prepared phase', lambda rows: entry(rows, 3)['attempts'][0].__setitem__('phase', 'dispatching')),
+            ('attempt transport', lambda rows: entry(rows, 1)['attempts'][0].__setitem__('transport', None)),
+            ('auto re-check', lambda rows: entry(rows, 1)['attempts'][1].__setitem__('autoRecheckedAt', None)),
+            ('recovery record', lambda rows: entry(rows, 1)['attempts'][1].__setitem__('recovery', None)),
+            ('refused file UIDs', lambda rows: entry(rows, 5).__setitem__('sopUid', None)),
+            ('manifest text', lambda rows: find(rows, 'download', 1)['download'].__setitem__('manifestCanonical', '{}')),
+            ('sent archive hash', lambda rows: find(rows, 'download', 1)['download']['attempts'][1].__setitem__('archiveSha256', None)),
+            ('sent finish', lambda rows: find(rows, 'download', 1)['download']['attempts'][1].__setitem__('responseFinished', False)),
+            ('supply counter', lambda rows: find(rows, 'download', 1)['download']['attempts'][0]['objects'][1].__setitem__('bytesSupplied', 0)),
+            ('sending lease', lambda rows: find(rows, 'download', 2)['download']['attempts'][1].__setitem__('leaseUntil', None)),
+            ('lost attempt', lambda rows: find(rows, 'download', 2)['download']['attempts'].pop()),
+            ('claim phase', lambda rows: find(rows, 'study-claim', 2)['claim'].__setitem__('phase', 'bound')),
+            ('claim holder', lambda rows: find(rows, 'sop-claim', 1)['claim'].__setitem__('heldByAttemptId', None)),
+            ('claim row lost', lambda rows: rows.remove(find(rows, 'sop-claim', 0))),
+        ]
+        for name, change in changes:
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
+            change(actual['rows']['ImportOperation'])
+            with self.subTest(change=name), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
     def test_current_git_migrations_are_covered(self):
         self.assertEqual(len(transfer.migration_sources()),len(transfer.MIGRATIONS))
 
@@ -283,8 +373,10 @@ class Pure(unittest.TestCase):
         # EMR-B1 added schema emr_access (46 migration files after the W2 union): still 51 public tables and the same public rows; its 8 tables are
         # observed schema-qualified beside them with 8 synthetic rows (two chained viewing entries, the heads of both streams, a placed and
         # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
-        self.assertEqual(len(transfer.MIGRATIONS), 46)
-        self.assertEqual(len(transfer.TABLES), 51)
+        # S9-U4b added ImportOperation (47 migration files, 52 public tables) with twelve synthetic rows: a member import with
+        # every attempt phase, a prepared, a Sent and a still-sending download, and the gate's four Study and four SOP reservations.
+        self.assertEqual(len(transfer.MIGRATIONS), 47)
+        self.assertEqual(len(transfer.TABLES), 52)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
@@ -310,7 +402,9 @@ class Pure(unittest.TestCase):
                          + 2    # S7-U5 member isolation: the owed and the done isolation fact
                          + 2    # S7-U5 member rights/import
                          + 1    # S8-CTX: revision with save attempt id, beside the legacy revision
-                         + 2)   # S7-U5 D600: the unknown and the settled provider change record
+                         + 2    # S7-U5 D600: the unknown and the settled provider change record
+                         + 12)  # S9-U4b: one import, three downloads, four Study and four SOP reservations
+        self.assert_import_operation_rows(rows['ImportOperation'])
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
         self.assertEqual(sorted(rows['MemberIsolation'][0]), ['attempts', 'decidedAt', 'nextAttemptAt', 'providerDoneAt', 'sub'])
