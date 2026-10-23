@@ -116,6 +116,21 @@ test('V4-T01 packs, overflow blobs and every-use verification of stored bytes', 
   writer.close(); store.close();
 });
 
+test('V4-T01 open pack descriptors are bounded: reads across more packs than the budget succeed while the store never holds more descriptors than the budget', { skip: !only('V4-T01') }, t => {
+  // RC-03/RC-05 (S1-PRE-16 resource bound): a state of thousands of packs must not hold one descriptor per pack ever read.
+  const dir = scratch(t), store = new V4.PackStore(path.join(dir, 'v4'), lineageSha, { cacheBytes: 0, maxDescriptors: 3 });
+  const refs = [];
+  for (let i = 0; i < 6; i++) { const w = new V4.PackWriter(store, 1); refs.push(w.append(1, 2, 0, 0, Buffer.from('{"i":' + i + '}'))); w.close(); }
+  assert.equal(store.listPacks().length, 6, 'one pack per writer');
+  for (let round = 0; round < 3; round++) for (const [i, ref] of refs.entries()) {
+    assert.equal(store.page(ref, { kind: 1, tree: 2 }, (h, p) => p.toString()), '{"i":' + i + '}', 'every pack is readable through the bounded descriptor set');
+    assert.ok(store.openDescriptors <= 3, 'the store never holds more descriptors than its budget: ' + store.openDescriptors);
+  }
+  assert.equal(store.openDescriptors, 3, 'the budget is used, not avoided');
+  store.release(refs[5].pack); assert.equal(store.openDescriptors, 2, 'a released pack closes its descriptor');
+  store.close(); assert.equal(store.openDescriptors, 0);
+});
+
 function populate(store, writer, treeId, n, valueOf = i => JSON.stringify({ phase: 'committed', generation: i, binding: { attemptId: 'a'.repeat(36), sequence: i, hash: 'h'.repeat(64), contentSha256: 'c'.repeat(64) } })) {
   const changes = new Map();
   for (let i = 0; i < n; i++) changes.set('viewing:' + String(i).padStart(8, '0') + '-' + sha256(String(i)).slice(0, 20), valueOf(i));
@@ -245,7 +260,25 @@ test('V4-T02 the bounded resumable walk visits every member and every page exact
   const appended = new Set(w2.written.map(r => r.pack + ':' + r.page)), added = [...after].filter(p => !before.has(p));
   assert.ok(added.every(p => appended.has(p)), 'every page the new root added was appended by this writer');
   assert.equal(next.get(firstKey), undefined); assert.equal(next.get(bigKey), '{"big":false}'); assert.equal(next.count, 4000);
-  w2.close(); writer.close(); store.close();
+  // RC-03 (S1-PRE-14): a relocation touch moves an overflow chain only when it occupies a pack being evacuated; the
+  // moved bucket keeps its value, the old chain is reported orphaned, and an ordinary touch leaves the chain in place.
+  const chainBefore = [...next.pagesWithOwners()].filter(([, owner]) => owner !== null);
+  assert.ok(chainBefore.length >= 2, 'the long key is stored as an overflow chain: ' + chainBefore.length);
+  assert.ok(chainBefore.every(([, owner]) => owner.tree === 5 && owner.digest === V4.routingDigest(5, bigKey)), 'every overflow page names the bucket that owns its chain');
+  const chainPacks = new Set(chainBefore.map(([ref]) => ref.pack));
+  const w3 = new V4.PackWriter(store, 3), untouched = [];
+  const stays = next.touch(w3, [V4.routingDigest(5, bigKey)], untouched); w3.flush();
+  assert.deepEqual([...stays.pagesWithOwners()].filter(([, o]) => o !== null).map(([r]) => r.pack + ':' + r.page), chainBefore.map(([r]) => r.pack + ':' + r.page), 'a plain touch reuses the chain where it is');
+  assert.ok(untouched.every(r => !chainBefore.some(([c]) => c.pack === r.pack && c.page === r.page)), 'a plain touch orphans no chain page');
+  const w4 = new V4.PackWriter(store, 4), moved = [];
+  const evacuated = next.touch(w4, [V4.routingDigest(5, bigKey)], moved, chainPacks); w4.flush();
+  const chainAfter = [...evacuated.pagesWithOwners()].filter(([, o]) => o !== null).map(([r]) => r);
+  assert.equal(chainAfter.length, chainBefore.length, 'the chain is copied page for page');
+  assert.ok(chainAfter.every(r => !chainPacks.has(r.pack)), 'an evacuated overflow chain leaves its pack');
+  assert.ok(chainBefore.every(([c]) => moved.some(r => r.pack === c.pack && r.page === c.page)), 'the old chain pages are the orphans of the evacuation');
+  assert.equal(evacuated.get(bigKey), '{"big":false}', 'the evacuated bucket keeps its value'); assert.equal(evacuated.count, 4000);
+  assert.deepEqual(w4.overflowRoutes.map(n => n.tree + ':' + n.digest), ['5:' + V4.routingDigest(5, bigKey)], 'the writer records the owning bucket of the chain it wrote');
+  w4.close(); w3.close(); w2.close(); writer.close(); store.close();
 });
 
 test('V4-T02 collision buckets retain and compare the full key (isolated harness with a substituted routing hash)', { skip: !only('V4-T02') }, t => {

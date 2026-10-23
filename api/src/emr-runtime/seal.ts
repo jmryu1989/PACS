@@ -648,13 +648,15 @@ export class AccessSeal {
   fullCheckDue(now: Date = new Date()): boolean {
     if (this.view().format !== 4) return false;
     const status = this.call('v4-status', { now: now.toISOString() });
-    return status.sweep !== null || status.fullCheck.overdue === true || status.accounting.known === false;
+    return status.sweep !== null || status.fullCheck.overdue === true;
   }
-  /** Whether the v4 owner's pack population is fragmented (more packs than the live pages justify) and a bounded
-   * relocation slice is due; `reclaimSlice` performs one (a logical no-change transition) plus the dead-pack slice. */
+  /** Whether a bounded maintenance slice is due: the liveness accounting still unknown (a new incarnation rebuilds it
+   * slice by slice) or the pack population fragmented (more packs than the live pages justify); `reclaimSlice`
+   * performs one (a rebuild step, or one relocation - a logical no-change transition - plus the dead-pack slice). */
   reclaimDue(): boolean {
     if (this.view().format !== 4) return false;
-    return this.call('v4-status').fragmentation.due === true;
+    const status = this.call('v4-status');
+    return status.accounting.known === false || status.fragmentation.due === true;
   }
   reclaimSlice(): any {
     if (this.view().format !== 4) throw new SealRefused('SealUnsupportedFormat', 'reclaim');

@@ -183,22 +183,29 @@ const pageSha256FromFooter = (bytes: Buffer) => createHash('sha256').update(byte
 export const pageSha256 = (page: Buffer): string => page.subarray(FOOTER_OFFSET).toString('hex');
 
 // ── pack store: immutable packs, bounded verified cache ──────────────────────────────────────────────────────────────
-export interface StoreOptions { cacheBytes?: number }
+export interface StoreOptions { cacheBytes?: number; maxDescriptors?: number }
 /** Packs live under `<v4>/pages/<packId>.pages`; pages are read by reference and verified before use; verified parsed
- * nodes are cached by (pack, page, expected hash) within a byte budget and invalidated explicitly. */
+ * nodes are cached by (pack, page, expected hash) within a byte budget and invalidated explicitly. Open read
+ * descriptors are bounded (least recently used closed first): a state of thousands of packs never holds one
+ * descriptor per pack. */
 export class PackStore {
   readonly pagesDirectory: string;
   private readonly cache = new Map<string, { bytes: number; value: any; header: PageHeader }>();
   private cacheBytes = 0;
+  /** Open descriptors in least-recently-used order (insertion order; a use re-inserts). */
   private readonly fds = new Map<string, number>();
   constructor(readonly v4Directory: string, readonly lineageSha256: string, private readonly options: StoreOptions = {}) {
     this.pagesDirectory = path.join(v4Directory, 'pages');
   }
   get cacheBudget(): number { return this.options.cacheBytes ?? 512 * 1024 * 1024; }
+  get descriptorBudget(): number { return this.options.maxDescriptors ?? 64; }
+  get openDescriptors(): number { return this.fds.size; }
   packFile(pack: string): string { if (!HEX32.test(pack)) corrupt('pack-id'); return path.join(this.pagesDirectory, pack + '.pages'); }
   private fd(pack: string): number {
     let fd = this.fds.get(pack);
-    if (fd === undefined) { fd = fs.openSync(this.packFile(pack), 'r'); this.fds.set(pack, fd); }
+    if (fd !== undefined) { this.fds.delete(pack); this.fds.set(pack, fd); return fd; }
+    while (this.fds.size >= Math.max(1, this.descriptorBudget)) this.release(this.fds.keys().next().value!);
+    fd = fs.openSync(this.packFile(pack), 'r'); this.fds.set(pack, fd);
     return fd;
   }
   /** Exact bytes of one page (full read length checked) from the named pack at page*65536. */
@@ -271,6 +278,9 @@ export class PackWriter {
   private newPacks = false;
   /** Every page this writer appended (in order): the liveness accounting of the roots that reference them. */
   readonly written: PageRef[] = [];
+  /** Every overflow chain this writer wrote for a tree bucket, with the bucket that owns it (the route a relocation
+   * of the chain's pages must rewrite); the engine drains it with `written`. */
+  readonly overflowRoutes: { tree: number; digest: string; descriptor: BlobDescriptor }[] = [];
   /** The pack the writer may still append to (never a reclamation candidate while this writer is open). */
   get currentPack(): string | null { return this.current ? this.current.pack : null; }
   constructor(readonly store: PackStore, public revision: number) {
@@ -500,11 +510,16 @@ export class Tree {
   }
   /** Every page reference reachable from this tree (nodes and overflow chains), for liveness accounting and copies. */
   *pages(): Generator<PageRef> {
-    const walk = function* (this: Tree, ref: PageRef, level: number, low: string | null, high: string | null): Generator<PageRef> {
-      yield ref;
+    for (const [ref] of this.pagesWithOwners()) yield ref;
+  }
+  /** Every reachable page with, for an overflow page, the bucket (tree, digest) whose chain it belongs to (the route
+   * that must be rewritten to move it); a node page carries null. */
+  *pagesWithOwners(): Generator<[PageRef, PageOwner | null]> {
+    const walk = function* (this: Tree, ref: PageRef, level: number, low: string | null, high: string | null): Generator<[PageRef, PageOwner | null]> {
+      yield [ref, null];
       const node = this.node(ref, level, low, high);
       if (node.kind === 1) {
-        for (const entry of node.entries) if ('overflow' in entry.value) yield* blobPages(this.store, entry.value.overflow, this.id);
+        for (const entry of node.entries) if ('overflow' in entry.value) for (const p of blobPages(this.store, entry.value.overflow, this.id)) yield [p, { tree: this.id, digest: entry.digest }];
         return;
       }
       for (const child of node.children) yield* walk.call(this, child.ref, node.level - 1, child.low, child.high);
@@ -530,12 +545,13 @@ export class Tree {
     return this.rewrite(writer, [...byDigest.keys()].sort(), byDigest, orphans);
   }
   /** Copy-on-write rewrite of the routes to `digests` with no logical change: the same members, the same partition,
-   * the pages on those routes relocated into the writer's current pack; the replaced pages are the orphans. Unchanged
-   * overflow chains are reused, never rewritten. */
-  touch(writer: PackWriter, digests: string[], orphans?: PageRef[]): Tree {
+   * the pages on those routes relocated into the writer's current pack; the replaced pages are the orphans. An
+   * unchanged overflow chain is reused, never rewritten - unless it occupies a pack in `evacuate`: then the bucket is
+   * re-encoded (a bounded copy of its pairs into a new chain) and the old chain is orphaned. */
+  touch(writer: PackWriter, digests: string[], orphans?: PageRef[], evacuate?: Set<string>): Tree {
     const sorted = [...new Set(digests)].sort();
     if (!sorted.length) return this;
-    return this.rewrite(writer, sorted, new Map(sorted.map(d => [d, new Map<string, string | null>()])), orphans);
+    return this.rewrite(writer, sorted, new Map(sorted.map(d => [d, new Map<string, string | null>()])), orphans, evacuate);
   }
   /** The node at `level` whose interval contains `digest` (the route from the root), with its interval. */
   locate(level: number, digest: string): { ref: PageRef; low: string | null; high: string | null } {
@@ -549,8 +565,8 @@ export class Tree {
     }
     return { ref, low, high };
   }
-  private rewrite(writer: PackWriter, digests: string[], byDigest: Map<string, Map<string, string | null>>, orphans?: PageRef[]): Tree {
-    const descriptors = this.update(writer, this.root, this.level, null, null, digests, byDigest, orphans);
+  private rewrite(writer: PackWriter, digests: string[], byDigest: Map<string, Map<string, string | null>>, orphans?: PageRef[], evacuate?: Set<string>): Tree {
+    const descriptors = this.update(writer, this.root, this.level, null, null, digests, byDigest, orphans, evacuate);
     let level = this.level, children = descriptors;
     while (children.length > 1) { children = this.writeBranches(writer, children, level + 1, null, null); level++; }
     let root = children[0];
@@ -563,7 +579,7 @@ export class Tree {
     }
     return new Tree(this.store, this.id, root.ref, root.count, level);
   }
-  private update(writer: PackWriter, ref: PageRef, level: number, low: string | null, high: string | null, digests: string[], byDigest: Map<string, Map<string, string | null>>, orphans?: PageRef[]): ChildDescriptor[] {
+  private update(writer: PackWriter, ref: PageRef, level: number, low: string | null, high: string | null, digests: string[], byDigest: Map<string, Map<string, string | null>>, orphans?: PageRef[], evacuate?: Set<string>): ChildDescriptor[] {
     const node = this.node(ref, level, low, high);
     orphans?.push(ref);
     if (node.kind === 1) {
@@ -573,12 +589,14 @@ export class Tree {
       for (const entry of node.entries) buckets.set(entry.digest, { digest: entry.digest, count: entry.count, value: entry.value, bytes: Buffer.byteLength(canonical({ digest: entry.digest, count: String(entry.count), value: entry.value })) });
       for (const digest of digests) {
         const existing = buckets.get(digest), edits = byDigest.get(digest)!;
+        if (!edits.size && existing && 'overflow' in existing.value) {
+          // A relocation touch of an overflow bucket: its chain stays where it is unless a page of it occupies a pack
+          // being evacuated - then the bucket is re-encoded into a new chain and the old one orphaned.
+          const chain = [...blobPages(this.store, existing.value.overflow, this.id)];
+          if (!evacuate || !chain.some(p => evacuate.has(p.pack))) continue;
+          orphans?.push(...chain);
+        } else if (existing && orphans && 'overflow' in existing.value && edits.size) for (const p of blobPages(this.store, existing.value.overflow, this.id)) orphans.push(p);
         const pairs = new Map(existing ? this.bucketPairs({ digest, value: existing.value }) : []);
-        if (!edits.size && existing) {
-          // A relocation touch of an existing bucket: re-encoded only when inline (an overflow chain stays where it is).
-          if ('overflow' in existing.value) continue;
-        }
-        if (existing && orphans && 'overflow' in existing.value && edits.size) for (const p of blobPages(this.store, existing.value.overflow, this.id)) orphans.push(p);
         for (const [key, value] of edits) { if (value === null) pairs.delete(key); else pairs.set(key, value); }
         if (!pairs.size) { buckets.delete(digest); continue; }
         buckets.set(digest, this.encodeBucket(writer, digest, [...pairs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))));
@@ -591,7 +609,7 @@ export class Tree {
       const mine: string[] = [];
       while (at < digests.length && below(digests[at], child.high)) { if (atLeast(digests[at], child.low)) mine.push(digests[at]); at++; }
       if (!mine.length) { next.push(child); continue; }
-      next.push(...this.update(writer, child.ref, node.level - 1, child.low, child.high, mine, byDigest, orphans));
+      next.push(...this.update(writer, child.ref, node.level - 1, child.low, child.high, mine, byDigest, orphans, evacuate));
     }
     return this.writeBranches(writer, next, node.level, low, high);
   }
@@ -600,6 +618,7 @@ export class Tree {
     const inline = canonical({ digest, count: String(pairs.length), value: { inline: pairs } });
     if (Buffer.byteLength(inline) <= BODY_CAPACITY - 160) return { digest, count: pairs.length, value: { inline: pairs }, bytes: Buffer.byteLength(inline) };
     const descriptor = writeBlob(writer, this.id, Buffer.from(canonical(pairs)));
+    writer.overflowRoutes.push({ tree: this.id, digest, descriptor });
     const text = canonical({ digest, count: String(pairs.length), value: { overflow: descriptor } });
     return { digest, count: pairs.length, value: { overflow: descriptor }, bytes: Buffer.byteLength(text) };
   }
@@ -701,8 +720,8 @@ export class Tree {
    * the boundary (the completed leaf's `high`) to continue from; `done` when the walk reached the end of the tree. The
    * caller sums `keys` against the root count. `visit` sees every reachable page exactly once over a complete walk
    * (leaves and overflow pages when their leaf is processed, a branch in the step that starts at its lower bound), so
-   * a sweep can rebuild the per-pack liveness accounting. */
-  checkFrom(from: string | null, maxLeaves: number, member?: (key: string, raw: string) => void, visit?: (ref: PageRef) => void): { next: string | null; keys: number; pages: number; done: boolean } {
+   * a sweep can rebuild the per-pack liveness accounting; an overflow page comes with the bucket that owns its chain. */
+  checkFrom(from: string | null, maxLeaves: number, member?: (key: string, raw: string) => void, visit?: (ref: PageRef, owner: PageOwner | null) => void): { next: string | null; keys: number; pages: number; done: boolean } {
     let keys = 0, pages = 0, leaves = 0, last: string | null = null, next: string | null = from, done = true;
     const walk = (ref: PageRef, level: number, low: string | null, high: string | null, expectedCount: number): boolean => {
       if (high !== null && from !== null && high <= from) return true;   // entirely before the cursor: already checked
@@ -710,13 +729,13 @@ export class Tree {
       if (node.count !== expectedCount) corrupt('tree:count');
       if (node.kind === 1) {
         if (leaves >= maxLeaves) { done = false; return false; }
-        leaves++; visit?.(ref);
+        leaves++; visit?.(ref, null);
         for (const entry of node.entries) {
           if (last !== null && !(entry.digest > last)) corrupt('tree:global-order');
           const pairs = this.bucketPairs(entry);
           if (pairs.length !== entry.count) corrupt('tree:bucket-count');
           for (const [key, raw] of pairs) { if (routingDigest(this.id, key) !== entry.digest) corrupt('tree:bucket-digest'); member?.(key, raw); }
-          if ('overflow' in entry.value) for (const p of blobPages(this.store, entry.value.overflow, this.id)) { pages++; visit?.(p); }
+          if ('overflow' in entry.value) for (const p of blobPages(this.store, entry.value.overflow, this.id)) { pages++; visit?.(p, { tree: this.id, digest: entry.digest }); }
           keys += pairs.length; last = entry.digest;
         }
         next = high;
@@ -725,7 +744,7 @@ export class Tree {
       if (node.children.length < 2) corrupt('tree:branch-children');
       // A branch is first entered in the step whose cursor is its lower bound (an earlier step that ran out of budget at
       // its first leaf left the cursor there); that is its one counted visit.
-      if (low === null ? from === null : low === from) visit?.(ref);
+      if (low === null ? from === null : low === from) visit?.(ref, null);
       for (const child of node.children) if (!walk(child.ref, node.level - 1, child.low, child.high, child.count)) return false;
       return true;
     };
@@ -733,7 +752,10 @@ export class Tree {
     return { next: done ? null : next, keys, pages, done };
   }
 }
-function* blobPages(store: PackStore, descriptor: BlobDescriptor, tree: number): Generator<PageRef> {
+/** The bucket a reachable overflow page belongs to (a node page has no owner but itself). */
+export interface PageOwner { tree: number; digest: string }
+/** The pages of one overflow chain in order (each page verified on the read that names its successor). */
+export function* blobPages(store: PackStore, descriptor: BlobDescriptor, tree: number): Generator<PageRef> {
   const pages = parseDecimal(descriptor.pages, 'blob');
   let ref: PageRef | null = descriptor.first;
   for (let i = 0; i < pages && ref; i++) {

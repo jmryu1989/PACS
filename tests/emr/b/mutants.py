@@ -493,6 +493,24 @@ V4_MUTANTS = {
         ("api/src/emr-runtime/external-writer.ts",
          "    (engine.terminal as V4Map).rebind(trees[5]); (engine.bundles as V4Map).rebind(trees[6]);\n",
          "")]),
+    # RC-03 (order 05): the scratch accounting of an earlier incarnation is trusted as deletion authority at admission.
+    "V4-M15": ("a stale scratch accounting naming the selected root is adopted at admission (a reachable pack it names at zero is unlinked)", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "    if (repair) { try { fs.rmSync(packsFile(v4), { force: true }); } catch { /* scratch */ } }\n",
+         "    const scratchPacks: any = readScratch(packsFile(v4)); const trusted: Map<string, number> | null = scratchPacks && scratchPacks.root === rootSha256 ? new Map(scratchPacks.live as [string, number][]) : null;\n"),
+        ("api/src/emr-runtime/external-writer.ts",
+         "      sweep, latched: null, writer: null, packs: null, dead: new Set(), liveness: null, overflowRoutes: null, relocateCursor: null,\n",
+         "      sweep, latched: null, writer: null, packs: trusted, dead: new Set(trusted ? [...trusted].filter(([, n]) => n === 0).map(([p]) => p) : []), liveness: null, overflowRoutes: null, relocateCursor: null,\n")]),
+    # RC-03 (S1-PRE-15): a relocation continues past a page it could not read on a candidate pack (the damage is swallowed).
+    "V4-M16": ("a relocation skips an unreadable page of a live pack and continues (current-route damage is swallowed, not latched)", [
+        ("api/src/emr-runtime/external-writer.ts",
+         "      if (unverified) return refuse('relocate:' + pack + ':unreadable-live:' + unverified);\n",
+         "      if (unverified) continue;\n")]),
+    # RC-03 (S1-PRE-14): an overflow chain of a pack being evacuated is left where it is (a sparse overflow-only pack never empties).
+    "V4-M17": ("an evacuated overflow chain stays in its pack (relocation never moves overflow pages)", [
+        ("api/src/emr-runtime/checkpoint-v4.ts",
+         "          if (!evacuate || !chain.some(p => evacuate.has(p.pack))) continue;\n",
+         "          continue;\n")]),
 }
 V4_SUITES = {
     "service-v4": {"command": ["tests/emr/b/state_service_test.cjs"], "variable": "EMR_SERVICE_CASES", "env": {"EMR_STATE_FORMAT": "4"}, "declared": "local_service_cases"},

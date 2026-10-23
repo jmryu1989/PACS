@@ -1514,7 +1514,11 @@ test('V4-T05 pack reclamation unlinks only packs unreachable from the selected r
   assert.ok(absorbed.length > 100, 'one immutable root per transition is on disk before the rotation: ' + absorbed.length);
   const g = await reopened(t, 'restart after reclamation', { directory: f.directory, model: model(structuredClone(f.database.streams)), cold: true });
   await startObserved(g.service); assert.equal(g.service.state, 'ready', 'restart after reclamation');
-  assert.equal(g.coordinator.call('v4-status').accounting.known, true, 'a clean close hands the exact accounting to the next incarnation');
+  // RC-03 (S1-PRE-01/B2-S2-08): no accounting outlives an incarnation. The next one starts with it unknown (no scratch
+  // file is deletion authority) and rebuilds it in bounded slices from the verified closure of a pinned root plus the
+  // deltas since; nothing is unlinked before the rebuild completes.
+  assert.equal(g.coordinator.call('v4-status').accounting.known, false, 'a new incarnation starts with the accounting unknown: no scratch file is deletion authority');
+  assert.ok(before.descriptors <= 64 && g.coordinator.call('v4-status').descriptors <= 64, 'open pack descriptors stay within the store budget');
   const gw = await (await g.hello()).work();
   for (const item of done) assert.equal(JSON.stringify((await gw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof));
   await complete(g, gw);
@@ -1524,10 +1528,82 @@ test('V4-T05 pack reclamation unlinks only packs unreachable from the selected r
   const remaining = fs.readdirSync(rootsDirectory);
   assert.ok(remaining.includes(rotated.rootSha256 + '.json'), 'the selected root remains');
   assert.ok(absorbed.every(name => !remaining.includes(name)), 'every root the retired segment absorbed is gone');
-  assert.ok(remaining.length <= 1 + rotated.wal.transitions, 'only the open segment\'s roots remain: ' + remaining.length);
+  assert.ok(remaining.length <= 2 + rotated.wal.transitions, 'only the open segment\'s roots (and a pinned rebuild root) remain: ' + remaining.length);
   for (const item of done) assert.equal(JSON.stringify((await gw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after rotation');
   for (const b of done[5].bundle.bindings) assertExcluded(await replayObservation(g, gw, b));
+  const rebuilt = await rebuildLiveness(g);
+  assert.equal(rebuilt.accounting.known, true, 'the accounting is rebuilt from the verified closure of a pinned root');
+  assert.equal(rebuilt.accounting.dead, 0, 'packs the rebuilt accounting proves dead are reclaimed in the next slice');
+  assert.ok(rebuilt.packs <= 2 * rebuilt.fragmentation.needed + 2, 'the rebuilt accounting keeps the population bound: ' + JSON.stringify({ packs: rebuilt.packs, fragmentation: rebuilt.fragmentation }));
+  // A scratch file of an earlier incarnation naming the selected root with a reachable pack at zero (a crash left it
+  // stale): never deletion authority - every proof is served through the pack, nothing is latched.
+  await closeOwner(g);
+  const selected = V4.readSelector(path.join(f.directory, 'seal/settlement.json')).body.rootSha256, reachablePack = v4LeafBelowRoot(f.directory, 5).ref.pack;
+  fs.writeFileSync(path.join(f.directory, 'seal/v4/tmp/packs.json'), JSON.stringify({ root: selected, live: [[reachablePack, 0]], sweep: null }));
+  const h = await reopen(t, g), hw = await (await h.hello()).work();
+  // An adopted scratch would unlink the pack in the startup reclamation already: the first reads through it, then the
+  // transitions after it, then the reads again.
+  for (const item of done) { const reply = await hw.call('confirm-bundle', item.bundle); assert.equal(reply.ok && JSON.stringify(reply.result) === JSON.stringify(item.proof), true, 'proofs after a stale scratch named a reachable pack at zero: ' + JSON.stringify(reply.error ?? null)); }
+  for (let i = 0; i < 6; i++) await complete(h, hw);
+  for (const item of done) assert.equal(JSON.stringify((await hw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after a stale scratch named a reachable pack at zero');
+  assert.equal(fs.existsSync(latchFile(f.directory)), false, 'a stale scratch unlinks no reachable pack (nothing is latched)');
+  assert.equal((await rebuildLiveness(h)).accounting.known, true);
+  // (S1-PRE-15) Damage on a page the accounting proves dead is skipped by a relocation (healthy control); damage on a
+  // live page of a candidate pack is discovered by the relocation itself and latches the owner at the discovery: no
+  // deletion, no compact transition published after it. Repaired, the same proofs are served again.
+  const dead = v4RelocationPages(f.directory).dead;
+  flipPageByte(f.directory, dead);
+  const beforeDead = h.coordinator.call('v4-status');
+  h.coordinator.call('compact', { force: true });
+  assert.equal(fs.existsSync(latchFile(f.directory)), false, 'a damaged page the accounting proves dead is not a discovery');
+  for (const item of done) assert.equal(JSON.stringify((await hw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after relocating around a dead damaged page');
+  assert.ok(h.coordinator.call('v4-status').packs <= beforeDead.packs, 'the forced compaction reclaimed as usual');
+  const live = v4RelocationPages(f.directory, false).live;   // after the forced compaction every remaining page is live
+  flipPageByte(f.directory, live);
+  const beforeLive = h.coordinator.call('v4-status');
+  let relocation = null;
+  try { h.coordinator.call('compact', { force: true }); } catch (error) { relocation = error; }
+  assert.ok(relocation && relocation.code === 'SealCorrupt' && String(relocation.detail).startsWith('latched:relocate:'), 'a relocation that meets damage on a current route refuses and latches: ' + String(relocation && (relocation.detail || relocation.message)));
+  const relocationLatch = JSON.parse(fs.readFileSync(latchFile(f.directory), 'utf8'));
+  assert.deepEqual({ phase: relocationLatch.phase, root: relocationLatch.root }, { phase: 'relocate', root: beforeLive.rootSha256 }, 'no transition is published after a relocation discovers damage (the latch names the root the compaction started from)');
+  assert.equal(V4.readSelector(path.join(f.directory, 'seal/settlement.json')).body.rootSha256, beforeLive.rootSha256, 'the selector is unchanged by the refused compaction');
+  assert.ok(fs.existsSync(path.join(f.directory, 'seal/v4/pages', live.pack + '.pages')), 'the damaged pack is not unlinked');
+  h.service.close(); await h.service.drained(); h.coordinator.close();
+  flipPageByte(f.directory, live); fs.rmSync(latchFile(f.directory));
+  const i = await reopen(t, h), iw = await (await i.hello()).work();
+  for (const item of done) assert.equal(JSON.stringify((await iw.call('confirm-bundle', item.bundle)).result), JSON.stringify(item.proof), 'proofs after the repair');
+  for (const b of done[5].bundle.bindings) assertExcluded(await replayObservation(i, iw, b));
 });
+/** Maintenance slices (what the idle tick runs) until the liveness accounting is known, then one more (the dead-pack slice). */
+async function rebuildLiveness(f) {
+  for (let i = 0; i < 10000; i++) { const status = f.coordinator.call('v4-status'); if (status.accounting.known) break; f.coordinator.call('compact', { slice: true }); }
+  f.coordinator.call('compact', { slice: true });
+  return f.coordinator.call('v4-status');
+}
+/** For the selected root: a live node page in the pack a relocation visits first (the smallest pack id, every pack being
+ * at most half live in this small state) and a dead node page (one no current root references). */
+function v4RelocationPages(directory, needDead = true) {
+  const v4 = path.join(directory, 'seal/v4'), root = V4.readRoot(v4, V4.readSelector(path.join(directory, 'seal/settlement.json')).body.rootSha256);
+  const store = new V4.PackStore(v4, root.lineageSha256);
+  try {
+    const reachable = new Map();
+    for (const d of root.trees) for (const [ref, owner] of V4.Tree.open(store, d.id, d.ref, Number(d.count)).pagesWithOwners()) reachable.set(ref.pack + ':' + ref.page, owner === null);
+    const nodePacks = [...new Set([...reachable].filter(([, node]) => node).map(([id]) => id.split(':')[0]))].sort();
+    const live = [...reachable].filter(([id, node]) => node && id.startsWith(nodePacks[0] + ':')).map(([id]) => ({ pack: id.split(':')[0], page: id.split(':')[1] }))[0];
+    let dead = null;
+    for (const pack of store.listPacks()) {
+      const pages = Math.floor(fs.statSync(store.packFile(pack)).size / 65536);
+      for (let page = 0; page < pages && !dead; page++) {
+        if (reachable.has(pack + ':' + page)) continue;
+        const bytes = store.readRaw({ pack, page: String(page), sha256: '0'.repeat(64) });
+        if (bytes.readUInt16LE(10) !== 3) dead = { pack, page: String(page) };   // a dead node page (kind 1 or 2)
+      }
+      if (dead) break;
+    }
+    assert.ok(live && (dead || !needDead), 'the state has a live node page' + (needDead ? ' and a dead node page' : '') + ': ' + JSON.stringify({ live, dead }));
+    return { live, dead };
+  } finally { store.close(); }
+}
 
 // ─── V4-T10: the periodic complete check (order sections 2/4.3; REQ-B2C-V4-05 / RISK-B2C-V4-UNDETECTED-CORRUPTION) ───
 const V4 = load('emr-runtime/checkpoint-v4');
@@ -1597,7 +1673,7 @@ test('V4-T10 complete checking: resumable sweeps over a pinned root, no timestam
   let g = await reopen(t, f);
   const resumed = g.coordinator.call('v4-status');
   assert.deepEqual({ root: resumed.sweep?.startedRoot, tree: resumed.sweep?.tree, phase: resumed.sweep?.phase }, { root: start.rootSha256, tree: paused.sweep.tree, phase: 'storage' }, 'the reopened owner resumes the sweep at the persisted cursor');
-  assert.equal(resumed.accounting.known, true);
+  assert.equal(resumed.accounting.known, false, 'the accounting is unknown until the new incarnation rebuilds it (RC-03)');
   let gw = await (await g.hello()).work();
   // Concurrent work during the sweep: enough transitions to retire whole packs whose last live pages belonged to the
   // pinned root (the sweep still reads them), plus a forced reclamation; neither may touch the pinned root's pages.
@@ -1613,13 +1689,13 @@ test('V4-T10 complete checking: resumable sweeps over a pinned root, no timestam
   // the files, never by what an earlier incarnation happened to keep in memory), with the accounting it was handed.
   await closeOwner(g);
   const g2 = await reopen(t, g), g2w = await (await g2.hello()).work();
-  assert.equal(g2.coordinator.call('v4-status').accounting.known, true);
+  assert.equal(g2.coordinator.call('v4-status').accounting.known, false, 'unknown again in the next incarnation');
   const completedAt = hoursLater(initialCompletedAt, 2);
   const finished = await sweepUntil(g2, completedAt, s => s.done === true);
   assert.equal(finished.failed, undefined, 'the sweep completes over its pinned root while the owner serves and reclaims: ' + String(finished.failed && finished.failed.message));
   assert.equal(finished.fullCheck.checkedRoot, start.rootSha256, 'the certificate names the checked snapshot, not the current root');
   assert.equal(finished.fullCheck.completedAt, completedAt.toISOString());
-  assert.equal(finished.accountingRepaired, false, 'the sweep rebuilt the same liveness accounting the owner maintained');
+  assert.equal((await rebuildLiveness(g2)).accounting.known, true, 'the liveness rebuild is the owner\'s own bounded walk, independent of the sweep');
   const checked = g2.coordinator.call('v4-status');
   assert.equal(checked.sweep, null); assert.equal(checked.fullCheck.completedAt, completedAt.toISOString()); assert.equal(checked.fullCheck.checkedRoot, start.rootSha256);
   assert.notEqual(checked.rootSha256, start.rootSha256, 'the completed check is published as its own transition');

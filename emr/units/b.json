@@ -1438,6 +1438,27 @@
         "kill": ["V4-T05"],
         "assertions": {"V4-T05": "relocation changes no member"},
         "behaviour": "leave the owner's terminal/bundle maps on the superseded root after a relocation: the next read walks orphaned pages whose pack is already reclaimed (V4-T12 ladder: missing-pack latch at ~250 attempts once the cache no longer masked it)"
+      },
+      {
+        "id": "V4-M15",
+        "suite": "service-v4",
+        "kill": ["V4-T05"],
+        "assertions": {"V4-T05": "proofs after a stale scratch named a reachable pack at zero"},
+        "behaviour": "RC-03/S1-PRE-01: adopt an earlier incarnation's scratch accounting at admission: a reachable pack it names at zero is unlinked by the next transition and the proofs stored in it are lost; the owner must start unknown and rebuild from the files"
+      },
+      {
+        "id": "V4-M16",
+        "suite": "service-v4",
+        "kill": ["V4-T05"],
+        "assertions": {"V4-T05": "a relocation that meets damage on a current route refuses and latches"},
+        "behaviour": "RC-03/S1-PRE-15: a relocation that cannot read a live page of a candidate pack continues and publishes; the owner must latch at the discovery (no deletion, no later publication)"
+      },
+      {
+        "id": "V4-M17",
+        "suite": "codec",
+        "kill": ["V4-T02"],
+        "assertions": {"V4-T02": "an evacuated overflow chain leaves its pack"},
+        "behaviour": "RC-03/S1-PRE-14: never move an overflow chain: a sparse pack whose live pages are all overflow chains is never emptied and starves relocation"
       }
     ]
   }

@@ -7,7 +7,7 @@ import type { CommitBinding, ExpiryCore } from './seal';
 import type { PairIdentity, SealedBundleProof } from './state-protocol';
 import { parseCommitBinding, parseSealedBundleProof } from './state-protocol';
 import {
-  BlobDescriptor, CONTROL_MAX_BYTES, Change, DOMAIN, FullCheck, KIND, PACK_PAGES, PAGE_BYTES, PackStore, PackWriter, PageRef, REF_BYTES, RootBody, SelectorBody, TREE_IDS, Transition, Tree, TreeDescriptor, TreeId, V4Error, V4_FORMAT, V4_VALIDATOR_ID, WalRecord, WalSegment, ZERO64, blobSha256, canonical, domainHash, lineageSha256 as lineageDigest, loadValidatorManifest, openEnvelope, pageSha256, parseCanonical, parseDecimal, parsePage, readRoot, readSelector, refFromBinary, rootsDirectory, routingDigest, validFullCheck, validWalRecord, walDirectory, writeAtomic, writeBlob, writeRoot, writeSelector,
+  BlobDescriptor, CONTROL_MAX_BYTES, Change, DOMAIN, FullCheck, KIND, PACK_PAGES, PAGE_BYTES, PackStore, PackWriter, PageOwner, PageRef, REF_BYTES, RootBody, SelectorBody, TREE_IDS, Transition, Tree, TreeDescriptor, TreeId, V4Error, V4_FORMAT, V4_VALIDATOR_ID, WalRecord, WalSegment, ZERO64, blobPages, blobSha256, canonical, domainHash, lineageSha256 as lineageDigest, loadValidatorManifest, openEnvelope, pageSha256, parseCanonical, parseDecimal, parsePage, readRoot, readSelector, refFromBinary, rootsDirectory, routingDigest, validFullCheck, validWalRecord, walDirectory, writeAtomic, writeBlob, writeRoot, writeSelector,
 } from './checkpoint-v4';
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -471,9 +471,8 @@ export class Engine {
   }
   close(): void {
     if (this.v4) {
-      // An owner's clean close persists the exact accounting (the next incarnation reclaims without a rebuild).
+      // No accounting outlives the incarnation: the next one starts unknown and rebuilds from the files (RC-03).
       try { this.v4.writer?.close(); } catch { /* the files are the authority */ } this.v4.writer = null;
-      if (!this.tainted && !this.readOnly) { try { persistPacks(this.v4); } catch { /* scratch */ } }
       this.v4.store.close(); this.v4.segment.close();
     }
   }
@@ -1415,17 +1414,30 @@ export interface V4State {
   latched: V4Latch | null;
   /** The one pack writer of this incarnation (packs are appended across transitions and sealed at 256 pages). */
   writer: PackWriter | null;
-  /** Pack liveness accounting for the selected root: pages referenced per pack (reconstructible; null = unknown after
-   * a crash, until the next complete check rebuilds it). Packs at zero are reclaimable in bounded slices. */
+  /** Pack liveness accounting for the selected root: pages referenced per pack. Every incarnation starts with it
+   * unknown (null: no scratch file of an earlier incarnation is deletion authority) and rebuilds it in bounded slices
+   * from the verified closure of a pinned root plus the accepted deltas since (`liveness`); nothing is unlinked
+   * before that. Packs at zero are then reclaimable in bounded slices. */
   packs: Map<string, number> | null;
   dead: Set<string>;
-  /** Pages orphaned since the running sweep started (its pinned root still references them) and pages written since
-   * (the sweep never sees them); with the sweep's own page count this rebuilds/verifies `packs` at completion. */
-  sweepOrphans: Map<string, number> | null; sweepAdded: Map<string, number> | null; sweepPacks: Map<string, number> | null;
+  /** The bounded liveness rebuild in progress, if any. */
+  liveness: V4Liveness | null;
+  /** The overflow chains per pack, as the owning bucket's route `tree:digest` (known with the accounting): what a
+   * relocation of a pack's overflow pages must rewrite. */
+  overflowRoutes: Map<string, Set<string>> | null;
+  /** The pack after which the next relocation slice picks its candidates (candidates rotate: no pack starves another). */
+  relocateCursor: string | null;
+  /** Packs the running sweep's pinned root may still read (orphaned since it started; after a restart: every pack
+   * present at admission, the exact set not having outlived the incarnation). Never reclaimed while the sweep runs. */
+  sweepOrphans: Map<string, number> | null;
   /** The selected root's transition-control overflow chain (orphaned when the root is superseded). */
   transitionBlob: BlobDescriptor | null;
-  /** Complete checks whose rebuilt accounting disagreed with the maintained one (the rebuilt one was adopted). */
-  accountingRepairs: number;
+}
+/** The liveness rebuild: the pages of the pinned root counted per pack by a bounded resumable walk (every visited page
+ * verified on use), the pages written and orphaned since it started; at the end `packs = pinned + added - orphans`. */
+export interface V4Liveness {
+  startedRoot: string; tree: number; from: string | null;
+  packs: Map<string, number>; added: Map<string, number>; orphans: Map<string, number>; routes: Map<string, Set<string>>;
 }
 /** The complete check's progress: the pinned root it checks, the storage cursor (tree, digest) and the DB cursor. */
 export interface V4Sweep {
@@ -1437,6 +1449,8 @@ const V4_META_KEYS = ['lineage', 'tail', 'retired', 'validator', 'dbWitness', 'f
 const V4_ROTATE_BYTES = 64 * 1024 * 1024, V4_ROTATE_TRANSITIONS = 2048, V4_ROTATE_MS = 30_000;
 /** The complete-check period (order section 2: a periodic full check within 24 h) and the leaves one step may visit. */
 export const V4_FULL_CHECK_MS = 24 * 60 * 60 * 1000, V4_FULL_CHECK_STEP_LEAVES = 256;
+/** Leaves one liveness-rebuild slice visits (one slice per accepted transition or maintenance step while unknown). */
+export const V4_LIVENESS_STEP_LEAVES = 64;
 const v4Directory = (directory: string) => path.join(directory, 'seal', 'v4');
 const sweepFile = (v4: string) => path.join(v4, 'tmp', 'full-check.json');
 const latchFile = (v4: string) => path.join(v4, 'tmp', 'latch.json');
@@ -1452,26 +1466,7 @@ function writeScratch(file: string, value: unknown): void {
   writeAtomic(file, JSON.stringify(value));
 }
 const countInto = (map: Map<string, number>, pack: string, by: number) => { const n = (map.get(pack) ?? 0) + by; if (n) map.set(pack, n); else map.delete(pack); return n; };
-/** The liveness accounting as persisted (scratch, never authority): exact only while the file names the selected root
- * (every transition supersedes it; it is rewritten at rotation, at a complete check's end and at a clean close). */
-function persistPacksFile(v4: string, root: string, live: Map<string, number>, sweep: { root: string; orphans: Map<string, number> } | null): void {
-  writeScratch(packsFile(v4), { root, live: [...live], sweep: sweep ? { root: sweep.root, orphans: [...sweep.orphans] } : null });
-}
-function persistPacks(v: V4State): void {
-  if (!v.packs) return;
-  persistPacksFile(v.directory, v.rootSha256, v.packs, v.sweep && v.sweepOrphans ? { root: v.sweep.startedRoot, orphans: v.sweepOrphans } : null);
-}
-/** The accounting for `root`, when the scratch file is exactly about it (no transition since it was written). */
-function loadPacks(v4: string, root: string): { live: Map<string, number>; sweep: { root: string; orphans: Map<string, number> } | null } | null {
-  const s = readScratch(packsFile(v4));
-  const pairs = (v: unknown): Map<string, number> | null => Array.isArray(v) && v.every(p => Array.isArray(p) && p.length === 2 && /^[0-9a-f]{32}$/.test(p[0]) && integer(p[1], 0)) ? new Map(v as [string, number][]) : null;
-  if (!s || !keys(s, ['root', 'live', 'sweep']) || s.root !== root) return null;
-  const live = pairs(s.live); if (!live) return null;
-  if (s.sweep === null) return { live, sweep: null };
-  if (!keys(s.sweep, ['root', 'orphans']) || !sha(s.sweep.root)) return null;
-  const orphans = pairs(s.sweep.orphans); if (!orphans) return null;
-  return { live, sweep: { root: s.sweep.root, orphans } };
-}
+const addRoute = (routes: Map<string, Set<string>>, pack: string, route: string) => { let set = routes.get(pack); if (!set) routes.set(pack, set = new Set()); set.add(route); };
 /** The pages a root's transition-control overflow chain occupies (part of that root's liveness). */
 function* transitionBlobPages(store: PackStore, descriptor: BlobDescriptor | null): Generator<PageRef> {
   if (!descriptor) return;
@@ -1483,17 +1478,58 @@ function* transitionBlobPages(store: PackStore, descriptor: BlobDescriptor | nul
     ref = store.page(current, { kind: KIND.overflow, tree: 0, level: 0 }, (_h, payload) => refFromBinary(payload.subarray(0, REF_BYTES), 'blob'), 'blob-next');
   }
 }
-/** The accounting of one accepted transition: the pages the new root references that the old one did not, the pages
- * it no longer references. Packs that reach zero are dead (reclaimable once no sweep still reads them). */
-function accountTransition(v: V4State, written: PageRef[], orphans: PageRef[]): void {
-  for (const ref of written) { if (v.packs) countInto(v.packs, ref.pack, 1); v.dead.delete(ref.pack); if (v.sweepAdded) countInto(v.sweepAdded, ref.pack, 1); }
+/** The accounting of one accepted transition: the pages the new root references that the old one did not (the
+ * writer's), the pages it no longer references. Packs that reach zero are dead (reclaimable once no sweep still reads
+ * them). The writer's overflow chains are recorded under the packs they occupy (the routes a relocation rewrites). */
+function accountTransition(v: V4State, writer: PackWriter, orphans: PageRef[]): void {
+  for (const ref of writer.written) { if (v.packs) countInto(v.packs, ref.pack, 1); v.dead.delete(ref.pack); if (v.liveness) countInto(v.liveness.added, ref.pack, 1); }
   for (const ref of orphans) {
     if (v.packs && countInto(v.packs, ref.pack, -1) === 0) v.dead.add(ref.pack);
+    if (v.liveness) countInto(v.liveness.orphans, ref.pack, 1);
     if (v.sweepOrphans) countInto(v.sweepOrphans, ref.pack, 1);
     // The page cache keeps the live pages, not every page this incarnation ever decoded (a running sweep re-reads its
     // pinned root's pages from the files: the bytes are the authority, the cache only a memo).
     v.store.forget(ref);
   }
+  const routes = [v.overflowRoutes, v.liveness?.routes].filter((m): m is Map<string, Set<string>> => !!m);
+  if (routes.length) for (const note of writer.overflowRoutes) for (const ref of blobPages(v.store, note.descriptor, note.tree)) for (const m of routes) addRoute(m, ref.pack, note.tree + ':' + note.digest);
+  writer.written.length = 0; writer.overflowRoutes.length = 0;
+}
+/** One bounded slice of the liveness rebuild (a new incarnation starts with the accounting unknown): the pinned root's
+ * pages counted per pack by the verified resumable walk, at most `budget` leaves per slice; at completion the
+ * accounting is `pinned + written since - orphaned since`, and every pack file it does not know is dead. A read error
+ * on the pinned root latches the owner (the pages are consumed bytes of the selected lineage). */
+function livenessSlice(engine: Engine, budget: number): { done: boolean; tree: number; from: string | null } {
+  const v = engine.v4!;
+  if (v.packs) return { done: true, tree: 9, from: null };
+  if (!v.liveness) {
+    v.liveness = { startedRoot: v.rootSha256, tree: 1, from: null, packs: new Map(), added: new Map(), orphans: new Map(), routes: new Map() };
+    for (const ref of transitionBlobPages(v.store, v.transitionBlob)) countInto(v.liveness.packs, ref.pack, 1);
+  }
+  const l = v.liveness;
+  try {
+    const pinned = readRoot(v.directory, l.startedRoot);
+    let leaves = budget;
+    while (l.tree <= 8 && leaves > 0) {
+      const d = pinned.trees[l.tree - 1];
+      const tree = Tree.open(v.store, l.tree, d.ref, parseDecimal(d.count, 'root'));
+      const result = tree.checkFrom(l.from, leaves, undefined, (ref, owner) => { countInto(l.packs, ref.pack, 1); if (owner) addRoute(l.routes, ref.pack, owner.tree + ':' + owner.digest); });
+      leaves -= Math.max(1, result.pages);
+      if (result.done) { l.tree++; l.from = null; } else l.from = result.next;
+    }
+  } catch (error: any) {
+    const translated = translateV4(error);
+    latchV4(engine, String(translated?.code ?? 'SealCorrupt'), String(translated?.detail ?? translated?.message ?? 'liveness'), 'liveness', l.tree, l.from);
+  }
+  if (l.tree <= 8) return { done: false, tree: l.tree, from: l.from };
+  const live = new Map(l.packs);
+  for (const [pack, n] of l.added) countInto(live, pack, n);
+  for (const [pack, n] of l.orphans) countInto(live, pack, -n);
+  // An orphan the pinned root and the writes since never referenced is an accounting contradiction, never a deletion.
+  for (const n of live.values()) if (n < 0) latchV4(engine, 'SealCorrupt', 'liveness:accounting', 'liveness', null, null);
+  v.packs = live; v.dead = new Set(); v.overflowRoutes = l.routes; v.liveness = null;
+  for (const pack of v.store.listPacks()) if (!(live.get(pack) ?? 0) && pack !== v.writer?.currentPack) { live.set(pack, 0); v.dead.add(pack); }
+  return { done: true, tree: 9, from: null };
 }
 /** Unlink up to `limit` dead packs: never the writer's current pack, never a pack the running sweep's pinned root may
  * still read (orphaned since it started). Deletion is rechecked against the accounting at unlink time. */
@@ -1510,15 +1546,12 @@ function reclaimDeadV4(v: V4State, limit: number): number {
   if (unlinked) syncDirectory(v.store.pagesDirectory);
   return unlinked;
 }
-/** Every page the selected root references (and the running sweep's root), as pack counts: the exact accounting. */
-function traverseLive(v: V4State): Map<string, number> {
-  const live = new Map<string, number>();
-  const count = (root: RootBody) => {
-    for (const d of root.trees) for (const ref of Tree.open(v.store, d.id, d.ref, parseDecimal(d.count, 'root')).pages()) countInto(live, ref.pack, 1);
-    if (root.transition.changes && 'overflow' in root.transition.changes) for (const ref of transitionBlobPages(v.store, root.transition.changes.overflow)) countInto(live, ref.pack, 1);
-  };
-  count(v.root);
-  return live;
+/** Every page the selected root references, as pack counts (the exact accounting) with the overflow routes per pack. */
+function traverseLive(v: V4State): { live: Map<string, number>; routes: Map<string, Set<string>> } {
+  const live = new Map<string, number>(), routes = new Map<string, Set<string>>();
+  for (const d of v.root.trees) for (const [ref, owner] of Tree.open(v.store, d.id, d.ref, parseDecimal(d.count, 'root')).pagesWithOwners()) { countInto(live, ref.pack, 1); if (owner) addRoute(routes, ref.pack, owner.tree + ':' + owner.digest); }
+  if (v.root.transition.changes && 'overflow' in v.root.transition.changes) for (const ref of transitionBlobPages(v.store, v.root.transition.changes.overflow)) countInto(live, ref.pack, 1);
+  return { live, routes };
 }
 /** The repository/image root the validator manifest is read from (dist/emr-runtime in the image, api/src here). */
 const appRoot = () => __dirname.split(path.sep).includes('dist') ? path.resolve(__dirname, '..', '..') : path.resolve(__dirname, '..', '..', '..');
@@ -1706,16 +1739,16 @@ function admitEngineV4(engine: Engine, selector: { body: SelectorBody; sha256: s
     touched.set('slots', new Set(Object.keys(engine.slots))); touched.set('intents', new Set(Object.keys(engine.intents))); touched.set('proofs', new Set(Object.keys(engine.proofs)));
     engine.validateTouched(touched, false);
     const stat = fs.statSync(segmentFile);
-    // The liveness accounting is exact only when nothing happened after it was persisted; otherwise it is unknown
-    // until the next complete check rebuilds it (a sweep resumed without it cannot rebuild: it starts over).
-    const accounting = loadPacks(v4, rootSha256);
-    let sweep = loadSweep(v4);
-    if (sweep && !accounting) { sweep = null; if (repair) { try { fs.rmSync(sweepFile(v4), { force: true }); } catch { /* scratch */ } } }
-    const sweepOrphans = sweep ? (accounting!.sweep && accounting!.sweep.root === sweep.startedRoot ? accounting!.sweep.orphans : new Map<string, number>()) : null;
+    // The liveness accounting starts unknown in every incarnation (a scratch file of an earlier one is never deletion
+    // authority; an older incarnation's file is removed) and is rebuilt in bounded slices from the files. A resumed
+    // sweep's pinned root may still read any pack present now: all of them are retained until it completes.
+    if (repair) { try { fs.rmSync(packsFile(v4), { force: true }); } catch { /* scratch */ } }
+    const sweep = loadSweep(v4);
+    const sweepOrphans = sweep ? new Map(store.listPacks().map(p => [p, 1] as [string, number])) : null;
     engine.v4 = { directory: v4, store, validatorSha256: manifest.validatorSha256, rootSha256, root, trees, meta, pending,
       segment: new WalSegment(v4, selector.body.wal.segment), lsn, previousSha256: previous, walEnd, segmentStart: 0, segmentTransitions: 0, segmentOpenedAt: stat.mtimeMs,
-      sweep, latched: null, writer: null, packs: accounting ? accounting.live : null, dead: new Set(accounting ? [...accounting.live].filter(([, n]) => n === 0).map(([p]) => p) : []),
-      sweepOrphans, sweepAdded: null, sweepPacks: null, transitionBlob: root.transition.changes && 'overflow' in root.transition.changes ? root.transition.changes.overflow : null, accountingRepairs: 0 };
+      sweep, latched: null, writer: null, packs: null, dead: new Set(), liveness: null, overflowRoutes: null, relocateCursor: null,
+      sweepOrphans, transitionBlob: root.transition.changes && 'overflow' in root.transition.changes ? root.transition.changes.overflow : null };
     engine.log = segmentFile;
     engine.checkpoint = { digest: rootSha256, bytes: 0, revision, publishing: false, navigable: true };
     engine.walOffset = walEnd;
@@ -1829,7 +1862,7 @@ function commitRecordV4(engine: Engine, body: any, kind: 'update' | 'reserve'): 
     v.lsn += 2; v.previousSha256 = complete.sha256; v.walEnd = complete.end; v.segmentTransitions++;
     engine.checkpoint = { digest: nextRoot, bytes: 0, revision, publishing: false, navigable: true };
     engine.walOffset = complete.end;
-    accountTransition(v, writer.written, orphans); writer.written.length = 0;
+    accountTransition(v, writer, orphans);
     reclaimDeadV4(v, V4_RECLAIM_SLICE);
     rotateV4(engine);
     engine.pin();
@@ -1855,15 +1888,15 @@ function rotateV4(engine: Engine, force = false): void {
   v.segment = next; v.lsn += 1; v.previousSha256 = start.sha256; v.walEnd = start.end; v.segmentStart = 0; v.segmentTransitions = 0; v.segmentOpenedAt = Date.now();
   engine.log = next.file; engine.walOffset = start.end;
   // The durable selector names the new segment: the previous one and every root it absorbed are retired (the selected
-  // root and a running sweep's pinned root stay). Provenance hashes in certificates keep no file alive.
+  // root, a running sweep's pinned root and the liveness rebuild's pinned root stay). Provenance hashes in
+  // certificates keep no file alive.
   try { fs.unlinkSync(previous.file); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
-  const keep = new Set([v.rootSha256, v.sweep?.startedRoot].filter((s): s is string => !!s));
+  const keep = new Set([v.rootSha256, v.sweep?.startedRoot, v.liveness?.startedRoot].filter((s): s is string => !!s));
   for (const name of fs.readdirSync(rootsDirectory(v.directory))) {
     if (!/^[0-9a-f]{64}\.json$/.test(name) || keep.has(name.slice(0, 64))) continue;
     try { fs.unlinkSync(path.join(rootsDirectory(v.directory), name)); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
   }
   syncDirectory(walDirectory(v.directory)); syncDirectory(rootsDirectory(v.directory));
-  persistPacks(v);
 }
 /** The fully validated initial root of a pristine v4 pair (empty trees, initial witness, complete coverage). */
 function initializeV4(engine: Engine, initialized: ExternalState): void {
@@ -1898,8 +1931,6 @@ function initializeV4(engine: Engine, initialized: ExternalState): void {
     const complete = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '3', previousSha256: prepare.sha256, type: 'complete', prepareLsn: '2', nextRoot: rootSha256 });
     segment.close(); syncDirectory(walDirectory(v4));
     writeSelector(engine.file, { format: V4_FORMAT, version: 4, layout: 1, rootSha256, revision: '1', wal: { segment: segment.segment, offset: String(complete.end), lsn: '3', previousSha256: complete.sha256 } });
-    const live = new Map<string, number>(); for (const ref of writer.written) countInto(live, ref.pack, 1);
-    persistPacksFile(v4, rootSha256, live, null);
     store.close();
   } catch (error) { throw translateV4(error); }
 }
@@ -1914,7 +1945,7 @@ function reclaimV4(engine: Engine, force: boolean): { unlinked: number; retained
   // The traversal alone decides what stays: the incarnation's writer is closed first (its pack is retained only by
   // the pages the selected root references in it; the next transition opens a fresh pack).
   try { v.writer?.close(); } catch { /* the files are the authority */ } v.writer = null;
-  const live = traverseLive(v);
+  const { live, routes } = traverseLive(v);
   const pinned = new Set<string>();
   if (v.sweep && v.sweep.startedRoot !== v.rootSha256) {
     const root = readRoot(v.directory, v.sweep.startedRoot);
@@ -1928,9 +1959,9 @@ function reclaimV4(engine: Engine, force: boolean): { unlinked: number; retained
     fs.unlinkSync(v.store.packFile(pack)); unlinked++;
   }
   if (unlinked) syncDirectory(v.store.pagesDirectory);
-  v.packs = live; v.dead = new Set();
-  if (v.sweep && v.sweepOrphans) for (const pack of pinned) if (!live.has(pack)) v.sweepOrphans.set(pack, v.sweepOrphans.get(pack) ?? 1);
-  persistPacks(v);
+  // The traversal is the complete accounting: a rebuild in progress is superseded by it.
+  v.packs = live; v.dead = new Set(); v.overflowRoutes = routes; v.liveness = null; v.relocateCursor = null;
+  if (v.sweep && v.sweepOrphans) { v.sweepOrphans = new Map(); for (const pack of pinned) if (!live.has(pack)) v.sweepOrphans.set(pack, 1); }
   return { unlinked, retained, accounting: 'known' };
 }
 function v4Status(engine: Engine, now?: string): any {
@@ -1943,11 +1974,12 @@ function v4Status(engine: Engine, now?: string): any {
   const reason = ageMs < 0 ? 'clock-rollback' : ageMs > V4_FULL_CHECK_MS ? 'age' : null;
   return { format: 4, rootSha256: v.rootSha256, revision: v.root.revision, trees: v.root.trees.map(t => ({ id: t.id, count: t.count })), pending: v.pending.size,
     wal: { segment: v.segment.segment, lsn: v.lsn, bytes: v.walEnd, transitions: v.segmentTransitions }, packs: v.store.listPacks().length,
-    accounting: { known: v.packs !== null, live: v.packs ? [...v.packs.values()].filter(n => n > 0).length : null, dead: v.dead.size, repairs: v.accountingRepairs },
+    accounting: { known: v.packs !== null, live: v.packs ? [...v.packs.values()].filter(n => n > 0).length : null, dead: v.dead.size,
+      rebuilding: v.liveness ? { startedRoot: v.liveness.startedRoot, tree: v.liveness.tree, from: v.liveness.from } : null },
     fragmentation: fragmentationV4(v),
     fullCheck: { ...v.root.fullCheck, ageMs, overdue: reason !== null, reason, periodMs: V4_FULL_CHECK_MS },
-    sweep: v.sweep ? { startedRoot: v.sweep.startedRoot, startedAt: v.sweep.startedAt, phase: v.sweep.phase, tree: v.sweep.tree, keys: { ...v.sweep.keys }, pages: v.sweep.pages, db: v.sweep.db, dbDone: v.sweep.dbDone, rebuilding: v.sweepPacks !== null } : null,
-    latched: v.latched, dbWitness: v.meta.dbWitness, cacheBytes: v.store.cachedBytes };
+    sweep: v.sweep ? { startedRoot: v.sweep.startedRoot, startedAt: v.sweep.startedAt, phase: v.sweep.phase, tree: v.sweep.tree, keys: { ...v.sweep.keys }, pages: v.sweep.pages, db: v.sweep.db, dbDone: v.sweep.dbDone } : null,
+    latched: v.latched, dbWitness: v.meta.dbWitness, cacheBytes: v.store.cachedBytes, descriptors: v.store.openDescriptors };
 }
 // ───────────────────────── periodic complete check (order section 2/4, V4-T10) ─────────────────────────
 function loadSweep(v4: string): V4Sweep | null {
@@ -2009,10 +2041,9 @@ function fullCheckV4(engine: Engine, value: any): any {
   if (!Number.isFinite(Date.parse(now))) fail('SealCorrupt');
   if (!v.sweep) {
     v.sweep = { startedRoot: v.rootSha256, startedAt: now, phase: 'storage', tree: 1, from: null, keys: {}, pages: 0, db: null, dbDone: false };
-    // A sweep started here rebuilds the liveness accounting as it goes (the selected root's transition chain is part
-    // of that root; the trees are counted page by page), then compares it with the maintained one at completion.
-    v.sweepOrphans = new Map(); v.sweepAdded = new Map(); v.sweepPacks = new Map();
-    for (const ref of transitionBlobPages(v.store, v.transitionBlob)) countInto(v.sweepPacks, ref.pack, 1);
+    // The packs the pinned root reads are protected from reclamation until the sweep completes (the pages orphaned
+    // from here on). The liveness accounting is not the sweep's business (RC-03: its own bounded rebuild).
+    v.sweepOrphans = new Map();
     persistSweep(v);
   }
   const sweep = v.sweep;
@@ -2036,27 +2067,13 @@ function fullCheckV4(engine: Engine, value: any): any {
     const fullCheck: FullCheck = { checkedRoot: sweep.startedRoot, coverageSha256: coverageSha256(checked.trees, meta), checkedRevision: checked.revision,
       validatorSha256: v.validatorSha256, completedAt: now, dbWitnessSha256: domainHash(DOMAIN.witness, canonical(v.meta.dbWitness)) };
     publishScrubV4(engine, fullCheck);
-    // The accounting rebuilt by this sweep: the checked root's pages, plus what was written since, minus what was
-    // orphaned since. It replaces an unknown accounting, and corrects a maintained one that disagrees (recorded).
-    let repaired = false;
-    if (v.sweepPacks && v.sweepAdded && v.sweepOrphans) {
-      const rebuilt = new Map(v.sweepPacks);
-      for (const [pack, n] of v.sweepAdded) countInto(rebuilt, pack, n);
-      for (const [pack, n] of v.sweepOrphans) countInto(rebuilt, pack, -n);
-      if (v.packs) {
-        const same = rebuilt.size === [...v.packs].filter(([, n]) => n > 0).length && [...rebuilt].every(([pack, n]) => v.packs!.get(pack) === n);
-        if (!same) { v.accountingRepairs++; repaired = true; }
-      }
-      if (!v.packs || repaired) { v.packs = rebuilt; v.dead = new Set(); }
-    }
     // Every pack file the accounting does not know (an interrupted writer's, a crashed reclamation's) is dead now.
     if (v.packs) for (const pack of v.store.listPacks()) if (!(v.packs.get(pack) ?? 0) && pack !== v.writer?.currentPack) { v.packs.set(pack, 0); v.dead.add(pack); }
-    v.sweep = null; v.sweepOrphans = null; v.sweepAdded = null; v.sweepPacks = null;
+    v.sweep = null; v.sweepOrphans = null;
     try { fs.rmSync(sweepFile(v.directory), { force: true }); } catch { /* scratch */ }
     // The checked root is no longer pinned: the packs only it kept alive are reclaimed (one bounded slice now).
     reclaimDeadV4(v, V4_RECLAIM_SLICE * 4);
-    persistPacks(v);
-    return { ...summary(), done: true, fullCheck, accountingRepaired: repaired };
+    return { ...summary(), done: true, fullCheck };
   }
   if (sweep.phase !== 'storage') return summary();
   const budget = integer(value?.budget, 1) ? Math.min(value.budget, 4096) : V4_FULL_CHECK_STEP_LEAVES;
@@ -2065,7 +2082,7 @@ function fullCheckV4(engine: Engine, value: any): any {
     const checked = readRoot(v.directory, sweep.startedRoot);
     const descriptor = checked.trees[id - 1];
     const tree = Tree.open(v.store, id, descriptor.ref, parseDecimal(descriptor.count, 'root'));
-    const result = tree.checkFrom(sweep.from, budget, (key, raw) => checkMemberV4(engine, id, key, raw), v.sweepPacks ? ref => countInto(v.sweepPacks!, ref.pack, 1) : undefined);
+    const result = tree.checkFrom(sweep.from, budget, (key, raw) => checkMemberV4(engine, id, key, raw));
     sweep.keys[String(id)] = (sweep.keys[String(id)] ?? 0) + result.keys; sweep.pages += result.pages;
     if (result.done) {
       if (sweep.keys[String(id)] !== tree.count) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'tree:total' });
@@ -2109,44 +2126,70 @@ function relocateV4(engine: Engine, maxPages: number): { relocated: number; pack
   const v = engine.v4!;
   if (v.latched) throw Object.assign(new Error('SealCorrupt'), { code: 'SealCorrupt', detail: 'latched:' + v.latched.detail, latch: v.latched });
   if (!v.packs) return { relocated: 0, packs: [] };
-  const candidates = [...v.packs].filter(([pack, n]) => n > 0 && n <= V4_RELOCATE_LIVE_MAX && pack !== v.writer?.currentPack).sort((a, b) => a[1] - b[1]).slice(0, V4_RELOCATE_PACKS);
-  const touches = new Map<number, string[]>(), emptied: string[] = [];
+  // Candidates rotate through the eligible packs in pack-id order from the last cursor: a pack that makes no progress in
+  // one slice (its live pages are overflow chains whose routes are not yet known) never starves the packs after it.
+  const eligible = [...v.packs].filter(([pack, n]) => n > 0 && n <= V4_RELOCATE_LIVE_MAX && pack !== v.writer?.currentPack).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  if (!eligible.length) return { relocated: 0, packs: [] };
+  let start = v.relocateCursor === null ? 0 : eligible.findIndex(([pack]) => pack > v.relocateCursor!); if (start < 0) start = 0;
+  const candidates = [...eligible.slice(start), ...eligible.slice(0, start)].slice(0, V4_RELOCATE_PACKS);
+  v.relocateCursor = candidates[candidates.length - 1][0];
+  // Discovered damage on a current route is corruption: the owner latches (no deletion, no positive publication after
+  // the discovery). Only bytes the verified accounting proves dead are skipped.
+  const refuse = (detail: string): never => latchV4(engine, 'SealCorrupt', detail, 'relocate', null, null);
+  const touches = new Map<number, Set<string>>(), emptied: string[] = [], evacuate = new Set<string>();
   let budget = maxPages, relocated = 0;
   for (const [pack, live] of candidates) {
     if (budget <= 0) break;
     const file = v.store.packFile(pack), info = fs.statSync(file, { throwIfNoEntry: false });
-    if (!info) continue;
-    const pages = Math.floor(info.size / PAGE_BYTES), want = Math.min(live, budget);
-    let found = 0;
-    for (let page = 0; page < pages && found < want; page++) {
-      // A page is live iff the current root's route to its own lower bound at its level reaches exactly this page.
-      let header: { kind: number; tree: number; level: number } | undefined, low: string | null | undefined;
+    if (!info) refuse('relocate:' + pack + ':missing-pack');
+    const pages = Math.floor(info!.size / PAGE_BYTES), routes = v.overflowRoutes?.get(pack) ?? null;
+    const mine = new Map<number, Set<string>>();
+    let found = 0, overflow = 0, unverified = 0, page = 0;
+    for (; page < pages && found < live && found < budget; page++) {
+      const ref = { pack, page: String(page), sha256: ZERO64 };
+      let bytes: Buffer;
+      try { bytes = v.store.readRaw(ref); } catch (error: any) { return refuse('relocate:' + pack + '/' + page + ':' + String(error?.detail ?? error?.message ?? 'read')); }
+      let header: { kind: number; tree: number; level: number }, low: string | null;
       try {
-        const bytes = v.store.readRaw({ pack, page: String(page), sha256: '0'.repeat(64) });
-        const parsed = parsePage(bytes, { ref: { pack, page: String(page), sha256: pageSha256(bytes) }, lineageSha256: v.root.lineageSha256 });
+        const parsed = parsePage(bytes, { ref: { ...ref, sha256: pageSha256(bytes) }, lineageSha256: v.root.lineageSha256 });
         header = parsed.header;
-        if (header.kind !== KIND.overflow) { const body = parseCanonical(parsed.payload, 'relocate'); low = body.low === null ? null : String(body.low); }
-      } catch { continue; }   // a page the current root does not reference needs no relocation (dead, or another root's)
-      if (!header || header.kind === KIND.overflow || !(header.tree >= 1 && header.tree <= 8) || low === undefined) continue;
+        if (header.kind === KIND.overflow) { overflow++; continue; }   // moved with the bucket that owns its chain (below)
+        if (!(header.tree >= 1 && header.tree <= 8)) { unverified++; continue; }
+        const body = parseCanonical(parsed.payload, 'relocate'); low = body.low === null ? null : String(body.low);
+      } catch { unverified++; continue; }   // not a page of this lineage as written: dead only if the accounting proves it
       const tree = v.trees[header.tree];
-      if (header.level > tree.level) continue;
+      if (header.level > tree.level) continue;   // a page of a deeper former shape: on no current route (dead)
       const digest = low ?? ZERO64;
+      // A page is live iff the current root's route to its own lower bound at its level reaches exactly this page; a
+      // read error on that route is current-route damage.
       let located: { ref: PageRef };
-      try { located = tree.locate(header.level, digest); } catch { continue; }
+      try { located = tree.locate(header.level, digest); } catch (error: any) { return refuse('relocate:' + pack + '/' + page + ':route:' + String(error?.detail ?? error?.message ?? 'locate')); }
       if (located.ref.pack !== pack || located.ref.page !== String(page)) continue;
-      let list = touches.get(header.tree); if (!list) touches.set(header.tree, list = []);
-      list.push(digest); found++;
+      let set = mine.get(header.tree); if (!set) mine.set(header.tree, set = new Set()); set.add(digest); found++;
     }
-    if (found) { if (found >= live) emptied.push(pack); relocated += found; budget -= found; }
+    // The pack's overflow pages move with their owning buckets when the routes are known (every chain of this pack is
+    // then evacuated); without the routes they wait for a later slice (the cursor moves on).
+    const covered = found + (routes && overflow ? overflow : 0);
+    if (page >= pages && covered < live) {
+      if (unverified) return refuse('relocate:' + pack + ':unreadable-live:' + unverified);
+      if (!(overflow && !routes)) return refuse('relocate:' + pack + ':accounting:' + covered + '/' + live);
+    }
+    if (routes && overflow) { for (const route of routes) { const [tree, digest] = route.split(':'); let set = mine.get(Number(tree)); if (!set) mine.set(Number(tree), set = new Set()); set.add(digest); } evacuate.add(pack); }
+    if (!covered) continue;
+    for (const [tree, digests] of mine) { let set = touches.get(tree); if (!set) touches.set(tree, set = new Set()); for (const d of digests) set.add(d); }
+    if (covered >= live) emptied.push(pack);
+    relocated += covered; budget -= covered;
   }
   if (!touches.size) return { relocated: 0, packs: [] };
   const writer = v.writer ??= new PackWriter(v.store, engine.head.revision);
-  writer.revision = engine.head.revision; writer.written.length = 0;
+  writer.revision = engine.head.revision; writer.written.length = 0; writer.overflowRoutes.length = 0;
   const orphans: PageRef[] = [];
   const trees: Record<number, Tree> = { ...v.trees };
-  try { for (const [id, digests] of touches) trees[id] = v.trees[id].touch(writer, digests, orphans); }
+  try { for (const [id, digests] of touches) trees[id] = v.trees[id].touch(writer, [...digests], orphans, evacuate); }
   catch (error) { engine.tainted = true; try { writer.close(); } catch { /* closing */ } v.writer = null; throw translateV4(error); }
   publishNoChangeV4(engine, 'compact', trees, v.meta, v.root.fullCheck, writer, orphans);
+  // The evacuated packs' chains were re-encoded into the writer's pack (recorded by the transition's accounting).
+  for (const pack of evacuate) v.overflowRoutes?.delete(pack);
   return { relocated, packs: emptied };
 }
 /** A logical no-change transition (`scrub`: a new fullCheck fact; `compact`: relocated pages): the same revision and
@@ -2171,7 +2214,7 @@ function publishNoChangeV4(engine: Engine, kind: 'scrub' | 'compact', trees: Rec
     v.lsn += 2; v.previousSha256 = complete.sha256; v.walEnd = complete.end; v.segmentTransitions++;
     engine.checkpoint = { digest: nextRoot, bytes: 0, revision: engine.head.revision, publishing: false, navigable: true };
     engine.walOffset = complete.end;
-    accountTransition(v, writer.written, orphans); writer.written.length = 0;
+    accountTransition(v, writer, orphans);
     reclaimDeadV4(v, V4_RECLAIM_SLICE);
     rotateV4(engine);
     engine.pin();
@@ -2278,7 +2321,6 @@ export function importV3ToV4(source: string, target: string, pair: PairIdentity 
     const complete = segment.append({ format: 'KIN-EMR-WAL', version: 4, segment: segment.segment, lsn: '3', previousSha256: prepare.sha256, type: 'complete', prepareLsn: '2', nextRoot: rootSha256 });
     segment.close(); syncDirectory(walDirectory(v4));
     writeSelector(path.join(target, 'seal', 'settlement.json'), { format: V4_FORMAT, version: 4, layout: 1, rootSha256, revision: revisionText, wal: { segment: segment.segment, offset: String(complete.end), lsn: '3', previousSha256: complete.sha256 } });
-    { const live = new Map<string, number>(); for (const ref of writer.written) countInto(live, ref.pack, 1); persistPacksFile(v4, rootSha256, live, null); }
     store.close();
     // Full revalidation of the produced target against the source: every tree, every member, every count.
     const produced = admitEngine(target, pair, false, 4);
@@ -2415,10 +2457,17 @@ export function executeExternal(request: WriterRequest): any {
           if (value?.force === true) {
             const v = engine.v4!;
             try { v.writer?.close(); } catch { /* the files are the authority */ } v.writer = null;
+            // An operator's forced compaction completes the liveness rebuild first (relocation candidates come from it).
+            while (!v.packs) livenessSlice(engine, V4_LIVENESS_STEP_LEAVES * 16);
             for (let i = 0; i < 64; i++) if (!relocateV4(engine, V4_RELOCATE_PAGES * 4).relocated) break;
             return reclaimV4(engine, true);
           }
-          if (value?.slice === true) { const moved = fragmentationV4(engine.v4!).due ? relocateV4(engine, V4_RELOCATE_PAGES) : { relocated: 0, packs: [] }; return { ...moved, unlinked: reclaimDeadV4(engine.v4!, V4_RECLAIM_SLICE * 4) }; }
+          if (value?.slice === true) {
+            const v = engine.v4!;
+            if (!v.packs) return { relocated: 0, packs: [], unlinked: 0, liveness: livenessSlice(engine, V4_LIVENESS_STEP_LEAVES * 4) };
+            const moved = fragmentationV4(v).due ? relocateV4(engine, V4_RELOCATE_PAGES) : { relocated: 0, packs: [] };
+            return { ...moved, unlinked: reclaimDeadV4(v, V4_RECLAIM_SLICE * 4) };
+          }
           return reclaimV4(engine, false);
         }
         if (value?.force === true || compactionDue(engine)) compactEngine(engine, context); return;
@@ -2448,8 +2497,12 @@ export function executeExternal(request: WriterRequest): any {
         // a transition that leaves the pack population over its bound is followed by one relocation slice (at most
         // V4_RELOCATE_PAGES live pages out of the emptiest packs), not deferred to an idle moment that sustained load
         // never offers. A slice only happens while the bound is exceeded, so its cost is amortized over the pack that
-        // was filled since the last one.
-        if (engine.format === 4 && !engine.v4!.latched && fragmentationV4(engine.v4!).due) relocateV4(engine, V4_RELOCATE_PAGES);
+        // was filled since the last one. While the accounting is still unknown (a new incarnation), the transition
+        // advances the bounded liveness rebuild instead; no reclamation happens before it completes.
+        if (engine.format === 4 && !engine.v4!.latched) {
+          if (!engine.v4!.packs) livenessSlice(engine, V4_LIVENESS_STEP_LEAVES);
+          else if (fragmentationV4(engine.v4!).due) relocateV4(engine, V4_RELOCATE_PAGES);
+        }
         return { changed: true, revision: engine.head.revision, generation: engine.head.generation };
       }
       case 'update': case 'reserve': case 'compare-and-set': {
