@@ -82,6 +82,7 @@ class ProductionImageTests(unittest.TestCase):
     def api(self, suffix, **overrides):
         env = {
             "DATABASE_URL": RUNTIME_URL,
+            "KIN_EMR_STATE_DIR": "/var/lib/kin-emr",
             "DEPLOYMENT_MODE": "production", "AUTH_REQUIRED": "true",
             "KC_ISSUER": "http://127.0.0.1:1/auth/realms/kin",
             "KC_JWKS_URL": "http://127.0.0.1:1/certs", "KC_AUDIENCE": "kin-api",
@@ -159,12 +160,27 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
         self.assertEqual(code, 0, logs[-2000:])
         # This image-only fixture has no realm server. Exercise the supported operator import with an empty realm
         # before boot; onModuleInit must see its real completion marker and never contact the unreachable provider.
+        script = """
+const {PrismaService}=require('./dist/prisma.service');
+const {EmrRuntime}=require('./dist/emr-runtime/application');
+const {importMemberRights}=require('./dist/member-rights-import');
+const db=new PrismaService();
+const runtime=new EmrRuntime(process.env.DATABASE_URL, '/var/lib/kin-emr/outage');
+(async()=>{
+  try {
+    await runtime.start();
+    const imported=await importMemberRights(db,{listUsers:async()=>({total:0,users:[]})},runtime.port);
+    await imported?.publication;
+  } finally {
+    try { await runtime.stop(Date.now()+5000); }
+    finally { await db.$disconnect(); }
+  }
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
         ops.run(["docker", "run", "--rm", "--network", "container:" + self.db,
-                 "-e", "DATABASE_URL=" + INSTALLER_URL,
-                 "--entrypoint", "node", self.image_id, "-e",
-                 "const {PrismaService}=require('./dist/prisma.service');const db=new PrismaService();"
-                 "require('./dist/member-rights-import').importMemberRights(db,{listUsers:async()=>({total:0,users:[]})})"
-                 ".finally(()=>db.$disconnect()).catch(()=>process.exit(1));"])
+                 "-e", "DATABASE_URL=" + RUNTIME_URL,
+                 "-e", "KC_ISSUER=http://127.0.0.1:1/auth/realms/kin",
+                 "--entrypoint", "node", self.image_id, "-e", script])
         self.assertEqual(self.psql('SELECT id FROM "MemberRightsImport";'), "realm-v1")
         name = self.api("healthy")
         # A failed migration assertion must not leave port3000 occupied for the drain test.
