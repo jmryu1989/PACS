@@ -44,11 +44,54 @@ def require_live_run():
         raise Refused("LiveStack requires scripts/run-tests.py and an explicit live test plan")
 
 
-def preflight_live():
-    """Fail fast while another live run owns the lease. An earlier run's marker
-    does not block other runs (D1804): it names that run's own fixtures to inspect."""
+MARKER = "live-needs-inspection.json"
+PENDING = "needs-inspection"
+
+
+def environment_name():
+    """The live environment a run uses (D1804): its Compose project, or an explicit
+    KIN_LIVE_ENVIRONMENT. A failed run blocks only this environment until inspected."""
+    name = os.environ.get("KIN_LIVE_ENVIRONMENT") or os.environ.get("COMPOSE_PROJECT_NAME") or "default"
+    return name.strip() or "default"
+
+
+def marker_environment(contents):
+    # Markers written before D1804 carry no environment: they belong to the default one.
+    if isinstance(contents, dict):
+        value = contents.get("environment", "default")
+        return value if isinstance(value, str) and value.strip() else None
+    return None
+
+
+def pending_markers():
+    """Every uninspected run record: the latest marker and the ones set aside."""
+    paths = [STATE / MARKER] + sorted((STATE / PENDING).glob("*.json"))
+    found = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            contents = json.loads(path.read_bytes())
+        except (OSError, ValueError):
+            contents = None
+        found.append((path, contents))
+    return found
+
+
+def refuse_if_pending(environment):
+    for path, contents in pending_markers():
+        owner = marker_environment(contents)
+        # An unreadable record names no environment, so it cannot be scoped: it blocks.
+        if owner is None or owner == environment:
+            raise Refused("Previous live run in environment '" + environment
+                          + "' needs fixture inspection: " + str(path))
+
+
+def preflight_live(environment=None):
+    """Fail fast while another live run owns the lease, or while an uninspected
+    failed run used this same environment. Other environments are not blocked."""
     with exclusive(STATE / "live.lock"):
-        pass
+        refuse_if_pending(environment or environment_name())
 
 
 def set_aside(marker):
@@ -58,7 +101,7 @@ def set_aside(marker):
         name = "{}-{}-{}".format(identity["unit"], identity["attempt"], identity["pid"])
     except (OSError, ValueError, TypeError, KeyError):
         name = "unreadable"
-    folder = STATE / "needs-inspection"
+    folder = STATE / PENDING
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / (re.sub(r"[^A-Za-z0-9._-]", "_", name) + "-" + str(marker.stat().st_mtime_ns) + ".json")
     os.replace(str(marker), str(target))
@@ -66,20 +109,34 @@ def set_aside(marker):
 
 
 def release_after_inspection(record):
-    """Close the current marker once its executor has retained an inspection."""
+    """Close the failed run's record once its executor has retained an inspection.
+
+    The record is found by the run's identity, whether it is still the latest
+    marker or was set aside by a run in another environment."""
+    identity_keys = ("unit", "module", "attempt", "plan_sha256", "pid", "started_at")
     with exclusive(STATE / "live.lock"):
-        marker = STATE / "live-needs-inspection.json"
-        if not marker.is_file():
+        pending = pending_markers()
+        if not pending:
             raise Refused("No live inspection marker to release")
         try:
             path = Path(record).resolve()
             raw = path.read_bytes()
             inspection = json.loads(raw)
-            marker_contents = json.loads(marker.read_bytes())
         except (OSError, ValueError, TypeError) as error:
             raise Refused("Inspection requires a readable JSON record and marker") from error
-        validate_identity(marker_contents)
         validate_identity(inspection)
+        # environment is optional in a record (existing callers copy the six identity fields);
+        # when given it must name the marker's environment.
+        keys = identity_keys + (("environment",) if "environment" in inspection else ())
+        matches = [(marker_path, contents) for marker_path, contents in pending
+                   if isinstance(contents, dict) and all(
+                       (marker_environment(contents) if key == "environment" else contents.get(key)) == inspection.get(key)
+                       for key in keys)]
+        if len(matches) != 1:
+            # No marker, or an unreadable/legacy one, is never matched by guessing.
+            raise Refused("Inspection does not identify the failed live run")
+        marker, marker_contents = matches[0]
+        validate_identity(marker_contents)
         if (not isinstance(inspection, dict)
                 or any(not isinstance(inspection.get(key), str) or not inspection[key].strip()
                        for key in ("unit", "module", "inspected_at", "inspector"))
@@ -184,15 +241,16 @@ def release_after_success(identity, wait_seconds=10):
     while True:
         try:
             with exclusive(STATE / "live.lock"):
-                marker = STATE / "live-needs-inspection.json"
-                try:
-                    current = json.loads(marker.read_bytes())
-                except (OSError, ValueError) as error:
-                    raise Refused("No readable live marker for this execution") from error
-                if current != identity:
+                # A run in another environment may have set this marker aside meanwhile
+                # (D1804): finish this execution's own record wherever it now is.
+                pending = pending_markers()
+                if not pending:
+                    raise Refused("No readable live marker for this execution")
+                own = [path for path, contents in pending if contents == identity]
+                if len(own) != 1:
                     # Never clear a marker this execution did not write.
                     raise Refused("Live marker does not identify this execution")
-                marker.unlink()
+                own[0].unlink()
                 return
         except LeaseBusy:
             if time.monotonic() >= deadline:
@@ -201,26 +259,30 @@ def release_after_success(identity, wait_seconds=10):
 
 
 @contextmanager
-def live_run(unit, module, plan_sha256, attempt, release=True):
+def live_run(unit, module, plan_sha256, attempt, release=True, environment=None):
     """Grant live permission under the lease with a persisted marker.
 
     release=False keeps the marker after a successful body: a supervised worker
     cannot see its parent's deadline or interruption, so only the parent decides
     whether the execution succeeded (release_after_success).
+    A pending marker blocks only runs in its own environment (D1804).
     """
     global _permitted_pid
     if _permitted_pid is not None:
         raise Refused("Nested live runs are forbidden")
+    environment = environment or environment_name()
     with exclusive(STATE / "live.lock"):
-        quarantine = STATE / "live-needs-inspection.json"
+        refuse_if_pending(environment)
+        quarantine = STATE / MARKER
         if quarantine.exists():
-            # An earlier run's marker stays as its owner's inspection record (needs-inspection/);
-            # it no longer blocks every other live run on the account.
+            # Another environment's uninspected run: keep its record for its owner
+            # (needs-inspection/); it does not block this environment.
             set_aside(quarantine)
-        # Persist before permitting any stack access, so a crash leaves a record
-        # of the run whose owned fixtures need inspection.
+        # Persist before permitting any stack access. A crash never silently
+        # reopens this environment; the executor must inspect its owned fixtures first.
         identity = dict(unit=unit, module=module, plan_sha256=plan_sha256, attempt=attempt,
-                        pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat())
+                        pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat(),
+                        environment=environment)
         validate_identity(identity)
         # Atomic: a termination mid-write must not leave a marker without its
         # identity, which no inspection could match and release.

@@ -484,6 +484,9 @@ class InspectionReleaseTests(unittest.TestCase):
             action()
         self.assertEqual(self.marker.read_bytes(), marker)
         self.assertEqual(self.ledger.read_bytes() if self.ledger.is_file() else None, ledger)
+        with self.assertRaises(gate.Refused):
+            with gate.live_run(**self.identity):
+                self.fail('Uninspected gate admitted a run')
 
     def fail_live_run(self):
         with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
@@ -504,10 +507,11 @@ class InspectionReleaseTests(unittest.TestCase):
         self.fail_live_run()
         self.record.unlink()
         invalid = [None, '{', '[]']
+        # environment is optional in a record (callers copy the six identity fields), so it is not dropped here.
         invalid += [json.dumps({k: v for k, v in self.inspection.items() if k != key})
-                    for key in self.inspection]
+                    for key in self.inspection if key != 'environment']
         invalid += [json.dumps({**self.inspection, key: value}) for key, value in (
-            ('unit', ''), ('module', []), ('attempt', True), ('pid', 0), ('plan_sha256', 'bad'),
+            ('unit', ''), ('module', []), ('attempt', True), ('pid', 0), ('plan_sha256', 'bad'), ('environment', 'other-stack'),
             ('exit', True), ('artifacts', 'probe.log'),
             ('artifacts', [None]), ('stack', []), ('inspected_at', None), ('inspector', ''))]
         for value in invalid:
@@ -580,17 +584,22 @@ class InspectionReleaseTests(unittest.TestCase):
             self.assertEqual(self.ledger.read_bytes(), current)
             previous = current
 
-    def test_earlier_marker_is_kept_aside_and_does_not_block_the_next_run(self):
-        self.fail_live_run()
-        failed = self.marker.read_bytes()
-        gate.preflight_live()
-        with gate.live_run(**{**self.identity, 'unit': 'next-unit'}):
+    def test_parent_finishes_its_success_after_another_environment_set_it_aside(self):
+        # D1804 interleaving: worker A (stack-a) ends with release=False, run B on stack-b
+        # takes the lease and sets A's marker aside, then A's parent finalizes.
+        with gate.live_run(**self.identity, release=False, environment='stack-a') as first:
             gate.require_live_run()
+        with gate.live_run(**{**self.identity, 'unit': 'other-unit'}, release=False, environment='stack-b') as second:
+            gate.require_live_run()
+        self.assertEqual(json.loads(self.marker.read_bytes()), second)
+        gate.release_after_success(first)
+        self.assertEqual(list((self.state / 'needs-inspection').iterdir()), [])
+        self.assertEqual(json.loads(self.marker.read_bytes()), second)
+        gate.release_after_success(second)
         self.assertFalse(self.marker.exists())
-        kept = list((self.state / 'needs-inspection').iterdir())
-        self.assertEqual([path.read_bytes() for path in kept], [failed])
-        self.assertTrue(kept[0].name.startswith('owned-probe-1-'))
         self.assertFalse(self.ledger.exists())
+        with gate.live_run(**self.identity, environment='stack-a'):
+            gate.require_live_run()
 
     def test_active_lease_prevents_inspection_release(self):
         with gate.live_run(**self.identity):
@@ -623,6 +632,8 @@ class InspectionReleaseTests(unittest.TestCase):
                         with self.assertRaises(OSError):
                             gate.release_after_inspection(self.record)
                     self.assertEqual(self.marker.read_bytes(), original)
+                    with self.assertRaises(gate.Refused):
+                        gate.preflight_live()
 
     def test_unreadable_ledger_keeps_marker(self):
         self.fail_live_run()
@@ -635,6 +646,9 @@ class InspectionReleaseTests(unittest.TestCase):
             gate.require_live_run()
         original = self.marker.read_bytes()
         self.assertEqual(json.loads(original), identity)
+        with self.assertRaises(gate.Refused):
+            with gate.live_run(**self.identity):
+                self.fail('A supervised success admitted another run before its parent released it')
         for key, value in (('unit', 'another-unit'), ('attempt', 2), ('pid', identity['pid'] + 1),
                            ('started_at', (datetime.now(timezone.utc) - timedelta(days=1)).isoformat())):
             with self.subTest(field=key):
@@ -728,9 +742,13 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
         path.write_text(json.dumps(value), encoding='utf-8')
         return path
 
-    def run_plan(self, plan):
+    def run_plan(self, plan, environment=None):
+        # Runs default to one shared environment; a named one stands for a separate stack (D1804).
+        env = {k: v for k, v in os.environ.items() if k not in ('KIN_LIVE_ENVIRONMENT', 'COMPOSE_PROJECT_NAME')}
+        if environment:
+            env['KIN_LIVE_ENVIRONMENT'] = environment
         return subprocess.run([sys.executable, '-B', str(self.bootstrap), '--plan', str(plan)],
-                              capture_output=True, timeout=60)
+                              capture_output=True, timeout=60, env=env)
 
     def test_live_stack_denies_before_configuration_or_network(self):
         import invariants_live as live
@@ -777,8 +795,7 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
         # D1804: no attempt cap and no refusal to rerun; the first failure is never overwritten.
         statuses = []
         for case, attempts in (('test_fail', 2), ('test_fail', 3), ('test_fail', None), ('test_pass', 1), ('test_pass', None)):
-            path = self.plan(case=case, attempts=attempts)
-            result = self.run_plan(path)
+            result = self.run_plan(self.plan(case=case, attempts=attempts))
             statuses.append('passed' if case == 'test_pass' else 'failed')
             self.assertEqual(result.returncode, 0 if case == 'test_pass' else 125, result.stderr)
             # The parent ran and recorded the attempt (a refusal prints no PLAN_RESULT).
@@ -791,11 +808,46 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
     def test_hang_timeout_is_required(self):
         for timeout in (0, None, '30'):
             with self.subTest(timeout=timeout):
-                path = self.plan(unit='no-timeout', timeout=timeout)
-                result = self.run_plan(path)
+                result = self.run_plan(self.plan(unit='no-timeout', timeout=timeout))
                 self.assertEqual(result.returncode, 125)
                 self.assertIn(b'timeout_seconds', result.stderr)
         self.assertFalse((self.state/'no-timeout.json').exists())
+
+    def kept_aside(self):
+        folder = self.state/'needs-inspection'
+        return [json.loads(path.read_bytes()) for path in folder.iterdir()] if folder.is_dir() else []
+
+    def test_failed_live_run_blocks_only_its_own_environment(self):
+        # D1804 #19: the uninspected environment stays closed (same unit retry included);
+        # a run on another environment proceeds and the failed run's record is kept.
+        self.assertEqual(self.run_plan(self.plan(case='test_fail', mode='live'), 'stack-a').returncode, 125)
+        failed = json.loads((self.state/'live-needs-inspection.json').read_bytes())
+        self.assertEqual(failed['environment'], 'stack-a')
+        retry = self.run_plan(self.plan(case='test_live', mode='live'), 'stack-a')
+        self.assertEqual(retry.returncode, 125)
+        self.assertIn(b"environment 'stack-a' needs fixture inspection", retry.stderr)
+        self.assertEqual(len(json.loads((self.state/'probe.json').read_bytes())['attempts']), 1)
+        other = self.run_plan(self.plan(unit='other', case='test_live', mode='live'), 'stack-b')
+        self.assertEqual(other.returncode, 0, other.stderr)
+        self.assertTrue((self.tests/'live').exists())
+        self.assertEqual(self.kept_aside(), [failed])
+        self.assertFalse((self.state/'live-needs-inspection.json').exists())
+        # Still closed for stack-a after the other environment's run.
+        (self.tests/'live').unlink()
+        again = self.run_plan(self.plan(unit='later', case='test_live', mode='live'), 'stack-a')
+        self.assertEqual(again.returncode, 125)
+        self.assertFalse((self.tests/'live').exists())
+        # Its owner inspects the set-aside record through the documented API; stack-a reopens.
+        record = self.path/'inspection-a.json'
+        record.write_text(json.dumps({**failed, 'exit': 125, 'artifacts': ['run.log'], 'stack': {'containers': []},
+                                      'inspected_at': datetime.now(timezone.utc).isoformat(),
+                                      'inspector': 'owner'}), encoding='utf-8')
+        with patch.object(gate, 'STATE', self.state):
+            gate.release_after_inspection(record)
+        self.assertEqual(self.kept_aside(), [])
+        entries = [json.loads(line) for line in (self.state/'inspections.jsonl').read_text().splitlines()]
+        self.assertEqual([entry['marker'] for entry in entries], [failed])
+        self.assertEqual(self.run_plan(self.plan(unit='reopened', case='test_live', mode='live'), 'stack-a').returncode, 0)
 
     def test_worker_entry_cannot_bypass_parent_budget(self):
         path = self.plan()
@@ -828,19 +880,13 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
         self.assertEqual(first.wait(timeout=30), 0)
         self.assertEqual(self.run_plan(self.plan(unit='third', case='test_live', mode='live')).returncode, 0)
 
-    def assert_kept_aside(self, unit):
-        kept = [json.loads(path.read_bytes()) for path in (self.state/'needs-inspection').iterdir()]
-        self.assertEqual([marker['unit'] for marker in kept], [unit])
-        return kept[0]
-
-    def test_failed_live_run_keeps_its_record_and_does_not_block_other_units(self):
+    def test_failed_live_run_stays_closed_for_other_units(self):
         self.assertEqual(self.run_plan(self.plan(case='test_fail', mode='live')).returncode, 125)
-        failed = json.loads((self.state/'live-needs-inspection.json').read_bytes())
         result = self.run_plan(self.plan(unit='next', case='test_live', mode='live'))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((self.tests/'live').exists())
-        self.assertEqual(self.assert_kept_aside('probe'), failed)
-        self.assertFalse((self.state/'live-needs-inspection.json').exists())
+        self.assertEqual(result.returncode, 125)
+        self.assertIn(b'fixture inspection', result.stderr)
+        self.assertFalse((self.state/'next.json').exists())
+        self.assertFalse((self.tests/'live').exists())
 
     def test_real_module_and_single_or_multi_file_plan_bind_marker_and_attempt(self):
         for filename in ('failure.py', 'other.py'):
@@ -867,7 +913,8 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
                                       if line.startswith('PLAN_RESULT ')))
                 marker_path = self.state / 'live-needs-inspection.json'
                 marker = json.loads(marker_path.read_bytes())
-                self.assertEqual(set(marker), {'unit', 'module', 'attempt', 'plan_sha256', 'pid', 'started_at'})
+                self.assertEqual(set(marker), {'unit', 'module', 'attempt', 'plan_sha256', 'pid', 'started_at', 'environment'})
+                self.assertEqual(marker['environment'], 'default')
                 self.assertEqual(marker['unit'], 'bound-probe')
                 self.assertEqual(marker['attempt'], attempt)
                 self.assertEqual(row['attempt'], attempt)
@@ -898,7 +945,7 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
                 self.assertEqual(entries[-1]['record_sha256'], hashlib.sha256(record.read_bytes()).hexdigest())
         self.assertEqual(self.run_plan(self.plan(unit='admitted', case='test_live', mode='live')).returncode, 0)
 
-    def test_timeout_kills_owned_descendants_and_keeps_the_marker(self):
+    def test_timeout_kills_owned_descendants_and_blocks_retry(self):
         listener = self.readiness_listener()
         # The budget includes imports/spawning. Readiness must arrive within 20s,
         # before the 30s deadline, so taskkill sees an already running descendant.
@@ -918,7 +965,7 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
             closed = b''
         self.assertEqual(closed, b'', stdout)
         self.assertFalse((self.tests/'escaped').exists())
-        self.assertEqual(json.loads((self.state/'probe.json').read_bytes())['attempts'][-1]['status'], 'interrupted')
+        self.assertEqual(self.run_plan(path).returncode, 125)
         self.assertTrue((self.state/'live-needs-inspection.json').exists())
 
     def child_first_bootstrap(self):
@@ -996,7 +1043,7 @@ if '--plan' in sys.argv:
                                                              hook + 'raise SystemExit(runner.main())'), encoding='utf-8')
         return path, log
 
-    def test_worker_exit_during_termination_keeps_the_interrupted_runs_marker(self):
+    def test_worker_exit_during_termination_keeps_marker_and_refuses_every_unit(self):
         bootstrap, log = self.child_first_bootstrap()
         listener = self.readiness_listener()
         path = self.plan(case='test_timeout', mode='live', timeout=30)
@@ -1021,18 +1068,37 @@ if '--plan' in sys.argv:
         result = json.loads(next(line[len('PLAN_RESULT '):] for line in stdout.decode().splitlines()
                                  if line.startswith('PLAN_RESULT ')))
         self.assertEqual((result['status'], result['exit_code']), ('interrupted', 124))
-        # The worker's normal exit never releases the interrupted run's marker: the first
-        # other unit finds it and keeps it aside as that run's record (D1804: no global block).
-        marker = json.loads(rows[1]['marker'])
-        self.assertEqual((marker['unit'], marker['module'], marker['attempt'], marker['plan_sha256']),
-                         ('probe', 'tests/probe.py', 1, result['plan_sha256']))
-        self.assertEqual(self.assert_kept_aside('probe'), marker)
         for row in rows[1:]:
             with self.subTest(point=row['point']):
-                self.assertEqual(row['exit'], 0, row)
-                self.assertTrue(row['live_written'])
-        self.assertEqual([row['marker'] for row in rows[2:]], [None, None])
-        self.assertFalse((self.state/'live-needs-inspection.json').exists())
+                self.assertEqual(row['exit'], 125, row)
+                self.assertIn('fixture inspection', row['stderr'])
+                self.assertEqual(row['marker'], rows[1]['marker'])
+                self.assertFalse(row['live_written'])
+                self.assertFalse((self.state/(row['unit'] + '.json')).exists())
+        marker_path = self.state/'live-needs-inspection.json'
+        marker = json.loads(marker_path.read_bytes())
+        self.assertEqual(json.loads(rows[1]['marker']), marker)
+        self.assertEqual((marker['unit'], marker['module'], marker['attempt'], marker['plan_sha256']),
+                         ('probe', 'tests/probe.py', 1, result['plan_sha256']))
+        same = self.run_plan(path)
+        self.assertEqual(same.returncode, 125)
+        self.assertIn(b'inspection', same.stderr)
+        self.assertEqual(len(json.loads((self.state/'probe.json').read_bytes())['attempts']), 1)
+        other = self.run_plan(self.plan(unit='other', case='test_live', mode='live'))
+        self.assertEqual(other.returncode, 125)
+        self.assertIn(b'fixture inspection', other.stderr)
+        self.assertFalse((self.tests/'live').exists())
+        self.assertEqual(json.loads(marker_path.read_bytes()), marker)
+        # The preserved marker is the one an inspection releases.
+        record = self.path/'inspection.json'
+        record.write_text(json.dumps({**marker, 'exit': 124, 'artifacts': ['run.log'], 'stack': {'containers': []},
+                                      'inspected_at': datetime.now(timezone.utc).isoformat(),
+                                      'inspector': 'commander'}), encoding='utf-8')
+        stamp = max(time.time_ns(), marker_path.stat().st_mtime_ns + 1_000_000)
+        os.utime(record, ns=(stamp, stamp))
+        with patch.object(gate, 'STATE', self.state):
+            gate.release_after_inspection(record)
+        self.assertEqual(self.run_plan(self.plan(unit='admitted', case='test_live', mode='live')).returncode, 0)
 
     def test_live_success_is_reopened_by_the_parent_and_admits_the_next_unit(self):
         result = self.run_plan(self.plan(unit='first', case='test_live', mode='live'))
@@ -1054,15 +1120,17 @@ if '--plan' in sys.argv:
                 self.assertEqual(marker.exists(), mode == 'live')
         self.assertEqual(json.loads(marker.read_bytes())['unit'], 'live-exit')
         other = self.run_plan(self.plan(unit='next', case='test_live', mode='live'))
-        self.assertEqual(other.returncode, 0, other.stderr)
-        self.assert_kept_aside('live-exit')
+        self.assertEqual(other.returncode, 125)
+        self.assertIn(b'fixture inspection', other.stderr)
+        self.assertFalse((self.tests/'live').exists())
 
-    def test_skipped_live_run_keeps_its_record_and_does_not_block_other_units(self):
+    def test_skipped_live_run_stays_closed_for_other_units(self):
         self.assertEqual(self.run_plan(self.plan(case='test_live_skip', mode='live')).returncode, 125)
         self.assertEqual(json.loads((self.state/'live-needs-inspection.json').read_bytes())['unit'], 'probe')
         result = self.run_plan(self.plan(unit='next', case='test_live', mode='live'))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assert_kept_aside('probe')
+        self.assertEqual(result.returncode, 125)
+        self.assertIn(b'fixture inspection', result.stderr)
+        self.assertFalse((self.tests/'live').exists())
 
     def test_descendant_fixture_can_observe_release_without_termination(self):
         listener = self.readiness_listener()

@@ -96,7 +96,7 @@ Orthanc·NestJS/Prisma·PostgreSQL·Keycloak·nginx로 구성된 의료영상 �
 
 `LiveStack`을 쓰는 시험은 `scripts/run-tests.py`가 만든 실행 범위 안에서만 허용한다. 일반 `unittest` 실행이나 환경 변수로 이 허가를 얻지 못한다. 실행기는 정확한 파일/클래스/메서드를 고정하고 순수 모드의 LiveStack 접근과 실환경 동시 실행을 거부한다. 시도 횟수 상한은 없다(D1804). 모든 시도는 단위 원장에 남고 최초 실패도 덮어쓰지 않으며, 다시 돌릴 때는 바뀐 코드·환경과 이유를 같은 작업 기록에 남긴다. `timeout_seconds`는 멈춘 실행을 끊는 hang timeout으로 필수이며 그 suite의 실측 소요에 맞춘다.
 
-실환경 실패·중단에는 OS 계정의 영구 상태 디렉터리 `test-gate/live-needs-inspection.json`이 남는다. 이 marker는 그 실행이 소유한 합성 fixture의 점검 기록이며 다른 실환경 시험을 막지 않는다. 다음 실환경 실행은 남은 marker를 `test-gate/needs-inspection/`으로 옮겨 보존한다. 실행 책임자는 자기 실행의 fixture를 점검·정리하고 근거를 남기며, 시간 경과를 이유로 marker나 원장을 지우지 않는다. 이 도구는 OS 자격증명 격리를 제공하지 않으며, 같은 계정의 임의 쉘·Docker 접근까지 차단했다고 보고하지 않는다.
+실환경 실패·중단에는 OS 계정의 영구 상태 디렉터리 `test-gate/live-needs-inspection.json`이 남는다. marker는 실행 환경(`KIN_LIVE_ENVIRONMENT` 또는 `COMPOSE_PROJECT_NAME`, 없으면 `default`)을 기록하며, 점검 전까지 **같은 환경**의 실환경 시험(같은 unit 재시도 포함)만 막고 다른 환경은 막지 않는다. 다른 환경의 실행은 남은 marker를 `test-gate/needs-inspection/`으로 옮겨 보존하고, 옮겨진 marker도 `release_after_inspection`으로 점검 완료한다. 실행 책임자는 자기 실행의 fixture를 점검·정리하고 근거를 남기며, 시간 경과를 이유로 marker나 원장을 지우지 않는다. 이 도구는 OS 자격증명 격리를 제공하지 않으며, 같은 계정의 임의 쉘·Docker 접근까지 차단했다고 보고하지 않는다.
 
 후보 라운드·검수 시도·CI 재실행에는 숫자 상한을 두지 않는다. 라운드 수는 기록일 뿐 제출·상담·병합 허가 조건이 아니다. 계약 충돌·같은 원인의 재발·해결 방향 불명일 때 남은 문제를 한 번에 상담하고, 이미 수용 기준이 분명한 단순 수정은 계속한다. CI 실패는 일시적 환경 문제로 분류된 경우에만 이유를 남겨 재실행하고, 재현되는 결함은 원인을 고치며 원래 실패를 보존한다.
 
