@@ -56,7 +56,8 @@ function judgeTap(text, expected) {
 
 if (process.argv.includes('--judge-tap')) {
   const file = process.argv[process.argv.indexOf('--judge-tap') + 1];
-  const unit = declaration(), expected = [...unit.cases.contract, ...unit.cases.queue];
+  const unit = declaration(), expected = process.argv.includes('--server-crypto')
+    ? unit.cases.server_crypto : [...unit.cases.contract, ...unit.cases.queue];
   const verdict = judgeTap(fs.readFileSync(file, 'utf8'), expected);
   process.stdout.write(JSON.stringify({ file, expected: expected.length, ...verdict }) + '\n');
   process.exit(verdict.ok ? 0 : 1);
@@ -1202,14 +1203,13 @@ test('C-C13 read and print requests stay on one version and an acknowledgement b
   assert.throws(() => NP.parseOfflineObservation({ ...access, action: 'print-done', relatedEventId: 'p', physicalOutput: null }), { code: 'PrintCompletionRefused' });
 });
 
-test('C-C14 the C1 declaration matches the files and collected cases exactly; missing, duplicate or undeclared files, existing single-writer paths and not-run cases counted as passed are refused', () => {
+test('C-C14 the C declaration matches the files and collected cases exactly; missing, duplicate or undeclared files, existing single-writer paths and not-run cases counted as passed are refused', () => {
   const unit = declaration();
   assert.deepEqual(Object.keys(unit).sort(), ['base_sha', 'candidate_cases', 'cases', 'consult', 'consumers', 'dependencies', 'deployment', 'expected', 'forbidden_single_writer', 'live',
     'migrations', 'models', 'mutants', 'order', 'owned_paths', 'records', 'req_risk_test', 'restore', 'round', 'routes', 'unit'].sort());
-  assert.equal(unit.round, 'C1');
+  assert.equal(unit.round, 'C2-core');
   const owned = unit.owned_paths;
-  assert.equal(owned.length, 20);
-  assert.equal(new Set(owned).size, 20);
+  assert.equal(new Set(owned).size, owned.length);
   for (const file of owned) assert(fs.statSync(path.join(root, file)).isFile(), file);
   assert.deepEqual(owned.filter(p => unit.forbidden_single_writer.includes(p)), []);
   for (const dir of ['api/src/emr-report', 'api/src/emr-signature', 'tests/emr/c']) {
@@ -1229,8 +1229,13 @@ test('C-C14 the C1 declaration matches the files and collected cases exactly; mi
   };
   assert.deepEqual(collected('tests/emr/c/contract_test.cjs'), unit.cases.contract);
   assert.deepEqual(collected('tests/emr/c/offline_queue_test.cjs'), unit.cases.queue);
-  assert.deepEqual(unit.expected, { contract: 14, queue: 8, dom: 6, total: 28 });
-  assert.equal(unit.cases.contract.length + unit.cases.queue.length + unit.cases.dom.length, unit.expected.total);
+  assert.deepEqual(collected('tests/emr/c/server_crypto_test.cjs'), unit.cases.server_crypto);
+  assert.deepEqual(Object.keys(unit.expected).sort(), [...Object.keys(unit.cases), 'total'].sort());
+  for (const [suite, cases] of Object.entries(unit.cases)) {
+    assert.equal(new Set(cases).size, cases.length, suite);
+    assert.equal(unit.expected[suite], cases.length, suite);
+  }
+  assert.equal(Object.values(unit.cases).reduce((total, cases) => total + cases.length, 0), unit.expected.total);
   for (const empty of [unit.routes.active, unit.models.active, unit.records.active, unit.migrations.active, unit.live.active, unit.candidate_cases]) assert.deepEqual(empty, []);
   // The exact-selection judge accepts only every declared case passing once.
   const ids = ['C-C01', 'C-Q01'];
