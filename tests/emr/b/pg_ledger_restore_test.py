@@ -74,6 +74,8 @@ class PgLedgerFixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         gate.require_live_run()
+        # Every case writes its evidence below this parent; a fresh checkout (CI) does not have it yet.
+        (ROOT / 'tmp/emr-b2-replace-20261023').mkdir(parents=True, exist_ok=True)
         cls.token = uuid.uuid4().hex[:12]
         cls.container = 'emr-b2r-schema-' + cls.token
         cls.network = cls.container + '-net'

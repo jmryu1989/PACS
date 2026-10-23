@@ -13,6 +13,7 @@ const { EmrLedgerClient } = require(path.join(build, 'emr-runtime/client.js'));
 const { FailureJournal, FailureSpool } = require(path.join(build, 'emr-runtime/failure-journal.js'));
 const { verifyRuntimeConnection } = require(path.join(build, 'emr-runtime/manifest.js'));
 const { EMR_BACKGROUND_WORK } = require(path.join(build, 'emr-runtime/background-work.js'));
+const { StudyTransferLocalService } = require(path.join(build, 'study-transfer-local.service.js'));
 const { provideAfterReceipt } = require(path.join(build, 'emr-runtime/contract.js'));
 const known = value => ({ status: 'known', value });
 
@@ -280,7 +281,9 @@ async function clinicalHttp() {
       {provide:FindingService,useValue:{}},
       {provide:StudyAccessService,useFactory:db=>new StudyAccessService(db,orthanc,{}),inject:[PrismaService]},
       {provide:EMR_RECORD_PORT,useValue:runtime.port},
-      {provide:EMR_BACKGROUND_WORK,useValue:runtime.background.work},{provide:APP_GUARD,useClass:AuthGuard}]})(ClinicalFixture);
+      {provide:EMR_BACKGROUND_WORK,useValue:runtime.background.work},{provide:APP_GUARD,useClass:AuthGuard},
+      // S9-U4b (#181): AuthGuard also injects the archive-grant service; the draft routes never reach it.
+      {provide:StudyTransferLocalService,useValue:{}}]})(ClinicalFixture);
     app=await NestFactory.create(ClinicalFixture,{logger:false});app.setGlobalPrefix('api');await app.listen(0,'127.0.0.1');
     const origin=await app.getUrl();
     const headers={authorization:'Bearer '+token,'content-type':'application/json','x-real-ip':'192.0.2.22'};
@@ -514,7 +517,9 @@ async function authSuccess(endings = false) {
     class AuthFixture {}
     Module({ controllers: [AuthController], providers: [PrismaService, KeycloakService,
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: observedPort },
-      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard}] })(AuthFixture);
+      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard},
+      // S9-U4b (#181): AuthGuard also injects the archive-grant service; these routes never reach it.
+      { provide: StudyTransferLocalService, useValue: {} }] })(AuthFixture);
     app = await NestFactory.create(AuthFixture, { logger: false });
     app.setGlobalPrefix('api');
     const interval = global.setInterval;
