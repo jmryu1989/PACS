@@ -272,7 +272,8 @@ jobs:
     - name: Production image migration, startup and refusal checks
       env:
         KIN_TEST_API_IMAGE: kin-api:ci
-        KIN_EXPECTED_REVISION: ${{ github.sha }}
+        # The image is built from the checked-out commit (CODE_SHA), not from the PR merge ref.
+        KIN_EXPECTED_REVISION: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/production-image --cwd . --file api/Dockerfile --file api/prisma/schema.prisma --file scripts/ops_backup.py --file tests/production_image_test.py -- python3 tests/production_image_test.py
     - name: Disposable host adapter API replacement and database preservation
       run: sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py
