@@ -66,4 +66,4 @@ async function bootstrap() {
   else
     console.log(`[KIN API] 인증: Keycloak (iss=${process.env.KC_ISSUER})`);
 }
-bootstrap().catch(() => { console.error('[KIN API] Startup failed.'); process.exitCode = 1; });
+bootstrap().catch(error => { console.error('[KIN API] Startup failed.', error); process.exitCode = 1; });

@@ -426,8 +426,8 @@ BEGIN
     END;
   END LOOP;
   RETURN jsonb_build_object('ran',true,'checkedAt',clock_timestamp(),'deletedEntries',entries,
-    'deletedFailures',failures,'retainedByDutyOrHold',held,'historyEndingRequired',unknown_history,
-    'complete',unknown_history=0);
+    'deletedFailures',failures,'retainedByDutyOrHold',held,'historyRetainedUnknownLifetime',unknown_history,
+    'complete',true);
 END $$;
 
 RESET ROLE;

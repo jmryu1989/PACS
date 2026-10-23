@@ -81,7 +81,7 @@ def daily_role_catalog():
 def expiry_receipt():
     return {"ran": True, "complete": True, "checkedAt": "2026-10-23T00:00:00Z",
             "deletedEntries": 0, "deletedFailures": 0, "retainedByDutyOrHold": 0,
-            "historyEndingRequired": 0}
+            "historyRetainedUnknownLifetime": 0}
 
 
 class DailyCluster:
@@ -941,15 +941,19 @@ class EmrRestoreVerification(unittest.TestCase):
         self.assertTrue(result["audit"]["verified"])
         self.assertEqual(cleanup.call_count, 3)
 
-    def test_d1796_unresolved_history_prevents_restored_business_readiness(self):
-        self.host.restored_expiry = {**expiry_receipt(), "complete": False, "historyEndingRequired": 1}
+    def test_d1796_unknown_history_is_counted_without_blocking_restore(self):
+        self.host.restored_expiry = {**expiry_receipt(), "historyRetainedUnknownLifetime": 1}
         before = self.host.files(self.folder)
         result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
-        self.assertIsInstance(error, RuntimeError)
-        self.assertFalse(result["success"])
+        self.assertIsNone(error)
+        self.assertTrue(result["success"])
         self.assertEqual(result["emr"]["expiry_sweep"], self.host.restored_expiry)
         self.assertEqual(self.host.files(self.folder), before)
         self.assertEqual(cleanup.call_count, 3)
+
+    def test_d1796_sweep_must_run_before_restored_business_readiness(self):
+        self.host.restored_expiry = {**expiry_receipt(), "ran": False}
+        self.assert_restore_refused()
 
     def test_tampered_and_partial_components_refuse_before_restore(self):
         for name in ("kin.dump", *ops.EMR_FILES):

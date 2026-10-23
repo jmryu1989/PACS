@@ -718,21 +718,23 @@ class PgLedgerRestoreSweepLive(PgLedgerFixture):
         try:
             self.sql(mutant)
             red=json.loads(self.sql('BEGIN;SELECT emr_access.restore_expiry_sweep();ROLLBACK','kin_emr_retention').stdout)
-            with self.assertRaises(AssertionError):self.assertFalse(red['complete'],'Unknown H ending cannot be a complete sweep')
+            with self.assertRaises(AssertionError):
+                self.assertEqual(red['historyRetainedUnknownLifetime'],1,'Retained unknown history must be counted')
         finally:self.sql(definition.replace('CREATE FUNCTION','CREATE OR REPLACE FUNCTION',1))
         first=json.loads(self.sql('SELECT emr_access.restore_expiry_sweep()','kin_emr_retention').stdout)
-        self.assertEqual((first['ran'],first['complete'],first['historyEndingRequired']),(True,False,1))
+        self.assertEqual((first['ran'],first['complete'],first['historyRetainedUnknownLifetime']),(True,True,1))
         self.assertEqual((first['deletedEntries'],first['deletedFailures'],first['retainedByDutyOrHold']),(2,1,1))
         self.assertEqual(self.sql(f"SELECT count(*) FROM emr_access.access_entry WHERE event_id='{events[1][0]}'").stdout.strip(),'1','rights keep their three-year floor')
         history=self.sql(f"SELECT entry_id FROM emr_access.access_entry WHERE event_id='{events[2][0]}' AND stream='history'").stdout.strip()
+        self.assertTrue(history,'Unknown-lifetime history must remain in the restored database')
         # Actual H graph/classification is independently exercised by the H
         # adapter case; this SQL boundary receives that complete ending result.
         endings=json.dumps({history:[dict(recordId='synthetic-record',versionId='v1',kind='report-version',
             endsAt='2015-01-01T00:00:00Z',evidenceId='synthetic-verified-H-graph')]})
         final=json.loads(self.sql(f"SELECT emr_access.restore_expiry_sweep('{endings}')",'kin_emr_retention').stdout)
-        self.assertEqual((final['complete'],final['deletedEntries'],final['historyEndingRequired']),(True,1,0))
+        self.assertEqual((final['complete'],final['deletedEntries'],final['historyRetainedUnknownLifetime']),(True,1,0))
         self.assertEqual(self.sql(f"SELECT count(*) FROM emr_access.failure_entry WHERE failure_id='{held}'").stdout.strip(),'1')
-        print('PASS restore sweep: actual row expiry; rights/hold retained; H-unknown incomplete red/control; receipt includes ran/time/counts')
+        print('PASS restore sweep: actual row expiry; rights/hold retained; unknown history retained/counted; count-omission mutant red')
 
 
 class PgLedgerImportCliLive(PgLedgerFixture):
@@ -833,6 +835,16 @@ class PgLedgerNativeRestoreLive(PgLedgerFixture):
         evidence.mkdir()
         snapshot = evidence / 'snapshot'
         snapshot.mkdir()
+        # B2R-REV-01 / D1796: Opus's 2020 record-history fault must survive
+        # native recovery without blocking it, and be counted in the receipt.
+        old_event, old_operation, old_attempt = (str(uuid.uuid4()) for _ in range(3))
+        old_payload = json.dumps(dict(eventId=old_event, occurredAt='2020-01-01T00:00:00Z',
+            userId={'status':'unresolved','reason':'not-authenticated'}, result='succeeded', action='write',
+            targets=[dict(kind='report-version',recordId={'status':'known','value':'SYNTHETIC-old'},
+                          versionId={'status':'known','value':'v1'})]))
+        old_literal = "'" + old_payload.replace("'", "''") + "'"
+        self.sql(f"SELECT emr_access.admit_operation('{old_operation}','{old_attempt}',{old_literal},'기재')",'kin_runtime')
+        self.sql(f"SELECT emr_access.append_operation('{old_operation}','{old_attempt}',{old_literal},'기재',NULL,NULL,NULL)",'kin_runtime')
         event, operation, attempt, failure = (str(uuid.uuid4()) for _ in range(4))
         payload = json.dumps(dict(eventId=event,occurredAt=datetime.now(timezone.utc).isoformat(),
             userId={'status':'unresolved','reason':'not-authenticated'},result='succeeded',
@@ -900,18 +912,28 @@ class PgLedgerNativeRestoreLive(PgLedgerFixture):
                 observed.update(json.loads(self.command(['docker','exec',restored,'psql','-X','-U','postgres','-d','kin','-qAt','-c',sql]).stdout))
             return result
         actual_catalog = ops.emr_catalog
+        actual_expiry = ops.restored_emr_expiry
+        def expiry_witness(container, user):
+            receipt = actual_expiry(container, user)
+            row = ops.psql_json(container, 'kin', f"SELECT json_build_object('count',count(*),"
+                f"'payload',min(payload)) FROM emr_access.access_entry WHERE event_id='{old_event}' AND stream='history'", user)
+            self.assertEqual(row, {'count':1,'payload':old_payload}, 'Restore must preserve the unknown-lifetime history row')
+            observed['old_history_retained'] = row['count']
+            return receipt
         def catalog_witness(container, user):
             value = actual_catalog(container, user)
             if container != self.container:
                 ops.write_json(evidence / ('restored-catalog-' + container + '.json'), value)
             return value
-        with patch.object(ops,'temporary_run',side_effect=witness), patch.object(ops,'emr_catalog',side_effect=catalog_witness):
+        with patch.object(ops,'temporary_run',side_effect=witness), patch.object(ops,'emr_catalog',side_effect=catalog_witness), \
+                patch.object(ops,'restored_emr_expiry',side_effect=expiry_witness):
             ops.rehearse(snapshot)
-        self.assertEqual(observed,dict(entries=2,outcomes=1,clinical=1,spool_imported=1))
+        self.assertEqual(observed,dict(entries=2,outcomes=1,clinical=1,spool_imported=1,old_history_retained=1))
         reports=[json.loads(p.read_text()) for p in snapshot.glob('rehearsal-*.json')]
         self.assertTrue(reports[-1]['success']);self.assertEqual(reports[-1]['cleanup_failures'],[])
         sweep=reports[-1]['emr']['expiry_sweep']
         self.assertIs(sweep['ran'],True);self.assertIs(sweep['complete'],True)
+        self.assertEqual(sweep['historyRetainedUnknownLifetime'],1)
         self.assertEqual(sweep['deletedFailures'],1)
         self.assertEqual(self.sql(f"SELECT count(*) FROM emr_access.failure_entry WHERE failure_id='{expired_failure}'").stdout.strip(),'1','Source backup fixture is preserved')
         wrong=evidence/'wrong-selected-installation';shutil.copytree(snapshot,wrong)

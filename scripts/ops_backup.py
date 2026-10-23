@@ -588,8 +588,8 @@ finally{await runtime.stop(Date.now()+15000);}})().catch(()=>{process.exitCode=1
 def restored_emr_expiry(container, user):
     """D1796: run ordinary checked expiry on the isolated restored database.
 
-    No history lifetime is inferred from access age. An H ending still needed
-    is recorded as incomplete, and this copy cannot be declared ready for use.
+    No history lifetime is inferred from access age. Unknown lifetimes are
+    retained and counted in the receipt without blocking business recovery.
     Source backups remain untouched and retain their existing rotation policy.
     """
     return psql_json(container, 'kin',
@@ -661,8 +661,8 @@ def rehearse_held(directory, manifest, *, daily=False):
                 raise RuntimeError("Restored PostgreSQL ledger or failure spool is not ready")
             result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True,
                              "expiry_sweep": restored_emr_expiry(name, "kin")}
-            if result["emr"]["expiry_sweep"].get("complete") is not True:
-                raise RuntimeError("Restored history requires verified H record endings before business use")
+            if result["emr"]["expiry_sweep"].get("ran") is not True:
+                raise RuntimeError("Restored expiry sweep did not run before business use")
         result["audit"] = rehearse_audit(directory, manifest, name, user="kin")
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
@@ -755,8 +755,8 @@ def rehearse(directory):
                 raise RuntimeError("Restored PostgreSQL ledger or failure spool is not ready")
             result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True,
                              "expiry_sweep": restored_emr_expiry(name, "postgres")}
-            if result["emr"]["expiry_sweep"].get("complete") is not True:
-                raise RuntimeError("Restored history requires verified H record endings before business use")
+            if result["emr"]["expiry_sweep"].get("ran") is not True:
+                raise RuntimeError("Restored expiry sweep did not run before business use")
         result["audit"] = rehearse_audit(directory, manifest, name)
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")

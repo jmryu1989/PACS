@@ -118,7 +118,7 @@ class FakeHost:
         if "emr_access.restore_expiry_sweep()" in joined:
             return json.dumps({"ran": True, "complete": True, "checkedAt": "2026-10-23T00:00:00Z",
                                "deletedEntries": 0, "deletedFailures": 0,
-                               "retainedByDutyOrHold": 0, "historyEndingRequired": 0})
+                               "retainedByDutyOrHold": 0, "historyRetainedUnknownLifetime": 0})
         if args[:2] == ["docker", "inspect"]:
             return json.dumps(self.containers())
         if "pg_stat_activity" in joined:
@@ -391,6 +391,27 @@ class HeldCaptureTests(unittest.TestCase):
         self.assertIn("POSTGRES_USER=kin", started)
         self.assertTrue(any("CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner" in " ".join(command) for command in host.commands))
         self.assertFalse(any("cluster-roles.sql" in str(command) or "--no-owner" in command for command in host.commands))
+
+    def test_d1796_held_restore_keeps_unknown_history_and_requires_the_sweep(self):
+        receipt = {"ran": True, "complete": True, "historyRetainedUnknownLifetime": 1}
+        for outcome in (receipt, {**receipt, "ran": False}, RuntimeError("synthetic sweep failure")):
+            with self.subTest(outcome=outcome):
+                host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post")
+                directory = host.capture(label="emr-b1")
+                expiry = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+                succeeds = outcome is receipt
+                with host.bound(), patch.object(ops, "remove_owned_if_present"), \
+                        patch.object(ops, "restored_emr_expiry", **expiry):
+                    if succeeds:
+                        ops.rehearse(directory)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            ops.rehearse(directory)
+                (record,) = directory.glob("rehearsal-*.json")
+                result = json.loads(record.read_text())
+                self.assertIs(result["success"], succeeds)
+                if succeeds:
+                    self.assertEqual(result["emr"]["expiry_sweep"], receipt)
 
     @unittest.skipUnless(os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0, "Linux root (the protected entry's user)")
     def test_12_root_captures_into_the_operating_accounts_private_backup_root_and_gives_the_capture_to_it(self):
