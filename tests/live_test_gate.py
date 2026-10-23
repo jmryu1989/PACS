@@ -45,13 +45,28 @@ def require_live_run():
 
 
 def preflight_live():
+    """Fail fast while another live run owns the lease. An earlier run's marker
+    does not block other runs (D1804): it names that run's own fixtures to inspect."""
     with exclusive(STATE / "live.lock"):
-        if (STATE / "live-needs-inspection.json").exists():
-            raise Refused("Previous live run needs fixture inspection: " + str(STATE))
+        pass
+
+
+def set_aside(marker):
+    """Keep an earlier run's marker as its inspection record; never delete it."""
+    try:
+        identity = json.loads(marker.read_bytes())
+        name = "{}-{}-{}".format(identity["unit"], identity["attempt"], identity["pid"])
+    except (OSError, ValueError, TypeError, KeyError):
+        name = "unreadable"
+    folder = STATE / "needs-inspection"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / (re.sub(r"[^A-Za-z0-9._-]", "_", name) + "-" + str(marker.stat().st_mtime_ns) + ".json")
+    os.replace(str(marker), str(target))
+    return target
 
 
 def release_after_inspection(record):
-    """Reopen a failed run only after its executor has retained an inspection."""
+    """Close the current marker once its executor has retained an inspection."""
     with exclusive(STATE / "live.lock"):
         marker = STATE / "live-needs-inspection.json"
         if not marker.is_file():
@@ -199,9 +214,11 @@ def live_run(unit, module, plan_sha256, attempt, release=True):
     with exclusive(STATE / "live.lock"):
         quarantine = STATE / "live-needs-inspection.json"
         if quarantine.exists():
-            raise Refused("Previous live run needs fixture inspection: " + str(quarantine))
-        # Persist before permitting any stack access. A crash never silently
-        # reopens the gate; the executor must inspect its owned fixtures first.
+            # An earlier run's marker stays as its owner's inspection record (needs-inspection/);
+            # it no longer blocks every other live run on the account.
+            set_aside(quarantine)
+        # Persist before permitting any stack access, so a crash leaves a record
+        # of the run whose owned fixtures need inspection.
         identity = dict(unit=unit, module=module, plan_sha256=plan_sha256, attempt=attempt,
                         pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat())
         validate_identity(identity)

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Run an explicit unittest plan with persistent attempts and a wall-clock bound.
+"""Run an explicit unittest plan with a recorded attempt history and a hang timeout.
 
 Use record-run.py around this command to retain raw output/source hashes. Plans
-select exact File/Class/test names, never implicit unittest discovery. This does
-not cap Codex calls or remove the host account's Docker/credential access.
+select exact File/Class/test names, never implicit unittest discovery. Every
+attempt is kept in the unit's history; there is no attempt cap (D1804). The
+timeout only stops a hung run. This does not remove the host account's
+Docker/credential access.
 """
 import argparse
 from contextlib import nullcontext
@@ -31,15 +33,17 @@ def read_plan(path):
 
 
 def validate_plan(plan):
-    if not isinstance(plan, dict) or set(plan) != {"unit", "mode", "tests", "max_attempts", "timeout_seconds"}:
-        raise gate.Refused("Plan requires unit, mode, tests, max_attempts, timeout_seconds only")
+    # max_attempts is still accepted from older plans and ignored (D1804: no attempt cap).
+    if (not isinstance(plan, dict) or not {"unit", "mode", "tests", "timeout_seconds"} <= set(plan)
+            or not set(plan) <= {"unit", "mode", "tests", "max_attempts", "timeout_seconds"}):
+        raise gate.Refused("Plan requires unit, mode, tests, timeout_seconds (max_attempts is ignored)")
     if not isinstance(plan["unit"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", plan["unit"]):
         raise gate.Refused("Invalid unit")
     if plan["mode"] not in ("pure", "live"):
         raise gate.Refused("Mode must be pure or live")
-    for key, maximum in (("max_attempts", 3), ("timeout_seconds", 3600)):
-        if type(plan[key]) is not int or not 1 <= plan[key] <= maximum:
-            raise gate.Refused("Invalid " + key)
+    # The hang timeout is required; its size is the suite's own measured need, not a fixed ceiling.
+    if type(plan["timeout_seconds"]) is not int or plan["timeout_seconds"] < 1:
+        raise gate.Refused("Invalid timeout_seconds")
     if isinstance(plan["tests"], dict):
         selector = plan["tests"]
         if (set(selector) != {"module", "class"} or not isinstance(selector["module"], str)
@@ -102,7 +106,7 @@ def collect(plan):
 
 
 def worker(path):
-    # The internal entry point cannot start an independent, unbudgeted run.
+    # The internal entry point cannot start an independent, unrecorded run.
     ticket = sys.stdin.readline(1024).strip()
     plan = read_plan(path)
     ledger = json.loads((gate.STATE / (plan["unit"] + ".json")).read_text())
@@ -128,8 +132,8 @@ def worker(path):
     with gate.live_run(unit=plan["unit"], module=module, plan_sha256=claim["plan_sha256"],
                        attempt=len(ledger["attempts"]), release=False) if plan["mode"] == "live" else nullcontext() as identity:
         result = unittest.TextTestRunner(verbosity=2).run(suite)
-        # A failed live run retains the inspection marker, even if it appears
-        # to have cleaned up. Do not retry against uncertain shared fixtures.
+        # A failed live run retains its marker as the record of the fixtures it
+        # owned, even if it appears to have cleaned up.
         if not result.wasSuccessful() or result.skipped:
             raise gate.Refused("Tests failed or skipped; this is not a completed plan")
         # An exit status alone is not completion (os._exit, a stray sys.exit):
@@ -175,19 +179,13 @@ def write_json(path, value):
 def execute(path):
     plan = read_plan(path)
     gate.STATE.mkdir(parents=True, exist_ok=True)
-    # Keep the unit stable across fixes and evidence directories. A different
-    # plan is not an implicit permission to restart the same unit's budget.
+    # Keep the unit stable across fixes and evidence directories: every attempt,
+    # including the first failure, stays in the unit's history (D1804: no cap).
     ledger_path = gate.STATE / (plan["unit"] + ".json")
     with gate.exclusive(gate.STATE / (plan["unit"] + ".lock")):
         if plan["mode"] == "live":
             gate.preflight_live()
-        ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {"attempts": [], "max_attempts": plan["max_attempts"]}
-        if ledger["max_attempts"] != plan["max_attempts"]:
-            raise gate.Refused("Cannot change an existing unit's attempt limit")
-        if any(row["status"] in ("running", "passed", "interrupted") for row in ledger["attempts"]):
-            raise gate.Refused("Unit already passed or needs inspection; automatic repetition is refused")
-        if len(ledger["attempts"]) >= ledger["max_attempts"]:
-            raise gate.Refused("Unit attempt budget exhausted")
+        ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {"attempts": []}
         frozen = gate.STATE / (plan["unit"] + "-attempt-" + str(len(ledger["attempts"]) + 1) + ".json")
         if frozen.exists():
             raise gate.Refused("Unrecorded attempt file needs inspection: " + str(frozen))
@@ -270,7 +268,7 @@ def module_plan(filename, unit, mode, timeout, class_name=None):
             if type(test).__module__ != module.__name__:
                 raise gate.Refused("Discovery included an imported TestCase; select explicit local tests")
             tests.append({"file": path.relative_to(ROOT).as_posix(), "case": type(test).__name__ + "." + test._testMethodName})
-    return {"unit": unit, "mode": mode, "tests": tests, "max_attempts": 3, "timeout_seconds": timeout}
+    return {"unit": unit, "mode": mode, "tests": tests, "timeout_seconds": timeout}
 
 
 def main():
@@ -292,7 +290,7 @@ def main():
             # import is subject to the same process-tree deadline as a test.
             plan = validate_plan({"unit": args.unit, "mode": args.mode,
                 "tests": {"module": args.module, "class": args.class_name},
-                "max_attempts": 3, "timeout_seconds": args.timeout})
+                "timeout_seconds": args.timeout})
             gate.STATE.mkdir(parents=True, exist_ok=True)
             path = gate.STATE / (args.unit + "-selected-" + secrets.token_hex(6) + ".json")
             with path.open("x", encoding="utf-8") as stream:
