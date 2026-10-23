@@ -19,11 +19,11 @@ sys.path.insert(0, str(ROOT / 'tests'))
 import live_test_gate as gate
 
 
-class PgLedgerSchemaLive(unittest.TestCase):
+class PgLedgerFixture(unittest.TestCase):
     @classmethod
-    def command(cls, args, *, data=None, check=True, timeout=120, env=None):
+    def command(cls, args, *, data=None, check=True, timeout=120, env=None, cwd=None):
         result = subprocess.run(args, input=data, capture_output=True, text=True,
-                                encoding='utf-8', timeout=timeout, env=env)
+                                encoding='utf-8', timeout=timeout, env=env, cwd=cwd)
         if check and result.returncode:
             raise RuntimeError(result.stderr[-2000:] or result.stdout[-2000:])
         return result
@@ -99,6 +99,7 @@ class PgLedgerSchemaLive(unittest.TestCase):
         if failures:
             raise RuntimeError('; '.join(failures))
 
+class PgLedgerSchemaLive(PgLedgerFixture):
     def test_pg_schema_atomicity_dedup_and_expiry(self):
         q = lambda s: "'" + s.replace("'", "''") + "'"
         event = dict(eventId=str(uuid.uuid4()), occurredAt='2020-01-01T00:00:00.000Z',
@@ -138,7 +139,7 @@ class PgLedgerSchemaLive(unittest.TestCase):
         self.assertEqual(self.sql('SELECT count(*) FROM emr_access.access_entry;').stdout.strip(), '1')
 
 
-class PgLedgerAdapterLive(PgLedgerSchemaLive):
+class PgLedgerAdapterLive(PgLedgerFixture):
     def test_public_pg_adapter(self):
         spool = ROOT / 'tmp/emr-b2-replace-20261023' / ('spool-' + self.token)
         result = self.command([os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072',
@@ -146,6 +147,81 @@ class PgLedgerAdapterLive(PgLedgerSchemaLive):
                               env={**os.environ, 'DATABASE_URL': self.runtime_url,
                                    'KIN_B2R_WITNESS_URL': self.witness_url, 'KIN_B2R_SPOOL': str(spool)})
         print(result.stdout)
+
+
+class PgLedgerProbeLive(PgLedgerFixture):
+    """OPS-01: the shipped operating probe and independent SQL, without a test HTTP endpoint.
+
+    This uses the compiled candidate on the host. Production-image and HTTP acceptance remain separate cells.
+    """
+    def test_operational_probe_pg_outcomes_and_readiness(self):
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import ops_emr_probe as probe
+        import ops_emr_introduction as intro
+        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('probe-' + self.token)
+        evidence.mkdir()
+        sequence = 0
+
+        def invoke(operation, value, *, url=None, script=None, success=True):
+            nonlocal sequence
+            sequence += 1
+            result = self.command([os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072', '-e',
+                                   script or probe.PROBE_SCRIPT, operation, json.dumps(value)],
+                                  check=False, cwd=ROOT / 'api', env={**os.environ,
+                                  'DATABASE_URL': url or self.runtime_url, 'KIN_EMR_STATE_DIR': str(evidence / 'spool')})
+            (evidence / f'{sequence:02d}.stdout').write_text(result.stdout, encoding='utf-8')
+            (evidence / f'{sequence:02d}.stderr').write_text(result.stderr, encoding='utf-8')
+            if success:
+                self.assertEqual(result.returncode, 0, result.stdout[-1000:] + result.stderr[-1000:])
+                return intro.result_line(result.stdout.encode())
+            return result
+
+        def payload():
+            return {'event': probe.probe_event({'study': 'SYNTHETIC-pg-probe', 'institution': 'synthetic-hospital',
+                                                'event_id': str(uuid.uuid4())}),
+                    'keys': {'operationId': str(uuid.uuid4()), 'attemptId': str(uuid.uuid4())}}
+
+        # A real missing-readiness regression is the red witness. The same assertion
+        # below refuses the healthy probe with installer credentials and no legal entry.
+        removed_check = probe.PROBE_SCRIPT.replace('await verifyRuntimeConnection(db);',
+                                                   "({role:'kin_runtime',relations:1});")
+        self.assertNotEqual(removed_check, probe.PROBE_SCRIPT)
+        mutant = payload()
+        red = invoke('append', mutant, url=self.witness_url, script=removed_check, success=False)
+        self.assertEqual(red.returncode, 0, red.stdout[-1000:])
+        red_assertion_failed = False
+        try:
+            self.assertNotEqual(red.returncode, 0, 'Installer probe must be refused')
+        except AssertionError:
+            red_assertion_failed = True
+        self.assertTrue(red_assertion_failed)
+        self.assertEqual(self.sql("SELECT count(*) FROM emr_access.access_entry WHERE event_id='" +
+                                  mutant['event']['eventId'] + "';").stdout.strip(), '1')
+        refused = payload()
+        green = invoke('append', refused, url=self.witness_url, success=False)
+        self.assertNotEqual(green.returncode, 0, 'Installer probe must be refused')
+        self.assertEqual(intro.result_line(green.stdout.encode())['error'], 'EmrRuntimeRefused')
+        self.assertEqual(self.sql("SELECT count(*) FROM emr_access.access_entry WHERE event_id='" +
+                                  refused['event']['eventId'] + "';").stdout.strip(), '0')
+
+        value = payload()
+        first = invoke('append', value)
+        restart = {'eventId': value['event']['eventId'], 'operationId': first['outcome']['operationId']}
+        second = invoke('restart', restart)
+        checked = probe.verify(first, second, restart['eventId'])
+        self.assertEqual(checked['added'], 1)
+        again, third = invoke('append', value), invoke('restart', restart)
+        self.assertEqual(probe.verify(again, third, restart['eventId'])['added'], 0)
+        self.assertEqual(first['outcome'], third['outcome'])
+        independent = json.loads(self.sql("SELECT json_build_object('entries', (SELECT count(*) FROM emr_access.access_entry "
+            "WHERE event_id='" + restart['eventId'] + "'), 'outcomes', (SELECT count(*) FROM emr_access.attempt_outcome "
+            "WHERE operation_id='" + restart['operationId'] + "'), 'failures', (SELECT count(*) FROM emr_access.failure_entry));").stdout)
+        self.assertEqual(independent, {'entries': 1, 'outcomes': 1, 'failures': 0})
+        (evidence / 'witness.json').write_text(json.dumps(independent, indent=2) + '\n', encoding='utf-8')
+        print(json.dumps({'status': 'PASS', 'boundary': 'actual compiled operating probe + independent PostgreSQL',
+                          'red': 'missing-readiness mutant admits installer; refusal assertion fails',
+                          'green': 'installer refused before append; runtime append/replay/two new processes retain one outcome',
+                          'evidence': str(evidence.relative_to(ROOT)), 'production_image': 'NOT_RUN', 'http': 'NOT_RUN'}))
 
 
 if __name__ == '__main__':
