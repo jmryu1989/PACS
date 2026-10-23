@@ -483,12 +483,15 @@ const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outc
 // ── a world: one empty database state, a fresh fake Keycloak state, two service instances ──
 
 const { AuthService } = require('/app/dist/auth.service');
+const { AccessLedgerStore } = require('/app/dist/emr-runtime/store');
+const { FailureJournal, FailureSpool } = require('/app/dist/emr-runtime/failure-journal');
+const { createRecordPort } = require('/app/dist/emr-runtime/record-port');
+const { createBackgroundWorkRegistry } = require('/app/dist/emr-runtime/background-work');
 const { KeycloakService } = require('/app/dist/keycloak.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
 const { AuthController } = require('/app/dist/auth.controller');
 const { PacsController } = require('/app/dist/pacs.controller');
 
-class SynProtectedController { read() {} }
 
 function deferred() {
   let resolve;
@@ -507,7 +510,10 @@ async function world(t, { now = START, imported = true } = {}) {
   await base.$executeRawUnsafe('TRUNCATE "MemberRightsImport"');
   await base.$executeRawUnsafe('TRUNCATE "ProviderChange" RESTART IDENTITY');
   await base.$transaction([base.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
-    base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
+    base.$executeRawUnsafe(`TRUNCATE emr_access.audit_projection, emr_access.access_target,
+      emr_access.access_entry, emr_access.entry_receipt, emr_access.attempt_outcome,
+      emr_access.attempt, emr_access.operation, emr_access.failure_entry, emr_access.disposal_fact,
+      "AuditLog" RESTART IDENTITY`)]);
   const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") + (SELECT count(*) FROM "IdpSessionEnd") + (SELECT count(*) FROM "MemberIsolation") + (SELECT count(*) FROM "ProviderChange") AS left`);
   assert.equal(Number(left), 0, 'every world starts with no session, no end mark, no isolation fact, no provider change record and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
@@ -565,10 +571,11 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     if (method === 'updateMany') return Object.keys(args?.data ?? {}).join() === 'lastSeenAt' ? 'touch' : 'store';
     return method;
   };
-  const delegate = (inst, client, model, scope) => new Proxy({}, { get(_target, method) {
+  const delegate = (inst, client, model, scope, enter = async () => {}) => new Proxy({}, { get(_target, method) {
     const real = client[model][method];
     if (typeof real !== 'function') return real;
     return async args => {
+      await enter();
       if (['authSession', 'auditLog', 'idpSessionEnd'].includes(model)) await hit(inst, pointOf(scope, model, method, args));
       await observe({ inst, scope, model, method, args, phase: 'before' });
       const result = await real.call(client[model], args);
@@ -578,13 +585,20 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
   } });
   const recorder = inst => new Proxy({}, { get(_target, key) {
     if (key === '$transaction') return async (fn, options) => {
-      await hit(inst, 'tx.open');
-      await observe({ inst, model: '$transaction', phase: 'before' });
+      let opened = false;
       const result = await base.$transaction(async tx => {
-        w.calls.push(inst + ':tx:start');
-        await observe({ inst, model: '$transaction', phase: 'started', client: tx });
+        // Session-race gates observe the business transaction. The ledger's
+        // separate identity lookup has no business delegate/execute call.
+        const enter = async () => {
+          if (opened) return;
+          opened = true;
+          await hit(inst, 'tx.open');
+          await observe({ inst, model: '$transaction', phase: 'before' });
+          w.calls.push(inst + ':tx:start');
+          await observe({ inst, model: '$transaction', phase: 'started', client: tx });
+        };
         const view = new Proxy({}, { get(_t, k) {
-          if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx');
+          if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx', enter);
           const value = tx[k];
           // The scenarios advance a virtual provider/application clock. Project DB timestamps onto that timeline;
           // CORE_COMMAND_DB_CLOCK opts out and proves the boundary against the actual PG transaction clock.
@@ -594,6 +608,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
             return result.map(row => Object.fromEntries(Object.entries(row).map(([key,v]) => [key,v instanceof Date ? new Date() : v])));
           };
           if (k === '$executeRaw') return async (...args) => {
+            await enter();
             await observe({ inst, scope:'tx', model:'$executeRaw', method:'execute', args, phase:'before' });
             const result = await value.apply(tx,args);
             await observe({ inst, scope:'tx', model:'$executeRaw', method:'execute', args, result, phase:'after' });
@@ -602,10 +617,10 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
           return typeof value === 'function' ? value.bind(tx) : value;
         } });
         const out = await fn(view);
-        w.calls.push(inst + ':tx:end');
+        if (opened) w.calls.push(inst + ':tx:end');
         return out;
       }, options);
-      await observe({ inst, model: '$transaction', phase: 'after', result });
+      if (opened) await observe({ inst, model: '$transaction', phase: 'after', result });
       return result;
     };
     if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(key)) return delegate(inst, base, key, 'root');
@@ -616,8 +631,18 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     // The product's own Keycloak admin client, over the fake's address: each instance its own (its own service token).
     // `prisma` is the instance's recording view, for the other product services a case builds over the same instance.
     const prisma = recorder(name);
-    const service = new AuthService(prisma, new KeycloakService());
-    return { name, service, prisma, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
+    // Exercise the real ledger on this world's recording client: transaction
+    // observations and SQL failures still reach the actual business boundary.
+    const spool = fs.mkdtempSync(require('node:path').join(os.tmpdir(), 'kin-auth-ledger-'));
+    const journal = new FailureJournal(prisma, new FailureSpool(spool));
+    const { port: ledger, control } = createRecordPort(new AccessLedgerStore(prisma, journal));
+    const background = createBackgroundWorkRegistry();
+    const service = new AuthService(prisma, new KeycloakService(), ledger, background.work);
+    t.after(async () => {
+      await service.onModuleDestroy(); background.quiesce(); await background.drained(); control.close(); await control.drained(); await journal.close();
+      fs.rmSync(spool, { recursive: true });
+    });
+    return { name, service, prisma, ledger, background, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
   };
   w.I1 = make('I1');
   w.I2 = make('I2');
@@ -642,7 +667,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
    */
   w.call = async (inst, kind, { sid, cookie, ip = IP, headers = {}, query = {}, body, bearer, binding, csrf = true } = {}) => {
     const routes = {
-      get: ['GET', '/api/syn/protected', SynProtectedController, SynProtectedController.prototype.read],
+      get: ['GET', '/api/studies', PacsController, PacsController.prototype.studies],
       health: ['GET', '/api/health', PacsController, PacsController.prototype.health],
       me: ['GET', '/api/me', PacsController, PacsController.prototype.me],
       authz: ['GET', '/api/authz/dicom', PacsController, PacsController.prototype.authzDicom],
@@ -658,7 +683,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     const cookies = [sid ? 'kin_sid=' + encodeURIComponent(sid) : null, cookie ?? null].filter(Boolean).join('; ');
     const unbound = ['me', 'entry', 'login', 'register', 'callback'].includes(kind);
     const bound = binding === undefined ? (sid && !unbound ? inst.service.sessionRef(sid) : null) : binding;
-    const req = { method, originalUrl: path, url: path, query, body, headers: {
+    const req = { method, originalUrl: path, url: path, route: { path }, query, body, headers: {
       ...(cookies ? { cookie: cookies } : {}), ...(ip === null ? {} : { 'x-real-ip': ip }),
       ...(method === 'POST' && csrf ? { 'x-kin-csrf': '1' } : {}), ...(bound ? { 'x-kin-session': bound } : {}),
       ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...headers } };
@@ -908,9 +933,9 @@ test('AS-11 the judges: secret hits, output channels, row sets and session versi
 
 /** What the compiled guard decides from one access token (Bearer): req.actor, req.sub, req.institution. */
 async function guardView(w, access) {
-  const req = { method: 'GET', originalUrl: '/api/syn/protected', url: '/api/syn/protected', headers: { authorization: 'Bearer ' + access } };
+  const req = { method: 'GET', originalUrl: '/api/studies', url: '/api/studies', route: { path: '/api/studies' }, headers: { authorization: 'Bearer ' + access } };
   try {
-    await w.I1.guard.canActivate(new ExecutionContextHost([req, { req }], SynProtectedController, SynProtectedController.prototype.read));
+    await w.I1.guard.canActivate(new ExecutionContextHost([req, { req }], PacsController, PacsController.prototype.studies));
   } catch (_) { /* a PENDING or INVALID member is refused after the guard has read the token */ }
   return { actor: req.actor, sub: req.sub, institution: req.institution ?? null };
 }
@@ -924,9 +949,16 @@ const lapsed = () => past(LEAD + 1000);
 test('AS-01 a login writes its session and one success row in one transaction', async t => {
   const w = await world(t);
   const v = await w.issue('ma', { sub: 'syn-sub-ma', groups: ['/' + A], email: 'syn-ma@synthetic.test' });
-  const [{ before }] = await w.base.$queryRaw`SELECT CURRENT_TIMESTAMP(3) AS before`;
+  let sawUncommitted = false;
+  w.observe({ inst: 'I1', scope: 'tx', model: 'auditLog', method: 'create', phase: 'after' }, async () => {
+    if (sawUncommitted) return;
+    assert.equal(await w.base.authSession.count(), 0, 'another connection sees no uncommitted session');
+    assert.equal(await w.base.auditLog.count(), 0, 'another connection sees no uncommitted projection');
+    sawUncommitted = true;
+  });
+  const before = new Date();
   const first = await login(w, w.I1, v);
-  const [{ after }] = await w.base.$queryRaw`SELECT CURRENT_TIMESTAMP(3) AS after`;
+  const after = new Date();
   assert.deepEqual([first.done.status, first.done.location.split('#kin-entry=')[0], !!first.done.proof, !!first.done.newSid],
     [302, ORIGIN + '/worklist/hpacs-lite/main.html', true, true], 'the callback is the one answer that sets kin_sid; the entry proof rides in the fragment');
   assert.equal(await w.sessions(), 1);
@@ -934,14 +966,19 @@ test('AS-01 a login writes its session and one success row in one transaction', 
     detail: { institution: A, ip: IP, dataSubject: null, outcome: 'success' } }]);
   const [stored] = await w.base.auditLog.findMany({ where: { action: 'auth.login', target: 'syn-sub-ma' }, select: { at: true } });
   assert.ok(stored.at instanceof Date, 'the persisted audit time is a Date instant');
-  // The ±1 s margin covers engine/DB clock rounding around the server-observed event window.
-  assert.ok(before.getTime() - 1000 <= stored.at.getTime(), 'the stored login time is not stale');
-  assert.ok(stored.at.getTime() <= after.getTime() + 1000, 'the stored login time is not in the future');
+  assert.ok(before.getTime() <= stored.at.getTime(), 'the stored login time is not stale');
+  assert.ok(stored.at.getTime() <= after.getTime(), 'the stored login time is not in the future');
   assert.ok(stored.at.toISOString().endsWith('Z'), 'the stored login time is a UTC instant');
-  const start = w.calls.indexOf('I1:tx:start');
-  assert.deepEqual(w.calls.slice(start, w.calls.indexOf('I1:tx:end', start) + 1),
-    ['I1:tx:start', 'I1:tx.markRead', 'I1:tx.create', 'I1:tx.audit', 'I1:tx:end'],
-    'the end mark of the provider session is read, then the session and its row are written, in one transaction');
+  assert.equal(sawUncommitted, true);
+  const [legal] = await w.base.$queryRaw`SELECT e.payload FROM emr_access.access_entry e
+    JOIN emr_access.audit_projection p ON p.event_id=e.event_id
+    JOIN "AuditLog" a ON a.id=p.audit_log_id
+    JOIN emr_access.attempt_outcome o ON o.operation_id=e.operation_id
+    WHERE a.action='auth.login' AND a.target='syn-sub-ma' AND o.outcome='committed'`;
+  assert.ok(legal, 'the returned session has a committed legal event and projection');
+  const logged = JSON.parse(legal.payload);
+  const session = await w.base.authSession.findFirst({ where: { sub: 'syn-sub-ma' } });
+  assert.equal(logged.session.value, session.auditRef);
   // Preserving pair: the same member again - a session and a row per login.
   await login(w, w.I1, await w.issue('ma2', { sub: 'syn-sub-ma', groups: ['/' + A], email: 'syn-ma@synthetic.test' }));
   assert.equal(await w.sessions(), 2);
@@ -1483,7 +1520,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
     await run('touch', async tag => { const sid = await session(tag, { lastSeenAt: past(10 * 60_000) }); w.fault('I1', 'touch', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'get', { sid }))); });
     await run('login-both', async tag => {
       w.fault('I1', 'tx.create', dbError(tag));
-      w.fault('I1', 'audit', dbError(tag + '-row'));
+      w.fault('I1', 'tx.audit', dbError(tag + '-row'));
       const done = (await login(w, w.I1, await w.issue(tag, { sub: 'syn-sub-' + tag, groups: [A] }))).done;
       assert.equal(done.location, ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=login_failed');
     });
@@ -2586,7 +2623,7 @@ test('U5E-04 the end marks a provider session only after its end condition holds
   held = w.call(w.I1, 'logout', { sid });
   await gate.arrived();
   let reads = w.calls.filter(c => c === 'I2:tx.markRead').length;
-  const callbackDecision = w.gate('I2', 'audit');
+  const callbackDecision = w.gate('I2', 'tx.audit');
   const heldC = answerFlow(w, w.I2, begin, await w.issue(s + '-v2', { sub: s, groups: [A] }));
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(w.calls.filter(c => c === 'I2:tx.markRead').length, reads, 'the callback waits for the lock the Log out holds');
@@ -3142,7 +3179,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 function activation(admin, m, caller) {
   const run = { settled: false, took: null };
   const from = performance.now();
-  run.result = admin.patchUser(m, { enabled: true }, caller)
+  run.result = patchMember(admin, m, { enabled: true }, caller)
     .then(user => ({ status: 200, user }), error => ({
       status: typeof error?.getStatus === 'function' ? error.getStatus() : 500,
       body: typeof error?.getResponse === 'function' ? error.getResponse() : { message: String(error) } }))
@@ -3521,17 +3558,34 @@ test('U5E-LR R1-R3 after a confirmed Log out a plain Login that brings back the 
 //      the provider, and nothing is left that blocks: the next answered request confirms the end / the next Activate succeeds.
 
 
+const adminLedgers = new WeakMap();
+function makeAdmin(inst, provider) {
+  const { AdminService } = require('/app/dist/admin.service');
+  const service = new AdminService(inst.prisma, provider, null, inst.service, inst.ledger);
+  adminLedgers.set(service, inst.ledger);
+  return service;
+}
+async function patchMember(admin, sub, body, caller) {
+  const work = adminLedgers.get(admin).begin();
+  try {
+    const actor = { issuer: ISSUER, subject: caller.sub,
+      id: await work.resolveRequestIdentity(ISSUER, caller.sub) };
+    return await admin.patchUser(sub, body, caller, { surface: 'PATCH admin/users/:id', actor,
+      roles: caller.roles, rightsVersion: 1, institution: caller.institution ?? null,
+      ip: IP, sessionRef: null, requestId: randomUUID() });
+  } finally { work.end(); }
+}
 const R10_CALLER = { roles: ['admin'], actor: 'syn-r10-admin@synthetic.test', sub: 'syn-r10-admin' };
 function r10Admin(w, inst = w.I1) {
   const { AdminService } = require('/app/dist/admin.service');
-  return new AdminService(inst.prisma, new KeycloakService(), null, inst.service);
+  return makeAdmin(inst, new KeycloakService());
 }
 function r10Member(sub, sessions = [], groups = [A], roles = ['radiologist']) {
   kc.members[sub] = { username: sub, email: sub + '@synthetic.test', enabled: true, groups, roles, sessions };
   return sub;
 }
 const r10Answer = p => p.then(user => ({ status: 200, user }), error => ({ status: error.getStatus?.() ?? 500, body: error.getResponse?.() ?? {} }));
-const r10Patch = (admin, sub, body) => r10Answer(admin.patchUser(sub, body, R10_CALLER));
+const r10Patch = (admin, sub, body) => r10Answer(patchMember(admin, sub, body, R10_CALLER));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function r10Survives(w, sub, idpSid, entered, label) {
   assert.ok(await w.base.authSession.findUnique({ where: { sid: entered.newSid } }), label + ': product row survives');
@@ -3649,7 +3703,7 @@ test('U3 HEADERS-TIMEOUT: provider effect with no headers reaches transport time
 test('U4 CRASH-CUTS: sid end records preserve recorded uncertainty across store/send/settle cuts and second-instance recovery', async t => {
   const w = await world(t);
   for (const kind of ['end_session']) {
-    for (const cut of ['before-record', 'after-record-before-commit', 'after-commit-before-send', 'before-effect', 'after-effect', 'settle-fails-three', 'after-settle']) {
+    for (const cut of ['before-record', 'after-record-before-commit', 'before-effect', 'after-effect', 'settle-fails-three', 'after-settle', 'after-commit-before-send']) {
       const m = r10Member('syn-u4-' + kind + '-' + cut), P = m + '-idp';
       let armed = true, committedChange = false, failures = 0;
       w.observe({ inst: 'I1', model: 'providerChange', method: 'create', phase: cut === 'after-record-before-commit' ? 'after' : 'before' }, e => {
@@ -3660,7 +3714,7 @@ test('U4 CRASH-CUTS: sid end records preserve recorded uncertainty across store/
         if (e.args.data.sub === m && e.args.data.kind === kind) committedChange = true;
       });
       w.observe({ inst: 'I1', model: '$transaction', phase: 'after' }, () => {
-        if (armed && committedChange && cut === 'after-commit-before-send') { armed = false; throw new Error('synthetic process lost after commit'); }
+        if (armed && committedChange && cut === 'after-commit-before-send') { armed = false; w.I1.background.quiesce(); }
       });
       w.observe({ inst: 'I1', model: 'providerChange', method: 'updateMany', phase: cut === 'after-settle' ? 'after' : 'before' }, async e => {
         if (!armed || !['settle-fails-three', 'after-settle'].includes(cut)) return;
@@ -3930,7 +3984,7 @@ test('CORE-IMPORT all imported members share a commit boundary; old Bearers fail
   // not page-fetch time, transaction start or a different instant for each member.
   w.observe({inst:'I1', scope:'tx', model:'memberRights', method:'upsert', phase:'after'}, () => w.tick(1100));
   const provider = {listUsers:async page => ({total:users.length, users:users.slice((page-1)*2,page*2)})};
-  await importMemberRights(w.I1.prisma, provider);
+  await importMemberRights(w.I1.prisma, provider, w.I1.ledger);
   assert.equal(await w.base.memberRights.count(), 5, 'member without session also has a row');
   assert.equal(await w.base.idpSessionEnd.count(), 0, 'refusal must not depend on an ended-SSO mark');
   const cookie = await w.call(w.I1, 'get', {sid});
@@ -3976,7 +4030,7 @@ test('CORE-IMPORT all imported members share a commit boundary; old Bearers fail
   assert.equal((await w.base.providerChange.findUnique({where:{id:unknown.id}})).state, 'unknown');
   await w.base.memberRights.update({where:{sub:'syn-import-a'},data:{version:4,newAuthAfter:new Date(),suspended:true}});
   const retained = await w.base.memberRights.findMany({orderBy:{sub:'asc'}});
-  await importMemberRights(w.base, {listUsers:() => {throw new Error('must not reimport authority');}});
+  await importMemberRights(w.base, {listUsers:() => {throw new Error('must not reimport authority');}}, w.I1.ledger);
   assert.deepEqual(await w.base.memberRights.findMany({orderBy:{sub:'asc'}}), retained, 'restart preserves the rights and their boundaries');
   assert.deepEqual(await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}}), marker);
   if (!process.env.KIN_AUTH_SESSION_DATABASE_URL.includes('local-stand-in')) {
@@ -4054,7 +4108,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
     assert.equal(await w.base.memberRightsImport.count(),0,'marker invisible before commit');
     failedCommit=true;throw new Error('synthetic failure after marker before commit');
   });
-  const service=new AuthService(w.I1.prisma,provider); t.after(()=>service.onModuleDestroy());
+  const service=new AuthService(w.I1.prisma,provider,w.I1.ledger,w.I1.background.work); t.after(()=>service.onModuleDestroy());
   // Only the import scheduler is controlled: no network/readiness sleeps are elided.
   const schedule=()=>{global.setTimeout=(fn,ms,...args)=>{if(![1000,2000,4000,8000,16000,30000].includes(ms))return realTimer(fn,ms,...args);delays.push(ms);queued.push(fn);return {unref(){}};};};
   const flush=async()=>{for(let i=0;i<100;i++)await new Promise(resolve=>setImmediate(resolve));};
@@ -4085,7 +4139,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
   assert.equal((await w.call(w.I1,'get',{bearer:old.access})).status,401);
   w.tick(1000);const fresh=await w.issue(m+'-fresh',{sub:m,authTime:Math.floor(Date.now()/1000)});
   assert.ok((await login(w,w.I2,fresh)).done.newSid);
-  const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}});
+  const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}},w.I1.ledger,w.I1.background.work);
   t.after(()=>restart.onModuleDestroy());await restart.onModuleInit();await flush();assert.equal(calls,11);
   const logs=await w.finish('CORE-R2-BOOT');
   assert.ok(logs.some(([,line])=>line.includes('synthetic realm unreachable')),'retry reason is logged');
@@ -4094,7 +4148,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
 test('CORE-R2-IMPORTED existing realm-v1 starts while the member admin API is down', async t => {
   const w=await world(t);let read=false,calls=0;
   w.observe({inst:'I1',scope:'root',model:'memberRightsImport',method:'findUnique',phase:'after'},()=>{read=true;});
-  const service=new AuthService(w.I1.prisma,{listUsers:async()=>{calls++;throw Error('synthetic realm down');}});
+  const service=new AuthService(w.I1.prisma,{listUsers:async()=>{calls++;throw Error('synthetic realm down');}},w.I1.ledger,w.I1.background.work);
   t.after(()=>service.onModuleDestroy());await service.onModuleInit();
   await w.until('import read or provider attempt completed',async()=>read||calls>0);
   // The stub fails synchronously, so draining this completed read's continuations settles the import attempt too.
@@ -4165,7 +4219,7 @@ for (const mode of ['temp', 'email']) test(`CORE_R8_PENDING_RESET ${mode}: regis
   const { AdminService } = require('/app/dist/admin.service');
   const provider = new KeycloakService();
   provider.resetPassword = async (id, sentMode, password) => { calls.push({ id, mode: sentMode, password }); };
-  const admin = new AdminService(w.I1.prisma, provider, null, w.I1.service);
+  const admin = makeAdmin(w.I1, provider);
   const reset = caller => r10Answer(admin.resetPassword(sub, { mode }, caller));
   assert.equal((await reset({ actor: 'syn-doctor', roles: ['radiologist'] })).status, 403);
   assert.equal(await w.base.memberRights.count({ where: { sub } }), 0);
@@ -4203,7 +4257,7 @@ test('CORE_R8_RESET_EXISTING_AND_RACE: reset preserves suspended rights, session
   const { AdminService } = require('/app/dist/admin.service');
   const provider = new KeycloakService();
   provider.resetPassword = async () => {};
-  const make = inst => new AdminService(inst.prisma, provider, null, inst.service);
+  const make = inst => makeAdmin(inst, provider);
   await w.base.memberRights.update({ where: { sub }, data: { suspended: true, newAuthAfter: new Date(START), version: 9 } });
   const before = await w.base.memberRights.findUnique({ where: { sub } });
   const session = await w.base.authSession.findUnique({ where: { sid } });
@@ -4409,12 +4463,12 @@ for(const [outcome,state] of [[204,'done'],[404,'void'],[403,'void'],[503,'unkno
   assert.equal(kc.endRequests.length,0);await w.finish('U7 '+outcome);
 });
 
-test('CORE_CREDENTIALS_COMMIT_CRASH_SECOND_API U8 intent survives crash before send; another API admits DB rights',async t=>{
+test('CORE_CREDENTIALS_COMMIT_CRASH_SECOND_API U8 intent survives shutdown before publication; another API admits DB rights',async t=>{
   const w=await world(t),m='syn-crash-credentials',{admin}=await coreMember(w,m);
   let crashed=false;w.observe({inst:'I1',model:'$transaction',phase:'after'},e=>{
-    if(e.result?.change?.kind==='credentials'&&!crashed){crashed=true;throw Error('synthetic process lost after commit');}
+    if(e.result?.change?.kind==='credentials'&&!crashed){crashed=true;w.I1.background.quiesce();}
   });
-  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,500);assert.equal(crashed,true);
+  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);assert.equal(crashed,true);
   const record=await w.base.providerChange.findFirst({where:{sub:m,kind:'credentials'}});assert.equal(record.state,'unknown');assert.equal(record.outcome,null);
   assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) /.test(x)));
   const second=w.instance('crash-restart');await second.service.onModuleInit();t.after(()=>second.service.onModuleDestroy());
@@ -4634,7 +4688,7 @@ test('CORE_IMPORT_OLD_A_CALLBACK_BEARER O1 existing-session and Bearer-only old 
     users.push({id:sub,username:sub,email:sub+'@synthetic.test',emailVerified:true,enabled:true,groups:[B],roles:['radiologist'],firstName:'SYN',lastName:'Import'});
   }
   await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
-  await require('/app/dist/member-rights-import').importMemberRights(w.I1.prisma,{listUsers:async()=>({total:users.length,users})});
+  await require('/app/dist/member-rights-import').importMemberRights(w.I1.prisma,{listUsers:async()=>({total:users.length,users})},w.I1.ledger);
   for(const token of tokens){
     assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
     const old=(await login(w,w.I2,token)).done;
@@ -4657,7 +4711,7 @@ test('CORE_FRESH_FLOW_TIME fresh recovery cannot reuse authentication older than
 
 test('CORE_REALM_404 a realm read 404 is a failed import, never a ready empty realm',async t=>{
   const w=await world(t,{imported:false});kc.realmReadStatus=404;
-  await assert.rejects(require('/app/dist/member-rights-import').importMemberRights(w.I1.prisma,new KeycloakService()),e=>e.getStatus?.()===503);
+  await assert.rejects(require('/app/dist/member-rights-import').importMemberRights(w.I1.prisma,new KeycloakService(),w.I1.ledger),e=>e.getStatus?.()===503);
   assert.equal(await w.base.memberRightsImport.count(),0);assert.equal((await w.call(w.I1,'health')).body.memberRights,'pending');
   kc.beforeAdmin=name=>name==='GET read'?404:undefined;
   assert.equal(await new KeycloakService().getUser('syn-absent'),null,'single-user lookup retains its absence contract');
@@ -4684,7 +4738,7 @@ test('CORE_PENDING_COUNT_UNREGISTERED_PAGED_DELETED counts the merged realm, wit
   // Two new users and one deleted row cannot accidentally cancel each other's count error.
   const users=[...ids.slice(0,4),'syn-count-new-second'].map(id=>({id,username:id,email:id+'@synthetic.test',emailVerified:true,groups:[],roles:[],enabled:true}));
   const provider={listUsers:async page=>({page,pageSize:2,total:users.length,realmUsers:users,users:users.slice((page-1)*2,page*2)})};
-  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const {AdminService}=require('/app/dist/admin.service'),admin=makeAdmin(w.I1,provider);
   const before=await w.base.memberRights.findMany({orderBy:{sub:'asc'}}),listed=[];
   for(const page of [1,2,3]){
     const out=await admin.listUsers(page,R10_CALLER);assert.equal(out.pendingCount,4);assert.equal(out.total,5);listed.push(...out.users);
@@ -4721,26 +4775,26 @@ test('CORE_IMPORT_TWO_INSTANCES_FIRST_BOOT overlapping first imports commit one 
     setEnabled:async(sub,enabled)=>{sends++;assert.equal(sub,m);assert.equal(enabled,true);assert.equal(await w.base.memberRightsImport.count(),1);}};
   for(const inst of ['I1','I2'])w.observe({inst,scope:'tx',model:'memberRightsImport',method:'create',phase:'after'},()=>{commits++;});
   const {importMemberRights}=require('/app/dist/member-rights-import');
-  const first=importMemberRights(w.I1.prisma,provider),second=importMemberRights(w.I2.prisma,provider);
+  const first=importMemberRights(w.I1.prisma,provider,w.I1.ledger),second=importMemberRights(w.I2.prisma,provider,w.I2.ledger);
   await within(arrived.promise,'both APIs read the missing marker');release.resolve();await Promise.all([first,second]);
   await coreSettled(w,m);const marker=await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}});
   assert.equal(commits,1);assert.equal(sends,1);assert.equal(await w.base.memberRightsImport.count(),1);
   assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),1);
   const row=await w.base.memberRights.findUnique({where:{sub:m}});assert.equal(row.suspended,true);assert.equal(row.newAuthAfter.getTime(),marker.completedAt.getTime());
-  await importMemberRights(w.I1.prisma,provider);assert.equal(readers,2);assert.equal(sends,1);await w.finish('CORE_IMPORT_TWO_INSTANCES');
+  await importMemberRights(w.I1.prisma,provider,w.I1.ledger);assert.equal(readers,2);assert.equal(sends,1);await w.finish('CORE_IMPORT_TWO_INSTANCES');
 });
 
 for(const cut of ['503','crash','404','held'])test(`CORE_LEGACY_DISABLED_RECOVERY_503_CRASH_LATE_DISABLE ${cut}`,async t=>{
   const w=await world(t,{imported:false}),m=r10Member('syn-legacy-'+cut);kc.members[m].enabled=false;kc.members[m].emailVerified=true;
   const {importMemberRights,retryMemberRoster}=require('/app/dist/member-rights-import'),provider=new KeycloakService();
-  const held=deferred(),arrived=deferred();t.after(()=>held.resolve());let crashed=false;
-  if(cut==='crash')w.observe({inst:'I1',model:'$transaction',phase:'after'},()=>{if(!crashed){crashed=true;throw Error('synthetic process lost after import commit');}});
+  const held=deferred(),arrived=deferred(),shutdown=new AbortController();t.after(()=>held.resolve());let crashed=false;
+  if(cut==='crash')w.observe({inst:'I1',model:'$transaction',phase:'after'},()=>{if(!crashed){crashed=true;shutdown.abort();}});
   kc.beforeAdmin=async(name,sub)=>{if(name!=='PUT enable'||sub!==m)return;
     assert.equal(await w.base.memberRightsImport.count(),1);assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,true);
     if(cut==='held'){arrived.resolve();await held.promise;}else if(cut==='503')return 503;else if(cut==='404')return 404;
   };
-  if(cut==='crash')await assert.rejects(importMemberRights(w.I1.prisma,provider),/synthetic process/);
-  else await importMemberRights(w.I1.prisma,provider);
+  if(cut==='crash'){await importMemberRights(w.I1.prisma,provider,w.I1.ledger,shutdown.signal);assert.equal(shutdown.signal.aborted,true);}
+  else await importMemberRights(w.I1.prisma,provider,w.I1.ledger);
   assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),1,'commit durably records the sole legacy intent before any answer');
   if(cut==='held'){await within(arrived.promise,'legacy enable pending');assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);held.resolve();}
   if(cut!=='crash')await coreSettled(w,m);
@@ -4872,7 +4926,7 @@ test('CORE_R9_LIST_ONE_SCAN page selection never multiplies realm admin requests
     if(route.includes('/groups?')||route.endsWith('/role-mappings/realm'))return [];
     assert.fail('unexpected admin request '+route);
   };
-  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const {AdminService}=require('/app/dist/admin.service'),admin=makeAdmin(w.I1,provider);
   const before=await w.base.memberRights.findMany();
   for(const page of [1,2,3,4]){
     calls.length=0;const result=await admin.listUsers(page,R10_CALLER);
@@ -4891,7 +4945,7 @@ for(const command of ['Approve','Change','Suspend','Activate','ResetTemp','Reset
 test(`CORE_R9_IDENTITY_COMMAND ${command}: only a command refreshes current provider identity`,async t=>{
   const w=await world(t),m='syn-r9-identity',setup=await coreSetup(w,m,command),provider=new KeycloakService();
   const {AdminService}=require('/app/dist/admin.service');provider.resetPassword=async()=>{};
-  const admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const admin=makeAdmin(w.I1,provider);
   const before=await w.base.memberRights.findUnique({where:{sub:m}});
   Object.assign(kc.members[m],{username:'renamed',email:'renamed@synthetic.test',firstName:'Given',lastName:'Family',emailVerified:command==='Approve'});
   assert.equal((await coreRoster(w,m)).email,before.email,'GET cannot refresh a registered row');
@@ -4911,7 +4965,7 @@ test('CORE_R9_IDENTITY_FORWARD: an older pre-read loses CAS and cannot rewind a 
   const original=provider.getUser.bind(provider),arrived=deferred(),release=deferred();let reads=0;
   t.after(()=>release.resolve());
   provider.getUser=async(...args)=>{const result=await original(...args);if(++reads===1){arrived.resolve();await release.promise;}return result;};
-  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service);
+  const admin=inst=>makeAdmin(inst,provider);
   const first=r10Patch(admin(w.I1),m,coreBody('Change'));await within(arrived.promise,'older identity captured');
   Object.assign(kc.members[m],{email:'newest@synthetic.test',firstName:'Newest',lastName:'Identity'});
   let second;
@@ -5016,7 +5070,7 @@ for(const path of ['callback','proof','refresh'])test(`CORE_R10_REMOTE_UNLOCKED 
   const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService(),original=provider.getUser.bind(provider);
   const arrived=deferred(),release=deferred();t.after(()=>release.resolve());
   provider.getUser=async(...args)=>{const result=await original(...args);arrived.resolve();await release.promise;return result;};
-  const command=r10Patch(new AdminService(w.I1.prisma,provider,null,w.I1.service),m,coreBody('Change'));
+  const command=r10Patch(makeAdmin(w.I1,provider),m,coreBody('Change'));
   await within(arrived.promise,'pre-read captured');let out;
   try{
     const entry=f.run();
@@ -5042,7 +5096,7 @@ test('CORE_R10_RESET_BUSY reset under member contention returns 409 MEMBER_BUSY 
   }else w.observe({inst:'I1',model:'$executeRaw',phase:'before'},e=>{
     if(e.args[1]===0x4b494e4d)throw Object.assign(Error('synthetic timeout'),{code:'P2010',meta:{code:'55P03'}});
   });
-  const result=await r10Answer(new AdminService(w.I1.prisma,provider,null,w.I1.service).resetPassword(m,{mode:'email'},R10_CALLER));
+  const result=await r10Answer(makeAdmin(w.I1,provider).resetPassword(m,{mode:'email'},R10_CALLER));
   release?.resolve();if(held)await held;
   assert.equal(result.status,409);assert.equal(result.body.code,'MEMBER_BUSY');assert.equal(sent,0);
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);await w.finish('CORE_R10_RESET_BUSY');
@@ -5069,11 +5123,11 @@ test('CORE_R10_IMPORT_DESIGNATION binds unique legacy P subjects atomically, pre
   await w.base.studyState.create({data:{uid:ids[0],rs:'P',preDoc:'one@synthetic.test',preReviewer:'duplicate@synthetic.test'}});
   await w.base.studyState.create({data:{uid:ids[1],rs:'P',preDoc:'unmatched@synthetic.test',preReviewer:'one@synthetic.test'}});
   const {importMemberRights}=require('/app/dist/member-rights-import');
-  await importMemberRights(w.I1.prisma,{listUsers:async()=>({total:users.length,users})});
+  await importMemberRights(w.I1.prisma,{listUsers:async()=>({total:users.length,users})},w.I1.ledger);
   const one=await w.base.studyState.findUnique({where:{uid:ids[0]}}),two=await w.base.studyState.findUnique({where:{uid:ids[1]}});
   assert.deepEqual([one.preDocSub,one.preReviewerSub,two.preDocSub,two.preReviewerSub],['syn-bind-one',null,null,'syn-bind-one']);
   assert.equal(await w.base.memberRightsImport.count(),1);
-  await importMemberRights(w.I2.prisma,{listUsers:async()=>assert.fail('marker prevents a second import')});
+  await importMemberRights(w.I2.prisma,{listUsers:async()=>assert.fail('marker prevents a second import')},w.I2.ledger);
   assert.deepEqual(await w.base.studyState.findUnique({where:{uid:ids[0]}}),one);
   await w.finish('CORE_R10_IMPORT_DESIGNATION');
 });
@@ -5083,7 +5137,7 @@ test('CORE_R10_RESET_FORWARD a delayed reset pre-read cannot hold a member lock 
   const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService(),original=provider.getUser.bind(provider);
   const arrived=deferred(),release=deferred();let reads=0;t.after(()=>release.resolve());provider.resetPassword=async()=>{};
   provider.getUser=async(...args)=>{const result=await original(...args);if(++reads===1){arrived.resolve();await release.promise;}return result;};
-  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service);
+  const admin=inst=>makeAdmin(inst,provider);
   const reset=r10Answer(admin(w.I1).resetPassword(m,{mode:'email'},R10_CALLER));await within(arrived.promise,'reset identity captured');
   Object.assign(kc.members[m],{email:'after-reset-read@synthetic.test',firstName:'Newest',lastName:'Identity'});
   let change,before;
@@ -5130,7 +5184,7 @@ test(`CORE_R11_CAS_OUTAGE_MATRIX ${first}->${second}`, async t => {
     const { admin } = await coreMember(w, m);
     const provider = new KeycloakService();
     const { AdminService } = require('/app/dist/admin.service');
-    const contender = new AdminService(w.I2.prisma, provider, null, w.I2.service);
+    const contender = makeAdmin(w.I2, provider);
     const held = w.pause({ inst: 'I2', scope: 'root', model: 'memberRights', method: 'findUnique', phase: 'after' });
     const loser = r10Patch(contender, m, coreBody(second)); await held.arrived();
     assert.equal((await r10Patch(admin, m, coreBody(first))).status, 200);

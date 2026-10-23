@@ -1,6 +1,6 @@
 {
   "unit": "EMR-B",
-  "round": "B2R-WIP",
+  "round": "B2R",
   "base_sha": "3649a70e76e94805ff9e747a3b2f8ee447b95f6c",
   "dependencies": [
     "EMR-A contract (PR #142, landed in main c4b5bdc)",
@@ -8,108 +8,94 @@
     "S7-U5 core (PR #131): DB MemberRights authority, session end and entry facts (consumed by B2, not changed by B1)"
   ],
   "owned_paths": {
-    "B1": [
-      "api/src/emr-runtime/contract.ts",
-      "api/src/emr-runtime/store.ts",
-      "api/src/emr-runtime/context.ts",
-      "api/src/emr-runtime/failure-journal.ts",
-      "api/src/emr-runtime/seal.ts",
-      "api/src/emr-runtime/manifest.ts",
+    "B2-replacement": [
+      "api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql",
+      "api/prisma/schema.prisma",
+      "api/src/emr-contract/README.md",
       "api/src/emr-contract/access-event.ts",
       "api/src/emr-contract/classification.ts",
-      "api/src/emr-contract/routes.ts",
-      "api/prisma/schema.prisma",
-      "api/prisma/migrations/20261008120000_emr_b/migration.sql",
+      "api/src/emr-contract/composition.ts",
+      "api/src/emr-runtime/admission.ts",
+      "api/src/emr-runtime/application.ts",
+      "api/src/emr-runtime/auth-events.ts",
+      "api/src/emr-runtime/client.ts",
+      "api/src/emr-runtime/context.ts",
+      "api/src/emr-runtime/contract.ts",
+      "api/src/emr-runtime/failure-journal.ts",
+      "api/src/emr-runtime/journal-file.ts",
+      "api/src/emr-runtime/limits.ts",
+      "api/src/emr-runtime/manifest.ts",
+      "api/src/emr-runtime/nest-lifecycle.ts",
+      "api/src/emr-runtime/record-port.ts",
+      "api/src/emr-runtime/store.ts",
+      "api/src/emr-audit/contract.ts",
+      "api/src/emr-clinical/records.ts",
+      "api/src/emr-image/contract.ts",
+      "api/src/emr-report/reads.ts",
+      "api/src/emr-retention/contract.ts",
+      "api/src/emr-retention/inventory.ts",
+      "api/src/app.module.ts",
+      "api/src/main.ts",
+      "api/src/prisma.service.ts",
+      "api/src/auth.service.ts",
+      "api/src/member-rights-import.ts",
+      "api/src/member-rights.ts",
+      "api/src/admin.service.ts",
+      "api/src/manual-sr.service.ts",
       "api/Dockerfile",
       "api/start-production.sh",
       "docker-compose.yml",
       "docker-compose.prod.yml",
-      "api/src/prisma.service.ts",
-      "scripts/ops_deploy_entry.py",
-      "scripts/ops_deploy_host.py",
-      "scripts/ops_deploy_preflight.py",
-      "scripts/ops_deploy_runner.py",
-      "tests/ops_deploy_host_container_test.py",
-      "tests/ops_deploy_host_test.py",
-      "tests/ops_deploy_preflight_test.py",
-      "tests/ops_deploy_runner_test.py",
-      "tests/audit_store_db_test.py",
-      "api/src/emr-contract/lawful-defaults.ts",
-      "api/src/emr-contract/composition.ts",
-      "api/src/emr-contract/legal-basis.ts",
-      ".env.example",
-      "tests/clinician_policy_fixtures.json",
-      "tests/clinician_policy_test.py",
-      "tests/e2e/test_dictation_live.py",
-      "tests/report_structure_migration_test.py",
-      "tests/order_reconciliation_source_test.py",
-      "tests/gateway_receipt_source_test.py",
-      "tests/gateway_retry_source_test.py",
-      "scripts/ops_backup.py",
-      "tests/ops_backup_test.py",
-      "scripts/ops_export_inventory.py",
-      "tests/ops_export_inventory_test.py",
-      ".github/workflows/stage2-rollout-rehearsal.yml",
-      "rehearsal-bundle/bundle-sha256.txt",
-      "rehearsal-bundle/rehearsal/stage2-rollout-rehearsal.yml",
-      "rehearsal-bundle/rehearsal/emr-b-restore-plan.json",
-      "rehearsal-bundle/rollout.py",
-      "rehearsal-bundle/selftest_rollout_stage2.py",
-      "api/src/emr-runtime/coordinator.ts",
-      "api/src/emr-runtime/external-writer.ts",
-      "api/src/emr-runtime/journal-file.ts",
-      "api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql",
-      "tests/emr/b/seal_checker.cjs",
-      "tests/route_inventory_ts.js",
-      "api/src/emr-runtime/file-lock.ts",
-      "tests/fixtures/clinician-source-contract-loads.json",
-      "api/src/emr-runtime/state-client.ts",
-      "api/src/emr-runtime/state-client-worker.ts",
-      "api/src/emr-runtime/limits.ts",
-      "api/src/emr-runtime/admission.ts",
-      "api/src/emr-runtime/client.ts",
-      "api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql",
-      "tests/emr/b/quiet_host.py",
-      "tests/emr/b/quiet_host_test.py",
-      "tests/emr/b/dry_run.py"
-    ],
-    "B1-B2": [
-      "api/src/emr-contract/README.md",
-      ".github/workflows/validate.yml",
-      "tests/measurement_ci.py",
-      "tests/measurement_ci_test.py",
-      "tests/candidate_ci.py",
-      "tests/candidate_ci_test.py",
-      "tests/production_image_test.py",
-      "tests/ops_product_transfer_fixture.py",
-      "tests/ops_product_transfer_test.py",
-      "tests/admin_audit_attribution_test.cjs",
-      "tests/emr_contract_test.cjs",
-      "tests/README.md",
-      ".github/workflows/emr-b.yml",
-      "emr/units/b.json",
+      "docker-compose.runtime-test.yml",
       "scripts/emr-compose.py",
+      "scripts/ops_backup.py",
+      "scripts/ops_emr_introduction.py",
+      "scripts/ops_emr_probe.py",
+      "emr/units/b.json",
       "tests/emr/b/contract_test.cjs",
-      "tests/emr/b/live.py",
-      "tests/emr/b/mutants.py",
-      "tests/emr/b/throughput.cjs",
-      "tests/emr/b/throughput_live.py",
+      "tests/emr/b/pg_ledger_api_test.cjs",
+      "tests/emr/b/pg_ledger_profile.cjs",
+      "tests/emr/b/pg_ledger_restore_test.py",
       "tests/emr/b/ab_latency.cjs",
       "tests/emr/b/ab_sustained.cjs",
       "tests/emr/b/journal_cost.cjs",
-      "tests/emr/b/performance.py",
-      "tests/emr/b/performance_test.py",
-      "tests/emr/b/performance_mutants.py",
-      "tests/emr/b/lock_test.cjs",
-      "tests/emr/b/transaction_options_test.cjs",
-      "tests/emr/b/client_pool_test.cjs",
+      "tests/emr/b/live.py",
       "tests/emr/b/live_acceptance.py",
       "tests/emr/b/live_benchmark.cjs",
       "tests/emr/b/live_mutants.py",
-      "tests/emr/b/noninferiority.py",
-      "tests/emr/b/noninferiority_test.py",
+      "tests/emr/b/mutants.py",
+      "tests/emr/b/lock_test.cjs",
+      "tests/emr/b/seal_checker.cjs",
+      "tests/emr/b/client_pool_test.cjs",
+      "tests/emr/b/transaction_options_test.cjs",
       "tests/emr/b/verification_plan.cjs",
-      "tests/emr/b/power_design.py"
+      "tests/emr/b/performance.py",
+      "tests/emr/b/performance_test.py",
+      "tests/emr/b/performance_mutants.py",
+      "tests/emr/b/throughput.cjs",
+      "tests/emr/b/throughput_live.py",
+      "tests/emr_contract_test.cjs",
+      "tests/emr/c/mutants.py",
+      "tests/emr/f/contract_test.cjs",
+      "tests/ops_backup_test.py",
+      "tests/ops_backup_held_test.py",
+      "tests/ops_backup_restore_test.py",
+      "tests/ops_emr_introduction_test.py",
+      "tests/ops_emr_probe_test.py",
+      "tests/production_image_test.py",
+      "tests/clinician_policy_test.py",
+      "tests/clinician_policy_fixtures.json",
+      "tests/route_inventory_ts.js",
+      "tests/ci_workflow_consumers_test.py",
+      ".github/workflows/emr-b.yml",
+      ".github/workflows/restore-combined.yml",
+      ".github/workflows/restore-database.yml",
+      ".github/workflows/restore-product.yml",
+      "api/src/emr-contract/routes.ts",
+      "api/prisma/import-member-rights.cjs",
+      "tests/ops_product_transfer_fixture.py",
+      "tests/auth_session_service_test.cjs",
+      "api/src/emr-runtime/background-work.ts"
     ]
   },
   "models": {
@@ -169,7 +155,8 @@
   "routes": {
     "nest_routes": 138,
     "internal_surfaces": [
-      "service:auth-session-sweep"
+      "service:auth-session-sweep",
+      "service:member-rights-import"
     ],
     "note": "B1 adds no HTTP route; the internal sweep surface is where B2 records sessions the server ends in process"
   },
@@ -238,9 +225,6 @@
       "order_fact"
     ],
     "runtime_functions": [
-      "chain_tail(text)",
-      "entries_after(text,bigint,integer)",
-      "entry_for_event(text,text)",
       "storage_placement()",
       "civil_period_end(timestamptz,integer)",
       "resolve_member_identity(text,text)",
@@ -253,47 +237,41 @@
       "clause_versions(text)",
       "order_facts_for(text)",
       "record_order_fact(text,text,text,text)",
-      "enter_writer()",
-      "fence_writers()",
-      "commit_marker_for_slot(text,bigint)",
-      "commit_marker_for_attempt(text,text)",
-      "append_reserved(text,text,text,text,text,text)",
-      "bind_commit(text,text,bigint,text)"
+      "admit_operation(uuid,uuid,text,text)",
+      "lock_operation(uuid)",
+      "append_operation(uuid,uuid,text,text,text,text,text)",
+      "settle_operation(uuid)",
+      "operation_result(uuid)",
+      "pending_operations(integer)",
+      "record_failure(uuid,uuid,text,timestamptz,text)",
+      "entries_after(bigint,integer)",
+      "entry_for_event(text,text)"
     ],
     "reader_functions": [
-      "chain_tail(text)",
-      "entries_after(text,bigint,integer)",
-      "entry_for_event(text,text)",
       "storage_placement()",
       "civil_period_end(timestamptz,integer)",
       "holds_for(text)",
       "duty_requests(text,text)",
       "clause_versions(text)",
       "order_facts_for(text)",
-      "enter_writer()",
-      "fence_writers()",
-      "commit_marker_for_slot(text,bigint)",
-      "commit_marker_for_attempt(text,text)"
+      "entries_after(bigint,integer)",
+      "entry_for_event(text,text)"
     ],
     "retention_functions": [
-      "retention_view(bigint,integer)",
-      "chain_tail(text)",
       "storage_placement()",
-      "enter_writer()",
-      "fence_writers()",
-      "commit_marker_for_slot(text,bigint)",
-      "commit_marker_for_attempt(text,text)",
-      "expire_reserved(bigint,text,text)",
-      "bind_commit(text,text,bigint,text)",
-      "lock_chain(text)"
+      "expire_entry(uuid)",
+      "expire_entry(uuid,jsonb)",
+      "expire_failure(uuid)",
+      "restore_expiry_sweep(jsonb)"
     ],
     "access_retention": {
-      "source": "commander D727/D731 (legal register 2026-10-09 final, Astra cross-check 0 disagreements): deltas D-1 revised, D-19, D-21; delta map D-3, D-18",
-      "streams": "two chains: viewing (every event; its own floor from the event's day, longer only under a hold or legal basis; prefix expiry with checkpoint and external seal) and history (succeeded 기재·추가기재·수정 about a record; kept with the changed record; destroyed with its destruction set by unit H; no deletion path in B1)",
-      "stored": "no deadline on any entry; statutory_act (A's mapping) and each record target (kind, record/version IDs) bound per entry in emr_access.access_target from the chained payload",
-      "rule": "api/src/emr-runtime/contract.ts accessDeadline(stream, entry, recordEnd) with ACCESS_RETENTION from A's RECORD_CLASSIFICATION['access-audit'], accessRetentionFloor, recordTargets",
-      "database_floor": "emr_access.access_retention_floor(timestamptz), the migration's only civil period; expire_prefix (viewing only) refuses an entry before it (EB004) or held (EB005)",
-      "bound_by": "A D-1 stream test, C07 (viewing at floor, history with its record, unknown record end = no end), C10 (only these two places compute a period, equal periods), L05 (SQL floor = runtime floor, bindings = recordTargets, old viewing prefix removed, history entry kept)"
+      "source": "D1770/D1794/D1796 and retained A/H calendar/classification contract",
+      "streams": "viewing: two-year floor; rights3y: three-year floor; history: actual linked record lifetime plus access floor. PG rows have independent expiry.",
+      "stored": "original occurred_at, statutory act, class and exact record/version targets; no retry/restore clock reset",
+      "rule": "A/H verified record graph to expireLedgerHistory; checked PG expire_entry/expire_failure serialize with actual holds/duties",
+      "database_floor": "civil_period_end(timestamptz,integer); row DELETE after known ending, floor and hold/duty checks",
+      "restore": "restore_expiry_sweep runs in private restored copy; receipt marks unknown history endings incomplete; no business use before completion",
+      "bound_by": "C07 civil periods; PG history/failure/H graph expiry and D1796 restored sweep red/control"
     },
     "compose_services": [
       "db (tablespace directory prepared at start)",
@@ -322,19 +300,23 @@
   },
   "restore": {
     "order": [
-      "provision the cluster (roles, secrets, tablespace)",
-      "createdb",
-      "pg_restore keeping owners and privileges, without --no-tablespaces",
-      "restore the API state volume from the same point",
-      "start: seal recovery must pass"
+      "provision roles and dedicated tablespace",
+      "restore native business and ledger snapshot with owners and privileges",
+      "restore failure-only spool from the same stopped-writer capture",
+      "check selected installation/schema/catalog/counts",
+      "start normal PG runtime recovery privately, import failure spool, verify representative business+dual event outcome",
+      "run checked restored expiry after failure-spool import; record sweep receipt; keep private if H endings are incomplete or any validation failed"
     ],
-    "never_assumed": "pg_dump carries neither roles nor tablespaces",
+    "never_assumed": "pg_dump carries neither cluster roles nor tablespace directories; a successful selected snapshot is not latest-site recovery",
     "refused": [
-      "a restore without the roles",
-      "ledger relations outside kin_emr_access",
-      "a state volume ahead of the database (LedgerBehindSeal)",
-      "a missing seal over stored entries (SealMissing)"
-    ]
+      "missing roles or dedicated tablespace",
+      "selected installation/catalog/count mismatch",
+      "PG startup or spool import failure",
+      "incomplete restored history ending evidence"
+    ],
+    "physical_closure": "D1794/D1796: expired access row DELETE; no claim every physical copy is closed; copied payloads age through existing rotation and must not be reused before restored expiry",
+    "receipt_ending": "A10 actual purpose and complete dependent-copy predicate; no per-key TTL in a live/restorable installation",
+    "rotation": "Existing ops_backup.py D1047 default seven daily generations; actual --rotate-keep/--no-rotate and held/protected/release/latest-verified/audit exceptions apply. No new period."
   },
   "req_risk_test": [
     {
@@ -446,27 +428,19 @@
   "cases": {
     "contract": {
       "file": "tests/emr/b/contract_test.cjs",
-      "B1": [
+      "B2R": [
         "C01 v2 authentication facts: v1 keeps its rules with D-18 context; online-auth admits verified success and verified refusal, refuses a clinical write, a mismatched result, an extra key and an audit-namespace credential",
         "C02 one immutable identity per verified issuer and subject; namesakes stay apart; a name never joins and unverified input is never known",
-        "C03 the observed ingress address and the in-process service; an untrusted forwarded header or an omitted success address is refused",
+        "C03 observed ingress facts remain known or explicitly unresolved; only in-process work uses no-address applicability",
         "C04 a verified offline original with its own reception; a self-declared flag, a reconnect address and another content under one ID are refused",
-        "C05 the body follows the commit receipt only; a provisional, enqueued or other event's receipt and any failure send zero bytes",
-        "C06 the stored chain against its trusted tail; a deleted middle or tail, a repeated sequence and an unsealed gap are found",
-        "C07 independent expired prefix and its checkpoint under the one retention rule: a viewing entry ends at the floor, a change's history entry lives as long as the record it changed and never ends while that end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused",
+        "C05 protected publication waits for its matching durable receipt and sends nothing on refusal",
+        "C07 civil access floors and actual history endings remain independent of later access and unrelated holds",
         "C08 complete hold set and clause history reloaded from the snapshot; a failed read is never empty; another transaction's snapshot is refused",
         "C09 the signed original and its recovery copy keep owner and original time; a private-draft end or a new authentication never restarts or erases them",
-        "C13 expiry recovery needs external proof of the deleted prefix and its trusted seal, including interrupted recovery",
-        "C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts",
         "C15 D24 registration needs its original direction; code-only native directions keep ten years through cancellation and later adoption",
         "C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart",
         "C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure",
         "C18 D24 claim duties require an actual ending event and preserve an outstanding statutory obligation past internal deadlines",
-        "C20 replay binds sealed DB bytes through the external seal before issuing any receipt",
-        "C21 adjacent stream advances share durability barriers and recover together after each publication cut",
-        "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
-        "C22 bounded lanes keep two verification connections free across small pools and shared stores",
-        "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
@@ -480,7 +454,7 @@
           "ci-emr-b-ledger"
         ]
       ],
-      "B1": [
+      "B2R": [
         "test_b01_ledger_roles_and_restart",
         "test_b02_business_commit_and_failure_journal",
         "test_b03_idempotency_and_concurrent_append",
@@ -498,60 +472,23 @@
     }
   },
   "expected": {
-    "contract": 21,
+    "contract": 13,
     "live": 13,
-    "mutants": 39,
+    "mutants": 15,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
     "emr_b_jobs": 1,
     "session_matrix": 8,
-    "candidate": 122,
-    "candidate_rows": 14,
-    "migrations": 47,
-    "public_tables": 51,
-    "emr_tables": 15,
-    "fixture_public_rows": 90,
-    "fixture_emr_rows": 11,
     "note": "declared before running; never generated from a run's own result"
   },
   "mutants": [
     {
-      "id": "M01",
-      "kill": [
-        "L01"
-      ],
-      "behaviour": "the runtime role regains superuser or owner membership: refused DML/DDL and role escalation must fail the case"
-    },
-    {
-      "id": "M02",
-      "kill": [
-        "L01"
-      ],
-      "behaviour": "the runtime may set session_replication_role: the replica-mode bypass must be refused"
-    },
-    {
-      "id": "M03",
-      "kill": [
-        "L02",
-        "L03"
-      ],
-      "behaviour": "the ledger append is skipped inside the business transaction"
-    },
-    {
       "id": "M04",
       "kill": [
-        "C05",
-        "L08"
+        "C05"
       ],
       "behaviour": "the body is sent before the durable receipt"
-    },
-    {
-      "id": "M05",
-      "kill": [
-        "L02"
-      ],
-      "behaviour": "the failure journal record is made inside the business transaction and vanishes with its rollback"
     },
     {
       "id": "M06",
@@ -575,41 +512,11 @@
       "behaviour": "a forwarded address header is trusted without a trusted peer"
     },
     {
-      "id": "M11",
-      "kill": [
-        "C06",
-        "L04"
-      ],
-      "behaviour": "the trusted tail comparison is skipped"
-    },
-    {
-      "id": "M12",
-      "kill": [
-        "C07",
-        "L05"
-      ],
-      "behaviour": "an unexpired prefix may be deleted"
-    },
-    {
       "id": "M14",
       "kill": [
         "C10"
       ],
       "behaviour": "a declared case missing from its test file is accepted"
-    },
-    {
-      "id": "M15",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "expiry checkpoints are trusted without durable external expiry evidence"
-    },
-    {
-      "id": "M16",
-      "kill": [
-        "C14"
-      ],
-      "behaviour": "torn bytes remain in the good journal after quarantine"
     },
     {
       "id": "M17",
@@ -668,130 +575,18 @@
       ]
     },
     {
-      "id": "M25",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "expiry must never run start-only recovery during append"
-    },
-    {
-      "id": "M26",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "a rolled-back expiry proof cannot justify a replacement checkpoint"
-    },
-    {
-      "id": "M27",
-      "kill": [
-        "C10"
-      ],
-      "behaviour": "count class methods as calendar owners"
-    },
-    {
-      "id": "M28",
-      "kill": [
-        "C10"
-      ],
-      "behaviour": "count exported arrows as calendar owners"
-    },
-    {
-      "id": "M29",
-      "kill": [
-        "C10"
-      ],
-      "behaviour": "count function expressions as calendar owners"
-    },
-    {
-      "id": "M30",
-      "kill": [
-        "C10"
-      ],
-      "behaviour": "count module-level calls as calendar owners"
-    },
-    {
-      "id": "M31",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "an interrupted expiry proof cannot hide an unresolved append"
-    },
-    {
-      "id": "M32",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "I1 prepared proof without marker/slot/generation: X-STALE is accepted"
-    },
-    {
-      "id": "M33",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "I2 startup pending veto blocks normal automatic recovery"
-    },
-    {
-      "id": "M34",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "I3 unrelated open B blocks the healthy committed A receipt"
-    },
-    {
-      "id": "M35",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "I4 expiry returns before its checkpoint seal"
-    },
-    {
-      "id": "M36",
-      "kill": [
-        "L03"
-      ],
-      "behaviour": "per-operation Node startup returns to the head-locked writer; D961 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median UB <=1.10 only; CI-gross latency FAIL iff R>1.25 AND signed pair-median p95 delta>5ms (D1006); reuse successful same-run L03 control"
-    },
-    {
-      "id": "M37",
-      "kill": [
-        "C13"
-      ],
-      "behaviour": "in-flight verification shares the mutable coordinator index and accepts another writer changed binding"
-    },
-    {
-      "id": "M38",
-      "behaviour": "A7 replay trusts a sealed DB row without binding its bytes through the external seal",
-      "kill": [
-        "C20"
-      ]
-    },
-    {
       "id": "M39",
       "kill": [
-        "C22"
+        "POOL-03"
       ],
       "behaviour": "head-lock waiters consume every pool connection ahead of a committed receipt verification"
     },
     {
       "id": "M40",
       "kill": [
-        "C22"
+        "POOL-03"
       ],
       "behaviour": "append lanes consume verification reserve"
-    },
-    {
-      "id": "M41",
-      "kill": [
-        "C21"
-      ],
-      "behaviour": "merged reservation loses durability"
-    },
-    {
-      "id": "M42",
-      "kill": [
-        "C21"
-      ],
-      "behaviour": "merged reservation loses recovery intent"
     }
   ],
   "candidate_cases": [
@@ -930,8 +725,397 @@
       }
     ],
     "unfinished_declaration_fields": [
-      "deployment functions/retention/volumes/restore",
-      "legacy contract/live/mutant test selection pending replacement evidence"
-    ]
+      "final first-site profile unit/margin pending commander; final evidence/source binding pending"
+    ],
+    "removed_paths": [
+      "api/src/emr-runtime/coordinator.ts",
+      "api/src/emr-runtime/external-writer.ts",
+      "api/src/emr-runtime/file-lock.ts",
+      "api/src/emr-runtime/http-admission.ts",
+      "api/src/emr-runtime/launcher.ts",
+      "api/src/emr-runtime/seal.ts",
+      "api/src/emr-runtime/state-client-worker.ts",
+      "api/src/emr-runtime/state-client.ts",
+      "api/src/emr-runtime/transaction-port.ts",
+      "tests/emr/b/startup_fixture.cjs",
+      "tests/emr/b/startup_pg_test.cjs"
+    ],
+    "test_dispositions": {
+      "C06/C13/C20/C21/C23": "REMOVED_D1770_D1757: chain/seal/external proof/frontier no longer exist",
+      "C14": "REPLACED: bounded failure spool + actual ENOSPC/crash evidence required under PG failure tests",
+      "C19/C22": "REPLACED: actual PG adapter concurrent receipt/settlement and request-work admission/drain tests",
+      "C04.database": "REPLACED: PG event/key exact duplicate and mismatch; offline approval absent from first release D1753",
+      "C08.database": "MOVED: actual PG hold/clause snapshot and release binding in live tests",
+      "C05/C07": "RETAINED: public publication/calendar contracts; actual commit/expiry boundaries independently in PG tests",
+      "C10.calendar_call_graph": "REMOVED_D73: behavior at civil boundaries replaces internal function call shape",
+      "POOL-PLAN/TIMING": "Removed external-chain verifier cost and wrapper instrumentation controls; actual PG key/pending EXPLAIN and first-site workload measurements replace them.",
+      "A-F05": "DISPOSED_D557: chain rewrite/omission/tail attacker checks removed.",
+      "A-D1": "Retain actual stream/classification contract; PG-03 covers dual SQL atomicity.",
+      "A-R4-09-symbol-location": "D73: remove internal source-location assertion; retained composition behavior and actual AppModule startup prove boundary.",
+      "F-patient-replay-chain": "DISPOSED_D557: rewrite detection via hash chain removed. Retain actual source event attribution, malformed row refusal and ordered paging with PG projection."
+    },
+    "mutant_dispositions": [
+      {
+        "id": "M01",
+        "kill": [
+          "L01"
+        ],
+        "behaviour": "the runtime role regains superuser or owner membership: refused DML/DDL and role escalation must fail the case",
+        "disposition": "REPLACED",
+        "reason": "PG schema installed role/startup boundary"
+      },
+      {
+        "id": "M02",
+        "kill": [
+          "L01"
+        ],
+        "behaviour": "the runtime may set session_replication_role: the replica-mode bypass must be refused",
+        "disposition": "DISPOSED_D557",
+        "reason": "Attacker trigger-bypass scenario removed"
+      },
+      {
+        "id": "M03",
+        "kill": [
+          "L02",
+          "L03"
+        ],
+        "behaviour": "the ledger append is skipped inside the business transaction",
+        "disposition": "REPLACED",
+        "reason": "PG adapter/auth/import actual omission controls"
+      },
+      {
+        "id": "M04",
+        "kill": [
+          "C05",
+          "L08"
+        ],
+        "behaviour": "the body is sent before the durable receipt",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M05",
+        "kill": [
+          "L02"
+        ],
+        "behaviour": "the failure journal record is made inside the business transaction and vanishes with its rollback",
+        "disposition": "REPLACED",
+        "reason": "PG independent failure rollback control"
+      },
+      {
+        "id": "M06",
+        "kill": [
+          "C02"
+        ],
+        "behaviour": "identities are joined by display name",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M07",
+        "kill": [
+          "C01"
+        ],
+        "behaviour": "an audit link ID or session reference is accepted as a credential",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M08",
+        "kill": [
+          "C03"
+        ],
+        "behaviour": "a forwarded address header is trusted without a trusted peer",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M11",
+        "kill": [
+          "C06",
+          "L04"
+        ],
+        "behaviour": "the trusted tail comparison is skipped",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M12",
+        "kill": [
+          "C07",
+          "L05"
+        ],
+        "behaviour": "an unexpired prefix may be deleted",
+        "disposition": "REPLACED",
+        "reason": "PG history and failure expiry omission controls"
+      },
+      {
+        "id": "M14",
+        "kill": [
+          "C10"
+        ],
+        "behaviour": "a declared case missing from its test file is accepted",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M15",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "expiry checkpoints are trusted without durable external expiry evidence",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M16",
+        "kill": [
+          "C14"
+        ],
+        "behaviour": "torn bytes remain in the good journal after quarantine",
+        "disposition": "REPLACED",
+        "reason": "Actual failure-only spool torn bytes/ENOSPC/fsync"
+      },
+      {
+        "id": "M17",
+        "kill": [
+          "C15"
+        ],
+        "behaviour": "native clinical directions get only five years",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M18",
+        "kill": [
+          "C15"
+        ],
+        "behaviour": "registration with no original direction is accepted",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M19",
+        "kill": [
+          "C16"
+        ],
+        "behaviour": "a retransmission resets the first local receipt clock",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M20",
+        "kill": [
+          "C17"
+        ],
+        "behaviour": "unanswered review silently ends on the internal deadline",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M21",
+        "kill": [
+          "C18"
+        ],
+        "behaviour": "a claim end timestamp needs no actual ending evidence",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M22",
+        "kill": [
+          "C15"
+        ],
+        "behaviour": "a changed seed is still treated as verified synthetic",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M23",
+        "kill": [
+          "C16"
+        ],
+        "behaviour": "a subsequent event can drop an inherited original duty",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M24",
+        "behaviour": "accept a clinical correction without its original-version predecessor",
+        "kill": [
+          "C15"
+        ],
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M25",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "expiry must never run start-only recovery during append",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M26",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "a rolled-back expiry proof cannot justify a replacement checkpoint",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M27",
+        "kill": [
+          "C10"
+        ],
+        "behaviour": "count class methods as calendar owners",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M28",
+        "kill": [
+          "C10"
+        ],
+        "behaviour": "count exported arrows as calendar owners",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M29",
+        "kill": [
+          "C10"
+        ],
+        "behaviour": "count function expressions as calendar owners",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M30",
+        "kill": [
+          "C10"
+        ],
+        "behaviour": "count module-level calls as calendar owners",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M31",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "an interrupted expiry proof cannot hide an unresolved append",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M32",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "I1 prepared proof without marker/slot/generation: X-STALE is accepted",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M33",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "I2 startup pending veto blocks normal automatic recovery",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M34",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "I3 unrelated open B blocks the healthy committed A receipt",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M35",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "I4 expiry returns before its checkpoint seal",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M36",
+        "kill": [
+          "L03"
+        ],
+        "behaviour": "per-operation Node startup returns to the head-locked writer; D961 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median UB <=1.10 only; CI-gross latency FAIL iff R>1.25 AND signed pair-median p95 delta>5ms (D1006); reuse successful same-run L03 control",
+        "disposition": "REPLACED",
+        "reason": "A11 PG production workload, no external-writer process remains"
+      },
+      {
+        "id": "M37",
+        "kill": [
+          "C13"
+        ],
+        "behaviour": "in-flight verification shares the mutable coordinator index and accepts another writer changed binding",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M38",
+        "behaviour": "A7 replay trusts a sealed DB row without binding its bytes through the external seal",
+        "kill": [
+          "C20"
+        ],
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M39",
+        "kill": [
+          "C22"
+        ],
+        "behaviour": "head-lock waiters consume every pool connection ahead of a committed receipt verification",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M40",
+        "kill": [
+          "C22"
+        ],
+        "behaviour": "append lanes consume verification reserve",
+        "disposition": "CARRIED_OVER",
+        "reason": "Retained real boundary control"
+      },
+      {
+        "id": "M41",
+        "kill": [
+          "C21"
+        ],
+        "behaviour": "merged reservation loses durability",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      },
+      {
+        "id": "M42",
+        "kill": [
+          "C21"
+        ],
+        "behaviour": "merged reservation loses recovery intent",
+        "disposition": "OBSOLETE_BY_REPLACE",
+        "reason": "Removed external engine or D73 source-shape check; see D1770/D1757"
+      }
+    ],
+    "ci_transition": {
+      "preserved": "push main, pull_request, workflow_dispatch; one emr-b job; measurement/candidate entry points unchanged",
+      "removed": "D1770 external-seal graph, file-owner coordination and fixed-delay external-engine A/B commands; no current PG capacity claim from them",
+      "replacement": "retained 15 negative controls, public contracts, pool/drain, actual PG candidate selectors, real filesystem/AppModule/H sweep/auth regressions",
+      "historical_unexecuted_tools": "old D878/D961 benchmark support files remain for unowned historical consumers; active candidate workflow does not invoke them"
+    }
   }
 }

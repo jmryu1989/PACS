@@ -12,7 +12,7 @@ export const ACCESS_ACTIONS = freeze({
   export: ['print-opened', 'print-done', 'pdf', 'copy', 'download', 'disclosure'],
   failure: ['auth-refused', 'permission-refused', 'conflict', 'storage-failed', 'signature-failed'],
 } as const);
-/** Closed non-patient targets. Everything else requires patient/study/record/version facts on success. */
+/** Closed non-patient targets. Patient-bearing records retain their observed identity facts. */
 export const NON_RECORD_TARGETS: readonly RecordKind[] = freeze(['preferences', 'reading-template', 'institution',
   'identity-access', 'authentication-session', 'system-operation']);
 export const STATUTORY_ACT = freeze({
@@ -48,7 +48,7 @@ export interface AccessEventV1 {
   actingInstitution: EvidenceFact<string>;
   managingInstitution: EvidenceFact<string>;
   occurredAt: string;
-  trustedProxyIp: EvidenceFact<{ address: string; source: 'trusted-proxy' }>;
+  trustedProxyIp: EvidenceFact<{ address: string; source: 'trusted-proxy' | 'request-peer' }>;
   cause: CauseKind;
   /** D-18: the business context the server bound to this access (optional reason out of context). */
   context: Readonly<WorkContext>;
@@ -110,7 +110,8 @@ function expectedResult(action: AccessAction): AccessEventV1['result'] {
     ['client-shown', 'print-done', 'pdf', 'copy'].includes(action) ? 'reported' : 'succeeded';
 }
 function surfaceKindsOf(surface: string): readonly RecordKind[] {
-  return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] : routeContract(surface).kinds;
+  return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] :
+    Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface) ? INTERNAL_SURFACES[surface].kinds : routeContract(surface).kinds;
 }
 function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean): AccessTarget[] {
   if (!Array.isArray(input)) throw new Error('Actual returned target set required');
@@ -128,7 +129,11 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
     if (facts.some(f => f.status === 'not-applicable' && (!NON_RECORD_TARGETS.includes(kind) || f.reason !== 'non-record-target')))
       throw new Error('Patient-bearing record facts cannot be waived');
-    if (!failure && facts.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
+    // The existing private draft is identified by its (study, author) resource
+    // and revision even when no patient-link row exists. Keep that fact unknown
+    // rather than inventing a patient link or blocking ordinary draft work.
+    const required = kind === 'private-draft' ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
+    if (!failure && required.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
     return parsed;
   });
 }
@@ -147,21 +152,28 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
   if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
   const userId = fact(v.userId, identity);
   const rolesAtTime = fact(v.rolesAtTime, roles => {
-    if (!Array.isArray(roles) || !roles.length || new Set(roles).size !== roles.length) throw new Error('Roles missing or duplicated');
+    const internalService = v.executor === 'service' && v.cause === 'service-job'
+      && Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface);
+    if (!Array.isArray(roles) || (!roles.length && !internalService) || new Set(roles).size !== roles.length)
+      throw new Error('Roles missing or duplicated');
     return roles.map(role => string(role));
   });
   const actingInstitution = fact(v.actingInstitution, value => string(value));
   const managingInstitution = fact(v.managingInstitution, value => string(value));
   const trustedProxyIp = fact(v.trustedProxyIp, value => {
     const ip = object(value, ['address', 'source']);
-    if (isIP(ip.address) === 0 || ip.source !== 'trusted-proxy') throw new Error('Trusted proxy IP required');
-    return { address: ip.address as string, source: 'trusted-proxy' as const };
+    if (isIP(ip.address) === 0 || !['trusted-proxy', 'request-peer'].includes(ip.source)) throw new Error('Observed IP required');
+    return { address: ip.address as string, source: ip.source as 'trusted-proxy' | 'request-peer' };
   });
   const executor = choice(v.executor, ['member', 'service', 'unauthenticated']);
   const cause = choice(v.cause, ['user-view', 'background-fetch', 'service-job']);
   const inProcess = executor === 'service' && cause === 'service-job' && trustedProxyIp.status === 'not-applicable' && trustedProxyIp.reason === 'in-process-service';
-  if ((!failure && [userId, rolesAtTime, actingInstitution, managingInstitution].some(f => f.status !== 'known')) ||
-      (!failure && trustedProxyIp.status !== 'known' && !inProcess) ||
+  // A member-rights command has no patient scope. An unobserved ingress address
+  // stays unknown for every event (B2 v2 item 2); it must never be invented.
+  const rightsOnly = Array.isArray(v.targets) && v.targets.length > 0 && v.targets.every(t => t.kind === 'identity-access');
+  if ((!failure && [userId, rolesAtTime, ...(!rightsOnly ? [actingInstitution, managingInstitution] : [])].some(f => f.status !== 'known')) ||
+      (!failure && !rightsOnly && trustedProxyIp.status !== 'known' && !inProcess
+        && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed')) ||
       (trustedProxyIp.status === 'not-applicable' && !inProcess) ||
       (executor === 'unauthenticated' && (action !== 'auth-refused' || userId.status !== 'unresolved')) ||
       (action === 'auth-refused' && executor !== 'unauthenticated') ||
@@ -322,7 +334,9 @@ const authRoutes = () => Object.keys(ROUTE_CONTRACTS).filter(r => ROUTE_CONTRACT
 function authSurfaces(action: AuthAction, endCause: AuthEndCause | null): readonly string[] {
   if (action === 'auth.login') return ['GET auth/callback'];
   if (action === 'auth.entry') return ['POST auth/entry'];
-  if (endCause === 'logout') return ['POST auth/logout'];
+  // The existing start flow also finishes an explicitly unfinished logout
+  // before starting the next login. Record that actual route and cause.
+  if (endCause === 'logout') return ['POST auth/logout', 'POST auth/login'];
   if (endCause === 'account-switch' || endCause === 'reauthentication') return authRoutes().filter(r => r !== 'POST auth/entry');
   if (endCause === 'isolation') return Object.keys(ROUTE_CONTRACTS).filter(r => ROUTE_CONTRACTS[r].operation === 'write' && ROUTE_CONTRACTS[r].kinds.includes('identity-access'));
   if (endCause === 'sweep') return Object.keys(INTERNAL_SURFACES).filter(s => INTERNAL_SURFACES[s].kinds.includes('authentication-session'));
@@ -365,11 +379,11 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   if (!surfaceCauses(surface).includes(cause)) throw new Error('Cause does not belong to the server surface');
   const context = workContext(v.context, cause, true);
   const executor = choice(v.executor, ['member', 'service', 'unauthenticated']);
-  const userId = factV2(v.userId, identity, ['not-authenticated'], []);
-  const affectedIdentity = factV2(v.affectedIdentity, identity, ['not-authenticated'], []);
+  const userId = factV2(v.userId, identity, ['not-authenticated', 'not-resolved'], []);
+  const affectedIdentity = factV2(v.affectedIdentity, identity, ['not-authenticated', 'not-resolved'], []);
   const rolesAtTime = factV2(v.rolesAtTime, roleList, ['not-authenticated', 'not-resolved'], []);
   const rightsVersion = factV2(v.rightsVersion, value => integer(value, 0), ['not-authenticated', 'not-resolved'], ['in-process-service']);
-  const actingInstitution = factV2(v.actingInstitution, value => string(value), ['not-authenticated', 'not-resolved', 'not-observed'], ['not-approved']);
+  const actingInstitution = factV2(v.actingInstitution, value => string(value), ['not-authenticated', 'not-resolved', 'not-observed'], ['not-approved', 'in-process-service']);
   const managingInstitution = factV2(v.managingInstitution, value => string(value), ['not-resolved'], []);
   const trustedProxyIp = factV2(v.trustedProxyIp, proxyAddress, ['not-observed'], ['in-process-service']);
   const session = factV2(v.session, value => {
@@ -378,6 +392,8 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
     return reference;
   }, ['not-resolved'], []);
   const succeeded = result === 'succeeded';
+  const unresolvedEnd = endCause !== null && session.status === 'known' &&
+    affectedIdentity.status === 'unresolved' && affectedIdentity.reason === 'not-resolved';
   // The executor's own facts, then the affected member. A sweep's service is never the member it ended; an
   // administrator's isolation ends another member; every other end and login is the executor's own.
   let consistent: boolean;
@@ -386,17 +402,23 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
       userId.status === 'unresolved' && affectedIdentity.status === 'unresolved' &&
       [rolesAtTime, rightsVersion, actingInstitution].every(f => f.status === 'unresolved' && f.reason === 'not-authenticated');
   } else if (executor === 'service') {
-    consistent = cause === 'service-job' && endCause === 'sweep' && userId.status === 'known' && affectedIdentity.status === 'known' &&
+    consistent = cause === 'service-job' && endCause === 'sweep' && userId.status === 'known' && (affectedIdentity.status === 'known' || unresolvedEnd) &&
       !sameIdentity(userId, affectedIdentity) && trustedProxyIp.status === 'not-applicable' && rightsVersion.status === 'not-applicable' &&
-      rolesAtTime.status === 'known' && actingInstitution.status === 'known';
+      rolesAtTime.status === 'known' && (actingInstitution.status === 'known' ||
+        (actingInstitution.status === 'not-applicable' && actingInstitution.reason === 'in-process-service'));
   } else {
-    consistent = cause !== 'service-job' && endCause !== 'sweep' && userId.status === 'known' && affectedIdentity.status === 'known' &&
+    consistent = cause !== 'service-job' && endCause !== 'sweep' &&
       trustedProxyIp.status !== 'not-applicable' && rightsVersion.status !== 'not-applicable' &&
-      (endCause === 'isolation' ? !sameIdentity(userId, affectedIdentity) : sameIdentity(userId, affectedIdentity));
+      !(actingInstitution.status === 'not-applicable' && actingInstitution.reason === 'in-process-service') &&
+      ((userId.status === 'known' && affectedIdentity.status === 'known' && (endCause === 'isolation' || sameIdentity(userId, affectedIdentity))) ||
+       (unresolvedEnd && userId.status === 'unresolved' && userId.reason === 'not-resolved'));
   }
   if (!consistent) throw new Error('Unresolved or inconsistent actor context');
-  if (succeeded && (trustedProxyIp.status === 'unresolved' || [rolesAtTime, rightsVersion].some(f => f.status === 'unresolved') ||
-      actingInstitution.status === 'unresolved' || managingInstitution.status !== 'known' || session.status !== 'known'))
+  // A missing observation stays missing. In particular an unapproved member
+  // can finish ordinary login; logging must not fabricate an institution/IP or
+  // turn the existing waiting-for-approval workflow into an authentication failure.
+  if (succeeded && ([rolesAtTime, rightsVersion].some(f => f.status === 'unresolved') ||
+      actingInstitution.status === 'unresolved' || session.status !== 'known'))
     throw new Error('A successful authentication fact requires its observed context');
   if (!succeeded && session.status === 'known') throw new Error('A refused or failed login has no product session');
   if (!Array.isArray(v.targets) || v.targets.length !== 0) throw new Error('Authentication events never name clinical targets');

@@ -1,3 +1,4 @@
+import { createBackgroundWorkRegistry } from './background-work';
 import { composeEmrAdapters } from '../emr-contract/composition';
 import { EmrLedgerClient } from './client';
 import { runtimeAdapters } from './context';
@@ -9,6 +10,7 @@ import { AccessLedgerStore } from './store';
 /** Ordinary PostgreSQL connection/start/stop ownership. No external state owner,
  * IPC session, seal, checkpoint, or second outcome authority. */
 export class EmrRuntime {
+  readonly background = createBackgroundWorkRegistry();
   readonly port: EmrRecordPort;
   readonly control: EmrRecordPortControl;
   private readonly db: EmrLedgerClient;
@@ -40,10 +42,10 @@ export class EmrRuntime {
   /** Launcher supplies its one existing shutdown deadline. Cleanup errors are
    * returned to that owner rather than hidden as a successful process exit. */
   async stop(deadline: number): Promise<void> {
-    this.control.close(); this.ready = false;
+    this.background.quiesce(); this.control.close(); this.ready = false;
     let timer: ReturnType<typeof setTimeout>;
     const stop = async () => {
-      await this.control.drained();
+      await Promise.all([this.background.drained(), this.control.drained()]);
       const results = await Promise.allSettled([this.journal.close(), this.db.$disconnect()]);
       if (results.some(r => r.status === 'rejected')) throw new Error('EmrCleanupFailed');
     };

@@ -7,7 +7,7 @@
 | `composition.ts` | 서버 시작 시 단 한 번 저장소·법적 의무·초안 종료·재진료 reader 결속 / B, C, H |
 | `classification.ts`, `routes.ts` | 기록 종류·저장 모델·제공 경로의 분류 / B–I |
 | `lawful-defaults.ts`, `legal-basis.ts` | 기간·편입 참조·법적 보존·파기·서명 강화 / H, I, 전체 |
-| `access-event.ts` | 대상 사실·행위·내구성·해시 체인·만료 checkpoint / B, C, D, E, F, H |
+| `access-event.ts` | 대상 사실·행위·내구성·보존 분류 / B, C, D, E, F, H |
 | `signature.ts` | 정확한 UTF-8 서명 바이트·ES256 JWS 봉투 / C, D, E |
 | `report-lifecycle.ts` | 점유·승인·24시간 수정·추가기재·취소·새 단위·보존 전용 / C, H |
 
@@ -155,7 +155,7 @@ B의 원장은 업무 데이터와 같은 PostgreSQL 트랜잭션에 참여하�
 
 `formatVersion: 1`의 필드·규칙·체인 바이트는 그대로다. `parseAccessEvent()`는 getter를 실행하지 않고 판본을 읽어 v1과 v2를 나누며 v2는 닫힌 두 분기다.
 
-- **`online-auth`**: `auth.login`·`auth.entry`·`auth.logout`·`auth.session.expired`(법정행위 전부 none, `AUTH_STATUTORY_ACT`). `targets`는 항상 빈 배열이며 임상 대상을 합성하지 않는다. 실행자(`userId`)와 영향 신원(`affectedIdentity`)을 분리한다: 회원 자신의 로그인·종료는 같은 신원, 관리자의 isolation은 다른 회원, 세션 수거는 서비스 신원과 그 회원이다(`service:auth-session-sweep`, `INTERNAL_SURFACES`, IP는 `not-applicable: in-process-service`). 검증 후 거절한 로그인은 known 신원을 남기고 검증 전 거절은 unresolved다. 역할은 확인된 빈 배열도 known이며 DB 권한 판(`rightsVersion`)을 함께 둔다. 기관 미승인 회원의 인증 성공은 `actingInstitution: not-applicable / not-approved`로 임상 접근 성공과 구별한다. 성공은 신뢰 프록시 IP·관리기관·비인증 난수 세션 참조(`authref:<UUID>`)가 필요하고 실패에는 세션이 없다. `auth`의 `endCause`·`failureCause`·`trigger`는 닫힌 값이며 trigger는 재인증 종료에만 있다. 원사건 ID는 서버가 만든 UUID다.
+- **`online-auth`**: `auth.login`·`auth.entry`·`auth.logout`·`auth.session.expired`(법정행위 전부 none, `AUTH_STATUTORY_ACT`). `targets`는 항상 빈 배열이며 임상 대상을 합성하지 않는다. 실행자(`userId`)와 영향 신원(`affectedIdentity`)을 분리한다: 회원 자신의 로그인·종료는 같은 신원, 관리자의 isolation은 다른 회원, 세션 수거는 서비스 신원과 그 회원이다(`service:auth-session-sweep`, `INTERNAL_SURFACES`, IP는 `not-applicable: in-process-service`). 검증 후 거절한 로그인은 known 신원을 남기고 검증 전 거절은 unresolved다. 역할은 확인된 빈 배열도 known이며 DB 권한 판(`rightsVersion`)을 함께 둔다. 기관 미승인 회원의 인증 성공은 `actingInstitution: not-applicable / not-approved`로 임상 접근 성공과 구별한다. 성공은 확인된 역할·권한 판과 비인증 난수 세션 참조(`authref:<UUID>`)를 남기고 실패에는 세션이 없다. 관찰하지 못한 접속지·관리기관은 unresolved로 유지하며, 기관에 속하지 않는 내부 수거 작업의 actingInstitution은 in-process-service로 표시한다. `auth`의 `endCause`·`failureCause`·`trigger`는 닫힌 값이며 trigger는 재인증 종료에만 있다. 원사건 ID는 서버가 만든 UUID다.
 - **`verified-offline`**: 단말에서 실제로 일어난 임상 행위. IP는 항상 `unresolved: offline`(재접속 IP는 `relatedEventId`의 별도 수신사건), 기기·kid·사전권한·시간 근거/불확실도·기기 순서·대상 manifest·실제 signedAt을 요구하며 이 사실은 서버 시작 시 한 번 구성하는 `composeOfflineReceiptVerifier()`의 결과와 같아야 한다. 본문의 `offline`/`verified` 플래그는 근거가 아니다. C의 실제 키·서명 검증이 없는 현재는 아무것도 구성하지 않으므로 이 분기는 `OfflineVerificationUnsupported`로 거절된다(B2가 main.ts에서 구성 위치를 정한다).
 
 B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델이 아니므로 `SQL_STORAGE_CLASSIFICATION`에 따로 분류하고 실제 catalog와 양방향 대조한다. 법적 보존 의무·요청(`legal-duty`)과 검토된 조문 판본 이력(`legal-reference`)은 원기록을 따르는 증빙이다(`source-record`). 저장된 접속사건은 `emr_access.access_entry` 모델로 A의 고정 접속 매핑과 같은 사실을 돌려준다.
@@ -232,4 +232,12 @@ B의 `emr_access.order_fact`는 주문 사실의 추가 전용 이력이다. 상
 
 접속·열람 사건은 viewing 스트림의 2년 하한, 변경 이력·원판·원서명·출처·원 기산 증거는 원기록 의무, 단순 전달 영수증은 제품 정책 2년으로 분리한다. 영수증의 2년은 법정 하한이나 원시 payload 전체의 보존 근거가 아니다. `orderReceptionEvidence`는 이 세 참조를 구별하고 원본 증거는 access payload가 아닌 주문 사실 저장소에 둔다. `nhi:96-4.1` 의무는 검토된 조문 이력과 실제 종료 사건을 읽는 법적 의무 어댑터를 요구한다. 종료 사건 공급이 불가능하면 담당자 절차의 의무 지속/적법 반환 경로를 사용하며 시각만으로 해제하지 않는다.
 
-검증: REQ/RISK-EMR-01/06/07/19/20 → B C13–C18, L17–L19 및 A 계약 회귀. synthetic 예외는 소유 실행/seed·검증 실행 ID·내용 해시 대조·실제 검사 연결 없음이 모두 확인된 행만 허용한다. 출처 없는 이관 행은 미확인 절차로 보존하며 synthetic 표식만으로 제외하지 않는다.
+검증: REQ/RISK-EMR-01/06/07/19/20 → B C15–C18, 실제 PG 주문 사실·보존·복원 경계 및 A 계약 회귀. synthetic 예외는 소유 실행/seed·검증 실행 ID·내용 해시 대조·실제 검사 연결 없음이 모두 확인된 행만 허용한다. 출처 없는 이관 행은 미확인 절차로 보존하며 synthetic 표식만으로 제외하지 않는다.
+
+회원 권한 변경은 `AdminService.patchUser(..., facts)`의 `RightsRequestFacts`로 실제 서버 요청 경계·실행자·접속지를 전달한다. 권한 변경과 그 변경으로 종료되는 세션의 원사건·AuditLog projection은 같은 PG 트랜잭션에서 확정된다. 요청 사실이 없으면 권한을 변경하지 않는다. 관리 컨트롤러의 요청 사실 연결은 REQUEST_FACTS 단위가 제공하며, 임의의 사용자·기관·주소로 대체하지 않는다.
+
+초기 권한 가져오기는 `service:member-rights-import`의 실제 서비스 주체로 기록한다. 명부 변경·완료 표식·3년 보존 권한 사건이 한 트랜잭션이며, CLI는 게시 결과와 원장 연결을 정리한 뒤 종료한다. API는 진행 중 가져오기·게시·세션 정리 작업을 추적하며 종료 신호에서 새 작업을 멈추고 기존 종료 기한 안에 기다린다.
+
+기존 세션의 저장 토큰을 읽을 수 없어 원래 issuer를 알 수 없을 때도 로그아웃은 수행한다. 그 종료 사건의 신원은 `unresolved/not-resolved`로 남기고 세션의 `auditRef` 및 같은 트랜잭션의 기존 subject projection을 보존한다. 현재 설정의 issuer를 과거 신원으로 추측하지 않는다. 이 표현은 기존 세션 종료에만 적용되며 로그인·진입의 검증된 신원 요건을 바꾸지 않는다.
+
+`expire_failure`는 원래 발생 시각의 2년 하한과 hold/duty를 검사한다. 만료 후 동일한 실패 ID가 spool에서 다시 오면 원문을 재생성하지 않는다. D1794에 따라 PG 행 DELETE를 부분 파기로 기록한다. 근거는 commander D1794 및 개인정보의 안전성 확보조치 기준 해설(DB 내부 부분 삭제)이다. 모든 물리 복제본의 폐쇄를 뜻하지 않는다. 기존 백업 회전은 `ops_backup.py`의 D1047 기본 7개 일일 세대이며, release·held·protected·latest-verified·미완료 세대와 감사 보존 예외는 기존 정책을 따른다. 실제 배포 설정의 `--rotate-keep`/`--no-rotate`와 예외를 함께 확인해야 하므로 7일 뒤 모든 사본이 없어졌다고 단정하지 않는다. D1796에 따라 복원 기록의 업무 재사용 전에 만료 sweep을 수행하고 복원 영수증에 남긴다. 수명이 확인되지 않은 기록 이력은 보존 건수로 남기며 복원을 막지 않는다. 백업 후 쓰기 서비스를 재개할 때 API의 PostgreSQL 원장 준비 확인이 실패하면 백업 사본은 보존하고 준비 완료로 표시하지 않는다.

@@ -4,18 +4,21 @@ import type { ResolvedRecord } from '../emr-contract/classification';
 import { refuse } from '../emr-contract/validation';
 import type { EmrSnapshot, SnapshotRequest } from './context';
 import { EMR_PENDING_LIMIT } from './limits';
-import type { AccessLedgerStore, AdmittedOperation, AttemptKeys, BusinessReference, OperationResult, ProvisionalAppend } from './store';
+import type { AccessLedgerStore, AdmittedOperation, AttemptKeys, BusinessReference, OperationResult, ProvisionalAppend, RecordMutation } from './store';
 
 export const EMR_RECORD_PORT = Symbol('EmrRecordPort');
 export type EmrRecordTransaction = Prisma.TransactionClient;
 export interface EmrRecordWork {
   admit(event: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<AdmittedOperation>;
   transaction(operation: AdmittedOperation, work: (tx: EmrRecordTransaction) => Promise<BusinessReference | null>): Promise<OperationResult>;
+  transactionWithRecords<T>(work: (tx: EmrRecordTransaction, record: RecordMutation) => Promise<T>,
+    options?: { maxWait: number; timeout: number }): Promise<T>;
   append(event: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<DurableAccessReceipt>;
   confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt>;
   lookup(operationId: string): Promise<OperationResult | null>;
   snapshot(tx: EmrRecordTransaction, scope: object, request: SnapshotRequest): Promise<EmrSnapshot>;
   resolveIdentity(tx: EmrRecordTransaction, issuer: string, subject: string): Promise<string>;
+  resolveRequestIdentity(issuer: string, subject: string): Promise<string>;
   end(): void;
 }
 export interface EmrRecordPort { begin(): EmrRecordWork }
@@ -49,11 +52,13 @@ export function createRecordPort(store: AccessLedgerStore): { port: EmrRecordPor
       return {
         admit: (event, served, keys) => run(() => store.admit(event, served, keys)),
         transaction: (operation, work) => run(() => store.transaction(operation, work)),
+        transactionWithRecords: (work, options) => run(() => store.transactionWithRecords(work, options)),
         append: (event, served, keys) => run(() => store.append(event, served, keys)),
         confirm: appended => run(() => store.confirm(appended)),
         lookup: id => run(() => store.lookup(id)),
         snapshot: (tx, scope, request) => run(() => store.snapshot(tx, scope, request)),
         resolveIdentity: (tx, issuer, subject) => run(() => store.resolveIdentity(tx, issuer, subject)),
+        resolveRequestIdentity: (issuer, subject) => run(() => store.resolveRequestIdentity(issuer, subject)),
         end() { ended = true; retire(); },
       };
     },

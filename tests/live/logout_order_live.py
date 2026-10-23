@@ -12,8 +12,57 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_support import Session, setup_stack
+from session_support import Session, SessionStack, cleanup_sessions
 from invariants_live import ROOT
+
+
+# B2 owns the service/ledger composition; the admin HTTP request-facts adapter
+# belongs to REQUEST_FACTS (D1794/D1806). Prepare owned identities through the
+# real service here, so this logout-order suite does not depend on that adapter.
+PREPARE_MEMBER = r"""
+const { PrismaService } = require('/app/dist/prisma.service');
+const { KeycloakService } = require('/app/dist/keycloak.service');
+const { AdminService } = require('/app/dist/admin.service');
+const { AuthService } = require('/app/dist/auth.service');
+const { EmrRuntime } = require('/app/dist/emr-runtime/application');
+(async () => {
+  const db = new PrismaService(), kc = new KeycloakService();
+  const runtime = new EmrRuntime(process.env.DATABASE_URL, '/tmp/logout-setup-' + input.sub);
+  try {
+    await db.$connect(); await runtime.start();
+    const admin = await db.memberRights.findFirst({where:{approved:true,suspended:false,roles:{has:'admin'}}});
+    if (!admin) throw Error('Imported fixture administrator missing');
+    const work = runtime.port.begin();
+    let actor;
+    try { actor = {issuer:process.env.KC_ISSUER,subject:admin.sub,
+      id:await work.resolveRequestIdentity(process.env.KC_ISSUER,admin.sub)}; }
+    finally { work.end(); }
+    const auth = new AuthService(db,kc,runtime.port,runtime.background.work);
+    const service = new AdminService(db,kc,null,auth,runtime.port);
+    const result = await service.patchUser(input.sub,input.changes,
+      {sub:admin.sub,actor:admin.email || admin.username,roles:admin.roles,institution:admin.institution},
+      {actor,roles:admin.roles,rightsVersion:admin.version,institution:admin.institution,
+       ip:null,sessionRef:null,requestId:require('node:crypto').randomUUID(),surface:'PATCH admin/users/:id'});
+    await runtime.background.drained();
+    console.log('MEMBER ' + JSON.stringify(result));
+  } finally { await runtime.stop(Date.now()+15000); await db.$disconnect(); }
+})().catch(error => { console.error(error.message); process.exitCode=1; });
+"""
+
+
+class LogoutFixtureStack(SessionStack):
+    def set_member_rights(self, user_id, **changes):
+        if user_id not in self.user_ids.values():
+            raise RuntimeError('Logout fixture can prepare only its own identities')
+        script = 'const input = ' + json.dumps({'sub': user_id, 'changes': changes}) + ';\n' + PREPARE_MEMBER
+        result = subprocess.run(['docker', 'compose', 'exec', '-T', 'api', 'node'], cwd=ROOT,
+                                input=script, capture_output=True, text=True, encoding='utf-8', timeout=60)
+        if result.returncode:
+            raise RuntimeError('Logout fixture member preparation failed: ' + result.stderr[-500:])
+        rows = [line[7:] for line in result.stdout.splitlines() if line.startswith('MEMBER ')]
+        if len(rows) != 1:
+            raise RuntimeError('Logout fixture member preparation returned no result')
+        return json.loads(rows[0])
 
 
 PROBE = r"""
@@ -40,7 +89,10 @@ const { AuthService } = copy.exports;
   const db = new PrismaService(), observer = new PrismaService();
   await db.$connect(); await observer.$connect();
   // The product's wiring: one Nest provider each, no constructor arguments, the container's environment.
-  const auth = new AuthService(db, new KeycloakService());
+  const { EmrRuntime } = require('/app/dist/emr-runtime/application');
+  const runtime = new EmrRuntime(process.env.DATABASE_URL, '/tmp/logout-order-' + input.sub);
+  await runtime.start();
+  const auth = new AuthService(db, new KeycloakService(), runtime.port, runtime.background.work);
   const sid = auth.sessionId({headers:{cookie:'kin_sid=' + input.cookie}});
   const row = await observer.authSession.findUnique({where:{sid}});
   if (!row || !row.idpSid) throw Error('The logged-in session must name its provider session');
@@ -73,6 +125,7 @@ const { AuthService } = copy.exports;
     console.log('ORDER ' + JSON.stringify({observations}));
   } finally {
     global.fetch = realFetch;
+    await runtime.stop(Date.now() + 15000);
     await db.$disconnect(); await observer.$disconnect();
   }
 })().catch(() => { console.error('Logout order probe failed (details withheld)'); process.exitCode=1; });
@@ -82,7 +135,11 @@ const { AuthService } = copy.exports;
 class LogoutOrderLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        setup_stack(cls)
+        cls.stack = LogoutFixtureStack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
+        cls.addClassCleanup(cleanup_sessions, cls.stack)
+        cls.addClassCleanup(cls.stack.cleanup_all)
+        cls.stack.require_stack()
 
     def probe(self, mutant):
         session = Session(self.stack).login(self)

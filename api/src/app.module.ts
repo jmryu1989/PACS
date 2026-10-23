@@ -1,3 +1,4 @@
+import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
 import { AsrService } from './asr.service';
 import { DictationController } from './dictation.controller';
 import { StudyAccessService } from './study-access.service';
@@ -65,6 +66,7 @@ export class AppModule implements NestModule {
   static withLedger(runtime: EmrRuntime): DynamicModule {
     return { module: AppModule, providers: [
       { provide: EMR_RECORD_PORT, useValue: runtime.port },
+      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work },
       { provide: EmrNestLifecycle, useValue: new EmrNestLifecycle(runtime) },
     ], exports: [EMR_RECORD_PORT] };
   }

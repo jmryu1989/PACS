@@ -16,6 +16,16 @@ import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsAudit } from './audit';
 import type { PacsReportEvidence } from './report-evidence';
+import type { AccessAction, AccessEventV1 } from '../emr-contract/access-event';
+import type { EmrRecordPort } from '../emr-runtime/record-port';
+
+export interface DraftRequestFacts {
+  issuer: string;
+  ip: { address: string; source: 'trusted-proxy' | 'request-peer' } | null;
+  requestId: string;
+}
+type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction };
+type RecordDraft = (state: any, value: any) => Promise<void>;
 
 export class PacsReportDraft {
   constructor(
@@ -23,7 +33,40 @@ export class PacsReportDraft {
     private readonly studyAccess: StudyAccessService,
     private readonly access: PacsAccess,
     private readonly audit: PacsAudit,
-    private readonly reportEvidence: PacsReportEvidence) {}
+    private readonly reportEvidence: PacsReportEvidence,
+    private readonly ledger: EmrRecordPort) {}
+
+  private async recorded<T>(uid: string, c: Caller, observation: DraftObservation,
+      body: (tx: Prisma.TransactionClient, record: RecordDraft) => Promise<T>,
+      options: { maxWait: number; timeout: number }): Promise<T> {
+    const work = this.ledger.begin();
+    try {
+      const { facts, surface, action } = observation;
+      const identity = { issuer: facts.issuer, subject: c.sub,
+        id: await work.resolveRequestIdentity(facts.issuer, c.sub) };
+      return await work.transactionWithRecords((tx, record) => body(tx, async (state, value) => {
+        const resource = JSON.stringify([uid, c.actor]);
+        const event: AccessEventV1 = {
+          formatVersion: 1, surface, eventId: randomUUID(),
+          userId: { status: 'known', value: identity }, rolesAtTime: { status: 'known', value: c.roles },
+          actingInstitution: { status: 'known', value: inst(c) },
+          managingInstitution: { status: 'known', value: state.institutionId },
+          occurredAt: new Date().toISOString(),
+          trustedProxyIp: facts.ip ? { status: 'known', value: facts.ip } : { status: 'unresolved', reason: 'not-observed' },
+          cause: 'user-view', context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null },
+          executor: 'member', targets: [{ kind: 'private-draft',
+            patientLinkSnapshot: { status: 'unresolved', reason: 'not-resolved' },
+            studyId: { status: 'known', value: uid }, recordId: { status: 'known', value: resource },
+            versionId: { status: 'known', value: value.revision } }],
+          action, result: action === 'provide-prepared' ? 'prepared' : 'succeeded',
+          requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null,
+        };
+        // Writes reach here in their business transaction; views supply the
+        // captured read snapshot. Neither response leaves before this commit.
+        await record(event, async () => ({ kind: 'ReportDraft', id: resource, version: value.revision }));
+      }), options);
+    } finally { work.end(); }
+  }
 
   /**
    * 판독문 초안 저장. **`Report`가 아니라 내 `ReportDraft` 행에 쓴다.**
@@ -84,12 +127,13 @@ export class PacsReportDraft {
   async draftTransaction<T>(uid: string, c: Caller, session: string | null, epoch: string,
       prepare: () => Promise<unknown>,
       work: (tx: Prisma.TransactionClient, state: any,
-        audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>) => Promise<T>): Promise<T> {
+        audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>) => Promise<T>,
+      observation?: DraftObservation): Promise<T> {
     const me = inst(c);
     // WORKLIST-SPLIT-UID: the request's own source observation is part of the same bounded preparation, outside the
     // transaction; no Orthanc read ever happens under the study lock.
     await draftBounded((async () => { await prepare(); await this.studyAccess.prepareSourceIdentity(c, [uid]); })());
-    return this.prisma.$transaction(async tx => {
+    const perform = async (tx: Prisma.TransactionClient, record?: RecordDraft) => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       if (session !== null) {
         const held = await tx.$queryRaw<any[]>`SELECT 1 AS held FROM "AuthSession" WHERE sid = ${session} FOR KEY SHARE`;
@@ -105,8 +149,13 @@ export class PacsReportDraft {
       this.studyAccess.assertUnsplitSource(c, uid);
       if (state.draftEpoch !== epoch) throw draftConflict();
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
-      return work(tx, state, audit);
-    },{maxWait:4000,timeout:8000}).catch(draftTransactionError);
+      const value = await work(tx, state, audit);
+      if (record) await record(state, value);
+      return value;
+    };
+    const options = { maxWait: 4000, timeout: 8000 };
+    return (observation ? this.recorded(uid, c, observation, perform, options)
+      : this.prisma.$transaction(tx => perform(tx), options)).catch(draftTransactionError);
   }
 
   /** 내 초안 행을 잠그고 요청이 본 revision과 대조한다. 행이 없으면 이 세대의 revision 0이다. */
@@ -150,20 +199,27 @@ export class PacsReportDraft {
    * 내 초안의 권위 있는 읽기(U5S-REQ-15, 17). 충돌이나 답을 받지 못한 저장 뒤에 화면이 무엇이 저장돼 있는지 확인하는
    * 자리다 — 검사 행의 세대와 내 행을 한 스냅숏에서 읽는다. 관문은 초안 쓰기와 같은 역할·기관·예비 판독 규칙이다.
    */
-  async readDraft(uid: string, c: Caller) {
+  async readDraft(uid: string, c: Caller, facts: DraftRequestFacts) {
     need(c.roles, 'radiologist', '판독문 초안 조회');
     const owner: DraftOwner = { institution: inst(c), sub: c.sub, author: c.actor };
     await this.studyAccess.prepare(c,[uid]);
     await this.studyAccess.prepareSourceIdentity(c,[uid]);
-    return this.prisma.$transaction(async tx => {
+    const snapshot = await this.prisma.$transaction(async tx => {
       const state = await this.access.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
       this.studyAccess.assertUnsplitSource(c, uid);
       if (!canReadPreliminary(state, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
-      return draftEnvelope(uid, owner, state.draftEpoch, await this.access.myDraft(uid, c.actor, tx));
+      const value = draftEnvelope(uid, owner, state.draftEpoch, await this.access.myDraft(uid, c.actor, tx));
+      return { state, value };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+    // Preserve the existing repeatable read. The entry describes that captured
+    // snapshot; no later fetch may substitute a different body after recording.
+    return this.recorded(uid, c, { facts, surface: 'GET studies/:uid/draft', action: 'provide-prepared' }, async (_tx, record) => {
+      await record(snapshot.state, snapshot.value);
+      return snapshot.value;
+    }, { maxWait: 2000, timeout: 5000 });
   }
 
   async dictationGate(uid: string, c: Caller) {
@@ -175,7 +231,7 @@ export class PacsReportDraft {
     await this.audit.audit(c.actor, 'dictation.request', uid, detail);
   }
 
-  async putReport(uid: string, body: any, c: Caller, session: string | null) {
+  async putReport(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
     need(c.roles, 'radiologist', '판독문 저장');
     // 작성자·경계·전체 스냅숏의 모양을 어떤 읽기보다 먼저 본다. 거절은 검사·초안 행을 읽거나 쓰거나 감사를 남기지 않는다.
     const owner = draftOwner(body, c);
@@ -261,7 +317,7 @@ export class PacsReportDraft {
       ...(cited.inserted ? { inserted: cited.inserted } : {}),
       // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지 목록을 넓힌다.
       ...(structure.applied ? { applied: structure.applied } : {}) };
-    }));
+    }, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' }));
   }
 
   /**

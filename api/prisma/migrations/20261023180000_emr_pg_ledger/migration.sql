@@ -2,6 +2,10 @@
 -- PostgreSQL owns finality. Hashes below compare accidental duplicate content;
 -- they are neither a chain nor an independent integrity/rollback witness.
 BEGIN;
+-- Public session schema belongs to the installer, not the ledger owner.
+-- Authentication events must never retain a cookie, token or session credential.
+ALTER TABLE public."AuthSession" ADD COLUMN "auditRef" text NOT NULL DEFAULT ('authref:' || gen_random_uuid()::text);
+CREATE UNIQUE INDEX "AuthSession_auditRef_key" ON public."AuthSession"("auditRef");
 SET LOCAL ROLE kin_emr_owner;
 SET LOCAL default_tablespace = 'kin_emr_access';
 
@@ -136,11 +140,15 @@ CREATE TABLE emr_access.failure_entry (
 );
 CREATE TABLE emr_access.disposal_fact (
   disposal_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  entry_id uuid NOT NULL UNIQUE REFERENCES emr_access.entry_receipt,
+  entry_id uuid UNIQUE REFERENCES emr_access.entry_receipt,
+  failure_id uuid UNIQUE,
+  failure_binding text,
   disposed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   basis text NOT NULL CHECK (basis = 'retention-elapsed'),
-  -- Logical expiry is not physical erasure; H closes the generation/copy duty.
-  physical_disposal_pending boolean NOT NULL DEFAULT true CHECK (physical_disposal_pending)
+  -- D1794: row DELETE closes this database copy. Older backup copies age out
+  -- through the existing rotation; this fact contains no clinical payload.
+  CHECK (num_nonnulls(entry_id,failure_id)=1),
+  CHECK ((failure_id IS NULL) = (failure_binding IS NULL))
 );
 
 CREATE FUNCTION emr_access.event_streams(p_event jsonb, p_act text) RETURNS text[]
@@ -271,6 +279,16 @@ $$;
 CREATE FUNCTION emr_access.record_failure(p_id uuid,p_operation uuid,p_event text,p_at timestamptz,p_cause text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
+  -- A delayed outage-spool retry cannot resurrect an expired failure payload.
+  -- This comparison key serves delivery recovery until H closes its copy lineage.
+  PERFORM pg_advisory_xact_lock(77104,2);
+  IF EXISTS (SELECT FROM emr_access.disposal_fact WHERE failure_id=p_id) THEN
+    IF NOT EXISTS (SELECT FROM emr_access.disposal_fact WHERE failure_id=p_id AND failure_binding=
+      encode(sha256(convert_to(jsonb_build_array(p_operation,p_event,extract(epoch FROM p_at),p_cause)::text,'UTF8')),'hex')) THEN
+      RAISE EXCEPTION 'FailureBindingConflict' USING ERRCODE='EB002';
+    END IF;
+    RETURN;
+  END IF;
   INSERT INTO emr_access.failure_entry(failure_id,operation_id,event_id,occurred_at,cause)
     VALUES(p_id,p_operation,p_event,p_at,p_cause) ON CONFLICT(failure_id) DO NOTHING;
   IF NOT EXISTS (SELECT FROM emr_access.failure_entry WHERE failure_id=p_id
@@ -302,9 +320,9 @@ CREATE TRIGGER hold_retention_lock BEFORE INSERT ON emr_access.legal_hold_event
 CREATE TRIGGER duty_retention_lock BEFORE INSERT ON emr_access.duty_request_event
   FOR EACH ROW EXECUTE FUNCTION emr_access.lock_retention_facts();
 
--- B cannot infer a record lifetime or copy closure. History remains until H
--- supplies that evidence; independent expired viewing/rights payloads can end.
-CREATE FUNCTION emr_access.expire_entry(p_entry uuid) RETURNS boolean
+-- H supplies the actual record/version endings. Missing or incomplete endings
+-- never become permission to remove history. The access floor applies as well.
+CREATE FUNCTION emr_access.expire_entry(p_entry uuid, p_record_ends jsonb) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE e emr_access.access_entry%ROWTYPE;
 BEGIN
@@ -312,7 +330,19 @@ BEGIN
   SELECT * INTO e FROM emr_access.access_entry WHERE entry_id=p_entry FOR UPDATE;
   IF NOT FOUND THEN RETURN false; END IF;
   IF e.retention_class='record-history' THEN
-    RAISE EXCEPTION 'RecordEndingEvidenceRequired' USING ERRCODE='EB004';
+    IF p_record_ends IS NULL OR jsonb_typeof(p_record_ends)<>'array' THEN
+      RAISE EXCEPTION 'RecordEndingEvidenceRequired' USING ERRCODE='EB004';
+    END IF;
+    IF EXISTS (WITH targets AS (SELECT * FROM emr_access.access_target WHERE entry_id=p_entry
+        AND target_kind NOT IN ('preferences','reading-template','institution','identity-access','authentication-session','system-operation'))
+      SELECT 1 WHERE NOT EXISTS (SELECT FROM targets)
+      OR jsonb_array_length(p_record_ends)<>(SELECT count(*) FROM targets)
+      OR EXISTS (SELECT FROM targets t WHERE
+        (SELECT count(*) FROM jsonb_array_elements(p_record_ends) r WHERE r->>'recordId'=t.record_id
+          AND r->>'versionId'=t.version_id AND r->>'kind'=t.target_kind
+          AND length(r->>'evidenceId')>0 AND (r->>'endsAt')::timestamptz<=clock_timestamp())<>1)) THEN
+      RAISE EXCEPTION 'RecordEndingEvidenceRequired' USING ERRCODE='EB004';
+    END IF;
   END IF;
   IF emr_access.civil_period_end(e.occurred_at,CASE WHEN e.retention_class='rights3y' THEN 3 ELSE 2 END)>clock_timestamp() THEN
     RAISE EXCEPTION 'RetentionNotElapsed' USING ERRCODE='EB004';
@@ -331,6 +361,75 @@ BEGIN
   RETURN true;
 END $$;
 
+CREATE FUNCTION emr_access.expire_entry(p_entry uuid) RETURNS boolean
+LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  SELECT emr_access.expire_entry(p_entry,NULL::jsonb)
+$$;
+
+CREATE FUNCTION emr_access.expire_failure(p_failure uuid) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE f emr_access.failure_entry%ROWTYPE;
+BEGIN
+  PERFORM pg_advisory_xact_lock(77104,2);
+  SELECT * INTO f FROM emr_access.failure_entry WHERE failure_id=p_failure FOR UPDATE;
+  IF NOT FOUND THEN RETURN false; END IF;
+  IF emr_access.civil_period_end(f.occurred_at,2)>clock_timestamp() THEN
+    RAISE EXCEPTION 'RetentionNotElapsed' USING ERRCODE='EB004';
+  END IF;
+  IF EXISTS (SELECT FROM emr_access.legal_hold_event h WHERE h.phase='placed'
+      AND (h.record_id=f.event_id OR h.record_id IN (SELECT t.record_id FROM emr_access.access_target t
+        JOIN emr_access.access_entry e USING(entry_id) WHERE e.operation_id=f.operation_id))
+      AND NOT EXISTS (SELECT FROM emr_access.legal_hold_event r WHERE r.hold_id=h.hold_id AND r.phase='released'))
+    OR EXISTS (SELECT FROM emr_access.duty_request_event d WHERE d.phase='received'
+      AND NOT EXISTS (SELECT FROM emr_access.duty_request_event r WHERE r.kind=d.kind AND r.request_id=d.request_id AND r.phase='resolved')
+      AND EXISTS (SELECT FROM jsonb_array_elements_text(d.body::jsonb->'recordIds') id
+        WHERE id=f.event_id OR id IN (SELECT t.record_id FROM emr_access.access_target t
+          JOIN emr_access.access_entry e USING(entry_id) WHERE e.operation_id=f.operation_id))) THEN
+    RAISE EXCEPTION 'LegalDutyActive' USING ERRCODE='EB005';
+  END IF;
+  INSERT INTO emr_access.disposal_fact(failure_id,failure_binding,basis) VALUES(p_failure,
+    encode(sha256(convert_to(jsonb_build_array(f.operation_id,f.event_id,extract(epoch FROM f.occurred_at),f.cause)::text,'UTF8')),'hex'),
+    'retention-elapsed');
+  DELETE FROM emr_access.failure_entry WHERE failure_id=p_failure;
+  RETURN true;
+END $$;
+
+-- D1796: a private restored copy reuses the ordinary checked row expiry.
+-- Record-history still needs H's actual ending evidence; age alone cannot
+-- establish its lifetime. The receipt reports that unfinished work explicitly.
+CREATE FUNCTION emr_access.restore_expiry_sweep(p_history_endings jsonb DEFAULT '{}'::jsonb) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE r record; entries bigint:=0; failures bigint:=0; held bigint:=0; unknown_history bigint:=0;
+BEGIN
+  IF p_history_endings IS NULL OR jsonb_typeof(p_history_endings)<>'object' THEN
+    RAISE EXCEPTION 'RecordEndingEvidenceRequired' USING ERRCODE='EB004';
+  END IF;
+  PERFORM pg_advisory_xact_lock(77104,2);
+  FOR r IN SELECT entry_id,retention_class FROM emr_access.access_entry
+    WHERE emr_access.civil_period_end(occurred_at,CASE WHEN retention_class='rights3y' THEN 3 ELSE 2 END)<=clock_timestamp()
+  LOOP
+    IF r.retention_class='record-history' AND NOT p_history_endings ? r.entry_id::text THEN
+      unknown_history:=unknown_history+1;
+      CONTINUE;
+    END IF;
+    BEGIN
+      IF emr_access.expire_entry(r.entry_id,p_history_endings->r.entry_id::text) THEN entries:=entries+1; END IF;
+    EXCEPTION WHEN SQLSTATE 'EB005' THEN held:=held+1;
+    END;
+  END LOOP;
+  FOR r IN SELECT failure_id FROM emr_access.failure_entry
+    WHERE emr_access.civil_period_end(occurred_at,2)<=clock_timestamp()
+  LOOP
+    BEGIN
+      IF emr_access.expire_failure(r.failure_id) THEN failures:=failures+1; END IF;
+    EXCEPTION WHEN SQLSTATE 'EB005' THEN held:=held+1;
+    END;
+  END LOOP;
+  RETURN jsonb_build_object('ran',true,'checkedAt',clock_timestamp(),'deletedEntries',entries,
+    'deletedFailures',failures,'retainedByDutyOrHold',held,'historyEndingRequired',unknown_history,
+    'complete',unknown_history=0);
+END $$;
+
 RESET ROLE;
 REVOKE ALL ON ALL TABLES IN SCHEMA emr_access FROM PUBLIC,kin_runtime,kin_emr_retention;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA emr_access FROM PUBLIC,kin_runtime,kin_emr_retention;
@@ -343,5 +442,6 @@ GRANT EXECUTE ON FUNCTION emr_access.admit_operation(uuid,uuid,text,text),
   emr_access.entry_for_event(text,text) TO kin_runtime;
 GRANT EXECUTE ON FUNCTION emr_access.entries_after(bigint,integer),emr_access.entry_for_event(text,text)
   TO kin_emr_reader;
-GRANT EXECUTE ON FUNCTION emr_access.expire_entry(uuid) TO kin_emr_retention;
+GRANT EXECUTE ON FUNCTION emr_access.expire_entry(uuid),emr_access.expire_entry(uuid,jsonb),
+  emr_access.expire_failure(uuid),emr_access.restore_expiry_sweep(jsonb) TO kin_emr_retention;
 COMMIT;

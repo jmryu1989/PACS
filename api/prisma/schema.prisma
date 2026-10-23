@@ -19,6 +19,8 @@ datasource db {
 /// 브라우저 대신 Keycloak 토큰을 보관하는 서버측 로그인 세션.
 model AuthSession {
   sid          String   @id
+  /// Non-credential correlation retained by authentication events after session deletion.
+  auditRef     String   @unique @default(dbgenerated("('authref:'::text || (gen_random_uuid())::text)"))
   sub          String
   accessToken  String
   refreshToken String

@@ -1,5 +1,6 @@
 import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
-import { PacsService, Caller } from './pacs.service';
+import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
+import { randomUUID } from 'node:crypto';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
 
@@ -44,6 +45,13 @@ const caller = (req: any): Caller => ({
  * `GET me`의 답과 서비스 전반으로 퍼지고, 세션 키는 초안 경로 밖으로 나가서는 안 된다.
  */
 const draftSession = (req: any): string | null => (req.authMethod === 'session' && typeof req.sid === 'string' ? req.sid : null);
+const draftFacts = (req: any): DraftRequestFacts => {
+  const proxy = req.headers?.['x-real-ip'];
+  const peer = req.socket?.remoteAddress;
+  return { issuer: process.env.KC_ISSUER, requestId: randomUUID(),
+    ip: typeof proxy === 'string' && proxy.trim() ? { address: proxy.trim(), source: 'trusted-proxy' }
+      : typeof peer === 'string' && peer ? { address: peer, source: 'request-peer' } : null };
+};
 
 @Controller()
 export class PacsController {
@@ -285,14 +293,14 @@ export class PacsController {
    */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.putReport(uid, body, caller(req), draftSession(req));
+    return this.svc.putReport(uid, body, caller(req), draftSession(req), draftFacts(req));
   }
 
   /** 내 초안의 권위 있는 읽기 — 충돌이나 답을 받지 못한 저장 뒤에 무엇이 저장돼 있는지 확인한다 */
   @Get('studies/:uid/draft')
   @Header('Cache-Control', 'no-store')
   draft(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.readDraft(uid, caller(req));
+    return this.svc.readDraft(uid, caller(req), draftFacts(req));
   }
 
   /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 비운다 */

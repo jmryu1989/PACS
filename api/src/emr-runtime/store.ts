@@ -23,6 +23,9 @@ export interface OperationResult {
   entries: readonly { entryId: string; stream: AccessStream; attemptId: string; expired: boolean }[];
 }
 export interface ProvisionalAppend { readonly provisional: true; readonly operationId: string; readonly eventId: string }
+/** Session/rights producers decide their facts under existing business locks.
+ * Call before the effect; null means a conditional write affected no row. */
+export type RecordMutation = (event: AccessEvent, effect: () => Promise<BusinessReference | null>) => Promise<BusinessReference | null>;
 const options = { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS };
 const toIso = (v: unknown) => utc(v instanceof Date ? v.toISOString() : String(v));
 const toDay = (v: unknown) => v instanceof Date ? v.toISOString().slice(0,10) : String(v).slice(0,10);
@@ -61,18 +64,78 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     this.sql = new PrismaLedgerSql(db);
   }
   async admit(input: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<AdmittedOperation> {
+    return admitAppend(this.db, this.poolSize, () => this.admitSql(input, served, keys));
+  }
+  private async admitSql(input: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<AdmittedOperation> {
     const canonical = canonicalPayload(input, served);
     const selected = keys ?? { operationId: randomUUID(), attemptId: randomUUID() };
     const act = statutoryAct(canonical.event, served);
     try {
-      const [row] = await admitAppend(this.db, this.poolSize, () => this.db.$queryRaw<{ id: string }[]>`
+      const [row] = await this.db.$queryRaw<{ id: string }[]>`
         SELECT emr_access.admit_operation(${selected.operationId}::uuid, ${selected.attemptId}::uuid,
-          ${canonical.text}::text, ${act}::text)::text AS id`);
+          ${canonical.text}::text, ${act}::text)::text AS id`;
       const operation = Object.freeze({ ...selected, operationId: row.id, event: canonical.event, payload: canonical.text, act });
       this.admitted.add(operation);
       return operation;
     } catch (error) {
       await this.journal.record(ledgerErrorCode(error)?.startsWith('EB') ? 'ledger-refused' : 'ledger-unreachable', canonical.event.eventId, null);
+      throw error;
+    }
+  }
+  /** One ordinary producer transaction, including multiple session endings.
+   * Admission uses a short separate connection before each effect. The outer
+   * transaction already owns an append lane: taking a second lane here could
+   * deadlock a saturated pool. Its two connection reserve services admission
+   * and settlement. No callback is retried after a lost COMMIT response. */
+  async transactionWithRecords<T>(work: (tx: Prisma.TransactionClient, record: RecordMutation) => Promise<T>,
+    transactionOptions = options): Promise<T> {
+    const operations: { operation: AdmittedOperation; expected?: 'committed' | 'negative' }[] = [];
+    let value: T, returned = false, wroteOutcome = false;
+    try {
+      return await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
+        const record: RecordMutation = async (event, effect) => {
+          const operation = await this.admitSql(event);
+          const tracked: typeof operations[number] = { operation };
+          operations.push(tracked);
+          const [locked] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
+          if (locked.value !== 'pending') {
+            const previous = await new PrismaLedgerSql(tx).result(operation.operationId);
+            if (previous?.outcome !== 'committed') throw new LedgerFailure('AppendNotCommitted');
+            if (previous.entries.some(row => row.expired)) throw new LedgerFailure('ResultExpired');
+            tracked.expected = 'committed';
+            return previous.result;
+          }
+          const reference = await effect();
+          if (reference === null) {
+            await tx.$queryRaw`SELECT emr_access.settle_operation(${operation.operationId}::uuid)`;
+            tracked.expected = 'negative';
+            return null;
+          }
+          this.transactions.set(tx, operation);
+          try {
+            await this.appendInTransaction(tx, operation, reference);
+            wroteOutcome = true;
+            if (reference.kind === 'AuditLog') await this.recordProjection(tx, event.eventId, integer(Number(reference.id), 1));
+          } finally { this.transactions.delete(tx); }
+          tracked.expected = 'committed';
+          return reference;
+        };
+        value = await work(tx, record);
+        returned = true;
+        return value;
+      }, transactionOptions));
+    } catch (error) {
+      // A confirmed negative could have been created by settlement after a
+      // rollback. Only an outcome written by this transaction proves its commit.
+      let resolved = returned && wroteOutcome;
+      for (const tracked of operations) {
+        await this.journal.record(returned ? 'commit-unknown' : 'business-rollback',
+          tracked.operation.event.eventId, tracked.operation.operationId);
+        const outcome = await this.settle(tracked.operation.operationId);
+        if (!tracked.expected || outcome?.outcome !== tracked.expected) resolved = false;
+      }
+      if (resolved) return value;
+      if (returned) throw new LedgerFailure('CommitUnknown');
       throw error;
     }
   }
@@ -89,6 +152,8 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
         try {
           const reference = await work(tx);
           await this.appendInTransaction(tx, operation, reference);
+          if (reference?.kind === 'AuditLog')
+            await this.recordProjection(tx, operation.event.eventId, integer(Number(reference.id), 1));
           return await new PrismaLedgerSql(tx).result(operation.operationId);
         } catch (error) { callbackFailed = true; throw error; }
         finally { this.transactions.delete(tx); }
@@ -196,6 +261,12 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     const result: Readonly<OrderFact>[] = [];
     for (const row of rows) result.push(parseOrderFact(JSON.parse(row.body), result[result.length - 1]));
     return Object.freeze(result);
+  }
+  /** Bootstrap the verified actor before its first event, with the same bounded
+   * admission and transaction options as the request's remaining work. */
+  async resolveRequestIdentity(issuer: string, subject: string): Promise<string> {
+    return admitAppend(this.db, this.poolSize, () => this.db.$transaction(
+      tx => this.resolveIdentity(tx, issuer, subject), options));
   }
   /** The immutable internal member ID of a verified issuer and subject (created once; names are never a key). */
   async resolveIdentity(tx: object, issuer: string, subject: string): Promise<string> {
