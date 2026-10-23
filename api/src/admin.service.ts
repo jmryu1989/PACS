@@ -292,6 +292,7 @@ export class AdminService {
               occurredAt: event.occurredAt, endCause: 'isolation', trigger: null,
             });
             ending.userId = { status: 'known', value: facts.actor };
+            ending.trustedProxyIp = event.trustedProxyIp;
             ending.requestId = facts.requestId;
             ending.managingInstitution = session.institution ? { status: 'known', value: session.institution }
               : { status: 'unresolved', reason: 'not-resolved' };

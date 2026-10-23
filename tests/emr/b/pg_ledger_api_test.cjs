@@ -246,6 +246,8 @@ async function clinicalHttp() {
   const { AuthGuard } = require(path.join(build, 'auth.guard.js'));
   const { PacsController } = require(path.join(build, 'pacs.controller.js'));
   const { PacsService } = require(path.join(build, 'pacs.service.js'));
+  const { AdminController } = require(path.join(build, 'admin.controller.js'));
+  const { AdminService } = require(path.join(build, 'admin.service.js'));
   const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
   const { OrthancService } = require(path.join(build, 'orthanc.service.js'));
   const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
@@ -262,6 +264,10 @@ async function clinicalHttp() {
   const token=await new jose.SignJWT({email:author,realm_access:{roles:['radiologist']},groups:['/'+institution]})
     .setProtectedHeader({alg:'RS256',kid:jwk.kid}).setIssuer(issuer).setSubject(sub).setAudience('kin-api')
     .setIssuedAt().setExpirationTime('10m').sign(privateKey);
+  const adminSub='synthetic-http-admin';
+  const adminToken=await new jose.SignJWT({email:adminSub+'@example.test',realm_access:{roles:['admin']},groups:['/'+institution]})
+    .setProtectedHeader({alg:'RS256',kid:jwk.kid}).setIssuer(issuer).setSubject(adminSub).setAudience('kin-api')
+    .setIssuedAt().setExpirationTime('10m').sign(privateKey);
   const witness=new PrismaClient({datasources:{db:{url:process.env.KIN_B2R_WITNESS_URL}}});
   const runtime=new EmrRuntime(process.env.DATABASE_URL,process.env.KIN_B2R_SPOOL);
   let app, release, blocker, restored=true;
@@ -271,12 +277,14 @@ async function clinicalHttp() {
     await witness.memberRightsImport.create({data:{id:'realm-v1'}});
     await witness.memberRights.create({data:{sub,username:sub,email:author,name:'Synthetic',emailVerified:true,
       approved:true,suspended:false,institution,roles:['radiologist']}});
+    await witness.memberRights.create({data:{sub:adminSub,username:adminSub,email:adminSub+'@example.test',name:'Synthetic',
+      emailVerified:true,approved:true,suspended:false,institution,roles:['admin']}});
     await runtime.start();
     const orthanc={studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}],studyIdentities:async()=>[]};
     class ClinicalFixture {}
     // Only external collaborators are synthetic. Both routes, the draft/CAS
     // implementation, auth/rights checks and PostgreSQL are the actual product.
-    Module({controllers:[PacsController],providers:[PrismaService,PacsService,AuthService,
+    Module({controllers:[PacsController,AdminController],providers:[PrismaService,PacsService,AuthService,AdminService,
       {provide:OrthancService,useValue:orthanc},{provide:KeycloakService,useValue:{}},
       {provide:FindingService,useValue:{}},
       {provide:StudyAccessService,useFactory:db=>new StudyAccessService(db,orthanc,{}),inject:[PrismaService]},
@@ -287,6 +295,37 @@ async function clinicalHttp() {
     app=await NestFactory.create(ClinicalFixture,{logger:false});app.setGlobalPrefix('api');await app.listen(0,'127.0.0.1');
     const origin=await app.getUrl();
     const headers={authorization:'Bearer '+token,'content-type':'application/json','x-real-ip':'192.0.2.22'};
+    const member='synthetic-http-member';
+    await witness.memberRights.create({data:{sub:member,username:member,email:member+'@example.test',name:'Synthetic',
+      emailVerified:true,approved:true,suspended:false,institution,roles:['radiologist']}});
+    await witness.authSession.create({data:{sid:randomUUID(),sub:member,accessToken:'synthetic-unused',refreshToken:randomUUID(),
+      atExpiresAt:new Date(Date.now()+600000),lastSeenAt:new Date(),rightsVersion:1,institution}});
+    const changeRights=async(body,proxyObserved=true)=>{
+      const requestHeaders={...headers,authorization:'Bearer '+adminToken};if(!proxyObserved)delete requestHeaders['x-real-ip'];
+      const response=await fetch(origin+'/api/admin/users/'+member,
+        {method:'PATCH',headers:requestHeaders,body:JSON.stringify(body)});
+      const text=await response.text();return {status:response.status,text,body:JSON.parse(text)};
+    };
+    const rights=await changeRights({enabled:false},false);
+    assert.equal(rights.status,200,rights.text);assert.equal(rights.body.version,2);
+    const [rightRow]=await witness.$queryRaw`SELECT e.payload FROM emr_access.access_entry e
+      JOIN emr_access.audit_projection p ON p.event_id=e.event_id JOIN public."AuditLog" a ON a.id=p.audit_log_id
+      WHERE a.target=${member} AND a.action='admin.user.suspend'`;
+    const rightEvent=JSON.parse(rightRow.payload);
+    assert.equal(rightEvent.userId.value.subject,adminSub);
+    assert.equal(rightEvent.surface,'PATCH admin/users/:id');
+    assert.deepEqual(rightEvent.trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.deepEqual(rightEvent.rolesAtTime.value,['admin']);
+    assert.equal(rightEvent.actingInstitution.value,institution);
+    const [endedRow]=await witness.$queryRaw`SELECT payload FROM emr_access.access_entry
+      WHERE payload::jsonb->'auth'->>'endCause'='isolation'`;
+    assert.deepEqual(JSON.parse(endedRow.payload).trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.equal(await witness.authSession.count({where:{sub:member}}),0);
+    assert.equal((await changeRights({enabled:true})).status,200);
+    const [proxyRow]=await witness.$queryRaw`SELECT e.payload FROM emr_access.access_entry e
+      JOIN emr_access.audit_projection p ON p.event_id=e.event_id JOIN public."AuditLog" a ON a.id=p.audit_log_id
+      WHERE a.target=${member} AND a.action='admin.user.activate'`;
+    assert.deepEqual(JSON.parse(proxyRow.payload).trustedProxyIp.value,{address:'192.0.2.22',source:'trusted-proxy'});
     const red=await witness.studyState.create({data:{uid:'SYNTHETIC-http-red',institutionId:institution,ss:'Verified'}});
     const green=await witness.studyState.create({data:{uid:'SYNTHETIC-http-green',institutionId:institution,ss:'Verified'}});
     const send=async(method,uid,body,proxyObserved=true,onBody)=>{
@@ -336,12 +375,17 @@ async function clinicalHttp() {
     const viewed=await entries(green.uid,'provide-prepared');assert.equal(viewed.length,1);
     assert.deepEqual(JSON.parse(viewed[0].payload).trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
     await witness.$executeRawUnsafe('REVOKE EXECUTE ON FUNCTION '+appendSignature+' FROM kin_runtime');restored=false;
+    const deniedRights=await changeRights({enabled:false});
+    assert.equal(deniedRights.status>=400,true,deniedRights.text);
+    const unchanged=await witness.memberRights.findUnique({where:{sub:member}});
+    assert.equal(unchanged.version,3);assert.equal(unchanged.suspended,false);
     const refused=await send('PUT',green.uid,input(saved.body.revision,'SYNTHETIC refused draft'));
     assert.equal(refused.status>=400,true);assert.equal(refused.text.includes('SYNTHETIC refused draft'),false);
     assert.equal((await witness.reportDraft.findUnique({where:{uid_author:{uid:green.uid,author}}})).findings,content);
     const noView=await send('GET',green.uid);assert.equal(noView.status>=400,true);assert.equal(noView.text.includes(content),false);
     console.log(JSON.stringify({status:'PASS',boundary:'real Nest PacsController/AuthGuard + PG',
-      cases:['omission mutant red','atomic draft write green','view body waits for PG commit','failed ledger rolls back save','failed ledger refuses protected view']}));
+      cases:['omission mutant red','atomic draft write green','view body waits for PG commit','failed ledger rolls back save',
+        'failed ledger refuses protected view','admin HTTP records observed request facts','failed ledger rolls back admin HTTP change']}));
   } finally {
     release?.();if(blocker)await blocker;
     if(!restored)await witness.$executeRawUnsafe('GRANT EXECUTE ON FUNCTION '+appendSignature+' TO kin_runtime');

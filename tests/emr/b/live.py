@@ -4,14 +4,30 @@ Historical selector names remain for the existing measurement/candidate callers.
 The mapping below replaces the removed chain/seal mechanisms with real PG
 boundaries. Each case owns a fresh synthetic database and the production image.
 """
+import os
 import sys
 import unittest
+import uuid
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import pg_ledger_restore_test as pg
 
 
 class EmrBLedgerLive(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        pg.gate.require_live_run()
+        if os.environ.get('KIN_TEST_API_IMAGE'):
+            return
+        # Candidate/measurement CI supplies a source checkout, as before B2.
+        # Restore its production-image preparation instead of requiring worker-local Node paths.
+        tag = 'kin-emrb-live:' + uuid.uuid4().hex[:12]
+        pg.PgLedgerFixture.command(['docker', 'build', '--target', 'production',
+            '--build-arg', 'VCS_REF=emr-b-live', '-t', tag, str(pg.ROOT / 'api')], timeout=1800)
+        cls.addClassCleanup(pg.PgLedgerFixture.command, ['docker', 'image', 'rm', tag])
+        os.environ['KIN_TEST_API_IMAGE'] = tag
+        cls.addClassCleanup(os.environ.pop, 'KIN_TEST_API_IMAGE', None)
+
     def boundary(self, fixture, method):
         case=fixture(method)
         try:

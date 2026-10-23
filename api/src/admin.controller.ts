@@ -1,6 +1,10 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { AdminService } from './admin.service';
 import { Caller, PacsService } from './pacs.service';
+import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
+import type { RightsRequestFacts } from './member-rights';
 
 const caller = (req: any): Caller => ({
   sub: req.sub,
@@ -20,7 +24,26 @@ const caller = (req: any): Caller => ({
  */
 @Controller('admin')
 export class AdminController {
-  constructor(private admin: AdminService, private pacs: PacsService) {}
+  constructor(private admin: AdminService, private pacs: PacsService,
+    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort) {}
+
+  private async rightsFacts(req: any, surface: string): Promise<RightsRequestFacts> {
+    const work = this.ledger.begin();
+    try {
+      const issuer = process.env.KC_ISSUER;
+      const proxy = req.headers?.['x-real-ip'];
+      const peer = req.socket?.remoteAddress;
+      const observedProxy = typeof proxy === 'string' && isIP(proxy);
+      // AuthGuard supplies the member and rights snapshot; nginx supplies the
+      // observed client address. A direct request retains its actual peer.
+      return { surface, actor: { issuer, subject: req.sub,
+        id: await work.resolveRequestIdentity(issuer, req.sub) },
+        roles: req.roles, rightsVersion: req.rightsVersion, institution: req.institution ?? null,
+        ip: observedProxy ? proxy : typeof peer === 'string' && isIP(peer) ? peer : null,
+        ipSource: observedProxy ? 'trusted-proxy' : 'request-peer',
+        sessionRef: req.sessionId ?? null, requestId: randomUUID() };
+    } finally { work.end(); }
+  }
 
   @Get('users')
   list(@Query('page') page: string | undefined, @Req() req: any) {
@@ -28,13 +51,13 @@ export class AdminController {
   }
 
   @Post('users')
-  create(@Body() body: any, @Req() req: any) {
-    return this.admin.createUser(body, caller(req));
+  async create(@Body() body: any, @Req() req: any) {
+    return this.admin.createUser(body, caller(req), await this.rightsFacts(req, 'POST admin/users'));
   }
 
   @Patch('users/:id')
-  patch(@Param('id') id: string, @Body() body: any, @Req() req: any) {
-    return this.admin.patchUser(id, body, caller(req));
+  async patch(@Param('id') id: string, @Body() body: any, @Req() req: any) {
+    return this.admin.patchUser(id, body, caller(req), await this.rightsFacts(req, 'PATCH admin/users/:id'));
   }
 
   @Post('users/:id/reset-password')

@@ -2,11 +2,11 @@ import { createHash, randomUUID } from 'crypto';
 import { APP_ROLES } from './clinician-policy';
 import type { AccessEventV1, ImmutableIdentity } from './emr-contract/access-event';
 
-/** The controller's server-observed request context, never request-body fields.
- * REQUEST_FACTS supplies this at the administration boundary. */
+/** The controller's server-observed request context, never request-body fields. */
 export interface RightsRequestFacts {
   surface: string; actor: ImmutableIdentity; roles: readonly string[]; rightsVersion: number;
   institution: string | null; ip: string | null; sessionRef: string | null; requestId: string;
+  ipSource?: 'trusted-proxy' | 'request-peer';
 }
 
 export function rightsAccessEvent(facts: RightsRequestFacts, affected: ImmutableIdentity,
@@ -18,7 +18,7 @@ export function rightsAccessEvent(facts: RightsRequestFacts, affected: Immutable
       : { status: 'unresolved', reason: 'not-observed' },
     managingInstitution: facts.institution ? { status: 'known', value: facts.institution }
       : { status: 'unresolved', reason: 'not-resolved' },
-    trustedProxyIp: facts.ip ? { status: 'known', value: { address: facts.ip, source: 'trusted-proxy' } }
+    trustedProxyIp: facts.ip ? { status: 'known', value: { address: facts.ip, source: facts.ipSource ?? 'trusted-proxy' } }
       : { status: 'unresolved', reason: 'not-observed' },
     occurredAt, cause: 'user-view', executor: 'member',
     context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null },

@@ -265,7 +265,7 @@ export interface AuthAccessEventV2 {
   actingInstitution: EvidenceFactV2<string>;
   managingInstitution: EvidenceFactV2<string>;
   occurredAt: string;
-  trustedProxyIp: EvidenceFactV2<{ address: string; source: 'trusted-proxy' }>;
+  trustedProxyIp: EvidenceFactV2<{ address: string; source: 'trusted-proxy' | 'request-peer' }>;
   cause: CauseKind;
   /** D-18: 'authentication', or 'service-job' for an in-process sweep. */
   context: Readonly<WorkContext>;
@@ -326,8 +326,8 @@ function roleList(value: unknown): readonly string[] {
 }
 function proxyAddress(value: unknown) {
   const ip = object(value, ['address', 'source']);
-  if (isIP(ip.address) === 0 || ip.source !== 'trusted-proxy') throw new Error('Trusted proxy IP required');
-  return { address: ip.address as string, source: 'trusted-proxy' as const };
+  if (isIP(ip.address) === 0 || !['trusted-proxy', 'request-peer'].includes(ip.source)) throw new Error('Observed IP required');
+  return { address: ip.address as string, source: ip.source as 'trusted-proxy' | 'request-peer' };
 }
 const authRoutes = () => Object.keys(ROUTE_CONTRACTS).filter(r => ROUTE_CONTRACTS[r].operation === 'auth' && ROUTE_CONTRACTS[r].kinds.includes('authentication-session'));
 /** Where each authentication fact can be observed; the producer records the actual route or the closed internal surface. */
