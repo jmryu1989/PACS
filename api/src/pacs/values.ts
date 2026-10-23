@@ -6,6 +6,7 @@ import { canReadPreliminary } from '../preliminary-reader';
 import { BadRequestException, ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { citationArray } from '../report-citation';
 import { structureArray } from '../report-structure';
+import { relatedInsertIdReused } from '../report-related-insert';
 import type { Caller } from './access';
 
 /**
@@ -202,6 +203,9 @@ export function draftTransactionError(error: any): never {
     throw draftUnavailable();
   // 초안 행의 PK 충돌은 같은 경계에서 두 쓰기가 첫 행을 만들려 한 것이다 — 진 쪽은 충돌이다.
   if (error?.code === 'P2002' && error?.meta?.modelName === 'ReportDraft') throw draftConflict();
+  // W5 삽입 영수증의 PK 충돌: 같은 Target의 같은 ID는 검사 행 잠금에서 줄을 서므로, 이 경합은 다른 Target(또는 owner)이 같은
+  // ID를 먼저 쓴 것이다. 그 행의 내용도, 이 요청이 적용되지 않았다는 단정도 답하지 않는다 — 진 쪽은 아무것도 남기지 않았다.
+  if (error?.code === 'P2002' && error?.meta?.modelName === 'ReportDraftInsertReceipt') throw relatedInsertIdReused();
   throw error;
 }
 

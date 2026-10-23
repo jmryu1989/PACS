@@ -40,6 +40,9 @@ jobs:
       - name: W4 shortcut v2 server contract
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w4-shortcut-v2-server --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --tree worklist-v0/hpacs-lite --tree tests -- node --test tests/workspace_shortcuts_v2_service_test.cjs
+      - name: W5 related insert idempotency and receipt contract
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w5-related-insert-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/related_report_insert_service_test.cjs -- node --test tests/related_report_insert_service_test.cjs
       - name: W2 account shortcut CAS and unavailable-target retention
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/filter-shortcuts --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/filter_shortcuts_service_test.cjs -- node --test tests/filter_shortcuts_service_test.cjs
