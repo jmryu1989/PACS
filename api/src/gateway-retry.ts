@@ -45,7 +45,7 @@ export function parseGatewayRetryPoll(query: unknown): string {
   return epoch;
 }
 
-export type GatewayRetryDecision = 'eligible' | 'not_retry' | 'unsupported_f01';
+type GatewayRetryDecision = 'eligible' | 'not_retry' | 'unsupported_f01';
 
 /** 요청을 묶을 수 있는 저장 영수증은 `retry` 하나다. 영수증이 없거나 다른 단계면 not_retry, `failed`는 F-01. */
 export function decideGatewayRetryRequest(receipt: { phase: string } | null): GatewayRetryDecision {

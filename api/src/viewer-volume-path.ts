@@ -13,7 +13,7 @@ const sub=(a:number[],b:number[])=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
 const cross=(a:number[],b:number[])=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
 const norm=(v:number[])=>Math.hypot(v[0],v[1],v[2]);
 const distance=(a:number[],b:number[])=>norm(sub(a,b));
-export const PATH_LIMITS=Object.freeze({points:64,columns:4096,rows:4096,samples:1048576,arc:1000,halfHeight:150});
+const PATH_LIMITS=Object.freeze({points:64,columns:4096,rows:4096,samples:1048576,arc:1000,halfHeight:150});
 // The same refusal thresholds as the viewer model; see volume-path.js for why each exists.
 const DEGENERATE=1e-3,REVERSAL=-.5,REFLECTION=1,UNIT=1e-6;
 

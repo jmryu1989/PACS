@@ -157,7 +157,7 @@ export const CLINICIAN_SNAPSHOT_FIELDS: Readonly<Record<string, readonly string[
 const MEASUREMENT_KINDS = ['length', 'angle', 'ellipse'];
 
 /** 저장된 표시 항목 한 건의 내용. 모르는 종류와 숨긴 항목은 null이다(닫힌 쪽으로 실패). */
-export function clinicianSnapshot(snapshot: any) {
+function clinicianSnapshot(snapshot: any) {
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) || snapshot.hidden === true) return null;
   const kind = snapshot.kind;
   if (typeof kind !== 'string' || !Object.prototype.hasOwnProperty.call(CLINICIAN_SNAPSHOT_FIELDS, kind)) return null;
@@ -241,8 +241,8 @@ function viewerCursorMac(key: Uint8Array, payload: string) {
 }
 
 /**
- * S5-U1b-F04 이어받기 값: `base64url(JSON {v, uid, version, after}).base64url(HMAC-SHA256)` — study-page.ts 목록 cursor와 같은
- * 모양이다. 판 번호는 서버가 이 쪽에서 확인한 확정 판이고, 서명이 있으므로 호출자가 다른 판으로 바꿔 이어 갈 수 없다.
+ * S5-U1b-F04 이어받기 값: `base64url(JSON {v, uid, version, after}).base64url(HMAC-SHA256)`.
+ * 판 번호는 서버가 이 쪽에서 확인한 확정 판이고, 서명이 있으므로 호출자가 다른 판으로 바꿔 이어 갈 수 없다.
  * 권한은 아니다: 다음 쪽도 관문(범위·역할·확정 판)을 처음부터 다시 탄다. 만료 시각이 없는 이유도 같다 — 매 쪽 머리 판과
  * 비교하므로 오래된 값은 같은 판이면 여전히 맞고, 아니면 거절된다.
  */
@@ -377,7 +377,7 @@ export type ClinicianIdentityRelation = 'match' | 'mismatch' | 'not_comparable';
 export interface ClinicianIdentityKeys { birth: string; sex: string }
 
 /** 서버 환자 키. 문자열이 아니거나 비었으면 null이다 — 키가 없는 검사는 누구와도 묶지 않는다. */
-export function clinicianPatientKey(row: any): string | null {
+function clinicianPatientKey(row: any): string | null {
   return typeof row?.sourcePatientKey === 'string' && row.sourcePatientKey ? row.sourcePatientKey : null;
 }
 

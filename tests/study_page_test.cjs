@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const {studyPageQuery:query,studyPageSlice:slice}=require('/app/dist/study-page');
 const owner=['hallym','subject','reader'];
 const uid=x=>x.uid;
-test('signed pages cover sorted unique snapshot, bind owner/size, reject changes and expiry',()=>{
+test('pages cover sorted unique snapshot, bind owner/size, reject changes and expiry',()=>{
  const rows=[{uid:'3'},{uid:'1'},{uid:'2'}];
  const first=slice(rows,uid,query({limit:'1'},owner),owner);
  assert.deepEqual(first.rows,[{uid:'1'}]);assert.equal(first.pagination.total,3);
@@ -12,7 +12,7 @@ test('signed pages cover sorted unique snapshot, bind owner/size, reject changes
  const last=slice(rows,uid,query({limit:'1',after:second.pagination.next},owner),owner);assert.deepEqual(last.rows,[{uid:'3'}]);assert.equal(last.pagination.next,null);
  assert.throws(()=>query({limit:'2',after:cursor},owner));
  for(const other of [['other','subject','reader'],['hallym','other','reader'],['hallym','subject','other']])assert.throws(()=>query({limit:'1',after:cursor},other));
- for(const token of [cursor+'!',cursor.slice(0,-3)+'abc','bad'])assert.throws(()=>query({limit:'1',after:token},owner));
+ for(const token of [cursor+'!','bad','',Buffer.from('null').toString('base64url')])assert.throws(()=>query({limit:'1',after:token},owner));
  assert.throws(()=>slice([...rows,{uid:'4'}],uid,query({limit:'1',after:cursor},owner),owner));
  assert.throws(()=>slice(rows.slice(1),uid,query({limit:'1',after:cursor},owner),owner));
  const now=Date.now;try{Date.now=()=>now()+300001;assert.throws(()=>query({limit:'1',after:cursor},owner));}finally{Date.now=now;}

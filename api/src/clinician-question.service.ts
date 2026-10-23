@@ -15,9 +15,9 @@ import type { Caller } from './pacs.service';
  * StudyAccessService.prepare()가 권한 판정을 위해 트랜잭션·잠금 전에 할 뿐이다(§4.1).
  */
 export const QUESTION_AUDIT_ACTION = 'study.question';
-export const QUESTION_BODY_MAX = 2000;
-export const QUESTION_ENTRY_LIMIT = 100;
-export const QUESTION_PAGE = 50;
+const QUESTION_BODY_MAX = 2000;
+const QUESTION_ENTRY_LIMIT = 100;
+const QUESTION_PAGE = 50;
 const RADIOLOGIST = 'radiologist';
 const ADMIN = 'admin';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -26,7 +26,7 @@ const CURSOR = /^[A-Za-z0-9_-]+$/;
 // 줄바꿈과 탭만 받는다. 그 밖의 C0·C1 제어문자는 화면·로그에서 보이지 않는 글자가 된다.
 const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/;
 
-export type QuestionCaller = Caller & { name?: string };
+type QuestionCaller = Caller & { name?: string };
 type Scope = 'all' | 'own';
 type Step = { action: string; kind: string; to: string; role: string; body: string };
 

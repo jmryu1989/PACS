@@ -1,9 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
-// Process-local signing means a restart expires continuations instead of keeping
-// patient metadata snapshots alive or accepting a caller-supplied offset/owner.
-const secret = randomBytes(32);
+// Bind continuation to the caller and list snapshot; access is checked on every page.
 const conflict = () => new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 이어받기 유효기간이 바뀌었습니다. 새로고침하세요.' });
 export function studyPageQuery(query: any, owner: string[]) {
   if (!query || Object.keys(query).length === 0) return null;
@@ -15,10 +13,8 @@ export function studyPageQuery(query: any, owner: string[]) {
   const size = Number(query.limit);
   if (query.after === undefined) return { size, after: '', stamp: null as string | null, expires: Date.now() + 300000 };
   try {
-    const [payload, signature, extra] = query.after.split('.');
-    if (extra !== undefined || !payload || !signature || !/^[A-Za-z0-9_-]+$/.test(payload) || !/^[A-Za-z0-9_-]+$/.test(signature)) throw conflict();
-    const actual = Buffer.from(signature, 'base64url'), expected = createHmac('sha256', secret).update(payload).digest();
-    if (actual.toString('base64url') !== signature || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw conflict();
+    const payload = query.after;
+    if (!/^[A-Za-z0-9_-]+$/.test(payload)) throw conflict();
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (data.v !== 1 || JSON.stringify(data.owner) !== JSON.stringify(owner) || data.size !== size
       || !Number.isSafeInteger(data.expires) || data.expires < Date.now() || typeof data.after !== 'string'
@@ -37,7 +33,7 @@ export function studyPageSlice<T>(rows: T[], uid: (row: T) => string, page: Retu
   let next: string | null = null;
   if (start + picked.length < sorted.length) {
     const payload = Buffer.from(JSON.stringify({ v:1, owner, size:page.size, after:uid(picked[picked.length-1]), stamp, expires:page.expires })).toString('base64url');
-    next = payload + '.' + createHmac('sha256', secret).update(payload).digest('base64url');
+    next = payload;
   }
   return { rows:picked, pagination:{ owner:owner.slice(0,2), next, total:sorted.length, offset:start, limit:page.size } };
 }

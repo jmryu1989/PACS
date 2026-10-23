@@ -39,7 +39,7 @@ const SUPERSEDE_KEYS = ['requestId', 'expectedOwner', 'revision', 'sourceVersion
 const READ = { isolationLevel: 'RepeatableRead' as const, maxWait: 4000, timeout: 8000 };
 const WRITE = { maxWait: 4000, timeout: 8000 };
 
-export type CriticalCaller = Caller & { name?: string };
+type CriticalCaller = Caller & { name?: string };
 type CreateRequest = { requestId: string; expectedOwner: unknown; recipientSub: string; sourceVersion: number; message: string };
 type ListQuery = { view?: string; state?: string; cursor?: string };
 
