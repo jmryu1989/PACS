@@ -1704,10 +1704,10 @@ jobs:
       product_sha256: ${{ steps.prepare.outputs.product_sha256 }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
+    # Default ref (GITHUB_SHA): the transfer fixtures bind their receipts to GITHUB_SHA and refuse another HEAD.
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
-        ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     - name: Database transport helper regressions
       run: python3 -B tests/ops_database_transfer_test.py
     - name: Product schema refusals
@@ -1746,7 +1746,6 @@ jobs:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
-        ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
         artifact-ids: ${{ needs.produce.outputs.artifact_id }}
