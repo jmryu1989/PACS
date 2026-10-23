@@ -29,8 +29,12 @@ class OHIFSourceEquivalenceE2E(ReadingWorkspaceE2E):
         work = self.login()
         self.choose(work, current)
         responses = []
-        work.context.on("response", responses.append)
-        self.addCleanup(lambda: work.context.remove_listener("response", responses.append))
+
+        # Playwright tags the handler object, so it must be a Python function, not a bound builtin.
+        def record(response):
+            responses.append(response)
+        work.context.on("response", record)
+        self.addCleanup(lambda: work.context.remove_listener("response", record))
         with work.context.expect_page() as opened:
             work.locator("#m-filmbox").click()
         viewer = opened.value
