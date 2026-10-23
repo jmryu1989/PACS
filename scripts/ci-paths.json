@@ -731,6 +731,7 @@
       "tests/fixtures/w5-ui/related-mode-page.json",
       "tests/main_*",
       "tests/measurement_ci_test.py",
+      "tests/multi_study_view_service_test.cjs",
       "tests/reading*",
       "tests/related*",
       "tests/report*",

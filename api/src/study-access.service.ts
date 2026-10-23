@@ -69,7 +69,9 @@ export class StudyAccessService {
   }
   needsMetadata(s:AccessSnapshot) {return s.policy.restricted&&s.policy.rules.some(ruleNeedsMetadata);}
   matches(s:AccessSnapshot,uid:string,row?:any) {return !s.policy.restricted||validAccessUid(uid)&&accessPolicyMatches(s.policy,uid,row?this.metadata(row):undefined);}
-  async prepare(c:Caller,uids?:string[],policy?:AccessSnapshot) {
+  // `signal`: a caller with its own deadline (W9 resolve) cancels the source read and its body; an aborted read is a failed
+  // preparation (503), never a cached answer. Callers without one keep the read's existing bounds.
+  async prepare(c:Caller,uids?:string[],policy?:AccessSnapshot,signal?:AbortSignal) {
     const scope=policy??await this.snapshot(c);
     if(!scope.policy.restricted||!accessWindowOpen(scope.policy)||!this.needsMetadata(scope))return;
     let cache=this.prepared.get(c);if(!cache){cache={all:false,metadata:new Map()};this.prepared.set(c,cache);}
@@ -81,7 +83,9 @@ export class StudyAccessService {
       // acquiring clinical locks; require(...,tx) only evaluates these tags.
       // One UID reads all of its resources; the batch keeps every enumeration row, so one UID's two resources
       // never make another UID's preparation fail.
-      const rows=requested?.length===1?await this.orthanc.studyIdentityResources(requested[0]):await this.orthanc.studyIdentities(true);
+      const rows=requested?.length===1?await this.orthanc.studyIdentityResources(requested[0],signal):await this.orthanc.studyIdentities(true,false,signal);
+      // A read that answers after its caller's signal ended is not a permission fact: never cache it (W9A2-1).
+      signal?.throwIfAborted();
       const fresh=new Map<string,StudyAccessMetadata[]>();
       for(const row of rows){const uid=OrthancService.tag(row,'0020000D');if(validAccessUid(uid))fresh.set(uid,[...fresh.get(uid)??[],this.metadata(row)]);}
       for(const [uid,list] of fresh)cache.metadata.set(uid,list);
@@ -98,7 +102,8 @@ export class StudyAccessService {
   private resourcesMatch(policy:StudyAccessPolicy,uid:string,list:StudyAccessMetadata[]|null|undefined) {
     return list?.length?list.every(metadata=>accessPolicyMatches(policy,uid,metadata)):accessPolicyMatches(policy,uid,undefined);
   }
-  async allowed(c:Caller,uids:string[],tx?:any):Promise<Set<string>> {
+  /** `signal` reaches the source read of the preparation only; the order, the per-resource AND and the re-checks are unchanged. */
+  async allowed(c:Caller,uids:string[],tx?:any,signal?:AbortSignal):Promise<Set<string>> {
     if(tx===this.prisma)tx=undefined;
     const unique=[...new Set(uids)];
     const policy=await this.snapshot(c,tx);
@@ -107,7 +112,7 @@ export class StudyAccessService {
     const result=new Set(unique.filter(uid=>this.matches(policy,uid)));
     const remaining=unique.filter(uid=>validAccessUid(uid)&&!result.has(uid));
     if(remaining.length&&this.needsMetadata(policy)) {
-      if(!tx)await this.prepare(c,remaining,policy);
+      if(!tx)await this.prepare(c,remaining,policy,signal);
       const cache=this.prepared.get(c);
       if(!cache||remaining.some(uid=>!cache.all&&!cache.metadata.has(uid)))throw conflict();
       for(const uid of remaining)if(this.resourcesMatch(policy.policy,uid,cache.metadata.get(uid)))result.add(uid);
