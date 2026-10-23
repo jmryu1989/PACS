@@ -82,15 +82,6 @@ PROFILES = {
             ('e2e/test_session_draft_boundaries.py', None, 'ci-u5-session-draft-boundaries'),
         ),
     },
-    'u5-session-mutants': {
-        'out': ROOT / 'tests/e2e/artifacts/u5-session-mutants-ci',
-        'project_prefix': 'kin-u5-session-mutants-ci-',
-        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
-        'suite_timeout': 900,
-        'suites': (
-            ('e2e/test_session_draft_mutants.py', None, 'ci-u5-session-draft-mutants'),
-        ),
-    },
     'u5-session-browser': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-browser-ci',
         'project_prefix': 'kin-u5-session-browser-ci-',
@@ -438,6 +429,18 @@ PROFILES = {
         'suites': (('e2e/test_three_d_cursor_wiring.py', 'ThreeDCursorWiringE2E',
                     'ci-three-d-cursor-wiring'),),
     },
+    'measurement-accuracy': {
+        'out': ROOT / 'tests/e2e/artifacts/measurement-accuracy-ci',
+        'project_prefix': 'kin-measure-accuracy-ci-',
+        # D1801 keeps these existing measurements cases on PRs. Their existing
+        # per-suite and outer deadlines are unchanged.
+        'suite_timeout': 540,
+        'suites': (
+            ('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E', 'ci-measure-readback'),
+            ('e2e/test_measurement_calibration.py', 'MeasurementCalibrationE2E', 'ci-measure-calibration'),
+            ('e2e/test_manual_sr.py', 'ManualSrE2E', 'ci-measure-manual-sr'),
+        ),
+    },
     'identity-fields': {
         'out': ROOT / 'tests/e2e/artifacts/identity-fields-ci',
         'project_prefix': 'kin-identity-ci-',
@@ -630,6 +633,7 @@ def seed_source():
         yy, xx = np.mgrid[:256,:256]
         ds.PixelData = (xx+yy+z).astype('<u2').tobytes()
         ds.save_as(dest / f'{z}.dcm', write_like_original=False)
+    return [dest / f'{z}.dcm' for z in range(8)]
 
 
 def stack_capture_commands(compose):
@@ -765,8 +769,9 @@ def main(profile_name, credential_provider=None):
         print(name+': '+str(code), flush=True)
         if code and not finalizing and fail_fast: raise RuntimeError(name+' failed; see sanitized artifact')
         return code
+    seeded = []
     try:
-        seed_source()
+        seeded = seed_source() or []
         run('database', compose+['up','-d','--wait','db'])
         # The image's temporary initdb server only listens on its local socket.
         run('database-tcp', compose+['exec','-T','db','sh','-c',
@@ -831,6 +836,13 @@ def main(profile_name, credential_provider=None):
                     # Its own Compose project, never an orphan of this one: removed after the consumer stack.
                     cleanup = gateway_remove(run, out) or cleanup
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
+                if not cleanup and not failed and seeded:
+                    # Merged jobs run profiles sequentially. Remove only this
+                    # profile's generated seed after successful stack cleanup.
+                    for path in seeded:
+                        path.unlink()
+                    seeded[0].parent.rmdir()
+                    seeded[0].parent.parent.rmdir()
             finally:
                 (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
                 (out/'summary.tsv').write_text(

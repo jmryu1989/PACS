@@ -144,8 +144,7 @@ class CandidateCiTests(unittest.TestCase):
             return parts
 
         triggers = workflow.get('on', workflow.get(True)) # YAML 1.1 spells `on` as a boolean.
-        self.assertEqual(set(triggers), {'pull_request', 'workflow_dispatch'})
-        self.assertIsNone(triggers['pull_request'])
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
         self.assertEqual(triggers['workflow_dispatch']['inputs']['candidate_sha']['required'], True)
         job = workflow['jobs']['candidate']
         self.assertEqual(job.get('name', 'candidate'), 'candidate')

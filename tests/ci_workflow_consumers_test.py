@@ -394,16 +394,12 @@ class WorkflowConsumerTests(unittest.TestCase):
         for workflow, document in catalogue.documents.items():
             for job_id, job in document['jobs'].items():
                 contexts.setdefault(job.get('name', job_id), []).append((workflow, job_id))
-        for kind in ('combined', 'database', 'image', 'orthanc', 'product'):
-            workflow = f'.github/workflows/restore-{kind}.yml'
-            for job_id in ('produce', 'consume'):
-                with self.subTest(workflow=workflow, job=job_id):
-                    self.assertEqual(contexts.get(f'restore-{kind} / {job_id}'),
-                                     [(workflow, job_id)])
-            # The shared bare names let one restore's success mask another's failure.
-            for shared in ('produce', 'consume'):
-                with self.subTest(workflow=workflow, shared=shared):
-                    self.assertNotIn(workflow, [path for path, _ in contexts.get(shared, [])])
+        for job_id in ('produce', 'consume'):
+            self.assertEqual(contexts.get(f'restore-product / {job_id}'),
+                             [(catalogue.owner(job_id)[0], job_id)])
+            self.assertNotIn(job_id, contexts)
+            for kind in ('combined', 'database', 'image', 'orthanc'):
+                self.assertNotIn(f'restore-{kind} / {job_id}', contexts)
 
     def test_audit_entry_points_report_gaps_without_failing_and_parse_errors_fail(self):
         # R5-DIAG-01: both public CLIs preserve diagnostics and exit semantics.
