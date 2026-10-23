@@ -101,11 +101,10 @@ REQ-RESTORE-JOB-NAMES → RISK-RESTORE-FAILURE-MASKED →
 job id `produce`·`consume`, `needs: produce`와 `needs.produce.outputs.*`는 그대로다.
 `ci_workflows.py`의 경로+job id 식별, `run-tests.py`, `execution_selection`,
 `candidate_ci`, `measurement_ci`의 시험 선택과 `candidate.yml`은 표시 이름을 선택 키로 쓰지 않는다.
-기존 10개 job은 두 공개 이름 `produce`·`consume`을 공유했다. 보호 API에서 삭제할 항목 수는
-실제 저장된 context/app 조합으로 확인하며 10개의 서로 다른 옛 context가 있다고 가정하지 않는다.
-사용자/지휘자는 새 10개 context를 기존 요구사항에 추가·재조회하고, main의 같은 SHA에서
-다섯 workflow의 최신 실행에 속한 새 10개 check가 모두 성공한 뒤에만 옛 항목을 제거한다.
-그 전에는 workflow별 지휘자 관문을 유지한다. 이름 변경 자체는 보호 설정 전환이나 병합 허가가 아니다.
+기존 10개 job은 두 공개 이름 `produce`·`consume`을 공유했다. 이 공유 이름은 한 workflow의 실패를
+다른 workflow의 성공이 가릴 수 있으므로 보호 요구사항에서 제거됐고, 전환용 임시 호환 job도 제거했다.
+restore workflow는 공유 이름 `produce`·`consume`을 다시 공개 check로 내보내지 않는다(같은 시험).
+이름 변경이나 이 정리 자체는 보호 설정 변경이나 병합 허가가 아니다.
 
 ## 공통 실행 증거 기록
 
@@ -3393,6 +3392,32 @@ PRE의 과거 original/approved/parent 동등성 전체 코스와 기존 mutants
 고정 landed 페이지와 의존 파일을 제공해 유지한다. 현재 동작을 과거 화면 구조와 같다고 주장하지 않으며,
 현재 PRE 순서/동작은 C3-LIVE와 아래 소비자 시험에 결속한다. 기존 PRE 단언이나 원본 바이트 핀은 삭제하지 않는다.
 Hosted LoadBudget은 역사적 오버라이드와 무관하게 현재 제품 디렉터리를 candidate로 사용한다.
+
+Windows 로컬 실행(F-ENV-02, LEDGER-CLEAN-1): 시험·하니스는 바꾸지 않고 CI와 같은 입력을 만든다.
+- 호출: `main_early_input_dom_test.py`를 단독으로 실행하지 않는다. CI처럼
+  `python -B tests/main_split_historical.py -- python -B tests/main_early_input_dom_test.py -v`로 실행해야
+  고정 landed 페이지(`KIN_PRE_PAGE`·`KIN_PRE_ASSETS`)와 previous parent(`KIN_SPLIT_PARENT=7bccdb6…`)가 주어진다.
+  단독 실행은 previous parent를 현재 HEAD로, 페이지를 현재 소스로 잡는다. 그러면 `Pages.layout(previous, actual)`이
+  부르는 `main_split_harness.cjs actual`이 previous-source 배치에서 exit 1로 끝나 과거 배치(layout)·필드 비교가
+  실패한다. 이것은 호출 차이이며 시험 결함이 아니다.
+- `node`가 PATH에 있어야 하고(하니스가 `node`를 직접 부른다), `api/node_modules`(TypeScript)가 있어야 한다.
+  이 호스트는 `$env:PATH = 'C:\Users\norne\pacs-pcb\tools\node-v22.23.2-win-x64;' + $env:PATH`,
+  `$env:NODE_OPTIONS = '--max-old-space-size=3072'`로 맞춘다.
+- `channel="chromium"`(LoadBudget·LateDictation·BackForwardCache)은 headless shell이 아닌 full Chromium
+  `chromium-<rev>\chrome-win64\chrome.exe`를 띄운다. 이 호스트(Windows 11 10.0.26300)에서는
+  `%LOCALAPPDATA%\ms-playwright\chromium-1223\chrome-win64\chrome.exe`가 그 자리에서만 SxS 활성화 실패
+  ("side-by-side configuration is incorrect", Application 로그 SideBySide: Dependent Assembly 148.0.7778.96
+  could not be found)로 시작하지 못해 Playwright가 `spawn UNKNOWN`을 낸다. 같은 바이트를 다른 디렉터리에 복사하면
+  시작하므로, 설치본을 복사해 그 경로를 쓴다:
+  `robocopy "$env:LOCALAPPDATA\ms-playwright" <새 경로> /E` 뒤 `$env:PLAYWRIGHT_BROWSERS_PATH = '<새 경로>'`.
+  기본 launch(headless shell)를 쓰는 나머지 class는 영향이 없다. Linux CI(`playwright install --with-deps chromium`)는 해당 없다.
+  launch가 실패한 class는 시작한 Playwright를 멈추지 못하므로, 그 뒤 class들의 setUpClass가 모두
+  "Playwright Sync API inside the asyncio loop"로 ERROR가 된다. 이 줄들은 첫 `spawn UNKNOWN`의 2차 결과다.
+  PreCase의 setUpClass(Playwright 시작·Chromium launch)를 물려받는 ActualLayout·EarlyInputSplit·HarnessSelfChecks의
+  setUpClass ERROR도 이 연쇄에서 나오며, 위 호출 차이와는 별개 원인이다.
+- LoadBudget의 기본 `hosted` 모드는 live gate·실스택이 필요하다(`KIN_PRE_LOAD_UNIT`, 지휘자 소유).
+  스택 없는 로컬 실행에서는 그 한 case가 gate 거절로 실패하는 것이 정상이며, 진단만 필요하면
+  `KIN_PRE_LOAD_MODE=route-diagnostic`을 준다(수용 증거가 아니다).
 baseline은 기존 approved PRE blob이며 script 요청 수는 baseline 56 / candidate 59이다. W2는 bundle 앞에 `worklist-folder-tree.js`와 해당 CSS를 추가하며, 추가 요청은 JS 1개·CSS 1개 및 계정 검색 GET 2개로 정확히 제한한다.
 W3는 `study-panel.js`와 `study-panel.css`를 bundle 앞에 추가한다(JS 1개·CSS 1개, 새 계정 GET 없음). CSS도 응답 hash·status·cache 기록에 포함된다. 시간 예산·쌍 개수·캐시 조건은 유지하며 새 measurement profile은 없다.
 
