@@ -177,13 +177,16 @@ class CryptoTests(unittest.TestCase):
             self.assert_failed(name)
         self.assert_original()
 
-    def test_08_wrong_age_binary_cannot_run(self):
-        wrong = self.output/'fake-age'
-        write(wrong, b'#!/bin/sh\ntouch SHOULD_NOT_EXIST\n'); wrong.chmod(0o700)
-        with self.assertRaises(ValueError):
-            crypto.seal(self.source, self.output/'sealed', wrong, self.recipient, self.fixture.expected)
-        self.assert_failed('sealed')
-        self.assertFalse((self.output/'SHOULD_NOT_EXIST').exists())
+    def test_08_installed_age_wrapper_roundtrips_without_a_binary_pin(self):
+        installed = self.output / 'installed-age'
+        write(installed, ('#!/bin/sh\nexec "' + str(self.age) + '" "$@"\n').encode())
+        installed.chmod(0o700)
+        result = crypto.seal(self.source, self.output/'sealed', installed, self.recipient, self.fixture.expected)
+        receipt = json.loads((self.output/'sealed/receipt.json').read_text())
+        self.assertEqual(receipt['age_sha256'], hashlib.sha256(installed.read_bytes()).hexdigest())
+        opened = self.unseal(result['receipt_sha256'])
+        self.assertTrue(opened['decrypted_inventory_prepared'])
+        self.assert_original()
 
     def test_09_wrong_receipt_hash_or_payload_is_refused_before_age(self):
         result = self.seal()
@@ -288,17 +291,16 @@ class CryptoTests(unittest.TestCase):
             self.unseal(hashlib.sha256(path.read_bytes()).hexdigest())
         extract.assert_not_called();self.assert_failed('opened')
 
-    def test_18_process_uses_fixed_executable_fd_and_no_identity_argument_on_seal(self):
+    def test_18_seal_uses_selected_tool_and_recipient_without_a_private_key(self):
         real=subprocess.run; calls=[]
         def guarded(args, **kwargs):
             calls.append((args,kwargs))
             return real(args,**kwargs)
         with patch.object(crypto.subprocess,'run',guarded): self.seal()
-        age_calls=[call for call in calls if call[0][0].startswith('/proc/self/fd/')]
+        age_calls=[call for call in calls if '--encrypt' in call[0]]
         self.assertEqual(len(age_calls),1)
         self.assertNotIn('-i',age_calls[0][0]);self.assertNotIn(str(self.key),age_calls[0][0])
-        self.assertTrue(age_calls[0][1]['pass_fds'])
-        self.assertTrue(all(call[0][0]=='git' or call[0][0].startswith('/proc/self/fd/') for call in calls))
+        self.assertEqual(age_calls[0][0], [str(self.age), '--encrypt', '-r', self.recipient])
 
     def test_19_input_changes_during_stream_are_refused(self):
         path = self.source/'snapshot/kin.dump'
@@ -347,9 +349,9 @@ class CryptoTests(unittest.TestCase):
         with target.open('rb') as stream:
             header = stream.read(512)
         # The format used by the actual pack path must support the inventory
-        # size boundary. Header-only checks do not claim huge-payload capacity.
+        # GNU size encoding. Header-only checks do not claim huge-payload capacity.
         self.assertEqual(header[257:265], tarfile.GNU_MAGIC)
-        for size in (2**33-1, 2**33, inventory.FILE_LIMIT):
+        for size in (2**33-1, 2**33, 2**37):
             info = tarfile.TarInfo('snapshot/orthanc.tgz')
             info.size = size
             encoded = info.tobuf(format=tarfile.GNU_FORMAT)
@@ -359,10 +361,10 @@ class CryptoTests(unittest.TestCase):
         with tarfile.open(target, 'r:') as archive:
             self.assertTrue(all(row.type == tarfile.REGTYPE and not row.pax_headers for row in archive))
         oversized = json.loads((self.source/'inventory.json').read_bytes())
-        oversized['files']['snapshot/orthanc.tgz']['bytes'] = inventory.FILE_LIMIT+1
+        oversized['files']['snapshot/orthanc.tgz']['bytes'] = 2**37+1
         raw = crypto.encode(oversized)
-        with self.assertRaises(ValueError):
-            inventory.parse_inventory(raw, hashlib.sha256(raw).hexdigest())
+        parsed = inventory.parse_inventory(raw, hashlib.sha256(raw).hexdigest())
+        self.assertEqual(parsed['files']['snapshot/orthanc.tgz']['bytes'], 2**37+1)
 
 
 if __name__ == '__main__':

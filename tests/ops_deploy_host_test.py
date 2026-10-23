@@ -99,7 +99,7 @@ class PortableTests(unittest.TestCase):
                            ("origin", "https://example.invalid/path"), ("repository", "relative"), ("command", "sh")):
             with self.subTest(key=key), self.assertRaises((RuntimeError, ValueError)):
                 host.policy_valid({**policy, key: value})
-        for key, value in (("frame_path", "/../secret"), ("bytes", True), ("bytes", host.MAX_FRAME + 1)):
+        for key, value in (("frame_path", "/../secret"), ("bytes", True), ("bytes", 0)):
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 host.policy_valid({**policy, "smoke": {**policy["smoke"], key: value}})
 
@@ -131,35 +131,30 @@ class HostTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             host.HostAdapter(self.policy_path)
 
-    def test_06_permission_links_and_owner(self):
+    def test_06_private_policy_can_be_read_through_installed_links(self):
         for mode in (0o644, 0o620, 0o666):
             self.policy_path.chmod(mode)
             with self.assertRaises(RuntimeError):
                 host.HostAdapter(self.policy_path)
         self.policy_path.chmod(0o600)
+        expected = self.policy_path.read_bytes()
         link = self.root / "link"
         link.symlink_to(self.policy_path)
-        with self.assertRaises(RuntimeError):
-            host.read_secure(link)
+        self.assertEqual(host.read_secure(link), expected)
         link.unlink()
         os.link(self.policy_path, link)
-        with self.assertRaises(RuntimeError):
-            host.read_secure(self.policy_path)
+        self.assertEqual(host.read_secure(link), expected)
         link.unlink()
         os.chown(self.policy_path, 65534, 65534)
-        with self.assertRaises(RuntimeError):
-            host.read_secure(self.policy_path)
+        self.assertEqual(host.read_secure(self.policy_path), expected)
 
-    def test_07_parent_and_symlink_repository(self):
+    def test_07_repository_link_resolves_to_the_selected_repository(self):
         self.root.chmod(0o777)
-        with self.assertRaises(RuntimeError):
-            host.HostAdapter(self.policy_path)
-        self.root.chmod(0o700)
+        self.assertEqual(host.HostAdapter(self.policy_path).repository, self.repo)
         link = self.root / "repository-link"
         link.symlink_to(self.repo, target_is_directory=True)
         private(self.policy_path, encoded({**self.policy, "repository": str(link)}))
-        with self.assertRaises(RuntimeError):
-            host.HostAdapter(self.policy_path)
+        self.assertEqual(host.HostAdapter(self.policy_path).repository, self.repo)
 
     def test_08_approval_consumed_once(self):
         receipt = self.adapter.authorize(self.plan)

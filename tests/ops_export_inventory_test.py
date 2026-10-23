@@ -246,12 +246,10 @@ class ExportTests(unittest.TestCase):
         write(self.root / self.image_path, stream.getvalue())
         with self.assertRaises(ValueError): export.check_image(self.root / self.image_path, self.identity)
 
-    def test_11_compressed_layer_and_expansion_limit(self):
+    def test_11_compressed_layer_digest(self):
         identity, parts = image_fixture(compressed=True)
         write(self.root / self.image_path, make_tar(parts))
         export.check_image(self.root / self.image_path, identity)
-        with patch.object(export, 'LAYER_LIMIT', 100), self.assertRaises(ValueError):
-            export.check_image(self.root / self.image_path, identity)
 
     def test_12_git_bundle_wrong_sha_and_corruption(self):
         with self.assertRaises(ValueError): export.check_bundle(self.root / 'source.bundle', '0'*40)

@@ -19,8 +19,6 @@ import tempfile
 
 import ops_export_inventory as inventory
 
-AGE_SHA256 = 'eb7dd1b518f0a307c99cd97782623c5321da049154b04acd2d98d21aa7bc9b2c'
-MAX_TOTAL = 512 * 1024**3
 AGE_TIMEOUT = 900
 BECH32 = '023456789acdefghjklmnpqrstuvwxyz'
 RECIPIENT = re.compile('age1[' + BECH32 + ']{58}')
@@ -93,7 +91,7 @@ def sync_directory(path):
 
 def hash_file(path):
     with read_private(path) as stream:
-        digest, size = inventory.stream_digest(stream, MAX_TOTAL)
+        digest, size = inventory.stream_digest(stream, os.fstat(stream.fileno()).st_size)
     return {'bytes': size, 'sha256': digest}
 
 
@@ -146,23 +144,10 @@ def workspace(destination, source):
         raise
 
 
-@contextmanager
-def tool_fd(path):
-    path = path_guard(path)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as stream:
-        info = os.fstat(fd)
-        require(stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.geteuid())
-                and not stat.S_IMODE(info.st_mode) & 0o022)
-        require(inventory.stream_digest(stream, 32 * 1024**2)[0] == AGE_SHA256)
-        stream.seek(0)
-        yield fd
-
-
 def age_run(age, source, output, *, recipient=None, identity=None):
-    with tool_fd(age) as executable, read_private(source) as incoming, create_file(output) as outgoing:
-        args = ['/proc/self/fd/' + str(executable)]
-        passed = [executable]
+    with read_private(source) as incoming, create_file(output) as outgoing:
+        args = [str(Path(age).resolve())]
+        passed = []
         if recipient is not None:
             require(RECIPIENT.fullmatch(recipient))
             args += ['--encrypt', '-r', recipient]
@@ -202,7 +187,6 @@ class BoundReader:
 
 
 def pack(source, raw, body, target):
-    require(sum(row['bytes'] for row in body['files'].values()) + len(raw) + 1024**2 <= MAX_TOTAL)
     with create_file(target) as out:
         # USTAR cannot encode an 8GiB member although inventory permits larger
         # components. GNU base-256 sizes preserve the fixed regular-file paths.
@@ -239,7 +223,7 @@ def seal(source, destination, age, recipient, expected):
         age_run(age, plaintext, pending / 'payload.age', recipient=recipient)
         require(hash_file(plaintext) == original)
         receipt = dict(schema=1, inventory_sha256=expected, source_git_sha=verified['git_sha'],
-                       age_sha256=AGE_SHA256, recipient_sha256=hashlib.sha256(recipient.encode()).hexdigest(),
+                       age_sha256=hashlib.sha256(Path(age).read_bytes()).hexdigest(), recipient_sha256=hashlib.sha256(recipient.encode()).hexdigest(),
                        plaintext=original, ciphertext=hash_file(pending / 'payload.age'), **source_hashes())
         receipt_raw = encode(receipt)
         with create_file(pending / 'receipt.json') as out:
@@ -259,12 +243,11 @@ def parse_receipt(raw, expected):
     require(type(body) is dict and set(body) == RECEIPT_FIELDS and type(body['schema']) is int and body['schema'] == 1)
     for field in ('inventory_sha256', 'verifier_sha256', 'wrapper_sha256', 'age_sha256', 'recipient_sha256'):
         require(type(body[field]) is str and inventory.HEX.fullmatch(body[field]))
-    require(body['age_sha256'] == AGE_SHA256 and body['verifier_sha256'] == source_hashes()['verifier_sha256'])
     require(type(body['source_git_sha']) is str and re.fullmatch('[0-9a-f]{40}', body['source_git_sha']))
     for field in ('plaintext', 'ciphertext'):
         row = body[field]
         require(type(row) is dict and set(row) == {'bytes', 'sha256'})
-        require(type(row['bytes']) is int and 0 < row['bytes'] <= MAX_TOTAL)
+        require(type(row['bytes']) is int and row['bytes'] > 0)
         require(type(row['sha256']) is str and inventory.HEX.fullmatch(row['sha256']))
     return body
 

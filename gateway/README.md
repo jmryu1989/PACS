@@ -52,12 +52,9 @@ UID·단계·병원 보유 N건 중 보낸 M건·재시도 횟수·고정 오류
 쓴다**는 전제에 기대므로 같은 `queue.db` 사본을 두 호스트에서 돌리지 않는다. `failed`(F-01, 같은 바이트로는 성공할
 수 없음)에는 요청 컨트롤이 없고 KIN도 거절한다.
 
-## 로컬 검증 전용
+## 검증
 
-`python gateway/verify_c6.py`는 **로컬 개발 스택 전용**이다. Keycloak Admin API로 임시 역할·
-클라이언트·사용자를 만들고 시험 DICOM과 DB 행을 삭제하므로 운영 렐름이나 실제 의료기관
-Gateway를 대상으로 실행하지 않는다. 운영 smoke는 `tests/README.md`의 지정된 fixture 명령을
-사용한다.
+격리된 합성 Gateway 검증은 [시험 실행 안내](../tests/README.md)의 지정된 fixture 명령을 사용한다.
 
 로그와 큐에는 UID·SOP UID·개수·바이트 수만 남기며 환자 이름과 PatientID는 남기지 않는다.
 `KIN_TLS_VERIFY=false`는 자체 서명 인증서를 쓰는 로컬 검증 전용이다. 운영에서는 신뢰할 수 있는

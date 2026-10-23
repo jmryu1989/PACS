@@ -115,7 +115,7 @@ class Transfer(unittest.TestCase):
         self.payload=b'age-encryption.org/v1\n'+b'SYNTHETIC-CIPHERTEXT\0'*(1024*60)
         write(self.source/'payload.age',self.payload)
         self.receipt=dict(schema=1,inventory_sha256='0'*64,source_git_sha='1'*40,
-            age_sha256=offsite.private.AGE_SHA256,recipient_sha256='2'*64,
+            age_sha256='a'*64,recipient_sha256='2'*64,
             plaintext=record(b'SYNTHETIC ONLY'),ciphertext=record(self.payload),**offsite.private.source_hashes())
         self.raw=offsite.private.encode(self.receipt)
         write(self.source/'receipt.json',self.raw)
