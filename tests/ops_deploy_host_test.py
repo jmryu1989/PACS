@@ -99,7 +99,7 @@ class PortableTests(unittest.TestCase):
                            ("origin", "https://example.invalid/path"), ("repository", "relative"), ("command", "sh")):
             with self.subTest(key=key), self.assertRaises((RuntimeError, ValueError)):
                 host.policy_valid({**policy, key: value})
-        for key, value in (("frame_path", "/../secret"), ("bytes", True), ("bytes", 0)):
+        for key, value in (("frame_path", "/../secret"), ("bytes", True), ("bytes", host.MAX_FRAME + 1)):
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 host.policy_valid({**policy, "smoke": {**policy["smoke"], key: value}})
 

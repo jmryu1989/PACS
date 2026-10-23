@@ -36,6 +36,7 @@ ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8",
 FRAME = re.compile(r"/dicom-web/studies/[0-9.]{1,64}/series/[0-9.]{1,64}/instances/[0-9.]{1,64}/frames/[1-9][0-9]{0,7}")
 DIRS = ("approvals", "evidence", "used", "journal", "outbox", "refusals")
 POLICY_KEYS = {"schema", "enabled", "repository", "state_dir", "compose_sha256", "origin", "smoke", "mail"}
+MAX_FRAME = 16 * 1024 * 1024
 
 
 def require(value):
@@ -106,7 +107,7 @@ def policy_valid(value):
     smoke = value["smoke"]
     require(type(smoke) is dict and set(smoke) == {"token_file", "frame_path", "bytes", "sha256", "ca_file"})
     require(type(smoke["frame_path"]) is str and FRAME.fullmatch(smoke["frame_path"]))
-    require(type(smoke["bytes"]) is int and smoke["bytes"] > 0)
+    require(type(smoke["bytes"]) is int and 0 < smoke["bytes"] <= MAX_FRAME)
     require(type(smoke["sha256"]) is str and pre.HASH.fullmatch(smoke["sha256"]))
     require(type(smoke["token_file"]) is str and smoke["token_file"].startswith("/"))
     require(smoke["ca_file"] is None or type(smoke["ca_file"]) is str and smoke["ca_file"].startswith("/"))

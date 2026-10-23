@@ -20,6 +20,8 @@ from ops_monitor import NAMES
 HEX = re.compile(r'[0-9a-f]{64}')
 IMAGE = re.compile(r'sha256:[0-9a-f]{64}')
 META_LIMIT = 1024 * 1024
+FILE_LIMIT = 128 * 1024**3
+LAYER_LIMIT = 8 * 1024**3
 HOST_FILES = {'host/' + name for name in ('collector.sh', 'crontab.txt', 'settings.json',
                                          'tls-fullchain.pem', 'tls-privkey.pem')}
 SOURCE_FILES = ('docker-compose.yml', 'docker-compose.prod.yml', 'docker-compose.monitor.yml',
@@ -60,22 +62,22 @@ def private(path, directory=False):
     return info
 
 
-def stream_digest(stream, limit=None):
+def stream_digest(stream, limit=FILE_LIMIT):
     result, size = hashlib.sha256(), 0
     while True:
         chunk = stream.read(1024 * 1024)
         if not chunk:
             return result.hexdigest(), size
         size += len(chunk)
-        require(limit is None or size <= limit)
+        require(size <= limit)
         result.update(chunk)
 
 
 def file_record(path):
     before = private(path)
-    require(before.st_size > 0)
+    require(0 < before.st_size <= FILE_LIMIT)
     with path.open('rb') as stream:
-        digest, size = stream_digest(stream, before.st_size)
+        digest, size = stream_digest(stream)
     after = path.stat()
     require((before.st_ino, before.st_size, before.st_mtime_ns) ==
             (after.st_ino, after.st_size, after.st_mtime_ns))
@@ -120,7 +122,7 @@ def check_image(path, identity):
             name = relative(member.name)
             require(name not in members and len(members) < 8192)
             require(member.isdir() or member.isfile())
-            require(member.size >= 0 and member.offset_data + member.size <= path.stat().st_size)
+            require(0 <= member.size <= FILE_LIMIT and member.offset_data + member.size <= path.stat().st_size)
             members[name] = member
 
         def data(name):
@@ -149,9 +151,9 @@ def check_image(path, identity):
                 stream.seek(0)
                 if compressed:
                     with gzip.GzipFile(fileobj=stream) as expanded:
-                        actual, _ = stream_digest(expanded)
+                        actual, _ = stream_digest(expanded, LAYER_LIMIT)
                 else:
-                    actual, _ = stream_digest(stream)
+                    actual, _ = stream_digest(stream, LAYER_LIMIT)
             require('sha256:' + actual == expected)
         if identity == config_id:
             return
@@ -216,7 +218,7 @@ def parse_inventory(raw, expected_hash):
     for name, record in files.items():
         relative(name)
         require(type(record) is dict and set(record) == {'bytes', 'sha256'})
-        require(type(record['bytes']) is int and record['bytes'] > 0)
+        require(type(record['bytes']) is int and 0 < record['bytes'] <= FILE_LIMIT)
         require(type(record['sha256']) is str and HEX.fullmatch(record['sha256']))
     return body
 

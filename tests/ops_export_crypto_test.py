@@ -349,9 +349,9 @@ class CryptoTests(unittest.TestCase):
         with target.open('rb') as stream:
             header = stream.read(512)
         # The format used by the actual pack path must support the inventory
-        # GNU size encoding. Header-only checks do not claim huge-payload capacity.
+        # size boundary. Header-only checks do not claim huge-payload capacity.
         self.assertEqual(header[257:265], tarfile.GNU_MAGIC)
-        for size in (2**33-1, 2**33, 2**37):
+        for size in (2**33-1, 2**33, inventory.FILE_LIMIT):
             info = tarfile.TarInfo('snapshot/orthanc.tgz')
             info.size = size
             encoded = info.tobuf(format=tarfile.GNU_FORMAT)
@@ -361,10 +361,10 @@ class CryptoTests(unittest.TestCase):
         with tarfile.open(target, 'r:') as archive:
             self.assertTrue(all(row.type == tarfile.REGTYPE and not row.pax_headers for row in archive))
         oversized = json.loads((self.source/'inventory.json').read_bytes())
-        oversized['files']['snapshot/orthanc.tgz']['bytes'] = 2**37+1
+        oversized['files']['snapshot/orthanc.tgz']['bytes'] = inventory.FILE_LIMIT+1
         raw = crypto.encode(oversized)
-        parsed = inventory.parse_inventory(raw, hashlib.sha256(raw).hexdigest())
-        self.assertEqual(parsed['files']['snapshot/orthanc.tgz']['bytes'], 2**37+1)
+        with self.assertRaises(ValueError):
+            inventory.parse_inventory(raw, hashlib.sha256(raw).hexdigest())
 
 
 if __name__ == '__main__':
