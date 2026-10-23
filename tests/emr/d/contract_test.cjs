@@ -22,7 +22,8 @@ const ts = require(path.join(api, 'node_modules/typescript'));
 const DSRC = path.resolve(process.env.KIN_EMR_D_SRC || path.join(api, 'src/emr-clinical'));
 const ASRC = path.join(DSRC, '..', 'emr-contract');
 const config = ts.readConfigFile(path.join(api, 'tsconfig.json'), ts.sys.readFile);
-assert.equal(config.error, undefined);
+assert.equal(config.error === undefined, true, config.error
+  ? `TS${config.error.code}: ${ts.flattenDiagnosticMessageText(config.error.messageText, '\n')}` : undefined);
 const options = ts.parseJsonConfigFileContent(config.config, ts.sys, api).options;
 const previousLoader = require.extensions['.ts'];
 require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'),
