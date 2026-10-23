@@ -443,7 +443,10 @@ function child(scenario) {
       return response.result;
     }
     lose() { this.loss.abort(new protocol.StateProtocolError('UNAVAILABLE', 'unavailable')); }
-    async close() { send('state-client-close'); this.socket.destroy(); }
+    async close() {
+      send('state-client-close'); this.socket.destroy();
+      if (scenario.stateClientClose === 'throw') throw Object.assign(new Error('synthetic session close rejection'), { code: 'SYN_CLOSE' });
+    }
   };
   } else {
     const RealStateClient = stateClientModule.StateClient;
@@ -458,7 +461,10 @@ function child(scenario) {
         send('session', { instanceId: session.instanceId, serviceEpoch: session.serviceEpoch });
         return session;
       }
-      close() { send('state-client-close'); return super.close(); }
+      async close() {
+        send('state-client-close'); await super.close();
+        if (scenario.stateClientClose === 'throw') throw Object.assign(new Error('synthetic session close rejection'), { code: 'SYN_CLOSE' });
+      }
     };
   }
   const stateClients = () => peers;

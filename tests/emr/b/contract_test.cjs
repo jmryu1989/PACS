@@ -2231,6 +2231,27 @@ function contractSuite() {
     const accounting = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('[KIN API] lifecycle accounting: ')).slice('[KIN API] lifecycle accounting: '.length));
     assert.equal(accounting.find(stage => stage.stage === 'onModuleDestroy').status, 'running');
     for (const stage of ['beforeApplicationShutdown', 'dispose', 'onApplicationShutdown']) assert.equal(accounting.find(row => row.stage === stage).status, 'not-started');
+    // RC-09 (B2-S2-09): a rejected release of the client runtime's own resources (the control session's close, the
+    // dedicated client's disconnect, or both) after a ready stop is a failed stop reported as its phase and a nonzero
+    // end, never a clean exit; each release is attempted exactly once, the second also after the first rejected, all
+    // within the one cleanup deadline.
+    for (const scenario of [{ disconnect: 'throw' }, { stateClientClose: 'throw' }, { disconnect: 'throw', stateClientClose: 'throw' }]) {
+      const label = JSON.stringify(scenario), dir = startup.stateDirectory('c-release');
+      const rejected = await startup.run({ db: 'memory', ...scenario }, {
+        env: startup.environment(dir), timeoutMs: 40000,
+        onEvent(event, child) { if (event.what === 'listening') startup.stop(child); },
+      });
+      fs.rmSync(dir, { recursive: true, force: true });
+      assert.equal(rejected.timedOut, false, label);
+      assert.equal(rejected.code, 1, label + ': a rejected release is a failed stop, never a clean exit: ' + rejected.stderr);
+      assert.equal(rejected.stderrLines.length, 1, label + ': ' + rejected.stderr);
+      assert.match(rejected.stderr, /종료 실패\(ledger\)/, label + ': the failed phase is the ledger release');
+      assert.equal(rejected.names.filter(name => name === 'state-client-close').length, 1, label + ': the control session release is attempted once');
+      assert.equal(rejected.names.filter(name => name === 'disconnect').length, 1, label + ': the client disconnect is attempted once, also after a rejected session close');
+      const interrupted = rejected.events.find(event => event.what === 'owner-interrupt').at, ended = rejected.events.find(event => event.what === 'exit').at;
+      assert(ended - interrupted < 6500, label + ': the failed releases end within the one cleanup deadline: ' + (ended - interrupted) + ' ms');
+      assert.equal(rejected.stderr.includes('P1017') || rejected.stderr.includes('SYN_CLOSE') || rejected.stderr.includes('Synthetic-Fixture-Secret'), false, label + ': the closed line carries no provider detail');
+    }
   });
 
   apiTest('C-A01.R15 incomplete headers and an admitted response beyond grace are force closed without late Nest entry (r2 C40 carried)', { timeout: 50000 }, async () => {

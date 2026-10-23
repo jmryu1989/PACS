@@ -101,7 +101,9 @@ export class EmrApiClientRuntime {
   /** A stop is requested, without releasing anything: recorded at once in every state. */
   interrupt(): void { this.requestStop(); }
   /** The explicit end, once: the start in flight is awaited (it ends at its next step), then the session and the
-   * client are released within the launcher's cleanup budget. A release error is not reported here. */
+   * client are released within the launcher's cleanup budget. Each release is attempted once; a rejected one ends this
+   * runtime `failed` and rejects the close (the launcher's release ledger reports the stop as failed), it is never a
+   * clean end. */
   close(): Promise<void> {
     this.requestStop();
     return this.closing ??= this.stop();
@@ -143,8 +145,9 @@ export class EmrApiClientRuntime {
     } catch (error) {
       const interrupted = this.state === 'stopping';
       if (!interrupted) this.state = 'failed';
-      // The release begins here, once; the start does not wait for it. close() waits for this same release.
-      void this.release();
+      // The release begins here, once; the start does not wait for it (its outcome reaches the launcher through close(),
+      // which waits for this same release). The start reports its own failure.
+      this.release().catch(() => undefined);
       throw new EmrStartupFailure(phase, error, interrupted);
     }
   }
@@ -166,11 +169,17 @@ export class EmrApiClientRuntime {
     await this.release();
     if (this.state !== 'failed') this.state = 'closed';
   }
+  /** Both releases are attempted, each once, whatever the other did; the rejections are collected and reported as one
+   * rejection (a count and the codes, never a provider message that may carry a connection string). */
   private release(): Promise<void> {
     return this.releasing ??= (async () => {
-      const client = this.client, db = this.db;
-      if (client) { try { await client.close(); } catch { /* see close() */ } }
-      if (db) { try { await db.$disconnect(); } catch { /* see close() */ } }
+      const client = this.client, db = this.db, failed: string[] = [];
+      if (client) { try { await client.close(); } catch (error: any) { failed.push('session:' + String(error?.code ?? error?.name ?? 'error')); } }
+      if (db) { try { await db.$disconnect(); } catch (error: any) { failed.push('client:' + String(error?.code ?? error?.name ?? 'error')); } }
+      if (failed.length) {
+        this.state = 'failed';
+        throw Object.assign(new Error('EmrReleaseFailed'), { code: 'EmrReleaseFailed', failed });
+      }
     })();
   }
 }
