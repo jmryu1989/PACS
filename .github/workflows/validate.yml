@@ -1182,6 +1182,48 @@ jobs:
             tmp/cell-merge-ci/
           if-no-files-found: error
           retention-days: 7
+  s9-u0e-served:
+    # S9-U0E: the generated config/ohif.js as Orthanc serves it on a normal worklist launch, in its own
+    # job and fresh runner like cell-merge. Same 45-minute job policy and 28-minute live step;
+    # measurement_ci.py's own 25-minute deadline and the profile's single 900s cap bound the run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: OHIF generated configuration matches ordered sources before the live run
+        run: python3 scripts/build-ohif-config.py --check
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 15
+        run: |
+          python3 -m venv "$RUNNER_TEMP/s9-u0e-python"
+          "$RUNNER_TEMP/s9-u0e-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/s9-u0e-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared S9-U0E served selection
+        run: python3 scripts/record-run.py --run-dir tmp/s9-u0e-served-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_s9_u0e_equivalence.py --file tests/e2e/test_reading_workspace.py --file tests/e2e/test_prior_selection.py --file tests/live_test_gate.py -- "$RUNNER_TEMP/s9-u0e-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared S9-U0E served configuration test
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/s9-u0e-python/bin/python" tests/measurement_ci.py --profile s9-u0e-served
+      - name: Sanitized synthetic S9-U0E served evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-s9-u0e-served-results
+          path: |
+            tests/e2e/artifacts/s9-u0e-served-ci/
+            tmp/s9-u0e/served/
+            tmp/s9-u0e-served-ci/
+          if-no-files-found: error
+          retention-days: 7
   u2b-regressions:
     # S5-CIE: the existing prior-selection and related-scope live modules that S5-U2b named as
     # required regressions reach a hosted run only here. A separate job, not more suites inside
@@ -1375,6 +1417,10 @@ jobs:
         # Production creates files under umask 077. Runtime readability must come
         # from the image build rather than the checkout host's file permissions.
         run: chmod -R go-rwx api
+      - name: OHIF generated configuration matches ordered sources
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
+      - name: OHIF builder byte and stale-output boundaries
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-build --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js --file tests/s9_u0e_build_test.py -- python3 scripts/run-tests.py --module tests/s9_u0e_build_test.py --mode pure --unit ci-s9-u0e-build
       - name: Build the production target
         env:
           CODE_SHA: ${{ github.sha }}

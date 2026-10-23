@@ -1,0 +1,32 @@
+{
+  "sources": [
+    "branding-defaults.js",
+    "session.js",
+    "toolbar-labels.js",
+    "branding.js",
+    "stack-precision.js",
+    "sr-provenance.js",
+    "navigation.js",
+    "history.js",
+    "layout-model.js",
+    "clinician-context.js",
+    "layout.js",
+    "ct-sync.js",
+    "cine.js",
+    "ct-preset-model.js",
+    "display-scope.js",
+    "cell-merge.js",
+    "images-only.js",
+    "image-text.js",
+    "ct-presets.js",
+    "jobs.js",
+    "findings.js",
+    "tech-note-loader.js",
+    "frame-coverage.js",
+    "three-d-cursor.js",
+    "dicom-pdf.js",
+    "series-recovery.js",
+    "context-loss.js",
+    "configuration.js"
+  ]
+}

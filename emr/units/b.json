@@ -485,7 +485,7 @@
     "contract": 21,
     "live": 13,
     "mutants": 39,
-    "profiles": 39,
+    "profiles": 40,
     "measurements_suites": 20,
     "validate_jobs": 22,
     "emr_b_jobs": 1,

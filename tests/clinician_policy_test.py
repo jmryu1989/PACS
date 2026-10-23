@@ -1713,7 +1713,8 @@ class ClinicianPolicySpec(unittest.TestCase):
                 self.assertEqual(set(row), {"decision", "unit", "commit", "basis"})
                 self.assertEqual(row["decision"], where[key], "the post_baseline decision is the row the route sits in")
                 self.assertRegex(row["commit"], r"^[0-9a-f]{7,40}$")
-                self.assertRegex(row["unit"], r"^S[0-9]-")
+                # a stage unit (S<n>-) or a UX-stage workflow unit (W<n>-, which has no stage number; W9-API)
+                self.assertRegex(row["unit"], r"^[SW][0-9]-")
                 self.assertGreater(len(row["basis"].strip()), 20)
                 self.assertEqual(allowed(key), row["decision"] in ("session", "business"))
         declared = set(FIXTURES["allowed_additions"])
@@ -2862,10 +2863,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (138 = 7 + 2 + 21 + 108); S9-U4b: the five import/download routes and the admin recovery route denied
-        # (144 = 7 + 2 + 21 + 114); S9-U4b D1489: the archive grant route denied (145 = 7 + 2 + 21 + 115)
-        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (145, 7, 2, 21, 115), "the real inventory is unchanged: 145 = 7 + 2 + 21 + 115")
+        # S9-U4b import/download/recovery/grant and W9 viewing-set routes remain denied.
+        self.assertEqual(
+            {"routes": len(baseline), "public": len(PUBLIC), "session": len(SESSION),
+             "business": len(BUSINESS), "denied": len(DENIED_ROUTES)}, counts,
+            "the real inventory matches the computed merged route matrix")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -3136,10 +3138,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (138 = 7 + 2 + 21 + 108); S9-U4b: the five import/download routes and the admin recovery route denied
-        # (144 = 7 + 2 + 21 + 114); S9-U4b D1489: the archive grant route denied (145 = 7 + 2 + 21 + 115)
-        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (145, 7, 2, 21, 115), "the real inventory is unchanged: 145 = 7 + 2 + 21 + 115")
+        # S9-U4b import/download/recovery/grant and W9 viewing-set routes remain denied.
+        self.assertEqual(
+            {"routes": len(baseline), "public": len(PUBLIC), "session": len(SESSION),
+             "business": len(BUSINESS), "denied": len(DENIED_ROUTES)}, counts,
+            "the real inventory matches the computed merged route matrix")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3317,10 +3320,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (138 = 7 + 2 + 21 + 108); S9-U4b: the five import/download routes and the admin recovery route denied
-        # (144 = 7 + 2 + 21 + 114); S9-U4b D1489: the archive grant route denied (145 = 7 + 2 + 21 + 115)
-        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (145, 7, 2, 21, 115), "the real inventory is unchanged: 145 = 7 + 2 + 21 + 115")
+        # S9-U4b import/download/recovery/grant and W9 viewing-set routes remain denied.
+        self.assertEqual(
+            {"routes": len(baseline), "public": len(PUBLIC), "session": len(SESSION),
+             "business": len(BUSINESS), "denied": len(DENIED_ROUTES)}, counts,
+            "the real inventory matches the computed merged route matrix")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

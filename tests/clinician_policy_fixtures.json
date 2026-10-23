@@ -144,10 +144,11 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 145, "public": 7, "session": 2, "business": 21, "denied": 115},
+    "counts": {"routes": 146, "public": 7, "session": 2, "business": 21, "denied": 116},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
+      "multi_study_view": "radiologist multi-study viewing of the own institution (W9-LITE): the same-patient viewing set's admission read (need radiologist, admin passes; owning institution, no tele, StudyAccess for every member); a clinician-only member neither resolves a viewing set nor records its display.",
       "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, order match/unmatch.",
       "workspace": "the caller's reading-workspace state, personal or site-shared (prefs, filters, favorites, templates, columns, layout, shortcuts, appearance, reading preferences, hanging protocols, study tags) and the caller's own StudyAccess status. No clinician screen uses them before S5-U2a.",
       "admin": "member console, study-access administration, audit, unassigned studies, institution assignment and operations metrics (need admin).",
@@ -172,6 +173,9 @@
         "POST studies/:uid/findings/:id/revisions", "POST studies/:uid/manual-sr", "POST studies/:uid/manual-sr/:id/store",
         "GET studies/:uid/viewer-jobs", "POST studies/:uid/viewer-jobs", "GET studies/:uid/viewer-jobs/:id",
         "POST studies/:uid/viewer-jobs/:id/revisions", "POST studies/:uid/viewer-jobs/preview"
+      ],
+      "multi_study_view": [
+        "POST studies/viewing-set/resolve"
       ],
       "operations": [
         "GET studies/:uid/tech-note", "POST studies/:uid/tech-note", "GET studies/:uid/tech-note/history",
@@ -216,6 +220,7 @@
     },
     "post_baseline": {
       "POST studies/:uid/viewer-context-events": {"decision": "business", "unit": "S8-CTX", "commit": "56e19e0", "basis": "finite diagnostic event after image permission and institution admission; server attributes the audit row; declared in allowed_additions"},
+      "POST studies/viewing-set/resolve": {"decision": "denied", "unit": "W9-API", "commit": "f83948e", "basis": "radiologist multi-study viewing of the own institution: the ordered same-patient viewing set's admission and minimal source metadata (need radiologist, admin passes; every member visible, owned, not tele, StudyAccess); a clinician-only member neither resolves nor records display"},
       "GET clinician/studies": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "narrow clinician worklist read: listStudies scope, one-snapshot report status, no drafts, bodies or writer fields; declared in allowed_additions"},
       "GET clinician/studies/:uid/report": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "the final head's body and key images only at RS A with an approve/addendum head, status otherwise; declared in allowed_additions"},
       "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},

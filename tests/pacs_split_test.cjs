@@ -210,9 +210,8 @@ test('U0B-CORRESPONDENCE a receiver is read back only as recorded: exact pair an
 
 // ── Nest DI and routes (order section 7 DI/routes, M23/M24) ──
 /**
- * S9-U4b (contract S9-U4p 6, R2-08/D1190): the snapshot minus exactly the declared additions (spec.di_additions: one
- * feature controller, two providers, their constructor tokens and six routes) equals the unchanged pre-split snapshot,
- * and what was taken away is exactly the declaration - nothing more, nothing less, nothing re-pinned.
+ * The snapshot minus exactly the declared additions of a later feature unit equals the unchanged pre-split snapshot, and
+ * what was taken away is exactly the declaration - nothing more, nothing less, nothing re-pinned (the S9-U4b pattern).
  */
 function withoutDeclared(now, declared) {
   const take = (list, names) => {
@@ -251,19 +250,33 @@ function withoutW5Arguments(now) {
 }
 test('U0B-DI Nest metadata equals main before the split: tokens, constructor tokens, scopes, enhancers, middleware, 138 routes', () => {
   const full = diSnapshot();
-  const declared = spec.di_additions;
-  assert.equal(declared.unit, 'S9-U4b');
-  assert.deepEqual([declared.controllers, declared.providers, declared.routes.length], [['StudyTransferLocalController'],
+  // W9-API (D1500): the viewing-set resolve controller, its service and the unbound access-record port, one route.
+  const w9 = spec.di_additions_w9;
+  assert.equal(w9.unit, 'W9-API');
+  assert.deepEqual([w9.controllers, w9.providers, w9.routes.length], [['MultiStudyViewController'],
+    ['MultiStudyViewService', 'ViewingSetAccess=ViewingSetAccessUnbound'], 1]);
+  const u4b = spec.di_additions;
+  assert.equal(u4b.unit, 'S9-U4b');
+  assert.deepEqual([u4b.controllers, u4b.providers, u4b.routes.length], [['StudyTransferLocalController'],
     ['StudyTransferLocalService', 'DicomImportGateService'], 7]);
-  assert.deepEqual(Object.keys(declared.changed_injectables).filter(k => k !== 'note'), ['AuthGuard'], 'D1489: one constructor change, the AuthGuard');
-  assert.deepEqual(declared.changed_injectables.AuthGuard.before, spec.di.injectables.AuthGuard, 'its earlier form is the unchanged snapshot');
+  assert.deepEqual(Object.keys(u4b.changed_injectables).filter(k => k !== 'note'), ['AuthGuard'], 'D1489: one constructor change, the AuthGuard');
+  assert.deepEqual(u4b.changed_injectables.AuthGuard.before, spec.di.injectables.AuthGuard, 'its earlier form is the unchanged snapshot');
+  const declared = {
+    controllers: [...w9.controllers, ...u4b.controllers],
+    providers: [...u4b.providers, ...w9.providers],
+    injectables: { ...u4b.injectables, ...w9.injectables },
+    changed_injectables: u4b.changed_injectables,
+    routes: [...w9.routes, ...u4b.routes].sort((a, b) =>
+      `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
+  };
   assert.equal(full.routes.length, 138 + declared.routes.length);
   // W5-API (D1460) x S9-U4b: both declarations are taken back - the added draft argument, then the U4b additions.
   const now = withoutDeclared(withoutW5Arguments(full), declared);
   assert.deepEqual(now, spec.di);
   assert.equal(now.routes.length, 138);
   assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
-  assert.ok(declared.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
+  assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
+  assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {
