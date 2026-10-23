@@ -3,7 +3,7 @@
 This is an accident barrier, not a sandbox against code that edits the gate.
 Neither an environment variable nor importing a live TestCase grants permission.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -87,11 +87,47 @@ def refuse_if_pending(environment):
                           + "' needs fixture inspection: " + str(path))
 
 
+@contextmanager
+def bookkeeping(wait_seconds=10):
+    """Short lock for reading and changing marker files only (markers.lock).
+
+    It is separate from the live lease (live.lock), which a run holds for its whole
+    duration, so finishing or inspecting one environment's record never waits for
+    a live run in another environment (D1804). Held only for file updates; a busy
+    lock is retried for a bounded time."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        stack = ExitStack()
+        try:
+            stack.enter_context(exclusive(STATE / "markers.lock"))
+            break
+        except LeaseBusy:
+            stack.close()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+    with stack:
+        yield
+
+
 def preflight_live(environment=None):
     """Fail fast while another live run owns the lease, or while an uninspected
     failed run used this same environment. Other environments are not blocked."""
     with exclusive(STATE / "live.lock"):
-        refuse_if_pending(environment or environment_name())
+        with bookkeeping():
+            refuse_if_pending(environment or environment_name())
+
+
+def run_markers(unit, module=None, environment=None):
+    """Uninspected records, active or set aside, for the automatic inspection callers
+    that must find their own failed execution: those of this unit (and module) and,
+    when an environment is given, every record that names that environment (a
+    record there that is not the caller's own is a binding problem to report)."""
+    with bookkeeping():
+        return [contents for _, contents in pending_markers()
+                if isinstance(contents, dict) and (
+                    (contents.get("unit") == unit and (module is None or contents.get("module") == module))
+                    or (environment is not None and marker_environment(contents) == environment))]
 
 
 def set_aside(marker):
@@ -114,7 +150,7 @@ def release_after_inspection(record):
     The record is found by the run's identity, whether it is still the latest
     marker or was set aside by a run in another environment."""
     identity_keys = ("unit", "module", "attempt", "plan_sha256", "pid", "started_at")
-    with exclusive(STATE / "live.lock"):
+    with bookkeeping():
         pending = pending_markers()
         if not pending:
             raise Refused("No live inspection marker to release")
@@ -137,6 +173,11 @@ def release_after_inspection(record):
             raise Refused("Inspection does not identify the failed live run")
         marker, marker_contents = matches[0]
         validate_identity(marker_contents)
+        if marker == STATE / MARKER:
+            # The active marker may belong to a run still using its stack: inspect it only
+            # once no live run holds the lease. A set-aside record's run has ended.
+            with exclusive(STATE / "live.lock"):
+                pass
         if (not isinstance(inspection, dict)
                 or any(not isinstance(inspection.get(key), str) or not inspection[key].strip()
                        for key in ("unit", "module", "inspected_at", "inspector"))
@@ -237,25 +278,18 @@ def release_after_success(identity, wait_seconds=10):
     retried for a bounded time; any other refusal leaves the marker in place.
     """
     validate_identity(identity)
-    deadline = time.monotonic() + wait_seconds
-    while True:
-        try:
-            with exclusive(STATE / "live.lock"):
-                # A run in another environment may have set this marker aside meanwhile
-                # (D1804): finish this execution's own record wherever it now is.
-                pending = pending_markers()
-                if not pending:
-                    raise Refused("No readable live marker for this execution")
-                own = [path for path, contents in pending if contents == identity]
-                if len(own) != 1:
-                    # Never clear a marker this execution did not write.
-                    raise Refused("Live marker does not identify this execution")
-                own[0].unlink()
-                return
-        except LeaseBusy:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.1)
+    # Only the marker files are touched, under the short bookkeeping lock: a live run in
+    # another environment may hold the lease meanwhile and may have set this marker aside
+    # (D1804). Finish this execution's own record wherever it now is.
+    with bookkeeping(wait_seconds):
+        pending = pending_markers()
+        if not pending:
+            raise Refused("No readable live marker for this execution")
+        own = [path for path, contents in pending if contents == identity]
+        if len(own) != 1:
+            # Never clear a marker this execution did not write.
+            raise Refused("Live marker does not identify this execution")
+        own[0].unlink()
 
 
 @contextmanager
@@ -272,23 +306,24 @@ def live_run(unit, module, plan_sha256, attempt, release=True, environment=None)
         raise Refused("Nested live runs are forbidden")
     environment = environment or environment_name()
     with exclusive(STATE / "live.lock"):
-        refuse_if_pending(environment)
         quarantine = STATE / MARKER
-        if quarantine.exists():
-            # Another environment's uninspected run: keep its record for its owner
-            # (needs-inspection/); it does not block this environment.
-            set_aside(quarantine)
-        # Persist before permitting any stack access. A crash never silently
-        # reopens this environment; the executor must inspect its owned fixtures first.
-        identity = dict(unit=unit, module=module, plan_sha256=plan_sha256, attempt=attempt,
-                        pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat(),
-                        environment=environment)
-        validate_identity(identity)
-        # Atomic: a termination mid-write must not leave a marker without its
-        # identity, which no inspection could match and release.
-        temporary = STATE / "live-needs-inspection.new"
-        temporary.write_text(json.dumps(identity) + "\n", encoding="utf-8")
-        os.replace(str(temporary), str(quarantine))
+        with bookkeeping():
+            refuse_if_pending(environment)
+            if quarantine.exists():
+                # Another environment's uninspected run: keep its record for its owner
+                # (needs-inspection/); it does not block this environment.
+                set_aside(quarantine)
+            # Persist before permitting any stack access. A crash never silently
+            # reopens this environment; the executor must inspect its owned fixtures first.
+            identity = dict(unit=unit, module=module, plan_sha256=plan_sha256, attempt=attempt,
+                            pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat(),
+                            environment=environment)
+            validate_identity(identity)
+            # Atomic: a termination mid-write must not leave a marker without its
+            # identity, which no inspection could match and release.
+            temporary = STATE / "live-needs-inspection.new"
+            temporary.write_text(json.dumps(identity) + "\n", encoding="utf-8")
+            os.replace(str(temporary), str(quarantine))
         _permitted_pid = os.getpid()
         try:
             yield dict(identity)
@@ -296,6 +331,7 @@ def live_run(unit, module, plan_sha256, attempt, release=True, environment=None)
             raise
         else:
             if release:
-                quarantine.unlink()
+                with bookkeeping():
+                    quarantine.unlink()
         finally:
             _permitted_pid = None
