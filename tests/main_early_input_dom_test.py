@@ -553,7 +553,7 @@ class Run:
 class Steps:
     """A deterministic run (Astra fix-2 design §2): the clock is paused before the page's first script; the synthetic
     origin keeps every request waiting. `drive()` answers the waiting requests one at a time in arrival order - each
-    one's answer and body taken by the page before the next is answered - and moves virtual time only when nothing is
+    one's answer and body taken by the page before the next is answered (release_in_turn, OUTCOMES) - and moves virtual time only when nothing is
     waiting or in flight, to the next timer or animation frame that is due. A phase ends at a barrier: its condition, no
     request waiting (other than those the schedule holds), nothing in flight, no answer body held, and nothing over its
     virtual time limit. Past the limit or the host bound the phase fails; the case keeps the raw state first."""
@@ -564,6 +564,7 @@ class Steps:
         self.run, self.virtual = run, 0
         self.phases = []
         self.hold_events = []
+        self.consumptions = []                        # each released answer's outcome (OUTCOMES), in release order
         self.host_clock = time.monotonic
         self.deadline_hook = None
         run.site.steps = self
@@ -574,7 +575,10 @@ class Steps:
     def pending(self, state, holds):
         waiting = [request for _, request in self.run.site.waiting if not self.is_held(request, holds)]
         flying = [f for f in state["fetches"] if (f["state"] == "pending" and not held_key(request_key(f), holds))
-                  or f["body"] == "reading"]
+                  or f["body"] in ("reading", "stream")]
+        # A child frame's fetches are in flight too (its own ledger; the barrier is the whole page's).
+        flying += [{**f, "path": "(frame) " + f["path"]} for child in self.frame_ledgers() for f in child["fetches"]
+                   if f["state"] == "pending" or f["body"] in ("reading", "stream")]
         return waiting, flying
 
     def is_held(self, request, holds):
@@ -606,6 +610,7 @@ class Steps:
                 self.release_in_turn(index, what)
                 continue
             state = self.ledger()
+            self.no_deferred_body(state, what)
             waiting, flying = self.pending(state, holds)
             if flying:
                 run.page.wait_for_timeout(5)
@@ -622,36 +627,127 @@ class Steps:
             run.page.clock.run_for(step)
             self.virtual += step
 
+    # What became of one released answer (S9U0A-STEP44 r2, S44D-ASTRA-01/02). The page's ledger keeps the states; the
+    # released request is followed to exactly its own fetch (the document and ordinal it carries to the origin):
+    #   taken     its body was read, cancelled or failed (text/json/... or the body stream to its end)
+    #   held      its body waits on the schedule's own hold (the release callback lets it go later)
+    #   rejected  the fetch failed (aborted by the page, or a network failure)
+    #   unread    answered, and the page's reaction to it left the body untouched (headers only, e.g. 204 or ok-only).
+    #             Counted taken - but should the page consume that body later, after another answer arrived, the
+    #             ledger records it and the phase fails (DEFERRED BODY): its consumption was not in release order.
+    #   gone      its document was replaced or its frame detached before it was taken
+    #   untracked no ledger tag: not a fetch of a ledgered document (a navigation, an image, another origin)
+    # Waiting, never settled: the fetch still pending, or its body 'reading' / 'stream'.
+    OUTCOMES = ("taken", "held", "rejected", "unread", "gone", "untracked")
+
     def release_in_turn(self, index, what):
         """Answers one waiting request, then waits in host time (the virtual clock stays where it is) until the page has
-        taken that answer - no fetch of its identity pending beyond those still waiting at the origin, and no answer body
-        being read - before `drive` may answer the next. Answers released back to back in one virtual instant were taken
-        in host I/O order instead: two session transports' finish() removed their abort listeners in either order on the
-        same page (S9U0A-STEP44-ABORT-SWAP, D1706). No comparison is relaxed for it; the release order is made fixed."""
+        taken that answer - its own fetch (by its ledger tag) settled as one of OUTCOMES - before `drive` may answer the
+        next; and answers nothing while any body is still being read. Answers released back to back in one virtual
+        instant were taken in host I/O order instead: two session transports' finish() removed their abort listeners in
+        either order on the same page (S9U0A-STEP44-ABORT-SWAP, D1706). No comparison is relaxed for it; the release
+        order is made fixed."""
         run = self.run
-        identity = run.site.request_rows[run.site.waiting[index][1]]["key"][:3]
+        request = run.site.waiting[index][1]
+        key = run.site.request_rows[request]["key"]
+        tag = request.headers.get("x-syn-ledger")
+        try:
+            frame = request.frame
+        except PlaywrightError:
+            frame = None
+        self.until_nothing_read(what)
         run.site.release(index)
+        if not tag:
+            return self.settle(key, tag, "untracked")
         # Its own bound (real host time): a phase's deadline stays drive()'s own check.
         bound = time.monotonic() + self.HOST_S
         while True:
             run.delivery.pump()
-            try:
-                state = self.ledger()
-            except PlaywrightError:
-                state = None                          # a document is being replaced; its fetches went with it
-            if state is not None:
-                waiting = sum(run.site.request_rows[r]["key"][:3] == identity for _, r in run.site.waiting)
-                pending = sum(f["state"] == "pending" and request_key(f)[:3] == identity for f in state["fetches"])
-                if pending <= waiting and not any(f["body"] == "reading" for f in state["fetches"]):
-                    return
+            outcome = self.outcome(frame, tag)
+            if outcome:
+                return self.settle(key, tag, outcome)
             if time.monotonic() > bound:
-                raise AssertionError(f"PHASE {what}: the page did not take the answer to {identity[0]} {identity[1]} "
+                raise AssertionError(f"PHASE {what}: the page did not take the answer to {key[0]} {key[1]} "
                                      f"within {self.HOST_S:.0f} s of host time")
             run.page.wait_for_timeout(5)
 
+    def outcome(self, frame, tag):
+        """One look at the fetch `tag` names in `frame`'s document: an OUTCOMES name, or None while it is not settled."""
+        if frame is None or frame.is_detached():
+            return "gone"
+        try:
+            seen = frame.evaluate("t => window.__synLedger ? window.__synLedger.consumption(t) : null", tag)
+        except PlaywrightError:
+            return None                               # a document is being replaced: asked again
+        if seen is None or seen["doc"] != tag.split(":", 1)[0] or seen["entry"] is None:
+            return "gone"
+        entry = seen["entry"]
+        if entry["state"] == "pending":
+            return None
+        if entry["state"] == "failed":
+            return "rejected"
+        if entry["body"] in ("reading", "stream"):
+            return None
+        if entry["body"] == "untracked-stream":
+            raise AssertionError(f"RELEASE: the page consumed the answer to {entry['method']} {entry['path']} in a way "
+                                 "the ledger cannot follow to its end (pipeThrough/tee); not settled")
+        if entry["body"] == "held":
+            return "held"
+        if entry["body"] == "unread":
+            try:
+                frame.evaluate("t => window.__synLedger.settleUnread(t)", tag)
+            except PlaywrightError:
+                return None
+            return "unread"
+        return "taken"
+
+    def settle(self, key, tag, outcome):
+        self.consumptions.append({"key": list(key), "tag": tag, "outcome": outcome, "virtual": self.virtual})
+        return outcome
+
+    def frame_ledgers(self):
+        """The ledger state of every child frame that has one (the page's own frames; the main frame is ledger())."""
+        states = []
+        for frame in self.run.page.frames[1:]:
+            try:
+                state = frame.evaluate("() => window.__synLedger ? window.__synLedger.state() : null")
+            except PlaywrightError:
+                continue
+            if state:
+                states.append(state)
+        return states
+
+    def until_nothing_read(self, what):
+        """No answer is released while a body is being read anywhere in the page: a read begun later (after a timer)
+        would otherwise end in host I/O order against the next answer."""
+        bound = time.monotonic() + self.HOST_S
+        while True:
+            try:
+                reading = self.run.page.evaluate("window.__synLedger.reading()")
+                reading += [f["path"] for state in self.frame_ledgers() for f in state["fetches"]
+                            if f["body"] in ("reading", "stream")]
+            except PlaywrightError:
+                reading = ["(document being replaced)"]
+            if not reading:
+                return
+            if time.monotonic() > bound:
+                raise AssertionError(f"PHASE {what}: bodies still being read within {self.HOST_S:.0f} s of host time: "
+                                     f"{reading[:5]}")
+            self.run.delivery.pump()
+            self.run.page.wait_for_timeout(5)
+
+    @staticmethod
+    def no_deferred_body(state, what):
+        if state.get("late"):
+            raise AssertionError(f"PHASE {what}: DEFERRED BODY - the page consumed an answer it had left unread at its "
+                                 f"release only after a later answer arrived: {state['late'][:3]}")
+
     def settled(self, holds=()):
-        """Nothing waiting, in flight or held (asserted after every barrier)."""
+        """Nothing waiting, in flight or held (asserted after every barrier); no body consumed out of release order."""
         state = self.ledger()
+        self.no_deferred_body(state, "barrier")
+        for child in self.frame_ledgers():
+            self.no_deferred_body(child, "barrier (child frame)")
         waiting, flying = self.pending(state, holds)
         return {"waiting": [urlparse(r.url).path for r in waiting], "in_flight": [f["path"] for f in flying],
                 "held_bodies": state["held"]}
@@ -700,6 +796,7 @@ class Steps:
         return {"phase": phase, "status": status, "virtual_ms": self.virtual, "trace": run.trace(), "ledger": self.ledger(),
                 "site": [dict(item) for item in run.site.ledger], "screen": run.observe(), "errors": list(run.errors),
                 "dialogs": list(run.dialogs), "phases": list(self.phases), "holds": list(self.hold_events),
+                "consumptions": list(self.consumptions),
                 "inbox_badge": run.page.evaluate("document.getElementById('cvr-inbox-badge')?.innerText || null"),
                 "source": {"page": run.manifest["source"], "sha256": hashlib.sha256(run.delivery.body("main.html")).hexdigest(),
                     "layout": run.manifest.get("count"), "original": run.original,
@@ -2226,6 +2323,88 @@ class TraceOracle(PreCase):
         self.assertNotEqual(sh.dispatch_order(runs[0][1],provenance),sh.dispatch_order(runs[1][1],provenance))
 
 
+class ReleaseOrigin:
+    """A bare synthetic origin for the release self-checks (S9U0A-STEP44 r2): a paused clock and the ledger, every request
+    but the document waiting until the case's Steps answers it. `deliver_late` holds a released answer back from the
+    page for a number of driver pumps (the host I/O gap between the origin's answer and the page), `deliver_now` ends
+    that."""
+
+    URL = "https://syn-release.test/"
+
+    def __init__(self, browser):
+        self.context = browser.new_context()
+        self.context.clock.install(time=CLOCK_START)
+        self.context.clock.pause_at(CLOCK_START)
+        self.context.add_init_script(sh.LEDGER_SCRIPT)
+        self.waiting, self.request_rows, self.ledger, self.late, self.pumps = [], {}, [], [], None
+        self.site = self
+        self.delivery = self
+        self.context.route("**/*", self.handle)
+        self.page = self.context.new_page()
+        self.page.set_default_timeout(10000)
+        self.page.goto(self.URL, wait_until="commit")
+        self.steps = Steps(self)
+
+    def handle(self, route, request):
+        path = urlparse(request.url).path
+        if path == "/":
+            return route.fulfill(body="<!doctype html><title>SYN release</title><body></body>", content_type="text/html")
+        if path == "/favicon.ico":
+            return route.fulfill(status=404, body="")
+        identity = (request.method, path, canonical_query(urlparse(request.url).query))
+        row = {"key": (*identity, 1 + sum(r["key"][:3] == identity for r in self.ledger)), "path": path}
+        self.ledger.append(row)
+        self.request_rows[request] = row
+        self.waiting.append((route, request))
+
+    @staticmethod
+    def fulfill(route):
+        try:
+            route.fulfill(body="synthetic", content_type="text/plain")
+        except PlaywrightError:
+            pass                                      # the page gave the request up (aborted)
+
+    def release(self, index=0):
+        route, request = self.waiting.pop(index)
+        self.request_rows[request]["released_at"] = self.steps.virtual
+        if self.pumps is None:
+            return self.fulfill(route)
+        self.late.append(route)
+
+    def deliver_late(self, after_pumps):
+        """The next answers reach the page only at the `after_pumps`-th pump (None: never)."""
+        self.pumps, self.after_pumps = [], after_pumps
+        return self.pumps
+
+    def deliver_now(self):
+        self.pumps = None
+        while self.late:
+            self.fulfill(self.late.pop(0))
+
+    def pump(self):
+        if self.pumps is None:
+            return
+        self.pumps.append(len(self.late))
+        if self.after_pumps is not None and len(self.pumps) >= self.after_pumps:
+            while self.late:
+                self.fulfill(self.late.pop(0))
+
+    def until(self, predicate, what, timeout=10.0):
+        end = time.monotonic() + timeout
+        while not predicate():
+            if time.monotonic() > end:
+                raise AssertionError(f"SETUP: {what} not reached")
+            self.page.wait_for_timeout(5)
+
+    def close(self):
+        for route in [*self.late, *(r for r, _ in self.waiting)]:
+            try:
+                route.abort()
+            except PlaywrightError:
+                pass
+        self.context.close()
+
+
 # ── harness self-checks (F2-I05, F2-I06) ──
 class HarnessSelfChecks(PreCase):
     SENTINEL = {"id": "SYN-SENTINEL", "name": "SYN Sentinel Search", "quick": "SENTINEL", "days": -1, "mode": "Radiology",
@@ -2321,6 +2500,161 @@ class HarnessSelfChecks(PreCase):
             self.assertEqual(released, run.page.evaluate("window.__serialTaken"), "taken in release order")
         finally:
             run.close()
+
+    # ── S9U0A-STEP44 r2 (D1720): the released answer's own fetch and the explicit consumption states ──
+    def origin(self):
+        origin = ReleaseOrigin(self.browser)
+        self.addCleanup(origin.close)
+        return origin
+
+    def test_a_released_answer_settles_only_its_own_fetch_of_its_own_document(self):
+        # S44D-ASTRA-01: a same-identity waiter of a replaced document, an aborted fetch or an image request must not
+        # settle another request's answer; the current document's fetch stays awaited until it is delivered and taken.
+        origin = self.origin()
+        origin.page.evaluate("() => { fetch('/api/same').catch(() => {}); }")
+        origin.until(lambda: len(origin.waiting) == 1, "the first document's request waits")
+        origin.page.goto(ReleaseOrigin.URL, wait_until="commit")
+        origin.page.evaluate("() => { window.taken = []; fetch('/api/same').then(r => r.text()).then(() => taken.push('same')); }")
+        origin.until(lambda: len(origin.waiting) == 2, "the second document's request waits")
+        pumps = origin.deliver_late(after_pumps=3)
+        outcome = origin.steps.release_in_turn(1, "current document's request")
+        self.assertGreaterEqual(len(pumps), 3, "not settled before its answer was delivered (a stale same-identity "
+                                               "waiter of the replaced document must not count for it)")
+        self.assertEqual(["same"], origin.page.evaluate("taken"), "settled once the page took its body")
+        self.assertEqual("taken", outcome, "the current fetch is settled by its own answer")
+        origin.deliver_now()
+        self.assertEqual("gone", origin.steps.release_in_turn(0, "replaced document's request"),
+                         "the replaced document's request is settled as gone, never as the current one")
+        # Aborted fetch and image request of one identity with a current fetch: each settles only itself.
+        origin.page.evaluate("""() => {
+          window.taken = []; const control = new AbortController(); window.__abortFirst = () => control.abort();
+          fetch('/api/twice', { signal: control.signal }).catch(() => taken.push('aborted'));
+          fetch('/api/twice').then(r => r.text()).then(() => taken.push('twice'));
+          const image = new Image(); image.src = '/api/twice'; document.body.append(image);
+        }""")
+        origin.until(lambda: len(origin.waiting) == 3, "two fetches and an image wait")
+        origin.page.evaluate("window.__abortFirst()")
+        origin.until(lambda: origin.page.evaluate("taken.includes('aborted')"), "the first fetch aborted")
+        kinds = [request.resource_type for _, request in origin.waiting]
+        image = kinds.index("image")
+        self.assertEqual("untracked", origin.steps.release_in_turn(image, "image request"))
+        self.assertEqual("rejected", origin.steps.release_in_turn(0, "aborted fetch"))
+        pumps = origin.deliver_late(after_pumps=3)
+        self.assertEqual("taken", origin.steps.release_in_turn(0, "current fetch of the same identity"))
+        self.assertGreaterEqual(len(pumps), 3, "the aborted and image requests did not settle the current fetch")
+        self.assertEqual(["aborted", "twice"], origin.page.evaluate("taken"))
+
+    def test_a_body_consumed_after_a_later_answer_fails_the_phase(self):
+        # S44D-ASTRA-02: an answer left unread by its reaction and read by a later task, after the next answer arrived,
+        # was not taken in release order: the phase fails (DEFERRED BODY) instead of counting it settled.
+        origin = self.origin()
+        origin.page.evaluate("""() => { window.taken = [];
+          fetch('/api/late').then(r => { setTimeout(async () => { await r.text(); taken.push('late'); }, 20); });
+          fetch('/api/next').then(async r => { await r.text(); taken.push('next'); });
+        }""")
+        origin.until(lambda: len(origin.waiting) == 2, "both requests wait")
+        with self.assertRaisesRegex(AssertionError, r"DEFERRED BODY.*/api/late"):
+            origin.steps.drive(lambda: origin.page.evaluate("taken.length") == 2, "deferred body", 100)
+        self.assertEqual(["unread", "taken"], [c["outcome"] for c in origin.steps.consumptions])
+
+    def test_consumption_states_and_their_schedules(self):
+        """The controls of the deferred-body rule: what still settles, and how."""
+        with self.subTest("immediate reads, in release order"):
+            origin = self.origin()
+            origin.page.evaluate("""() => { window.taken = [];
+              for (const name of ['one', 'two']) fetch('/api/' + name).then(r => r.text()).then(() => taken.push(name)); }""")
+            origin.until(lambda: len(origin.waiting) == 2, "both wait")
+            origin.steps.drive(lambda: origin.page.evaluate("taken.length") == 2, "immediate", 100)
+            self.assertEqual((["one", "two"], ["taken", "taken"], 0),
+                             (origin.page.evaluate("taken"), [c["outcome"] for c in origin.steps.consumptions],
+                              origin.steps.virtual))
+        with self.subTest("headers only, then another answer"):
+            origin = self.origin()
+            origin.page.evaluate("""() => { window.taken = [];
+              fetch('/api/ok').then(r => { if (r.ok) taken.push('ok'); });
+              fetch('/api/next').then(r => r.text()).then(() => taken.push('next')); }""")
+            origin.until(lambda: len(origin.waiting) == 2, "both wait")
+            origin.steps.drive(lambda: origin.page.evaluate("taken.length") == 2, "headers only", 100)
+            self.assertEqual(["unread", "taken"], [c["outcome"] for c in origin.steps.consumptions])
+            self.assertEqual({"waiting": [], "in_flight": [], "held_bodies": []}, origin.steps.settled())
+        with self.subTest("a later read with no answer in between"):
+            origin = self.origin()
+            origin.page.evaluate("""() => { window.taken = [];
+              fetch('/api/alone').then(r => { setTimeout(async () => { await r.text(); taken.push('alone'); }, 20); }); }""")
+            origin.until(lambda: len(origin.waiting) == 1, "it waits")
+            origin.steps.drive(lambda: origin.page.evaluate("taken.length") == 1, "later read alone", 100)
+            self.assertEqual((["unread"], 20), ([c["outcome"] for c in origin.steps.consumptions], origin.steps.virtual))
+        with self.subTest("a body read as a stream"):
+            origin = self.origin()
+            origin.page.evaluate("""() => { window.taken = [];
+              fetch('/api/stream').then(async r => { const reader = r.body.getReader();
+                while (!(await reader.read()).done) {} taken.push('stream'); });
+              fetch('/api/next').then(r => r.text()).then(() => taken.push('next')); }""")
+            origin.until(lambda: len(origin.waiting) == 2, "both wait")
+            origin.steps.drive(lambda: origin.page.evaluate("taken.length") == 2, "stream", 100)
+            self.assertEqual(["taken", "taken"], [c["outcome"] for c in origin.steps.consumptions])
+            self.assertEqual(["read", "read"], [f["body"] for f in origin.steps.ledger()["fetches"]])
+            self.assertEqual(["stream", "next"], origin.page.evaluate("taken"))
+        with self.subTest("a clone read, a body piped to its end"):
+            origin = self.origin()
+            origin.page.evaluate("""() => { window.taken = [];
+              fetch('/api/clone').then(r => r.clone().text()).then(() => taken.push('clone'));
+              fetch('/api/pipe').then(r => r.body.pipeTo(new WritableStream())).then(() => taken.push('pipe')); }""")
+            origin.until(lambda: len(origin.waiting) == 2, "both wait")
+            origin.steps.drive(lambda: origin.page.evaluate("taken.length") == 2, "clone and pipe", 100)
+            self.assertEqual(["taken", "taken"], [c["outcome"] for c in origin.steps.consumptions])
+            self.assertEqual(["clone", "pipe"], origin.page.evaluate("taken"))
+        with self.subTest("the schedule's body hold"):
+            origin = self.origin()
+            key = json.dumps(("GET", "/api/body-hold", (), 1), separators=(",", ":"))
+            origin.page.evaluate("""key => { window.taken = []; window.__synBodyHolds = new Map([[key, []]]);
+              fetch('/api/body-hold').then(r => r.text()).then(() => taken.push('body')); }""", key)
+            origin.until(lambda: len(origin.waiting) == 1, "it waits")
+            released = []
+
+            def release(state):
+                if not state["held"] or origin.steps.virtual < 16:
+                    return False
+                released.append(origin.steps.virtual)
+                return origin.page.evaluate("key => window.__synLedger.release(key)", key) > 0
+            origin.steps.drive(lambda: origin.page.evaluate("taken.length") == 1, "body hold", 100, release=release)
+            self.assertEqual((["held"], [16], 16), ([c["outcome"] for c in origin.steps.consumptions], released,
+                                                    origin.steps.virtual))
+        with self.subTest("the schedule's request hold"):
+            origin = self.origin()
+            origin.page.evaluate("""() => { window.taken = [];
+              fetch('/api/held').then(r => r.text()).then(() => taken.push('held'));
+              fetch('/api/free').then(r => r.text()).then(() => taken.push('free')); }""")
+            origin.until(lambda: len(origin.waiting) == 2, "both wait")
+            origin.steps.drive(lambda: origin.page.evaluate("taken.includes('free')"), "request hold", 100,
+                               holds={("GET", "/api/held", (), 1)})
+            self.assertEqual((["/api/held"], ["free"], 0), ([urlparse(q.url).path for _, q in origin.waiting],
+                                                            origin.page.evaluate("taken"), origin.steps.virtual))
+        with self.subTest("an answer never delivered fails within the host bound"):
+            origin = self.origin()
+            origin.page.evaluate("() => { fetch('/api/never').catch(() => {}); }")
+            origin.until(lambda: len(origin.waiting) == 1, "it waits")
+            origin.deliver_late(after_pumps=None)
+            origin.steps.HOST_S = 0.3
+            with self.assertRaisesRegex(AssertionError, "did not take the answer to GET /api/never"):
+                origin.steps.release_in_turn(0, "never delivered")
+            self.assertEqual(0, origin.steps.virtual, "no virtual time spent waiting")
+
+    def test_no_answer_is_released_while_a_body_is_being_read(self):
+        # Sibling of S44D-ASTRA-02 (D1080): a body still being read (here a stream the page opened and keeps) keeps the
+        # next answer waiting; released, both would end in host I/O order.
+        origin = self.origin()
+        origin.page.evaluate("""() => {
+          fetch('/api/open').then(r => { window.__reader = r.body.getReader(); });
+          fetch('/api/after').then(r => r.text()); }""")
+        origin.until(lambda: len(origin.waiting) == 2, "both wait")
+        origin.deliver_now()
+        origin.site.release(0)
+        origin.until(lambda: origin.page.evaluate("!!window.__reader"), "the page holds the first body's stream")
+        origin.steps.HOST_S = 0.3
+        with self.assertRaisesRegex(AssertionError, "bodies still being read.*/api/open"):
+            origin.steps.release_in_turn(0, "next answer during a read")
+        self.assertEqual(["/api/after"], [urlparse(q.url).path for _, q in origin.waiting], "the next answer still waits")
 
     def render_dispatch_counterexamples(self, event):
         body = TraceOracle.ORDER.replace("'click'", repr(event)).replace(

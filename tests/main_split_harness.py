@@ -779,30 +779,122 @@ def keep(directory, name, value):
 # wraps are the paused clock's. `__synBodyHolds` maps exact serialized request keys to release callbacks.
 LEDGER_SCRIPT = r"""(() => {
   if (window.__synLedger) return;
-  const fetches = [], timers = new Map(), answers = new WeakMap();
-  let count = 0;
+  const fetches = [], timers = new Map(), answers = new WeakMap(), streams = new WeakMap(), readers = new WeakMap();
+  let count = 0, answersSeen = 0;
+  const late = [];
+  // S9U0A-STEP44 r2 (S44D-ASTRA-01): each fetch of this document carries its own tag (document, ordinal) to the
+  // synthetic origin, so the harness settles a released request against exactly that fetch of exactly that document.
+  const doc = (() => { const a = new Uint32Array(2); crypto.getRandomValues(a); return a[0].toString(36) + a[1].toString(36); })();
+  const byTag = new Map();
   const realFetch = window.fetch;
   const canonical = query => [...new URLSearchParams(query)].sort((a, b) =>
     a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0);
+  // (S44D-ASTRA-02) A body first consumed after the harness counted it unread, once another answer has arrived since:
+  // the order of that consumption against the later answer was not the release order. Recorded; the harness fails.
+  const consume = (entry, how) => {
+    if (entry.settledUnread !== undefined && entry.lateConsumed === undefined) {
+      entry.lateConsumed = how;
+      if (answersSeen > entry.settledUnread)
+        late.push({ tag: entry.tag, method: entry.method, path: entry.path, query: entry.query, how,
+                    answersAtSettle: entry.settledUnread, answersAtConsumption: answersSeen });
+    }
+  };
   window.fetch = function (input, init) {
-    let path = '', query = '';
-    try { const url = new URL(typeof input === 'string' ? input : input.url, location.href); path = url.pathname; query = url.search; } catch (_) {}
+    let path = '', query = '', origin = null;
+    try { const url = new URL(typeof input === 'string' ? input : input.url, location.href); path = url.pathname; query = url.search; origin = url.origin; } catch (_) {}
     const entry = { n: ++count, method: String((init && init.method) || (input && input.method) || 'GET').toUpperCase(), path, query,
       at: Date.now(), traceSequence: window.__kinTrace?.now(), state: 'pending', status: null, body: 'unread' };
     entry.canonicalQuery = canonical(query);
     entry.occurrence = 1 + fetches.filter(f => f.method === entry.method && f.path === path &&
       JSON.stringify(f.canonicalQuery) === JSON.stringify(entry.canonicalQuery)).length;
     entry.key = [entry.method, entry.path, entry.canonicalQuery, entry.occurrence];
+    entry.tag = null;
+    let args = arguments;
+    if (origin === location.origin) {
+      // Same origin only (a custom header elsewhere would add a preflight the page does not make). The page's own
+      // init and headers are left untouched; the request gets a copy with the tag.
+      try {
+        const own = init && init.headers !== undefined ? init.headers : (input instanceof Request ? input.headers : undefined);
+        const headers = new Headers(own);
+        headers.set('x-syn-ledger', doc + ':' + entry.n);
+        args = [input, Object.assign({}, init, { headers })];
+        entry.tag = doc + ':' + entry.n;
+        byTag.set(entry.tag, entry);
+      } catch (_) { args = arguments; }
+    }
     fetches.push(entry);
-    return realFetch.apply(this, arguments).then(response => {
-      entry.state = 'answered'; entry.answeredAt = Date.now(); entry.status = response.status; answers.set(response, entry); return response;
+    return realFetch.apply(this, args).then(response => {
+      entry.state = 'answered'; entry.answeredAt = Date.now(); entry.status = response.status; entry.answer = ++answersSeen;
+      answers.set(response, entry); return response;
     }, error => { entry.state = 'failed'; entry.error = String(error && error.name); throw error; });
+  };
+  // A body taken as a stream (getReader / cancel) is consumption too: 'stream' while it is being read, then read,
+  // cancelled or failed.
+  const bodyGetter = Object.getOwnPropertyDescriptor(Response.prototype, 'body').get;
+  Object.defineProperty(Response.prototype, 'body', { configurable: true, enumerable: true, get() {
+    const stream = bodyGetter.call(this), entry = answers.get(this);
+    if (entry && stream && !streams.has(stream)) streams.set(stream, entry);
+    return stream;
+  } });
+  const getReader = ReadableStream.prototype.getReader;
+  ReadableStream.prototype.getReader = function () {
+    const reader = getReader.apply(this, arguments), entry = streams.get(this);
+    if (entry) {
+      readers.set(reader, entry);
+      consume(entry, 'stream');
+      if (entry.body === 'unread') entry.body = 'stream';
+    }
+    return reader;
+  };
+  const cancelStream = ReadableStream.prototype.cancel;
+  ReadableStream.prototype.cancel = function () {
+    const entry = streams.get(this);
+    if (entry) { consume(entry, 'cancel'); if (entry.body === 'unread' || entry.body === 'stream') entry.body = 'cancelled'; }
+    return cancelStream.apply(this, arguments);
+  };
+  const readChunk = ReadableStreamDefaultReader.prototype.read;
+  ReadableStreamDefaultReader.prototype.read = function () {
+    const entry = readers.get(this), chunk = readChunk.apply(this, arguments);
+    if (!entry) return chunk;
+    return chunk.then(result => { if (result.done && entry.body === 'stream') entry.body = 'read'; return result; },
+                      error => { if (entry.body === 'stream') entry.body = 'failed'; throw error; });
+  };
+  const pipeTo = ReadableStream.prototype.pipeTo;
+  ReadableStream.prototype.pipeTo = function () {
+    const entry = streams.get(this), piped = pipeTo.apply(this, arguments);
+    if (!entry) return piped;
+    consume(entry, 'pipeTo');
+    if (entry.body === 'unread') entry.body = 'stream';
+    return piped.then(value => { if (entry.body === 'stream') entry.body = 'read'; return value; },
+                      error => { if (entry.body === 'stream') entry.body = 'failed'; throw error; });
+  };
+  // Consumption the ledger cannot follow to its end: the harness refuses to settle it (fails closed).
+  for (const name of ['pipeThrough', 'tee']) {
+    const native = ReadableStream.prototype[name];
+    ReadableStream.prototype[name] = function () {
+      const entry = streams.get(this);
+      if (entry) { consume(entry, name); entry.body = 'untracked-stream'; }
+      return native.apply(this, arguments);
+    };
+  }
+  const clone = Response.prototype.clone;
+  Response.prototype.clone = function () {
+    const copy = clone.apply(this, arguments), entry = answers.get(this);
+    if (entry) answers.set(copy, entry);
+    return copy;
+  };
+  const cancelReader = ReadableStreamDefaultReader.prototype.cancel;
+  ReadableStreamDefaultReader.prototype.cancel = function () {
+    const entry = readers.get(this);
+    if (entry && entry.body === 'stream') entry.body = 'cancelled';
+    return cancelReader.apply(this, arguments);
   };
   for (const name of ['json', 'text', 'arrayBuffer', 'blob', 'formData']) {
     const read = Response.prototype[name];
     Response.prototype[name] = function () {
       const entry = answers.get(this), reading = read.call(this);
       if (!entry) return reading;
+      consume(entry, name);
       const key = JSON.stringify(entry.key);
       const holds = window.__synBodyHolds, held = holds && holds.has(key);
       const finish = promise => promise.then(value => { entry.body = 'read'; entry.consumedAt = Date.now(); return value; }, error => { entry.body = 'failed'; throw error; });
@@ -836,12 +928,18 @@ LEDGER_SCRIPT = r"""(() => {
     state() {
       const live = [...timers.values()].filter(t => !t.done && !t.cleared);
       return { now: Date.now(), fetches: fetches.map(f => ({ ...f })),
-        inFlight: fetches.filter(f => f.state === 'pending' || f.body === 'reading').length,
+        inFlight: fetches.filter(f => f.state === 'pending' || f.body === 'reading' || f.body === 'stream').length,
         held: fetches.filter(f => f.body === 'held').map(f => f.path),
         timers: live.map(t => ({ kind: t.kind, delay: t.delay, due: due(t), fired: t.fired })),
-        nextDue: live.length ? Math.min(...live.map(due)) : null };
+        nextDue: live.length ? Math.min(...live.map(due)) : null, doc, late: late.map(l => ({ ...l })) };
     },
     release(path) { const list = window.__synBodyHolds && window.__synBodyHolds.get(path); const n = list ? list.length : 0; if (list) list.splice(0).forEach(go => go()); return n; },
+    // The fetch a tag names, if it belongs to this document; bodies being read anywhere in it.
+    consumption(tag) { const entry = byTag.get(tag); return { doc, entry: entry ? { ...entry } : null,
+      reading: fetches.filter(f => f.body === 'reading' || f.body === 'stream').map(f => f.path) }; },
+    reading() { return fetches.filter(f => f.body === 'reading' || f.body === 'stream').map(f => f.path); },
+    // The harness counted this answer taken with its body untouched (headers only, or not yet).
+    settleUnread(tag) { const entry = byTag.get(tag); if (entry && entry.settledUnread === undefined) entry.settledUnread = answersSeen; return !!entry; },
   }) });
 })();"""
 
