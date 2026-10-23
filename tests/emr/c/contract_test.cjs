@@ -1208,8 +1208,8 @@ test('C-C14 the C1 declaration matches the files and collected cases exactly; mi
     'migrations', 'models', 'mutants', 'order', 'owned_paths', 'records', 'req_risk_test', 'restore', 'round', 'routes', 'unit'].sort());
   assert.equal(unit.round, 'C1');
   const owned = unit.owned_paths;
-  assert.equal(owned.length, 20);
-  assert.equal(new Set(owned).size, 20);
+  assert.equal(owned.length, 19);
+  assert.equal(new Set(owned).size, 19);
   for (const file of owned) assert(fs.statSync(path.join(root, file)).isFile(), file);
   assert.deepEqual(owned.filter(p => unit.forbidden_single_writer.includes(p)), []);
   for (const dir of ['api/src/emr-report', 'api/src/emr-signature', 'tests/emr/c']) {

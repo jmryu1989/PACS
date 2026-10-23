@@ -2,7 +2,8 @@ name: Validate production image
 permissions:
   contents: read
 concurrency:
-  group: validate-${{ github.ref }}
+  # The nightly restore run keeps its own group so it never replaces a pending main-push run.
+  group: validate-${{ github.event_name == 'schedule' && 'nightly-' || '' }}${{ github.ref }}
   cancel-in-progress: false
 jobs:
   runtime:
@@ -1330,7 +1331,8 @@ jobs:
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
-        name: synthetic-runtime-record-runs
+        # Distinct from the runtime job's artifact: both now upload in the same workflow run.
+        name: synthetic-worklist-runtime-record-runs
         path: tmp/runtime-ci/
         if-no-files-found: error
         retention-days: 7
@@ -1888,6 +1890,9 @@ jobs:
     tags:
     - v*
   pull_request: null
+  # D1797/D1808: hosted nightly of runtime + restore-product on main; 18:00 UTC = 03:00 KST.
+  schedule:
+  - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
       candidate_sha:

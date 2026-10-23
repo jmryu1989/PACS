@@ -2,9 +2,12 @@ name: Nightly measurement regressions
 permissions:
   contents: read
 concurrency:
-  group: validate-${{ github.ref }}
+  group: measurements-nightly-${{ github.ref }}
   cancel-in-progress: false
 'on':
+  # D1797/D1808: public repository, so the hosted nightly costs nothing; 17:30 UTC = 02:30 KST.
+  schedule:
+  - cron: '30 17 * * *'
   workflow_dispatch: null
 jobs:
   measurements:

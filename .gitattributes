@@ -10,7 +10,6 @@ api/start-production.sh text eol=lf
 # throughout and target-compose.yml carries one CRLF line. `-text` forbids eol conversion on
 # checkin and checkout on every platform; `diff` keeps the files reviewable as text.
 rehearsal-bundle/** -text diff
-.github/workflows/stage2-rollout-rehearsal.yml -text diff
 
 # Ordered classic bundle: preserve the migration proof and served bytes on every checkout.
 worklist-v0/hpacs-lite/main.html text eol=lf

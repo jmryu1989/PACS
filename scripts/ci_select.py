@@ -63,10 +63,14 @@ def main():
     else:
         event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
         main_push = name == 'push' and os.environ.get('GITHUB_REF') == 'refs/heads/main'
-        paths = [] if main_push else event_paths(event, name)
+        paths = [] if main_push or name == 'schedule' else event_paths(event, name)
         selected = select(paths, all_jobs=name == 'workflow_dispatch' or
                           os.environ.get('GITHUB_REF', '').startswith('refs/tags/'),
                           main_push=main_push)
+        if name == 'schedule':
+            # The nightly run of main is the restore-product nightly (D1808); the measurement
+            # bulk has its own scheduled workflow.
+            selected = {job: job == 'restore-product' for job in selected}
     result = json.dumps(selected, separators=(',', ':'))
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:

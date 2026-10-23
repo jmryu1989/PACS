@@ -49,7 +49,6 @@
       "tests/ops_backup_test.py",
       "scripts/ops_export_inventory.py",
       "tests/ops_export_inventory_test.py",
-      ".github/workflows/stage2-rollout-rehearsal.yml",
       "rehearsal-bundle/bundle-sha256.txt",
       "rehearsal-bundle/rehearsal/stage2-rollout-rehearsal.yml",
       "rehearsal-bundle/rehearsal/emr-b-restore-plan.json",
