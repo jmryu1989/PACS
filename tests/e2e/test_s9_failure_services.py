@@ -75,14 +75,6 @@ class FailureServicesE2E(unittest.TestCase):
         self.cleanup_fixtures()
         event("fixture_cleanup", result="PASS")
 
-    def compose(self, *args):
-        result = subprocess.run(
-            ["docker", "compose", "-p", os.environ["COMPOSE_PROJECT_NAME"], *args],
-            cwd=ROOT, capture_output=True, text=True, timeout=120,
-        )
-        self.assertEqual(result.returncode, 0, "Owned Compose command failed: " + args[0])
-        return result.stdout.strip()
-
     def running(self, container):
         result = subprocess.run(
             ["docker", "inspect", "--format", "{{.State.Running}}", container],
@@ -111,7 +103,12 @@ class FailureServicesE2E(unittest.TestCase):
 
     @contextmanager
     def stopped(self, service):
-        container = self.compose("ps", "-q", service)
+        result = subprocess.run(
+            ["docker", "compose", "ps", "-q", service],
+            cwd=ROOT, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, "Owned Compose command failed: ps")
+        container = result.stdout.strip()
         self.assertTrue(container and len(container.splitlines()) == 1, "Expected one owned service")
         self.assertTrue(self.running(container))
         self.assertEqual(self.health(service), 200)
@@ -119,23 +116,57 @@ class FailureServicesE2E(unittest.TestCase):
         # Register restoration before stop: a failed command may already have stopped it.
         try:
             type(self).service_restored = False
-            self.compose("stop", service)
+            result = subprocess.run(
+                ["docker", "compose", "stop", service],
+                cwd=ROOT, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, "Owned Compose command failed: stop")
             self.assertFalse(self.running(container))
             event("stopped", service=service, running=False)
             yield
         finally:
-            self.compose("start", service)
+            result = subprocess.run(
+                ["docker", "compose", "start", service],
+                cwd=ROOT, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, "Owned Compose command failed: start")
             self.wait_healthy(service)
             self.assertTrue(self.running(container))
             type(self).service_restored = True
             event("restored", service=service, running=True, health=200)
 
     def metrics(self, page):
-        with page.expect_response(lambda r: r.url.endswith("/api/admin/metrics")) as response:
-            page.get_by_role("button", name="Refresh Operations", exact=True).click()
+        url = self.stack.proxy + "/api/admin/metrics"
+        started = time.monotonic()
+
+        def failed(request):
+            if request.url == url:
+                event("admin_metrics_request_failed", failure=request.failure)
+
+        page.on("requestfailed", failed)
+        try:
+            with page.expect_response(lambda r: r.url == url) as response:
+                page.get_by_role("button", name="Refresh Operations", exact=True).click()
+        except PlaywrightError:
+            # A browser response wait alone cannot distinguish a server stall
+            # from a cancelled read on this Docker/browser host. Preserve both
+            # observations while retaining the original test failure.
+            try:
+                probe_started = time.monotonic()
+                probe = page.request.get(url, timeout=30000)
+                event("admin_metrics_direct_probe", status=probe.status,
+                      elapsed=time.monotonic() - probe_started)
+            except PlaywrightError as error:
+                event("admin_metrics_direct_probe_failed", error=str(error))
+            raise
+        finally:
+            page.remove_listener("requestfailed", failed)
         self.assertEqual(response.value.status, 200)
         body = response.value.json()
-        return next(row for row in body["metrics"] if row["key"] == "storage.server")
+        storage = next(row for row in body["metrics"] if row["key"] == "storage.server")
+        event("admin_metrics_response", status=response.value.status,
+              state=storage["state"], value=storage["value"], elapsed=time.monotonic() - started)
+        return storage
 
     def test_orthanc_observation_thumbnail_storage_and_recovery(self):
         fixture = self.stack.create_fixture()
