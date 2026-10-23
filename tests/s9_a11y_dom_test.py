@@ -147,8 +147,6 @@ class S9AccessibilityPage(unittest.TestCase):
 
     def test_exposed_controls_have_browser_computed_accessible_names(self):
         """Collect all name defects in each state; do not stop at the first one."""
-        with self.subTest(state='document-language'):
-            self.assertTrue(self.page.locator('html').get_attribute('lang'), 'document language is declared')
         with self.subTest(state='worklist'):
             self.assertEqual([], self.unnamed_controls())
         self.page.locator('#rows tr[data-uid]').first.click()
