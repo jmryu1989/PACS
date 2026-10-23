@@ -106,6 +106,16 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),5)
         self.assertEqual(runner.collect(plan).countTestCases(),5)
 
+    def test_s9_u0e_served_profile_selects_the_one_declared_launch_case(self):
+        filename,class_name,unit=ci.PROFILES['s9-u0e-served']['suites'][0]
+        plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+        cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+        declared={class_name+'.'+name for name in cls.__dict__ if name.startswith('test_s9_u0e_')}
+        # Only the case this module declares itself; the inherited ReadingWorkspaceE2E cases stay out.
+        self.assertEqual({row['case'] for row in plan['tests']},declared)
+        self.assertEqual(len(plan['tests']),1)
+        self.assertEqual(runner.collect(plan).countTestCases(),1)
+
     def test_u5_fixups_profile_selects_exactly_the_five_fix_round_cases(self):
         # S7-U5 final review part 1, blocker 3: the five authored cases that pin the fix round, each once. run-tests.py
         # collects no imported class, so the module carries them on local subclasses that declare nothing; each selected

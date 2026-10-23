@@ -147,6 +147,10 @@ jobs:
         docker run --rm --network none --read-only --user nginx --entrypoint sh kin-proxy:ci -c 'test -r /usr/share/nginx/html/kin-brand/kin-favicon-32.png && test -r /usr/share/nginx/html/kin-brand/kin-emblem-j1.svg && test -r /etc/nginx/templates/default.conf.template'
     - name: Reproduce a private deployment checkout
       run: chmod -R go-rwx api
+    - name: OHIF generated configuration matches ordered sources
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
+    - name: OHIF builder byte and stale-output boundaries
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-build --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js --file tests/s9_u0e_build_test.py -- python3 scripts/run-tests.py --module tests/s9_u0e_build_test.py --mode pure --unit ci-s9-u0e-build
     - name: Build the production target
       env:
         CODE_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
@@ -1843,6 +1847,48 @@ jobs:
       REHEARSAL_IMAGE: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
       REHEARSAL_POSTGRES: postgres:16-alpine@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
       BUNDLE: rehearsal-bundle
+  s9-u0e-served:
+    # S9-U0E (main #199): the generated config/ohif.js as Orthanc serves it on a normal worklist launch, in its
+    # own job and runner. The exact-selection self-check runs once in runtime (ci-selfchecks).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        persist-credentials: false
+        ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+    - name: OHIF generated configuration matches ordered sources before the live run
+      run: python3 scripts/build-ohif-config.py --check
+    - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+      run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+    - name: Cache pinned Python downloads
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
+    - name: Install synthetic DICOM and pinned browser test dependencies
+      timeout-minutes: 15
+      run: |
+        python3 -m venv "$RUNNER_TEMP/s9-u0e-python"
+        "$RUNNER_TEMP/s9-u0e-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+        "$RUNNER_TEMP/s9-u0e-python/bin/python" -m playwright install --with-deps chromium
+    - name: Isolated declared S9-U0E served configuration test
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/s9-u0e-python/bin/python" tests/measurement_ci.py --profile s9-u0e-served
+    - name: Sanitized synthetic S9-U0E served evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-s9-u0e-served-results
+        path: |
+          tests/e2e/artifacts/s9-u0e-served-ci/
+          tmp/s9-u0e/served/
+          tmp/s9-u0e-served-ci/
+        if-no-files-found: error
+        retention-days: 7
+    needs: runtime
+    if: ${{ fromJSON(needs.runtime.outputs.jobs)['s9-u0e-served'] }}
   patient-identity-measurements:
     runs-on: ubuntu-24.04
     timeout-minutes: 150

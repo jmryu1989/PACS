@@ -13,6 +13,7 @@
     "api/start-production.sh",
     "api/tsconfig*.json",
     "config/ohif.js",
+    "config/ohif/**",
     "config/orthanc.json",
     "docker-compose*.yml",
     "gateway/agent/**",
@@ -20,6 +21,7 @@
     "keycloak/**",
     "proxy/**",
     "scripts/build-main-split-bundle.py",
+    "scripts/build-ohif-config.py",
     "scripts/ci_browser_apt.py",
     "scripts/main-split-order.json",
     "scripts/record-run.py",
@@ -148,7 +150,8 @@
     "volume-marks",
     "volume-rendering",
     "worklist-ux-measurements",
-    "patient-identity-measurements"
+    "patient-identity-measurements",
+    "s9-u0e-served"
   ],
   "jobs": {
     "asr-engine": [
@@ -777,6 +780,14 @@
       "tests/live_test_gate.py",
       "api/src/emr-runtime/**",
       "api/src/emr-contract/**"
+    ],
+    "s9-u0e-served": [
+      "tests/e2e/test_prior_selection.py",
+      "tests/e2e/test_reading_workspace.py",
+      "tests/e2e/test_s9_u0e_equivalence.py",
+      "tests/live_test_gate.py",
+      "tests/measurement_ci.py",
+      "tests/s9_u0e_build_test.py"
     ],
     "patient-identity-measurements": [
       "tests/reading_appearance*",

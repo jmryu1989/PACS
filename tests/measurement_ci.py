@@ -157,6 +157,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_viewer_cell_merge.py', 'ViewerCellMergeE2E', 'ci-cell-merge'),),
     },
+    's9-u0e-served': {
+        'out': ROOT / 'tests/e2e/artifacts/s9-u0e-served-ci',
+        'project_prefix': 'kin-s9-u0e-ci-',
+        # S9-U0E: the generated config/ohif.js as Orthanc actually serves it, on a normal worklist launch. Its own job
+        # and runner so no other profile's budget is consumed. One case at the single-suite 900s ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_s9_u0e_equivalence.py', 'OHIFSourceEquivalenceE2E', 'ci-s9-u0e-served'),),
+    },
     'image-thumbnails': {
         'out': ROOT / 'tests/e2e/artifacts/image-thumbnails-ci',
         'project_prefix': 'kin-image-thumbs-ci-',

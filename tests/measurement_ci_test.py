@@ -612,6 +612,48 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['out'], other['out'])
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
 
+    def test_s9_u0e_served_profile_is_exact_and_separate(self):
+        profile = ci.PROFILES['s9-u0e-served']
+        self.assertEqual(profile['suites'], (('e2e/test_s9_u0e_equivalence.py', 'OHIFSourceEquivalenceE2E',
+                                              'ci-s9-u0e-served'),))
+        self.assertEqual(profile['out'].name, 's9-u0e-served-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-s9-u0e-ci-')
+        self.assertNotIn('suite_budgets', profile)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_s9_u0e_equivalence.py')
+        self.assertEqual(command[command.index('--class')+1], 'OHIFSourceEquivalenceE2E')
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name == 's9-u0e-served':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
+
+    def test_validate_workflow_runs_s9_u0e_served_in_its_own_bounded_job(self):
+        # Owner and artifact binding for every profile is test_all_profiles_have_unique_workflow_owners_and_report_artifacts;
+        # the exact-selection self-check runs once in runtime. Here: the served config is checked against its sources
+        # before the one bounded live run, and the evidence keeps both output directories.
+        owner = [row for row in self.catalog.profile_bindings()['s9-u0e-served'] if not row['dispatch']]
+        self.assertEqual([row['job'] for row in owner], ['s9-u0e-served'])
+        job = self.catalog.job('s9-u0e-served')
+        runs = [str(step.get('run', '')) for step in job['steps']]
+        check = next(i for i, run in enumerate(runs) if 'scripts/build-ohif-config.py --check' in run)
+        live = next(i for i, run in enumerate(runs) if '--profile s9-u0e-served' in run)
+        self.assertLess(check, live)
+        self.assertEqual(job['steps'][live].get('timeout-minutes'), 28)
+        uploads = [s for s in job['steps'] if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0]['with']['name'], 'synthetic-s9-u0e-served-results')
+        for path in ('tests/e2e/artifacts/s9-u0e-served-ci/', 'tmp/s9-u0e/served/'):
+            self.assertIn(path, uploads[0]['with']['path'].splitlines())
+        self.assertEqual(self.catalog.text().count('--profile s9-u0e-served'), 1)
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertNotIn('- s9-u0e-served', dispatch)
+
     def test_validate_attribution_record_binds_exact_scanner_inputs(self):
         import argparse
         import shlex
@@ -1131,6 +1173,8 @@ class MeasurementCiTests(unittest.TestCase):
                          {'context-loss', 'measurement-accuracy', 'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
+                          # S9-U0E: the served generated OHIF config, in its own validate.yml job.
+                          's9-u0e-served',
                           'gateway-e2e', 'critical-result-screens',
                           # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
                           'emr-b',

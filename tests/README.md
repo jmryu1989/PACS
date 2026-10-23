@@ -2972,3 +2972,31 @@ D1691 (r7, 사용자 승인 2026-10-22; D1606 선택 1·D1617/D1620 유지):
 - 이전 기록(v1~v3: `kin-study-transfer-local`·`kin-study-transfer-local:<owner>`)은 로그인 서버가 적혀 있지 않아 누구 것인지 증명할 수 없다. 바이트 그대로 보존하고(삭제·덮어쓰기·병합·정리·재표기 없음) 자동으로 보이거나 상태를 읽지 않으며, 그 이유를 한국어로 안내한다(기존 저장 안내 문단 하나에 함께; 노드 수 4 + 25 그대로). 새 기록은 별도의 v4 슬롯에 남는다. 이전의 "legacy 자동 재관찰" 약속은 사용자 승인으로 이 정책이 대신한다.
 - 복사 탭 oracle(`copied_tab`): 복사 문서의 상태 GET을 네트워크에서 잡아 두었다가 구별되는 오래된 retryable 답으로 풀고, 그 응답 본문 수신 완료와 복사 문서 행에의 적용(코드 표시)을 본 뒤에 버튼·POST 부재를 단언한다. 완전한 양성 답으로 복사 문서가 답을 적용함을 대조한다. helper 자체의 음성 대조: 잡힌 답은 준비로 세지 않고, 복사 문서의 처리를 PBKDF2로 늦춰도 적용 뒤에만 돌아온다.
 - 시험: DOM `test_r7_a01_*`(추월 12회·두 완료 순서·10회 뒤 수동 sending·반복 수동·종결 뒤 늦은 poll), `test_r7_a02_*`(같은 기관·sub 다른 로그인 서버 A→B→재로드→A·복사 탭·actor 변경·다른 sub 같은 actor·로그인 서버 없음/빈 값/문자 아님 뒤 정상 로그인; 기관만 다름은 이 합성 origin이 한 기관의 목록만 주므로 공용 모듈 시험), `test_r7_a03_*`(helper 대조), `test_r7_a04_*`(실제 v1/v2/v3·owner 슬롯 legacy). 공용 모듈 시험 `test_r6_a07_identity_vectors_*`는 로그인 서버만 다름·기관만 다름·다른 sub를 본다. 서버 S9U4-B88은 실제 `GET me` 처리기의 issuer가 두 설정에서 각각 그 작업의 ownerIssuer와 같고 설정이 없으면 null(서비스는 IMPORT_ISSUER_UNCONFIGURED)임을 묶는다. `session_work_gate_test.cjs` AUTH-ISS는 shipped `auth.js`가 issuer를 그대로 두고 없거나 문자열이 아니면 null로 둠을 본다. 변이는 62개에 R7 8개(응답 시점 계수·소진 뒤 재충전·auth/mount의 issuer 누락·발급자 공유 키·issuer 없는 신원 허용·legacy 재표기·legacy 덮어쓰기)를 더한 70개이고, `/me` issuer 누락은 서버 사례의 별도 고장 실행으로 확인한다. 전송 패널 DOM 단계 제한은 측정(70개, 로컬 약 380초; r6 hosted 284초/63개)에 따라 9분이다.
+
+## S9-U0E OHIF source build and equivalence
+
+REQ-S9-U0e-BEHAVIOUR-PRESERVED → RISK-SOURCE-ORDER → TEST-S9-U0E-BUILD.
+REQ-S9-U0e-INJECTION → RISK-STALE-SERVED-CONFIG → TEST-S9-U0E-SERVED.
+
+Edit `config/ohif/*.js`, then run `python scripts/build-ohif-config.py`.
+`config/ohif/source-order.json` defines the byte concatenation order;
+`source-map.json` maps the original declarations, registration order and loaders.
+`config/ohif.js` remains the single Orthanc UserConfiguration artifact.
+The builder preserves all source bytes and introduces no module scope or runtime loader.
+`--check` compares current sources and artifact; it does not pin future features to the extraction baseline.
+
+```sh
+python scripts/build-ohif-config.py --check
+python scripts/run-tests.py --module tests/s9_u0e_build_test.py --mode pure --unit s9-u0e-build
+python scripts/run-tests.py --module tests/e2e/test_s9_u0e_equivalence.py --mode live --unit s9-u0e-served
+```
+
+The first two commands need no stack. The live command requires a verified isolated synthetic stack
+and the existing execution gate. It launches from the real worklist, compares the HTTP-injected
+config bytes, records OHIF script responses and checks displayed study/series/SOP/frame identities.
+`KIN_EVIDENCE_DIR` selects its artifact directory (default `tmp/s9-u0e/served`).
+In CI the `runtime` job runs the first two commands, and the `s9-u0e-served` job runs the live case
+through `tests/measurement_ci.py --profile s9-u0e-served` on its own empty hosted runner.
+It does not replace the existing layout, identity, history, jobs, cine, precision, CT sync, volume,
+prior and clinician flows or same-candidate CI and binding review. Existing tests that rewrite
+app-config responses are auxiliary evidence under this unit's D73 contract.
