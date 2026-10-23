@@ -217,12 +217,19 @@
       // WORKLIST-SPLIT-UID: an unresolved study's kept text is never sent. It is a refused save, answered like the others
       // (Retry/Check/Stay, no target switch, nothing written); the text stays in the editor.
       if (a.identityUnresolved) return { status: "refused", reason: "환자 식별 불일치로 이 검사의 글을 저장할 수 없습니다. 원본 확인이 필요합니다" };
+      // W5: an explicit Related insert whose receipt is not settled keeps the Target (D1423 R3): the move waits for its Check or
+      // same-ID Retry; the Notice speaks for that operation (its own action), and no ordinary write is sent for its text.
+      const related = relatedInsertPending(uid);
+      if (related) return { status: related.state === "refused" ? "refused" : "unknown", reason: RELATED_PENDING_REASON };
       const held = heldByOther(studies.find(s => s.uid === uid));
       if (held) return { status: "refused", reason: `${displayActor(held)} 님이 판독 중입니다` };
       return null;
     }
 
     function enterStudy(uid, { deferViewer = false, openSelected = false } = {}) {
+      // W5: a move closes Related Report mode first (the move gate already confirmed the Target clean); its return point
+      // belongs to the study being left.
+      relatedMode?.exit();
       clearReportNotice();
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);

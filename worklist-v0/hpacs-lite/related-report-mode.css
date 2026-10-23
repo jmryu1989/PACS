@@ -1,0 +1,43 @@
+/* W5 Related Report mode (design v5 section 1.4/1.7). The mode takes the editor's place in the report column; the editor
+   host keeps its nodes, text and Undo while it is hidden and inert. Both the Workspace and body.reading use these rules. */
+#related-mode[hidden], .redit[hidden] { display: none !important; }
+#related-mode { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 8px;
+  overflow: auto; border-top: 2px solid #c98a2b; background: var(--kin-panel, #161b24); color: var(--kin-text, #dfe5ee); }
+.related-mode-head, .related-mode-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; flex: none; }
+.related-mode-head .spacer, .related-mode-foot .spacer { flex: 1; }
+#related-mode-title { margin: 0; font-size: 13px; font-weight: 600; }
+#related-mode-title:focus-visible, #related-mode button:focus-visible, #related-insert-dialog :focus-visible {
+  outline: 2px solid #93c5fd; outline-offset: 2px; }
+.related-mode-role { color: #c3cad6; font-size: 11px; }
+#related-mode button, #related-insert-dialog button { padding: 3px 10px; border: 1px solid var(--kin-line2, #3a4356); border-radius: 3px;
+  background: var(--kin-panel2, #232936); color: var(--kin-text, #dfe5ee); cursor: pointer; font-size: 11px; }
+#related-mode button:disabled, #related-insert-dialog button:disabled { opacity: .55; cursor: default; }
+#related-mode-insert, #related-insert-confirm { border-color: var(--kin-accent, #3b6ea5); }
+/* Two cards side by side where they fit; one above the other in a narrow column. */
+.related-mode-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; flex: none; }
+.related-mode-card { min-width: 0; padding: 5px 8px; border: 1px solid var(--kin-line2, #3a4356); border-radius: 4px;
+  font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.related-mode-card h4 { margin: 0 0 3px; font-size: 11px; }
+.related-mode-card.related-mode-source { border: 2px solid #d29a3a; }
+.related-mode-line { display: flex; gap: 6px; }
+.related-mode-label { flex: none; min-width: 6.5em; color: #9fb0c8; }
+.related-mode-badge { display: inline-block; margin-top: 4px; padding: 1px 6px; border: 1px solid #d29a3a; border-radius: 3px;
+  color: #f0c27a; font-weight: 600; letter-spacing: .04em; }
+.related-mode-note { margin-top: 3px; color: #c3cad6; }
+.related-mode-body { flex: 1 1 auto; min-height: 90px; overflow: auto; }
+.related-mode-section h4 { margin: 4px 0 2px; color: var(--kin-muted, #9fb0c8); font-size: 11px; font-weight: normal; }
+/* Read-only text that can be selected and copied: never an input, never focusable for editing. */
+.related-mode-text { min-height: 20px; padding: 5px 7px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;
+  border: 1px solid var(--kin-line2, #2c3442); background: var(--kin-bg, #10151d); }
+#related-mode-status { color: #bdd3f4; font-size: 11px; }
+#related-insert-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; padding: 12px 14px;
+  border: 1px solid #7893b8; border-radius: 6px; background: var(--kin-panel, #161b24); color: var(--kin-text, #dfe5ee); }
+#related-insert-dialog::backdrop { background: #0009; }
+#related-insert-dialog h3 { margin: 0 0 6px; font-size: 13px; }
+#related-insert-dialog p { margin: 4px 0; font-size: 12px; overflow-wrap: anywhere; }
+#related-insert-dialog fieldset { margin: 6px 0; border: 1px solid var(--kin-line2, #3a4356); font-size: 12px; }
+#related-insert-text { max-height: 40vh; margin: 6px 0; padding: 6px 8px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  border: 1px solid var(--kin-line2, #3a4356); background: var(--kin-bg, #10151d); font: inherit; }
+#related-insert-error { color: #ff9a9a; }
+.related-insert-actions { display: flex; justify-content: flex-end; gap: 8px; }
+body.reading #related-mode { min-height: 180px; }

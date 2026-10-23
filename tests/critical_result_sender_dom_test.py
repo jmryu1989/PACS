@@ -68,6 +68,7 @@ import base64
 import copy
 import json
 import re
+import subprocess
 import time
 import unicodedata
 import unittest
@@ -84,6 +85,37 @@ JS_NAME = "critical-result-send.js"
 
 def lf_text(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+
+
+def expose_sender_boundaries(source):
+    """Fault injection only: TS locates the real mount; no product instrumentation or shape assertions.
+
+    Private function names locate execution inputs, as in the D114 consult. Assertions below concern transport,
+    request identity and outcome. Isolating each boundary prevents an intact redundant check masking its mutant.
+    """
+    script = r"""
+const fs=require('node:fs'), ts=require('./api/node_modules/typescript');
+const source=fs.readFileSync(0,'utf8');
+const ast=ts.createSourceFile('sender.js',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
+const mounts=[];
+function visit(n){if(ts.isFunctionDeclaration(n)&&n.name?.text==='mount')mounts.push(n);ts.forEachChild(n,visit);}
+visit(ast); if(mounts.length!==1)throw new Error('Cannot locate sender mount for boundary execution');
+const at=mounts[0].body.getStart(ast)+1;
+const seam=`
+window.synCvrBoundary={attempts:()=>[...attempts.values()], transmit:a=>transmit(a),
+  call:(...args)=>call(...args),
+  flipAfterPaint:()=>{const original=paintAttempt;paintAttempt=a=>{
+    original(a);paintAttempt=original;window.synRelated=true;
+  };},
+  isolateTransmit:()=>{const original=call;call=(...args)=>{
+    const gate=blocked;blocked=()=>null;try{return original(...args);}finally{blocked=gate;}
+  };}
+};
+`;
+process.stdout.write(source.slice(0,at)+seam+source.slice(at));
+"""
+    return subprocess.check_output(['node', '--max-old-space-size=3072', '-e', script], input=source,
+                                   text=True, encoding='utf-8', cwd=ROOT, timeout=30)
 
 
 MAIN = read_page_source(HPACS / "main.html")
@@ -181,6 +213,8 @@ const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
 let sess = window.synSession;
 let serverMode = window.synMode.serverMode, demoMode = false, offline = window.synMode.offline;
 let selectedUid = null;
+// W5 (order-list-store.js): the page's Related Report mode binding, which the block's Send CVR reason reads; null = no mode.
+let relatedMode = null;
 let studies = window.synStudies;
 let appState = window.synAppState;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
@@ -724,6 +758,422 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.entry_settled()
 
     # ── SD01 ──
+    # W5R3-ADMIT-01..06 -> REQ-S7-U1b-FAILURE / RISK-S7-U1p-FALSE-UNDELIVERED.
+    def r3_mode(self, active):
+        self.page.evaluate("""active => {
+          window.synRelated = active;
+          relatedMode = {active: () => window.synRelated,
+            reason: () => 'Related Report 모드에서는 쓸 수 없습니다. Back으로 돌아가세요.'};
+          criticalResults.sync();
+        }""", active)
+
+    def r3_prepare(self, action, held=False):
+        record = self.server.add(B, X) if action != 'create' else None
+        self.ready_reader()
+        if action == 'create':
+            self.mark()
+            self.compose(text='SYN retained input')
+            box = self.page.locator('#cvr-send')
+            field = box.locator('#cvr-send-message')
+            confirm = box.get_by_role('button', name='Send', exact=True)
+        else:
+            self.show_sent()
+            if held:
+                self.fault('recipients', hold=True, apply=True)
+            label = 'Cancel Delivery' if action == 'cancel' else 'Supersede'
+            self.page.locator(f'tr[data-id="{record["id"]}"]').get_by_role('button', name=label).click()
+            box = self.page.locator('tr[data-form]')
+            field = box.locator('textarea')
+            field.fill('SYN retained input')
+            confirm = box.get_by_role('button', name=label, exact=True)
+        if not held:
+            expect(confirm).to_be_enabled()
+        field.focus()
+        self.page.evaluate("""() => {
+          window.synAllocations = 0;
+          const uuid = crypto.randomUUID.bind(crypto);
+          crypto.randomUUID = () => { window.synAllocations++; return uuid(); };
+        }""")
+        return box, field, confirm
+
+    def r3_preopened(self, action):
+        box, field, confirm = self.r3_prepare(action)
+        confirm.focus()
+        self.r3_mode(True)
+        # Real pointer and keyboard events cannot activate an already-focused, now disabled control.
+        confirm.scroll_into_view_if_needed()
+        bounds = confirm.bounding_box()
+        self.page.mouse.click(bounds['x'] + bounds['width']/2, bounds['y'] + bounds['height']/2)
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'), 'disabled pointer activation creates no attempt')
+        self.page.keyboard.press('Enter')
+        self.page.keyboard.press('Space')
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'), 'disabled native key activation creates no attempt')
+        field.focus()
+        # A dispatched callback bypasses the browser's disabled-button protection.
+        confirm.dispatch_event('click')
+        self.settle()
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'), 'Related refuses before allocating a CVR ID')
+        self.assertEqual([], [r for r in self.log if r['method'] == 'POST'])
+        expect(confirm).to_be_disabled()
+        expect(confirm).to_have_attribute('title', re.compile('Related Report'))
+        expect(box).to_contain_text('Related Report 모드에서는 쓸 수 없습니다')
+        expect(field).to_have_value('SYN retained input')
+        expect(field).to_be_focused()
+        self.assertNotIn('status unknown', box.inner_text())
+        self.r3_mode(False)
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'), 'Back alone never sends')
+        expect(confirm).to_be_enabled()
+        self.fault(action, status=404, body={'code': 'CRITICAL_RESULT_NOT_FOUND', 'message': 'SYN refused'})
+        confirm.focus()
+        self.page.keyboard.press('Enter')
+        self.wait_until(lambda: len(self.requests(action)) == 1, 'explicit first dispatch')
+        outcome = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts')
+        expect(outcome).to_contain_text('Not cancelled' if action == 'cancel' else 'Not delivered')
+
+    def test_w5r3_preopened_send_refuses_before_attempt(self):
+        self.r3_preopened('create')
+
+    def test_w5r3_preopened_cancel_refuses_before_attempt(self):
+        self.r3_preopened('cancel')
+
+    def test_w5r3_preopened_supersede_refuses_before_attempt(self):
+        self.r3_preopened('supersede')
+
+    def test_w5r3_focused_form_and_late_source_remain_blocked(self):
+        box, field, confirm = self.r3_prepare('supersede', held=True)
+        held = self.take('recipients')
+        self.r3_mode(True)
+        self.release(held)
+        expect(confirm).to_be_disabled()
+        expect(confirm).to_have_attribute('title', re.compile('Related Report'))
+        expect(field).to_have_value('SYN retained input')
+        expect(field).to_be_focused()
+        self.page.locator('#cvr-sent-refresh').dispatch_event('click')
+        self.settle()
+        expect(confirm).to_be_disabled()
+        expect(field).to_have_value('SYN retained input')
+        expect(field).to_be_focused()
+        confirm.dispatch_event('click')
+        self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+
+    def test_w5r3_row_entries_refuse_pointer_keyboard_and_callback(self):
+        self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        self.r3_mode(True)
+        for label in ('Supersede', 'Cancel Delivery'):
+            control = self.page.locator('#cvr-sent-rows').get_by_role('button', name=label, exact=True)
+            control.dispatch_event('click')
+            self.assertEqual(0, self.page.locator('tr[data-form]').count(), 'blocked row entry keeps the form closed')
+            expect(control).to_be_disabled()
+            expect(control).to_have_attribute('title', re.compile('Related Report'))
+        self.open_more()
+        entry = self.page.locator('#b-mark-cvr')
+        entry.dispatch_event('click')
+        expect(self.page.locator('#cvr-send')).to_be_hidden()
+        self.assertEqual([], [r for r in self.log if r['method'] == 'POST'])
+        self.r3_mode(False)
+        control.focus()
+        self.page.keyboard.press('Space')
+        expect(self.page.locator('tr[data-form]')).to_be_visible()
+
+    def test_w5r3_row_action_explanations_survive_mode_round_trip(self):
+        # REQ-S7-U1b-SENDER-UI / W5R3-ADMIT-02/10: action guidance remains useful after the restriction ends.
+        self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        controls = {name: self.page.locator('#cvr-sent-rows').get_by_role('button', name=name, exact=True)
+                    for name in ('Supersede', 'Cancel Delivery')}
+        hints = {name: control.get_attribute('title') for name, control in controls.items()}
+        for name, hint in hints.items():
+            self.assertTrue(has_hangul(hint or ''), f'{name} explains its action in Korean')
+        self.assertIn(X['name'], hints['Supersede'], 'replacement guidance identifies the retained recipient')
+        self.assertIn('취소', hints['Cancel Delivery'], 'cancellation guidance explains the irreversible action')
+        controls['Supersede'].focus()
+        self.r3_mode(True)
+        for control in controls.values():
+            expect(control).to_be_disabled()
+            expect(control).to_have_attribute('title', re.compile('Related Report'))
+        self.r3_mode(False)
+        for name, control in controls.items():
+            expect(control).to_be_enabled()
+            self.assertEqual(hints[name], control.get_attribute('title'), 'Back restores action guidance')
+        # W5R3B-01: a list read that lands while focus is in the rows defers the row repaint; Related mode begins, then focus
+        # leaves the rows and the deferred repaint runs. The rebuilt actions must carry the mode's restriction, not their
+        # ordinary state, and Back must give the guidance back.
+        controls['Cancel Delivery'].focus()
+        before = len(self.log)
+        self.page.locator('#cvr-sent-refresh').dispatch_event('click')
+        self.wait_until(lambda: len(self.log) > before, 'list read while focus is in the rows')
+        self.settle()
+        self.r3_mode(True)
+        self.settle()
+        self.page.evaluate('() => document.activeElement && document.activeElement.blur()')
+        self.settle()
+        for control in controls.values():
+            expect(control).to_be_disabled()
+            expect(control).to_have_attribute('title', re.compile('Related Report'))
+        controls['Cancel Delivery'].dispatch_event('click')
+        self.assertEqual(0, self.page.locator('tr[data-form]').count(), 'blocked row entry keeps the form closed')
+        self.r3_mode(False)
+        for name, control in controls.items():
+            expect(control).to_be_enabled()
+            self.assertEqual(hints[name], control.get_attribute('title'), 'Back restores action guidance after the deferred paint')
+        self.assertEqual([], [r for r in self.log if r['method'] == 'POST'])
+
+    def r3_unknown(self, action):
+        box, field, confirm = self.r3_prepare(action)
+        self.fault(action, abort=True)
+        confirm.click()
+        outcome = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts')
+        expect(outcome).to_contain_text('status unknown')
+        first = self.requests(action)[0]['raw']
+        self.r3_mode(True)
+        again = self.page.locator('#cvr-send-check') if action == 'create' else outcome.get_by_role('button', name='Check Again')
+        again.dispatch_event('click')
+        expect(again).to_be_disabled()
+        self.assertEqual(1, len(self.requests(action)))
+        expect(outcome).to_contain_text('status unknown')
+        self.r3_mode(False)
+        self.fault(action, hold=True, status=404, body={'code': 'CRITICAL_RESULT_NOT_FOUND', 'message': 'SYN refused'})
+        again.click()
+        self.wait_until(lambda: len(self.requests(action)) == 2, 'retry after real prior dispatch')
+        held = self.take(action)
+        expect(again).to_be_disabled()
+        self.assertEqual(first, self.requests(action)[1]['raw'])
+        self.release(held)
+        expect(outcome).to_contain_text('SYN refused')
+        expect(outcome).to_contain_text('status unknown')
+        expect(again).to_be_enabled()
+        self.assertEqual(first, self.requests(action)[1]['raw'])
+
+    def test_w5r3_create_unknown_survives_mode_and_retry_404(self):
+        self.r3_unknown('create')
+
+    def test_w5r3_cancel_unknown_survives_mode_and_retry_404(self):
+        self.r3_unknown('cancel')
+
+    def test_w5r3_supersede_unknown_survives_mode_and_retry_404(self):
+        self.r3_unknown('supersede')
+
+    # W5R3B-04 (D73 §1-B.14): the outcome oracle is what the reader sees once the response is consumed - the status word
+    # (first line of the dialog status or of the attempt line), its explanation and the retry control's label - never the
+    # module's private attempt state. The words and explanations are the §4 product wording (TEXT in the module).
+    R3_WORDS = {
+        'create': {'not-sent': 'Not Sent', 'unknown': 'Delivery status unknown', 'rejected': 'Not delivered', 'delivered': 'Delivered'},
+        'supersede': {'not-sent': 'Not Sent', 'unknown': 'Delivery status unknown', 'rejected': 'Not delivered', 'delivered': 'Delivered'},
+        'cancel': {'not-sent': 'Not Sent', 'unknown': 'Cancellation status unknown', 'rejected': 'Not cancelled', 'cancelled': 'Cancelled'},
+    }
+    R3_LINES = {'unknown': {'create': '전달되었을 수 있습니다', 'supersede': '전달되었을 수 있습니다', 'cancel': '취소되었을 수 있습니다'},
+                'delivered': '전달 기록이 저장되었습니다', 'cancelled': '전달을 취소했습니다',
+                'not-sent': 'Related Report 모드에서는 쓸 수 없습니다'}
+    # W5R5C-01: a confirmed refusal's Korean explanation (contract S7-U1p §8.1 reason wording, by code, else by HTTP status),
+    # fixed here as the expectation of each first-dispatch vector - never read back from the page or the module.
+    R3_REFUSAL_REASONS = {
+        'CRITICAL_RESULT_NOT_FOUND': '전달 기록을 찾을 수 없습니다. 접근 조건이 바뀌었을 수 있습니다.',
+        'CRITICAL_RESULT_SOURCE_MOVED': '그사이 판독 판이 바뀌었습니다. 보낼 판을 다시 확인하세요.',
+        'CRITICAL_RESULT_UNAVAILABLE': '서버가 계정 또는 원본 정보를 확인하지 못해 보내지 않았습니다.',
+        400: '서버가 입력을 거절했습니다.',
+        403: '서버가 이 요청을 거절했습니다.',
+    }
+
+    def r3_retry(self, action):
+        return self.page.locator('#cvr-send-check' if action == 'create' else '#cvr-sent-attempts li button')
+
+    def r3_expect_outcome(self, action, outcome, response=None):
+        """Wait until the displayed outcome is `outcome`'s word, then require its explanation and retry control.
+
+        `response` ({status, code, message}) is the answer the case gave this dispatch. Its own message is the response
+        barrier: an earlier Not Sent / status unknown paint of the same attempt cannot satisfy a later outcome.
+        W5R4A-02: the outcome region must be displayed - text of a hidden region is not what the reader sees.
+        W5R5C-01: a rejection must display its refusal's Korean explanation, the server's message, HTTP status and code.
+        """
+        words = self.R3_WORDS[action]
+        word = words[outcome]
+        region = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts li')
+        expect(region).to_have_count(1)
+        if response and response.get('message'):
+            expect(region).to_contain_text(response['message'])
+        # Pending text never satisfies this: a dispatched request shows no word (dialog) or 'Sending' (line) until settled.
+        expect(region).to_contain_text(re.compile(r'^\s*' + re.escape(word) + r'(\s·|\s*$)', re.M), use_inner_text=True)
+        expect(region).to_be_visible()
+        text = region.inner_text()
+        first = next(line.strip() for line in text.splitlines() if line.strip())
+        self.assertRegex(first, r'^' + re.escape(word) + r'( · |$)', 'the status word is the first visible line')
+        for other in set(words.values()) - {word}:
+            self.assertNotIn(other, first, f'{outcome}: no other outcome word is shown')
+        expected = self.R3_LINES.get(outcome)
+        if isinstance(expected, dict):
+            expected = expected[action]
+        if outcome == 'rejected':
+            self.assertIsNotNone(response, 'a rejection is judged against the refusal the case gave')
+            expected = self.R3_REFUSAL_REASONS.get(response.get('code')) or self.R3_REFUSAL_REASONS[response['status']]
+        if expected:
+            self.assertIn(expected, text, f'{outcome}: its explanation is shown')
+            expect(region.get_by_text(expected).first, f'{outcome}: its explanation is displayed').to_be_visible()
+        if response and response.get('message'):
+            expect(region.get_by_text(response['message']), 'the response message is displayed').to_be_visible()
+        if outcome == 'rejected':
+            expect(region.get_by_text(f"HTTP {response['status']}"), 'the refusal HTTP status is displayed').to_be_visible()
+            if response.get('code'):
+                expect(region.get_by_text(response['code']), 'the refusal code is displayed').to_be_visible()
+        for name, line in (('unknown', '되었을 수 있습니다'), ('delivered', self.R3_LINES['delivered']),
+                           ('cancelled', self.R3_LINES['cancelled'])):
+            if name != outcome:
+                self.assertNotIn(line, text, f'{outcome}: the {name} explanation is not shown')
+        retry = self.r3_retry(action)
+        if outcome in ('not-sent', 'unknown'):
+            expect(retry).to_be_visible()
+            expect(retry).to_have_text('Send' if outcome == 'not-sent' else 'Check Again')
+        else:
+            expect(retry).to_be_hidden()
+        return retry
+
+    def r3_boundary(self, action, boundary, prior=False):
+        self.js = expose_sender_boundaries(self.js)
+        box, field, confirm = self.r3_prepare(action)
+        self.r3_mode(False)
+        if prior:
+            self.fault(action, abort=True)
+            confirm.click()
+            outcome = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts')
+            expect(outcome).to_contain_text('status unknown')
+            first = self.requests(action)[0]['raw']
+        if boundary == 'transmit':
+            self.page.evaluate('synCvrBoundary.isolateTransmit()')
+            if prior:
+                self.page.evaluate('() => {window.synRelated=true; synCvrBoundary.transmit(synCvrBoundary.attempts()[0]);}')
+            else:
+                self.page.evaluate("""() => { const uuid=crypto.randomUUID.bind(crypto);
+                  crypto.randomUUID=()=>{const id=uuid();window.synRelated=true;return id;}; }""")
+                confirm.click()
+        else:
+            self.page.evaluate('synCvrBoundary.flipAfterPaint()')
+            if prior:
+                self.page.evaluate('synCvrBoundary.transmit(synCvrBoundary.attempts()[0])')
+            else:
+                confirm.click()
+        self.settle()
+        self.assertEqual(1 if prior else 0, len(self.requests(action)), 'isolated boundary must stop transport')
+        # Local refusal retains prior transport provenance: a request never dispatched says Not Sent with Send, one whose
+        # reply was lost stays status unknown with Check Again.
+        retry = self.r3_expect_outcome(action, 'unknown' if prior else 'not-sent')
+        expect(retry).to_be_disabled()
+        expect(retry).to_have_attribute('title', re.compile('Related Report'))
+        # The call-level refusal must be distinguishable from a transport error even when called independently.
+        if boundary == 'call':
+            refused = self.page.evaluate("""async () => { const a=synCvrBoundary.attempts()[0];
+              try {await synCvrBoundary.call('POST',a.path,a.body);return null;}
+              catch(e){return {outcome:e.outcome??null,status:e.status??null,message:e.message};} }""")
+            self.assertEqual('not-sent', refused['outcome'])
+            self.assertIsNone(refused['status'])
+            self.assertIn('Related Report', refused['message'])
+        if prior:
+            self.r3_mode(False)
+            self.fault(action, status=404, body={'code': 'CRITICAL_RESULT_NOT_FOUND', 'message': 'SYN refused'})
+            expect(retry).to_be_enabled()
+            retry.click()
+            self.wait_until(lambda: len(self.requests(action)) == 2, 'real retry')
+            # Response barrier: the retry's own refusal detail is displayed before the outcome is judged.
+            outcome = self.page.locator('#cvr-send-status' if action == 'create' else '#cvr-sent-attempts li')
+            expect(outcome).to_contain_text('SYN refused')
+            refused = {'status': 404, 'code': 'CRITICAL_RESULT_NOT_FOUND', 'message': 'SYN refused'}
+            expect(self.r3_expect_outcome(action, 'unknown', refused)).to_be_enabled()
+            self.assertEqual(first, self.requests(action)[1]['raw'])
+
+    def r3_boundaries(self, boundary, prior=False):
+        original = self.js
+        for action in ('create', 'cancel', 'supersede'):
+            with self.subTest(action=action, boundary=boundary, prior=prior):
+                self.server = CvrServer()
+                self.log.clear()
+                self.js = original
+                self.r3_boundary(action, boundary, prior)
+
+    def test_w5r3_transmit_zero_dispatch_is_not_sent(self):
+        self.r3_boundaries('transmit')
+
+    def test_w5r3_call_zero_dispatch_is_typed_not_sent(self):
+        self.r3_boundaries('call')
+
+    def test_w5r3_transmit_preserves_prior_unknown(self):
+        self.r3_boundaries('transmit', prior=True)
+
+    def test_w5r3_call_preserves_prior_unknown(self):
+        self.r3_boundaries('call', prior=True)
+
+    def test_w5r3_back_rechecks_invalid_input_owner_and_role(self):
+        for action in ('create', 'cancel', 'supersede'):
+            for variant in ('invalid', 'owner', 'role'):
+                with self.subTest(action=action, variant=variant):
+                    self.server = CvrServer()
+                    self.log.clear()
+                    box, field, confirm = self.r3_prepare(action)
+                    # Capture before role/session changes can hide or replace this control.
+                    stale_confirm = confirm.element_handle() if variant == 'role' else None
+                    try:
+                        self.r3_mode(True)
+                        confirm.dispatch_event('click')
+                        self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+                        if variant == 'invalid':
+                            field.fill('   ')
+                        elif variant == 'owner':
+                            self.page.evaluate("window.synSession={...window.synSession,sub:'99999999-0000-4000-8000-000000000001'}")
+                        else:
+                            self.page.evaluate("window.synSession={...window.synSession,roles:['technician']}")
+                        self.r3_mode(False)
+                        self.settle()
+                        self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+                        self.assertEqual([], [r for r in self.log if r['method']=='POST'])
+                        if variant == 'role':
+                            expect(box).to_be_hidden()
+                            self.assertIsNotNone(stale_confirm)
+                            stale_confirm.dispatch_event('click')
+                        else:
+                            confirm.dispatch_event('click')
+                        self.settle()
+                        self.assertEqual(0, self.page.evaluate('window.synAllocations'))
+                        self.assertEqual([], [r for r in self.log if r['method']=='POST'])
+                    finally:
+                        if stale_confirm is not None:
+                            stale_confirm.dispose()
+
+
+    def r3_first_dispatch(self, action):
+        original = self.js
+        for vector, (status, code, state) in enumerate([(201, None, 'cancelled' if action == 'cancel' else 'delivered'),
+                (400, 'SYN_BAD_INPUT', 'rejected'), (403, 'SYN_FORBIDDEN', 'rejected'),
+                (404, 'CRITICAL_RESULT_NOT_FOUND', 'rejected'), (409, 'CRITICAL_RESULT_SOURCE_MOVED', 'rejected'),
+                (503, 'CRITICAL_RESULT_UNAVAILABLE', 'rejected'), (503, 'SYN_AMBIGUOUS', 'unknown'), (0, None, 'unknown')]):
+            with self.subTest(action=action, status=status, code=code):
+                self.server = CvrServer()
+                self.log.clear()
+                self.js = original
+                self.r3_boundary(action, 'call')
+                self.r3_mode(False)
+                response = None
+                if status == 0:
+                    self.fault(action, abort=True)
+                elif status != 201:
+                    # A message unique to this vector: the response barrier of r3_expect_outcome.
+                    response = {'status': status, 'code': code, 'message': f'SYN r5 answer {action} vector {vector}'}
+                    self.fault(action, status=status, body={'code': code, 'message': response['message']})
+                # The reader's Send on the Not Sent request is its first actual dispatch.
+                retry = self.r3_expect_outcome(action, 'not-sent')
+                expect(retry).to_be_enabled()
+                retry.click()
+                self.wait_until(lambda: len(self.requests(action)) == 1, 'first actual dispatch')
+                self.r3_expect_outcome(action, state, response)
+
+    def test_w5r3_create_first_actual_dispatch_classification(self):
+        self.r3_first_dispatch('create')
+
+    def test_w5r3_cancel_first_actual_dispatch_classification(self):
+        self.r3_first_dispatch('cancel')
+
+    def test_w5r3_supersede_first_actual_dispatch_classification(self):
+        self.r3_first_dispatch('supersede')
+
     def test_u5_cancel_delivery_survives_cancelled_preparation_without_source_read(self):
         record = self.server.add(B, X)
         self.ready_reader()

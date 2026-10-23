@@ -385,6 +385,26 @@ def workflow_step_audit(root):
 
 
 class WorkflowConsumerTests(unittest.TestCase):
+    def test_restore_required_check_names_are_unique_and_workflow_qualified(self):
+        # REQ-RESTORE-JOB-NAMES -> RISK-RESTORE-FAILURE-MASKED:
+        # These are external branch-protection contexts, not implementation pins.
+        from ci_workflows import WorkflowCatalog
+        catalogue = WorkflowCatalog(ROOT)
+        contexts = {}
+        for workflow, document in catalogue.documents.items():
+            for job_id, job in document['jobs'].items():
+                contexts.setdefault(job.get('name', job_id), []).append((workflow, job_id))
+        for kind in ('combined', 'database', 'image', 'orthanc', 'product'):
+            workflow = f'.github/workflows/restore-{kind}.yml'
+            for job_id in ('produce', 'consume'):
+                with self.subTest(workflow=workflow, job=job_id):
+                    self.assertEqual(contexts.get(f'restore-{kind} / {job_id}'),
+                                     [(workflow, job_id)])
+            # The shared bare names let one restore's success mask another's failure.
+            for shared in ('produce', 'consume'):
+                with self.subTest(workflow=workflow, shared=shared):
+                    self.assertNotIn(workflow, [path for path, _ in contexts.get(shared, [])])
+
     def test_audit_entry_points_report_gaps_without_failing_and_parse_errors_fail(self):
         # R5-DIAG-01: both public CLIs preserve diagnostics and exit semantics.
         with tempfile.TemporaryDirectory() as folder:

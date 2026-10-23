@@ -104,8 +104,9 @@
     // 단축어 Tab(아래 등록)이 부르는 편집기의 한 자리다. 분할된 script 사이의 Tab이 미정의를 만나지 않게 등록보다 앞에 둔다(S9-U0a-PRE).
     // All application edits use the frame's native undo transaction. Its input event owns dirty/hold
     // accounting; this adapter only retains the final multi-field snapshot. Delayed callers pass
-    // their captured request so later input or another opening cannot accept an old insertion.
-    function editReport(edits) {
+    // their captured request so later input or another opening cannot accept an old insertion. `admission` (W5, D1423 R2)
+    // is Related Report mode's one-shot token for its single reviewed edit; it reaches only a single-field native insert.
+    function editReport(edits, { admission = null } = {}) {
       if (work.state() !== "active" || !selectedUid) return false;
       const frame = mountReportFrame();
       if (!frame) return false;
@@ -118,7 +119,7 @@
       if (waiting && !frame.isComposing()) waiting.close();
       let result;
       try {
-        result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);
+        result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text, admission) : frame.insertMany(changes);
       } finally {
         if (waiting?.isConnected && !waiting.open && work.state() === "active") {
           waiting.showModal();

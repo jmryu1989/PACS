@@ -429,6 +429,9 @@ const staleAnswer = () => Object.assign(new Error('SYN obsolete'), {stale:true})
 // in this file's cases: the stand-in answers that fact and copies no rule of the page (whether and how Log out waits for
 // one is tests/report_text_boundaries_dom_test.py's, on the real page). No commit of unknown outcome is kept either.
 const workBusy = () => false, reportUnknownCommits = new Map();
+// W5: no Related Report insert is unsettled in this file's cases, so the cut handler has none to read (how Log out reads one
+// is tests/related_report_mode_dom_test.py's, on the real page).
+const relatedInsertPending = () => null;
 """
 
 OTHER_PANEL = "() => { window.synOtherEnds = 0; KinWorkContext.onInvalidate(e => { if(e.reason === 'lifecycle' && !['active','preparing'].includes(e.state)) window.synOtherEnds += 1; }); }"
