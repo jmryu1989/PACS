@@ -138,6 +138,20 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST auth/entry'] },
   { kinds: ['private-draft', 'report-evidence'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/draft'] },
+  // S9-U4b (contract S9-U4p 6, U4P3-06): the self-institution import writes originals, the study's metadata and per-file
+  // delivery results; the original download is the server-recorded `download` export of a fixed manifest, never `copy`.
+  { kinds: ['image', 'study-metadata', 'delivery-receipt'], operation: 'write', causes: ['user-view'],
+    routes: ['POST dicom-import'] },
+  { kinds: ['delivery-receipt'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET dicom-import/:operationId'] },
+  // D1489: the archive grant is the user-view start of that same export (it is not the supply; the archive GET is).
+  { kinds: ['image', 'download'], operation: 'export', causes: ['user-view'],
+    routes: ['POST studies/:uid/original-downloads', 'GET studies/:uid/original-downloads/:operationId/archive',
+      'POST studies/:uid/original-downloads/:operationId/archive/grant'] },
+  { kinds: ['download'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET studies/:uid/original-downloads/:operationId'] },
+  { kinds: ['delivery-receipt', 'study-metadata'], operation: 'write', causes: ['user-view'],
+    routes: ['POST admin/dicom-import/:operationId/files/:index/recovery'] },
 ];
 
 const routeEntries = groups.flatMap(({ routes, ...contract }) => routes.map(route => [route, contract] as const));

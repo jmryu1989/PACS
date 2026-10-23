@@ -192,9 +192,10 @@
       "20261008120000_emr_b",
       "20261010120000_emr_seal_attempts",
       "20261010150000_emr_read_jit_off",
-      "20261011120000_filter_shortcuts"
+      "20261011120000_filter_shortcuts",
+      "20261015013945_import_operation"
     ],
-    "count": 46,
+    "count": 47,
     "latest_before": "20261007200000_designation_subjects"
   },
   "deployment": {
@@ -490,10 +491,10 @@
     "session_matrix": 8,
     "candidate": 122,
     "candidate_rows": 14,
-    "migrations": 46,
-    "public_tables": 51,
+    "migrations": 47,
+    "public_tables": 52,
     "emr_tables": 10,
-    "fixture_public_rows": 90,
+    "fixture_public_rows": 102,
     "fixture_emr_rows": 11,
     "note": "declared before running; never generated from a run's own result"
   },

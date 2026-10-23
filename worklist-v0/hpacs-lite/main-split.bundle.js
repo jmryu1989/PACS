@@ -9349,6 +9349,12 @@
       changed:(uid,value)=>{updateReaderAssignment(uid,value);render();},
     });
     $('#rows').addEventListener('click',event=>{const button=event.target.closest('[data-reader-assignment]');if(!button)return;event.stopPropagation();readerAssignment.open(studies.find(s=>s.uid===button.dataset.readerAssignment));},true);
+    // S9-U4b: Import DICOM (toolbar, Technician rows), Download Originals (rows) and their non-modal result panel.
+    // D1691: the transfer owner is the login server, the institution and the subject, as the service keys an operation.
+    const studyTransfer=KinStudyTransferLocal({api:API,transport,allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,
+      identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.issuer,s.institution,s.sub]:null;},
+      can:role=>KinAuth.has(role),demo:()=>!!KinAuth.session()?.demo,study:uid=>studies.find(s=>s.uid===uid),
+    });
 
 
     const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
@@ -11852,6 +11858,8 @@
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
           { sep: 1 },
           { label: "판독 시작 (수신 기관)", dis: mine || ts !== "sent", act: () => setTs(uid, "inReading") },
+          // 원본 다운로드는 자기 기관 검사만이다(S9-U4p §3·§6) — 원격판독으로 받은 행은 회색, 서버도 404로 막는다.
+          ...(studyTransfer.canDownload() ? [{ sep: 1 }, { label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }] : []),
           ...forceReleaseItems,
         ], null, opened);
       } else {
@@ -11875,6 +11883,10 @@
           { label: "Merge / Split Exam", dis: 1, act: () => {} },
           { sep: 1 },
           { label: "Delete", dis: s.rs !== "W", act: () => doDelete(uid) },
+          // 이 행의 검사로 반입(X-KIN-Expect-Study)과 원본 다운로드(S9-U4p §6). 둘 다 메뉴를 연 그 선택(opened)에 묶인다.
+          ...(studyTransfer.canImport() || studyTransfer.canDownload() ? [{ sep: 1 }] : []),
+          ...(studyTransfer.canImport() ? [{ label: "Import DICOM", act: () => studyTransfer.importInto(opened.uid) }] : []),
+          ...(studyTransfer.canDownload() ? [{ label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }] : []),
           ...forceReleaseItems,
         ], null, opened);
       }

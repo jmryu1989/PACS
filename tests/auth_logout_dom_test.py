@@ -162,8 +162,11 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
 END_KEY = "kin-session-end"
 PROBE_KEY = "kin-session-probe"
 INSTITUTION = "SYN-INST-A"
+# /api/me also names the login server that verified the session (S9-U4b D1691: PacsController.me issuer = KC_ISSUER).
+ISSUER = "https://syn.test/auth/realms/kin"
 RAD = {"sub": "SYN-RAD-SUB", "actor": "syn-rad@synthetic.test", "user": "syn-rad@synthetic.test",
-       "displayName": "SYN Reader Kim", "roles": ["radiologist"], "institution": INSTITUTION, "kind": "member"}
+       "displayName": "SYN Reader Kim", "roles": ["radiologist"], "institution": INSTITUTION, "kind": "member",
+       "issuer": ISSUER}
 RAD_OTHER = {**RAD, "sub": "SYN-RAD2-SUB", "actor": "syn-rad2@synthetic.test", "user": "syn-rad2@synthetic.test",
              "displayName": "SYN Reader Lee"}
 ADMIN = {**RAD, "sub": "SYN-ADMIN-SUB", "actor": "syn-admin@synthetic.test", "user": "syn-admin@synthetic.test",

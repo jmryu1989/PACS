@@ -141,6 +141,32 @@ CONTRACT.synthetic_vectors.push(
   {"row":39,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":[],"withheld_sides":{},"note":"PENDING member (no group): no institution"},
   {"row":40,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":[],"withheld_sides":{},"note":"two groups (INVALID): no single institution"},
   {"row":41,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m3's session could not be stored: failure row with the verified A identity"});
+/* S9-U4b (contract S9-U4p 4.9, U4P4-02): the seven self-institution import / original download actions are attributed to
+ * the institution they recorded, detail.institutionId = the operation's ImportOperation.institutionId (the verified session
+ * institution of the member who opened it; for a recovery the operation's, which the admin's own must equal). Vectors
+ * 42-50 continue the numbering; the card block above stays verbatim. */
+const IMPORT_MEANING = "record-time institution of the operation (ImportOperation.institutionId)";
+Object.assign(CONTRACT.field_rules, {"dicom.import.intent":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "dicom.import.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "dicom.import.recovery.request":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "dicom.import.recovery.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "original.download.prepare":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "original.download.intent":{"source":"detail.institutionId","meaning":IMPORT_MEANING},
+  "original.download.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING}});
+// D1489: the archive grant's issue/refusal row is attributed the same way (vectors 51-52).
+CONTRACT.field_rules["original.download.grant"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
+CONTRACT.synthetic_vectors.push(
+  {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
+  {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},
+  {"row":44,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"B's file result, never A's"},
+  {"row":45,"action":"dicom.import.recovery.request","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A admin's recovery request"},
+  {"row":46,"action":"dicom.import.recovery.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A admin's recovery result"},
+  {"row":47,"action":"original.download.prepare","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's download preparation"},
+  {"row":48,"action":"original.download.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's archive intent"},
+  {"row":49,"action":"original.download.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"B member's archive result"},
+  {"row":50,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":[],"withheld_sides":{},"note":"no institutionId recorded although the actor is an A member: no_institution_recorded, nobody sees it"},
+  {"row":51,"action":"original.download.grant","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's archive grant issued (D1489)"},
+  {"row":52,"action":"original.download.grant","rule":"field:detail.institutionId","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"B member's archive grant refused, never A's"});
 
 const json = value => JSON.parse(JSON.stringify(value));
 const WITHHELD = { withheld: 'other_institution' };
@@ -222,6 +248,33 @@ for (const r of [
   row(40, 'auth.login', MX, authDetail(null, { outcome: 'success' }), 'syn-mx-login@synthetic.test'),
   row(41, 'auth.login', M3, authDetail('inst-a', { outcome: 'failure', cause: 'session_failed' }), 'syn-m3-login@synthetic.test'),
 ]) ROWS.set(r.id, r);
+// S9-U4b: dicom-import-gate.service.ts and study-transfer-local.service.ts write these details (UIDs, hashes, ids and
+// outcomes; never a patient value); target is the Study UID, actor the member (or the admin for a recovery).
+const OP_A = '00000000-0000-4000-8000-0000000004a1', OP_B = '00000000-0000-4000-8000-0000000004b1', ATT = '00000000-0000-4000-8000-0000000004c1';
+const importDetail = (institutionId, rest = {}) => ({ institutionId, operationId: institutionId === 'inst-b' ? OP_B : OP_A, index: 3, attemptId: ATT,
+  generation: 1, kind: 'import', actor: 'syn-tech-a@members.test', ownerIssuer: 'https://synthetic.test/realms/kin', ownerSubject: 'syn-tech-a-sub',
+  studyUid: S1, seriesUid: S1 + '.1', sopUid: S1 + '.1.1', sha256: 'a'.repeat(64), bytes: 2048, at: '2026-10-15T00:00:00.000Z', ...rest });
+const downloadDetail = (institutionId, rest = {}) => ({ institutionId, operationId: institutionId === 'inst-b' ? OP_B : OP_A, manifestSha256: 'b'.repeat(64),
+  ownerIssuer: 'https://synthetic.test/realms/kin', ownerSubject: 'syn-rad-sub', at: '2026-10-15T00:00:00.000Z', ...rest });
+for (const r of [
+  row(42, 'dicom.import.intent', S1, importDetail('inst-a'), 'syn-tech-a@members.test'),
+  row(43, 'dicom.import.result', S1, importDetail('inst-a', { outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', writeDisposition: null, transport: 'unknown' }), 'syn-tech-a@members.test'),
+  row(44, 'dicom.import.result', S2, importDetail('inst-b', { studyUid: S2, outcome: 'stored', code: null, writeDisposition: null, transport: null }), 'syn-tech-b@members.test'),
+  row(45, 'dicom.import.recovery.request', S1, { institutionId: 'inst-a', operationId: OP_A, index: 3, attemptId: ATT, generation: 1, basis: 'orthanc-restarted',
+    checkedAt: '2026-10-15T00:00:00.000Z', adminIssuer: 'https://synthetic.test/realms/kin', adminSubject: 'syn-admin-a-sub', at: '2026-10-15T00:01:00.000Z' }, 'syn-admin-a@members.test'),
+  row(46, 'dicom.import.recovery.result', S1, { institutionId: 'inst-a', operationId: OP_A, index: 3, attemptId: ATT, generation: 1, basis: 'orthanc-restarted',
+    checkedAt: '2026-10-15T00:00:00.000Z', adminIssuer: 'https://synthetic.test/realms/kin', adminSubject: 'syn-admin-a-sub', outcome: 'retryable',
+    code: 'RECOVERED_NO_OBJECT', at: '2026-10-15T00:01:01.000Z' }, 'syn-admin-a@members.test'),
+  row(47, 'original.download.prepare', S1, downloadDetail('inst-a', { studyUid: S1, objects: 3, bytes: 6144 }), 'syn-rad-a@members.test'),
+  row(48, 'original.download.intent', S1, downloadDetail('inst-a', { attemptId: ATT, number: 1 }), 'syn-rad-a@members.test'),
+  row(49, 'original.download.result', S2, downloadDetail('inst-b', { attemptId: ATT, state: 'sent', archiveSha256: 'c'.repeat(64), responseFinished: true,
+    reason: null, objects: [{ sopUid: S2 + '.1.1', sha256: 'd'.repeat(64), bytesSupplied: 2048, complete: true }] }), 'syn-rad-b@members.test'),
+  row(50, 'dicom.import.result', S1, (({ institutionId, ...rest }) => ({ ...rest, outcome: 'stored', code: null }))(importDetail('inst-a')), 'syn-tech-a@members.test'),
+  row(51, 'original.download.grant', S1, downloadDetail('inst-a', { phase: 'issued', studyUid: S1, grantId: ATT, grantHash: 'e'.repeat(64), sessionRef: 'ref-synthetic',
+    issuedAt: '2026-10-15T00:00:00.000Z', expiresAt: '2026-10-15T00:02:00.000Z', replacedGrantId: null, authMethod: 'session', bindingMethod: 'session-header' }), 'syn-rad-a@members.test'),
+  row(52, 'original.download.grant', S2, downloadDetail('inst-b', { phase: 'refused', studyUid: S2, grantId: ATT, grantHash: 'f'.repeat(64), sessionRef: 'ref-synthetic-b',
+    code: 'MANIFEST_CHANGED', authMethod: 'session', bindingMethod: 'archive-grant' }), 'syn-rad-b@members.test'),
+]) ROWS.set(r.id, r);
 
 /** Sides of a member row the reader gets as {withheld:'other_institution'} (field rows withhold nothing). */
 function withheldSides(projection) {
@@ -275,8 +328,9 @@ test('the module table is the card contract; allowed and hidden never overlap; t
 
 test('the synthetic vectors (the card\'s 30 and study.question): record-time readers and withheld sides per row', () => {
   // 31 = the card's 30, unchanged, and the study.question row added with its contract row (Astra S5-U5b-D-F02); 32-41
-  // are the S7-U5 access-record rows (AT-02).
-  assert.equal(CONTRACT.synthetic_vectors.length, 41);
+  // are the S7-U5 access-record rows (AT-02); 42-50 the S9-U4b import/download rows (contract S9-U4p 4.9).
+  // 51-52: the D1489 archive grant rows.
+  assert.equal(CONTRACT.synthetic_vectors.length, 52);
   assert.deepEqual(CONTRACT.synthetic_vectors.slice(0, 30).map(v => v.row), Array.from({ length: 30 }, (_, i) => i + 1));
   assert.deepEqual(CONTRACT.synthetic_vectors[30], { row: 31, action: 'study.question', rule: 'hidden:study_scoped_owner_only',
     record_time_visible_to: [], withheld_sides: {}, note: CONTRACT.synthetic_vectors[30].note });
@@ -300,6 +354,20 @@ test('the synthetic vectors (the card\'s 30 and study.question): record-time rea
       assert.equal(A.projectAuditRow(source, reader), null, `row ${vector.row} must not reach ${reader}`);
     assert.equal(result.hidden === null, vector.record_time_visible_to.length > 0, `row ${vector.row} hidden reason`);
   }
+});
+
+test('S9-U4b import/download rows: the admin finds operationId and index; a row without institutionId reaches nobody; eight more candidates (D1489 the grant)', () => {
+  const unconfirmed = A.projectAuditRow(ROWS.get(43), 'inst-a');
+  assert.deepEqual([unconfirmed.detail.operationId, unconfirmed.detail.index, unconfirmed.detail.attemptId, unconfirmed.detail.outcome],
+    [OP_A, 3, ATT, 'unconfirmed']);
+  assert.equal(A.projectAuditRow(ROWS.get(43), 'inst-b'), null);
+  assert.equal(A.attributeAuditRow(ROWS.get(50)).hidden, 'no_institution_recorded');
+  const seven = ['dicom.import.intent', 'dicom.import.result', 'dicom.import.recovery.request', 'dicom.import.recovery.result',
+    'original.download.prepare', 'original.download.grant', 'original.download.intent', 'original.download.result'];
+  for (const action of seven) assert.equal(A.auditRule(action), 'field:detail.institutionId', action);
+  assert.deepEqual(A.AUDIT_CANDIDATE_ACTIONS.filter(action => /^(dicom\.import|original\.download)\./.test(action)).sort(), [...seven].sort());
+  // Not one of them is widened by a hidden wildcard or a neighbouring name.
+  for (const near of ['dicom.import', 'dicom.import.recovery', 'original.download', 'dicom.import.result.extra', 'original.download.grant.issued']) assert.equal(A.auditRule(near), 'hidden:unknown_action', near);
 });
 
 test('member rows: each side sees its own snapshot, the other side is withheld unnamed; email is never projected', () => {
@@ -760,7 +828,8 @@ test('B-F02: the SQL prefilter is a literal substring: names with \\, ", % and _
 // completeness cases below) ──
 
 test('AT-03 negative control: the current-group rule hands exactly m\'s A-era access rows to B; the record-time rule keeps them in A', () => {
-  const vectors = CONTRACT.synthetic_vectors.filter(v => v.row >= 32);
+  // The S7-U5 access-record vectors are 32-41 (the S9-U4b rows 42-50 follow them and are no access records).
+  const vectors = CONTRACT.synthetic_vectors.filter(v => v.row >= 32 && v.row <= 41);
   assert.deepEqual(vectors.map(v => v.row), [32, 33, 34, 35, 36, 37, 38, 39, 40, 41]);
   const leaks = vectors.filter(v => JSON.stringify(currentRule(ROWS.get(v.row))) !== JSON.stringify(v.record_time_visible_to))
     .map(v => v.row);
@@ -1577,6 +1646,21 @@ function scanAuditWrites(sources = auditSources()) {
         if (name === 'Map' && path[0] === '*' && path[1] === '1') return use(parent, ['*', ...path.slice(2)], depth + 1);
         if (name === 'Set') return path.length === 1 ? null : use(parent, path, depth + 1);
       }
+      // R-KEPT (U4BB4-02): a record a program class keeps in a private readonly parameter property - its constructor's use
+      // of the parameter and every `this.<property>` read of the class are this binding's uses, on the same path.
+      if (ts.isNewExpression(parent) && parent.arguments?.includes(node)) {
+        const kept = keptRecord(parent, node);
+        if (typeof kept === 'string') return fail(parent, `is kept by \`new ${snippet(parent.expression)}\`, but ${kept}`);
+        if (kept) {
+          const own = parameterHazard(kept.parameter);
+          if (own) return own;
+          for (const read of kept.reads) {
+            const issue = use(read, path, depth + 1);
+            if (issue) return issue;
+          }
+          return null;
+        }
+      }
       if (ts.isBinaryExpression(parent) && parent.right === node && parent.operatorToken.kind === K.EqualsToken) {
         const left = bare(parent.left);
         return ts.isIdentifier(left) ? follow(left, path) : fail(parent, 'is stored through another object');
@@ -1927,6 +2011,11 @@ function scanAuditWrites(sources = auditSources()) {
     const owned = object.kind === 'instance' && start.kind !== K.ThisKeyword && start.kind !== K.SuperKeyword
       ? ownedUse(object, start, node, parent) : undefined;
     if (owned !== undefined) return owned && `is handed on at ${where(parent)} (W4-C: ${owned})`;
+    // W4-L / W4-T (U4BB4-02): an instance kept by a const of its class, or handed to a parameter declared as its class,
+    // stays a holder - every use of that const or parameter is a value typed as the instance, read by these same rules.
+    const typed = object.kind === 'instance' && start.kind !== K.ThisKeyword && start.kind !== K.SuperKeyword
+      ? typedHolderUse(object, node, parent) : undefined;
+    if (typed !== undefined) return typed && `is handed on at ${where(parent)} (${typed})`;
     if (mutated(node)) return `is written at ${where(parent)}`;
     if (inert(node) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent)) return null;
     if (object.kind === 'class' && ts.isNewExpression(parent) && parent.expression === node) return null;
@@ -2104,6 +2193,88 @@ function scanAuditWrites(sources = auditSources()) {
     if (ts.isPropertyDeclaration(parent) && parent.initializer === node && ts.isNewExpression(start)) return declaredIssue(parent, start, object);
     if (ts.isNewExpression(parent) && parent.arguments?.includes(node)) return argumentIssue(parent, node, object);
     return undefined;
+  }
+  /**
+   * W4-L / W4-T (S9-U4b part (c), U4BB4-02; Astra consult u4bb4_02_shape): one use of a holder of an instance that keeps
+   * it a holder - null when it does, why not when the use has one of these shapes, undefined for any other use.
+   *   W4-L: the initializer of a const declaring one name, not exported, the const's declared type exactly the instance's
+   *         class.
+   *   W4-T: an argument of a call whose every callee the check follows ('flow') receives it in one named parameter declared
+   *         exactly as the instance's class (a type reference by a name of its file or of one direct import), the callee a
+   *         function with a body, the parameter neither optional, defaulted, rest, decorated nor written.
+   * In both, the new name's every reference is a value the checker types as the instance (instancesTyped), so it is a
+   * holder whose uses this same W4 reading proves; nothing is trusted to the declared type beyond finding those holders.
+   */
+  function typedHolderUse(object, node, parent) {
+    const exact = type => { const found = namedClass(type); return !!found && found === object.declaration; };
+    if (ts.isVariableDeclaration(parent) && parent.initializer === node) {
+      if (!isConst(parent) || !ts.isIdentifier(parent.name)) return 'W4-L: not a const of one name';
+      // An exported const is reached by callers outside this program: the instance is handed on to them.
+      if (isExported(parent)) return `W4-L: \`${parent.name.text}\` is exported`;
+      const declared = checker.getTypeOfSymbol(symbolAt(parent.name)), target = declared.objectFlags & ts.ObjectFlags.Reference ? declared.target : declared;
+      if (parent.type ? !exact(parent.type) : !(target.symbol?.declarations ?? []).includes(object.declaration) || declared.isUnion())
+        return `W4-L: \`${parent.name.text}\` is not declared \`${className(object.declaration)}\``;
+      return null;
+    }
+    if (!ts.isCallExpression(parent) || !parent.arguments.includes(node)) return undefined;
+    const index = parent.arguments.indexOf(node);
+    if (parent.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return 'W4-T: a spread argument';
+    const targets = argumentTargets(parent, index, 'flow');
+    if (!targets?.length) return `W4-T: \`${snippet(parent.expression)}\` is not a function the check follows`;
+    for (const parameter of targets) {
+      const owner = parameter.parent, name = parameter.name.getText();
+      if (!owner.body || decorated(owner) || decorated(parameter) || parameter.questionToken || parameter.initializer || parameter.dotDotDotToken)
+        return `W4-T: \`${name}\` (${where(parameter)}) is optional, defaulted, rest or decorated, or its function has no body`;
+      if (!exact(parameter.type)) return `W4-T: \`${name}\` (${where(parameter)}) is not declared \`${className(object.declaration)}\``;
+      if (changedBinding(symbolAt(parameter.name))) return `W4-T: \`${name}\` (${where(parameter)}) is written`;
+    }
+    return null;
+  }
+  const within = (node, container) => { for (let at = node; at; at = at.parent) if (at === container) return true; return false; };
+  /**
+   * R-KEPT (S9-U4b part (c), U4BB4-02; Astra consult u4bb4_02_shape): a record value handed to `new C(...)` of a class of
+   * the program whose one constructor with a body keeps it in a private readonly parameter property. Gives the parameter
+   * (its own uses in the constructor are the record's) and the reads `this.<property>` of the class's code (each a use of
+   * the record on the same path), or why the record is not kept so, or null when `new` names no class of the program (the
+   * use stays unproved). Kept so: the class named directly, neither decorated nor extending, implementing or extended; the
+   * property written nowhere (slotWrites, through every holder); every reference to it `this.<property>` inside the class;
+   * the class and its instances keeping to W4 (no prototype, no key W1 does not fix, no assertion to another type, no
+   * replaced method, no instance handed on - W4-C, W4-L and W4-T holders only). A record handed on through a property of
+   * a public, a mutable or an optional slot, or read anywhere else, is not kept: its use stays unproved where it stands.
+   */
+  function keptRecord(call, node) {
+    const target = ts.isIdentifier(bare(call.expression)) ? directClass(bare(call.expression)) : null;
+    if (!target) return null;
+    const index = call.arguments.indexOf(node);
+    if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return 'a spread argument';
+    if (decorated(target) || target.heritageClauses?.length || familyOf(target).size !== 1)
+      return `\`${className(target)}\` is decorated, has a heritage clause or a subclass`;
+    const constructors = target.members.filter(ts.isConstructorDeclaration), [constructor] = constructors;
+    if (constructors.length !== 1 || !constructor.body) return `\`${className(target)}\` has not one constructor with a body`;
+    const parameter = constructor.parameters[index];
+    if (!parameter || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name)) return `argument ${index + 1} is not received by one named parameter`;
+    // A plain parameter: its own references in the constructor (storing it anywhere is then an unproved use there).
+    if (!ts.isParameterPropertyDeclaration(parameter, constructor)) return { parameter, reads: references(symbolAt(parameter.name)) };
+    const flags = ts.getCombinedModifierFlags(parameter), key = parameter.name.text, what = `\`${key}\` of \`${className(target)}\``;
+    if (!(flags & ts.ModifierFlags.Private) || !(flags & ts.ModifierFlags.Readonly) || decorated(parameter) || parameter.questionToken)
+      return `${what} is not a private readonly parameter property without decorator or ?`;
+    const [own, property] = checker.getSymbolsOfParameterPropertyDeclaration(parameter, key) ?? [];
+    if (!own || !property) return `${what} has no parameter and property symbols`;
+    const written = slotWrites(parameter, target);
+    if (written.length) return `${what} is written at ${where(written[0])}`;
+    // The parameter's and the property's references share their declaration: a bare name is the parameter (the
+    // constructor's own use of the record), a member name the property, which must be `this.<property>` in the class.
+    const reads = [];
+    for (const reference of new Set([...references(own), ...references(property)])) {
+      const access = accessOf(reference);
+      if (!access) { reads.push(reference); continue; }
+      if (bare(access.expression).kind !== K.ThisKeyword || !within(access, target))
+        return `${what} is read at ${where(reference)} other than as \`this.${key}\` in its class`;
+      reads.push(access);
+    }
+    const escape = objectUse({ kind: 'class', declaration: target }).escape;
+    if (escape) return `the class \`${className(target)}\`, which ${escape}`;
+    return { parameter, reads };
   }
 
   // ── W3: functions, their calls and their callbacks ──
@@ -4912,6 +5083,58 @@ for (const entry of CLOSED_MUTANTS) {
     console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: entry.id, variants: results }));
   });
 }
+
+// CW21 (S9-U4b part (c), U4BB4-02; Astra consult u4bb4_02_shape): R-KEPT with W4-L/W4-T over a corpus of its own,
+// constructor-record-flow.ts (cases.json record_flow). Positive: the class form and the equivalent record form of one
+// record give the same raw-read candidates (SQL bound values proved, no AuditLog) and the same writers and actions, with
+// nothing unresolved. Negative: each variant leaves the named line unresolved with its reason, or lists an action outside
+// the table - an alias that writes the record, the record handed to an opaque callback, an assertion that hides it, a key
+// the program does not fix, a replaced method; and a class audit write is counted as its own action.
+const RECORD_FLOW = CLOSED_CASES.record_flow;
+function recordCorpus(edits = []) {
+  let text = fixtureText('constructor-record-flow.ts', CLOSED);
+  for (const { find, replace } of edits) {
+    assert.equal(text.split(find).length, 2, `constructor-record-flow.ts: the edited text occurs exactly once: ${find}`);
+    text = text.replace(find, () => replace);
+  }
+  return [closedSource('constructor-record-flow.ts', text)];
+}
+const recordTable = () => ({ rows: RECORD_FLOW.table.rows, wildcards: [], listed: action => RECORD_FLOW.table.rows.includes(action) });
+
+test('CW21 a record a class keeps in a private readonly parameter property gives the same SQL values and writers as the equivalent record; an alias write, an opaque callback, an assertion, an unfixed key or a replaced method leaves the read unresolved, and a class audit write is counted', () => {
+  const sources = recordCorpus(), scan = scanAuditWrites(sources);
+  for (const source of sources) assertMarked(scan, source);
+  assert.deepEqual(verdict(scan, recordTable()), EMPTY_VERDICT, 'both forms pass alone');
+  const at = tag => closedTag(sources, tag);
+  // The two forms differ only in where they stand and in their method names (positive.names: record name -> class name).
+  const placeless = text => RECORD_FLOW.positive.names.reduce((all, [record, kept]) => all.split(record).join(kept),
+    text.replace(/\s*\(api\/src\/[^)]*\)/g, '').replace(/api\/src\/[\w./-]+:\d+/g, ''));
+  const candidates = tag => scan.candidates.filter(entry => entry.file === at(tag).file && entry.line === at(tag).line)
+    .map(entry => placeless(`${entry.kind} | ${entry.status} | ${entry.reason} | ${entry.rule}`));
+  for (const [classTag, recordTag] of RECORD_FLOW.positive.pairs) {
+    assert.ok(candidates(classTag).length > 0, classTag);
+    assert.deepEqual(candidates(classTag), candidates(recordTag), `${classTag} and ${recordTag} are read alike`);
+  }
+  const writers = scan.sites.map(site => `${site.via} [${site.actions}] [${site.prefixes}]`).sort();
+  assert.deepEqual(writers, RECORD_FLOW.positive.writers, 'the same writers and actions in both forms');
+  const results = [];
+  for (const variant of RECORD_FLOW.variants) {
+    const label = `CW21 ${variant.name}`, edited = recordCorpus(variant.edits), found = verdict(scanAuditWrites(edited), recordTable());
+    for (const name of Object.keys(VERDICT)) {
+      if (name !== 'unresolved') { assert.deepEqual(found[name], variant.expect[name] ?? [], `${label}: ${name}`); continue; }
+      const wanted = (variant.expect.unresolved ?? []).map(item => ({ ...item, at: closedTag(edited, item.tag) }));
+      for (const entry of found.unresolved) {
+        const hit = wanted.findIndex(item => entry.startsWith(`${item.at.file}:${item.at.line} `) && entry.includes(item.reason));
+        assert.ok(hit >= 0, `${label}: an unresolved entry it does not name: ${entry}`);
+        wanted.splice(hit, 1);
+      }
+      assert.deepEqual(wanted.map(item => `@cw:${item.tag} ${item.reason}`), [], `${label}: named unresolved entries it does not give`);
+    }
+    assert.ok(failing(found).length > 0, `${label} fails the gate`);
+    results.push({ variant: variant.name, failing: failing(found) });
+  }
+  console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: 'CW21', writers, variants: results }));
+});
 
 // ── the controls over api/src: rewrites by the positions the compiler parsed, and values changed to fail ──
 // No spelling of the product is assumed: the edits are made where the compiler found each write, and every write site keeps
