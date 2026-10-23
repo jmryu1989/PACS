@@ -99,8 +99,8 @@
       $("#filterrow").innerHTML = shownColumns().map(c => {
         if (!c.f) return "<th></th>";
         if (c.f === "text" || c.k === 'modality')
-          return `<th><input data-f="${c.k}" value="${esc(fval[c.k] ?? "")}"></th>`;
-        return `<th><select data-f="${c.k}">` +
+          return `<th><input data-f="${c.k}" aria-label="${esc(c.t)} Filter" value="${esc(fval[c.k] ?? "")}"></th>`;
+        return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +
           ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
           `</select></th>`;
       }).join("");
