@@ -49,6 +49,15 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "auth.logout": 'detail.institution',
   "auth.session.expired": 'detail.institution',
   "auth.entry": 'detail.institution',
+  // S9-U4b 자기 기관 반입·원본 다운로드(계약 S9-U4p §4.9): 작업을 연 member의 검증된 세션 기관 = 그 작업의 ImportOperation.institutionId
+  "dicom.import.intent": 'detail.institutionId',
+  "dicom.import.result": 'detail.institutionId',
+  "dicom.import.recovery.request": 'detail.institutionId',
+  "dicom.import.recovery.result": 'detail.institutionId',
+  "original.download.prepare": 'detail.institutionId',
+  "original.download.grant": 'detail.institutionId',
+  "original.download.intent": 'detail.institutionId',
+  "original.download.result": 'detail.institutionId',
 });
 
 /** `report.<action>` 확정 행은 detail.by(행위 기관)로 귀속한다. commitReport가 받는 여섯 동작이다. */

@@ -41,10 +41,14 @@ printf 'proxy_set_header Authorization "Basic %s";\n' "$ORTHANC_BASIC" \
   > "$SNIPPET_DIR/orthanc-basic-auth.conf"
 
 if [ "$DEPLOYMENT_MODE" = "production" ]; then
+  # 다른 Host로 온 요청의 기록도 nginx.conf.template의 두 server와 같은 기준이다: query에 원본 다운로드 grant가 있으면
+  # 이미지 기본(main, 요청 줄 전체) 대신 query 없는 형식으로만 남긴다(S9-U4b U4C-01). 변수는 그 template의 http map이다.
   printf '%s\n' \
     'server {' \
     '    listen 80 default_server;' \
     '    server_name _;' \
+    '    access_log /var/log/nginx/access.log main if=$kin_plain_log;' \
+    '    access_log /var/log/nginx/access.log kin_original_archive if=$kin_grant_query;' \
     '    return 444;' \
     '}' \
     'server {' \
@@ -54,6 +58,8 @@ if [ "$DEPLOYMENT_MODE" = "production" ]; then
     "    ssl_certificate     $TLS_CERTIFICATE;" \
     "    ssl_certificate_key $TLS_CERTIFICATE_KEY;" \
     '    ssl_protocols TLSv1.2 TLSv1.3;' \
+    '    access_log /var/log/nginx/access.log main if=$kin_plain_log;' \
+    '    access_log /var/log/nginx/access.log kin_original_archive if=$kin_grant_query;' \
     '    return 444;' \
     '}' > "$SNIPPET_DIR/default-servers.conf"
 

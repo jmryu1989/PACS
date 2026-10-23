@@ -472,7 +472,10 @@ class LiveAndWorkflowPins(unittest.TestCase):
         planned = [row["case"] for row in RUNNER.module_plan("tests/invariants_live.py", "study-identity-selection", "live",
                                                               600)["tests"]]
         self.assertEqual(planned.count("LiveInvariantTests.test_s4u5_order_identity_qido_only_w_gates_and_report_preservation"), 1)
-        self.assertEqual(len(planned), 101)  # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 101: WORKLIST-SPLIT-UID
+        # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 100: S9-U4b added the five test_s9_u4_* cases;
+        # 100 -> 101: its pure S9U4CleanupTests (round 2, U4BB-15); 101 -> 102: its pure S9U4RegisterTests (round 6, U4BL-03).
+        # WORKLIST-SPLIT-UID: + six WorklistSplitUidInvariantTests (95 -> 101 on main); the union with S9-U4b: 102 + 6 = 108.
+        self.assertEqual(len(planned), 108)
         self.assertIn(("invariants_live.py", None, "candidate-invariants", len(planned)), candidate_ci.BASE)
 
     def test_hosted_steps_run_the_real_code_with_source_hashes(self):
