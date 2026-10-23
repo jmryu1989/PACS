@@ -147,11 +147,9 @@ Finalized는 24시간 수정창 종료일 뿐 목적 종료가 아니다. `archi
 
 `STATUTORY_ACT`는 모든 action을 제23조④ **기재·추가기재·수정·열람 또는 none**에 대응한다. write/approve-sign/draft-save는 기재, additional-entry/addendum은 추가기재, modify/amend/cancel/clear/discard는 수정이다. 제공/전송/표시/출력 단계는 열람, finalize/archive/resume/연장/법적 보존/해제/파기 및 실패는 none으로 별도 기록한다. none은 사건 생략을 뜻하지 않는다. 제공 준비·전송·화면 표시·명시적 ACK는 서로 다른 관찰이다. print-done은 앞 print-opened 참조가 필요하며 실제 종이 출력의 증명은 아니다.
 
-B의 접속 저장소는 업무 기록과 **별도 저장소**이며 제23조④의 별도 보관과 제21조③의 분리 관리를 계약으로 강제한다. 런타임은 전용 INSERT만 가능하고 owner/superuser/UPDATE/DELETE 권한을 갖지 않는다. 각 저장 사건은 서버가 같은 append 안에서 단조 sequence·previousHash·SHA-256을 결속한다(`AccessChainEntry`). 외부 seal에 저장한 신뢰 tail까지 검증하여 중간/끝 누락을 확인한다. 별도 읽기 요청·사용자 확인창을 추가하지 않는다.
+B의 원장은 업무 데이터와 같은 PostgreSQL 트랜잭션에 참여하며 `emr_access` 스키마와 별도 볼륨의 `kin_emr_access` tablespace에 저장한다. 런타임은 owner가 정의한 append 함수의 EXECUTE 권한만 갖고 원장 테이블을 직접 수정·삭제하지 않는다. PostgreSQL COMMIT 확인 전에는 보호된 응답을 내보내지 않는다. 이 배치는 별도 백업이나 독립 하드웨어 장애 영역을 뜻하지 않는다.
 
-**append-only는 보존 중 사건의 불변성**이다. 2년 만료와 모순되지 않는다: 별도 retention-job 역할만 만료한 prefix를 삭제하며, 그 삭제를 같은 원자적 작업 안에서 `sealAccessExpiry()`의 체인 사건으로 기록한다. 삭제 끝 sequence·hash와 건수의 비개인 checkpoint가 남아 이후 체인 검증을 이어간다. 삭제 역할은 미만료/보존 명령 대상이나 임의 행을 삭제할 수 없다. checkpoint도 자기 사건부터 2년으로 관리하고 최소 비개인 seal만 갱신한다. 접속 사건은 원기록 기간/마지막 열람으로 자동 연장하지 않는다.
-
-`provideAfterDurableEvent()`는 내구성 있는 제공 사건 전에는 본문을 보내지 않는다. 성공 쓰기/서명/공개/접속 append는 함께 commit하고 실패 사건은 업무 rollback과 별개 저널에 남긴다. B의 합성 실환경 시험은 런타임 UPDATE/DELETE/trigger 해제 거절, 저장소 분리, 위변조·누락 탐지, retention 역할의 미만료 삭제 거절, 삭제/checkpoint 중단 원자성·복구를 검증해야 한다. A의 해시 체인 순수 시험은 DB 권한의 실제 이행을 증명하지 않는다.
+보존기간이 지난 payload는 다른 사건의 hold와 독립적으로 만료할 수 있다. 최소 attempt·결과·receipt 결속은 유지하여 오래된 요청이 업무 효과를 재실행하거나 내용을 되살리지 않게 한다. SQL DELETE는 물리적 파기 증거가 아니며 H의 원본·WAL·backup·scratch 사본 종료와 실제 매체/키 폐기 근거가 별도로 필요하다.
 
 ## EMR-B1: 접속사건 v2·SQL 저장 분류·단말 경계
 
@@ -162,19 +160,21 @@ B의 접속 저장소는 업무 기록과 **별도 저장소**이며 제23조④
 
 B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델이 아니므로 `SQL_STORAGE_CLASSIFICATION`에 따로 분류하고 실제 catalog와 양방향 대조한다. 법적 보존 의무·요청(`legal-duty`)과 검토된 조문 판본 이력(`legal-reference`)은 원기록을 따르는 증빙이다(`source-record`). 저장된 접속사건은 `emr_access.access_entry` 모델로 A의 고정 접속 매핑과 같은 사실을 돌려준다.
 
-**접속기록 보존 규칙(지휘 D727/D731, 법령 등록부 최종 §5-11·D-1, Astra 교차 확인 이견 0):** 원장은 두 스트림이다. 열람 스트림은 모든 사건(열람·비기록 사건·변경 사건의 2년 잔여)을 사건일부터 2년(첫날 산입) 보존하고 hold·법적 근거가 있을 때만 더 길게 두며, 기존 prefix 삭제·checkpoint·외부 seal을 쓴다. 변경 이력 스트림은 기록을 바꾼 기재·추가기재·수정 사건을 대상 기록의 보존 종료까지 두고 그 기록의 파기 묶음에서 H가 함께 파기한다(B1에는 그 삭제 경로가 없다). 행에는 만료 시각을 저장하지 않고 `statutory_act`와 대상 기록·판 ID(`emr_access.access_target`)를 결속하며, 기한은 파기 검토 때 `accessDeadline(stream, …)` 하나로 계산한다. A의 `accessStreams`·`statutoryAct`·`sealAccessEvent(…, stream)`·`verifyAccessChain(…, stream)`이 스트림 경계를 고정한다(history payload kind는 `history`). 권한 이력 3년은 B1 저장이 아니다(D-8).
+**B2 PostgreSQL 교체(D1770):** 기존 B1 migration 세 개는 변경하지 않고 `20261023180000_emr_pg_ledger`를 추가한다. 기존 사건이 있으면 설치를 거부하고 보존한다. chain·외부 seal·별도 상태 프로세스·전체 이력 온라인 검사는 사용하지 않는다. `operation`과 `(stream, attempt_id)`를 먼저 기록하고 업무 변경, 필요한 모든 stream, 단일 terminal outcome을 같은 연결의 한 트랜잭션에서 기록한다. COMMIT 응답이 유실되면 새 연결에서 같은 operation 잠금을 얻은 뒤만 결과를 확정한다. 잠금/DB를 사용할 수 없으면 UNKNOWN이며 시간이 지났다는 이유로 negative를 만들지 않는다.
 
-**B1 seal 동시성 신뢰 계약(D867):** 사건 ID와 transaction attempt ID를 분리하고, COMMIT 전 외부의 정확한 chain/slot/hash/generation 예약을 같은 transaction의 `commit_marker`와 대조한다. 실행 중 `reconcileCommitted()`는 확정 사실만 봉인하며, 부재 판정은 모든 API·retention writer가 공유하는 DB fence 뒤 `recoverAtStart()`에서 수행한다. expiry는 자기 checkpoint 봉인 후 성공하고 다음 job은 restart 없이 실행한다. 두 stream과 실패 journal은 같은 커널 잠금 소유 writer가 기록한다. 폐기·대체 proof 및 tail-only replay는 settlement frontier의 generation/high-water로 거절한다. 응답 전달 전에 정상 만료된 사건은 본문 없는 임시 확정 결속으로 receipt를 확인하고 응답 확인 시 정리한다. 다른 프로세스의 시작 fence는 이미 COMMIT된 응답의 전달을 취소하지 않으므로 아직 응답하지 않은 최소 hash/위치 결속은 유지한다. 본문·환자/판독 내용은 이 결속에 복제하지 않는다.
+**보존:** 열람·인증 등 비기록 사건은 원래 사건일부터 민법상 2년, 권한 부여·변경·말소 이력은 별도 3년 분류다. 변경 history는 실제 연결 기록의 적용 보존기간과 2년 하한을 함께 따른다. 기록 종료를 모르면 파기하지 않으며, 실제 hold·미해결 의무를 유지한다. 재시도·복원은 시계를 다시 시작하지 않는다. 현재 교체 구현의 history 파기 및 물리적 사본 종료 연결은 검증 전이며 운영 파기를 승인하지 않는다.
 
-**명명된 한계 B1-ROLLBACK-WITNESS:** B1은 외부에 확정된 history의 변경·삭제·재순서화, 예약되지 않은 unsealed history와 폐기·대체된 proof의 재생을 거절하며, 응답 불명 복구에는 정직한 DB의 transaction finality를 사용한다. DB marker는 독립 COMMIT 증거가 아니다. 특권 공격자가 COMMIT 행·head·marker까지 포함한 DB 전체를 되돌리는 공격(보호 상태 전체를 함께 되돌리는 경우 포함)은 B1 보장 밖이다. 필요한 대책은 독립적이고 rollback 불가능한 finality witness 또는 off-host monotonic high-water이며 Stage 9 운영 강화로 보류한다. 외부 백업은 계속 OFF다.
+**실패 기록:** 업무 rollback 뒤 별도 DB 트랜잭션에 기록한다. DB가 받지 못하면 기존 64 MiB 한도의 failure-only outage spool에 fsync한다. 성공 결과·예약·seal을 spool에 쓰지 않는다. 완전한 기록은 failure ID로 중복 없이 가져오고, 불완전한 끝 바이트는 보존한다. DB와 spool 모두 실패하면 실패 기록을 보존했다고 주장하지 않고 운영 오류를 내보낸다.
 
-**명명된 한계 B1-PRESERVE-REFUSE:** 진전 보장은 유한 장애 이후의 정상 도달 상태에 적용한다. F02의 journal·격리 원문 합산 64 MiB 초과, 중간 journal 손상, 외부 seal 소실과 변조는 원문 보존 후 거절하며 관리자·개인정보 보호책임자에게만 알린다. 의사 확인창과 자동 삭제는 추가하지 않는다. Windows 순수 모델은 Linux 커널 잠금·fsync·다중 프로세스 내구성을 대신 증명하지 않는다.
+**운영자 검토:** reader 자격으로 `emr_access.entries_after(after_sequence, page_size)`를 페이지별 조회하여 원래 시각, actor의 issuer/subject, 관찰된 접속 위치, 대상 기록·판, 업무·결과를 검토한다. sequence는 조회 위치이며 rollback으로 생긴 빈 번호가 유실의 증거는 아니다. 다음 페이지에는 마지막 반환 sequence를 사용한다. 다운로드 건은 실제 업무 사정과 대조하여 검토 근거를 남긴다. 2026-10-31까지 월 1회 이상 점검·다운로드 사유 확인, 2026-11-01부터 공포된 내부관리계획 점검 규칙을 적용한다(legal-cross C06). 의사에게 열람 사유 입력을 요구하지 않는다.
 
-REQ-EMR-06/19 → RISK-EMR-06/19 → C05/C06/C07/C13, `tests/emr/b/seal_checker.cjs` I1–I4 및 L02/L03/L04/L05/L08/L18/L19. 새 migration은 기존 적용 migration을 고치지 않고 marker/ACL을 추가하며 같은 pause의 DB·roles·tablespace·보호 상태 복원에 포함한다.
+**법령 시점:** 민감정보 시스템의 2년 보관은 이미 적용 중이다. 의료법 제23조제4항의 열람·최초 기재 확장 시행일은 2026-12-10이며 10월 23일 현행으로 쓰지 않는다. 제품은 기존 사용자 요구에 따라 현재도 모든 열람을 기록한다. 고시가 정하지 않은 예측 항목을 추가하지 않는다.
 
-**동시 열람 지연(D874):** 공유 DB writer fence를 얻은 intent들은 head lock 전에 한 번의 내구 저장으로 묶는다. 정확한 슬롯 예약은 계속 각 transaction의 head lock 아래 COMMIT 전에 내구화한다. Linux writer는 `flock`에 상속한 열린 파일 설명을 직접 유지하고 동기 쓰기·fsync 후 닫으며, 예약마다 Node 프로세스를 새로 실행하지 않는다. 이미 COMMIT된 receipt 요청만 묶어 봉인하고, 검증한 stream frontier와 정확한 예약이 같을 때만 최신 외부 상태에 반영한다. 무관한 intent 변경은 재검증을 유발하지 않고, frontier가 달라졌으면 새 DB snapshot을 검증한다. 미확정 요청을 그룹에 포함하거나 완료를 기다리지 않는다. append timeout 15초·maxWait 10초는 유지한다. REQ-D874-EMR-B-THROUGHPUT → RISK-READING-RECEIPT-LATENCY → C19·L03/L03b·M36 및 그룹 응답 edge를 포함한 I1–I4 checker로 결속한다.
+**복구 한계:** native backup과 WAL의 실제 복구 지점·손실 범위를 보고한다. 오래된 유효 backup을 명시적으로 선택한 경우 그 복구 지점을 표시한다. 독립 per-commit witness가 없으므로 DB와 catalog가 함께 되돌아간 경우나 마지막 보존 WAL 이후의 전체 손실을 검출한다고 주장하지 않는다. 외부 백업·일정의 기존 OFF 선택은 그대로 적용한다.
 
-**D-18 업무 문맥(예측 의존):** 모든 접속사건은 서버가 업무 문맥(배정 판독·동일 환자 과거 비교·임상 요청·worklist·background fetch·서비스 작업·인증)에서 자동 결속한 `context`를 가지며 해시 대상이다. 문맥 밖 접근만 한 줄 사유(`out-of-context`, 200자 이하, 줄바꿈 금지)를 요구한다. 사유는 권한이 아니다.
+DISPOSED_D557: 공격자 시나리오에 근거한 체인·외부 seal·anti-rollback 추가 의무는 이번 교체 범위에서 제외한다.
+
+**D-18 업무 문맥:** 기존 서버 자동 문맥을 사건에 유지한다. 문맥 밖 사유는 선택 사항이며 일반 열람을 차단하지 않는다. 로그인/Approve UI나 단계별 재인증을 추가하지 않는다. 서버 보유 의사별 온라인 서명은 C2가 구현하며 B2는 키를 생성하거나 사용하지 않는다. 첫 릴리스의 offline approval은 제공하지 않는다.
 
 **D-3 Tech Note:** 방사선사 본인 Tech Note는 작성자 본인 키 서명판(`tech-note`, 서명 필수)이고 관리자 메모는 서명 없는 운영 문구(`operational-note`)다. 저장 행의 작성자 역할(`authorRole`)로 구분하고 요청 플래그로 정하지 않는다. 서명 연결은 C다.
 

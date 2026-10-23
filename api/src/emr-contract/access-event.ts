@@ -50,7 +50,7 @@ export interface AccessEventV1 {
   occurredAt: string;
   trustedProxyIp: EvidenceFact<{ address: string; source: 'trusted-proxy' }>;
   cause: CauseKind;
-  /** D-18: the business context the server bound to this access (one-line reason only out of context). */
+  /** D-18: the business context the server bound to this access (optional reason out of context). */
   context: Readonly<WorkContext>;
   executor: 'member' | 'service' | 'unauthenticated';
   targets: readonly AccessTarget[];
@@ -182,7 +182,7 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
  * D-18 (legal register / delta map MAP-D18) [PREDICTED-CONSERVATIVE]: every access event names the business context the
  * server observed, bound from the work context - reading an assigned study, comparing a same-patient prior, a clinical
  * request, the worklist, a background fetch for the current work, an in-process job, authentication. Nothing is typed in
- * the normal flow. Only an access outside every context carries one explicit line of reason (break-glass). The context is
+ * the normal flow. An optional reason may accompany out-of-context access; it never gates ordinary viewing. The context is
  * part of the hashed event and is never a permission: authorization is decided before and apart from it.
  */
 export const WORK_CONTEXTS = freeze(['assigned-reading', 'same-patient-comparison', 'clinical-request', 'worklist',
@@ -202,8 +202,8 @@ function workContext(input: unknown, cause: CauseKind, authentication: boolean):
     authentication ? ['authentication'] : MEMBER_CONTEXTS;
   if (!expected.includes(basis)) refuse('WorkContextMismatch');
   if (basis === 'out-of-context') {
-    if (reason === null || reason !== reason.trim() || /[\r\n\u2028\u2029]/.test(reason) || reason.length > OUT_OF_CONTEXT_REASON_MAX)
-      refuse('OutOfContextReasonRequired');
+    if (reason !== null && (reason !== reason.trim() || /[\r\n\u2028\u2029]/.test(reason) || reason.length > OUT_OF_CONTEXT_REASON_MAX))
+      refuse('OutOfContextReasonInvalid');
   } else if (reason !== null) refuse('ReasonOnlyOutOfContext');
   if ((basis === 'assigned-reading' || basis === 'clinical-request') && (studyId === null || relatedStudyId !== null)) refuse('WorkContextStudyRequired');
   if (basis === 'same-patient-comparison' && (studyId === null || relatedStudyId === null || studyId === relatedStudyId)) refuse('WorkContextStudyRequired');
@@ -488,9 +488,9 @@ export async function provideAfterDurableEvent<T>(store: AppendOnlyAccessStore, 
 export const ACCESS_INVARIANTS = freeze({
   mutation: 'append-only-while-retained; runtime-insert-only-not-owner-or-superuser; no-update-delete',
   store: 'separate-from-business-records; privacy-21.3-segregation-and-medical-23.4-access-store',
-  integrity: 'server-sequence-and-previous-hash-in-same-append; trusted-tail-seal-detects-omissions',
-  deletion: 'retention-job-only; viewing-stream: expired-prefix-only, atomic-chain-checkpoint-with-nonpersonal-anchor; history-stream: with-the-changed-record-destruction-set-only (H); never-runtime',
-  liveVerification: 'B: runtime-update-delete-disable-trigger-denied; tamper-gap-tail-detected; expiry-role-no-unexpired-delete; crash-checkpoint-rollback',
+  integrity: 'PostgreSQL transaction, append functions and native recovery',
+  deletion: 'retention-role-only; expired payloads independently; minimal receipt survives; H closes physical copies',
+  liveVerification: 'B: runtime cannot mutate retained entries; atomic commit, bounded pending recovery and checked expiry',
   retention: 'two-streams (D-1): viewing = each-event-floor-2-years, longer-only-under-hold-or-legal-basis; history = changes (기재·추가기재·수정) as-long-as-the-changed-record; no-stored-expiry; no-last-access-reset-or-institution-override',
   retentionBasis: '안전성 확보조치 기준 제8조① 본문(정보주체 제외)·①2; 개인정보 보호법 제3조①②·제21조①',
   expiry: 'destroy-irreversibly-when-the-two-year-security-purpose-ends; no-automatic-longer-retention',
@@ -499,7 +499,7 @@ export const ACCESS_INVARIANTS = freeze({
   failure: 'independent transaction or protected failure journal; business rollback cannot erase failure',
   correlation: 'followups retain the prepared event target/version set; ACK never migrates to a new version',
   link: 'random audit-only ID; never a session ID, cookie, bearer token, or authentication credential',
-  context: 'D-18: server-bound work context in every event (hashed); one-line reason only out of context; never a permission',
+  context: 'D-18: server-bound work context in every event (hashed); optional reason out of context; never a permission',
   emptyTargets: 'only an actually empty result or non-record operation; never omitted discovered targets',
   proxy: 'B supplies verified proxy context, never an untrusted forwarded header',
   exports: 'print-done/pdf/copy describe client reports only, not proof of physical output or OS completion',
@@ -510,7 +510,7 @@ export const ACCESS_INVARIANTS = freeze({
  *  - `viewing`: every access event, kept for its own floor (안전성 확보조치 기준 제8조①, counted from the event; longer only
  *    under a hold or another legal basis). It holds 열람 events, events about no EMR record, and the floor remainder of
  *    every change, so a change made shortly before its record is destroyed stays here for its own floor. An expired
- *    prefix is deleted with a chained checkpoint (`sealAccessExpiry`) behind B's external seal.
+ *    payload may expire independently of unrelated held events, with a minimal disposal fact.
  *  - `history`: the change history of EMR records - a succeeded 기재·추가기재·수정 act about at least one record target
  *    (의료법 제23조④, 시행규칙 제16조①2·②) - kept as long as the record it changed and destroyed with that record's
  *    destruction set (unit H). It has no prefix expiry.
@@ -546,58 +546,4 @@ export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]
   const changed = CHANGE_ACTS.includes(statutoryAct(event, served)) && event.result === 'succeeded' &&
     (event.targets as readonly AccessTarget[]).some(target => !NON_RECORD_TARGETS.includes(target.kind));
   return changed ? ACCESS_STREAMS : freeze(['viewing'] as const);
-}
-
-/** Hash input is the ordered parsed payload plus monotonic position, never caller-supplied chain fields. */
-export interface ChainPosition { sequence: number; hash: string }
-export interface AccessExpiryCheckpoint { kind: 'expiry'; at: string; deletedThrough: number; deletedCount: number; anchorHash: string }
-export interface AccessChainEntry extends ChainPosition {
-  previousHash: string;
-  payload: { kind: 'access'; event: Readonly<AccessEvent> } | { kind: 'history'; event: Readonly<AccessEvent> } | AccessExpiryCheckpoint;
-}
-/** Each stream is its own chain from this genesis. */
-export const ACCESS_CHAIN_GENESIS: Readonly<ChainPosition> = freeze({ sequence: 0, hash: '0'.repeat(64) });
-function chainEntry(previous: ChainPosition, payload: AccessChainEntry['payload']): Readonly<AccessChainEntry> {
-  object(previous, ['sequence', 'hash']); integer(previous.sequence); sha256(previous.hash);
-  const sequence = integer(previous.sequence + 1, 1), previousHash = previous.hash;
-  const hash = createHash('sha256').update(JSON.stringify({ sequence, previousHash, payload })).digest('hex');
-  return freeze({ sequence, previousHash, payload, hash });
-}
-/** The viewing stream's entry keeps the v1 payload kind 'access'; the history stream's is 'history', so an entry can never
- * be moved between the streams unnoticed. Only an event that changed a record may enter the history stream. */
-export function sealAccessEvent(previous: ChainPosition, input: AccessEvent, stream: AccessStream = 'viewing'): Readonly<AccessChainEntry> {
-  choice(stream, ACCESS_STREAMS);
-  const event = parseAccessEvent(input);
-  if (stream === 'history' && !accessStreams(event).includes('history')) refuse('HistoryStreamRefused');
-  return chainEntry(previous, stream === 'history' ? { kind: 'history', event } : { kind: 'access', event });
-}
-/** Viewing stream only. Through is the last deleted prefix entry; B checks every entry's end and the legal holds first. */
-export function sealAccessExpiry(previous: ChainPosition, through: ChainPosition, deletedCount: number, at: string): Readonly<AccessChainEntry> {
-  object(through, ['sequence', 'hash']); integer(through.sequence, 1); integer(deletedCount, 1); sha256(through.hash);
-  if (through.sequence > previous.sequence || deletedCount > through.sequence) throw new Error('Invalid expired prefix');
-  return chainEntry(previous, { kind: 'expiry', at: utc(at), deletedThrough: through.sequence, deletedCount, anchorHash: through.hash });
-}
-/** Verification of one stream starts at a sealed anchor and must reach an independently protected expected tail. */
-export function verifyAccessChain(anchor: ChainPosition, entries: readonly AccessChainEntry[], expectedTail: ChainPosition,
-  stream: AccessStream = 'viewing'): boolean {
-  try {
-    choice(stream, ACCESS_STREAMS);
-    let previous = anchor;
-    for (const entry of entries) {
-      object(entry, ['sequence', 'previousHash', 'payload', 'hash']);
-      let expected: Readonly<AccessChainEntry>;
-      if (entry.payload.kind === 'access' || entry.payload.kind === 'history') {
-        if ((entry.payload.kind === 'history') !== (stream === 'history')) return false;
-        object(entry.payload, ['kind', 'event']); expected = sealAccessEvent(previous, entry.payload.event, stream);
-      } else {
-        if (stream !== 'viewing') return false;
-        const p = object(entry.payload, ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']); choice(p.kind, ['expiry']);
-        expected = sealAccessExpiry(previous, { sequence: p.deletedThrough, hash: p.anchorHash }, p.deletedCount, p.at);
-      }
-      if (entry.sequence !== expected.sequence || entry.previousHash !== expected.previousHash || entry.hash !== expected.hash) return false;
-      previous = { sequence: entry.sequence, hash: entry.hash };
-    }
-    object(expectedTail, ['sequence', 'hash']); integer(expectedTail.sequence); sha256(expectedTail.hash);
-    return previous.sequence === expectedTail.sequence && previous.hash === expectedTail.hash;
-  } catch { return false; }
 }

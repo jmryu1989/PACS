@@ -1,6 +1,8 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { dictationParser } from './dictation-parser';
+import { join } from 'node:path';
+import { EmrRuntime } from './emr-runtime/application';
 
 async function bootstrap() {
   // 설정 실수는 첫 요청의 500/인증 우회가 아니라 기동 실패로 드러나야 한다.
@@ -19,7 +21,13 @@ async function bootstrap() {
         process.exit(1);
       }
 
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  if (!process.env.KIN_EMR_STATE_DIR || !process.env.DATABASE_URL)
+    throw new Error('EmrDatabaseAndFailureDirectoryRequired');
+  const runtime = new EmrRuntime(process.env.DATABASE_URL, join(process.env.KIN_EMR_STATE_DIR, 'outage'));
+  await runtime.start();
+  let app;
+  try { app = await NestFactory.create(AppModule.withLedger(runtime), { rawBody: true, abortOnError: false }); }
+  catch (error) { await runtime.stop(Date.now() + 5000); throw error; }
   app.use(dictationParser());
   /**
    * 모든 `/api/` 응답의 기본값은 `no-store`다(S7-U5 A016). 예전에는 경로 목록에 든 곳만 그랬고, 목록에 없는 GET(판독 이력·
@@ -45,11 +53,15 @@ async function bootstrap() {
     app.enableCors({ origin: corsOrigins, credentials: false });
   app.setGlobalPrefix('api');
 
-  await app.listen(3000, '0.0.0.0');
+  try { await app.listen(3000, '0.0.0.0'); }
+  catch (error) {
+    try { await app.close(); } finally { await runtime.stop(Date.now() + 5000); }
+    throw error;
+  }
   console.log('[KIN API] http://localhost:3000/api');
   if (process.env.AUTH_REQUIRED === 'false')
     console.warn('[KIN API] ⚠️  인증이 꺼져 있습니다 (AUTH_REQUIRED=false). 사내망 밖에 노출하지 마세요.');
   else
     console.log(`[KIN API] 인증: Keycloak (iss=${process.env.KC_ISSUER})`);
 }
-bootstrap();
+bootstrap().catch(() => { console.error('[KIN API] Startup failed.'); process.exitCode = 1; });

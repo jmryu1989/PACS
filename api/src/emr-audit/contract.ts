@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
-import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, sealAccessEvent, statutoryAct } from '../emr-contract/access-event';
+import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, statutoryAct } from '../emr-contract/access-event';
 import type { AccessEvent, AccessTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
 import { retentionDisposition, verifiedRecord } from '../emr-contract/classification';
 import type { ResolvedRecord } from '../emr-contract/classification';
@@ -299,18 +299,16 @@ export interface ReplayEntry {
 }
 export interface InvestigationPage { rows: readonly ReplayEntry[]; total: number; top: number; nextCursor: string | null }
 
-/** A row whose recomputed chain hash differs (a rewritten patient, version or institution) is refused, never shown. */
+/** Validate the stored event and keyset page order before presenting the operator report. */
 function verifiedRow(input: unknown, top: number, previous: number): { sequence: number; event: Readonly<AccessEvent>; durableAt: string } {
   return guarded('LedgerRowIntegrityRefused', () => {
     const row = object(input, ['entry', 'durableAt', 'served']);
-    const entry = object(row.entry, ['sequence', 'previousHash', 'payload', 'hash']);
-    integer(entry.sequence, 1); sha256(entry.previousHash); sha256(entry.hash);
+    const entry = object(row.entry, ['sequence', 'payload']);
+    integer(entry.sequence, 1);
     if (entry.sequence > top || entry.sequence >= previous) refuse('LedgerSourceOrderRefused');
     const payload = object(entry.payload, ['kind', 'event']);
     if (payload.kind !== 'access') throw new Error('Not an access event');
     const event = parseAccessEvent(payload.event, row.served === null ? undefined : row.served);
-    const sealed = sealAccessEvent({ sequence: entry.sequence - 1, hash: entry.previousHash }, event);
-    if (sealed.hash !== entry.hash) throw new Error('Chain hash mismatch');
     return { sequence: entry.sequence, event, durableAt: utc(row.durableAt) };
   });
 }

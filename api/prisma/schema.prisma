@@ -1022,3 +1022,7 @@ model StudyAccessRevision {
   @@id([institution,subject,revision])
   @@unique([institution,subject,requestId], map:"StudyAccessRevision_request_key")
 }
+
+// EMR B2: emr_access remains SQL-owned and EXECUTE-only for kin_runtime.
+// Migration 20261023180000_emr_pg_ledger defines operation/attempt/outcome,
+// legal entries and failure facts; Prisma business delegates share its transaction.

@@ -1,32 +1,26 @@
-import { StateCoordinator } from './coordinator';
-import { JournalKind, JournalRecord, JournalUnavailable } from './journal-file';
-export { JOURNAL_MAX_BYTES, JOURNAL_KINDS, JOURNAL_CAUSES, JournalKind, JournalRecord, JournalUnavailable,
-  protectedDirectory, syncDirectory } from './journal-file';
+import { randomUUID } from 'node:crypto';
+import type { RawQuery } from './manifest';
+import { FailureSpool, JournalRecord } from './journal-file';
+export { FailureSpool, JournalRecord, JournalUnavailable } from './journal-file';
 
-/** The same fenced external writer owns journal and seal IO, including torn-tail recovery. */
+/** This client is never the caller's business transaction. */
 export class FailureJournal {
-  readonly coordinator: StateCoordinator;
-  readonly tornBytes: number;
-  /** Retention is always a client of the API's lifetime fence. If the API is
-   * absent, construction fails after bounded retries; the job defers without
-   * acquiring ownership or starting its deleting transaction. */
-  static retention(directory: string): FailureJournal {
-    return new FailureJournal(directory, new StateCoordinator(directory, undefined, 'retention'));
+  constructor(private readonly db: RawQuery, private readonly spool: FailureSpool) {}
+  private async import(record: JournalRecord): Promise<void> {
+    await this.db.$queryRaw`SELECT emr_access.record_failure(${record.id}::uuid, ${record.operationId}::uuid,
+      ${record.eventId}::text, ${record.at}::timestamptz, ${record.cause}::text)::text`;
   }
-  constructor(directory: string | undefined, coordinator?: StateCoordinator) {
-    this.coordinator = coordinator ?? new StateCoordinator(directory);
-    this.tornBytes = this.invoke('journal-load').tornBytes;
-  }
-  private invoke(operation: string, value?: any): any {
-    try { return this.coordinator.call(operation, value); }
-    catch (error: any) {
-      if (String(error.code).startsWith('FailureJournal')) throw new JournalUnavailable(error.code);
-      throw error;
+  async record(cause: JournalRecord['cause'], eventId: string | null, operationId: string | null): Promise<'database' | 'spool'> {
+    const record: JournalRecord = { id: randomUUID(), cause, eventId, operationId, at: new Date().toISOString() };
+    try { await this.import(record); return 'database'; }
+    catch {
+      try { await this.spool.append(record); return 'spool'; }
+      catch {
+        console.error('[EMR] Failure storage unavailable; no durable failure record was accepted.');
+        throw new Error('FailureStorageUnavailable');
+      }
     }
   }
-  record(id: string, kind: JournalKind, body: Record<string, string | number>, at = new Date().toISOString()): Readonly<JournalRecord> {
-    return this.invoke('journal-record', { id, kind, body, at });
-  }
-  all(): readonly Readonly<JournalRecord>[] { return this.invoke('journal-load').records; }
-  find(id: string): Readonly<JournalRecord> | undefined { return this.invoke('journal-find', id); }
+  replay(): Promise<number> { return this.spool.replay(record => this.import(record)); }
+  close(): Promise<void> { return this.spool.close(); }
 }

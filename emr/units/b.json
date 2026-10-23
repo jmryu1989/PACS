@@ -1,7 +1,7 @@
 {
   "unit": "EMR-B",
-  "round": "B1",
-  "base_sha": "8c411b97ff208fa85f0cc0cf625ee11126c4417e",
+  "round": "B2R-WIP",
+  "base_sha": "3649a70e76e94805ff9e747a3b2f8ee447b95f6c",
   "dependencies": [
     "EMR-A contract (PR #142, landed in main c4b5bdc)",
     "S8-CTX landing (PR #144, main 2fc7358): migration 20261006000000_tech_note_attempt_id, profile context-loss, G3 114",
@@ -121,9 +121,6 @@
       "emr_access.access_target": [
         "access-audit"
       ],
-      "emr_access.chain_head": [
-        "access-audit"
-      ],
       "emr_access.audit_projection": [
         "access-audit"
       ],
@@ -146,8 +143,26 @@
         "received-order",
         "order-exam-component"
       ],
-      "emr_access.commit_marker": [
+      "emr_access.operation": [
         "access-audit"
+      ],
+      "emr_access.attempt": [
+        "access-audit"
+      ],
+      "emr_access.attempt_outcome": [
+        "access-audit"
+      ],
+      "emr_access.entry_receipt": [
+        "access-audit"
+      ],
+      "emr_access.failure_entry": [
+        "access-audit"
+      ],
+      "emr_access.disposal_fact": [
+        "access-audit"
+      ],
+      "emr_access.ledger_metadata": [
+        "system-operation"
       ]
     }
   },
@@ -189,13 +204,11 @@
   },
   "migrations": {
     "added": [
-      "20261008120000_emr_b",
-      "20261010120000_emr_seal_attempts",
-      "20261010150000_emr_read_jit_off",
-      "20261011120000_filter_shortcuts"
+      "20261023180000_emr_pg_ledger"
     ],
-    "count": 46,
-    "latest_before": "20261007200000_designation_subjects"
+    "count": 47,
+    "latest_before": "20261011120000_filter_shortcuts",
+    "historic_b1": "unchanged"
   },
   "deployment": {
     "schema": "emr_access",
@@ -210,13 +223,18 @@
     "tables": [
       "access_entry",
       "access_target",
+      "attempt",
+      "attempt_outcome",
       "audit_projection",
-      "chain_head",
       "clause_version",
-      "commit_marker",
+      "disposal_fact",
       "duty_request_event",
+      "entry_receipt",
+      "failure_entry",
+      "ledger_metadata",
       "legal_hold_event",
       "member_identity",
+      "operation",
       "order_fact"
     ],
     "runtime_functions": [
@@ -490,9 +508,9 @@
     "session_matrix": 8,
     "candidate": 122,
     "candidate_rows": 14,
-    "migrations": 46,
+    "migrations": 47,
     "public_tables": 51,
-    "emr_tables": 10,
+    "emr_tables": 15,
     "fixture_public_rows": 90,
     "fixture_emr_rows": 11,
     "note": "declared before running; never generated from a run's own result"
@@ -781,5 +799,139 @@
       "file": "tests/emr/b/live.py",
       "case": "EmrBLedgerLive.test_b01_ledger_roles_and_restart"
     }
-  ]
+  ],
+  "replacement": {
+    "order": "D1770/D1774 b2-replace-order-20261023",
+    "status": "IMPLEMENTATION_IN_PROGRESS",
+    "consumer_matrix": [
+      {
+        "consumer": "AuthService login/entry/logout/expiry",
+        "transaction": "session and access fact on one PG connection",
+        "response": "session publication after COMMIT",
+        "test": [
+          "PG-02",
+          "PG-03",
+          "API-01"
+        ]
+      },
+      {
+        "consumer": "member-rights/AdminService rights changes",
+        "transaction": "rights mutation and viewing rights3y event together",
+        "response": "publish rights after COMMIT",
+        "test": [
+          "PG-02",
+          "PG-03"
+        ]
+      },
+      {
+        "consumer": "clinical/report/image/audit contract consumers",
+        "transaction": "record-port transaction; exact prepared record/version manifest",
+        "response": "durable receipt before body; cancellation rechecked",
+        "test": [
+          "PG-03",
+          "PG-04",
+          "API-01"
+        ]
+      },
+      {
+        "consumer": "startup/probe/introduction/backup resume",
+        "transaction": "PG readiness; indexed pending settlement",
+        "response": "no protected readiness before checks",
+        "test": [
+          "PG-01",
+          "OPS-01"
+        ]
+      },
+      {
+        "consumer": "retention/native backup/private restore",
+        "transaction": "holds/duties and expiry serialized; selected backup snapshot",
+        "response": "complete only after recovery validation",
+        "test": [
+          "RET-01",
+          "RESTORE-01"
+        ]
+      }
+    ],
+    "traceability": [
+      {
+        "requirement": "REQ-B2R-01",
+        "risk": "unauthorized mutation",
+        "risk_id": "RISK-B2R-01",
+        "tests": [
+          "PG-01",
+          "OPS-01"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-02",
+        "risk": "duplicate/wrong identity",
+        "risk_id": "RISK-B2R-02",
+        "tests": [
+          "PG-02"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-03",
+        "risk": "partial or false success",
+        "risk_id": "RISK-B2R-03",
+        "tests": [
+          "PG-03",
+          "PG-04"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-04",
+        "risk": "unrecorded access",
+        "risk_id": "RISK-B2R-04",
+        "tests": [
+          "API-01",
+          "FAIL-01"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-05",
+        "risk": "premature erasure/resurrection",
+        "risk_id": "RISK-B2R-05",
+        "tests": [
+          "RET-01"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-06",
+        "risk": "unusable restore",
+        "risk_id": "RISK-B2R-06",
+        "tests": [
+          "RESTORE-01"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-07",
+        "risk": "false readiness",
+        "risk_id": "RISK-B2R-07",
+        "tests": [
+          "OPS-01"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-08",
+        "risk": "overload",
+        "risk_id": "RISK-B2R-08",
+        "tests": [
+          "SCALE-01"
+        ]
+      },
+      {
+        "requirement": "REQ-B2R-09",
+        "risk": "false PASS",
+        "risk_id": "RISK-B2R-09",
+        "tests": [
+          "EVID-01"
+        ]
+      }
+    ],
+    "unfinished_declaration_fields": [
+      "deployment functions/retention/volumes/restore",
+      "legacy contract/live/mutant test selection pending replacement evidence"
+    ]
+  }
 }
