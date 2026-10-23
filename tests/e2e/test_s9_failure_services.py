@@ -28,7 +28,7 @@ import unittest
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
-from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "live"))
@@ -191,17 +191,40 @@ class FailureServicesE2E(unittest.TestCase):
                 expect(storage_row.locator(".metric-value")).not_to_contain_text(re.compile(r"\d"))
                 event("orthanc_admin_storage", state=lost["state"], value=lost["value"])
 
-        with page.expect_response(lambda r: "/api/studies?" in r.url) as response:
-            page.get_by_role("group", name="Refresh", exact=True).get_by_role("button", name="Refresh", exact=True).click()
-        self.assertEqual(response.value.status, 200)
-        returned = response.value.json()
-        observed = next(row for row in returned["studies"] if row["uid"] == fixture.uid)
-        self.assertGreater(observed["count"], 0)
+        # Docker's restarted interface can invalidate Chromium reads on the same
+        # host, even after Orthanc is healthy. Retry the real Refresh only for
+        # that reported browser failure, never an HTTP/data assertion or silence.
+        network_changes = []
+
+        def network_changed(request):
+            if request.failure == "net::ERR_NETWORK_CHANGED" and request.url.startswith(tuple(
+                self.stack.proxy + path for path in ("/api/studies?", "/api/dicom/", "/dicom-web/")
+            )):
+                network_changes.append(request.url)
+
+        page.on("requestfailed", network_changed)
+        try:
+            while True:
+                network_changes.clear()
+                try:
+                    with page.expect_response(lambda r: "/api/studies?" in r.url) as response:
+                        page.get_by_role("group", name="Refresh", exact=True).get_by_role("button", name="Refresh", exact=True).click()
+                    self.assertEqual(response.value.status, 200)
+                    returned = response.value.json()
+                    observed = next(row for row in returned["studies"] if row["uid"] == fixture.uid)
+                    self.assertGreater(observed["count"], 0)
+                    self.select(page, fixture)
+                    page.wait_for_function("""() => [...document.querySelectorAll('#thumbwrap img')]
+                        .some(img => img.complete && img.naturalWidth > 0)""")
+                    break
+                except PlaywrightError as error:
+                    if not network_changes:
+                        raise
+                    event("orthanc_host_network_changed", requests=network_changes.copy(), error=str(error), retry="Refresh")
+        finally:
+            page.remove_listener("requestfailed", network_changed)
         expect(page.locator("#err")).to_be_empty()
         expect(page.locator("#observation-status")).not_to_contain_text("관측 불가")
-        self.select(page, fixture)
-        page.wait_for_function("""() => [...document.querySelectorAll('#thumbwrap img')]
-            .some(img => img.complete && img.naturalWidth > 0)""")
         recovered = self.metrics(admin)
         self.assertEqual(recovered["state"], "observed")
         self.assertGreater(recovered["value"], 0)
