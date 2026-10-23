@@ -193,8 +193,8 @@
     "added": [
       "20261023180000_emr_pg_ledger"
     ],
-    "count": 47,
-    "latest_before": "20261011120000_filter_shortcuts",
+    "count": 48,
+    "latest_before": "20261015013945_import_operation",
     "historic_b1": "unchanged"
   },
   "deployment": {
@@ -475,7 +475,7 @@
     "contract": 13,
     "live": 13,
     "mutants": 15,
-    "profiles": 39,
+    "profiles": 40,
     "measurements_suites": 20,
     "validate_jobs": 22,
     "emr_b_jobs": 1,

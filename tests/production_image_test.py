@@ -137,7 +137,8 @@ class ProductionImageTests(unittest.TestCase):
 const fs=require('fs'), assert=require('assert');
 assert.notStrictEqual(process.getuid(),0);
 for(const p of ['dist/main.js','dist/emr-runtime/store.js','prisma/migrations/0_init/migration.sql',
-  'prisma/migrations/20261008120000_emr_b/migration.sql', 'prisma/migrations/20261010120000_emr_seal_attempts/migration.sql', 'prisma/migrations/20261010150000_emr_read_jit_off/migration.sql', 'prisma/migrations/20261011120000_filter_shortcuts/migration.sql', 'prisma/migrations/20261023180000_emr_pg_ledger/migration.sql',
+  'prisma/migrations/20261008120000_emr_b/migration.sql', 'prisma/migrations/20261010120000_emr_seal_attempts/migration.sql', 'prisma/migrations/20261010150000_emr_read_jit_off/migration.sql', 'prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
+  'prisma/migrations/20261015013945_import_operation/migration.sql', 'prisma/migrations/20261023180000_emr_pg_ledger/migration.sql',
   'node_modules/prisma/build/index.js','node_modules/.prisma/client/index.js']) assert(fs.existsSync(p),p);
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
@@ -183,8 +184,21 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
                           '20261005120000_idp_session_end', '20261005130000_member_isolation',
                           '20261006000000_tech_note_attempt_id',
                           '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects',
-                          '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts', '20261023180000_emr_pg_ledger'])
+                          '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
+                          '20261015013945_import_operation', '20261023180000_emr_pg_ledger'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
+        # S9-U4b: the runtime role reads exactly the three history columns of the import readiness fact, and an
+        # ImportOperation row written now survives the restart below with its owner and kind.
+        self.assertEqual(self.psql("SELECT concat_ws(',', has_column_privilege('kin_runtime', 'public._prisma_migrations', 'migration_name', 'SELECT'),"
+                                   " has_column_privilege('kin_runtime', 'public._prisma_migrations', 'finished_at', 'SELECT'),"
+                                   " has_column_privilege('kin_runtime', 'public._prisma_migrations', 'rolled_back_at', 'SELECT'),"
+                                   " has_column_privilege('kin_runtime', 'public._prisma_migrations', 'checksum', 'SELECT'),"
+                                   " has_column_privilege('kin_runtime', 'public._prisma_migrations', 'logs', 'SELECT'));"),
+                         "t,t,t,f,f")
+        self.psql("INSERT INTO \"ImportOperation\" (id,\"institutionId\",\"ownerIssuer\",\"ownerSubject\",actor,kind,status)"
+                  " VALUES ('00000000-0000-4000-8000-0000000c1001','c1-hospital','https://c1.test/realm','c1-sub','c1-actor','import','open');")
+        import_row = "SELECT concat_ws('|', kind, status, \"ownerSubject\", actor, results::text) FROM \"ImportOperation\";"
+        self.assertEqual(self.psql(import_row), "import|open|c1-sub|c1-actor|[]")
         ops.run(["docker", "exec", name, "node", "-e",
             "fetch('http://127.0.0.1:3000/api/me').then(r=>{if(r.status!==401)process.exit(1)})"
             ".catch(()=>process.exit(1))"])
@@ -199,6 +213,7 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
         self.wait_running_api(name)
         self.assertEqual(self.psql(history_query), history)
         self.assertEqual(self.psql("SELECT value FROM c1_probe;"), "preserved")
+        self.assertEqual(self.psql(import_row), "import|open|c1-sub|c1-actor|[]")
         code, logs = self.migrate("migrate-again")
         self.assertEqual(code, 0)
         self.assertIn("No pending migrations to apply", logs)

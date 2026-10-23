@@ -183,7 +183,8 @@ test('(1) a metadata rule reads source tags before $transaction and never inside
     assert.ok(later.indexOf('orthanc:studyIdentities') < second, label);
     assert.deepEqual(later.slice(second).filter(e => e.startsWith('orthanc:')), [], label);
   }
-  assert.deepEqual(w.calls.filter(call => call.name === 'studyIdentities').map(call => call.args), [[true], [true]]);
+  // the batch read asks for the access tags and not the accession (an optional deadline signal is not part of the request)
+  assert.deepEqual(w.calls.filter(call => call.name === 'studyIdentities').map(call => [!!call.args[0], !!call.args[1]]), [[true, false], [true, false]]);
   assert.deepEqual(w.writes, { request: 1, update: 1, receipt: 2, audit: 2 });
 });
 
@@ -236,7 +237,7 @@ test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, a
   assert.ok(metadata.calls.length > 0);
   for (const call of metadata.calls) {
     assert.ok(['studyIdentityResources', 'studyIdentities'].includes(call.name), call.name);
-    if (call.name === 'studyIdentities') assert.deepEqual(call.args, [true]);
+    if (call.name === 'studyIdentities') assert.deepEqual([!!call.args[0], !!call.args[1]], [true, false]);
   }
   for (const policy of [null, uidPolicy()]) {
     const w = world(policy);

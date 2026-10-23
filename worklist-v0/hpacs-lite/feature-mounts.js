@@ -51,6 +51,12 @@
       changed:(uid,value)=>{updateReaderAssignment(uid,value);render();},
     });
     $('#rows').addEventListener('click',event=>{const button=event.target.closest('[data-reader-assignment]');if(!button)return;event.stopPropagation();readerAssignment.open(studies.find(s=>s.uid===button.dataset.readerAssignment));},true);
+    // S9-U4b: Import DICOM (toolbar, Technician rows), Download Originals (rows) and their non-modal result panel.
+    // D1691: the transfer owner is the login server, the institution and the subject, as the service keys an operation.
+    const studyTransfer=KinStudyTransferLocal({api:API,transport,allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,
+      identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.issuer,s.institution,s.sub]:null;},
+      can:role=>KinAuth.has(role),demo:()=>!!KinAuth.session()?.demo,study:uid=>studies.find(s=>s.uid===uid),
+    });
 
 
     const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,

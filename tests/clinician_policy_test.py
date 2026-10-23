@@ -1713,7 +1713,8 @@ class ClinicianPolicySpec(unittest.TestCase):
                 self.assertEqual(set(row), {"decision", "unit", "commit", "basis"})
                 self.assertEqual(row["decision"], where[key], "the post_baseline decision is the row the route sits in")
                 self.assertRegex(row["commit"], r"^[0-9a-f]{7,40}$")
-                self.assertRegex(row["unit"], r"^S[0-9]-")
+                # a stage unit (S<n>-) or a UX-stage workflow unit (W<n>-, which has no stage number; W9-API)
+                self.assertRegex(row["unit"], r"^[SW][0-9]-")
                 self.assertGreater(len(row["basis"].strip()), 20)
                 self.assertEqual(allowed(key), row["decision"] in ("session", "business"))
         declared = set(FIXTURES["allowed_additions"])
@@ -2661,7 +2662,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(len(baseline), MATRIX["counts"]["routes"])
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "StudyAccessController],"
+        member, registered = "  @Get() read(", "StudyTransferLocalController],"
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertTrue(sources[tags].endswith("}\n"))
@@ -2682,7 +2683,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                    "const descriptor = Object.getOwnPropertyDescriptor(target, 'unlisted');\n"
                    "Put('write')(target, 'unlisted', descriptor);\nPublic()(target, 'unlisted', descriptor);\n")
         app_module = ("import { UnlistedController } from './unlisted-routes';\n"
-                      + sources[app].replace(registered, "StudyAccessController, UnlistedController],"))
+                      + sources[app].replace(registered, "StudyTransferLocalController, UnlistedController],"))
 
         def names(source):
             return sorted({name for run in decorator_runs(source) for name, _start, _end in run["items"]})
@@ -2862,9 +2863,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (138 = 7 + 2 + 21 + 108)
-        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (138, 7, 2, 21, 108), "the real inventory is unchanged: 138 = 7 + 2 + 21 + 108")
+        # S9-U4b import/download/recovery/grant and W9 viewing-set routes remain denied.
+        self.assertEqual(
+            {"routes": len(baseline), "public": len(PUBLIC), "session": len(SESSION),
+             "business": len(BUSINESS), "denied": len(DENIED_ROUTES)}, counts,
+            "the real inventory matches the computed merged route matrix")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2890,7 +2893,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         tags, outside, helpers, app = (API / "study-tags.controller.ts", API / "unlisted-routes.ts",
                                        API / "route-helpers.ts", API / "app.module.ts")
-        member, registered = "  @Get() read(", "StudyAccessController],"
+        member, registered = "  @Get() read(", "StudyTransferLocalController],"
         heading, constructor = "export class StudyTagsController {", "constructor(private service:StudyTagsService){}"
         for text in (member, heading, constructor):
             self.assertEqual(sources[tags].count(text), 1, text)
@@ -2899,7 +2902,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         def register(name):
             return {app: f"import {{ {name} }} from './unlisted-routes';\n"
-                         + sources[app].replace(registered, f"StudyAccessController, {name}],")}
+                         + sources[app].replace(registered, f"StudyTransferLocalController, {name}],")}
 
         loader = "a module loader the binding check does not follow"
         sealed = "a sealed name or a form the source contract does not list"
@@ -3135,9 +3138,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (138 = 7 + 2 + 21 + 108)
-        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (138, 7, 2, 21, 108), "the real inventory is unchanged: 138 = 7 + 2 + 21 + 108")
+        # S9-U4b import/download/recovery/grant and W9 viewing-set routes remain denied.
+        self.assertEqual(
+            {"routes": len(baseline), "public": len(PUBLIC), "session": len(SESSION),
+             "business": len(BUSINESS), "denied": len(DENIED_ROUTES)}, counts,
+            "the real inventory matches the computed merged route matrix")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3223,7 +3228,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             return str(caught.exception)
 
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "StudyAccessController],"
+        member, registered = "  @Get() read(", "StudyTransferLocalController],"
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertNotIn(outside, sources)
@@ -3245,7 +3250,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 outside, "UnlistedController", "Reflect.defineMetadata('path', 'unlisted', UnlistedController); ",
                 lambda text: {outside: "export class UnlistedController {\n  unlisted() { return {}; }\n}\n" + text,
                               app: "import { UnlistedController } from './unlisted-routes';\n"
-                                   + sources[app].replace(registered, "StudyAccessController, UnlistedController],")}),
+                                   + sources[app].replace(registered, "StudyTransferLocalController, UnlistedController],")}),
         }
         self.assertEqual(sorted(places), sorted(contract["places"]))
         # control: the reader at e33e040 opened a regex after '(,=:[!&|?{};+-*%<>~^', and each form puts '+', '-' or '}'
@@ -3315,9 +3320,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (138 = 7 + 2 + 21 + 108)
-        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (138, 7, 2, 21, 108), "the real inventory is unchanged: 138 = 7 + 2 + 21 + 108")
+        # S9-U4b import/download/recovery/grant and W9 viewing-set routes remain denied.
+        self.assertEqual(
+            {"routes": len(baseline), "public": len(PUBLIC), "session": len(SESSION),
+             "business": len(BUSINESS), "denied": len(DENIED_ROUTES)}, counts,
+            "the real inventory matches the computed merged route matrix")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()
