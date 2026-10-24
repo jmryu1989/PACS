@@ -67,6 +67,7 @@ export class OnlineApproval {
       transitionReport(current.facts, lifecycle);
       await this.reports.validate(tx, current, lifecycle, approval);
       const event: SigningEvent = { eventId: randomUUID(), operationId: command.operationId, actor: actor.identity,
+        roles: actor.roles, managingInstitutionId: study.managingInstitutionId,
         institutionId: actor.institutionId, at: signed.signedAt, ingress: currentIdentity.ingress, task: content.action as SigningEvent['task'],
         result: 'succeeded', doctorId: actor.identity.id, kid: key.kid, patient: study.patient, studyId: study.studyId,
         recordId: command.recordId, versionId };
@@ -99,6 +100,7 @@ export class OnlineApproval {
   private viewEvent(current: Awaited<ReturnType<RequestIdentityPort['resolve']>>, result: StoredApproval): SigningEvent {
     const payload = JSON.parse(Buffer.from(result.envelope.payload, 'base64url').toString('utf8'));
     return { eventId: randomUUID(), operationId: randomUUID(), actor: current.actor.identity, institutionId: current.actor.institutionId,
+      roles: current.actor.roles, managingInstitutionId: payload.managingInstitutionId,
       at: new Date().toISOString(), ingress: current.ingress, task: 'view', result: 'succeeded', doctorId: result.doctorId,
       kid: result.kid, patient: payload.patient, studyId: payload.studyId, recordId: result.recordId, versionId: result.versionId };
   }

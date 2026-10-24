@@ -35,7 +35,10 @@ function historicalSource() {
     execFileSync(process.execPath, [path.join(root, 'api/node_modules/prisma/build/index.js'), 'generate', '--schema', path.join(dir, 'schema.prisma')],
       { cwd: root, env: { ...process.env, PRISMA_GENERATE_SKIP_AUTOINSTALL: 'true' }, maxBuffer: 8e6, timeout: 60000 });
     overrides[path.join(root, 'api/node_modules/.prisma/client/index.d.ts')] = fs.readFileSync(path.join(output, 'index.d.ts'), 'utf8');
-    const source = require('./pacs_source.cjs').createSource({ apiSrc, overrides });
+    // Historical equivalence uses the declaration map committed with those sources.
+    // Current product additions/deletions must not rewrite that historical contract.
+    const spec = JSON.parse(execFileSync('git', ['show', `${landed}:tests/pacs_split_spec.json`], { cwd: root, encoding: 'utf8', maxBuffer: 8e6 }));
+    const source = require('./pacs_source.cjs').createSource({ apiSrc, overrides, spec });
     assert.deepEqual(source.sourceFiles().map(file => file.file).sort(), [...files].sort(), 'exact landed source corpus');
     return source;
   } finally {

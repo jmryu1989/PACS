@@ -2,10 +2,10 @@
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
-const B2_REQUEST_FACTS = { issuer: 'https://synthetic.invalid', ip: null, requestId: 'synthetic-request' };
+const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
 function b2Ledger(prisma) {
   return { begin: () => ({
-    resolveRequestIdentity: async () => 'synthetic-member',
+    resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
     transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
     end() {},
   }) };
@@ -169,8 +169,8 @@ function world({ resources = [], states = [], policy = null, institutions = INST
   w.prisma = client(store, true);
   w.orthancService = new OrthancService();
   w.studyAccess = new StudyAccessService(w.prisma, w.orthancService, {});
-  w.pacs = new PacsService(w.prisma, w.orthancService, { usersInGroupWithRole: async () => [] }, w.studyAccess,
-    { readableFindings: async () => [] }, b2Ledger(w.prisma));
+  w.pacs = withDraftRequestContext(new PacsService(w.prisma, w.orthancService, { usersInGroupWithRole: async () => [] }, w.studyAccess,
+    { readableFindings: async () => [] }, b2Ledger(w.prisma)), b2Ledger(w.prisma));
   w.start = async () => { const log = console.log; console.log = () => {}; try { await w.pacs.onModuleInit(); } finally { console.log = log; } return w; };
   w.arrivals = () => w.audits.filter(a => a.action === 'study.arrived');
   w.sourceWrites = () => w.orthanc.filter(c => !(c.method === 'GET' || c.method === 'POST' && c.path === '/tools/find'));
@@ -472,10 +472,10 @@ async function clinical(resources, over = {}) {
 test('TEST-WSU-08 every report write and read on a split UID is 409 STUDY_IDENTITY_UNRESOLVED with no write; a single resource proceeds', async () => {
   const c = caller({ roles: ['radiologist', 'admin'] });
   const entries = {
-    readDraft: w => w.pacs.readDraft(SPLIT, c, B2_REQUEST_FACTS),
+    readDraft: w => w.pacs.readDraft(SPLIT, c),
     hold: w => w.pacs.hold(SPLIT, c),
-    putDraft: w => w.pacs.putReport(SPLIT, draftBody(c), c, null, B2_REQUEST_FACTS),
-    clearDraft: w => w.pacs.putReport(SPLIT, draftBody(c, { findings: '' }), c, null, B2_REQUEST_FACTS),
+    putDraft: w => w.pacs.putReport(SPLIT, draftBody(c), c, null),
+    clearDraft: w => w.pacs.putReport(SPLIT, draftBody(c, { findings: '' }), c, null),
     discardDraft: w => w.pacs.discardDraft(SPLIT, { expectedOwner: owner(c), expectedRevision: EPOCH + ':0' }, c, null),
     forceDiscard: w => w.pacs.forceDiscardDrafts(SPLIT, { expectedOwner: owner(c), expectedEpoch: EPOCH }, c, null),
     ...Object.fromEntries(['save', 'approve', 'reset', 'defer', 'addendum'].map(action => ['commit-' + action,
@@ -502,7 +502,7 @@ test('TEST-WSU-08 every report write and read on a split UID is 409 STUDY_IDENTI
   }
   // Positive control: the same draft save and hold on one resource write.
   const one = await clinical([A()]);
-  await one.pacs.putReport(SPLIT, draftBody(c), c, null, B2_REQUEST_FACTS);
+  await one.pacs.putReport(SPLIT, draftBody(c), c, null);
   await one.pacs.hold(SPLIT, c);
   assert.deepEqual(one.writes.map(x => x.model + '.' + x.op), ['reportDraft.create', 'auditLog.create', 'studyState.update', 'auditLog.create']);
 });
@@ -524,25 +524,25 @@ test('TEST-WSU-08 hold release and force release stay available; images are 403 
 test('TEST-WSU-08 scope and role refusals come first and say nothing about the source; an unobservable source is 503 (403 for images)', async () => {
   const outsider = caller({ institution: 'other', roles: ['radiologist'] });
   const w = await clinical([A(), B()]);
-  await rejects(w.pacs.readDraft(SPLIT, outsider, B2_REQUEST_FACTS), 404);
-  await rejects(w.pacs.putReport(SPLIT, draftBody(outsider), outsider, null, B2_REQUEST_FACTS), 404);
+  await rejects(w.pacs.readDraft(SPLIT, outsider), 404);
+  await rejects(w.pacs.putReport(SPLIT, draftBody(outsider), outsider, null), 404);
   await rejects(w.pacs.hold(SPLIT, outsider), 404);
   await rejects(w.pacs.versions(SPLIT, outsider), 404);
   await rejects(w.pacs.authzDicom('/dicom-web/studies/' + SPLIT + '/series', 'GET', outsider), 403);
-  await rejects(w.pacs.readDraft(SPLIT, caller({ roles: ['technician'] }), B2_REQUEST_FACTS), 403);
+  await rejects(w.pacs.readDraft(SPLIT, caller({ roles: ['technician'] })), 403);
   const down = await clinical([A()]);
   down.orthancDown = true;
   const c = caller();
-  await rejects(down.pacs.readDraft(SPLIT, c, B2_REQUEST_FACTS), 503, 'STUDY_SOURCE_UNAVAILABLE');
-  await rejects(down.pacs.putReport(SPLIT, draftBody(c), c, null, B2_REQUEST_FACTS), 503, 'STUDY_SOURCE_UNAVAILABLE');
+  await rejects(down.pacs.readDraft(SPLIT, c), 503, 'STUDY_SOURCE_UNAVAILABLE');
+  await rejects(down.pacs.putReport(SPLIT, draftBody(c), c, null), 503, 'STUDY_SOURCE_UNAVAILABLE');
   await rejects(down.pacs.authzDicom('/dicom-web/studies/' + SPLIT + '/series', 'GET', c), 403);
   assert.deepEqual(down.writes, []);
 });
 test('TEST-WSU-08 a source observation is per request: an earlier single answer does not admit a later split', async () => {
   const c1 = caller(), w = await clinical([A()]);
-  await w.pacs.readDraft(SPLIT, c1, B2_REQUEST_FACTS);
+  await w.pacs.readDraft(SPLIT, c1);
   w.resources.push(B());
-  await rejects(w.pacs.readDraft(SPLIT, caller(), B2_REQUEST_FACTS), 409, 'STUDY_IDENTITY_UNRESOLVED');
+  await rejects(w.pacs.readDraft(SPLIT, caller()), 409, 'STUDY_IDENTITY_UNRESOLVED');
 });
 
 // ── TEST-WSU-09 derived projections (M-WSU-04) ──
@@ -614,7 +614,7 @@ test('TEST-WSU-12 refusals keep rows, drafts and audits; an external resolution 
     baseVersion: 0, citations: null, structured: null, revision: 3, present: true, updatedAt: new Date() });
   const before = JSON.stringify([[...w.states], [...w.drafts], w.audits]);
   await w.pacs.listStudies(c);
-  await rejects(w.pacs.putReport(SPLIT, draftBody(c, { expectedRevision: EPOCH + ':3' }), c, null, B2_REQUEST_FACTS), 409, 'STUDY_IDENTITY_UNRESOLVED');
+  await rejects(w.pacs.putReport(SPLIT, draftBody(c, { expectedRevision: EPOCH + ':3' }), c, null), 409, 'STUDY_IDENTITY_UNRESOLVED');
   await rejects(w.pacs.commitReport(SPLIT, { ...draftBody(c, { expectedRevision: EPOCH + ':3' }), action: 'approve', removeCitationIds: [] }, c, null), 409, 'STUDY_IDENTITY_UNRESOLVED');
   assert.equal(JSON.stringify([[...w.states], [...w.drafts], w.audits]), before);
   assert.deepEqual(w.sourceWrites(), []);
@@ -628,5 +628,5 @@ test('TEST-WSU-12 refusals keep rows, drafts and audits; an external resolution 
   assert.equal(JSON.stringify([[...w.states], [...w.drafts], w.audits]), before, 'listing wrote nothing');
   // An unobservable source is not a resolution.
   w.resources = [A(), B()]; w.orthancDown = true;
-  await rejects(w.pacs.readDraft(SPLIT, caller(), B2_REQUEST_FACTS), 503, 'STUDY_SOURCE_UNAVAILABLE');
+  await rejects(w.pacs.readDraft(SPLIT, caller()), 503, 'STUDY_SOURCE_UNAVAILABLE');
 });

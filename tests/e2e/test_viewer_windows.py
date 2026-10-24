@@ -10,11 +10,44 @@ from viewer_session import end_document
 from viewer_session import observe_viewer
 
 
+def retained_window(page, uid, fresh_document=False):
+    """Set up a pre-U1 live registry consumer using shipped APIs and OHIF.
+
+    U1 cannot create another window through normal opening. This fixture keeps
+    coverage of existing multi-window documents without replacing controllers.
+    """
+    with page.context.expect_page() as opened:
+        page.evaluate('''({uid, freshDocument}) => {
+          const url = '/ohif/viewer?StudyInstanceUIDs=' + encodeURIComponent(uid);
+          const choice = viewerWindows.choose(url, 4, {freshDocument});
+          if (choice.error || !choice.fresh) throw Error('Legacy fixture slot unavailable');
+          const popup = window.open('', choice.name, 'popup=yes,resizable=yes');
+          if (!popup) throw Error('Legacy fixture popup blocked');
+          viewerWindows.attach(choice, popup); ohifPopupSlots.set(popup, choice.index);
+          popup.opener = null;
+          if (!handOverSession(popup, choice.name)) throw Error('Legacy fixture session unavailable');
+          const linked = viewerWindows.linked(url, choice.index), previous = popup.document;
+          popup.location.href = linked; viewerWindows.navigating(choice, linked, previous);
+        }''', dict(uid=uid, freshDocument=fresh_document))
+    popup = opened.value
+    popup.wait_for_url('**/ohif/viewer?**')
+    canvas_ready(popup, 1)
+    popup.wait_for_function('() => typeof kinViewerWindowOwner === "function" && kinViewerWindowOwner() && typeof kinViewerJobWorkspaceState === "function" && !kinViewerJobWorkspaceState().busy')
+    return popup
+
+
 class ViewerWindowsE2E(ViewerOpeningE2E):
     def limit(self, p, count):
         self.settings(p, 'window', False)
-        p.locator('#image-opening-limit').select_option(str(count))
         self.close_settings(p)
+        # Real persisted preference from a pre-U1 browser; normal opening must
+        # ignore its window count, without losing the other opening choices.
+        p.evaluate('''count => {
+          const key = KinViewerOpening.key(KinAuth.session());
+          const value = JSON.stringify({...imageOpening.snapshot(), maxWindows: count});
+          localStorage.setItem(key, value);
+          dispatchEvent(new StorageEvent('storage', {key, newValue: value}));
+        }''', count)
 
     def separate(self, p, fixture):
         self.choose(p, fixture)
@@ -45,7 +78,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         first.evaluate("window.__windowMarker='first'")
         first.get_by_role('button', name='Comparison', exact=True).click()
         first.get_by_label('Job Title', exact=True).fill('KEEP UNSAVED WINDOW')
-        second = self.separate(p, b)
+        second = retained_window(p, b.uid)
         second.evaluate("window.__windowMarker='second'")
         self.choose(p, c)
         p.locator('#m-filmbox').click()
@@ -64,22 +97,28 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         first.get_by_label('Job Title', exact=True).fill('')
         first.wait_for_function('() => !kinViewerJobWorkspaceState().dirty')
         self.manager(p)
+        # The live status also covers the still-running initial placement.
+        expect(self.control(p, 0, 'latest')).to_be_enabled()
         self.control(p, 0, 'close').click()
         expect(p.locator('.viewer-window-row')).to_have_count(1)
         self.assertTrue(first.is_closed())
         p.locator('#viewer-windows-done').click()
-        third = self.separate(p, c)
-        self.assertEqual(second.evaluate('window.__windowMarker'), 'second')
+        self.choose(p, c)
+        p.locator('#m-filmbox').click()
+        second.wait_for_url('**StudyInstanceUIDs=' + c.uid + '**')
+        canvas_ready(second, 1)
+        self.assertEqual(len(p.context.pages), 2)
         self.limit(p, 1)
         self.manager(p)
-        expect(p.locator('.viewer-window-row')).to_have_count(2)
+        expect(p.locator('.viewer-window-row')).to_have_count(1)
         self.capture(p, 'windows-limit')
         p.locator('#viewer-windows-done').click()
         self.choose(p, a)
         p.locator('#m-filmbox').click()
-        expect(p.locator('#viewer-windows-dialog')).to_be_visible()
-        self.assertEqual(self.ids(third), [c.uid])
-        self.assertEqual(self.ids(second), [b.uid])
+        second.wait_for_url('**StudyInstanceUIDs=' + a.uid + '**')
+        canvas_ready(second, 1)
+        self.assertEqual(self.ids(second), [a.uid])
+        self.assertEqual(len(p.context.pages), 2)
         self.assertEqual(self.originals(), originals)
         self.assertEqual(self.jobs(a), [])
 
@@ -88,7 +127,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         p = self.sign_in(self.device())
         self.limit(p, 2)
         first = self.separate(p, a)
-        second = self.separate(p, b)
+        second = retained_window(p, b.uid)
         first.evaluate("window.__windowMarker='reload-kept'")
         record = p.evaluate("Object.entries(sessionStorage).find(([key])=>key.startsWith('kin-viewer-windows:'))")
         saved = json.loads(record[1])

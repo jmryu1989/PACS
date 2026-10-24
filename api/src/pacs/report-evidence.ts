@@ -14,8 +14,7 @@ import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationIns
   REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA, SOURCE_UNAVAILABLE } from '../report-citation';
 import { applyStructureKeepList, isStructureEntry, projectStructure, structureApplyInput, structureArray,
   structureIdList, structureItemKey, structureSameTextCounts, structureUnion, StructureInputError, STRUCTURE_CATALOG,
-  REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA, validateCatalog } from '../report-structure';
-import type { StructureTemplate } from '../report-structure';
+  REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA } from '../report-structure';
 import { draftToken } from './values';
 import type { Caller, PacsAccess } from './access';
 
@@ -82,27 +81,6 @@ export class PacsReportEvidence {
     // 그보다 넓어서, 그것만으로 통과시키면 읽을 수 없는 비교 검사가 인용을 통해 새어 나온다.
     private readonly findings: FindingService,
     private readonly access: PacsAccess) {}
-
-  /**
-   * 구조화 서식 목록 (P7의 주입 이음매).
-   *
-   * 제품에서는 언제나 `STRUCTURE_CATALOG`이고 그것은 **비어 있다**(P6). 시험만이 자기
-   * 인스턴스의 이 칸을 합성 목록으로 덮는다 — 환경변수도, 헤더도, 라우트도 아니다.
-   * 제품 코드나 HTTP로 합성 항목에 닿을 방법이 없어야 지어낸 임상 내용이 새지 않는다.
-   */
-  private structureCatalogValue: readonly StructureTemplate[] = STRUCTURE_CATALOG;
-  protected get structureCatalog(): readonly StructureTemplate[] { return this.structureCatalogValue; }
-  /**
-   * 목록을 갈아끼우는 **유일한 길**이고, 그 길에는 관문이 있다 (P12).
-   *
-   * 검사는 갈아끼우기 **전에** 한다. 규칙을 어긴 목록은 던지면서 지나가고, 그때 이미 서 있던
-   * 유효한 목록은 그대로 남는다 — 잘못된 배정이 멀쩡한 목록을 치우고 그 자리를 비워두는 일은
-   * 없다. 제품 인스턴스는 언제나 비어 있는 `STRUCTURE_CATALOG`으로 시작한다.
-   */
-  protected set structureCatalog(next: readonly StructureTemplate[]) {
-    validateCatalog(next);
-    this.structureCatalogValue = next;
-  }
 
   /**
    * PUT 한 번에 들어온 인용 변경을 본문과 **같은 쓰기**로 풀어낸다.
@@ -197,7 +175,7 @@ export class PacsReportEvidence {
       if (!lineBlockOccurrences(content[input.field], input.renderedText))
         throw new ConflictException({ code: 'REPORT_STRUCTURE_TEXT',
           message: '구조화 항목의 문장이 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
-      const template = this.structureCatalog.find(t => t.templateId === input.templateId);
+      const template = STRUCTURE_CATALOG.find(t => t.templateId === input.templateId);
       const item = template?.items.find(i => i.code === input.itemCode);
       const entry = { v: REPORT_STRUCTURE_SCHEMA, sid: randomUUID(), field: input.field,
         templateId: input.templateId, templateRevision: input.templateRevision, itemCode: input.itemCode,
@@ -238,7 +216,7 @@ export class PacsReportEvidence {
     catch (e: any) { if (e instanceof StructureInputError) throw new BadRequestException(e.message); throw e; }
   }
   private structureInput(value: any) {
-    try { return structureApplyInput(value, this.structureCatalog); }
+    try { return structureApplyInput(value, STRUCTURE_CATALOG); }
     catch (e: any) { if (e instanceof StructureInputError) throw new BadRequestException(e.message); throw e; }
   }
 

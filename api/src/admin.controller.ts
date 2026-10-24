@@ -1,11 +1,9 @@
 import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
 import { AdminService } from './admin.service';
 import { AdminAccessReview } from './admin-access-review';
 import { Caller, PacsService } from './pacs.service';
-import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
-import type { RightsRequestFacts } from './member-rights';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
+import type { AdminRequestFacts } from './admin.service';
 
 const caller = (req: any): Caller => ({
   sub: req.sub,
@@ -26,25 +24,22 @@ const caller = (req: any): Caller => ({
 @Controller('admin')
 export class AdminController {
   constructor(private admin: AdminService, private pacs: PacsService,
-    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
     private readonly accessReview: AdminAccessReview) {}
 
-  private async rightsFacts(req: any, surface: string): Promise<RightsRequestFacts> {
-    const work = this.ledger.begin();
-    try {
-      const issuer = process.env.KC_ISSUER;
-      const proxy = req.headers?.['x-real-ip'];
-      const peer = req.socket?.remoteAddress;
-      const observedProxy = typeof proxy === 'string' && isIP(proxy);
-      // AuthGuard supplies the member and rights snapshot; nginx supplies the
-      // observed client address. A direct request retains its actual peer.
-      return { surface, actor: { issuer, subject: req.sub,
-        id: await work.resolveRequestIdentity(issuer, req.sub) },
-        roles: req.roles, rightsVersion: req.rightsVersion, institution: req.institution ?? null,
-        ip: observedProxy ? proxy : typeof peer === 'string' && isIP(peer) ? peer : null,
-        ipSource: observedProxy ? 'trusted-proxy' : 'request-peer',
-        sessionRef: req.sessionId ?? null, requestId: randomUUID() };
-    } finally { work.end(); }
+  private withRightsFacts<T>(req: any, task: (facts: AdminRequestFacts) => Promise<T>): Promise<T> {
+    return this.requests.withWork(req, async request => {
+      await request.requireCurrent();
+      const facts = request.facts;
+      try {
+        return await task({ surface: facts.surface, actor: facts.actor,
+          roles: facts.roles, rightsVersion: facts.rightsVersion, institution: facts.institution,
+          ip: facts.ingress.status === 'known' ? facts.ingress.value.address : null,
+          ipSource: 'trusted-proxy', sessionRef: facts.binding.sessionRef, requestId: facts.requestId, request });
+      } finally {
+        await request.requireCurrent();
+      }
+    });
   }
 
   @Get('users')
@@ -54,12 +49,12 @@ export class AdminController {
 
   @Post('users')
   async create(@Body() body: any, @Req() req: any) {
-    return this.admin.createUser(body, caller(req), await this.rightsFacts(req, 'POST admin/users'));
+    return this.withRightsFacts(req, facts => this.admin.createUser(body, caller(req), facts));
   }
 
   @Patch('users/:id')
   async patch(@Param('id') id: string, @Body() body: any, @Req() req: any) {
-    return this.admin.patchUser(id, body, caller(req), await this.rightsFacts(req, 'PATCH admin/users/:id'));
+    return this.withRightsFacts(req, facts => this.admin.patchUser(id, body, caller(req), facts));
   }
 
   @Post('users/:id/reset-password')
@@ -80,7 +75,7 @@ export class AdminController {
    */
   @Get('audit')
   auditEvents(@Query() query: any, @Req() req: any) {
-    if (query.report === 'access') return this.accessReview.read(query, caller(req));
+    if (query.report === 'access') return this.requests.withWork(req, request => this.accessReview.read(query, caller(req), request));
     return this.admin.auditEvents(query, caller(req));
   }
 }
