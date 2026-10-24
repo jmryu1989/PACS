@@ -147,6 +147,9 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         for table in ("Report","ReportVersion"):self.assertEqual(after[table], rows[current.uid][table])
         for row in after["ReportDraft"]:
             saved = json.loads(row)
+            # W5-API (#182) keeps a revision row for an absent draft (present false, no text); only a stored draft holds text.
+            if saved.get("present") is False:
+                continue
             for name,value in values.items():self.assertEqual(saved[name],value)
         self.assertEqual(self.report_rows(related),rows[related.uid])
         page.set_viewport_size(dict(width=900,height=1200))
