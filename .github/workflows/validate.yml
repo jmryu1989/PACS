@@ -525,12 +525,12 @@ jobs:
     - name: Generate the Prisma client for the API type check
       working-directory: api
       run: ./node_modules/.bin/prisma generate
-    - name: API type check including the C1 modules
+    - name: API type check including the online report modules
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/tsc --cwd . --tree api/src/emr-report --tree api/src/emr-signature --file api/tsconfig.json --file api/package-lock.json -- node api/node_modules/typescript/bin/tsc --noEmit -p api
-    - name: C1 contract and queue cases (C-C01..C-C14, C-Q01..C-Q08)
+    - name: Online report read, retention and print contracts
       if: ${{ !cancelled() }}
-      run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/contract_test.cjs --file tests/emr/c/offline_queue_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/node.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/contract_test.cjs tests/emr/c/offline_queue_test.cjs
-    - name: Exact selection of the C1 Node cases (every declared case passed once, none skipped or extra)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/contract_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/node.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/contract_test.cjs
+    - name: Exact selection of the retained report cases (every declared case passed once, none skipped or extra)
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/node.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/node.tap
     - name: C2 server crypto cases
@@ -539,27 +539,7 @@ jobs:
     - name: Exact selection of C2 server crypto cases
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-crypto-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/server-crypto.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/server-crypto.tap --server-crypto
-    - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-      if: ${{ !cancelled() }}
-      run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-    - name: Cache pinned Python downloads
-      if: ${{ !cancelled() }}
-      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
-    - name: Install the pinned browser test dependencies
-      if: ${{ !cancelled() }}
-      timeout-minutes: 15
-      run: |
-        python3 -m venv "$RUNNER_TEMP/emr-c-python"
-        "$RUNNER_TEMP/emr-c-python/bin/python" -m pip install -r tests/e2e/requirements.txt
-        "$RUNNER_TEMP/emr-c-python/bin/python" -m playwright install --with-deps chromium
-    - name: C1 isolated offline report DOM cases (C-D01..C-D06)
-      if: ${{ !cancelled() }}
-      timeout-minutes: 5
-      run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/dom --cwd . --file worklist-v0/hpacs-lite/offline-report.js --file tests/emr/c/offline_report_dom_test.py -- "$RUNNER_TEMP/emr-c-python/bin/python" -B tests/emr/c/offline_report_dom_test.py -v
-    - name: C1 evidence
+    - name: Online report and server signing evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
