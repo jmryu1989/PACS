@@ -489,6 +489,10 @@ const { createRecordPort } = require('/app/dist/emr-runtime/record-port');
 const { createBackgroundWorkRegistry } = require('/app/dist/emr-runtime/background-work');
 const { KeycloakService } = require('/app/dist/keycloak.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
+const { createRequestContext } = require('/app/dist/emr-runtime/request-context');
+const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
+const { EventEmitter } = require('node:events');
+const { Socket } = require('node:net');
 const { AuthController } = require('/app/dist/auth.controller');
 const { PacsController } = require('/app/dist/pacs.controller');
 
@@ -642,7 +646,8 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
       await service.onModuleDestroy(); background.quiesce(); await background.drained(); control.close(); await control.drained(); await journal.close();
       fs.rmSync(spool, { recursive: true });
     });
-    return { name, service, prisma, ledger, background, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
+    return { name, service, prisma, ledger, background, guard: new AuthGuard(new Reflector(), service, undefined,
+      createRequestContext(createRequestIngress({ proxyPeers: [] }), ledger).capture), controller: new AuthController(service), handled: 0 };
   };
   w.I1 = make('I1');
   w.I2 = make('I2');
@@ -683,16 +688,16 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     const cookies = [sid ? 'kin_sid=' + encodeURIComponent(sid) : null, cookie ?? null].filter(Boolean).join('; ');
     const unbound = ['me', 'entry', 'login', 'register', 'callback'].includes(kind);
     const bound = binding === undefined ? (sid && !unbound ? inst.service.sessionRef(sid) : null) : binding;
-    const req = { method, originalUrl: path, url: path, route: { path }, query, body, headers: {
+    const req = Object.assign(new http.IncomingMessage(new Socket()), { method, originalUrl: path, url: path, route: { path }, query, body, headers: {
       ...(cookies ? { cookie: cookies } : {}), ...(ip === null ? {} : { 'x-real-ip': ip }),
       ...(method === 'POST' && csrf ? { 'x-kin-csrf': '1' } : {}), ...(bound ? { 'x-kin-session': bound } : {}),
-      ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...headers } };
-    const res = { req, setCookies: [], sentHeaders: {}, headersSent: false, statusCode: null, body: undefined, location: null, sent: false,
+      ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...headers } });
+    const res = Object.assign(new EventEmitter(), { req, setCookies: [], sentHeaders: {}, headersSent: false, statusCode: null, body: undefined, location: null, sent: false,
       append(name, value) { if (name === 'Set-Cookie') this.setCookies.push(value); },
       setHeader(name, value) { this.sentHeaders[String(name).toLowerCase()] = value; },
-      redirect(status, url) { this.statusCode = status; this.location = url; this.sent = true; },
+      redirect(status, url) { this.statusCode = status; this.location = url; this.sent = true; this.emit('finish'); },
       status(code) { this.statusCode = code; return this; },
-      send(body) { this.body = body; this.sent = true; return this; } };
+      send(body) { this.body = body; this.sent = true; this.emit('finish'); return this; } });
     try {
       await inst.guard.canActivate(new ExecutionContextHost([req, res], cls, handler));
       if (kind === 'get') { inst.handled++; res.status(200).send({ ok: true }); }
@@ -3563,19 +3568,22 @@ test('U5E-LR R1-R3 after a confirmed Log out a plain Login that brings back the 
 const adminLedgers = new WeakMap();
 function makeAdmin(inst, provider) {
   const { AdminService } = require('/app/dist/admin.service');
-  const service = new AdminService(inst.prisma, provider, null, inst.service, inst.ledger);
-  adminLedgers.set(service, inst.ledger);
+  const service = new AdminService(inst.prisma, provider, null, inst.service);
+  adminLedgers.set(service, createRequestContext(createRequestIngress({proxyPeers:[]}), inst.ledger));
   return service;
 }
 async function patchMember(admin, sub, body, caller) {
-  const work = adminLedgers.get(admin).begin();
+  const requests = adminLedgers.get(admin);
+  const req = new http.IncomingMessage(new Socket()), res = new http.ServerResponse(req);
+  requests.capture.capture(req,res,{issuer:ISSUER,subject:caller.sub,roles:caller.roles,
+    rightsVersion:1,institution:caller.institution ?? A,binding:{method:'bearer',sessionRef:null}},
+    {method:'PATCH',route:'admin/users/:id',purpose:'clinical'},async()=>{});
   try {
-    const actor = { issuer: ISSUER, subject: caller.sub,
-      id: await work.resolveRequestIdentity(ISSUER, caller.sub) };
-    return await admin.patchUser(sub, body, caller, { surface: 'PATCH admin/users/:id', actor,
-      roles: caller.roles, rightsVersion: 1, institution: caller.institution ?? null,
-      ip: IP, sessionRef: null, requestId: randomUUID() });
-  } finally { work.end(); }
+    return await requests.source.withWork(req,request=>admin.patchUser(sub, body, caller, {
+      surface:request.facts.surface,actor:request.facts.actor,
+      roles:request.facts.roles,rightsVersion:request.facts.rightsVersion,institution:request.facts.institution,
+      ip:null,sessionRef:null,requestId:request.facts.requestId,request }));
+  } finally { res.emit('finish'); }
 }
 const R10_CALLER = { roles: ['admin'], actor: 'syn-r10-admin@synthetic.test', sub: 'syn-r10-admin' };
 function r10Admin(w, inst = w.I1) {

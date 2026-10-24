@@ -18,6 +18,8 @@ import { DynamicModule, MiddlewareConsumer, Module, NestModule } from '@nestjs/c
 import type { EmrRuntime } from './emr-runtime/application';
 import { EMR_RECORD_PORT } from './emr-runtime/record-port';
 import { EmrNestLifecycle } from './emr-runtime/nest-lifecycle';
+import { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } from './emr-runtime/request-context';
+import { createRequestIngress, RequestIngressConfiguration } from './emr-runtime/request-ingress';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PrismaService } from './prisma.service';
 import { PacsController } from './pacs.controller';
@@ -76,12 +78,15 @@ function adminNoStore(_req: any, res: any, next: () => void) {
   ],
 })
 export class AppModule implements NestModule {
-  static withLedger(runtime: EmrRuntime): DynamicModule {
+  static withLedger(runtime: EmrRuntime, ingress: RequestIngressConfiguration = { proxyPeers: [] }): DynamicModule {
+    const requests = createRequestContext(createRequestIngress(ingress), runtime.port);
     return { module: AppModule, providers: [
+      { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
+      { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
       { provide: EMR_RECORD_PORT, useValue: runtime.port },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work },
       { provide: EmrNestLifecycle, useValue: new EmrNestLifecycle(runtime) },
-    ], exports: [EMR_RECORD_PORT] };
+    ], exports: [EMR_RECORD_PORT, REQUEST_CONTEXT_SOURCE] };
   }
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.

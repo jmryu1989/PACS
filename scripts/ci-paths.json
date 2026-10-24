@@ -828,6 +828,25 @@
       "tests/measurement_ci*.py",
       "tests/execution_selection_test.py",
       "tests/ci_workflows.py"
+    ],
+    "emr-b": [
+      "api/**",
+      "emr/**",
+      "docker-compose*.yml",
+      "proxy/**",
+      "keycloak/**",
+      "scripts/emr-compose.py",
+      "scripts/run-tests.py",
+      "scripts/record-run.py",
+      "scripts/ops_backup.py",
+      "tests/emr/**",
+      "tests/auth_session_service_test.cjs",
+      "tests/report_draft_cas_service_test.cjs",
+      "tests/live/**",
+      "tests/live_test_gate.py",
+      "tests/measurement_ci.py",
+      "tests/candidate_ci.py",
+      "tests/e2e/**"
     ]
   }
 }
