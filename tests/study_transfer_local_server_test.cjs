@@ -1758,11 +1758,19 @@ const casSql = sql => sql.includes("download->'attempts'->-1");
 async function heldArchive(h, as = RAD) {
   const study = await downloadStudy(h, 2), id = randomUUID();
   assert.equal((await prepare(h, study, id, as)).status, 200);
-  let served = 0, release;
+  let served = 0, release, ready;
   const held = new Promise(resolve => { release = resolve; });
-  h.orthanc.fault = async call => (call.path.endsWith('/file') && ++served === 2 ? (await held, null) : null);
+  const checkpointed = new Promise(resolve => { ready = resolve; });
+  h.orthanc.fault = async call => {
+    if (call.path.endsWith('/file') && ++served === 2) { ready(); await held; }
+    return null;
+  };
   const archive = h.request('GET', archivePath(study, id), { as });
-  await sleep(200);
+  // The writer checkpoints object 1 before requesting object 2; elapsed time cannot establish that boundary.
+  try {
+    await Promise.race([checkpointed, archive.then(() => { throw new Error('archive ended before its held source'); })]);
+    assert.deepEqual(h.s.op(id).download.attempts[0].objects.map(o => o.complete), [true], 'object 1 checkpointed before returning the held archive');
+  } catch (error) { release(); throw error; }
   const manifest = JSON.parse(h.s.op(id).download.manifestCanonical);
   return { study, id, archive, release, second: h.orthanc.instances.get(manifest.objects[1].orthancId).bytes };
 }
