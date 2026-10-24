@@ -228,13 +228,19 @@
       "api/prisma/schema.prisma",
       "api/src/emr-contract/**",
       "api/src/emr-image/**",
+      "api/src/emr-runtime/**",
+      "api/src/orthanc.service.ts",
       "api/tsconfig*.json",
       "docker-compose*.yml",
+      "emr/units/e.json",
       "keycloak/**",
       "proxy/**",
       "scripts/emr-compose.py",
       "scripts/record-run.py",
-      "tests/emr/e/**"
+      "scripts/run-tests.py",
+      "tests/emr/b/pg_ledger_restore_test.py",
+      "tests/emr/e/**",
+      "tests/live_test_gate.py"
     ],
     "emr-f-contracts": [
       "api/Dockerfile*",
