@@ -66,57 +66,6 @@
       }
     },
     {
-      "id": "member:structureCatalogValue:PropertyDeclaration",
-      "category": "member",
-      "name": "structureCatalogValue",
-      "kind": "PropertyDeclaration",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalogValue",
-        "kind": "PropertyDeclaration"
-      },
-      "baseline": {
-        "text_sha256": "26397785bcb3ea703837abb4303e0ae1847d87e1103ead9507806371571fb6ff",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:structureCatalog:GetAccessor",
-      "category": "member",
-      "name": "structureCatalog",
-      "kind": "GetAccessor",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalog",
-        "kind": "GetAccessor"
-      },
-      "baseline": {
-        "text_sha256": "01f9a81be3f22aa4fb9413ea8969392561a4e93a48258d59cf834b95b5418993",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:structureCatalog:SetAccessor",
-      "category": "member",
-      "name": "structureCatalog",
-      "kind": "SetAccessor",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalog",
-        "kind": "SetAccessor"
-      },
-      "baseline": {
-        "text_sha256": "1b34982dc61f4374cec32d7ead45e4b36c5d589b2b3d1f7b901e6488f48e15cf",
-        "sql": []
-      }
-    },
-    {
       "id": "member:onModuleInit:MethodDeclaration",
       "category": "member",
       "name": "onModuleInit",
@@ -8475,7 +8424,7 @@
       }
     ]
   },
-  "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee",
+  "allocation_sha256": "4affecaecb385eeda40deb5efd0afe0dfa5f545746c029086815f1a28271eb81",
   "w5_api": {
     "unit": "W5-API",
     "decision": "D1460",
