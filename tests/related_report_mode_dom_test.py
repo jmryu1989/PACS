@@ -2235,43 +2235,49 @@ class RelatedModePage(unittest.TestCase):
         finally:
             retained.dispose()
 
-    # W5B-REVIEW-01: the received Critical Results list opened in the report column must not squeeze the mode. Each part a
-    # reader needs (title, Source text, Insert, Back) is brought into view by scrolling the page's own scroll containers
-    # and is then wholly visible; the mode itself is not shrunk below its content.
-    MODE_PARTS = ("#related-mode-title", '#related-mode [data-related-source="findings"]', "#related-mode-insert", "#related-mode-back")
-    SEEN = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect();
-      let top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
-      for (let p = e.parentElement; p; p = p.parentElement) {
-        if (!/auto|scroll|hidden|clip/.test(getComputedStyle(p).overflowY)) continue;
-        const b = p.getBoundingClientRect(); top = Math.max(top, b.top); bottom = Math.min(bottom, b.bottom); }
-      return [Math.round(r.height), Math.max(0, Math.round(bottom - top))]; }"""
+    # W5B-REVIEW-01 / D1821 (Minhoon): the received Critical Results list opens as an overlay over the report area. Opening
+    # it does not shrink the Related Report mode (its box keeps its place and size); the list is visible, on top at its
+    # own centre, and Hide Received closes it with the mode unchanged.
+    # The box inside its report column (the click on the toggle may scroll the column into view; that is not a resize).
+    BOX = """selector => { const r = document.querySelector(selector).getBoundingClientRect(),
+      c = document.querySelector(".report-p").getBoundingClientRect(); return [Math.round(r.top - c.top), Math.round(r.height)]; }"""
+    ON_TOP = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = Math.max(r.top, 0) + Math.min(r.height, innerHeight) / 2;
+      const hit = document.elementFromPoint(x, y); return !!hit && e.contains(hit); }"""
 
-    def mode_usable_with_the_inbox_open(self, reading):
+    def received_list_overlays_the_mode(self, reading):
         self.b05_cvr_page()
         self.open()
         self.open_target()
         if reading:
             self.enter_reading()
         self.enter()
-        self.page.locator("#cvr-inbox-toggle").click()
-        expect(self.page.locator("#cvr-inbox-toggle")).to_have_text("Hide Received")
         self.settle(200)
-        client, scroll = self.js("() => { const m = document.querySelector('#related-mode'); return [m.clientHeight, m.scrollHeight]; }")
-        self.assertLessEqual(scroll, client + 1, f"the mode is squeezed below its content ({client}px of {scroll}px)")
-        for selector in self.MODE_PARTS:
-            self.page.locator(selector).scroll_into_view_if_needed()
-            height, seen = self.js(self.SEEN, selector)
-            self.assertGreater(height, 0, selector)
-            self.assertGreaterEqual(seen, height - 1, f"{selector}: {seen}px of {height}px visible after scrolling into view")
-        # The list stays reachable in the same column.
-        self.page.locator("#cvr-inbox-toggle").scroll_into_view_if_needed()
-        expect(self.page.locator("#cvr-inbox-toggle")).to_be_in_viewport()
+        before = self.js(self.BOX, "#related-mode")
+        toggle = self.page.locator("#cvr-inbox-toggle")
+        toggle.click()
+        expect(toggle).to_have_text("Hide Received")
+        body = self.page.locator("#cvr-inbox-body")
+        expect(body).to_be_visible()
+        self.settle(200)
+        after = self.js(self.BOX, "#related-mode")
+        self.assertGreaterEqual(after[1], before[1] - 1, f"the mode shrank when the list opened: {before} -> {after}")
+        self.assertEqual(before[0], after[0], "the mode stays where it was in its column")
+        expect(body).to_be_in_viewport()
+        self.assertTrue(self.js(self.ON_TOP, "#cvr-inbox-body"), "the opened list is drawn over the report area")
+        expect(toggle).to_be_in_viewport()
+        toggle.click()
+        expect(body).to_be_hidden()
+        expect(toggle).to_have_text("Show Received")
+        self.settle(200)
+        self.assertEqual(before, self.js(self.BOX, "#related-mode"), "closing the list gives the same mode")
+        expect(self.mode()).to_be_visible()
 
-    def test_w5b_mode_stays_usable_with_the_received_list_open_normal(self):
-        self.mode_usable_with_the_inbox_open(False)
+    def test_w5b_received_list_overlays_the_mode_normal(self):
+        self.received_list_overlays_the_mode(False)
 
-    def test_w5b_mode_stays_usable_with_the_received_list_open_reading(self):
-        self.mode_usable_with_the_inbox_open(True)
+    def test_w5b_received_list_overlays_the_mode_reading(self):
+        self.received_list_overlays_the_mode(True)
 
     # W5B-REVIEW-02: the worklist's own ways to the report editor (Enter on the current row, its keyboard activation, the
     # row menu's 판독문 작성으로) are Report Editor in the mode too: the mode closes and the editor returns with the

@@ -198,8 +198,10 @@ MUTANTS = [
     ("row-menu-focuses-the-hidden-editor", "context-menu.js",
      '{ label: "판독문 작성으로", act: () => focusReportEditor() },', '{ label: "판독문 작성으로", act: () => $("#findings").focus() },',
      "test_w5b_row_menu_report_editor_leaves_the_mode"),
-    ("current-row-enter-focuses-the-hidden-editor", "worklist-row-events.js",
-     "      e.preventDefault();\n      focusReportEditor();", '      e.preventDefault();\n      $("#findings").focus();',
+    # Enter on the current row reaches the row navigation's activation first (it stops the event); the worklist-row-events
+    # Enter handler is then a second layer that no page path reaches on its own (a mutant of it alone survives, recorded).
+    ("current-row-enter-focuses-the-hidden-editor", "page-boot.js",
+     "if(mode==='Radiology')focusReportEditor();", "if(mode==='Radiology')$('#findings').focus();",
      "test_w5b_enter_on_the_current_row_leaves_the_mode"),
     # PAGE-10: a double click opens the comparison viewer again.
     ("double-click-opens-images", "related-controls.js", "    function openRelatedImages(uid) {",
