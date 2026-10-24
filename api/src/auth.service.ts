@@ -700,12 +700,13 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
             || live.idpSid !== admitted.idpSid || live.institution !== admitted.institution
             || live.rightsVersion !== admitted.rightsVersion || live.lastSeenAt.getTime() < Date.now() - SESSION_IDLE_MS)
           throw this.ended('요청을 시작한 인증 세션이 종료되었습니다');
+        // Token expiry is not a session end (S7-U5 ④): an admitted request keeps going on its stored token while a
+        // refresh is slow or fails; the session ends only when its row is gone or replaced, idle, or rights change.
         const stored = decodeJwt(live.accessToken);
-        if (stored.iss !== claims.iss || stored.sub !== claims.sub || !(Number(stored.exp) * 1000 > Date.now()))
+        if (stored.iss !== claims.iss || stored.sub !== claims.sub)
           throw this.ended('요청을 시작한 인증 세션을 확인할 수 없습니다');
         current = await this.sessionRights(live, db);
       } else {
-        if (!(Number(claims.exp) * 1000 > Date.now())) throw this.ended('인증 토큰이 만료되었습니다');
         current = await this.bearerRights(claims, raw, db);
       }
       if (!rightsAllow(current) || current.version !== expected.version || current.institution !== expected.institution
