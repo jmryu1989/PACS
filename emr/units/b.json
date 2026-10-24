@@ -86,7 +86,7 @@
       "tests/clinician_policy_fixtures.json",
       "tests/route_inventory_ts.js",
       "tests/ci_workflow_consumers_test.py",
-      ".github/workflows/emr-b.yml",
+      ".github/workflows/validate.yml",
       "api/src/emr-contract/routes.ts",
       "api/prisma/import-member-rights.cjs",
       "tests/ops_product_transfer_fixture.py",
@@ -640,6 +640,20 @@
         "test": [
           "RET-01",
           "RESTORE-01"
+        ]
+      },
+      {
+        "consumer": "REQUEST_FACTS final Guard capture and AdminController shared facts",
+        "transaction": "original request work; current AuthService authorization in business transaction",
+        "response": "revoked on response termination; no client-derived actor or fallback ingress",
+        "test": [
+          "tests/emr/request/request_facts_test.cjs",
+          "tests/emr/request/request_facts_live.py::RequestFactsLive"
+        ],
+        "collection": "node --test discovers the pure suite; run-tests.py discovers RequestFactsLive methods; no copied count",
+        "pending": [
+          "Module A clinical RF-3/RF-4",
+          "deployed nginx and Keycloak RF-2/RF-6"
         ]
       }
     ],
