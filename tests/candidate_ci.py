@@ -63,9 +63,11 @@ FLOWS = (
     # W4-FLOW: Approve & Next under the RS=W filter moves to the row after the approved study, and a template's hidden
     # Recommendation is announced, approved and shown again (the selection 123 -> 124).
     ("e2e/test_report_flow.py", "W4ReportFlowE2E", "test_w4_01_approve_next_anchor_recommendation_roundtrip", "test_w4_01_"),
-    # W5-UI Related Report mode FLOW (e2e/test_related_report_mode.py RelatedReportModeE2E.test_w5_01_...): deferred to
-    # W5-UI Phase B by D1675, not deleted. Phase A serves no mode markup on the live page (W5-PHASE-A-INTERIM), so the flow
-    # cannot run before Phase B; Phase B adds this row back with main.html's mode markup (the selection 130 -> 131).
+    # W5-UI Phase B: the Related Report mode FLOW on the live page (main.html now serves the mode): entry save, reviewed
+    # insertion with a committed-but-lost reply, same-ID replay, Back, explicit approval, reopen once (the selection 141 -> 142;
+    # with the S9/U1 registration 174 -> 175).
+    ("e2e/test_related_report_mode.py", "RelatedReportModeE2E",
+     "test_w5_01_prior_insert_loss_check_back_commit_reopen", "test_w5_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),

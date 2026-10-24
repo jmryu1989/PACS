@@ -6,13 +6,15 @@ first line of the Source's Findings, confirms the exact insertion at the end of 
 the PUT that wrote it is lost. The page keeps the operation Result Unknown (never Draft Saved); Retry resends the same ID
 and the same body, and the server replays the applied receipt without a second insertion; the receipt query reads the
 same receipt. Back returns to the editor at the insertion end, Approve commits the inserted text, and reopening the
-study shows it once; the receipt stays applied but no longer matches the cleared draft. The Source's versions and every
-original DICOM instance are unchanged. Page-level outcomes (refused, discard tombstone, superseded, ID_REUSED, logout,
-both layouts) are cases in tests/related_report_mode_dom_test.py; restart and lock order are W5-API's PostgreSQL cases.
+study shows it once; the receipt stays applied but no longer matches the cleared draft. The private draft (the typed
+Target text and the inserted line) is never visible to another authorized reader of the same study (doctor2, the existing
+private-draft boundary of test_worklist's two-account case). The Source's versions are unchanged, and every original DICOM
+instance of both studies is byte-identical at the end: TemplatePreservationE2E.fixture() records each instance's SHA-256
+and its cleanup (check_originals) asserts them. Page-level outcomes (refused, discard tombstone, superseded, ID_REUSED,
+logout, both layouts) are cases in tests/related_report_mode_dom_test.py; restart and lock order are W5-API's PostgreSQL
+cases.
 
-Owner: W5-UI Phase B (D1675). Phase A serves no Related Report mode markup on the live page (W5-PHASE-A-INTERIM), so this
-flow is not in the Phase A candidate selection (tests/candidate_ci.py FLOWS, 130 cases) and passes nothing there. Phase B
-adds it back to FLOWS (130 -> 131) together with main.html's mode markup.
+Candidate FLOW (tests/candidate_ci.py FLOWS): W5-UI Phase B serves the mode on the live page (the selection 141 -> 142).
 """
 from __future__ import annotations
 
@@ -107,6 +109,13 @@ class RelatedReportModeE2E(TemplatePreservationE2E):
         receipt = checked["relatedInsert"]
         self.assertEqual((receipt["result"], receipt["state"], receipt["currentMatches"]), ("applied", "applied", True))
         self.assertEqual(checked["snapshot"]["findings"], TARGET_OWN + INSERTED)
+        # Author-only: another authorized reader of the study sees neither the typed text nor the inserted line.
+        self.assertIsNone(self.state(target, "doctor2").get("draft"))
+        other = self.stack.request("GET", f"/studies/{target.uid}/draft", "doctor2")
+        self.assertEqual(other.status, 200)
+        self.assertFalse(other.body["present"])
+        self.assertNotIn(TARGET_OWN, other.text)
+        self.assertNotIn(SOURCE_LINE, other.text)
 
         # Back: the editor returns at the insertion end; Approve commits the inserted text once.
         page.locator("#related-mode-back").click()

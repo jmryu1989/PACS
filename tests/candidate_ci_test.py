@@ -62,7 +62,11 @@ class CandidateCiTests(unittest.TestCase):
         self.assertEqual([item["case"] for item in selected if item["file"] == "tests/e2e/test_s9_role_sweep.py"], [
             "S9RoleSweepE2E.test_sweep_05_admin_role_change_old_document_and_fresh_login",
             "S9RoleSweepE2E.test_sweep_05_institution_move_requires_new_scope_on_real_page"])
-        self.assertNotIn("tests/e2e/test_related_report_mode.py", {item["file"] for item in selected})
+        related = [item for item in selected if item["file"] == "tests/e2e/test_related_report_mode.py"]
+        self.assertEqual(related, [{"file": "tests/e2e/test_related_report_mode.py",
+                                    "case": "RelatedReportModeE2E.test_w5_01_prior_insert_loss_check_back_commit_reopen"}])
+        self.assertEqual(len({(item["file"], item["case"]) for item in selected}), len(selected))
+        self.assertIn(("e2e/test_related_report_mode.py", "RelatedReportModeE2E", "candidate-flow-related-report-mode"), rows)
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
         self.assertEqual([item["case"] for item in selected[-len(candidate.FLOWS):]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
