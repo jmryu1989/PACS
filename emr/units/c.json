@@ -45,7 +45,6 @@
     "tests/emr/c/offline_report_dom_test.py",
     "tests/emr/c/mutants.py",
     "emr/units/c.json",
-    ".github/workflows/emr-c.yml",
     "api/src/emr-report/current-study.ts",
     "api/src/emr-report/online-approval.ts",
     "api/src/emr-report/online-store.ts",
