@@ -1418,7 +1418,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/w4-shortcut-v2-module --cwd . --tree worklist-v0/hpacs-lite --tree tests -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_shortcuts_test.cjs
     - name: U1 single viewer registry and spanning geometry boundary
       if: ${{ !cancelled() }}
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-ux-u1-boundary --cwd . --file tests/e2e/test_viewer_ux_span.py --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/work-context.js --file tests/module_session_harness.cjs -- timeout 600 python3 tests/e2e/test_viewer_ux_span.py --boundary
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-ux-u1-boundary --cwd . --file tests/e2e/test_viewer_ux_span.py --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/module_session_harness.cjs -- timeout 600 python3 tests/e2e/test_viewer_ux_span.py --boundary
     - name: Synthetic runtime record-run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
