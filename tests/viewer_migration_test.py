@@ -259,7 +259,7 @@ const read=async()=>{const s=await p.studyState.findUnique({where:{uid:UID},sele
  return {epoch:s.draftEpoch,pre:{expectedOwner:OWNER,expectedRevision:s.draftEpoch+':'+(d?d.revision:0)},
   kept:d&&Array.isArray(d.citations)?d.citations.map(e=>e.cid):[]};};
 const put=async b=>{const r=await read();return svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null,facts);};
-const commit=async b=>{const r=await read();return svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null);};
+const commit=async b=>{const r=await read();return svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null,facts);};
 const force=async()=>{const r=await read();return svc.forceDiscardDrafts(UID,{expectedOwner:OWNER,expectedEpoch:r.epoch},CALLER,null);};
 /**
  * A failing assertion in here used to leave exit 1 and nothing else: ops.run raises on the exit code

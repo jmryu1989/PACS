@@ -196,7 +196,13 @@
       "scripts/emr-compose.py",
       "scripts/record-run.py",
       "tests/e2e/requirements.txt",
-      "tests/emr/c/**"
+      "tests/emr/c/**",
+      "api/src/emr-runtime/**",
+      "api/src/emr-clinical/**",
+      "tests/emr/b/pg_ledger_restore_test.py",
+      "tests/emr/d/**",
+      "tests/live_test_gate.py",
+      "scripts/run-tests.py"
     ],
     "emr-d": [
       "api/Dockerfile*",

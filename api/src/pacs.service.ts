@@ -346,7 +346,7 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── report-commit (api/src/pacs/report-commit.ts) ──
-  async commitReport(uid: string, body: any, c: Caller, session: string | null) {
-    return this.reportCommitConcern.commitReport(uid, body, c, session);
+  async commitReport(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
+    return this.reportCommitConcern.commitReport(uid, body, c, session, facts);
   }
 }

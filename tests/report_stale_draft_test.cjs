@@ -88,7 +88,7 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   const real = new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma));
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
   const svc = {
-    commitReport: (uid, body, c) => real.commitReport(uid, { ...pre(c), ...body }, c, null),
+    commitReport: (uid, body, c) => real.commitReport(uid, { ...pre(c), ...body }, c, null, B2_REQUEST_FACTS),
     putReport: (uid, body, c) => real.putReport(uid, { citationIds: [], structureIds: [], ...pre(c), ...body }, c, null, B2_REQUEST_FACTS),
   };
   return { svc, writes, audits, raw, reads, tx };

@@ -1,6 +1,6 @@
 {
   "unit": "EMR-C",
-  "round": "C2-core",
+  "round": "C2-online",
   "base_sha": "c07c3cfbc589d73249af26fa9351b2dcf2620cb4",
   "order": "astra-control/evidence/emr-c-prep-20261009/emr-c-order.md (D714; prepared on 2fc7358, rebound on 04e50ab); C2 core D1809, landing fix D1812 (production integration deferred)",
   "dependencies": {
@@ -16,9 +16,9 @@
       "api/src/emr-contract/validation.ts"
     ],
     "ports_not_imported": {
-      "C2": "Mandatory LedgerPort and RequestIdentityPort; production B2 adapter and request/report composition deferred"
+      "C2": "RequestIdentityPort and native report/startup composition remain integration handoffs; the B2 PostgreSQL LedgerPort adapter is active."
     },
-    "not_wired": "Retained reads and C2 online signing core are not registered with live routes or pages. Production B2 integration belongs to emr-d-online."
+    "not_wired": "C2 PostgreSQL ledger adapter, server-signing migration and ServerSigningPg suite are active. Online D composition consumes the C2 server keys. Native report routes, request identity/startup and served pages remain unwired; C1 offline code was removed (#213)."
   },
   "owned_paths": [
     "api/src/emr-report/contract.ts",
@@ -36,7 +36,11 @@
     "api/src/emr-signature/server-signing.module.ts",
     "api/src/emr-signature/server-signing.ts",
     "api/src/emr-signature/server-verification.ts",
-    "tests/emr/c/server_crypto_test.cjs"
+    "tests/emr/c/server_crypto_test.cjs",
+    "api/src/emr-signature/pg-ledger.ts",
+    "tests/emr/c/server_signing_live.py",
+    "tests/emr/c/server_signing_pg_test.cjs",
+    "api/prisma/migrations/20261023200000_emr_server_signing/migration.sql"
   ],
   "forbidden_single_writer": [
     "worklist-v0/hpacs-lite/main.html",
@@ -266,17 +270,19 @@
     ]
   },
   "migrations": {
-    "active": [],
+    "active": [
+      "api/prisma/migrations/20261023200000_emr_server_signing/migration.sql"
+    ],
     "planned_c2": [
       "api/prisma/migrations/20261009160000_emr_c/migration.sql"
     ]
   },
   "deployment": {
-    "active": "none: unwired modules and one unwired static page script; no image, compose or ops change",
+    "active": "C2 PostgreSQL server-signing schema and B2 LedgerPort adapter; native route/startup wiring and operational secret custody are not yet activated.",
     "planned_c2": "C2 + C-NATIVE package; no activation before measured Q/J/H/epsilon"
   },
   "restore": {
-    "active": "none",
+    "active": "ServerSigningPg verifies historical signatures and new signing across native pg_dump/pg_restore; wrapping-secret custody is external to PostgreSQL and remains a release-tools handoff.",
     "planned_c2": "versions, signature bytes, key history, unadopted originals, receipts and t0 survive dump/restore"
   },
   "req_risk_test": [
@@ -357,7 +363,15 @@
   "mutants": [],
   "candidate_cases": [],
   "live": {
-    "active": [],
+    "active": [
+      {
+        "module": "tests/emr/c/server_signing_live.py",
+        "class": "ServerSigningPg",
+        "methods": [
+          "test_signing_and_restore"
+        ]
+      }
+    ],
     "planned_c2": {
       "module": "tests/emr/c/live.py",
       "class": "EmrCReportLive",
