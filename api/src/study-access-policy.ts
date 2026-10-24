@@ -1,4 +1,4 @@
-export type StudyAccessRule = { all: true } | {
+type StudyAccessRule = { all: true } | {
   patientId: string | null; modalities: string[]; dateFrom: string | null; dateTo: string | null; studyUids: string[];
 };
 export interface StudyAccessPolicy {
@@ -50,7 +50,7 @@ export function accessWindowOpen(p:StudyAccessPolicy,now=Date.now()):boolean {
 export function ruleNeedsMetadata(r:StudyAccessRule):boolean {
   return !('all' in r)&&!!(r.patientId!==null||r.modalities.length||r.dateFrom||r.dateTo);
 }
-export function ruleMatches(r:StudyAccessRule,uid:string,m?:StudyAccessMetadata):boolean {
+function ruleMatches(r:StudyAccessRule,uid:string,m?:StudyAccessMetadata):boolean {
   if('all' in r)return true;
   if(r.studyUids.length&&!r.studyUids.includes(uid))return false;
   if(!ruleNeedsMetadata(r))return true;

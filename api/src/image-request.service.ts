@@ -17,11 +17,11 @@ import type { Caller } from './pacs.service';
  * 어떤 역할로도 읽지 못한다(OQ-1 a, T-5).
  */
 export const IMAGE_REQUEST_AUDIT_ACTION = 'study.image-request';
-export const IMAGE_REQUEST_KINDS: readonly string[] = Object.freeze(['external-image', 'image-transfer']);
-export const IMAGE_REQUEST_ACTIONS: readonly string[] = Object.freeze(['accept', 'close', 'decline', 'cancel']);
-export const IMAGE_REQUEST_TEXT_MAX = 2000;
-export const IMAGE_REQUEST_COUNTERPARTY_MAX = 256;
-export const IMAGE_REQUEST_PAGE = 50;
+const IMAGE_REQUEST_KINDS: readonly string[] = Object.freeze(['external-image', 'image-transfer']);
+const IMAGE_REQUEST_ACTIONS: readonly string[] = Object.freeze(['accept', 'close', 'decline', 'cancel']);
+const IMAGE_REQUEST_TEXT_MAX = 2000;
+const IMAGE_REQUEST_COUNTERPARTY_MAX = 256;
+const IMAGE_REQUEST_PAGE = 50;
 const RADIOLOGIST = 'radiologist';
 const TECHNICIAN = 'technician';
 const ADMIN = 'admin';
@@ -41,7 +41,7 @@ const CURSOR = /^[A-Za-z0-9_-]+$/;
 // 줄바꿈과 탭만 받는다. 그 밖의 C0·C1 제어문자는 화면·로그에서 보이지 않는 글자가 된다.
 const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/;
 
-export type RequestCaller = Caller & { name?: string };
+type RequestCaller = Caller & { name?: string };
 type CreateRequest = { requestId: string; expectedOwner: unknown; kind: 'external-image' | 'image-transfer';
   counterparty: string; counterpartyInstitutionId: string | null; reason: string };
 type ListQuery = { view?: string; state?: string; kind?: string; cursor?: string };

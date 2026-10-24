@@ -13,7 +13,7 @@ internal.addAddress('::1', 'ipv6');
 internal.addSubnet('fc00::', 7, 'ipv6');
 internal.addSubnet('fe80::', 10, 'ipv6');
 
-export function isInternalAsrAddress(address: string) {
+function isInternalAsrAddress(address: string) {
   const family = isIP(address);
   return !!family && internal.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }

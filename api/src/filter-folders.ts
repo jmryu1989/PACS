@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 
 export type SearchFolder = { path: string; description: string; ordinal: number };
-export type FolderSearch = { id: number; folder: string };
+type FolderSearch = { id: number; folder: string };
 
 export function folderPath(value: unknown, root = false): string {
   if (typeof value !== 'string') throw new BadRequestException('폴더 경로를 확인하세요');

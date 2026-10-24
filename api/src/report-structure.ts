@@ -17,18 +17,18 @@ import { blockIsBlank, comparisonKey, lineBlockOccurrences, presenceState } from
  */
 
 export const REPORT_STRUCTURE_LIMITS = Object.freeze({ entries: 64, bytes: 65536, renderedText: 512 });
-export const REPORT_STRUCTURE_FIELDS = Object.freeze(['findings', 'conclusion', 'recommendation'] as const);
-export type ReportStructureField = typeof REPORT_STRUCTURE_FIELDS[number];
-export const REPORT_STRUCTURE_VALUE_TYPES = Object.freeze(['choice', 'number', 'text', 'boolean'] as const);
-export type ReportStructureValueType = typeof REPORT_STRUCTURE_VALUE_TYPES[number];
+const REPORT_STRUCTURE_FIELDS = Object.freeze(['findings', 'conclusion', 'recommendation'] as const);
+type ReportStructureField = typeof REPORT_STRUCTURE_FIELDS[number];
+const REPORT_STRUCTURE_VALUE_TYPES = Object.freeze(['choice', 'number', 'text', 'boolean'] as const);
+type ReportStructureValueType = typeof REPORT_STRUCTURE_VALUE_TYPES[number];
 /** 저장 형식의 판. 서식 목록의 `revision`과 별개다. */
 export const REPORT_STRUCTURE_SCHEMA = 1;
 /** 서식 문장 안에서 값이 들어갈 자리. 정확히 한 번만 나와야 한다. */
 export const STRUCTURE_VALUE_SLOT = '{value}';
 
-export interface StructureChoice { code: string; text: string }
+interface StructureChoice { code: string; text: string }
 
-export interface StructureItem {
+interface StructureItem {
   code: string;
   field: ReportStructureField;
   valueType: ReportStructureValueType;
@@ -145,7 +145,7 @@ export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([
 export class StructureInputError extends Error {}
 
 /** 목록 검사의 규칙 이름. 거절은 언제나 **어느 규칙**인지 말한다. */
-export type StructureRule = 'R-D' | 'R-S' | 'R-C' | 'R-A' | 'R-B';
+type StructureRule = 'R-D' | 'R-S' | 'R-C' | 'R-A' | 'R-B';
 
 /**
  * 서식 목록 자체가 규칙을 어겼다. 적재 시점에 터지는 것이 맞다 — 조용히 쓰면 기록이 모호해진다.
@@ -159,7 +159,7 @@ export class StructureCatalogError extends Error {
   }
 }
 
-export interface ReportStructureApply {
+interface ReportStructureApply {
   op: 'apply' | 'replace';
   field: ReportStructureField;
   templateId: string;
@@ -228,7 +228,7 @@ export function utf8Bytes(text: string): number {
  * 문면, boolean 낱말)은 그 길을 지나지 않는다. 온전하지 않은 문자열은 정규화·저장·비교가
  * 저마다 다르게 굴 수 있으므로 목록을 받는 자리에서 막는다.
  */
-export function wellFormedUtf16(text: string): boolean {
+function wellFormedUtf16(text: string): boolean {
   const value = String(text ?? '');
   for (let i = 0; i < value.length; i++) {
     const unit = value.charCodeAt(i);
@@ -258,7 +258,7 @@ const nfc = (text: string) => String(text ?? '').normalize('NFC');
  *
  * 고치지 않는다 — 사람이 친 글자도, 이미 기록된 바이트도 다시 쓰지 않는다. 거절만 한다.
  */
-export function boundaryStable(prefix: string, valueText: string, suffix: string): boolean {
+function boundaryStable(prefix: string, valueText: string, suffix: string): boolean {
   return comparisonKey(String(prefix) + String(valueText) + String(suffix))
     === nfc(prefix) + comparisonKey(String(valueText)) + nfc(suffix);
 }

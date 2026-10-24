@@ -11,7 +11,7 @@ const dot=(a:number[],b:number[])=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 const sub=(a:number[],b:number[])=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
 const cross=(a:number[],b:number[])=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
 const distance=(a:number[],b:number[])=>Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
-export const CURVED_LIMITS=Object.freeze({curved:64,freehand:128,columns:4096,rows:4096,samples:1048576,arc:1000,halfHeight:150});
+const CURVED_LIMITS=Object.freeze({curved:64,freehand:128,columns:4096,rows:4096,samples:1048576,arc:1000,halfHeight:150});
 const INTERPOLATION:Record<string,string>={curved:'catmull-rom-uniform-16',freehand:'linear'};
 
 /** Arc length and output grid by the client rule: Catmull-Rom 16 per segment or linear. */

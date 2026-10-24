@@ -12,7 +12,7 @@ const norm = (a: number[]) => Math.sqrt(dot(a, a));
 
 // Only Orthanc's uncompressed, C-order single-frame grayscale NPY response is
 // accepted. Parse its literal header; never evaluate the Python dictionary.
-export function srPixels(raw: Buffer, rows: number, cols: number): (i: number) => number {
+function srPixels(raw: Buffer, rows: number, cols: number): (i: number) => number {
   if (!Buffer.isBuffer(raw) || raw.length < 12 || raw.subarray(0, 6).toString('hex') !== '934e554d5059') invalid();
   const major = raw[6], offset = major === 1 ? 10 : major === 2 ? 12 : invalid();
   const length = major === 1 ? raw.readUInt16LE(8) : raw.readUInt32LE(8);

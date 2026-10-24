@@ -3,10 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
-import io
 import json
-import os
 from pathlib import Path
 import re
 import sys
@@ -84,7 +81,6 @@ class RequestGuard:
 
 
 def sdk_client(config, secret, keys):
-    require({name: importlib.metadata.version(name) for name in storage.VERSIONS} == storage.VERSIONS)
     import boto3
     from botocore.config import Config
     client = boto3.session.Session().client(
