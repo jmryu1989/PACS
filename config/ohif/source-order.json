@@ -27,6 +27,7 @@
     "dicom-pdf.js",
     "series-recovery.js",
     "context-loss.js",
+    "viewer-ux.js",
     "configuration.js"
   ]
 }
