@@ -7,6 +7,15 @@ from test_viewer_windows import ViewerWindowsE2E
 
 
 class FrameCoverageE2E(ViewerWindowsE2E):
+    def separate(self, page, fixture):
+        viewer = super().separate(page, fixture)
+        # U1 completes window placement after pixels are ready. Wait for the
+        # served manager to allow navigation before testing the coverage guard.
+        self.manager(page)
+        expect(self.control(page, 0, 'latest')).to_be_enabled(timeout=30000)
+        page.locator('#viewer-windows-done').click()
+        return viewer
+
     def enable(self, viewer):
         try:
             viewer.wait_for_function("() => typeof kinViewerFrameCoverageState==='function' && document.querySelector('#kin-frame-warning') && !document.querySelector('#kin-frame-warning').disabled")
@@ -95,11 +104,19 @@ class FrameCoverageE2E(ViewerWindowsE2E):
         a,b=self.pair();context=self.device();p=self.sign_in(context);self.limit(p,2);v=self.separate(p,a);self.enable(v)
         persisted=v.evaluate("Object.entries(localStorage).filter(([k])=>k.startsWith('kin-frame-warning:'))")
         self.assertEqual(len(persisted),1);self.assertEqual(persisted[0][1],'true');self.assertNotIn(a.uid,str(persisted))
-        second=self.separate(p,b)
+        # Normal opening reuses the single viewer; the preference must survive
+        # that new document, after accepting the unseen-frame warning.
+        self.choose(p,b)
+        prompts=[]
+        p.once('dialog',lambda d:(prompts.append(d.message),d.accept()))
+        p.locator('#m-filmbox').click()
+        self.assertEqual(len(prompts),1);self.assertIn('원본 프레임',prompts[0])
+        v.wait_for_url('**StudyInstanceUIDs='+b.uid+'**')
+        second=v
         second.wait_for_function("() => window.kinViewerFrameCoverageState?.().phase==='ready'")
         self.assertTrue(second.evaluate('kinViewerFrameCoverageState().enabled'))
         self.assertGreater(second.evaluate('kinViewerFrameCoverageState().remaining'),0)
-        v.close();second.close();self.sign_out(p)
+        second.close();self.sign_out(p)
         other=self.sign_in(context,'doctor2');self.limit(other,2);third=self.separate(other,a)
         third.wait_for_function("() => document.querySelector('#kin-frame-warning') && !document.querySelector('#kin-frame-warning').disabled")
         self.assertFalse(third.evaluate('kinViewerFrameCoverageState().enabled'))
