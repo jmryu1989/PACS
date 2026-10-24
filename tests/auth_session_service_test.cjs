@@ -1459,10 +1459,7 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
       && (await w.rows()).length === before + 2);
     assert.equal(await left(), 1);
     assert.ok(capture.texts.some(([, text]) => /auth_storage category=sweep_target/.test(text)), 'a fixed category is logged');
-    // A committed row precedes settlement of the timer-owned task. Advancing
-    // the fake hour while it is still running legitimately skips that tick.
-    await w.I2.background.drained();
-    await new Promise(resolve => setImmediate(resolve));
+    await quiet(w);
     w.tick(HOUR);
     await w.until('the next sweep run', async () => (await w.rows()).length === before + 3);
     assert.equal(await left(), 0);
