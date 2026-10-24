@@ -158,5 +158,12 @@
       "probe.ts": "export const load = () => import('@prisma/client');\n"
     },
     "refused": "not a package the loaders may take"
+  },
+  {
+    "name": "typed service require method on a local receiver",
+    "files": {
+      "service.ts": "export class Access { require(uid: string) { return uid; } }\n",
+      "probe.ts": "import { Access } from './service'; export const check = (access: Access) => access.require('study');\n"
+    }
   }
 ]

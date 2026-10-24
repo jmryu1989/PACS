@@ -766,6 +766,8 @@ def main(profile_name, credential_provider=None):
         evidence_stage = Path(runner_temp)/('kin-vr-suite-evidence-'+secrets.token_hex(6))
         evidence_stage.mkdir(parents=True, exist_ok=False)
     env = profile_environment(profile_name, out, values, evidence_stage)
+    from emr.d.synthetic_stack import configure as configure_signing
+    signing_custody = configure_signing(ROOT, env)
     project = profile['project_prefix']+secrets.token_hex(6)
     # Fixed container names mean isolation comes from the empty hosted daemon,
     # not this project name. Helpers must still address the same Compose project.
@@ -868,6 +870,7 @@ def main(profile_name, credential_provider=None):
                         f"{row['seconds']:.3f}\t{row['name']}.log\n" for row in results), encoding='utf-8')
                 if evidence_stage is not None:
                     shutil.rmtree(evidence_stage)
+                signing_custody.cleanup()
 
 
 if __name__ == '__main__':

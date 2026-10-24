@@ -1,12 +1,12 @@
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
-const B2_REQUEST_FACTS = { issuer: 'https://synthetic.invalid', ip: null, requestId: 'synthetic-request', request: {} };
+const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
 // Native signing is a collaborator here; this fixture is not cryptographic evidence.
 const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 function b2Ledger(prisma) {
   return { begin: () => ({
-    resolveRequestIdentity: async () => 'synthetic-member',
+    resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
     transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
     end() {},
   }) };
@@ -35,7 +35,7 @@ const { PacsReportDraft } = require('/app/dist/pacs/report-draft');
 const { PacsReportCommit } = require('/app/dist/pacs/report-commit');
 const structure = require('/app/dist/report-structure');
 const { Prisma } = require('/app/node_modules/@prisma/client');
-const vectors = require('/tests/report_structure_vectors.json');
+const vectors = require('./report_structure_vectors.json');
 
 const UID = '2.25.4242';
 const CALLER = { kind: 'member', institution: 'synthetic', sub: 'sub-1', actor: 'doctor@synthetic', roles: ['radiologist'] };
@@ -132,9 +132,9 @@ function fixture({ state = STATE,
   // Compose the real report consumers over the synthetic store.
   const access = new PacsAccess(prisma, studyAccess), audit = new PacsAudit(prisma, studyAccess, access);
   const evidence = new PacsReportEvidence(prisma, studyAccess, findings, access);
-  const drafts_ = new PacsReportDraft(prisma, studyAccess, access, audit, evidence, b2Ledger(prisma));
-  const commit = new PacsReportCommit({ usersInGroupWithRole: async () => [] }, studyAccess, evidence, drafts_, nativeSigning);
-  const svc = { putReport: (...a) => drafts_.putReport(...a, null, null, null, B2_REQUEST_FACTS), commitReport: (...a) => commit.commitReport(...a),
+  const drafts_ = withDraftRequestContext(new PacsReportDraft(prisma, studyAccess, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
+  const commit = withDraftRequestContext(new PacsReportCommit({ usersInGroupWithRole: async () => [] }, studyAccess, evidence, drafts_, nativeSigning), b2Ledger(prisma));
+  const svc = { putReport: (...a) => drafts_.putReport(...a, null, null, null), commitReport: (...a) => commit.commitReport(...a),
     forceDiscardDrafts: (...a) => drafts_.forceDiscardDrafts(...a), reportStructure: (...a) => evidence.reportStructure(...a) };
   // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a
   // draft PUT the whole snapshot - a keep list the case does not name is the draft's current list (nothing dropped).
@@ -142,8 +142,8 @@ function fixture({ state = STATE,
   const ids = (key, id) => (Array.isArray(row?.[key]) ? row[key].map(entry => entry[id]) : []);
   const asDocument = new Proxy(svc, { get(target, name) {
     if (name === 'putReport') return (uid, body, c) => target.putReport(uid, { findings: '', conclusion: '', recommendation: '', baseVersion: 0,
-      citationIds: ids('citations', 'cid'), structureIds: ids('structured', 'sid'), ...pre(c), ...body }, c, null, B2_REQUEST_FACTS);
-    if (name === 'commitReport') return (uid, body, c) => target.commitReport(uid, { ...pre(c), ...body }, c, null, B2_REQUEST_FACTS);
+      citationIds: ids('citations', 'cid'), structureIds: ids('structured', 'sid'), ...pre(c), ...body }, c, null);
+    if (name === 'commitReport') return (uid, body, c) => target.commitReport(uid, { ...pre(c), ...body }, c, null);
     if (name === 'forceDiscardDrafts') return (uid, c) => target.forceDiscardDrafts(uid, { expectedOwner: pre(c).expectedOwner, expectedEpoch: EPOCH }, c, null);
     const value = target[name];
     return typeof value === 'function' ? value.bind(target) : value;
@@ -221,7 +221,7 @@ test('every shipped item is accepted by the reader, in its own field', async () 
     const content = { findings: '', conclusion: '', recommendation: '', baseVersion: 4 };
     content[read.field] = send.renderedText;
     const { svc, created } = fixture();
-    await svc.putReport(UID, { ...content, structure: send }, CALLER, null, B2_REQUEST_FACTS);
+    await svc.putReport(UID, { ...content, structure: send }, CALLER, null);
     const [entry] = created.find(c => c.call === 'draft').update.structured;
     assert.equal(entry.itemCode, code);
     assert.equal(entry.templateId, 'GEN-1');
@@ -554,7 +554,7 @@ const draftBody = (over = {}) => body({ findings: DRAFT_LINE, ...over });
 
 test('an apply stores the value, the sentence and the attestation the server owns', async () => {
   const { svc, created } = fixture();
-  const answer = await svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null, B2_REQUEST_FACTS);
+  const answer = await svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null);
   const written = created.find(c => c.call === 'draft').create.structured;
   assert.equal(written.length, 1);
   assert.match(written[0].sid, UUID);
@@ -571,7 +571,7 @@ test('an apply stores the value, the sentence and the attestation the server own
 test('an apply whose sentence is not in this request body is refused and writes nothing', async () => {
   const { svc, writes } = fixture();
   const answer = await refusal(
-    svc.putReport(UID, { ...draftBody({ findings: 'typed something else' }), structure: draftApply() }, CALLER, null, B2_REQUEST_FACTS), 409);
+    svc.putReport(UID, { ...draftBody({ findings: 'typed something else' }), structure: draftApply() }, CALLER, null), 409);
   assert.equal(answer.code, 'REPORT_STRUCTURE_TEXT');
   assert.deepEqual(writes, []);
 });
@@ -579,14 +579,14 @@ test('an apply whose sentence is not in this request body is refused and writes 
 test('an empty body carrying an apply is refused rather than silently ignored', async () => {
   const { svc, writes } = fixture();
   const answer = await refusal(svc.putReport(UID,
-    { findings: '', conclusion: '', recommendation: '', baseVersion: 4, structure: draftApply() }, CALLER, null, B2_REQUEST_FACTS), 409);
+    { findings: '', conclusion: '', recommendation: '', baseVersion: 4, structure: draftApply() }, CALLER, null), 409);
   assert.equal(answer.code, 'REPORT_STRUCTURE_TEXT');
   assert.deepEqual(writes, []);
 });
 
 test('the same item cannot be entered twice; the second apply says to use replace', async () => {
   const { svc } = fixture({ draft: { structured: [draftStored({ sid: 's-mine' })] } });
-  const answer = await refusal(svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null, B2_REQUEST_FACTS), 409);
+  const answer = await refusal(svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null), 409);
   assert.equal(answer.code, 'REPORT_STRUCTURE_EXISTS');
 });
 
@@ -596,7 +596,7 @@ test('replace can address a HEAD entry, which is what makes the value editable a
   const { svc, created } = fixture({ versions,
     report: { version: 4, findings: DRAFT_LINE2, conclusion: '', recommendation: '' } });
   await svc.putReport(UID, { ...draftBody({ findings: DRAFT_LINE2 }),
-    structure: draftApply({ op: 'replace', replacesSid: 's-head', value: 'prior', renderedText: DRAFT_LINE2 }) }, CALLER, null, B2_REQUEST_FACTS);
+    structure: draftApply({ op: 'replace', replacesSid: 's-head', value: 'prior', renderedText: DRAFT_LINE2 }) }, CALLER, null);
   const written = created.find(c => c.call === 'draft').create.structured;
   assert.equal(written.length, 1, 'the head row is immutable: only the new draft entry is written');
   assert.equal(written[0].value, 'prior');
@@ -608,7 +608,7 @@ test('replace is refused while the old sentence is still in the body', async () 
   const { svc, writes } = fixture({ versions });
   const answer = await refusal(svc.putReport(UID, { ...draftBody({ findings: DRAFT_LINE + '\n' + DRAFT_LINE2 }),
     structure: draftApply({ op: 'replace', replacesSid: 's-head', value: 'prior', renderedText: DRAFT_LINE2 }) },
-    CALLER, null, B2_REQUEST_FACTS), 409);
+    CALLER, null), 409);
   assert.equal(answer.code, 'REPORT_STRUCTURE_REPLACE');
   assert.deepEqual(writes, []);
 });
@@ -617,12 +617,12 @@ test('replace refuses a sid that is neither mine nor the head, and a different i
   const versions = new Map([[4, { structured: [draftStored({ sid: 's-head' })] }]]);
   const { svc } = fixture({ versions, report: { version: 4, findings: DRAFT_LINE2, conclusion: '', recommendation: '' } });
   const gone = await refusal(svc.putReport(UID, { ...draftBody({ findings: DRAFT_LINE2 }),
-    structure: draftApply({ op: 'replace', replacesSid: 'ghost', value: 'prior', renderedText: DRAFT_LINE2 }) }, CALLER, null, B2_REQUEST_FACTS), 409);
+    structure: draftApply({ op: 'replace', replacesSid: 'ghost', value: 'prior', renderedText: DRAFT_LINE2 }) }, CALLER, null), 409);
   assert.equal(gone.code, 'REPORT_STRUCTURE_REPLACE');
   const other = await refusal(svc.putReport(UID, { ...draftBody({ findings: TEXT_LINE }),
     structure: { op: 'replace', replacesSid: 's-head', field: 'findings', templateId: 'GEN-1',
       templateRevision: 1, itemCode: 'TECHNIQUE', valueType: 'text', value: '12', renderedText: TEXT_LINE } },
-    CALLER, null, B2_REQUEST_FACTS), 409);
+    CALLER, null), 409);
   assert.equal(other.code, 'REPORT_STRUCTURE_REPLACE');
   assert.match(String(other.message), /같은 서식의 같은 항목/);
 });
@@ -631,13 +631,13 @@ test('replace refuses a sid that is neither mine nor the head, and a different i
 
 test('A1 an explicit empty keep list clears the column to SQL NULL', async () => {
   const { svc, created } = fixture({ draft: { structured: [draftStored({ sid: 's-mine' })] } });
-  await svc.putReport(UID, { ...draftBody(), structureIds: [] }, CALLER, null, B2_REQUEST_FACTS);
+  await svc.putReport(UID, { ...draftBody(), structureIds: [] }, CALLER, null);
   const write = created.find(c => c.call === 'draft');
   assert.equal(write.update.structured, Prisma.DbNull, 'the write must say NULL out loud');
   assert.notEqual(write.update.structured, null, 'a JS null would be the Prisma JSON-null trap');
   // A first write with nothing to keep stores no empty array either: the column is not named at all.
   const first = fixture();
-  await first.svc.putReport(UID, { ...draftBody(), structureIds: [] }, CALLER, null, B2_REQUEST_FACTS);
+  await first.svc.putReport(UID, { ...draftBody(), structureIds: [] }, CALLER, null);
   assert.equal('structured' in first.created.find(c => c.call === 'draft').create, false, 'a new row has nothing to clear, so it omits');
 });
 
@@ -645,16 +645,16 @@ test('A1 a keep list that is not sent is refused, never read as "leave it alone"
   // S7-U5: omission used to mean "unchanged", so a write that did not know the list kept or dropped what it never saw.
   // The draft PUT is the whole snapshot now: without the list nothing is written; with the full list all is kept.
   const absent = fixture({ draft: { structured: [draftStored({ sid: 's-mine' })] } });
-  const answer = await refusal(absent.svc.putReport(UID, { ...draftBody(), structureIds: undefined }, CALLER, null, B2_REQUEST_FACTS), 400);
+  const answer = await refusal(absent.svc.putReport(UID, { ...draftBody(), structureIds: undefined }, CALLER, null), 400);
   assert.deepEqual([answer.code, answer.field], ['REPORT_DRAFT_PRECONDITION_REQUIRED', 'structureIds']);
   assert.deepEqual(absent.writes, []);
   const kept = fixture({ draft: { structured: [draftStored({ sid: 's-mine' })] } });
-  await kept.svc.putReport(UID, { ...draftBody(), structureIds: ['s-mine'] }, CALLER, null, B2_REQUEST_FACTS);
+  await kept.svc.putReport(UID, { ...draftBody(), structureIds: ['s-mine'] }, CALLER, null);
   assert.deepEqual(kept.created.find(c => c.call === 'draft').update.structured.map(e => e.sid), ['s-mine']);
 });
 test('A1 a keep list that keeps something still writes the array', async () => {
   const { svc, created } = fixture({ draft: { structured: [draftStored({ sid: 'a' }), draftStored({ sid: 'b' })] } });
-  await svc.putReport(UID, { ...draftBody(), structureIds: ['a'] }, CALLER, null, B2_REQUEST_FACTS);
+  await svc.putReport(UID, { ...draftBody(), structureIds: ['a'] }, CALLER, null);
   const write = created.find(c => c.call === 'draft');
   assert.deepEqual(write.update.structured.map(e => e.sid), ['a']);
   assert.deepEqual(write.create.structured.map(e => e.sid), ['a']);
@@ -663,14 +663,14 @@ test('A1 a keep list that keeps something still writes the array', async () => {
 test('a structureIds-only request gets no structured key in the answer', async () => {
   // P9: the key exists only when the request carried `structure`.
   const { svc } = fixture({ draft: { structured: [draftStored({ sid: 'a' })] } });
-  const answer = await svc.putReport(UID, { ...draftBody(), structureIds: ['a'] }, CALLER, null, B2_REQUEST_FACTS);
+  const answer = await svc.putReport(UID, { ...draftBody(), structureIds: ['a'] }, CALLER, null);
   assert.equal('applied' in answer, false);
   assert.deepEqual(answer.snapshot.structured, ['a'], 'the snapshot names what the draft keeps');
 });
 
 test('the draft audit carries counts and sids only', async () => {
   const { svc, audits } = fixture();
-  await svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null, B2_REQUEST_FACTS);
+  await svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null);
   const entry = audits.find(a => a.action === 'report.draft');
   /**
    * `AuditLog.detail` is `String?` (schema.prisma) and the service writes it through
@@ -786,7 +786,7 @@ test('B3 a superseded head entry is not live, so the same item can be changed ag
   await svc.putReport(UID, { ...draftBody({ findings: TEXT_18 }), structureIds: ['s2'],
     structure: { op: 'replace', replacesSid: 's2', field: 'findings', templateId: 'GEN-1',
       templateRevision: 1, itemCode: 'TECHNIQUE', valueType: 'text', value: '18',
-      renderedText: TEXT_18 } }, CALLER, null, B2_REQUEST_FACTS);
+      renderedText: TEXT_18 } }, CALLER, null);
   const written = created.find(c => c.call === 'draft').update.structured;
   assert.equal(written.length, 1, 's2 is gone and exactly the new entry remains');
   assert.equal(written[0].value, '18');
@@ -798,14 +798,14 @@ test('B3 a head entry whose sentence IS in the body still blocks a second apply'
   const versions = new Map([[4, { structured: [draftStored({ sid: 's1', renderedText: DRAFT_LINE })] }]]);
   const { svc, writes } = fixture({ versions });
   const answer = await refusal(svc.putReport(UID, { ...draftBody({ findings: DRAFT_LINE }), structure: draftApply() },
-    CALLER, null, B2_REQUEST_FACTS), 409);
+    CALLER, null), 409);
   assert.equal(answer.code, 'REPORT_STRUCTURE_EXISTS');
   assert.deepEqual(writes, []);
 });
 
 test('our CHECK name becomes a named 409 on the draft path and on commit', async () => {
   for (const [name, run] of [
-    ['ReportDraft_structured_check', ({ svc }) => svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null, B2_REQUEST_FACTS)],
+    ['ReportDraft_structured_check', ({ svc }) => svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null)],
     ['ReportVersion_structured_check', ({ svc }) => svc.commitReport(UID,
       { action: 'save', baseVersion: 4, findings: DRAFT_LINE, conclusion: '', recommendation: '' }, CALLER)],
   ]) {
@@ -815,7 +815,7 @@ test('our CHECK name becomes a named 409 on the draft path and on commit', async
   }
   // A database error that is not ours is not disguised as a limit.
   const other = fixture({ failWith: Object.assign(new Error('connection reset'), { code: 'P1001' }) });
-  const e = await other.svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null, B2_REQUEST_FACTS).then(() => null, x => x);
+  const e = await other.svc.putReport(UID, { ...draftBody(), structure: draftApply() }, CALLER, null).then(() => null, x => x);
   assert.equal(e.code, 'P1001');
 });
 
@@ -824,7 +824,7 @@ test('too many entries are refused before the database is asked', async () => {
   const { svc } = fixture({ draft: { structured: many } });
   const answer = await refusal(svc.putReport(UID, { ...draftBody({ findings: TEXT_LINE }),
     structure: draftApply({ itemCode: 'TECHNIQUE', valueType: 'text', value: '12', renderedText: TEXT_LINE }) },
-    CALLER, null, B2_REQUEST_FACTS), 409);
+    CALLER, null), 409);
   assert.equal(answer.code, 'REPORT_STRUCTURE_LIMIT');
 });
 

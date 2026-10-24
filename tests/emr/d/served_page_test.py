@@ -167,10 +167,19 @@ class ServedClinicalPages(unittest.TestCase):
         old = self.site.account
         self.site.account = {**old, 'sub': h.RAD_OTHER['sub'], 'actor': h.RAD_OTHER['actor'], 'displayName': 'SYN switched doctor'}
         if name == 'main':
-            self.page.get_by_role('group', name='Refresh').get_by_role('button', name='Refresh', exact=True).click()
+            self.page.get_by_role('group', name='Refresh').get_by_role('button', name='Refresh', exact=True).click(no_wait_after=True)
         else:
-            self.page.locator('#refresh').click()
-        self.page.wait_for_function("KinWorkContext.state() !== 'active'")
+            self.page.locator('#refresh').click(no_wait_after=True)
+        # Replacement closes the old document and automatically enters the new
+        # account. Waiting for a transient non-active state races that navigation
+        # on Linux Chromium. Observe the new session, then revisit the same UID.
+        self.page.wait_for_function("session => typeof KinWorkContext !== 'undefined' && "
+                                    "KinWorkContext.state() === 'active' && KinWorkContext.session() === session",
+                                    arg=self.site.cookie)
+        self.select(name, h.UID_B)
+        self.open_questions(name)
+        expect(self.page.locator('#question-thread')).to_contain_text('CURRENT-' + h.UID_B)
+        expect(self.page.locator('#question-thread')).to_contain_text('2030')
         route, body = self.site.threads.pop()
         route.fulfill(json=body)
         self.page.wait_for_timeout(100)

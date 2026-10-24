@@ -18,7 +18,7 @@ async function clinicalFixture(db, records, issuer, members) {
   };
   for (const member of members) {
     const id = await db.$transaction(tx => resolveId(tx, member.sub));
-    const doctor = { identity: { id, issuer, subject: member.sub }, identityRegistrationId: 'fixture:' + member.sub,
+    const doctor = { identity: { id, issuer, subject: member.sub }, identityRegistrationId: 'member:' + id,
       institutionId: member.institution, canSign: member.roles.some(r => ['radiologist', 'clinician', 'technician'].includes(r)) };
     registrations.set(id, doctor);
     if (doctor.canSign) {
@@ -30,7 +30,7 @@ async function clinicalFixture(db, records, issuer, members) {
   }
   const identity = {
     async resolve(tx, request) {
-      const member = await tx.memberRights.findUnique({ where: { sub: request.sub } });
+      const member = await tx.memberRights.findUnique({ where: { sub: request.sub ?? request.facts.subject } });
       if (!member || !member.approved || member.suspended) throw new Error('SyntheticAccountInactive');
       const id = await resolveId(tx, member.sub), doctor = registrations.get(id);
       return { online: true, capacity: doctor.canSign ? 'clinical' : 'operator',
@@ -56,12 +56,12 @@ async function clinicalFixture(db, records, issuer, members) {
       },
       async study(tx, request, uid) {
         const state = await tx.studyState.findUnique({ where: { uid } });
-        if (!state || ![state.institutionId, state.teleInstitutionId].includes(request.institution)) product('emr-contract/validation').refuse('NotFound');
+        if (!state || ![state.institutionId, state.teleInstitutionId].includes(request.institution ?? request.facts.institution)) product('emr-contract/validation').refuse('NotFound');
         return { studyId: uid, managingInstitutionId: state.institutionId, teleInstitutionId: state.teleInstitutionId,
           patient: { linkId: 'fixture:' + uid, patientId: 'synthetic:' + uid, assigningAuthority: state.institutionId } };
       },
     }, async project() { throw new Error('Real route projector required'); },
   });
-  return { services, providers: onlineClinicalProviders(services), keys };
+  return { services, providers: onlineClinicalProviders(services), keys, wrappingSecret: Buffer.from(wrap) };
 }
 module.exports = { clinicalFixture };

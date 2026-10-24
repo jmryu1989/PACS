@@ -810,6 +810,7 @@ class Compiler:
                 self.answers[key].setdefault(API / name, {}).update(
                     relative_loads=dict(contract["relative_loads"]),
                     import_types=dict(contract["import_types"]),
+                    method_calls=set(contract["method_calls"]),
                     prototype_comparisons=set(contract["prototype_comparisons"]),
                     constructors_without_return=set(contract["constructors_without_return"]))
         return self.answers[key]
@@ -1212,7 +1213,7 @@ def module_loads(path, source, code, bindings=None):
         end = call_end(code, paren) if called else paren
         text = word + ("(" + " ".join(source[paren + 1:end - 1].split()) + ")" if called else "")
         if is_property(code, at):
-            if not (word == "require" and called and this_field(code, at)):
+            if not (word == "require" and called and (this_field(code, at) or at in bindings.get("method_calls", set()))):
                 base = owner(code, at)
                 found.append((line_of(code, at), f"{base[0] if base else '<expression>'}.{text}: a member {word} other "
                                                  f"than this.require(...) or this.<field>.require(...)"))

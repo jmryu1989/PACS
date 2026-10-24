@@ -711,6 +711,15 @@ class LiveStack:
             raise RuntimeError(f"로컬 시험 사용자 비밀번호 설정 실패({logical}): {reset.status}")
         if group and roles:
             self.set_member_rights(user_id, institution=group, roles=roles, enabled=True, verificationOverride=True)
+            if os.environ.get('KIN_D_SYNTHETIC_SIGNING') == '1':
+                if os.environ.get('KIN_SYNTHETIC_REALM') != '1':
+                    raise RuntimeError('Synthetic signing requires the isolated synthetic realm')
+                script = (ROOT / 'tests/emr/d/provision_synthetic.cjs').read_text(encoding='utf-8')
+                provision = subprocess.run(['docker', 'compose', 'exec', '-T', 'api', 'node', '-', user_id],
+                                           cwd=ROOT, input=script, capture_output=True, text=True,
+                                           encoding='utf-8', errors='replace', timeout=PSQL_TIMEOUT_SECONDS)
+                if provision.returncode:
+                    raise RuntimeError('Synthetic signing key setup failed: ' + provision.stdout + provision.stderr)
         purge_user_audit(user_id)  # Scenarios measure their own commands after the owned fixture setup.
         return user_id
 

@@ -36,32 +36,42 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
   const db = new PrismaClient({ datasources: { db: { url: process.env.KIN_D_WITNESS_URL } } });
   const runtime = new (product('emr-runtime/application').EmrRuntime)(process.env.DATABASE_URL, process.env.KIN_D_SPOOL);
   let app, ready = false;
+  const fs = require('node:fs');
+  const custody = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'd-startup-'));
   try {
     await db.memberRightsImport.create({ data: { id: 'realm-v1' } });
     for (const data of Object.values(members)) await db.memberRights.create({ data });
     await runtime.start(); ready = true;
     const clinical = await require('./clinical_fixture.cjs').clinicalFixture(db, runtime.port, issuer, Object.values(members));
-    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [] };
+    const secretFile = path.join(custody, 'wrapping.key');
+    fs.writeFileSync(secretFile, clinical.wrappingSecret);
+    process.env.KIN_EMR_WRAPPING_KEY_ID = 'fixture-wrap';
+    process.env.KIN_EMR_WRAPPING_KEY_FILES = JSON.stringify({ 'fixture-wrap': secretFile });
+    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [],
+      connectStudyIdentity: async uid => ({ patientId: 'synthetic:' + uid }) };
     const users = Object.values(members).map(m => ({ id: m.sub, username: m.username, email: m.email, firstName: m.name,
       enabled: true, groups: [m.institution], roles: m.roles }));
     const keycloak = { getUser: async sub => users.find(u => u.id === sub),
       assignmentReaders: async institution => users.filter(u => u.groups.includes(institution)), isReader: async () => true };
     const { PrismaService } = product('prisma.service'), { StudyAccessService } = product('study-access.service');
-    const services = ['pacs', 'clinician-question', 'image-request', 'consultation', 'reader-assignment'];
+    const services = ['pacs', 'clinician-question', 'image-request', 'consultation', 'reader-assignment', 'finding'];
     const className = name => name.split('-').map(x => x[0].toUpperCase() + x.slice(1)).join('');
     class HttpFixture {}
+    const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = product('emr-runtime/request-context');
+    const { createRequestIngress } = product('emr-runtime/request-ingress');
+    const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
     Module({ controllers: services.map(n => product(n + '.controller')[className(n) + 'Controller']),
       providers: [PrismaService, ...services.map(n => product(n + '.service')[className(n) + 'Service']),
-        product('auth.service').AuthService, ...clinical.providers,
+        product('auth.service').AuthService, ...product('emr-clinical/startup').startupClinicalProviders,
+        { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
         { provide: product('orthanc.service').OrthancService, useValue: orthanc },
         { provide: product('keycloak.service').KeycloakService, useValue: keycloak },
-        { provide: product('finding.service').FindingService, useValue: {} },
         { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, orthanc, keycloak), inject: [PrismaService] },
         { provide: product('emr-runtime/record-port').EMR_RECORD_PORT, useValue: runtime.port },
         { provide: product('emr-runtime/background-work').EMR_BACKGROUND_WORK, useValue: runtime.background.work },
         { provide: APP_GUARD, useClass: product('auth.guard').AuthGuard },
         { provide: product('study-transfer-local.service').StudyTransferLocalService, useValue: {} }] })(HttpFixture);
-    app = await NestFactory.create(HttpFixture, { logger: ['error'] });
+    app = await NestFactory.create(HttpFixture, { logger: ['error'], rawBody: true });
     app.setGlobalPrefix('api'); await app.listen(0, '127.0.0.1');
     const origin = await app.getUrl();
     const send = async (name, method, route, body, expected = method === 'GET' || method === 'PATCH' ? 200 : 201) => {
@@ -76,6 +86,12 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const uid = '1.2.840.9999.24', teleUid = '1.2.840.9999.25';
     await db.studyState.create({ data: { uid, institutionId: hospital, ss: 'Verified' } });
     await db.studyState.create({ data: { uid: teleUid, institutionId: hospital, teleInstitutionId: receiver, ts: 'wait', ss: 'Verified' } });
+    const finding = await send('doctor', 'POST', `/studies/${uid}/findings`, {
+      requestId: randomUUID(), item: { schemaVersion: 1, title: '합성 소견', text: '원본 연결 대기',
+        sources: [{ itemId: randomUUID(), revision: 1 }] },
+    }, 503);
+    assert.equal(finding.code, 'ModuleAFixedVersionReaderPending');
+    assert.equal(await db.finding.count(), 0);
     const question = { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
     const created = await send('clinician', 'POST', `/studies/${uid}/questions`, question);
     const signature = created.emr.signature;
@@ -155,5 +171,6 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);
     await db.$disconnect(); await new Promise(resolve => idp.close(resolve));
+    fs.rmSync(custody, { recursive: true });
   }
 });

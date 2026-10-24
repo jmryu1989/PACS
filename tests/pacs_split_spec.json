@@ -8637,9 +8637,21 @@
   "di_additions_d_online": {
     "unit": "EMR-D online routes",
     "controllers": [],
-    "providers": [],
+    "providers": [
+      "ModuleAClinicalSourcesPending",
+      "Symbol(OnlineClinicalServices)=factory",
+      "Symbol(EMR_CLINICAL_ROUTES)=factory",
+      "Symbol(EMR_NATIVE_REPORT_SIGNING)=factory"
+    ],
     "routes": [],
-    "injectables": {},
+    "injectables": {
+      "ModuleAClinicalSourcesPending": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
     "changed_injectables": {
       "PacsService": {
         "before": {
@@ -8793,6 +8805,107 @@
           "optional": [
             1
           ]
+        }
+      },
+      "AuthGuard": {
+        "before": {
+          "params": [
+            "Reflector",
+            "AuthService",
+            "StudyTransferLocalService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "Reflector",
+            "AuthService",
+            "StudyTransferLocalService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(RequestContextCapture)"
+          ],
+          "optional": []
+        }
+      },
+      "AdminService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "4:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        }
+      },
+      "AdminController": {
+        "before": {
+          "params": [
+            "AdminService",
+            "PacsService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "AdminService",
+            "PacsService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "PacsController": {
+        "before": {
+          "params": [
+            "PacsService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PacsService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
         }
       }
     }
