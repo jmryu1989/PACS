@@ -1,8 +1,8 @@
 {
-  "unit": "EMR-C1",
-  "round": "C1",
-  "base_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
-  "order": "astra-control/evidence/emr-c-prep-20261009/emr-c-order.md (D714; prepared on 2fc7358, rebound on 04e50ab)",
+  "unit": "EMR-C",
+  "round": "C2-core",
+  "base_sha": "c07c3cfbc589d73249af26fa9351b2dcf2620cb4",
+  "order": "astra-control/evidence/emr-c-prep-20261009/emr-c-order.md (D714; prepared on 2fc7358, rebound on 04e50ab); C2 core D1809, landing fix D1812 (production integration deferred)",
   "dependencies": {
     "reads_a_contract": [
       "api/src/emr-contract/access-event.ts",
@@ -20,9 +20,10 @@
       "B2": "verified identity/authority snapshot (VerifiedActor), re-authentication and AUTH_SESSION_ENDED signal, offline v2 access-event branch",
       "C-NATIVE": "native signer, protected durable queue, time anchors and key custody (native-port.ts protocol kin-native/1)",
       "E": "offline manifest supply and local image serving (OfflineManifest parts)",
-      "H": "expiry/purpose-end destruction of recovery copies and caches"
+      "H": "expiry/purpose-end destruction of recovery copies and caches",
+      "C2": "Mandatory LedgerPort and RequestIdentityPort; production B2 adapter and request/report composition deferred"
     },
-    "not_wired": "no route, DI registration, page script registration, database write or OS key use in C1"
+    "not_wired": "C1 legacy modules and C2 online signing core are not registered with live routes, pages or DI. C2 schema and PostgreSQL integration tests are deferred to the B2-to-C2 integration unit."
   },
   "owned_paths": [
     "api/src/emr-report/contract.ts",
@@ -43,7 +44,17 @@
     "tests/emr/c/offline_queue_test.cjs",
     "tests/emr/c/offline_report_dom_test.py",
     "tests/emr/c/mutants.py",
-    "emr/units/c.json"
+    "emr/units/c.json",
+    "api/src/emr-report/current-study.ts",
+    "api/src/emr-report/online-approval.ts",
+    "api/src/emr-report/online-store.ts",
+    "api/src/emr-signature/server-contract.ts",
+    "api/src/emr-signature/server-crypto.ts",
+    "api/src/emr-signature/server-keys.ts",
+    "api/src/emr-signature/server-signing.module.ts",
+    "api/src/emr-signature/server-signing.ts",
+    "api/src/emr-signature/server-verification.ts",
+    "tests/emr/c/server_crypto_test.cjs"
   ],
   "forbidden_single_writer": [
     "worklist-v0/hpacs-lite/main.html",
@@ -650,13 +661,28 @@
       "test_d04_end_reauth_and_other_account",
       "test_d05_conflict_keeps_both_versions",
       "test_d06_read_and_print_observations"
+    ],
+    "server_crypto": [
+      "T-BIND exact v1 Korean, newline, Unicode and hidden Recommendation bytes verify independently",
+      "T-BIND an accidentally paired content or context is refused for every signed binding",
+      "T-BIND wrong key material, kid or signature pairing cannot verify",
+      "T-BIND predecessor and attachment order are fixed in revisions without changing the original",
+      "T-BIND existing v1 envelope from independent Node signing stays readable with its original time",
+      "T-TIME crypto records its own current signing instant and refuses a supplied timestamp",
+      "T-BIND invalid v1 source text, missing recommendation and invalid revision cannot produce an envelope",
+      "T-BIND clinical text and immutable attachment references preserve the supplied canonical content",
+      "T-KEY distinct generated doctor keys round-trip through encrypted PKCS8 and serialized custody rows",
+      "T-KEY absent or mismatched wrapping custody cannot restore a signing key",
+      "T-KEY historical envelope verification requires only retained public bytes after private material is released",
+      "T-KEY unsupported curve and public-only keys cannot be used for server signing or wrapping"
     ]
   },
   "expected": {
     "contract": 14,
     "queue": 8,
     "dom": 6,
-    "total": 28
+    "total": 40,
+    "server_crypto": 12
   },
   "mutants": [
     {
