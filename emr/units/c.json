@@ -43,8 +43,7 @@
     "tests/emr/c/offline_queue_test.cjs",
     "tests/emr/c/offline_report_dom_test.py",
     "tests/emr/c/mutants.py",
-    "emr/units/c.json",
-    ".github/workflows/emr-c.yml"
+    "emr/units/c.json"
   ],
   "forbidden_single_writer": [
     "worklist-v0/hpacs-lite/main.html",

@@ -11,11 +11,10 @@ import shlex
 # This is the existing validation contract's job set, not a file allowlist.
 # Looking each id up separately also rejects disappeared or duplicated jobs.
 VALIDATION_JOBS = (
-    'measurements', 'volume-rendering', 'volume-mpr', 'volume-slab', 'volume-path',
-    'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi',
-    'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient',
-    's7-u5-session-contracts', 'context-loss', 'hanging-protocols', 'cell-merge',
-    'study-arrivals', 'u2b-regressions', 'runtime', 'asr-engine', 'dictation-capture',
+    'measurements', 'volume-rendering', 'volume-mpr', 'volume-batch',
+    'volume-marks', 'volume-mip-voi', 's7-u5-session-contracts',
+    'hanging-protocols', 'worklist-ux-measurements', 'runtime', 'asr-engine',
+    'patient-identity-measurements',
 )
 
 
