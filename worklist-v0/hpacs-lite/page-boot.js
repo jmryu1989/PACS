@@ -331,7 +331,7 @@
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
-        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')$('#findings').focus();})});
+        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')focusReportEditor();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
         current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},

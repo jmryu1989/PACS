@@ -2235,6 +2235,73 @@ class RelatedModePage(unittest.TestCase):
         finally:
             retained.dispose()
 
+    # W5B-REVIEW-01: the received Critical Results list opened in the report column must not squeeze the mode. Each part a
+    # reader needs (title, Source text, Insert, Back) is brought into view by scrolling the page's own scroll containers
+    # and is then wholly visible; the mode itself is not shrunk below its content.
+    MODE_PARTS = ("#related-mode-title", '#related-mode [data-related-source="findings"]', "#related-mode-insert", "#related-mode-back")
+    SEEN = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect();
+      let top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
+      for (let p = e.parentElement; p; p = p.parentElement) {
+        if (!/auto|scroll|hidden|clip/.test(getComputedStyle(p).overflowY)) continue;
+        const b = p.getBoundingClientRect(); top = Math.max(top, b.top); bottom = Math.min(bottom, b.bottom); }
+      return [Math.round(r.height), Math.max(0, Math.round(bottom - top))]; }"""
+
+    def mode_usable_with_the_inbox_open(self, reading):
+        self.b05_cvr_page()
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+        self.enter()
+        self.page.locator("#cvr-inbox-toggle").click()
+        expect(self.page.locator("#cvr-inbox-toggle")).to_have_text("Hide Received")
+        self.settle(200)
+        client, scroll = self.js("() => { const m = document.querySelector('#related-mode'); return [m.clientHeight, m.scrollHeight]; }")
+        self.assertLessEqual(scroll, client + 1, f"the mode is squeezed below its content ({client}px of {scroll}px)")
+        for selector in self.MODE_PARTS:
+            self.page.locator(selector).scroll_into_view_if_needed()
+            height, seen = self.js(self.SEEN, selector)
+            self.assertGreater(height, 0, selector)
+            self.assertGreaterEqual(seen, height - 1, f"{selector}: {seen}px of {height}px visible after scrolling into view")
+        # The list stays reachable in the same column.
+        self.page.locator("#cvr-inbox-toggle").scroll_into_view_if_needed()
+        expect(self.page.locator("#cvr-inbox-toggle")).to_be_in_viewport()
+
+    def test_w5b_mode_stays_usable_with_the_received_list_open_normal(self):
+        self.mode_usable_with_the_inbox_open(False)
+
+    def test_w5b_mode_stays_usable_with_the_received_list_open_reading(self):
+        self.mode_usable_with_the_inbox_open(True)
+
+    # W5B-REVIEW-02: the worklist's own ways to the report editor (Enter on the current row, its keyboard activation, the
+    # row menu's 판독문 작성으로) are Report Editor in the mode too: the mode closes and the editor returns with the
+    # Target, its text and its caret, as Ctrl+Alt+4 does.
+    def editor_entry_in_the_mode(self, act):
+        self.open()
+        self.open_target()
+        self.page.locator("#findings").fill("SYN A kept for the editor entry")
+        self.page.locator("#findings").evaluate("node => node.setSelectionRange(5, 9)")
+        self.autosave()
+        self.enter()
+        act()
+        expect(self.mode()).to_be_hidden()
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual((UID_A, "SYN A kept for the editor entry"), (self.js("selectedUid"), self.value()))
+        self.assertEqual([5, 9], self.js("[$('#findings').selectionStart, $('#findings').selectionEnd]"))
+
+    def test_w5b_row_menu_report_editor_leaves_the_mode(self):
+        def act():
+            self.page.locator(f'#rows tr[data-uid="{UID_A}"]').click(button="right")
+            self.page.locator("#ctx [data-i]", has_text="판독문 작성으로").click()
+        self.editor_entry_in_the_mode(act)
+
+    def test_w5b_enter_on_the_current_row_leaves_the_mode(self):
+        def act():
+            self.page.locator(f'#rows tr[data-uid="{UID_A}"]').click()
+            self.page.keyboard.press("Enter")
+        self.editor_entry_in_the_mode(act)
+
     def test_w5r3b05_received_normal(self):
         self.b05_received(False)
 

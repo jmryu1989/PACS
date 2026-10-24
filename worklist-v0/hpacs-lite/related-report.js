@@ -128,6 +128,16 @@
       return true;
     }
 
+    /**
+     * The worklist's ways to the report editor (Enter on the current row, its keyboard activation, the row menu's
+     * 판독문 작성으로). In Related Report mode the editor is hidden, so this is the mode's Back (Report Editor): the Target,
+     * its text and its caret come back. Otherwise the Findings field takes the focus as before.
+     */
+    function focusReportEditor() {
+      if (backToCurrentDraft()) return;
+      $("#findings").focus();
+    }
+
     function previewRelated(uid) {
       const current = cur();
       const target = studies.find(s => s.uid === uid);

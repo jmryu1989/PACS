@@ -194,6 +194,13 @@ MUTANTS = [
     ("empty-recommendation-heading-in-the-pane", "related-report.js",
      'value.closest(".prior-report-section").hidden = !value.textContent;', 'value.closest(".prior-report-section").hidden = false;',
      "test_w5b_recommendation_shows_only_with_text_and_a_whole_insert_carries_only_what_is_shown"),
+    # W5B-REVIEW-02: the worklist's editor entries focus the hidden editor instead of leaving the mode.
+    ("row-menu-focuses-the-hidden-editor", "context-menu.js",
+     '{ label: "판독문 작성으로", act: () => focusReportEditor() },', '{ label: "판독문 작성으로", act: () => $("#findings").focus() },',
+     "test_w5b_row_menu_report_editor_leaves_the_mode"),
+    ("current-row-enter-focuses-the-hidden-editor", "worklist-row-events.js",
+     "      e.preventDefault();\n      focusReportEditor();", '      e.preventDefault();\n      $("#findings").focus();',
+     "test_w5b_enter_on_the_current_row_leaves_the_mode"),
     # PAGE-10: a double click opens the comparison viewer again.
     ("double-click-opens-images", "related-controls.js", "    function openRelatedImages(uid) {",
      '    $("#relrows").addEventListener("dblclick", e => { const tr = e.target.closest("tr"); if (tr?.dataset.uid) openRelatedImages(tr.dataset.uid); });\n'

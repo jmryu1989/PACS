@@ -4267,6 +4267,16 @@
       return true;
     }
 
+    /**
+     * The worklist's ways to the report editor (Enter on the current row, its keyboard activation, the row menu's
+     * 판독문 작성으로). In Related Report mode the editor is hidden, so this is the mode's Back (Report Editor): the Target,
+     * its text and its caret come back. Otherwise the Findings field takes the focus as before.
+     */
+    function focusReportEditor() {
+      if (backToCurrentDraft()) return;
+      $("#findings").focus();
+    }
+
     function previewRelated(uid) {
       const current = cur();
       const target = studies.find(s => s.uid === uid);
@@ -11698,7 +11708,7 @@
       const tr = e.target.closest("tr[data-uid]");
       if (!tr || tr.dataset.uid !== selectedUid) return;
       e.preventDefault();
-      $("#findings").focus();
+      focusReportEditor();
     });
     $("#rows").addEventListener("dblclick", e => {
       if (e.target.closest('[data-tech-note]')) return;
@@ -11866,7 +11876,7 @@
         const mine = !s?.tele;
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
-          { label: "판독문 작성으로", act: () => $("#findings").focus() },
+          { label: "판독문 작성으로", act: () => focusReportEditor() },
           { sep: 1 },
           { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
@@ -12384,7 +12394,7 @@
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
-        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')$('#findings').focus();})});
+        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')focusReportEditor();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
         current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
