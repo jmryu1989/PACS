@@ -3033,6 +3033,6 @@ regressions. These are synthetic browser results, not first-site hardware accept
 `test_viewer_opening.py`, `test_viewer_windows.py` and `test_viewer_display_layout.py`
 retain opening guards and legacy multi-window consumers; their retained-window setup
 uses the actual registry/session handoff and OHIF, without replacing controllers.
-The worklist-ux CI registration runs only the pure boundary; served-page and physical
+The validate.yml worklist-ux-measurements registration runs only the pure boundary; served-page and physical
 results remain separate from final same-SHA G3/PR CI and Opus review. Recheck before a
 larger site, increased image/tab load or changed monitor/DPI/browser (VIEWER-FIRST-SITE-REVERIFY).
