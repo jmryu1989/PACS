@@ -78,13 +78,20 @@ def daily_role_catalog():
             "schemas": ["emr_access", "public"]}
 
 
+def expiry_receipt():
+    return {"ran": True, "complete": True, "checkedAt": "2026-10-23T00:00:00Z",
+            "deletedEntries": 0, "deletedFailures": 0, "retainedByDutyOrHold": 0,
+            "historyRetainedUnknownLifetime": 0}
+
+
 class DailyCluster:
     """The fresh networkless rehearsal cluster of a daily EMR set restored by the catalog replay (D23): bootstrap superuser
     kin; it applies the CREATE ROLE / GRANT statements sent on stdin, the EMR tablespace and pg_restore --create; its
     databases, tablespaces and schemas are then the snapshot's (or `restored`, a restore that came out differently)."""
 
-    def __init__(self, source, restored=None):
+    def __init__(self, source, restored=None, expiry=None):
         self.source, self.restored = source, restored
+        self.expiry = expiry if expiry is not None else expiry_receipt()
         self.roles = {"kin": next(role for role in source["roles"] if role["rolname"] == "kin")}
         self.memberships, self.tablespace, self.restored_databases, self.statements = [], False, set(), []
         self.verifiers = set()
@@ -107,6 +114,8 @@ class DailyCluster:
 
     def text(self, args, **kwargs):
         joined = " ".join(args)
+        if "emr_access.restore_expiry_sweep()" in joined:
+            return json.dumps(self.expiry)
         if ops.ROLE_CATALOG_SQL in args:
             return json.dumps(self.catalog())
         if "datname='keycloak'" in joined:
@@ -163,6 +172,7 @@ class Host:
         # D23: the cluster's role catalog the backup records, and (when set) what a rehearsal's restore comes out with.
         self.role_catalog = daily_role_catalog()
         self.restored_role_catalog = None
+        self.restored_expiry = expiry_receipt()
         self.cluster = None
         # Backups a minute apart within the monitor's 30-hour window: the monitor orders manifests by whole seconds.
         self.clock = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -241,7 +251,7 @@ class Host:
         cleanup = Mock()
         earlier = set(folder.glob("rehearsal-*.json"))
         recorded = json.loads((folder / "manifest.json").read_text(encoding="utf-8")).get("role_catalog")
-        self.cluster = DailyCluster(recorded or self.role_catalog, self.restored_role_catalog)
+        self.cluster = DailyCluster(recorded or self.role_catalog, self.restored_role_catalog, self.restored_expiry)
 
         def rehearsal_run(args, **kwargs):
             self.events.append(("command", list(args)))
@@ -440,6 +450,19 @@ class BackupSafetyTests(unittest.TestCase):
                 _, manifest = ops.validate_backup(directory)
             self.assertTrue(manifest["complete"])
             self.assertFalse(manifest["ready"])
+
+    def test_emr_resume_refusal_preserves_snapshot_without_claiming_ready(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            with patch.object(ops, 'resumed_ledger_ready', side_effect=RuntimeError('synthetic PG unavailable')):
+                folder, manifest, error = host.backup(rows_stream({1: 'fixture'}))
+            self.assertIsNotNone(error)
+            self.assertTrue(manifest['complete'])
+            self.assertFalse(manifest['ready'])
+            self.assertFalse(manifest['emr']['resumed_pg_ready'])
+            self.assertEqual(manifest['resume_failures'], [])
+            self.assertTrue((folder/'kin.dump').is_file())
 
     def test_14_readiness_failure_blocks_deploy_but_preserves_completed_backup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -844,6 +867,7 @@ class BackupSafetyTests(unittest.TestCase):
                     with fake.active(), patch.object(ops, "ROOT", host.repo), patch.object(ops, "require_local_docker"), \
                             patch.object(ops, "run", side_effect=rehearsal_run), \
                             patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                            patch.object(ops, "restored_emr_expiry", return_value=expiry_receipt()), \
                             patch.object(ops, "counts", return_value={"public.Report": 5}), \
                             patch.object(ops, "temporary_run", side_effect=host.fake_archive), \
                             patch.object(audit, "evaluate", side_effect=limited), \
@@ -912,9 +936,24 @@ class EmrRestoreVerification(unittest.TestCase):
         result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
         self.assertIsNone(error)
         self.assertTrue(result["success"])
-        self.assertEqual(result["emr"], {"owner_acl_preserved": True, "database_state_verified": True})
+        self.assertEqual(result["emr"], {"owner_acl_preserved": True, "database_state_verified": True,
+                                          "expiry_sweep": self.host.restored_expiry})
         self.assertTrue(result["audit"]["verified"])
         self.assertEqual(cleanup.call_count, 3)
+
+    def test_d1796_unknown_history_is_counted_without_blocking_restore(self):
+        self.host.restored_expiry = {**expiry_receipt(), "historyRetainedUnknownLifetime": 1}
+        before = self.host.files(self.folder)
+        result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
+        self.assertIsNone(error)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["emr"]["expiry_sweep"], self.host.restored_expiry)
+        self.assertEqual(self.host.files(self.folder), before)
+        self.assertEqual(cleanup.call_count, 3)
+
+    def test_d1796_sweep_must_run_before_restored_business_readiness(self):
+        self.host.restored_expiry = {**expiry_receipt(), "ran": False}
+        self.assert_restore_refused()
 
     def test_tampered_and_partial_components_refuse_before_restore(self):
         for name in ("kin.dump", *ops.EMR_FILES):

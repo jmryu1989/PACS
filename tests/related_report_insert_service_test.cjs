@@ -278,7 +278,9 @@ function world({ source = SOURCE_LOW } = {}) {
   };
   const trap = name => new Proxy({}, { get(_t, key) { return () => { throw new Error(`harness: ${name}.${String(key)} must not be reached`); }; } });
   const w = { store, sa, source, epoch: randomUUID() };
-  w.build = () => { w.svc = new PacsService(store.client, trap('orthanc'), trap('keycloak'), sa, trap('findings'));
+  const ledger = { begin: () => ({ end() {}, resolveRequestIdentity: async () => 'synthetic-member-id',
+    transactionWithRecords: (work, options) => store.client.$transaction(tx => work(tx, async (_event, effect) => effect()), options) }) };
+  w.build = () => { w.svc = new PacsService(store.client, trap('orthanc'), trap('keycloak'), sa, trap('findings'), ledger);
     w.controller = new PacsController(w.svc, trap('auth')); };
   w.build();
   const now = new Date('2026-10-17T00:00:00.000Z');

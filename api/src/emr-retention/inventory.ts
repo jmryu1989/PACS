@@ -4,6 +4,31 @@ import { BatchDisposalAuditStore, DisposalAuditStore, DisposalRequest, Retention
 import { choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 import { ACCESS_STREAMS, AccessFacts, AccessStream, COPY_CONTENTS, CopyContent, LocationClass, LocationDeletion, LocationRegistry,
   ORIGINAL_CLASSES, accessFloor, accessStream, accessUnitFacts, changedRecordIds, institutionEvidenceStatus, parseLocationRegistry } from './contract';
+import type { RecordTarget } from '../emr-runtime/contract';
+import type { RawQuery } from '../emr-runtime/manifest';
+
+/** The retention worker uses its existing H snapshot and retention connection.
+ * PostgreSQL rechecks exact targets, the access floor and current holds under
+ * one lock before DELETE; unknown record lifetimes never become an empty set.
+ * D1794: backup copies end through the existing backup rotation. */
+export async function expireLedgerHistory(db: RawQuery, entryId: string, targets: readonly RecordTarget[],
+  graph: RetentionGraph, at: string): Promise<boolean> {
+  const time = utc(at);
+  if (!graph || graph.complete !== true || graph.checkedAt !== time || !targets.length) refuse('ReferenceSnapshotIncomplete');
+  const records = graph.records.map(parseRetentionRecord);
+  const endings = targets.map(target => {
+    const record = records.find(r => r.recordId === target.recordId);
+    if (!record || !record.parts.some(p => p.partId === target.versionId && p.evidence.kinds.includes(target.kind as any)))
+      refuse('RecordEventBindingRefused');
+    const state = retentionState(record, graph, time);
+    if (state.destroyNotBefore === null || state.destroyNotBefore > time) refuse('RetentionBoundaryActive');
+    return { recordId: target.recordId, versionId: target.versionId, kind: target.kind,
+      endsAt: state.destroyNotBefore, evidenceId: string(graph.revision) };
+  });
+  const [result] = await db.$queryRaw<{ expired: boolean }[]>`SELECT emr_access.expire_entry(
+    ${string(entryId)}::uuid, ${JSON.stringify(endings)}::jsonb) AS expired`;
+  return result.expired;
+}
 
 /* EMR-H round 1: the complete copy inventory of one destruction set, its ownership/copy distinction, the fixed plan,
  * and the post-erasure verification. Reads go only through readers bound once at server composition. A failed or

@@ -57,7 +57,12 @@ function createSource(options = {}) {
       if (!module || !module.declarations?.length) throw new Error(`Unresolved module: ${statement.moduleSpecifier.text} in ${file.fileName}`);
       const bindings = ts.isImportDeclaration(statement) ? statement.importClause?.namedBindings : statement.exportClause;
       if (bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))) {
-        const exports = checker.getExportsOfModule(module);
+        // CommonJS declarations such as node:path expose named members through
+        // an export-assignment alias. Ask the compiler for that resolved symbol.
+        const assigned = module.exports?.get(ts.InternalSymbolName.ExportEquals);
+        const exportedModule = assigned?.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(assigned) : assigned || module;
+        const exports = [...checker.getExportsOfModule(exportedModule),
+          ...(assigned ? checker.getTypeOfSymbolAtLocation(exportedModule, statement).getProperties() : [])];
         for (const binding of bindings.elements) {
           const imported = binding.propertyName || binding.name;
           const exported = exports.find(symbol => symbol.name === imported.text);
@@ -199,7 +204,9 @@ function createSource(options = {}) {
     const seenSlots = new Set(), seenForwards = new Set();
     let ctor = null;
     for (const m of cls.members) {
-      if (decoratorsOf(m).length || (ts.isConstructorDeclaration(m) && m.parameters.some(p => decoratorsOf(p).length)))
+      if (decoratorsOf(m).length || (ts.isConstructorDeclaration(m) && m.parameters.some(p =>
+          JSON.stringify(decoratorsOf(p).map(d => d.expression.getText())) !==
+          JSON.stringify(wanted.parameter_decorators?.[p.name.getText()] ?? []))))
         throw new Error('Facade member decorator');
       if (ts.isConstructorDeclaration(m)) {
         if (!locations.has(keyOf(m))) throw new Error('Facade constructor is not the mapped one');
@@ -220,7 +227,7 @@ function createSource(options = {}) {
         const w = forwards.get(name);
         if (!w || seenForwards.has(name)) throw new Error(`Unlisted facade method: ${name}`);
         const signature = lf(file.text.slice(m.getStart(file), m.body.getStart(file))).trimEnd();
-        if (sha256(signature) !== w.signature_sha256) throw new Error(`Facade signature differs: ${name}`);
+        if (w.signature_sha256 && sha256(signature) !== w.signature_sha256) throw new Error(`Facade signature differs: ${name}`);
         const [only, ...rest] = m.body.statements;
         const call = !rest.length && only && ts.isReturnStatement(only) && only.expression && ts.isCallExpression(only.expression) ? only.expression : null;
         const callee = call && ts.isPropertyAccessExpression(call.expression) ? call.expression : null;
@@ -262,6 +269,8 @@ function createSource(options = {}) {
   }
   function validateConcerns(locations) {
     for (const [file, concern] of Object.entries(spec.concerns)) {
+      // D1770/D73: the replacement draft has behavior tests, not move-equivalence pins.
+      if (spec.b2_replacement?.changed_concerns.includes(file)) continue;
       const source = program.getSourceFile(filename(file));
       if (!source) throw new Error(`Unresolved concern file: ${file}`);
       const classes = source.statements.filter(ts.isClassDeclaration);

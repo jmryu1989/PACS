@@ -922,7 +922,7 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
     require(verify["b1_manifest_sha256"] == receipt["rehearsal_b1_manifest_sha256"] and verify["b1_restore_check"] is True,
             "Receipt B1 evidence differs")
     probe = _keys(verify["probe"], ("added", "replay_duplicates", "restart", "evidence_sha256"), "receipt probe evidence")
-    require(probe["added"] == 1 and probe["replay_duplicates"] == 0 and probe["restart"] == "same chain and seal"
+    require(probe["added"] == 1 and probe["replay_duplicates"] == 0 and probe["restart"] == "same PostgreSQL outcome and entry"
             and type(probe["evidence_sha256"]) is str and HASH.fullmatch(probe["evidence_sha256"]), "Receipt probe evidence differs")
     rollback = _keys(evidence["rollback"], ("bfail_manifest_sha256", "recovery"), "receipt rollback evidence")
     require(rollback["bfail_manifest_sha256"] == receipt["bfail_manifest_sha256"], "Receipt Bfail evidence differs")

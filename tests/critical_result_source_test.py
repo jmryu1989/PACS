@@ -29,7 +29,6 @@ DEV_IMAGE = os.environ.get("KIN_TEST_API_DEV_IMAGE")
 DATABASE = "kin_critical_result_source"
 IMPORTS = {"@nestjs/common", "node:crypto", "crypto", "./member-rights", "./prisma.service", "./study-access.service", "./keycloak.service",
            "./orthanc.service", "./clinician-policy", "./critical-result-policy", "./critical-result.service", "./preliminary-reader"}
-TYPE_ONLY_IMPORTS = {"./pacs.service"}
 REPORT_COLUMNS = {"uid", "version"}
 FORBIDDEN_MEMBERS = {"report", "reportDraft", "reportPreview", "$queryRawUnsafe", "$executeRawUnsafe"}
 FORBIDDEN_TEXT = ("ReportDraft", "reportDraft", "report-preview", "reportPreview")
@@ -217,7 +216,8 @@ def statement_problems(db: Database, name: str, template: dict) -> list[str]:
 def file_problems(name: str, facts: dict) -> list[str]:
     problems = [f"{name}: {error}" for error in facts["errors"]] + [f"{name}:{reason}" for reason in facts["refused"]]
     for item in facts["imports"]:
-        allowed = item["module"] in IMPORTS or item["module"] in TYPE_ONLY_IMPORTS and item["typeOnly"]
+        # Erased type imports cannot supply report content at runtime.
+        allowed = item["typeOnly"] or item["module"] in IMPORTS
         if not allowed:
             problems.append(f"{name}:{item['line']}: imports {item['module']!r}{'' if item['typeOnly'] else ' (a value)'}, outside the "
                             "critical result's own modules")

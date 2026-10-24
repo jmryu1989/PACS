@@ -468,10 +468,10 @@ class LiveStack:
         if not self.orthanc_password:
             raise RuntimeError("KIN_TEST_ORTHANC_PASSWORD 또는 ORTHANC_PASS가 필요합니다")
 
-    def _open(self, request: Request):
+    def _open(self, request: Request, *, timeout: float = 30):
         if request.full_url.startswith("https://"):
-            return urlopen(request, timeout=30, context=self.context)
-        return urlopen(request, timeout=30)
+            return urlopen(request, timeout=timeout, context=self.context)
+        return urlopen(request, timeout=timeout)
 
     # The master realm's admin-cli token lives only its accessTokenLifespan (60 s on the synthetic stack) while a class
     # runs for minutes, so kc_admin logs in again this much before the token would expire; reusing the first token
@@ -487,7 +487,7 @@ class LiveStack:
             "username": "admin", "password": password,
         }).encode("ascii")
         request = Request(
-            "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/token",
+            self.keycloak.rsplit('/realms/', 1)[0] + "/realms/master/protocol/openid-connect/token",
             data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
         )
         # Counted from before the request: Keycloak starts the lifetime when it issues the token, which is later.
@@ -507,7 +507,7 @@ class LiveStack:
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = Request(
-            "http://127.0.0.1:8080/auth/admin/realms/kin" + path,
+            self.keycloak.rsplit('/realms/', 1)[0] + "/admin/realms/kin" + path,
             data=data, headers=headers, method=method,
         )
         try:
@@ -989,7 +989,7 @@ class LiveStack:
 
     def bearer_request(
         self, method: str, path: str, token: str, body: Any = None,
-        *, base: str | None = None, headers: dict[str, str] | None = None,
+        *, base: str | None = None, headers: dict[str, str] | None = None, timeout: float | None = None,
     ) -> HttpResult:
         request_headers = {"Accept": "application/json", "Authorization": "Bearer " + token}
         request_headers.update(headers or {})
@@ -1002,7 +1002,7 @@ class LiveStack:
             request_headers["Content-Type"] = "application/json"
         request = Request((base or self.api) + path, data=data, headers=request_headers, method=method)
         try:
-            with self._open(request) as response:
+            with (self._open(request) if timeout is None else self._open(request, timeout=timeout)) as response:
                 payload, text = _json_or_text(response.read())
                 return HttpResult(response.status, payload, text, dict(response.headers.items()))
         except HTTPError as error:
@@ -1459,7 +1459,7 @@ class BffInvariantTests(unittest.TestCase):
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = Request(
-            "http://127.0.0.1:8080/auth/admin/realms/kin" + path,
+            self.stack.keycloak.rsplit('/realms/', 1)[0] + "/admin/realms/kin" + path,
             data=data, headers=headers, method=method,
         )
         try:
@@ -5322,13 +5322,13 @@ class LiveInvariantTests(unittest.TestCase):
     # study row, ImportOperation row and audit row a case makes is synthetic and removed by its own scope, originals first.
 
     def s9u4_import(self, user: str, data: bytes, *, op: str | None = None, index: int = 0, expect: str | None = None,
-                    headers: dict[str, str] | None = None) -> tuple[str, HttpResult]:
+                    headers: dict[str, str] | None = None, timeout: float | None = None) -> tuple[str, HttpResult]:
         op = op or str(uuid.uuid4())
         sent = {"Content-Type": "application/dicom", "X-KIN-Operation-Id": op, "X-KIN-File-Index": str(index)}
         if expect:
             sent["X-KIN-Expect-Study"] = expect
         sent.update(headers or {})
-        return op, self.stack.bearer_request("POST", "/dicom-import", self.stack.token(user), data, headers=sent)
+        return op, self.stack.bearer_request("POST", "/dicom-import", self.stack.token(user), data, headers=sent, timeout=timeout)
 
     def s9u4_operation(self, op: str) -> dict[str, Any] | None:
         self.assertRegex(op, UUID_RE)
@@ -5587,7 +5587,9 @@ class LiveInvariantTests(unittest.TestCase):
                     self.s9u4_orthanc_upload(s9u4_dicom(study=uid, series=uid + ".1", sop=f"{uid}.1.{n + 1}", patient_id="S9U4-BULK", pixel=2))
                 self.s9u4_register(uid)
                 started = time.monotonic()
-                op, r = self.s9u4_import("tech", s9u4_dicom(study=uid, series=uid + ".2", sop=s9u4_uid(), patient_id="S9U4-BULK"))
+                # The existing INIT_BUDGET_MS and assertion below allow 240 s;
+                # the generic 30 s HTTP helper must not abort this bulk check first.
+                op, r = self.s9u4_import("tech", s9u4_dicom(study=uid, series=uid + ".2", sop=s9u4_uid(), patient_id="S9U4-BULK"), timeout=240)
                 scope["operations"].append(op)
                 self.assertEqual((r.status, r.body.get("outcome") if expected[0] == 200 else r.body.get("code")), expected, r.text)
                 self.assertLess(time.monotonic() - started, 240, "the initialisation stays inside its 240 s bound")

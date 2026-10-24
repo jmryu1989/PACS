@@ -55,6 +55,9 @@ class S9RoleSweepE2E(StudyAccessE2E):
             raise RuntimeError('Real BFF clinician login could not be submitted') from None
         page.wait_for_url('**/worklist/hpacs-lite/clinician.html', timeout=30000)
         expect(page.get_by_role('heading', name='Clinician Home', exact=True)).to_be_visible()
+        # The heading is static; the signed-in actor appears after this document
+        # has established its session, as the worklist login waits for its role.
+        expect(page.locator('#actor')).to_contain_text(actor)
         return page
 
     def test_sweep_05_admin_role_change_old_document_and_fresh_login(self):

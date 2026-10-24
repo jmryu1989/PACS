@@ -76,7 +76,7 @@ export function snapshotFromRows(scope: object, rows: SnapshotRows): EmrSnapshot
   const accessEvents = new Map<string, unknown>();
   for (const [id, entry] of rows.accessEvents) {
     if (!entry || entry.kind !== 'access' || entry.eventId !== id) refuse('AccessRecordRequired');
-    accessEvents.set(id, freeze((json(entry.payload) as any).event));
+    accessEvents.set(id, freeze(json(entry.payload)));
   }
   const orderFacts = new Map<string, readonly Readonly<OrderFact>[]>();
   for (const [id, history] of rows.orderFacts ?? []) {

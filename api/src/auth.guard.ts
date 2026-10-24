@@ -200,6 +200,7 @@ export class AuthGuard implements CanActivate {
       : await this.auth.sessionRights(admittedSession);
     req.roles = rightsAllow(rights) ? rights.roles : [];
     req.institution = rights.institution;
+    req.rightsVersion = rights.version;
     req.groups = rights.institution ? [rights.institution] : [];
 
     const state = memberState(req.groups, req.roles);

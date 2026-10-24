@@ -19,14 +19,24 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
     $executeRaw: async () => 0, $queryRaw: async () => [{boundary:new Date()}] };
   db.$transaction = async work => work(db);
   const kc = { institutions: async () => ['synthetic-hospital'], getUser: async () => ({id:member.sub,emailVerified:true}) };
-  const service = new AdminService(db,kc,null,{publishCredentials() {}});
+  process.env.KC_ISSUER = 'https://synthetic-identity.example.test/auth/realms/kin';
+  const facts = { actor: {issuer:process.env.KC_ISSUER,subject:caller.sub,id:'synthetic-admin-id'},
+    roles:caller.roles,rightsVersion:1,institution:member.institution,ip:'192.0.2.1',
+    surface:'PATCH admin/users/:id',requestId:'synthetic-admin-request' };
+  const events = [], ledger = {begin:()=>({
+    resolveRequestIdentity:async(issuer,subject)=>{assert.equal(issuer,process.env.KC_ISSUER);return 'identity:'+subject;},
+    transactionWithRecords:async work=>work(db,async(event,mutation)=>{const result=await mutation();events.push(event);return result;}),
+    end(){},
+  })};
+  const service = new AdminService(db,kc,null,{publishCredentials() {}},ledger);
   const roles = ['radiologist','technician','admin','clinician'];
   for (const role of roles) {
-    await service.patchUser(member.sub,{roles:[role]},caller);
+    await service.patchUser(member.sub,{roles:[role]},caller,facts);
     assert.deepEqual(changed.roles,[role]);
   }
-  await service.patchUser(member.sub,{roles:['clinician','radiologist']},caller);
+  await service.patchUser(member.sub,{roles:['clinician','radiologist']},caller,facts);
   assert.deepEqual(changed.roles,['clinician','radiologist']);
+  assert.equal(events.length,5,'each successful rights change reaches the ledger transaction');
   for (const invalid of [[],['gateway'],['invented'],['clinician','invented']]) {
     const before=writes;
     await assert.rejects(service.patchUser(member.sub,{roles:invalid},caller),e=>e.getStatus()===400);
