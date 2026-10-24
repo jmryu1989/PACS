@@ -79,6 +79,39 @@ class MeasurementCiTests(unittest.TestCase):
         output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
         print('WORKFLOW_PROFILES ' + json.dumps({name: row['workflow'] for name, row in report.items()}, sort_keys=True))
 
+    def test_candidate_additions_use_dispatch_stack_and_its_own_deadline(self):
+        import candidate_ci as candidate
+        runner = candidate.load(ci.ROOT / 'scripts/run-tests.py', 'candidate_deadline_runner')
+        original = dict(ci.PROFILES['measurements'])
+        with tempfile.TemporaryDirectory() as folder, patch.dict(ci.PROFILES), \
+                patch.object(ci, 'guarded_profile_run', ci.guarded_profile_run), \
+                patch.object(ci, 'profile_environment', ci.profile_environment):
+            candidate.configure(ci.ROOT, ci, runner, Path(folder) / 'plans')
+            self.assertEqual(ci.profile_deadline_seconds('measurements'), candidate.CANDIDATE_DEADLINE_SECONDS)
+            self.assertEqual(ci.PROFILES['measurements']['suite_timeout'], original['suite_timeout'])
+            for filename, class_name, unit, _ in candidate.BASE[3:]:
+                command, outer = ci.guarded_profile_run(ci.PROFILES['measurements'], filename, class_name, unit,
+                                                       candidate.CANDIDATE_DEADLINE_SECONDS)
+                self.assertEqual(command[command.index('--module') + 1], 'tests/' + filename)
+                self.assertEqual(command[command.index('--class') + 1], class_name)
+                self.assertEqual(command[command.index('--mode') + 1], 'live')
+                self.assertEqual(command[command.index('--timeout') + 1], '540')
+                self.assertEqual(outer, 575)
+        self.assertEqual(ci.PROFILES['measurements'], original)
+        self.assertEqual(ci.profile_deadline_seconds('measurements'), 1500)
+
+    def test_u1_transport_change_selects_boundary_and_records_its_input(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('u1_ci_select', ci.ROOT / 'scripts/ci_select.py')
+        selector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(selector)
+        path = 'worklist-v0/hpacs-lite/session-transport.js'
+        self.assertTrue(selector.select([path])['worklist-ux-measurements'])
+        steps = self.catalog.job('worklist-ux-measurements')['steps']
+        step = next(step for step in steps if 'test_viewer_ux_span.py --boundary' in step.get('run', ''))
+        args = shlex.split(step['run'])
+        self.assertIn(path, [args[i + 1] for i, arg in enumerate(args) if arg == '--file'])
+
     def test_profile_owner_survives_workflow_rename(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -192,7 +225,7 @@ class MeasurementCiTests(unittest.TestCase):
 
     def test_emr_b_profile_runs_the_declared_ledger_cases_only_in_its_own_workflow(self):
         """EMR-B1 (order section 10): one declared ledger suite including D941 live latency, a 3600s planned ceiling within
-        its dedicated 65 minute deadline, a separate artifact and project, and only emr-b.yml requests the profile."""
+        its dedicated 65 minute deadline, a separate artifact and project, and only the emr-b job requests the profile."""
         import ast
         import yaml
         profile = ci.PROFILES['emr-b']
@@ -217,9 +250,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
                          declaration['cases']['live']['B2R'])
         self.assertEqual([row['job'] for row in self.catalog.profile_bindings()['emr-b']], ['emr-b'])
-        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
-        self.assertEqual(list(workflow['jobs']), ['emr-b'])
-        steps = workflow['jobs']['emr-b']['steps']
+        steps = self.catalog.job('emr-b')['steps']
         self.assertEqual(len([s for s in steps if '--profile emr-b' in str(s.get('run', ''))]), 1)
         uploads = [s for s in steps if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
         self.assertTrue(any('tests/e2e/artifacts/emr-b-ci' in str(s['with']['path']) for s in uploads))
@@ -1176,7 +1207,7 @@ class MeasurementCiTests(unittest.TestCase):
                           # S9-U0E: the served generated OHIF config, in its own validate.yml job.
                           's9-u0e-served',
                           'gateway-e2e', 'critical-result-screens',
-                          # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
+                          # EMR-B1: the access ledger profile, run only by the emr-b job.
                           'emr-b',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).

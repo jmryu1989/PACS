@@ -6,6 +6,77 @@ concurrency:
   group: validate-${{ github.event_name == 'schedule' && 'nightly-' || '' }}${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  emr-b:
+    needs: runtime
+    if: ${{ fromJSON(needs.runtime.outputs.jobs)['emr-b'] }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    env:
+      NODE_OPTIONS: --max-old-space-size=3072
+      KIN_EMR_PYTHON: python3
+      KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+      - name: Existing compiler and Prisma client
+        timeout-minutes: 8
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+          (cd api && ./node_modules/.bin/prisma generate)
+      - name: PG declaration and exact collection
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/declaration --tree emr/units --file scripts/emr-compose.py --tree tests/emr/b --tree api/prisma -- python3 -B scripts/emr-compose.py check
+      - name: Retained law and public boundary contracts
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/contract --tree api/src --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs -- node --test --test-concurrency=1 --test-reporter=tap tests/emr/b/contract_test.cjs
+          python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/emr-b-ci/contract
+      - name: Transaction options, connection reserve and background drain
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/lifecycle --tree api/src --tree tests/emr/b -- node --test --test-concurrency=1 tests/emr/b/transaction_options_test.cjs tests/emr/b/client_pool_test.cjs tests/emr/b/lock_test.cjs
+      - name: Request facts capture, ingress and ownership
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-pure --tree api/src --tree tests/emr/request -- node --test tests/emr/request/request_facts_test.cjs
+      - name: Production API image of this commit
+        timeout-minutes: 15
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/image --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package-lock.json -- docker build --target production --build-arg "VCS_REF=${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" -t "kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" api
+      - name: Pinned synthetic stack test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/emr-b-python"
+          "$RUNNER_TEMP/emr-b-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+      - name: Orthanc image for same-point native restore
+        run: docker pull orthancteam/orthanc:24.12.0
+      - name: Existing thirteen candidate selectors on the PG implementation
+        timeout-minutes: 68
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/live --tree api/src --tree api/prisma --tree tests/emr/b --file scripts/ops_backup.py --file tests/measurement_ci.py -- "$RUNNER_TEMP/emr-b-python/bin/python" tests/measurement_ci.py --profile emr-b
+      - name: Actual PG roles, clinical HTTP, consumers and recovery
+        timeout-minutes: 30
+        run: |
+          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerDraftRegressionLive:draft-regression' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end'; do
+            cls="${entry%%:*}"
+            unit="${entry#*:}"
+            python3 scripts/record-run.py --run-dir "tmp/emr-b-ci/$unit" --tree api/src --tree tests/emr/b -- python3 scripts/run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class "$cls" --mode live --unit "ci-b2r-$unit" --timeout 300
+          done
+      - name: Existing auth compatibility on the real PG record port
+        timeout-minutes: 65
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/auth-regression --tree api/src --file tests/auth_session_service_test.cjs --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class PgLedgerAuthRegressionLive --mode live --unit ci-b2r-auth-regression --timeout 3600
+      - name: Request facts through registered HTTP and PostgreSQL
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-live --tree api/src --tree tests/emr/request -- python3 scripts/run-tests.py --module tests/emr/request/request_facts_live.py --class RequestFactsLive --mode live --unit ci-request-facts --timeout 300
+      - name: EMR-B evidence (synthetic, sanitized)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-b-evidence
+          path: |
+            tests/e2e/artifacts/emr-b-ci/
+            tmp/emr-b-ci/
+            tmp/emr-b2-replace-20261023/
+            tmp/request-auth/
+          if-no-files-found: error
+          retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
     # 19m43s-19m52s on main and a 20-minute timeout already hit under queue load (#182).
@@ -1347,7 +1418,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/w4-shortcut-v2-module --cwd . --tree worklist-v0/hpacs-lite --tree tests -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_shortcuts_test.cjs
     - name: U1 single viewer registry and spanning geometry boundary
       if: ${{ !cancelled() }}
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-ux-u1-boundary --cwd . --file tests/e2e/test_viewer_ux_span.py --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/work-context.js --file tests/module_session_harness.cjs -- timeout 600 python3 tests/e2e/test_viewer_ux_span.py --boundary
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-ux-u1-boundary --cwd . --file tests/e2e/test_viewer_ux_span.py --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/module_session_harness.cjs -- timeout 600 python3 tests/e2e/test_viewer_ux_span.py --boundary
     - name: Synthetic runtime record-run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
