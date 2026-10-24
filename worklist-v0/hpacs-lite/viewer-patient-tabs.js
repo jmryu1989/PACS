@@ -164,7 +164,11 @@ window.KinViewerPatientTabs = (() => {
       capture();
       let tab = tabs.find(tab => tab.key === resolved.key);
       if (!tab) { tab = resolved; tabs.push(tab); }
-      // Reopening a patient focuses the existing tab and its preserved grid.
+      else if (JSON.stringify(tab.studies) !== JSON.stringify(resolved.studies)) {
+        // A patient can have several examinations. Preserve the tab identity,
+        // but never restore the previous examination over the requested one.
+        Object.assign(tab, resolved, { view: null });
+      }
       navigate(tab); return true;
     } catch (error) { if (ticket === sequence && error.name !== 'AbortError') status.textContent = error.message; return false; }
     finally { if (ticket === sequence) { pending = false; render(); } }
@@ -196,18 +200,29 @@ window.KinViewerPatientTabs = (() => {
     const list = document.createElement('div'); list.setAttribute('role', 'tablist'); list.setAttribute('aria-label', 'Patients');
     status = document.createElement('span'); status.setAttribute('role', 'status');
     const empty = document.createElement('p'); empty.className = 'kin-patient-empty'; empty.textContent = 'No Patient — 목록에서 검사를 여세요.';
-    host.append(list, status, empty); refresh();
+    const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry Patient'; retry.hidden = true;
+    host.append(list, status, retry, empty); refresh();
     window.kinViewerOpenPatient = open;
-    const ticket = sequence;
-    try {
+    async function loadPatient() {
+      const ticket = sequence;
+      retry.hidden = true;
+      try {
       const resolved = await resolve(location.href);
       if (!mounted || epoch !== mountEpoch || ticket !== sequence) return;
       let tab = tabs.find(tab => tab.key === resolved.key);
       if (!tab) { tab = resolved; tabs.push(tab); }
-      current = tab; render(); publish(); restore();
+      current = tab; status.textContent = ''; render(); publish(); restore();
       if (focusAfterMount) { host.querySelector('[aria-selected=true]')?.focus(); focusAfterMount = false; }
       document.body.classList.remove('kin-patient-switching');
-    } catch (error) { if (mounted && epoch === mountEpoch && ticket === sequence) status.textContent = error.message; }
+      } catch (error) {
+        if (mounted && epoch === mountEpoch && ticket === sequence) {
+          render(); status.textContent = error.message; retry.hidden = false;
+          document.body.classList.remove('kin-patient-switching');
+        }
+      }
+    }
+    retry.onclick = loadPatient;
+    await loadPatient();
   }
   function dispose() {
     mounted = false; mountEpoch++; dataSubscription?.unsubscribe(); dataSubscription = null; dataReady = null; restoreSubscription?.(); restoreSubscription = null; host?.remove(); host = null;

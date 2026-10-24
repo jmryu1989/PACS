@@ -11,6 +11,7 @@ from playwright.sync_api import expect
 from test_viewer_job_print import ViewerJobPrintE2E,canvas_ready
 from test_viewer_jobs import literal,psql
 from test_viewer_history import ViewerHistoryE2E
+from viewer_tools import display_transform
 
 
 class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
@@ -54,7 +55,8 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
   p.evaluate('''async sop=>{const g=services.viewportGridService.getState();const v=services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId);
    const index=v.getImageIds().findIndex(id=>cornerstone.metaData.get('instance',id).SOPInstanceUID===sop);if(index<0)throw Error('fixture SOP missing');
    await v.setImageIdIndex(index);v.scroll(index-v.getTargetImageIdIndex(),false);}''',head['item']['sopUid'])
-  for key in ['2','r','h','v']:p.keyboard.press(key)
+  p.keyboard.press('2')
+  for action in ['r','h','v']:display_transform(p,action)
   self.gesture(p,'Zoom',0,25);self.gesture(p,'Pan',20,10)
   expected=p.evaluate('''points=>{const g=services.viewportGridService.getState();const v=services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId);
    return {points:points.map(p=>v.worldToCanvas(p).map(n=>n*devicePixelRatio)),width:v.getCanvas().width,height:v.getCanvas().height};}''',head['item']['points'])
@@ -90,7 +92,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
     p.screenshot(path=str(Path(__file__).parent/'artifacts/job-annotation-manual-failure.png'));raise
    row=p.locator('#kin-viewer-history section[data-kind='+kind+']');row.get_by_label('Annotation Text').fill('한글 저장 '+kind)
    row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
-  for key in ['r','h','v']:p.keyboard.press(key)
+  for action in ['r','h','v']:display_transform(p,action)
   self.open_layout_tools(p)
   p.get_by_label('Job Title',exact=True).fill('수치가 확인되는 과거 작업');self.click_job(p,'Save Job with Annotations','고정했습니다')
   job=self.get_job(f,self.jobs(f)[0]);self.assertEqual(len(job['annotations']),3)

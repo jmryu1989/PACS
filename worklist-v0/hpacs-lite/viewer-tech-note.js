@@ -397,6 +397,7 @@ window.kinViewerTechNote=function(services,session=null){
     const nativeLabels=new Map();
     function focusNativeToolbar(){
       if(!live()||window.top===window&&!owner||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return false;
+      if(window.kinViewerUXFocusTools)return window.kinViewerUXFocusTools();
       const targets=[...document.querySelectorAll('#root button[data-cy="Zoom"]')].filter(b=>!b.disabled&&b.getAttribute('aria-disabled')!=='true'&&b.getClientRects().length&&!b.closest('[inert],[hidden],[aria-hidden="true"]')&&getComputedStyle(b).visibility==='visible');
       if(targets.length!==1)return false;
       const target=targets[0];

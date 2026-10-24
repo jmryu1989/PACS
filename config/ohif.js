@@ -4098,7 +4098,12 @@ function kinCreateStudyPrefetch() {
     };
     prefetch.enable = wrapped;
     const leave = () => {
-      for (const element of elements) prefetch.disable(element);
+      // The pinned disable removes listeners before reading enabled-element
+      // state. OHIF can already have removed that state during pane teardown.
+      for (const element of elements) {
+        try { prefetch.disable(element); }
+        catch (error) { if (core.getEnabledElement(element)) throw error; }
+      }
       elements.clear(); clearQueued();
     };
     window.addEventListener('pagehide', leave);

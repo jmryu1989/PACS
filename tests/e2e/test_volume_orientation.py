@@ -104,7 +104,11 @@ class VolumeOrientationE2E(VolumeJobsE2E):
    const rendered=await new Promise((resolve,reject)=>{const done=e=>{clearTimeout(timer);resolve({at:performance.now(),viewportId:e.detail?.viewportId??null})};const timer=setTimeout(()=>{v.element.removeEventListener(E.IMAGE_RENDERED,done);reject(Error('IMAGE_RENDERED not received within 5000ms of render()'))},5000);
     v.element.addEventListener(E.IMAGE_RENDERED,done,{once:true});try{v.render()}catch(error){clearTimeout(timer);v.element.removeEventListener(E.IMAGE_RENDERED,done);reject(error)}});
    const c=v.getCanvas(),xy=v.worldToCanvas(p),pixel=(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2)?c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]:null;
-   return {id,requested,rendered,xy:Array.from(xy),pixel,canvas:('''+self.CANVAS_STATS+''')(id,c),render_proof:window.kinRenderProof?JSON.parse(JSON.stringify(kinRenderProof)):null}}''',[index,point]))
+   const mapper=v.getActors()[0].actor.getMapper(),data=mapper.getInputData(),center=xy.map(Math.floor),world=v.canvasToWorld(center.map(x=>x+.5));
+   return {id,requested,rendered,xy:Array.from(xy),pixel,world:Array.from(world),sampleDistance:mapper.getSampleDistance(),
+     index:cornerstone.utilities.transformWorldToIndex(data,world),dimensions:Array.from(data.getDimensions()),
+     neighborhood:Array.from(c.getContext('2d').getImageData(center[0]-2,center[1]-2,5,5).data).filter((_,i)=>i%4===0),
+     canvas:('''+self.CANVAS_STATS+''')(id,c),render_proof:window.kinRenderProof?JSON.parse(JSON.stringify(kinRenderProof)):null}}''',[index,point]))
   if isinstance((record['diagnostic'] or {}).get('pixel'),(int,float)):record['diagnostic_within_original_tolerance']=abs(record['diagnostic']['pixel']-expected)<=3
   record['outcome']='diagnosis only; the original assertion is re-raised unchanged'
   attempt('diagnosis_record',lambda:save(folder/(stem+'-diagnosis.json'),record))

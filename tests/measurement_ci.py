@@ -861,7 +861,7 @@ def main(profile_name, credential_provider=None):
                     # Its own Compose project, never an orphan of this one: removed after the consumer stack.
                     cleanup = gateway_remove(run, out) or cleanup
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
-                if not cleanup and not failed and seeded:
+                if not cleanup and seeded:
                     # Merged jobs run profiles sequentially. Remove only this
                     # profile's generated seed after successful stack cleanup.
                     for path in seeded:

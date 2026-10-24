@@ -131,9 +131,9 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual([timeout for argv, timeout in calls if 'logs' in argv], [30])
             self.assertEqual([timeout for argv, timeout in calls if 'down' in argv], [60])
 
-    def test_sequential_profiles_remove_only_successful_generated_seeds(self):
+    def test_sequential_profiles_remove_generated_seeds_after_stack_cleanup(self):
         # D1799: exercise the real seed writer and cleanup between merged profiles;
-        # failed runs retain their files for inspection, before the next admission.
+        # failed results remain in artifacts without blocking the next profile.
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             unrelated = root / 'preserved.txt'
@@ -158,7 +158,8 @@ class MeasurementCiTests(unittest.TestCase):
                     returncode=1 if 'up' in command else 0, stdout=b'', stderr=b'')
                 with self.assertRaises(RuntimeError):
                     ci.main('volume-path', credential_provider=lambda *args: 'synthetic')
-                self.assertEqual(len(list((root/'sample-data/public').glob('*.dcm'))), 8)
+                self.assertFalse((root/'sample-data').exists())
+                self.assertEqual(json.loads((root/'volume-path/results.json').read_text())[0]['exit'], 1)
                 self.assertEqual(unrelated.read_text(), 'keep')
 
     def test_context_loss_profile_selects_only_its_declared_cases_on_a_fresh_runner(self):
@@ -2801,6 +2802,47 @@ class MeasurementCiTests(unittest.TestCase):
             daemon = json.loads((profile['out']/'daemon-empty.json').read_text(encoding='utf-8'))
             self.assertEqual(daemon, {'remaining': {'containers': [], 'volumes': [], 'networks': []}, 'problems': []})
             self.assertTrue((profile['out']/'results.json').exists())
+
+    def test_failed_profile_cleans_its_seed_before_viewer_shell_profile(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            profiles = {name: {**ci.PROFILES[name], 'out': root/name}
+                        for name in ['study-arrivals', 'viewer-ux-shell']}
+            failed_once = False
+
+            def seed():
+                source = root/'sample-data/public/fixture.dcm'
+                source.parent.mkdir(parents=True, exist_ok=False)
+                source.write_bytes(b'synthetic seed')
+                return [source]
+
+            def run(command, **kwargs):
+                nonlocal failed_once
+                code = 0
+                if any(str(part).endswith('run-tests.py') for part in command) and not failed_once:
+                    failed_once = True
+                    code = 1
+                return MagicMock(returncode=code, stdout=b'original result', stderr=b'')
+
+            response = MagicMock(); response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+                 patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, profiles), \
+                 patch.object(ci, 'seed_source', side_effect=seed), \
+                 patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']*2), \
+                 patch.object(ci.subprocess, 'run', side_effect=run), \
+                 patch.object(ci, 'urlopen', return_value=response), \
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='synthetic-password'), \
+                 patch.object(ci, 'inspect_failed_module'), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'failed'):
+                    ci.main('study-arrivals')
+                self.assertFalse((root/'sample-data').exists())
+                ci.main('viewer-ux-shell')
+            failed = json.loads((root/'study-arrivals/results.json').read_text())
+            later = json.loads((root/'viewer-ux-shell/results.json').read_text())
+            self.assertTrue(any(row['exit'] == 1 for row in failed))
+            self.assertTrue(any(row['name'] == 'test_viewer_ux_shell' and row['exit'] == 0 for row in later))
+            self.assertFalse((root/'sample-data').exists())
 
     def test_local_and_self_hosted_refused_before_docker(self):
         for env in [{}, {'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'self-hosted'}]:

@@ -51,7 +51,7 @@ window.KinViewerUXToolbar = (() => {
         button('Clear', row, () => { input.value = ''; input.focus(); });
       }
     }
-    function openSettings() { if (!loaded || saving || !active()) return false; opener = document.activeElement; fill(preferences); feedback.textContent = ''; dialog.showModal(); return true; }
+    function openSettings() { if (saving || !active()) return false; opener = document.activeElement; fill(preferences); feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); return true; }
     window.kinViewerUXOpenSettings = openSettings;
     button('Restore Defaults', dialog, () => fill(defaults()));
     const saveButton = button('Save', dialog, async () => {
@@ -70,7 +70,7 @@ window.KinViewerUXToolbar = (() => {
     dialog.addEventListener('keydown', event => event.stopPropagation());
     function label(item) { return item.label || item.title || item.tooltip || item.id; }
     function invoke(id) {
-      if (!active() || !loaded || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
+      if (!active() || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
       const item = service.getButtonProps(id); if (!item || item.disabled) return false;
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
       if (states.some(state => !state || state.busy)) return false;
@@ -82,7 +82,7 @@ window.KinViewerUXToolbar = (() => {
     function tool(id, parent) {
       const item = catalog.get(id), key = preferences.shortcuts[id];
       const node = button('', parent, () => { invoke(id); }); node.className = 'kin-ux-tool'; node.draggable = loaded && !saving;
-      node.dataset.tool = id; node.disabled = !loaded; node.setAttribute('aria-label', label(item));
+      node.dataset.tool = id; node.setAttribute('aria-label', label(item));
       node.title = label(item) + (key ? ' · ' + key.toUpperCase() : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
       if (key) node.setAttribute('aria-keyshortcuts', key.toUpperCase());
       const icon = element('span', symbols[id] || label(item).split(' ').map(word => word[0]).slice(0, 2).join(''), node); icon.setAttribute('aria-hidden', 'true'); icon.className = 'kin-ux-tool-icon';
@@ -98,13 +98,13 @@ window.KinViewerUXToolbar = (() => {
       [...catalog.keys()].filter(id => !preferences.bar.includes(id)).forEach(id => tool(id, menu));
       if (!bar.children.length) element('span', '도구를 여기로 끌어 놓으세요.', bar);
       if (!menu.children.length) element('span', '도구를 여기로 끌어 놓으세요.', menu);
-      edit.disabled = !loaded || saving; saveButton.disabled = saving;
+      edit.disabled = saving; saveButton.disabled = !loaded || saving;
       refreshState();
     }
     function refreshState() {
       for (const node of toolbar.querySelectorAll('[data-tool]')) {
         const props = service.getButtonProps(node.dataset.tool);
-        node.disabled = !loaded || !props || !!props.disabled;
+        node.disabled = !props || !!props.disabled;
         if (props?.isActive !== undefined) node.setAttribute('aria-pressed', String(!!props.isActive));
         else node.removeAttribute('aria-pressed');
       }
@@ -156,22 +156,14 @@ window.KinViewerUXToolbar = (() => {
     service.clearButtonSection('primary'); service.createButtonSection('primary', retained);
     const subscription = service.subscribe(service.EVENTS.TOOL_BAR_MODIFIED, refreshState);
     function focusTools() {
-      if (!active() || !loaded || document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]')) return false;
+      if (!active() || document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]')) return false;
       const first = bar.querySelector('button:not(:disabled)') || summary;
       first.focus(); first.scrollIntoView({ block: 'nearest', inline: 'nearest' }); return true;
     }
-    // Existing Image Tools entry points must still work after Zoom moves to More.
-    const focusClick = event => {
-      if (event.target.closest?.('#kin-viewer-focus-9') && focusTools()) { event.preventDefault(); event.stopImmediatePropagation(); }
-    };
-    const focusKey = event => {
-      const data = record?.bindings;
-      const code = data?.version === 2 ? data.nativeTools : data?.nativeTools ? 'Control+Alt+' + data.nativeTools : 'Control+Alt+Digit9';
-      const pressed = event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey ? 'Control+Alt+' + event.code : null;
-      if (pressed && pressed === code && !event.repeat && !event.isComposing && focusTools()) { event.preventDefault(); event.stopImmediatePropagation(); }
-    };
-    document.addEventListener('click', focusClick, true); window.addEventListener('keydown', focusKey, true);
-    const shortcuts = window.KinViewerUXShortcuts.mount({ getBindings: () => preferences.shortcuts, invoke, allowed: () => active() && loaded });
+    // Reuse the existing navigation bindings and their modal/session guards.
+    // That controller also serves the Image Tools button and embedded focus requests.
+    window.kinViewerUXFocusTools = focusTools;
+    const shortcuts = window.KinViewerUXShortcuts.mount({ getBindings: () => preferences.shortcuts, invoke, allowed: active });
     function refresh() {
       const strip = document.querySelector('.kin-viewer-series-strip');
       if (!toolbar.isConnected && strip) strip.before(toolbar);
@@ -180,7 +172,8 @@ window.KinViewerUXToolbar = (() => {
     render(); load();
     return { dispose() {
       if (ended) return; ended = true; abort.abort(); observer.disconnect(); shortcuts.dispose(); toolbar.remove(); settings.remove(); dialog.remove();
-      subscription.unsubscribe(); document.removeEventListener('click', focusClick, true); window.removeEventListener('keydown', focusKey, true);
+      subscription.unsubscribe();
+      if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
       if (window.kinViewerUXOpenSettings === openSettings) delete window.kinViewerUXOpenSettings;
       if (JSON.stringify(service.getButtonSection('primary').map(button => button.id)) === JSON.stringify(retained)) {
         service.clearButtonSection('primary'); service.createButtonSection('primary', original);

@@ -9048,7 +9048,7 @@
             return;
           }
           // U2 keeps this document and checks coverage at the final assignment.
-          if (typeof popup.kinViewerOpenPatient === 'function') {
+          if (!freshDocument && !stopped && typeof popup.kinViewerOpenPatient === 'function') {
             popup.kinViewerOpenPatient(url);
             popup.focus(); watchOhifRect(popup); return;
           }

@@ -23,7 +23,7 @@ window.KinViewerInfoBar = (() => {
     return { viewportId, viewport, cell, set, instance: matched ? instance : null };
   }
   function mount({ services, studyActions }) {
-    const bars = new Map();
+    const bars = new Map(), labels = new Map();
     function refresh() {
       const state = services.viewportGridService.getState();
       const ids = [...state.viewports.keys()];
@@ -35,7 +35,7 @@ window.KinViewerInfoBar = (() => {
         return !element || panes[index].contains(element);
       });
       for (const [id, bar] of bars) if (!state.viewports.has(id) || !bar.isConnected) {
-        bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); bars.delete(id);
+        bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); bars.delete(id); labels.delete(id);
       }
       for (const [index, id] of ids.entries()) {
         const current = identity(services, id);
@@ -55,10 +55,19 @@ window.KinViewerInfoBar = (() => {
         const m = current.instance;
         bar.children[2].disabled = !m || !studyActions?.available();
         bar.children[2].title = studyActions?.available() ? '이 셀의 이전 검사 목록을 엽니다.' : '이전 검사 연결은 다음 단계에서 제공됩니다.';
-        const label = m ? [text(m.PatientName) || 'Unknown', text(m.PatientSex) || 'Unknown',
+        let label = m ? [text(m.PatientName) || 'Unknown', text(m.PatientSex) || 'Unknown',
           text(m.PatientAge) || 'Unknown', text(m.PatientID) || 'Unknown',
           [text(m.StudyDate), text(m.StudyTime)].filter(Boolean).join(' ') || 'Unknown',
           text(m.StudyDescription), text(m.InstitutionName)].filter(Boolean).join(' | ') : 'Loading / No image';
+        const previous = labels.get(id);
+        const viewportStatus = window.cornerstone.Enums.ViewportStatus;
+        const pending = [viewportStatus.LOADING, viewportStatus.PRE_RENDER, viewportStatus.RESIZE].includes(current.viewport?.viewportStatus);
+        // While another frame of this same stack loads, the last rendered
+        // pixels still have this identity. Replacing it with a shorter Loading
+        // label resizes the image area on every cine frame.
+        if (m) labels.set(id, { viewport: current.viewport, set: current.set, label });
+        else if (pending && current.viewport?.type === 'stack' && previous?.viewport === current.viewport && previous.set === current.set) label = previous.label;
+        else labels.delete(id);
         const type = current.viewport?.type;
         const mode = ({ stack: '2D', orthographic: 'MPR', volume3d: '3D' })[type] || type || 'No image';
         const layout = state.layout;
@@ -70,8 +79,8 @@ window.KinViewerInfoBar = (() => {
     }
     return {
       refresh,
-      invalidate() { for (const bar of bars.values()) bar.children[0].textContent = 'Loading / No image'; },
-      dispose() { for (const bar of bars.values()) { bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); } bars.clear(); },
+      invalidate() { labels.clear(); for (const bar of bars.values()) bar.children[0].textContent = 'Loading / No image'; },
+      dispose() { for (const bar of bars.values()) { bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); } bars.clear(); labels.clear(); },
     };
   }
   return { mount, identity };
