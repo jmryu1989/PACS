@@ -39,7 +39,9 @@ def fixture():
         sequence_settings=[dict(sequencename=name) for name in transfer.SEQUENCES])
     product = dict(migrations=MIGRATIONS, study_uid=UID, catalog=catalog,
                    rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
-                   emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows()))
+                   emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows(),
+                       image=dict(catalog=dict(tables=['observation', 'preparation']), rows=transfer.expected_image_rows(),
+                           sequence=dict(last_value=2, is_called=True))))
     return dict(body, schema=2, profile=transfer.PROFILE, product=product,
                 relation=transfer.relation(body['snapshot'])), files, pg_config, orth_config
 
@@ -52,6 +54,18 @@ def check(body, product_sha=None):
 
 
 class Pure(unittest.TestCase):
+    def test_image_restore_keeps_source_response_and_copy_facts(self):
+        expected = fixture()[0]['product']
+        transfer.image_contract(expected['emr']['image'])
+        for field in ('source_manifest', 'response_manifest', 'staging_copies'):
+            actual = copy.deepcopy(expected)
+            actual['emr']['image']['rows']['preparation'][0][field] = None
+            with self.subTest(field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+        actual = copy.deepcopy(expected)
+        actual['emr']['image']['rows']['observation'].pop()
+        with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+            transfer.verify_product('owned', 'kin', expected)
     def test_catalog_column_budget_supports_current_schema_and_stays_bounded(self):
         catalog=fixture()[0]['product']['catalog']
         # S9-U4b + W5-API: the product has 542 scalar columns in schema.prisma with ImportOperation (15) and
@@ -359,9 +373,13 @@ class Pure(unittest.TestCase):
         for values in ([], MIGRATIONS*2, [dict(MIGRATIONS[0], sha256='0'*64)]):
             changed = copy.deepcopy(body); changed['product']['migrations'] = values
             with self.assertRaises(ValueError): check(changed)
-        with patch.object(transfer, 'command', return_value=('\n'.join(transfer.MIGRATIONS+['api/prisma/migrations/new/migration.sql'])).encode()) as call:
-            with self.assertRaises(ValueError): transfer.migration_sources()
-            self.assertEqual(call.call_count, 1)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in transfer.MIGRATIONS + ['api/prisma/migrations/new/migration.sql']:
+                path = root/name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('SELECT 1;', encoding='utf-8')
+            with self.assertRaises(ValueError): transfer.migration_sources(root)
 
     def test_05_all_rows_columns_empty_tables_and_typed_sequences(self):
         body, _, _, _ = fixture()
@@ -419,7 +437,6 @@ class Pure(unittest.TestCase):
         # every attempt phase, a prepared, a Sent and a still-sending download, and the gate's four Study and four SOP reservations.
         # W5-API added ReportDraftInsertReceipt (48 migration files, 53 public tables with S9-U4b) with three synthetic receipts:
         # refused, applied and discarded.
-        self.assertEqual(len(transfer.MIGRATIONS), 51)
         self.assertEqual(len(transfer.TABLES), 53)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()

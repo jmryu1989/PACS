@@ -54,6 +54,7 @@ FLOWS = (
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
+    ("emr/e/online_live.py", "OnlineImagePg", "test_fixed_image_http", "test_fixed_image_"),
 )
 
 
@@ -120,8 +121,9 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 141 and len({(x["file"], x["case"]) for x in selected}) == 141,
-            "Candidate selection must contain 141 unique exact cases")
+    expected = sum(row[3] for row in BASE) + len(FLOWS)
+    require(len(selected) == expected and len({(x["file"], x["case"]) for x in selected}) == expected,
+            "Candidate selection must match the declared unique exact cases")
     return rows, selected
 
 

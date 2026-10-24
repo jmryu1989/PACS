@@ -1,14 +1,15 @@
 {
   "unit": "EMR-E",
-  "round": "online-core",
-  "base_sha": "1a1b6b772e92470344c6de36faf64a2f7482668a",
+  "round": "online-integration",
+  "base_sha": "e2f700f683cb06cfcaf4d301e809032c823635b1",
   "order": "E_ONLINE (2026-10-23), D1753/D1770/D1804/D1818",
   "status": "integration-incomplete",
   "dependencies": {
     "B2": "EmrRecordPort.admit/transaction/confirm; same PostgreSQL transaction for image evidence and provide-prepared",
-    "D": "accepted online core at base_sha; real source/patient identity and current request context still require shared assembly",
+    "D": "origin/main f6d0f1f (#212); merged without conflicts",
     "C2": "server-held keys; E does not sign device-generated objects",
-    "shared_writer": "persistent ImageEvidenceStore, current-authority adapter, route/DI assembly, then nginx/OHIF integration"
+    "shared_writer": "E assigned integration writer (continuation 4)",
+    "A": "REQUEST_FACTS #211 current identity/patient/source/decoder/StudyAccess binding missing"
   },
   "owned_paths": [
     "api/src/emr-image/contract.ts",
@@ -16,7 +17,10 @@
     "api/src/emr-image/stream.ts",
     "api/src/orthanc.service.ts",
     "tests/emr/e/",
-    "emr/units/e.json"
+    "emr/units/e.json",
+    "api/src/emr-image/context.ts",
+    "api/src/emr-image/service.ts",
+    "api/src/emr-image/store.ts"
   ],
   "implemented_boundaries": [
     "fixed source object/frame bytes staged and checked before the durable provide receipt",
@@ -25,10 +29,18 @@
     "transfer-ended/aborted/unknown observations separate from client display",
     "staging copy creation/removal facts for the H storage owner",
     "unverified MG representation and source-reference subtree preservation",
-    "prepared response manifest retains actual request, Range, HTTP status/headers, multipart envelope and selected byte ranges before first byte"
+    "prepared response manifest retains actual request, Range, HTTP status/headers, multipart envelope and selected byte ranges before first byte",
+    "production PostgreSQL representation/transport/copy detail adapter, using B2 transaction",
+    "GET/HEAD Connect API route with explicit unavailable Module A seam",
+    "migration, production-image and restore consumers together"
   ],
-  "routes": [],
-  "migrations": [],
+  "routes": [
+    "GET images/dicom-web",
+    "HEAD images/dicom-web"
+  ],
+  "migrations": [
+    "20261025000000_emr_e_online"
+  ],
   "tests": {
     "pure": [
       "tests/emr/e/contract_test.cjs"
@@ -37,7 +49,7 @@
       "tests/emr/e/online_live.py:OnlineImagePg.test_fixed_image_http"
     ],
     "pg_http_implementation": "tests/emr/e/stream_pg_test.cjs",
-    "acceptance_limit": "PG/HTTP uses the actual B2 ledger and synthetic Orthanc protocol plus an evidence-port SQL fixture; it is not production storage/route or OHIF renderer acceptance",
+    "acceptance_limit": "actual B2 transaction and shipped E migration/evidence store plus synthetic Orthanc protocol; production context unavailable, no served OHIF acceptance",
     "ci": {
       "workflow": ".github/workflows/validate.yml",
       "job": "emr-e-contracts",
@@ -92,12 +104,10 @@
     }
   ],
   "remaining": [
-    "reserve and land E persistent evidence fields through the shared storage writer; no second success ledger",
-    "bind current server identity/patient/StudyAccess to the same B2 transaction",
-    "generate complete source/decoder manifests from the actual image store",
-    "route nginx/API PDF/preview/thumbnail/DICOMweb through the boundary",
-    "wire actual OHIF renderer exposures, account/opening generations and retained historical exposures",
-    "actual nginx/Orthanc/pinned-OHIF and failure recovery acceptance",
-    "same final commander SHA PR CI/G3 and Opus binding review"
+    "Module A REQUEST_FACTS #211: bind authoritative current identity/patient/source/decoder/StudyAccess adapter",
+    "nginx image routes after context binding; preserve STOW",
+    "derived PDF/preview/thumbnail/metadata immutable snapshot source",
+    "pinned served OHIF renderer and account/opening generations",
+    "same final commander SHA PR CI/G3 and Opus review"
   ]
 }

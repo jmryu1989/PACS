@@ -19,6 +19,7 @@ const { OrthancService } = load('orthanc.service');
 const { buildImageManifest } = load('emr-image/manifest');
 const E = load('emr-image/contract');
 const { sendOnlineImage } = load('emr-image/stream');
+const { PgImageEvidenceStore } = load('emr-image/store');
 const { parseAccessEvent } = load('emr-contract/access-event');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const known = value => ({ status: 'known', value });
@@ -62,19 +63,20 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
   const orthanc = new OrthancService();
   let denyAtCommit = false, failPrepared = false, loseCommit = false, failObservation = false, interruptFrame = false;
   let afterPrepared = () => {}, current, handleResult, clientRequest, countAuth = 0;
+  const storedEvidence = new PgImageEvidenceStore(db);
   const evidence = {
     async prepared(tx, fixed, sourceManifest, copies) {
       assert.equal(sourceManifest.sha256, fixed.studyManifestSha256);
-      await tx.$executeRaw`INSERT INTO public.e_response(event_id,manifest,copies) VALUES (${fixed.eventId}::uuid,${JSON.stringify(fixed)}::jsonb,${JSON.stringify(copies)}::jsonb)`;
+      await storedEvidence.prepared(tx, fixed, sourceManifest, copies);
       if (failPrepared) throw new Error('SyntheticPrepareRollback');
       afterPrepared();
     },
     async transferred(tx, id, observations, wire) {
       if (failObservation) throw new Error('SyntheticObservationFailure');
-      await tx.$executeRaw`INSERT INTO public.e_transfer(event_id,body) VALUES (${id}::uuid,${JSON.stringify({ observations, wire })}::jsonb)`;
+      await storedEvidence.transferred(tx, id, observations, wire);
     },
     async copiesRemoved(id, copies) {
-      await witness.$executeRaw`INSERT INTO public.e_copy_end(event_id,body) VALUES (${id}::uuid,${JSON.stringify(copies)}::jsonb)`;
+      await storedEvidence.copiesRemoved(id, copies);
     },
   };
   const boundary = { records: port, evidence, source: orthanc.imageSource(), stagingDirectory: staging,
@@ -133,7 +135,7 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
         // The independent connection can see both the exact manifest and B2
         // preparation before the first protected HTTP chunk is consumed.
         if (res.statusCode < 300) {
-          const rows = await witness.$queryRaw`SELECT manifest FROM public.e_response WHERE event_id=${current.event.eventId}::uuid`;
+          const rows = await witness.$queryRaw`SELECT response_manifest AS manifest FROM emr_image.preparation WHERE event_id=${current.event.eventId}::uuid`;
           assert.equal(rows.length, 1);
           assert.equal((await ledger.lookup(current.event.eventId)).outcome, 'committed');
           const fixed = rows[0].manifest;
@@ -205,12 +207,12 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
     begin(); failPrepared = true; sent = await request(); failPrepared = false;
     assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
     assert.equal((await ledger.lookup(current.event.eventId)).outcome, 'negative');
-    assert.equal((await witness.$queryRaw`SELECT event_id FROM public.e_response WHERE event_id=${current.event.eventId}::uuid`).length, 0);
+    assert.equal((await witness.$queryRaw`SELECT event_id FROM emr_image.preparation WHERE event_id=${current.event.eventId}::uuid`).length, 0);
     begin(); denyAtCommit = true; sent = await request(); denyAtCommit = false;
     assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
     begin(); sourceBytes = Buffer.alloc(original.length, 99); sent = await request(); sourceBytes = original;
     assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
-    const failedCopies = await witness.$queryRaw`SELECT body FROM public.e_copy_end WHERE event_id=${current.event.eventId}::uuid`;
+    const failedCopies = await witness.$queryRaw`SELECT body FROM emr_image.observation WHERE kind='copies' AND event_id=${current.event.eventId}::uuid`;
     assert.equal(failedCopies.length, 1, 'a failed preparation still accounts for its temporary copy');
     assert.equal(failedCopies[0].body[0].state, 'removed');
     begin(); headerSyntax = '1.2.840.10008.1.2.4.50'; sent = await request(); headerSyntax = ts;
@@ -233,5 +235,38 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
   } finally {
     await close(server); await close(source);
     await journal.close(); await db.$disconnect(); await witness.$disconnect();
+  }
+});
+
+test('E registered Connect GET/HEAD refuses unavailable production context without image bytes', async () => {
+  const { NestFactory } = require(path.join(api, 'node_modules/@nestjs/core'));
+  const { AppModule } = load('app.module');
+  const { EmrRuntime } = load('emr-runtime/application');
+  const previous = { ...process.env };
+  Object.assign(process.env, { AUTH_REQUIRED: 'false', KIN_EMR_STATE_DIR: process.env.KIN_E_SPOOL,
+    KC_ADMIN_URL: 'http://127.0.0.1:9', KC_ISSUER: 'http://127.0.0.1:9/realms/synthetic',
+    KC_JWKS_URL: 'http://127.0.0.1:9/realms/synthetic/certs', PUBLIC_ORIGIN: 'http://127.0.0.1' });
+  const runtime = new EmrRuntime(process.env.DATABASE_URL, path.join(process.env.KIN_E_SPOOL, 'route-outage'));
+  let app;
+  try {
+    await runtime.start();
+    app = await NestFactory.create(AppModule.withLedger(runtime), { logger: false, abortOnError: false });
+    app.setGlobalPrefix('api');
+    await app.listen(0, '127.0.0.1');
+    const endpoint = await app.getUrl();
+    const target = '/dicom-web/studies/2.25.701/series/2.25.701.1/instances/2.25.701.1.1';
+    for (const method of ['GET', 'HEAD']) {
+      const response = await fetch(endpoint + '/api/images/dicom-web?target=' + encodeURIComponent(target), { method });
+      assert.equal(response.status, 503);
+      assert.equal(response.headers.get('x-kin-image-event'), null);
+      if (method === 'HEAD') assert.equal((await response.arrayBuffer()).byteLength, 0);
+      else assert.equal((await response.json()).code, 'IMAGE_CONTEXT_UNAVAILABLE');
+    }
+    const malformed = await fetch(endpoint + '/api/images/dicom-web?target=' + encodeURIComponent('/instances/anything/file'));
+    assert.equal(malformed.status, 400);
+  } finally {
+    if (app) await app.close(); else await runtime.stop(Date.now() + 15000);
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
   }
 });
