@@ -27,6 +27,8 @@
     "dicom-pdf.js",
     "series-recovery.js",
     "context-loss.js",
+    "mammography-hanging.js",
+    "study-prefetch.js",
     "configuration.js"
   ]
 }
