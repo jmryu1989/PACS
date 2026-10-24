@@ -419,7 +419,7 @@ class Pure(unittest.TestCase):
         # every attempt phase, a prepared, a Sent and a still-sending download, and the gate's four Study and four SOP reservations.
         # W5-API added ReportDraftInsertReceipt (48 migration files, 53 public tables with S9-U4b) with three synthetic receipts:
         # refused, applied and discarded.
-        self.assertEqual(len(transfer.MIGRATIONS), 49)
+        self.assertEqual(len(transfer.MIGRATIONS), 51)
         self.assertEqual(len(transfer.TABLES), 53)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()

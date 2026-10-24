@@ -133,7 +133,8 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     // Native drafts and the approved Source read by a W5 insertion have persisted
     // study/record/version identities but no patient-link row. Preserve that
     // unknown fact on these existing boundaries; never invent a patient link.
-    const nativeRecord = kind === 'private-draft' || (surface === 'PUT studies/:uid/report' && kind === 'report-version');
+    const nativeRecord = kind === 'private-draft' ||
+      (['PUT studies/:uid/report', 'POST studies/:uid/report/commit'].includes(surface) && kind === 'report-version');
     const required = nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
     if (!failure && required.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
     return parsed;

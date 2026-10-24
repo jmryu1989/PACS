@@ -497,26 +497,26 @@ test('SPLIT-07 commit appends one version per decision; an approved report leave
   const w = world();
   const s = w.study();
   const epoch = s.draftEpoch;
-  await refused(() => w.commit.commitReport(s.uid, commitBody(TECH_A, 'save', epoch, 0, 0, { findings: 't' }), TECH_A, null), 403);
+  await refused(() => w.commit.commitReport(s.uid, commitBody(TECH_A, 'save', epoch, 0, 0, { findings: 't' }), TECH_A, null, B2_REQUEST_FACTS), 403);
   assert.deepEqual([w.db.transactions, w.db.writes.length], [0, 0], 'the refused caller opened no transaction and wrote nothing');
 
-  const saved = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'save', epoch, 0, 0, { findings: 'first text' }), RAD_A, null);
+  const saved = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'save', epoch, 0, 0, { findings: 'first text' }), RAD_A, null, B2_REQUEST_FACTS);
   assert.equal(saved.state.rs, 'T');
-  const approved = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'approve', epoch, 1, 1, { findings: 'second text' }), RAD_A, null);
+  const approved = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'approve', epoch, 1, 1, { findings: 'second text' }), RAD_A, null, B2_REQUEST_FACTS);
   assert.equal(approved.state.rs, 'A');
   assert.equal(approved.state.repDoc, RAD_A.actor.split('@')[0]);
   const history = () => w.db.rows('reportVersion').filter(v => v.uid === s.uid).map(v => [v.version, v.action, v.findings]);
   assert.deepEqual(history(), [[1, 'save', 'first text'], [2, 'approve', 'second text']]);
 
   for (const action of ['approve', 'save']) {
-    await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A2, action, epoch, 0, 2, { findings: 'quiet change' }), RAD_A2, null), 400);
+    await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A2, action, epoch, 0, 2, { findings: 'quiet change' }), RAD_A2, null, B2_REQUEST_FACTS), 400);
   }
   assert.deepEqual(history(), [[1, 'save', 'first text'], [2, 'approve', 'second text']]);
   assert.equal(w.db.rows('studyState')[0].rs, 'A');
-  const addendum = await w.commit.commitReport(s.uid, commitBody(RAD_A2, 'addendum', epoch, 0, 2, { findings: 'second text + addendum' }), RAD_A2, null);
+  const addendum = await w.commit.commitReport(s.uid, commitBody(RAD_A2, 'addendum', epoch, 0, 2, { findings: 'second text + addendum' }), RAD_A2, null, B2_REQUEST_FACTS);
   assert.equal(addendum.state.rs, 'A');
-  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A, 'reset', epoch, 2, 3), RAD_A, null), 400);
-  const reset = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'reset', epoch, 2, 3, { reason: 'wrong patient' }), RAD_A, null);
+  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A, 'reset', epoch, 2, 3), RAD_A, null, B2_REQUEST_FACTS), 400);
+  const reset = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'reset', epoch, 2, 3, { reason: 'wrong patient' }), RAD_A, null, B2_REQUEST_FACTS);
   assert.equal(reset.state.rs, 'W');
   assert.deepEqual(history(), [[1, 'save', 'first text'], [2, 'approve', 'second text'], [3, 'addendum', 'second text + addendum'],
     [4, 'discarded', 'second text + addendum'], [5, 'reset', '']]);
@@ -532,12 +532,12 @@ test('SPLIT-08 a preliminary report is approved by its designated senior only; i
   w.db.seed('report', { uid: s.uid, findings: 'prelim', conclusion: '', recommendation: '', version: 1, updatedBy: RAD_A.actor });
   w.db.seed('reportVersion', { uid: s.uid, version: 1, action: 'preliminary', findings: 'prelim', conclusion: '', recommendation: '', author: RAD_A.actor });
   const epoch = s.draftEpoch;
-  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A, 'approve', epoch, 0, 1, { findings: 'self' }), RAD_A, null), 403);
+  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A, 'approve', epoch, 0, 1, { findings: 'self' }), RAD_A, null, B2_REQUEST_FACTS), 403);
   assert.equal(w.db.rows('reportVersion').length, 1);
-  const kept = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'save', epoch, 0, 1, { findings: 'prelim 2' }), RAD_A, null);
+  const kept = await w.commit.commitReport(s.uid, commitBody(RAD_A, 'save', epoch, 0, 1, { findings: 'prelim 2' }), RAD_A, null, B2_REQUEST_FACTS);
   assert.equal(kept.state.rs, 'P');
-  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_B, 'approve', epoch, 0, 2), RAD_B, null), 404);
-  const done = await w.commit.commitReport(s.uid, commitBody(RAD_A2, 'approve', epoch, 0, 2, { findings: 'final' }), RAD_A2, null);
+  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_B, 'approve', epoch, 0, 2), RAD_B, null, B2_REQUEST_FACTS), 404);
+  const done = await w.commit.commitReport(s.uid, commitBody(RAD_A2, 'approve', epoch, 0, 2, { findings: 'final' }), RAD_A2, null, B2_REQUEST_FACTS);
   assert.equal(done.state.rs, 'A');
   assert.deepEqual(w.db.rows('reportVersion').map(v => v.action), ['preliminary', 'save', 'approve']);
 });
@@ -613,7 +613,7 @@ test('SPLIT-11 a live hold of another reader is reported, never overwritten; an 
   assert.deepEqual(await w.hold.hold(s.uid, RAD_A2), { holder: RAD_A.actor, mine: false, conflict: true });
   assert.equal(row().holder, RAD_A.actor);
   // the commit of the other reader is refused while the hold lives
-  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A2, 'save', s.draftEpoch, 0, 0, { findings: 'x' }), RAD_A2, null), 409, 'REPORT_HELD');
+  await refused(() => w.commit.commitReport(s.uid, commitBody(RAD_A2, 'save', s.draftEpoch, 0, 0, { findings: 'x' }), RAD_A2, null, B2_REQUEST_FACTS), 409, 'REPORT_HELD');
   w.db.tables.studyState.find(r => r.uid === s.uid).heldAt = new Date(Date.now() - (4 * 60_000 + 50_000));
   assert.deepEqual(await w.hold.hold(s.uid, RAD_A2), { holder: RAD_A.actor, mine: false, conflict: true }, 'still alive just under five minutes');
   w.db.tables.studyState.find(r => r.uid === s.uid).heldAt = new Date(Date.now() - (5 * 60_000 + 1_000));
@@ -874,7 +874,7 @@ test('SPLIT-22 the facade starts its institutions concern and each public call a
   w.orthanc.rows = [qido(s.uid, 'SYN A HOSPITAL')];
   assert.deepEqual((await facade.listStudies(RAD_A)).studies.map(r => [r.uid, r.institutionName]), [[s.uid, 'SYN A']]);
   assert.deepEqual(await facade.hold(s.uid, RAD_A), { holder: RAD_A.actor, mine: true, conflict: false });
-  const saved = await facade.commitReport(s.uid, commitBody(RAD_A, 'save', s.draftEpoch, 0, 0, { findings: 'via facade' }), RAD_A, null);
+  const saved = await facade.commitReport(s.uid, commitBody(RAD_A, 'save', s.draftEpoch, 0, 0, { findings: 'via facade' }), RAD_A, null, B2_REQUEST_FACTS);
   assert.deepEqual([saved.state.rs, saved.state.holder], ['T', null], 'a commit releases the hold');
   assert.deepEqual((await facade.versions(s.uid, RAD_A)).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
   const draft = await facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 1, { findings: 'next', baseVersion: 1 }), RAD_A, null, B2_REQUEST_FACTS);
@@ -890,7 +890,7 @@ test('SPLIT-22 the facade starts its institutions concern and each public call a
 test('SPLIT-23 the facade passes every refusal through unchanged: status, code, and nothing written', async () => {
   const w = world();
   const facade = w.facade(), s = w.study();
-  await refused(() => facade.commitReport(s.uid, commitBody(TECH_A, 'save', s.draftEpoch, 0, 0), TECH_A, null), 403);
+  await refused(() => facade.commitReport(s.uid, commitBody(TECH_A, 'save', s.draftEpoch, 0, 0), TECH_A, null, B2_REQUEST_FACTS), 403);
   await refused(() => facade.patchState(s.uid, { rs: 'A' }, TECH_A), 400);
   await refused(() => facade.putReport(s.uid, draftBody(RAD_A, randomUUID(), 0, { findings: 'x' }), RAD_A, null, B2_REQUEST_FACTS), 409, 'REPORT_DRAFT_CONFLICT');
   await refused(() => facade.audits(s.uid, 10, RAD_B), 404);
@@ -913,7 +913,7 @@ test('SPLIT-24 a split UID is refused by every report entry with STUDY_IDENTITY_
     () => facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 0, { findings: 'x' }), RAD_A, null, B2_REQUEST_FACTS),
     () => facade.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${s.draftEpoch}:0` }, RAD_A, null),
     () => facade.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null),
-    ...['save', 'approve', 'reset', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null)),
+    ...['save', 'approve', 'reset', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null, B2_REQUEST_FACTS)),
     () => facade.readDraft(s.uid, RAD_A, B2_REQUEST_FACTS), () => facade.hold(s.uid, RAD_A), () => facade.dictationGate(s.uid, RAD_A),
     () => facade.versions(s.uid, RAD_A), () => facade.reportCitations(s.uid, RAD_A), () => facade.reportStructure(s.uid, RAD_A),
     () => facade.reportVersionCitations(s.uid, '1', RAD_A), () => facade.clinicianReportRead(s.uid, CLIN_A),
