@@ -514,6 +514,10 @@ class RelatedModePage(unittest.TestCase):
     # ── PAGE-01/02/03: entry, the two cards, the Source ──
     def test_w5_entry_from_a_clean_target_shows_two_cards_hides_the_editor_and_focuses_the_title(self):
         self.open()
+        # Phase B startup order: the mode is mounted before its first eager consumer. Both CVR areas call `blocked()` while
+        # they mount; had the mode not existed yet, their mount would have failed into the page's fallback toast.
+        self.assertEqual([True, True, True], self.js("[relatedMode.active() === false, criticalResults !== null, "
+                                                     "criticalInbox !== null]"))
         self.open_target()
         writes = len(self.site.flow_puts)
         self.enter()
