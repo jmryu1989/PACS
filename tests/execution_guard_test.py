@@ -752,17 +752,6 @@ class AutomaticInspectionCallerTests(unittest.TestCase):
                          (failed['pid'], failed['started_at'], None))
         self.assert_inspected_and_reopened('ci-probe', failed)
 
-    def test_emr_b_mutant_driver_inspects_a_set_aside_failure(self):
-        spec = importlib.util.spec_from_file_location('emr_b_mutants_under_test', ROOT / 'tests/emr/b/mutants.py')
-        mutants = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mutants)
-        _, failed = self.fail_then_other_environment('emr-b-mutant-probe', 'tests/emr/b/live.py')
-        out = self.path / 'out'
-        out.mkdir()
-        with patch.object(mutants, 'leftovers', return_value=[]):
-            outcome = mutants.release_gate(ROOT, 'emr-b-mutant-probe', 1, self.path / 'run.log', out, 'M00')
-        self.assertEqual(outcome['marker'], 'released', outcome)
-        self.assert_inspected_and_reopened('emr-b-mutant-probe', failed)
 
 
 class ExecutionGuardTests(unittest.TestCase):

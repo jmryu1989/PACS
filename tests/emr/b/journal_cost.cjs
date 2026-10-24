@@ -1,71 +1,69 @@
-/* Opus r4 review: cost of ONE failure-journal record() as the journal grows, r3 (in-memory index, loaded once at start)
- * vs r4c (persistent coordinator index, incrementally refreshed for other writers).
- * Usage: node journal_cost.cjs <r3 checkout> <candidate checkout> <out.json>. Synthetic records only. */
-const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), crypto = require('node:crypto');
-const { performance } = require('node:perf_hooks');
-const { spawnSync } = require('node:child_process');
-const ts = require(process.env.KIN_EMR_TYPESCRIPT || path.resolve(__dirname, '../../../api/node_modules/typescript'));
-require.extensions['.ts'] = (m, f) => m._compile(ts.transpileModule(fs.readFileSync(f, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, esModuleInterop: true }, fileName: f }).outputText, f);
-const [r3, r4b, out] = process.argv.slice(2);
-const J3 = require(path.join(r3, 'api/src/emr-runtime/failure-journal.ts'));
-const J4 = require(path.join(r4b, 'api/src/emr-runtime/failure-journal.ts'));
-const CO = require(path.join(r4b, 'api/src/emr-runtime/coordinator.ts')), EW = require(path.join(r4b, 'api/src/emr-runtime/external-writer.ts'));
-function seed(dir, n) {
-  fs.mkdirSync(path.join(dir, 'journal'), { recursive: true });
-  const lines = [];
-  for (let i = 0; i < n; i++) {
-    const rec = { id: 'append-rolled-back:viewing:' + crypto.randomUUID() + ':business-rollback', kind: 'append-rolled-back', at: '2026-10-10T00:00:00.000Z', body: { eventId: crypto.randomUUID(), cause: 'business-rollback' } };
-    const text = JSON.stringify(rec); lines.push(JSON.stringify({ ...rec, sha256: crypto.createHash('sha256').update(text).digest('hex') }));
+'use strict';
+// FAIL-01 primitive tests. Real local files; no claim of Linux ENOSPC/failed-fsync
+// or process-kill qualification. DB idempotence is tested at the PG boundary.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { randomUUID } = require('node:crypto');
+const { FailureSpool } = require(path.join(process.env.KIN_B2R_BUILD, 'emr-runtime/journal-file.js'));
+const root = path.resolve(__dirname,'../../../tmp/emr-b2-replace-20261023/spool-tests');
+const record = () => ({id:randomUUID(),operationId:null,eventId:randomUUID(),at:new Date().toISOString(),cause:'ledger-unreachable'});
+async function fixture(work) {
+  const directory = path.join(root,randomUUID());
+  const file = path.join(directory,'failure-spool.jsonl');
+  let spool = new FailureSpool(directory), passed = false;
+  try {
+    await work({directory,file,get spool(){return spool;},restart:async()=>{
+      await spool.close(); spool = new FailureSpool(directory);
+    }});
+    passed = true;
+  } finally {
+    await spool.close();
+    if (passed) {
+      for (const owned of [file,file+'.partial']) if(fs.existsSync(owned)) fs.unlinkSync(owned);
+      fs.rmdirSync(directory);
+    } else console.error('Preserved failed spool fixture: '+directory);
   }
-  // The retained fixture represents an already durable journal. Its initial
-  // megabytes must not be flushed by the first measured append's fdatasync.
-  const fd=fs.openSync(path.join(dir,'journal','failure-journal.jsonl'),'w');
-  try{fs.writeFileSync(fd,lines.length?lines.join('\n')+'\n':'');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
 }
-function sample(label, rep, n) {
-  const make = label === 'r3' ? d => new J3.FailureJournal(d) : d => new J4.FailureJournal(d,
-    new CO.StateCoordinator(d, process.platform === 'linux' ? undefined : request => EW.executeExternal(request)));
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus-jcost-')); seed(dir, n);
-    try {
-      const t0 = performance.now(), j = make(dir), open_ms = performance.now() - t0, times = [];
-      let readBytes=0;
-      const fileRead=fs.readFileSync,rangeRead=fs.readSync;
-      fs.readFileSync=function(...args){const v=fileRead.apply(this,args);readBytes+=Buffer.byteLength(v);return v;};
-      fs.readSync=function(...args){const n=rangeRead.apply(this,args);readBytes+=n;return n;};
-      try {
-        for (let i = 0; i < 20; i++) {
-          const s = performance.now();
-          j.record('ledger-unavailable:transaction:' + crypto.randomUUID() + ':commit-unknown', 'ledger-unavailable', { eventId: crypto.randomUUID(), cause: 'commit-unknown' });
-          times.push(performance.now() - s);
-          // One observed retained-prefix read already violates the IO contract.
-          // Preserve that counterexample instead of repeating a known O(n)
-          // regression until a timeout obscures its behavioural failure.
-          if (label === 'r4d' && readBytes > 0) break;
-        }
-      } finally { fs.readFileSync=fileRead;fs.readSync=rangeRead; }
-      times.sort((a, b) => a - b);
-      const bytes = fs.statSync(path.join(dir, 'journal', 'failure-journal.jsonl')).size;
-      return { version: label, rep, records: n, journal_mib: +(bytes / 1048576).toFixed(1), open_ms: +open_ms.toFixed(1), read_bytes:readBytes,
-        p50:times[Math.ceil(times.length*.5)-1],p95:times[Math.ceil(times.length*.95)-1],p99:times[Math.ceil(times.length*.99)-1],samples:times };
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-}
-if (out === '--sample') {
-  const [label, rep, n] = process.argv.slice(5);
-  console.log(JSON.stringify(sample(label, Number(rep), Number(n))));
-} else {
-  const rows = [], reps = Number(process.env.JOURNAL_REPS || 5);
-  for (let rep = 0; rep < reps; rep++) {
-    const sizes = [0, 10000, 150000], offset = rep % sizes.length;
-    const order = [...sizes.slice(offset), ...sizes.slice(0, offset)]; if (rep % 2) order.reverse();
-    for (const n of order) for (const label of rep % 2 ? ['r4d', 'r3'] : ['r3', 'r4d']) {
-      // A state owner's lifetime ends with its process. Isolate each fixture's
-      // lifetime so deleted journals do not leave their retained indexes and
-      // ownership fences alive during the next, unrelated size measurement.
-      const run = spawnSync(process.execPath, [__filename, r3, r4b, '--sample', label, String(rep), String(n)],
-        { encoding: 'utf8', timeout: 60000 });
-      if (run.status !== 0) throw new Error(`journal sample failed: ${run.stderr || run.error}`);
-      const row = JSON.parse(run.stdout); rows.push(row); console.log(JSON.stringify(row));
-    }
-  }
-  fs.writeFileSync(out, JSON.stringify(rows, null, 1));
-}
+test('failure spool retains complete facts across a failed import and repeated restart',async()=>fixture(async f=>{
+  const a=record(), b=record();
+  await f.spool.append(a); await f.spool.append(b);
+  const imported = new Map();
+  await assert.rejects(f.spool.replay(async row=>{
+    if(row.id===b.id)throw new Error('Database unavailable');
+    imported.set(row.id,row);
+  }),/Database unavailable/);
+  assert.ok(fs.statSync(f.file).size>0);
+  await f.restart();
+  assert.equal(await f.spool.replay(async row=>imported.set(row.id,row)),2);
+  assert.equal(imported.size,2); assert.deepEqual(imported.get(a.id),a);
+  assert.equal(fs.statSync(f.file).size,0);
+  await f.restart(); assert.equal(await f.spool.replay(async()=>{throw new Error('Unexpected duplicate');}),0);
+}));
+test('incomplete final bytes survive the archive-before-truncate crash cut',async()=>fixture(async f=>{
+  const a=record(); await f.spool.append(a);
+  const partial=Buffer.from('{"id":"incomplete');
+  fs.appendFileSync(f.file,partial);
+  // A prior restart saved these bytes but died before truncating the main file.
+  fs.writeFileSync(f.file+'.partial',partial);
+  await f.restart();
+  const seen=[]; assert.equal(await f.spool.replay(async r=>seen.push(r)),1);
+  assert.equal(seen[0].id,a.id); assert.deepEqual(fs.readFileSync(f.file+'.partial'),partial);
+  assert.equal(fs.statSync(f.file).size,0);
+  await f.spool.append(record());
+  await f.restart(); assert.equal(await f.spool.replay(async()=>{}),1);
+}));
+test('append waits for import before accepting another fact and close refuses new work',async()=>fixture(async f=>{
+  await f.spool.append(record());
+  let release,started;
+  const hold=new Promise(resolve=>release=resolve), observed=new Promise(resolve=>started=resolve);
+  const replay=f.spool.replay(async()=>{started();await hold;});
+  await observed;
+  const b=record();let accepted=false;
+  const append=f.spool.append(b).then(()=>{accepted=true;});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(accepted,false);
+  release(); await replay; await append;
+  const seen=[];await f.spool.replay(async r=>seen.push(r));assert.equal(seen[0].id,b.id);
+  await f.spool.close();await assert.rejects(f.spool.append(record()),/FailureSpoolClosed/);
+}));

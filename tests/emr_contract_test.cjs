@@ -833,40 +833,16 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.equal(D.extendRetention(record, extension({ at: new Date(Date.parse(end) - 1).toISOString() })).extension.at, '2031-10-04T14:59:59.999Z');
     assert.throws(() => D.extendRetention(record, extension({ at: end })));
   });
-  test('TEST-EMR-06/07-A F05: hash chain detects mutation, internal omission and missing tail; expiry checkpoint preserves verification', () => {
-    const pos = e => ({ sequence: e.sequence, hash: e.hash });
-    const a = A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, access());
-    const b = A.sealAccessEvent(pos(a), access({ eventId: 'event-2' }));
-    assert.equal(b.previousHash, a.hash);
-    assert(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [a, b], pos(b)));
-    const changed = clone(b); changed.payload.event.targets[0].versionId.value = 'changed';
-    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [a, changed], pos(b)), false);
-    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [b], pos(b)), false);
-    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [a], pos(b)), false);
-    const checkpoint = A.sealAccessExpiry(pos(b), pos(a), 1, '2028-10-05T15:00:00.000Z');
-    assert(A.verifyAccessChain(pos(a), [b, checkpoint], pos(checkpoint)));
-    assert(!JSON.stringify(checkpoint.payload).includes('SYN-1'));
-    assert.throws(() => A.sealAccessExpiry(pos(a), pos(b), 2, t0));
-  });
+  // DISPOSED_D557: chain rewrite/omission/tail attack scenarios are removed by D1770.
   test('TEST-EMR-07/19-A D-1: a record change is in both streams, a viewing or a non-record event only in the viewing stream', () => {
-    const pos = e => ({ sequence: e.sequence, hash: e.hash });
     const viewing = access(), change = access({ eventId: 'change-1', surface: 'POST studies/:uid/report/commit', action: 'approve-sign', result: 'succeeded' });
     const refused = access({ eventId: 'refused-1', action: 'permission-refused', result: 'refused' });
     const noRecord = access({ eventId: 'no-record-1', targets: [] });
     assert.deepEqual(A.accessStreams(change), ['viewing', 'history']);
     for (const event of [viewing, refused, noRecord]) assert.deepEqual(A.accessStreams(event), ['viewing'], event.eventId);
     assert.deepEqual([change, viewing, refused].map(e => A.statutoryAct(e)), ['기재', '열람', 'none']);
-    // Each stream is its own chain; the history entry carries its own payload kind, so moving an entry between streams fails.
-    const v1 = A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, change), h1 = A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, change, 'history');
-    assert.equal(v1.payload.kind, 'access'); assert.equal(h1.payload.kind, 'history'); assert.notEqual(v1.hash, h1.hash);
-    assert(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [h1], pos(h1), 'history'));
-    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [h1], pos(h1), 'viewing'), false);
-    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [v1], pos(v1), 'history'), false);
-    assert.throws(() => A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, viewing, 'history'), { code: 'HistoryStreamRefused' });
-    // The history stream has no prefix expiry: a checkpoint never verifies there.
-    const checkpoint = A.sealAccessExpiry(pos(h1), pos(h1), 1, t0);
-    assert.equal(A.verifyAccessChain(pos(h1), [checkpoint], pos(checkpoint), 'history'), false);
-    assert.throws(() => A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, change, 'other'));
+    // PG-03 independently verifies atomic dual rows; this pure boundary selects streams.
+
   });
   test('TEST-EMR-19-A D-21: each statutory part counts from its pinned starting event', () => {
     assert.deepEqual(Object.keys(D.PERIOD_START).sort(), ['access-audit', 'acquired', 'critical-result-ack', 'delivery-receipt', 'extension', 'hold', 'inherited', 'other', 'received-order', 'signed']);
@@ -882,30 +858,27 @@ if (process.argv.includes('--emr-inventory-generator')) {
           snapshotFor(null, t0, [report])), { code: 'NewLawfulRecordEventRequired' }, `${kind} ${act}`);
     }
   });
-  test('TEST-EMR-07-A D-18: every event carries its server-bound work context; only an out-of-context access has a one-line reason', () => {
-    const pos = e => ({ sequence: e.sequence, hash: e.hash });
+  test('TEST-EMR-07-A D-18/D1770: server-bound work context preserves an optional one-line reason', () => {
     assert.deepEqual(A.parseAccessEvent(access()).context, { basis: 'assigned-reading', studyId: 'study-1', relatedStudyId: null, reason: null });
     const compare = { basis: 'same-patient-comparison', studyId: 'study-1', relatedStudyId: 'prior-1', reason: null };
     assert.deepEqual(A.parseAccessEvent(access({ context: compare })).context, compare);
     const glass = { basis: 'out-of-context', studyId: 'study-1', relatedStudyId: null, reason: '응급실 협진 요청 전화 확인' };
     assert.deepEqual(A.parseAccessEvent(access({ context: glass })).context, glass);
+    assert.deepEqual(A.parseAccessEvent(access({ context: { ...glass, reason: null } })).context,
+      { ...glass, reason: null }, 'ordinary viewing never requires a reason');
     const refusals = [
-      [{ ...glass, reason: null }, 'OutOfContextReasonRequired'], [{ ...glass, reason: 'line one\nline two' }, 'OutOfContextReasonRequired'],
-      [{ ...glass, reason: 'x'.repeat(A.OUT_OF_CONTEXT_REASON_MAX + 1) }, 'OutOfContextReasonRequired'], [{ ...glass, reason: ' padded' }, 'OutOfContextReasonRequired'],
+      [{ ...glass, reason: 'line one\nline two' }, 'OutOfContextReasonInvalid'],
+      [{ ...glass, reason: 'x'.repeat(A.OUT_OF_CONTEXT_REASON_MAX + 1) }, 'OutOfContextReasonInvalid'], [{ ...glass, reason: ' padded' }, 'OutOfContextReasonInvalid'],
       [{ ...compare, reason: 'not needed' }, 'ReasonOnlyOutOfContext'], [{ ...compare, relatedStudyId: 'study-1' }, 'WorkContextStudyRequired'],
       [{ basis: 'assigned-reading', studyId: null, relatedStudyId: null, reason: null }, 'WorkContextStudyRequired'],
       [{ basis: 'service-job', studyId: null, relatedStudyId: null, reason: null }, 'WorkContextMismatch'],
     ];
     for (const [context, code] of refusals) assert.throws(() => A.parseAccessEvent(access({ context })), { code }, JSON.stringify(context));
-    // The cause and its context are one fact; a context is required and is part of the hashed event.
+    // The cause and its context describe the same observed work.
     assert.throws(() => A.parseAccessEvent(access({ cause: 'background-fetch', context: access().context })), { code: 'WorkContextMismatch' });
     assert(A.parseAccessEvent(access({ cause: 'background-fetch' })));
     const bare = access(); delete bare.context; assert.throws(() => A.parseAccessEvent(bare));
-    const first = A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, access({ context: glass }));
-    const other = A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, access({ context: { ...glass, reason: '다른 사유' } }));
-    assert.notEqual(first.hash, other.hash);
-    const changed = clone(first); changed.payload.event.context.reason = '다른 사유';
-    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [changed], pos(first)), false);
+    // DISPOSED_D557: altered-reason hash-chain detection belongs to the removed engine.
   });
   test('TEST-EMR-01/17-A D-3: the stored author role decides a signed Tech Note from an unsigned administrator note', () => {
     const note = stored('tech-note', 'note-r', 'n1', t0), admin = stored('operational-note', 'note-a', 'a1', t0);
@@ -940,9 +913,12 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => A.parseAccessEvent(event));
     assert.deepEqual(A.parseAccessEvent(access({ targets: [] })).targets, []);
   });
-  test('TEST-EMR-07-A P09-success-with-unresolved-proxy-ip: member success always needs a trusted proxy', () => {
+  test('TEST-EMR-07-A P09-success-with-unresolved-proxy-ip: B2 v2 records observed location or leaves it unknown', () => {
     assert(A.parseAccessEvent(access()));
-    assert.throws(() => A.parseAccessEvent(access({ trustedProxyIp: { status: 'unresolved', reason: 'not-observed' } })));
+    const unknown = { status: 'unresolved', reason: 'not-observed' };
+    assert.deepEqual(A.parseAccessEvent(access({ trustedProxyIp: unknown })).trustedProxyIp, unknown);
+    const peer = known({ address: '127.0.0.1', source: 'request-peer' });
+    assert.deepEqual(A.parseAccessEvent(access({ trustedProxyIp: peer })).trustedProxyIp, peer);
     assert(A.parseAccessEvent(access({ action: 'permission-refused', result: 'refused', trustedProxyIp: { status: 'unresolved', reason: 'not-observed' } })));
   });
   test('TEST-EMR-07-A P08-print-done-without-preceding-event: print completion is linked to its opened event', () => {
@@ -1734,20 +1710,8 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const result = spawnSync(process.execPath, ['-e', script], { cwd: root, encoding: 'utf8', timeout: 30000 });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
   });
-  test('TEST-EMR-01/19-A R4-09: TypeScript symbols restrict adapter composition calls to the server composition module', () => {
-    const program = ts.createProgram(parsed.fileNames, parsed.options), checker = program.getTypeChecker();
-    const resolve = symbol => symbol?.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-    const file = program.getSourceFiles().find(f => f.fileName.replaceAll('\\', '/').endsWith('/emr-contract/composition.ts'));
-    const compose = checker.getExportsOfModule(checker.getSymbolAtLocation(file)).find(s => s.name === 'composeEmrAdapters');
-    assert(compose);
-    for (const source of program.getSourceFiles().filter(f => parsed.fileNames.includes(f.fileName))) {
-      const visit = node => {
-        if (ts.isCallExpression(node) && resolve(checker.getSymbolAtLocation(node.expression)) === compose) assert.equal(source, file);
-        ts.forEachChild(node, visit);
-      };
-      visit(source);
-    }
-  });
+  // D73: runtime composition/refusal and actual AppModule startup cover this boundary;
+  // internal source-file ownership is not a behavior assertion.
   test('TEST-EMR-13/19-A R4-11 Y2c: full processing claims cannot publish a clinical Addendum after expiry under a hold', () => {
     const report = makeRecord('report-1', ['report-version'], t0, 'v1'), held = holdRecord(report);
     const at = '2040-01-01T00:00:00.000Z', f = finalized(), archive = L.archiveFinalizedReport(f, archiveCommand());

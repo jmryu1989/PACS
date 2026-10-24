@@ -419,17 +419,25 @@ class Pure(unittest.TestCase):
         # every attempt phase, a prepared, a Sent and a still-sending download, and the gate's four Study and four SOP reservations.
         # W5-API added ReportDraftInsertReceipt (48 migration files, 53 public tables with S9-U4b) with three synthetic receipts:
         # refused, applied and discarded.
-        self.assertEqual(len(transfer.MIGRATIONS), 48)
+        self.assertEqual(len(transfer.MIGRATIONS), 49)
         self.assertEqual(len(transfer.TABLES), 53)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
         self.assertEqual({name: len(value) for name, value in emr.items()},
-                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 2, 'clause_version': 1, 'commit_marker': 2,
-                          'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1, 'order_fact': 1})
+                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'clause_version': 1,
+                          'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1, 'order_fact': 1,
+                          'ledger_metadata': 1, 'operation': 2, 'attempt': 2, 'attempt_outcome': 2, 'entry_receipt': 2,
+                          'failure_entry': 0, 'disposal_fact': 0})
         first, second = emr['access_entry']
-        self.assertEqual((first['previous_hash'], second['previous_hash']), ('0'*64, first['hash']))
-        self.assertEqual(emr['chain_head'][0]['hash'], second['hash'])
+        for entry, operation, attempt, outcome, receipt in zip(emr['access_entry'], emr['operation'], emr['attempt'],
+                emr['attempt_outcome'], emr['entry_receipt']):
+            self.assertEqual({row['operation_id'] for row in (entry, operation, attempt, outcome, receipt)}, {operation['operation_id']})
+            self.assertEqual(receipt['entry_id'], entry['entry_id'])
+            self.assertEqual(receipt['event_id'], operation['event_id'])
+            self.assertEqual(receipt['attempt_id'], attempt['attempt_id'])
+            self.assertEqual(outcome['outcome'], 'committed')
+            self.assertFalse(operation['pending'])
         # No deadline is stored on an entry (the one retention rule computes it when destruction is considered).
         self.assertFalse({'expires_at', 'expiry', 'deadline'} & (set(first) | set(second)))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
@@ -694,12 +702,12 @@ class Pure(unittest.TestCase):
             state = next(i for i, text in enumerate(sql) if 'INSERT INTO "StudyState"' in text)
             report = next(i for i, text in enumerate(sql) if 'INSERT INTO "Report" ' in text)
             self.assertLess(state, report)
-            # EMR-B1: every expected ledger fact is seeded too, schema-qualified, and the head names the last entry.
+            # The clean migration creates metadata; the fixture assigns its installation, then inserts the ledger facts.
             for table, rows in transfer.expected_emr_rows().items():
                 inserted = [text for text in sql if 'INSERT INTO emr_access.'+table+' ' in text]
-                self.assertEqual(len(inserted), 0 if table == 'chain_head' else len(rows), table)
-            [head] = [text for text in sql if 'UPDATE emr_access.chain_head' in text]
-            self.assertIn(transfer.expected_emr_rows()['chain_head'][0]['hash'], head)
+                self.assertEqual(len(inserted), 0 if table == 'ledger_metadata' else len(rows), table)
+            [metadata] = [text for text in sql if 'UPDATE emr_access.ledger_metadata' in text]
+            self.assertIn(transfer.expected_emr_rows()['ledger_metadata'][0]['installation_id'], metadata)
             for text in sql:
                 if text.startswith('INSERT INTO "ReportVersion"'): self.assertNotIn('"id"', text.split(' SELECT ')[0])
 

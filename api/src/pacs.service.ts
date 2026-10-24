@@ -1,4 +1,5 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
@@ -18,6 +19,8 @@ import { PacsHold } from './pacs/hold';
 import { PacsClinician } from './pacs/clinician';
 import { PacsReportEvidence } from './pacs/report-evidence';
 import { PacsReportDraft } from './pacs/report-draft';
+import type { DraftRequestFacts } from './pacs/report-draft';
+export type { DraftRequestFacts } from './pacs/report-draft';
 import { PacsReportCommit } from './pacs/report-commit';
 import type { Caller } from './pacs/access';
 
@@ -30,7 +33,7 @@ export { ADMIN_METRIC_KEYS, ADMIN_METRIC_DAY_MS, ADMIN_METRIC_WEEK_MS, orthancDi
 export type { AdminMetricFailure, AdminMetricStorage, AdminMetricStudies } from './pacs/metrics';
 
 /**
- * PACS 업무 API의 facade. 컨트롤러·서비스가 주입받는 Nest provider는 이것 하나다(5개 의존성, 기존 constructor 순서).
+ * PACS 업무 API의 facade. 컨트롤러·서비스는 이 provider를 통해 concern과 초안의 PG 원장을 사용한다.
  * 구현은 api/src/pacs/ 의 concern 객체에 있고, 그 객체는 여기서만 만든다 — Nest provider가 아니므로 DI 그래프는
  * 분할 전과 같다. 공개 메서드는 같은 이름의 concern 메서드에 인수를 순서 그대로 넘긴다. 지도는 api/src/pacs/README.md.
  */
@@ -58,7 +61,8 @@ export class PacsService implements OnModuleInit {
     private keycloak: KeycloakService, private studyAccess:StudyAccessService,
     // 인용이 가리키는 소견의 가독은 소견 쪽 관문이 판정한다. 판독문 관문(기관·예비판독)은
     // 그보다 넓어서, 그것만으로 통과시키면 읽을 수 없는 비교 검사가 인용을 통해 새어 나온다.
-    private findings: FindingService) {
+    private findings: FindingService,
+    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort) {
     this.accessConcern = new PacsAccess(this.prisma, this.studyAccess);
     this.institutionsConcern = new PacsInstitutions(this.prisma, this.orthanc, this.keycloak, this.studyAccess, this.accessConcern);
     this.preferencesConcern = new PacsPreferences(this.prisma);
@@ -72,7 +76,7 @@ export class PacsService implements OnModuleInit {
     this.holdConcern = new PacsHold(this.prisma, this.studyAccess, this.accessConcern);
     this.clinicianConcern = new PacsClinician(this.prisma, this.studyAccess, this.accessConcern, this.worklistConcern);
     this.reportEvidenceConcern = new PacsReportEvidence(this.prisma, this.studyAccess, this.findings, this.accessConcern);
-    this.reportDraftConcern = new PacsReportDraft(this.prisma, this.studyAccess, this.accessConcern, this.auditConcern, this.reportEvidenceConcern);
+    this.reportDraftConcern = new PacsReportDraft(this.prisma, this.studyAccess, this.accessConcern, this.auditConcern, this.reportEvidenceConcern, this.ledger);
     this.reportCommitConcern = new PacsReportCommit(this.keycloak, this.studyAccess, this.reportEvidenceConcern, this.reportDraftConcern);
   }
 
@@ -317,8 +321,8 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── report-draft (api/src/pacs/report-draft.ts) ──
-  async readDraft(uid: string, c: Caller, insertRequestId?: string) {
-    return this.reportDraftConcern.readDraft(uid, c, insertRequestId);
+  async readDraft(uid: string, c: Caller, facts: DraftRequestFacts, insertRequestId?: string) {
+    return this.reportDraftConcern.readDraft(uid, c, facts, insertRequestId);
   }
 
   async dictationGate(uid: string, c: Caller) {
@@ -329,8 +333,8 @@ export class PacsService implements OnModuleInit {
     return this.reportDraftConcern.dictationAudit(uid, c, detail);
   }
 
-  async putReport(uid: string, body: any, c: Caller, session: string | null) {
-    return this.reportDraftConcern.putReport(uid, body, c, session);
+  async putReport(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
+    return this.reportDraftConcern.putReport(uid, body, c, session, facts);
   }
 
   async discardDraft(uid: string, body: any, c: Caller, session: string | null) {

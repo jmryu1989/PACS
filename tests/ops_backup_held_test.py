@@ -115,6 +115,10 @@ class FakeHost:
     def text(self, args, **kwargs):
         self.commands.append(list(args))
         joined = " ".join(args)
+        if "emr_access.restore_expiry_sweep()" in joined:
+            return json.dumps({"ran": True, "complete": True, "checkedAt": "2026-10-23T00:00:00Z",
+                               "deletedEntries": 0, "deletedFailures": 0,
+                               "retainedByDutyOrHold": 0, "historyRetainedUnknownLifetime": 0})
         if args[:2] == ["docker", "inspect"]:
             return json.dumps(self.containers())
         if "pg_stat_activity" in joined:
@@ -381,10 +385,33 @@ class HeldCaptureTests(unittest.TestCase):
         (record,) = directory.glob("rehearsal-*.json")
         result = json.loads(record.read_text())
         self.assertTrue(result["success"] and result["emr"]["database_state_verified"])
+        self.assertTrue(result["emr"]["expiry_sweep"]["ran"])
+        self.assertTrue(result["emr"]["expiry_sweep"]["complete"])
         started = next(command for command in host.commands if command[:3] == ["docker", "run", "-d"])
         self.assertIn("POSTGRES_USER=kin", started)
         self.assertTrue(any("CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner" in " ".join(command) for command in host.commands))
         self.assertFalse(any("cluster-roles.sql" in str(command) or "--no-owner" in command for command in host.commands))
+
+    def test_d1796_held_restore_keeps_unknown_history_and_requires_the_sweep(self):
+        receipt = {"ran": True, "complete": True, "historyRetainedUnknownLifetime": 1}
+        for outcome in (receipt, {**receipt, "ran": False}, RuntimeError("synthetic sweep failure")):
+            with self.subTest(outcome=outcome):
+                host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post")
+                directory = host.capture(label="emr-b1")
+                expiry = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+                succeeds = outcome is receipt
+                with host.bound(), patch.object(ops, "remove_owned_if_present"), \
+                        patch.object(ops, "restored_emr_expiry", **expiry):
+                    if succeeds:
+                        ops.rehearse(directory)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            ops.rehearse(directory)
+                (record,) = directory.glob("rehearsal-*.json")
+                result = json.loads(record.read_text())
+                self.assertIs(result["success"], succeeds)
+                if succeeds:
+                    self.assertEqual(result["emr"]["expiry_sweep"], receipt)
 
     @unittest.skipUnless(os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0, "Linux root (the protected entry's user)")
     def test_12_root_captures_into_the_operating_accounts_private_backup_root_and_gives_the_capture_to_it(self):
@@ -1074,6 +1101,46 @@ class RealClusterTests(unittest.TestCase):
         result = ops.replay_roles(target, catalog, shape="pre", credentials={"kin": "r4-synthetic-fixture-only"})
         self.assertEqual(sorted(result["created"]), ["kin_legacy_group", "kin_legacy_reader"])
         self.assertEqual(ops.role_catalog(target)["memberships"], catalog["memberships"])
+
+
+
+class PgLedgerCopyRetirement(unittest.TestCase):
+    """REQ-B2R-05: no ending by silence or unknown dependent-copy status."""
+    def copy(self, copy_id='backup', **changes):
+        value = ops.copy_manifest(copy_id=copy_id, location='owned-synthetic', custodian='fixture',
+            manifest={'sha256': {'kin.dump': 'a'*64}}, installation_id='synthetic-installation',
+            data_classes=['RET-06', 'RET-11'], restorable=False,
+            disposition={'action': 'existing rotation removed archive', 'verification': 'fixture-receipt'})
+        return {**value, **changes}
+
+    def evidence(self, copies):
+        result = {name: {'met': True, 'evidence': 'synthetic-receipt'} for name in ops.RETIREMENT_CONDITIONS}
+        result['consumers_ended']['basis'] = 'installation decommissioned'
+        result['no_restorable_copy_remains'].update(copies=copies, inventory_complete=True)
+        return result
+
+    def test_purpose_and_complete_copy_ending(self):
+        def decide(copies):
+            return ops.retirement('synthetic-installation', self.evidence(copies))['retire']
+        self.assertTrue(decide([self.copy()]))
+        for changes in ({'restorable': True}, {'restorable': None}, {'restorable': 0},
+                        {'disposition': None}, {'dependent_copy_ids': ['missing']},
+                        {'hold': {'basis': 'actual hold', 'closure_evidence': None}},
+                        {'installation_id': 'other'}):
+            with self.subTest(changes=changes):
+                self.assertFalse(decide([self.copy(**changes)]))
+        absent = self.copy(); del absent['restorable']
+        self.assertFalse(decide([absent]))
+        self.assertFalse(decide([None]))
+        self.assertTrue(decide([self.copy(dependent_copy_ids=['restore']), self.copy('restore')]))
+        for basis in ops.NOT_AN_ENDING:
+            facts = self.evidence([self.copy()]); facts['consumers_ended']['basis'] = basis
+            self.assertFalse(ops.retirement('synthetic-installation', facts)['retire'])
+        facts = self.evidence([]); facts['no_restorable_copy_remains'].pop('inventory_complete')
+        self.assertFalse(ops.retirement('synthetic-installation', facts)['retire'])
+        facts = self.evidence([]); facts['retired_from_service']['met'] = 1
+        with self.assertRaises(ValueError):
+            ops.retirement('synthetic-installation', facts)
 
 
 if __name__ == "__main__":
