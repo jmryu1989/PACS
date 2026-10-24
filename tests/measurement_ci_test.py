@@ -225,7 +225,7 @@ class MeasurementCiTests(unittest.TestCase):
 
     def test_emr_b_profile_runs_the_declared_ledger_cases_only_in_its_own_workflow(self):
         """EMR-B1 (order section 10): one declared ledger suite including D941 live latency, a 3600s planned ceiling within
-        its dedicated 65 minute deadline, a separate artifact and project, and only emr-b.yml requests the profile."""
+        its dedicated 65 minute deadline, a separate artifact and project, and only the emr-b job requests the profile."""
         import ast
         import yaml
         profile = ci.PROFILES['emr-b']
@@ -250,9 +250,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
                          declaration['cases']['live']['B2R'])
         self.assertEqual([row['job'] for row in self.catalog.profile_bindings()['emr-b']], ['emr-b'])
-        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
-        self.assertEqual(list(workflow['jobs']), ['emr-b'])
-        steps = workflow['jobs']['emr-b']['steps']
+        steps = self.catalog.job('emr-b')['steps']
         self.assertEqual(len([s for s in steps if '--profile emr-b' in str(s.get('run', ''))]), 1)
         uploads = [s for s in steps if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
         self.assertTrue(any('tests/e2e/artifacts/emr-b-ci' in str(s['with']['path']) for s in uploads))
@@ -1209,7 +1207,7 @@ class MeasurementCiTests(unittest.TestCase):
                           # S9-U0E: the served generated OHIF config, in its own validate.yml job.
                           's9-u0e-served',
                           'gateway-e2e', 'critical-result-screens',
-                          # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
+                          # EMR-B1: the access ledger profile, run only by the emr-b job.
                           'emr-b',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).

@@ -75,7 +75,6 @@
       "tests/emr/b/throughput.cjs",
       "tests/emr/b/throughput_live.py",
       "tests/emr_contract_test.cjs",
-      "tests/emr/c/mutants.py",
       "tests/emr/f/contract_test.cjs",
       "tests/ops_backup_test.py",
       "tests/ops_backup_held_test.py",
@@ -87,7 +86,7 @@
       "tests/clinician_policy_fixtures.json",
       "tests/route_inventory_ts.js",
       "tests/ci_workflow_consumers_test.py",
-      ".github/workflows/emr-b.yml",
+      ".github/workflows/validate.yml",
       "api/src/emr-contract/routes.ts",
       "api/prisma/import-member-rights.cjs",
       "tests/ops_product_transfer_fixture.py",
@@ -152,6 +151,7 @@
   "routes": {
     "nest_routes": 138,
     "internal_surfaces": [
+      "server:doctor-key-management",
       "service:auth-session-sweep",
       "service:member-rights-import"
     ],
@@ -188,9 +188,10 @@
   },
   "migrations": {
     "added": [
-      "20261023180000_emr_pg_ledger"
+      "20261023180000_emr_pg_ledger",
+      "20261023200000_emr_server_signing",
+      "20261024120000_emr_d_online"
     ],
-    "count": 49,
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"
   },
@@ -641,6 +642,20 @@
         "test": [
           "RET-01",
           "RESTORE-01"
+        ]
+      },
+      {
+        "consumer": "REQUEST_FACTS final Guard capture and AdminController shared facts",
+        "transaction": "original request work; current AuthService authorization in business transaction",
+        "response": "revoked on response termination; no client-derived actor or fallback ingress",
+        "test": [
+          "tests/emr/request/request_facts_test.cjs",
+          "tests/emr/request/request_facts_live.py::RequestFactsLive"
+        ],
+        "collection": "node --test discovers the pure suite; run-tests.py discovers RequestFactsLive methods; no copied count",
+        "pending": [
+          "Module A clinical RF-3/RF-4",
+          "deployed nginx and Keycloak RF-2/RF-6"
         ]
       }
     ],

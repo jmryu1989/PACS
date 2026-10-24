@@ -197,7 +197,12 @@
       "scripts/record-run.py",
       "tests/e2e/requirements.txt",
       "tests/emr/c/**",
-      "worklist-v0/hpacs-lite/offline-report.js"
+      "api/src/emr-runtime/**",
+      "api/src/emr-clinical/**",
+      "tests/emr/b/pg_ledger_restore_test.py",
+      "tests/emr/d/**",
+      "tests/live_test_gate.py",
+      "scripts/run-tests.py"
     ],
     "emr-d": [
       "api/Dockerfile*",
@@ -814,6 +819,25 @@
       "tests/measurement_ci*.py",
       "tests/execution_selection_test.py",
       "tests/ci_workflows.py"
+    ],
+    "emr-b": [
+      "api/**",
+      "emr/**",
+      "docker-compose*.yml",
+      "proxy/**",
+      "keycloak/**",
+      "scripts/emr-compose.py",
+      "scripts/run-tests.py",
+      "scripts/record-run.py",
+      "scripts/ops_backup.py",
+      "tests/emr/**",
+      "tests/auth_session_service_test.cjs",
+      "tests/report_draft_cas_service_test.cjs",
+      "tests/live/**",
+      "tests/live_test_gate.py",
+      "tests/measurement_ci.py",
+      "tests/candidate_ci.py",
+      "tests/e2e/**"
     ]
   }
 }

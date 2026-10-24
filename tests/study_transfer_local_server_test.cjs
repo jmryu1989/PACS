@@ -31,6 +31,8 @@ const { PrismaService } = require('/app/dist/prisma.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AuthService } = require('/app/dist/auth.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
+const { createRequestContext, REQUEST_CONTEXT_CAPTURE } = require('/app/dist/emr-runtime/request-context');
+const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
 const { readDicomPart10 } = require('/app/dist/dicom-part10-reader');
 
 process.env.KC_ISSUER = 'https://synthetic.test/auth/realms/kin';
@@ -536,6 +538,8 @@ function guardAuth(s) {
       return { ...payload, email: payload.sub.replace(/-sub$/, '') + '@synthetic.test', realm_access: { roles: r?.roles ?? [] }, groups: r ? ['/' + r.institution] : [] };
     },
     sessionRights: async session => { count('sessionRights'); return s.rights.get(session.sub) ?? null; },
+    // Transfer authorization has its own recheck; these cases do not consume facts.
+    bindCurrentAuthorization: () => async () => { throw new Error('Unexpected request-facts consumer'); },
     credentialsMissing: () => refusal(401, 'AUTH_CREDENTIALS_MISSING', '인증 정보가 없습니다'),
     requireCsrf: req => { if (req.headers['x-kin-csrf'] !== '1') throw refusal(403, 'AUTH_CSRF_REQUIRED', 'CSRF 확인값이 없습니다'); },
   };
@@ -565,7 +569,11 @@ async function harness(options = {}) {
   };
   const access = new StudyAccessService(s.prisma, { studyIdentityResources, ...(options.accessOrthanc ?? {}) }, {});
   class TestModule {}
+  const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), {
+    begin() { throw new Error('Transfer route unexpectedly opened request-facts work'); },
+  });
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
+    { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
     { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access },
     { provide: AuthService, useValue: options.realGuard ? guardAuth(s) : fakeAuth(s) },
     { provide: APP_GUARD, useClass: options.realGuard ? AuthGuard : TestGuard }] })(TestModule);
@@ -1758,11 +1766,19 @@ const casSql = sql => sql.includes("download->'attempts'->-1");
 async function heldArchive(h, as = RAD) {
   const study = await downloadStudy(h, 2), id = randomUUID();
   assert.equal((await prepare(h, study, id, as)).status, 200);
-  let served = 0, release;
+  let served = 0, release, ready;
   const held = new Promise(resolve => { release = resolve; });
-  h.orthanc.fault = async call => (call.path.endsWith('/file') && ++served === 2 ? (await held, null) : null);
+  const checkpointed = new Promise(resolve => { ready = resolve; });
+  h.orthanc.fault = async call => {
+    if (call.path.endsWith('/file') && ++served === 2) { ready(); await held; }
+    return null;
+  };
   const archive = h.request('GET', archivePath(study, id), { as });
-  await sleep(200);
+  // The writer checkpoints object 1 before requesting object 2; elapsed time cannot establish that boundary.
+  try {
+    await Promise.race([checkpointed, archive.then(() => { throw new Error('archive ended before its held source'); })]);
+    assert.deepEqual(h.s.op(id).download.attempts[0].objects.map(o => o.complete), [true], 'object 1 checkpointed before returning the held archive');
+  } catch (error) { release(); throw error; }
   const manifest = JSON.parse(h.s.op(id).download.manifestCanonical);
   return { study, id, archive, release, second: h.orthanc.instances.get(manifest.objects[1].orthancId).bytes };
 }
