@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { AdminService } from './admin.service';
+import { AdminAccessReview } from './admin-access-review';
 import { Caller, PacsService } from './pacs.service';
 import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import type { RightsRequestFacts } from './member-rights';
@@ -25,7 +26,8 @@ const caller = (req: any): Caller => ({
 @Controller('admin')
 export class AdminController {
   constructor(private admin: AdminService, private pacs: PacsService,
-    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort) {}
+    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
+    private readonly accessReview: AdminAccessReview) {}
 
   private async rightsFacts(req: any, surface: string): Promise<RightsRequestFacts> {
     const work = this.ledger.begin();
@@ -78,6 +80,7 @@ export class AdminController {
    */
   @Get('audit')
   auditEvents(@Query() query: any, @Req() req: any) {
+    if (query.report === 'access') return this.accessReview.read(query, caller(req));
     return this.admin.auditEvents(query, caller(req));
   }
 }
