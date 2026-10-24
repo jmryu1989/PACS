@@ -52,7 +52,13 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     await runtime.start(); ready = true;
     const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [] };
     class HttpFixture {}
+    // REQUEST_FACTS: the Guard captures into, and the report routes read, the shared request context;
+    // this direct fixture's loopback peer stands in for the deployment proxy.
+    const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = product('emr-runtime/request-context');
+    const { createRequestIngress } = product('emr-runtime/request-ingress');
+    const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
     Module({ controllers: [PacsController], providers: [PrismaService, PacsService, AuthService,
+      { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
       { provide: OrthancService, useValue: orthanc }, { provide: KeycloakService, useValue: {} },
       { provide: FindingService, useValue: {} },
       { provide: StudyAccessService, useFactory: db => new StudyAccessService(db, orthanc, {}), inject: [PrismaService] },
