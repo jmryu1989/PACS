@@ -131,7 +131,7 @@ function fixture({ state = STATE,
   const access = new PacsAccess(prisma, studyAccess), audit = new PacsAudit(prisma, studyAccess, access);
   const evidence = new PacsReportEvidence(prisma, studyAccess, findings, access);
   const drafts_ = withDraftRequestContext(new PacsReportDraft(prisma, studyAccess, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
-  const commit = new PacsReportCommit({ usersInGroupWithRole: async () => [] }, studyAccess, evidence, drafts_);
+  const commit = withDraftRequestContext(new PacsReportCommit({ usersInGroupWithRole: async () => [] }, studyAccess, evidence, drafts_), b2Ledger(prisma));
   const svc = { putReport: (...a) => drafts_.putReport(...a, null, null, null), commitReport: (...a) => commit.commitReport(...a),
     forceDiscardDrafts: (...a) => drafts_.forceDiscardDrafts(...a), reportStructure: (...a) => evidence.reportStructure(...a) };
   // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a

@@ -159,7 +159,9 @@ export const CLINICAL_SURFACES = freeze({
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Hidden'], to: 'Visible' },
   // reader-assignment.service.ts:79 write: allocation only, no free text exists to smuggle a clinical entry through.
   'assignment.write': { ...base, record: 'assignment', model: 'ReaderAssignment', route: 'POST studies/:uid/reader-assignment', opens: 'if-absent',
-    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], normalize: { readerSub: 'lower' }, textField: null, text: 'none', revisionField: 'revision', act: 'additional-entry',
+    // The allocation service checks its row revision under its own lock. A
+    // tele-channel close can move that revision without appending a D entry.
+    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], normalize: { readerSub: 'lower' }, textField: null, text: 'none', revisionField: null, act: 'additional-entry',
     paths: ['admin', 'technician', 'radiologist'].map(role => ({ relation: 'any' as const, role, capacity: S, kind: 'assignment' as const })),
     from: [null, 'Assigned', 'Unassigned'], to: 'reader' },
   // pacs.service.ts:1181 saveTechNote (base version, whole text, trimmed reason, attempt ID). The radiographer signs their
@@ -214,6 +216,8 @@ export interface ActorFacts {
  */
 export interface StudyFacts {
   studyId: string; managingInstitutionId: string; patient: PatientLinkSnapshot;
+  /** Current receiving institution, used only for its own operational allocation (D1190). */
+  teleInstitutionId?: string | null;
 }
 export interface ClinicalVersion {
   formatVersion: 'emr-clinical/1';

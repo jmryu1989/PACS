@@ -335,7 +335,7 @@ export class PacsController {
   /** 확정 — save / approve / addendum / reset / preliminary. 내용·버전·RS를 한 트랜잭션으로 */
   @Post('studies/:uid/report/commit')
   commit(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.commitReport(uid, body, caller(req), draftSession(req));
+    return this.withDraftFacts(req, facts => this.svc.commitReport(uid, body, caller(req), draftSession(req), facts));
   }
 
   /** 판독문 이력 */

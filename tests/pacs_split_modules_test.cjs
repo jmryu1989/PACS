@@ -331,7 +331,7 @@ function world() {
   const clinician = new PacsClinician(prisma, sa, access, worklist);
   const evidence = new PacsReportEvidence(prisma, sa, findings, access);
   const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
-  const commit = new PacsReportCommit(keycloak, sa, evidence, draft);
+  const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft), b2Ledger(prisma));
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
     studyState, techNote, hold, clinician, evidence, draft, commit };
   /** The PacsService facade over the same providers: it builds and owns its own concern graph. */

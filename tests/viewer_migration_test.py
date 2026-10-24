@@ -235,10 +235,10 @@ const {createRequestContext}=require('./dist/emr-runtime/request-context.js');
 const {createRequestIngress}=require('./dist/emr-runtime/request-ingress.js');
 const {IncomingMessage,ServerResponse}=require('node:http'),{Socket}=require('node:net');
 const requests=createRequestContext(createRequestIngress({proxyPeers:[]}),port);
-const withFacts=async run=>{const req=new IncomingMessage(new Socket()),res=new ServerResponse(req);
+const withFacts=async(run,method='PUT',route='studies/:uid/report')=>{const req=new IncomingMessage(new Socket()),res=new ServerResponse(req);
  requests.capture.capture(req,res,{issuer:'https://synthetic.invalid',subject:CALLER.sub,roles:CALLER.roles,
   institution:CALLER.institution,rightsVersion:1,binding:{method:'bearer',sessionRef:null}},
-  {method:'PUT',route:'studies/:uid/report',purpose:'clinical'},async()=>{});
+  {method,route,purpose:'clinical'},async()=>{});
  try{return await requests.source.withWork(req,request=>run({issuer:request.facts.issuer,ip:null,
   requestId:request.facts.requestId,request}));}finally{res.emit('finish');}};
 const entry=(n,prefix)=>({v:2,cid:prefix+String(n).padStart(12,'0'),field:'findings',findingId:FINDING,
@@ -269,7 +269,7 @@ const read=async()=>{const s=await p.studyState.findUnique({where:{uid:UID},sele
  return {epoch:s.draftEpoch,pre:{expectedOwner:OWNER,expectedRevision:s.draftEpoch+':'+(d?d.revision:0)},
   kept:d&&Array.isArray(d.citations)?d.citations.map(e=>e.cid):[]};};
 const put=async b=>{const r=await read();return withFacts(facts=>svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null,facts));};
-const commit=async b=>{const r=await read();return svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null);};
+const commit=async b=>{const r=await read();return withFacts(facts=>svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null,facts),'POST','studies/:uid/report/commit');};
 const force=async()=>{const r=await read();return svc.forceDiscardDrafts(UID,{expectedOwner:OWNER,expectedEpoch:r.epoch},CALLER,null);};
 /**
  * A failing assertion in here used to leave exit 1 and nothing else: ops.run raises on the exit code
