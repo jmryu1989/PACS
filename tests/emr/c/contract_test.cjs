@@ -1213,10 +1213,18 @@ test('C-C14 the C declaration matches the files and collected cases exactly; mis
   assert.equal(new Set(owned).size, owned.length);
   for (const file of owned) assert(fs.statSync(path.join(root, file)).isFile(), file);
   assert.deepEqual(owned.filter(p => unit.forbidden_single_writer.includes(p)), []);
+  // The expected set is derived, not counted: every file in the C module/test directories plus the concrete paths the
+  // actual CI selector assigns to the C job alone (scripts/ci-paths.json entries no other job or shared list names).
+  const ciPaths = JSON.parse(fs.readFileSync(path.join(root, 'scripts', 'ci-paths.json'), 'utf8'));
+  const elsewhere = new Set([...ciPaths.common, ...ciPaths.shared_browser,
+    ...Object.entries(ciPaths.jobs).filter(([job]) => job !== 'emr-c').flatMap(([, paths]) => paths)]);
+  const expected = ciPaths.jobs['emr-c'].filter(p => !p.includes('*') && !elsewhere.has(p));
   for (const dir of ['api/src/emr-report', 'api/src/emr-signature', 'tests/emr/c']) {
     const present = fs.readdirSync(path.join(root, dir), { withFileTypes: true }).filter(e => !(e.isDirectory() && e.name === '__pycache__')).map(e => dir + '/' + e.name);
     assert.deepEqual(present.filter(p => !owned.includes(p)), [], dir);
+    expected.push(...present);
   }
+  assert.deepEqual([...owned].sort(), [...new Set(expected)].sort());
   // Collected cases come from the installed TypeScript parser over the real test files.
   const collected = file => {
     const source = ts.createSourceFile(file, fs.readFileSync(path.join(root, file), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS), ids = [];
