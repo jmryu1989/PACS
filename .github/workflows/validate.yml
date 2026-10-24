@@ -38,6 +38,9 @@ jobs:
       - name: Request facts capture, ingress and ownership
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-pure --tree api/src --tree tests/emr/request -- node --test tests/emr/request/request_facts_test.cjs
+      - name: Module A local-read projection, outcome and audit replay
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pure --tree api/src --tree tests/emr/a -- node --test tests/emr/a/local_read_test.cjs
       - name: Production API image of this commit
         timeout-minutes: 15
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/image --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package-lock.json -- docker build --target production --build-arg "VCS_REF=${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" -t "kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" api
@@ -65,6 +68,9 @@ jobs:
       - name: Request facts through registered HTTP and PostgreSQL
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-live --tree api/src --tree tests/emr/request -- python3 scripts/run-tests.py --module tests/emr/request/request_facts_live.py --class RequestFactsLive --mode live --unit ci-request-facts --timeout 300
+      - name: Module A local-read recording on the real PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pg --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/recording_boundary_test.py --class LocalReadRecordingBoundary --mode live --unit ci-module-a-pg --timeout 300
       - name: EMR-B evidence (synthetic, sanitized)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -74,6 +80,7 @@ jobs:
             tests/e2e/artifacts/emr-b-ci/
             tmp/emr-b-ci/
             tmp/emr-b2-replace-20261023/
+            tmp/module-a-01-2/
             tmp/request-auth/
           if-no-files-found: error
           retention-days: 7
