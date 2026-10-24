@@ -49,10 +49,10 @@ async function main() {
     PUBLIC_ORIGIN: 'https://synthetic.invalid', KC_ADMIN_URL: 'http://127.0.0.1:' + provider.address().port,
     ORTHANC_URL: 'http://127.0.0.1:' + provider.address().port, ORTHANC_USER: 'synthetic', ORTHANC_PASS: randomUUID(),
     KC_JWKS_URL: 'http://127.0.0.1:' + provider.address().port + '/certs' });
-  const token = (subject = sub, iss = issuer, roles = ['admin'], extra = {}) => new jose.SignJWT({
+  const token = (subject = sub, iss = issuer, roles = ['admin'], extra = {}, expires = '10m') => new jose.SignJWT({
     email: 'equal-display@example.test', name: 'Equal Display', realm_access: { roles }, groups: ['/' + institution], ...extra,
   }).setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(iss).setSubject(subject).setAudience('kin-api')
-    .setIssuedAt().setExpirationTime('10m').sign(privateKey);
+    .setIssuedAt().setExpirationTime(expires).sign(privateKey);
   const witness = new PrismaClient({ datasources: { db: { url: process.env.KIN_B2R_WITNESS_URL } } });
   const runtime = new EmrRuntime(process.env.DATABASE_URL, process.env.KIN_B2R_SPOOL);
   let app, proxy, blocker, unlock;
@@ -232,10 +232,25 @@ async function main() {
     release.resolve(); await blocker; blocker = null;
     await runtime.control.drained(); assert.equal(runtime.control.live(), 0);
     assert.equal((await events()).length, 5, 'Cancelled identity lookup cannot begin an admin mutation');
+    // S7-U5 ④: token expiry is not a session end. The same live session's stored access token expires while this
+    // admitted request waits on its source (as when a refresh-ahead is slow); the change still commits and answers.
+    const still = await sessionHeaders();
+    const expiring = pendingHold = held = { reached: deferred(), release: deferred() };
+    const beforeExpiry = await current();
+    const answered = send(still.headers, { roles: ['radiologist', 'technician'], institution, verificationOverride: true });
+    await expiring.reached.promise;
+    await witness.authSession.update({ where: { sid: still.sid },
+      data: { accessToken: await token(sub, issuer, ['admin'], {}, Math.floor(Date.now() / 1000) - 1) } });
+    expiring.release.resolve();
+    const kept = await answered; pendingHold = null;
+    assert.equal(kept.status, 200, JSON.stringify(kept));
+    assert.equal((await current()).version, beforeExpiry.version + 1);
+    assert.equal((await events()).length, 6);
     console.log(JSON.stringify({ status: 'PASS', boundary: 'AppModule real signed Guard/session/bearer/admin HTTP + independent PG',
       cases: ['unobserved ingress stays unresolved under accepted B2 contract', 'observed ingress', 'immutable issuer/subject identity', 'server request correlation',
         'sessionRef preserved; bearer null', 'source wait: session replacement/institution/rights/isolation refuse',
-        'response finish revokes context', 'client disconnect during PG identity: no body, original work drains'],
+        'response finish revokes context', 'client disconnect during PG identity: no body, original work drains',
+        'stored token expiring during an admitted request is not a session end'],
       pending: ['Module A RF-3/RF-4', 'real Keycloak/nginx RF-2/RF-6'] }));
   } finally {
     (held ?? pendingHold)?.release.resolve();
