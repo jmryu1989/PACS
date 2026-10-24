@@ -479,7 +479,7 @@ test('TEST-WSU-08 every report write and read on a split UID is 409 STUDY_IDENTI
     discardDraft: w => w.pacs.discardDraft(SPLIT, { expectedOwner: owner(c), expectedRevision: EPOCH + ':0' }, c, null),
     forceDiscard: w => w.pacs.forceDiscardDrafts(SPLIT, { expectedOwner: owner(c), expectedEpoch: EPOCH }, c, null),
     ...Object.fromEntries(['save', 'approve', 'reset', 'defer', 'addendum'].map(action => ['commit-' + action,
-      w => w.pacs.commitReport(SPLIT, { ...draftBody(c), action, reason: 'SYN reason', removeCitationIds: [] }, c, null)])),
+      w => w.pacs.commitReport(SPLIT, { ...draftBody(c), action, reason: 'SYN reason', removeCitationIds: [] }, c, null, B2_REQUEST_FACTS)])),
     dictation: w => w.pacs.dictationGate(SPLIT, c),
     versions: w => w.pacs.versions(SPLIT, c),
     citations: w => w.pacs.reportCitations(SPLIT, c),
@@ -615,7 +615,7 @@ test('TEST-WSU-12 refusals keep rows, drafts and audits; an external resolution 
   const before = JSON.stringify([[...w.states], [...w.drafts], w.audits]);
   await w.pacs.listStudies(c);
   await rejects(w.pacs.putReport(SPLIT, draftBody(c, { expectedRevision: EPOCH + ':3' }), c, null, B2_REQUEST_FACTS), 409, 'STUDY_IDENTITY_UNRESOLVED');
-  await rejects(w.pacs.commitReport(SPLIT, { ...draftBody(c, { expectedRevision: EPOCH + ':3' }), action: 'approve', removeCitationIds: [] }, c, null), 409, 'STUDY_IDENTITY_UNRESOLVED');
+  await rejects(w.pacs.commitReport(SPLIT, { ...draftBody(c, { expectedRevision: EPOCH + ':3' }), action: 'approve', removeCitationIds: [] }, c, null, B2_REQUEST_FACTS), 409, 'STUDY_IDENTITY_UNRESOLVED');
   assert.equal(JSON.stringify([[...w.states], [...w.drafts], w.audits]), before);
   assert.deepEqual(w.sourceWrites(), []);
   assert.deepEqual(w.unexpected, []);

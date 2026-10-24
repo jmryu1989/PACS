@@ -194,8 +194,12 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
   async lookup(operationId: string): Promise<OperationResult | null> {
     return this.db.$transaction(async tx => {
+      const sql = new PrismaLedgerSql(tx);
+      // A caller can persist its request before B2 admission commits. Absence
+      // is unresolved, as the public port promises; it is not a negative result.
+      if (!await sql.result(operationId)) return null;
       await tx.$queryRaw`SELECT emr_access.lock_operation(${operationId}::uuid)`;
-      return new PrismaLedgerSql(tx).result(operationId);
+      return sql.result(operationId);
     }, options);
   }
   async settle(operationId: string): Promise<OperationResult | null> {

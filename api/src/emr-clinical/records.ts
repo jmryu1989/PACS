@@ -35,8 +35,10 @@ function actorFacts(input: unknown): Readonly<ActorFacts> {
     institutionId: string(a.institutionId), signingRegistrationId: a.signingRegistrationId === null ? null : string(a.signingRegistrationId) };
 }
 function studyFacts(input: unknown): Readonly<StudyFacts> {
-  const s = object(input, ['studyId', 'managingInstitutionId', 'patient']);
-  return { studyId: string(s.studyId), managingInstitutionId: string(s.managingInstitutionId), patient: patientLink(s.patient) };
+  const tele = !!input && typeof input === 'object' && own(input, 'teleInstitutionId');
+  const s = object(input, ['studyId', 'managingInstitutionId', 'patient', ...(tele ? ['teleInstitutionId'] : [])]);
+  return { studyId: string(s.studyId), managingInstitutionId: string(s.managingInstitutionId), patient: patientLink(s.patient),
+    teleInstitutionId: !tele || s.teleInstitutionId === null ? null : string(s.teleInstitutionId) };
 }
 function workContext(input: unknown): Readonly<WorkContext> | null {
   if (input === null) return null;
@@ -234,7 +236,9 @@ function admit(input: WriteInput) {
   if (spec.opens === false && unit === null) refuse('NotFound');
   // The institution boundary is checked before anything about the record is revealed by a later, more specific refusal.
   const managing = unit?.managingInstitutionId ?? study.managingInstitutionId;
-  if (!institutionAdmits(actor.institutionId, managing)) refuse('NotFound');
+  const holder = spec.record === 'assignment' ? unit?.versions[0].actingInstitutionId ?? actor.institutionId : managing;
+  if (!institutionAdmits(actor.institutionId, holder) ||
+      (holder !== managing && (spec.record !== 'assignment' || holder !== study.teleInstitutionId))) refuse('NotFound');
   const { requestId, revision, b, meaning } = clientBody(spec, w.body, actor);
   const path: SurfacePath = resolvePath(surface, actor, projection ? { parties: projection.parties } : null);
   // The route target, not the stored unit: a write that opens a unit and its replay name the same study.
@@ -612,11 +616,18 @@ export interface ClinicalBody {
 // Bodies stay out of the plan object itself, so nothing can hand them out before the access event is durable.
 const planBodies = new WeakMap<object, readonly ClinicalBody[]>();
 
-export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit; scope: 'current' | 'history' }): Readonly<ReadPlan> {
-  const r = object(input, ['actor', 'unit', 'scope']);
+export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit; scope: 'current' | 'history'; study?: StudyFacts }): Readonly<ReadPlan> {
+  const r = object(input, ['actor', 'unit', 'scope', ...(own(input, 'study') ? ['study'] : [])]);
   const actor = actorFacts(r.actor), unit: ClinicalUnit = r.unit, scope = choice(r.scope, ['current', 'history']);
   const { parties } = projectUnit(unit);
-  if (actor.kind !== 'member' || !institutionAdmits(actor.institutionId, unit.managingInstitutionId))
+  const currentStudy = r.study ? studyFacts(r.study) : null;
+  const allocationHolder = unit.record === 'assignment' ? unit.versions[0].actingInstitutionId : null;
+  const ownAllocation = allocationHolder === actor.institutionId && currentStudy?.studyId === unit.studyId &&
+    currentStudy.managingInstitutionId === unit.managingInstitutionId &&
+    (allocationHolder === unit.managingInstitutionId || allocationHolder === currentStudy.teleInstitutionId);
+  if (actor.kind !== 'member' || (unit.record === 'assignment' ? !ownAllocation &&
+      !(allocationHolder === unit.managingInstitutionId && institutionAdmits(actor.institutionId, allocationHolder)) :
+      !institutionAdmits(actor.institutionId, unit.managingInstitutionId)))
     refuse('NotFound');
   const isAuthor = parties.authorId === actor.identity.id;
   const isParty = isAuthor || parties.recipientId === actor.identity.id;
