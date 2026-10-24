@@ -13,10 +13,10 @@ import { clinicianFinal, clinicianIdentityRelation, clinicianTimelineMembers } f
 import type { ClinicianIdentityKeys, ClinicianIdentityRelation } from './clinician-policy';
 import { birthKey, sexKey } from './study-identity';
 
-export const CLINICAL_CONTEXT_SCHEMA = 'kin.clinical-context/1';
+const CLINICAL_CONTEXT_SCHEMA = 'kin.clinical-context/1';
 
 /** 판독 화면 패널이다(CS-03). 명시 집합이고 need()가 아니다 — need()는 admin을 역할마다 통과시키는 다른 규칙이다(D33 OQ-3). */
-export const CLINICAL_CONTEXT_ROLES: readonly string[] = Object.freeze(['radiologist', 'admin']);
+const CLINICAL_CONTEXT_ROLES: readonly string[] = Object.freeze(['radiologist', 'admin']);
 
 export const CLINICAL_CONTEXT_INPUT_INVALID = 'CLINICAL_CONTEXT_INPUT_INVALID';
 export const CLINICAL_CONTEXT_ROLE = 'CLINICAL_CONTEXT_ROLE';
@@ -28,10 +28,10 @@ export const CONTEXT_PRIOR_LIMIT = 10;
 export const CONTEXT_HISTORY_LIMIT = 200;
 
 /** 파생 객체의 헤더를 읽고 요청 태그가 "없다"고 말하지 않기 위해 원본 영상 시리즈만 고른다(CS-06). */
-export const CONTEXT_DERIVED_MODALITIES: readonly string[] = Object.freeze(['SR', 'KO', 'PR', 'SEG']);
+const CONTEXT_DERIVED_MODALITIES: readonly string[] = Object.freeze(['SR', 'KO', 'PR', 'SEG']);
 
 /** 확인하는 요청 태그(CS-05). 헤더 최상위 요소만 읽고, 이 순서가 `checked`의 순서다. */
-export const CONTEXT_REQUEST_TAGS: readonly { tag: string; keyword: string; vr: 'LO' | 'LT' }[] = Object.freeze([
+const CONTEXT_REQUEST_TAGS: readonly { tag: string; keyword: string; vr: 'LO' | 'LT' }[] = Object.freeze([
   { tag: '00321030', keyword: 'ReasonForStudy', vr: 'LO' },
   { tag: '00401002', keyword: 'ReasonForTheRequestedProcedure', vr: 'LO' },
   { tag: '001021B0', keyword: 'AdditionalPatientHistory', vr: 'LT' },
@@ -40,16 +40,16 @@ export const CONTEXT_REQUEST_TAGS: readonly { tag: string; keyword: string; vr: 
 ]);
 export const CONTEXT_REQUEST_TAG_CODES: readonly string[] = Object.freeze(CONTEXT_REQUEST_TAGS.map(t => t.tag));
 /** LT의 최대 길이. 넘는 값은 자르지 않고 `too_long`으로만 알린다 — 잘린 값이 원문처럼 보이지 않게. */
-export const CONTEXT_REQUEST_TAG_MAX_CHARS = 10240;
+const CONTEXT_REQUEST_TAG_MAX_CHARS = 10240;
 
-export type ContextSectionName = 'priorReports' | 'history' | 'requestTags' | 'techNote';
-export type ContextSectionState = 'present' | 'absent' | 'not_configured' | 'failed';
-export type ContextAccess = 'owner' | 'tele';
+type ContextSectionName = 'priorReports' | 'history' | 'requestTags' | 'techNote';
+type ContextSectionState = 'present' | 'absent' | 'not_configured' | 'failed';
+type ContextAccess = 'owner' | 'tele';
 
-export const CONTEXT_SECTION_NAMES: readonly ContextSectionName[] = Object.freeze(['priorReports', 'history', 'requestTags', 'techNote']);
+const CONTEXT_SECTION_NAMES: readonly ContextSectionName[] = Object.freeze(['priorReports', 'history', 'requestTags', 'techNote']);
 
 /** 구역마다 고정 영어 출처 이름(§5.1). */
-export const CONTEXT_SOURCE_LABELS: Readonly<Record<ContextSectionName, string>> = Object.freeze({
+const CONTEXT_SOURCE_LABELS: Readonly<Record<ContextSectionName, string>> = Object.freeze({
   priorReports: 'KIN signed report (head version)',
   history: 'DICOM study + KIN study state',
   requestTags: 'DICOM header (one original instance)',
@@ -57,7 +57,7 @@ export const CONTEXT_SOURCE_LABELS: Readonly<Record<ContextSectionName, string>>
 });
 
 /** 구역마다 provenance kind(§5.1). */
-export const CONTEXT_PROVENANCE_KINDS: Readonly<Record<ContextSectionName, string>> = Object.freeze({
+const CONTEXT_PROVENANCE_KINDS: Readonly<Record<ContextSectionName, string>> = Object.freeze({
   priorReports: 'kin.report-version',
   history: 'dicom.study+kin.study-state',
   requestTags: 'dicom.instance-header',
@@ -69,7 +69,7 @@ export const CONTEXT_PROVENANCE_KINDS: Readonly<Record<ContextSectionName, strin
  * DB가 답하지 못하면 답 전체가 503이라 구역 실패는 모양 위반(source_invalid)뿐이다.
  */
 const SOURCE_FAILURES = ['source_unavailable', 'source_invalid', 'source_row_missing'];
-export const CONTEXT_REASONS: Readonly<Record<ContextSectionName, { not_configured: readonly string[]; failed: readonly string[] }>> = Object.freeze({
+const CONTEXT_REASONS: Readonly<Record<ContextSectionName, { not_configured: readonly string[]; failed: readonly string[] }>> = Object.freeze({
   priorReports: { not_configured: ['no_patient_key'], failed: SOURCE_FAILURES },
   history: { not_configured: ['no_patient_key'], failed: SOURCE_FAILURES },
   requestTags: { not_configured: ['no_original_instance'], failed: SOURCE_FAILURES },
@@ -110,7 +110,7 @@ const own = (value: Record<string, any>, key: string) => Object.prototype.hasOwn
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 
 /** KIN 서버 시각(ISO 8601 UTC). 읽을 수 없는 값은 null이고, null이 허용되지 않는 칸이면 그 항목이 모양 확인에서 걸린다. */
-export function contextInstant(value: unknown): string | null {
+function contextInstant(value: unknown): string | null {
   const time = value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : NaN;
   return Number.isFinite(time) ? new Date(time).toISOString() : null;
 }
@@ -156,7 +156,7 @@ export interface ContextSourceStudy {
   date: string; modalities: string; description: string; accession: string; row?: any;
 }
 
-export type ContextStudySources =
+type ContextStudySources =
   | { kind: 'read'; anchor: ContextSourceStudy; candidates: ContextSourceStudy[] }
   | { kind: 'missing' } | { kind: 'invalid' };
 
@@ -209,7 +209,7 @@ export function contextIdentity(keys: ClinicianIdentityKeys[]): { conflict: bool
 }
 
 /** K-6 행 관계: 기준 검사와 그 행 둘의 관계. */
-export function contextRowIdentity(anchor: ClinicianIdentityKeys, row: ClinicianIdentityKeys) {
+function contextRowIdentity(anchor: ClinicianIdentityKeys, row: ClinicianIdentityKeys) {
   return { birth: clinicianIdentityRelation([anchor.birth, row.birth]), sex: clinicianIdentityRelation([anchor.sex, row.sex]) };
 }
 
@@ -330,7 +330,7 @@ export function contextFirstInstance(instances: unknown): { id: string; sop: str
 }
 
 /** Orthanc /instances/{id}/tags의 키 형식("0010,21b0"). */
-export function contextHeaderKey(tag: string): string {
+function contextHeaderKey(tag: string): string {
   return (tag.slice(0, 4) + ',' + tag.slice(4)).toLowerCase();
 }
 
@@ -532,7 +532,7 @@ function sectionItems(name: ContextSectionName, section: Record<string, any>, co
 }
 
 /** 구역 하나의 모양(§5.1·§5.4·§5.6·§7·§9.1). 위반이면 경로와 이유를 담은 문자열(값은 담지 않는다), 아니면 null. */
-export function contextSectionShapeError(name: ContextSectionName, value: unknown, context: { uid: string; anchor: any; patientKey: string | null }): string | null {
+function contextSectionShapeError(name: ContextSectionName, value: unknown, context: { uid: string; anchor: any; patientKey: string | null }): string | null {
   try {
     const path = 'sections.' + name;
     const section = keysExactly(value, name === 'requestTags' ? CLINICAL_CONTEXT_KEYS.requestTagsSection : CLINICAL_CONTEXT_KEYS.section, path);

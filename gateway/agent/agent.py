@@ -12,7 +12,6 @@ import os
 import re
 import signal
 import sqlite3
-import sys
 import time
 import uuid
 from dataclasses import dataclass

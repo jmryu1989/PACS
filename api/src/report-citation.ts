@@ -19,7 +19,7 @@ import { FINDING_LIMITS } from './finding-input';
  */
 export const REPORT_CITATION_LIMITS = Object.freeze({ entries: 64, bytes: 65536, insertedText: 4096 });
 export const REPORT_CITATION_FIELDS = Object.freeze(['findings', 'conclusion', 'recommendation'] as const);
-export type ReportCitationField = typeof REPORT_CITATION_FIELDS[number];
+type ReportCitationField = typeof REPORT_CITATION_FIELDS[number];
 /** 저장 형식의 판. `Finding.snapshot`의 schemaVersion과 별개다. */
 export const REPORT_CITATION_SCHEMA = 2;
 /** 화면이 읽을 수 없는 건에 다는 단 하나의 중립 상태. 거절인지 부재인지 말하지 않는다. */
@@ -31,7 +31,7 @@ export const SOURCE_UNAVAILABLE = 'source-unavailable';
  */
 export class CitationInputError extends Error {}
 
-export interface ReportCitationInsert {
+interface ReportCitationInsert {
   field: ReportCitationField;
   findingId: string;
   findingRevision: number;

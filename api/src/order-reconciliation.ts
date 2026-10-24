@@ -27,9 +27,9 @@ export function accessionRelation(order: unknown, study: unknown): AccessionRela
   return left === right ? 'match' : 'mismatch';
 }
 
-export interface OrderSideRow { oid: string; institutionId: string; accession: string | null; matched: string; studyUid: string | null }
-export interface StudyLinkRow { uid: string; institutionId: string | null; matched: string; orderOid: string | null }
-export type ReconciledOrder =
+interface OrderSideRow { oid: string; institutionId: string; accession: string | null; matched: string; studyUid: string | null }
+interface StudyLinkRow { uid: string; institutionId: string | null; matched: string; orderOid: string | null }
+type ReconciledOrder =
   | { oid: string; link: 'observed' | 'not_observed'; studyUid: string }
   | { oid: string; link: 'unlinked'; accession: 'present' | 'absent'; candidates: string[] };
 

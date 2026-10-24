@@ -14,7 +14,7 @@ export const STUDY_SOURCE_UNAVAILABLE = 'STUDY_SOURCE_UNAVAILABLE';
 export const STUDY_IDENTITY_UNRESOLVED_MESSAGE = '환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.';
 export const STUDY_SOURCE_UNAVAILABLE_MESSAGE = '검사 원본을 확인하지 못했습니다. 잠시 후 다시 시도하세요';
 
-export interface SourceGroups<T> {
+interface SourceGroups<T> {
   /** 열거에 처음 나온 순서의 UID. 정상 행의 기존 목록 순서를 그대로 지킨다. */
   readonly uids: string[];
   readonly byUid: Map<string, T[]>;

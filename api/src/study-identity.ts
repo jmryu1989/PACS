@@ -15,7 +15,7 @@
 import { accessionRelation, ORDER_RECONCILIATION_SOURCE } from './order-reconciliation';
 import type { AccessionRelation } from './order-reconciliation';
 
-export type IdentityRelation = AccessionRelation;
+type IdentityRelation = AccessionRelation;
 
 /** 이 읽기가 고르는 칸. 목록 쿼리는 이 상수만 쓴다 — 관계를 판정할 칸 밖의 오더 값은 읽지도 않는다. */
 export const ORDER_IDENTITY_SELECT = {
@@ -23,13 +23,13 @@ export const ORDER_IDENTITY_SELECT = {
   accession: true, patientId: true, name: true, birth: true, sex: true,
 } as const;
 
-export interface OrderIdentityRow {
+interface OrderIdentityRow {
   oid: string; institutionId: string; studyUid: string | null; matched: string;
   accession: string | null; patientId: string; name: string; birth: string; sex: string;
 }
-export interface IdentityStudyRow { uid: string; institutionId: string | null; matched: string; orderOid: string | null }
+interface IdentityStudyRow { uid: string; institutionId: string | null; matched: string; orderOid: string | null }
 
-export interface OrderIdentity {
+interface OrderIdentity {
   source: typeof ORDER_RECONCILIATION_SOURCE;
   oid: string;
   accession: IdentityRelation;

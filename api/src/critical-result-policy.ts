@@ -8,7 +8,7 @@ import { CLINICIAN_ROLE, clinicianFinal } from './clinician-policy';
  * 사례가 같은 규칙이어야 하고, 겹친 실패에서 어느 거절이 먼저인지(§4 순서 12~15)를 서비스 흐름과 따로 확인할 수 있어야 한다.
  */
 export const RADIOLOGIST = 'radiologist';
-export const CRITICAL_RESULT_TEXT_MAX = 2000;
+const CRITICAL_RESULT_TEXT_MAX = 2000;
 export const CRITICAL_RESULT_PAGE = 50;
 export const CRITICAL_RESULT_STATES: readonly string[] = Object.freeze(['created', 'acknowledged', 'cancelled', 'superseded']);
 /** 고정할 수 있는 머리 판 action. reset은 보낼 원천이 없다는 뜻이고 discarded는 머리가 될 수 없다(F-7). */
@@ -25,8 +25,8 @@ export const CRITICAL_RESULT_TRANSITIONS: Readonly<Record<string, { from: string
 export type RecipientClass = 'clinician' | 'radiologist';
 export type Refusal = { status: 400 | 403 | 404 | 409 | 503; code: string; id?: string; replacedBy?: string };
 export type Head = { version: number; action: string | null; author?: string | null; at?: any } | null;
-export type StudyReadState = { rs?: string | null; preDoc?: string | null; preReviewer?: string | null; preDocSub?: string | null; preReviewerSub?: string | null };
-export type RecipientCase = {
+type StudyReadState = { rs?: string | null; preDoc?: string | null; preReviewer?: string | null; preDocSub?: string | null; preReviewerSub?: string | null };
+type RecipientCase = {
   case: 'C2' | 'C3' | 'C4' | 'C5' | 'R2' | 'R3' | 'R4' | 'R5';
   /** full: 메시지·고정 판·본문, stub: 기록 칸만, null: 행이 없다(C5/R5). */
   view: 'full' | 'stub' | null;
@@ -91,7 +91,7 @@ export function recipientClass(roles: readonly string[] | undefined): RecipientC
   return null;
 }
 
-export type StudyScopeState = { institutionId?: string | null; teleInstitutionId?: string | null };
+type StudyScopeState = { institutionId?: string | null; teleInstitutionId?: string | null };
 
 /**
  * 발신 범위(S7-U1c, D-S7-05 a): 지금 이 검사에서 caller 기관이 보낼 수 있는 기록의 기관. 소유 기관이면 그 기관이고,
@@ -204,7 +204,7 @@ export function ackRefusal(record: { state: string; revision: number }, revision
   return recordRefusal(record, revision, replacedBy) ?? (kase.ack ? null : { status: 409, code: C.SOURCE_CHANGED });
 }
 
-export type KeycloakUserLike = { id: string; username?: string; email?: string; firstName?: string; lastName?: string;
+type KeycloakUserLike = { id: string; username?: string; email?: string; firstName?: string; lastName?: string;
   enabled: boolean; serviceAccountClientId?: string | null; groups: string[]; roles: string[] };
 
 /** 직원 actor는 가드와 같은 모양(email 우선, 없으면 username)이다. P 짝 비교가 이 값으로 된다. */

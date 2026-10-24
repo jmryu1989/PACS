@@ -507,10 +507,11 @@ class InspectionReleaseTests(unittest.TestCase):
         self.fail_live_run()
         self.record.unlink()
         invalid = [None, '{', '[]']
+        # environment is optional in a record (callers copy the six identity fields), so it is not dropped here.
         invalid += [json.dumps({k: v for k, v in self.inspection.items() if k != key})
-                    for key in self.inspection]
+                    for key in self.inspection if key != 'environment']
         invalid += [json.dumps({**self.inspection, key: value}) for key, value in (
-            ('unit', ''), ('module', []), ('attempt', True), ('pid', 0), ('plan_sha256', 'bad'),
+            ('unit', ''), ('module', []), ('attempt', True), ('pid', 0), ('plan_sha256', 'bad'), ('environment', 'other-stack'),
             ('exit', True), ('artifacts', 'probe.log'),
             ('artifacts', [None]), ('stack', []), ('inspected_at', None), ('inspector', ''))]
         for value in invalid:
@@ -583,6 +584,49 @@ class InspectionReleaseTests(unittest.TestCase):
             self.assertEqual(self.ledger.read_bytes(), current)
             previous = current
 
+    def test_parent_finishes_its_success_after_another_environment_set_it_aside(self):
+        # D1804 interleaving: worker A (stack-a) ends with release=False, run B on stack-b
+        # takes the lease and sets A's marker aside, then A's parent finalizes.
+        with gate.live_run(**self.identity, release=False, environment='stack-a') as first:
+            gate.require_live_run()
+        with gate.live_run(**{**self.identity, 'unit': 'other-unit'}, release=False, environment='stack-b') as second:
+            gate.require_live_run()
+        self.assertEqual(json.loads(self.marker.read_bytes()), second)
+        gate.release_after_success(first)
+        self.assertEqual(list((self.state / 'needs-inspection').iterdir()), [])
+        self.assertEqual(json.loads(self.marker.read_bytes()), second)
+        gate.release_after_success(second)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.ledger.exists())
+        with gate.live_run(**self.identity, environment='stack-a'):
+            gate.require_live_run()
+
+    def test_parent_finishes_its_success_while_another_environment_holds_the_lease(self):
+        # Review F03 (delta): A's parent finalizes while run B (stack-b) is still live and owns the lease.
+        with gate.live_run(**self.identity, release=False, environment='stack-a') as first:
+            gate.require_live_run()
+        with gate.live_run(**{**self.identity, 'unit': 'other-unit'}, environment='stack-b') as second:
+            gate.release_after_success(first, wait_seconds=1)
+            self.assertEqual(list((self.state / 'needs-inspection').iterdir()), [])
+            self.assertEqual(json.loads(self.marker.read_bytes()), second)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.ledger.exists())
+
+    def test_set_aside_failure_is_inspected_while_another_environment_holds_the_lease(self):
+        # A set-aside record belongs to a run that has ended, so its inspection does not wait for B.
+        with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
+            with gate.live_run(**self.identity, environment='stack-a'):
+                raise RuntimeError('synthetic failure')
+        failed = json.loads(self.marker.read_bytes())
+        with gate.live_run(**{**self.identity, 'unit': 'other-unit'}, environment='stack-b'):
+            self.assertEqual(gate.run_markers('owned-probe'), [failed])
+            self.inspection = {**failed, 'exit': 125, 'artifacts': ['probe.log'], 'stack': {'containers': []},
+                               'inspected_at': datetime.now(timezone.utc).isoformat(), 'inspector': 'fixture-owner'}
+            self.record.write_text(json.dumps(self.inspection), encoding='utf-8')
+            gate.release_after_inspection(self.record)
+            self.assertEqual(gate.run_markers('owned-probe'), [])
+        self.assertEqual([json.loads(line)['marker'] for line in self.ledger.read_text().splitlines()], [failed])
+
     def test_active_lease_prevents_inspection_release(self):
         with gate.live_run(**self.identity):
             with self.assertRaises(gate.Refused):
@@ -637,7 +681,8 @@ class InspectionReleaseTests(unittest.TestCase):
                 with self.assertRaises(gate.Refused):
                     gate.release_after_success({**identity, key: value})
                 self.assertEqual(self.marker.read_bytes(), original)
-        with gate.exclusive(self.state / 'live.lock'):
+        # Only the short marker-bookkeeping lock can delay finalization (bounded); the live lease cannot.
+        with gate.exclusive(self.state / 'markers.lock'):
             with self.assertRaises(gate.LeaseBusy):
                 gate.release_after_success(identity, wait_seconds=0.3)
         self.assertEqual(self.marker.read_bytes(), original)
@@ -648,6 +693,76 @@ class InspectionReleaseTests(unittest.TestCase):
             gate.release_after_success(identity)
         with gate.live_run(**self.identity):
             gate.require_live_run()
+
+
+class AutomaticInspectionCallerTests(unittest.TestCase):
+    """Review F02 (delta): the automatic inspection callers find their own failed run
+    after a run in another environment has set its marker aside (D1804)."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='pacs-inspection-caller-')
+        self.addCleanup(temporary.cleanup)
+        self.path = Path(temporary.name)
+        self.state = self.path / 'state'
+        state = patch.object(gate, 'STATE', self.state)
+        state.start()
+        self.addCleanup(state.stop)
+        self.ledger = self.state / 'inspections.jsonl'
+
+    def fail_then_other_environment(self, unit, module):
+        identity = dict(unit=unit, module=module, plan_sha256='c' * 64, attempt=1)
+        with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
+            with gate.live_run(**identity, environment='stack-a'):
+                raise RuntimeError('synthetic failure')
+        failed = json.loads((self.state / 'live-needs-inspection.json').read_bytes())
+        with gate.live_run(unit='other-unit', module='tests/other.py', plan_sha256='d' * 64, attempt=1,
+                           environment='stack-b'):
+            gate.require_live_run()
+        self.assertFalse((self.state / 'live-needs-inspection.json').exists())
+        self.assertEqual(gate.run_markers(unit), [failed])
+        with self.assertRaises(gate.Refused):
+            gate.preflight_live('stack-a')
+        time.sleep(0.05)  # the caller's record must be newer than the set-aside marker
+        return identity, failed
+
+    def assert_inspected_and_reopened(self, unit, failed):
+        self.assertEqual(gate.run_markers(unit), [])
+        self.assertEqual([json.loads(line)['marker'] for line in self.ledger.read_text().splitlines()], [failed])
+        gate.preflight_live('stack-a')
+        with gate.live_run(unit=unit, module=failed['module'], plan_sha256='e' * 64, attempt=2, environment='stack-a'):
+            gate.require_live_run()
+
+    def test_measurement_ci_inspects_a_set_aside_failure(self):
+        import measurement_ci as ci
+        identity, failed = self.fail_then_other_environment('ci-probe', 'tests/probe_suite.py')
+        out = self.path / 'out'
+        out.mkdir()
+        result = {'name': 'probe_suite', 'exit': 125}
+        (out / 'probe_suite.log').write_text('PLAN_RESULT ' + json.dumps(
+            {'status': 'failed', 'attempt': 1, 'plan_sha256': identity['plan_sha256'], 'exit_code': 125}) + '\n',
+            encoding='utf-8')
+        def run(log, command, timeout=None, finalizing=False):
+            (out / (log + '.log')).write_text('synthetic ' + log, encoding='utf-8')
+            return 0
+        with patch.object(ci, 'gate', gate):
+            # A synthetic argv: the fake run() executes nothing; index 3 is the profile's project name.
+            ci.inspect_failed_module(run, out, ['fake', 'stack', '-p', 'kin-probe'], 'ci-probe', 'probe_suite.py', result)
+        record = json.loads((out / 'inspection-probe_suite.json').read_bytes())
+        self.assertEqual((record['pid'], record['started_at'], record['binding_error']),
+                         (failed['pid'], failed['started_at'], None))
+        self.assert_inspected_and_reopened('ci-probe', failed)
+
+    def test_emr_b_mutant_driver_inspects_a_set_aside_failure(self):
+        spec = importlib.util.spec_from_file_location('emr_b_mutants_under_test', ROOT / 'tests/emr/b/mutants.py')
+        mutants = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mutants)
+        _, failed = self.fail_then_other_environment('emr-b-mutant-probe', 'tests/emr/b/live.py')
+        out = self.path / 'out'
+        out.mkdir()
+        with patch.object(mutants, 'leftovers', return_value=[]):
+            outcome = mutants.release_gate(ROOT, 'emr-b-mutant-probe', 1, self.path / 'run.log', out, 'M00')
+        self.assertEqual(outcome['marker'], 'released', outcome)
+        self.assert_inspected_and_reopened('emr-b-mutant-probe', failed)
 
 
 class ExecutionGuardTests(unittest.TestCase):
@@ -714,16 +829,23 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
         self.assertEqual(connection.recv(1), b'R', 'Owned child did not signal readiness')
         return connection
 
-    def plan(self, unit='probe', case='test_pass', mode='pure', timeout=30, attempts=3):
+    def plan(self, unit='probe', case='test_pass', mode='pure', timeout=30, attempts=None):
+        # attempts: an older plan's ignored max_attempts field (D1804); None omits it.
         value = dict(unit=unit, mode=mode, tests=[dict(file='tests/probe.py', case='Probe.'+case)],
-                     max_attempts=attempts, timeout_seconds=timeout)
+                     timeout_seconds=timeout)
+        if attempts is not None:
+            value['max_attempts'] = attempts
         path = self.path/(unit+'-input.json')
         path.write_text(json.dumps(value), encoding='utf-8')
         return path
 
-    def run_plan(self, plan):
+    def run_plan(self, plan, environment=None):
+        # Runs default to one shared environment; a named one stands for a separate stack (D1804).
+        env = {k: v for k, v in os.environ.items() if k not in ('KIN_LIVE_ENVIRONMENT', 'COMPOSE_PROJECT_NAME')}
+        if environment:
+            env['KIN_LIVE_ENVIRONMENT'] = environment
         return subprocess.run([sys.executable, '-B', str(self.bootstrap), '--plan', str(plan)],
-                              capture_output=True, timeout=60)
+                              capture_output=True, timeout=60, env=env)
 
     def test_live_stack_denies_before_configuration_or_network(self):
         import invariants_live as live
@@ -766,24 +888,119 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
             self.assertEqual(self.run_plan(path).returncode, 125)
         self.assertFalse((self.tests/'passed').exists())
 
-    def test_pass_cannot_repeat_even_with_new_evidence_or_changed_plan(self):
-        path = self.plan()
-        self.assertEqual(self.run_plan(path).returncode, 0)
-        path = self.plan(case='test_fail')
-        result = self.run_plan(path)
-        self.assertEqual(result.returncode, 125)
-        self.assertIn(b'already passed', result.stderr)
-        self.assertEqual(len(json.loads((self.state/'probe.json').read_text())['attempts']), 1)
+    def test_every_attempt_stays_in_the_unit_history_without_a_cap(self):
+        # D1804: no attempt cap and no refusal to rerun; the first failure is never overwritten.
+        statuses = []
+        for case, attempts in (('test_fail', 2), ('test_fail', 3), ('test_fail', None), ('test_pass', 1), ('test_pass', None)):
+            result = self.run_plan(self.plan(case=case, attempts=attempts))
+            statuses.append('passed' if case == 'test_pass' else 'failed')
+            self.assertEqual(result.returncode, 0 if case == 'test_pass' else 125, result.stderr)
+            # The parent ran and recorded the attempt (a refusal prints no PLAN_RESULT).
+            self.assertIn(b'PLAN_RESULT', result.stdout)
+        rows = json.loads((self.state/'probe.json').read_text())['attempts']
+        self.assertEqual([row['status'] for row in rows], statuses)
+        self.assertEqual([row['attempt'] for row in rows], list(range(1, len(statuses) + 1)))
+        self.assertTrue((self.tests/'passed').exists())
 
-    def test_attempt_budget_survives_fixes_and_cannot_be_raised(self):
-        path = self.plan(case='test_fail', attempts=2)
-        self.assertEqual(self.run_plan(path).returncode, 125)
-        self.assertEqual(self.run_plan(path).returncode, 125)
-        path = self.plan(case='test_pass', attempts=3)
-        self.assertIn(b'Cannot change', self.run_plan(path).stderr)
-        path = self.plan(case='test_pass', attempts=2)
-        self.assertIn(b'budget exhausted', self.run_plan(path).stderr)
-        self.assertFalse((self.tests/'passed').exists())
+    def test_hang_timeout_is_required(self):
+        for timeout in (0, None, '30'):
+            with self.subTest(timeout=timeout):
+                result = self.run_plan(self.plan(unit='no-timeout', timeout=timeout))
+                self.assertEqual(result.returncode, 125)
+                self.assertIn(b'timeout_seconds', result.stderr)
+        self.assertFalse((self.state/'no-timeout.json').exists())
+
+    def kept_aside(self):
+        folder = self.state/'needs-inspection'
+        return [json.loads(path.read_bytes()) for path in folder.iterdir()] if folder.is_dir() else []
+
+    def test_real_supervisor_succeeds_while_another_environment_holds_the_lease(self):
+        # Review F03 (delta): A's worker passes; before A's parent finalizes, run B on stack-b
+        # starts and holds the lease (test_hold). A must still end exit 0 with no record left.
+        listener = self.readiness_listener()
+        log = self.path/'overlap.jsonl'
+        hook = '''
+import json, subprocess, sys, time
+_release = runner.gate.release_after_success
+def _overlap(identity, *args, **kwargs):
+    plan = runner.gate.STATE.parent / 'b-input.json'
+    plan.write_text(json.dumps(dict(unit='b-unit', mode='live', timeout_seconds=90,
+                                    tests=[dict(file='tests/probe.py', case='Probe.test_hold')])), encoding='utf-8')
+    env = dict(__import__('os').environ, KIN_LIVE_ENVIRONMENT='stack-b')
+    subprocess.Popen([sys.executable, '-B', ''' + repr(str(self.bootstrap)) + ''', '--plan', str(plan)], env=env,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    marker = runner.gate.STATE / 'live-needs-inspection.json'
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            if json.loads(marker.read_bytes()).get('unit') == 'b-unit':
+                break
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.05)
+    try:
+        with runner.gate.exclusive(runner.gate.STATE / 'live.lock'):
+            held = False
+    except runner.gate.LeaseBusy:
+        held = True
+    with open(''' + repr(str(log)) + ''', 'a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'b_holds_lease': held}) + '\\n')
+    return _release(identity, *args, **kwargs)
+runner.gate.release_after_success = _overlap
+'''
+        bootstrap = self.path/'overlap-bootstrap.py'
+        bootstrap.write_text(self.bootstrap.read_text().replace('raise SystemExit(runner.main())',
+                                                                  hook + 'raise SystemExit(runner.main())'), encoding='utf-8')
+        env = {k: v for k, v in os.environ.items() if k not in ('KIN_LIVE_ENVIRONMENT', 'COMPOSE_PROJECT_NAME')}
+        first = subprocess.run([sys.executable, '-B', str(bootstrap), '--plan',
+                                str(self.plan(unit='a-unit', case='test_live', mode='live'))],
+                               capture_output=True, timeout=120, env=env)
+        self.assertEqual(json.loads(log.read_text(encoding='utf-8')), {'b_holds_lease': True})
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        row = json.loads(next(line[len('PLAN_RESULT '):] for line in first.stdout.decode().splitlines()
+                              if line.startswith('PLAN_RESULT ')))
+        self.assertEqual((row['status'], row['exit_code'], row.get('release_error')), ('passed', 0, None))
+        self.assertEqual(self.kept_aside(), [])
+        self.assertEqual(json.loads((self.state/'live-needs-inspection.json').read_bytes())['unit'], 'b-unit')
+        ready = self.child_ready(listener)
+        ready.sendall(b'G')
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and (self.state/'live-needs-inspection.json').exists():
+            time.sleep(0.1)
+        self.assertFalse((self.state/'live-needs-inspection.json').exists())
+        self.assertEqual(json.loads((self.state/'b-unit.json').read_bytes())['attempts'][-1]['status'], 'passed')
+
+    def test_failed_live_run_blocks_only_its_own_environment(self):
+        # D1804 #19: the uninspected environment stays closed (same unit retry included);
+        # a run on another environment proceeds and the failed run's record is kept.
+        self.assertEqual(self.run_plan(self.plan(case='test_fail', mode='live'), 'stack-a').returncode, 125)
+        failed = json.loads((self.state/'live-needs-inspection.json').read_bytes())
+        self.assertEqual(failed['environment'], 'stack-a')
+        retry = self.run_plan(self.plan(case='test_live', mode='live'), 'stack-a')
+        self.assertEqual(retry.returncode, 125)
+        self.assertIn(b"environment 'stack-a' needs fixture inspection", retry.stderr)
+        self.assertEqual(len(json.loads((self.state/'probe.json').read_bytes())['attempts']), 1)
+        other = self.run_plan(self.plan(unit='other', case='test_live', mode='live'), 'stack-b')
+        self.assertEqual(other.returncode, 0, other.stderr)
+        self.assertTrue((self.tests/'live').exists())
+        self.assertEqual(self.kept_aside(), [failed])
+        self.assertFalse((self.state/'live-needs-inspection.json').exists())
+        # Still closed for stack-a after the other environment's run.
+        (self.tests/'live').unlink()
+        again = self.run_plan(self.plan(unit='later', case='test_live', mode='live'), 'stack-a')
+        self.assertEqual(again.returncode, 125)
+        self.assertFalse((self.tests/'live').exists())
+        # Its owner inspects the set-aside record through the documented API; stack-a reopens.
+        record = self.path/'inspection-a.json'
+        record.write_text(json.dumps({**failed, 'exit': 125, 'artifacts': ['run.log'], 'stack': {'containers': []},
+                                      'inspected_at': datetime.now(timezone.utc).isoformat(),
+                                      'inspector': 'owner'}), encoding='utf-8')
+        with patch.object(gate, 'STATE', self.state):
+            gate.release_after_inspection(record)
+        self.assertEqual(self.kept_aside(), [])
+        entries = [json.loads(line) for line in (self.state/'inspections.jsonl').read_text().splitlines()]
+        self.assertEqual([entry['marker'] for entry in entries], [failed])
+        self.assertEqual(self.run_plan(self.plan(unit='reopened', case='test_live', mode='live'), 'stack-a').returncode, 0)
 
     def test_worker_entry_cannot_bypass_parent_budget(self):
         path = self.plan()
@@ -849,7 +1066,8 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
                                       if line.startswith('PLAN_RESULT ')))
                 marker_path = self.state / 'live-needs-inspection.json'
                 marker = json.loads(marker_path.read_bytes())
-                self.assertEqual(set(marker), {'unit', 'module', 'attempt', 'plan_sha256', 'pid', 'started_at'})
+                self.assertEqual(set(marker), {'unit', 'module', 'attempt', 'plan_sha256', 'pid', 'started_at', 'environment'})
+                self.assertEqual(marker['environment'], 'default')
                 self.assertEqual(marker['unit'], 'bound-probe')
                 self.assertEqual(marker['attempt'], attempt)
                 self.assertEqual(row['attempt'], attempt)
