@@ -147,10 +147,10 @@ async function main() {
     assert.notEqual(ledger.find(event => event.userId.value.issuer === nextIssuer).userId.value.id, identity);
     process.env.KC_ISSUER = issuer;
     const auth = app.get(AuthService);
-    const sessionHeaders = async () => {
+    const sessionHeaders = async (rightsVersion = 1) => {
       const sid = randomUUID();
       await witness.authSession.create({ data: { sid, sub, accessToken: bearer, refreshToken: randomUUID(),
-        rightsVersion: 1, institution, atExpiresAt: new Date(Date.now() + 600000), lastSeenAt: new Date() } });
+        rightsVersion, institution, atExpiresAt: new Date(Date.now() + 600000), lastSeenAt: new Date() } });
       return { sid, headers: { cookie: 'kin_sid=' + sid, 'x-kin-session': auth.sessionRef(sid), 'x-kin-csrf': '1' } };
     };
     const session = await sessionHeaders();
@@ -234,11 +234,14 @@ async function main() {
     assert.equal((await events()).length, 5, 'Cancelled identity lookup cannot begin an admin mutation');
     // S7-U5 ④: token expiry is not a session end. The same live session's stored access token expires while this
     // admitted request waits on its source (as when a refresh-ahead is slow); the change still commits and answers.
-    const still = await sessionHeaders();
+    // The admin's rights version moved in the 'rights' case above; a session admitted now carries the current one.
+    const still = await sessionHeaders((await witness.memberRights.findUnique({ where: { sub } })).version);
     const expiring = pendingHold = held = { reached: deferred(), release: deferred() };
     const beforeExpiry = await current();
     const answered = send(still.headers, { roles: ['radiologist', 'technician'], institution, verificationOverride: true });
-    await expiring.reached.promise;
+    await Promise.race([expiring.reached.promise, answered.then(early => {
+      throw new Error('Answered before the provider wait: ' + JSON.stringify(early));
+    })]);
     await witness.authSession.update({ where: { sid: still.sid },
       data: { accessToken: await token(sub, issuer, ['admin'], {}, Math.floor(Date.now() / 1000) - 1) } });
     expiring.release.resolve();
