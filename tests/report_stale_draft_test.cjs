@@ -1,7 +1,9 @@
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
-const B2_REQUEST_FACTS = { issuer: 'https://synthetic.invalid', ip: null, requestId: 'synthetic-request' };
+const B2_REQUEST_FACTS = { issuer: 'https://synthetic.invalid', ip: null, requestId: 'synthetic-request', request: {} };
+// Native signing is a collaborator here; this fixture is not cryptographic evidence.
+const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 function b2Ledger(prisma) {
   return { begin: () => ({
     resolveRequestIdentity: async () => 'synthetic-member',
@@ -85,7 +87,7 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
   // readable set is the honest stub — reaching it at all would be the defect.
   const findings = { readableFindings: async () => { throw new Error('the stale-draft paths must not ask about findings'); } };
-  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma));
+  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma), nativeSigning);
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
   const svc = {
     commitReport: (uid, body, c) => real.commitReport(uid, { ...pre(c), ...body }, c, null, B2_REQUEST_FACTS),

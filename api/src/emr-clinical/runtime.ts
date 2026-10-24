@@ -7,7 +7,7 @@ import type { OperationResult } from '../emr-runtime/store';
 import type { ActorFacts, StudyFacts, WriteReceipt } from './contract';
 import { CLINICAL_SURFACES } from './contract';
 import { ClinicalWritePlan, planClinicalWrite, prepareClinicalWrite, WriteInput } from './records';
-import type { ClinicalSigner } from './signing';
+import type { ClinicalSigner, ClinicalSignature } from './signing';
 import { ClinicalStore, StoredClinicalCommand } from './store';
 
 export interface ClinicalRequestFacts {
@@ -34,23 +34,24 @@ export interface ClinicalRuntimeParts {
   signer: ClinicalSigner;
   /** Existing service projectors recheck their own state and change their rows
    * only on the B2 transaction supplied here. */
-  project(tx: Prisma.TransactionClient, request: object, plan: Readonly<ClinicalWritePlan>, projection: unknown): Promise<void>;
+  project(tx: Prisma.TransactionClient, request: object, plan: Readonly<ClinicalWritePlan>, projection: unknown): Promise<unknown>;
 }
 export type OnlineClinicalOutcome =
-  | { status: 'committed' | 'replayed'; receipt: WriteReceipt; access: { eventId: string; durableAt: string } }
+  | { status: 'committed' | 'replayed'; receipt: WriteReceipt; response?: unknown; signature?: ClinicalSignature;
+      access: { eventId: string; durableAt: string } }
   | { status: 'unknown'; code: 'OutcomeUnknown'; retry: 'same-request' }
   | { status: 'rejected'; code: 'AppendNotCommitted' };
 const unknown = (): OnlineClinicalOutcome => ({ status: 'unknown', code: 'OutcomeUnknown', retry: 'same-request' });
 const known = <T>(value: T) => ({ status: 'known' as const, value });
 
-function eventFor(facts: ClinicalRequestFacts, plan: ClinicalWritePlan): Readonly<AccessEvent> {
+function eventFor(facts: ClinicalRequestFacts, plan: ClinicalWritePlan): Readonly<AccessEventV1> {
   const v = plan.version;
   return parseAccessEvent({ formatVersion: 1, surface: plan.access.route, eventId: randomUUID(),
     userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
     managingInstitution: known(v.managingInstitutionId), occurredAt: v.at, trustedProxyIp: facts.ip,
     cause: 'user-view', context: { basis: v.kind === 'clinical-question' || v.kind === 'image-request' ? 'clinical-request' : 'worklist',
       studyId: v.studyId, relatedStudyId: null, reason: null }, executor: 'member', targets: [plan.access.target],
-    action: plan.access.action, result: 'succeeded', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null } as AccessEventV1);
+    action: plan.access.action, result: 'succeeded', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null } as AccessEventV1) as Readonly<AccessEventV1>;
 }
 
 /** One online write, one B2 operation. Lookup never signs or runs a projector. */
@@ -75,7 +76,7 @@ export class ClinicalRuntime {
     const plan = command.plan;
     if (result.result?.kind !== 'emr-clinical' || result.result.id !== plan.version.recordId ||
         result.result.version !== plan.version.versionId) refuse('ClinicalResultMismatch');
-    await this.parts.store.transaction(async tx => {
+    const stored = await work.transactionWithRecords(async (tx, record) => {
       const facts = await this.parts.context.facts(tx, request);
       await this.parts.context.study(tx, request, plan.version.studyId);
       if (facts.actor.identity.id !== plan.version.author.id || facts.actor.institutionId !== plan.version.actingInstitutionId) refuse('OwnerChanged');
@@ -85,9 +86,16 @@ export class ClinicalRuntime {
         if (!stored.signature) refuse('SignatureRequired');
         this.parts.signer.verify(stored.signature, plan.signing);
       }
+      if (stored.response !== undefined) {
+        const event = { ...eventFor(facts, plan), eventId: randomUUID(), action: 'provide-prepared' as const,
+          result: 'prepared' as const, occurredAt: new Date().toISOString() };
+        await record(event, async () => ({ kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId }));
+      }
+      return stored;
     });
     const receipt = await work.confirm({ provisional: true, operationId: command.operationId, eventId: command.event.eventId });
     return freeze({ status: replay ? 'replayed' : 'committed', receipt: plan.receipt,
+      ...(stored.response !== undefined ? { response: stored.response, signature: stored.signature } : {}),
       access: { eventId: receipt.eventId, durableAt: receipt.durableAt } });
   }
 
@@ -126,8 +134,8 @@ export class ClinicalRuntime {
         const current = planClinicalWrite({ ...command.input, ...prepared, actor: facts.actor, study, unit });
         if (current.version.sha256 !== plan.version.sha256) refuse('StaleRevision');
         const signature = plan.signing ? await this.parts.signer.sign(tx, request, plan.signing) : null;
-        await this.parts.store.append(tx, command, signature);
-        await this.parts.project(tx, request, plan, command.projection);
+        const response = await this.parts.project(tx, request, plan, command.projection);
+        await this.parts.store.append(tx, command, signature, response);
         return { kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId };
       });
       return await this.answer(work, request, command, result, !created);

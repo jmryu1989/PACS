@@ -49,7 +49,7 @@ const draftSession = (req: any): string | null => (req.authMethod === 'session' 
 const draftFacts = (req: any): DraftRequestFacts => {
   const proxy = req.headers?.['x-real-ip'];
   const peer = req.socket?.remoteAddress;
-  return { issuer: process.env.KC_ISSUER, requestId: randomUUID(),
+  return { request: req, issuer: process.env.KC_ISSUER, requestId: randomUUID(),
     ip: typeof proxy === 'string' && isIP(proxy) ? { address: proxy, source: 'trusted-proxy' }
       : typeof peer === 'string' && isIP(peer) ? { address: peer, source: 'request-peer' } : null };
 };
@@ -267,12 +267,12 @@ export class PacsController {
 
   @Patch('studies/:uid')
   patch(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.patchState(uid, body, caller(req));
+    return this.svc.patchState(uid, body, caller(req), req);
   }
 
   @Get('studies/:uid/tech-note')
   techNote(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.techNote(uid, noteCaller(req));
+    return this.svc.techNote(uid, noteCaller(req), undefined, req);
   }
 
   @Post('studies/:uid/tech-note')
@@ -284,12 +284,12 @@ export class PacsController {
     if (body && typeof body === 'object' && 'attemptId' in body &&
         !(typeof body.attemptId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.attemptId)))
       throw new BadRequestException('저장 시도 ID를 확인하세요');
-    return this.svc.saveTechNote(uid, body, who);
+    return this.svc.saveTechNote(uid, body, who, req);
   }
 
   @Get('studies/:uid/tech-note/history')
   techNoteHistory(@Param('uid') uid: string, @Query('before') before: string, @Req() req: any) {
-    return this.svc.techNote(uid, noteCaller(req), before ?? '2147483647');
+    return this.svc.techNote(uid, noteCaller(req), before ?? '2147483647', req);
   }
 
   /**
@@ -374,7 +374,7 @@ export class PacsController {
 
   @Delete('studies/:uid')
   remove(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.removeState(uid, caller(req));
+    return this.svc.removeState(uid, caller(req), req);
   }
 
   @Post('match')

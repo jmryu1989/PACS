@@ -207,10 +207,12 @@ async function world() {
     studies: async () => [...t.StudyState.values()].map(s => ({ '0020000D': { Value: [s.uid] }, '00080080': { Value: [s.institutionId] },
       '00100020': { Value: ['SYN-' + s.uid] }, '00100010': { Value: ['SYNTHETIC^PATIENT'] } })),
   };
+  const workflow = { workflow: (_request, surface, execute) => root.$transaction(tx => execute({ tx,
+    closeAssignment: async (uid, owner, revision) => { log.push({ client: tx.__name, model: 'Ledger', op: 'close', uid, owner, revision, surface }); } })) };
   const w = {
     t, log, access, keycloak,
     ra: new ReaderAssignmentService(root, keycloak, access),
-    pacs: new PacsService(root, orthanc, keycloak, access, {}),
+    pacs: new PacsService(root, orthanc, keycloak, access, {}, undefined, undefined, workflow),
     study(uid, { owner = A, tele = null, ts = tele ? 'wait' : 'none', rs = 'W', holder = null, heldAt = null } = {}) {
       t.StudyState.set(uid, { uid, institutionId: owner, teleInstitutionId: tele, origin: 'dicom', rs, holdReason: null, ss: 'Verified', em: 'N', ts,
         matched: 'U', ward: '', reqHosp: owner, repDoc: null, confirm: null, preDoc: null, preReviewer: null, ov: null, orig: null,
@@ -222,7 +224,7 @@ async function world() {
       readerSub: readerName ? SUB[readerName] : null, requestId }),
     write: (name, body, uid = UID) => w.ra.write(uid, caller(name), body),
     async assign(name, readerName, uid = UID) { return w.write(name, w.body(name, await w.read(name, uid), readerName), uid); },
-    tele: (body, uid = UID, name = 'aDoc') => w.pacs.patchState(uid, body, caller(name)),
+    tele: (body, uid = UID, name = 'aDoc') => w.pacs.patchState(uid, body, caller(name), {}),
     mark: () => log.length,
     since: at => log.slice(at),
     audits: () => clone(t.AuditLog).map(a => ({ ...a, detail: JSON.parse(a.detail) })),
@@ -359,7 +361,7 @@ test('closing the channel closes the receiver row in the same transaction, with 
   assert.deepEqual(w.row(UID, A), ownerBefore);
   const added = w.audits().slice(auditsBefore);
   assert.deepEqual(added.filter(a => a.action === ACTION).map(a => [a.actor, a.target, a.detail]),
-    [[actorOf('aDoc'), UID, { institution: B, revision: 3, from: actorOf('bDoc2'), to: null, closed: 'tele-closed' }]]);
+    [[actorOf('aDoc'), UID, { institution: B, revision: 3, from: actorOf('bDoc2'), to: null, closed: 'tele-closed', caller: { sub: SUB.aDoc, institution: A, roles: caller('aDoc').roles }, ownerInstitution: B }]]);
   // Nothing of B's assignment reaches B afterwards; A's reads are what they were.
   for (const name of ['bTech', 'bDoc', 'bAdmin']) await assert.rejects(w.read(name), status(404), name);
   await assert.rejects(w.write('bTech', w.body('bTech', { revision: 3 }, 'bDoc')), status(404));
@@ -382,7 +384,7 @@ test('closing the channel closes the receiver row in the same transaction, with 
     studyUid: UID, institutionId: B, revision: 1, readerSub: null, readerActor: null, readerName: null, changedBy: actorOf('aDoc'),
     lastRequest: true, lastFingerprint: true, updatedAt: undefined, closedRevision: 1, closedAt: true });
   assert.deepEqual(v.audits().filter(a => a.action === ACTION).map(a => [a.actor, a.target, a.detail]),
-    [[actorOf('aDoc'), UID, { institution: B, revision: 1, from: null, to: null, closed: 'tele-closed' }]]);
+    [[actorOf('aDoc'), UID, { institution: B, revision: 1, from: null, to: null, closed: 'tele-closed', caller: { sub: SUB.aDoc, institution: A, roles: caller('aDoc').roles }, ownerInstitution: B }]]);
   assert.equal(v.row(UID, A), null);
 });
 
@@ -456,7 +458,7 @@ test('every close gives the ended channel a new revision: a request prepared in 
   assert.deepEqual(w.row(UID, A), ownerBefore);
   assert.deepEqual(w.audits().filter(a => a.action === ACTION).map(a => [a.actor, a.detail]), [
     [actorOf('aTech'), { institution: A, revision: 1, from: null, to: actorOf('aDoc') }],
-    [actorOf('aDoc'), { institution: B, revision: 1, from: null, to: null, closed: 'tele-closed' }],
+    [actorOf('aDoc'), { institution: B, revision: 1, from: null, to: null, closed: 'tele-closed', caller: { sub: SUB.aDoc, institution: A, roles: caller('aDoc').roles }, ownerInstitution: B }],
     [actorOf('bTech'), { institution: B, revision: 2, from: null, to: actorOf('bDoc') }]]);
 
   // (b) A row closed by an earlier channel: Z received the study first and assigned; the owner redirected it to B, which
@@ -530,23 +532,23 @@ test('every path that takes the channel away closes the row: a new teleTo and a 
   await d.assign('aTech', 'aDoc');
   await d.assign('bTech', 'bDoc');
   const ownerBefore = d.row(UID, A), at = d.mark();
-  assert.deepEqual(await d.pacs.removeState(UID, caller('aTech')), { ok: true });
+  assert.deepEqual(await d.pacs.removeState(UID, caller('aTech'), {}), { ok: true });
   const calls = d.since(at), tx = calls.find(c => c.model === 'StudyState' && c.op === 'delete').client;
   assert.deepEqual(calls.filter(c => c.model === 'ReaderAssignment' && c.op === 'update').map(c => c.client), [tx]);
   assert.deepEqual(d.audits().filter(a => a.action === ACTION && a.detail.closed).map(a => [a.actor, a.detail]),
-    [[actorOf('aTech'), { institution: B, revision: 2, from: actorOf('bDoc'), to: null, closed: 'study-deleted' }]]);
+    [[actorOf('aTech'), { institution: B, revision: 2, from: actorOf('bDoc'), to: null, closed: 'study-deleted', caller: { sub: SUB.aTech, institution: A, roles: caller('aTech').roles }, ownerInstitution: B }]]);
   assert.deepEqual(d.row(UID, A), ownerBefore);
   // Delete while the channel is open but B never assigned: B still gets its closed row at revision 1 (F02).
   const e = await world();
   await channel(e, 'open');
-  await e.pacs.removeState(UID, caller('aTech'));
+  await e.pacs.removeState(UID, caller('aTech'), {});
   assert.deepEqual([e.row(UID, B).revision, e.row(UID, B).closedRevision, e.row(UID, B).closedAt instanceof Date, e.row(UID, A)], [1, 1, true, null]);
-  assert.deepEqual(e.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'study-deleted' }]);
+  assert.deepEqual(e.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'study-deleted', caller: { sub: SUB.aTech, institution: A, roles: caller('aTech').roles }, ownerInstitution: B }]);
   // Delete with no channel open: no assignment call at all.
   const n = await world();
   n.study(OTHER_UID);
   const mark = n.mark();
-  await n.pacs.removeState(OTHER_UID, caller('aTech'));
+  await n.pacs.removeState(OTHER_UID, caller('aTech'), {});
   assert.deepEqual(n.since(mark).filter(c => c.model === 'ReaderAssignment'), []);
 });
 
@@ -564,7 +566,7 @@ test('a write whose check passed before the close cannot land after it', async (
   // entry is that close.
   const row = w.row(UID, B);
   assert.deepEqual([row.revision, row.closedRevision, row.closedAt instanceof Date, row.readerSub, row.readerActor], [1, 1, true, null, null]);
-  assert.deepEqual(w.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'tele-closed' }]);
+  assert.deepEqual(w.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'tele-closed', caller: { sub: SUB.aDoc, institution: A, roles: caller('aDoc').roles }, ownerInstitution: B }]);
 });
 
 test('every assignment write and every close leave one audit row: a registered action, recorded for the institution whose row it is (B-F01)', async () => {
@@ -609,7 +611,7 @@ test('every assignment write and every close leave one audit row: a registered a
   await step('the receiver assigns in the new channel', () => w.assign('bTech', 'bDoc'), [[actorOf('bTech'), B, null]]);
   await step('the owner sends the study to Z instead', () => w.tele({ ts: 'sending', teleTo: Z }), [[actorOf('aDoc'), B, 'tele-closed']], ['state.patch']);
   await step('Z assigns', () => w.assign('zTech', 'zDoc'), [[actorOf('zTech'), Z, null]]);
-  await step('the owner deletes the study', () => w.pacs.removeState(UID, caller('aTech')), [[actorOf('aTech'), Z, 'study-deleted']], ['state.delete']);
+  await step('the owner deletes the study', () => w.pacs.removeState(UID, caller('aTech'), {}), [[actorOf('aTech'), Z, 'study-deleted']], ['state.delete']);
   assert.deepEqual(structuredClone(w.t.AuditLog), seen, 'no audit row outside the steps');
 });
 
@@ -642,7 +644,7 @@ test('a delete is refused while a record holds the study or the caller may not d
   ];
   const refused = async (w, name, uid, expected, code, label) => {
     const before = w.snapshot();
-    const error = await w.pacs.removeState(uid, caller(name)).then(() => null, e => e);
+    const error = await w.pacs.removeState(uid, caller(name), {}).then(() => null, e => e);
     assert.ok(error && status(expected)(error), label + ': ' + (error ? error.message : 'deleted'));
     if (code) assert.equal(error.getResponse().code, code, label);
     assert.deepEqual(w.snapshot(), before, label + ': the refusal changed a row');
@@ -652,7 +654,7 @@ test('a delete is refused while a record holds the study or the caller may not d
     w.t.held[model].push(row);
     await refused(w, 'aTech', UID, expected, code, label);
     w.t.held[model].length = 0;
-    assert.deepEqual(await w.pacs.removeState(UID, caller('aTech')), { ok: true }, label + ': without it the study is deleted');
+    assert.deepEqual(await w.pacs.removeState(UID, caller('aTech'), {}), { ok: true }, label + ': without it the study is deleted');
     assert.equal(w.t.StudyState.has(UID), false, label);
   }
   // Who asks: the tele receiver and a radiologist of the owner (403), a third institution and an unknown UID (404).
@@ -663,7 +665,7 @@ test('a delete is refused while a record holds the study or the caller may not d
   await refused(w, 'aTech', UNKNOWN_UID, 404, null, 'an unknown study');
   // A report version that is only a discarded draft's safe copy does not hold the study.
   w.t.held.ReportVersion.push({ id: 2, uid: UID, version: 0, action: 'discarded' });
-  assert.deepEqual(await w.pacs.removeState(UID, caller('aTech')), { ok: true });
+  assert.deepEqual(await w.pacs.removeState(UID, caller('aTech'), {}), { ok: true });
   assert.equal(w.t.StudyState.has(UID), false);
 });
 
@@ -674,7 +676,7 @@ test('a delete closes the receiver\'s assignment and audits it in its own transa
     const w = await deletable('O-SYN-73002');
     const before = w.snapshot(), at = w.mark();
     w.failAudit = failing;
-    await assert.rejects(w.pacs.removeState(UID, caller('aTech')), /SYNTHETIC audit failure/, label);
+    await assert.rejects(w.pacs.removeState(UID, caller('aTech'), {}), /SYNTHETIC audit failure/, label);
     w.failAudit = null;
     assert.deepEqual(w.snapshot(), before, label);
     const calls = w.since(at), tx = calls.find(c => c.model === 'StudyState' && c.op === 'raw').client;
@@ -687,7 +689,7 @@ test('a delete closes the receiver\'s assignment and audits it in its own transa
   // The owner's row is left as it was.
   const w = await deletable('O-SYN-73002');
   const owner = w.row(UID, A), receiver = w.row(UID, B), from = w.t.AuditLog.length, at = w.mark();
-  assert.deepEqual(await w.pacs.removeState(UID, caller('aTech')), { ok: true });
+  assert.deepEqual(await w.pacs.removeState(UID, caller('aTech'), {}), { ok: true });
   const calls = w.since(at), tx = calls.find(c => c.model === 'StudyState' && c.op === 'delete').client;
   assert.deepEqual(calls.filter(c => ['update', 'create', 'upsert', 'delete'].includes(c.op)).map(c => [c.client, c.model, c.op, c.args?.data?.action ?? '']).sort(),
     [[tx, 'AuditLog', 'create', ACTION], [tx, 'AuditLog', 'create', 'state.delete'], [tx, 'Order', 'update', ''], [tx, 'ReaderAssignment', 'update', ''],
@@ -701,7 +703,7 @@ test('a delete closes the receiver\'s assignment and audits it in its own transa
   assert.deepEqual(w.row(UID, A), owner);
   const added = w.audits().slice(from);
   assert.deepEqual(added.filter(a => a.action === ACTION).map(a => [a.actor, a.target, a.detail]),
-    [[actorOf('aTech'), UID, { institution: B, revision: receiver.revision + 1, from: actorOf('bDoc'), to: null, closed: 'study-deleted' }]]);
+    [[actorOf('aTech'), UID, { institution: B, revision: receiver.revision + 1, from: actorOf('bDoc'), to: null, closed: 'study-deleted', caller: { sub: SUB.aTech, institution: A, roles: caller('aTech').roles }, ownerInstitution: B }]]);
   assert.deepEqual(added.filter(a => a.action !== ACTION).map(a => [a.actor, a.action, a.target, a.detail]), [[actorOf('aTech'), 'state.delete', UID, { by: A }]]);
 });
 

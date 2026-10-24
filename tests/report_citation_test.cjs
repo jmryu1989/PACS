@@ -1,7 +1,9 @@
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
-const B2_REQUEST_FACTS = { issuer: 'https://synthetic.invalid', ip: null, requestId: 'synthetic-request' };
+const B2_REQUEST_FACTS = { issuer: 'https://synthetic.invalid', ip: null, requestId: 'synthetic-request', request: {} };
+// Native signing is a collaborator here; this fixture is not cryptographic evidence.
+const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 function b2Ledger(prisma) {
   return { begin: () => ({
     resolveRequestIdentity: async () => 'synthetic-member',
@@ -136,7 +138,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   const keycloak = { usersInGroupWithRole: async () => [] };
   // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a
   // draft PUT the whole snapshot - a keep list the case does not name is the draft's current list (nothing dropped).
-  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma));
+  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma), nativeSigning);
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
   const ids = (key, id) => (Array.isArray(row?.[key]) ? row[key].map(entry => entry[id]) : []);
   const svc = new Proxy(real, { get(target, name) {

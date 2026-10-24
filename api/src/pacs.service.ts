@@ -1,4 +1,7 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { EMR_NATIVE_REPORT_SIGNING, NativeReportSigning } from './emr-report/native-signing';
+import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes } from './emr-clinical/routes';
 import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
@@ -62,7 +65,9 @@ export class PacsService implements OnModuleInit {
     // 인용이 가리키는 소견의 가독은 소견 쪽 관문이 판정한다. 판독문 관문(기관·예비판독)은
     // 그보다 넓어서, 그것만으로 통과시키면 읽을 수 없는 비교 검사가 인용을 통해 새어 나온다.
     private findings: FindingService,
-    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort) {
+    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
+    @Optional() @Inject(EMR_NATIVE_REPORT_SIGNING) signing?: NativeReportSigning,
+    @Optional() @Inject(EMR_CLINICAL_ROUTES) private readonly clinical?: ClinicalRoutes) {
     this.accessConcern = new PacsAccess(this.prisma, this.studyAccess);
     this.institutionsConcern = new PacsInstitutions(this.prisma, this.orthanc, this.keycloak, this.studyAccess, this.accessConcern);
     this.preferencesConcern = new PacsPreferences(this.prisma);
@@ -77,7 +82,7 @@ export class PacsService implements OnModuleInit {
     this.clinicianConcern = new PacsClinician(this.prisma, this.studyAccess, this.accessConcern, this.worklistConcern);
     this.reportEvidenceConcern = new PacsReportEvidence(this.prisma, this.studyAccess, this.findings, this.accessConcern);
     this.reportDraftConcern = new PacsReportDraft(this.prisma, this.studyAccess, this.accessConcern, this.auditConcern, this.reportEvidenceConcern, this.ledger);
-    this.reportCommitConcern = new PacsReportCommit(this.keycloak, this.studyAccess, this.reportEvidenceConcern, this.reportDraftConcern);
+    this.reportCommitConcern = new PacsReportCommit(this.keycloak, this.studyAccess, this.reportEvidenceConcern, this.reportDraftConcern, signing);
   }
 
   // ── institutions (api/src/pacs/institutions.ts) ──
@@ -248,8 +253,8 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── study-state (api/src/pacs/study-state.ts) ──
-  async patchState(uid: string, body: any, c: Caller) {
-    return this.studyStateConcern.patchState(uid, body, c);
+  async patchState(uid: string, body: any, c: Caller, request?: object) {
+    return this.clinical && request ? this.clinical.workflow(request, 'PATCH studies/:uid', workflow => this.studyStateConcern.patchState(uid, body, c, workflow)) : this.studyStateConcern.patchState(uid, body, c);
   }
 
   async match(uid: string, oid: string, patient: any, c: Caller) {
@@ -260,17 +265,25 @@ export class PacsService implements OnModuleInit {
     return this.studyStateConcern.unmatch(uid, c);
   }
 
-  async removeState(uid: string, c: Caller) {
-    return this.studyStateConcern.removeState(uid, c);
+  async removeState(uid: string, c: Caller, request?: object) {
+    return this.clinical && request ? this.clinical.workflow(request, 'DELETE studies/:uid', workflow => this.studyStateConcern.removeState(uid, c, workflow)) : this.studyStateConcern.removeState(uid, c);
   }
 
   // ── tech-note (api/src/pacs/tech-note.ts) ──
-  async techNote(uid: string, c: Caller, before?: string) {
-    return this.techNoteConcern.techNote(uid, c, before);
+  async techNote(uid: string, c: Caller, before?: string, request?: object) {
+    return clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
+      tx => this.techNoteConcern.techNote(uid, c, before, tx),
+      value => !value.note && !value.items?.length,
+      before === undefined ? 'GET studies/:uid/tech-note' : 'GET studies/:uid/tech-note/history');
   }
 
-  async saveTechNote(uid: string, body: any, c: Caller) {
-    return this.techNoteConcern.saveTechNote(uid, body, c);
+  async saveTechNote(uid: string, body: any, c: Caller, request: object) {
+    // Older pages have no attempt ID. Give this operation its own identity while
+    // preserving the projection's legacy null attempt and version-conflict rule.
+    const onlineBody = body && typeof body === 'object' && !('attemptId' in body) ? { ...body, attemptId: randomUUID() } : body;
+    return clinicalRoutes(this.clinical).write(request,
+      { surface: 'tech-note.write', studyId: uid, recordId: uid, body: onlineBody },
+      tx => this.techNoteConcern.saveTechNote(uid, body, c, tx));
   }
 
   // ── hold (api/src/pacs/hold.ts) ──

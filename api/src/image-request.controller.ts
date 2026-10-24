@@ -1,3 +1,6 @@
+import { Inject, Optional } from '@nestjs/common';
+import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes } from './emr-clinical/routes';
+import type { SurfaceKey } from './emr-clinical/contract';
 import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import { ImageRequestService } from './image-request.service';
 
@@ -8,10 +11,10 @@ const caller = (r: any) => ({ sub: r.sub, actor: r.actor, roles: r.roles ?? [], 
 
 @Controller()
 export class ImageRequestController {
-  constructor(private service: ImageRequestService) {}
-  @Get('image-requests') list(@Req() r: any, @Query() q: any) { return this.service.list(caller(r), q); }
-  @Get('image-requests/:id') read(@Param('id') id: string, @Req() r: any) { return this.service.read(id, caller(r)); }
-  @Get('studies/:uid/image-requests') forStudy(@Param('uid') uid: string, @Req() r: any) { return this.service.forStudy(uid, caller(r)); }
-  @Post('studies/:uid/image-requests') create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) { return this.service.create(uid, caller(r), b); }
-  @Post('image-requests/:id') change(@Param('id') id: string, @Req() r: any, @Body() b: any) { return this.service.change(id, caller(r), b); }
+  constructor(private service: ImageRequestService, @Optional() @Inject(EMR_CLINICAL_ROUTES) private readonly clinical?: ClinicalRoutes) {}
+  @Get('image-requests') list(@Req() r: any, @Query() q: any) { return clinicalRoutes(this.clinical).collection(r, 'GET image-requests', 'image-request', tx => this.service.list(caller(r), q, tx)); }
+  @Get('image-requests/:id') read(@Param('id') id: string, @Req() r: any) {return clinicalRoutes(this.clinical).read(r, 'image-request', id.toLowerCase(), tx => this.service.read(id, caller(r), tx));}
+  @Get('studies/:uid/image-requests') forStudy(@Param('uid') uid: string, @Req() r: any) { return clinicalRoutes(this.clinical).collection(r, 'GET studies/:uid/image-requests', 'image-request', tx => this.service.forStudy(uid, caller(r), tx)); }
+  @Post('studies/:uid/image-requests') async create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) { return clinicalRoutes(this.clinical).write(r, { surface: 'image-request.create', studyId: uid, recordId: typeof b?.requestId === 'string' ? b.requestId.toLowerCase() : null, body: b }, tx => this.service.create(uid, caller(r), b, tx)); }
+  @Post('image-requests/:id') async change(@Param('id') id: string, @Req() r: any, @Body() b: any) { return clinicalRoutes(this.clinical).write(r, { surface: ('image-request.'+b?.action) as SurfaceKey, studyId: (await this.service.read(id, caller(r))).item.studyUid, recordId: id.toLowerCase(), body: b }, tx => this.service.change(id, caller(r), b, tx)); }
 }

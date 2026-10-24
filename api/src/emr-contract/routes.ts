@@ -59,7 +59,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET bootstrap'] },
   { kinds: ['study-metadata', 'report-head', 'private-draft'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies'] },
-  { kinds: ['study-metadata', 'study-correction', 'report-head', 'private-draft'], operation: 'write', causes: ['user-view'],
+  { kinds: ['study-metadata', 'study-correction', 'report-head', 'private-draft', 'assignment'], operation: 'write', causes: ['user-view'],
     routes: ['PATCH studies/:uid', 'DELETE studies/:uid'] },
   { kinds: ['patient-match', 'study-correction', 'order', 'received-order', 'report-head', 'private-draft'], operation: 'write', causes: ['user-view'],
     routes: ['POST match', 'POST unmatch'] },
