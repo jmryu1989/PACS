@@ -2240,7 +2240,8 @@ class RelatedModePage(unittest.TestCase):
     # own centre, and Hide Received closes it with the mode unchanged.
     # The box inside its report column (the click on the toggle may scroll the column into view; that is not a resize).
     BOX = """selector => { const r = document.querySelector(selector).getBoundingClientRect(),
-      c = document.querySelector(".report-p").getBoundingClientRect(); return [Math.round(r.top - c.top), Math.round(r.height)]; }"""
+      p = document.querySelector(".report-p"), c = p.getBoundingClientRect();
+      return [Math.round(r.top - c.top + p.scrollTop), Math.round(r.height)]; }"""
     ON_TOP = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect();
       const x = r.left + r.width / 2, y = Math.max(r.top, 0) + Math.min(r.height, innerHeight) / 2;
       const hit = document.elementFromPoint(x, y); return !!hit && e.contains(hit); }"""
@@ -2263,6 +2264,7 @@ class RelatedModePage(unittest.TestCase):
         after = self.js(self.BOX, "#related-mode")
         self.assertGreaterEqual(after[1], before[1] - 1, f"the mode shrank when the list opened: {before} -> {after}")
         self.assertEqual(before[0], after[0], "the mode stays where it was in its column")
+        body.scroll_into_view_if_needed()
         expect(body).to_be_in_viewport()
         self.assertTrue(self.js(self.ON_TOP, "#cvr-inbox-body"), "the opened list is drawn over the report area")
         expect(toggle).to_be_in_viewport()
@@ -2272,6 +2274,42 @@ class RelatedModePage(unittest.TestCase):
         self.settle(200)
         self.assertEqual(before, self.js(self.BOX, "#related-mode"), "closing the list gives the same mode")
         expect(self.mode()).to_be_visible()
+
+    # D1822: what used to open the list by itself (here: the synthetic site does not answer the received-list read, the
+    # S7-U2a failure) only marks the bar; the list stays closed and the report being written is never covered: Findings
+    # and Approve are on top at their own centre, typing goes into Findings, and in the mode Insert and Back are on top and
+    # work. The reader then opens the list with Show Received, which clears the mark.
+    def self_opened_list_leaves_the_report_usable(self, reading):
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+        expect(self.page.locator("#cvr-inbox-p")).to_have_attribute("data-state", "failed")
+        for selector in ("#findings", "#b-approve"):
+            self.page.locator(selector).scroll_into_view_if_needed()
+            self.assertTrue(self.js(self.ON_TOP, selector), f"{selector} is covered by the list that opened by itself")
+        self.page.locator("#findings").fill("SYN typed under a self-opened list")
+        self.assertEqual("SYN typed under a self-opened list", self.value())
+        self.enter()
+        for selector in ("#related-mode-insert", "#related-mode-back"):
+            self.page.locator(selector).scroll_into_view_if_needed()
+            self.assertTrue(self.js(self.ON_TOP, selector), f"{selector} is covered by the list that opened by itself")
+        self.open_insert()
+        self.page.locator("#related-insert-cancel").click()
+        self.back()
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.assertEqual("SYN typed under a self-opened list", self.value())
+        expect(self.page.locator("#cvr-inbox-p")).to_have_attribute("data-attention", "true")
+        expect(self.page.locator("#cvr-inbox-body")).to_be_hidden()
+        self.page.locator("#cvr-inbox-toggle").click()
+        expect(self.page.locator("#cvr-inbox-body")).to_be_visible()
+        expect(self.page.locator("#cvr-inbox-p")).not_to_have_attribute("data-attention", "true")
+
+    def test_w5b_self_opened_list_leaves_the_report_usable_normal(self):
+        self.self_opened_list_leaves_the_report_usable(False)
+
+    def test_w5b_self_opened_list_leaves_the_report_usable_reading(self):
+        self.self_opened_list_leaves_the_report_usable(True)
 
     def test_w5b_received_list_overlays_the_mode_normal(self):
         self.received_list_overlays_the_mode(False)

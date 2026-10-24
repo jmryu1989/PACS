@@ -1021,9 +1021,12 @@
        접힌다. 요약 줄은 보낸 목록 줄(.cvr-sent-bar)과 같은 모양이라 판독 칼럼에 더하는 높이는 그 한 줄이다. 펼친 본문은 높이 상한
        안에서 스크롤해 판독문 칸을 밀어내지 않는다. 글자는 12px 이상, 상태는 색과 함께 늘 글자로 쓴다. */
     #cvr-inbox-p { flex: none; font-size: 12px; color: var(--kin-text); background: var(--kin-panel); border-top: 1px solid var(--kin-line2); }
-    /* D1821 (Minhoon, W5B-REVIEW-01): the opened received list floats over the report area instead of taking its room.
-       The report column (editor or Related Report mode) keeps its size; the list is anchored to the column's bottom, no
-       taller than the column itself, scrolls inside, and keeps its bar (Hide Received) at the top while it scrolls. */
+    /* D1821/D1822 (W5B-REVIEW-01): the received list the reader opens (Show Received; it never opens by itself on this page)
+       floats over the report area instead of taking its room. The report column (editor or Related Report mode) keeps its
+       size; the list is anchored to the column's bottom, no taller than the column, scrolls inside, and keeps its bar (Hide
+       Received) on top. What used to open it by itself marks the bar (data-attention) in the existing CVR amber. */
+    #cvr-inbox-p[data-attention] > .cvr-inbox-bar { box-shadow: inset 3px 0 #d29a3a; }
+    #cvr-inbox-p[data-attention] #cvr-inbox-toggle { border-color: #d29a3a; color: #f0c27a; }
     .report-p { position: relative; }
     #cvr-inbox-p:has(> #cvr-inbox-body:not([hidden])) { position: absolute; left: 0; right: 0; bottom: 0; max-height: 100%;
       overflow: auto; z-index: 5; box-shadow: 0 -6px 18px #0009; }
