@@ -183,6 +183,8 @@ class FakeHost:
         if "python3" in args:
             return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0})
         if "node" in args:
+            if any("WRAPPING_RESTORE_VERIFIED" in arg for arg in args):
+                return "WRAPPING_RESTORE_VERIFIED"
             return "EMR_RESTORE_VERIFIED"
         return ""
 
@@ -210,6 +212,31 @@ class HeldCaptureTests(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.folder = folder.name
+
+    def test_held_signing_keys_require_custody_and_restore_from_recorded_locator(self):
+        host = FakeHost(self.folder, shape="post")
+        host.value_changes = {"kin": {"emr_signing.private_key": True}}
+        self.enterContext(patch.object(ops, "WRAPPING_CUSTODY_CONFIG", Path(self.folder) / "custody.json"))
+        self.enterContext(patch.dict(os.environ, {"KIN_EMR_WRAPPING_CUSTODY": ""}))
+        with patch.dict(os.environ, {"KIN_EMR_WRAPPING_CUSTODY": ""}):
+            with self.assertRaisesRegex(RuntimeError, "Signing keys require"):
+                host.capture()
+        root = Path(self.folder)
+        secret = root / "live.key"
+        secret.write_bytes(bytes(range(32)))
+        config = root / "custody.json"
+        config.write_text(json.dumps({"backup_root": str(root / "custody"), "files": {"wrap-1": str(secret)}}))
+        with patch.object(ops, "signing_keys", return_value=[{"kid": "doctor", "wrapped": {"wrappingKeyId": "wrap-1"}}]):
+            directory = host.capture()
+            secret.unlink()
+            with host.bound(), patch.object(ops, "remove_owned_if_present"):
+                ops.rehearse(directory)
+        (record,) = directory.glob("rehearsal-*.json")
+        result = json.loads(record.read_text())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["wrapping_custody"]["keys"], 1)
+        self.assertEqual(Path(result["wrapping_custody"]["directory"]).parent, root / "custody")
+        self.assertEqual(host.lifecycle_commands(), [])
 
     def test_01_pre_emr_capture_is_complete_private_and_validates_both_ways(self):
         host = FakeHost(self.folder)
@@ -648,6 +675,77 @@ class RealClusterTests(unittest.TestCase):
 
     def setUp(self):
         self.enterContext(ops.resource_names(os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-")))
+
+    def test_daily_schema_counts_and_wrapping_custody_real_restore(self):
+        """Real PG dumps and the production unwrap boundary; only synthetic rows and keys."""
+        import sqlite3
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak;")
+        self.ok(source, "CREATE TABLE public.fixture(id integer);")
+        self.ok(source, "CREATE TABLE public.fixture(id integer);", "keycloak")
+        self.ok(source, "CREATE SCHEMA emr_access; CREATE SCHEMA emr_signing; CREATE SCHEMA emr_clinical; "
+                       "CREATE TABLE emr_access.fixture(id integer); CREATE TABLE emr_clinical.fixture(id integer); "
+                       "INSERT INTO emr_clinical.fixture VALUES (1),(2); "
+                       "CREATE TABLE emr_signing.private_key(kid text PRIMARY KEY,wrapped jsonb);")
+        observed = ops.counts(source, "kin", "kin")
+        self.assertEqual(set(observed), {"public.fixture", "emr_access.fixture", "emr_signing.private_key", "emr_clinical.fixture"})
+        image = os.environ.get("KIN_TEST_API_IMAGE", "kin-api:ci")
+        script = """const c=require('/app/dist/emr-signature/server-crypto');
+const k=c.generateServerKeyPair(); process.stdout.write(JSON.stringify(c.wrapServerPrivateKey(
+k.privateKey,'synthetic-doctor-key','wrap-1',Buffer.from(Array.from({length:32},(_,i)=>i)))));"""
+        wrapped = ops.temporary_run(["--network", "none", "--read-only", "--entrypoint", "node", image, "-e", script])
+        self.ok(source, "INSERT INTO emr_signing.private_key VALUES ('synthetic-doctor-key','" + wrapped.replace("'", "''") + "');")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "backups" / "synthetic-snapshot"
+            snapshot.mkdir(parents=True)
+            live = root / "live.key"
+            live.write_bytes(bytes(range(32)))
+            config = root / "custody.json"
+            config.write_text(json.dumps({"backup_root": str(root / "custody"), "files": {"wrap-1": str(live)}}))
+            manifest = {"format": 1, "complete": True, "git_sha": ops.text(["git", "rev-parse", "HEAD"]),
+                "counts": {db: ops.counts(source, db, "kin") for db in ("kin", "keycloak")},
+                "postgres_image": ops.text(["docker", "image", "inspect", POSTGRES_IMAGE, "--format", "{{.Id}}"]),
+                "orthanc_image": ops.text(["docker", "image", "inspect", "orthancteam/orthanc:24.12.0", "--format", "{{.Id}}"]),
+                "running_images": {"kin-api": {"id": ops.text(["docker", "image", "inspect", image, "--format", "{{.Id}}"])}},
+            }
+            with patch.dict(os.environ, {"KIN_EMR_WRAPPING_CUSTODY": str(config)}):
+                ops.capture_wrapping_custody(snapshot, manifest, source)
+            for database in ("kin", "keycloak"):
+                with (snapshot / (database + ".dump")).open("wb") as handle:
+                    ops.run(["docker", "exec", source, "pg_dump", "-U", "kin", "-d", database, "-Fc"], output=handle)
+            with sqlite3.connect(root / "index") as db:
+                db.execute("CREATE TABLE AttachedFiles(uuid TEXT, compressedSize INTEGER)")
+            with tarfile.open(snapshot / "orthanc.tgz", "w:gz") as archive:
+                archive.add(root / "index", arcname="index")
+            for name in ops.FILES[3:]: (snapshot / name).write_text("SYNTHETIC ONLY\n")
+            manifest["sha256"] = {name: ops.digest(snapshot / name) for name in ops.FILES}
+            manifest["bytes"] = {name: (snapshot / name).stat().st_size for name in ops.FILES}
+            ops.write_json(snapshot / "manifest.json", manifest)
+            live.unlink()
+            config.unlink()
+            ops.rehearse(snapshot)
+            receipt = json.loads(next(snapshot.glob("rehearsal-*.json")).read_text())
+            self.assertTrue(receipt["success"])
+            self.assertEqual(receipt["wrapping_custody"]["keys"], 1)
+            # A mistaken custody copy can have a matching file checksum but cannot unwrap the saved key.
+            entry = manifest["wrapping_custody"]["files"]["wrap-1"]
+            secret = Path(manifest["wrapping_custody"]["directory"]) / entry["file"]
+            secret.write_bytes(b"x" * 32)
+            entry["sha256"] = ops.digest(secret)
+            ops.write_json(snapshot / "manifest.json", manifest)
+            with self.assertRaises(RuntimeError): ops.rehearse(snapshot)
+            secret.unlink()
+            with self.assertRaisesRegex(RuntimeError, "custody file is unavailable"): ops.rehearse(snapshot)
+            # Separate from checksum verification, both added schemas participate in the restore comparison.
+            secret.write_bytes(bytes(range(32)))
+            entry["sha256"] = ops.digest(secret)
+            for table in ("emr_signing.private_key", "emr_clinical.fixture"):
+                manifest["counts"]["kin"][table] += 1
+                ops.write_json(snapshot / "manifest.json", manifest)
+                with self.assertRaisesRegex(RuntimeError, "row counts differ"): ops.rehearse(snapshot)
+                manifest["counts"]["kin"][table] -= 1
+            self.assertEqual(ops.counts(source, "kin", "kin"), manifest["counts"]["kin"])
 
     def start(self, superuser="kin"):
         import subprocess
