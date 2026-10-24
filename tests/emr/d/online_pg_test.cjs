@@ -14,6 +14,7 @@ const { PrismaClient } = require(path.join(api, 'node_modules/@prisma/client'));
 const { AccessLedgerStore, LedgerFailure } = require(path.join(dist, 'emr-runtime/store'));
 const { createRecordPort } = require(path.join(dist, 'emr-runtime/record-port'));
 const { FailureJournal, FailureSpool } = require(path.join(dist, 'emr-runtime/failure-journal'));
+const { EMR_TX_TIMEOUT_MS } = require(path.join(dist, 'emr-runtime/limits'));
 const { ClinicalStore } = require(path.join(dist, 'emr-clinical/store'));
 const { composeClinicalRuntime } = require(path.join(dist, 'emr-clinical/runtime'));
 const { createOnlineClinicalServices } = require(path.join(dist, 'emr-clinical/services'));
@@ -140,6 +141,36 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
     assert.equal(arrivals.every(v => ['committed', 'replayed', 'unknown'].includes(v.status)), true);
     assert.equal((await runtime.lookup({}, parallel)).status, 'replayed');
     assert.equal(signCalls, callsAfterCommit + 1);
+
+    const blocked = create('synthetic ledger lock'), beforeBlocked = await count('emr_clinical.online_version');
+    const beforeBlockedProjection = await count('public.d_online_projection');
+    let acquired, release, timer;
+    const locked = new Promise(resolve => { acquired = resolve; });
+    const released = new Promise(resolve => { release = resolve; });
+    const blocker = witness.$transaction(async tx => {
+      await tx.$executeRaw`LOCK TABLE emr_access.access_entry IN ACCESS EXCLUSIVE MODE`;
+      acquired(); await released;
+    }, { timeout: EMR_TX_TIMEOUT_MS * 2 });
+    await Promise.race([locked, blocker]);
+    const started = performance.now();
+    const pending = runtime.write({}, blocked).then(value => ({ value }), error => ({ error }));
+    let refused;
+    try {
+      refused = await Promise.race([pending, new Promise(resolve => {
+        timer = setTimeout(() => resolve({ deadline: true }), EMR_TX_TIMEOUT_MS);
+      })]);
+      console.log('D locked-ledger refusal ms:', performance.now() - started);
+    } finally { clearTimeout(timer); release(); await blocker; await pending; }
+    assert.equal(refused.deadline, undefined, 'clinical write must settle while the ledger remains locked');
+    assert.equal(refused.error?.meta?.code, '55P03');
+    assert.equal(await count('emr_clinical.online_version'), beforeBlocked);
+    assert.equal(await count('public.d_online_projection'), beforeBlockedProjection);
+    // Settlement itself may be blocked by the ledger. B2 recovery decides
+    // the terminal outcome once the database is available, never the timer.
+    await ledger.recoverPending();
+    assert.equal((await runtime.lookup({}, blocked)).status, 'rejected');
+    assert.equal((await runtime.write({}, blocked)).status, 'rejected');
+    assert.equal((await runtime.write({}, create('synthetic retry after lock'))).status, 'committed');
 
     const beforeKeyFailure = await count('emr_clinical.online_version');
     await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='suspended' WHERE kid=${kid}`;

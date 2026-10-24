@@ -27,6 +27,7 @@ const { EmrLedgerClient } = require(path.join(api, 'src/emr-runtime/client.ts'))
 const { AccessLedgerStore } = require(path.join(api, 'src/emr-runtime/store.ts'));
 const { createRecordPort } = require(path.join(api, 'src/emr-runtime/record-port.ts'));
 const { FailureJournal, FailureSpool } = require(path.join(api, 'src/emr-runtime/failure-journal.ts'));
+const { EMR_TX_TIMEOUT_MS } = require(path.join(api, 'src/emr-runtime/limits.ts'));
 if (oldLoader) require.extensions['.ts'] = oldLoader; else delete require.extensions['.ts'];
 
 const url = process.env.C2_TEST_DATABASE_URL;
@@ -212,6 +213,48 @@ test('T-TX real signature persistence failure also preserves report and draft', 
   await db.$executeRaw`ALTER TABLE emr_signing.signed_version ADD CONSTRAINT ordinary_storage_failure CHECK (false) NOT VALID`;
   try { await assert.rejects(service.approval.approve(request('doctor-1'), cmd)); }
   finally { await db.$executeRaw`ALTER TABLE emr_signing.signed_version DROP CONSTRAINT ordinary_storage_failure`; }
+  assert.deepEqual(await counts(cmd.recordId), { signatures: 0, events: 0, drafts: 1, published: false });
+});
+
+test('T-TX a locked ledger refuses approval before the request deadline and preserves the draft', async () => {
+  const cmd = await report('doctor-1');
+  let acquired, release, timer;
+  const locked = new Promise(resolve => { acquired = resolve; });
+  const released = new Promise(resolve => { release = resolve; });
+  const blocker = db.$transaction(async tx => {
+    await tx.$executeRaw`LOCK TABLE emr_access.access_entry IN ACCESS EXCLUSIVE MODE`;
+    acquired(); await released;
+  }, { timeout: EMR_TX_TIMEOUT_MS * 2 });
+  await Promise.race([locked, blocker]);
+  const started = performance.now();
+  const pending = service.approval.approve(request('doctor-1'), cmd)
+    .then(value => ({ value }), error => ({ error }));
+  let result;
+  try {
+    result = await Promise.race([pending, new Promise(resolve => {
+      timer = setTimeout(() => resolve({ deadline: true }), EMR_TX_TIMEOUT_MS);
+    })]);
+    console.log('C2 locked-ledger refusal ms:', performance.now() - started);
+  } finally { clearTimeout(timer); release(); await blocker; await pending; }
+  assert.equal(result.deadline, undefined, 'approval must settle while the ledger remains locked');
+  assert.equal(result.error?.meta?.code, '55P03');
+  assert.deepEqual(await counts(cmd.recordId), { signatures: 0, events: 0, drafts: 1, published: false });
+  assert.equal(await service.approval.result(request('doctor-1'), cmd.operationId), null);
+  await service.approval.approve(request('doctor-1'), cmd);
+  assert.deepEqual(await counts(cmd.recordId), { signatures: 1, events: 1, drafts: 0, published: true });
+});
+
+test('T-TX a slow database statement refuses approval without publication', async () => {
+  const cmd = await report('doctor-1');
+  const slow = core({ reports: { ...reports, async validate(tx, current) {
+    await reports.validate(tx, current);
+    await tx.$queryRaw`SELECT pg_sleep(${EMR_TX_TIMEOUT_MS / 1000})::text`;
+  } } });
+  const started = performance.now();
+  await assert.rejects(slow.approval.approve(request('doctor-1'), cmd), error => error.meta?.code === '57014');
+  const elapsed = performance.now() - started;
+  console.log('C2 statement refusal ms:', elapsed);
+  assert.ok(elapsed < EMR_TX_TIMEOUT_MS);
   assert.deepEqual(await counts(cmd.recordId), { signatures: 0, events: 0, drafts: 1, published: false });
 });
 

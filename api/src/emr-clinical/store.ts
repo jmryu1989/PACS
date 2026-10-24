@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { AccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
-import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS } from '../emr-runtime/limits';
+import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import type { ClinicalRecord, ClinicalUnit } from './contract';
 import { applyPlan, ClinicalWritePlan, projectUnit, RequestIdentity, WriteInput } from './records';
 import type { ClinicalSignature } from './signing';
@@ -30,7 +30,10 @@ export class ClinicalStore {
   constructor(readonly db: PrismaClient) {}
 
   async transaction<T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-    return this.db.$transaction(work, options);
+    return this.db.$transaction(async tx => {
+      await boundEmrStatements(tx);
+      return work(tx);
+    }, options);
   }
 
   async command(tx: Prisma.TransactionClient, identity: RequestIdentity): Promise<StoredClinicalCommand | null> {
