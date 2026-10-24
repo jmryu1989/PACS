@@ -116,6 +116,10 @@ class ReadingPanelLayoutE2E(ReadingWorkspaceE2E):
         marker = self.mark_document(frame)
         page.locator(f'#relrows tr[data-uid="{prior.uid}"]').click()
         expect(page.locator('#prior-findings')).to_have_text('PRIOR ' + prior.uid)
+        # W5: the row click opened Related Report mode; Report Editor (its Back) gives the editor back, the prior stays viewed.
+        expect(page.locator('#related-mode-title')).to_be_focused()
+        page.keyboard.press('Control+Alt+4')
+        expect(page.locator('#findings')).to_be_focused()
         draft = 'PANEL RESIZE PRIVATE REPORT ' + current.uid
         page.locator('#findings').fill(draft)
         comparison = frame.get_by_role('button', name='Comparison', exact=True)
@@ -152,8 +156,9 @@ class ReadingPanelLayoutE2E(ReadingWorkspaceE2E):
         expect(page.locator('#reading-resize-related')).not_to_be_visible()
         expect(page.locator('#reading-resize-prior')).not_to_be_visible()
         expect(page.locator('#reading-related-toggle')).to_have_text('Show Related Panel')
+        # W5: Related Report opens the mode on the viewed prior (the typed draft is saved first) and shows the hidden panel.
         page.keyboard.press('Control+Alt+3')
-        expect(page.locator('#reading-prior-report')).to_be_focused()
+        expect(page.locator('#related-mode-title')).to_be_focused()
         expect(page.locator('#reading-related-region')).to_be_visible()
         expect(page.locator('#prior-findings')).to_have_text('PRIOR ' + prior.uid)
         self.assertEqual(self.panels(page), chosen)

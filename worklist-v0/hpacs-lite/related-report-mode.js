@@ -12,6 +12,7 @@
   'use strict';
   const SOURCE_FIELDS = Object.freeze(['findings', 'conclusion', 'recommendation']);
   const SECTIONS = Object.freeze(['findings', 'conclusion']);
+  const OPTIONAL_FIELDS = Object.freeze(['recommendation']);
   const LABEL = Object.freeze({ findings: 'Findings', conclusion: 'Conclusion', recommendation: 'Recommendation' });
   const ACTION = Object.freeze({ approve: 'Approved', addendum: 'Addendum' });
   const UNKNOWN = '확인할 수 없음';
@@ -74,6 +75,11 @@
       const el = section.querySelector('[data-related-source="' + field + '"]');
       if (!el) throw new Error('Related Report mode: the ' + field + ' text block is missing');
       return [field, el];
+    }));
+    const sections = Object.fromEntries(SOURCE_FIELDS.map(field => {
+      const box = shown[field].closest('.related-mode-section');
+      if (!box) throw new Error('Related Report mode: the ' + field + ' section is missing');
+      return [field, box];
     }));
     const editor = app.editor();
     if (!editor) throw new Error('Related Report mode: the report editor host is missing');
@@ -200,6 +206,9 @@
       for (const field of SOURCE_FIELDS) {
         const text = view.state === 'ready' ? view.texts?.[field] ?? '' : '';
         if (shown[field].textContent !== text) shown[field].textContent = text;
+        // W-07b: Findings and Conclusion are the two report sections. A stored Recommendation is shown read-only only when it
+        // has text, so an empty heading never shows and a whole-report Insert never carries text the reader did not see.
+        if (OPTIONAL_FIELDS.includes(field)) sections[field].hidden = !text;
       }
     }
 

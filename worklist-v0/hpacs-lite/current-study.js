@@ -229,7 +229,7 @@
     function enterStudy(uid, { deferViewer = false, openSelected = false } = {}) {
       // W5: a move closes Related Report mode first (the move gate already confirmed the Target clean); its return point
       // belongs to the study being left.
-      relatedMode?.exit();
+      relatedMode.exit();
       clearReportNotice();
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);

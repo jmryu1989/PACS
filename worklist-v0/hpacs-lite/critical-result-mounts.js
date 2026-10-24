@@ -11,7 +11,7 @@
     try {
       criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'cvr-inbox-p', prefix: 'cvr-inbox', fold: true,
         onAccountChanged: notifyAccountChanged,
-        blocked: () => relatedMode?.active() ? relatedMode.reason() : null,
+        blocked: () => relatedMode.active() ? relatedMode.reason() : null,
         eligible: () => { const s = KinAuth.session(); return !!sess && serverMode && !demoMode && !offline && s?.state === 'approved'
           && Array.isArray(s.roles) && (s.roles.includes('clinician') || s.roles.includes('radiologist')); },
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; } });
@@ -34,6 +34,6 @@
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
         actorName: value => displayActor(value),
         // W5 (설계 v5 §1.6): Send CVR waits for Back in Related Report mode; the reason is said on the control.
-        blocked: () => relatedMode?.active() ? relatedMode.reason() : null });
+        blocked: () => relatedMode.active() ? relatedMode.reason() : null });
       accountChangeHooks.push((reason, detail) => criticalResults.lock(detail));
     } catch (_) { toast('중요 결과 발신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
