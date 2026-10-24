@@ -712,21 +712,21 @@ test('SPLIT-14 a citation is shown only while its finding is readable; a databas
   assert.equal(await w.evidence.reportLimitChecked(async () => 'ok'), 'ok');
 });
 
-// ── SPLIT-15 the structure catalog gate (M18) ──
+// ── SPLIT-15 the product catalog at the report boundary ──
 
-test('SPLIT-15 the structure catalog is replaced only by a list that passes the gate; a refused list leaves the previous one standing', () => {
-  const w = world();
-  // The catalog's own replacement path (P7/P12) is the protected accessor; a subclass reaches it as the product's tests do.
-  class Seam extends PacsReportEvidence { set(next) { this.structureCatalog = next; } get current() { return this.structureCatalog; } }
-  const seam = new Seam(w.db.root, w.sa, w.findings, w.access);
-  assert.equal(seam.current, STRUCTURE_CATALOG);
-  const broken = [STRUCTURE_CATALOG[0], STRUCTURE_CATALOG[0]];   // the same templateId twice
-  assert.throws(() => seam.set(broken));
-  assert.equal(seam.current, STRUCTURE_CATALOG);
-  seam.set([]);
-  assert.deepEqual(seam.current, []);
-  assert.throws(() => seam.set(broken));
-  assert.deepEqual(seam.current, []);
+test('SPLIT-15 a report draft accepts the shipped catalog and rejects an unknown item without writing', async () => {
+  const w = world(), uid = uidOf();
+  const item = STRUCTURE_CATALOG[0].items.find(i => i.code === 'TECHNIQUE');
+  const request = { op: 'apply', field: item.field, templateId: STRUCTURE_CATALOG[0].templateId,
+    templateRevision: STRUCTURE_CATALOG[0].revision, itemCode: item.code, valueType: item.valueType,
+    value: 'SYN technique', renderedText: 'Technique: SYN technique' };
+  const result = await w.evidence.draftStructure(w.db.root, uid, null, { structure: request, structureIds: [] },
+    { findings: request.renderedText }, RAD_A, 0);
+  assert.equal(result.entries[0].value, 'SYN technique');
+  assert.equal(result.entries[0].renderedText, request.renderedText);
+  await assert.rejects(() => w.evidence.draftStructure(w.db.root, uid, null,
+    { structure: { ...request, itemCode: 'UNKNOWN' }, structureIds: [] }, { findings: request.renderedText }, RAD_A, 0),
+    error => error.getStatus() === 400);
 });
 
 // ── SPLIT-16 clinician reads ──

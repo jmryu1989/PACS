@@ -32,45 +32,13 @@ test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   assert.equal(spec.phase, 'split');
   const source = createSource();
   // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
-  assert.deepEqual(source.validate(), { members: 125, declarations: 57 });
+  assert.deepEqual(source.validate(), { members: 122, declarations: 57 });
   assert.equal(spec.facade.forwards.length, 64);
   assert.equal(spec.facade.slots.length, 15);
   assert.equal(spec.facade.reexports.length, 14);
 });
-/**
- * W5-API (D1460): the facade's readDraft forwards the Check's optional insertRequestId, so the spec holds its current signature
- * and records the landed one beside it (spec.w5_api) - exactly that one forward, nothing else. The landed corpus (c8e4f1b) is
- * judged with the facade it was approved with: the same spec with that one signature put back.
- */
-function landedSpec() {
-  const declared = spec.w5_api;
-  assert.equal(declared.unit, 'W5-API');
-  assert.deepEqual(declared.facade_signatures.map(change => change.name), ['readDraft']);
-  const landed = structuredClone(spec);
-  for (const change of landed.b2_replacement.facade_signatures) {
-    const forward = landed.facade.forwards.find(item => item.name === change.name);
-    forward.signature_sha256 = change.before;
-  }
-  assert.equal(landed.facade.parameters.pop(), 'ledger:EmrRecordPort');
-  assert.equal(landed.facade.reexports.pop(), 'DraftRequestFacts');
-  assert.equal(landed.facade.slots.find(x => x.name === 'reportDraftConcern').args.pop(), 'ledger');
-  landed.concerns['api/src/pacs/report-draft.ts'] = landed.b2_replacement.draft_before;
-  delete landed.facade.parameter_decorators;
-  delete landed.b2_replacement;
-  for (const change of declared.facade_signatures) {
-    const forward = landed.facade.forwards.find(item => item.name === change.name);
-    assert.equal(forward.signature_sha256, change.current, change.name);
-    forward.signature_sha256 = change.landed;
-  }
-  delete landed.w5_api;
-  return landed;
-}
 test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
-  // historicalSource() builds its source through pacs_source.cjs's export with the spec file's default; give it the landed spec.
-  const sources = require('./pacs_source.cjs'), current = sources.createSource;
-  sources.createSource = options => current({ spec: landedSpec(), ...options });
-  try { assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 }); }
-  finally { sources.createSource = current; }
+  assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
 });
 test('U0B-STRUCT-SPLIT explicit moved location and re-export resolve in one Program', () => {
   const source = fixture(plain, () => {}, { [path.join(apiSrc, 'pacs.service.ts')]: "export { Worklist } from './pacs/worklist';" });
@@ -123,7 +91,7 @@ test('U0B CommonJS export-assignment members resolve through installed Node decl
 for (const [field, value] of [['name', 'gatewayReceiptt'], ['kind', 'PropertyDeclaration'],
   ['id', 'member:gatewayReceiptt:MethodDeclaration'], ['category', 'declaration'], ['live.kind', undefined]]) {
   test(`U0B-R02 spec ${field} must describe the resolved declaration`, () => {
-    assert.deepEqual(createSource().validate(), { members: 125, declarations: 57 });
+    assert.deepEqual(createSource().validate(), { members: 122, declarations: 57 });
     const wrong = structuredClone(spec);
     const entry = wrong.entries.find(item => item.name === 'gatewayReceipt');
     if (field === 'live.kind') delete entry.live.kind;

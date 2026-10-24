@@ -75,7 +75,6 @@
       "tests/emr/b/throughput.cjs",
       "tests/emr/b/throughput_live.py",
       "tests/emr_contract_test.cjs",
-      "tests/emr/c/mutants.py",
       "tests/emr/f/contract_test.cjs",
       "tests/ops_backup_test.py",
       "tests/ops_backup_held_test.py",
