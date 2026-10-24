@@ -36,13 +36,13 @@ function positive(value: any): number {
 export interface FindingSourceRef { itemId: string; revision: number }
 /// A Saved Comparison Job anchored on the finding's study at metadata revision `revision`: the whole saved
 /// view, or with `markId` one of its immutable version 6 3D points. `markId` is omitted, never undefined.
-export interface FindingJobRef { jobId: string; revision: number; markId?: string }
-export type FindingRef = FindingSourceRef | FindingJobRef;
+interface FindingJobRef { jobId: string; revision: number; markId?: string }
+type FindingRef = FindingSourceRef | FindingJobRef;
 /// Client-supplied part of a finding. Every copied field (kind, identity, values, digest, study set,
 /// point, volume) is rejected here so a client can never present a forged number as provenance.
 /// Version 1 is exactly the shipped shape (item pairs only); version 2 adds the required free-text
 /// `characteristics` and job references.
-export interface FindingItemInput { schemaVersion: 1 | 2; title: string; text: string; characteristics?: string; sources: FindingRef[]; primary: number }
+interface FindingItemInput { schemaVersion: 1 | 2; title: string; text: string; characteristics?: string; sources: FindingRef[]; primary: number }
 export interface FindingCommand {
   requestId: string; expectedRevision?: number; action: 'create' | 'edit' | 'hide' | 'restore'; reason: string; item: FindingItemInput;
 }
@@ -141,7 +141,7 @@ export function comparisonStudies(anchor: string, studyUids: Iterable<unknown>):
   return [...found].sort();
 }
 
-export type LinkState = 'current' | 'revised' | 'hidden' | 'missing';
+type LinkState = 'current' | 'revised' | 'hidden' | 'missing';
 export function linkState(source: { itemId: string; revision: number; studyUid?: string }, head: any): LinkState {
   if (!head || head.id !== source.itemId || (source.studyUid !== undefined && head.studyUid !== source.studyUid)) return 'missing';
   if (head.hidden) return 'hidden';
@@ -155,7 +155,7 @@ export function linkState(source: { itemId: string; revision: number; studyUid?:
 /// revision. `studyUid` is the authorization projection (the comparison study when there is one) that
 /// shipped readers already require; `jobStudyUid` and `studies` are the whole lineage the new readers
 /// require. `mark` is a version 6 3D point with the identity of the volume it was placed on.
-export interface FindingJobMark {
+interface FindingJobMark {
   id: string; label: string; point: number[];
   volume: { study: string; series: string; frameOfReferenceUid: string; sourceDigest: string; sopCount: number };
 }
@@ -222,7 +222,7 @@ export function sourceStudies(source: any): unknown[] {
   if (source?.kind !== 'job') return [source?.studyUid];
   return jobShape(source) ? [source.studyUid, ...source.studies, source.jobStudyUid] : [source?.studyUid, ''];
 }
-export type JobLinkState = 'current' | 'metadata-changed' | 'hidden' | 'missing';
+type JobLinkState = 'current' | 'metadata-changed' | 'hidden' | 'missing';
 export function jobLinkState(source: { jobId: string; revision: number; jobStudyUid: string }, head: any): JobLinkState {
   if (!head || head.id !== source.jobId || head.studyUid !== source.jobStudyUid) return 'missing';
   if (head.hidden) return 'hidden';

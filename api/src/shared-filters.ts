@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { allFolderPaths, folderEntries, folderPath, SearchFolder } from './filter-folders';
 
-export type SharedSearch = {
+type SharedSearch = {
   id: number; name: string; mode: string; quick: string; days: number; cols: Record<string, any>;
   sortKey: string | null; sortDir: number; folder: string; description: string; ordinal: number;
 };

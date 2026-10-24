@@ -108,14 +108,14 @@ export function viewerContextEvent(raw: Buffer) {
     cause: body.cause as string, repeatCount: body.repeatCount as number, attempt: body.attempt as number,
     reason: body.reason as string, result: body.result as string };
 }
-export interface ViewerItemInput {
+interface ViewerItemInput {
   schemaVersion: 1; kind: 'arrow' | 'key' | 'length' | 'angle' | 'ellipse'; seriesUid: string; sopUid: string; frame: number;
   frameOfReferenceUid?: string; label?: string; points?: number[][]; title?: string; description?: string;
   viewPlaneNormal?: number[]; viewUp?: number[];
   baseline?: { calculator: string; values: number[] };
 }
 export const isManualMeasurement = (kind: string) => ['length', 'angle', 'ellipse'].includes(kind);
-export interface ViewerCommand {
+interface ViewerCommand {
   requestId: string; expectedRevision?: number; action: 'create' | 'edit' | 'hide' | 'restore'; reason: string; item: ViewerItemInput;
 }
 export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
