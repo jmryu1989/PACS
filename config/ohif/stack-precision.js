@@ -50,6 +50,12 @@ const kinStackPrecision = (() => {
   }
 
   function flip({ flipHorizontal, flipVertical }) {
+    // Each reflection changes the normal needed by the next one.
+    if (flipHorizontal && flipVertical) {
+      flip.call(this, { flipHorizontal: true });
+      flip.call(this, { flipVertical: true });
+      return;
+    }
     const imageData = this.getDefaultImageData();
     if (!imageData) return;
     const camera = this.getCamera();
