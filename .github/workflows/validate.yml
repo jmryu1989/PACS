@@ -80,6 +80,7 @@ jobs:
             tests/e2e/artifacts/emr-b-ci/
             tmp/emr-b-ci/
             tmp/emr-b2-replace-20261023/
+            tmp/module-a-01-2/
             tmp/request-auth/
           if-no-files-found: error
           retention-days: 7
