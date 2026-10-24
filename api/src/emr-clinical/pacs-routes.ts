@@ -1,0 +1,40 @@
+import { randomUUID } from 'node:crypto';
+import type { Caller } from '../pacs/access';
+import type { PacsStudyState } from '../pacs/study-state';
+import type { PacsTechNote } from '../pacs/tech-note';
+import { ClinicalRoutes, clinicalRoutes } from './routes';
+
+/** PACS projections and the clinical record share the request's transaction.
+ * Route selection belongs with the clinical runtime, outside the public facade. */
+export class PacsClinicalRoutes {
+  constructor(private readonly studyState: PacsStudyState, private readonly notes: PacsTechNote,
+    private readonly clinical?: ClinicalRoutes) {}
+
+  async patchState(uid: string, body: any, c: Caller, request?: object) {
+    return this.clinical && request
+      ? this.clinical.workflow(request, 'PATCH studies/:uid', workflow => this.studyState.patchState(uid, body, c, workflow))
+      : this.studyState.patchState(uid, body, c);
+  }
+
+  async removeState(uid: string, c: Caller, request?: object) {
+    return this.clinical && request
+      ? this.clinical.workflow(request, 'DELETE studies/:uid', workflow => this.studyState.removeState(uid, c, workflow))
+      : this.studyState.removeState(uid, c);
+  }
+
+  async techNote(uid: string, c: Caller, before?: string, request?: object) {
+    return clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
+      tx => this.notes.techNote(uid, c, before, tx),
+      value => !value.note && !value.items?.length,
+      before === undefined ? 'GET studies/:uid/tech-note' : 'GET studies/:uid/tech-note/history');
+  }
+
+  async saveTechNote(uid: string, body: any, c: Caller, request: object) {
+    // Older pages have no attempt ID. Give this operation its own identity while
+    // preserving the projection's legacy null attempt and version-conflict rule.
+    const onlineBody = body && typeof body === 'object' && !('attemptId' in body) ? { ...body, attemptId: randomUUID() } : body;
+    return clinicalRoutes(this.clinical).write(request,
+      { surface: 'tech-note.write', studyId: uid, recordId: uid, body: onlineBody },
+      tx => this.notes.saveTechNote(uid, body, c, tx));
+  }
+}

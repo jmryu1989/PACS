@@ -34,7 +34,7 @@ test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
   assert.deepEqual(source.validate(), { members: 122, declarations: 57 });
   assert.equal(spec.facade.forwards.length, 64);
-  assert.equal(spec.facade.slots.length, 15);
+  assert.equal(spec.facade.slots.length, 16);
   assert.equal(spec.facade.reexports.length, 14);
 });
 test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
@@ -255,7 +255,8 @@ test('U0B-DI Nest metadata equals main before the split: tokens, constructor tok
   };
   assert.equal(full.routes.length, 138 + declared.routes.length);
   // W5-API (D1460) x S9-U4b: both declarations are taken back - the added draft argument, then the U4b additions.
-  const now = withoutDeclared(withoutDeclared(withoutW5Arguments(full), spec.di_additions_b2), declared);
+  const beforeClinical = withoutDeclared(full, spec.di_additions_d_online);
+  const now = withoutDeclared(withoutDeclared(withoutW5Arguments(beforeClinical), spec.di_additions_b2), declared);
   assert.deepEqual(now, spec.di);
   assert.equal(now.routes.length, 138);
   assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');

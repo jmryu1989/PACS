@@ -1,7 +1,7 @@
 import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
 import { EMR_NATIVE_REPORT_SIGNING, NativeReportSigning } from './emr-report/native-signing';
-import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes } from './emr-clinical/routes';
+import { EMR_CLINICAL_ROUTES, ClinicalRoutes } from './emr-clinical/routes';
+import { PacsClinicalRoutes } from './emr-clinical/pacs-routes';
 import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
@@ -57,6 +57,7 @@ export class PacsService implements OnModuleInit {
   private readonly reportEvidenceConcern: PacsReportEvidence;
   private readonly reportDraftConcern: PacsReportDraft;
   private readonly reportCommitConcern: PacsReportCommit;
+  private readonly clinicalConcern: PacsClinicalRoutes;
 
   constructor(
     private prisma: PrismaService,
@@ -67,7 +68,7 @@ export class PacsService implements OnModuleInit {
     private findings: FindingService,
     @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
     @Optional() @Inject(EMR_NATIVE_REPORT_SIGNING) signing?: NativeReportSigning,
-    @Optional() @Inject(EMR_CLINICAL_ROUTES) private readonly clinical?: ClinicalRoutes) {
+    @Optional() @Inject(EMR_CLINICAL_ROUTES) clinical?: ClinicalRoutes) {
     this.accessConcern = new PacsAccess(this.prisma, this.studyAccess);
     this.institutionsConcern = new PacsInstitutions(this.prisma, this.orthanc, this.keycloak, this.studyAccess, this.accessConcern);
     this.preferencesConcern = new PacsPreferences(this.prisma);
@@ -83,6 +84,7 @@ export class PacsService implements OnModuleInit {
     this.reportEvidenceConcern = new PacsReportEvidence(this.prisma, this.studyAccess, this.findings, this.accessConcern);
     this.reportDraftConcern = new PacsReportDraft(this.prisma, this.studyAccess, this.accessConcern, this.auditConcern, this.reportEvidenceConcern, this.ledger);
     this.reportCommitConcern = new PacsReportCommit(this.keycloak, this.studyAccess, this.reportEvidenceConcern, this.reportDraftConcern, signing);
+    this.clinicalConcern = new PacsClinicalRoutes(this.studyStateConcern, this.techNoteConcern, clinical);
   }
 
   // ── institutions (api/src/pacs/institutions.ts) ──
@@ -254,7 +256,7 @@ export class PacsService implements OnModuleInit {
 
   // ── study-state (api/src/pacs/study-state.ts) ──
   async patchState(uid: string, body: any, c: Caller, request?: object) {
-    return this.clinical && request ? this.clinical.workflow(request, 'PATCH studies/:uid', workflow => this.studyStateConcern.patchState(uid, body, c, workflow)) : this.studyStateConcern.patchState(uid, body, c);
+    return this.clinicalConcern.patchState(uid, body, c, request);
   }
 
   async match(uid: string, oid: string, patient: any, c: Caller) {
@@ -266,24 +268,16 @@ export class PacsService implements OnModuleInit {
   }
 
   async removeState(uid: string, c: Caller, request?: object) {
-    return this.clinical && request ? this.clinical.workflow(request, 'DELETE studies/:uid', workflow => this.studyStateConcern.removeState(uid, c, workflow)) : this.studyStateConcern.removeState(uid, c);
+    return this.clinicalConcern.removeState(uid, c, request);
   }
 
   // ── tech-note (api/src/pacs/tech-note.ts) ──
   async techNote(uid: string, c: Caller, before?: string, request?: object) {
-    return clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
-      tx => this.techNoteConcern.techNote(uid, c, before, tx),
-      value => !value.note && !value.items?.length,
-      before === undefined ? 'GET studies/:uid/tech-note' : 'GET studies/:uid/tech-note/history');
+    return this.clinicalConcern.techNote(uid, c, before, request);
   }
 
   async saveTechNote(uid: string, body: any, c: Caller, request: object) {
-    // Older pages have no attempt ID. Give this operation its own identity while
-    // preserving the projection's legacy null attempt and version-conflict rule.
-    const onlineBody = body && typeof body === 'object' && !('attemptId' in body) ? { ...body, attemptId: randomUUID() } : body;
-    return clinicalRoutes(this.clinical).write(request,
-      { surface: 'tech-note.write', studyId: uid, recordId: uid, body: onlineBody },
-      tx => this.techNoteConcern.saveTechNote(uid, body, c, tx));
+    return this.clinicalConcern.saveTechNote(uid, body, c, request);
   }
 
   // ── hold (api/src/pacs/hold.ts) ──

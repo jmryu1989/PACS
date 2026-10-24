@@ -271,9 +271,14 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [], constructors = [];
+    const loads = [], comparisons = [], constructors = [], importTypes = [];
     const visit = node => {
       if (!broken) {
+        // ImportType nodes are erased by TypeScript; they are not runtime loaders.
+        if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
+          const keyword = node.getChildren(file).find(child => child.kind === ts.SyntaxKind.ImportKeyword);
+          if (keyword) importTypes.push([codePoint(file, keyword.getStart(file)), node.argument.literal.text]);
+        }
         const constructor = constructorWithoutReturn(node, file);
         if (constructor !== null) constructors.push(constructor);
         const load = relativeLoad(node, file, program, checker, known, files);
@@ -291,7 +296,7 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
-    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors };
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors, import_types: importTypes };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {

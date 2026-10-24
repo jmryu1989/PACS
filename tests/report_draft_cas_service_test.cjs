@@ -231,7 +231,10 @@ async function world() {
     const findings = { readableFindings: async (_tx, _c, _uid, ids) => ids.includes(FINDING) ? [{ id: FINDING, revision: 1, hidden: false,
       sources: [{ kind: 'item', itemId: '0f0f0f0f-0000-4000-8000-00000000000b', revision: 1 }],
       links: [{ linkState: 'current', headRevision: 1 }] }] : [] };
-    const svc = new PacsService(recorder, orthanc, keycloak, access, findings, ledger);
+    // This suite checks draft/CAS transactions. C2 signing and key failures are
+    // exercised by emr/d/report_commit_pg_test.cjs with the real signer.
+    const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
+    const svc = new PacsService(recorder, orthanc, keycloak, access, findings, ledger, nativeSigning);
     const controllers = new Map();
     return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc)); return controllers.get(cls); } };
   };
