@@ -3045,6 +3045,8 @@ larger site, increased image/tab load or changed monitor/DPI/browser (VIEWER-FIR
 python scripts/run-tests.py --module tests/e2e/test_viewer_ux_shell.py --class ViewerUXShellE2E --mode live --unit viewer-ux-u2 --timeout 635
 ```
 
+In CI the `worklist-ux-measurements` job runs the same `ViewerUXShellE2E` cases through `tests/measurement_ci.py --profile viewer-ux-shell` on the hosted runner's disposable synthetic stack (single-suite 900 s ceiling); `scripts/ci-paths.json` selects that job for the U2 modules and this test. Without `KIN_EVIDENCE_DIR` the screenshots go to `tmp/viewer-ux-u2/screens`, which the job uploads.
+
 The hang bound reuses the measured U1 live plan (634.798 seconds); U2 run manifests record its own elapsed time. The patient-tab cases use the real workspace launch consumer and one OHIF document. They check document continuity, all-cell patient identity and restored stack layout. First-site hardware and Minhoon acceptance remain separate.
 
 U3 consumes the viewer-local `KinViewerUX` seam: `snapshot/subscribe` for active patient and sequence, `viewport(id)` for the rendered cell identity/mode, `assign(context, displaySets)` through the existing work guard and server patient identity, and `comparisonTarget(context)` for the existing layout and a vacant cell. `registerStudyActions({listPriors,openImages,openReport})` enables each cell's Study entry; `listPriors` receives the originating context and anchor. `reportHost.show(context, {title,findings,impression})` provides a read-only overlay and rejects a stale context. Unregister and patient/mode exit remove the overlay. U3 remains responsible for fetching, selecting and authorizing the clicked study/report; an unregistered Study entry stays disabled.

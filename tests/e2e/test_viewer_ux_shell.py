@@ -87,7 +87,8 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         before = self.cells(page)
         page.wait_for_function('''() => [...services.viewportGridService.getState().viewports.keys()]
           .every(id=>services.cornerstoneViewportService.getViewportInfo(id)?.getViewportData())''')
-        folder=Path(os.environ['KIN_EVIDENCE_DIR']);page.screenshot(path=str(folder/'patient-tabs-before.png'))
+        folder=Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens'));folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder/'patient-tabs-before.png'))
         display_state = '''() => JSON.stringify([...services.viewportGridService.getState().viewports.values()]
           .sort((a,b)=>a.y-b.y||a.x-b.x).map(cell=>{
             const v=services.cornerstoneViewportService.getCornerstoneViewport(cell.viewportId),canvas=v?.element?.querySelector('canvas');
@@ -108,7 +109,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         })''',arg=b.uid)
         canvas_ready(page, 1)
         self.assertEqual(page.evaluate('performance.timeOrigin'),document_id)
-        folder=Path(os.environ['KIN_EVIDENCE_DIR']);page.screenshot(path=str(folder/'patient-tabs-two.png'))
+        page.screenshot(path=str(folder/'patient-tabs-two.png'))
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
         page.wait_for_function('''uid => services.viewportGridService.getState().viewports.size===2 &&
           [...services.viewportGridService.getState().viewports.keys()].every(id =>
@@ -482,7 +483,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertEqual(page.evaluate(active_tool), 'Zoom')
         self.assertEqual(page.evaluate(voi), before_override)
         self.assertEqual(document_request(page, 'GET', '/api/workspace-shortcuts').json()['bindings'], bindings)
-        folder = Path(os.environ['KIN_EVIDENCE_DIR']); folder.mkdir(parents=True, exist_ok=True)
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
         other.screenshot(path=str(folder / 'toolbar-roaming.png'))
 
 
