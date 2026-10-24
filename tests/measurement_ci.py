@@ -716,8 +716,9 @@ def inspect_failed_module(run, out, compose, unit, suite, result):
 
 def profile_deadline_seconds(profile_name):
     # D941's live 20k prefill needs the whole EMR suite budget plus setup/cleanup.
-    # Every other existing profile retains the shared 25 minute deadline.
-    return 65*60 if profile_name == 'emr-b' else 25*60
+    # Candidate configuration supplies its measured cumulative allowance;
+    # other existing profiles retain the shared 25 minute deadline.
+    return PROFILES[profile_name].get('deadline_seconds', 65*60 if profile_name == 'emr-b' else 25*60)
 
 
 def workflow_report(root=None):
