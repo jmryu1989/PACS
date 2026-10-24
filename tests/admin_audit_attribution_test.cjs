@@ -3,6 +3,9 @@
  * D1816: legacy provenance below excludes the B2 auth/runtime/retention producers
  * and B2 composition decorators. Attribution behavior remains checked; the old
  * whole-product completeness claim does not cover those replacement modules.
+ * EMR-D/REQUEST_FACTS: caller-owned transaction handoffs are checked by running
+ * the real clinical producers, shared request context and admin consumer. Their
+ * SQL and legacy audit writes still pass through the provenance scan below.
  * REQ-S5-U5b-ADMIN-AUDIT / MOVE-PROJECTION / UNCLEAR-HIDDEN / NO-MIGRATION-START
  *   -> RISK-S5-U5b-CROSS-INSTITUTION / CURRENT-GROUP-ATTRIBUTION / CURRENT-OWNER-ATTRIBUTION / HIDDEN-COUNT /
  *      NEW-ACTION-DEFAULT / INVENTED-FIELDS / FAILURE-AS-EMPTY.
@@ -1249,7 +1252,7 @@ function auditProgram(sources) {
  * the controls that rewrite them. Every positive judgement below is one of the entries W1-W6 name; anything else is
  * unresolved with where and why.
  */
-function scanAuditWrites(sources = auditSources()) {
+function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set()) {
   const { ts } = typescript();
   const K = ts.SyntaxKind, TF = ts.TypeFlags;
   const program = auditProgram(sources), checker = program.getTypeChecker();
@@ -1603,6 +1606,10 @@ function scanAuditWrites(sources = auditSources()) {
       }
       if (ts.isCallExpression(parent) && parent.arguments.includes(node)) {
         const callee = bare(parent.expression);
+        // Native cloning without a transfer list copies the record; it does not
+        // retain a mutable alias to the original SQL parameter value.
+        if (ts.isIdentifier(callee) && callee.text === 'structuredClone' && parent.arguments.length === 1
+          && (symbolAt(callee)?.declarations ?? []).some(lib)) return null;
         if (['join', 'sql'].includes(prismaMember(callee)) || (isAccess(callee) && RAW.has(w1(callee).key))) return null;
         if (isAccess(callee) && ts.isIdentifier(bare(callee.expression))
           && (symbolAt(bare(callee.expression))?.declarations ?? []).some(lib)
@@ -2521,7 +2528,10 @@ function scanAuditWrites(sources = auditSources()) {
       for (const declaration of declarations) {
         if (memberChanged(symbolAt(declaration.name))) return null;
         const object = holdingObject(declaration);
-        if (objectUse(object).escape) return null;
+        // A direct private call on this still executes this body when the
+        // instance is returned by its factory. Action provenance (w3/closed)
+        // keeps its existing ownership rules; client flow follows the body.
+        if (objectUse(object).escape && !(mode === 'flow' && helpers && receiver.kind === K.ThisKeyword)) return null;
         // An override in the family runs instead of it on some instances: every one is a method with a body too.
         const family = object.kind === 'instance' ? [...familyOf(object.declaration)] : [object.declaration];
         for (const other of family.flatMap(member => member.members.filter(item => item.name && !ts.isComputedPropertyName(item.name)
@@ -3339,6 +3349,44 @@ function scanAuditWrites(sources = auditSources()) {
       const symbol = symbolAt(node), declarations = symbol?.declarations ?? [], [declaration] = declarations;
       if (declarations.length !== 1) return { why: `\`${node.text}\` ${declarations.length ? 'has several declarations' : 'does not resolve'}` };
       if (ts.isParameter(declaration) && ts.isFunctionLike(declaration.parent)) return parameterValue(declaration, symbol, node.text, true);
+      if (ts.isBindingElement(declaration)) {
+        const changed = changedBinding(symbol) || contentIssue(symbol);
+        if (changed) return { why: changed };
+        const keys = [];
+        let at = declaration;
+        while (ts.isBindingElement(at)) {
+          if (at.initializer || at.dotDotDotToken || !ts.isObjectBindingPattern(at.parent))
+            return { why: 'record destructuring has a default, rest or array binding' };
+          const key = at.propertyName ? w1(at.propertyName).key : at.name.text;
+          if (key === undefined) return { why: 'record destructuring key is not fixed' };
+          keys.unshift(key);
+          at = at.parent.parent;
+        }
+        if (!isConst(at) || !at.initializer) return { why: 'record destructuring is not a const with an initializer' };
+        // Destructuring keeps an alias to the nested record. Its original
+        // container can still mutate that record through another consumer.
+        let origin = bare(at.initializer);
+        const originPath = [...keys];
+        while (isAccess(origin)) {
+          const key = w1(origin).key;
+          if (key === undefined) return { why: 'record source key is not fixed' };
+          originPath.unshift(key);
+          origin = bare(origin.expression);
+        }
+        if (ts.isIdentifier(origin)) {
+          const issue = contentIssue(symbolAt(origin), originPath);
+          if (issue) return { why: issue };
+        }
+        const base = recordOf(at.initializer);
+        if (base.why) return base;
+        let type = checker.getTypeAtLocation(at.initializer);
+        for (const key of keys) {
+          const member = checker.getPropertyOfType(checker.getNonNullableType(type), key)?.declarations?.[0];
+          type = member?.type && checker.getTypeFromTypeNode(member.type);
+          if (!isRecordType(type)) return { why: `destructured \`${key}\` is not declared as a record` };
+        }
+        return ok('F02 fixed record destructuring', ...base.rules);
+      }
       const loop = ts.isVariableDeclaration(declaration) ? forOf(declaration) : null;
       if (loop) {
         if (result(loop.expression)) return ok('W6 an element of a JSON/Prisma result');
@@ -4561,6 +4609,19 @@ function scanAuditWrites(sources = auditSources()) {
     }
     const parent = node.parent;
     const argument = (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.arguments?.includes(node);
+    // These ports deliberately accept a caller-owned transaction. A declaration
+    // is not proof of their effects: the real producer/consumer exercise supplies
+    // this set only after checking the B2 events and retained AuditLog rows.
+    if (argument && parent.arguments[0] === node) {
+      const declaration = checker.getResolvedSignature(parent)?.declaration;
+      const owner = declaration?.parent;
+      const boundary = declaration?.name && owner?.name
+        ? `${repoPath(declaration.getSourceFile().fileName)}#${owner.name.text}.${declaration.name.text}` : null;
+      if (verifiedHandoffs.has(boundary)) {
+        note(start, 'client value', 'behaviorally_covered', boundary, 'B2 recorded boundary');
+        return;
+      }
+    }
     const receiving = argument && callees(parent, 'flow')?.every(owner => {
       const parameter = owner.parameters[parent.arguments.indexOf(node) + shift(owner)];
       return parameter && ts.isIdentifier(parameter.name) && !parameter.dotDotDotToken && clients.has(parameter);
@@ -4629,10 +4690,26 @@ function verdict(scan, table = productTable(), listing = null) {
 }
 const failing = found => Object.keys(VERDICT).filter(name => found[name].length > 0);
 
+test('record destructuring and native copying preserve SQL values and retained audit writers', () => {
+  const text = readFileSync(path.join(__dirname, 'fixtures/admin-audit-checker/destructured-record.ts'), 'utf8');
+  const scan = scanAuditWrites([{ file: 'api/src/syn-fixture/destructured-record.ts', text }]);
+  assert.deepEqual(scan.unresolved, []);
+  assert.deepEqual(scan.sites.flatMap(site => site.actions).sort(), ['syn.private', 'syn.record']);
+  // A default can supply SQL rather than a record; a clone supplied by a caller
+  // has no native copy contract. Neither is made safe by the declared type.
+  for (const changed of [text.replace('const { plan }', 'const { plan = opaque() }'),
+    text.replace("import { Prisma }", 'declare function structuredClone(value: any): any;\nimport { Prisma }')]) {
+    const changedScan = scanAuditWrites([{ file: 'api/src/syn-fixture/destructured-record.ts',
+      text: 'declare function opaque(): any;\n' + changed }]);
+    assert.ok(changedScan.unresolved.length > 0);
+  }
+});
 
-test('legacy AuditLog coverage outside the B2 replacement: retained candidates and table rows agree', () => {
+
+test('legacy AuditLog coverage outside the B2 replacement: retained candidates and table rows agree', async () => {
+  const handoffs = await require('./fixtures/admin-audit-checker/recorded-boundaries.cjs')();
   const { sources, listing } = productSources();
-  const scan = scanAuditWrites(sources);
+  const scan = scanAuditWrites(sources, handoffs);
   const found = verdict(scan, productTable(), listing);
   // The inventory, whatever the verdict: every write site with its kind, actions or prefixes and their basis, every
   // unresolved candidate, and every candidate proven not to be a write with its reason.
@@ -4644,6 +4721,8 @@ test('legacy AuditLog coverage outside the B2 replacement: retained candidates a
   console.log('ADMIN_AUDIT_CANDIDATES ' + JSON.stringify(tally));
   for (const entry of scan.candidates.filter(entry => entry.status === 'proven_non_audit')) console.log('ADMIN_AUDIT_NON_AUDIT ' + JSON.stringify(entry));
   console.log('ADMIN_AUDIT_CLIENT_FLOW ' + JSON.stringify(scan.flow));
+  for (const entry of scan.candidates.filter(entry => entry.status === 'behaviorally_covered'))
+    console.log('ADMIN_AUDIT_B2_HANDOFF ' + JSON.stringify(entry));
   const literals = new Set(scan.sites.flatMap(site => site.actions)), byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({ scope: 'legacy AuditLog outside B2',
