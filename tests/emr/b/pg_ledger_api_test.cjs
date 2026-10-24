@@ -878,11 +878,25 @@ async function rightsProducer() {
       name:'Same',emailVerified:true,approved:true,suspended:false,institution:'synthetic-hospital',roles:sub==='administrator'?['admin']:['radiologist']}});
     for(let i=0;i<2;i++) await witness.authSession.create({data:{sid:randomUUID(),sub:'member',accessToken:'synthetic-unused',refreshToken:randomUUID(),
       atExpiresAt:new Date(Date.now()+600000),lastSeenAt:new Date(),rightsVersion:1,institution:'synthetic-hospital'}});
-    const work=runtime.port.begin(); let actor;
-    try{actor={issuer:process.env.KC_ISSUER,subject:caller.sub,id:await work.resolveRequestIdentity(process.env.KC_ISSUER,caller.sub)};}finally{work.end();}
-    const facts={surface:'PATCH admin/users/:id',actor,roles:['admin'],rightsVersion:1,institution:caller.institution,ip:null,sessionRef:null,requestId:randomUUID()};
-    const make=Type=>new Type(db,{}, {}, {},runtime.port);
-    await make(modified.exports.AdminService).patchUser('red-rights',{enabled:false},caller,facts);
+    // REQUEST_FACTS: each rights change runs inside the shared request context over this same record port,
+    // as AdminController does; the actor and its work come from that context.
+    const { createRequestContext } = require(path.join(build, 'emr-runtime/request-context.js'));
+    const { createRequestIngress } = require(path.join(build, 'emr-runtime/request-ingress.js'));
+    const { IncomingMessage, ServerResponse } = require('node:http'), { Socket } = require('node:net');
+    const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), runtime.port);
+    const patch = async (service, sub, body) => {
+      const req=new IncomingMessage(new Socket()), res=new ServerResponse(req);
+      requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:caller.sub,roles:caller.roles,
+        rightsVersion:1,institution:caller.institution,binding:{method:'bearer',sessionRef:null}},
+        {method:'PATCH',route:'admin/users/:id',purpose:'clinical'},async()=>{});
+      try {
+        return await requests.source.withWork(req,request=>service.patchUser(sub,body,caller,{surface:request.facts.surface,
+          actor:request.facts.actor,roles:request.facts.roles,rightsVersion:request.facts.rightsVersion,
+          institution:request.facts.institution,ip:null,ipSource:'trusted-proxy',sessionRef:null,requestId:request.facts.requestId,request}));
+      } finally { res.emit('finish'); }
+    };
+    const make=Type=>new Type(db,{}, {}, {});
+    await patch(make(modified.exports.AdminService),'red-rights',{enabled:false});
     assert.equal((await witness.memberRights.findUnique({where:{sub:'red-rights'}})).suspended,true);
     const missing=await legal('red-rights'); assert.throws(()=>assert.equal(missing.length,1,'Rights change requires its legal event'));
     const service=make(AdminService);
@@ -890,12 +904,12 @@ async function rightsProducer() {
     await witness.$executeRawUnsafe(`CREATE FUNCTION public.b2r_fail_rights() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.retention_class='rights3y' THEN RAISE EXCEPTION 'Synthetic rights failure'; END IF; RETURN NEW; END $$`);
     await witness.$executeRawUnsafe(`CREATE TRIGGER b2r_fail_rights BEFORE INSERT ON emr_access.access_entry FOR EACH ROW EXECUTE FUNCTION public.b2r_fail_rights()`);
-    await assert.rejects(service.patchUser('member',{enabled:false},caller,facts));
+    await assert.rejects(patch(service,'member',{enabled:false}));
     assert.equal((await witness.memberRights.findUnique({where:{sub:'member'}})).version,1);
     assert.equal(await witness.authSession.count({where:{sub:'member'}}),2);
     assert.equal(await projectionCount('member'),0); assert.equal((await legal('member')).length,0);
     await witness.$executeRawUnsafe('DROP TRIGGER b2r_fail_rights ON emr_access.access_entry');
-    const changed=await service.patchUser('member',{enabled:false},caller,facts);
+    const changed=await patch(service,'member',{enabled:false});
     assert.equal(changed.version,2); assert.equal(changed.enabled,false);
     assert.equal(await witness.authSession.count({where:{sub:'member'}}),0);
     const records=await legal('member');assert.equal(records.length,1);assert.equal(records[0].retention_class,'rights3y');
