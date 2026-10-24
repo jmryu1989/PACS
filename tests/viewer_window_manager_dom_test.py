@@ -98,11 +98,12 @@ const KinViewerOpening = {PREFIX:'kin:',key:()=>sessionOwner ? 'kin:' + sessionO
 const KinAuth = {session:()=>({state:'approved'})};
 const ohifPopupSlots = new WeakMap(), ohifPopupSequences = new WeakMap(), ohifPlacementWrites = new WeakMap();
 const display={id:'display-1',left:0,top:0,width:1280,height:900,primary:true};
-const KinViewerDisplayLayout = {screens:details=>details.screens||[],identity:screen=>screen.id,
+const KinViewerDisplayLayout = {span:()=>null,screens:details=>details.screens||[],identity:screen=>screen.id,
   fit:()=>({left:10,top:10,width:800,height:600})};
-const initMonitorPermission = async()=>{}, cacheMonitorScreens=()=>{}, popupRect=()=>null;
+const initMonitorPermission = async()=>{}, cacheMonitorScreens=details=>{monitorDetails=details}, popupRect=()=>null;
+const readOhifSpanScreens=()=>null;const OHIF_SPAN_SCREENS_KEY='kin.ohif.span.screens';
 const monitorPermissionGranted = ()=>true, rememberOhifRect=()=>true, watchOhifRect=()=>{};
-let monitorQueryUnsupported=false, monitorSessionGranted=false;
+let monitorQueryUnsupported=false, monitorSessionGranted=false, monitorDetails=null;const screensCache=[display];
 let demoMode=false,ohifOpenSeq=0,viewerOpenSeq=0,monitorHintShown=false;
 let monitorPermission={state:'denied'};
 const screen={isExtended:false};
@@ -141,7 +142,7 @@ window.__popups=[];
 window.__makePopup = ({href='https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.1', pending=null,
   kind='viewer',ready=true,busy=false,dirty=false,owner=sessionOwner,coverage=true,sequence=1}={}) => {
   const documentToken={querySelector:()=>null,visibilityState:'visible'};
-  const popup={kind,location:{href},document:documentToken,ready,busy,dirty,owner,
+  const popup={kind,location:{href,reload(){popup.reloadCalls++}},history:{state:null,replaceState(state,title,url){popup.location.href=new URL(url,location.origin).href}},document:documentToken,ready,busy,dirty,owner,reloadCalls:0,
     coverageCalls:0,focusCalls:0,closeCalls:0,closed:false,
     focus(){this.focusCalls++},close(){this.closeCalls++;this.closed=true},
     kinViewerFrameCoverageConfirm(callback){this.coverageCalls++;return typeof coverage==='function'?coverage(this,callback):coverage}
@@ -363,12 +364,12 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         self.assertIn("Comparison: 2026-09-11 · 1.2.2", text)
         self.assertNotIn("Prior:", text)
 
-    def test_latest_images_opens_a_separate_blank_document_and_preserves_dirty_source(self):
+    def test_latest_images_refuses_reload_and_preserves_dirty_source(self):
         result = self.page.evaluate("""() => {
           const made=__makePopup({dirty:true});
           const original={href:made.popup.location.href,document:made.popup.document,dirty:made.popup.dirty};
           document.querySelector('#viewer-windows-open').click();
-          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').onclick();
           return {original,index:made.index,rows:viewerWindows.rows().map(r=>({index:r.index,pending:r.pending})),
             old:{href:made.popup.location.href,sameDocument:made.popup.document===original.document,
               dirty:made.popup.dirty,closeCalls:made.popup.closeCalls},
@@ -377,12 +378,9 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         self.assertEqual(result["index"], 0)
         self.assertEqual(result["old"], {"href": result["original"]["href"], "sameDocument": True,
                                           "dirty": True, "closeCalls": 0})
-        self.assertEqual(result["rows"], [{"index": 0, "pending": False}, {"index": 1, "pending": True}])
-        self.assertEqual(len(result["fresh"]), 1)
-        self.assertEqual(result["fresh"][0]["args"][0], "")
-        self.assertNotEqual(result["fresh"][0]["args"][1], "kin-ohif-current")
-        self.assertIn("StudyInstanceUIDs=1.2.1", result["fresh"][0]["href"])
-        self.assertIsNone(result["fresh"][0]["opener"])
+        self.assertEqual(result["rows"], [{"index": 0, "pending": False}])
+        self.assertEqual(result["fresh"], [])
+        self.assertIn('저장하지 않은', self.page.locator('#viewer-windows-status').inner_text())
 
     def test_latest_images_full_limit_never_reuses_a_clean_document(self):
         result = self.page.evaluate("""() => {
@@ -391,7 +389,7 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
           const clean=__makePopup({href:'https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.2'});
           const before=[dirty.popup.location.href,clean.popup.location.href];
           document.querySelector('#viewer-windows-open').click();
-          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').onclick();
           return {before,after:[dirty.popup.location.href,clean.popup.location.href],opened:__opened.length,
             closes:[dirty.popup.closeCalls,clean.popup.closeCalls],toasts:__toasts.map(x=>x.message),rows:viewerWindows.rows().length};
         }""")
@@ -399,27 +397,25 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         self.assertEqual(result["opened"], 0)
         self.assertEqual(result["closes"], [0, 0])
         self.assertEqual(result["rows"], 2)
-        self.assertTrue(any("Viewer Windows 수" in message for message in result["toasts"]))
+        self.assertTrue(any("저장하지 않은" in message for message in result["toasts"]))
 
-    def test_latest_images_popup_block_releases_slot_and_retry_uses_a_new_blank(self):
-        first = self.page.evaluate("""() => {
-          __makePopup();document.querySelector('#viewer-windows-open').click();__blockNextOpen=true;
-          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
-          return {rows:viewerWindows.rows().length,opened:__opened.length,toasts:__toasts.map(x=>x.message)};
+    def test_latest_images_clean_reload_reuses_even_when_popups_are_blocked(self):
+        result = self.page.evaluate("""() => {
+          const made=__makePopup();document.querySelector('#viewer-windows-open').click();__blockNextOpen=true;
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').onclick();
+          return {rows:viewerWindows.rows().length,opened:__opened.length,openCalls:__openCalls.length,
+            reloads:made.popup.reloadCalls,coverage:made.popup.coverageCalls,closed:made.popup.closeCalls,
+            href:made.popup.location.href,opener:made.popup.opener};
         }""")
-        self.assertEqual(first["rows"], 1)
-        self.assertEqual(first["opened"], 0)
-        self.assertTrue(any("팝업이 차단" in message for message in first["toasts"]))
-        retried = self.page.evaluate("""() => {
-          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
-          return {rows:viewerWindows.rows().map(r=>({index:r.index,pending:r.pending})),opened:__opened.length,
-            href:__opened[0]?.location.href,opener:__opened[0]?.opener};
-        }""")
-        self.assertEqual(retried["rows"], [{"index": 0, "pending": False}, {"index": 1, "pending": True}])
-        self.assertEqual(retried["opened"], 1)
-        self.assertIn("StudyInstanceUIDs=1.2.1", retried["href"])
-        self.assertIsNone(retried["opener"])
-        self.assertEqual("", self.page.locator("#viewer-windows-status").text_content())
+        self.assertEqual(result['rows'], 1)
+        self.assertEqual(result['opened'], 0)
+        self.assertEqual(result['openCalls'], 0)
+        self.assertEqual(result['reloads'], 1)
+        self.assertEqual(result['coverage'], 1)
+        self.assertEqual(result['closed'], 0)
+        self.assertIn('StudyInstanceUIDs=1.2.1', result['href'])
+        self.assertIsNone(result['opener'])
+        self.assertEqual('', self.page.locator('#viewer-windows-status').text_content())
 
     def test_latest_detached_button_revalidates_owner_pending_unknown_and_current_scope(self):
         for boundary in ("owner", "pending", "unknown"):
@@ -441,19 +437,19 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
           const made=__makePopup();document.querySelector('#viewer-windows-open').click();
           const old=document.querySelector('[data-window-index="0"][data-window-action="latest"]');
           made.popup.location.href='https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.2';
-          old.onclick();return {oldClose:made.popup.closeCalls,href:__opened[0]?.location.href};
+          old.onclick();return {oldClose:made.popup.closeCalls,href:made.popup.location.href};
         }""")
         self.assertEqual(current["oldClose"], 0)
         self.assertIn("StudyInstanceUIDs=1.2.2", current["href"])
         self.assertNotIn("StudyInstanceUIDs=1.2.1", current["href"])
 
-    def test_latest_named_window_collision_preserves_original_and_releases_reservation(self):
+    def test_latest_dirty_source_never_requests_another_named_window(self):
         result = self.page.evaluate("""() => {
           const made=__makePopup({dirty:true});
           const original={href:made.popup.location.href,document:made.popup.document};
           document.querySelector('#viewer-windows-open').click();
           __nextOpenPopup=made.popup;
-          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').onclick();
           return {rows:viewerWindows.rows().map(r=>({index:r.index,pending:r.pending,popup:r.popup===made.popup})),
             href:made.popup.location.href,sameDocument:made.popup.document===original.document,
             dirty:made.popup.dirty,closeCalls:made.popup.closeCalls,openCalls:__openCalls.length,
@@ -464,15 +460,15 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         self.assertTrue(result["sameDocument"])
         self.assertTrue(result["dirty"])
         self.assertEqual(result["closeCalls"], 0)
-        self.assertEqual(result["openCalls"], 1)
-        self.assertIn("새 창 이름", result["status"])
+        self.assertEqual(result["openCalls"], 0)
+        self.assertIn("저장하지 않은", result["status"])
 
     def test_latest_collision_focus_failure_keeps_visible_notice_and_no_exception(self):
         self.page.evaluate("""()=>{const made=__makePopup({dirty:true});
           document.querySelector('#viewer-windows-open').click();
           made.popup.focus=()=>{throw Error('native focus failed')};__nextOpenPopup=made.popup;}""")
-        self.page.locator('[data-window-index="0"][data-window-action="latest"]').click()
-        self.assertIn('기존 화면', self.page.locator('#viewer-windows-status').text_content())
+        self.page.locator('[data-window-index="0"][data-window-action="latest"]').evaluate('button=>button.onclick()')
+        self.assertIn('저장하지 않은', self.page.locator('#viewer-windows-status').text_content())
         self.assertEqual([], self.page_errors)
         self.assertEqual(1, self.page.evaluate('viewerWindows.rows().length'))
 
@@ -483,8 +479,8 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
                 f"#kin-reading-return={reading_return}")
         opened = self.page.evaluate("""href => {
           __makePopup({href});document.querySelector('#viewer-windows-open').click();
-          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
-          return __opened[0]?.location.href;
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').onclick();
+          return __popups[0].location.href;
         }""", href)
         target = self.page.evaluate("href => {const u=new URL(href,location.origin);return {studies:u.searchParams.get('StudyInstanceUIDs'),"
                                     "hp:u.searchParams.get('hangingProtocolId'),series:u.searchParams.get('initialSeriesInstanceUID'),"
@@ -494,9 +490,9 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
 
     def test_latest_failures_are_announced_inside_the_open_dialog(self):
         scenarios = {
-            "full": """openingPreference={maxWindows:1,reuseClean:true};__makePopup();""",
-            "popup": """__makePopup();__blockNextOpen=true;""",
-            "collision": """const made=__makePopup({dirty:true});__nextOpenPopup=made.popup;""",
+            "dirty": "__makePopup({dirty:true});",
+            "busy": "__makePopup({busy:true});",
+            "coverage": "__makePopup({coverage:false});",
         }
         for name, setup in scenarios.items():
             with self.subTest(name=name):
@@ -504,19 +500,15 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
                 result = self.page.evaluate(f"""() => {{
                   {setup}
                   document.querySelector('#viewer-windows-open').click();
-                  document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+                  document.querySelector('[data-window-index="0"][data-window-action="latest"]').onclick();
                   const dialog=document.querySelector('#viewer-windows-dialog');
                   return {{open:dialog.open,status:dialog.querySelector('#viewer-windows-status').textContent,
                     rows:viewerWindows.rows().length}};
                 }}""")
                 self.assertTrue(result["open"])
                 self.assertTrue(result["status"].strip())
-                if name == "full":
-                    self.assertIn("Viewer Windows 수", result["status"])
-                elif name == "popup":
-                    self.assertIn("팝업이 차단", result["status"])
-                else:
-                    self.assertIn("새 창 이름", result["status"])
+                expected = {"dirty": "저장하지 않은", "busy": "검사와 계정을 확인", "coverage": "Frame Coverage"}
+                self.assertIn(expected[name], result["status"])
                 self.assertEqual(result["rows"], 1)
 
 

@@ -8649,6 +8649,7 @@
     // ── 공통 이벤트 ──
     // 판독 창 위치는 계정 데이터가 아니라 이 브라우저·이 장비의 작업환경 설정이다.
     const OHIF_RECT_KEY = "kin.ohif.current.rect";
+    const OHIF_SPAN_SCREENS_KEY = "kin.ohif.span.screens";
     let ohifPopupHandle = null;
     const ohifRectPolls = new Map(), ohifPopupSlots = new WeakMap(), ohifPopupSequences = new WeakMap();
     const ohifPlacementWrites = new WeakMap();
@@ -8719,9 +8720,8 @@
         if (details) {
           if (monitorQueryUnsupported) monitorSessionGranted = true;
           cacheMonitorScreens(details);
-          for (let i = 0; i < 4; i++) localStorage.removeItem(i ? OHIF_RECT_KEY + ':' + i : OHIF_RECT_KEY);
           updateMonitorButton();
-          toast("모니터 배치 허용됨 — 판독 창이 다른 모니터에 열립니다", "info");
+          toast("모니터 배치 허용됨 — Viewer Windows에서 두 화면을 선택하세요. 기존 창 위치는 유지합니다.", "info");
         } else {
           monitorSessionGranted = false;
           updateMonitorButton();
@@ -8798,8 +8798,34 @@
       };
     }
 
+    function readOhifSpanScreens() {
+      try {
+        const selected = JSON.parse(localStorage.getItem(OHIF_SPAN_SCREENS_KEY) || 'null');
+        return KinViewerDisplayLayout.span(selected) ? selected : null;
+      } catch (_) { return null; }
+    }
+
+    function ohifSpanTarget() {
+      const selected = readOhifSpanScreens();
+      if (!selected || !monitorPermissionGranted()) return null;
+      const matched = selected.map(saved => screensCache.find(s => KinViewerDisplayLayout.identity(s) === KinViewerDisplayLayout.identity(saved)));
+      return KinViewerDisplayLayout.span(matched);
+    }
+
     function ohifPlacement(stored, details = null) {
       const screens = (details?.screens || []).map(usableScreenRect).filter(Boolean);
+      const selected = readOhifSpanScreens(), span = ohifSpanTarget();
+      if (selected) {
+        // A missing display is not a successful new layout. The launch path
+        // suspends saving until the user moves/resizes the remaining window.
+        if (!span) return defaultOhifRect(currentScreenRect());
+        return stored && rectInsideScreen(stored, span) ? stored : span;
+      }
+      if (stored && monitorPermissionGranted()) {
+        const touched = screensCache.filter(target => overlapArea(stored, target) > 0);
+        // Also restore a manually spanned window without fitting it to one screen.
+        if (touched.length >= 2) return stored;
+      }
       // 권한 없이 현재 화면 하나로 clamp하면 다른 모니터의 저장 자리를 끌어온다.
       if (stored) return monitorPermissionGranted() && screensCache.length
         ? clampOhifRect(stored, screensCache) : stored;
@@ -8836,6 +8862,9 @@
           if (!suspended.baseline) { suspended.baseline = rect; return false; }
           if (Object.keys(rect).every(k => rect[k] === suspended.baseline[k])) return false;
           // After a failed placement, an actual user move resumes position saving.
+          // Restore that manual rectangle next time, including when display
+          // permission was denied or a previously selected screen disappeared.
+          localStorage.removeItem(OHIF_SPAN_SCREENS_KEY);
           ohifPlacementWrites.delete(popup);
         }
         const slot = ohifPopupSlots.get(popup) || 0;
@@ -8975,16 +9004,10 @@
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash;
       const seq = ++ohifOpenSeq;
       if (!viewerWindows) { notify('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return; }
-      const preferences = imageOpening?.snapshot(), limit = preferences?.maxWindows || 1;
-      let choice = viewerWindows.choose(url, limit, { freshDocument });
-      if (!freshDocument && choice.full && viewerWindows.available() && preferences?.reuseClean && limit > 1) {
-        const rows = viewerWindows.rows();
-        const clean = row => row.status?.kind === 'viewer' && row.status.ready && !row.status.busy && !row.status.dirty;
-        const reusable = rows.length === limit && (rows.find(row => row.index !== viewerWindowCursor && clean(row)) || rows.find(clean));
-        if (reusable) choice = { ...reusable, fresh: false };
-      }
+      // A saved multi-window preference must not allocate another viewer. Keep
+      // older live windows in the registry so their work remains reachable.
+      const choice = viewerWindows.choose(url, 1, { singleWindow: true });
       if (choice.error) { notify(choice.error, 'err', 8000); if (choice.full && !freshDocument) $('#viewer-windows-open').click(); return; }
-      if (freshDocument && (!choice.fresh || choice.pending)) { notify('기존 영상을 유지했습니다. 새 영상 창을 확보한 뒤 다시 여세요.', 'err'); return; }
       url = viewerWindows.linked(url, choice.index);
       const stored = readStoredOhifRect(choice.index);
       const initial = ohifPlacement(stored);
@@ -9002,13 +9025,6 @@
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
       );
       if (popup) {
-        if (freshDocument && ohifPopupState(popup).kind !== "blank") {
-          try { popup.opener = null; } catch (_) {}
-          viewerWindows.blocked(choice);
-          notify("새 창 이름에 기존 화면이 연결되어 열지 않았습니다. 기존 화면을 유지했습니다.", "err", 8000);
-          try { popup.focus(); } catch (_) {}
-          return;
-        }
         viewerWindows.attach(choice, popup); viewerWindowCursor = choice.index; ohifPopupSlots.set(popup, choice.index);
         // Reopening a named window can restore its opener even without navigation.
         try{popup.opener=null;}catch(_){notify('영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.','err',8000);return;}
@@ -9018,13 +9034,13 @@
           return;
         }
         const previous = ohifPopupState(popup);
-        const deferredPlacement = previous.kind === 'blank' && monitorPermissionGranted() && screen.isExtended === true;
+        const deferredPlacement = previous.kind === 'blank';
         const placementWrite = deferredPlacement ? {pending:true,baseline:null} : null;
         if (placementWrite) ohifPlacementWrites.set(popup, placementWrite);
         // 진입에서 멈춘 창은 초점만 주거나 "닫고 다시 여세요"로 돌려보내지 않는다: 아래에서 새 세션 확인과 함께 다시 읽게 한다.
         const stopped = previous.kind === "viewer" && !previous.ready && viewerEntryStopped(popup);
         if (previous.kind === "viewer" && !stopped) {
-          if (sameOhifScope(previous.href, url)) {
+          if (!freshDocument && sameOhifScope(previous.href, url)) {
             if(popup.location.hash!==new URL(url,location.origin).hash){
               try{
                 // Hash navigation can re-enter OHIF's mode and clear live job
@@ -9043,7 +9059,7 @@
             return;
           }
           if (previous.busy || previous.dirty || !previous.ready) {
-            popup.focus();
+            try { popup.focus(); } catch (_) {}
             watchOhifRect(popup);
             notify(!previous.ready
               ? "기존 영상 창의 보호 상태를 확인할 수 없습니다. 로딩을 확인하고 계속되지 않으면 그 창을 닫은 뒤 다시 여세요."
@@ -9079,7 +9095,7 @@
         ohifPopupSequences.set(popup, seq);
         // 멈춘 창을 같은 검사로 다시 열 때는 주소가 같아(달라도 # 뒤만 다르다) 대입으로는 새 문서가 읽히지 않는다 —
         // 주소만 맞춘 뒤 그 창을 다시 읽게 한다. 넘겨준 세션은 다시 읽힌 문서의 첫 스크립트가 받는다.
-        if (stopped && sameOhifScope(previous.href, url)) {
+        if ((stopped || freshDocument) && sameOhifScope(previous.href, url)) {
           try { popup.history.replaceState(popup.history.state, "", url); } catch (_) {}
           popup.location.reload();
         } else popup.location.href = url;
@@ -9088,7 +9104,7 @@
         watchOhifRect(popup);
         if (!monitorHintShown && monitorPermission?.state === "prompt" && screen.isExtended === true) {
           monitorHintShown = true;
-          notify("판독 창을 다른 화면에 열려면 툴바 [다른 모니터로]에서 허용하세요.", "info", 8000);
+          notify("Viewer Windows의 Detect Displays에서 두 화면을 선택할 수 있습니다. 지원하지 않으면 영상 창을 직접 늘리세요.", "info", 8000);
         }
         // about:blank에서 opener를 분리한 직후에는 Chrome이 다른 화면 좌표를
         // 현재 화면으로 제한한다. 실제 뷰어 문서가 준비된 뒤 한 번 배치한다.
@@ -9098,23 +9114,28 @@
           const placementAt = work.capture("document");
           const currentPlacement = () => ohifPlacementWrites.get(popup) === placementWrite;
           const validPlacement = () => {
-            try { return work.admits(placementAt) && seq === ohifPopupSequences.get(popup) && !popup.closed && monitorPermissionGranted() &&
+            try { return work.admits(placementAt) && seq === ohifPopupSequences.get(popup) && !popup.closed &&
               placementOwner && placementOwner === KinViewerOpening.key(KinAuth.session()); }
             catch (_) { return false; }
           };
           const stopPlacement = () => {
-            if (currentPlacement()) { placementWrite.pending = false; placementWrite.baseline = popupRect(popup); }
+            if (currentPlacement() && placementWrite.pending) {
+              placementWrite.pending = false; placementWrite.baseline = popupRect(popup);
+              if (validPlacement()) notify('자동 창 배치를 확인하지 못해 이전 저장 위치를 유지했습니다. 영상 창을 직접 이동하거나 늘리세요.', 'info', 8000);
+            }
           };
           // This timer also bounds a screen-details promise that never settles.
           const expiry = setTimeout(stopPlacement, 15000);
           try {
-            window.getScreenDetails().then(details => {
+            const detailsRequest = monitorPermissionGranted() ? window.getScreenDetails() : Promise.resolve(null);
+            detailsRequest.then(details => {
               if (!validPlacement()) { clearTimeout(expiry); stopPlacement(); return; }
-              cacheMonitorScreens(details);
+              if (details) cacheMonitorScreens(details);
+              if (readOhifSpanScreens() && (!monitorPermissionGranted() || !ohifSpanTarget())) { clearTimeout(expiry); stopPlacement(); return; }
               const rect = ohifPlacement(stored, details);
               const place = () => {
                 if (!currentPlacement() || !placementWrite.pending) return;
-                if (Date.now() >= deadline || !validPlacement()) { clearTimeout(expiry);stopPlacement();return; }
+                if (Date.now() >= deadline || !validPlacement() || (details && !monitorPermissionGranted()) || (readOhifSpanScreens() && !ohifSpanTarget())) { clearTimeout(expiry);stopPlacement();return; }
                 try {
                   if (popup.document === previousDocument || popup.document.readyState === 'loading' || !sameOhifScope(popup.location.href, url)) {
                     if (Date.now() < deadline) setTimeout(place, 100);
@@ -9128,7 +9149,7 @@
                   const settled = () => {
                     try {
                     if (!currentPlacement() || !placementWrite.pending) return;
-                    if (Date.now() >= deadline || !validPlacement() || !sameOhifScope(popup.location.href,url)) { clearTimeout(expiry);stopPlacement();return; }
+                    if (Date.now() >= deadline || !validPlacement() || (details && !monitorPermissionGranted()) || (readOhifSpanScreens() && !ohifSpanTarget()) || !sameOhifScope(popup.location.href,url)) { clearTimeout(expiry);stopPlacement();return; }
                     const actual = popupRect(popup);
                     if (actual && Object.keys(rect).every(k => Math.abs(actual[k]-rect[k]) <= 16)) {
                       clearTimeout(expiry);ohifPlacementWrites.delete(popup);rememberOhifRect(popup);
@@ -9161,6 +9182,32 @@
       detectDisplays.id='viewer-windows-displays';detectDisplays.textContent='Detect Displays';
       detectDisplays.title='화면 접근 권한을 확인합니다. 번호는 좌표 순의 브라우저 목록이며 OS 설정 번호와 다를 수 있습니다.';
       list.before(detectDisplays);
+      const spanChoices = document.createElement('fieldset');
+      const spanLegend = document.createElement('legend'); spanLegend.textContent = 'Viewer Displays'; spanChoices.append(spanLegend);
+      const spanSelects = [1, 2].map(number => {
+        const label = document.createElement('label'), select = document.createElement('select');
+        label.append('Viewer Display ' + number + ' ', select); spanChoices.append(label);
+        select.onchange = () => { signature = ''; render(); };
+        return select;
+      });
+      const spanHelp = document.createElement('p');
+      spanHelp.textContent = '영상 창을 걸칠 두 화면을 선택하세요. 목록·판독 창은 이동하지 않습니다. 자동 배치가 제한되면 영상 창을 직접 늘리세요.';
+      spanChoices.append(spanHelp); list.before(spanChoices);
+      let displaySignature = '';
+      function renderDisplayChoices() {
+        const next = JSON.stringify(displayScreens);
+        if (next !== displaySignature) {
+          displaySignature = next;
+          const saved = readOhifSpanScreens();
+          spanSelects.forEach((select, index) => {
+            const previous = select.value || (saved?.[index] && KinViewerDisplayLayout.identity(saved[index]));
+            select.replaceChildren(new Option('Select Display', ''));
+            displayScreens.forEach((screen, i) => select.add(new Option('Display ' + (i + 1) + ' · ' + screen.left + ', ' + screen.top + ' · ' + screen.width + ' × ' + screen.height, KinViewerDisplayLayout.identity(screen))));
+            select.value = previous || '';
+          });
+        }
+        spanChoices.hidden = displayScreens.length < 2;
+      }
       detectDisplays.onclick=async()=>{
         const request=++displaySequence,owner=KinViewerOpening.key(KinAuth.session());detectDisplays.disabled=true;
         // 화면 정보의 답은 이 확인을 시작한 문맥과 계정·요청 번호를 함께 지난다. 잠근 단추는 이 확인이 푼다(자기 것만).
@@ -9178,6 +9225,7 @@
       async function moveDisplay(index,chosen){
         const owner=KinViewerOpening.key(KinAuth.session());
         if(!viewerWindows.available()){status.textContent='현재 계정을 확인한 뒤 다시 여세요.';return;}
+        if(!monitorPermissionGranted()){status.textContent='Detect Displays에서 화면을 확인하거나 영상 창을 직접 이동하세요.';return;}
         const row=viewerWindows.rows().find(r=>r.index===index),popup=row?.popup;
         if(!popup||row.pending||!row.status?.ready||row.status.busy||movingWindows.has(popup)||ohifPlacementWrites.get(popup)?.pending){status.textContent='창을 불러오는 중이거나 작업 중입니다. 완료 후 다시 이동하세요.';return;}
         const request=++displayMoveSequence;movingWindows.set(popup,request);render();
@@ -9194,21 +9242,32 @@
         try{
           const details=await window.getScreenDetails();
           if(!valid()){if(shown())status.textContent='창 상태가 바뀌어 이동하지 않았습니다. 현재 창을 다시 확인하세요.';return;}
-          const fresh=KinViewerDisplayLayout.screens(details),target=fresh.find(s=>KinViewerDisplayLayout.identity(s)===KinViewerDisplayLayout.identity(chosen));
+          cacheMonitorScreens(details);
+          const fresh=KinViewerDisplayLayout.screens(details),spanning=Array.isArray(chosen);
+          const selected=(spanning?chosen:[chosen]).map(value=>fresh.find(s=>KinViewerDisplayLayout.identity(s)===KinViewerDisplayLayout.identity(value)));
+          const target=spanning?KinViewerDisplayLayout.span(selected):selected[0];
           if(!target||!monitorPermissionGranted()){displayScreens=fresh;render();status.textContent='화면 구성이나 권한이 바뀌었습니다. 화면을 다시 확인한 뒤 선택하세요.';return;}
-          const rect=KinViewerDisplayLayout.fit(popupRect(popup),target);
+          const rect=spanning?target:KinViewerDisplayLayout.fit(popupRect(popup),target);
           if(!rect){status.textContent='창을 복원한 뒤 다시 이동하세요.';return;}
           const gate={pending:true,baseline:null};ohifPlacementWrites.set(popup,gate);
           const moved=await new Promise(resolve=>{
             let finished=false;
             const finish=ok=>{if(finished)return;finished=true;clearTimeout(timeout);
               let saved=false;
-              if(ohifPlacementWrites.get(popup)===gate){if(ok){ohifPlacementWrites.delete(popup);saved=rememberOhifRect(popup);}else{gate.pending=false;gate.baseline=popupRect(popup);}}
+              if(ohifPlacementWrites.get(popup)===gate){
+                if(ok){
+                  try {
+                    if(spanning)localStorage.setItem(OHIF_SPAN_SCREENS_KEY,JSON.stringify(selected));
+                    else localStorage.removeItem(OHIF_SPAN_SCREENS_KEY);
+                    ohifPlacementWrites.delete(popup);saved=rememberOhifRect(popup);
+                  } catch (_) { gate.pending=false;gate.baseline=popupRect(popup); }
+                }else{gate.pending=false;gate.baseline=popupRect(popup);}
+              }
               resolve({moved:ok,saved});
             };
             const timeout=setTimeout(()=>finish(false),2500);
             const check=()=>{if(finished)return;
-              if(!valid()||!monitorPermissionGranted()||ohifPlacementWrites.get(popup)!==gate){finish(false);return;}
+              if(!valid()||!monitorPermissionGranted()||selected.some(s=>!screensCache.some(current=>KinViewerDisplayLayout.identity(s)===KinViewerDisplayLayout.identity(current)))||ohifPlacementWrites.get(popup)!==gate){finish(false);return;}
               const actual=popupRect(popup);
               if(actual&&Object.keys(rect).every(k=>Math.abs(actual[k]-rect[k])<=16))finish(true);else setTimeout(check,100);
             };
@@ -9220,11 +9279,14 @@
         finally{if(movingWindows.get(popup)===request)movingWindows.delete(popup);if(work.admits(at)&&viewerWindows.available())render();}
       }
       function render() {
-        const rows = viewerWindows?.rows() || [], limit = imageOpening?.snapshot().maxWindows || 1;
-        button.textContent = 'Viewer Windows · ' + rows.length + '/' + limit;
+        const rows = viewerWindows?.rows() || [];
+        button.textContent = 'Viewer Windows · ' + rows.length;
+        displayScreens = monitorPermissionGranted() && monitorDetails ? KinViewerDisplayLayout.screens(monitorDetails) : [];
+        renderDisplayChoices();
         $('#viewer-windows-prev').disabled = $('#viewer-windows-next').disabled = !rows.length;
-        const values = rows.map(row => ({ index: row.index, scope: row.scope, state: row.pending ? 'Loading' : !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : movingWindows.has(row.popup) ? 'Moving' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
-        const next = JSON.stringify([values,displayScreens]); if (next === signature) return; signature = next;
+        const values = rows.map(row => ({ index: row.index, scope: row.scope, state: row.pending ? 'Loading' : !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : movingWindows.has(row.popup) || ohifPlacementWrites.get(row.popup)?.pending ? 'Moving' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
+        const selectedDisplays = spanSelects.map(select => displayScreens.find(s => KinViewerDisplayLayout.identity(s) === select.value));
+        const next = JSON.stringify([values,displayScreens,selectedDisplays]); if (next === signature) return; signature = next;
         const focused = document.activeElement, focusIndex = focused?.dataset.windowIndex, focusAction = focused?.dataset.windowAction;
         list.replaceChildren();
         for (const row of values) {
@@ -9237,7 +9299,7 @@
           for (const action of ['focus', 'latest', 'close']) {
             const control = document.createElement('button'); control.type = 'button'; control.className = 'chip';
             control.textContent = action === 'focus' ? 'Focus' : action === 'latest' ? 'Latest Images' : 'Close Window';
-            if (action === 'latest') { control.disabled = !['Open', 'Unsaved'].includes(row.state); control.title = '추가된 영상을 같은 검사 범위의 새 창에서 조회합니다. 기존 화면과 미저장 작업은 유지하며 설정한 창 수 제한을 따릅니다.'; }
+            if (action === 'latest') { control.disabled = row.state !== 'Open'; control.title = '같은 창에서 이 검사의 최신 영상을 다시 읽습니다. 미저장 작업이나 처리 중인 작업이 있으면 유지합니다.'; }
             control.dataset.windowIndex = String(row.index); control.dataset.windowAction = action;
             control.onclick = () => operate(row.index, action); section.append(control);
           }
@@ -9248,6 +9310,12 @@
             control.dataset.windowIndex=String(row.index);control.dataset.windowAction='display-'+i;
             control.disabled=!['Open','Unsaved'].includes(row.state);control.onclick=()=>moveDisplay(row.index,screen);section.append(control);
           });
+          if (displayScreens.length >= 2) {
+            const control = document.createElement('button'); control.type = 'button'; control.className = 'chip';
+            control.textContent = 'Span Displays'; control.dataset.windowIndex = String(row.index); control.dataset.windowAction = 'span';
+            control.disabled = !['Open', 'Unsaved'].includes(row.state) || !KinViewerDisplayLayout.span(selectedDisplays);
+            control.onclick = () => moveDisplay(row.index, selectedDisplays); section.append(control);
+          }
           list.append(section);
         }
         if (!rows.length) list.textContent = '연결된 영상 창이 없습니다.';
