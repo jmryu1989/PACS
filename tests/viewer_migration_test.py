@@ -218,11 +218,19 @@ SELECT (SELECT count(*) FROM "ViewerItem")||','||(SELECT count(*) FROM "Finding"
     CITATION_PRELUDE = """
 const assert=require('node:assert/strict'),{PrismaClient}=require('@prisma/client');
 const {PacsService}=require('./dist/pacs.service.js');
+const {EmrLedgerClient}=require('./dist/emr-runtime/client.js');
+const {AccessLedgerStore}=require('./dist/emr-runtime/store.js');
+const {FailureJournal,FailureSpool}=require('./dist/emr-runtime/failure-journal.js');
+const {createRecordPort}=require('./dist/emr-runtime/record-port.js');
 const UID=process.env.SYNTHETIC_UID, ITEM='00000000-0000-4000-8000-0000000000e1';
 const FINDING='00000000-0000-4000-8000-0000000000f1', ACTOR='SYNTHETIC-reader';
 const CALLER={kind:'member',sub:'SYNTHETIC-sub',actor:ACTOR,roles:['radiologist','admin'],institution:'SYNTHETIC-hospital'};
 const TEXT='SYNTHETIC 인용 줄';
 const p=new PrismaClient();
+const ledgerDb=new EmrLedgerClient(process.env.DATABASE_URL);
+const {port,control}=createRecordPort(new AccessLedgerStore(ledgerDb,
+ new FailureJournal(ledgerDb,new FailureSpool('/tmp/citation-ledger'))));
+const facts={issuer:'https://synthetic.invalid',ip:null,requestId:require('node:crypto').randomUUID()};
 const entry=(n,prefix)=>({v:2,cid:prefix+String(n).padStart(12,'0'),field:'findings',findingId:FINDING,
  findingRevision:1,sourceIndex:0,sourceRef:{kind:'item',itemId:ITEM,sourceRevision:1},
  linkStateAtInsert:'current',headRevisionAtInsert:1,insertedText:TEXT,
@@ -234,7 +242,7 @@ const studyAccess={prepare:async()=>{},require:async()=>{},allowed:async()=>new 
 const findings={readableFindings:async(_t,_c,uid,ids)=>ids.map(id=>({id,revision:1,hidden:false,
  sources:[{kind:'item',itemId:ITEM,revision:1,studyUid:uid}],
  links:[{itemId:ITEM,linkState:'current',headRevision:1,headHidden:false}]}))};
-const svc=new PacsService(p,{},{usersInGroupWithRole:async()=>[]},studyAccess,findings);
+const svc=new PacsService(p,{},{usersInGroupWithRole:async()=>[]},studyAccess,findings,port);
 const draft=()=>p.reportDraft.findUnique({where:{uid_author:{uid:UID,author:ACTOR}}});
 const refused=async(fn,code)=>{const e=await fn().then(()=>null,x=>x);
  assert.ok(e,'the write was accepted');
@@ -250,7 +258,7 @@ const OWNER={institution:CALLER.institution,sub:CALLER.sub,author:ACTOR};
 const read=async()=>{const s=await p.studyState.findUnique({where:{uid:UID},select:{draftEpoch:true}});const d=await draft();
  return {epoch:s.draftEpoch,pre:{expectedOwner:OWNER,expectedRevision:s.draftEpoch+':'+(d?d.revision:0)},
   kept:d&&Array.isArray(d.citations)?d.citations.map(e=>e.cid):[]};};
-const put=async b=>{const r=await read();return svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null);};
+const put=async b=>{const r=await read();return svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null,facts);};
 const commit=async b=>{const r=await read();return svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null);};
 const force=async()=>{const r=await read();return svc.forceDiscardDrafts(UID,{expectedOwner:OWNER,expectedEpoch:r.epoch},CALLER,null);};
 /**
@@ -260,8 +268,8 @@ const force=async()=>{const r=await read();return svc.forceDiscardDrafts(UID,{ex
  * on stdout; the Python side refuses the marker before it looks for the success sentinels.
  * The data here is synthetic, so printing a stack costs nothing.
  */
-const report=work=>work().then(()=>p.$disconnect(),
- async e=>{console.log('SCRIPT-FAILED '+((e&&e.stack)||e));await p.$disconnect();});
+const report=work=>work().catch(e=>{console.log('SCRIPT-FAILED '+((e&&e.stack)||e));})
+ .finally(async()=>{control.close();await control.drained();await ledgerDb.$disconnect();await p.$disconnect();});
 """
 
     CITATION_WRITE_PATHS = CITATION_PRELUDE + """

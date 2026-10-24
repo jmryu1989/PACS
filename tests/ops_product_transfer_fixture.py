@@ -704,7 +704,7 @@ def seed_emr(name, db):
         for row in data[table]:
             execute(name, db, 'INSERT INTO emr_access.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
                     sql_literal(json.dumps(row))+')')
-    execute(name, db, "SELECT setval('emr_access.access_entry_sequence_seq', 2, true)")
+    execute(name, db, "DO $$ BEGIN PERFORM setval('emr_access.access_entry_sequence_seq', 2, true); END $$")
 
 
 def create_product(name, db, uid):
@@ -1187,7 +1187,8 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'emr placement lost'; END IF;
       BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; DELETE FROM emr_access.access_entry;
         RAISE EXCEPTION 'runtime deletes legal entries'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; INSERT INTO emr_access.access_entry SELECT * FROM emr_access.access_entry;
+      -- Valid identity syntax lets this probe reach the runtime grant check.
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; INSERT INTO emr_access.access_entry OVERRIDING SYSTEM VALUE SELECT * FROM emr_access.access_entry;
         RAISE EXCEPTION 'runtime writes the ledger directly'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
       BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; PERFORM emr_access.expire_entry('00000000-0000-4000-8000-000000000401');
         RAISE EXCEPTION 'runtime reaches expiry'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;

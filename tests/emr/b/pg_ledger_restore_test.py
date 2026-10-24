@@ -483,7 +483,8 @@ class PgLedgerStartupLive(PgLedgerFixture):
         import ops_backup as ops
         evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('startup-' + self.token)
         evidence.mkdir()
-        name = self.container + '-node'
+        compose_file = evidence / 'compose.json'
+        name = None
         config = {'DEPLOYMENT_MODE':'production','AUTH_REQUIRED':'true',
             'KC_ISSUER':'http://127.0.0.1:9/realms/synthetic','KC_JWKS_URL':'http://127.0.0.1:9/jwks',
             'KC_ADMIN_URL':'http://127.0.0.1:9','KC_AUDIENCE':'synthetic-api',
@@ -493,11 +494,19 @@ class PgLedgerStartupLive(PgLedgerFixture):
             'PUBLIC_ORIGIN':'https://synthetic.invalid','KIN_EMR_STATE_DIR':'/var/lib/kin-emr',
             'NODE_OPTIONS':'--max-old-space-size=3072'}
         def start(url):
-            args = ['docker','run','-d','--name',name,'--label','kin.b2r='+self.token,
-                    '--network',self.network,'--memory','1536m','--memory-swap','1536m',
-                    '-p','127.0.0.1::3000','-e','DATABASE_URL='+url]
-            for key,value in config.items(): args += ['-e',key+'='+value]
-            self.command(args+[self.image]) # Real image CMD -> start-production.sh serve -> main/AppModule.
+            nonlocal name
+            compose_file.write_text(json.dumps({'services': {'api': {
+                'image': self.image, 'labels': {'kin.b2r': self.token},
+                'environment': {**config, 'DATABASE_URL': url},
+                'mem_limit': '1536m', 'memswap_limit': '1536m',
+                'ports': ['127.0.0.1::3000'], 'networks': ['fixture']}},
+                'networks': {'fixture': {'external': True, 'name': self.network}}}), encoding='utf-8')
+            # Real image CMD; Compose inherits this run's COMPOSE_PROJECT_NAME.
+            with patch.dict(os.environ, {'COMPOSE_FILE': str(compose_file)}):
+                subprocess.run(['docker','compose','up','-d','api'], cwd=ROOT,
+                               capture_output=True, text=True, check=True, timeout=120)
+                name = subprocess.run(['docker','compose','ps','-aq','api'], cwd=ROOT,
+                                      capture_output=True, text=True, check=True, timeout=30).stdout.strip()
         def inspect():
             return json.loads(self.command(['docker','inspect',name]).stdout)[0]
         def logs(label):
@@ -531,10 +540,12 @@ class PgLedgerStartupLive(PgLedgerFixture):
             self.assertIsNotNone(health,'Actual AppModule did not become ready')
             self.assertTrue(health['auth'])
             # Invoke the backup driver's real readiness command against this
-            # fixture's resumed API; only its fixed deployment name is mapped.
+            # fixture's resumed API through its owning Compose project.
             def owned_run(args, **kwargs):
-                self.assertEqual(args[:3], ['docker', 'exec', 'kin-api'])
-                return self.command([*args[:2], name, *args[3:]], **kwargs)
+                self.assertEqual(args[:3], ['docker', 'exec', ops.ROLE_KEYS['api']])
+                with patch.dict(os.environ, {'COMPOSE_FILE': str(compose_file)}):
+                    return subprocess.run(['docker','compose','exec','-T','api',*args[3:]], cwd=ROOT,
+                                          capture_output=True, text=True, check=True, **kwargs)
             with patch.object(ops, 'run', side_effect=owned_run):
                 ops.resumed_ledger_ready(30)
             with self.assertRaises(urllib.error.HTTPError) as refused:
