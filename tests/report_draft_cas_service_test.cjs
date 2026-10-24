@@ -84,7 +84,11 @@ function database() {
   })();
   return prepared;
 }
-test.after(async () => { if (prepared) await (await prepared).$disconnect(); });
+const ledgerCleanup = [];
+test.after(async () => {
+  for (const close of ledgerCleanup) await close();
+  if (prepared) await (await prepared).$disconnect();
+});
 
 // ── the routes ──
 
@@ -179,17 +183,29 @@ async function world() {
     if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
       await hit('tx-start');
       const out = await fn(view(tx));
-      // the work is done and nothing is committed yet: the request holds the study row here. W5-API: a transaction that took no
-      // row lock and wrote nothing has no transaction ID and holds no row (the read-only receipt check of a relatedInsert PUT,
-      // before its write): its end is the point 'read-commit', so a case that holds or fails `commit` reaches the write.
+      // Pause the actual business transaction. Identity/admission transactions
+      // touch only the ledger schema and do not hold the study/member/session.
+      const [{ business }] = await tx.$queryRawUnsafe(`SELECT EXISTS (
+        SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE l.pid=pg_backend_pid() AND l.granted AND n.nspname='public'
+      ) AS business`);
       const [{ holds }] = await tx.$queryRawUnsafe('SELECT txid_current_if_assigned() IS NOT NULL AS holds');
-      if (!holds) { await hit('read-commit'); return out; }
-      await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
+      if (business && !holds) await hit('read-commit');
+      if (business && holds) await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
       return out;
     }, options);
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
+  const { AccessLedgerStore } = require('/app/dist/emr-runtime/store');
+  const { FailureJournal, FailureSpool } = require('/app/dist/emr-runtime/failure-journal');
+  const { createRecordPort } = require('/app/dist/emr-runtime/record-port');
+  const { createBackgroundWorkRegistry } = require('/app/dist/emr-runtime/background-work');
+  const spool = fs.mkdtempSync(require('node:path').join(os.tmpdir(), 'kin-draft-ledger-'));
+  const journal = new FailureJournal(recorder, new FailureSpool(spool));
+  const { port: ledger, control } = createRecordPort(new AccessLedgerStore(recorder, journal));
+  const background = createBackgroundWorkRegistry();
   // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
   // here), and the full bootstrap reads the inventory only to leave out a UID answered twice (none here); any other
   // Orthanc member is still out of bounds for this harness.
@@ -215,19 +231,32 @@ async function world() {
     const findings = { readableFindings: async (_tx, _c, _uid, ids) => ids.includes(FINDING) ? [{ id: FINDING, revision: 1, hidden: false,
       sources: [{ kind: 'item', itemId: '0f0f0f0f-0000-4000-8000-00000000000b', revision: 1 }],
       links: [{ linkState: 'current', headRevision: 1 }] }] : [] };
-    const svc = new PacsService(recorder, orthanc, keycloak, access, findings);
+    const svc = new PacsService(recorder, orthanc, keycloak, access, findings, ledger);
     const controllers = new Map();
     return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc)); return controllers.get(cls); } };
   };
   w.app = build();
   /** A new process: nothing of the old one's memory, the same database. */
   w.restart = () => { w.app = build(); };
-  w.auth = new AuthService(recorder);
+  w.auth = new AuthService(recorder, undefined, ledger, background.work);
+  ledgerCleanup.push(async () => {
+    await w.auth.onModuleDestroy(); background.quiesce(); await background.drained();
+    control.close(); await control.drained(); await journal.close();
+    fs.rmSync(spool, { recursive: true });
+  });
   w.suspendReviewer = () => flow.run({label:'suspend'}, async () => {
     const {AdminService}=require('/app/dist/admin.service');
     const provider={getUser:async()=>({id:REVIEWER.sub,username:'reviewer',email:REVIEWER.actor,
       emailVerified:true,firstName:'Synthetic',lastName:'Reviewer',groups:[INST],roles:['radiologist'],enabled:true})};
-    return new AdminService(recorder,provider,null,w.auth).patchUser(REVIEWER.sub,{enabled:false},ADMIN);
+    const work = ledger.begin();
+    let id;
+    try { id = await work.resolveRequestIdentity(process.env.KC_ISSUER, ADMIN.sub); }
+    finally { work.end(); }
+    return new AdminService(recorder,provider,null,w.auth,ledger).patchUser(REVIEWER.sub,{enabled:false},ADMIN, {
+      actor: { issuer: process.env.KC_ISSUER, subject: ADMIN.sub, id }, roles: ADMIN.roles,
+      rightsVersion: 1, institution: ADMIN.institution, ip: null,
+      surface: 'PATCH admin/users/:id', requestId: randomUUID(),
+    });
   });
 
   /** One request through its routed handler. The answer is what the HTTP layer would send: status, code, body. */

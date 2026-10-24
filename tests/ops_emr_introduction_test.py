@@ -141,7 +141,7 @@ def receipt_fixture(plan, *, created=None, **changes):
             "evidence": {"seed": {"source_b0_manifest_sha256": "8" * 64},
                          "capture": {"b0_manifest_sha256": "e" * 64, "restore_check": True},
                          "verify": {"b1_manifest_sha256": "f" * 64, "b1_restore_check": True,
-                                    "probe": {"added": 1, "replay_duplicates": 0, "restart": "same chain and seal", "evidence_sha256": "5" * 64}},
+                                    "probe": {"added": 1, "replay_duplicates": 0, "restart": "same PostgreSQL outcome and entry", "evidence_sha256": "5" * 64}},
                          "rollback": {"bfail_manifest_sha256": "6" * 64, "recovery": recovery},
                          "rollback_reopen": {"recovery_persisted": True,
                                              "smoke": {"member": True, "token_after_restore": True, "worklist_uid": FRAME_STUDY,
@@ -546,7 +546,7 @@ class RequestApprovalReceiptTests(unittest.TestCase):
         refuses(self, lambda: intro.receipt_valid(changed_target, plan, "8" * 64, production, bundle=bundle))
         for name, kwargs, message in (("a phase that needed attention", {"status": {"verify": "NEEDS_ATTENTION"}}, "passed phase: verify"),
                                       ("a probe that replayed", {"details": {("verify", "L-10b"): {"added": 1, "replay_duplicates": 1,
-                                                                                                   "restart": "same chain and seal",
+                                                                                                   "restart": "same PostgreSQL outcome and entry",
                                                                                                    "evidence_sha256": "5" * 64}}}, "probe"),
                                       ("a seed of another B0", {"details": {("seed", "S-01"): {"source_manifest_sha256": "0" * 64}}}, "another B0"),
                                       ("a failed previous smoke", {"details": {("rollback_reopen", "RB-04b"): {"health": True}}}, "previous-version smoke")):
@@ -1033,7 +1033,7 @@ class FakeOps:
 
     def effect_probe(self, context):
         context.state["probe"] = {"event_id": "e", "receipt": {}, "evidence_sha256": "5" * 64, "added": 1, "replay_duplicates": 0,
-                                  "restart": "same chain and seal"}
+                                  "restart": "same PostgreSQL outcome and entry"}
         return context.state["probe"]
 
     def effect_seed_restore(self, context):

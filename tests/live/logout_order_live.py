@@ -12,7 +12,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_support import Session, setup_stack
+from session_support import Session, SessionStack, cleanup_sessions
 from invariants_live import ROOT
 
 
@@ -40,7 +40,10 @@ const { AuthService } = copy.exports;
   const db = new PrismaService(), observer = new PrismaService();
   await db.$connect(); await observer.$connect();
   // The product's wiring: one Nest provider each, no constructor arguments, the container's environment.
-  const auth = new AuthService(db, new KeycloakService());
+  const { EmrRuntime } = require('/app/dist/emr-runtime/application');
+  const runtime = new EmrRuntime(process.env.DATABASE_URL, '/tmp/logout-order-' + input.sub);
+  await runtime.start();
+  const auth = new AuthService(db, new KeycloakService(), runtime.port, runtime.background.work);
   const sid = auth.sessionId({headers:{cookie:'kin_sid=' + input.cookie}});
   const row = await observer.authSession.findUnique({where:{sid}});
   if (!row || !row.idpSid) throw Error('The logged-in session must name its provider session');
@@ -73,6 +76,7 @@ const { AuthService } = copy.exports;
     console.log('ORDER ' + JSON.stringify({observations}));
   } finally {
     global.fetch = realFetch;
+    await runtime.stop(Date.now() + 15000);
     await db.$disconnect(); await observer.$disconnect();
   }
 })().catch(() => { console.error('Logout order probe failed (details withheld)'); process.exitCode=1; });
@@ -82,7 +86,11 @@ const { AuthService } = copy.exports;
 class LogoutOrderLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        setup_stack(cls)
+        cls.stack = SessionStack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
+        cls.addClassCleanup(cleanup_sessions, cls.stack)
+        cls.addClassCleanup(cls.stack.cleanup_all)
+        cls.stack.require_stack()
 
     def probe(self, mutant):
         session = Session(self.stack).login(self)

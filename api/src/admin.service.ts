@@ -1,5 +1,5 @@
 import {
-  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException,
+  BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
@@ -7,7 +7,7 @@ import {
   AUDIT_CANDIDATE_ACTIONS, AUDIT_TARGET_ACTIONS, AuditCursor, AuditLogRow, AuditSource, auditMention, auditPageQuery,
   openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
-import { lockMemberRights, rightsAllow, rosterOverlap } from './member-rights';
+import { lockMemberRights, rightsAllow, rosterOverlap, rightsAccessEvent, RightsRequestFacts } from './member-rights';
 import { AuthService, lockWaitExceeded } from './auth.service';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
@@ -15,6 +15,8 @@ import { KeycloakService, KeycloakUser, within } from './keycloak.service';
 import { Caller } from './pacs.service';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
+import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
+import { sessionEndEvent } from './emr-runtime/auth-events';
 
 // 감사 기록 다음 쪽 값의 봉인 키. 프로세스마다 새로 만든다 — API가 다시 시작되면 이어받기는 만료(409)되고
 // 처음부터 다시 읽는다. 키를 설정으로 두면 값이 재시작을 넘어 살아남을 이유만 생긴다.
@@ -35,6 +37,7 @@ export class AdminService {
     private keycloak: KeycloakService,
     private studyAccess: StudyAccessService,
     private auth: AuthService,
+    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
   ) {}
 
   private admin(c: Caller) {
@@ -132,7 +135,7 @@ export class AdminService {
       || rosterOverlap(ordinary);
   }
 
-  async createUser(body: any, c: Caller) {
+  async createUser(body: any, c: Caller, facts?: RightsRequestFacts) {
     this.admin(c);
     const username = text(body?.username, 'username', 128);
     if (username.startsWith('service-account-'))
@@ -150,6 +153,8 @@ export class AdminService {
       throw new BadRequestException('대면 확인 생성에는 institution과 roles가 모두 필요합니다');
     // Validate scope before provider creation, so invalid input cannot leave a disabled orphan.
     if (verificationOverride) {
+      if (!facts || facts.actor.subject !== c.sub)
+        throw new ServiceUnavailableException('회원 변경 요청의 접속 사실을 확인할 수 없습니다');
       await this.institution(body.institution);
       this.roles(body.roles);
     }
@@ -165,7 +170,7 @@ export class AdminService {
       await this.keycloak.setEnabled(created.id, true);
       let after;
       if (verificationOverride) {
-        after = await this.patchUser(created.id, { institution: body.institution, roles: body.roles, verificationOverride: true, enabled: true }, c);
+        after = await this.patchUser(created.id, { institution: body.institution, roles: body.roles, verificationOverride: true, enabled: true }, c, facts);
       } else {
         after = await this.prisma.$transaction(async tx => {
           await lockMemberRights(tx, created!.id);
@@ -189,7 +194,7 @@ export class AdminService {
     }
   }
 
-  async patchUser(id: string, body: any, c: Caller) {
+  async patchUser(id: string, body: any, c: Caller, facts?: RightsRequestFacts) {
     this.admin(c);
     const existing = await this.prisma.memberRights.findUnique({ where: { sub: id } });
     const identityToRegister = existing ? null : await this.managed(id);
@@ -253,8 +258,13 @@ export class AdminService {
       } catch (error) { preReadError = error; }
     }
 
+    if (!facts || facts.actor.subject !== c.sub) throw new ServiceUnavailableException('회원 변경 요청의 접속 사실을 확인할 수 없습니다');
+    const work = this.ledger.begin();
     try {
-      const committed = await this.prisma.$transaction(async tx => {
+      const issuer = process.env.KC_ISSUER;
+      if (!issuer) throw new Error('Missing member identity issuer');
+      const affected = { issuer, subject: id, id: await work.resolveRequestIdentity(issuer, id) };
+      const committed = await work.transactionWithRecords(async (tx, record) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await lockMemberRights(tx, id);
         const current = await tx.memberRights.findUnique({ where: { sub: id } });
@@ -263,28 +273,49 @@ export class AdminService {
         if (preReadError) throw preReadError;
         // The observed version precedes the remote pre-read. CAS rejects an older command after any
         // newer command commits, so its captured identity cannot rewind that newer identity. No I/O holds this lock.
-        const version = existing ? observed.version : (await this.register(tx, identity!)).version;
-        const [{ boundary }] = await tx.$queryRaw<{ boundary: Date }[]>`SELECT now() AS boundary`;
-        const { count } = await tx.memberRights.updateMany({ where: { sub: id, version }, data: {
-          approved, suspended, institution, roles, ...(identity ? this.identity(identity) : {}),
-          version: { increment: 1 }, newAuthAfter: boundary,
-        } });
-        if (count !== 1) throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
-        // No remote end is scheduled here: this deletion cannot outlive this version's commit.
-        const sessions = await tx.authSession.findMany({ where: { sub: id } });
-        for (const session of sessions) {
-          const deleted = await tx.authSession.deleteMany({ where: { sid: session.sid } });
-          if (deleted.count !== 1) continue;
-          await tx.auditLog.create({ data: { actor: observed.email || observed.username, action: 'auth.logout', target: id,
-            detail: JSON.stringify({ institution: session.institution, ip: null, dataSubject: null, cause: 'isolation' }) } });
-        }
-        const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
-        await tx.auditLog.create({ data: { actor: c.actor, action: `admin.user.${action}`, target: id,
-          detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
-        const change = approvalMutation ? await tx.providerChange.create({ data: {
-          kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
-        } }) : null;
-        return { after, change, rosterUnconfirmed: !!change || await this.rosterUnconfirmed(id, tx) };
+        const version = existing ? observed.version : 1;
+        let result: { after: ReturnType<AdminService['row']>; change: any; rosterUnconfirmed: boolean };
+        const event = rightsAccessEvent(facts, affected, version + 1, new Date().toISOString());
+        await record(event, async () => {
+          if (!existing) await this.register(tx, identity!);
+          const [{ boundary }] = await tx.$queryRaw<{ boundary: Date }[]>`SELECT now() AS boundary`;
+          const { count } = await tx.memberRights.updateMany({ where: { sub: id, version }, data: {
+            approved, suspended, institution, roles, ...(identity ? this.identity(identity) : {}),
+            version: { increment: 1 }, newAuthAfter: boundary,
+          } });
+          if (count !== 1) throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
+          const sessions = await tx.authSession.findMany({ where: { sub: id } });
+          for (const session of sessions) {
+            const ending = sessionEndEvent({ status: 'known', value: affected }, {
+              surface: facts.surface, roles: facts.roles, rightsVersion: facts.rightsVersion,
+              institution: facts.institution, auditRef: session.auditRef, ip: facts.ip,
+              occurredAt: event.occurredAt, endCause: 'isolation', trigger: null,
+            });
+            ending.userId = { status: 'known', value: facts.actor };
+            ending.trustedProxyIp = event.trustedProxyIp;
+            ending.requestId = facts.requestId;
+            ending.managingInstitution = session.institution ? { status: 'known', value: session.institution }
+              : { status: 'unresolved', reason: 'not-resolved' };
+            await record(ending, async () => {
+              const deleted = await tx.authSession.deleteMany({ where: { sid: session.sid } });
+              if (deleted.count !== 1) return null;
+              const audit = await tx.auditLog.create({ data: { at: new Date(event.occurredAt),
+                actor: observed.email || observed.username, action: 'auth.logout', target: id,
+                detail: JSON.stringify({ institution: session.institution, ip: facts.ip, dataSubject: null, cause: 'isolation' }) } });
+              return { kind: 'AuditLog', id: String(audit.id), version: null };
+            });
+          }
+          const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
+          const audit = await tx.auditLog.create({ data: { at: new Date(event.occurredAt),
+            actor: c.actor, action: `admin.user.${action}`, target: id,
+            detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
+          const change = approvalMutation ? await tx.providerChange.create({ data: {
+            kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
+          } }) : null;
+          result = { after, change, rosterUnconfirmed: !!change || await this.rosterUnconfirmed(id, tx) };
+          return { kind: 'AuditLog', id: String(audit.id), version: null };
+        });
+        return result!;
       }, { maxWait: 4000, timeout: 8000 });
       if (committed.change) this.auth.publishCredentials({ id: committed.change.id, kind: 'credentials', target: id }, institution!, roles);
       return { ...committed.after, rosterUnconfirmed: committed.rosterUnconfirmed };
@@ -296,7 +327,7 @@ export class AdminService {
       if (lockWaitExceeded(error))
         throw new ConflictException({ code: 'MEMBER_BUSY', message: '다른 요청이 회원 상태를 변경하고 있습니다. 잠시 후 다시 시도하세요' });
       throw error;
-    }
+    } finally { work.end(); }
   }
 
   async resetPassword(id: string, body: any, c: Caller) {

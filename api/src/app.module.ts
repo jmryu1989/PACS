@@ -1,3 +1,4 @@
+import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
 import { AsrService } from './asr.service';
 import { DictationController } from './dictation.controller';
 import { StudyAccessService } from './study-access.service';
@@ -13,7 +14,10 @@ import { CriticalResultController } from './critical-result.controller';
 import { CriticalResultService } from './critical-result.service';
 import { ReaderAssignmentController } from './reader-assignment.controller';
 import { ReaderAssignmentService } from './reader-assignment.service';
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { DynamicModule, MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import type { EmrRuntime } from './emr-runtime/application';
+import { EMR_RECORD_PORT } from './emr-runtime/record-port';
+import { EmrNestLifecycle } from './emr-runtime/nest-lifecycle';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PrismaService } from './prisma.service';
 import { PacsController } from './pacs.controller';
@@ -67,6 +71,13 @@ function adminNoStore(_req: any, res: any, next: () => void) {
   ],
 })
 export class AppModule implements NestModule {
+  static withLedger(runtime: EmrRuntime): DynamicModule {
+    return { module: AppModule, providers: [
+      { provide: EMR_RECORD_PORT, useValue: runtime.port },
+      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work },
+      { provide: EmrNestLifecycle, useValue: new EmrNestLifecycle(runtime) },
+    ], exports: [EMR_RECORD_PORT] };
+  }
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
     consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);

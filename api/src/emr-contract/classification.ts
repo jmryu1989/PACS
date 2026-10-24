@@ -124,9 +124,11 @@ export type RecordKind = keyof typeof RECORD_CLASSIFICATION;
 /** SQL-only storage of EMR-B (schema emr_access, its own tablespace), classified apart from Prisma models: none of these is
  * a Prisma model and the Prisma inventory never lists them. The live catalog is compared with this table both ways. */
 export const SQL_STORAGE_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]>> = freeze({
-  'emr_access.access_entry': ['access-audit'], 'emr_access.access_target': ['access-audit'], 'emr_access.chain_head': ['access-audit'],
+  'emr_access.access_entry': ['access-audit'], 'emr_access.access_target': ['access-audit'], 'emr_access.operation': ['access-audit'],
   'emr_access.audit_projection': ['access-audit'],
-  'emr_access.commit_marker': ['access-audit'],
+  'emr_access.attempt': ['access-audit'], 'emr_access.attempt_outcome': ['access-audit'],
+  'emr_access.entry_receipt': ['access-audit'], 'emr_access.failure_entry': ['access-audit'],
+  'emr_access.disposal_fact': ['access-audit'], 'emr_access.ledger_metadata': ['system-operation'],
   'emr_access.member_identity': ['identity-access'],
   'emr_access.legal_hold_event': ['legal-duty'], 'emr_access.duty_request_event': ['legal-duty'],
   'emr_access.clause_version': ['legal-reference'],

@@ -84,11 +84,8 @@ export function institutionEvidenceStatus(registry: LocationRegistry): Readonly<
 export const ACCESS_STREAMS = freeze(['change-history', 'viewing', 'permission-history', 'non-record'] as const);
 export type AccessStream = typeof ACCESS_STREAMS[number];
 export const ACCESS_STREAM_RULE = freeze({
-  // D-1 ①, PREDICTED-CONSERVATIVE (LR-11 §5-11): who changed a record, when, where and on what basis is that
-  // record's change history (시행규칙 제16조①2·② 이력관리 장비). It leaves with the record's destruction set; the part
-  // of its own two-year floor still running at that moment stays behind with the viewing stream's floor. Re-check
-  // when 시행규칙 제16조② (above 제1177호) or the 고시 after 2023-245 is promulgated; a fixed period there is
-  // applied as the longer of that period and this rule.
+  // Retained record-history policy (D1770), linked to the actual record lifetime.
+  // No predicted fixed access-log period is implemented ahead of the notice.
   'change-history': { clauseIds: [STATUTORY_MINIMUM.access.clauseId, 'medical:23.4'], years: STATUTORY_MINIMUM.access.years, withRecord: true },
   // 예측: 의료법 제23조④ 위임 보건복지부령이 로그인·로그아웃을 포함한 접속기록의 고정 보존기간을
   // 정하면 viewing과 non-record도 재검토한다. 확정 전에는 현재 접속기록 하한을 적용한다.

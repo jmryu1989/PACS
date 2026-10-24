@@ -82,6 +82,7 @@ class ProductionImageTests(unittest.TestCase):
     def api(self, suffix, **overrides):
         env = {
             "DATABASE_URL": RUNTIME_URL,
+            "KIN_EMR_STATE_DIR": "/var/lib/kin-emr",
             "DEPLOYMENT_MODE": "production", "AUTH_REQUIRED": "true",
             "KC_ISSUER": "http://127.0.0.1:1/auth/realms/kin",
             "KC_JWKS_URL": "http://127.0.0.1:1/certs", "KC_AUDIENCE": "kin-api",
@@ -138,8 +139,7 @@ const fs=require('fs'), assert=require('assert');
 assert.notStrictEqual(process.getuid(),0);
 for(const p of ['dist/main.js','dist/emr-runtime/store.js','prisma/migrations/0_init/migration.sql',
   'prisma/migrations/20261008120000_emr_b/migration.sql', 'prisma/migrations/20261010120000_emr_seal_attempts/migration.sql', 'prisma/migrations/20261010150000_emr_read_jit_off/migration.sql', 'prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
-  'prisma/migrations/20261015013945_import_operation/migration.sql',
-  'prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
+  'prisma/migrations/20261015013945_import_operation/migration.sql', 'prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql', 'prisma/migrations/20261023180000_emr_pg_ledger/migration.sql',
   'node_modules/prisma/build/index.js','node_modules/.prisma/client/index.js']) assert(fs.existsSync(p),p);
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
@@ -160,12 +160,27 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
         self.assertEqual(code, 0, logs[-2000:])
         # This image-only fixture has no realm server. Exercise the supported operator import with an empty realm
         # before boot; onModuleInit must see its real completion marker and never contact the unreachable provider.
+        script = """
+const {PrismaService}=require('./dist/prisma.service');
+const {EmrRuntime}=require('./dist/emr-runtime/application');
+const {importMemberRights}=require('./dist/member-rights-import');
+const db=new PrismaService();
+const runtime=new EmrRuntime(process.env.DATABASE_URL, '/var/lib/kin-emr/outage');
+(async()=>{
+  try {
+    await runtime.start();
+    const imported=await importMemberRights(db,{listUsers:async()=>({total:0,users:[]})},runtime.port);
+    await imported?.publication;
+  } finally {
+    try { await runtime.stop(Date.now()+5000); }
+    finally { await db.$disconnect(); }
+  }
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
         ops.run(["docker", "run", "--rm", "--network", "container:" + self.db,
-                 "-e", "DATABASE_URL=" + INSTALLER_URL,
-                 "--entrypoint", "node", self.image_id, "-e",
-                 "const {PrismaService}=require('./dist/prisma.service');const db=new PrismaService();"
-                 "require('./dist/member-rights-import').importMemberRights(db,{listUsers:async()=>({total:0,users:[]})})"
-                 ".finally(()=>db.$disconnect()).catch(()=>process.exit(1));"])
+                 "-e", "DATABASE_URL=" + RUNTIME_URL,
+                 "-e", "KC_ISSUER=http://127.0.0.1:1/auth/realms/kin",
+                 "--entrypoint", "node", self.image_id, "-e", script])
         self.assertEqual(self.psql('SELECT id FROM "MemberRightsImport";'), "realm-v1")
         name = self.api("healthy")
         # A failed migration assertion must not leave port3000 occupied for the drain test.
@@ -186,7 +201,7 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
                           '20261006000000_tech_note_attempt_id',
                           '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects',
                           '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
-                          '20261015013945_import_operation', '20261016120000_related_report_insert_receipt'])
+                          '20261015013945_import_operation', '20261016120000_related_report_insert_receipt', '20261023180000_emr_pg_ledger'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         # S9-U4b: the runtime role reads exactly the three history columns of the import readiness fact, and an
         # ImportOperation row written now survives the restart below with its owner and kind.

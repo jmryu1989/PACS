@@ -67,7 +67,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET studies/:uid/tech-note', 'GET studies/:uid/tech-note/history'] },
   { kinds: ['tech-note', 'operational-note'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/tech-note'] },
-  { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view', 'background-fetch'],
+  { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view', 'background-fetch'],
     routes: ['PUT studies/:uid/report'] },
   { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view'],
     routes: ['DELETE studies/:uid/draft', 'DELETE studies/:uid/draft/force'] },
@@ -179,6 +179,7 @@ export function classifyRoute(route: string): readonly RecordKind[] {
  * Closed: a new background job adds its own entry here with the records it touches. */
 export const INTERNAL_SURFACES: Readonly<Record<string, RouteContract>> = freeze({
   'service:auth-session-sweep': { kinds: ['authentication-session'], operation: 'auth', causes: ['service-job'] },
+  'service:member-rights-import': { kinds: ['identity-access'], operation: 'write', causes: ['service-job'] },
 });
 for (const surface of Object.keys(INTERNAL_SURFACES)) {
   if (Object.prototype.hasOwnProperty.call(ROUTE_CONTRACTS, surface)) throw new Error('Internal surface shadows an HTTP route');
