@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from urllib.parse import urlparse
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -62,18 +63,15 @@ class SessionDraftBoundaries(worklist.WorklistE2E):
         expect(page.locator("#password")).to_be_visible()
         self.assertIn("/auth/realms/kin/", page.url)
 
-    def test_entry_proof_consumed_automatically_once(self):
+    def test_callback_document_bootstraps_current_session_without_click(self):
         session = Session(self.stack).login(self)
         context = self.profile(session)
         responses = []
-        context.on("response", lambda r: responses.append(r.status) if r.url.endswith("/api/auth/entry") else None)
-        page = self.open_main(context, "#kin-entry=" + session.proof)
-        self.assertNotIn("kin-entry", page.url)
-        self.assertEqual(responses, [200], "U5_ENTRY_PROOF")
-        replay = context.request.post(self.stack.api + "/auth/entry", data={"proof": session.proof},
-                                      headers={"X-KIN-CSRF": "1"})
-        self.assertEqual(replay.status, 403)
-        self.assertEqual(replay.json()["code"], "AUTH_ENTRY_REFUSED")
+        context.on("response", lambda r: responses.append(r.status) if r.url.endswith("/api/me") else None)
+        page = self.open_main(context)
+        self.assertEqual(urlparse(page.url).fragment, "")
+        self.assertTrue(responses and all(status == 200 for status in responses))
+        self.assertEqual(page.evaluate("KinAuth.sessionId()"), session.session)
 
     def test_open_edit_autosave_reload_restores_draft(self):
         fixture = self.fixture()

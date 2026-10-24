@@ -27,7 +27,7 @@ function kinCreateViewerLayout() {
       if (controller.signal.aborted || signal?.aborted) abort();
       const timer = setTimeout(abort, 10000);
       try {
-        const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
+        const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: {  } });
         if (!live()) {
           // Session termination is owned by the page transport and gate.
           if (path === '/api/me' && response.ok) kinViewerSession.sameAccount(await response.json().catch(() => null));

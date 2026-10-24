@@ -291,7 +291,7 @@
       const bytes = cur.audio.slice();
       try {
         const pending = transport.request(url, { context: at, read: 'response', deadlineMs: 0, method: 'POST', credentials: 'same-origin', cache: 'no-store',
-          redirect: 'error', headers: { 'Content-Type': 'audio/wav', 'X-KIN-CSRF': '1' },
+          redirect: 'error', headers: { 'Content-Type': 'audio/wav' },
           body: bytes, signal: abort.signal });
         // Clear the transmitted buffer; the run owns one RAM copy until its reply or cancellation.
         zero(bytes);

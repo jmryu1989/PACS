@@ -51,7 +51,7 @@
     }
     async function resolveSource(value,ticket){
       const controller=new AbortController(),signal=controller.signal,operation={controller,value};cancelSource();sourceRequest=operation;
-      const init=(method='GET',body)=>({method,credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
+      const init=(method='GET',body)=>({method,credentials:'same-origin',cache:'no-store',signal,headers:{...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
       const sourceOwns=()=>!ended&&sourceRequest===operation&&ticket===generation&&live(value),sourceLive=()=>sourceOwns()&&!signal.aborted;
       const reply=async(path,options)=>{const result=await fetcher(path,options);if(!sourceLive())throw Error('선택한 원본 문서가 변경되었습니다.');if(!result?.ok){throw root.KinSessionTransport.responseError(result,'원본 PDF 확인 요청을 완료하지 못했습니다.','로그인 또는 검사 접근 권한을 확인하세요.');}const data=await json(result);if(!sourceLive())throw Error('선택한 원본 문서가 변경되었습니다.');return data;};
       const work=(async()=>{
@@ -112,7 +112,7 @@
     async function open(){
       if(ended||request||!boundOwner)return;if(nativeRetryNeeded){if(nativeRetryPending||!nativeRetrySource)return;nativeRetryPending=true;options.onRetry?.(nativeRetrySource.displaySet,nativeRetrySource.pdfUrl);button.textContent='Retry Source PDF';button.disabled=true;status.textContent='Checking native PDF…';return;}if(!source){button.disabled=true;button.textContent='Retry Source PDF';refresh();return;}
       const before=snapshot(source),owner={...boundOwner},controller=new AbortController(),operation={controller,before,generation,url:null};request=operation;let failure=null;const signal=controller.signal,timer=setTimeout(()=>controller.abort(),10000);button.disabled=true;patient.textContent='';status.textContent='Verifying source PDF…';
-      const init=(method='GET',body)=>({method,credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
+      const init=(method='GET',body)=>({method,credentials:'same-origin',cache:'no-store',signal,headers:{...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
       try{
         const first=ownerOf(await response('/api/me',init(),operation));if(!sameOwner(first,owner))throw Error('계정이 변경되어 PDF를 열지 않았습니다.');assertLive(operation);
         const lookup=await response('/api/dicom/lookup',init('POST',{studyUid:before.study,sopUid:before.sop}),operation);
@@ -129,7 +129,7 @@
     button.addEventListener('click',open);
     async function bindOwner(){
       const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);ownerRequest=controller;
-      try{const reply=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1'}}),data=reply?.ok?await json(reply):null,next=ownerOf(data);if(!next)throw Error();if(!ended&&ownerRequest===controller){boundOwner=next;refresh();}}
+      try{const reply=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{}}),data=reply?.ok?await json(reply):null,next=ownerOf(data);if(!next)throw Error();if(!ended&&ownerRequest===controller){boundOwner=next;refresh();}}
       catch(_){if(!ended&&ownerRequest===controller){boundOwner=null;ownerError='로그인 세션을 확인할 수 없습니다. 뷰어를 다시 여세요.';status.textContent=ownerError;button.disabled=true;}}
       finally{clearTimeout(timer);if(ownerRequest===controller)ownerRequest=null;}
     }

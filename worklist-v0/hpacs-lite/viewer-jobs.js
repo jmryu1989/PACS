@@ -132,7 +132,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       // browser's own error.
       const read = idempotent === true || ['GET', 'HEAD'].includes(String(request.method || 'GET').toUpperCase());
       const send = () => fetch('/api' + url, { ...request, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-        headers: { 'X-KIN-CSRF': '1', ...(me ? { 'X-KIN-Subject': me.sub } : {}), ...(request.body ? { 'Content-Type': 'application/json' } : {}) } });
+        headers: { ...(me ? { 'X-KIN-Subject': me.sub } : {}), ...(request.body ? { 'Content-Type': 'application/json' } : {}) } });
       try {
         // Nothing more leaves a document whose login has ended, whichever step of a read or write was next.
         if (session?.ended()) throw new Error('세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');

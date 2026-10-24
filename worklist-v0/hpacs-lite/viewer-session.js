@@ -497,7 +497,7 @@
           const deadline = nativeTimeout(() => controller.abort(), 10000);
           try {
             const response = await originalFetch('/api/me', { credentials: 'same-origin', cache: 'no-store',
-              headers: { 'X-KIN-CSRF': '1' }, signal: controller.signal });
+              headers: {  }, signal: controller.signal });
             let me = null;
             try { me = await response.json(); } catch (_) {}
             const code = response.headers.get('X-KIN-Auth-Code') || me?.code;

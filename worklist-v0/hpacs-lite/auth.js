@@ -67,8 +67,6 @@ const KinAuth = (() => {
   const PASSIVE_KEEP_MS = 12 * 60 * 60 * 1000;
   const PROBE_KEY = 'kin-session-probe';
   const CHANNEL = 'kin-session';
-  // 로그인 콜백이 주소 조각으로 넘기는 일회용 진입 증명의 이름(U5S-REQ-09).
-  const ENTRY_MARK = 'kin-entry';
   // 요청 시작부터 응답 본문 판정까지. 넘으면 결과를 모르는 것이고 다시 보내는 것은 사람뿐이다.
   const REQUEST_WAIT_MS = 10000;
   // 페이지가 POST 앞에 끼우는 일(main.html의 점유 해제)의 한도. 그 일이 끝나지 않아도 종료는 막히지 않는다.
@@ -295,42 +293,11 @@ const KinAuth = (() => {
     }
   }
 
-  /**
-   * 로그인 콜백이 주소 조각에 실어 준 일회용 진입 증명을 꺼내고 그 조각을 바로 지운다 — 주소 표시줄·방문 기록·복사한 주소에
-   * 남지 않게 한다. 증명은 쿠키 없이는 아무것도 열지 못하고, 서버가 한 번만 받는다.
-   */
-  function takeProof() {
-    let found = null;
-    try {
-      const fragment = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
-      if (!fragment.has(ENTRY_MARK)) return null;
-      found = fragment.get(ENTRY_MARK) || null;
-      history.replaceState(history.state, '', location.pathname + location.search);
-    } catch (e) {}
-    return found;
-  }
-
   const reliable = probeStorage();
-  let proof = takeProof();
-  let entryBinding = null;
-  /**
-   * 이 문서는 로그인 증명으로 들어가는 중이다(A013). 그동안에는 이 브라우저에 남은 **다른** 세션의 기록·통지로 판정하지
-   * 않는다: 어제의 Log out 기록은 이 로그인이 넘겨받을 것이고, 확인을 기다리는 사이의 창 초점·탭 표시·저장소 알림이 그
-   * 기록으로 이 문서를 닫으면 방금 한 로그인이 버려진다. 새 세션의 식별값을 알게 된 뒤에는 그 세션 자신의 종료만 따른다.
-   */
-  let proofEntry = !!proof;
-  // 진입 증명의 답을 잃었다(A012). 증명은 다시 내지 않고, 이 문서는 증명 없는 평소의 문서로 한 번 확인한다.
-  let entryLost = false;
   // 새 문서가 발견한 "떠나려는 중" 기록. 그 준비를 하던 창이 살아 있는지는 비동기로만 알 수 있어 진입(enter)이 가린다.
   let pendingLeaving = null;
 
-  /**
-   * 저장소가 말하는 이 문서의 시작 상태. 사람의 로그아웃 기록이 있으면 그 상태로 닫혀 있고, 저장소를 믿을 수 없으면 unknown이다.
-   * "떠나려는 중" 기록이 있으면 저장소 판정은 그 준비가 끝난 뒤로 미룬다(settleLeaving이 다시 부른다) — 판정이 먼저 서면 Login이
-   * 살아 있는 준비의 세션을 끝낼 수 있다. 미루는 것이지 건너뛰는 것이 아니다.
-   * 증명의 답을 잃은 문서(entryLost)는 방금 명시적 로그인을 마친 문서다: 다른 세션의 사람의 로그아웃 기록(어제의 Log out)은
-   * 이 문서를 세우지 않는다 — 그 기록은 이 로그인이 넘겨받을 것이고, 자기 세션의 기록·통지는 진입(adopt)이 따로 막는다.
-   */
+
   function classify() {
     const { records, unreadable } = readAll();
     pendingLeaving = null;
@@ -339,7 +306,7 @@ const KinAuth = (() => {
       reason = 'record';
       return;
     }
-    const record = entryLost ? null : blocking(records);
+    const record = blocking(records);
     if (record) {
       state = record.status;
       reason = record.reason;
@@ -355,7 +322,8 @@ const KinAuth = (() => {
     }
   }
   prune();
-  if (!proof) classify();
+  // 첫 /me 응답으로 세션을 확인한 뒤 그 세션의 종료 기록만 적용한다.
+  if (!reliable || readAll().unreadable) classify();
 
   /** 서버에 물을 수 있는 시작인가: 아직 아무것도 정해지지 않은 unknown뿐이다. */
   function undecided() { return state === 'unknown' && reason === null; }
@@ -456,7 +424,7 @@ const KinAuth = (() => {
     const control = new AbortController();
     const timer = setTimeout(() => control.abort(), REQUEST_WAIT_MS);
     try {
-      const headers = { 'X-KIN-CSRF': '1' };
+      const headers = {};
       if (session) headers['X-KIN-Session'] = session;
       if (json !== undefined) headers['Content-Type'] = 'application/json';
       const response = await fetch(`${API}${path}`, {
@@ -530,18 +498,16 @@ const KinAuth = (() => {
    * 그 세션의 종료가 기록되었거나 통지되었으면 그 답은 신원을 만들지 않는다. 증명 없는 진입은 어느 세션의 것이든 사람의
    * 로그아웃 기록 앞에 선다. 그 세션의 "떠나려는 중"은 막지 않는다 — 살아 있는 창의 것인지는 진입이 이미 가렸다.
    */
-  function adopt(id, identity, viaProof) {
+  function adopt(id, identity) {
     if (!undecided()) return null;
-    // 증명으로 들어가는 문서는 저장소를 읽지 못해도 들어간다(서버가 방금의 로그인을 확인했다). 그 밖에는 읽지 못하면 닫힌다 —
-    // 증명의 답을 잃은 문서도 그렇다(서버의 확인은 증명이 아니라 결속 없는 /api/me였다).
     const { records, unreadable } = readAll();
-    if (unreadable && (!viaProof || entryLost)) {
+    if (unreadable) {
       reason = 'record';
       announce();
       return null;
     }
     const own = records.get(id), told = heard.get(id);
-    const ended = own && own.status !== 'leaving' ? own : viaProof ? null : blocking(records);
+    const ended = own && own.status !== 'leaving' ? own : null;
     if (ended || told) {
       [state, reason] = ended ? [ended.status, ended.reason] : heardState(told);
       sessionId = ended ? ended.session : id;
@@ -549,13 +515,11 @@ const KinAuth = (() => {
       announce();
       return null;
     }
-    // 증명 진입 또는 사람이 누른 Login이 현재 세션을 확인했다. 앞선 세션의 종료 기록은 여기서만 지운다.
-    if (viaProof) supersede(id);
+    supersede(id);
     tab.remove(AUTO_LOGIN_KEY);
     cached = identity;
     sessionId = id;
     state = 'active';
-    proofEntry = false;
     announce();
     return cached;
   }
@@ -571,89 +535,24 @@ const KinAuth = (() => {
     // 시작할 수 있다(autoLogin). 5xx·시간 초과·읽을 수 없는 답은 "세션 없음"이 아니라 확인 실패다 — 아래에서 던진다.
     if (answer.status === 401) {
       absent = true;
+      classify();
       return null;
     }
     const { id, identity } = readIdentity(answer);
-    // 증명의 답을 잃은 문서(A012·SEB-F01)는 방금 명시적 로그인을 마친 문서다: 서버가 확인해 준 세션으로, 성공한 증명 진입처럼
+    const own = readAll().records.get(id);
+    if (own?.status === 'leaving') {
+      pendingLeaving = own;
+      await settleLeaving();
+      if (!undecided()) return null;
+    }
     // 앞선 세션들의 기록을 넘겨받는다. 그 세션 자신의 기록·통지는 여전히 막는다(adopt).
-    return adopt(id, identity, entryLost);
+    return adopt(id, identity);
   }
 
-  /**
-   * 명시적 로그인을 마친 문서의 진입: 증명을 서버에 한 번 내고(쓰면 사라진다), 받은 세션 식별값에 묶어 신원을 확인한다.
-   * 저장소를 쓸 수 없거나 앞선 종료 기록이 남아 있어도 이 길로는 들어간다 — 서버가 방금의 로그인을 확인했기 때문이다.
-   * 거절된 증명(다른 세션·만료·재사용)은 아무것도 열지 않는다.
-   *
-   * 증명의 답을 잃었으면(연결 끊김·5xx·읽지 못한 답, A012) 그 증명은 다시 내지 않는다 — 쓰였는지 모른다. 이 문서는 증명
-   * 없는 평소의 문서로 돌아가 한 번 확인한다: 서버가 살아 있는 세션을 답하고 막는 기록이 없으면 새 탭이 그러듯 클릭 없이
-   * 들어간다. 그 확인도 얻지 못할 때에만 랜딩이 사정을 한 번 알린다.
-   */
-  async function enterWithProof() {
-    if (!entryBinding) {
-      const offered = proof;
-      proof = null;
-      let entry = null;
-      try { entry = await send('/auth/entry', { method: 'POST', json: { proof: offered } }); }
-      catch (_) { entry = null; }
-      if (!entry || entry.status >= 500 || entry.status === 429 || (entry.status === 200 && !entry.body?.sessionId)) {
-        // A012·SEB-F01: 어제의 Log out 기록(다른 세션)은 이 문서를 세우지 않는다 — 결속 없는 /api/me 한 번이 정한다. 그 답을
-        // 기다리는 동안에도 다른 세션의 기록·통지·창 사건으로 판정하지 않는다(A013과 같은 보류: proofEntry는 그대로이고,
-        // 새 세션의 식별값을 아직 모르므로 닫는 것은 진입이 확인한 그 세션 자신의 기록·통지뿐이다). 믿을 수 없는 저장소와
-        // 읽을 수 없는 기록은 지금처럼 랜딩이다.
-        entryLost = true;
-        classify();
-        if (!undecided()) { proofEntry = false; announce(); return null; }
-        return enterPlain();
-      }
-      entryBinding = entry.status === 200 && typeof entry.body?.sessionId === 'string' && entry.body.sessionId
-        ? entry.body.sessionId : null;
-    }
-    const id = entryBinding;
-    let found = null;
-    if (id) {
-      try {
-        const answer = await send('/me', { session: id });
-        const read = readIdentity(answer);
-        if (read.id === id) found = read;
-      } catch (error) { if (error.retryable || ['network', 'timeout'].includes(error.kind)) throw error; }
-    }
-    if (!undecided()) return null;
-    // Roles may change after the callback chose this document. A consumed proof cannot be
-    // forwarded to a different document; only the bound identity may admit this one.
-    if (found && found.identity.state === 'approved') {
-      const roles = found.identity.roles;
-      if ((/\/main\.html$/.test(location.pathname) && home(found.identity) === 'clinician.html')
-        || (/\/clinician\.html$/.test(location.pathname) && !roles.includes('clinician') && !roles.includes('admin')))
-        found = null;
-    }
-    if (!found) {
-      proofEntry = false;
-      classify();
-      pendingLeaving = null;
-      if (undecided()) reason = 'entry';
-      announce();
-      return null;
-    }
-    return adopt(found.id, found.identity, true);
-  }
-
-  /** 증명 없는 문서의 진입: 남은 "떠나려는 중" 표지를 먼저 가리고, 막는 것이 없으면 서버에 한 번 묻는다. */
+  /** 서버가 알려 준 세션에 대해서만 종료와 진행 중인 로그아웃을 대조한다. */
   async function enterPlain() {
     if (pendingLeaving) await settleLeaving();
-    const result = undecided() ? await bootstrap() : null;
-    // 증명의 답을 잃은 문서가 세션을 확인하지 못했다(서버가 세션 없음을 답했다): 스스로 로그인을 다시 시작하지 않는다.
-    if (entryLost && !result && undecided() && !moved) return entryUnconfirmed();
-    if (entryLost && !undecided()) proofEntry = false;
-    return result;
-  }
-
-  function entryUnconfirmed() {
-    proofEntry = false;
-    if (!undecided()) return null;
-    reason = 'entry-unconfirmed';
-    announce();
-    leave();
-    return moved ? new Promise(() => {}) : null;
+    return undecided() ? bootstrap() : null;
   }
 
   async function enter() {
@@ -670,7 +569,7 @@ const KinAuth = (() => {
     }
     // 사람의 로그아웃이 기록된 동안, 또는 저장소를 믿을 수 없는 동안에는 남은 서버 세션으로 업무에 들어가지 않는다. 어느
     // 문서든 같다 — 랜딩이 상태를 보이고, 다시 들어가는 길은 사용자의 명시적 로그인뿐이다.
-    const result = proof || entryBinding ? await enterWithProof() : await enterPlain();
+    const result = await enterPlain();
     // 답을 기다리는 사이 이 문서가 이동을 시작했으면 기다리던 쪽(boot)이 두 번째 이동을 하지 않게 끝나지 않는 약속을 준다.
     if (moved) return new Promise(() => {});
     return result;
@@ -688,11 +587,7 @@ const KinAuth = (() => {
     return roles.includes('clinician') && !roles.some(role => LEGACY_ROLES.includes(role)) ? 'clinician.html' : 'main.html';
   }
 
-  /**
-   * Login callbacks already select the final document before delivering its proof. This redirect
-   * handles ordinary main.html entry without a proof. Keep boot pending until navigation finishes
-   * so a clinician-only account never starts the main worklist.
-   */
+
   function land(session) {
     if (!/\/main\.html$/.test(location.pathname) || home(session) !== 'clinician.html') return session;
     location.replace('clinician.html');
@@ -702,9 +597,7 @@ const KinAuth = (() => {
   function leave() {
     if (moved || (keep && keep())) return;
     moved = true;
-    // 진입을 확인하지 못했다는 표지는 랜딩이 한 번 읽고 지우는 알림일 뿐이다 — 상태도, 들어갈 권한도 아니다.
-    location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html')
-      + (reason === 'entry-unconfirmed' ? '?auth_error=entry_unconfirmed' : ''));
+    location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html'));
   }
 
   /** 이 문서를 닫는다: 신원을 내려놓고 상태를 알린다. 이후 session()·has()는 이전 신원을 주지 않는다. */
@@ -803,18 +696,6 @@ const KinAuth = (() => {
     notifyEnded();
   }
 
-  /** 증명으로 들어가는 중인 문서가 **자기 새 세션의** 종료를 알았다: 그 종료는 언제나 따른다(증명도 자기 종료는 넘지 못한다). */
-  function closeEntry() {
-    if (!undecided() || !entryBinding) return;
-    const own = ownEnd(entryBinding), told = heard.get(entryBinding);
-    if (!own && !told) return;
-    proofEntry = false;
-    [state, reason] = own ? [own.status, own.reason] : heardState(told);
-    sessionId = entryBinding;
-    operation = own ? own.operation : told.operation;
-    announce();
-    notifyEnded();
-  }
 
   /**
    * 통지로만 들은 종료의 [상태, 사유]: 서버가 끝낸 세션은 끝난 세션, 다른 로그인이 대신한 세션은 교체(확인되지 않은 종료),
@@ -841,10 +722,7 @@ const KinAuth = (() => {
       if (own) endedElsewhere(own.status, own.reason, own.operation);
       return;
     }
-    if (proofEntry && undecided()) {
-      if (entryBinding && (ownEnd(entryBinding) || heard.has(entryBinding))) closeEntry();
-      return;
-    }
+    if (undecided()) return;
     const { records, unreadable } = readAll();
     if (unreadable) return;
     const record = blocking(records);
@@ -877,11 +755,6 @@ const KinAuth = (() => {
       const own = ownEnd(sessionId), told = heard.get(data.session);
       if (own) endedElsewhere(own.status, own.reason, own.operation);
       else endedElsewhere(...heardState(told), told.operation);
-      return;
-    }
-    // A013: 증명으로 들어가는 중에는 들은 것을 적어 둘 뿐, 자기 새 세션의 통지만 따른다.
-    if (proofEntry && undecided()) {
-      if (entryBinding && data.session === entryBinding) closeEntry();
       return;
     }
     recheck();
@@ -970,9 +843,6 @@ const KinAuth = (() => {
     } catch (error) { throw new Error(error.message + ' · 잠시 뒤 다시 눌러 주세요.'); }
     const target = answer.status === 200 && answer.body && typeof answer.body.location === 'string' ? answer.body.location : null;
     if (target && new URL(target, location.origin).origin === location.origin) return toIdp(target);
-    // 랜딩의 end_unconfirmed와 같은 사정·같은 안내다: 답을 잃은 종료는 저절로 확인되지 않으므로 관리자에게 넘긴다.
-    if (answer.code === 'AUTH_IDP_END_UNCONFIRMED')
-      throw new Error('이전 로그인 종료를 확인하지 못했습니다. 이 상태는 기다려도 풀리지 않을 수 있으니 관리자에게 문의하세요. Login을 다시 누를 수는 있습니다.');
     if (answer.code === 'AUTH_SESSION_MISMATCH' || answer.code === 'AUTH_SESSION_REQUIRED')
       throw new Error('이 브라우저의 로그인 세션이 바뀌어 로그인을 시작하지 않았습니다. 버튼을 다시 눌러 주세요.');
     throw new Error(answer.status === 409 ? '다른 요청과 겹쳐 로그인을 시작하지 못했습니다. 버튼을 다시 눌러 주세요.'
@@ -1004,13 +874,12 @@ const KinAuth = (() => {
       if (entered) return cached;
       if (!initializing) {
         initializing = (async () => {
-          const delays = retry || proof || entryBinding ? [1000, 2000, 4000] : [];
+          const delays = retry ? [1000, 2000, 4000] : [];
           for (let attempt = 0; ; attempt += 1) {
             try { return await enter(); }
             catch (error) {
               if (!undecided() || moved) return null;
               if (attempt >= delays.length || !(error.retryable || ['network', 'timeout'].includes(error.kind))) {
-                if (entryBinding || entryLost) return entryUnconfirmed();
                 throw error;
               }
               if (typeof onRetry === 'function') onRetry();
@@ -1079,13 +948,7 @@ const KinAuth = (() => {
     /** 인증 서버가 지금 답하는가(랜딩의 상태 줄). 한도 안에 답이 없으면 false다. */
     idpReachable() { return idpReachable(); },
 
-    /**
-     * 평소의 진입에서 세션이 없을 때 스스로 로그인 화면으로 보낸다 — 의사가 로그인 단추를 한 번 더 누르게 하지 않는다.
-     * 근거는 하나뿐이다: 저장소를 믿을 수 있고 사람의 로그아웃 기록이 없는 문서에서 서버가 방금 "세션 없음"(401)이라고
-     * 답했다. 그런 기록이 있거나(명시적 로그아웃·미확인 종료), 저장소를 믿을 수 없거나, 확인이 실패했으면(5xx·시간 초과·
-     * 진입 증명 거절) 시작하지 않는다 — 그때는 랜딩이 사정을 보이고 사람이 누른다. 방금의 자동 로그인이 세션 없이 되돌아온
-     * 탭도 다시 보내지 않는다. 시작했으면 true다(부른 쪽은 그 뒤 화면을 그리지 않는다).
-     */
+
     autoLogin() {
       if (!absent || !undecided() || moved) return false;
       const last = Number(tab.get(AUTO_LOGIN_KEY));

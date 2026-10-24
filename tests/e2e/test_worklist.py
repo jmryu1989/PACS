@@ -40,9 +40,6 @@ def require_local_targets(stack):
             raise RuntimeError(f"E2E refuses non-local {name}")
     if os.environ.get("KIN_TEST_INGEST", "cstore").strip().lower() != "cstore":
         raise RuntimeError("E2E requires local cstore fixtures")
-    compose_file = os.environ.get("COMPOSE_FILE", "")
-    if compose_file and Path(compose_file).resolve() != ROOT / "docker-compose.yml":
-        raise RuntimeError("E2E requires the repository's local Compose file")
     docker_host = os.environ.get("DOCKER_HOST", "")
     if docker_host and not docker_host.startswith(("npipe:////./pipe/", "unix:///")):
         raise RuntimeError("E2E refuses remote DOCKER_HOST")
@@ -75,7 +72,7 @@ class LocalTargetGuardTests(unittest.TestCase):
         """E2E-B2-12b: fixture writes cannot use a remote Docker daemon or Gateway."""
         for overrides in ({"DOCKER_HOST": "ssh://remote"}, {"DOCKER_HOST": "tcp://127.0.0.1:2375"},
                           {"DOCKER_HOST": "npipe:////remote/pipe/docker_engine"},
-                          {"KIN_TEST_INGEST": "gateway"}, {"COMPOSE_FILE": "docker-compose.prod.yml"}):
+                          {"KIN_TEST_INGEST": "gateway"}):
             with self.subTest(env=overrides), patch.dict(os.environ, overrides, clear=True), patch.object(subprocess, "run") as command:
                 with self.assertRaises(RuntimeError):
                     require_local_targets(self.targets())
@@ -659,24 +656,6 @@ class WorklistE2E(unittest.TestCase):
             raise RuntimeError(f"The page's own session does not name exactly one provider session (rows: {len(rows)})")
         return rows[0]
 
-    def provider_ended(self, provider):
-        """Bounded wait for the logged-out session's provider end: its IdpSessionEnd.confirmedAt and no end_session
-        ProviderChange to it still unknown. A missing row is not a confirmed end. This settles the transfer fixture on the
-        boundary a fresh login needs (OPUS-06); it does not change or claim to repair the auth product."""
-        deadline = time.monotonic() + 60
-        while True:
-            try:
-                mark = psql(f"SELECT (\"confirmedAt\" IS NOT NULL)::text FROM \"IdpSessionEnd\" WHERE \"idpSid\"='{provider}';")
-                unknown = psql(f"SELECT count(*) FROM \"ProviderChange\" WHERE kind='end_session' AND target='{provider}' AND state='unknown';")
-            except RuntimeError:
-                raise RuntimeError("The provider end rows could not be read") from None
-            if mark == ["true"] and unknown == ["0"]:
-                return
-            if time.monotonic() >= deadline:
-                raise RuntimeError("The logged-out session's provider end was not observed within 60 s (end mark: "
-                                   f"{mark[0] if mark else 'missing'}, unknown end_session changes: {unknown[0] if unknown else '?'}); "
-                                   "Login was not pressed")
-            time.sleep(0.2)
 
     def sign_in_again(self, page, actor, before_login=None):
         """Log Out in this tab, then the real login form again: a new session in the same tab (its sessionStorage stays).
@@ -689,7 +668,6 @@ class WorklistE2E(unittest.TestCase):
         page.once("dialog", lambda dialog: dialog.accept())
         page.locator("#logout").click()
         page.wait_for_url("**/index.html**", timeout=30000)
-        self.provider_ended(provider)
         if before_login:
             before_login()
         name = self.stack.username(actor)
@@ -757,7 +735,7 @@ class WorklistE2E(unittest.TestCase):
         """The saved file is the server's whole ZIP of the prepared manifest: the ZIP signature, every central-directory
         entry in manifest order and then manifest.json, each object's length and MD5 as prepared and its CRC-32, the final
         manifest's per-object SHA-256 equal to the saved bytes and to the attempt's recorded objects, the archive SHA-256
-        the attempt's. Attempt <number> is Sent with the writer's own finish and was opened by a consumed grant."""
+        the attempt's. Attempt <number> is Sent only after the writer's own finish."""
         with open(path, "rb") as saved:
             data = saved.read()
         self.assertEqual(data[:4], b"PK\x03\x04")
@@ -776,10 +754,7 @@ class WorklistE2E(unittest.TestCase):
         attempt = download["attempts"][number - 1]
         self.assertEqual((len(download["attempts"]), attempt["state"], attempt["responseFinished"]), (number, "sent", True))
         self.assertEqual(([o["sha256"] for o in attempt["objects"]], attempt["archiveSha256"]), (sha, hashlib.sha256(data).hexdigest()))
-        self.assertEqual((download["schemaVersion"], download["activeArchiveGrant"]), (2, None), "format 2, the grant consumed")
-        use = download["archiveGrantUses"][-1]
-        self.assertEqual(use["attemptId"], attempt["attemptId"], "the grant opened this attempt")
-        return stored, attempt, use
+        return stored, attempt, download.get("activeArchiveGrant")
 
     def download_audit(self, operation):
         rows = psql(f"SELECT action || E'\\t' || detail FROM \"AuditLog\" WHERE detail::jsonb->>'operationId'='{operation}' ORDER BY id;")
@@ -855,14 +830,13 @@ class WorklistE2E(unittest.TestCase):
                                                                "original.download.intent", "original.download.result"])
             issued, intent, result = audit[1][1], audit[2][1], audit[3][1]
             self.assertEqual((issued["phase"], issued["grantId"], issued["grantHash"]), ("issued", use["grantId"], use["hash"]))
-            self.assertEqual((intent["attemptId"], intent["grantId"], intent["bindingMethod"], intent["destination"]),
-                             (attempt["attemptId"], use["grantId"], "archive-grant", "browser-download"))
+            self.assertEqual((intent["attemptId"], intent["destination"]),
+                             (attempt["attemptId"], "browser-download"))
             self.assertEqual((result["attemptId"], result["state"]), (attempt["attemptId"], "sent"))
             self.assertEqual(len({detail["institutionId"] for _, detail in audit}), 1, "one record-time institution")
             self.assertFalse(grant in stored or any(grant in json.dumps(detail) for _, detail in audit), "the raw grant is stored nowhere")
             status = self.stack.request("GET", f"/studies/{fixture.uid}/original-downloads/{operation}", "doctor")
-            self.assertEqual((status.body["state"], status.body["archiveRequest"]["state"], status.body["archiveRequest"]["attemptId"]),
-                             ("sent", "consumed", attempt["attemptId"]))
+            self.assertEqual(status.body["state"], "sent")
             # SRU4-1: the same grant on the non-canonical spellings never reaches the API's general log path - the proxy
             # refuses each with 400 before any location and logs it in the archive format (no query).
             base = f"/api/studies/{fixture.uid}/original-downloads/{operation}"

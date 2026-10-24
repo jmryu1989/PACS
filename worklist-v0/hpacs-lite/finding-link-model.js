@@ -612,7 +612,7 @@
       try {
         if (!valid(ticket) || !work.admits(at)) throw { stale: true };
         const res = await transport.request('/api' + path, { ...options, context: at, read: 'response', deadlineMs: 0, cache: 'no-store', credentials: 'same-origin', signal: request?.signal,
-          headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+          headers: { [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
         const data = await res.json().catch(() => null);
         if (!valid(ticket) || !work.admits(at)) throw { stale: true };
         const headerCode = res.headers?.get('X-KIN-Auth-Code');

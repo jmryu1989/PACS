@@ -17,7 +17,7 @@ export class ReportPreviewController {
 
   /**
    * S5-U1b clinician reads. They live here, beside the report preview, because both answer "what may this
-   * person read of the report"; the controller is already no-store (app.module adminNoStore) and under the
+   * person read of the report"; the controller is already no-store (main.ts API middleware) and under the
    * StudyAccess interceptor. The worklist route GET studies stays denied for clinician-only.
    */
   @Get('clinician/studies')

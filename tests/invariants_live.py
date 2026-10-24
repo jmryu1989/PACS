@@ -112,7 +112,6 @@ ROUTES: dict[tuple[str, str], Route] = {
     # single-use entry of a login. Public to the guard; AuthService checks cookie, CSRF, binding and proof itself.
     ("POST", "auth/login"): Route(Kind.NEITHER),
     ("POST", "auth/register"): Route(Kind.NEITHER),
-    ("POST", "auth/entry"): Route(Kind.NEITHER),
     ("POST", "auth/logout"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
     ("GET", "authz/dicom"): Route(Kind.TENANT),
@@ -774,14 +773,6 @@ class LiveStack:
                 allowed = {"rights_pending", "member_isolated", "storage_failure", "token_invalid", "state_mismatch", "exchange_failed"}
                 causes = [value if value in allowed else "unclassified" for value in causes]
                 raise RuntimeError(f"Fixture BFF callback not admitted: paths={trace}, landing={landed.path}, causes={causes}")
-            proof = parse_qs(landed.fragment).get("kin-entry", [None])[0]
-            if not proof:
-                raise RuntimeError("Fixture BFF callback did not return an entry proof")
-            entry = Request(self.proxy + "/api/auth/entry", data=json.dumps({"proof": proof}).encode("utf-8"), method="POST",
-                            headers={"Content-Type": "application/json", "X-KIN-CSRF": "1"})
-            with opener.open(entry, timeout=30) as response:
-                if response.status != 200 or not json.loads(response.read()).get("sessionId"):
-                    raise RuntimeError("Fixture BFF entry proof was not admitted")
             with opener.open(self.proxy + "/api/me", timeout=30) as response:
                 me = json.loads(response.read())
             if me.get("sub") != matches[0]["id"] or "admin" not in me.get("roles", []) or not me.get("sessionId"):

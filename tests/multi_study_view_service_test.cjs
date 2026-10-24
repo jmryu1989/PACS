@@ -1,6 +1,6 @@
 'use strict';
 /* W9-API (W9-LITE server half, D1500): the compiled viewing-set resolve - service, controller, Orthanc read and the real
- * StudyAccess service and interceptor - over a StudyState-only Prisma double, an Orthanc double with real AbortSignal
+ * StudyAccess service - over a StudyState-only Prisma double, an Orthanc double with real AbortSignal
  * semantics and a recording access-record port.
  *
  * W9L-01 (server) -> W9L-R01 -> T02;  W9L-02 -> W9L-R02 -> T03, T04, T18;  W9L-06 (server) -> W9L-R06 -> T10, T18;
@@ -31,7 +31,6 @@ const HELD_SOURCE = { connectionsCheckingInterval: 2147483647, requestTimeout: 0
 const { MultiStudyViewService, ViewingSetAccess, ViewingSetAccessUnbound, VIEWING_SET_SURFACE } = require('/app/dist/multi-study-view.service');
 const { MultiStudyViewController } = require('/app/dist/multi-study-view.controller');
 const { StudyAccessService } = require('/app/dist/study-access.service');
-const { StudyAccessInterceptor } = require('/app/dist/study-access.interceptor');
 const { OrthancService } = require('/app/dist/orthanc.service');
 const { PrismaService } = require('/app/dist/prisma.service');
 const { STUDY_IDENTITY_UNRESOLVED } = require('/app/dist/study-source-groups');
@@ -588,16 +587,16 @@ test('W9API-15 W9L-07: a resolve writes no clinical row and registers no StudySt
   noWrites(wm, 'a resolve writes nothing and registers no StudyState');
 });
 
-/** A real Nest HTTP application around the real controller, service and StudyAccess interceptor (guard: synthetic caller). */
+/** A real Nest HTTP application around the real controller, service and StudyAccess (guard: synthetic caller). */
 async function serve(w, port) {
-  const { NestFactory, APP_GUARD, APP_INTERCEPTOR } = require('/app/node_modules/@nestjs/core');
+  const { NestFactory, APP_GUARD } = require('/app/node_modules/@nestjs/core');
   const { Module } = require('/app/node_modules/@nestjs/common');
   class SyntheticGuard { canActivate(context) { const req = context.switchToHttp().getRequest(); Object.assign(req, JSON.parse(req.headers['x-syn-caller'])); return true; } }
   class HttpProbe {}
   Module({ controllers: [MultiStudyViewController], providers: [MultiStudyViewService,
     { provide: PrismaService, useValue: w.prisma }, { provide: OrthancService, useValue: w.orthanc },
     { provide: StudyAccessService, useValue: w.studyAccess }, { provide: ViewingSetAccess, useValue: port ?? w.port },
-    { provide: APP_GUARD, useValue: new SyntheticGuard() }, { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor }] })(HttpProbe);
+    { provide: APP_GUARD, useValue: new SyntheticGuard() }] })(HttpProbe);
   const app = await NestFactory.create(HttpProbe, { rawBody: true, logger: false });
   app.setGlobalPrefix('api');
   await app.listen(0, '127.0.0.1');
@@ -606,7 +605,7 @@ async function serve(w, port) {
 const post = (url, raw, caller, signal) => fetch(url, { method: 'POST', body: raw, signal,
   headers: { 'content-type': 'application/json', 'x-syn-caller': JSON.stringify(caller) } });
 
-test('W9API-16 T10/T18 HTTP: 200 is the resolve body and ends the transfer; a post-handler refusal or a closed connection aborts it', async () => {
+test('W9API-16 T10/T18 HTTP: 200 is the resolve body and ends the transfer; a completed response ends it and a closed connection aborts it', async () => {
   const members = [study(), study()];
   // the real route: raw body, 200, and the finished body is the observed end
   const w = world(members), app = await serve(w);
@@ -619,14 +618,14 @@ test('W9API-16 T10/T18 HTTP: 200 is the resolve body and ends the transfer; a po
     assert.equal(w.port.finished[0].outcome, 'ended', 'a finished 200 body is an ended transfer');
     const duplicate = await post(app.url, Buffer.from(body(ids(members)).toString().replace('{', '{"generation":2,')), reader());
     assert.deepEqual([duplicate.status, (await duplicate.json()).code], [400, 'W9_SELECTION_INVALID'], 'a duplicate JSON key is refused from the raw body');
-    // the policy changes while the record is prepared: the interceptor refuses the reply, so the body never went out
+    // A later policy change does not discard the already resolved response through a second global check.
     w.policy = unrestricted();
     w.port.during = async () => { w.revision = 7; };
     const refused = await post(app.url, body(ids(members)), reader());
     const refusal = await refused.json();
-    assert.deepEqual([refused.status, refusal.code, 'members' in refusal], [409, 'STUDY_ACCESS_CHANGED', false]);
-    await until(() => w.port.finished.length === 2, 'the refused transfer outcome');
-    assert.equal(w.port.finished[1].outcome, 'aborted', 'a refused reply must never be recorded as a finished transfer');
+    assert.deepEqual([refused.status, refusal.code, 'members' in refusal], [200, undefined, true]);
+    await until(() => w.port.finished.length === 2, 'the completed transfer outcome');
+    assert.equal(w.port.finished[1].outcome, 'ended', 'the completed response is recorded as a finished transfer');
     // the connection closes before the body: aborted
     w.policy = null; w.revision = 1;
     let release; w.port.during = () => new Promise(resolve => { release = resolve; });

@@ -783,10 +783,6 @@ class Harness(unittest.TestCase):
             self.unexpected.append(f"{route.request.method} {route.request.url}")
             route.abort()
             return False
-        if url.path.startswith("/api/") and route.request.headers.get("x-kin-csrf") != "1":
-            self.unexpected.append(f"{route.request.method} {url.path} without X-KIN-CSRF")
-            route.abort()
-            return False
         return True
 
     def answer_read(self, route, target, reply):

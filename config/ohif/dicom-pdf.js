@@ -62,7 +62,7 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
       const rendered = '/dicom-web/studies/' + source.value.StudyInstanceUID + '/series/' + source.value.SeriesInstanceUID + '/instances/' + source.value.SOPInstanceUID + '/rendered';
       if (parsed.origin !== root.origin || parsed.pathname !== rendered || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error('원본 PDF 경로를 확인할 수 없습니다.');
       const init = (method = 'GET', body) => ({ method, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-        headers: { 'X-KIN-CSRF': '1', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+        headers: { ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
       const firstReply = requireReply(await fetch('/api/me', init()), '로그인 세션을 확인할 수 없습니다.'); assertLive(source, ticket, controller);
       const first = ownerOf(await json(firstReply)); assertLive(source, ticket, controller);
       if (!first) throw new Error('로그인 세션을 확인할 수 없습니다.');

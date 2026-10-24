@@ -138,8 +138,6 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET admin/agreements', 'GET studies/:uid/basis', 'GET transfers'] },
   { kinds: ['transfer-governance'], operation: 'write', causes: ['user-view'],
     routes: ['POST admin/agreements', 'PATCH admin/agreements/:id', 'POST studies/:uid/basis', 'POST studies/:uid/basis/:id/revoke', 'POST studies/:uid/transfers', 'POST transfers/:id/revoke'] },
-  { kinds: ['authentication-session'], operation: 'auth', causes: ['user-view', 'background-fetch'],
-    routes: ['POST auth/entry'] },
   { kinds: ['private-draft', 'report-evidence'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/draft'] },
   // S9-U4b (contract S9-U4p 6, U4P3-06): the self-institution import writes originals, the study's metadata and per-file

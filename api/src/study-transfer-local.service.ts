@@ -7,7 +7,7 @@
  * through DicomImportGateService. A refusal never names another institution's study, a patient value or an upstream body.
  */
 import { ForbiddenException, HttpException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { AuthService, authRefusal } from './auth.service';
@@ -68,8 +68,6 @@ const GRANT_BIND_KEYS = ['grantId', 'hash', 'sessionRef', 'ownerIssuer', 'ownerS
 const ACTIVE_GRANT_KEYS = [...GRANT_BIND_KEYS, 'state', 'refusal'];
 const GRANT_USE_KEYS = [...GRANT_BIND_KEYS, 'admittedAt', 'consumedAt', 'attemptId'];
 const grantHash = (raw: string) => createHash('sha256').update('kin-original-download-grant-v1:' + raw).digest('hex');
-/** The server-internal proof the guard leaves on the request after it admitted a grant (never read from the client). */
-export interface GrantAdmission { grantId: string; hash: string; sessionRef: string; expiresAt: string; admittedAt: string }
 
 export const TRANSFER_MESSAGES = Object.freeze({
   restricted: '검사 범위가 제한된 계정은 새 검사를 반입할 수 없습니다. 제한 없는 계정으로 반입한 뒤 열람 범위를 확인하세요.',
@@ -679,111 +677,28 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     }
   }
 
-  /**
-   * The guard's check of a grant on the exact archive GET (it has matched the route by its Nest metadata and canonical
-   * path, and a present binding header first), read-only and before any token refresh: the query is exactly one grant
-   * of the issued form; the grant is this operation's active one, of this cookie session, unused, not closed and not
-   * expired by the database's clock at this admission. A browser's own GET without the header must come from this
-   * origin (Fetch Metadata). The answers never tell whether another person's operation exists.
-   */
-  async admitArchiveGrant(req: any, sessionRef: string, native: boolean): Promise<GrantAdmission> {
-    if (native && req.headers?.['sec-fetch-site'] !== 'same-origin') throw error(403, 'DOWNLOAD_GRANT_ORIGIN_REQUIRED', TRANSFER_MESSAGES.grantOrigin);
-    const query = String(req.originalUrl ?? '').split('?').slice(1).join('?');
-    const found = /^grant=([A-Za-z0-9_-]{43})$/.exec(query);
-    if (!found) throw error(400, 'DOWNLOAD_GRANT_INVALID', TRANSFER_MESSAGES.grantInvalid);
-    const raw = found[1], hash = grantHash(raw);
-    const invalid = () => error(403, 'DOWNLOAD_GRANT_INVALID', TRANSFER_MESSAGES.grantInvalid);
-    const { uid, operationId } = req.params ?? {};
-    const op = await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId } }), downloadStorage);
-    if (!op || op.kind !== 'download' || op.studyUid !== uid) throw invalid();
-    const d = this.storedDownload(op).download;
-    const same = (g: any) => g && timingSafeEqual(Buffer.from(g.hash, 'hex'), Buffer.from(hash, 'hex'));
-    const active = d.schemaVersion === 2 && same(d.activeArchiveGrant) ? d.activeArchiveGrant : null;
-    const used = d.schemaVersion === 2 ? d.archiveGrantUses.find(same) ?? null : null;
-    const grant = active ?? used;
-    if (!grant) throw invalid();
-    // Another cookie session never redeems it, the same subject's new login included; its own session is not named.
-    if (grant.sessionRef !== sessionRef) throw authRefusal(409, 'AUTH_SESSION_MISMATCH', '이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다');
-    if (!active) throw error(409, 'DOWNLOAD_GRANT_CONSUMED', TRANSFER_MESSAGES.grantConsumed);
-    if (active.state !== 'issued') throw invalid();
-    const now = await this.storageRead(() => this.gate.dbNow(), downloadStorage);
-    if (now.getTime() >= Date.parse(active.expiresAt)) throw error(410, 'DOWNLOAD_GRANT_EXPIRED', TRANSFER_MESSAGES.grantExpired);
-    return { grantId: active.grantId, hash, sessionRef, expiresAt: active.expiresAt, admittedAt: now.toISOString() };
-  }
-
-  /**
-   * The canonical archive path of the matched route: the path parameters in their stored forms (a Study UID, a lower-case
-   * operation id) and the request path exactly /api/studies/<uid>/original-downloads/<id>/archive - no case, slash or
-   * encoding alias of it.
-   */
-  archiveGrantPath(req: any, path: string): boolean {
-    const p = req?.params ?? {};
-    return typeof p.uid === 'string' && p.uid.length <= 64 && UID.test(p.uid) && typeof p.operationId === 'string' && UUID_TEXT.test(p.operationId)
-      && path === `/api/studies/${p.uid}/original-downloads/${p.operationId}/archive`;
-  }
-
-  /**
-   * A grant admitted for an archive GET that was refused before any supply (rights, manifest, state): the operation's
-   * active grant, if it is still that admitted one, is closed as refused with the code and the database's time, and
-   * the refusal is audited; no attempt is opened. Nothing else of the row changes.
-   */
-  private async refuseGrant(operationId: string, owner: ImportOwner, admission: GrantAdmission, code: string) {
-    await this.gate.write(async tx => {
-      const { op, now, stored } = await this.lockDownload(tx, operationId);
-      const a = stored?.download.schemaVersion === 2 ? stored.download.activeArchiveGrant : null;
-      if (!op || !a || a.grantId !== admission.grantId || a.hash !== admission.hash || a.sessionRef !== admission.sessionRef || a.state !== 'issued') return;
-      const download = JSON.parse(JSON.stringify(stored!.download));
-      download.activeArchiveGrant.state = 'refused';
-      download.activeArchiveGrant.refusal = { code: code.slice(0, 64), at: now.toISOString() };
-      checkDownloadRow({ ...op, download });
-      await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
-      await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.grant', target: op.studyUid,
-        detail: JSON.stringify({ institutionId: op.institutionId, phase: 'refused', operationId: op.id, studyUid: op.studyUid, grantId: a.grantId,
-          grantHash: a.hash, sessionRef: a.sessionRef, ownerIssuer: a.ownerIssuer, ownerSubject: a.ownerSubject, manifestSha256: op.manifestSha256,
-          issuedAt: a.issuedAt, expiresAt: a.expiresAt, admittedAt: admission.admittedAt, code, authMethod: 'session', bindingMethod: 'archive-grant',
-          at: now.toISOString() }) } });
-    });
-  }
-
   // ── GET /api/studies/:uid/original-downloads/:operationId/archive (5.2 steps 3-7) ──
 
   async archive(uid: string, operationId: string, req: any, res: any, c: Caller): Promise<void> {
     // Express maps HEAD to a GET handler: a HEAD starts no supply and consumes no grant.
     if (req.method !== 'GET') throw error(405, 'DOWNLOAD_METHOD_NOT_ALLOWED', TRANSFER_MESSAGES.methodNotAllowed);
-    // Set by the guard alone, after it admitted a grant of this cookie session on this exact route (D1489).
-    const admission: GrantAdmission | null = req.archiveGrantAdmission ?? null;
     const owner = this.owner(c, 'download');
     await this.gate.ready(true);
     const op = OPERATION_ID.test(operationId ?? '') ? await this.storageRead(() => this.prisma.importOperation.findUnique({ where: { id: operationId.toLowerCase() } }), downloadStorage) : null;
-    // A refused start closes the admitted grant (it was this session's own, valid one) and answers as it is; a storage
-    // answer (503) decides nothing about the request, so the grant stays as it was. A grant that another request has
-    // consumed or replaced meanwhile is no longer the active one and stays as that request left it (refuseGrant).
-    const refused = async (failure: unknown) => {
-      if (admission && op && failure instanceof HttpException && failure.getStatus() !== 503) {
-        const code = String((failure.getResponse() as any)?.code ?? 'HTTP_' + failure.getStatus());
-        await this.refuseGrant(op.id, owner, admission, code).catch(() => undefined);
-      }
-      return failure;
-    };
     let stored!: StoredDownload;
     let archivePlan!: Extract<ReturnType<typeof planArchive>, { ok: true }>['plan'];
-    try {
-      if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
-      await this.downloadStudyNow(uid, c);
-      // After the scope check: an operation prepared before its Study UID became split is refused at the start too.
-      await this.unsplitSource(uid, c);
-      stored = this.storedDownload(op);
-      const plan = planArchive(stored.manifest);
-      if (plan.ok === false) throw error(409, plan.code, plan.message);
-      archivePlan = plan.plan;
-      if (op.status === 'sent') throw error(409, 'DOWNLOAD_ALREADY_SENT', TRANSFER_MESSAGES.alreadySent);
-      await this.unchangedOriginals(uid, stored);
-      await this.storageRead(() => this.currentRights(c, 'download', uid, req), downloadStorage);
-    } catch (failure) { throw await refused(failure); }
-    if (!op) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
-    let attempt!: Awaited<ReturnType<StudyTransferLocalService['openAttempt']>>;
-    try { attempt = await this.openAttempt(op.id, owner, stored, c, uid, admission); }
-    catch (failure) { throw await refused(failure); }
+    if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
+    await this.downloadStudyNow(uid, c);
+    // After the scope check: an operation prepared before its Study UID became split is refused at the start too.
+    await this.unsplitSource(uid, c);
+    stored = this.storedDownload(op);
+    const plan = planArchive(stored.manifest);
+    if (plan.ok === false) throw error(409, plan.code, plan.message);
+    archivePlan = plan.plan;
+    if (op.status === 'sent') throw error(409, 'DOWNLOAD_ALREADY_SENT', TRANSFER_MESSAGES.alreadySent);
+    await this.unchangedOriginals(uid, stored);
+    await this.storageRead(() => this.currentRights(c, 'download', uid, req), downloadStorage);
+    const attempt = await this.openAttempt(op.id, owner, stored, c, uid);
     // Everything is decided: headers, then bytes. From here no error becomes an HTTP status (5.2 step 6).
     res.status(200);
     res.setHeader('Content-Type', 'application/zip');
@@ -979,22 +894,12 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * 5.2 step 5: one sending attempt per operation, its intent row committed before the first byte or nothing is sent. A
    * previous attempt whose sending lease ran out is closed Unconfirmed with its result row in the same transaction.
    */
-  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, c: Caller, uid: string, admission: GrantAdmission | null = null) {
+  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, c: Caller, uid: string) {
     try {
       return await this.gate.write(async tx => {
         const { op, now, stored } = await this.lockDownload(tx, operationId);
         if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
         const download = JSON.parse(JSON.stringify(stored!.download));
-        // D1489: an admitted grant is redeemed under this lock - still the operation's active one, unused, of the same
-        // session and window - and consumed with the attempt and its intent row in this one transaction, so of two
-        // requests with one grant exactly one opens an attempt. The window was the admission's (a slow start is not cut).
-        const active = admission && download.schemaVersion === 2 ? download.activeArchiveGrant : null;
-        if (admission) {
-          if (download.schemaVersion === 2 && download.archiveGrantUses.some((u: any) => u.grantId === admission.grantId))
-            throw error(409, 'DOWNLOAD_GRANT_CONSUMED', TRANSFER_MESSAGES.grantConsumed);
-          if (!active || active.grantId !== admission.grantId || active.hash !== admission.hash || active.sessionRef !== admission.sessionRef
-              || active.expiresAt !== admission.expiresAt || active.state !== 'issued') throw error(403, 'DOWNLOAD_GRANT_INVALID', TRANSFER_MESSAGES.grantInvalid);
-        }
         // The rights now, in this transaction under its lock (U4C-05): what the preflight read may have changed before the
         // lock was taken, so the member rights and the study (still the institution's own, inside StudyAccess - its metadata
         // prepared by the preflight, outside the lock) are read again here, as each supply approval does. A change is
@@ -1019,19 +924,10 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
           ownerInstance: this.gate.bootId, leaseUntil: new Date(now.getTime() + LEASE_MS).toISOString(), objects: [] as ArchiveObjectResult[],
           archiveSha256: null as string | null, responseFinished: false };
         download.attempts.push(attempt);
-        if (active) {
-          const { state: _state, refusal: _refusal, ...bound } = active;
-          download.archiveGrantUses.push({ ...bound, admittedAt: admission!.admittedAt, consumedAt: now.toISOString(), attemptId: attempt.attemptId });
-          download.activeArchiveGrant = null;
-          checkDownloadRow({ ...op, status: 'sending', download });
-        }
         await tx.importOperation.update({ where: { id: operationId }, data: { download, status: 'sending', updatedAt: now } });
         await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.intent', target: op.studyUid,
           detail: JSON.stringify({ institutionId: op.institutionId, operationId, attemptId: attempt.attemptId, number: attempt.number,
-            manifestSha256: op.manifestSha256, ownerIssuer: owner.ownerIssuer, ownerSubject: owner.ownerSubject, at: now.toISOString(),
-            ...(active ? { destination: 'browser-download', bindingMethod: 'archive-grant', grantId: active.grantId, grantHash: active.hash,
-              sessionRef: active.sessionRef, issuedAt: active.issuedAt, expiresAt: active.expiresAt, admittedAt: admission!.admittedAt,
-              consumedAt: now.toISOString() } : {}) }) } });
+            manifestSha256: op.manifestSha256, ownerIssuer: owner.ownerIssuer, ownerSubject: owner.ownerSubject, at: now.toISOString() }) } });
         return attempt;
       });
     } catch (failure) {

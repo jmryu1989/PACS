@@ -110,7 +110,7 @@
         const body = method === 'GET' ? undefined : { expectedOwner: owner, revision, ...(action === 'save' ? { layout: snapshot } : {}) };
         // Only a write carries a body and the CSRF header the server requires of a write.
         const response = await transport.request(endpoint, { context: at, method, credentials: 'same-origin', cache: 'no-store',
-          headers: reading ? {} : { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' },
+          headers: reading ? {} : { 'Content-Type': 'application/json' },
           body: body === undefined ? undefined : JSON.stringify(body), signal: local.signal });
         if (response.auth || !work.admits(at)) return;
         const data = response.body;

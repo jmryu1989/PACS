@@ -659,9 +659,7 @@ async function authSuccess(endings = false) {
     class AuthFixture {}
     Module({ controllers: [AuthController], providers: [...requestProviders(observedPort), PrismaService, KeycloakService,
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: observedPort },
-      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard},
-      // S9-U4b (#181): AuthGuard also injects the archive-grant service; these routes never reach it.
-      { provide: StudyTransferLocalService, useValue: {} }] })(AuthFixture);
+      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard}] })(AuthFixture);
     app = await NestFactory.create(AuthFixture, { logger: false });
     app.setGlobalPrefix('api');
     const interval = global.setInterval;
@@ -689,18 +687,14 @@ async function authSuccess(endings = false) {
     assert.equal(response.status, 302);
     const cookie = response.headers.getSetCookie().find(row => row.startsWith('kin_sid='))?.split(';')[0];
     assert.equal(!!cookie, true, 'Login must publish its committed session');
-    const proof = new URLSearchParams(new URL(response.headers.get('location')).hash.slice(1)).get('kin-entry');
-    assert.equal(!!proof, true);
-    return { cookie, proof };
+    assert.equal(new URL(response.headers.get('location')).hash, '');
+    return { cookie };
   }
   async function events(sub, action) {
     const rows = await witness.$queryRaw`SELECT payload FROM emr_access.access_entry
       WHERE payload::jsonb->'userId'->'value'->>'subject'=${sub} AND payload::jsonb->>'action'=${action}`;
     return rows.map(row => JSON.parse(row.payload));
   }
-  const enter = (origin, login) => fetch(origin + '/auth/entry', { method: 'POST', headers: {
-    cookie: login.cookie, origin: process.env.PUBLIC_ORIGIN, 'x-kin-csrf': '1', 'content-type': 'application/json', 'x-real-ip': '192.0.2.12',
-  }, body: JSON.stringify({ proof: login.proof }) });
   try {
     await witness.$connect();
     await witness.memberRightsImport.create({ data: { id: 'realm-v1' } });
@@ -711,8 +705,7 @@ async function authSuccess(endings = false) {
     if (endings) {
       const logout = async (origin, login) => {
         if (!login.sessionId) {
-          const entry = await enter(origin, login); assert.equal(entry.status,200);
-          login.sessionId = (await entry.json()).sessionId;
+          login.sessionId = app.get(AuthService).sessionRef(login.cookie.slice('kin_sid='.length));
         }
         return fetch(origin + '/auth/logout', {method:'POST',headers:{cookie:login.cookie,
           origin:process.env.PUBLIC_ORIGIN,'x-kin-csrf':'1','x-real-ip':'192.0.2.12','x-kin-session':login.sessionId}});
@@ -802,24 +795,7 @@ async function authSuccess(endings = false) {
     assert.equal(loginEvent.session.value, session.auditRef);
     assert.equal(loginEvent.userId.value.issuer, issuer);
     assert.equal(loginEvent.rightsVersion.value, session.rightsVersion);
-    assert.equal([session.sid, session.accessToken, session.refreshToken, first.proof].some(secret => JSON.stringify(loginEvent).includes(secret)), false);
-
-    // Refuse the legal append after consuming the proof: all business/projection
-    // changes must roll back, leaving the same proof usable for a healthy retry.
-    await witness.$executeRawUnsafe(`CREATE FUNCTION public.b2r_fail_entry() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN IF NEW.payload::jsonb->>'action'='auth.entry' THEN RAISE EXCEPTION 'Synthetic entry write failure'; END IF; RETURN NEW; END $$`);
-    await witness.$executeRawUnsafe(`CREATE TRIGGER b2r_fail_entry BEFORE INSERT ON emr_access.access_entry
-      FOR EACH ROW EXECUTE FUNCTION public.b2r_fail_entry()`);
-    const refused = await enter(origin, first); assert.equal(refused.status, 500); await refused.text();
-    assert.equal((await witness.authSession.findUnique({ where: { sid: session.sid } })).entryProofHash, session.entryProofHash);
-    assert.equal((await events('doctor-a', 'auth.entry')).length, 0);
-    await witness.$executeRawUnsafe('DROP TRIGGER b2r_fail_entry ON emr_access.access_entry');
-    const entries = await Promise.all([enter(origin, first), enter(origin, first)]);
-    assert.deepEqual(entries.map(row => row.status).sort(), [200, 403]);
-    await Promise.all(entries.map(row => row.text()));
-    const [entryEvent] = await events('doctor-a', 'auth.entry');
-    assert.equal(entryEvent.session.value, loginEvent.session.value);
-    assert.equal((await events('doctor-a', 'auth.entry')).length, 1);
+    assert.equal([session.sid, session.accessToken, session.refreshToken].some(secret => JSON.stringify(loginEvent).includes(secret)), false);
 
     entered(await (await begin(origin, 'doctor-b'))());
     const [other] = await events('doctor-b', 'auth.login');
@@ -828,7 +804,6 @@ async function authSuccess(endings = false) {
     const [pendingEvent] = await events('pending-member', 'auth.login');
     assert.equal(pendingEvent.actingInstitution.reason, 'not-approved');
     assert.equal(pendingEvent.trustedProxyIp.reason, 'not-observed');
-    assert.equal((await enter(origin, pending)).status, 200);
     const starts = await Promise.all(['parallel-1', 'parallel-2', 'parallel-3', 'parallel-4'].map(sub => begin(origin, sub)));
     for (const result of await Promise.all(starts.map(run => run()))) entered(result);
     const [projection] = await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.access_entry e
@@ -836,8 +811,7 @@ async function authSuccess(endings = false) {
     assert.equal(projection.n, 0);
     console.log(JSON.stringify({ status: 'PASS', boundary: 'real AuthController/AuthService + JWKS/token transport + PG',
       red: 'login omission returns session without legal event; behavioral assertion fails',
-      green: ['cookie after independently witnessed append commit', 'login/entry same non-credential session reference',
-        'entry rollback preserves proof', 'concurrent proof consumed once', 'same display distinct subjects',
+      green: ['cookie after independently witnessed append commit', 'login non-credential session reference', 'same display distinct subjects',
         'waiting member and unknown observation preserved', 'four concurrent transactions drain'],
       notCovered: 'logout/expiry/sweep, rights producers, full AppModule/Guard, clinical first-byte boundary' }));
   } finally {

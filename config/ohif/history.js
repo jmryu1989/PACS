@@ -593,7 +593,7 @@ function kinCreateViewerHistory() {
       const timeout = setTimeout(abort, 30000);
       try {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
-        headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+        headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
       // Session termination is owned by the page transport and gate.
       const drop = async data => {
         if (path === '/me' && res.ok) kinViewerSession.sameAccount(data === undefined ? await res.json().catch(() => null) : data);

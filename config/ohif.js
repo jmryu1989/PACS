@@ -1453,7 +1453,7 @@ function kinCreateViewerHistory() {
       const timeout = setTimeout(abort, 30000);
       try {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
-        headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+        headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
       // Session termination is owned by the page transport and gate.
       const drop = async data => {
         if (path === '/me' && res.ok) kinViewerSession.sameAccount(data === undefined ? await res.json().catch(() => null) : data);
@@ -2292,7 +2292,7 @@ const kinViewerSession = (() => {
       if (role === 'read-only') return Promise.resolve(role);
       const answer = new Promise(resolve => waiting.add(resolve));
       if (!read && typeof fetch === 'function') {
-        read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } }).then(async response => {
+        read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: {  } }).then(async response => {
           if (response.ok) note(await response.json());
         }).catch(() => {}).finally(() => { read = null; for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(state()); } });
       }
@@ -2329,7 +2329,7 @@ function kinCreateViewerLayout() {
       if (controller.signal.aborted || signal?.aborted) abort();
       const timer = setTimeout(abort, 10000);
       try {
-        const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
+        const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: {  } });
         if (!live()) {
           // Session termination is owned by the page transport and gate.
           if (path === '/api/me' && response.ok) kinViewerSession.sameAccount(await response.json().catch(() => null));
@@ -2562,7 +2562,7 @@ function kinCreateCTSync() {
       const timer = setTimeout(abort, 10000);
       try {
         let r;
-        try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' }, signal: request.signal }); }
+        try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: {  }, signal: request.signal }); }
         catch (_) { throw refusal('failed'); }
         if (window.KinSessionTransport.refusal(r) === 'denied' && r.status === 403) throw refusal('denied', r.status);
         if (!r.ok) throw refusal('failed', r.status);
@@ -3626,7 +3626,7 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
       const rendered = '/dicom-web/studies/' + source.value.StudyInstanceUID + '/series/' + source.value.SeriesInstanceUID + '/instances/' + source.value.SOPInstanceUID + '/rendered';
       if (parsed.origin !== root.origin || parsed.pathname !== rendered || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error('원본 PDF 경로를 확인할 수 없습니다.');
       const init = (method = 'GET', body) => ({ method, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-        headers: { 'X-KIN-CSRF': '1', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+        headers: { ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
       const firstReply = requireReply(await fetch('/api/me', init()), '로그인 세션을 확인할 수 없습니다.'); assertLive(source, ticket, controller);
       const first = ownerOf(await json(firstReply)); assertLive(source, ticket, controller);
       if (!first) throw new Error('로그인 세션을 확인할 수 없습니다.');
@@ -4046,7 +4046,7 @@ function kinCreateMammographyHanging() {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/mammography-model.js';
       script.onload = resolve; script.onerror = () => reject(Error('유방영상 분류를 불러오지 못했습니다.')); document.head.append(script);
     });
-    const response = await fetch('/api/me', { credentials: 'same-origin', headers: { 'X-KIN-CSRF': '1' } });
+    const response = await fetch('/api/me', { credentials: 'same-origin', headers: {  } });
     const me = response.ok ? await response.json() : null;
     institution = kinViewerSession.sameAccount(me) === true ? me.institution : null;
     window.kinMammographyHanging = preferences;

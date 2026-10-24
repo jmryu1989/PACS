@@ -1,7 +1,5 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {StudyAccessService}=require('/app/dist/study-access.service');
-const {StudyAccessInterceptor}=require('/app/dist/study-access.interceptor');
-const {of,lastValueFrom,tap}=require('/app/node_modules/rxjs');
 const caller={kind:'member',institution:'synthetic',sub:'synthetic-sub',actor:'synthetic-actor',roles:['radiologist']};
 const policy=()=>({version:1,restricted:true,startsAt:null,endsAt:null,rules:[{patientId:'SYNTHETIC',modalities:[],dateFrom:null,dateTo:null,studyUids:[]}]});
 const uid='2.25.1234';
@@ -23,24 +21,6 @@ test('transaction scope stays on one pooled connection, takes shared advisory lo
   const tx={$queryRaw:async(strings)=>{const sql=strings.join('?');calls.push(sql);return sql.includes('pg_advisory')?[{locked:1}]:[{institution:caller.institution,revision:3,policy:p}];}};
   await f.svc.require(caller,[uid],tx);assert.equal(f.queries(),0);assert.equal(calls.length,2);assert.match(calls[0],/pg_advisory_xact_lock_shared/);
 });
-test('final response check rejects a policy change across a read snapshot',async()=>{
-  const f=service([]),interceptor=new StudyAccessInterceptor(f.svc);
-  const context={switchToHttp:()=>({getRequest:()=>caller}),getClass:()=>({name:'ViewerController'}),getHandler:()=>({name:'list'})};
-  const stream=await interceptor.intercept(context,{handle:()=>of({patient:'must not escape'}).pipe(tap(()=>f.set([{revision:1,policy:policy()}])))});
-  await assert.rejects(lastValueFrom(stream),e=>e.getStatus()===409);
-});
-test('DICOM auth maps failed policy lookup to nginx-compatible 403',async()=>{
-  const f=service([{revision:1,policy:{}}]),interceptor=new StudyAccessInterceptor(f.svc);
-  const context={switchToHttp:()=>({getRequest:()=>caller}),getClass:()=>({name:'PacsController'}),getHandler:()=>({name:'authzDicom'})};
-  await assert.rejects(interceptor.intercept(context,{handle:()=>of(null)}),e=>e.getStatus()===403);
-});
-test('profile remains available to recover malformed study policy through admin scope',async()=>{
-  const f=service([{revision:1,policy:{}}]),interceptor=new StudyAccessInterceptor(f.svc);
-  const context={switchToHttp:()=>({getRequest:()=>caller}),getClass:()=>({name:'PacsController'}),getHandler:()=>({name:'me'})};
-  assert.deepEqual(await lastValueFrom(await interceptor.intercept(context,{handle:()=>of({sub:caller.sub})})),{sub:caller.sub});
-  assert.equal(f.queries(),0);
-});
-
 test('managed identity requires new institution decision, even when old policy was cleared',async()=>{
   const p={version:1,restricted:false,startsAt:null,endsAt:null,rules:[]};
   const f=service([{institution:'previous',revision:4,policy:p}]);
@@ -128,15 +108,10 @@ test('a failed policy read answers one 503 body with no code of its own, on the 
 test('the worklist, report preview and response interceptor keep their answers when the policy read fails',async()=>{
   const {PacsService}=require('/app/dist/pacs.service');
   const {ReportPreviewController}=require('/app/dist/report-preview.controller');
-  const context=(controller,handler)=>({switchToHttp:()=>({getRequest:()=>caller}),getClass:()=>({name:controller}),getHandler:()=>({name:handler})});
   const state={uid,institutionId:caller.institution,teleInstitutionId:null,rs:'A',preDoc:null,preReviewer:null,ov:null};
   for(const [label,error] of failures()){
     const f=service([]);f.db.$queryRaw=async()=>{throw error;};
     await assert.rejects(new PacsService(f.db,f.orth,{},f.svc,{}).listStudies({...caller}),e=>same(e,'worklist '+label));
-    const interceptor=new StudyAccessInterceptor(f.svc);
-    await assert.rejects(interceptor.intercept(context('ViewerController','list'),{handle:()=>of(null)}),e=>same(e,'interceptor '+label));
-    await assert.rejects(interceptor.intercept(context('PacsController','authzDicom'),{handle:()=>of(null)}),
-      e=>e.getStatus()===403&&JSON.stringify(e.getResponse())===JSON.stringify({message:'열람 권한이 없습니다',error:'Forbidden',statusCode:403}));
     // report preview: the policy read fails first on the root client, then (root fine) inside its own transaction
     const db=(read)=>({$queryRaw:read,studyState:{findUnique:async()=>({...state})}});
     const orth={...f.orth,reportPreviewStudy:async()=>({})};

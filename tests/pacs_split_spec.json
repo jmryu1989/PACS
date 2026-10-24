@@ -5408,8 +5408,7 @@
       "ImageRequestService",
       "ClinicalContextService",
       "CriticalResultService",
-      "APP_GUARD=AuthGuard",
-      "APP_INTERCEPTOR=StudyAccessInterceptor"
+      "APP_GUARD=AuthGuard"
     ],
     "exports": [],
     "imports": [],
@@ -5786,42 +5785,9 @@
         "scope": null,
         "declared": [],
         "optional": []
-      },
-      "StudyAccessInterceptor": {
-        "params": [
-          "StudyAccessService"
-        ],
-        "scope": null,
-        "declared": [],
-        "optional": []
       }
     },
-    "middleware": [
-      {
-        "apply": [
-          "adminNoStore"
-        ],
-        "exclude": [],
-        "forRoutes": [
-          "AdminController",
-          "ViewerController",
-          "FindingController",
-          "ViewerJobController",
-          "ConnectController",
-          "ManualSrController",
-          "ReportPreviewController",
-          "FavoriteController",
-          "StudyTagsController",
-          "ReaderAssignmentController",
-          "ConsultationController",
-          "ClinicianQuestionController",
-          "ImageRequestController",
-          "ClinicalContextController",
-          "CriticalResultController",
-          "StudyAccessController"
-        ]
-      }
-    ],
+    "middleware": [],
     "routes": [
       {
         "controller": "AdminController",
@@ -5944,23 +5910,6 @@
           "4:2@2:\"code\":0",
           "4:3@3:\"state\":0",
           "4:4@4:\"error\":0"
-        ]
-      },
-      {
-        "controller": "AuthController",
-        "handler": "entry",
-        "method": "POST",
-        "paths": [
-          "auth|entry"
-        ],
-        "public": true,
-        "status": 200,
-        "headers": [],
-        "guards": [],
-        "interceptors": [],
-        "args": [
-          "0:0@0:null:0",
-          "1:1@1:null:0"
         ]
       },
       {

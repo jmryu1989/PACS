@@ -18,7 +18,7 @@ export class AuthController {
 
   /**
    * 링크로 여는 로그인. 어떤 세션도 끝내지 않는다 — 살아 있는 세션의 쿠키가 있으면 Keycloak으로 보내지 않고 입구로
-   * 돌려보낸다. 주소의 매개변수로는 재인증을 청할 수 없다: 그 의도는 CSRF로 보호된 POST만 시작한다.
+   * 돌려보낸다. 주소의 매개변수로는 재인증을 청할 수 없다: 세션을 바꾸는 요청은 결속된 POST만 시작한다.
    */
   @Public()
   @Get('login')
@@ -36,7 +36,7 @@ export class AuthController {
 
   /**
    * 재인증 의도의 로그인 개시(끝내지 못한 로그아웃 뒤의 Login, 계정 전환, 떠났는지 알 수 없는 브라우저의 Login). 본문은
-   * `{intent: 'reauthenticate', reason}`이다. CSRF와, 살아 있는 세션이 있으면 그 세션의 결속을 확인한 뒤에만 그 세션을
+   * `{intent: 'reauthenticate', reason}`이다. 살아 있는 세션의 결속을 확인한 뒤에만 그 세션을
    * 끝낸다. 답은 이동할 주소다 — 헤더를 실어야 하는 요청이라 링크로는 보낼 수 없다.
    */
   @Public()
@@ -74,24 +74,14 @@ export class AuthController {
       result = { kind: 'landing' as const, error: 'login_failed' };
     }
     if (result.kind === 'entered') {
-      // `kin_sid`를 쓰는 응답은 이것 하나다. 진입 증명은 fragment로만 나간다 — 서버·프록시 기록과 Referer에 실리지 않는다.
+      // 늦은 로그아웃 응답이 새 쿠키를 지우지 않도록 성공한 콜백만 쿠키를 쓴다.
       this.auth.setSessionCookie(res, result.sid);
-      res.redirect(302, `${pages}/${result.document}#kin-entry=${encodeURIComponent(result.proof)}`);
-    } else if (result.kind === 'redirect') {
-      res.redirect(302, result.location);
+      res.redirect(302, `${pages}/${result.document}`);
     } else if (result.kind === 'work') {
       res.redirect(302, `${pages}/main.html`);
     } else {
       res.redirect(302, `${pages}/index.html?auth_error=${encodeURIComponent(result.error)}`);
     }
-  }
-
-  /** 로그인 직후의 문서가 진입 증명을 한 번 쓰고 그 세션의 식별값을 받는다. */
-  @Public()
-  @Post('entry')
-  @HttpCode(200)
-  async entry(@Req() req: any, @Res({ passthrough: true }) res: any) {
-    return this.coded(res, () => this.auth.enter(req));
   }
 
   @Post('logout')

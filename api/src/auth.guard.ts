@@ -9,14 +9,10 @@ import { rightsAllow } from './member-rights';
 import {
   APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,
 } from './clinician-policy';
-import { ARCHIVE_ROUTE_KEY, StudyTransferLocalService } from './study-transfer-local.service';
+import { ARCHIVE_ROUTE_KEY } from './study-transfer-local.service';
 import { REQUEST_CONTEXT_CAPTURE, RequestContextCapture } from './emr-runtime/request-context';
 
-/**
- * 이 가드의 토큰·결속 검사를 받지 않는 진입점에만 붙인다: health, 로그인·가입 개시(GET·POST), callback, 로그인 뒤 진입.
- * 로그인 개시의 POST와 진입(auth/entry)은 세션이 아직 없거나 그 식별값을 아직 모르는 문서가 부르므로 여기 속하고,
- * 쿠키·CSRF·결속·진입 증명은 AuthService가 직접 확인한다.
- */
+/** 로그인·가입의 시작과 callback은 AuthService가 흐름과 세션 결속을 확인한다. */
 export const Public = () => SetMetadata('public', true);
 
 type MemberState = 'PENDING' | 'APPROVED' | 'INVALID';
@@ -44,7 +40,7 @@ export function memberState(groups: string[], roles: string[]): MemberState {
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private reflector: Reflector, private auth: AuthService, private transfer: StudyTransferLocalService,
+  constructor(private reflector: Reflector, private auth: AuthService,
     @Inject(REQUEST_CONTEXT_CAPTURE) private readonly requestCapture: RequestContextCapture) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -107,26 +103,19 @@ export class AuthGuard implements CanActivate {
          * 식별값을 아직 모르는 첫 `GET me` 하나만 결속 없이 받는다(그 답이 식별값을 준다).
          */
         const bootstrap = req.method === 'GET' && path === '/api/me' && this.auth.binding(req, sid) === 'missing';
-        /**
-         * S9-U4b 원본 다운로드(D1489): 브라우저의 자체 다운로드는 결속 헤더를 실을 수 없으므로, 정확한 archive GET 하나에서만
-         * 결속된 POST가 발급한 일회용 grant가 그 헤더를 대신한다(route는 Nest 메타데이터와 정규 경로로 판정). 헤더가 있으면
-         * 먼저 그 결속을 본다 — 다른 세션의 헤더는 grant로 구제되지 않는다. 이 뒤의 세션 인증·권한·CSRF 검사는 그대로다.
-         */
-        const grant = !bootstrap && req.method === 'GET' && String(req.originalUrl ?? '').includes('?') && routeKey(
+        // 브라우저의 자체 다운로드는 헤더를 실을 수 없으므로 정확한 archive GET만 결속을 생략한다.
+        const native = req.method === 'GET' && routeKey(
           this.reflector.get(METHOD_METADATA, ctx.getHandler()), this.reflector.get(PATH_METADATA, ctx.getClass()),
-          this.reflector.get(PATH_METADATA, ctx.getHandler())) === ARCHIVE_ROUTE_KEY && this.transfer.archiveGrantPath(req, path);
-        const native = grant && this.auth.binding(req, sid) === 'missing';
+          this.reflector.get(PATH_METADATA, ctx.getHandler())) === ARCHIVE_ROUTE_KEY && this.auth.binding(req, sid) === 'missing';
         if (!bootstrap && !native) this.auth.requireBinding(req, sid);
-        if (grant) req.archiveGrantAdmission = await this.transfer.admitArchiveGrant(req, this.auth.sessionRef(sid), native);
         req.sid = sid;
         req.sessionId = this.auth.sessionRef(sid);
         req.authMethod = 'session';
         /**
          * 로그아웃은 토큰 갱신을 기다리지 않는다(U5S-REQ-05). 저장된 access token이 만료됐거나 Keycloak이 멈춰 있어도
-         * 결속과 CSRF가 맞으면 세션을 끝낼 수 있어야 한다 — 끝내려는 세션을 살리려고 Keycloak을 먼저 부르지 않는다.
+         * 결속이 맞으면 세션을 끝낼 수 있어야 한다 — 끝내려는 세션을 살리려고 Keycloak을 먼저 부르지 않는다.
          */
         if (isLogout) {
-          this.auth.requireCsrf(req);
           return true;
         }
         const session = await this.auth.authenticateSession(sid, res);
@@ -193,11 +182,6 @@ export class AuthGuard implements CanActivate {
     // Logout grants no rights; a Bearer still passed signature/issuer/audience/expiry verification.
     if (isLogout) return true;
 
-    /**
-     * Bearer로 온 사용자 토큰도 종료 표식을 본다(S7-U5 R1). 쿠키 요청은 제품 세션 행이 지워진 순간 거절되지만, 이미 발급된
-     * access token은 만료까지 서명이 유효하다 — 제품이 끝내기로 한 provider 세션의 토큰은 여기서 끝난 세션으로 답한다.
-     * gateway·서비스 계정의 토큰(위에서 갈렸거나 `sid`가 없다)은 대상이 아니다.
-     */
     const rights = method === 'bearer' ? await this.auth.bearerRights(payload, raw)
       : await this.auth.sessionRights(admittedSession);
     req.roles = rightsAllow(rights) ? rights.roles : [];
@@ -234,8 +218,6 @@ export class AuthGuard implements CanActivate {
         throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });
     }
 
-    // Bearer 호출은 CSRF 대상이 아니다. 브라우저가 자동으로 싣는 쿠키 호출만 헤더를 요구한다.
-    if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method)) this.auth.requireCsrf(req);
     const surface = routeKey(this.reflector.get(METHOD_METADATA, ctx.getHandler()),
       this.reflector.get(PATH_METADATA, ctx.getClass()), this.reflector.get(PATH_METADATA, ctx.getHandler()));
     this.requestCapture.capture(req, res, {

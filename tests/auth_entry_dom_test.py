@@ -81,7 +81,7 @@ class AuthEntryDOMTest(unittest.TestCase):
                 path = urlparse(self.path).path
                 if path == "/api/auth/callback":
                     self.send_response(302)
-                    self.send_header("Location", BASE + cls.destination + "#kin-entry=" + PROOF)
+                    self.send_header("Location", BASE + cls.destination)
                     self.end_headers()
                     return
                 name = path.removeprefix(BASE)
@@ -193,7 +193,7 @@ class AuthEntryDOMTest(unittest.TestCase):
                     return route.fulfill(json={"location": self.origin + "/auth/synthetic-login"})
                 return route.fulfill(content_type="text/html", body="<p>Identity provider login</p>")
             if path == "/api/me":
-                if self.hold_me and request.headers.get("x-kin-session"):
+                if self.hold_me:
                     self.held_me = route
                     return
                 if self.me_absent:
@@ -248,20 +248,15 @@ class AuthEntryDOMTest(unittest.TestCase):
         return [(method, path.rsplit("/", 1)[1], headers.get("x-kin-session"), json.loads(body) if body else None)
                 for method, headers, body, path in self.login_starts]
 
-    def test_consumed_proof_reconfirms_same_session_after_transient_failure(self):
-        for failure in (503, 500, "network", "timeout"):
-            with self.subTest(failure=failure):
-                self.used = False
-                self.entries.clear()
-                self.requests.clear()
-                self.me_failures = [failure]
-                self.roles = ['radiologist']
-                self.login('main.html')
-                expect(self.page.locator("#work")).to_be_visible(timeout=15000)
-                self.assert_entry()
-                self.assertEqual([binding for path, binding in self.requests if path == "/api/me"], [SESSION, SESSION])
+    def test_bootstrap_failure_lands_and_fresh_document_recovers(self):
+        self.me_failures = [503]
+        self.login()
+        self.page.wait_for_url("**/index.html")
+        self.login()
+        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
+        self.assert_entry()
 
-    def assert_entered_without_a_click(self, proofs=1):
+    def assert_entered_without_a_click(self, proofs=0):
         """The document is at work in the live session: nothing was pressed, the proof was not offered again, and no
         login start or logout went out."""
         self.assertEqual(len(self.entries), proofs)
@@ -270,86 +265,9 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertEqual(self.page.evaluate("window.synClicks"), 0)
         self.assertEqual(self.page.evaluate("KinAuth.sessionId()"), SESSION)
 
-    def test_consumed_proof_budget_exhaustion_is_confirmed_by_the_landing_without_a_click(self):
-        # A012: the bound confirmation of a consumed proof fails four times. The work document gives up with a one-shot
-        # notice; the landing then confirms the live session the ordinary way (one unbound /api/me) and enters.
-        self.real_landing = True
-        self.me_failures = [503] * 4
-        self.login(denied=False)
-        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty", timeout=20000)
-        self.assertEqual([binding for path, binding in self.requests if path == "/api/me"][:5], [SESSION] * 4 + [None])
-        self.assertIn(BASE + "index.html", self.documents)
-        self.assert_entered_without_a_click()
 
-    def test_lost_entry_answer_is_confirmed_by_me_and_enters_without_a_click(self):
-        # A012: the answer of POST /api/auth/entry is lost (the proof may or may not be consumed). The proof is never
-        # offered again; one unbound /api/me confirms the live session and the document enters - no landing, no click.
-        # (the third row: the confirmation itself fails once and is retried - the proof is still not offered again)
-        # SEB-F01, the day-start path: the browser still holds yesterday's own Log out record (another session). The
-        # document that just logged in is not stopped by it: the bound-free confirmation of the NEW session decides, the
-        # document enters with no click and takes the old record over (as a successful proof entry does).
-        for yesterday in (False, True):
-            for failure, me_failures in (("lost", []), (502, []), ("lost", [503])):
-                with self.subTest(yesterday=yesterday, failure=failure, retried=bool(me_failures)):
-                    self.renew()
-                    if yesterday:
-                        self.seed_yesterday()
-                    self.lose_entry, self.entry_status = failure == "lost", None if failure == "lost" else failure
-                    self.me_failures = list(me_failures)
-                    self.roles = ["radiologist"]
-                    self.login("main.html", denied=False)
-                    if yesterday and me_failures:
-                        # While the confirmation waits to be retried, window events and a storage notice of yesterday's
-                        # record arrive: they do not decide this document by yesterday's record (A013 on this path).
-                        self.page.wait_for_function("typeof KinAuth !== 'undefined'")
-                        self.page.wait_for_timeout(300)
-                        self.page.evaluate(self.EVENTS["focus"] + ";" + self.EVENTS["storage"])
-                    expect(self.page.locator("#work")).to_be_visible(timeout=15000)
-                    self.assertEqual(self.requests[:2], [("/api/auth/entry", None), ("/api/me", None)],
-                                     "the confirmation after a lost answer is unbound")
-                    self.assertEqual(len([1 for path, _ in self.requests if path == "/api/me"]), 2 if me_failures else 1)
-                    self.assertNotIn(BASE + "index.html", self.documents)
-                    self.assert_entered_without_a_click()
-                    self.assertEqual(self.end_records(), {}, "yesterday's record is taken over by this login")
 
-    def test_lost_entry_answer_never_admits_over_the_sessions_own_end(self):
-        # SEB-F01, the opposite side: the confirmation names a session whose own Log out is recorded (or heard), or the
-        # storage cannot be trusted - the document does not enter, offers no proof again and starts no login.
-        own = next(iter(self.record(SESSION).items()))
-        for case in ("own record", "storage refuses writes"):
-            with self.subTest(case=case):
-                self.renew()
-                if case == "own record":
-                    self.context.add_init_script("localStorage.setItem(%s, %s);" % (json.dumps(own[0]), json.dumps(own[1])))
-                else:
-                    self.context.add_init_script(STORAGE_FULL)
-                self.lose_entry = True
-                self.roles = ["radiologist"]
-                self.login("main.html", denied=False)
-                self.page.wait_for_function("KinAuth.lifecycle().state !== 'unknown' || KinAuth.endState() !== null")
-                self.page.wait_for_timeout(300)
-                self.assertNotIn("active", [event["state"] for event in self.auth_states])
-                expect(self.page.locator("#work")).to_be_hidden()
-                self.assertEqual((len(self.entries), self.login_starts, self.page.evaluate("window.synClicks")), (1, [], 0))
-                if case == "own record":
-                    self.assertEqual(self.page.evaluate("KinAuth.endState()"), {"state": "confirmed", "reason": None})
-                    self.assertIn("kin-session-end:" + SESSION, self.end_records(), "the session's own record stays")
 
-    def test_lost_entry_answer_without_a_session_shows_the_notice_once_and_starts_no_login(self):
-        # A012, the other side: the confirmation cannot be had (the server says there is no session). The landing says
-        # so once - the address is cleaned, a reload does not show it again - and no login starts by itself on that
-        # arrival. The same button then starts the ordinary login.
-        self.real_landing = self.lose_entry = True
-        self.me_absent = True
-        self.login(denied=False)
-        self.page.wait_for_url("**/index.html", timeout=15000)
-        expect(self.page.locator("#msg")).to_contain_text("확인하지 못해")
-        self.assertEqual((urlparse(self.page.url).query, self.login_starts, len(self.entries)), ("", [], 1))
-        self.page.wait_for_timeout(1200)
-        self.assertEqual(self.login_starts, [], "no automatic login on the failed arrival")
-        self.page.locator("#signin").click()
-        self.page.wait_for_url("**/api/auth/login")
-        self.assertEqual([start[0] for start in self.login_starts], ["GET"])
 
     def test_the_arrival_notice_hides_no_real_end_state(self):
         # A012: a recorded unfinished Log out wins the text and keeps Retry Log Out, whatever notice the address carried.
@@ -358,7 +276,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         expect(self.page.locator("#msg")).not_to_contain_text("업무 화면을 열지 않았습니다")
         expect(self.page.locator("#retry-logout")).to_be_visible()
         self.assertEqual(urlparse(self.page.url).query, "")
-        self.assertEqual(self.requests, [], "a recorded end is not overridden by asking the server")
+        self.assertEqual(self.requests, [("/api/me", None)], "the recorded end of this session still wins after bootstrap")
 
     def landing(self, record=None, query="?auth_error=entry_unconfirmed", origin="logout", status="confirmed", reason=None,
                 raw=None, script=None, expect_button=True):
@@ -384,15 +302,6 @@ class AuthEntryDOMTest(unittest.TestCase):
         if expect_button:
             expect(self.page.locator('#signin')).to_be_enabled()
 
-    def test_lost_entry_with_old_end_record_enters_on_first_login_and_clears_only_old_record(self):
-        self.landing(OTHER)
-        self.page.reload()
-        self.page.locator('#signin').click()
-        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
-        self.assertEqual(self.page.evaluate("Object.keys(localStorage).filter(key => key.startsWith('kin-session-end'))"), [])
-        self.assertNotIn('kin-session-end', self.page.evaluate('document.cookie'))
-        self.assertEqual(self.login_starts, [])
-        self.assertEqual(self.page.evaluate('KinAuth.sessionId()'), SESSION)
 
     def test_confirmation_login_with_own_end_starts_bound_explicit_login(self):
         self.landing(SESSION)
@@ -402,7 +311,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         method, headers, _, _ = self.login_starts[0]
         self.assertEqual(method, 'POST')
         self.assertEqual(headers.get('x-kin-session'), SESSION)
-        self.assertEqual(headers.get('x-kin-csrf'), '1')
+        self.assertIsNone(headers.get('x-kin-csrf'))
         self.assertEqual(self.starts(), [('POST', 'login', SESSION, {'intent': 'reauthenticate', 'reason': 'logout_unfinished'})])
         self.assertNotIn('active', [event['state'] for event in self.auth_states])
 
@@ -426,53 +335,25 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertNotIn('active', [event['state'] for event in self.auth_states])
 
     def test_confirmation_transient_failure_allows_same_login_button_to_retry(self):
-        self.landing(OTHER)
         self.me_failures = [503]
-        self.page.locator('#signin').click()
-        expect(self.page.locator('#msg')).to_contain_text('다시 누르세요')
-        self.page.wait_for_timeout(1200)
-        self.assertEqual(self.requests, [('/api/me', None)])
+        self.landing(OTHER)
         self.assertEqual(self.login_starts, [])
         self.page.locator('#signin').click()
         expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
         self.assertEqual(self.login_starts, [])
 
     def test_ordinary_landing_old_record_also_enters_without_revoking_live_session(self):
-        self.landing(OTHER, query='')
-        self.page.locator('#signin').click()
+        self.landing(OTHER, query='', expect_button=False)
         expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
         self.assertEqual(self.login_starts, [])
 
-    def test_confirmation_network_failure_names_login_retry_and_second_press_enters(self):
-        self.landing(OTHER)
+    def test_confirmation_network_failure_retries_bootstrap_without_starting_login(self):
         self.me_failures = ['network']
-        self.page.locator('#signin').click()
-        expect(self.page.locator('#msg')).to_contain_text('서버에 연결하지 못했습니다')
-        expect(self.page.locator('#msg')).to_contain_text('잠시 뒤 Login을 다시 누르세요.')
-        self.page.wait_for_timeout(1200)
-        self.assertEqual(self.requests, [('/api/me', None)])
-        self.assertEqual(self.login_starts, [])
-        self.page.locator('#signin').click()
+        self.landing(OTHER, expect_button=False)
         expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
         self.assertEqual(self.login_starts, [])
 
-    def test_refused_proof_on_landing_can_confirm_live_session_with_login(self):
-        self.refuse = True
-        self.landing(query='#kin-entry=refused-proof')
-        expect(self.page.locator('#msg')).to_contain_text('다시 로그인')
-        self.page.locator('#signin').click()
-        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
-        self.assertEqual(self.login_starts, [])
-        self.assertEqual(len(self.entries), 1)
-
-    def test_consumed_proof_definitive_refusal_does_not_retry(self):
-        self.me_code = "AUTH_SESSION_MISMATCH"
-        self.login(denied=False)
-        self.page.wait_for_url("**/index.html")
-        self.assertEqual(self.requests, [("/api/auth/entry", None), ("/api/me", SESSION)])
-        self.assertNotIn("active", [event["state"] for event in self.auth_states])
-
-    def login(self, destination="clinician.html", denied=True):
+    def login(self, destination="clinician.html", denied=False):
         type(self).destination = destination
         if denied and not self.storage_denied:
             self.context.add_init_script(STORAGE_DENIED)
@@ -480,19 +361,15 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.page.goto(self.origin + "/api/auth/callback?code=SYN-code&state=SYN-state")
 
     def assert_entry(self):
-        self.assertEqual(len(self.entries), 1)
-        body, headers, url = self.entries[0]
-        self.assertEqual(body, {"proof": PROOF})
-        self.assertEqual(headers.get("x-kin-csrf"), "1")
-        self.assertNotIn("x-kin-session", headers)
-        self.assertNotIn("#", url, "fragment is removed before consumption")
-        self.assertNotIn(PROOF, headers.get("referer", ""))
-        for path, binding in self.requests:
-            if path in ("/api/me", "/api/clinician/studies", "/api/syn-work"):
+        self.assertEqual(self.entries, [])
+        self.assertEqual(self.requests[0], ("/api/me", None))
+        for path, binding in self.requests[1:]:
+            if path in ("/api/clinician/studies", "/api/syn-work"):
                 self.assertEqual(binding, SESSION, path)
         self.assertEqual(self.page.evaluate("window.synClicks"), 0)
 
-    def test_clinician_storage_denied_enters_final_page_once_without_click(self):
+
+    def test_clinician_enters_final_page_once_without_click(self):
         self.login()
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
         expect(self.page.locator("#actor")).to_have_text("SYN Doctor")
@@ -513,49 +390,14 @@ class AuthEntryDOMTest(unittest.TestCase):
                 self.assertEqual(urlparse(self.page.url).path, BASE + "main.html")
                 self.assert_entry()
 
-    def test_refused_proof_opens_nothing_even_with_reliable_storage(self):
-        self.refuse = True
-        self.login(denied=False)
-        self.page.wait_for_url("**/index.html")
-        self.assertEqual(self.requests, [("/api/auth/entry", None)])
-        self.assertEqual(len(self.entries), 1)
 
-    def test_replay_opens_nothing_and_reload_never_reuses_proof(self):
-        self.login()
+
+    def test_bootstrap_current_roles_choose_the_work_document(self):
+        self.roles = ["clinician"]
+        self.login("main.html")
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
-        self.page.reload()
-        self.page.wait_for_url("**/index.html")
-        self.assertEqual(len(self.entries), 1)
-        self.requests.clear()
-        self.page.goto(self.origin + BASE + "clinician.html#kin-entry=" + PROOF)
-        self.page.wait_for_url("**/index.html")
-        self.assertEqual(self.requests, [("/api/auth/entry", None)])
-        self.assertEqual(len(self.entries), 2)
-
-    def test_role_change_cannot_activate_or_forward_to_another_document(self):
-        for destination, roles in (("main.html", ["clinician"]), ("clinician.html", ["radiologist"]),
-                                   ("clinician.html", ["technician"])):
-            with self.subTest(destination=destination, roles=roles):
-                self.roles, self.used = roles, False
-                self.entries.clear()
-                self.requests.clear()
-                self.auth_states.clear()
-                self.login(destination)
-                # Observe the authority before a mistaken redirect can discard the document.
-                self.page.wait_for_function("true")
-                self.assertNotIn("active", [event["state"] for event in self.auth_states])
-                if destination == "clinician.html":
-                    self.page.wait_for_url("**/index.html")
-                else:
-                    # endState() is null while nothing blocks the landing (its documented
-                    # open state); poll until a closed state with a reason exists instead
-                    # of dereferencing null on a slow runner (hosted CI, 2026-10-08).
-                    self.page.wait_for_function(
-                        "(() => { const end = KinAuth.endState(); return end !== null && end.reason !== null; })()")
-                    self.assertEqual(self.page.evaluate("KinWorkContext.state()"), "unknown")
-                    expect(self.page.locator("#work")).to_be_hidden()
-                self.assertEqual(self.requests, [("/api/auth/entry", None), ("/api/me", SESSION)])
-                self.assert_entry()
+        self.assertEqual(urlparse(self.page.url).path, BASE + "clinician.html")
+        self.assertEqual(self.entries, [])
 
     def test_pending_and_invalid_membership_display_no_work(self):
         for code, title in (("INSTITUTION_PENDING", "Pending Approval"), ("INSTITUTION_INVALID", "Account Setup Required")):
@@ -566,7 +408,7 @@ class AuthEntryDOMTest(unittest.TestCase):
                 self.login()
                 expect(self.page.locator("#membership-title")).to_have_text(title)
                 expect(self.page.locator("#home")).to_be_hidden()
-                self.assertEqual(self.requests, [("/api/auth/entry", None), ("/api/me", SESSION)])
+                self.assertEqual(self.requests, [("/api/me", None)])
                 self.assert_entry()
 
     def test_role_change_that_still_permits_clinician_document_keeps_entry(self):
@@ -581,16 +423,16 @@ class AuthEntryDOMTest(unittest.TestCase):
                 self.assertEqual(urlparse(self.page.url).path, BASE + "clinician.html")
                 self.assert_entry()
 
-    def test_no_work_before_entry_answer_and_concurrent_init_consumes_once(self):
-        self.hold_entry = True
+    def test_no_work_before_bootstrap_and_concurrent_init_shares_one_read(self):
+        self.hold_me = True
         self.login()
         self.page.wait_for_function("typeof KinAuth !== 'undefined'")
-        self.assertIsNotNone(self.held_entry)
+        self.assertIsNotNone(self.held_me)
         self.page.evaluate("void KinAuth.init(); void KinAuth.init();")
-        self.assertEqual(self.requests, [("/api/auth/entry", None)])
+        self.assertEqual(self.requests, [("/api/me", None)])
         self.assertEqual(self.page.evaluate("KinWorkContext.state()"), "unknown")
-        self.assertNotIn("#", self.page.url)
-        self.answer_entry(self.held_entry)
+        self.hold_me = False
+        self.held_me.fulfill(json={"sub": "SYN-sub", "actor": "SYN-doctor", "displayName": "SYN Doctor", "roles": self.roles, "kind": "member", "institution": "SYN-hospital", "sessionId": SESSION})
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
         self.assert_entry()
 
@@ -618,7 +460,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         elif outcome[0] == "post":
             self.page.wait_for_url("**/auth/synthetic-login")
             self.assertEqual(self.starts(), [("POST",) + tuple(outcome[1:])])
-            self.assertEqual(self.login_starts[0][1].get("x-kin-csrf"), "1")
+            self.assertNotIn("x-kin-csrf", self.login_starts[0][1])
             self.assertNotIn("active", [event["state"] for event in self.auth_states], "no entry before the re-authentication")
         else:
             self.page.wait_for_url("**/api/auth/" + outcome[1])
@@ -634,13 +476,13 @@ class AuthEntryDOMTest(unittest.TestCase):
         table = (
             ("no record, a live session", {}, None, True, ("enter", 1), None, None),
             ("no record, no session", {}, None, False, ("login", 1), None, None),
-            ("own logout, confirmed", own(), None, True, ("landing", 0), "#signin", ("post", "login", SESSION, REAUTH("logout_unfinished"))),
-            ("own logout, unconfirmed", own(status="unconfirmed", reason="network"), None, True, ("landing", 0), "#signin",
+            ("own logout, confirmed", own(), None, True, ("landing", 1), "#signin", ("post", "login", SESSION, REAUTH("logout_unfinished"))),
+            ("own logout, unconfirmed", own(status="unconfirmed", reason="network"), None, True, ("landing", 1), "#signin",
              ("post", "login", SESSION, REAUTH("logout_unfinished"))),
-            ("own logout, still ending", own(status="ending"), None, True, ("landing", 0), "#signin",
+            ("own logout, still ending", own(status="ending"), None, True, ("landing", 1), "#signin",
              ("post", "login", SESSION, REAUTH("logout_unfinished"))),
-            ("another session's logout (yesterday), a live session", other(), None, True, ("landing", 0), "#signin", ("enter",)),
-            ("another session's logout, no session", other(), None, False, ("landing", 0), "#signin",
+            ("another session's logout (yesterday), a live session", other(), None, True, ("enter", 1), None, None),
+            ("another session's logout, no session", other(), None, False, ("landing", 1), "#signin",
              ("post", "login", None, REAUTH("logout_unfinished"))),
             ("another session ended by the server, a live session", other(origin="server_end"), None, True, ("enter", 1), None, None),
             ("another session ended by the server, no session", other(origin="server_end"), None, False, ("login", 1), None, None),
@@ -662,12 +504,12 @@ class AuthEntryDOMTest(unittest.TestCase):
              ("post", "login", None, REAUTH("storage_untrusted"))),
             ("storage that takes no write", {}, STORAGE_FULL, True, ("landing", 0), "#signin",
              ("post", "login", SESSION, REAUTH("storage_untrusted"))),
-            ("Switch account, a live session", other(), None, True, ("landing", 0), "#switch",
+            ("Switch account, a live session", own(), None, True, ("landing", 1), "#switch",
              ("post", "login", SESSION, REAUTH("switch_account"))),
-            ("Switch account, no session", other(), None, False, ("landing", 0), "#switch",
+            ("Switch account, no session", other(), None, False, ("landing", 1), "#switch",
              ("post", "login", None, REAUTH("switch_account"))),
-            ("Register, a live session", other(), None, True, ("landing", 0), "#register", ("post", "register", SESSION, None)),
-            ("Register, no session", other(), None, False, ("landing", 0), "#register", ("get", "register")),
+            ("Register, a live session", own(), None, True, ("landing", 1), "#register", ("post", "register", SESSION, None)),
+            ("Register, no session", other(), None, False, ("landing", 1), "#register", ("get", "register")),
         )
         for label, entries, script, alive, (at_load, asked), button, outcome in table:
             with self.subTest(row=label):
@@ -694,8 +536,7 @@ class AuthEntryDOMTest(unittest.TestCase):
 
     def test_login_over_another_sessions_record_clears_that_record_only(self):
         # The explicit Login confirmed the live session: the earlier session's record is taken over, nothing else.
-        self.landing(OTHER, query="")
-        self.page.locator("#signin").click()
+        self.landing(OTHER, query="", expect_button=False)
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
         self.assertEqual(self.page.evaluate("Object.keys(localStorage).filter(key => key.startsWith('kin-session-end'))"), [])
         self.assertEqual(self.starts(), [])
@@ -710,36 +551,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertIn("종료를 확인하지 못했습니다", self.page.locator("#msg").inner_text())
         expect(self.page.locator("#signin")).to_be_enabled()
 
-    def test_a_start_the_provider_end_did_not_confirm_says_so_and_the_same_button_works(self):
-        # 503 AUTH_IDP_END_UNCONFIRMED: the session is ended and marked server-side; the landing gives the unconfirmed-end
-        # guidance and stays without sending anything again by itself, and the same press goes through once the server answers.
-        self.start_answers = [(503, {"code": "AUTH_IDP_END_UNCONFIRMED", "message": "SYN"})]
-        self.landing(SESSION, query="")
-        self.page.locator("#signin").click()
-        self.assert_end_unconfirmed_guidance()
-        self.page.wait_for_timeout(1500)
-        self.assertEqual((urlparse(self.page.url).path, len(self.starts())), (BASE + "index.html", 1), "no start again by itself")
-        self.page.locator("#signin").click()
-        self.page.wait_for_url("**/auth/synthetic-login")
-        self.assertEqual(len(self.starts()), 2)
 
-    def test_an_arrival_refused_for_an_unconfirmed_end_names_the_administrator_and_other_refusals_do_not(self):
-        # The callback refused the login because the previous SSO's end is unconfirmed (end_unconfirmed): the same guidance
-        # as the refused start, no login started by itself. The opposite side: refusals that a later press does resolve
-        # (the provider briefly unavailable, a login not finished) keep their own guidance and do not send the person to
-        # the administrator.
-        for notice, administrator in (("end_unconfirmed", True), ("sso_unidentified", False), ("login_failed", False)):
-            with self.subTest(notice=notice):
-                self.renew()
-                self.me_absent = True
-                self.landing(query="?auth_error=" + notice)
-                if administrator:
-                    self.assert_end_unconfirmed_guidance()
-                else:
-                    expect(self.page.locator("#msg")).not_to_have_text("")
-                    self.assertNotIn(self.ADMIN_GUIDANCE, self.page.locator("#msg").inner_text())
-                self.page.wait_for_timeout(1000)
-                self.assertEqual((urlparse(self.page.url).path, self.starts()), (BASE + "index.html", []), "no login by itself")
 
     def test_a_start_refused_for_a_changed_session_ends_nothing_and_asks_again(self):
         # The browser's session changed between the check and the start (another tab logged in): the server refuses.
@@ -753,6 +565,7 @@ class AuthEntryDOMTest(unittest.TestCase):
 
     def test_discovery_failure_does_not_disable_login_and_is_checked_again(self):
         self.discovery = 503
+        self.me_absent = True
         self.landing(OTHER, query="")
         expect(self.page.locator("#signin")).to_be_enabled()
         expect(self.page.locator("#stat")).to_contain_text("연결하지 못했습니다")
@@ -770,6 +583,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertEqual(self.discoveries, asked, "connected: no further check")
         # ... and a live session is entered with /api/me alone, whatever the provider does.
         self.discovery = 503
+        self.me_absent = False
         self.page.locator("#signin").click()
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
         self.assertEqual(self.starts(), [])
@@ -777,6 +591,7 @@ class AuthEntryDOMTest(unittest.TestCase):
     def test_a_status_line_that_stays_unreachable_is_checked_once_per_return_and_never_polled(self):
         # SEB-F07, the opposite side: one deferred check per return to the window, no loop of checks.
         self.discovery = 503
+        self.me_absent = True
         self.landing(OTHER, query="")
         expect(self.page.locator("#stat")).to_contain_text("연결하지 못했습니다")
         self.page.evaluate("window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange'))")
@@ -788,10 +603,12 @@ class AuthEntryDOMTest(unittest.TestCase):
 
     def test_discovery_that_never_answers_ends_by_its_deadline_and_login_stays_usable(self):
         self.discovery = "hang"
+        self.me_absent = True
         self.landing(OTHER, query="")
         expect(self.page.locator("#signin")).to_be_enabled()
         self.assertNotIn("확인 중", self.page.locator("#signin").inner_text())
         expect(self.page.locator("#stat")).to_contain_text("연결하지 못했습니다", timeout=8000)
+        self.me_absent = False
         self.page.locator("#signin").click()
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
 
@@ -826,67 +643,8 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.context.add_init_script("localStorage.setItem(%s, %s);" % tuple(
             json.dumps(part) for part in next(iter(self.record(OTHER).items()))))
 
-    def test_events_while_the_proof_is_confirmed_do_not_abort_the_entry(self):
-        for name, script in self.EVENTS.items():
-            with self.subTest(event=name):
-                self.renew()
-                self.seed_yesterday()
-                self.roles = ["radiologist"]
-                self.hold_entry = True
-                self.login("main.html", denied=False)
-                self.page.wait_for_function("typeof KinAuth !== 'undefined'")
-                self.assertIsNotNone(self.held_entry)
-                self.page.evaluate(script)
-                self.page.wait_for_timeout(300)
-                self.assertEqual((urlparse(self.page.url).path, self.page.evaluate("KinAuth.lifecycle().state"), self.page.evaluate("KinAuth.endState()")),
-                                 (BASE + "main.html", "unknown", None), "the entry is still undecided")
-                self.answer_entry(self.held_entry)
-                expect(self.page.locator("#work")).to_be_visible()
-                self.assert_entry()
-                self.assertEqual(self.page.evaluate("Object.keys(localStorage).filter(key => key.startsWith('kin-session-end'))"), [],
-                                 "the login took over yesterday's record")
 
-    def test_events_during_the_retry_wait_of_a_proof_entry_do_not_abort_it(self):
-        for name, script in self.EVENTS.items():
-            with self.subTest(event=name):
-                self.renew()
-                self.seed_yesterday()
-                self.roles = ["radiologist"]
-                self.me_failures = [503]
-                self.login("main.html", denied=False)
-                self.page.wait_for_function("typeof KinAuth !== 'undefined'")
-                self.page.wait_for_timeout(300)
-                self.page.evaluate(script)
-                expect(self.page.locator("#work")).to_be_visible(timeout=8000)
-                self.assert_entry()
 
-    def test_the_new_sessions_own_end_still_closes_a_proof_entry(self):
-        # The opposite side: a notice or a record naming the session this document is entering always closes it.
-        for kind in ("notice", "record"):
-            with self.subTest(kind=kind):
-                self.renew()
-                self.seed_yesterday()
-                self.roles = ["radiologist"]
-                self.hold_me = True
-                self.login("main.html", denied=False)
-                self.page.wait_for_function("typeof KinAuth !== 'undefined'")
-                for _ in range(50):
-                    if self.held_me:
-                        break
-                    self.page.wait_for_timeout(50)
-                self.assertIsNotNone(self.held_me, "the proof is consumed; the bound confirmation is out")
-                if kind == "notice":
-                    self.page.evaluate("(() => { const c = new BroadcastChannel('kin-session'); c.postMessage({ type: 'session-ended', session: '%s', operation: 9, status: 'ending', origin: 'logout' }); c.close(); })()" % SESSION)
-                else:
-                    self.page.evaluate("([key, text]) => { localStorage.setItem(key, text); window.dispatchEvent(new Event('focus')); }",
-                                       list(next(iter(self.record(SESSION, status="unconfirmed", reason="network", operation=9).items()))))
-                self.page.wait_for_function("KinAuth.lifecycle().state !== 'unknown'")
-                self.hold_me = False
-                self.held_me.fulfill(json={"sub": "SYN-sub", "actor": "SYN-doctor", "user": "SYN-doctor", "displayName": "SYN Doctor",
-                                           "roles": self.roles, "kind": "member", "institution": "SYN-hospital", "sessionId": SESSION})
-                self.page.wait_for_timeout(300)
-                self.assertNotIn("active", [event["state"] for event in self.auth_states])
-                expect(self.page.locator("#work")).to_be_hidden()
 
     # ── A017: `leaving` - Log Out pressed, not ended ──
 
@@ -948,7 +706,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.page.goto(self.origin + BASE + "index.html")
         expect(self.page.locator("#msg")).to_contain_text("로그아웃을 시작한 창이 닫혀")
         expect(self.page.locator("#retry-logout")).to_be_visible()
-        self.assertEqual(([], urlparse(self.page.url).path), (self.requests, BASE + "index.html"))
+        self.assertEqual(([("/api/me", None)], urlparse(self.page.url).path), (self.requests, BASE + "index.html"))
         # Login there is the re-authentication of the unfinished Log out, bound to that session.
         self.press("#signin", ("post", "login", SESSION, {"intent": "reauthenticate", "reason": "logout_unfinished"}))
 
@@ -986,11 +744,12 @@ class AuthEntryDOMTest(unittest.TestCase):
         # SEB-F04: storage that takes no write (records fall back to cookies). A window of this browser (entered through
         # its login proof) prepares its Log out. A new landing waits for that preparation and ends nothing; when the
         # preparation is cancelled the storage rule still decides - no entry by itself, the explicit Login only.
-        self.context.add_init_script(STORAGE_FULL)
         self.roles = ["radiologist"]
         self.login("main.html", denied=False)
         expect(self.page.locator("#work")).to_be_visible()
         first = self.page
+        first.evaluate(STORAGE_FULL)
+        self.context.add_init_script(STORAGE_FULL)
         self.assertTrue(first.evaluate("KinAuth.leaving('P7')"))
         self.assertIn("kin-session-end.", first.evaluate("document.cookie"))
         self.real_landing = True
@@ -1041,13 +800,14 @@ class AuthEntryDOMTest(unittest.TestCase):
         # not bring S0's record back: a new tab then enters the live session with no click.
         self.roles = ["radiologist"]
         self.real_landing = True
+        self.me_absent = True
         self.seed_once(self.record(OTHER, status="unconfirmed", reason="network"))
         stale = self.page
         stale.goto(self.origin + BASE + "index.html")
         expect(stale.locator("#retry-logout")).to_be_visible()
+        self.me_absent = False
         fresh = self.context.new_page()
         fresh.goto(self.origin + BASE + "index.html")
-        fresh.locator("#signin").click()
         fresh.wait_for_url("**/main.html")
         expect(fresh.locator("#work")).to_be_visible()
         self.assertEqual(self.end_records(fresh), {})
@@ -1068,6 +828,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         # SEB-F05, the opposite side: the Log out is genuinely unfinished (its record is still here). Retry Log Out writes
         # its attempt and result as before - lost: still unconfirmed (and new tabs keep landing); answered: confirmed.
         self.real_landing = True
+        self.me_absent = True
         self.seed_once(self.record(OTHER, status="unconfirmed", reason="network", operation=1))
         self.page.goto(self.origin + BASE + "index.html")
         self.logout_lost = True

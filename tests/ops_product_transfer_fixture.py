@@ -105,7 +105,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
-              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql']
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -113,7 +113,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # W5-API (53 tables, 48 migrations with S9-U4b): ReportDraftInsertReceipt, its three synthetic rows (refused, applied,
 # discarded), one primary key, two checks, one index and the terminal guard's two triggers. Not measured on a stack when
 # written: estimated at about 6 KB of catalog and rows, well inside the cap above.
-TABLES = sorted(['ImportOperation', 'AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+TABLES = sorted(['ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'ReportDraftInsertReceipt', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -453,14 +453,6 @@ def expected_rows(uid):
         dataset=None if n==3 else dict(SOPInstanceUID=uid+'.'+str(n)),dicom=None if n==3 else '\\x'+('01'*132),
         attemptedAt=STAMP if n<3 else None,nextCheckAt=STAMP if n==1 else None,
         storedAt=STAMP if n==2 else None,orthancId='SYNTHETIC-stored' if n==2 else None) for n in (1,2,3)]
-    # S7-U5 session end: the marks of provider sessions the product decided to end are state a restore must keep - an
-    # unconfirmed one is still owed to the provider and still blocks that session's logins, a confirmed one blocks until
-    # it is swept. One of each, every column with a value (confirmedAt NULL on the pending one).
-    rows['IdpSessionEnd'] = [
-        dict(idpSid='SYNTHETIC-idp-session-pending',cause='logout',decidedAt=STAMP,confirmedAt=None,attempts=3,
-             nextAttemptAt='2026-10-06T00:00:00.123'),
-        dict(idpSid='SYNTHETIC-idp-session-confirmed',cause='reauthentication',decidedAt=STAMP,confirmedAt=STAMP,attempts=1,
-             nextAttemptAt=STAMP)]
     # S7-U5 member isolation: our own record that a member is isolated is state a restore must keep - while it exists the
     # member gets no session, and an unfinished one is provider work still owed. One of each, every column with a value
     # (providerDoneAt NULL on the owed one).
@@ -718,7 +710,7 @@ def create_product(name, db, uid):
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt', 'ReportDraftInsertReceipt',
-                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
+                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
                   'ImportOperation', 'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:
