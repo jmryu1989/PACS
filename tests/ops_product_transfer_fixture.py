@@ -711,7 +711,7 @@ def seed_emr(name, db):
     for table, rows in expected_image_rows().items():
         for row in rows:
             execute(name, db, 'INSERT INTO emr_image.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_image.'+table+', '+sql_literal(json.dumps(row))+')')
-    execute(name, db, "SELECT setval('emr_image.observation_sequence_seq', 2, true)")
+    execute(name, db, "DO $$ BEGIN PERFORM setval('emr_image.observation_sequence_seq', 2, true); END $$")
 
 
 def expected_image_rows():
