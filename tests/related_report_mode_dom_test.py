@@ -5,11 +5,11 @@ Design v5 section 1 (D1244: "이전 판독문 보며 쓰기" required), the O4 a
 one-shot admission, R3 the operation outlives the mode, R6 three generations) and the W5-API wire contract (02c8a87 report
 `wire_contract`, the r1 review's `handover_to_w5_ui`, #180's identity codes) as the D1473 addendum reads them.
 
-The page is the delivered split page: main.html, its bundle and every shipped asset, against a synthetic origin. W5-UI
-Phase A (D1477/D1480): main.html does not yet tag the mode's asset, so the page under test is the delivered main.html with
-the insertions of tests/fixtures/w5-ui/related-mode-page.json applied (the exact bytes Phase B writes into main.html), served
-through the **/main.html route the W4 mutant composer uses; the mode's two new files are served from the tree by a static()
-override beside the logout suite's allowlist. Phase B deletes both (PH2.4). Nothing here edits a product file.
+The page is the delivered split page: the checkout's unmodified main.html, its generated bundle and every asset they
+reference (related-report-mode.js/.css included), served by the logout suite's static handler from its allowlist against a
+synthetic origin (W5 Phase B: no composed page, no fixture insertion, no Related-only asset route). A fault control of
+related_report_mode_mutants.py serves one identified faulty copy of a real asset; the positive control never does.
+Nothing here edits a product file.
 
 W5Site extends the W4 FlowSite (the logout suite's wire boundary) with: three studies of one patient (a Target and two
 Sources with approve/addendum ReportVersions) and one of another patient; the relatedInsert branch of PUT report
@@ -33,7 +33,6 @@ from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 LITE = ROOT / "worklist-v0/hpacs-lite"
-FIXTURE = ROOT / "tests/fixtures/w5-ui/related-mode-page.json"
 FIELDS = tuple(h.FIELDS)
 UID_A, UID_B, UID_C, UID_D = h.UID, h.UID_B, rf.UID_C, rf.UID_D
 ALPHA, DELTA = "SYN PATIENT ALPHA", "SYN PATIENT DELTA"
@@ -105,17 +104,6 @@ def wire_request(text="😀", end=2, seed=""):
                 "targetUid": UID_A, "targetBaseVersion": 0, "section": "findings", "position": "end",
                 "offset": len(seed.encode("utf-16-le")) // 2, "text": text,
                 "selectionSeq": 1, "contentRevision": 1, "sourceGeneration": 1, "seedKind": "report-head" if seed else "empty"}}
-
-
-def compose_page(text=None):
-    """The delivered main.html with the Phase B insertions; every anchor must match exactly once (else setup fails)."""
-    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    html = text if text is not None else (ROOT / fixture["page"]).read_text(encoding="utf-8")
-    for item in fixture["insertions"]:
-        if html.count(item["anchor"]) != 1:
-            raise AssertionError("W5 page fixture anchor does not match exactly once: " + item["anchor"][:80])
-        html = html.replace(item["anchor"], item["anchor"] + item["text"], 1)
-    return html
 
 
 class W5Site(rf.FlowSite):
@@ -404,20 +392,11 @@ class W5Site(rf.FlowSite):
         route, uid = self.held_versions.pop(index)
         route.fulfill(json=sorted(self.versions[uid], key=lambda v: -v["version"]))
 
-    def static(self, route, path):
-        # Phase A only (PH1.4): the mode's two files are not in the logout suite's allowlist until main.html tags them.
-        name = path[len(h.BASE):] if path.startswith(h.BASE) else None
-        if name in ("related-report-mode.js", "related-report-mode.css"):
-            h.SERVED.add("worklist-v0/hpacs-lite/" + name)
-            return route.fulfill(status=200, content_type=h.TYPES[Path(name).suffix], body=(LITE / name).read_bytes())
-        return super().static(route, path)
-
 
 # One Ctrl+Z / Ctrl+Shift+Z in the focused field, as the keyboard sends it (native history).
 class RelatedModePage(unittest.TestCase):
-    """REQ W5-PAGE-01..10 on the delivered split page with the Phase B markup; only HTTP is synthetic."""
-    bundle_source = None
-    html_source = None       # a mutant's main.html (already composed)
+    """REQ W5-PAGE-01..10 on the delivered split page; only HTTP is synthetic."""
+    bundle_source = None     # a fault control's bundle (related_report_mode_mutants.py)
     asset_source = None      # (file, body): one shipped asset outside the bundle served as a one-off copy
     viewport = {"width": 1400, "height": 900}
 
@@ -425,7 +404,6 @@ class RelatedModePage(unittest.TestCase):
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
-        cls.page_html = compose_page()
 
     @classmethod
     def tearDownClass(cls):
@@ -436,8 +414,6 @@ class RelatedModePage(unittest.TestCase):
         self.site = W5Site()
         self.context = self.browser.new_context(viewport=self.viewport, locale="ko-KR", timezone_id="Asia/Seoul")
         self.context.route("**/*", lambda route, request: self.site.handle(route, request))
-        html = self.html_source if self.html_source is not None else self.page_html
-        self.context.route("**/main.html", lambda route: route.fulfill(body=html, content_type="text/html; charset=utf-8"))
         if self.bundle_source is not None:
             self.context.route("**/main-split.bundle.js", lambda route: route.fulfill(
                 body=self.bundle_source, content_type="text/javascript; charset=utf-8"))
@@ -538,6 +514,10 @@ class RelatedModePage(unittest.TestCase):
     # ── PAGE-01/02/03: entry, the two cards, the Source ──
     def test_w5_entry_from_a_clean_target_shows_two_cards_hides_the_editor_and_focuses_the_title(self):
         self.open()
+        # Phase B startup order: the mode is mounted before its first eager consumer. Both CVR areas call `blocked()` while
+        # they mount; had the mode not existed yet, their mount would have failed into the page's fallback toast.
+        self.assertEqual([True, True, True], self.js("[relatedMode.active() === false, criticalResults !== null, "
+                                                     "criticalInbox !== null]"))
         self.open_target()
         writes = len(self.site.flow_puts)
         self.enter()
@@ -684,6 +664,36 @@ class RelatedModePage(unittest.TestCase):
         expect(self.page.locator("#related-mode-source")).to_contain_text("승인된 판독문이 없습니다")
         self.assertEqual("", self.source_text("findings"))
         expect(self.page.locator("#related-mode-insert")).to_be_disabled()
+
+    def test_w5b_recommendation_shows_only_with_text_and_a_whole_insert_carries_only_what_is_shown(self):
+        """W-07b (gap report: hide when empty). Findings and Conclusion are the report's sections. A stored Recommendation is
+        shown read-only only when it has text, in the mode and in the Related Report pane alike; an empty one shows no heading.
+        A whole-report Insert carries exactly the sections on screen, and the Target's own hidden Recommendation is kept."""
+        self.open()
+        self.open_target()
+        sections = self.page.locator("#related-mode .related-mode-section h4:visible")
+        pane = self.page.locator(".prior-report-section h4:visible")
+        self.enter()
+        expect(sections).to_have_text(["Findings", "Conclusion", "Recommendation"])
+        expect(pane).to_have_text(["Findings", "Conclusion", "Recommendation"])
+        expect(self.page.locator('#related-mode [data-related-source="recommendation"]')).to_have_text(PRIOR_B["recommendation"])
+        # C's approved addendum has no Recommendation: neither place shows the heading, the two sections stay.
+        self.related_row(UID_C).locator("td").first.click()
+        self.wait(lambda: self.source_text("findings") == PRIOR_C["findings"], "C's text")
+        expect(sections).to_have_text(["Findings", "Conclusion"])
+        expect(pane).to_have_text(["Findings", "Conclusion"])
+        self.open_insert()
+        shown = PRIOR_C["findings"] + "\n\n" + PRIOR_C["conclusion"]
+        expect(self.page.locator("#related-insert-text")).to_have_text(shown)
+        self.page.locator("#related-insert-confirm").click()
+        self.wait(lambda: self.op_state() == "applied", "the applied receipt")
+        ri = self.site.related_puts[-1][1]["relatedInsert"]
+        self.assertEqual(["findings", "conclusion"], [p["field"] for p in ri["source"]["parts"]], "no invisible Source field")
+        self.assertEqual({"findings": shown, "conclusion": "", "recommendation": ""}, self.stored())
+        # Back to B: its Recommendation is shown again (the value was never dropped).
+        self.related_row(UID_B).locator("td").first.click()
+        self.wait(lambda: self.source_text("findings") == PRIOR_B["findings"], "B's text")
+        expect(sections).to_have_text(["Findings", "Conclusion", "Recommendation"])
 
     def test_w5_source_text_is_text_and_unresolved_studies_never_enter(self):
         self.site.versions[UID_B] = [self.site.version_row(UID_B, 1, "approve", {
@@ -1115,6 +1125,27 @@ class RelatedModePage(unittest.TestCase):
         expect(self.mode()).to_be_hidden()
         self.assertEqual([False, False], self.editor_hidden())
         self.assertIsNone(self.js("relatedUid"))
+
+    def test_w5b_the_common_command_block_carries_the_mode_reason_and_next_prev_leave_through_the_gate(self):
+        """W4F-05 on the real mode (moved from report_flow_dom_test's W5_REASON stand-in, W5 Phase B). In the mode the
+        common block answers the mode's reason for Approve, Ctrl+S (Finalize) and Approve & Next, and nothing commits;
+        Next and Prev are not report commands there: they leave through the move gate, which for a clean Target closes the
+        mode and switches in the same event."""
+        self.open()
+        self.open_target()
+        self.enter()
+        reasons = self.js("['approve', 'finalize', 'finalize-next', 'next', 'prev'].map(c => reportCommandBlocked(c))")
+        self.assertEqual([self.js("relatedMode.reason()")] * 3 + [None, None], reasons)
+        self.assertFalse(self.js("KinReportCommands.finalize()"))
+        self.js("() => approveAndNext()")
+        self.settle(300)
+        self.assertEqual(([], UID_A), (self.site.flow_commits, self.js("selectedUid")))
+        expect(self.mode()).to_be_visible()
+        moved = self.js("() => { document.querySelector('#b-next').click(); return selectedUid; }")
+        self.assertNotEqual(UID_A, moved, "Next switches in the same event")
+        expect(self.mode()).to_be_hidden()
+        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual([], self.site.flow_commits)
 
     def test_w5_back_without_insert_restores_caret_selection_direction_scroll_and_undo(self):
         self.open()
@@ -1668,7 +1699,7 @@ class RelatedModePage(unittest.TestCase):
             self.assertIsNone(insertion_text(version, [{'field': 'findings', 'start': start, 'end': end}], ''),
                               'split surrogate and out-of-range selections are refused')
 
-    def test_w5r2_runtime_assets_are_current_phase_a_sources(self):
+    def test_w5r2_runtime_assets_are_the_current_sources(self):
         # D73/B6: byte identity itself is the provenance requirement here, not a constraint on product behavior.
         # Hash the HTTP bodies actually served, rather than treating the recorder HEAD as the runtime subject.
         self.open()
@@ -1683,9 +1714,9 @@ class RelatedModePage(unittest.TestCase):
           return result;
         }''', names)
         for name in names:
-            expected = compose_page().encode('utf-8') if name == 'main.html' else (LITE / name).read_bytes()
+            expected = (LITE / name).read_bytes()
             self.assertEqual(hashlib.sha256(expected).hexdigest(), observed[name], 'W5A-07: current runtime source ' + name)
-        print('W5-UI-RUNTIME-SOURCES ' + json.dumps({'subject': 'current Phase A working sources with declared markup injection',
+        print('W5-UI-RUNTIME-SOURCES ' + json.dumps({'subject': 'unmodified working sources of the checkout',
                                                   'served_sha256': observed}), flush=True)
 
     def r3_id_vectors(self, field):
@@ -2184,7 +2215,10 @@ class RelatedModePage(unittest.TestCase):
             self.assertTrue(retained.evaluate("e => e.disabled"))
             self.assertIn("Related Report", retained.get_attribute("title"))
             expect(pane).to_contain_text(MODE_REASON)
-            self.back()
+            # D1821: the list the reader opened lies over the report area (in body.reading it covers the mode's Back
+            # button), so Back is the Report Editor key here, which is the same Back.
+            self.page.keyboard.press("Control+Alt+4")
+            expect(self.mode()).to_be_hidden()
             self.settle(100)
             self.assertEqual(1 if unknown else 0, len(posts), "Back does not acknowledge")
             retained.dispatch_event("click")
@@ -2203,6 +2237,117 @@ class RelatedModePage(unittest.TestCase):
                 expect(pane).to_contain_text("Acknowledged")
         finally:
             retained.dispose()
+
+    # W5B-REVIEW-01 / D1821 (Minhoon): the received Critical Results list opens as an overlay over the report area. Opening
+    # it does not shrink the Related Report mode (its box keeps its place and size); the list is visible, on top at its
+    # own centre, and Hide Received closes it with the mode unchanged.
+    # The box inside its report column (the click on the toggle may scroll the column into view; that is not a resize).
+    BOX = """selector => { const r = document.querySelector(selector).getBoundingClientRect(),
+      p = document.querySelector(".report-p"), c = p.getBoundingClientRect();
+      return [Math.round(r.top - c.top + p.scrollTop), Math.round(r.height)]; }"""
+    ON_TOP = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = Math.max(r.top, 0) + Math.min(r.height, innerHeight) / 2;
+      const hit = document.elementFromPoint(x, y); return !!hit && e.contains(hit); }"""
+
+    def received_list_overlays_the_mode(self, reading):
+        self.b05_cvr_page()
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+        self.enter()
+        self.settle(200)
+        before = self.js(self.BOX, "#related-mode")
+        toggle = self.page.locator("#cvr-inbox-toggle")
+        toggle.click()
+        expect(toggle).to_have_text("Hide Received")
+        body = self.page.locator("#cvr-inbox-body")
+        expect(body).to_be_visible()
+        self.settle(200)
+        after = self.js(self.BOX, "#related-mode")
+        self.assertGreaterEqual(after[1], before[1] - 1, f"the mode shrank when the list opened: {before} -> {after}")
+        self.assertEqual(before[0], after[0], "the mode stays where it was in its column")
+        body.scroll_into_view_if_needed()
+        expect(body).to_be_in_viewport()
+        self.assertTrue(self.js(self.ON_TOP, "#cvr-inbox-body"), "the opened list is drawn over the report area")
+        expect(toggle).to_be_in_viewport()
+        toggle.click()
+        expect(body).to_be_hidden()
+        expect(toggle).to_have_text("Show Received")
+        self.settle(200)
+        self.assertEqual(before, self.js(self.BOX, "#related-mode"), "closing the list gives the same mode")
+        expect(self.mode()).to_be_visible()
+
+    # D1822: what used to open the list by itself (here: the synthetic site does not answer the received-list read, the
+    # S7-U2a failure) only marks the bar; the list stays closed and the report being written is never covered: Findings
+    # and Approve are on top at their own centre, typing goes into Findings, and in the mode Insert and Back are on top and
+    # work. The reader then opens the list with Show Received, which clears the mark.
+    def self_opened_list_leaves_the_report_usable(self, reading):
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+        expect(self.page.locator("#cvr-inbox-p")).to_have_attribute("data-state", "failed")
+        for selector in ("#findings", "#b-approve"):
+            self.page.locator(selector).scroll_into_view_if_needed()
+            self.assertTrue(self.js(self.ON_TOP, selector), f"{selector} is covered by the list that opened by itself")
+        self.page.locator("#findings").fill("SYN typed under a self-opened list")
+        self.assertEqual("SYN typed under a self-opened list", self.value())
+        self.enter()
+        for selector in ("#related-mode-insert", "#related-mode-back"):
+            self.page.locator(selector).scroll_into_view_if_needed()
+            self.assertTrue(self.js(self.ON_TOP, selector), f"{selector} is covered by the list that opened by itself")
+        self.open_insert()
+        self.page.locator("#related-insert-cancel").click()
+        self.back()
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.assertEqual("SYN typed under a self-opened list", self.value())
+        expect(self.page.locator("#cvr-inbox-p")).to_have_attribute("data-attention", "true")
+        expect(self.page.locator("#cvr-inbox-body")).to_be_hidden()
+        self.page.locator("#cvr-inbox-toggle").click()
+        expect(self.page.locator("#cvr-inbox-body")).to_be_visible()
+        expect(self.page.locator("#cvr-inbox-p")).not_to_have_attribute("data-attention", "true")
+
+    def test_w5b_self_opened_list_leaves_the_report_usable_normal(self):
+        self.self_opened_list_leaves_the_report_usable(False)
+
+    def test_w5b_self_opened_list_leaves_the_report_usable_reading(self):
+        self.self_opened_list_leaves_the_report_usable(True)
+
+    def test_w5b_received_list_overlays_the_mode_normal(self):
+        self.received_list_overlays_the_mode(False)
+
+    def test_w5b_received_list_overlays_the_mode_reading(self):
+        self.received_list_overlays_the_mode(True)
+
+    # W5B-REVIEW-02: the worklist's own ways to the report editor (Enter on the current row, its keyboard activation, the
+    # row menu's 판독문 작성으로) are Report Editor in the mode too: the mode closes and the editor returns with the
+    # Target, its text and its caret, as Ctrl+Alt+4 does.
+    def editor_entry_in_the_mode(self, act):
+        self.open()
+        self.open_target()
+        self.page.locator("#findings").fill("SYN A kept for the editor entry")
+        self.page.locator("#findings").evaluate("node => node.setSelectionRange(5, 9)")
+        self.autosave()
+        self.enter()
+        act()
+        expect(self.mode()).to_be_hidden()
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual((UID_A, "SYN A kept for the editor entry"), (self.js("selectedUid"), self.value()))
+        self.assertEqual([5, 9], self.js("[$('#findings').selectionStart, $('#findings').selectionEnd]"))
+
+    def test_w5b_row_menu_report_editor_leaves_the_mode(self):
+        def act():
+            self.page.locator(f'#rows tr[data-uid="{UID_A}"]').click(button="right")
+            self.page.locator("#ctx [data-i]", has_text="판독문 작성으로").click()
+        self.editor_entry_in_the_mode(act)
+
+    def test_w5b_enter_on_the_current_row_leaves_the_mode(self):
+        def act():
+            self.page.locator(f'#rows tr[data-uid="{UID_A}"]').click()
+            self.page.keyboard.press("Enter")
+        self.editor_entry_in_the_mode(act)
 
     def test_w5r3b05_received_normal(self):
         self.b05_received(False)
