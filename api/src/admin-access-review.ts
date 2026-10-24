@@ -3,11 +3,14 @@ import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { Caller } from './pacs.service';
 import { inst, need } from './pacs/access';
+import { randomUUID } from 'node:crypto';
+import type { RequestWorkContext } from './emr-runtime/request-context';
+import type { AccessEventV1 } from './emr-contract/access-event';
 
 // Reuse the existing Admin audit page size; this is presentation, not a review threshold.
 const PAGE_SIZE = 25;
 type Cursor = { top: string; before: string; from: string; until: string; downloads: boolean; institution: string };
-type Row = { entry_id: string; sequence: bigint; event_id: string; occurred_at: Date; recorded_at: Date;
+type Row = { entry_id: string; sequence: bigint; snapshot_top: bigint; event_id: string; occurred_at: Date; recorded_at: Date;
   statutory_act: string; payload: string };
 
 function queryOptions(query: any, institution: string) {
@@ -38,36 +41,20 @@ function queryOptions(query: any, institution: string) {
 export class AdminAccessReview {
   constructor(private readonly db: PrismaService, private readonly access: StudyAccessService) {}
 
-  async read(query: unknown, caller: Caller) {
+  async read(query: unknown, caller: Caller, request: RequestWorkContext) {
     need(caller.roles, 'admin', '접속기록 점검');
     const institution = inst(caller);
     if (caller.kind !== 'member') throw new ForbiddenException('관리자 회원 계정이 필요합니다.');
     const { from, until, downloads, cursor } = queryOptions(query, institution);
+    await request.requireCurrent();
     const access = await this.access.snapshot(caller);
     if (access.policy.restricted) throw new ForbiddenException('검사 접근 범위가 제한된 계정은 접속기록을 조회할 수 없습니다.');
     let rows: Row[], top: string;
     try {
-      top = cursor?.top ?? String((await this.db.$queryRaw<{ top: bigint }[]>`
-        SELECT COALESCE(max(sequence), 0) AS top FROM emr_access.access_entry`)[0].top);
-      // Filter recorded managing institution before pagination. Keep historical rows
-      // without a viewing copy, but count a viewing/history pair as one event.
       rows = await this.db.$queryRaw<Row[]>`
-        WITH scoped AS (
-          SELECT *, payload::jsonb AS event FROM emr_access.access_entry
-          WHERE sequence <= ${top}::bigint AND occurred_at >= ${from}::timestamptz AND occurred_at < ${until}::timestamptz
-            AND payload::jsonb #>> '{managingInstitution,status}' = 'known'
-            AND payload::jsonb #>> '{managingInstitution,value}' = ${institution}
-        ), events AS (
-          SELECT DISTINCT ON (event_id) * FROM scoped
-          WHERE NOT ${downloads}::boolean OR event->>'action' IN ('download','pdf','copy','disclosure')
-            OR event->>'surface' LIKE '%original-downloads%'
-            OR EXISTS (SELECT 1 FROM jsonb_array_elements(event->'targets') target
-                       WHERE target->>'kind' IN ('download','pdf','copy','disclosure'))
-          ORDER BY event_id, sequence
-        )
-        SELECT entry_id::text, sequence, event_id, occurred_at, recorded_at, statutory_act, payload FROM events
-        WHERE (${cursor?.before ?? null}::bigint IS NULL OR sequence < ${cursor?.before ?? null}::bigint)
-        ORDER BY sequence DESC LIMIT ${PAGE_SIZE + 1}`;
+        SELECT * FROM emr_access.review_entries(${institution}::text, ${from}::timestamptz, ${until}::timestamptz,
+          ${downloads}::boolean, ${cursor?.top ?? null}::bigint, ${cursor?.before ?? null}::bigint, ${PAGE_SIZE + 1}::integer)`;
+      top = cursor?.top ?? String(rows[0]?.snapshot_top ?? 0);
     } catch {
       throw new ServiceUnavailableException('접속기록을 조회하지 못했습니다. 다시 조회하세요.');
     }
@@ -83,6 +70,27 @@ export class AdminAccessReview {
         affectedIdentity: event.affectedIdentity ?? null, auth: event.auth ?? null, rightsVersion: event.rightsVersion ?? null };
     });
     await this.access.unchanged(caller, access);
+    await request.requireCurrent();
+    const known = <T>(value: T) => ({ status: 'known' as const, value });
+    const na = { status: 'not-applicable' as const, reason: 'non-record-target' as const };
+    const event: AccessEventV1 = {
+      formatVersion: 1, eventId: randomUUID(), surface: request.facts.surface,
+      userId: known(request.facts.actor), rolesAtTime: known([...request.facts.roles]),
+      actingInstitution: known(request.facts.institution), managingInstitution: known(institution),
+      occurredAt: new Date().toISOString(), trustedProxyIp: request.facts.ingress,
+      executor: 'member', cause: 'user-view',
+      context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null },
+      // The target is the immutable audit row, including patientless authentication
+      // rows. Do not invent a patient or expose the unserved look-ahead row.
+      targets: page.map(row => ({ kind: 'access-audit', patientLinkSnapshot: na, studyId: na,
+        recordId: known(row.entry_id), versionId: na })),
+      action: 'provide-prepared', result: 'prepared', requestId: request.facts.requestId,
+      auditLinkId: `audit:${randomUUID()}`, relatedEventId: null,
+    };
+    try { await request.work.append(event); }
+    catch { throw new ServiceUnavailableException('접속기록 열람을 기록하지 못했습니다. 다시 조회하세요.'); }
+    await this.access.unchanged(caller, access);
+    await request.requireCurrent();
     const next: Cursor | null = rows.length > PAGE_SIZE ? { top, before: String(page[page.length - 1].sequence),
       from, until, downloads, institution } : null;
     return { institutionId: institution, from, until, observedAt: new Date().toISOString(), rows: result,
