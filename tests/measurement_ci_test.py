@@ -30,7 +30,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -633,6 +633,39 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
                 self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
 
+    def test_viewer_ux_shell_profile_runs_only_its_declared_cases_in_worklist_ux(self):
+        # Viewer U2 (D1821): the served test_viewer_ux_shell.py cases had no CI registration after
+        # worklist-ux.yml moved into validate.yml. --class selects only the methods the local class declares,
+        # never the inherited ViewerLayoutE2E cases.
+        profile = ci.PROFILES['viewer-ux-shell']
+        self.assertEqual(profile['suites'], (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),))
+        self.assertEqual(profile['out'], ci.ROOT/'tests/e2e/artifacts/viewer-ux-shell-ci')
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--class')+1], 'ViewerUXShellE2E')
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name == 'viewer-ux-shell':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
+        owner = [row for row in self.catalog.profile_bindings()['viewer-ux-shell'] if not row['dispatch']]
+        self.assertEqual([row['job'] for row in owner], ['worklist-ux-measurements'])
+        job = self.catalog.job('worklist-ux-measurements')
+        step = job['steps'][owner[0]['step']]
+        self.assertEqual(step['if'], '${{ !cancelled() }}')
+        uploads = [s for s in job['steps'] if str(s.get('uses', '')).startswith('actions/upload-artifact@')
+                   and s['with']['name'] == 'synthetic-viewer-ux-shell-results']
+        self.assertEqual(len(uploads), 1)
+        # The module's default KIN_EVIDENCE_DIR: profile_environment does not set one for this profile.
+        for path in ('tests/e2e/artifacts/viewer-ux-shell-ci/', 'tmp/viewer-ux-u2/screens/'):
+            self.assertIn(path, uploads[0]['with']['path'].splitlines())
+        self.assertEqual(self.catalog.text().count('--profile viewer-ux-shell'), 1)
+        selection = json.loads((ci.ROOT/'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']['worklist-ux-measurements']
+        self.assertIn('tests/e2e/test_viewer_ux_shell.py', selection)
+
     def test_validate_workflow_runs_s9_u0e_served_in_its_own_bounded_job(self):
         # Owner and artifact binding for every profile is test_all_profiles_have_unique_workflow_owners_and_report_artifacts;
         # the exact-selection self-check runs once in runtime. Here: the served config is checked against its sources
@@ -1175,6 +1208,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           # S9-U0E: the served generated OHIF config, in its own validate.yml job.
                           's9-u0e-served',
+                          # Viewer U2 shell (D1821), in the worklist-ux-measurements job.
+                          'viewer-ux-shell',
                           'gateway-e2e', 'critical-result-screens',
                           # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
                           'emr-b',

@@ -145,6 +145,14 @@ PROFILES = {
         'suites': (('e2e/test_prior_selection.py', 'PriorSelectionE2E', 'ci-u2b-prior-selection'),
                    ('e2e/test_related_scope.py', 'RelatedScopeE2E', 'ci-u2b-related-scope')),
     },
+    'viewer-ux-shell': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-ux-shell-ci',
+        'project_prefix': 'kin-viewer-ux-shell-ci-',
+        # Viewer U2 shell (D1821): the module's own test_shell_* cases on the shipped viewer, in the
+        # worklist-ux-measurements job. One suite at the single-suite 900s ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
+    },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
         'project_prefix': 'kin-display-scope-ci-',

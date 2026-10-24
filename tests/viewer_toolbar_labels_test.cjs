@@ -88,7 +88,8 @@ class El{
 }
 function world(){
   const observers=new Set();let html;
-  const doc={title:'',activeElement:null,
+  const events=new EventTarget();
+  const doc={title:'',activeElement:null,addEventListener:events.addEventListener.bind(events),removeEventListener:events.removeEventListener.bind(events),
     connected:e=>{for(let n=e;n;n=n.parentElement)if(n===html)return true;return false;},
     changed:(target,record)=>{
       if(!doc.connected(target))return;

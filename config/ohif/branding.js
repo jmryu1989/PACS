@@ -25,6 +25,20 @@ function KinViewerBrand({ React }) {
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
       : node.nodeType === 3 ? node.data : '';
+    // D1821 replaces the browser-local shortcut editor with account settings.
+    // Route the existing settings entry to its current owner without moving React nodes.
+    const accountSettings = event => {
+      const scope = menuScope(), menu = event.target.closest?.('.absolute.right-0');
+      if (!scope || !menu || !scope.contains(menu)) return;
+      let row = event.target;
+      while (row && row !== menu) {
+        if (SETTINGS_TITLES.has(labelOf(row).trim()) && window.kinViewerUXOpenSettings?.()) {
+          event.preventDefault(); event.stopImmediatePropagation(); return;
+        }
+        row = row.parentElement;
+      }
+    };
+    document.addEventListener('click', accountSettings, true);
     // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
     const hideAboutRows = scope => {
       scope.querySelectorAll('*').forEach(row => {
@@ -86,6 +100,7 @@ function KinViewerBrand({ React }) {
     return () => {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
       observer.disconnect();
+      document.removeEventListener('click', accountSettings, true);
       if (sessionChannel) {
         sessionChannel.close();
       }

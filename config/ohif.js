@@ -209,6 +209,20 @@ function KinViewerBrand({ React }) {
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
       : node.nodeType === 3 ? node.data : '';
+    // D1821 replaces the browser-local shortcut editor with account settings.
+    // Route the existing settings entry to its current owner without moving React nodes.
+    const accountSettings = event => {
+      const scope = menuScope(), menu = event.target.closest?.('.absolute.right-0');
+      if (!scope || !menu || !scope.contains(menu)) return;
+      let row = event.target;
+      while (row && row !== menu) {
+        if (SETTINGS_TITLES.has(labelOf(row).trim()) && window.kinViewerUXOpenSettings?.()) {
+          event.preventDefault(); event.stopImmediatePropagation(); return;
+        }
+        row = row.parentElement;
+      }
+    };
+    document.addEventListener('click', accountSettings, true);
     // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
     const hideAboutRows = scope => {
       scope.querySelectorAll('*').forEach(row => {
@@ -270,6 +284,7 @@ function KinViewerBrand({ React }) {
     return () => {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
       observer.disconnect();
+      document.removeEventListener('click', accountSettings, true);
       if (sessionChannel) {
         sessionChannel.close();
       }
@@ -3333,6 +3348,9 @@ function kinCreateViewerTechNote() {
         typeof window.kinRenderVolumeScout==='function'?Promise.resolve():load('viewer-volume-scout.js'),
         typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
+      .then(()=>standalone&&!window.KinViewerUXShortcuts?load('viewer-ux-shortcuts.js'):undefined)
+      .then(()=>standalone&&!window.KinViewerUXToolbar?load('viewer-ux-toolbar.js'):undefined)
+      .then(()=>{if(standalone)window.kinCreateViewerToolbarPreferences=window.KinViewerUXToolbar.mount;})
       .then(()=>window.kinViewerTechNote(servicesManager.services,kinViewerSession.writeModule)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
     window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};
@@ -3876,9 +3894,45 @@ function kinCreateContextLoss() {
     });
   }, onModeExit() { epoch++; current?.stop(); } };
 }
+// The stock mode owns the grid and Cornerstone elements. This extension owns
+// only its chrome and removes it when that mode or document ends.
+function kinCreateViewerUX() {
+  let services, dispose, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shell.js'];
+  function load() {
+    return ready ||= assets.reduce((previous, name) => previous.then(() => new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = () => { script.remove(); resolve(); };
+      script.onerror = () => { script.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); };
+      document.head.append(script);
+    })), Promise.resolve()).catch(error => { ready = null; throw error; });
+  }
+  function stop() { generation++; dispose?.(); dispose = null; }
+  return {
+    id: 'kin.viewer-ux',
+    preRegistration({ servicesManager }) { services = servicesManager.services; },
+    onModeEnter() {
+      stop();
+      if (window.top !== window) return;
+      const ticket = generation;
+      load().then(() => {
+        if (ticket !== generation || kinViewerSession.ended()) return;
+        const shell = window.KinViewerUXShell.mount({ services });
+        const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
+        dispose = () => { channel?.close(); shell.dispose(); };
+      }).catch(error => {
+        if (ticket !== generation) return;
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+      });
+    },
+    onModeExit: stop,
+  };
+}
+
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateViewerUX()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

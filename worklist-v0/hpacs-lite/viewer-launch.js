@@ -163,6 +163,9 @@
                 popup.dispatchEvent(new popup.Event('kin-window-link-changed'));
               }catch(_){notify('판독문 복귀 연결을 확인하지 못했습니다. 목록 창을 직접 선택하세요.','info');}
             }
+            // A selected tab can also cancel an in-flight open, or reopen the
+            // last closed patient while retaining the same document URL.
+            popup.kinViewerOpenPatient?.(url);
             popup.focus();
             watchOhifRect(popup);
             return;
@@ -176,6 +179,11 @@
               ? "기존 영상 창의 저장·복원 또는 상태 확인을 마치고 열린 대화상자를 닫은 뒤 다른 검사를 여세요."
               : "기존 영상 창에 저장하지 않은 표식이나 작업 내용(소견 작성 내용 포함)이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.", "err", 8000);
             return;
+          }
+          // U2 keeps this document and checks coverage at the final assignment.
+          if (typeof popup.kinViewerOpenPatient === 'function') {
+            popup.kinViewerOpenPatient(url);
+            popup.focus(); watchOhifRect(popup); return;
           }
           if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
             popup.focus(); notify('기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.', 'info'); return;
