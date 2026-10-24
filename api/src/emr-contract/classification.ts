@@ -321,7 +321,11 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   StudyState: ['study-metadata', 'study-correction', 'patient-match', 'assignment'],
   GatewayReceipt: ['delivery-receipt'], GatewayRetryRequest: ['delivery-receipt'],
   TechNoteRevision: ['tech-note', 'operational-note'], TransferBasis: ['transfer-governance'], ProcessingAgreement: ['transfer-governance'], Transfer: ['transfer-governance', 'patient-match'],
-  Report: ['report-head'], ReportDraft: ['private-draft', 'report-evidence'], ReportVersion: ['report-version', 'report-evidence'], Order: ['order', 'received-order', 'order-indication', 'exam-clinical-info', 'order-exam-component', 'patient-match', 'chart-incorporation'],
+  Report: ['report-head'], ReportDraft: ['private-draft', 'report-evidence'],
+  // W5-API (O4 R1): the receipt of one Related Report insertion into the owner's draft - a delivery receipt of that fixed
+  // request, bound to the Source version and the draft revision it wrote (no text of either).
+  ReportDraftInsertReceipt: ['delivery-receipt', 'report-evidence'],
+  ReportVersion: ['report-version', 'report-evidence'], Order: ['order', 'received-order', 'order-indication', 'exam-clinical-info', 'order-exam-component', 'patient-match', 'chart-incorporation'],
   UserFilterCollection: ['preferences'], SharedFilterLibrary: ['preferences'], UserFilter: ['preferences'], ReadingTemplate: ['reading-template'],
   AuditLog: ['access-audit'], ViewerItem: ['measurement', 'key-image'], ViewerRevision: ['measurement', 'key-image'], ManualSr: ['manual-sr'],
   ViewerStorageBudget: ['system-operation'], ViewerRequest: ['delivery-receipt'], Finding: ['finding'], FindingRevision: ['finding'],

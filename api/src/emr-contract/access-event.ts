@@ -113,7 +113,8 @@ function surfaceKindsOf(surface: string): readonly RecordKind[] {
   return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] :
     Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface) ? INTERNAL_SURFACES[surface].kinds : routeContract(surface).kinds;
 }
-function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean): AccessTarget[] {
+function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean,
+    surface?: string): AccessTarget[] {
   if (!Array.isArray(input)) throw new Error('Actual returned target set required');
   return input.map((target, index) => {
     const t = object(target, ['kind', 'patientLinkSnapshot', 'studyId', 'recordId', 'versionId']);
@@ -129,10 +130,11 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
     if (facts.some(f => f.status === 'not-applicable' && (!NON_RECORD_TARGETS.includes(kind) || f.reason !== 'non-record-target')))
       throw new Error('Patient-bearing record facts cannot be waived');
-    // The existing private draft is identified by its (study, author) resource
-    // and revision even when no patient-link row exists. Keep that fact unknown
-    // rather than inventing a patient link or blocking ordinary draft work.
-    const required = kind === 'private-draft' ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
+    // Native drafts and the approved Source read by a W5 insertion have persisted
+    // study/record/version identities but no patient-link row. Preserve that
+    // unknown fact on these existing boundaries; never invent a patient link.
+    const nativeRecord = kind === 'private-draft' || (surface === 'PUT studies/:uid/report' && kind === 'report-version');
+    const required = nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
     if (!failure && required.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
     return parsed;
   });
@@ -179,7 +181,7 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
       (action === 'auth-refused' && executor !== 'unauthenticated') ||
       (cause === 'service-job' && executor !== 'service')) throw new Error('Unresolved or inconsistent actor context');
   const context = workContext(v.context, cause, action === 'auth-refused');
-  const targets = parseTargets(v.targets, surfaceKinds, manifest, failure);
+  const targets = parseTargets(v.targets, surfaceKinds, manifest, failure, surface);
   const auditLinkId = string(v.auditLinkId);
   if (!AUDIT_LINK.test(auditLinkId)) throw new Error('Invalid audit link ID');
   const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);

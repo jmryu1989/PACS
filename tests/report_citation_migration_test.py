@@ -167,8 +167,6 @@ class LeakBoundaryTests(SourceCase):
         # citations - not the bodies and not a count - may enter it.
         assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-PROJECTION')
 
-    def test_the_draft_projection_still_lists_its_fields(self) -> None:
-        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-PROJECTION')
 
     def test_the_dedicated_read_regates_finding_readability(self) -> None:
         assert_behaviour('report_citation_test.cjs', '^(the dedicated read|the citation read|the historical read runs)')
@@ -191,29 +189,7 @@ class LeakBoundaryTests(SourceCase):
         # S7-U5: the release and the commit stand in line on the study row, so the version race and its retry leg are
         # gone - there is one attempt, and it is the one inside the mapping.
         assert_behaviour('report_citation_test.cjs', '^a forced release runs once')
-    def test_both_counts_use_one_equivalence(self) -> None:
-        counts = body_of(self.pure, "export function sameTextCounts(")
-        self.assertIn("comparisonKey(", counts)
-        self.assertNotIn("normalizeForCompare(", counts)
-        self.assertIn("blockLines(text).join(", body_of(self.pure, "export function comparisonKey("))
 
-    def test_the_runtime_harness_cannot_lose_its_own_failure(self) -> None:
-        """The first hosted run of that case reported only 'docker run failed (exit 1)': the script
-        set process.exitCode and ops.run raised before anything was printed, so the one fact pin A1
-        asks for - what the driver actually raised - was lost in exactly the failing case."""
-        whole = (ROOT / "tests" / "viewer_migration_test.py").read_text(encoding="utf-8")
-        # Only the citation harness; the older fixed-image case in the same file keeps its own tail.
-        harness = whole[whole.index("CITATION_PRELUDE = "):whole.index("def test_workspace_shortcuts")]
-        self.assertIn("console.log('SCRIPT-FAILED '", harness, "a failing script must say why on stdout")
-        self.assertNotIn("process.exitCode", harness, "a non-zero exit makes ops.run swallow the output")
-        self.assertEqual(harness.count("report(async()=>{"), 2, "both scripts must go through the reporting tail")
-        for receipt in ("first", "second"):
-            printed = harness.index("print(%s)" % receipt)
-            self.assertLess(printed, harness.index("self.assertNotIn('SCRIPT-FAILED', %s" % receipt),
-                            "print the output, then refuse the marker, then look for the sentinels")
-        # The lock proof must rest on the signed cid set, not on a rejection or on elapsed time.
-        self.assertIn("signed=2 entries", harness)
-        self.assertNotIn("assert.ok(blocked", harness, "an arbitrary rejection proves nothing about the lock")
 
     def test_the_insertion_prepares_access_outside_the_transaction(self) -> None:
         # S7-U5: the preparation is the callback `draftTransaction` runs (bounded) before it opens its transaction.

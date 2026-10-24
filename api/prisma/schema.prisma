@@ -386,6 +386,43 @@ model ReportDraft {
   @@index([uid])
 }
 
+/// W5 Related Report 삽입의 **영수증** (O4 R1, D1423). 다른 판독문의 승인본 원문을 내 초안 한 칸 끝에 넣는 명시 삽입
+/// (`PUT /api/studies/:uid/report`의 `relatedInsert`) 한 건이 한 행이다. 답을 못 받은 삽입을 같은 ID로 다시 보내도 두 번
+/// 들어가지 않고, 같은 ID에 다른 요청이 오면 거절하기 위한 멱등 표식이다.
+///
+/// 초안 행(`ReportDraft`)의 칸이나 감사로그(`AuditLog`)를 쓰지 않는 이유: 초안은 비우기·버리기·확정·강제 해제·세대 교체로
+/// 사라지거나 다시 쓰이지만, "이 삽입은 이미 적용됐다"는 사실은 그 뒤에도 남아야 다시 넣지 않는다. 감사 통로는 기관 단위
+/// 읽기라 개인 초안의 증언을 실을 자리가 아니다.
+///
+/// 원문·환자 이름·삽입 문구는 싣지 않는다 — 요청과 제안의 SHA-256(`requestHash`·`proposalHash`)과 대조에 필요한 식별·경계만
+/// 둔다. state: refused(아직 적용되지 않았음을 잠금 아래 확인하고 남긴 거절; 같은 경계에서 다시 시도하거나 취소할 수 있다) →
+/// applied(초안 저장과 같은 트랜잭션) 또는 discarded(취소 표식). applied·discarded는 끝이다: 행의 수정·삭제·TRUNCATE는
+/// migration의 trigger가 모든 역할에 거절한다. 초안·검사·판에 삭제 연쇄 FK를 두지 않는다 — 검사 삭제·초안 비움이 표식을
+/// 지우지 않는다. 보존 기한·정리 작업은 이 단위에 없다(법정 보존기간의 새 판정이 아니다).
+model ReportDraftInsertReceipt {
+  insertRequestId   String   @id @db.Uuid
+  targetUid         String
+  ownerInstitution  String
+  ownerSub          String
+  ownerAuthor       String
+  requestHash       String   @db.Char(64)
+  proposalHash      String   @db.Char(64)
+  expectedEpoch     String   @db.Uuid
+  expectedRevision  Int
+  sourceUid         String
+  sourceVersion     Int
+  targetBaseVersion Int
+  section           String
+  state             String
+  appliedRevision   Int?
+  reason            String?
+  receiptRevision   Int      @default(1)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([targetUid, ownerInstitution, ownerSub, ownerAuthor])
+}
+
 /// 판독문의 **역사**. 추가만 하고 고치거나 지우지 않는다(append-only).
 ///
 /// 왜 필요한가: 판독문은 의무기록이다. "누가 언제 무엇이라고 말했는가"가 나중에

@@ -631,9 +631,9 @@ class PgLedgerRetentionLive(PgLedgerFixture):
         encoded = json.dumps(body)
         self.sql(f"SELECT emr_access.release_hold('{hold}','{encoded}');", 'kin_runtime')
         self.assertEqual(self.sql(f"SELECT emr_access.expire_failure('{held}');", 'kin_emr_retention').stdout.strip(), 't')
-        self.assertEqual(self.sql('SELECT bool_and(physical_disposal_pending) FROM emr_access.disposal_fact;').stdout.strip(), 't')
+        self.assertEqual(self.sql(f"SELECT count(*) FROM emr_access.disposal_fact WHERE failure_id IN ('{expired}','{held}') AND basis='retention-elapsed' AND disposed_at IS NOT NULL;").stdout.strip(), '2')
         print(json.dumps({'status': 'PASS', 'boundary': 'actual SQL failure expiry, hold and duplicate spool import',
-            'red': 'early-expiry mutant accepts an unexpired failure', 'physical_disposal': 'NOT_VERIFIED_H_OWNER_REQUIRED'}))
+            'red': 'early-expiry mutant accepts an unexpired failure', 'disposal': 'expired failure rows deleted and disposal facts retained'}))
 
 
 class PgLedgerRetentionAdapterLive(PgLedgerFixture):

@@ -67,7 +67,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET studies/:uid/tech-note', 'GET studies/:uid/tech-note/history'] },
   { kinds: ['tech-note', 'operational-note'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/tech-note'] },
-  { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view', 'background-fetch'],
+  { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view', 'background-fetch'],
     routes: ['PUT studies/:uid/report'] },
   { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view'],
     routes: ['DELETE studies/:uid/draft', 'DELETE studies/:uid/draft/force'] },

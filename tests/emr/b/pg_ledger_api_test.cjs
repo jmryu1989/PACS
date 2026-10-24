@@ -292,7 +292,7 @@ async function clinicalHttp() {
       {provide:EMR_BACKGROUND_WORK,useValue:runtime.background.work},{provide:APP_GUARD,useClass:AuthGuard},
       // S9-U4b (#181): AuthGuard also injects the archive-grant service; the draft routes never reach it.
       {provide:StudyTransferLocalService,useValue:{}}]})(ClinicalFixture);
-    app=await NestFactory.create(ClinicalFixture,{logger:false});app.setGlobalPrefix('api');await app.listen(0,'127.0.0.1');
+    app=await NestFactory.create(ClinicalFixture,{logger:['error']});app.setGlobalPrefix('api');await app.listen(0,'127.0.0.1');
     const origin=await app.getUrl();
     const headers={authorization:'Bearer '+token,'content-type':'application/json','x-real-ip':'192.0.2.22'};
     const member='synthetic-http-member';
@@ -328,9 +328,9 @@ async function clinicalHttp() {
     assert.deepEqual(JSON.parse(proxyRow.payload).trustedProxyIp.value,{address:'192.0.2.22',source:'trusted-proxy'});
     const red=await witness.studyState.create({data:{uid:'SYNTHETIC-http-red',institutionId:institution,ss:'Verified'}});
     const green=await witness.studyState.create({data:{uid:'SYNTHETIC-http-green',institutionId:institution,ss:'Verified'}});
-    const send=async(method,uid,body,proxyObserved=true,onBody)=>{
+    const send=async(method,uid,body,proxyObserved=true,onBody,query='')=>{
       const requestHeaders={...headers};if(!proxyObserved)delete requestHeaders['x-real-ip'];
-      const response=await fetch(origin+'/api/studies/'+uid+(method==='GET'?'/draft':'/report'),
+      const response=await fetch(origin+'/api/studies/'+uid+(method==='GET'?'/draft'+query:'/report'),
         {method,headers:requestHeaders,body:body===undefined?undefined:JSON.stringify(body)});
       let text;
       if(onBody){
@@ -372,8 +372,94 @@ async function clinicalHttp() {
     assert.equal(waiting,true,'view entry reaches actual PG lock');assert.equal(published,false,'no protected HTTP body before view record commit');
     release();await blocker;blocker=null;
     const read=await reading;assert.equal(read.status,200,read.text);assert.equal(read.body.snapshot.findings,content);
-    const viewed=await entries(green.uid,'provide-prepared');assert.equal(viewed.length,1);
-    assert.deepEqual(JSON.parse(viewed[0].payload).trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    const viewed=(await entries(green.uid,'provide-prepared')).map(row=>JSON.parse(row.payload));assert.equal(viewed.length,2);
+    assert.deepEqual(viewed.find(event=>event.surface==='GET studies/:uid/draft').trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    // D1813 -> missing clinical history / unrecorded disclosure -> real W5 HTTP
+    // with separate PG observations. Each of the three required records has an omission control.
+    let relatedSeq=0;
+    const relatedFixture=async()=>{
+      const uid='2.25.710'+(++relatedSeq), sourceUid='2.25.720'+relatedSeq;
+      const state=await witness.studyState.create({data:{uid,institutionId:institution,ss:'Verified'}});
+      await witness.studyState.create({data:{uid:sourceUid,institutionId:institution,ss:'Verified',rs:'A'}});
+      const sourceText='SYNTHETIC source approved '+relatedSeq, seed='SYNTHETIC target '+relatedSeq;
+      await witness.report.create({data:{uid:sourceUid,version:1,findings:sourceText,conclusion:'',recommendation:''}});
+      await witness.reportVersion.create({data:{uid:sourceUid,version:1,action:'approve',author,
+        findings:sourceText,conclusion:'',recommendation:''}});
+      await witness.reportDraft.create({data:{uid,author,revision:1,present:true,findings:seed,conclusion:'',recommendation:'',baseVersion:0}});
+      const text='\n'+sourceText;
+      const body={...input(state.draftEpoch+':1',seed+text),relatedInsert:{intent:'apply',insertRequestId:randomUUID(),
+        source:{uid:sourceUid,version:1,action:'approve',parts:[{field:'findings',start:0,end:sourceText.length}]},
+        targetUid:uid,targetBaseVersion:0,section:'findings',position:'end',offset:seed.length,text,
+        selectionSeq:1,contentRevision:1,sourceGeneration:1,seedKind:'private-draft'}};
+      return {uid,sourceUid,body,seed};
+    };
+    const w5Events=async f=>(await witness.$queryRaw`SELECT payload FROM emr_access.access_entry
+      WHERE payload::jsonb->'targets'->0->'studyId'->>'value' IN (${f.uid},${f.sourceUid})`).map(row=>JSON.parse(row.payload));
+    const isRecord={save:e=>e.action==='draft-save',draftView:e=>e.action==='provide-prepared'&&e.targets[0].kind==='private-draft',
+      sourceView:e=>e.action==='provide-prepared'&&e.targets[0].kind==='report-version'};
+    const assertW5=async(f,kind)=>assert.ok((await w5Events(f)).some(isRecord[kind]),'D1813 requires '+kind);
+    for(const kind of Object.keys(isRecord)){
+      const f=await relatedFixture();
+      runtime.ledger.appendInTransaction=async function(tx,operation,reference){
+        if(isRecord[kind](operation.event))return {provisional:true};
+        return original.call(this,tx,operation,reference);
+      };
+      try{
+        const answer=await send('PUT',f.uid,f.body);assert.equal(answer.status,200,answer.text);
+        await assert.rejects(assertW5(f,kind),new RegExp('D1813 requires '+kind));
+      }finally{runtime.ledger.appendInTransaction=original;}
+      // Fail the actual PG transaction at this record; neither draft nor receipt may commit.
+      const denied=await relatedFixture();
+      runtime.ledger.appendInTransaction=async function(tx,operation,reference){
+        if(isRecord[kind](operation.event))await tx.$executeRawUnsafe('SELECT 1/0');
+        return original.call(this,tx,operation,reference);
+      };
+      try{
+        const answer=await send('PUT',denied.uid,denied.body);assert.ok(answer.status>=400,answer.text);
+        assert.equal(answer.text.includes(denied.seed),false);
+        assert.equal((await witness.reportDraft.findUnique({where:{uid_author:{uid:denied.uid,author}}})).findings,denied.seed);
+        assert.equal(await witness.reportDraftInsertReceipt.count({where:{insertRequestId:denied.body.relatedInsert.insertRequestId}}),0);
+        assert.equal((await w5Events(denied)).filter(e=>e.result==='prepared'||e.result==='succeeded').length,0);
+      }finally{runtime.ledger.appendInTransaction=original;}
+    }
+    const related=await relatedFixture();
+    const applied=await send('PUT',related.uid,related.body);assert.equal(applied.status,200,applied.text);
+    for(const kind of Object.keys(isRecord))await assertW5(related,kind);
+    const appliedEvents=await w5Events(related);
+    assert.equal(appliedEvents.length,4,'save intent/result, draft view and Source view only');
+    for(const event of appliedEvents){
+      assert.equal(event.userId.value.subject,sub);assert.equal(event.userId.value.issuer,issuer);
+      assert.deepEqual(event.rolesAtTime.value,['radiologist']);assert.equal(event.actingInstitution.value,institution);
+      assert.deepEqual(event.trustedProxyIp.value,{address:'192.0.2.22',source:'trusted-proxy'});
+    }
+    const sourceEvent=appliedEvents.find(isRecord.sourceView);
+    assert.equal(sourceEvent.targets[0].studyId.value,related.sourceUid);assert.equal(sourceEvent.targets[0].versionId.value,'1');
+    const replay=await send('PUT',related.uid,related.body);assert.equal(replay.status,200,replay.text);
+    const checked=await send('GET',related.uid,undefined,true,undefined,'?insertRequestId='+related.body.relatedInsert.insertRequestId);
+    assert.equal(checked.body.relatedInsert.result,'applied');
+    const cannotDiscard=await send('PUT',related.uid,{...related.body,relatedInsert:{...related.body.relatedInsert,intent:'discard',expectedReceiptRevision:1}});
+    assert.equal(cannotDiscard.status,409);assert.equal(cannotDiscard.body.snapshot.findings,applied.body.snapshot.findings);
+    assert.equal((await w5Events(related)).filter(isRecord.draftView).length,4);
+    assert.equal((await w5Events(related)).filter(isRecord.sourceView).length,1,'replay/Check/refusal read no Source');
+    const held=await relatedFixture();
+    await witness.studyState.update({where:{uid:held.uid},data:{holder:'synthetic-other-doctor',heldAt:new Date()}});
+    const heldAnswer=await send('PUT',held.uid,held.body);assert.equal(heldAnswer.status,409,heldAnswer.text);
+    assert.equal(heldAnswer.body.snapshot.findings,held.seed);
+    assert.equal((await w5Events(held)).length,1,'a pre-Source refusal records only its returned draft');
+    // A ledger lock holds both replay and refusal HTTP bytes until their view commits.
+    for(const f of [related,held]){
+      let acquired;const locked=new Promise(resolve=>acquired=resolve),unlock=new Promise(resolve=>release=resolve);
+      blocker=witness.$transaction(async tx=>{await tx.$executeRawUnsafe('LOCK TABLE emr_access.access_entry IN ACCESS EXCLUSIVE MODE');acquired();await unlock;},{timeout:15000});
+      await locked;let published=false;
+      const pending=send('PUT',f.uid,f.body,true,()=>{published=true;});
+      let waiting=false;
+      for(let n=0;n<100;n++){
+        const [row]=await witness.$queryRaw`SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename='kin_runtime' AND wait_event_type='Lock'`;
+        if(row.n){waiting=true;break;}await new Promise(resolve=>setTimeout(resolve,10));
+      }
+      assert.equal(waiting,true);assert.equal(published,false,'W5 draft bytes wait for the view commit');
+      release();await blocker;blocker=null;await pending;
+    }
     await witness.$executeRawUnsafe('REVOKE EXECUTE ON FUNCTION '+appendSignature+' FROM kin_runtime');restored=false;
     const deniedRights=await changeRights({enabled:false});
     assert.equal(deniedRights.status>=400,true,deniedRights.text);
@@ -383,9 +469,14 @@ async function clinicalHttp() {
     assert.equal(refused.status>=400,true);assert.equal(refused.text.includes('SYNTHETIC refused draft'),false);
     assert.equal((await witness.reportDraft.findUnique({where:{uid_author:{uid:green.uid,author}}})).findings,content);
     const noView=await send('GET',green.uid);assert.equal(noView.status>=400,true);assert.equal(noView.text.includes(content),false);
+    for(const f of [related,held]){
+      const denied=await send('PUT',f.uid,f.body);assert.ok(denied.status>=400);assert.equal(denied.text.includes(f.seed),false);
+    }
     console.log(JSON.stringify({status:'PASS',boundary:'real Nest PacsController/AuthGuard + PG',
       cases:['omission mutant red','atomic draft write green','view body waits for PG commit','failed ledger rolls back save',
-        'failed ledger refuses protected view','admin HTTP records observed request facts','failed ledger rolls back admin HTTP change']}));
+        'failed ledger refuses protected view','admin HTTP records observed request facts','failed ledger rolls back admin HTTP change',
+        'D1813 save/draft-view/source-view omissions red; all green','D1813 each record failure rolls back draft and receipt',
+        'W5 apply/replay/Check/refusal identity and exact records','W5 replay/refusal bytes wait for commit and fail closed']}));
   } finally {
     release?.();if(blocker)await blocker;
     if(!restored)await witness.$executeRawUnsafe('GRANT EXECUTE ON FUNCTION '+appendSignature+' TO kin_runtime');

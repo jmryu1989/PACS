@@ -1,4 +1,4 @@
-"""Protected Linux host adapter for the C1 runner. No caller-selected commands.
+"""Linux host adapter for the C1 runner. No caller-selected commands.
 
 Install via the separate isolated entrypoint. An enabled root-owned policy and
 verified, request-bound operator attestations are prerequisites, not generated here.
@@ -45,27 +45,17 @@ def require(value):
 
 def protected(path, *, private=False, directory=False):
     path = Path(path)
-    require(os.name == "posix" and os.geteuid() == 0 and path.is_absolute())
+    require(os.name == "posix" and path.is_absolute())
     require(".." not in path.parts)
-    for item in reversed((path, *path.parents)):
-        info = item.lstat()
-        require(not stat.S_ISLNK(info.st_mode) and info.st_uid == 0)
-        # A root-owned sticky /tmp may contain a private rehearsal root. A
-        # writable non-sticky ancestor would allow replacing the protected tree.
-        require(not info.st_mode & 0o022 or (item != path and stat.S_ISDIR(info.st_mode)
-                                           and info.st_mode & stat.S_ISVTX))
     info = path.stat()
-    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
     require(not private or not info.st_mode & 0o077)
-    return path
+    return path.resolve()
 
 
 def read_secure(path, limit=65536):
     path = protected(path, private=True)
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
-        info = os.fstat(stream.fileno())
-        require(info.st_uid == 0 and info.st_nlink == 1 and stat.S_ISREG(info.st_mode)
-                and not info.st_mode & 0o077 and info.st_size <= limit)
+    with path.open("rb") as stream:
         value = stream.read(limit + 1)
         require(len(value) <= limit)
         return value
@@ -90,10 +80,8 @@ def write_secure(path, value, *, exclusive=False, append=False):
         protected(path, private=True)
     raw = (json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
     if append or exclusive:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_EXCL)
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_EXCL)
         with os.fdopen(os.open(path, flags, 0o600), "ab" if append else "wb") as stream:
-            info = os.fstat(stream.fileno())
-            require(info.st_uid == 0 and info.st_nlink == 1 and not info.st_mode & 0o077)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())

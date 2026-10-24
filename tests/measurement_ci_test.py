@@ -165,7 +165,7 @@ class MeasurementCiTests(unittest.TestCase):
         module = ast.parse((ci.ROOT/'tests/emr/b/live.py').read_text(encoding='utf-8'))
         cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'EmrBLedgerLive')
         self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
-                         declaration['cases']['live']['B1'])
+                         declaration['cases']['live']['B2R'])
         self.assertEqual([row['job'] for row in self.catalog.profile_bindings()['emr-b']], ['emr-b'])
         workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
         self.assertEqual(list(workflow['jobs']), ['emr-b'])

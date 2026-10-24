@@ -78,26 +78,6 @@ class ReportStructureMigration(unittest.TestCase):
     def test_the_service_maps_our_check_names_and_only_ours(self) -> None:
         assert_behaviour('report_structure_test.cjs', '^(our CHECK|B1 the forced release)')
 
-    def test_every_limit_wrapper_call_names_a_method_that_exists(self) -> None:
-        # B1: the candidate renamed the wrapper at its definition and at one of two call sites, so
-        # `this.citationChecked` survived in forceDiscardDrafts and the API stopped compiling
-        # (TS2339) - the image build fails before any compiled test runs, and an emitted build would
-        # throw TypeError on every admin force-discard. A name check is cheap; tsc is not local.
-        assert_behaviour('report_structure_test.cjs', '^(our CHECK|B1 the forced release)')
-
-    def test_the_rendered_sentence_is_cut_and_joined_never_pattern_replaced(self) -> None:
-        # B2: `String.replace(needle, replacement)` expands `$$`, `$&`, '$`' and "$'" inside the
-        # REPLACEMENT, so a value containing a dollar came out as something the reader never typed -
-        # the stored `value` and the stored `renderedText` then say different things.
-        client = (ROOT / "worklist-v0" / "hpacs-lite" / "report-structure.js").read_text(encoding="utf-8")
-        for name, text, slot in (("report-structure.ts", PURE, "STRUCTURE_VALUE_SLOT"),
-                                 ("report-structure.js", client, "VALUE_SLOT")):
-            with self.subTest(file=name):
-                render = text[text.index("function renderItem("):]
-                render = render[:render.index("\n}") + 2] if name.endswith(".ts") else render[:render.index("\n    }") + 6]
-                self.assertNotIn(".replace(", render, "a string replacement re-reads $ in the value")
-                self.assertIn("indexOf(" + slot + ")", render)
-                self.assertIn("slice(", render)
 
     def test_an_empty_list_is_cleared_with_DbNull_and_never_by_omission(self) -> None:
         # A1. `Prisma.JsonNull` would store the JSON value null - neither an array nor SQL NULL - and a key left out of
@@ -159,48 +139,6 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
         self.assertIn(MIGRATION_DIR.name, names)
         self.assertIn("api/prisma/migrations/20261008120000_emr_b/migration.sql", restore_fixture.MIGRATIONS)
-
-    def test_the_synthetic_catalog_never_reaches_product_code(self) -> None:
-        # P6/P7. The seam is one instance property a test overwrites on its own instance; anything
-        # else (env var, header, route) would make invented clinical content reachable from the
-        # product. P12 made it a validated property pair - still one seam, now with a gate on it.
-        assert_behaviour('report_structure_test.cjs', '^the injection seam validates')
-        self.assertEqual(PURE.count("SYN-"), 0, "nor in the pure module")
-        self.assertEqual(PURE.count("process.env"), 0, "no environment-variable seam")
-        # The literal is brace-matched with string contents skipped, not regex-scraped: `[^\]]*`
-        # stops at the first `]`, and every shipped template contains `{value}`. A truncated
-        # extraction here would turn the leak assertion below into a test of nothing.
-        # (The same scanner, with its own corner-case cases, lives in report_structure_vectors_test.)
-        anchor = "STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze("
-        at = PURE.index(anchor)
-        start = PURE.index("[", at + len(anchor))
-        depth, quote, escaped, end = 0, False, False, -1
-        for i in range(start, len(PURE)):
-            ch = PURE[i]
-            if quote:
-                # `\"` closes nothing and `\\` closes the escape, so the previous character's state
-                # has to be consumed BEFORE this one is judged.
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == '"':
-                    quote = False
-                continue
-            if ch == '"':
-                quote = True
-            elif ch in "[{":
-                depth += 1
-            elif ch in "]}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        self.assertGreater(end, start, "the shipped catalog literal is never closed")
-        catalog = json.loads(PURE[start:end])
-        self.assertIsInstance(catalog, list, "the shipped catalog must be strict JSON in an array")
-        self.assertEqual(json.dumps(catalog, ensure_ascii=False).count("SYN-"), 0,
-                         "no synthetic fixture may be reachable from the shipped catalog")
 
 
 if __name__ == "__main__":

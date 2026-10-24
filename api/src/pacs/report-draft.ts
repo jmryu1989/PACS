@@ -16,6 +16,10 @@ import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsAudit } from './audit';
 import type { PacsReportEvidence } from './report-evidence';
+import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequestHash, relatedProposalHash, relatedInsertionText,
+  relatedOwnReceipt, relatedSameBinding, relatedResult, relatedInsertInvalid, relatedInsertRefusal, relatedInsertIdReused }
+  from '../report-related-insert';
+import type { RelatedInsertRefusal } from '../report-related-insert';
 import type { AccessAction, AccessEventV1 } from '../emr-contract/access-event';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
 
@@ -25,7 +29,8 @@ export interface DraftRequestFacts {
   requestId: string;
 }
 type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction };
-type RecordDraft = (state: any, value: any) => Promise<void>;
+type RecordDraft = (state: any, value: any, action?: AccessAction,
+  source?: { uid: string; version: number }) => Promise<void>;
 
 export class PacsReportDraft {
   constructor(
@@ -41,11 +46,12 @@ export class PacsReportDraft {
       options: { maxWait: number; timeout: number }): Promise<T> {
     const work = this.ledger.begin();
     try {
-      const { facts, surface, action } = observation;
+      const { facts, surface } = observation;
       const identity = { issuer: facts.issuer, subject: c.sub,
         id: await work.resolveRequestIdentity(facts.issuer, c.sub) };
-      return await work.transactionWithRecords((tx, record) => body(tx, async (state, value) => {
-        const resource = JSON.stringify([uid, c.actor]);
+      return await work.transactionWithRecords((tx, record) => body(tx, async (state, value, action = observation.action, source) => {
+        const resource = source ? JSON.stringify([source.uid, source.version]) : JSON.stringify([uid, c.actor]);
+        const revision = source ? String(source.version) : value.revision;
         const event: AccessEventV1 = {
           formatVersion: 1, surface, eventId: randomUUID(),
           userId: { status: 'known', value: identity }, rolesAtTime: { status: 'known', value: c.roles },
@@ -54,18 +60,23 @@ export class PacsReportDraft {
           occurredAt: new Date().toISOString(),
           trustedProxyIp: facts.ip ? { status: 'known', value: facts.ip } : { status: 'unresolved', reason: 'not-observed' },
           cause: 'user-view', context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null },
-          executor: 'member', targets: [{ kind: 'private-draft',
+          executor: 'member', targets: [{ kind: source ? 'report-version' : 'private-draft',
             patientLinkSnapshot: { status: 'unresolved', reason: 'not-resolved' },
-            studyId: { status: 'known', value: uid }, recordId: { status: 'known', value: resource },
-            versionId: { status: 'known', value: value.revision } }],
+            studyId: { status: 'known', value: source?.uid ?? uid }, recordId: { status: 'known', value: resource },
+            versionId: { status: 'known', value: revision } }],
           action, result: action === 'provide-prepared' ? 'prepared' : 'succeeded',
           requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null,
         };
         // Writes reach here in their business transaction; views supply the
         // captured read snapshot. Neither response leaves before this commit.
-        await record(event, async () => ({ kind: 'ReportDraft', id: resource, version: value.revision }));
+        await record(event, async () => ({ kind: source ? 'ReportVersion' : 'ReportDraft', id: resource, version: revision }));
       }), options);
     } finally { work.end(); }
+  }
+
+  private relatedDraftView(outcome: any) {
+    const value = outcome?.body ?? outcome?.refusal?.getResponse?.();
+    return value?.snapshot ? value : null;
   }
 
   /**
@@ -123,16 +134,23 @@ export class PacsReportDraft {
    *  4. 세대(draftEpoch)가 요청이 본 것과 다르면 충돌이다. 내 행의 revision 대조는 `ownDraft`가, 조건부 쓰기와 revision
    *     전진은 `storeDraft`가 한다. 감사 행은 같은 트랜잭션에서 쓴다 — 변경과 감사는 함께 남거나 함께 없다.
    * 잠금 순서는 세션 → 검사 → (확정의 Report) → 초안 행으로 하나다. 대기는 유한하다: 연결 4초, 잠금 3초, 트랜잭션 8초.
+   *
+   * `related`는 W5 관련 판독문 삽입(O4 R1)만 넘긴다. 그 요청은 Source 검사 행도 함께 잡는다(FOR SHARE: 그 판의 확정·초기화가
+   * 판정 중에 끼어들지 못하고, 같은 Source를 쓰는 다른 삽입은 막지 않는다). 두 행은 중복 없이 UID의 코드 단위 순서(DICOM UID에서는
+   * C 순서)로 잠그므로 A←B와 B←A가 같은 줄에 선다. 그리고 세대 대조를 여기서 하지 않는다 — 이미 적용된 같은 요청은 세대·revision이
+   * 바뀐 뒤에도 영수증으로 답해야 하므로, 영수증 판정이 CAS 앞에 있고 새 적용만 CAS를 본다(그 판정은 putReport에 있다).
+   * 일반 호출자는 `related` 없이 이전과 같은 질의·순서·거절을 그대로 지난다.
    */
   async draftTransaction<T>(uid: string, c: Caller, session: string | null, epoch: string,
       prepare: () => Promise<unknown>,
       work: (tx: Prisma.TransactionClient, state: any,
-        audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>) => Promise<T>,
-      observation?: DraftObservation): Promise<T> {
+        audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>, record?: RecordDraft) => Promise<T>,
+      related?: { source: string | null }, observation?: DraftObservation): Promise<T> {
     const me = inst(c);
     // WORKLIST-SPLIT-UID: the request's own source observation is part of the same bounded preparation, outside the
     // transaction; no Orthanc read ever happens under the study lock.
     await draftBounded((async () => { await prepare(); await this.studyAccess.prepareSourceIdentity(c, [uid]); })());
+    let rolledBackView: { state: any; value: any } | null = null;
     const perform = async (tx: Prisma.TransactionClient, record?: RecordDraft) => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       if (session !== null) {
@@ -141,21 +159,42 @@ export class PacsReportDraft {
           throw new UnauthorizedException({ code: 'AUTH_SESSION_ENDED', message: '인증 세션이 종료되어 판독문 초안을 저장하지 않았습니다' });
       }
       await this.studyAccess.require(c,[uid],tx);
+      const source = related?.source ?? null;
+      if (source !== null && source < uid) await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR SHARE`;
       const states = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       const state = states[0];
+      if (source !== null && source > uid) await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR SHARE`;
       if (!state || !this.access.visible(state, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
       // Every draft change, clear, discard, forced discard and commit of a UID two patient resources answer is refused
       // before any write: no Verified or emergency state makes either patient's header the report's patient.
       this.studyAccess.assertUnsplitSource(c, uid);
-      if (state.draftEpoch !== epoch) throw draftConflict();
+      if (!related && state.draftEpoch !== epoch) throw draftConflict();
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
-      const value = await work(tx, state, audit);
-      if (record) await record(state, value);
+      let value: T;
+      try { value = await work(tx, state, audit, record); }
+      catch (error) {
+        const view = related && this.relatedDraftView({ refusal: error });
+        if (view) rolledBackView = { state, value: view };
+        throw error;
+      }
+      if (record) {
+        if (!related) await record(state, value);
+        const view = related ? this.relatedDraftView(value) : value;
+        if (view) await record(state, view, 'provide-prepared');
+      }
       return value;
     };
     const options = { maxWait: 4000, timeout: 8000 };
     return (observation ? this.recorded(uid, c, observation, perform, options)
-      : this.prisma.$transaction(tx => perform(tx), options)).catch(draftTransactionError);
+      : this.prisma.$transaction(tx => perform(tx), options)).catch(async error => {
+        // A receipt race can roll back the business transaction but still return
+        // its captured draft. Commit that view before sending the refusal.
+        if (rolledBackView && observation) await this.recorded(uid, c,
+          { ...observation, action: 'provide-prepared' }, async (_tx, record) => {
+            await record(rolledBackView.state, rolledBackView.value);
+          }, options);
+        return draftTransactionError(error);
+      });
   }
 
   /** 내 초안 행을 잠그고 요청이 본 revision과 대조한다. 행이 없으면 이 세대의 revision 0이다. */
@@ -198,10 +237,15 @@ export class PacsReportDraft {
   /**
    * 내 초안의 권위 있는 읽기(U5S-REQ-15, 17). 충돌이나 답을 받지 못한 저장 뒤에 화면이 무엇이 저장돼 있는지 확인하는
    * 자리다 — 검사 행의 세대와 내 행을 한 스냅숏에서 읽는다. 관문은 초안 쓰기와 같은 역할·기관·예비 판독 규칙이다.
+   *
+   * `insertRequestId`(W5 Check, O4 R1)가 오면 같은 스냅숏에서 그 삽입 영수증도 읽어 봉투에 `relatedInsert`로 싣는다. 쓰기는
+   * 없다 — 읽기가 거절·취소 행을 만들지 않는다. 관문은 지금 Target 개인 초안의 가독뿐이고 Source의 글·상세는 답하지 않는다.
+   * 영수증이 없으면 unknown, 남의 영수증이면 그 내용 없이 ID_REUSED다.
    */
-  async readDraft(uid: string, c: Caller, facts: DraftRequestFacts) {
+  async readDraft(uid: string, c: Caller, facts: DraftRequestFacts, insertRequestId?: string) {
     need(c.roles, 'radiologist', '판독문 초안 조회');
     const owner: DraftOwner = { institution: inst(c), sub: c.sub, author: c.actor };
+    const receiptId = insertRequestId === undefined ? null : relatedInsertId(insertRequestId);
     await this.studyAccess.prepare(c,[uid]);
     await this.studyAccess.prepareSourceIdentity(c,[uid]);
     const snapshot = await this.prisma.$transaction(async tx => {
@@ -211,8 +255,11 @@ export class PacsReportDraft {
       if (!canReadPreliminary(state, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
-      const value = draftEnvelope(uid, owner, state.draftEpoch, await this.access.myDraft(uid, c.actor, tx));
-      return { state, value };
+      const envelope = draftEnvelope(uid, owner, state.draftEpoch, await this.access.myDraft(uid, c.actor, tx));
+      if (receiptId === null) return { state, value: envelope };
+      const receipt = await tx.reportDraftInsertReceipt.findUnique({ where: { insertRequestId: receiptId } });
+      return { state, value: { ...envelope,
+        relatedInsert: relatedResult(receiptId, receipt, envelope, !receipt || relatedOwnReceipt(receipt, owner, uid), null) } };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
     // Preserve the existing repeatable read. The entry describes that captured
     // snapshot; no later fetch may substitute a different body after recording.
@@ -237,6 +284,192 @@ export class PacsReportDraft {
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
     const content = draftSnapshotInput(body);
+    if (body.relatedInsert !== undefined) {
+      /**
+       * W5 관련 판독문 삽입(O4 R1, D1423). 다른 검사의 승인본(approve/addendum) 원문 일부를 내 초안 Findings/Conclusion 한 칸 끝에
+       * 넣는 명시 삽입이며, 같은 PUT이 그 고정 요청 전체(본문 세 칸·기준 판·두 ID 목록)를 싣는다. 이 요청 하나가 영수증 한 행이다.
+       * 기존 인용(`insert`)·구조화(`structure`)와 한 요청에 섞지 않는다 — 어느 증언이 어느 글의 것인지 갈라지지 않게.
+       */
+      if (body.insert !== undefined || body.structure !== undefined) throw relatedInsertInvalid('relatedInsert');
+      const related = relatedInsertInput(body.relatedInsert, uid, content, expected);
+      const proposal = { ...content, ...relatedEvidenceIds(body) };
+      const asked = { requestHash: relatedRequestHash(related, owner, expected, proposal), proposalHash: relatedProposalHash(proposal),
+        expected, proposal };
+      const binding = { insertRequestId: related.insertRequestId, targetUid: uid, ownerInstitution: owner.institution,
+        ownerSub: owner.sub, ownerAuthor: owner.author, requestHash: asked.requestHash, proposalHash: asked.proposalHash,
+        expectedEpoch: expected.epoch, expectedRevision: expected.revision, sourceUid: related.source.uid,
+        sourceVersion: related.source.version, targetBaseVersion: related.targetBaseVersion, section: related.section };
+      /**
+       * 영수증만으로 끝나는 답: 같은 ID의 다른 요청(ID_REUSED)과 이미 끝난 영수증(applied·discarded)의 replay·취소 답. Source는 쓰지
+       * 않는다 — 과거 적용을 답하는 데 지금 Source를 다시 읽을 이유가 없고, Source의 원본 조회 실패·권한 상실·행 경합이 이미
+       * 적용된 삽입의 답을 막아서는 안 된다(O4 R1). 영수증이 없거나 refused면 null: 새 적용·재시도·취소 판정으로 간다.
+       */
+      const settled = (receipt: any, envelope: any) => {
+        if (!receipt) return null;
+        // 같은 ID의 다른 요청: 이 호출만 거절하고 그 행은 바꾸지도, 답하지도 않는다.
+        if (!relatedSameBinding(receipt, owner, uid, related, expected, asked.requestHash, asked.proposalHash))
+          return { refusal: relatedInsertIdReused() };
+        const view = relatedResult(related.insertRequestId, receipt, envelope, true, asked);
+        if (receipt.state === 'applied') {
+          if (related.intent === 'discard') return { refusal: relatedInsertRefusal('RELATED_INSERT_NOT_DISCARDABLE', envelope, view) };
+          // 정확한 replay: 쓰기·감사·revision 증가 없이 지금 봉투와 영수증. clear/discard/commit/force/세대 교체 뒤에도 다시 넣지 않는다.
+          return view.result === 'applied' ? { body: { ...envelope, relatedInsert: view } }
+            : { refusal: relatedInsertRefusal('RELATED_INSERT_SUPERSEDED', envelope, view) };
+        }
+        if (receipt.state === 'discarded')
+          return related.intent === 'discard' ? { body: { ...envelope, relatedInsert: view } }
+            : { refusal: relatedInsertRefusal('RELATED_INSERT_DISCARDED', envelope, view) };
+        return null;
+      };
+      /**
+       * 먼저 지금 Target의 개인 초안 읽기 관문(역할·기관·StudyAccess·예비 판독)과 owner 아래, 한 RepeatableRead 스냅숏에서 내 초안과
+       * 영수증을 읽어 끝난 영수증·ID_REUSED를 답한다. Source 준비도 Source 행 잠금도 없다. 쓰기가 없으므로 잠그지 않는다 — 이
+       * 스냅숏 뒤에 끝난 영수증은 아래 잠근 트랜잭션이 CAS 전에 다시 판정한다.
+       * WORKLIST-SPLIT-UID: Target의 원본 관찰은 트랜잭션 밖의 유한한 준비에 있고, 두 환자 자원이 답하는 Target이면 영수증을
+       * 읽기 전에 409 STUDY_IDENTITY_UNRESOLVED다 — 이미 적용·취소·거절된 영수증이 있어도 그 내용도 봉투도 답하지 않는다.
+       */
+      await draftBounded((async () => {
+        await this.studyAccess.prepare(c,[uid]);
+        await this.studyAccess.prepareSourceIdentity(c,[uid]);
+      })());
+      const early = await this.prisma.$transaction(async tx => {
+        const state = await this.access.gate(uid, c, tx);
+        if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
+        this.studyAccess.assertUnsplitSource(c, uid);
+        if (!canReadPreliminary(state, c))
+          throw new ForbiddenException(
+            `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+        const mine = await this.access.myDraft(uid, c.actor, tx);
+        const stored = await tx.reportDraftInsertReceipt.findUnique({ where: { insertRequestId: related.insertRequestId } });
+        return { state, outcome: settled(stored, draftEnvelope(uid, owner, state.draftEpoch, mine)) };
+      }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+      const earlyView = this.relatedDraftView(early.outcome);
+      if (earlyView) await this.recorded(uid, c,
+        { facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }, async (_tx, record) => {
+          await record(early.state, earlyView);
+        }, { maxWait: 2000, timeout: 5000 });
+      if (early.outcome?.refusal) throw early.outcome.refusal;
+      if (early.outcome) return early.outcome.body;
+      const outcome = await this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch,
+        async () => {
+          await this.studyAccess.prepare(c,[uid]);
+          // 취소는 Source를 읽지 않는다. 새 적용·refused 재시도만 Source의 현재 가독과 원본 관찰을 다시 요구한다(잠금 밖, 유한하게).
+          if (related.intent === 'apply') {
+            await this.studyAccess.prepare(c,[related.source.uid]);
+            await this.studyAccess.prepareSourceIdentity(c,[related.source.uid]);
+          }
+        }, async (tx, state, audit, record) => {
+        // 지금 Target 개인 초안의 가독이 영수증 판정보다 먼저다(replay도 지금 권한 아래에서만 답한다).
+        if (!canReadPreliminary(state, c))
+          throw new ForbiddenException(
+            `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+        // 잠금 순서의 나머지: 내 초안 행 → 영수증 행. 경쟁한 요청의 적용·취소는 이 잠금 뒤에 읽히므로 놓치지 않는다.
+        const drafts = await tx.$queryRaw<any[]>`
+          SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt"
+          FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
+        const row = drafts[0] ?? null;
+        const receipts = await tx.$queryRaw<any[]>`
+          SELECT * FROM "ReportDraftInsertReceipt" WHERE "insertRequestId" = ${related.insertRequestId}::uuid FOR UPDATE`;
+        const receipt = receipts[0] ?? null;
+        const envelope = draftEnvelope(uid, owner, state.draftEpoch, row);
+        const view = (stored: any) => relatedResult(related.insertRequestId, stored, envelope, true, asked);
+        // 잠금 아래 다시 판정한다: 앞의 스냅숏 뒤에 경쟁한 요청이 적용·취소했으면 그 끝난 영수증으로 답한다(놓치지 않는다).
+        const decided = settled(receipt, envelope);
+        if (decided) return decided;
+        // 영수증 행의 전이는 refused에서만, receiptRevision 하나씩 (migration의 guard와 같은 규칙).
+        const move = async (from: any, to: { state: string; appliedRevision: number | null; reason: string | null }) => {
+          const moved = await tx.reportDraftInsertReceipt.updateMany({
+            where: { insertRequestId: from.insertRequestId, state: 'refused', receiptRevision: from.receiptRevision },
+            data: { ...to, receiptRevision: from.receiptRevision + 1 } });
+          if (moved.count !== 1) throw relatedInsertRefusal('RELATED_INSERT_RECEIPT_CHANGED', envelope, view(from));
+          return { ...from, ...to, receiptRevision: from.receiptRevision + 1 };
+        };
+        if (related.intent === 'discard') {
+          // 거절이 확인된 그 receiptRevision의 삽입만 취소 표식이 된다. 초안 본문·revision과 Source는 건드리지 않는다.
+          if (!receipt) return { refusal: relatedInsertRefusal('RELATED_INSERT_NOT_DISCARDABLE', envelope, view(receipt)) };
+          if (receipt.receiptRevision !== related.expectedReceiptRevision)
+            return { refusal: relatedInsertRefusal('RELATED_INSERT_RECEIPT_CHANGED', envelope, view(receipt)) };
+          const fenced = await move(receipt, { state: 'discarded', appliedRevision: null, reason: 'INSERT_DISCARDED' });
+          return { body: { ...envelope, relatedInsert: view(fenced) } };
+        }
+        // 새 적용 또는 refused의 같은 ID 재시도. 업무 거절은 초안을 쓰기 전, 아직 유효한 이 트랜잭션에서 refused 행으로 남긴다
+        // (같은 사유면 행을 다시 쓰지 않는다). DB 오류는 여기서 잡지 않는다 — 결과를 모르는 채 거절 행을 쓰지 않는다.
+        const refuse = async (reason: RelatedInsertRefusal) => {
+          const kept = !receipt
+            ? await tx.reportDraftInsertReceipt.create({ data: { ...binding, state: 'refused', reason } })
+            : receipt.reason === reason ? receipt : await move(receipt, { state: 'refused', appliedRevision: null, reason });
+          return { refusal: relatedInsertRefusal('RELATED_INSERT_REFUSED', envelope, view(kept)) };
+        };
+        // 처음 CAS 그대로다. 세대나 revision이 전진했으면 같은 ID의 재시도도 거절이다 — 조용히 새 기준에 다시 얹지 않는다.
+        if (state.draftEpoch !== expected.epoch || (row?.revision ?? 0) !== expected.revision) return refuse('DRAFT_CONFLICT');
+        try { this.reportDraftRules(state, c); }
+        catch (error: any) {
+          if (!(error instanceof ConflictException)) throw error;
+          return refuse((error.getResponse() as any)?.code === 'REPORT_HELD' ? 'TARGET_HELD' : 'TARGET_UNVERIFIED');
+        }
+        // Source: 지금 이 사람이 그 검사의 판 이력을 읽을 수 있는가(versions()와 같은 관문), 그 판이 서버의 승인·추가기재 판인가,
+        // 그 판이 아직 그 검사의 머리인가. 화면이 보낸 글은 승인의 증명이 아니다 — 글은 아래에서 서버가 그 판으로 다시 만든다.
+        let sourceState: any = null;
+        try { sourceState = await this.access.gate(related.source.uid, c, tx); }
+        catch (error: any) { if (!(error instanceof NotFoundException)) throw error; }
+        if (!sourceState || !canReadPreliminary(sourceState, c)) return refuse('SOURCE_UNAVAILABLE');
+        // WORKLIST-SPLIT-UID: 두 환자 자원이 답하는 Source의 판·머리·글은 쓰지 않는다(409 STUDY_IDENTITY_UNRESOLVED). 원본을
+        // 관찰하지 못한 요청은 503 STUDY_SOURCE_UNAVAILABLE이다. 둘 다 업무 거절이 아니므로 영수증 행을 남기지 않는다 —
+        // 트랜잭션은 아무것도 쓰지 않고 끝나며, 같은 ID의 재시도·Check·취소는 그대로 열려 있다.
+        this.studyAccess.assertUnsplitSource(c, related.source.uid);
+        const version = await tx.reportVersion.findUnique({
+          where: { uid_version: { uid: related.source.uid, version: related.source.version } },
+          select: { action: true, findings: true, conclusion: true, recommendation: true } });
+        if (!version || !['approve', 'addendum'].includes(version.action)) return refuse('SOURCE_UNAVAILABLE');
+        await record(sourceState, null, 'provide-prepared', related.source);
+        if (version.action !== related.source.action) throw relatedInsertInvalid('source.action');
+        const sourceHead = await tx.report.findUnique({ where: { uid: related.source.uid }, select: { version: true } });
+        if ((sourceHead?.version ?? 0) !== related.source.version) return refuse('SOURCE_CHANGED');
+        // Target seed: 내 초안이 있으면 그 revision의 글, 없으면 기준 판의 승인본(그 판이 아직 머리일 때만). 재기준은 없다.
+        const head = await tx.report.findUnique({ where: { uid },
+          select: { version: true, findings: true, conclusion: true, recommendation: true } });
+        const present = !!row?.present;
+        if (present !== (related.seedKind === 'private-draft')) throw relatedInsertInvalid('seedKind');
+        if (!present && (head?.version ?? 0) !== related.targetBaseVersion) return refuse('SEED_CHANGED');
+        const seed = present
+          ? { findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation, baseVersion: row.baseVersion }
+          : { findings: head?.findings ?? '', conclusion: head?.conclusion ?? '', recommendation: head?.recommendation ?? '',
+              baseVersion: head?.version ?? 0 };
+        if (related.seedKind === 'empty' && (seed.findings || seed.conclusion || seed.recommendation)) throw relatedInsertInvalid('seedKind');
+        if (seed.baseVersion !== related.targetBaseVersion) throw relatedInsertInvalid('targetBaseVersion');
+        // 제안 = 고정 seed의 그 칸 끝에 서버가 그 판에서 다시 만든 글을 더한 것. 다른 칸·Recommendation·근거 목록은 그대로다.
+        if (relatedInsertionText(version, related.source.parts, seed[related.section]) !== related.text) throw relatedInsertInvalid('text');
+        if (related.offset !== seed[related.section].length) throw relatedInsertInvalid('offset');
+        const wanted = { ...seed, [related.section]: seed[related.section] + related.text };
+        for (const field of ['findings', 'conclusion', 'recommendation', 'baseVersion'] as const)
+          if (content[field] !== wanted[field]) throw relatedInsertInvalid(field);
+        const kept = present ? envelope.snapshot : { citations: [], structured: [] };
+        const same = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+        if (!same(proposal.citationIds, kept.citations)) throw relatedInsertInvalid('citationIds');
+        if (!same(proposal.structureIds, kept.structured)) throw relatedInsertInvalid('structureIds');
+        // 적용: 초안(+1), 기존 최소 report.draft 감사(일반 저장과 같은 모양: 길이와 인용·구조화의 식별자만), applied 영수증이 한 commit이다.
+        const prior = present ? row : null;
+        const cited = await this.reportEvidence.draftCitations(tx, uid, prior, body, content, c, head?.version ?? 0);
+        const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
+        const saved = await this.storeDraft(tx, uid, c.actor, row,
+          { ...content, citations: cited.entries, structured: structure.entries });
+        await audit(c.actor, 'report.draft', uid, {
+          len: [content.findings.length, content.conclusion.length, content.recommendation.length],
+          ...(cited.detail ? { cits: cited.detail } : {}),
+          ...(structure.detail ? { strs: structure.detail } : {}),
+        });
+        const appliedRevision = expected.revision + 1;
+        const applied = receipt ? await move(receipt, { state: 'applied', appliedRevision, reason: null })
+          : await tx.reportDraftInsertReceipt.create({ data: { ...binding, state: 'applied', appliedRevision } });
+        const after = draftEnvelope(uid, owner, state.draftEpoch, saved);
+        await record(state, after, 'draft-save');
+        return { body: { ...after, relatedInsert: relatedResult(related.insertRequestId, applied, after, true, asked) } };
+        }, { source: related.intent === 'apply' ? related.source.uid : null },
+        { facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }));
+      // 업무 거절의 refused 행은 위 트랜잭션과 함께 commit됐다. 거절 답은 그 commit 뒤에 낸다.
+      if (outcome.refusal) throw outcome.refusal;
+      return outcome.body;
+    }
     const empty = !(content.findings || content.conclusion || content.recommendation);
     return this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
       await this.studyAccess.prepare(c,[uid]);
@@ -317,7 +550,7 @@ export class PacsReportDraft {
       ...(cited.inserted ? { inserted: cited.inserted } : {}),
       // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지 목록을 넓힌다.
       ...(structure.applied ? { applied: structure.applied } : {}) };
-    }, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' }));
+    }, undefined, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' }));
   }
 
   /**

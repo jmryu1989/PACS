@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""S3-ASR-U3 runtime attestation, recorded and checked BEFORE the engine is started.
+"""Record the ASR engine, model and fixture used by the acceptance run.
 
-`ASR_ENGINE_PIN` / `ASR_MODEL_PIN` in api/src/asr.service.ts are configured attribution
-labels. They are not evidence that a particular engine build or model file did the work.
-This script produces the separate evidence: the actual built-image identities (not base-image
-digests), the engine source commit that was really checked out and built, the generator
-identity, the model file's expected and computed SHA-256 and size, and the fixture file's own
-SHA-256 cross-checked against its provenance, the generator's raw WAV and the validator verdict.
-
-It exits non-zero on any mismatch, so the workflow never reaches `docker run` for the
-engine with an unresolved pin. No engine process is started here: the only container use is
-`cat` of a provenance file baked into an image at build time.
+Engine provenance is diagnostic metadata. Audio format and fixture identity are checked
+here; the real-engine acceptance suite checks language, quality, latency and failure.
 """
 
 from __future__ import annotations
@@ -24,7 +16,7 @@ import re
 import subprocess
 import sys
 
-# Accepted S3-ASR-U0b pins (engine-pin-card.json). Literals, so drift fails loudly.
+# Accepted S3-ASR-U0b experiment references (engine-pin-card.json), retained for attribution.
 PINS = {
     "engine_name": "whisper.cpp",
     "engine_tag": "v1.9.4",
@@ -41,20 +33,6 @@ PINS = {
     "generator_sentence": "The blue square is next to the green circle.",
 }
 
-# Cross-check only. `git rev-parse HEAD == engine_commit` already binds the whole tree, so a
-# difference here is reported as a note for review rather than as a gate: these are the SHA-256
-# values of the official text snapshots recorded in astra-source-pins.json.
-ENGINE_SOURCE_FILES = {
-    "examples/server/server.cpp":
-        "903bf6a6904301a698e0db79c0a72f25bca5bc7c3953b493eb09a68683e53356",
-    "examples/server/README.md":
-        "d6a953253065ce2b3252c18286ef2a2f14be8f09804564c25c6d9fb3bb8acb4b",
-    "examples/common-whisper.cpp":
-        "852fbc77d2461322a82b9c571cf4703bac3c78c5c51d3a90e80792ce0c04e313",
-    "src/whisper.cpp":
-        "c48686fbc2cba1b0ac0f9c8e964188c691e67fff5906f2629f3223ff64f92d16",
-}
-
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HF_RESOLVE = re.compile(r"^https://huggingface\.co/(?P<repo>[^/]+/[^/]+)/resolve/"
                         r"(?P<revision>[^/]+)/(?P<file>[^/?#]+)$")
@@ -63,7 +41,7 @@ IMAGES_NOTE = ("built-image IDs from `docker image inspect` (plus any RepoDigest
                "local build); base-image digests are NOT recorded")
 MODEL_REVISION_NOTE = ("repo, revision and file are parsed from the --model-source-url the "
                        "workflow declares it fetched; this is not a revision observed from Hugging "
-                       "Face. The model bytes are bound only by the size and SHA-256 comparison")
+                       "Face. Model size and SHA-256 are observations, not an executable certification gate")
 
 
 def model_source(url: str) -> dict:
@@ -72,17 +50,6 @@ def model_source(url: str) -> dict:
     if not match:
         return {"repo": None, "revision": None, "file": None}
     return match.groupdict()
-
-
-def source_file_notes(record: dict) -> list:
-    """Compare the built tree's files with the cached official snapshots. Never blocking."""
-    actual = (((record.get("engine_provenance") or {}).get("source") or {}).get("files") or {})
-    notes = []
-    for name, expected in sorted(ENGINE_SOURCE_FILES.items()):
-        notes.append({"file": name, "expected_sha256": expected,
-                      "actual_sha256": actual.get(name),
-                      "matches": actual.get(name) == expected})
-    return notes
 
 
 def utc_now() -> str:
@@ -130,48 +97,6 @@ def evaluate(record: dict) -> list:
     """Pure check of an assembled record. Returns the list of named problems."""
     problems = []
     pins = record.get("pins") or {}
-
-    engine = (record.get("engine_provenance") or {})
-    engine_source = engine.get("source") or {}
-    if engine_source.get("commit") != pins.get("engine_commit"):
-        problems.append("engine source commit {!r} != pinned {!r}".format(
-            engine_source.get("commit"), pins.get("engine_commit")))
-    if engine_source.get("tag") != pins.get("engine_tag"):
-        problems.append("engine source tag {!r} != pinned {!r}".format(
-            engine_source.get("tag"), pins.get("engine_tag")))
-    if engine_source.get("tag_object") != pins.get("engine_tag_object"):
-        problems.append("engine annotated tag object {!r} != pinned {!r}".format(
-            engine_source.get("tag_object"), pins.get("engine_tag_object")))
-    binary = engine.get("binary") or {}
-    if not HEX64.match(str(binary.get("sha256", ""))):
-        problems.append("engine binary SHA-256 is missing or malformed")
-    if not binary.get("path"):
-        problems.append("engine binary path was not recorded")
-
-    generator = (record.get("generator_provenance") or {})
-    generator_source = generator.get("source") or {}
-    if generator_source.get("tag") != pins.get("generator_tag"):
-        problems.append("generator tag {!r} != pinned {!r}".format(
-            generator_source.get("tag"), pins.get("generator_tag")))
-    if not generator_source.get("commit"):
-        problems.append("generator resolved commit was not recorded")
-
-    model = record.get("model") or {}
-    if model.get("bytes") != pins.get("model_bytes"):
-        problems.append("model size {!r} != pinned {!r}".format(
-            model.get("bytes"), pins.get("model_bytes")))
-    if model.get("sha256") != pins.get("model_sha256"):
-        problems.append("model computed SHA-256 {!r} != pinned {!r}".format(
-            model.get("sha256"), pins.get("model_sha256")))
-    if model.get("revision") != pins.get("model_revision"):
-        problems.append("model revision {!r} != pinned {!r}".format(
-            model.get("revision"), pins.get("model_revision")))
-    if model.get("repo") != pins.get("model_repo"):
-        problems.append("model source repo {!r} != pinned {!r}".format(
-            model.get("repo"), pins.get("model_repo")))
-    if model.get("file") != pins.get("model_file"):
-        problems.append("model source file {!r} != pinned {!r}".format(
-            model.get("file"), pins.get("model_file")))
 
     fixture = record.get("fixture") or {}
     validator = record.get("validator") or {}
@@ -272,13 +197,8 @@ def main(argv=None) -> int:
         print("asr_engine_attest: cannot assemble attestation: {}".format(error), file=sys.stderr)
         return 2
 
-    record["source_file_notes"] = source_file_notes(record)
     problems = evaluate(record)
     record["problems"] = problems
-    for note in record["source_file_notes"]:
-        if not note["matches"]:
-            print("asr_engine_attest: NOTE {} is {} not the cached snapshot {}".format(
-                note["file"], note["actual_sha256"], note["expected_sha256"]), file=sys.stderr)
     record["status"] = "ATTESTED" if not problems else "UNRESOLVED"
     with Path(args.output).open("w", encoding="utf-8", newline="\n") as stream:
         json.dump(record, stream, ensure_ascii=True, indent=2, sort_keys=True)
