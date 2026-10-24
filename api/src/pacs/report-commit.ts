@@ -14,7 +14,7 @@ import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
 import type { PacsReportEvidence } from './report-evidence';
-import type { PacsReportDraft } from './report-draft';
+import type { PacsReportDraft, DraftRequestFacts } from './report-draft';
 
 export class PacsReportCommit {
   constructor(
@@ -30,7 +30,7 @@ export class PacsReportCommit {
    * 두 요청의 도착 순서가 뒤집히면 "승인됐는데 내용은 이전 것"인 상태가 남는다.
    * 판독문과 그 판독문의 상태는 같이 움직여야 하는 하나의 사실이다.
    */
-  async commitReport(uid: string, body: any, c: Caller, session: string | null) {
+  async commitReport(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
     need(c.roles, 'radiologist', '판독문 확정');
     const me = inst(c);
     const action = body?.action;
@@ -66,7 +66,7 @@ export class PacsReportCommit {
           const candidates = roster.filter(user => user.id === wanted);
           candidate = candidates.length === 1 ? candidates[0] : null;
         }
-      }, async (tx, prev, audit) => {
+      }, async (tx, prev, audit, record) => {
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
@@ -326,6 +326,7 @@ export class PacsReportCommit {
             reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
             author: cur.updatedBy ?? c.actor,
           }});
+          await record(prev, null, 'write', { uid, version });
           version += 1;
         }
 
@@ -360,7 +361,9 @@ export class PacsReportCommit {
         });
 
         return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared) };
-      });
+      }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
+        action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum'
+          : action === 'reset' ? 'cancel' : 'write', target: 'report-version' });
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
       if (isCitationCheck(e)) citationLimit();
