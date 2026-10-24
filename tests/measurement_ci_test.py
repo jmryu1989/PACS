@@ -79,6 +79,39 @@ class MeasurementCiTests(unittest.TestCase):
         output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
         print('WORKFLOW_PROFILES ' + json.dumps({name: row['workflow'] for name, row in report.items()}, sort_keys=True))
 
+    def test_candidate_additions_use_dispatch_stack_and_its_own_deadline(self):
+        import candidate_ci as candidate
+        runner = candidate.load(ci.ROOT / 'scripts/run-tests.py', 'candidate_deadline_runner')
+        original = dict(ci.PROFILES['measurements'])
+        with tempfile.TemporaryDirectory() as folder, patch.dict(ci.PROFILES), \
+                patch.object(ci, 'guarded_profile_run', ci.guarded_profile_run), \
+                patch.object(ci, 'profile_environment', ci.profile_environment):
+            candidate.configure(ci.ROOT, ci, runner, Path(folder) / 'plans')
+            self.assertEqual(ci.profile_deadline_seconds('measurements'), candidate.CANDIDATE_DEADLINE_SECONDS)
+            self.assertEqual(ci.PROFILES['measurements']['suite_timeout'], original['suite_timeout'])
+            for filename, class_name, unit, _ in candidate.BASE[3:]:
+                command, outer = ci.guarded_profile_run(ci.PROFILES['measurements'], filename, class_name, unit,
+                                                       candidate.CANDIDATE_DEADLINE_SECONDS)
+                self.assertEqual(command[command.index('--module') + 1], 'tests/' + filename)
+                self.assertEqual(command[command.index('--class') + 1], class_name)
+                self.assertEqual(command[command.index('--mode') + 1], 'live')
+                self.assertEqual(command[command.index('--timeout') + 1], '540')
+                self.assertEqual(outer, 575)
+        self.assertEqual(ci.PROFILES['measurements'], original)
+        self.assertEqual(ci.profile_deadline_seconds('measurements'), 1500)
+
+    def test_u1_transport_change_selects_boundary_and_records_its_input(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('u1_ci_select', ci.ROOT / 'scripts/ci_select.py')
+        selector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(selector)
+        path = 'worklist-v0/hpacs-lite/session-transport.js'
+        self.assertTrue(selector.select([path])['worklist-ux-measurements'])
+        steps = self.catalog.job('worklist-ux-measurements')['steps']
+        step = next(step for step in steps if 'test_viewer_ux_span.py --boundary' in step.get('run', ''))
+        args = shlex.split(step['run'])
+        self.assertIn(path, [args[i + 1] for i, arg in enumerate(args) if arg == '--file'])
+
     def test_profile_owner_survives_workflow_rename(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

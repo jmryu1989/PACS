@@ -764,6 +764,7 @@
       "worklist-v0/hpacs-lite/reading*",
       "worklist-v0/hpacs-lite/related*",
       "worklist-v0/hpacs-lite/report*",
+      "worklist-v0/hpacs-lite/session-transport.js",
       "worklist-v0/hpacs-lite/study-*",
       "worklist-v0/hpacs-lite/viewer-display-layout.js",
       "worklist-v0/hpacs-lite/viewer-windows.js",
