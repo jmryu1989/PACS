@@ -105,7 +105,7 @@ const seam=`
 window.synCvrBoundary={attempts:()=>[...attempts.values()], transmit:a=>transmit(a),
   call:(...args)=>call(...args),
   flipAfterPaint:()=>{const original=paintAttempt;paintAttempt=a=>{
-    original(a);paintAttempt=original;window.synRelated=true;
+    original(a);paintAttempt=original;window.synRelatedMode(true);
   };},
   isolateTransmit:()=>{const original=call;call=(...args)=>{
     const gate=blocked;blocked=()=>null;try{return original(...args);}finally{blocked=gate;}
@@ -120,6 +120,21 @@ process.stdout.write(source.slice(0,at)+seam+source.slice(at));
 
 MAIN = read_page_source(HPACS / "main.html")
 SHIPPED_JS = lf_text(HPACS / JS_NAME)
+# W5 Phase B: the page always mounts its Related Report mode (order-list-store.js), before the CVR blocks read it in their
+# `blocked` option. The shipped module is run as main.html loads it (a classic script before the bundle) and mounted on
+# main.html's own mode markup, which page_html() keeps. This harness has no study context for the mode's cards (they say
+# 확인할 수 없음, and no Insert can open). A case that needs the mode enters and leaves it through the module's own
+# enter()/exit() (window.synRelatedMode); the page's entry flow itself (save first, Back, the complete page's CVR) is
+# tests/related_report_mode_dom_test.py's. tests/critical_result_recipient_dom_test.py and report_actions_dom_test.py use
+# the same lines (through PRELUDE / RELATED_MODE).
+RELATED_MODE = lf_text(HPACS / "related-report-mode.js") + """
+const relatedMode = KinRelatedReportMode({ editor: () => document.querySelector('.redit'),
+  field: name => document.getElementById(name), target: () => null, source: () => null, insertBlock: () => null });
+window.synRelatedMode = active => {
+  if (active) relatedMode.enter({ target: selectedUid, selectionSeq: 0, owner: null, opening: null, focus: false });
+  else relatedMode.exit();
+};
+"""
 ORIGIN = "https://reader.test"
 BASE = "/worklist/hpacs-lite/"
 
@@ -213,8 +228,7 @@ const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
 let sess = window.synSession;
 let serverMode = window.synMode.serverMode, demoMode = false, offline = window.synMode.offline;
 let selectedUid = null;
-// W5 (order-list-store.js): the page's Related Report mode binding, which the block's Send CVR reason reads; null = no mode.
-let relatedMode = null;
+""" + RELATED_MODE + """
 let studies = window.synStudies;
 let appState = window.synAppState;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
@@ -760,12 +774,8 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
     # ── SD01 ──
     # W5R3-ADMIT-01..06 -> REQ-S7-U1b-FAILURE / RISK-S7-U1p-FALSE-UNDELIVERED.
     def r3_mode(self, active):
-        self.page.evaluate("""active => {
-          window.synRelated = active;
-          relatedMode = {active: () => window.synRelated,
-            reason: () => 'Related Report 모드에서는 쓸 수 없습니다. Back으로 돌아가세요.'};
-          criticalResults.sync();
-        }""", active)
+        # The shipped mode itself (RELATED_MODE): its enter()/exit(), then the repaint the page makes on entry and Back.
+        self.page.evaluate("""active => { window.synRelatedMode(active); criticalResults.sync(); }""", active)
 
     def r3_prepare(self, action, held=False):
         record = self.server.add(B, X) if action != 'create' else None
@@ -1042,10 +1052,10 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         if boundary == 'transmit':
             self.page.evaluate('synCvrBoundary.isolateTransmit()')
             if prior:
-                self.page.evaluate('() => {window.synRelated=true; synCvrBoundary.transmit(synCvrBoundary.attempts()[0]);}')
+                self.page.evaluate('() => {window.synRelatedMode(true); synCvrBoundary.transmit(synCvrBoundary.attempts()[0]);}')
             else:
                 self.page.evaluate("""() => { const uuid=crypto.randomUUID.bind(crypto);
-                  crypto.randomUUID=()=>{const id=uuid();window.synRelated=true;return id;}; }""")
+                  crypto.randomUUID=()=>{const id=uuid();window.synRelatedMode(true);return id;}; }""")
                 confirm.click()
         else:
             self.page.evaluate('synCvrBoundary.flipAfterPaint()')

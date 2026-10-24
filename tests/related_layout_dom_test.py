@@ -276,7 +276,9 @@ class Window:
         page.wait_for_timeout(120)
         case.assertAlmostEqual(before[0], self.visible(self.title)["box"][0], delta=0.5, msg=f"{tag}: the Related list scrolled sideways")
         # Reachable inside their panes (S): the keyboard help, and in the shown state the Findings value.
-        reach = [("keyboard help", self.help)] + ([("Findings value", page.get_by_text(FINDINGS, exact=True))] if state == "shown" else [])
+        # W5 Phase B: the row click that shows the prior also opens Related Report mode, which shows the same Source text in
+        # the report column; the value this case reaches is the Related panel's own (its pane), so it is found there.
+        reach = [("keyboard help", self.help)] + ([("Findings value", self.panel.get_by_text(FINDINGS, exact=True))] if state == "shown" else [])
         for name, locator in reach:
             case.assertIsNotNone(js(page, "return firstRect(texts(arg)[0]);", locator.element_handle()), f"{tag}: {name} rendered")
             self.scroll_into_view(locator)
