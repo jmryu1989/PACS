@@ -1093,6 +1093,10 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         if fold_open and self.view()["shown"]:
             self.open_body()
 
+    def attention(self):
+        """D1822: the reading panel's bar mark that replaced the body opening by itself (None when unmarked)."""
+        return self.page.locator(self.root).get_attribute("data-attention")
+
     def open_body(self):
         toggle = self.region().get_by_role("button", name="Show Received", exact=True)
         if toggle.count():
@@ -1786,7 +1790,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.servers = [s]
         moved = s.add(rec(31, case="R3"))
         s.add(rec(32, case="R4"), rec(33, case="R3", full=False), rec(34, case="R4", full=False))
-        self.open_panel()
+        # D1822: on the reading page the body opens on Show Received only.
+        self.open_panel(fold_open=True)
         for marker in ("SYN-PT-31", "SYN-PT-32"):
             seen = self.row(marker)
             self.assertIn("Source Changed", seen["text"])
@@ -2225,8 +2230,11 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.servers = [s]
         s.add(rec(141, case="R2", source={"version": 1, "action": "save", "author": "syn-rad@kin", "at": "2026-09-28T00:30:00.000Z"}))
         self.open_panel()
-        # The body opened by itself: the first read has a pending record.
-        expect(self.region().get_by_role("button", name="Hide Received", exact=True)).to_be_visible()
+        # D1822: the first read has a pending record, which marks the bar; the body stays folded until Show Received.
+        self.assertEqual("true", self.attention())
+        expect(self.region().get_by_role("button", name="Show Received", exact=True)).to_be_visible()
+        self.open_body()
+        self.assertIsNone(self.attention())
         seen = self.row("SYN-PT-141")
         self.assertIn(f"Source: v1 · Save · syn-rad@kin · {kst('2026-09-28T00:30:00.000Z')}", seen["text"])
         self.assertEqual([["Acknowledge", False]], seen["buttons"])
@@ -2664,35 +2672,48 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual([f"/api/critical-results/{rid(174)}"], [q["path"] for q in self.requests("read")])
         self.press("Hide Received")
         self.assertEqual({"Show Received", "Refresh"}, {b[0] for b in self.view()["buttons"]})
-        # P-02: a failed read shows a word with no number, and opens the body with the failure and Refresh.
+        # P-02: a failed read shows a word with no number and marks the bar (D1822: the body no longer opens by itself on
+        # the reading page); Show Received shows the failure and Refresh.
         self.server = RecipientServer([INSTITUTION, RAD["sub"]])
         self.servers.append(self.server)
         self.fault("list", status=500, body={"message": "SYN failure"})
         self.open_panel()
         self.assert_no_count("failed")
+        self.assertIn(["Show Received", False, None, "false"], self.view()["buttons"])
+        self.assertEqual("true", self.attention())
+        self.press("Show Received")
         self.assertIn("SYN failure", self.status())
         self.assertIn(["Hide Received", False, None, "true"], self.view()["buttons"])
-        # The pair: pending 1 opens the body, and the panel is then more than its summary line.
+        # The pair: pending 1 marks the bar; opened, the panel is then more than its summary line.
         s = self.server = RecipientServer([INSTITUTION, RAD["sub"]])
         self.servers.append(s)
         s.add(rec(175, case="R2"))
         self.open_panel()
+        self.assertEqual("true", self.attention())
+        self.open_body()
         g = self.page.evaluate(self.GEOMETRY)
         self.assertGreater(g["shown"]["panel"], 2 * g["shown"]["button"], "the open body is measured too")
-        # P-07: the body opens by itself only on its four triggers and never closes by itself; nothing about it is kept.
+        # P-07 (D1822): the four triggers that used to open the body mark the bar instead; the body never opens or closes by
+        # itself, the reader's Show Received clears the mark; nothing about it is kept.
         self.press("Hide Received")
         self.tick(60000)
         self.assertIn(["Show Received", False, None, "false"], self.view()["buttons"], "the same pending: stays folded")
+        self.assertIsNone(self.attention(), "the same pending: no mark")
         s.add(rec(176, case="R2"))
         self.tick(60000)
-        self.assertIn(["Hide Received", False, None, "true"], self.view()["buttons"], "pending rose: opens")
+        self.assertIn(["Show Received", False, None, "false"], self.view()["buttons"], "pending rose: stays folded")
+        self.assertEqual("true", self.attention(), "pending rose: marks the bar")
+        self.press("Show Received")
+        self.assertIsNone(self.attention(), "Show Received clears the mark")
         s.records.pop(rid(176))
         self.tick(60000)
         self.assertIn(["Hide Received", False, None, "true"], self.view()["buttons"], "pending fell: stays open")
         self.press("Hide Received")
         self.fault("list", status=500, body={"message": "SYN failure"})
         self.tick(60000)
-        self.assertIn(["Hide Received", False, None, "true"], self.view()["buttons"], "a failed read opens it")
+        self.assertIn(["Show Received", False, None, "false"], self.view()["buttons"], "a failed read: stays folded")
+        self.assertEqual("true", self.attention(), "a failed read marks the bar")
+        self.press("Show Received")
         self.press("Refresh")
         self.reads_settled()
         self.fault("ack", hold=True, status=503, body={"code": "CRITICAL_RESULT_BUSY", "message": "SYN busy"})
@@ -2700,8 +2721,10 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         held = self.take("ack")
         self.press("Hide Received")
         self.release(held)
-        self.assertIn(["Hide Received", False, None, "true"], self.view()["buttons"], "an unknown acknowledgement opens it")
+        self.assertIn(["Show Received", False, None, "false"], self.view()["buttons"], "an unknown acknowledgement: stays folded")
+        self.assertEqual("true", self.attention(), "an unknown acknowledgement marks the bar")
         # P-06: the minute's read with the body folded and open alike; none while the document is hidden.
+        self.press("Show Received")
         self.press("Hide Received")
         for label in ("folded", "open"):
             new = self.tick(60000)
