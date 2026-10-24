@@ -8,7 +8,7 @@ the stored per-study revision and canonical envelopes, including reads after unc
 from pathlib import Path
 
 LITE = Path(__file__).resolve().parents[1] / "worklist-v0/hpacs-lite"
-ASSETS = ("work-context.js", "session-transport.js", "report-draft-client.js", "report-editor-frame.js")
+ASSETS = ("work-context.js", "session-transport.js", "report-draft-client.js", "report-editor-frame.js", "related-report-mode.js")
 
 BOOT = r"""
 const work = KinWorkContext;
@@ -106,6 +106,13 @@ const transport = KinSessionTransport.page();
 function staleAnswer() { return Object.assign(new Error('stale'),{name:'AbortError'}); }
 function onSessionEnd() {}
 function onCommonEnd() {}
+// W5 Phase B: the page always mounts its Related Report mode (order-list-store.js) and the sliced report region calls it
+// (refresh, blocked, admits, noticeDiscard, announce). A fixture declares the page's `relatedMode` binding; the contract
+// mounts the shipped module on main.html's own mode markup (install_contract) over the fixture's report fields. It stays
+// inactive here: entering it is the complete page's (tests/related_report_mode_dom_test.py).
+if (typeof relatedMode !== 'undefined' && relatedMode === null)
+  relatedMode = KinRelatedReportMode({ editor: () => document.querySelector('.redit') ?? document.getElementById('findings').parentElement,
+    field: name => document.getElementById(name) });
 """
 
 
@@ -129,6 +136,15 @@ def install_contract(html):
         at = html.index('id="b-approve"')
         at = html.rindex('<', 0, at)
         html = html[:at] + _page_markup('<button class="approve" id="b-approve-next"', '</button>') + html[at:]
+    # W5 Phase B: main.html's Related Report mode markup (the mode mounts on it) and the Notice's Discard Insert, as the page has
+    # them, for a fixture that slices the report region without them.
+    if 'let relatedMode = null;' in html:
+        if 'id="report-notice-discard"' not in html:
+            at = html.index('<script', html.index('<body'))
+            html = html[:at] + _page_markup('<button id="report-notice-discard"', '</button>') + html[at:]
+        if 'id="related-mode"' not in html:
+            at = html.index('<script', html.index('<body'))
+            html = html[:at] + _page_markup('<section id="related-mode"', '</section>') + html[at:]
     scripts = ''.join('<script>' + (LITE / asset).read_text(encoding='utf-8') + '</script>' for asset in ASSETS)
     html = html.replace('<head>', '<head>' + scripts, 1)
     # Fixtures retain their endpoint-specific fault injection, which is installed before BOOT.
