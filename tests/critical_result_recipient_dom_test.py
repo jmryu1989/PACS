@@ -109,7 +109,7 @@ from playwright.sync_api import Error as PlaywrightError, expect, sync_playwrigh
 from module_session_harness import CORE, STANDIN, setup_standin
 
 from clinician_home_dom_test import ACKNOWLEDGED, AVOIDED, CLOSED_VIEW, PAGE_TEXT, acknowledgement_outside
-from critical_result_sender_dom_test import has_hangul, page_html, slice_between
+from critical_result_sender_dom_test import RELATED_MODE, has_hangul, page_html, slice_between
 
 ROOT = Path(__file__).resolve().parents[1]
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
@@ -141,7 +141,7 @@ const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
 
 let sess = window.synSession, serverMode = !!window.synMode.serverMode, demoMode = !!window.synMode.demoMode;
 let offline = !!window.synMode.offline, selectedUid = null;
-let relatedMode = null;
+""" + RELATED_MODE + """
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
 const KinAuth = {
   session: () => window.synSession,
@@ -1164,11 +1164,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
     # ── RD01-RD04: rows as the server's view draws them ──
     # W5R3-ADMIT-09 -> REQ-S7-U2a-EXPLICIT-ACK / false ACK and Unknown preservation.
     def r3_mode(self, active):
-        self.page.evaluate("""active => {
-          window.synRelated = active;
-          relatedMode = {active: () => window.synRelated,
-            reason: () => 'Related Report 모드에서는 쓸 수 없습니다. Back으로 돌아가세요.'};
-        }""", active)
+        # The shipped mode itself (critical_result_sender_dom_test.RELATED_MODE): its enter()/exit().
+        self.page.evaluate("active => window.synRelatedMode(active)", active)
         # The existing host watch also updates an already-open inbox.
         self.page.clock.fast_forward(1100)
         self.settle()

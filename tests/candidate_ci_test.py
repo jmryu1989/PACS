@@ -57,13 +57,18 @@ class CandidateCiTests(unittest.TestCase):
         # W5-UI Phase A adds no flow: its Related Report mode FLOW is deferred to Phase B (D1675), and is never selected here.
         # Merge of main 3649a70 (W5-UI Phase A) into S9-U4b: still 108 + 17 + 14 = 139.
         # S9-U4A-SET: + 2 S9RoleSweepE2E cases. 108 + 17 + 2 + 14 = 141.
-        self.assertEqual(len(selected), 141)
+        # W5-UI Phase B: + the Related Report mode FLOW. 108 + 17 + 2 + 15 = 142.
+        self.assertEqual(len(selected), 142)
         self.assertEqual([item["case"] for item in selected if item["file"] == "tests/e2e/test_s9_role_sweep.py"], [
             "S9RoleSweepE2E.test_sweep_05_admin_role_change_old_document_and_fresh_login",
             "S9RoleSweepE2E.test_sweep_05_institution_move_requires_new_scope_on_real_page"])
-        self.assertNotIn("tests/e2e/test_related_report_mode.py", {item["file"] for item in selected})
+        related = [item for item in selected if item["file"] == "tests/e2e/test_related_report_mode.py"]
+        self.assertEqual(related, [{"file": "tests/e2e/test_related_report_mode.py",
+                                    "case": "RelatedReportModeE2E.test_w5_01_prior_insert_loss_check_back_commit_reopen"}])
+        self.assertEqual(len({(item["file"], item["case"]) for item in selected}), len(selected))
+        self.assertIn(("e2e/test_related_report_mode.py", "RelatedReportModeE2E", "candidate-flow-related-report-mode"), rows)
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
-        self.assertEqual([item["case"] for item in selected[-14:]],
+        self.assertEqual([item["case"] for item in selected[-15:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
         self.assertEqual(selected[-1:], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
@@ -106,14 +111,14 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 17)
+            self.assertEqual(len(profile["suites"]), 18)
             command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][3], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 141)   # 108 + 17 + 2 + 14
+            self.assertEqual(len(selected), 142)   # 108 + 17 + 2 + 15
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.

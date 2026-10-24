@@ -282,16 +282,24 @@
      * W5(설계 v5 §1.6, D1423 R2): Related Report 모드와, 저장 영수증이 확인되지 않은 Related 삽입도 쓰기를 막는다. 예외는 모드가 연
      * 일회용 허가(`admission`) 하나뿐이다 — 검토한 Insert의 그 칸, 그 한 번의 native 편집. `RELATED_BASE`는 모드가 "Target이 그
      * 삽입을 받을 수 있는가"를 물을 때 W5 사유를 빼고 기존 규칙만 묻는 표시이고, 편집을 열지 않는다(편집기의 canEdit은 모드가
-     * 직접 확인한 허가만 넘긴다). `relatedMode`는 page-boot가 올린 모드이며, 그보다 앞의 소비자가 읽으므로 여기서 선언한다(S9-U0a-PRE).
+     * 직접 확인한 허가만 넘긴다). `relatedMode`는 페이지가 언제나 싣는 Related Report 모드다(W5 Phase B). 첫 소비자(중요 결과
+     * 발신·수신의 mount가 그리는 대기 사유, 판독 버튼, 편집기 frame)보다 먼저 여기서 선언과 함께 만든다 — 넘기는 page 함수는
+     * 모두 함수 선언이라 이 시점에 이미 있고, 모드가 mount 때 부르는 것은 편집기 host 하나뿐이다.
      */
-    let relatedMode = null;
+    const relatedMode = KinRelatedReportMode({
+      editor: () => document.querySelector('.redit'), field: name => $('#' + name),
+      target: relatedTargetCard, source: relatedSourceCard,
+      insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
+      freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
+      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
+    });
     const RELATED_BASE = Object.freeze({ base: true });
     function reportWriteBlock(admission = null) {
       if (!selectedUid) return "검사를 선택하세요";
       if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
       if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
       if (admission === RELATED_BASE) return null;
-      return relatedMode?.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);
+      return relatedMode.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);
     }
 
     // ── Reading Template ──
@@ -1581,7 +1589,7 @@
       // W5 (설계 v5 §1.6): in Related Report mode the report commands wait for Back, with the reason said on each control;
       // an unsettled explicit Related insert holds the decisions that would carry its text. Prev/Next stay: they leave through
       // the move gate. Placed before the identity rule below, whose titles then stand.
-      const relatedWhy = relatedMode?.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
+      const relatedWhy = relatedMode.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
       if (relatedWhy)
         for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
           "#b-prelim"]) {
@@ -2341,7 +2349,7 @@
     function enterStudy(uid, { deferViewer = false, openSelected = false } = {}) {
       // W5: a move closes Related Report mode first (the move gate already confirmed the Target clean); its return point
       // belongs to the study being left.
-      relatedMode?.exit();
+      relatedMode.exit();
       clearReportNotice();
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);
@@ -4142,14 +4150,24 @@
       $("#prior-report-content").style.display = "none";
       for (const id of ["#prior-findings", "#prior-conclusion", "#prior-recommendation"])
         $(id).textContent = "";
+      showPriorRecommendation();
       // W5: the Source display context follows (an empty Source never keeps an older read's text).
-      relatedMode?.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
+      relatedMode.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
     }
 
     /**
      * 지금의 승인 판독문: 폐기 기록을 뺀 가장 새 판이 approve/addendum일 때만 그 판이다(W5 Source는 승인/추가기재 ReportVersion뿐).
      * 그 뒤에 취소(reset) 같은 판이 섰으면 예전 승인을 지금의 승인본으로 보이지 않는다 — 서버도 그런 Source의 삽입을 받지 않는다.
      */
+    /**
+     * W-07b: Findings and Conclusion are the report's two sections. A stored Recommendation (legacy or template value) is
+     * shown read-only only when it has text; an empty one shows no heading. The value itself is never dropped.
+     */
+    function showPriorRecommendation() {
+      const value = $("#prior-recommendation");
+      value.closest(".prior-report-section").hidden = !value.textContent;
+    }
+
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
       return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
@@ -4174,7 +4192,7 @@
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
-      const shown = view => relatedMode?.showSource({ seq, uid, ...view });
+      const shown = view => relatedMode.showSource({ seq, uid, ...view });
       $("#prior-report-meta").textContent = relatedReportMeta(s);
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
       $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
@@ -4212,6 +4230,7 @@
       $("#prior-findings").textContent = report.findings ?? "";
       $("#prior-conclusion").textContent = report.conclusion ?? "";
       $("#prior-recommendation").textContent = report.recommendation ?? "";
+      showPriorRecommendation();
       $("#prior-report-status").style.display = "none";
       $("#prior-report-content").style.display = "";
       shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
@@ -4223,7 +4242,7 @@
       if (!cur() || !relatedUid) return;
       // W5: in Related Report mode, Return to Current also leaves the mode — the editor comes back with its caret, selection
       // and scroll (Back to Current Draft alone keeps the Related study viewed: backToCurrentDraft).
-      const left = relatedMode?.exit() ?? null;
+      const left = relatedMode.exit();
       // 같은 판독 행 재선택은 의도적으로 무동작이다. 영상만 돌아가려다 판독문을 재로딩하거나 점유를 풀면 안 된다.
       relatedUid = null;
       ++relatedReportSeq;
@@ -4240,7 +4259,7 @@
      * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
      */
     function backToCurrentDraft() {
-      const left = relatedMode?.exit() ?? null;
+      const left = relatedMode.exit();
       if (!left) return false;
       renderClinical(); updateReportButtons(); renderDraftBar();
       criticalInbox?.sync();
@@ -4270,7 +4289,7 @@
      */
     let relatedEntrySeq = 0;
     async function enterRelatedMode(uid, { focus = true } = {}) {
-      if (!relatedMode || work.state() !== "active") return;
+      if (work.state() !== "active") return;
       if (relatedMode.active()) {
         if (uid !== relatedUid) previewRelated(uid);
         if (focus) relatedMode.focus();
@@ -4322,12 +4341,8 @@
       criticalInbox?.sync();
     }
 
-    /**
-     * The Related row's own action (click, Enter): the mode's entry. W5-PHASE-A-INTERIM: a page that does not serve the mode's
-     * asset keeps the row's preview; Phase B serves the asset and deletes this guard with the mount guard in page-boot.js.
-     */
+    /** The Related row's own action (click, Enter): the mode's entry. */
     function relatedActivate(uid, options) {
-      if (!relatedMode) { previewRelated(uid); return; }
       enterRelatedMode(uid, options);
     }
 
@@ -4336,7 +4351,6 @@
      * entry for the viewed Related study and its Back. True when the mode took the key; otherwise the caller's focus action runs.
      */
     function relatedModeCommand(which) {
-      if (!relatedMode) return false;
       if (which === "report") return backToCurrentDraft();
       if (which !== "prior" || work.state() !== "active") return false;
       if (relatedMode.active()) { relatedMode.focus(); return true; }
@@ -4375,7 +4389,7 @@
         // W5 (D1423 R2): every existing rule holds for every edit; Related Report mode lets through only the admission it
         // issued itself for exactly this field and request (the mode checks and consumes it here, once per edit span).
         canEdit: (field, admission = null, at = null) => work.state() === "active" && !!selectedUid
-          && !reportEditorBlock(admission && relatedMode?.admits(admission, field, at) ? admission : null),
+          && !reportEditorBlock(admission && relatedMode.admits(admission, field, at) ? admission : null),
       });
       return reportFrame;
     }
@@ -4566,7 +4580,7 @@
       renderRecommendationNotice();
       if (reportNotice || reportNoticeShown) renderReportNotice();
       // W5: the Reading Target card of Related Report mode shows this same draft state.
-      relatedMode?.refresh();
+      relatedMode.refresh();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -4715,7 +4729,7 @@
       $("#report-notice-check").style.display = ["unknown", "discard-unknown"].includes(s) || (busy && s === "checking") ? "" : "none";
       $("#report-notice-check").disabled = busy || unresolved;
       $("#report-notice-retry").disabled = busy || unresolved;
-      relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
+      relatedMode.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
         ? op : null, busy);
     }
     function renderReportNotice() {
@@ -4725,7 +4739,7 @@
       $("#report-notice").style.display = n ? "flex" : "none";
       $("#report-notice-retry").disabled = false;
       if (n?.action?.kind === "related-insert") { renderRelatedInsertNotice(n); return; }
-      relatedMode?.noticeDiscard(null);
+      relatedMode.noticeDiscard(null);
       if (!n) return;
       const unconfirmed = reportConverge.has(n.uid);
       // Check가 서버의 지금 초안을 읽고 알게 된 것(checkReportNotice). 그 뒤 이 글의 확인 여부가 바뀌었으면(늦게 닿은 저장, 새로
@@ -5049,14 +5063,14 @@
       const uid = selectedUid, at = work.capture("editor");
       if (!uid || appState[uid]?.prelimHidden) return;
       // W5: replacing the editor's text is a report command; in Related Report mode it waits for Back.
-      if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
+      if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
       try {
         await draftClient.settled(uid);
         if (!work.admits(at)) return;
         const b = await api("GET", "/bootstrap", undefined, undefined, at);
         work.commit(at, () => {
           // Related can open while the read is pending; its Target must keep the opening text.
-          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
+          if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
           appState[uid] = replaceReportState(uid, b.states?.[uid]);
           syncStudy(uid);
           loadReport({ force: true });
@@ -5487,7 +5501,7 @@
      */
     function relatedInsertFreeze({ section, parts, source, admission }) {
       const uid = selectedUid, owner = draftOwner, related = relatedStudy();
-      if (!["findings", "conclusion"].includes(section) || !relatedMode) return { refused: "넣을 칸을 확인할 수 없습니다" };
+      if (!["findings", "conclusion"].includes(section)) return { refused: "넣을 칸을 확인할 수 없습니다" };
       const why = relatedInsertBlock() || reportEditorBlock(admission);
       if (why) return { refused: why };
       if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
@@ -5620,7 +5634,7 @@
       if (exact) {
         const at = reportFrame.capture(op.field, { start: op.offset, end: op.offset + op.text.length });
         const edit = admission => editReport([{ field: op.field, at, text: "" }], { admission });
-        const removed = relatedMode ? relatedMode.admit({ field: op.field, at, text: "", op }, edit) : edit(null);
+        const removed = relatedMode.admit({ field: op.field, at, text: "", op }, edit);
         reverted = !!removed && reportFrame.read(op.field) === op.before;
       }
       if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }
@@ -5682,9 +5696,9 @@
         renderDraftBar();
         updateReportButtons();
       }
-      if (op.state === "applied") relatedMode?.announce("삽입됨 · " + relatedInsertLabel(op));
-      else if (op.state === "discarded" && op.reverted) relatedMode?.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
-      relatedMode?.refresh();
+      if (op.state === "applied") relatedMode.announce("삽입됨 · " + relatedInsertLabel(op));
+      else if (op.state === "discarded" && op.reverted) relatedMode.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
+      relatedMode.refresh();
     }
     /** Shows the pending operation's Notice again (a refused command or entry names it). */
     function relatedInsertNotice(uid) {
@@ -7296,7 +7310,7 @@
      */
     function relatedCommandBlock(command) {
       if (!selectedUid || appState[selectedUid]?.identityUnresolved || ["next", "prev"].includes(command)) return null;
-      if (relatedMode?.active()) return relatedMode.reason();
+      if (relatedMode.active()) return relatedMode.reason();
       return relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
     }
     /**
@@ -9993,7 +10007,7 @@
     try {
       criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'cvr-inbox-p', prefix: 'cvr-inbox', fold: true,
         onAccountChanged: notifyAccountChanged,
-        blocked: () => relatedMode?.active() ? relatedMode.reason() : null,
+        blocked: () => relatedMode.active() ? relatedMode.reason() : null,
         eligible: () => { const s = KinAuth.session(); return !!sess && serverMode && !demoMode && !offline && s?.state === 'approved'
           && Array.isArray(s.roles) && (s.roles.includes('clinician') || s.roles.includes('radiologist')); },
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; } });
@@ -10016,7 +10030,7 @@
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
         actorName: value => displayActor(value),
         // W5 (설계 v5 §1.6): Send CVR waits for Back in Related Report mode; the reason is said on the control.
-        blocked: () => relatedMode?.active() ? relatedMode.reason() : null });
+        blocked: () => relatedMode.active() ? relatedMode.reason() : null });
       accountChangeHooks.push((reason, detail) => criticalResults.lock(detail));
     } catch (_) { toast('중요 결과 발신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
@@ -12488,16 +12502,6 @@
     // Finalize (Approve) as a command another document can run (D1371): a bound viewer frame's keydown never reaches this
     // window, so the frame forwards its Finalize key here, and the dispatcher below uses the same hook. It answers true only
     // when the command ran; only then may the caller keep the browser's own Ctrl+S (Save Page) from happening.
-    // W5 Related Report mode (design v5 section 1; D1423 R2/R3/R6). W5-PHASE-A-INTERIM: mounted only where the page serves the
-    // mode's asset and markup (the Phase A branch's pages do not yet); Phase B serves both, mounts it unconditionally and
-    // deletes this guard.
-    relatedMode = window.KinRelatedReportMode?.({
-      editor: () => document.querySelector('.redit'), field: name => $('#' + name),
-      target: relatedTargetCard, source: relatedSourceCard,
-      insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
-      freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
-      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
-    }) ?? null;
     // `related` (W5): the Related Report / Report Editor keys of another document (the viewer frame) and the workspace buttons.
     window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which) });
     window.addEventListener('keydown', event => {
