@@ -1,0 +1,6 @@
+{
+  "backup_root": "/srv/kin-signing-custody",
+  "files": {
+    "c2-wrap-v1": "/srv/kin-signing-secrets/emr-signing-wrap-v1"
+  }
+}
