@@ -2215,7 +2215,10 @@ class RelatedModePage(unittest.TestCase):
             self.assertTrue(retained.evaluate("e => e.disabled"))
             self.assertIn("Related Report", retained.get_attribute("title"))
             expect(pane).to_contain_text(MODE_REASON)
-            self.back()
+            # D1821: the list the reader opened lies over the report area (in body.reading it covers the mode's Back
+            # button), so Back is the Report Editor key here, which is the same Back.
+            self.page.keyboard.press("Control+Alt+4")
+            expect(self.mode()).to_be_hidden()
             self.settle(100)
             self.assertEqual(1 if unknown else 0, len(posts), "Back does not acknowledge")
             retained.dispatch_event("click")
