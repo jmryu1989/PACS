@@ -3,6 +3,7 @@
     // ── 공통 이벤트 ──
     // 판독 창 위치는 계정 데이터가 아니라 이 브라우저·이 장비의 작업환경 설정이다.
     const OHIF_RECT_KEY = "kin.ohif.current.rect";
+    const OHIF_SPAN_SCREENS_KEY = "kin.ohif.span.screens";
     let ohifPopupHandle = null;
     const ohifRectPolls = new Map(), ohifPopupSlots = new WeakMap(), ohifPopupSequences = new WeakMap();
     const ohifPlacementWrites = new WeakMap();
@@ -73,9 +74,8 @@
         if (details) {
           if (monitorQueryUnsupported) monitorSessionGranted = true;
           cacheMonitorScreens(details);
-          for (let i = 0; i < 4; i++) localStorage.removeItem(i ? OHIF_RECT_KEY + ':' + i : OHIF_RECT_KEY);
           updateMonitorButton();
-          toast("모니터 배치 허용됨 — 판독 창이 다른 모니터에 열립니다", "info");
+          toast("모니터 배치 허용됨 — Viewer Windows에서 두 화면을 선택하세요. 기존 창 위치는 유지합니다.", "info");
         } else {
           monitorSessionGranted = false;
           updateMonitorButton();
@@ -152,8 +152,34 @@
       };
     }
 
+    function readOhifSpanScreens() {
+      try {
+        const selected = JSON.parse(localStorage.getItem(OHIF_SPAN_SCREENS_KEY) || 'null');
+        return KinViewerDisplayLayout.span(selected) ? selected : null;
+      } catch (_) { return null; }
+    }
+
+    function ohifSpanTarget() {
+      const selected = readOhifSpanScreens();
+      if (!selected || !monitorPermissionGranted()) return null;
+      const matched = selected.map(saved => screensCache.find(s => KinViewerDisplayLayout.identity(s) === KinViewerDisplayLayout.identity(saved)));
+      return KinViewerDisplayLayout.span(matched);
+    }
+
     function ohifPlacement(stored, details = null) {
       const screens = (details?.screens || []).map(usableScreenRect).filter(Boolean);
+      const selected = readOhifSpanScreens(), span = ohifSpanTarget();
+      if (selected) {
+        // A missing display is not a successful new layout. The launch path
+        // suspends saving until the user moves/resizes the remaining window.
+        if (!span) return defaultOhifRect(currentScreenRect());
+        return stored && rectInsideScreen(stored, span) ? stored : span;
+      }
+      if (stored && monitorPermissionGranted()) {
+        const touched = screensCache.filter(target => overlapArea(stored, target) > 0);
+        // Also restore a manually spanned window without fitting it to one screen.
+        if (touched.length >= 2) return stored;
+      }
       // 권한 없이 현재 화면 하나로 clamp하면 다른 모니터의 저장 자리를 끌어온다.
       if (stored) return monitorPermissionGranted() && screensCache.length
         ? clampOhifRect(stored, screensCache) : stored;
@@ -190,6 +216,9 @@
           if (!suspended.baseline) { suspended.baseline = rect; return false; }
           if (Object.keys(rect).every(k => rect[k] === suspended.baseline[k])) return false;
           // After a failed placement, an actual user move resumes position saving.
+          // Restore that manual rectangle next time, including when display
+          // permission was denied or a previously selected screen disappeared.
+          localStorage.removeItem(OHIF_SPAN_SCREENS_KEY);
           ohifPlacementWrites.delete(popup);
         }
         const slot = ohifPopupSlots.get(popup) || 0;
