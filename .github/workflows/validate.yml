@@ -539,12 +539,21 @@ jobs:
     - name: Exact selection of C2 server crypto cases
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-crypto-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/server-crypto.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/server-crypto.tap --server-crypto
+    - name: Online C2 and D on the native PostgreSQL ledger, including signature restore
+      run: |
+        node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
+        export KIN_B2R_NODE="$(command -v node)"
+        export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
+        python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-signing-pg --cwd . --tree api/src/emr-signature --tree api/src/emr-report --tree tests/emr/c -- python3 -B scripts/run-tests.py --module tests/emr/c/server_signing_live.py --class ServerSigningPg --mode live --unit emr-online-signing --timeout 600
+        python3 scripts/record-run.py --run-dir tmp/emr-c-ci/clinical-pg --cwd . --tree api/src/emr-clinical --tree tests/emr/d -- python3 -B scripts/run-tests.py --module tests/emr/d/online_live.py --mode live --unit emr-online-clinical --timeout 600
     - name: Online report and server signing evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-c1-results
-        path: tmp/emr-c-ci/
+        path: |
+          tmp/emr-c-ci/
+          tmp/emr-d-online/
         if-no-files-found: error
         retention-days: 7
     needs: runtime

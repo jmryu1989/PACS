@@ -27,7 +27,8 @@ export class FileWrappingSecrets implements WrappingSecrets {
 export function clinicalIdentity(input: RequestIdentity): RequestIdentity {
   const actor = parseVerifiedActor(input.actor);
   if (!input.online || input.capacity !== 'clinical' || actor.kind !== 'member' ||
-      actor.sessionState !== 'active' || !actor.canSign || !actor.roles.includes('radiologist')) refuse('OnlineDoctorApprovalRequired');
+      actor.sessionState !== 'active' || !actor.canSign ||
+      !actor.roles.some(role => ['radiologist', 'clinician', 'technician'].includes(role))) refuse('OnlineDoctorApprovalRequired');
   return { ...input, actor };
 }
 
@@ -62,6 +63,7 @@ export class ServerKeys {
       }
       const at = new Date().toISOString(), kid = doctor ? randomUUID() : previous.kid;
       const event: SigningEvent = { eventId: randomUUID(), operationId: randomUUID(), actor: actor.identity, institutionId, at,
+        roles: actor.roles, managingInstitutionId: institutionId,
         ingress: operator.ingress, task: command.action === 'provision' ? 'key-grant' : `key-${command.action}` as SigningEvent['task'],
         result: 'succeeded', doctorId, kid, patient: null, studyId: null, recordId: null, versionId: null };
       let result: ServerKeyRegistration;

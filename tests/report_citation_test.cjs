@@ -142,7 +142,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   const svc = new Proxy(real, { get(target, name) {
     if (name === 'putReport') return (uid, body, c) => target.putReport(uid, { findings: '', conclusion: '', recommendation: '', baseVersion: 0,
       citationIds: ids('citations', 'cid'), structureIds: ids('structured', 'sid'), ...pre(c), ...body }, c, null, B2_REQUEST_FACTS);
-    if (name === 'commitReport') return (uid, body, c) => target.commitReport(uid, { ...pre(c), ...body }, c, null);
+    if (name === 'commitReport') return (uid, body, c) => target.commitReport(uid, { ...pre(c), ...body }, c, null, B2_REQUEST_FACTS);
     if (name === 'forceDiscardDrafts') return (uid, c) => target.forceDiscardDrafts(uid, { expectedOwner: pre(c).expectedOwner, expectedEpoch: EPOCH }, c, null);
     const value = target[name];
     return typeof value === 'function' ? value.bind(target) : value;

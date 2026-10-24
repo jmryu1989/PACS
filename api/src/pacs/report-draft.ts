@@ -28,7 +28,7 @@ export interface DraftRequestFacts {
   ip: { address: string; source: 'trusted-proxy' | 'request-peer' } | null;
   requestId: string;
 }
-type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction };
+type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction; target?: 'report-version' };
 type RecordDraft = (state: any, value: any, action?: AccessAction,
   source?: { uid: string; version: number }) => Promise<void>;
 
@@ -50,8 +50,9 @@ export class PacsReportDraft {
       const identity = { issuer: facts.issuer, subject: c.sub,
         id: await work.resolveRequestIdentity(facts.issuer, c.sub) };
       return await work.transactionWithRecords((tx, record) => body(tx, async (state, value, action = observation.action, source) => {
-        const resource = source ? JSON.stringify([source.uid, source.version]) : JSON.stringify([uid, c.actor]);
-        const revision = source ? String(source.version) : value.revision;
+        const report = !!source || observation.target === 'report-version';
+        const revision = source ? String(source.version) : report ? String(value.state.version) : value.revision;
+        const resource = report ? JSON.stringify([source?.uid ?? uid, Number(revision)]) : JSON.stringify([uid, c.actor]);
         const event: AccessEventV1 = {
           formatVersion: 1, surface, eventId: randomUUID(),
           userId: { status: 'known', value: identity }, rolesAtTime: { status: 'known', value: c.roles },
@@ -60,7 +61,7 @@ export class PacsReportDraft {
           occurredAt: new Date().toISOString(),
           trustedProxyIp: facts.ip ? { status: 'known', value: facts.ip } : { status: 'unresolved', reason: 'not-observed' },
           cause: 'user-view', context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null },
-          executor: 'member', targets: [{ kind: source ? 'report-version' : 'private-draft',
+          executor: 'member', targets: [{ kind: report ? 'report-version' : 'private-draft',
             patientLinkSnapshot: { status: 'unresolved', reason: 'not-resolved' },
             studyId: { status: 'known', value: source?.uid ?? uid }, recordId: { status: 'known', value: resource },
             versionId: { status: 'known', value: revision } }],
@@ -69,7 +70,7 @@ export class PacsReportDraft {
         };
         // Writes reach here in their business transaction; views supply the
         // captured read snapshot. Neither response leaves before this commit.
-        await record(event, async () => ({ kind: source ? 'ReportVersion' : 'ReportDraft', id: resource, version: revision }));
+        await record(event, async () => ({ kind: report ? 'ReportVersion' : 'ReportDraft', id: resource, version: revision }));
       }), options);
     } finally { work.end(); }
   }

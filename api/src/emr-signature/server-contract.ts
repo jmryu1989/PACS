@@ -44,7 +44,9 @@ export interface SigningEvent {
   eventId: string;
   operationId: string;
   actor: ImmutableIdentity;
+  roles: readonly string[];
   institutionId: string;
+  managingInstitutionId: string;
   at: string;
   ingress: IngressContext;
   task: 'key-grant' | 'key-suspend' | 'key-revoke' | 'key-replace' | 'approve-sign' | 'amend' | 'addendum' | 'cancel' | 'view';
@@ -61,9 +63,8 @@ export type SigningRecordMutation = (event: SigningEvent,
 
 /**
  * Same transaction/callback shape as B2 EmrRecordWork.transactionWithRecords and RecordMutation.
- * TODO after B2 merges: adapt SigningEvent to its accepted AccessEvent/permission contracts and
- * required streams, retaining B2 admission/unknown-result handling. No production ledger adapter
- * is installed here. A callback result is provisional until this outer promise commits.
+ * The PG adapter maps the observed facts to B2's access contract. A callback
+ * result remains provisional until the outer B2 transaction confirms COMMIT.
  */
 export interface LedgerPort {
   transactionWithRecords<T>(work: (tx: SigningTransaction, record: SigningRecordMutation) => Promise<T>): Promise<T>;

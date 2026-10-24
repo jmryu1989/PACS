@@ -178,6 +178,7 @@ export function classifyRoute(route: string): readonly RecordKind[] {
  * the member it affects; its events carry `not-applicable: in-process-service` instead of an invented client address.
  * Closed: a new background job adds its own entry here with the records it touches. */
 export const INTERNAL_SURFACES: Readonly<Record<string, RouteContract>> = freeze({
+  'server:doctor-key-management': { kinds: ['identity-access'], operation: 'write', causes: ['user-view'] },
   'service:auth-session-sweep': { kinds: ['authentication-session'], operation: 'auth', causes: ['service-job'] },
   'service:member-rights-import': { kinds: ['identity-access'], operation: 'write', causes: ['service-job'] },
 });
