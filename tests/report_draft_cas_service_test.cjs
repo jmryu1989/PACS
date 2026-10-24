@@ -124,6 +124,10 @@ function routed(method, path) {
   assert.equal(found.length, 1, `${method} ${path} must reach one handler`);
   return found[0];
 }
+// The Guard captures each request's actual route; the harness hands the handler the same admission.
+const ROUTE_KEYS = { put: ['PUT', 'studies/:uid/report'], read: ['GET', 'studies/:uid/draft'], discard: ['DELETE', 'studies/:uid/draft'],
+  force: ['DELETE', 'studies/:uid/draft/force'], commit: ['POST', 'studies/:uid/report/commit'], remove: ['DELETE', 'studies/:uid'],
+  citations: ['GET', 'studies/:uid/report/citations'], structure: ['GET', 'studies/:uid/report/structure'] };
 const ROUTE = {
   put: routed('PUT', 'studies/:uid/report'), read: routed('GET', 'studies/:uid/draft'),
   discard: routed('DELETE', 'studies/:uid/draft'), force: routed('DELETE', 'studies/:uid/draft/force'),
@@ -157,7 +161,7 @@ async function within(promise, what, ms = 8000) {
 
 async function world() {
   const base = await database();
-  const w = { base, gates: [], faults: [], points: [] };
+  const w = { base, gates: [], faults: [], points: [], open: 0 };
   for(const p of [A,B,C,ADMIN,OTHER_ADMIN,REVIEWER]) await base.memberRights.upsert({where:{sub:p.sub},update:{},create:{
     sub:p.sub,username:p.actor,email:p.actor,name:p.actor,emailVerified:true,approved:true,suspended:false,institution:p.institution,roles:p.roles}});
   /** Holds the request `label` at `point` (prepare | commit) until released; `fault` makes its next audit write throw. */
@@ -185,6 +189,8 @@ async function world() {
   } });
   const recorder = new Proxy({}, { get(_t, key) {
     if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
+      w.open++;
+      try {
       await hit('tx-start');
       const out = await fn(view(tx));
       // Pause the actual business transaction. Identity/admission transactions
@@ -198,6 +204,7 @@ async function world() {
       if (business && !holds) await hit('read-commit');
       if (business && holds) await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
       return out;
+      } finally { w.open--; }
     }, options);
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
@@ -272,7 +279,7 @@ async function world() {
     // the separate registered HTTP suite. Keep its real request work/lifetime.
     requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:as.sub,roles:as.roles,
       institution:as.institution,rightsVersion:1,binding:sid ? {method:'session',sessionRef:w.auth.sessionRef(sid)} : {method:'bearer',sessionRef:null}},
-      {method:route === 'read' ? 'GET' : 'PUT',route:route === 'read' ? 'studies/:uid/draft' : 'studies/:uid/report',purpose:'clinical'},async()=>{});
+      {method:ROUTE_KEYS[route][0],route:ROUTE_KEYS[route][1],purpose:'clinical'},async()=>{});
     const args = [];
     for (const [slot, { index, data }] of Object.entries(Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, key) ?? {})) {
       const type = Number(slot.split(':')[0]);
@@ -1187,7 +1194,9 @@ test('CORE_R9_REVIEWER_FRESH: a cached colleague read cannot decide designation,
   const w=await world(),{KeycloakService}=require('/app/dist/keycloak.service');
   const provider=new KeycloakService();let current=[{id:REVIEWER.sub,email:REVIEWER.actor,username:'reviewer',enabled:true}];
   provider.adm=async route=>{
-    assert.ok(!w.points.includes('fresh:tx-start'),'roster I/O must finish before the report transaction opens');
+    // REQUEST_FACTS resolves the request identity in its own short ledger transaction before the handler runs;
+    // what must not happen is roster I/O while any transaction (and its locks) is open.
+    assert.equal(w.open,0,'roster I/O must finish before the report transaction opens');
     return route==='/groups'?[{id:'syn-group',name:INST}]:current;
   };
   assert.equal((await provider.usersInGroupWithRole(INST,'radiologist'))[0].sub,REVIEWER.sub);
