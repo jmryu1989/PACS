@@ -196,8 +196,7 @@
       "scripts/emr-compose.py",
       "scripts/record-run.py",
       "tests/e2e/requirements.txt",
-      "tests/emr/c/**",
-      "worklist-v0/hpacs-lite/offline-report.js"
+      "tests/emr/c/**"
     ],
     "emr-d": [
       "api/Dockerfile*",
