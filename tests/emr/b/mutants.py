@@ -310,12 +310,11 @@ def release_gate(copy, unit, code, log, out, name):
     """After a failed live run: inspect this run's labelled resources, then release through the gate's protocol."""
     sys.path.insert(0, str(copy / "tests"))
     import live_test_gate as gate  # the copy's gate: the same account-wide state directory
-    marker = gate.STATE / "live-needs-inspection.json"
-    if not marker.is_file():
+    # This unit's uninspected records, active or set aside by a run in another environment (D1804).
+    own = sorted(gate.run_markers(unit), key=lambda row: str(row.get("started_at")))
+    if not own:
         return {"marker": "absent"}
-    identity = json.loads(marker.read_text(encoding="utf-8"))
-    if identity.get("unit") != unit:
-        return {"marker": "foreign", "unit": identity.get("unit")}
+    identity = own[-1]
     remaining = leftovers()
     if remaining:
         return {"marker": "kept", "remaining": remaining}

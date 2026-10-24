@@ -317,8 +317,8 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── report-draft (api/src/pacs/report-draft.ts) ──
-  async readDraft(uid: string, c: Caller) {
-    return this.reportDraftConcern.readDraft(uid, c);
+  async readDraft(uid: string, c: Caller, insertRequestId?: string) {
+    return this.reportDraftConcern.readDraft(uid, c, insertRequestId);
   }
 
   async dictationGate(uid: string, c: Caller) {

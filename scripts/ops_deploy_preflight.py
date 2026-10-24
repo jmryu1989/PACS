@@ -291,9 +291,6 @@ def check_projection_preserved(before, after):
     require(not changed, "Existing rows changed: " + ",".join(changed)[:400])
 
 
-def check_counts_preserved(before, after):
-    require(all(after.get(name) == count for name, count in before.items()), "Row counts of existing tables changed")
-
 
 def check_introduced_api(container, *, name, image, release, working_dir, state_volume):
     """The running API of the introduced release: OS user node, DB role kin_runtime only, production authentication,

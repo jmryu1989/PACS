@@ -5170,7 +5170,7 @@
       {
         "name": "readDraft",
         "slot": "reportDraftConcern",
-        "signature_sha256": "33d456190b1720ceffd63013536b18298cf09dbe4814c0f089cb3c22ad59eab9"
+        "signature_sha256": "889584c7d524a17c84437ed4ceb317a5c706fa92e164f00d949ed81cb38123e2"
       },
       {
         "name": "dictationGate",
@@ -8476,5 +8476,25 @@
       }
     ]
   },
-  "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee"
+  "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee",
+  "w5_api": {
+    "unit": "W5-API",
+    "decision": "D1460",
+    "facade_signatures": [
+      {
+        "name": "readDraft",
+        "landed": "33d456190b1720ceffd63013536b18298cf09dbe4814c0f089cb3c22ad59eab9",
+        "current": "889584c7d524a17c84437ed4ceb317a5c706fa92e164f00d949ed81cb38123e2"
+      }
+    ],
+    "route_args": [
+      {
+        "controller": "PacsController",
+        "handler": "draft",
+        "added": [
+          "4:2@2:\"insertRequestId\":0"
+        ]
+      }
+    ]
+  }
 }

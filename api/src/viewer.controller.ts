@@ -9,7 +9,7 @@ import { CLINICIAN_VIEWER_CHANGED, clinicianOnly, clinicianViewerContinuation, c
 const caller = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: req.roles ?? [],
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
 
-// S5-U1b-F04 이어받기 서명 키. study-page.ts처럼 프로세스 안에서만 만들어 설정할 비밀이 없고, 재시작하면 열린 이어받기는
+// S5-U1b-F04 이어받기 서명 키. 프로세스 안에서만 만들어 설정할 비밀이 없고, 재시작하면 열린 이어받기는
 // 409(처음부터 다시)로 끝난다. 서명이 지키는 것은 "이 판은 서버가 앞 쪽에서 확인한 값"이라는 것뿐이다 — 권한은 매 쪽 관문이 본다.
 const VIEWER_CURSOR_KEY = randomBytes(32);
 const changed = (message = '판독 상태가 바뀌었습니다. 새로고침하세요.') =>

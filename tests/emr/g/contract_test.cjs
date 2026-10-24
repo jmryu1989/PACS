@@ -37,7 +37,8 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
   const api = path.join(root, 'api');
   const ts = require(path.join(api, 'node_modules/typescript'));
   const config = ts.readConfigFile(path.join(api, 'tsconfig.json'), ts.sys.readFile);
-  assert.equal(config.error, undefined);
+  assert.equal(config.error === undefined, true, config.error
+    ? `TS${config.error.code}: ${ts.flattenDiagnosticMessageText(config.error.messageText, '\n')}` : undefined);
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, api);
   const contractFile = path.join(api, 'src/emr-legacy/contract.ts');
   const override = process.env.KIN_EMR_G_CONTRACT_SOURCE || null;

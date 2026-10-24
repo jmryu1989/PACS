@@ -1,0 +1,1198 @@
+{
+  "purpose": "Responsibility and first-extraction map; not a permanent baseline hash gate. Edit sources, then build. No runtime module boundaries are introduced.",
+  "base_sha": "ddc49c05646a6994af16afce45c56c60830671e3",
+  "baseline_path": "config/ohif.js",
+  "offsets": "original_bytes: zero-based half-open UTF-8 Git blob offsets; original_line: one-based; historical extraction only",
+  "scope": "All sources concatenate into the same classic Script lexical scope. Initial branding constants remain before session entry; CT preset model remains before intervening loaders.",
+  "modules": [
+    {
+      "file": "branding-defaults.js",
+      "original_bytes": [
+        0,
+        728
+      ],
+      "statements": [
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "KIN_VIEWER_DEFAULT_TITLE"
+          ],
+          "original_line": 13
+        },
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "KIN_VIEWER_PRODUCT"
+          ],
+          "original_line": 14
+        }
+      ],
+      "references": [],
+      "loader_assets": [],
+      "consumers": [
+        "session.js",
+        "branding.js"
+      ],
+      "registrations": []
+    },
+    {
+      "file": "session.js",
+      "original_bytes": [
+        728,
+        5616
+      ],
+      "statements": [
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "KIN_VIEWER_EXPECTED_SESSION"
+          ],
+          "original_line": 18
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateSessionBoundary"
+          ],
+          "original_line": 36
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinViewerOnEnd"
+          ],
+          "original_line": 84
+        },
+        {
+          "kind": "ExpressionStatement",
+          "symbols": [
+            "window.kinViewerOnEnd"
+          ],
+          "original_line": 98
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        },
+        {
+          "symbol": "KIN_VIEWER_DEFAULT_TITLE",
+          "file": "branding-defaults.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/work-context.js",
+        "/worklist/hpacs-lite/session-transport.js",
+        "/worklist/hpacs-lite/viewer-resources.js",
+        "/worklist/hpacs-lite/viewer-session.js"
+      ],
+      "consumers": [
+        "branding.js",
+        "sr-provenance.js",
+        "history.js",
+        "clinician-context.js",
+        "layout.js",
+        "ct-sync.js",
+        "cine.js",
+        "display-scope.js",
+        "cell-merge.js",
+        "images-only.js",
+        "image-text.js",
+        "three-d-cursor.js",
+        "dicom-pdf.js",
+        "configuration.js"
+      ],
+      "registrations": [
+        0
+      ]
+    },
+    {
+      "file": "toolbar-labels.js",
+      "original_bytes": [
+        5616,
+        11085
+      ],
+      "statements": [
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "kinViewerToolbarLabels"
+          ],
+          "original_line": 105
+        }
+      ],
+      "references": [],
+      "loader_assets": [],
+      "consumers": [
+        "branding.js"
+      ],
+      "registrations": []
+    },
+    {
+      "file": "branding.js",
+      "original_bytes": [
+        11085,
+        20891
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "KinViewerBrand"
+          ],
+          "original_line": 187
+        },
+        {
+          "kind": "ExpressionStatement",
+          "symbols": [
+            "document.title"
+          ],
+          "original_line": 365
+        }
+      ],
+      "references": [
+        {
+          "symbol": "KIN_VIEWER_DEFAULT_TITLE",
+          "file": "branding-defaults.js"
+        },
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        },
+        {
+          "symbol": "KIN_VIEWER_PRODUCT",
+          "file": "branding-defaults.js"
+        },
+        {
+          "symbol": "kinViewerToolbarLabels",
+          "file": "toolbar-labels.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": []
+    },
+    {
+      "file": "stack-precision.js",
+      "original_bytes": [
+        20891,
+        30717
+      ],
+      "statements": [
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "kinStackPrecision"
+          ],
+          "original_line": 389
+        }
+      ],
+      "references": [],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        1
+      ]
+    },
+    {
+      "file": "sr-provenance.js",
+      "original_bytes": [
+        30717,
+        47656
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateSRProvenance"
+          ],
+          "original_line": 542
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        2
+      ]
+    },
+    {
+      "file": "navigation.js",
+      "original_bytes": [
+        47656,
+        53543
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinViewerImageReference"
+          ],
+          "original_line": 783
+        },
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "KIN_NAVIGATION_REASONS"
+          ],
+          "original_line": 792
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinViewerNavigateTo"
+          ],
+          "original_line": 793
+        },
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "KIN_ACTIVATION_REASONS"
+          ],
+          "original_line": 842
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinViewerActivateStudy"
+          ],
+          "original_line": 843
+        }
+      ],
+      "references": [],
+      "loader_assets": [],
+      "consumers": [
+        "history.js"
+      ],
+      "registrations": []
+    },
+    {
+      "file": "history.js",
+      "original_bytes": [
+        53543,
+        150897
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateViewerHistory"
+          ],
+          "original_line": 862
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        },
+        {
+          "symbol": "kinViewerImageReference",
+          "file": "navigation.js"
+        },
+        {
+          "symbol": "kinViewerNavigateTo",
+          "file": "navigation.js"
+        },
+        {
+          "symbol": "kinViewerActivateStudy",
+          "file": "navigation.js"
+        },
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        3
+      ]
+    },
+    {
+      "file": "layout-model.js",
+      "original_bytes": [
+        150897,
+        154153
+      ],
+      "statements": [
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "kinViewerLayoutModel"
+          ],
+          "original_line": 2152
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinHangingProtocolDisplaySets"
+          ],
+          "original_line": 2191
+        }
+      ],
+      "references": [],
+      "loader_assets": [],
+      "consumers": [
+        "layout.js",
+        "jobs.js"
+      ],
+      "registrations": []
+    },
+    {
+      "file": "clinician-context.js",
+      "original_bytes": [
+        154153,
+        159861
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinViewerClinicianOnly"
+          ],
+          "original_line": 2208
+        },
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "kinViewerSession"
+          ],
+          "original_line": 2217
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [
+        "session.js",
+        "history.js",
+        "layout.js",
+        "ct-sync.js",
+        "jobs.js",
+        "findings.js",
+        "tech-note-loader.js",
+        "context-loss.js"
+      ],
+      "registrations": []
+    },
+    {
+      "file": "layout.js",
+      "original_bytes": [
+        159861,
+        174277
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateViewerLayout"
+          ],
+          "original_line": 2304
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerLayoutModel",
+          "file": "layout-model.js"
+        },
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        },
+        {
+          "symbol": "kinHangingProtocolDisplaySets",
+          "file": "layout-model.js"
+        },
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/hanging-protocol-model.js",
+        "/worklist/hpacs-lite/viewer-hanging-protocol.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        5
+      ]
+    },
+    {
+      "file": "ct-sync.js",
+      "original_bytes": [
+        174277,
+        193925
+      ],
+      "statements": [
+        {
+          "kind": "FirstStatement",
+          "symbols": [
+            "kinCTSyncModel"
+          ],
+          "original_line": 2474
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateCTSync"
+          ],
+          "original_line": 2515
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        },
+        {
+          "symbol": "kinViewerClinicianOnly",
+          "file": "clinician-context.js"
+        },
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        11
+      ]
+    },
+    {
+      "file": "cine.js",
+      "original_bytes": [
+        193925,
+        217189
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCineWithinBudget"
+          ],
+          "original_line": 2731
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCineNext"
+          ],
+          "original_line": 2737
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateCine"
+          ],
+          "original_line": 2755
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        12
+      ]
+    },
+    {
+      "file": "ct-preset-model.js",
+      "original_bytes": [
+        217189,
+        218545
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinApplyCTPreset"
+          ],
+          "original_line": 3001
+        }
+      ],
+      "references": [],
+      "loader_assets": [],
+      "consumers": [
+        "ct-presets.js"
+      ],
+      "registrations": []
+    },
+    {
+      "file": "display-scope.js",
+      "original_bytes": [
+        218545,
+        220769
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateDisplayScope"
+          ],
+          "original_line": 3019
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-display-scope.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        13
+      ]
+    },
+    {
+      "file": "cell-merge.js",
+      "original_bytes": [
+        220769,
+        224624
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateCellMerge"
+          ],
+          "original_line": 3059
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-cell-merge.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        14
+      ]
+    },
+    {
+      "file": "images-only.js",
+      "original_bytes": [
+        224624,
+        226826
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateImagesOnly"
+          ],
+          "original_line": 3117
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-images-only.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        15
+      ]
+    },
+    {
+      "file": "image-text.js",
+      "original_bytes": [
+        226826,
+        229017
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateImageText"
+          ],
+          "original_line": 3154
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-image-text.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        16
+      ]
+    },
+    {
+      "file": "ct-presets.js",
+      "original_bytes": [
+        229017,
+        230550
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateCTPresets"
+          ],
+          "original_line": 3191
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinApplyCTPreset",
+          "file": "ct-preset-model.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        17
+      ]
+    },
+    {
+      "file": "jobs.js",
+      "original_bytes": [
+        230550,
+        232597
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateViewerJobs"
+          ],
+          "original_line": 3218
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        },
+        {
+          "symbol": "kinViewerLayoutModel",
+          "file": "layout-model.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-volume-job.js",
+        "/worklist/hpacs-lite/viewer-stack-restore.js",
+        "/worklist/hpacs-lite/viewer-jobs.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        6
+      ]
+    },
+    {
+      "file": "findings.js",
+      "original_bytes": [
+        232597,
+        235302
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateViewerFindings"
+          ],
+          "original_line": 3246
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/finding-link-model.js",
+        "/worklist/hpacs-lite/viewer-findings.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        4
+      ]
+    },
+    {
+      "file": "tech-note-loader.js",
+      "original_bytes": [
+        235302,
+        240553
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateViewerTechNote"
+          ],
+          "original_line": 3282
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/tech-note.js",
+        "/worklist/hpacs-lite/viewer-workspace-dock.js",
+        "/worklist/hpacs-lite/workspace-shortcuts.js",
+        "/worklist/hpacs-lite/viewer-windows.js",
+        "/worklist/hpacs-lite/viewer-identity.js",
+        "/worklist/hpacs-lite/volume-orientation.js",
+        "/worklist/hpacs-lite/viewer-volume-orientation.js",
+        "/worklist/hpacs-lite/volume-display.js",
+        "/worklist/hpacs-lite/viewer-volume-display.js",
+        "/worklist/hpacs-lite/viewer-volume-sync.js",
+        "/worklist/hpacs-lite/viewer-volume-progressive.js",
+        "/worklist/hpacs-lite/volume-marks.js",
+        "/worklist/hpacs-lite/viewer-volume-marks.js",
+        "/worklist/hpacs-lite/volume-curved.js",
+        "/worklist/hpacs-lite/viewer-volume-curved.js",
+        "/worklist/hpacs-lite/volume-path.js",
+        "/worklist/hpacs-lite/viewer-volume-path.js",
+        "/worklist/hpacs-lite/volume-preferences.js",
+        "/worklist/hpacs-lite/viewer-volume-preferences.js",
+        "/worklist/hpacs-lite/volume-crosshair.js",
+        "/worklist/hpacs-lite/viewer-volume-crosshair.js",
+        "/worklist/hpacs-lite/volume-batch.js",
+        "/worklist/hpacs-lite/volume-batch-scout.js",
+        "/worklist/hpacs-lite/viewer-volume-scout.js",
+        "/worklist/hpacs-lite/viewer-volume-batch.js",
+        "/worklist/hpacs-lite/viewer-tech-note.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        7
+      ]
+    },
+    {
+      "file": "frame-coverage.js",
+      "original_bytes": [
+        240553,
+        241879
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateFrameCoverage"
+          ],
+          "original_line": 3346
+        }
+      ],
+      "references": [],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-frame-coverage.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        8
+      ]
+    },
+    {
+      "file": "three-d-cursor.js",
+      "original_bytes": [
+        241879,
+        254587
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateThreeDCursor"
+          ],
+          "original_line": 3371
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/three-d-cursor-model.js",
+        "/worklist/hpacs-lite/viewer-three-d-cursor.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        18
+      ]
+    },
+    {
+      "file": "dicom-pdf.js",
+      "original_bytes": [
+        254587,
+        268842
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinDicomPdfViewportGuard"
+          ],
+          "original_line": 3566
+        },
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateDicomPdf"
+          ],
+          "original_line": 3701
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-dicom-pdf.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        10
+      ]
+    },
+    {
+      "file": "series-recovery.js",
+      "original_bytes": [
+        268842,
+        277483
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateSeriesMetadataRecovery"
+          ],
+          "original_line": 3751
+        }
+      ],
+      "references": [],
+      "loader_assets": [],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        19
+      ]
+    },
+    {
+      "file": "context-loss.js",
+      "original_bytes": [
+        277483,
+        278870
+      ],
+      "statements": [
+        {
+          "kind": "FunctionDeclaration",
+          "symbols": [
+            "kinCreateContextLoss"
+          ],
+          "original_line": 3856
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-context-loss.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ],
+      "registrations": [
+        20
+      ]
+    },
+    {
+      "file": "configuration.js",
+      "original_bytes": [
+        278870,
+        280704
+      ],
+      "statements": [
+        {
+          "kind": "ExpressionStatement",
+          "symbols": [
+            "window.config"
+          ],
+          "original_line": 3880
+        }
+      ],
+      "references": [
+        {
+          "symbol": "kinCreateSessionBoundary",
+          "file": "session.js"
+        },
+        {
+          "symbol": "kinStackPrecision",
+          "file": "stack-precision.js"
+        },
+        {
+          "symbol": "kinCreateSRProvenance",
+          "file": "sr-provenance.js"
+        },
+        {
+          "symbol": "kinCreateViewerHistory",
+          "file": "history.js"
+        },
+        {
+          "symbol": "kinCreateViewerFindings",
+          "file": "findings.js"
+        },
+        {
+          "symbol": "kinCreateViewerLayout",
+          "file": "layout.js"
+        },
+        {
+          "symbol": "kinCreateViewerJobs",
+          "file": "jobs.js"
+        },
+        {
+          "symbol": "kinCreateViewerTechNote",
+          "file": "tech-note-loader.js"
+        },
+        {
+          "symbol": "kinCreateFrameCoverage",
+          "file": "frame-coverage.js"
+        },
+        {
+          "symbol": "kinCreateDicomPdf",
+          "file": "dicom-pdf.js"
+        },
+        {
+          "symbol": "kinCreateCTSync",
+          "file": "ct-sync.js"
+        },
+        {
+          "symbol": "kinCreateCine",
+          "file": "cine.js"
+        },
+        {
+          "symbol": "kinCreateDisplayScope",
+          "file": "display-scope.js"
+        },
+        {
+          "symbol": "kinCreateCellMerge",
+          "file": "cell-merge.js"
+        },
+        {
+          "symbol": "kinCreateImagesOnly",
+          "file": "images-only.js"
+        },
+        {
+          "symbol": "kinCreateImageText",
+          "file": "image-text.js"
+        },
+        {
+          "symbol": "kinCreateCTPresets",
+          "file": "ct-presets.js"
+        },
+        {
+          "symbol": "kinCreateThreeDCursor",
+          "file": "three-d-cursor.js"
+        },
+        {
+          "symbol": "kinCreateSeriesMetadataRecovery",
+          "file": "series-recovery.js"
+        },
+        {
+          "symbol": "kinCreateContextLoss",
+          "file": "context-loss.js"
+        },
+        {
+          "symbol": "KinViewerBrand",
+          "file": "branding.js"
+        }
+      ],
+      "loader_assets": [],
+      "consumers": [],
+      "registrations": []
+    }
+  ],
+  "registration_order": [
+    {
+      "index": 0,
+      "expression": "kinCreateSessionBoundary()",
+      "source": "session.js"
+    },
+    {
+      "index": 1,
+      "expression": "kinStackPrecision",
+      "source": "stack-precision.js"
+    },
+    {
+      "index": 2,
+      "expression": "kinCreateSRProvenance()",
+      "source": "sr-provenance.js"
+    },
+    {
+      "index": 3,
+      "expression": "kinCreateViewerHistory()",
+      "source": "history.js"
+    },
+    {
+      "index": 4,
+      "expression": "kinCreateViewerFindings()",
+      "source": "findings.js"
+    },
+    {
+      "index": 5,
+      "expression": "kinCreateViewerLayout()",
+      "source": "layout.js"
+    },
+    {
+      "index": 6,
+      "expression": "kinCreateViewerJobs()",
+      "source": "jobs.js"
+    },
+    {
+      "index": 7,
+      "expression": "kinCreateViewerTechNote()",
+      "source": "tech-note-loader.js"
+    },
+    {
+      "index": 8,
+      "expression": "kinCreateFrameCoverage()",
+      "source": "frame-coverage.js"
+    },
+    {
+      "index": 9,
+      "expression": "'@ohif/extension-dicom-pdf'",
+      "source": "pinned OHIF extension"
+    },
+    {
+      "index": 10,
+      "expression": "kinCreateDicomPdf()",
+      "source": "dicom-pdf.js"
+    },
+    {
+      "index": 11,
+      "expression": "kinCreateCTSync()",
+      "source": "ct-sync.js"
+    },
+    {
+      "index": 12,
+      "expression": "kinCreateCine()",
+      "source": "cine.js"
+    },
+    {
+      "index": 13,
+      "expression": "kinCreateDisplayScope()",
+      "source": "display-scope.js"
+    },
+    {
+      "index": 14,
+      "expression": "kinCreateCellMerge()",
+      "source": "cell-merge.js"
+    },
+    {
+      "index": 15,
+      "expression": "kinCreateImagesOnly()",
+      "source": "images-only.js"
+    },
+    {
+      "index": 16,
+      "expression": "kinCreateImageText()",
+      "source": "image-text.js"
+    },
+    {
+      "index": 17,
+      "expression": "kinCreateCTPresets()",
+      "source": "ct-presets.js"
+    },
+    {
+      "index": 18,
+      "expression": "kinCreateThreeDCursor()",
+      "source": "three-d-cursor.js"
+    },
+    {
+      "index": 19,
+      "expression": "kinCreateSeriesMetadataRecovery()",
+      "source": "series-recovery.js"
+    },
+    {
+      "index": 20,
+      "expression": "kinCreateContextLoss()",
+      "source": "context-loss.js"
+    }
+  ],
+  "served_consumer": {
+    "configuration": "config/orthanc.json OHIF.UserConfiguration",
+    "artifact": "config/ohif.js",
+    "source_order": "config/ohif/source-order.json",
+    "builder": "scripts/build-ohif-config.py"
+  }
+}

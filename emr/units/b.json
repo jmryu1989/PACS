@@ -193,9 +193,10 @@
       "20261010120000_emr_seal_attempts",
       "20261010150000_emr_read_jit_off",
       "20261011120000_filter_shortcuts",
-      "20261015013945_import_operation"
+      "20261015013945_import_operation",
+      "20261016120000_related_report_insert_receipt"
     ],
-    "count": 47,
+    "count": 48,
     "latest_before": "20261007200000_designation_subjects"
   },
   "deployment": {
@@ -484,17 +485,17 @@
     "contract": 21,
     "live": 13,
     "mutants": 39,
-    "profiles": 39,
+    "profiles": 40,
     "measurements_suites": 20,
     "validate_jobs": 22,
     "emr_b_jobs": 1,
     "session_matrix": 8,
     "candidate": 122,
     "candidate_rows": 14,
-    "migrations": 47,
-    "public_tables": 52,
+    "migrations": 48,
+    "public_tables": 53,
     "emr_tables": 10,
-    "fixture_public_rows": 102,
+    "fixture_public_rows": 105,
     "fixture_emr_rows": 11,
     "note": "declared before running; never generated from a run's own result"
   },

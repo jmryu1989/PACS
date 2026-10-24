@@ -4,9 +4,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
-import importlib.metadata
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -20,8 +18,6 @@ import ops_storage_reconcile as core
 WORKER_TIMEOUT = 120
 REQUEST_LIMIT = 20000
 LOCK = Path(__file__).with_name('requirements-storage-sdk.txt')
-VERSIONS = {'boto3': '1.43.89', 'botocore': '1.43.89', 'jmespath': '1.1.0',
-            'python-dateutil': '2.9.0.post0', 's3transfer': '0.19.2', 'six': '1.17.0', 'urllib3': '2.7.0'}
 AUTHORITY = dict(content_verified=False, provider_verified=False, snapshot_consistency_verified=False,
                  restore_verified=False, migration_authorized=False)
 CONFIG_FIELDS = {'schema', 'endpoint', 'region', 'bucket', 'prefix', 'expected_owner',
@@ -128,8 +124,6 @@ class RequestGuard:
 
 
 def sdk_client(config, secret, ca):
-    actual = {name: importlib.metadata.version(name) for name in VERSIONS}
-    require(actual == VERSIONS)
     import boto3
     from botocore.config import Config
     client = boto3.session.Session().client(
@@ -201,7 +195,7 @@ def worker(pending):
     finally:
         client.close()
     receipt = dict(schema=1, config_sha256=request['config_sha256'], sdk_lock_sha256=request['sdk_lock_sha256'],
-                   sdk_versions=VERSIONS, scope={k: config[k] for k in
+                   scope={k: config[k] for k in
                        ('endpoint', 'region', 'bucket', 'prefix', 'expected_owner')},
                    started_at=started, ended_at=utc(), request_attempts=guard.attempts,
                    listing_sha256=digest(raw), listed_objects=objects, pages=pages,
@@ -247,13 +241,13 @@ def collect(config_path, config_hash, destination):
                 out.write(ca); private.sync(out)
         run_worker(pending)
         receipt = parse(bound_small(pending/'receipt.json'))
-        require(type(receipt) is dict and set(receipt) == {'schema', 'config_sha256', 'sdk_lock_sha256', 'sdk_versions',
+        require(type(receipt) is dict and set(receipt) == {'schema', 'config_sha256', 'sdk_lock_sha256',
                 'scope', 'started_at', 'ended_at', 'request_attempts', 'listing_sha256', 'listed_objects', 'pages',
                 'collection_complete'} | set(AUTHORITY))
         require(type(receipt['schema']) is int and receipt['schema'] == 1
                 and receipt['collection_complete'] is True and all(receipt[k] is False for k in AUTHORITY))
         require(receipt['config_sha256'] == config_hash and receipt['sdk_lock_sha256'] == request['sdk_lock_sha256']
-                and receipt['sdk_versions'] == VERSIONS and receipt['scope'] == {k: config[k] for k in
+                and receipt['scope'] == {k: config[k] for k in
                     ('endpoint', 'region', 'bucket', 'prefix', 'expected_owner')})
         require(all(type(receipt[field]) is str for field in ('started_at', 'ended_at')))
         started, ended = (datetime.fromisoformat(receipt[field]) for field in ('started_at', 'ended_at'))

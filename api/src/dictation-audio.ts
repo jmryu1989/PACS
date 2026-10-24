@@ -4,9 +4,9 @@
  * bounded capture wire format, not a general-purpose WAV upload/import parser.
  */
 export const DICTATION_AUDIO_MAX_BYTES = 1_048_576;
-export const DICTATION_SAMPLE_RATE = 16_000;
+const DICTATION_SAMPLE_RATE = 16_000;
 
-export type DictationAudioInspection =
+type DictationAudioInspection =
   | { ok: false; reason: 'invalid-limit' | 'not-bytes' | 'too-large' | 'invalid-wave' | 'unsupported-format' }
   | { ok: true; byteLength: number; dataOffset: number; dataBytes: number;
       frames: number; seconds: number; sampleRate: 16000; channels: 1; bitsPerSample: 16 };

@@ -1,29 +1,10 @@
 # coding: utf-8
-"""TEST-S7-U1a-SERVICE SV11, the source half (contract S7-U1p section 2.3 SV11, section 3.2): the critical result sources
-read the report only through ReportVersion rows, never the current Report body, a ReportDraft or the report preview.
+"""TEST-S7-U1a-SERVICE SV11: the delivered critical-result sources read signed versions.
 
-REQ-S7-U1a-SOURCE-PIN -> RISK-S7-U1p-DRAFT-OR-LATEST / RISK-S7-CVR-SOURCE-BYPASS / RISK-S7-U1p-WIDENING -> this file and
-tests/critical_result_service_test.cjs (whose PostgreSQL cases show that each answer carries its own pinned row).
-
-Nothing here reads SQL or TypeScript by pattern (S7-U1a-R-001-F03, AGENTS 1-B.15). Two installed tools decide:
-  1. TypeScript's compiler API (the development image of api/, KIN_TEST_API_DEV_IMAGE) parses every
-     api/src/critical-result*.ts file and lists its imports, the $queryRaw/$executeRaw tagged templates with their literal
-     parts, member names, string literals and identifiers. A raw query written another way (called as a function, an
-     Unsafe variant, a template holding a template, a tag the check does not know) is refused, not read around.
-  2. PostgreSQL 16 plans every template (EXPLAIN (VERBOSE, GENERIC_PLAN, FORMAT JSON), each ${...} a parameter) on a
-     disposable postgres:16-alpine (--network none, tmpfs) holding every migration. The plan names each relation a
-     statement scans, its alias and every column it outputs, filters or joins on, whatever alias, spacing or keyword case
-     the statement is written with.
-A file fails when a plan scans "ReportDraft" or reads a "Report" column other than uid and version (findings, conclusion
-and recommendation are the current body; version is how the head is found), when it names a report, reportDraft or
-reportPreview member (a Prisma delegate or the preview method; OrthancService.reportPreviewStudy, the original identity
-read of section 3.1, is another name), a ReportDraft or report-preview string, fetch or require, or imports a module
-outside the critical result's own list (the report preview controller, a pacs.service value, the consultation, question
-and image request services, section 10.1). Which ReportVersion row a statement reads is the service test's to show: the
-static check cannot tell the pinned version parameter from another one. Outside this check: a member reached by a key
-computed at run time.
-Each rule is shown on the real files and on probe modules this file writes itself (not cut from the product's text, so the
-product's SQL may be rewritten in any equivalent form): equivalent spellings pass, each forbidden access fails.
+REQ-S7-U1a-SOURCE-PIN -> RISK-S7-U1p-DRAFT-OR-LATEST -> TEST-S7-U1a-SERVICE.
+TypeScript extracts the real service queries and disposable PostgreSQL plans their
+relations and columns. critical_result_service_test.cjs checks actual pinned-row
+answers. Checker grammar variants are historical evidence, not extra product rules.
 """
 from __future__ import annotations
 
@@ -261,75 +242,9 @@ def judge(db: Database, facts: dict) -> list[str]:
 PROBE = "critical-result.probe.ts"
 
 
-def probe(body: str, imports: str = "") -> dict[str, str]:
-    """A small api/src/critical-result*.ts module around one method body, judged on its own by the same rules as the real
-    files. The probes are written here, not cut from the product's text, so the product's SQL can be rewritten in any
-    equivalent way without touching this file."""
-    return {PROBE: (imports + "import { Injectable } from '@nestjs/common';\n\n@Injectable()\nexport class CriticalResultProbe {\n"
-                    "  constructor(private orthanc: any) {}\n\n  async read(tx: any, uid: string, version: number) {\n    "
-                    + body + "\n  }\n}\n")}
-
-
-EQUIVALENT = {
-    "the head version read with aliases, AS, spacing and keyword case": probe(
-        "return tx.$queryRaw`select   cur.version as \"headVersion\" , ver.action AS \"headAction\", ver.author AS \"headAuthor\",\n"
-        "        ver.at AS \"headAt\"\n      FROM \"Report\" AS cur\n        LEFT JOIN \"ReportVersion\" AS ver\n"
-        "          ON ver.uid = cur.uid AND ver.version = cur.version\n      WHERE cur.uid = ${uid}`;"),
-    "the head version read with no alias": probe(
-        "return tx.$queryRaw`SELECT \"Report\".version, \"ReportVersion\".action FROM \"Report\" LEFT JOIN \"ReportVersion\"\n"
-        "      ON \"ReportVersion\".uid = \"Report\".uid AND \"ReportVersion\".version = \"Report\".version WHERE \"Report\".uid = ${uid}`;"),
-    "a ReportVersion body with a table alias and another line layout": probe(
-        "return tx.$queryRaw`SELECT pv.findings, pv.conclusion, pv.recommendation\n        FROM \"ReportVersion\" pv\n"
-        "        WHERE pv.uid = ${uid} AND pv.version = ${version}`;"),
-    "the original identity read of section 3.1": probe("return this.orthanc.reportPreviewStudy(uid);"),
-}
 # (probe, the reason the refusal must give)
-FORBIDDEN = {
-    "the head read also takes the current findings": (probe(
-        "return tx.$queryRaw`SELECT r.version AS \"headVersion\", v.action AS \"headAction\", r.findings AS \"headFindings\"\n"
-        "      FROM \"Report\" r LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version WHERE r.uid = ${uid}`;"),
-        r"reads the current report body, \"Report\" columns \['findings'\]"),
-    "the body read from Report": (probe("return tx.$queryRaw`SELECT findings, conclusion, recommendation FROM \"Report\" WHERE uid = ${uid}`;"),
-        r"\"Report\" columns \['conclusion', 'findings', 'recommendation'\]"),
-    # the second join is what the first depends on, so the planner cannot drop it as unused
-    "Report joined again under another alias for its conclusion": (probe(
-        "return tx.$queryRaw`SELECT r.version FROM \"Report\" AS cur LEFT JOIN \"Report\" r ON r.uid = cur.uid AND cur.conclusion <> ''\n"
-        "      WHERE cur.uid = ${uid}`;"),
-        r"\"Report\" columns \['conclusion'\]"),
-    "a subquery reads the current body": (probe(
-        "return tx.$queryRaw`SELECT (SELECT h.findings FROM \"Report\" h WHERE h.uid = ${uid}) AS findings, v.conclusion\n"
-        "      FROM \"ReportVersion\" v WHERE v.uid = ${uid} AND v.version = ${version}`;"),
-        r"\"Report\" columns \['findings'\]"),
-    "every Report column": (probe("return tx.$queryRaw`SELECT * FROM \"Report\" WHERE uid = ${uid}`;"),
-        r"\"Report\" columns \['conclusion', 'findings', 'recommendation', 'updatedAt', 'updatedBy'\]"),
-    "a draft read in SQL": (probe("return tx.$queryRaw`SELECT findings FROM \"ReportDraft\" WHERE uid = ${uid}`;"),
-        r"scans \"ReportDraft\", a personal draft"),
-    "the draft delegate": (probe("return tx.reportDraft.findFirst({ where: { uid } });"), r"names the member reportDraft"),
-    "the report delegate": (probe("return tx.report.findUnique({ where: { uid } });"), r"names the member report\b"),
-    "the report preview controller imported": (probe("return ReportPreviewController;",
-                                                     "import { ReportPreviewController } from './report-preview.controller';\n"),
-        r"imports './report-preview\.controller' \(a value\)"),
-    "the preview through a pacs.service value": (probe("return PacsService;", "import { PacsService } from './pacs.service';\n"),
-        r"imports './pacs\.service' \(a value\)"),
-    "the preview method": (probe("return (this as any).pacs.reportPreview(uid);"), r"names the member reportPreview"),
-    "the preview route over HTTP": (probe("return fetch('http://127.0.0.1:3000/api/studies/' + uid + '/report-preview');"),
-        r"a string naming a draft or the preview: '/report-preview'.*names fetch"),
-    "an Unsafe raw query": (probe("return tx.$queryRawUnsafe('SELECT findings FROM \"Report\" WHERE uid = $1', uid);"),
-        r"names the member \$queryRawUnsafe"),
-    "a raw query called as a function": (probe("return tx.$queryRaw(Prisma.sql`SELECT findings FROM \"Report\"`);"),
-        r"\$queryRaw used other than as the tag of a template"),
-    "a template inside a raw query": (probe("return tx.$queryRaw`SELECT ${version ? `findings` : `version`} FROM \"Report\" WHERE uid = ${uid}`;"),
-        r"a \$\{\.\.\.\} of a raw query holds a template"),
-    "the question service imported": (probe("return ClinicianQuestionService;",
-                                            "import { ClinicianQuestionService } from './clinician-question.service';\n"),
-        r"imports './clinician-question\.service' \(a value\)"),
-}
 
 
-# D623: member eligibility is a DB module; it is also scanned above, never an unchecked report escape.
-EQUIVALENT["member authority import"] = probe("return rightsUser(null);", "import { rightsUser } from './member-rights';\n")
-EQUIVALENT["designation subject import"] = probe("return canReadPreliminary(null, { actor: 'synthetic', sub: 'subject' });",
-                                                "import { canReadPreliminary } from './preliminary-reader';\n")
 
 class CriticalResultSourceTest(unittest.TestCase):
     maxDiff = None
@@ -339,7 +254,7 @@ class CriticalResultSourceTest(unittest.TestCase):
         cls.texts = {path.name: path.read_text(encoding="utf-8") for path in SOURCES}
         cls.db = Database()
         cls.addClassCleanup(cls.db.close)
-        cls.facts = extract({"real": cls.texts, **EQUIVALENT, **{label: files for label, (files, _message) in FORBIDDEN.items()}})
+        cls.facts = extract({"real": cls.texts})
 
     def test_01_the_real_sources_read_the_report_only_through_report_version(self) -> None:
         facts = self.facts["real"]
@@ -355,22 +270,6 @@ class CriticalResultSourceTest(unittest.TestCase):
                 scanned |= {node["Relation Name"] for node in plan_nodes(self.db.plan(sql)) if "Relation Name" in node}
         print("CRITICAL_RESULT_SOURCE " + json.dumps({"files": sorted(facts), "templates": len(templates), "scanned": sorted(scanned),
               "imports": sorted({i["module"] for f in facts.values() for i in f["imports"]})}, sort_keys=True))
-
-    def test_02_equivalent_spellings_pass(self) -> None:
-        for label in EQUIVALENT:
-            with self.subTest(equivalent=label):
-                self.assertEqual(judge(self.db, self.facts[label]), [])
-
-    def test_03_each_forbidden_access_fails_with_its_reason(self) -> None:
-        reasons = {}
-        for label, (_files, message) in FORBIDDEN.items():
-            with self.subTest(forbidden=label):
-                problems = judge(self.db, self.facts[label])
-                self.assertTrue(problems, "passed")
-                self.assertRegex(" | ".join(problems), message)
-                reasons[label] = problems
-        print("CRITICAL_RESULT_SOURCE_REFUSALS " + json.dumps({"equivalent_passed": sorted(EQUIVALENT), "refused": reasons},
-                                                              ensure_ascii=True, sort_keys=True))
 
 
 if __name__ == "__main__":

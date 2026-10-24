@@ -166,6 +166,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_viewer_cell_merge.py', 'ViewerCellMergeE2E', 'ci-cell-merge'),),
     },
+    's9-u0e-served': {
+        'out': ROOT / 'tests/e2e/artifacts/s9-u0e-served-ci',
+        'project_prefix': 'kin-s9-u0e-ci-',
+        # S9-U0E: the generated config/ohif.js as Orthanc actually serves it, on a normal worklist launch. Its own job
+        # and runner so no other profile's budget is consumed. One case at the single-suite 900s ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_s9_u0e_equivalence.py', 'OHIFSourceEquivalenceE2E', 'ci-s9-u0e-served'),),
+    },
     'image-thumbnails': {
         'out': ROOT / 'tests/e2e/artifacts/image-thumbnails-ci',
         'project_prefix': 'kin-image-thumbs-ci-',
@@ -652,17 +660,26 @@ def inspect_failed_module(run, out, compose, unit, suite, result):
         plan_result = rows[0]
     except (OSError, ValueError) as error:
         binding_error = 'Cannot read this run\'s PLAN_RESULT: ' + str(error)
-    marker_path = gate.STATE / 'live-needs-inspection.json'
+    # This module's uninspected records, active or set aside by a run in another
+    # environment (D1804), plus any record in this profile's own environment (its
+    # Compose project): one that is not this run's own stops the profile.
+    candidates = gate.run_markers(unit, module, environment=compose[3])
     marker = None
-    if marker_path.exists():
+    if candidates:
         try:
-            marker = json.loads(marker_path.read_bytes())
-            gate.validate_identity(marker)
             if (plan_result is None or type(plan_result.get('attempt')) is not int
-                    or marker['unit'] != unit or marker['module'] != module
-                    or any(marker[key] != plan_result.get(key) for key in ('attempt', 'plan_sha256'))
                     or plan_result.get('exit_code') != result['exit']):
                 raise ValueError('Marker does not match this command and PLAN_RESULT')
+            own = [row for row in candidates
+                   if row.get('unit') == unit and row.get('module') == module
+                   and all(row.get(key) == plan_result.get(key) for key in ('attempt', 'plan_sha256'))]
+            if len(own) != len(candidates):
+                # Another record in this profile's environment: not this run's to release.
+                own = []
+            if len(own) != 1:
+                raise ValueError('Marker does not match this command and PLAN_RESULT')
+            marker = own[0]
+            gate.validate_identity(marker)
         except (OSError, ValueError, gate.Refused) as error:
             binding_error = str(error)
     stack = {}
@@ -687,7 +704,7 @@ def inspect_failed_module(run, out, compose, unit, suite, result):
         raise RuntimeError(suite + ' fixture inspection failed; gate remains closed')
     # A plan refused before its live run (lease, selection) leaves no marker: nothing to release,
     # the record still documents the failure and the next module may proceed.
-    if marker_path.exists():
+    if candidates:
         if binding_error:
             raise RuntimeError(suite + ' fixture inspection binding failed; gate remains closed: ' + binding_error)
         gate.release_after_inspection(record)

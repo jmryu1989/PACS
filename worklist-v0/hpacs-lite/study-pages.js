@@ -61,7 +61,8 @@
         const me = await get('/me');
         if (me?.kind !== 'member' || !same([me.institution,me.sub],owner)) throw Object.assign(new Error('계정이 바뀌어 목록 응답을 적용하지 않았습니다.'),{ownerChanged:true});
         if (!active()) throw Object.assign(new Error('판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'),{stale:true});
-        const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null }; result.identityIssues = draft.identityIssues ?? null; work.commit(at,()=>{pending = null; notice = '';}); return result;
+        const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null, identityIssues:draft.identityIssues ?? null };
+        work.commit(at,()=>{pending = null; notice = '';}); return result;
       } catch (error) {
         if (mine !== sequence) { error.stale = true; throw error; }
         if (error.code === 'STUDY_LIST_CHANGED') {
