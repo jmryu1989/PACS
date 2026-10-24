@@ -149,8 +149,9 @@ class CandidateCiTests(unittest.TestCase):
             return parts
 
         triggers = workflow.get('on', workflow.get(True)) # YAML 1.1 spells `on` as a boolean.
-        self.assertEqual(set(triggers), {'pull_request', 'workflow_dispatch'})
-        self.assertIsNone(triggers['pull_request'])
+        # G3 runs only by dispatch at the final candidate SHA. A pull_request trigger would run main's registered
+        # selection against an older PR head (strict=false) and refuse files that head lacks (#206), so it stays off.
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
         self.assertEqual(triggers['workflow_dispatch']['inputs']['candidate_sha']['required'], True)
         job = workflow['jobs']['candidate']
         self.assertEqual(job.get('name', 'candidate'), 'candidate')
