@@ -151,6 +151,7 @@
   "routes": {
     "nest_routes": 138,
     "internal_surfaces": [
+      "server:doctor-key-management",
       "service:auth-session-sweep",
       "service:member-rights-import"
     ],
@@ -187,9 +188,10 @@
   },
   "migrations": {
     "added": [
-      "20261023180000_emr_pg_ledger"
+      "20261023180000_emr_pg_ledger",
+      "20261023200000_emr_server_signing",
+      "20261024120000_emr_d_online"
     ],
-    "count": 49,
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"
   },

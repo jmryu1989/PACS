@@ -268,17 +268,21 @@ test('C-C14 the C declaration matches the files and collected cases exactly; mis
   const unit = declaration();
   assert.deepEqual(Object.keys(unit).sort(), ['base_sha', 'candidate_cases', 'cases', 'consult', 'consumers', 'dependencies', 'deployment', 'expected', 'forbidden_single_writer', 'live',
     'migrations', 'models', 'mutants', 'order', 'owned_paths', 'records', 'req_risk_test', 'restore', 'round', 'routes', 'unit'].sort());
-  assert.equal(unit.round, 'C2-core');
+  assert.equal(unit.round, 'C2-online');
   const owned = unit.owned_paths;
   assert.equal(new Set(owned).size, owned.length);
   for (const file of owned) assert(fs.statSync(path.join(root, file)).isFile(), file);
   assert.deepEqual(owned.filter(p => unit.forbidden_single_writer.includes(p)), []);
-  // The expected set is derived, not counted: every file in the C module/test directories plus the concrete paths the
-  // actual CI selector assigns to the C job alone (scripts/ci-paths.json entries no other job or shared list names).
+  // CI consumers do not transfer ownership: C uses the B-owned PG fixture.
+  // Keep ownership in the unit declarations, even when a shared dependency
+  // is a concrete C CI trigger and a glob in its owning job.
   const ciPaths = JSON.parse(fs.readFileSync(path.join(root, 'scripts', 'ci-paths.json'), 'utf8'));
+  const bOwned = Object.values(JSON.parse(fs.readFileSync(path.join(root, 'emr/units/b.json'), 'utf8')).owned_paths).flat();
   const elsewhere = new Set([...ciPaths.common, ...ciPaths.shared_browser,
+    ...bOwned,
     ...Object.entries(ciPaths.jobs).filter(([job]) => job !== 'emr-c').flatMap(([, paths]) => paths)]);
   const expected = ciPaths.jobs['emr-c'].filter(p => !p.includes('*') && !elsewhere.has(p));
+  expected.push(...unit.migrations.active);
   for (const dir of ['api/src/emr-report', 'api/src/emr-signature', 'tests/emr/c']) {
     const present = fs.readdirSync(path.join(root, dir), { withFileTypes: true }).filter(e => !(e.isDirectory() && e.name === '__pycache__')).map(e => dir + '/' + e.name);
     assert.deepEqual(present.filter(p => !owned.includes(p)), [], dir);
@@ -304,7 +308,9 @@ test('C-C14 the C declaration matches the files and collected cases exactly; mis
     assert.equal(unit.expected[suite], cases.length, suite);
   }
   assert.equal(Object.values(unit.cases).reduce((total, cases) => total + cases.length, 0), unit.expected.total);
-  for (const empty of [unit.routes.active, unit.models.active, unit.records.active, unit.migrations.active, unit.live.active, unit.candidate_cases]) assert.deepEqual(empty, []);
+  for (const empty of [unit.routes.active, unit.models.active, unit.records.active, unit.candidate_cases]) assert.deepEqual(empty, []);
+  assert.deepEqual(unit.migrations.active, ['api/prisma/migrations/20261023200000_emr_server_signing/migration.sql']);
+  assert.deepEqual(unit.live.active, [{ module: 'tests/emr/c/server_signing_live.py', class: 'ServerSigningPg', methods: ['test_signing_and_restore'] }]);
   // The exact-selection judge accepts only every declared case passing once.
   const ids = ['C-C01', 'C-Q01'];
   const tap = lines => 'TAP version 13\n' + lines.join('\n') + '\n1..' + lines.length + '\n';

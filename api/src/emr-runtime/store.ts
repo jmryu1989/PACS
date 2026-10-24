@@ -8,7 +8,7 @@ import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
 import { FailureJournal } from './failure-journal';
 import { RawQuery } from './manifest';
 import { admitAppend } from './admission';
-import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_APPEND_POOL_SIZE } from './limits';
+import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_APPEND_POOL_SIZE, boundEmrStatements } from './limits';
 
 export type LedgerFailureCode = 'CommitUnknown' | 'AppendNotCommitted' | 'LedgerRefused' | 'LedgerUnreachable' | 'ResultExpired';
 export class LedgerFailure extends Error {
@@ -93,6 +93,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     let value: T, returned = false, wroteOutcome = false;
     try {
       return await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
+        await boundEmrStatements(tx);
         const record: RecordMutation = async (event, effect) => {
           const operation = await this.admitSql(event);
           const tracked: typeof operations[number] = { operation };
@@ -146,6 +147,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     let callbackFailed = false;
     try {
       const result = await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
+        await boundEmrStatements(tx);
         const [state] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
         if (state.value !== 'pending') return new PrismaLedgerSql(tx).result(operation.operationId);
         this.transactions.set(tx, operation);
@@ -194,13 +196,19 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
   async lookup(operationId: string): Promise<OperationResult | null> {
     return this.db.$transaction(async tx => {
+      await boundEmrStatements(tx);
+      const sql = new PrismaLedgerSql(tx);
+      // A caller can persist its request before B2 admission commits. Absence
+      // is unresolved, as the public port promises; it is not a negative result.
+      if (!await sql.result(operationId)) return null;
       await tx.$queryRaw`SELECT emr_access.lock_operation(${operationId}::uuid)`;
-      return new PrismaLedgerSql(tx).result(operationId);
+      return sql.result(operationId);
     }, options);
   }
   async settle(operationId: string): Promise<OperationResult | null> {
     try {
       return await this.db.$transaction(async tx => {
+        await boundEmrStatements(tx);
         const [row] = await tx.$queryRaw<{ value: OperationResult }[]>`SELECT emr_access.settle_operation(${operationId}::uuid) AS value`;
         return row.value;
       }, options);
