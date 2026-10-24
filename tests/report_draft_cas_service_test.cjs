@@ -36,6 +36,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
+const {IncomingMessage, ServerResponse} = require('node:http');
+const {Socket} = require('node:net');
+const {createRequestContext} = require('/app/dist/emr-runtime/request-context');
+const {createRequestIngress} = require('/app/dist/emr-runtime/request-ingress');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { execFileSync } = require('node:child_process');
 const { randomBytes, randomUUID } = require('node:crypto');
@@ -205,6 +209,7 @@ async function world() {
   const spool = fs.mkdtempSync(require('node:path').join(os.tmpdir(), 'kin-draft-ledger-'));
   const journal = new FailureJournal(recorder, new FailureSpool(spool));
   const { port: ledger, control } = createRecordPort(new AccessLedgerStore(recorder, journal));
+  const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), ledger);
   const background = createBackgroundWorkRegistry();
   // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
   // here), and the full bootstrap reads the inventory only to leave out a UID answered twice (none here); any other
@@ -233,7 +238,7 @@ async function world() {
       links: [{ linkState: 'current', headRevision: 1 }] }] : [] };
     const svc = new PacsService(recorder, orthanc, keycloak, access, findings, ledger);
     const controllers = new Map();
-    return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc)); return controllers.get(cls); } };
+    return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc, w.auth, requests.source)); return controllers.get(cls); } };
   };
   w.app = build();
   /** A new process: nothing of the old one's memory, the same database. */
@@ -246,24 +251,28 @@ async function world() {
   });
   w.suspendReviewer = () => flow.run({label:'suspend'}, async () => {
     const {AdminService}=require('/app/dist/admin.service');
+    const {AdminController}=require('/app/dist/admin.controller');
     const provider={getUser:async()=>({id:REVIEWER.sub,username:'reviewer',email:REVIEWER.actor,
       emailVerified:true,firstName:'Synthetic',lastName:'Reviewer',groups:[INST],roles:['radiologist'],enabled:true})};
-    const work = ledger.begin();
-    let id;
-    try { id = await work.resolveRequestIdentity(process.env.KC_ISSUER, ADMIN.sub); }
-    finally { work.end(); }
-    return new AdminService(recorder,provider,null,w.auth,ledger).patchUser(REVIEWER.sub,{enabled:false},ADMIN, {
-      actor: { issuer: process.env.KC_ISSUER, subject: ADMIN.sub, id }, roles: ADMIN.roles,
-      rightsVersion: 1, institution: ADMIN.institution, ip: null,
-      surface: 'PATCH admin/users/:id', requestId: randomUUID(),
-    });
+    const req=Object.assign(new IncomingMessage(new Socket()),ADMIN),res=new ServerResponse(req);
+    requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:ADMIN.sub,roles:ADMIN.roles,
+      rightsVersion:1,institution:ADMIN.institution,binding:{method:'bearer',sessionRef:null}},
+      {method:'PATCH',route:'admin/users/:id',purpose:'clinical'},async()=>{});
+    try {return await new AdminController(new AdminService(recorder,provider,null,w.auth),null,requests.source)
+      .patch(REVIEWER.sub,{enabled:false},req);} finally {res.emit('finish');}
   });
 
   /** One request through its routed handler. The answer is what the HTTP layer would send: status, code, body. */
   w.send = (label, route, { as, sid = null, uid, body, query = {} }) => flow.run({ label }, async () => {
     const { controller, key } = ROUTE[route];
-    const req = { sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind, headers: {},
-      ...(sid ? { sid, authMethod: 'session' } : { authMethod: 'bearer' }) };
+    const req = Object.assign(new IncomingMessage(new Socket()), { sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind, headers: {},
+      ...(sid ? { sid, authMethod: 'session' } : { authMethod: 'bearer' }) });
+    const res = new ServerResponse(req);
+    // This harness begins at the handler; signed Guard/current-rights coverage is
+    // the separate registered HTTP suite. Keep its real request work/lifetime.
+    requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:as.sub,roles:as.roles,
+      institution:as.institution,rightsVersion:1,binding:sid ? {method:'session',sessionRef:w.auth.sessionRef(sid)} : {method:'bearer',sessionRef:null}},
+      {method:route === 'read' ? 'GET' : 'PUT',route:route === 'read' ? 'studies/:uid/draft' : 'studies/:uid/report',purpose:'clinical'},async()=>{});
     const args = [];
     for (const [slot, { index, data }] of Object.entries(Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, key) ?? {})) {
       const type = Number(slot.split(':')[0]);
@@ -280,7 +289,7 @@ async function world() {
       if (!(error instanceof HttpException)) return { ok: false, status: 0, code: 'NOT_HTTP', body: null, error };
       const answer = error.getResponse();
       return { ok: false, status: error.getStatus(), code: typeof answer === 'object' ? answer.code ?? null : null, body: answer };
-    }
+    } finally {res.emit('finish');}
   });
 
   // ── synthetic rows ──

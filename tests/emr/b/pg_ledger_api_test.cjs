@@ -15,6 +15,13 @@ const { verifyRuntimeConnection } = require(path.join(build, 'emr-runtime/manife
 const { EMR_BACKGROUND_WORK } = require(path.join(build, 'emr-runtime/background-work.js'));
 const { StudyTransferLocalService } = require(path.join(build, 'study-transfer-local.service.js'));
 const { provideAfterReceipt } = require(path.join(build, 'emr-runtime/contract.js'));
+const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = require(path.join(build, 'emr-runtime/request-context.js'));
+const { createRequestIngress } = require(path.join(build, 'emr-runtime/request-ingress.js'));
+function requestProviders(port) {
+  const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), port);
+  return [{ provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
+    { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source }];
+}
 const known = value => ({ status: 'known', value });
 
 async function requestWork() {
@@ -284,7 +291,7 @@ async function clinicalHttp() {
     class ClinicalFixture {}
     // Only external collaborators are synthetic. Both routes, the draft/CAS
     // implementation, auth/rights checks and PostgreSQL are the actual product.
-    Module({controllers:[PacsController,AdminController],providers:[PrismaService,PacsService,AuthService,AdminService,
+    Module({controllers:[PacsController,AdminController],providers:[...requestProviders(runtime.port),PrismaService,PacsService,AuthService,AdminService,
       {provide:OrthancService,useValue:orthanc},{provide:KeycloakService,useValue:{}},
       {provide:FindingService,useValue:{}},
       {provide:StudyAccessService,useFactory:db=>new StudyAccessService(db,orthanc,{}),inject:[PrismaService]},
@@ -314,12 +321,12 @@ async function clinicalHttp() {
     const rightEvent=JSON.parse(rightRow.payload);
     assert.equal(rightEvent.userId.value.subject,adminSub);
     assert.equal(rightEvent.surface,'PATCH admin/users/:id');
-    assert.deepEqual(rightEvent.trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.deepEqual(rightEvent.trustedProxyIp,{status:'unresolved',reason:'not-observed'});
     assert.deepEqual(rightEvent.rolesAtTime.value,['admin']);
     assert.equal(rightEvent.actingInstitution.value,institution);
     const [endedRow]=await witness.$queryRaw`SELECT payload FROM emr_access.access_entry
       WHERE payload::jsonb->'auth'->>'endCause'='isolation'`;
-    assert.deepEqual(JSON.parse(endedRow.payload).trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.deepEqual(JSON.parse(endedRow.payload).trustedProxyIp,{status:'unresolved',reason:'not-observed'});
     assert.equal(await witness.authSession.count({where:{sub:member}}),0);
     assert.equal((await changeRights({enabled:true})).status,200);
     const [proxyRow]=await witness.$queryRaw`SELECT e.payload FROM emr_access.access_entry e
@@ -373,7 +380,7 @@ async function clinicalHttp() {
     release();await blocker;blocker=null;
     const read=await reading;assert.equal(read.status,200,read.text);assert.equal(read.body.snapshot.findings,content);
     const viewed=(await entries(green.uid,'provide-prepared')).map(row=>JSON.parse(row.payload));assert.equal(viewed.length,2);
-    assert.deepEqual(viewed.find(event=>event.surface==='GET studies/:uid/draft').trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.deepEqual(viewed.find(event=>event.surface==='GET studies/:uid/draft').trustedProxyIp,{status:'unresolved',reason:'not-observed'});
     // D1813 -> missing clinical history / unrecorded disclosure -> real W5 HTTP
     // with separate PG observations. Each of the three required records has an omission control.
     let relatedSeq=0;
@@ -650,7 +657,7 @@ async function authSuccess(endings = false) {
   let sweepCallback;
   async function start(AuthType) {
     class AuthFixture {}
-    Module({ controllers: [AuthController], providers: [PrismaService, KeycloakService,
+    Module({ controllers: [AuthController], providers: [...requestProviders(observedPort), PrismaService, KeycloakService,
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: observedPort },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard},
       // S9-U4b (#181): AuthGuard also injects the archive-grant service; these routes never reach it.
