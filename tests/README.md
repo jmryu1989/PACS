@@ -3010,3 +3010,29 @@ through `tests/measurement_ci.py --profile s9-u0e-served` on its own empty hoste
 It does not replace the existing layout, identity, history, jobs, cine, precision, CT sync, volume,
 prior and clinician flows or same-candidate CI and binding review. Existing tests that rewrite
 app-config responses are auxiliary evidence under this unit's D73 contract.
+
+V-01 / U1-F1..F4 → RISK-WRONG-TARGET/UNSAVED-WORK/CLIPPED-WINDOW → U1-T1..T4:
+`tests/e2e/test_viewer_ux_span.py --boundary` checks the shipped single-window registry
+and available-rectangle geometry (synthetic coordinates, not physical span evidence).
+Run `scripts/run-tests.py --module tests/e2e/test_viewer_ux_span.py --class ViewerSpanE2E --mode live --unit viewer-ux-u1`
+on an isolated synthetic HTTPS stack for workspace → shipped OHIF opening/reuse,
+saved multi-window settings, Focus/Close/reopen, latest-image refresh, actual rendered
+study identity, retained report drafts/jobs and permission denial. Use the suite's
+measured hang timeout. `--class ViewerSpanPhysicalE2E` additionally requires
+`KIN_E2E_HEADED=1`, one actual workspace display and two actual viewer displays;
+`KIN_EVIDENCE_DIR` receives OS/browser/DPI/available rectangles, requested/actual/restored
+bounds and screenshots. Browser clamp or missing hardware is not PASS; manual span,
+popup blocking and disconnect/reconnect still need explicit execution evidence.
+Continuation 2 also permits `--class ViewerSpanEmulatedE2E` on the synthetic VM:
+Chromium CDP supplies three screen geometries (including negative coordinates,
+gaps and mixed DPI) and actual browser window bounds. The served page still uses
+its normal Screen Details, move/resize and placement/persistence code. A separate
+native-clamp case checks failure preservation and explicit manual recovery.
+`KIN_U1_EMULATED_DISPLAYS=1` supplies two CDP screens for the existing display-layout
+regressions. These are synthetic browser results, not first-site hardware acceptance.
+`test_viewer_opening.py`, `test_viewer_windows.py` and `test_viewer_display_layout.py`
+retain opening guards and legacy multi-window consumers; their retained-window setup
+uses the actual registry/session handoff and OHIF, without replacing controllers.
+The worklist-ux CI registration runs only the pure boundary; served-page and physical
+results remain separate from final same-SHA G3/PR CI and Opus review. Recheck before a
+larger site, increased image/tab load or changed monitor/DPI/browser (VIEWER-FIRST-SITE-REVERIFY).
