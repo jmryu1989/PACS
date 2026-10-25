@@ -61,4 +61,34 @@ COMMIT before their first clinical byte and lost-reply resolution. REQ-A-TARGET
 / A-HTTP-BODY and REQ-A-OUTCOME / A-HTTP-OUTCOME require the real Nest routes;
 renderer acceptance belongs to A5. Empty fixture endpoints do not close them.
 The current workflow is `validate.yml`; the order's `emr-b.yml` is absent.
-Its owner must add these selections when assembling the joint candidate.
+A1 and A3 selections are registered there under the `emr-b` job.
+
+
+A3 binds W9's ready metadata to this boundary. Its source manifest uses each
+ready member's UID and original ordinal, the admitted StudyState institution,
+the raw observed PatientID/InstitutionName, and the existing D-5 comparison
+anchor. Only the serialized `members[ordinal].metadata` projection is hashed.
+Error members have neither metadata nor receipt. Client composition/generation/
+request IDs remain correlation fields; RF supplies the recording identity.
+W9's existing source cutoff/deadline remains active through A1 preparation;
+finish/close releases its timer. A1 alone records response outcomes and drains
+late receipts. These metadata receipts do not certify image display/download.
+W9API-20 stays disposed. A3 removes W9's duplicate post-source StudyState/policy
+and source-tag rechecks, preserving initial access and split-source identity.
+
+Run the actual W9 HTTP/PG boundary on the B2 synthetic fixture:
+
+```sh
+KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/emr/a/viewing_set_test.py --class ViewingSetHttpBoundary --mode live --unit module-a-03-w9 --timeout 300
+```
+
+The 300-second hang timeout follows the existing Module A PG CI step. The
+fixture checks ready/partial/error-only, original ordinal and comparison anchor,
+source patient/UID mismatch, COMMIT before first clinical byte, final-target
+SQL refusal, close/deadline with a late receipt, and the existing source cutoff.
+Native runs use the existing `KIN_B2R_NODE`, `KIN_B2R_BUILD`, and
+`KIN_B2R_PRISMA_CLI` fixture settings. No source/production stack is used.
+The real registration is `validate.yml`'s `emr-b` job (the order's `emr-b.yml`
+does not exist); A3's continuation transfers ownership of this additive step.
+Audit replay's local-subject consumers depend on #225 and are not certified
+by the W9 HTTP tests. Actual client rendering belongs to W9-UI/A5.
