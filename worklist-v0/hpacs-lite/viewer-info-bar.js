@@ -24,7 +24,11 @@ window.KinViewerInfoBar = (() => {
   }
   function mount({ services, studyActions }) {
     const bars = new Map(), labels = new Map();
-    function refresh() {
+    // Attach a bar to every pane that lacks one. The bar takes its height from
+    // the pane's canvas container, so a pane must get it before the stock code
+    // enables the element and sizes the canvas; `added` tells the caller which
+    // panes were measured without it and need a re-fit now.
+    function adopt() {
       const state = services.viewportGridService.getState();
       const ids = [...state.viewports.keys()];
       const panes = [...document.querySelectorAll('[data-cy="viewport-grid"] [data-cy="viewport-pane"]')];
@@ -37,21 +41,28 @@ window.KinViewerInfoBar = (() => {
       for (const [id, bar] of bars) if (!state.viewports.has(id) || !bar.isConnected) {
         bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); bars.delete(id); labels.delete(id);
       }
+      const cells = []; let added = false;
       for (const [index, id] of ids.entries()) {
         const current = identity(services, id);
         const pane = current.viewport?.element?.closest('[data-cy="viewport-pane"]') || (ordered && panes[index]);
         if (!pane) continue;
-        let bar = bars.get(id);
-        if (!bar) {
-          bar = document.createElement('section'); bar.className = 'kin-viewer-info-bar';
+        if (!bars.has(id)) {
+          const bar = document.createElement('section'); bar.className = 'kin-viewer-info-bar';
           bar.dataset.kinUxOwned = ''; bar.setAttribute('aria-label', 'Viewport Information');
           const label = document.createElement('span'); label.className = 'kin-viewer-info-identity';
           const mode = document.createElement('span'); mode.className = 'kin-viewer-info-mode';
           const study = document.createElement('button'); study.type = 'button'; study.textContent = 'Study ▾';
           study.disabled = true; study.title = '이전 검사 연결은 다음 단계에서 제공됩니다.';
           study.onclick = () => studyActions?.open(id, study);
-          bar.append(label, mode, study); pane.classList.add('kin-ux-pane'); pane.prepend(bar); bars.set(id, bar);
+          bar.append(label, mode, study); pane.classList.add('kin-ux-pane'); pane.prepend(bar); bars.set(id, bar); added = true;
         }
+        cells.push({ id, current, bar: bars.get(id) });
+      }
+      return { layout: state.layout, cells, added };
+    }
+    function refresh() {
+      const { layout, cells } = adopt();
+      for (const { id, current, bar } of cells) {
         const m = current.instance;
         bar.children[2].disabled = !m || !studyActions?.available();
         bar.children[2].title = studyActions?.available() ? '이 셀의 이전 검사 목록을 엽니다.' : '이전 검사 연결은 다음 단계에서 제공됩니다.';
@@ -70,7 +81,6 @@ window.KinViewerInfoBar = (() => {
         else labels.delete(id);
         const type = current.viewport?.type;
         const mode = ({ stack: '2D', orthographic: 'MPR', volume3d: '3D' })[type] || type || 'No image';
-        const layout = state.layout;
         const status = mode + ' | ' + (layout.layoutType === 'grid' ? layout.numRows + '×' + layout.numCols : layout.layoutType);
         // The bar clamps the label to two lines; the full identity stays readable on hover.
         if (bar.children[0].textContent !== label) { bar.children[0].textContent = label; bar.children[0].title = m ? label : ''; }
@@ -80,6 +90,7 @@ window.KinViewerInfoBar = (() => {
     }
     return {
       refresh,
+      adopt: () => adopt().added,
       invalidate() { labels.clear(); for (const bar of bars.values()) bar.children[0].textContent = 'Loading / No image'; },
       dispose() { for (const bar of bars.values()) { bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); } bars.clear(); labels.clear(); },
     };

@@ -95,7 +95,15 @@ window.KinViewerUXShell = (() => {
     const imageEvents = [events.PRE_STACK_NEW_IMAGE, events.STACK_NEW_IMAGE, events.IMAGE_RENDERED, events.ELEMENT_ENABLED, events.ELEMENT_DISABLED].filter(Boolean);
     imageEvents.forEach(event => document.addEventListener(event, schedule, true));
     const observer = new MutationObserver(records => {
-      if (records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) schedule();
+      if (ended || !records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) return;
+      // A pane gets its bar in this same microtask, before the stock passive
+      // effect enables the element, so the canvas is created at the size it
+      // keeps. A pane whose element already exists is re-fitted at once: left
+      // to the next frame, a Job or tab restore could apply its camera to the
+      // unfitted canvas first, and the later fit re-derives that camera from
+      // the pan in pixels, reopening the saved screen a bar's height away.
+      if (info.adopt()) services.cornerstoneViewportService.resize(true);
+      schedule();
     });
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     schedule();
