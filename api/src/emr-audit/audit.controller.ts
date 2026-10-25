@@ -6,7 +6,10 @@ import { EmrAuditService } from './service';
 class AuditContractFilter implements ExceptionFilter {
   catch(error: ContractError, host: ArgumentsHost) {
     const denied = ['AuditorNotDesignated','AuditScopeNotGranted','AuditorDesignationAuthorityRequired'];
-    host.switchToHttp().getResponse().status(denied.includes(error.code) ? 403 : 409)
+    const status = denied.includes(error.code) ? 403 :
+      ['IssuanceNotFound','RequestNotFound'].includes(error.code) ? 404 :
+      ['AuditRequestInvalid','InvestigationQueryRefused','DisclosureRequestRefused'].includes(error.code) ? 400 : 409;
+    host.switchToHttp().getResponse().status(status)
       .json({ code: error.code, message: '감사 권한과 요청 상태를 확인하세요' });
   }
 }
@@ -21,6 +24,8 @@ export class EmrAuditController {
   investigate(@Req() req: any, @Body() body: unknown) { return this.audit.investigate(req, body); }
   @Post('exports') @HttpCode(200)
   export(@Req() req: any, @Body() body: unknown) { return this.audit.investigate(req, body, 'export'); }
+  @Post('requests') @HttpCode(200)
+  register(@Req() req: any, @Body() body: unknown) { return this.audit.register(req, body); }
   @Post('issuances') @HttpCode(200)
   prepare(@Req() req: any, @Body() body: unknown) { return this.audit.prepare(req, body); }
   @Post('issuances/:id/issue') @HttpCode(200)

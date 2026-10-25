@@ -5,9 +5,10 @@ import type { IncomingMessage } from 'node:http';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { identity, newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
-import type { AccessTarget } from '../emr-contract/access-event';
+import type { AccessTarget, AccessEventV1 } from '../emr-contract/access-event';
+import { clauseVersionAt, HOLD_CLAUSE_VERSIONS } from '../emr-contract/legal-basis';
 import type { LegalHold } from '../emr-contract/lawful-defaults';
-import { object, refuse, string, utc } from '../emr-contract/validation';
+import { choice, object, refuse, string, utc } from '../emr-contract/validation';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestWorkContext } from '../emr-runtime/request-context';
 import type { RecordMutation } from '../emr-runtime/store';
 import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
@@ -17,7 +18,7 @@ import { fixedOriginals, onlineFixedListing } from './fixed-listing';
 import { fixedContentType, fixedDocument } from './fixed-document';
 
 type Tx = Prisma.TransactionClient;
-type HeldRequest = { kind: 'access-request'; request: F.DisclosureRequest; facts: F.RequestDeadlineFacts; holds: LegalHold[]; issuanceId: string };
+type HeldRequest = { kind: 'access-request'; request: F.DisclosureRequest; facts: F.RequestDeadlineFacts; holds: LegalHold[]; issuanceId: string | null };
 const known = <T>(value: T) => ({ status: 'known' as const, value });
 const none = { status: 'not-applicable' as const, reason: 'non-record-target' as const };
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -39,7 +40,8 @@ export class EmrAuditService {
   }
   private async authority(tx: Tx, context: RequestWorkContext): Promise<F.AuditAuthority> {
     const f = context.facts;
-    await this.lock(tx, JSON.stringify(['emr-f-roster', f.institution]));
+    const roster = JSON.stringify(['emr-f-roster', f.institution]);
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock_shared(hashtextextended(${roster},0))::text`;
     const rows = await tx.$queryRaw<{ body: F.RosterGrant }[]>`SELECT DISTINCT ON(grant_id) body
       FROM emr_audit.roster_event WHERE subject_id=${f.actor.id} ORDER BY grant_id,sequence DESC`;
     return F.resolveAuditAuthority({ listGrants: () => ({ subject: f.actor, complete: true, grants: rows.map(r => r.body) }) },
@@ -63,8 +65,32 @@ export class EmrAuditService {
       occurredAt: now(), trustedProxyIp: f.ingress, cause: 'user-view',
       context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null }, executor: 'member',
       targets, action, result: action === 'provide-prepared' ? 'prepared' : 'succeeded',
-      requestId: f.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
-    await record(event, async () => ({ kind: 'emr-audit', id: reference, version: null }));
+      requestId: f.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null }) as Readonly<AccessEventV1>;
+    // B1's admit_operation/storage contract caps the canonical UTF-8 payload at 65,536 bytes.
+    // Partition by bytes, keeping every target and the request correlation in the same transaction.
+    const cap = 65_536, overhead = Buffer.byteLength(JSON.stringify({ ...event, targets: [] }));
+    let chunk: AccessTarget[] = [], bytes = overhead;
+    const append = async () => {
+      await record(parseAccessEvent({ ...event, eventId: randomUUID(), auditLinkId: newAuditLinkId(), targets: chunk }),
+        async () => ({ kind: 'emr-audit', id: reference, version: null }));
+    };
+    for (const target of event.targets) {
+      const size = Buffer.byteLength(JSON.stringify(target));
+      if (overhead + size > cap) refuse('AccessPayloadInvalid');
+      if (chunk.length && bytes + size + 1 > cap) { await append(); chunk = []; bytes = overhead; }
+      bytes += size + (chunk.length ? 1 : 0); chunk.push(target);
+    }
+    if (chunk.length || !event.targets.length) await append();
+  }
+
+  private async rosterSubject(tx: Tx, input: unknown) {
+    const subject = requestValue(() => {
+      const v = object(input, ['issuer','subject']);
+      return { issuer: string(v.issuer), subject: string(v.subject) };
+    });
+    const [row] = await tx.$queryRaw<{ id: string }[]>`SELECT
+      emr_access.resolve_member_identity(${subject.issuer},${subject.subject})::text AS id`;
+    return identity({ ...subject, id: row.id });
   }
 
   async changeRoster(request: IncomingMessage, grantId: string, input: unknown) {
@@ -79,14 +105,14 @@ export class EmrAuditService {
       const [previous] = await tx.$queryRaw<{ body: F.RosterGrant }[]>`SELECT body FROM emr_audit.roster_event
         WHERE grant_id=${grantId} ORDER BY sequence DESC LIMIT 1`;
       if (previous && previous.body.institutionId !== ctx.facts.institution) refuse('AuditScopeNotGranted');
-      const kind = (input as any)?.kind;
+      const kind = requestValue(() => choice((input as any)?.kind, ['granted','changed','revoked']));
       const body = requestBody(input, kind === 'granted' ? ['kind','subject','scopes','validFrom','validUntil'] :
         kind === 'changed' ? ['kind','scopes','validUntil'] : ['kind','reason']);
       const event: Record<string, any> = { ...body, eventId: randomUUID(), at: now(), by: ctx.facts.actor,
         capacity: grantor.capacity, basisDocumentId: grantor.basis_document_id };
       delete event.subject;
       const grant: F.RosterGrant = previous ? { ...previous.body, events: [...previous.body.events, event as F.RosterEvent] } :
-        { grantId, subject: requestValue(() => identity(body.subject)), institutionId: ctx.facts.institution, events: [event as F.RosterEvent] };
+        { grantId, subject: await this.rosterSubject(tx, body.subject), institutionId: ctx.facts.institution, events: [event as F.RosterEvent] };
       F.grantStateAt(grant, now());
       await tx.$executeRaw`INSERT INTO emr_audit.roster_event(grant_id,institution_id,subject_id,body)
         VALUES(${grantId},${grant.institutionId},${grant.subject.id},${JSON.stringify(grant)}::json)`;
@@ -115,15 +141,19 @@ export class EmrAuditService {
       });
       const page = await F.readInvestigationStreams({ changes, views }, { changes: source('history'), views: source('viewing') });
       const ids = [...new Set([...page.changes.rows, ...page.views.rows].flatMap(r => [r.eventId, ...(r.relatedEventId ? [r.relatedEventId] : [])]))];
-      const images = [];
-      for (const id of ids) {
-        // Audit events can have non-UUID IDs. E owns UUID preparation keys.
-        const prepared = await tx.$queryRaw<any[]>`SELECT event_id::text,source_manifest,response_manifest,staging_copies
-          FROM emr_image.preparation WHERE event_id::text=${id}`;
-        const observations = await tx.$queryRaw<any[]>`SELECT sequence::text,kind,body FROM emr_image.observation
-          WHERE event_id::text=${id} ORDER BY sequence`;
-        if (prepared.length || observations.length) images.push({ eventId: id, preparation: prepared[0] ?? null, observations });
+      // E's primary/index keys are UUIDs; other B1 event IDs have no E facts.
+      const imageIds = ids.filter(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+      const prepared = imageIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,source_manifest,response_manifest,staging_copies
+        FROM emr_image.preparation WHERE event_id=ANY(${imageIds}::uuid[])` : [];
+      const observations = imageIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,sequence::text,kind,body
+        FROM emr_image.observation WHERE event_id=ANY(${imageIds}::uuid[]) ORDER BY sequence` : [];
+      const joined = new Map<string, { eventId: string; preparation: any; observations: any[] }>();
+      for (const p of prepared) joined.set(p.event_id, { eventId: p.event_id, preparation: p, observations: [] });
+      for (const { event_id, ...observation } of observations) {
+        if (!joined.has(event_id)) joined.set(event_id, { eventId: event_id, preparation: null, observations: [] });
+        joined.get(event_id).observations.push(observation);
       }
+      const images = [...joined.values()];
       const event = F.investigationLedgerEvent(page.changes), viewEvent = F.investigationLedgerEvent(page.views);
       const targets = [...new Map([...event.targets, ...viewEvent.targets].map(t => [JSON.stringify(t), t])).values()];
       await this.recorded(record, ctx, event.action, targets, changes.planId);
@@ -158,42 +188,33 @@ export class EmrAuditService {
     return Promise.all(ids.map(id => loadFixedVersions(tx, id)));
   }
 
-  async prepare(request: IncomingMessage, input: unknown) {
+  private requestTargets(state: HeldRequest): readonly AccessTarget[] {
+    return state.request.scope.map(s => ({ kind: 'disclosure', patientLinkSnapshot: known(state.request.patient),
+      studyId: { status: 'unresolved', reason: 'not-resolved' }, recordId: known(s.recordId),
+      versionId: { status: 'unresolved', reason: 'not-resolved' } }));
+  }
+
+  async register(request: IncomingMessage, input: unknown) {
     return this.run(request, async (tx, ctx, record) => {
-      const v = requestBody(input, ['request','dueAt']);
-      const dueAt = requestValue(() => utc(v.dueAt));
+      const v = requestBody(input, ['request','dueAt']), dueAt = requestValue(() => utc(v.dueAt));
       const authority = await this.authority(tx, ctx), at = now();
       const approval = F.approveDisclosure(authority, v.request, at);
       const previous = await this.held(tx, approval.request.requestId, authority.institutionId);
       if (previous) {
-        const saved = await this.issuance(tx, previous.issuanceId, authority.institutionId);
         if (!isDeepStrictEqual(previous.request, approval.request) || previous.facts.initialDueAt !== dueAt)
           refuse('DisclosureRequestConflict');
-        if (F.issuanceState(saved).state === 'Prepared') {
-          const listings = await this.fixed(tx, previous.facts.recordIds);
-          const changed = listings.some(l => {
-            const fixed = onlineFixedListing(l), prior = saved.manifest.records.find(r => r.recordId === fixed.recordId);
-            return !prior || prior.revision !== fixed.revision;
-          });
-          if (changed) {
-            const refreshed = F.prepareDisclosurePackage(authority, approval, listings, at, saved.environment);
-            await this.saveIssuance(tx, F.abortIssuance(authority, saved, { reason: '기록이 변경되어 고정판을 다시 준비함', at }));
-            await this.saveIssuance(tx, refreshed);
-            await this.saveHeld(tx, authority.institutionId, { ...previous, issuanceId: refreshed.issuanceId });
-            await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(refreshed), refreshed.issuanceId);
-            return refreshed;
-          }
-        }
-        await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(saved), saved.issuanceId);
-        return saved;
+        await this.recorded(record, ctx, 'provide-prepared', this.requestTargets(previous), previous.facts.requestId);
+        return previous;
       }
-      const ids = approval.request.scope.map(s => s.recordId), listings = await this.fixed(tx, ids);
-      const issuance = F.prepareDisclosurePackage(authority, approval, listings, at,
-        process.env.KIN_EMR_ENVIRONMENT === 'synthetic-test' ? 'synthetic-test' : 'operational');
+      const ids = approval.request.scope.map(s => s.recordId);
+      for (const id of [...ids].sort()) await lockFixedRecord(tx, id);
       const facts: F.RequestDeadlineFacts = { requestId: approval.request.requestId, recordIds: ids,
         receivedAt: approval.request.receivedAt, initialDueAt: dueAt, extensions: [], resolution: null };
+      // 개인정보 보호법 제35조③: retain the request while access is pending.
+      // A owns the publication effective on the placement date (including 21910 from 2027-03-09 KST).
+      const publication = clauseVersionAt(HOLD_CLAUSE_VERSIONS['privacy:35.3'], at).publication;
       const holds: LegalHold[] = ids.map(recordId => ({ holdId: randomUUID(), recordId, basis: {
-        type: 'pending-access-request', clause: { law: 'privacy', article: '35.3', version: '21445' }, clauseId: 'privacy:35.3',
+        type: 'pending-access-request', clause: { law: 'privacy', article: '35.3', version: publication }, clauseId: 'privacy:35.3',
         requestId: facts.requestId, authorityId: authority.institutionId, authorityKind: 'personal-information-controller',
         managingInstitutionId: authority.institutionId, scope: ids, verified: true,
         validity: { from: facts.receivedAt, until: facts.initialDueAt, condition: 'request-pending' } },
@@ -202,9 +223,38 @@ export class EmrAuditService {
       await tx.$queryRaw`SELECT emr_access.record_duty_request('access-request',${facts.requestId},'received',
         ${JSON.stringify({ requestId: facts.requestId, recordIds: ids, receivedAt: facts.receivedAt, responseDueAt: facts.initialDueAt, resolution: null })})::text`;
       for (const hold of holds) await tx.$queryRaw`SELECT emr_access.place_hold(${hold.holdId},${hold.recordId},${JSON.stringify(hold)})::text`;
-      await this.saveHeld(tx, authority.institutionId, { kind: 'access-request', request: approval.request, facts, holds, issuanceId: issuance.issuanceId });
-      await this.saveIssuance(tx, issuance);
-      await this.recorded(record, ctx, 'legal-hold', F.disclosureLedgerTargets(issuance), issuance.issuanceId);
+      const state: HeldRequest = { kind: 'access-request', request: approval.request, facts, holds, issuanceId: null };
+      await this.saveHeld(tx, authority.institutionId, state);
+      await this.recorded(record, ctx, 'legal-hold', this.requestTargets(state), facts.requestId);
+      return state;
+    });
+  }
+
+  async prepare(request: IncomingMessage, input: unknown) {
+    // Intake commits first: an unavailable original must not erase the request or its hold.
+    const registered = await this.register(request, input);
+    return this.run(request, async (tx, ctx, record) => {
+      const authority = await this.authority(tx, ctx), at = now();
+      const state = await this.held(tx, registered.facts.requestId, authority.institutionId);
+      const approval = F.approveDisclosure(authority, state.request, at);
+      if (state.facts.resolution) refuse('RequestAlreadyResolved');
+      const saved = state.issuanceId ? await this.issuance(tx, state.issuanceId, authority.institutionId) : null;
+      let issuance = saved;
+      if (!saved || F.issuanceState(saved).state === 'Prepared') {
+        const listings = await this.fixed(tx, state.facts.recordIds);
+        const changed = !saved || listings.some(l => {
+          const fixed = onlineFixedListing(l), prior = saved.manifest.records.find(r => r.recordId === fixed.recordId);
+          return !prior || prior.revision !== fixed.revision;
+        });
+        if (changed) {
+          issuance = F.prepareDisclosurePackage(authority, approval, listings, at,
+            process.env.KIN_EMR_ENVIRONMENT === 'synthetic-test' ? 'synthetic-test' : 'operational');
+          if (saved) await this.saveIssuance(tx, F.abortIssuance(authority, saved, { reason: '기록이 변경되어 고정판을 다시 준비함', at }));
+          await this.saveIssuance(tx, issuance);
+          await this.saveHeld(tx, authority.institutionId, { ...state, issuanceId: issuance.issuanceId });
+        }
+      }
+      await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(issuance), issuance.issuanceId);
       return issuance;
     });
   }
@@ -215,6 +265,9 @@ export class EmrAuditService {
       const issuance = await this.issuance(tx, issuanceId, authority.institutionId);
       const [existing] = await tx.$queryRaw<{ body: Buffer; sha256: string }[]>`SELECT body,sha256 FROM emr_audit.fixed_copy WHERE issuance_id=${issuanceId}`;
       if (existing) {
+        const actual = hash(existing.body);
+        if (actual !== existing.sha256 || actual !== F.issuanceState(issuance).issuedArtifactSha256)
+          refuse('FixedCopyIntegrityMismatch');
         await this.recorded(record, ctx, 'disclosure', F.disclosureLedgerTargets(issuance), issuanceId);
         return { issuance, artifact: existing.body.toString('base64'), sha256: existing.sha256, contentType: fixedContentType(issuance.manifest) };
       }
@@ -238,6 +291,13 @@ export class EmrAuditService {
     return this.run(request, async (tx, ctx, record) => {
       const authority = await this.authority(tx, ctx), issuance = await this.issuance(tx, issuanceId, authority.institutionId);
       const v = requestBody(input, ['outcome','evidence','note']);
+      requestValue(() => {
+        choice(v.outcome, ['delivered','failed','unknown']);
+        if (v.note !== null) string(v.note);
+        if (v.evidence !== null) {
+          const e = object(v.evidence, ['kind','evidenceId']); string(e.kind); string(e.evidenceId);
+        }
+      });
       const next = F.recordDelivery(authority, issuance, { outcome: v.outcome, evidence: v.evidence, note: v.note, at: now() });
       await this.saveIssuance(tx, next);
       await this.recorded(record, ctx, 'disclosure', F.disclosureLedgerTargets(next), issuanceId);
@@ -250,8 +310,7 @@ export class EmrAuditService {
       const a = await this.authority(tx, ctx); F.requireScope(a, 'disclosure');
       const value = await this.held(tx, requestId, a.institutionId);
       if (!value) refuse('RequestNotFound');
-      const issuance = await this.issuance(tx, value.issuanceId, a.institutionId);
-      await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(issuance), requestId);
+      await this.recorded(record, ctx, 'provide-prepared', this.requestTargets(value), requestId);
       return { ...value, states: value.holds.map(h => F.requestHoldState(value.facts, h, now())) };
     });
   }
@@ -259,14 +318,17 @@ export class EmrAuditService {
     return this.run(request, async (tx, ctx, record) => {
       const a = await this.authority(tx, ctx); F.requireScope(a, 'disclosure');
       const v = requestBody(input, ['extensionId','previousDueAt','dueAt','basis','evidenceId']);
+      requestValue(() => {
+        string(v.extensionId); utc(v.previousDueAt); utc(v.dueAt); string(v.evidenceId);
+        const basis = object(v.basis, ['clauseId','version']); string(basis.clauseId); string(basis.version);
+      });
       const state = await this.held(tx, requestId, a.institutionId);
       if (!state) refuse('RequestNotFound');
-      await this.fixed(tx, state.facts.recordIds);
-      const issuance = await this.issuance(tx, state.issuanceId, a.institutionId);
+      for (const id of [...state.facts.recordIds].sort()) await lockFixedRecord(tx, id);
       const prior = state.facts.extensions.find(e => e.extensionId === v.extensionId);
       if (prior) {
         if (['previousDueAt','dueAt','basis','evidenceId'].some(k => !isDeepStrictEqual(prior[k], v[k]))) refuse('DeadlineExtensionConflict');
-        await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(issuance), requestId);
+        await this.recorded(record, ctx, 'provide-prepared', this.requestTargets(state), requestId);
         return state;
       }
       if (state.holds.some(h => v.basis?.clauseId !== h.basis.clauseId || v.basis?.version !== h.basis.clause.version)) refuse('DeadlineExtensionRefused');
@@ -274,7 +336,7 @@ export class EmrAuditService {
       const extended = state.holds.map(h => F.extendRequestHold(state.facts, h, extension));
       const next = { ...state, facts: extended[0].facts, holds: extended.map(e => e.hold) };
       await this.saveHeld(tx, a.institutionId, next);
-      await this.recorded(record, ctx, 'legal-hold', F.disclosureLedgerTargets(issuance), requestId);
+      await this.recorded(record, ctx, 'legal-hold', this.requestTargets(state), requestId);
       return next;
     });
   }
@@ -282,17 +344,18 @@ export class EmrAuditService {
     return this.run(request, async (tx, ctx, record) => {
       const a = await this.authority(tx, ctx); F.requireScope(a, 'disclosure');
       const v = requestBody(input, ['outcome','evidenceId']);
+      requestValue(() => { choice(v.outcome, ['fulfilled','withdrawn','lawfully-refused']); string(v.evidenceId); });
       const state = await this.held(tx, requestId, a.institutionId);
       if (!state) refuse('RequestNotFound');
-      await this.fixed(tx, state.facts.recordIds);
-      const issuance = await this.issuance(tx, state.issuanceId, a.institutionId);
+      for (const id of [...state.facts.recordIds].sort()) await lockFixedRecord(tx, id);
       if (state.facts.resolution) {
         if (state.facts.resolution.eventId !== v.evidenceId || state.facts.resolution.outcome !== v.outcome) refuse('RequestAlreadyResolved');
-        await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(issuance), requestId);
+        await this.recorded(record, ctx, 'provide-prepared', this.requestTargets(state), requestId);
         return state;
       }
       const at = now(), facts = { ...state.facts, resolution: { at, eventId: requestValue(() => string(v.evidenceId)), outcome: v.outcome } };
-      if (v.outcome === 'fulfilled' && F.issuanceState(issuance).state !== 'Delivered') refuse('DeliveryEvidenceRequired');
+      if (v.outcome === 'fulfilled' && (!state.issuanceId ||
+          F.issuanceState(await this.issuance(tx, state.issuanceId, a.institutionId)).state !== 'Delivered')) refuse('DeliveryEvidenceRequired');
       const holds = state.holds.map(h => ({ ...h, release: F.planRequestHoldRelease(a, facts, h,
         { reason: 'effect-ended', evidenceId: v.evidenceId, endingFact: { kind: 'request-resolved', at, eventId: v.evidenceId } }, at) }));
       const next = { ...state, facts, holds };
@@ -300,7 +363,7 @@ export class EmrAuditService {
         ${JSON.stringify({ requestId, recordIds: facts.recordIds, receivedAt: facts.receivedAt, responseDueAt: F.effectiveDue(facts), resolution: facts.resolution })})::text`;
       for (const hold of holds) await tx.$queryRaw`SELECT emr_access.release_hold(${hold.holdId},${JSON.stringify(hold)})::text`;
       await this.saveHeld(tx, a.institutionId, next);
-      await this.recorded(record, ctx, 'lift-legal-hold', F.disclosureLedgerTargets(issuance), requestId);
+      await this.recorded(record, ctx, 'lift-legal-hold', this.requestTargets(state), requestId);
       return next;
     });
   }

@@ -443,8 +443,10 @@ export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ ac
   if (!plan) refuse('InvestigationPageRequired');
   const targets: AccessTarget[] = [], seen = new Set<string>();
   for (const row of page.rows) for (const t of row.targets) {
-    if (t.patient?.status !== 'known' || t.studyId.status !== 'known') continue;
-    const key = JSON.stringify([row.eventId, t.patient.value.patientId, t.patient.value.assigningAuthority, t.studyId.value]);
+    if (t.patient?.status !== 'known') continue;
+    // Intake can precede source resolution. Its event is still shown and must
+    // be recorded, carrying the unknown study rather than dropping the access.
+    const key = JSON.stringify([row.eventId, t.patient.value.patientId, t.patient.value.assigningAuthority, t.studyId]);
     if (seen.has(key)) continue;
     seen.add(key);
     targets.push({ kind: 'access-audit', patientLinkSnapshot: t.patient, studyId: t.studyId,

@@ -93,15 +93,21 @@ export function accessPersistence(action: AccessAction): 'business-transaction' 
 export function newAuditLinkId(): string { return `audit:${randomUUID()}`; }
 
 const servedManifests = new WeakMap<object, readonly ResolvedRecord[]>();
+const parsedEvents = new WeakSet<object>();
 /** On mixed surfaces B supplies the rows actually served, in target order, from its bound storage capability.
  * Rehydrating a persisted mixed event likewise requires its server-verified row manifest.
  * formatVersion 1 keeps its original fields and rules, plus D-18's required work context; 2 is the closed EMR-B branch set below.
  */
 export function parseAccessEvent(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEvent> {
+  // Parser outputs are deeply frozen. Reuse them during replay/classification;
+  // a new supplied manifest still requires the full target-binding check.
+  if (served === undefined && input && typeof input === 'object' && parsedEvents.has(input)) return input as Readonly<AccessEvent>;
   // Read the discriminator without running a getter; the selected parser validates the whole object.
   const version = input && typeof input === 'object' && !Array.isArray(input) ?
     Object.getOwnPropertyDescriptor(input, 'formatVersion')?.value : undefined;
-  return version === 2 ? parseAccessEventV2(input, served) : parseAccessEventV1(input, served);
+  const parsed = version === 2 ? parseAccessEventV2(input, served) : parseAccessEventV1(input, served);
+  parsedEvents.add(parsed);
+  return parsed;
 }
 function expectedResult(action: AccessAction): AccessEventV1['result'] {
   const failure = accessPersistence(action) === 'independent-failure';
@@ -140,7 +146,14 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     // unknown fact on these existing boundaries; never invent a patient link.
     const nativeRecord = kind === 'private-draft' ||
       (['PUT studies/:uid/report', 'POST studies/:uid/report/commit'].includes(surface) && kind === 'report-version');
-    const required = nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
+    // Request intake and hold administration disclose request facts even when an original
+    // cannot yet be packaged. Preserve its patient/record; do not invent a study or version.
+    const requestFacts = kind === 'disclosure' && ['POST emr-audit/requests', 'POST emr-audit/issuances',
+      'GET emr-audit/requests/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve'].includes(surface);
+    const investigatedEvent = kind === 'access-audit' && ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface);
+    const required = requestFacts ? [parsed.patientLinkSnapshot, parsed.recordId] :
+      investigatedEvent ? [parsed.patientLinkSnapshot, parsed.recordId, parsed.versionId] :
+      nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
     if (!failure && required.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
     return parsed;
   });

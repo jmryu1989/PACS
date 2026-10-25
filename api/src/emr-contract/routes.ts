@@ -24,7 +24,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],
     routes: ['POST emr-audit/investigations', 'POST emr-audit/exports'] },
   { kinds: ['disclosure'], operation: 'write', causes: ['user-view'],
-    routes: ['POST emr-audit/issuances', 'POST emr-audit/issuances/:id/issue', 'POST emr-audit/issuances/:id/delivery',
+    routes: ['POST emr-audit/requests', 'POST emr-audit/issuances', 'POST emr-audit/issuances/:id/issue', 'POST emr-audit/issuances/:id/delivery',
       'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve'] },
   { kinds: ['disclosure'], operation: 'read', causes: ['user-view'], routes: ['GET emr-audit/requests/:id'] },
   { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'download', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],

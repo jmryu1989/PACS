@@ -52,7 +52,7 @@ except Exception:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTROLLER_GLOB = "*controller.ts"
+CONTROLLER_GLOB = "*.controller.ts"
 
 # Read only the authentication time recorded by Keycloak's successful interactive flow, never iat or a test value.
 AUTH_TIME_MAPPER = {
@@ -104,6 +104,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "emr-audit/roster/:grantId"): Route(Kind.TENANT),
     ("POST", "emr-audit/investigations"): Route(Kind.TENANT),
     ("POST", "emr-audit/exports"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests"): Route(Kind.TENANT),
     ("POST", "emr-audit/issuances"): Route(Kind.TENANT),
     ("POST", "emr-audit/issuances/:id/issue"): Route(Kind.TENANT),
     ("POST", "emr-audit/issuances/:id/delivery"): Route(Kind.TENANT),

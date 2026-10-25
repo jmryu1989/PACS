@@ -1,5 +1,5 @@
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
-import { EmrAuditController } from './emr-audit/controller';
+import { EmrAuditController } from './emr-audit/audit.controller';
 import { EmrAuditService } from './emr-audit/service';
 import { EmrViewingModule } from './emr-viewing/emr-viewing.module';
 import { AsrService } from './asr.service';

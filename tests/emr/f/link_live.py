@@ -13,6 +13,7 @@ import pg_ledger_restore_test as pg
 
 
 class AuditLinkPg(pg.PgLedgerFixture):
+    disk_storage = True  # The review scale includes 300k E rows and 20k access events.
     @classmethod
     def setUpClass(cls):
         pg.gate.require_live_run()
@@ -24,23 +25,32 @@ class AuditLinkPg(pg.PgLedgerFixture):
             os.environ['KIN_TEST_API_IMAGE'] = tag
             cls.addClassCleanup(os.environ.pop, 'KIN_TEST_API_IMAGE', None)
         super().setUpClass()
+        bootstrap = cls.command([sys.executable, str(ROOT / 'scripts/emr-compose.py'), 'sql', 'audit-grantor',
+            '--institution', 'synthetic-hospital', '--issuer', 'https://synthetic.invalid/realms/f-link',
+            '--subject', 'officer', '--capacity', 'privacy-officer',
+            '--basis-document', 'synthetic-designation-authority']).stdout
+        cls.sql(bootstrap)
 
     def test_audit_copy_hold_http(self):
         logs = ROOT / 'tmp/emr-f-link' / ('pg-' + self.token)
         logs.mkdir(parents=True)
+        spool = logs / 'spool'
+        spool.mkdir()
+        if self.image:
+            spool.chmod(0o777)  # Disposable synthetic output, writable by the image's node user.
         env = {'DATABASE_URL': self.runtime_url, 'KIN_F_WITNESS_URL': self.witness_url,
-               'KIN_F_SPOOL': '/tmp/f-spool' if self.image else str(logs / 'spool')}
+               'KIN_F_SPOOL': '/evidence' if self.image else str(spool)}
         if self.image:
             command = ['docker', 'run', '--rm', '--name', self.container + '-node',
                        '--label', 'kin.b2r=' + self.token, '--network', self.network, '--tmpfs', '/tmp',
-                       '-v', str(ROOT / 'tests/emr/f') + ':/tests:ro', '-e', 'KIN_F_API=/app']
+                       '-v', str(ROOT / 'tests/emr/f') + ':/tests:ro', '-v', str(spool) + ':/evidence', '-e', 'KIN_F_API=/app']
             for key, value in env.items():
                 command += ['-e', key + '=' + value]
             command += ['--entrypoint', 'node', self.image, '--test', '/tests/link_pg_test.cjs']
         else:
             command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/f/link_pg_test.cjs')]
         try:
-            result = self.command(command, env={**os.environ, **env}, check=False, timeout=180)
+            result = self.command(command, env={**os.environ, **env}, check=False, timeout=360)
         except subprocess.TimeoutExpired as error:
             for name, content in [('stdout', error.stdout), ('stderr', error.stderr)]:
                 if isinstance(content, bytes):

@@ -15,13 +15,17 @@ export function fixedDocument(manifest: DisclosureManifest, originals: Original[
     const source = JSON.parse(item.original);
     const content = source.plan ? JSON.parse(source.plan).version :
       JSON.parse(Buffer.from(source.envelope.payload, 'base64url').toString('utf8'));
+    const signing = source.plan ? JSON.parse(source.signature ?? 'null')?.registration?.doctor : source.keyAtSigning?.doctor;
+    // 의료법 제22조①: retain the registered signer identity carried by this original.
+    const author = signing?.identityRegistrationId ?? (source.plan ? JSON.parse(source.plan).signing?.identityRegistrationId : content.identityRegistrationId);
+    const authorLabel = author ?? `${content.author.issuer} / ${content.author.subject}`;
     const action = { 'approve-sign': 'Approved Report', addendum: 'Addendum', amend: 'Amendment',
       cancel: 'Cancellation', entry: 'Original Entry', 'additional-entry': 'Additional Entry', correction: 'Correction' }[content.action ?? content.act] ?? 'Record Version';
     const text = content.text?.kind === 'report'
       ? field('Findings', content.text.findings) + field('Conclusion', content.text.conclusion) + field('Recommendation', content.text.recommendation)
       : field('Content', typeof content.text === 'string' ? content.text : content.text?.body ?? '');
     return `<section><h2>${action}</h2><dl><dt>Recorded</dt><dd>${esc(content.serverTime ?? content.at)}</dd>` +
-      `<dt>Author</dt><dd>${esc(content.author.subject)}</dd><dt>Study</dt><dd>${esc(content.studyId)}</dd>` +
+      `<dt>Author</dt><dd>${esc(authorLabel)}</dd><dt>Study</dt><dd>${esc(content.studyId)}</dd>` +
       `<dt>Record</dt><dd>${esc(item.recordId)}</dd><dt>Version</dt><dd>${esc(item.versionId)}</dd></dl>` +
       text + field('Reason', content.reason ?? '') + '</section>';
   }).join('');
