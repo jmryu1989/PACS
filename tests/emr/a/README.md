@@ -73,9 +73,12 @@ target (study UID, the `ReportVersion` id, its version) and carries its own
 `accessRef`, the event ID of its provide-prepared record; an empty history has no
 target. A version citations answer is one `report-evidence` target for the stored
 version and the filtered answer (an empty projection is still that version's
-read) and carries its `accessRef`. Refusals (400/403/404/409) record nothing. The
-routes do not retain the source PatientID or source institution, so both are
-`not-observed`. Cause is `user-view` and no work context is observed.
+read) and carries its `accessRef`. The routes' own refusals (400/403/404/409)
+record nothing; a refusal by an outer interceptor after preparation (the
+`StudyAccessInterceptor` 409) leaves the prepared records with `transfer-aborted`.
+The routes keep no source PatientID or source institution
+(`StudyAccessService.prepareSourceIdentity` keeps only the resource count), so
+both are `not-observed`. Cause is `user-view` and no work context is observed.
 
 The real cells run the production `AppModule.withLedger` over HTTP on the B2 PG
 fixture with an independent witness: all targets committed before the first

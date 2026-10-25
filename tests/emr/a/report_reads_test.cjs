@@ -231,16 +231,18 @@ test('A-HTTP-REPORT / A-HTTP-BODY / A-PG-COMMIT: every returned version is commi
     await version(uid, 4, { action: 'addendum', findings: sentinel + ' v4', reason: 'SYN addendum reason' })];
   const hold = holdLedger();
   await hold.locked;
-  let firstByte = null;
-  const pending = call('/studies/' + encodeURIComponent(uid) + '/report/versions', { onResponse: async () => {
-    // At the first response bytes, an independent connection already sees every target committed.
-    firstByte = (await prepared(uid)).length;
-  } });
-  await runtimeWaitsOnLock();
-  assert.equal(firstByte, null, 'no response byte while the provide-prepared INSERT waits on PostgreSQL');
-  assert.equal((await prepared(uid)).length, 0);
-  await hold.release();
-  const answer = await pending.done;
+  let firstByte = null, answer;
+  try {
+    const pending = call('/studies/' + encodeURIComponent(uid) + '/report/versions', { onResponse: async () => {
+      // At the first response bytes, an independent connection already sees every target committed.
+      firstByte = (await prepared(uid)).length;
+    } });
+    await runtimeWaitsOnLock();
+    assert.equal(firstByte, null, 'no response byte while the provide-prepared INSERT waits on PostgreSQL');
+    assert.equal((await prepared(uid)).length, 0);
+    await hold.release();
+    answer = await pending.done;
+  } finally { await hold.release(); }
   assert.equal(answer.status, 200, answer.text);
   assert.equal(firstByte, rows.length, 'every returned version is committed before the first byte');
   assert.match(answer.headers['content-type'], /^application\/json/);
@@ -279,8 +281,10 @@ test('A-HTTP-REPORT / A-HTTP-BODY / A-PG-COMMIT: every returned version is commi
 test('A-HTTP-REPORT: version citations record the filtered projection of the stored version; empty, missing and refused reads', async () => {
   const uid = await study();
   const finding = randomUUID(), hidden = randomUUID();
+  // A readable finding: its one source item stays inside this study (the stored shape needs one to eight sources).
+  // `hidden` names no stored finding, so the caller cannot read it.
   await ctx.witness.finding.create({ data: { id: finding, studyUid: uid, authorSub: sub, authorActor: actor, revision: 1,
-    hidden: false, snapshot: { sources: [] }, updatedAt: new Date() } });
+    hidden: false, snapshot: { sources: [{ kind: 'item', studyUid: uid, itemId: randomUUID(), revision: 1 }] }, updatedAt: new Date() } });
   const line = 'SYN cited line', secret = 'SYN-HIDDEN-SENTENCE-' + randomUUID();
   const entry = (findingId, insertedText) => ({ v: 2, cid: randomUUID(), field: 'findings', findingId, findingRevision: 1, sourceIndex: 0,
     sourceRef: { kind: 'item', itemId: randomUUID(), sourceRevision: 1 }, linkStateAtInsert: 'current', headRevisionAtInsert: 1,
@@ -382,12 +386,13 @@ test('A-HTTP-OUTCOME: a client that leaves before the COMMIT gets no body; the l
   const hold = holdLedger();
   await hold.locked;
   let answered = false;
-  const pending = call('/studies/' + encodeURIComponent(uid) + '/report/versions', { onResponse: () => { answered = true; } });
-  const failed = pending.done.then(() => 'answered', () => 'left');
-  await runtimeWaitsOnLock();
-  pending.req.destroy();
-  assert.equal(await failed, 'left');
-  await hold.release();
+  try {
+    const pending = call('/studies/' + encodeURIComponent(uid) + '/report/versions', { onResponse: () => { answered = true; } });
+    const failed = pending.done.then(() => 'answered', () => 'left');
+    await runtimeWaitsOnLock();
+    pending.req.destroy();
+    assert.equal(await failed, 'left');
+  } finally { await hold.release(); }
   const recorded = await settled(uid, 1);
   assert.deepEqual(recorded.map(e => e.event.action), ['provide-prepared', 'transfer-aborted']);
   assert.equal(answered, false);
@@ -399,12 +404,14 @@ test('A-HTTP-BODY: a policy change caught by the outer access check after prepar
   await version(uid, 1, { findings: sentinel });
   const hold = holdLedger();
   await hold.locked;
-  const pending = call('/studies/' + encodeURIComponent(uid) + '/report/versions');
-  await runtimeWaitsOnLock();
-  // The request already passed its own gates; StudyAccessInterceptor compares the policy snapshot after the handler.
-  await ctx.witness.studyAccessPolicy.create({ data: { institution: foreignInstitution, subject: sub, revision: 1,
-    policy: {}, reason: 'SYN institution review', updatedBy: 'synthetic-admin' } });
   try {
+    const pending = call('/studies/' + encodeURIComponent(uid) + '/report/versions');
+    await runtimeWaitsOnLock();
+    // The request already passed its own gates; StudyAccessInterceptor compares the policy snapshot after the handler.
+    // A policy row of another institution for this subject is the existing "needs institution review" scope change.
+    await ctx.witness.studyAccessPolicy.create({ data: { institution: foreignInstitution, subject: sub, revision: 1,
+      policy: { version: 1, restricted: true, startsAt: null, endsAt: null, rules: [] }, reason: 'SYN institution review',
+      updatedBy: 'synthetic-admin' } });
     await hold.release();
     const refused = await pending.done;
     assert.equal(refused.status, 409, refused.text);
@@ -413,7 +420,8 @@ test('A-HTTP-BODY: a policy change caught by the outer access check after prepar
     const recorded = await settled(uid, 1);
     assert.deepEqual(recorded.map(e => e.event.action), ['provide-prepared', 'transfer-aborted']);
   } finally {
-    await ctx.witness.studyAccessPolicy.delete({ where: { institution_subject: { institution: foreignInstitution, subject: sub } } });
+    await hold.release();
+    await ctx.witness.studyAccessPolicy.deleteMany({ where: { institution: foreignInstitution, subject: sub } });
   }
 });
 
