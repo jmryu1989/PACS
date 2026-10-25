@@ -61,15 +61,22 @@ body.kin-viewer-ux #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) 
 body.kin-viewer-ux #kin-workspace-dock button:focus-visible {
   outline: 2px solid var(--kin-accent); outline-offset: -2px;
 }
-.kin-ux-pane > .relative { flex: 1; min-height: 0; height: 0; }
+/* The bar's row is reserved by the pane's padding from the pane's first layout (the stylesheet is
+   loaded before the shell mounts) and the bar overlays that row: attaching or removing a bar never
+   changes the canvas container, so no re-fit, and no camera reset the MPR crosshairs could carry to
+   the linked planes, follows a pane's creation. A bar inserted into the flex column instead was
+   sometimes attached after the stock effect had sized the canvas (layout changes from a double
+   click flush React effects synchronously), and the re-fit that corrected it moved the untouched
+   MPR planes' focal points by rounding. */
+body.kin-viewer-ux [data-cy="viewport-pane"] { box-sizing: border-box; padding-top: 42px; }
 .kin-viewer-info-bar {
-  display: flex; align-items: center; gap: .6em; flex: none;
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; align-items: center; gap: .6em;
   padding: .3em .5em; font: 12px/1.4 sans-serif; min-width: 0;
   pointer-events: auto;
-  /* Two text lines whatever the label says. The bar shares the pane with the
-     canvas, so a label that wraps differently (identity vs Loading, another
-     patient, a fallback glyph) would re-fit the image on every change. */
-  box-sizing: border-box; height: 3.5em; overflow: hidden;
+  /* Two text lines whatever the label says: a label that wraps differently
+     (identity vs Loading, another patient, a fallback glyph) must not move anything. */
+  box-sizing: border-box; height: 42px; overflow: hidden;
 }
 .kin-viewer-info-identity {
   flex: 1; min-width: 0; overflow-wrap: anywhere; overflow: hidden;

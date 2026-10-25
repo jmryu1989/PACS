@@ -24,10 +24,9 @@ window.KinViewerInfoBar = (() => {
   }
   function mount({ services, studyActions }) {
     const bars = new Map(), labels = new Map();
-    // Attach a bar to every pane that lacks one. The bar takes its height from
-    // the pane's canvas container, so a pane must get it before the stock code
-    // enables the element and sizes the canvas; `added` tells the caller which
-    // panes were measured without it and need a re-fit now.
+    // Attach a bar to every pane that lacks one. The pane reserves the bar's
+    // row by its own padding (theme) and the bar overlays it, so attaching a
+    // bar changes no size; `added` only tells the caller a pane was adopted.
     function adopt() {
       const state = services.viewportGridService.getState();
       const ids = [...state.viewports.keys()];
@@ -39,7 +38,7 @@ window.KinViewerInfoBar = (() => {
         return !element || panes[index].contains(element);
       });
       for (const [id, bar] of bars) if (!state.viewports.has(id) || !bar.isConnected) {
-        bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); bars.delete(id); labels.delete(id);
+        bar.remove(); bars.delete(id); labels.delete(id);
       }
       const cells = []; let added = false;
       for (const [index, id] of ids.entries()) {
@@ -54,7 +53,7 @@ window.KinViewerInfoBar = (() => {
           const study = document.createElement('button'); study.type = 'button'; study.textContent = 'Study ▾';
           study.disabled = true; study.title = '이전 검사 연결은 다음 단계에서 제공됩니다.';
           study.onclick = () => studyActions?.open(id, study);
-          bar.append(label, mode, study); pane.classList.add('kin-ux-pane'); pane.prepend(bar); bars.set(id, bar); added = true;
+          bar.append(label, mode, study); pane.prepend(bar); bars.set(id, bar); added = true;
         }
         cells.push({ id, current, bar: bars.get(id) });
       }
@@ -92,7 +91,7 @@ window.KinViewerInfoBar = (() => {
       refresh,
       adopt: () => adopt().added,
       invalidate() { labels.clear(); for (const bar of bars.values()) bar.children[0].textContent = 'Loading / No image'; },
-      dispose() { for (const bar of bars.values()) { bar.parentElement?.classList.remove('kin-ux-pane'); bar.remove(); } bars.clear(); labels.clear(); },
+      dispose() { for (const bar of bars.values()) bar.remove(); bars.clear(); labels.clear(); },
     };
   }
   return { mount, identity };
