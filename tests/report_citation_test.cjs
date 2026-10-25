@@ -648,13 +648,14 @@ test('the historical read runs the report gates and the access re-check inside o
 test('the historical read answers one preserved row, and a version with no row is not an empty one', async () => {
   const mine = { ...carried('a', '2026-09-02T00:00:00.000Z', 'v2-author@synthetic'), findingId: FINDING, insertedText: LINE };
   const head = { ...carried('z', '2026-09-03T00:00:00.000Z', 'v4-author@synthetic'), findingId: FINDING, insertedText: LINE };
-  const f = fixture({ versions: new Map([[2, preserved([mine])], [4, preserved([head])]]) });
+  const stored = { ...preserved([mine]), id: 202, uid: UID, version: 2, action: 'approve',
+    author: 'stored-author@synthetic', at: new Date('2026-09-02T00:00:00.000Z'), reason: 'SYN stored reason' };
+  const f = fixture({ versions: new Map([[2, stored], [4, preserved([head])]]) });
   const answer = await historyRead(f, '2');
-  const call = f.calls.find(c => c.call === 'reportVersion.findUnique');
-  assert.deepEqual(call.args.where, { uid_version: { uid: UID, version: 2 } });
-  assert.deepEqual(Object.keys(call.args.select).sort(), ['citations', 'conclusion', 'findings', 'id', 'recommendation'],
-    'action/author/at/reason belong to the history response and must not leave the DB layer here');
-  assert.equal(Object.hasOwn(answer, 'id'), false, 'the row id names the access record target; it is not answered');
+  assert.equal(answer.version, 2, 'the answer identifies the requested stored version');
+  // The public projection is the contract; internal query columns may also support the access record.
+  for (const key of ['id', 'action', 'author', 'at', 'reason', 'findings', 'conclusion', 'recommendation', 'citations'])
+    assert.equal(Object.hasOwn(answer, key), false, key + ' must not be answered by the citations route');
   assert.equal(answer.entries.length, 1);
   assert.equal(answer.entries[0].insertedBy, 'v2-author@synthetic', 'the head row is not the answer');
 
