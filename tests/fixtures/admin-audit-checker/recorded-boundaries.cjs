@@ -1,7 +1,11 @@
 'use strict';
 // Real producers and request ownership; recording storage doubles only. The
 // PostgreSQL suites (emr/d/online_live.py and emr/request/request_facts_live.py)
-// separately check durability. No source text or line-number exemption here.
+// separately check durability. This is the behaviour behind the D1816 scope the
+// legacy AuditLog scan takes for EMR-D and the B2 request ports: what those flows
+// record (B2 events with the shared request's facts; the retained admin AuditLog
+// row). The context, prepare and current-session callbacks are test doubles,
+// since api/src supplies no ClinicalContextSource or OnlineClinicalWrite yet.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -171,12 +175,6 @@ module.exports = async function recordedBoundaries() {
   assert.equal(legacy.length, 1); assert.equal(legacy[0].action, 'admin.user.create');
   assert.equal(legacy[0].actor, subject); assert.equal(legacy[0].target, kcUser.id);
   assert.ok(currentChecks > 0); assert.equal(control.live(), 0);
-  console.log('ADMIN_AUDIT_RECORDED_BOUNDARIES ' + JSON.stringify({ clinicalEvents: events.length,
-    clinicalVersions: versions.length, legacyActions: legacy.map(row => row.action), sharedRequestFacts: true }));
-  return new Set([
-    'api/src/emr-runtime/request-context.ts#RequestWorkContext.requireCurrent',
-    'api/src/emr-clinical/runtime.ts#ClinicalContextSource.facts',
-    'api/src/emr-clinical/runtime.ts#ClinicalContextSource.study',
-    'api/src/emr-clinical/runtime.ts#OnlineClinicalWrite.prepare',
-  ]);
+  return { clinicalEvents: events.map(event => event.action), clinicalVersions: versions.length,
+    legacyActions: legacy.map(row => row.action), sharedRequestFacts: true };
 };

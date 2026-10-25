@@ -3,9 +3,12 @@
  * D1816: legacy provenance below excludes the B2 auth/runtime/retention producers
  * and B2 composition decorators. Attribution behavior remains checked; the old
  * whole-product completeness claim does not cover those replacement modules.
- * EMR-D/REQUEST_FACTS: caller-owned transaction handoffs are checked by running
- * the real clinical producers, shared request context and admin consumer. Their
- * SQL and legacy audit writes still pass through the provenance scan below.
+ * EMR-D (#212/#219, api/src/emr-clinical/) records through the B2 ledger only and
+ * joins that scope on the same basis, with one condition checked here: it names
+ * no AuditLog. A client a legacy file hands to a B2 port (an interface member
+ * declared in that scope, e.g. REQUEST_FACTS' requireCurrent, #211) enters B2.
+ * The B2 events and the retained AuditLog row are shown by running the real
+ * producers through the shared request context (recorded-boundaries.cjs).
  * REQ-S5-U5b-ADMIN-AUDIT / MOVE-PROJECTION / UNCLEAR-HIDDEN / NO-MIGRATION-START
  *   -> RISK-S5-U5b-CROSS-INSTITUTION / CURRENT-GROUP-ATTRIBUTION / CURRENT-OWNER-ATTRIBUTION / HIDDEN-COUNT /
  *      NEW-ACTION-DEFAULT / INVENTED-FIELDS / FAILURE-AS-EMPTY.
@@ -1195,8 +1198,12 @@ function productSources() {
 // D1816: B2's auth/ledger producers are covered by real PG/HTTP behavior tests.
 // Keep the old AuditLog checker on its remaining source scope; do not extend its
 // provenance grammar to the replacement ledger or claim completeness for B2.
+// EMR-D's online records (#212/#219) are B2 AccessEvents through the record port,
+// checked on PostgreSQL by tests/emr/d/online_pg_test.cjs; it writes no AuditLog,
+// which the scan below requires of every file it adds (emrD).
+const emrD = file => file.startsWith('api/src/emr-clinical/');
 const b2Replaced = file => file === 'api/src/auth.service.ts'
-  || file.startsWith('api/src/emr-runtime/') || file.startsWith('api/src/emr-retention/');
+  || file.startsWith('api/src/emr-runtime/') || file.startsWith('api/src/emr-retention/') || emrD(file);
 const b2Composition = file => b2Replaced(file) || ['api/src/admin.controller.ts', 'api/src/admin.service.ts',
   'api/src/pacs.service.ts', 'api/src/app.module.ts', 'api/src/main.ts'].includes(file);
 const auditSources = () => productSources().sources;
@@ -1252,7 +1259,7 @@ function auditProgram(sources) {
  * the controls that rewrite them. Every positive judgement below is one of the entries W1-W6 name; anything else is
  * unresolved with where and why.
  */
-function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set()) {
+function scanAuditWrites(sources = auditSources()) {
   const { ts } = typescript();
   const K = ts.SyntaxKind, TF = ts.TypeFlags;
   const program = auditProgram(sources), checker = program.getTypeChecker();
@@ -1606,10 +1613,6 @@ function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set())
       }
       if (ts.isCallExpression(parent) && parent.arguments.includes(node)) {
         const callee = bare(parent.expression);
-        // Native cloning without a transfer list copies the record; it does not
-        // retain a mutable alias to the original SQL parameter value.
-        if (ts.isIdentifier(callee) && callee.text === 'structuredClone' && parent.arguments.length === 1
-          && (symbolAt(callee)?.declarations ?? []).some(lib)) return null;
         if (['join', 'sql'].includes(prismaMember(callee)) || (isAccess(callee) && RAW.has(w1(callee).key))) return null;
         if (isAccess(callee) && ts.isIdentifier(bare(callee.expression))
           && (symbolAt(bare(callee.expression))?.declarations ?? []).some(lib)
@@ -2528,10 +2531,7 @@ function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set())
       for (const declaration of declarations) {
         if (memberChanged(symbolAt(declaration.name))) return null;
         const object = holdingObject(declaration);
-        // A direct private call on this still executes this body when the
-        // instance is returned by its factory. Action provenance (w3/closed)
-        // keeps its existing ownership rules; client flow follows the body.
-        if (objectUse(object).escape && !(mode === 'flow' && helpers && receiver.kind === K.ThisKeyword)) return null;
+        if (objectUse(object).escape) return null;
         // An override in the family runs instead of it on some instances: every one is a method with a body too.
         const family = object.kind === 'instance' ? [...familyOf(object.declaration)] : [object.declaration];
         for (const other of family.flatMap(member => member.members.filter(item => item.name && !ts.isComputedPropertyName(item.name)
@@ -3349,44 +3349,6 @@ function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set())
       const symbol = symbolAt(node), declarations = symbol?.declarations ?? [], [declaration] = declarations;
       if (declarations.length !== 1) return { why: `\`${node.text}\` ${declarations.length ? 'has several declarations' : 'does not resolve'}` };
       if (ts.isParameter(declaration) && ts.isFunctionLike(declaration.parent)) return parameterValue(declaration, symbol, node.text, true);
-      if (ts.isBindingElement(declaration)) {
-        const changed = changedBinding(symbol) || contentIssue(symbol);
-        if (changed) return { why: changed };
-        const keys = [];
-        let at = declaration;
-        while (ts.isBindingElement(at)) {
-          if (at.initializer || at.dotDotDotToken || !ts.isObjectBindingPattern(at.parent))
-            return { why: 'record destructuring has a default, rest or array binding' };
-          const key = at.propertyName ? w1(at.propertyName).key : at.name.text;
-          if (key === undefined) return { why: 'record destructuring key is not fixed' };
-          keys.unshift(key);
-          at = at.parent.parent;
-        }
-        if (!isConst(at) || !at.initializer) return { why: 'record destructuring is not a const with an initializer' };
-        // Destructuring keeps an alias to the nested record. Its original
-        // container can still mutate that record through another consumer.
-        let origin = bare(at.initializer);
-        const originPath = [...keys];
-        while (isAccess(origin)) {
-          const key = w1(origin).key;
-          if (key === undefined) return { why: 'record source key is not fixed' };
-          originPath.unshift(key);
-          origin = bare(origin.expression);
-        }
-        if (ts.isIdentifier(origin)) {
-          const issue = contentIssue(symbolAt(origin), originPath);
-          if (issue) return { why: issue };
-        }
-        const base = recordOf(at.initializer);
-        if (base.why) return base;
-        let type = checker.getTypeAtLocation(at.initializer);
-        for (const key of keys) {
-          const member = checker.getPropertyOfType(checker.getNonNullableType(type), key)?.declarations?.[0];
-          type = member?.type && checker.getTypeFromTypeNode(member.type);
-          if (!isRecordType(type)) return { why: `destructured \`${key}\` is not declared as a record` };
-        }
-        return ok('F02 fixed record destructuring', ...base.rules);
-      }
       const loop = ts.isVariableDeclaration(declaration) ? forOf(declaration) : null;
       if (loop) {
         if (result(loop.expression)) return ok('W6 an element of a JSON/Prisma result');
@@ -4508,6 +4470,18 @@ function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set())
     if (broken.length) note(file, 'source file', 'unresolved', `does not parse: ${ts.flattenDiagnosticMessageText(broken[0].messageText, ' ')}`, 'SPEC-F01');
     else files.push(file);
   }
+  // EMR-D is in the B2 scope because it writes no AuditLog: a delegate key or a text naming the table there is unresolved.
+  for (const file of files.filter(file => emrD(repoPath(file.fileName)))) {
+    const look = node => {
+      const named = isAccess(node) ? w1(node).key : ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text
+        : ts.isTemplateExpression(node) ? [node.head.text, ...node.templateSpans.map(span => span.literal.text)].join('') : undefined;
+      if (named !== undefined && TABLE_WORDS.test(named)) {
+        note(node, 'EMR-D naming AuditLog', 'unresolved', `\`${snippet(node)}\`: EMR-D is in the B2 scope (D1816) only while it writes no AuditLog`, 'D1816 EMR-D');
+      }
+      ts.forEachChild(node, look);
+    };
+    look(file);
+  }
   // The client flow: the seeds, then every binding, argument and result a client reaches, to a fixed point.
   const bindings = [], calledAt = [], returns = [];
   const enclosing = node => { for (let at = node.parent; at; at = at.parent) if (ts.isFunctionLike(at)) return at.body ? at : null; return null; };
@@ -4598,6 +4572,12 @@ function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set())
         && ts.isCallExpression(use.parent) && use.parent.expression === use;
     });
   }
+  function b2Port(call) {
+    const declaration = checker.getResolvedSignature(call)?.declaration;
+    if (!declaration || !(ts.isMethodSignature(declaration) || ts.isFunctionTypeNode(declaration) || ts.isCallSignatureDeclaration(declaration))
+      || !b2Replaced(repoPath(declaration.getSourceFile().fileName))) return null;
+    return `\`${snippet(call.expression)}\` (${where(declaration)})`;
+  }
   function followClient(start) {
     let node = start;
     for (;;) {
@@ -4609,19 +4589,6 @@ function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set())
     }
     const parent = node.parent;
     const argument = (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.arguments?.includes(node);
-    // These ports deliberately accept a caller-owned transaction. A declaration
-    // is not proof of their effects: the real producer/consumer exercise supplies
-    // this set only after checking the B2 events and retained AuditLog rows.
-    if (argument && parent.arguments[0] === node) {
-      const declaration = checker.getResolvedSignature(parent)?.declaration;
-      const owner = declaration?.parent;
-      const boundary = declaration?.name && owner?.name
-        ? `${repoPath(declaration.getSourceFile().fileName)}#${owner.name.text}.${declaration.name.text}` : null;
-      if (verifiedHandoffs.has(boundary)) {
-        note(start, 'client value', 'behaviorally_covered', boundary, 'B2 recorded boundary');
-        return;
-      }
-    }
     const receiving = argument && callees(parent, 'flow')?.every(owner => {
       const parameter = owner.parameters[parent.arguments.indexOf(node) + shift(owner)];
       return parameter && ts.isIdentifier(parameter.name) && !parameter.dotDotDotToken && clients.has(parameter);
@@ -4634,6 +4601,14 @@ function scanAuditWrites(sources = auditSources(), verifiedHandoffs = new Set())
       || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === K.EqualsToken && parent.right === node
         && (assignedClient(parent.left) || ts.isObjectLiteralExpression(bare(parent.left)) || ts.isArrayLiteralExpression(bare(parent.left))))
       || (argument && (receiving || identityMapKey(parent,node))) || (owner && callsOf(owner, 'flow').escapes.length === 0) || inert(node)) return;
+    // D1816: a member the B2 scope declares without a body (an interface port such as RequestWorkContext.requireCurrent)
+    // is implemented and tested there; a client handed to it enters B2. Only a call TypeScript resolves to that one
+    // declaration qualifies: a port declared outside the scope, or a receiver it does not type, stays unresolved.
+    const port = argument && ts.isCallExpression(parent) ? b2Port(parent) : null;
+    if (port) {
+      note(start, 'client value', 'b2_scope', `\`${snippet(start)}\`: handed to ${port}, a port of the B2 scope`, 'D1816 B2 port');
+      return;
+    }
     note(start, 'client value', 'unresolved', `\`${snippet(start)}\`: ` + (argument ? `a client value handed to \`${snippet(parent.expression)}\`, which this check does not follow`
       : owner ? `a client value returned from ${describe(owner)}, which is handed on` : `a client value used in a ${K[parent.kind]}, where this check does not follow it`), 'SPEC-F01 client flow');
   }
@@ -4690,26 +4665,52 @@ function verdict(scan, table = productTable(), listing = null) {
 }
 const failing = found => Object.keys(VERDICT).filter(name => found[name].length > 0);
 
-test('record destructuring and native copying preserve SQL values and retained audit writers', () => {
-  const text = readFileSync(path.join(__dirname, 'fixtures/admin-audit-checker/destructured-record.ts'), 'utf8');
-  const scan = scanAuditWrites([{ file: 'api/src/syn-fixture/destructured-record.ts', text }]);
-  assert.deepEqual(scan.unresolved, []);
-  assert.deepEqual(scan.sites.flatMap(site => site.actions).sort(), ['syn.private', 'syn.record']);
-  // A default can supply SQL rather than a record; a clone supplied by a caller
-  // has no native copy contract. Neither is made safe by the declared type.
-  for (const changed of [text.replace('const { plan }', 'const { plan = opaque() }'),
-    text.replace("import { Prisma }", 'declare function structuredClone(value: any): any;\nimport { Prisma }')]) {
-    const changedScan = scanAuditWrites([{ file: 'api/src/syn-fixture/destructured-record.ts',
-      text: 'declare function opaque(): any;\n' + changed }]);
-    assert.ok(changedScan.unresolved.length > 0);
+test('D1816 scope: a client handed to a B2 port enters B2; the same port declared elsewhere stays unresolved', () => {
+  const port = "import type { Prisma } from '@prisma/client';\nexport interface SynPort { check(tx?: Prisma.TransactionClient): Promise<void>; }\n";
+  const service = at => `import { PrismaClient } from '@prisma/client';
+import type { SynPort } from '${at}';
+export class SynService {
+  constructor(private readonly prisma: PrismaClient, private readonly port: SynPort) {}
+  async run() {
+    await this.prisma.$transaction(async tx => {
+      await this.port.check(tx);
+      await tx.auditLog.create({ data: { action: 'syn.write', actor: 'a', target: 't' } });
+    });
+  }
+}
+`;
+  const inB2 = scanAuditWrites([{ file: 'api/src/emr-runtime/syn-port.ts', text: port }, { file: 'api/src/syn-service.ts', text: service('./emr-runtime/syn-port') }]);
+  assert.deepEqual(inB2.unresolved, []);
+  assert.deepEqual(inB2.candidates.filter(entry => entry.status === 'b2_scope').map(entry => `${entry.file}:${entry.line}`), ['api/src/syn-service.ts:7']);
+  assert.deepEqual(inB2.sites.flatMap(site => site.actions), ['syn.write']);
+  const outside = scanAuditWrites([{ file: 'api/src/syn-port.ts', text: port }, { file: 'api/src/syn-service.ts', text: service('./syn-port') }]);
+  assert.equal(outside.candidates.filter(entry => entry.status === 'b2_scope').length, 0);
+  assert.ok(outside.unresolved.some(entry => entry.startsWith('api/src/syn-service.ts:7 client value:')), outside.unresolved.join('\n'));
+});
+
+test('D1816 scope: an EMR-D file that names AuditLog leaves the scope basis and is unresolved', () => {
+  const file = 'api/src/emr-clinical/syn-store.ts';
+  const head = "import type { Prisma } from '@prisma/client';\nexport async function put(tx: Prisma.TransactionClient, id: string) {\n";
+  const clean = scanAuditWrites([{ file, text: head + '  await tx.$executeRaw`INSERT INTO emr_clinical.syn(id) VALUES (${id})`;\n}\n' }]);
+  assert.deepEqual([clean.unresolved, clean.sites], [[], []]);
+  for (const body of ["  await tx.auditLog.create({ data: { action: 'syn.d' } });\n", "  await tx['auditLog'].create({ data: { action: 'syn.d' } });\n",
+    '  await tx.$executeRaw`INSERT INTO "AuditLog"(action) VALUES (${id})`;\n']) {
+    const named = scanAuditWrites([{ file, text: head + body + '}\n' }]);
+    assert.ok(named.unresolved.some(entry => entry.startsWith(`${file}:3 EMR-D naming AuditLog:`)), body + named.unresolved.join('\n'));
   }
 });
 
+test('B2 scope behaviour: EMR-D writes and reads record B2 events with the shared request facts; the admin create keeps its AuditLog row', async () => {
+  const recorded = await require('./fixtures/admin-audit-checker/recorded-boundaries.cjs')();
+  console.log('ADMIN_AUDIT_RECORDED_BOUNDARIES ' + JSON.stringify(recorded));
+  assert.deepEqual(recorded.legacyActions, ['admin.user.create']);
+  assert.deepEqual(recorded.clinicalEvents, ['write', 'provide-prepared']);
+});
 
-test('legacy AuditLog coverage outside the B2 replacement: retained candidates and table rows agree', async () => {
-  const handoffs = await require('./fixtures/admin-audit-checker/recorded-boundaries.cjs')();
+
+test('legacy AuditLog coverage outside the B2 replacement: retained candidates and table rows agree', () => {
   const { sources, listing } = productSources();
-  const scan = scanAuditWrites(sources, handoffs);
+  const scan = scanAuditWrites(sources);
   const found = verdict(scan, productTable(), listing);
   // The inventory, whatever the verdict: every write site with its kind, actions or prefixes and their basis, every
   // unresolved candidate, and every candidate proven not to be a write with its reason.
@@ -4721,8 +4722,7 @@ test('legacy AuditLog coverage outside the B2 replacement: retained candidates a
   console.log('ADMIN_AUDIT_CANDIDATES ' + JSON.stringify(tally));
   for (const entry of scan.candidates.filter(entry => entry.status === 'proven_non_audit')) console.log('ADMIN_AUDIT_NON_AUDIT ' + JSON.stringify(entry));
   console.log('ADMIN_AUDIT_CLIENT_FLOW ' + JSON.stringify(scan.flow));
-  for (const entry of scan.candidates.filter(entry => entry.status === 'behaviorally_covered'))
-    console.log('ADMIN_AUDIT_B2_HANDOFF ' + JSON.stringify(entry));
+  for (const entry of scan.candidates.filter(entry => entry.status === 'b2_scope')) console.log('ADMIN_AUDIT_B2_PORT ' + JSON.stringify(entry));
   const literals = new Set(scan.sites.flatMap(site => site.actions)), byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({ scope: 'legacy AuditLog outside B2',
