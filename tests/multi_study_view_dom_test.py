@@ -940,6 +940,110 @@ class MultiStudyViewPage(unittest.TestCase):
                 kept(before)
                 self.page.locator('#multi-study-close').click()
 
+    def check_long_status_layout(self, mode):
+        self.open()
+        self.page.locator('#toolbar-view > summary').click()
+        self.page.locator('#image-opening-open').click()
+        self.page.locator('#image-opening-target').select_option(mode)
+        self.page.locator('#image-opening-done').click()
+        order = self.visible_order()
+        self.row(order[0]).click()
+        self.wait(lambda: self.target() == order[0], 'Reading Target')
+        for width in (1366, 1024):
+            with self.subTest(mode=mode, width=width):
+                self.page.set_viewport_size({'width': width, 'height': 768})
+                n = self.open_set(order[:5])['studyUids']
+                expect(self.member(n[0])).to_contain_text('Viewing')
+                self.site.resolve_answers.append({n[2]: 'W9_LOAD_FAILED'})
+                self.press('#multi-study-next')
+                expect(self.member(n[2])).to_contain_text('Load Failed')
+                self.open_set([n[1], n[3], n[4]], {
+                    n[3]: 'W9_SCOPE_EXCLUDED', n[4]: 'W9_IDENTITY_UNAVAILABLE'})
+                expect(self.page.locator('#multi-study-candidate')).to_contain_text('Access Restricted')
+                for uid in (n[0], n[2], n[4]):
+                    row = self.member(uid)
+                    row.scroll_into_view_if_needed()
+                    expect(row).to_be_in_viewport(ratio=1)
+                    for name in ('Previous', 'Next', 'Compare Two', 'Back to Pages', 'Close'):
+                        expect(self.host().get_by_role('button', name=name, exact=True)).to_be_in_viewport(ratio=1)
+                # Real clicks must reach the row controls while the new selection's errors remain visible.
+                self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
+                self.wait_viewer([n[2]])
+                expect(self.page.locator('#multi-study-candidate')).to_contain_text('Access Restricted')
+                self.page.locator('#multi-study-close').click()
+                for popup in self.popups:
+                    if not popup.is_closed():
+                        popup.close()
+
+    def test_long_status_keeps_a_full_member_and_navigation_visible(self):
+        self.check_long_status_layout('window')
+
+    def test_workspace_long_status_keeps_a_full_member_and_navigation_visible(self):
+        self.check_long_status_layout('workspace')
+
+    def test_workspace_retry_reuses_the_previous_compositions_window_with_guards(self):
+        self.open()
+        self.page.locator('#toolbar-view > summary').click()
+        self.page.locator('#image-opening-open').click()
+        self.page.locator('#image-opening-target').select_option('workspace')
+        self.page.locator('#image-opening-done').click()
+        order = self.visible_order()
+        self.row(order[0]).click()
+        self.wait(lambda: self.target() == order[0], 'Reading Target')
+        for width in (1366, 1024):
+            with self.subTest(width=width):
+                self.page.set_viewport_size({'width': width, 'height': 768})
+                popup = None
+                previous_composition = None
+                for failed in (order[2], order[2], order[3]):
+                    current = self.open_set(order[:5])
+                    self.assertNotEqual(previous_composition, current['compositionId'])
+                    previous_composition = current['compositionId']
+                    expect(self.member(order[0])).to_contain_text('Viewing')
+                    self.site.resolve_answers.append({failed: 'W9_LOAD_FAILED'})
+                    self.press('#multi-study-next')
+                    expect(self.member(failed)).to_contain_text('Load Failed')
+                    partner_uid = order[3] if failed == order[2] else order[2]
+                    frame = self.page.locator('#reading-frame')
+                    self.wait(lambda: partner_uid in (frame.get_attribute('src') or ''), 'workspace partner')
+                    self.wait(lambda: any(partner_uid in f.url for f in self.page.frames), 'partner document')
+                    partner = next(f for f in self.page.frames if '/ohif/viewer' in f.url)
+                    partner.evaluate("() => { document.body.dataset.kept = 'partner'; }")
+                    old_src = frame.get_attribute('src')
+                    retry = f'#multi-study-members li[data-uid="{failed}"] [data-action=retry]'
+                    old_opening = self.viewer_studies(popup)[2] if popup else None
+                    count = len(self.popups)
+                    if popup and failed != order[2]:
+                        old_url = popup.url
+                        loads = len(self.site.viewer_loads)
+                        popup.evaluate('window.__synDirty = true')
+                        self.press(retry)
+                        expect(self.status()).to_contain_text(BUSY)
+                        self.assertEqual(old_url, popup.url)
+                        self.assertEqual(loads, len(self.site.viewer_loads))
+                        popup.evaluate('window.__synDirty = false; window.kinViewerFrameCoverageConfirm = () => false')
+                        self.press(retry)
+                        expect(self.status()).to_contain_text('기존 영상 창을 유지했습니다')
+                        self.assertEqual(old_url, popup.url)
+                        self.assertEqual(loads, len(self.site.viewer_loads))
+                        popup.evaluate('window.kinViewerFrameCoverageConfirm = () => true')
+                    body = self.press(retry)
+                    self.assertEqual(current['compositionId'], body['compositionId'])
+                    self.assertEqual(current['studyUids'], body['studyUids'])
+                    self.wait_viewer([failed])
+                    if popup:
+                        self.assertIs(popup, self.viewer())
+                        self.assertEqual(count, len(self.popups))
+                        self.wait(lambda: old_opening != self.viewer_studies(popup)[2], 'new opening in the same window')
+                        self.post_viewer_event(popup, old_opening, {'type': 'failed'})
+                        expect(self.member(failed)).to_contain_text('Loading')
+                    popup = self.viewer()
+                    self.assertEqual(old_src, frame.get_attribute('src'))
+                    self.assertEqual('partner', partner.locator('body').get_attribute('data-kept'))
+                    expect(self.member(partner_uid)).to_contain_text('Viewing')
+                    self.page.locator('#multi-study-close').click()
+                popup.close()
+
     def test_idle_viewer_ticks_leave_live_regions_unchanged_and_updates_still_announce(self):
         self.open()
         order = self.visible_order()

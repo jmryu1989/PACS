@@ -326,8 +326,8 @@
       if (demoMode) return { status: 'refused', message: '데모 모드에서는 뷰어를 열 수 없습니다.' };
       if (!viewerWindows) return { status: 'refused', message: '영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.' };
       const url = `/ohif/viewer?StudyInstanceUIDs=${uids.map(encodeURIComponent).join(',')}` + (uids.length === 2 ? '&hangingProtocolId=@ohif/hpCompare' : '');
-      const ownRetryWindow = preservePartner && viewingSetRetryWindow?.compositionId === compositionId &&
-        viewingSetRetryWindow.isOpen() && viewerWindows.rows().some(row => row.popup === viewingSetRetryWindow.popup);
+      // A previous composition may leave this retry document open. Reuse its slot through the normal launch guards.
+      const ownRetryWindow = preservePartner && viewingSetRetryWindow?.isOpen() && viewerWindows.rows().some(row => row.popup === viewingSetRetryWindow.popup);
       const choice = viewerWindows.choose(url, 1, preservePartner && !ownRetryWindow ? { freshDocument: true } : { singleWindow: true });
       if (choice.error) return { status: 'refused', message: choice.full
         ? '영상 창 수 제한에 도달했습니다. Viewer Windows에서 기존 창으로 돌아가거나 저장 후 닫으세요.' : choice.error };

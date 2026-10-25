@@ -5,8 +5,8 @@ body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .rw {
   flex: 0 1 auto; min-height: 48px; overflow: auto;
 }
 body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .workrow { flex: 1 0 360px; }
-body:not(.portrait):not(.reading) .multi-study { flex: 0 0 260px; min-height: 260px; }
-.multi-study { flex: none; display: flex; flex-direction: column; max-height: min(34vh, 260px); min-height: 0; overflow: auto;
+body:not(.portrait):not(.reading) .multi-study { flex: 0 0 auto; min-height: min-content; }
+.multi-study { flex: none; display: flex; flex-direction: column; height: min(34vh, 260px); min-height: min-content; overflow: auto;
   border-top: 1px solid var(--kin-line2); border-bottom: 1px solid var(--kin-line2); background: var(--kin-panel);
   color: var(--kin-text); font-size: 12px; }
 .multi-study[hidden] { display: none !important; }
@@ -16,8 +16,10 @@ body:not(.portrait):not(.reading) .multi-study { flex: 0 0 260px; min-height: 26
 .multi-study-nav { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
 #multi-study-status, #multi-study-identity { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; }
 #multi-study-status:empty { display: none; }
-#multi-study-candidate { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; }
-.multi-study-members { list-style: none; margin: 0; padding: 0 8px 6px; overflow: auto; min-height: 0; }
+/* Keep the new-selection heading, summary and first error visible; further errors scroll without displacing member actions. */
+#multi-study-candidate { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; max-height: 3lh; overflow: auto; }
+/* A wrapped failed row is 134px in the 1024px workspace; retain it plus the list padding when status text grows. */
+.multi-study-members { list-style: none; margin: 0; padding: 0 8px 6px; overflow: auto; flex: 1 0 140px; height: 140px; min-height: 140px; }
 .multi-study-member { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 3px 4px;
   border-top: 1px solid var(--kin-line); }
 .multi-study-member.active { box-shadow: inset 3px 0 var(--kin-accent); }
