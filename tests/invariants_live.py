@@ -719,7 +719,8 @@ class LiveStack:
                                            cwd=ROOT, input=script, capture_output=True, text=True,
                                            encoding='utf-8', errors='replace', timeout=PSQL_TIMEOUT_SECONDS)
                 if provision.returncode:
-                    raise RuntimeError('Synthetic signing key setup failed: ' + provision.stdout + provision.stderr)
+                    raise RuntimeError(f'Synthetic signing key setup failed (exit {provision.returncode}): '
+                                       + provision.stdout + provision.stderr)
         purge_user_audit(user_id)  # Scenarios measure their own commands after the owned fixture setup.
         return user_id
 
