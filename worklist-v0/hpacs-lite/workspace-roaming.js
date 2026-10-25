@@ -108,7 +108,7 @@
       try {
         const method = action === 'save' ? 'PUT' : action === 'clear' ? 'DELETE' : 'GET';
         const body = method === 'GET' ? undefined : { expectedOwner: owner, revision, ...(action === 'save' ? { layout: snapshot } : {}) };
-        // Only a write carries a body and the CSRF header the server requires of a write.
+        // Only a write carries a body.
         const response = await transport.request(endpoint, { context: at, method, credentials: 'same-origin', cache: 'no-store',
           headers: reading ? {} : { 'Content-Type': 'application/json' },
           body: body === undefined ? undefined : JSON.stringify(body), signal: local.signal });

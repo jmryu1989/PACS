@@ -224,7 +224,7 @@ function kinCreateMammographyHanging() {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/mammography-model.js';
       script.onload = resolve; script.onerror = () => reject(Error('유방영상 분류를 불러오지 못했습니다.')); document.head.append(script);
     });
-    const response = await fetch('/api/me', { credentials: 'same-origin', headers: {  } });
+    const response = await fetch('/api/me', { credentials: 'same-origin' });
     const me = response.ok ? await response.json() : null;
     institution = kinViewerSession.sameAccount(me) === true ? me.institution : null;
     window.kinMammographyHanging = preferences;

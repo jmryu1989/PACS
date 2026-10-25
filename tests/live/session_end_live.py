@@ -15,10 +15,9 @@ DB rights refuse the browser and old Bearer while provider sessions remain alive
 SE-11 keeps the C10 same-sid end contract using explicit Log out; provider member reconciliation belongs to U5b.
 SE-03b/SE-03c (S1 real-screen counterexample 1, candidate-diag-S1 ce1-diagnosis): Keycloak names a new SSO by the browser's
 authentication-session id, and a login screen left unfinished in that browser keeps the id alive past a login - the next
-SSO of the browser, the next person's or the same doctor's, gets the ENDED SSO's id. The end mark must not refuse it
-(it covers the ended SSO's authentication, not the id): the next person at an unfinished-logout landing in a profile that
-once closed a login page (SE-03b), and the same doctor after an ordinary Log out in one tab that opened the app twice
-before logging in (SE-03c), each enter with one credential entry; the ended SSO's token stays refused on the Bearer path.
+SSO of the browser, the next person's or the same doctor's, gets the ENDED SSO's id. Nothing may refuse it: the next
+person at an unfinished-logout landing in a profile that once closed a login page (SE-03b), and the same doctor after an
+ordinary Log out in one tab that opened the app twice before logging in (SE-03c), each enter with one credential entry.
 
 Run only through the guarded runner, on the isolated synthetic stack, after the unit's migration is applied there:
     python scripts/run-tests.py --module tests/live/session_end_live.py --mode live --unit s7-u5-session-end --timeout 1800
@@ -29,9 +28,8 @@ no restart, no configuration change). SE-09 suspends and activates doctor A thro
 LiveStack admin identity jmryu) and SE-10 changes A through the same product member API; both put A back
 enabled. Every other case only reads Keycloak and the database.
 
-Owned data: the LiveStack test identities doctor (A) and doctor2 (B), their product sessions, their access rows, the
-end marks (IdpSessionEnd) of their own provider sessions and A's isolation fact (MemberIsolation) - all removed at the
-end. Nothing secret is printed: each case prints one line `S7-U5-END-LIVE {case, ...}` of names, counts and booleans.
+Owned data: the LiveStack test identities doctor (A) and doctor2 (B), their product sessions, their access rows and
+A's isolation fact (MemberIsolation) - all removed at the end. Nothing secret is printed: each case prints one line `S7-U5-END-LIVE {case, ...}` of names, counts and booleans.
 On a browser wait timeout, `S7-U5-WAIT-DIAGNOSTIC` adds at most 64 KiB of route/status/console categories and a
 public landing reason. Each event history keeps at most 64 entries. Bodies, cookies, tokens and arbitrary page text
 are omitted; KIN_EVIDENCE_DIR also receives this JSON if configured. The original timeout still fails the case.
@@ -141,7 +139,7 @@ def diagnostic_auth_error(value: str) -> str | None:
     try:
         if len(value) <= 4096:
             reason = parse_qs(urlparse(value).query).get("auth_error", [None])[0]
-            if reason in ("stale", "session_active", "entry_unconfirmed", "end_unconfirmed", "login_failed", "sso_unidentified"):
+            if reason in ("stale", "session_active", "login_failed"):
                 return reason
     except (TypeError, ValueError):
         pass
@@ -396,15 +394,6 @@ class SessionEndLive(unittest.TestCase):
         self.case_sessions[who].append(idp)
         return idp, token
 
-    def end_requests(self, idp: str) -> list:
-        """The states of the product's recorded end requests (ProviderChange) of one provider session, in order."""
-        return psql(f'SELECT state FROM "ProviderChange" WHERE kind = \'end_session\' AND target = \'{idp}\' ORDER BY id;')
-
-    def refusals(self, who: str) -> int:
-        """Login refusals of this account as a provider session the product had ended, written during this case."""
-        return int(psql(f'SELECT count(*) FROM "AuditLog" WHERE target=\'{self.ids[who]}\' AND id > {self.audit_floor} '
-                        "AND action = 'auth.login' AND detail::json->>'cause' = 'idp_session_ended';")[0])
-
     def keycloak_kept_the_login_screen(self, context) -> bool:
         """Whether the browser's Keycloak authentication session holds an unfinished login screen after a login (its
         restart cookie outlives the login - ce1-diagnosis 3.4). A precondition, not a product rule."""
@@ -521,7 +510,7 @@ class SessionEndLive(unittest.TestCase):
     def test_03b_next_person_in_a_profile_that_kept_an_abandoned_login_page(self):
         """S1 real-screen counterexample 1, round 2: the same as SE-03, in a profile that once opened a login page and
         closed it without logging in - so Keycloak gives the next SSO of this browser the id of the ended one. The next
-        person B still enters as B with one credential entry; the ended SSO's token stays refused, B's is not."""
+        person B still enters as B with one credential entry and B's token is accepted."""
         context, page = self.profile()
         spare = context.new_page()
         spare.goto(self.stack.proxy + "/api/auth/login")
@@ -547,16 +536,14 @@ class SessionEndLive(unittest.TestCase):
         self.assertEqual(b_sid, a_sid, "precondition: Keycloak gave B's new SSO the ended SSO's id - else this case proves nothing")
         self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.product_sessions("B"), self.provider_alive("B")),
                          (0, 0, 1, 1))
-        self.assertEqual((self.ends("A"), self.refusals("B")), ([("auth.logout", "logout")], 0))
-        # The Bearer path judges as the callback: same id, the ended SSO's token refused, the new SSO's accepted.
-        self.assertEqual((self.bearer_me(a_token), self.bearer_me(b_token)), ((401, "AUTH_SESSION_ENDED"), (200, self.ids["B"])))
+        self.assertEqual(self.ends("A"), [("auth.logout", "logout")])
+        self.assertEqual(self.bearer_me(b_token), (200, self.ids["B"]))
         self.report("SE-03b", same_sid=True)
 
     def test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice(self):
         """ce1-diagnosis X6 with the same doctor: one tab opens the app's address twice before A types (a second bookmark
         click - the first login screen is left unfinished), A logs in; an ordinary Log out ends A's SSO; A comes back with
-        one Login press and one credential entry, although Keycloak gives A's new SSO the ended SSO's id. The ended SSO's
-        token stays refused, the new one is not."""
+        one Login press and one credential entry, although Keycloak gives A's new SSO the ended SSO's id."""
         context, page = self.profile()
         self.sign_in(page, "A", opens=2)
         self.assertTrue(self.keycloak_kept_the_login_screen(context), "precondition: the abandoned login screen outlived A's login")
@@ -576,9 +563,9 @@ class SessionEndLive(unittest.TestCase):
         self.assertEqual(self.me(context), (200, self.ids["A"]))
         again_sid, again_token = self.provider_session_and_token("A")
         self.assertEqual(again_sid, a_sid, "precondition: Keycloak gave A's new SSO the ended SSO's id - else this case proves nothing")
-        self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.ends("A"), self.refusals("A")),
-                         (1, 1, [("auth.logout", "logout")], 0))
-        self.assertEqual((self.bearer_me(a_token), self.bearer_me(again_token)), ((401, "AUTH_SESSION_ENDED"), (200, self.ids["A"])))
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.ends("A")),
+                         (1, 1, [("auth.logout", "logout")]))
+        self.assertEqual(self.bearer_me(again_token), (200, self.ids["A"]))
         self.report("SE-03c", same_sid=True)
 
     def test_04_switch_account_shows_an_editable_name(self):
@@ -665,7 +652,6 @@ class SessionEndLive(unittest.TestCase):
             self.assertEqual(self.product_sessions("A"), 0)
             self.assertEqual(self.stack.bearer_request("GET", "/me", old).status, 401)
             self.assertEqual((self.provider_alive("A"), self.provider_enabled("A")), (before, True))
-            self.assertEqual(self.end_requests(provider), [], "Suspend schedules no provider session end")
             self.assertEqual(self.ends("A"), [("auth.logout", "isolation")])
             activated = self.stack.set_member_rights(self.ids["A"], enabled=True)
             self.assertEqual(self.stack.bearer_request("GET", "/me", old).status, 401)

@@ -495,7 +495,7 @@
       const controller = new AbortController(), stop = setTimeout(() => controller.abort(), TIMEOUT_MS);
       inflight.add(controller);
       try {
-        const headers = raw === undefined ? {  } : { 'Content-Type': 'application/json' };
+        const headers = raw === undefined ? {} : { 'Content-Type': 'application/json' };
         const waiting = method === 'POST' && blocked();
         if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });
         onDispatch();

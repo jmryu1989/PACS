@@ -6626,14 +6626,14 @@ def browser_smoke(spec):
             "refresh_token": tokens["refresh_token"], "subject": claims.get("sub"), "product_session": product}
 
 
-# The product's own session requests as its web documents send them (worklist-v0/hpacs-lite/auth.js: X-KIN-CSRF, and
-# X-KIN-Session once the document knows its session); GET /api/me without the binding is the product's bootstrap call.
-PRODUCT_ME_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-CSRF': '1'}; if (sid) h['X-KIN-Session'] = sid;"
+# The product's own session requests as its web documents send them (worklist-v0/hpacs-lite/auth.js: X-KIN-Session
+# once the document knows its session); GET /api/me without the binding is the product's bootstrap call.
+PRODUCT_ME_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {}; if (sid) h['X-KIN-Session'] = sid;"
                  " const r = await fetch('/api/me', {headers: h, credentials: 'same-origin', cache: 'no-store', signal: kinSmokeSignal()});"
                  " let b = {}; try { b = await r.json(); } catch (e) {}"
                  " return {status: r.status, sid: typeof b.sessionId === 'string' && b.sessionId ? b.sessionId : null}; }")
 PRODUCT_LOGOUT_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; return (await fetch('/api/auth/logout', {method: 'POST', credentials: 'same-origin', signal: kinSmokeSignal(),"
-                     " headers: {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}})).status; }")
+                     " headers: {'X-KIN-Session': sid}})).status; }")
 
 
 def sign_in(page, spec):
@@ -6696,15 +6696,15 @@ def product_session_check(page, spec):
     browser_stage(page, "a neutral page", lambda: page.goto(origin + "/auth/realms/kin/.well-known/openid-configuration",
                                                              wait_until="domcontentloaded", timeout=browser_timeout(60000)))
     logout = browser_stage(page, "the product logout", lambda: page.evaluate(PRODUCT_LOGOUT_JS, sid))
-    bound = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1", "X-KIN-Session": sid})
-    cookie_only = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1"})
+    bound = session_replay(spec, {"Cookie": jar, "X-KIN-Session": sid})
+    cookie_only = session_replay(spec, {"Cookie": jar})
     return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie_only, "screens": screens}
 
 
 SCREEN_CHECKS = ("worklist_row", "modality_rendered", "folders_loaded", "reading_workspace", "shortcuts_dialog", "viewer_rendered")
 # The signed-in document's own paged list (as study-pages.js asks for it): the plan's study and its patient ID and
 # modality, which stay in the browser (only booleans leave it).
-SCREEN_STUDY_JS = ("async ([uid, sid]) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}; let after = null;"
+SCREEN_STUDY_JS = ("async ([uid, sid]) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-Session': sid}; let after = null;"
                    " for (let n = 0; n < 500; n++) { const r = await fetch('/api/studies?limit=100' + (after ? '&after=' + encodeURIComponent(after) : ''),"
                    " {headers: h, credentials: 'same-origin', cache: 'no-store', signal: kinSmokeSignal()}); if (r.status !== 200) return {status: r.status};"
                    " const body = await r.json(); const row = (body.studies || []).find(s => s && s.uid === uid);"

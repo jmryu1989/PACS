@@ -278,7 +278,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertEqual(urlparse(self.page.url).query, "")
         self.assertEqual(self.requests, [("/api/me", None)], "the recorded end of this session still wins after bootstrap")
 
-    def landing(self, record=None, query="?auth_error=entry_unconfirmed", origin="logout", status="confirmed", reason=None,
+    def landing(self, record=None, query="?auth_error=stale", origin="logout", status="confirmed", reason=None,
                 raw=None, script=None, expect_button=True):
         """The real landing in a browser that holds `record` (a session id) as an end record of that origin and status,
         or the raw storage entries `raw` ({key: text}). `script` is a further init script (after the seeding)."""
@@ -540,18 +540,6 @@ class AuthEntryDOMTest(unittest.TestCase):
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
         self.assertEqual(self.page.evaluate("Object.keys(localStorage).filter(key => key.startsWith('kin-session-end'))"), [])
         self.assertEqual(self.starts(), [])
-
-    # S7-U5 fix round 7 (Astra fix-6 decision a): an end the server could not confirm may stay unconfirmed for good (a lost
-    # answer is settled by nothing but itself), so its guidance says the end is not confirmed and sends the person to the
-    # administrator - pressing Login again is not promised as the remedy. The button stays usable; nothing is sent by itself.
-    ADMIN_GUIDANCE = "관리자에게 문의"
-
-    def assert_end_unconfirmed_guidance(self):
-        expect(self.page.locator("#msg")).to_contain_text(self.ADMIN_GUIDANCE)
-        self.assertIn("종료를 확인하지 못했습니다", self.page.locator("#msg").inner_text())
-        expect(self.page.locator("#signin")).to_be_enabled()
-
-
 
     def test_a_start_refused_for_a_changed_session_ends_nothing_and_asks_again(self):
         # The browser's session changed between the check and the start (another tab logged in): the server refuses.

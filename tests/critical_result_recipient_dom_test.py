@@ -1361,7 +1361,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.tick(60000)
         self.assertEqual([], self.posts())
         self.assertIsNone(ACKED.search(self.view()["text"]))
-        # One click, one POST with exactly the contract's body and the CSRF header.
+        # One click, one POST with exactly the contract's body.
         self.fault("ack", hold=True)
         self.acknowledge("SYN-PT-06")
         held = self.take("ack")
@@ -1370,7 +1370,6 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual(ACK_KEYS, sorted(post["body"]))
         self.assertRegex(post["body"]["requestId"], UUID_V4)
         self.assertEqual(([INSTITUTION, CLIN["sub"]], 1), (post["body"]["expectedOwner"], post["body"]["revision"]))
-        self.assertEqual("1", post["request"].headers.get("x-kin-csrf"))
         # While the answer is held nothing reads as acknowledged, and the button sends nothing more.
         waiting = self.view()
         self.assertIsNone(ACKED.search(waiting["text"]))

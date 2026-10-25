@@ -5061,3 +5061,40 @@ test('PC3 native archive GET admits a cookie session without a header; other rou
   assert.equal(h.s.op(id).status, 'sent');
   assert.equal(audits(h.s, 'original.download.intent').length, 1);
 });
+
+test('PC3 native archive GET refused before supply is byte 0 with no attempt (manifest changed, rights lost, logged out); Sent only from the server finish; format 2 read strictly', async () => {
+  const h = await harness({ realGuard: true });
+  sessionOf(h, 'sid-r1');
+  const native = (study, id) => h.request('GET', archivePath(study, id), { as: null, headers: { cookie: 'kin_sid=sid-r1' } });
+  const study = await downloadStudy(h, 2);
+  const id = await boundPrepare(h, study, 'sid-r1');
+  h.orthanc.store(dicom({ study, series: study + '.9', id: 'SYN-D', pixel: 90 }));
+  const changed = await native(study, id);
+  assert.deepEqual([changed.status, changed.body?.code, String(changed.headers['content-type']).startsWith('application/json')], [409, 'MANIFEST_CHANGED', true], 'byte 0: the refusal, never a ZIP');
+  assert.equal(h.s.op(id).download.attempts.length, 0);
+  // Rights lost after the preparation: the guard's own rights read refuses the GET before the handler.
+  const study2 = await downloadStudy(h, 1);
+  const id2 = await boundPrepare(h, study2, 'sid-r1');
+  h.s.rights.set(RAD.sub, { ...h.s.rights.get(RAD.sub), roles: ['clinician'] });
+  assert.equal((await native(study2, id2)).status, 403);
+  assert.equal(h.s.op(id2).download.attempts.length, 0);
+  h.s.rights.set(RAD.sub, { ...h.s.rights.get(RAD.sub), roles: ['radiologist'] });
+  // A logged-out session: authentication refuses it as for any request.
+  h.s.sessions.delete('sid-r1');
+  assert.equal((await native(study2, id2)).status, 401);
+  sessionOf(h, 'sid-r1');
+  assert.equal(audits(h.s, 'original.download.intent').length, 0, 'no intent, no attempt');
+  // Sent is the server's own finish after the last byte.
+  assert.equal((await native(study2, id2)).status, 200);
+  await sleep(50);
+  assert.deepEqual([h.s.op(id2).status, audits(h.s, 'original.download.result').filter(a => a.detail.operationId === id2).map(a => a.detail.state)], ['sent', ['sent']]);
+  // Format 2 is closed: an unknown key in the stored JSON is 503 MANIFEST_STORE_INVALID on the status and the archive.
+  const study3 = await downloadStudy(h, 1);
+  const id3 = await boundPrepare(h, study3, 'sid-r1');
+  assert.equal((await grantRequest(h, study3, id3, 'sid-r1')).status, 200, 'the grant issue converts the row to format 2');
+  h.s.ops.get(id3).download.archiveGrantNote = 'synthetic';
+  assert.deepEqual([(await boundStatus(h, study3, id3, 'sid-r1')).body.code, (await native(study3, id3)).body.code], ['MANIFEST_STORE_INVALID', 'MANIFEST_STORE_INVALID']);
+  delete h.s.ops.get(id3).download.archiveGrantNote;
+  h.s.ops.get(id3).download.schemaVersion = 3;
+  assert.equal((await boundStatus(h, study3, id3, 'sid-r1')).body.code, 'MANIFEST_STORE_INVALID', 'an unknown version is never read as another');
+});

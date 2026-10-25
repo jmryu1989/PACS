@@ -891,7 +891,7 @@ function refuseFlow(w, inst, begin, error, { cookies = [] } = {}) {
 }
 
 const promptOf = out => new URL(out.location).searchParams.get('prompt');
-const atProvider = out => typeof out.location === 'string' && ['auth', 'registrations'].some(path => out.location.startsWith(ISSUER + '/protocol/openid-connect/' + path + '?'));
+const atProvider = out => typeof out.location === 'string' && out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?');
 const landing = error => ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=' + error;
 
 const rowsOf = (rows, target) => rows.filter(r => r.target === target);
@@ -1143,7 +1143,7 @@ test('AS-05 a login start that ends the browser session records the cause it dec
   // [kind, body, account, session options, the row's cause, its trigger, the prompt of the final step]
   for (const [kind, body, sub, options, cause, trigger, prompt] of [
     ['switch', SWITCH, 'syn-sub-s1', {}, 'account_switch', undefined, 'login'],
-    ['signup', undefined, 'syn-sub-s2', {}, 'reauthentication', 'register', 'login'],
+    ['signup', undefined, 'syn-sub-s2', {}, 'reauthentication', 'register', 'create'],
     ['switch', SWITCH, 'syn-sub-s3', { lastSeenAt: past(13 * HOUR) }, 'account_switch', undefined, 'login'],
     ['switch', UNFINISHED, 'syn-sub-s4', {}, 'logout', undefined, 'login'],
     ['switch', UNTRUSTED, 'syn-sub-s5', {}, 'reauthentication', 'storage_untrusted', 'login'],
@@ -1170,7 +1170,7 @@ test('AS-05 a login start that ends the browser session records the cause it dec
     const gone = await w.call(w.I1, 'switch', { sid, body: SWITCH, binding: null });
     assert.deepEqual([gone.status, gone.cookie, promptOf(gone)], [200, 'P', 'login'], 'every new flow requests credentials');
     const signup = await w.call(w.I1, 'signup', { sid, binding: null });
-    assert.deepEqual([signup.status, signup.cookie, promptOf(signup)], [200, 'P', 'login']);
+    assert.deepEqual([signup.status, signup.cookie, promptOf(signup)], [200, 'P', 'create']);
   }
   assert.equal((await w.rows()).length, before, 'no cookie or an absent session: no row');
   // A start without a declared reason, or with one the server does not know, starts nothing and ends nothing.

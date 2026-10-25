@@ -435,7 +435,7 @@ class AuthAuditLive(unittest.TestCase):
         count = f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'
         for kind, reason, cause, trigger, prompt in (
                 ("login", "switch_account", "account_switch", None, "login"),
-                ("register", None, "reauthentication", "register", "login"),
+                ("register", None, "reauthentication", "register", "create"),
                 ("login", "logout_unfinished", "logout", None, "login"),
                 ("login", "storage_untrusted", "reauthentication", "storage_untrusted", "login"),
                 ("login", "record_unreadable", "reauthentication", "record_unreadable", "login")):
@@ -456,7 +456,7 @@ class AuthAuditLive(unittest.TestCase):
             status, _, answer = start()
             self.assertEqual(200, status, label)
             location = json.loads(answer).get("location", "")
-            self.assertIn("/protocol/openid-connect/" + ("auth" if kind == "login" else "registrations") + "?", location, label)
+            self.assertIn("/protocol/openid-connect/auth?", location, label)
             self.assertEqual(parse_qs(urlparse(location).query).get("prompt"), [prompt], label)
             self.assertEqual(self.ends("ma")[-1], ("auth.logout", cause, self.groups["A"][0], self.expected_ip), label)
             self.assertEqual(json.loads(self.rows_of("ma")[-1]["detail"]).get("trigger"), trigger, label)

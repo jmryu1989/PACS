@@ -462,7 +462,6 @@ class Site:
             # Keycloak's form and the callback, as one page.
             return route.fulfill(body=self.complete_login(), content_type="text/html; charset=utf-8")
         if path.startswith("/api/"):
-            # Every write (the logout POST and the draft write among them) carries the CSRF header.
             self.calls.append((method, path))
             return self.api(route, request, method, path, url.query)
         if method == "GET" and (path == "/statistics" or path.startswith("/dicom-web/") or path.startswith("/instances/")):

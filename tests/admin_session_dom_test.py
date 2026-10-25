@@ -153,8 +153,6 @@ class PageSessionDOMTest(unittest.TestCase):
             route.fulfill(status=204)
         elif path == '/api/auth/login':
             route.fulfill(status=204)
-        elif path == '/api/auth/entry':
-            route.fulfill(json={'sessionId':self.session})
         elif path in self.responses:
             route.fulfill(json=self.responses[path])
         elif path == '/api/admin/users':

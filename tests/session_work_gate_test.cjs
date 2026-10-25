@@ -1274,7 +1274,7 @@ const SITE = 'https://kin.test';
  */
 function browser({ storage = 'reliable' } = {}) {
   const local = new Map(), documents = [], channels = [];
-  const server = { sessions: new Map(), ended: new Set(), cookie: null, serial: 0, calls: [], logouts: [], proofs: new Map(),
+  const server = { sessions: new Map(), ended: new Set(), cookie: null, serial: 0, calls: [], logouts: [],
     answers: [],
     login(account = { sub: 'SYN-SUB', actor: 'syn@synthetic.test', institution: 'SYN-INST', roles: ['radiologist'], kind: 'member' }) {
       const id = `S${++server.serial}`;
@@ -1298,12 +1298,6 @@ function browser({ storage = 'reliable' } = {}) {
       return Promise.resolve(respond(scripted.status, scripted.body, scripted.code));
     }
     const refuse = (status, code) => Promise.resolve(respond(status, { code, message: 'SYN' }, code));
-    if (path === '/api/auth/entry') {
-      const proof = JSON.parse(init.body).proof, session = server.proofs.get(proof);
-      if (!session || session !== server.cookie) return refuse(403, 'AUTH_ENTRY_REFUSED');
-      server.proofs.delete(proof);
-      return Promise.resolve(respond(200, { sessionId: session }));
-    }
     if (server.cookie === null) return refuse(401, 'AUTH_CREDENTIALS_MISSING');
     if (bound !== null && bound !== server.cookie) return refuse(409, 'AUTH_SESSION_MISMATCH');
     if (bound === null && path !== '/api/me') return refuse(428, 'AUTH_SESSION_REQUIRED');

@@ -2298,7 +2298,7 @@ const kinViewerSession = (() => {
       if (role === 'read-only') return Promise.resolve(role);
       const answer = new Promise(resolve => waiting.add(resolve));
       if (!read && typeof fetch === 'function') {
-        read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: {  } }).then(async response => {
+        read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store' }).then(async response => {
           if (response.ok) note(await response.json());
         }).catch(() => {}).finally(() => { read = null; for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(state()); } });
       }
@@ -2335,7 +2335,7 @@ function kinCreateViewerLayout() {
       if (controller.signal.aborted || signal?.aborted) abort();
       const timer = setTimeout(abort, 10000);
       try {
-        const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: {  } });
+        const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal });
         if (!live()) {
           // Session termination is owned by the page transport and gate.
           if (path === '/api/me' && response.ok) kinViewerSession.sameAccount(await response.json().catch(() => null));
@@ -2568,7 +2568,7 @@ function kinCreateCTSync() {
       const timer = setTimeout(abort, 10000);
       try {
         let r;
-        try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: {  }, signal: request.signal }); }
+        try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal }); }
         catch (_) { throw refusal('failed'); }
         if (window.KinSessionTransport.refusal(r) === 'denied' && r.status === 403) throw refusal('denied', r.status);
         if (!r.ok) throw refusal('failed', r.status);
@@ -4108,7 +4108,7 @@ function kinCreateMammographyHanging() {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/mammography-model.js';
       script.onload = resolve; script.onerror = () => reject(Error('유방영상 분류를 불러오지 못했습니다.')); document.head.append(script);
     });
-    const response = await fetch('/api/me', { credentials: 'same-origin', headers: {  } });
+    const response = await fetch('/api/me', { credentials: 'same-origin' });
     const me = response.ok ? await response.json() : null;
     institution = kinViewerSession.sameAccount(me) === true ? me.institution : null;
     window.kinMammographyHanging = preferences;

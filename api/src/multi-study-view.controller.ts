@@ -8,7 +8,7 @@ const caller = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: r
 
 /**
  * What happened to this response's body, observed on the response itself and installed before the service prepares any
- * provision. A finished 200 is the resolve's own body; a finished refusal (the interceptor's post-handler policy check, a
+ * provision. A finished 200 is the resolve's own body; a finished refusal (a
  * serializer error) or a connection closed before finishing is a body that did not go out whole.
  */
 function transferOf(res: any): Promise<TransferOutcome> {

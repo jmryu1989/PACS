@@ -129,7 +129,7 @@
     button.addEventListener('click',open);
     async function bindOwner(){
       const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);ownerRequest=controller;
-      try{const reply=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{}}),data=reply?.ok?await json(reply):null,next=ownerOf(data);if(!next)throw Error();if(!ended&&ownerRequest===controller){boundOwner=next;refresh();}}
+      try{const reply=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal:controller.signal}),data=reply?.ok?await json(reply):null,next=ownerOf(data);if(!next)throw Error();if(!ended&&ownerRequest===controller){boundOwner=next;refresh();}}
       catch(_){if(!ended&&ownerRequest===controller){boundOwner=null;ownerError='로그인 세션을 확인할 수 없습니다. 뷰어를 다시 여세요.';status.textContent=ownerError;button.disabled=true;}}
       finally{clearTimeout(timer);if(ownerRequest===controller)ownerRequest=null;}
     }

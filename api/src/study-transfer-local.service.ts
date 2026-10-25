@@ -628,7 +628,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
 
   /**
    * One grant for the browser's own archive GET, issued only to a bound cookie session (the request passed the guard's
-   * binding and CSRF checks; a bearer caller needs none and gets none), for the owner's own download operation that may
+   * binding check; a bearer caller needs none and gets none), for the owner's own download operation that may
    * start now (Ready, Incomplete or Unconfirmed; an expired sending attempt is reconciled first), with the rights now.
    * Format 1 becomes format 2 in this transaction; an unused grant of the operation is replaced. The answer is no-store
    * (the controller) and the raw value appears nowhere else - not in the row, the audit or a log.

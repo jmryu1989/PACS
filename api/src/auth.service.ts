@@ -649,7 +649,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   // ── 로그인 시작 ──
 
-  /** 흐름별 pending을 유지하되 모든 인증은 자격 입력을 요구한다. */
+  /**
+   * 흐름 하나에 서명한 pending 쿠키 하나. 로그인은 언제나 prompt=login으로 자격 입력을 요구하고(살아 있는 SSO로 폼 없이
+   * 돌아오지 않는다), 가입은 prompt=create의 가입 폼이다.
+   */
   private startFlow(res: any, register = false): string {
     const verifier = randomBytes(32).toString('base64url');
     const state = randomBytes(32).toString('base64url');
@@ -658,8 +661,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     this.appendCookie(res, `${this.pendingName(state)}=${encodeURIComponent(this.signPending(pending))}; Path=/api/auth; `
       + `HttpOnly; Secure; SameSite=Lax; Max-Age=${PENDING_VALID_MS / 1000}`);
     const query = new URLSearchParams({ client_id: 'kin-bff', response_type: 'code', scope: 'openid profile email',
-      redirect_uri: this.redirectUri(), state, nonce: state, code_challenge: challenge, code_challenge_method: 'S256', prompt: 'login' });
-    return `${this.externalOidc(register ? '/registrations' : '/auth')}?${query}`;
+      redirect_uri: this.redirectUri(), state, nonce: state, code_challenge: challenge, code_challenge_method: 'S256', prompt: register ? 'create' : 'login' });
+    return `${this.externalOidc('/auth')}?${query}`;
   }
 
   /** 결속 없는 링크는 다른 문서가 쓰는 세션을 끝내지 않는다. */
@@ -756,6 +759,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   /** 자기 pending만 소비하고 세션과 성공 기록을 같은 transaction으로 만든다. */
   async finishCallback(req: any, res: any, query: { code?: string; state?: string; error?: string }): Promise<CallbackResult> {
     const { code, state, error } = query;
+    if ((!code || !state) && await this.hasSession(req)) return { kind: 'work' };
     const flows = this.pendingFlows(req);
     const own = state ? flows.find(item => item.name === this.pendingName(state) && item.pending?.state === state) : undefined;
     if (own) this.expirePending(res, own.name);
@@ -1030,7 +1034,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 예전 순서(Keycloak 먼저)에서는 Keycloak이 멈춘 동안 이 앱의 세션이 살아 있었고, 그 응답이 늦으면 종료 자체가
    * 시작되지 않았다. 이제 DB 실패·경쟁(409)은 "끝났다"는 답도 Keycloak 호출도 만들지 않고, 폐기 뒤의 Keycloak 실패·
    * 시간 초과·프로세스 재시작은 세션을 되살리거나 접속기록을 하나 더 만들지 못한다.
-   * 이미 없는 세션은 접속기록 없이 끝난 것으로 답한다. 결속과 CSRF는 가드가 토큰 갱신 없이 먼저 확인했다.
+   * 이미 없는 세션은 접속기록 없이 끝난 것으로 답한다. 결속은 가드가 토큰 갱신 없이 먼저 확인했다.
    *
    * 답은 Keycloak을 기다리지 않는다(개정 ⑨): 폐기와 접속기록이 commit되면 이 앱의 로그아웃은 끝난 것이고, 사람이
    * "로그아웃 중"을 보고 있을 이유가 없다. provider 세션의 종료는 그 뒤에 청하고, 늦거나 실패하면 표식이 다시 청한다 —
