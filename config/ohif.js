@@ -4160,10 +4160,10 @@ function kinCreateStudyPrefetch() {
 function kinCreateMultiStudyStrip() {
   let ready = null, current = null, services, epoch = 0, active = false;
   const wanted = () => /(?:^#|&)kin-w9=/.test(location.hash);
-  const load = () => ready || (ready = new Promise((resolve, reject) => {
+  const load = () => window.KinViewerMultiStudy ? Promise.resolve() : ready || (ready = new Promise((resolve, reject) => {
     const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-multi-study.js';
-    const timeout = setTimeout(() => reject(Error('Multi-Study View loading timeout')), 20000);
-    script.onload = () => { clearTimeout(timeout); resolve(); };
+    const timeout = setTimeout(() => { ready = null; reject(Error('Multi-Study View loading timeout')); }, 20000);
+    script.onload = () => { clearTimeout(timeout); resolve(); start(); };
     script.onerror = () => { clearTimeout(timeout); ready = null; reject(Error('Multi-Study View loading failed')); };
     document.head.append(script);
   }));

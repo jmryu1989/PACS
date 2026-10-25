@@ -386,8 +386,8 @@ window.KinReadingWorkspace = function (app) {
   }
   const parentKeyboard = e => keyboard(e);
   document.addEventListener('keydown', parentKeyboard, true);
-  function label(uid) {
-    const s = app.study(uid) || viewingSetRow(uid);
+  function label(uid, image = false) {
+    const s = image && shown?.viewingSet === viewingSet?.opening && viewingSetRow(uid) || app.study(uid);
     return s ? [s.name || s.patientName || '', s.patientId || s.id || '', s.date || '날짜 미확인', s.modality || '', s.desc || s.description || '', uid].filter(Boolean).join(' · ') : uid;
   }
   const sameTarget = () => shown?.reportUid === app.current();
@@ -514,7 +514,7 @@ window.KinReadingWorkspace = function (app) {
   function identify() {
     const uid = app.current(); target.textContent = uid ? '판독 대상 · ' + label(uid) : '판독 대상을 선택하세요';
     reportTarget.textContent = target.textContent;
-    info.textContent = shown && sameTarget() ? '영상 열람 · ' + label(shown.uid) + (shown.prior ? '\n비교 영상 · ' + label(shown.prior) : '') : '';
+    info.textContent = shown && sameTarget() ? '영상 열람 · ' + label(shown.uid, true) + (shown.prior ? '\n비교 영상 · ' + label(shown.prior, true) : '') : '';
     separate.disabled = !frame || !sameTarget() || !loaded;
     imageFocus.disabled = separate.disabled;
     updateNote();
@@ -580,7 +580,8 @@ window.KinReadingWorkspace = function (app) {
     viewingSet = { opening: set.opening, metadata: new Map([...set.metadata].filter(([key]) => key === uid || key === prior)) };
     const accepted = attempt({ uid, prior: prior || null, series: null, reportUid: app.current(), viewingSet: set.opening }, false);
     if (!accepted) { viewingSet = before; identify(); return refused(status.textContent || '영상 작업공간에서 열지 않았습니다.'); }
-    return { status: 'accepted' };
+    const openedFrame = frame;
+    return { status: 'accepted', isOpen: () => !ended && active && frame === openedFrame && sameTarget() && shown?.viewingSet === set.opening };
   }
   function attempt(r, abandon) {
     if (ended) { app.notice('영상 작업공간이 종료되었습니다. 판독문 초안을 저장한 뒤 화면을 새로고침하세요.'); return false; }
@@ -624,6 +625,8 @@ window.KinReadingWorkspace = function (app) {
           if (values.length < 1 || values.length > 2 || values.some(x => !/^\d+(?:\.\d+)+$/.test(x) || x.length > 64) || new Set(values).size !== values.length) throw new Error('Invalid viewer scope');
           observedDocument = doc; observedHref = location.href; failed = false; deadline = Date.now() + 45000;
           shown = { uid: values[0], prior: values[1] || null, series: location.searchParams.get('initialSeriesInstanceUID'), reportUid: r.reportUid };
+          const opening = new URLSearchParams(location.hash.slice(1)).get('kin-w9');
+          if (opening) shown.viewingSet = opening;
           const job = location.searchParams.get('kinJob'); if (job) shown.job = job;
           if (sameTarget()) { status.textContent = '영상 작업공간을 불러오는 중…'; identify(); }
         }

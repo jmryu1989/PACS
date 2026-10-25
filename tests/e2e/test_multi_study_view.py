@@ -20,7 +20,12 @@ the stack's guard). Two parts, recorded apart as the order's Q10 requires:
 from __future__ import annotations
 
 import sys
+import os
+import json
+import time
+from pathlib import Path
 import unittest
+from unittest.mock import patch
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
@@ -28,6 +33,8 @@ from playwright.sync_api import expect
 
 import test_worklist as base
 import test_prior_selection as prior
+import test_viewer_history as history
+import viewer_api_test as viewer_fixture
 
 RESOLVE = "/api/studies/viewing-set/resolve"
 AUDIT = "열람 기록을 저장하지 못했습니다. 잠시 후 Retry로 다시 시도하세요."
@@ -45,6 +52,12 @@ def ready_answer(body, patient):
 
 
 class MultiStudyViewE2E(base.WorklistE2E):
+    @classmethod
+    def setUpClass(cls):
+        # The review regression saves a real manual measurement; its owned child rows need the viewer fixture cleanup.
+        with patch.object(base, 'LiveStack', viewer_fixture.ViewerStack):
+            super().setUpClass()
+
     originals = prior.PriorSelectionE2E.originals
 
     def ids(self, page):
@@ -122,6 +135,126 @@ class MultiStudyViewE2E(base.WorklistE2E):
         self.assertEqual(clinical, self.clinical(fixtures))
         self.assertEqual(originals, self.originals())
 
+
+    def test_w9_02_review_fixes_on_the_served_stack(self):
+        """Review regression: real page, OHIF, images, measurement/save and lifecycle; only W9 resolve is synthetic."""
+        patient = 'W9FIX-' + uuid.uuid4().hex[:12]
+        fixtures = [prior.synthetic_ct(self.stack, patient, 'w9fix'+str(i), date, slices=2)
+                    for i, date in enumerate(('20260805','20260804','20260803','20260802','20260801'))]
+        originals, clinical = self.originals(), self.clinical(fixtures)
+        page = self.login(); page.set_viewport_size({'width':1366,'height':768})
+        page.locator('#quick').fill(patient)
+        for f in fixtures: expect(page.locator(f'#rows tr[data-uid="{f.uid}"]')).to_be_visible()
+        order = page.locator('#rows tr[data-uid]').evaluate_all('(rows) => rows.map(r=>r.dataset.uid)')
+        self.assertEqual(sorted(order), sorted(f.uid for f in fixtures))
+        page.locator(f'#rows tr[data-uid="{order[0]}"]').click()
+        errors, correction, bodies, held = {}, {}, [], []
+        def resolve(route):
+            body = route.request.post_data_json; bodies.append(body)
+            reply = ready_answer(body,patient)
+            for m in reply['members']:
+                if m['uid'] in errors:
+                    m.update(status='error',code=errors[m['uid']]);m.pop('metadata');m.pop('accessRef')
+                else: m['metadata'].update(correction.get(m['uid'],{}))
+            count = sum(m['status']=='ready' for m in reply['members'])
+            reply['scopeStatus'] = 'ready' if count==len(reply['members']) else 'partial' if count else 'rejected'
+            route.fulfill(json=reply)
+        page.route('**'+RESOLVE,resolve)
+        module = '**/worklist/hpacs-lite/viewer-multi-study.js'
+        page.context.route(module, lambda route: held.append((route,time.monotonic())))
+        def open_set(uids):
+            in_workspace = page.locator('body').evaluate("e => e.classList.contains('reading')")
+            if in_workspace and not page.locator('body').evaluate("e => e.classList.contains('reading-list-open')"):
+                page.locator('#reading-bar').get_by_role('button',name='Worklist',exact=True).click()
+            clear = page.locator('#multi-selection-clear')
+            if clear.is_enabled(): clear.click()
+            for uid in uids: page.locator(f'#rows tr[data-uid="{uid}"]').click(modifiers=['Control'])
+            with page.expect_response(lambda r:r.url.endswith(RESOLVE)):
+                page.locator('#multi-selection-open-set').click()
+            if in_workspace and page.locator('body').evaluate("e => e.classList.contains('reading-list-open')"):
+                page.locator('#reading-bar').get_by_role('button',name='Worklist',exact=True).click()
+        with page.context.expect_page() as opened: open_set(order)
+        viewer = opened.value
+        prior.canvas_ready(viewer,2)
+        deadline = time.monotonic()+30
+        while not held and time.monotonic()<deadline: page.wait_for_timeout(50)
+        self.assertEqual(len(held),1)
+        # Let the shipped loader's actual 20s timeout elapse; no product timer or constructor is replaced.
+        page.wait_for_timeout(max(0, (held[0][1]+21-time.monotonic())*1000))
+        expect(viewer.locator('#kin-multi-study')).to_have_count(0)
+        held.pop()[0].continue_(); page.context.unroute(module)
+        expect(viewer.locator('#kin-multi-study')).to_contain_text('Studies 5 · Page 1/3',timeout=30000)
+        for uid in order[:2]: expect(self.member(page,uid)).to_contain_text('Displayed',timeout=60000)
+        def ready_window():
+            viewer.wait_for_function("() => typeof kinViewerHistoryWorkspaceState==='function' && !kinViewerHistoryWorkspaceState().busy && "
+                                     "typeof kinViewerJobWorkspaceState==='function' && !kinViewerJobWorkspaceState().busy && "
+                                     "typeof kinViewerFrameCoverageState==='function' && !kinViewerFrameCoverageState().warn")
+        ready_window()
+        facts = page.evaluate("""() => {
+          const visible = e => {const r=e.getBoundingClientRect();let top=r.top,bottom=r.bottom;
+            for(let a=e.parentElement;a;a=a.parentElement){const s=getComputedStyle(a),b=a.getBoundingClientRect();
+              if(['hidden','auto','scroll','clip'].includes(s.overflowY)){top=Math.max(top,b.top);bottom=Math.min(bottom,b.bottom)}}
+            return {height:r.height,visible:Math.max(0,Math.min(innerHeight,bottom)-Math.max(0,top))};};
+          return {row:visible(document.querySelector('#relrows tr')),header:visible(document.querySelector('.reltabs')),
+            report:visible(document.querySelector('.redit')),findings:visible(document.querySelector('#findings'))};} """)
+        self.assertGreaterEqual(facts['row']['visible'],facts['row']['height'])
+        self.assertEqual(facts['header']['visible'],facts['header']['height'])
+        self.assertGreaterEqual(facts['report']['visible'],facts['findings']['height'])
+        print('W9_REVIEW_LAYOUT',json.dumps(facts),flush=True)
+        evidence=Path(os.environ.get('KIN_EVIDENCE_DIR','tmp/w9-review'));evidence.mkdir(parents=True,exist_ok=True)
+        page.screenshot(path=str(evidence/'w9-open-1366.png'),full_page=True)
+        # Real unsaved manual length: the existing viewer guard refuses both Next and a new overlapping selection.
+        history.ViewerHistoryE2E.open_measurement_tools(self,viewer)
+        viewer.get_by_role('button',name='Length',exact=True).click()
+        box=viewer.locator('.cornerstone-canvas').first.bounding_box()
+        x,y=box['x']+box['width']*.38,box['y']+box['height']*.4
+        viewer.mouse.move(x,y);viewer.mouse.down();viewer.mouse.move(x+65,y+32,steps=10);viewer.mouse.up()
+        viewer.wait_for_function('() => kinViewerHistoryWorkspaceState().dirty')
+        with page.expect_response(lambda r:r.url.endswith(RESOLVE)): page.locator('#multi-study-next').click()
+        expect(page.locator('#multi-study-status')).to_contain_text('Not Opened')
+        expect(page.locator('#multi-study-summary')).to_contain_text('Page 1/3')
+        self.assertEqual(self.ids(viewer),order[:2])
+        open_set([order[1],order[4]])
+        expect(page.locator('#multi-study-status')).to_contain_text('Not Opened')
+        expect(self.member(page,order[1])).to_contain_text('Displayed')
+        expect(self.member(page,order[1])).not_to_contain_text('Not Opened')
+        expect(self.member(page,order[1]).get_by_role('button',name='Retry',exact=True)).to_have_count(0)
+        viewer.locator('#kin-viewer-history section[data-kind=length]').get_by_role('button',name='Save',exact=True).click()
+        viewer.wait_for_function('() => !kinViewerHistoryWorkspaceState().dirty && !kinViewerHistoryWorkspaceState().busy')
+        errors[order[2]]='W9_LOAD_FAILED'
+        with page.expect_response(lambda r:r.url.endswith(RESOLVE)): page.locator('#multi-study-next').click()
+        viewer.wait_for_url('**StudyInstanceUIDs='+order[3]+'**')
+        expect(page.locator('#multi-study-summary')).to_contain_text('Page 2/3')
+        expect(self.member(page,order[3])).to_contain_text('Displayed',timeout=60000)
+        errors.clear();errors[order[4]]='W9_SCOPE_EXCLUDED'
+        open_set([order[0],order[4]])
+        expect(page.locator('#multi-study-candidate')).to_contain_text('Access Restricted')
+        expect(self.member(page,order[2])).to_contain_text('Load Failed')
+        # F4 remains the delivered one-window rule. Closing the partner frees that slot for this row's Retry.
+        viewer.close();errors.clear()
+        with page.context.expect_page() as reopened, page.expect_response(lambda r:r.url.endswith(RESOLVE)):
+            self.member(page,order[2]).get_by_role('button',name='Retry',exact=True).click()
+        viewer=reopened.value;viewer.wait_for_url('**StudyInstanceUIDs='+order[2]+'**')
+        self.assertEqual(bodies[-1]['studyUids'],order)
+        expect(self.member(page,order[2])).to_contain_text('Displayed',timeout=60000)
+        viewer.close()
+        with page.context.expect_page() as reopened, page.expect_response(lambda r:r.url.endswith(RESOLVE)):
+            self.member(page,order[1]).get_by_role('button',name='Select for Reporting',exact=True).click()
+        viewer=reopened.value;viewer.wait_for_url('**StudyInstanceUIDs='+order[1]+'**')
+        expect(self.member(page,order[1])).to_contain_text('Displayed',timeout=60000)
+        self.assertEqual(page.evaluate('selectedUid'),order[1])
+        viewer.close()
+        page.locator('#toolbar-view > summary').click();page.locator('#image-opening-open').click()
+        page.locator('#image-opening-target').select_option('workspace');page.locator('#image-opening-done').click()
+        correction[order[1]]={'patientName':'SYN CORRECTED PATIENT','description':'SYN CORRECTED SOURCE DESCRIPTION'}
+        open_set(order)
+        expect(page.locator('#reading-images')).to_contain_text('SYN CORRECTED PATIENT')
+        expect(page.locator('#reading-images')).to_contain_text('SYN CORRECTED SOURCE DESCRIPTION')
+        expect(page.locator('#reading-target')).not_to_contain_text('SYN CORRECTED PATIENT')
+        expect(self.member(page,order[1])).to_contain_text('Displayed',timeout=60000)
+        page.screenshot(path=str(evidence/'w9-corrected-workspace.png'),full_page=True)
+        self.assertEqual(clinical,self.clinical(fixtures))
+        self.assertEqual(originals,self.originals())
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], *sys.argv[1:]])

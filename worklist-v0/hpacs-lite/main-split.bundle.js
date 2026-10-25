@@ -9250,7 +9250,12 @@
         return readingWorkspace.openViewingSet(plan.uid, plan.priorUid, { opening, metadata });
       }
       if (reservation?.kind !== 'window') return { status: 'refused', message: '영상 창을 확인하지 못했습니다. 다시 여세요.' };
-      return openOhifWindow(plan.uid, plan.priorUid, null, null, { reservation, viewingSet: opening });
+      const result = openOhifWindow(plan.uid, plan.priorUid, null, null, { reservation, viewingSet: opening });
+      if (result.status === 'accepted') {
+        const sequence = ohifPopupSequences.get(reservation.popup);
+        result.isOpen = () => !reservation.popup.closed && ohifPopupSequences.get(reservation.popup) === sequence;
+      }
+      return result;
     }
     function releaseViewingSet(reservation) {
       if (reservation?.kind !== 'window') return;
@@ -9474,7 +9479,7 @@
       button.onclick = () => { viewerWindows.refresh(); render(); status.textContent = viewerWindows.error() || ''; dialog.showModal(); $('#viewer-windows-done').focus(); };
       $('#viewer-windows-done').onclick = () => dialog.close(); dialog.addEventListener('close', () => { ++displaySequence;if (!button.disabled) button.focus(); });
       // 주기마다 그때의 문맥으로 지난다: 로그아웃 준비 중에는 다시 그리지 않고, 편집으로 돌아오면 다음 주기가 이어 간다.
-      const timer = setInterval(() => { work.commit(work.capture('document'), () => { viewerWindows.refresh(); render(); }); }, 2000);
+      const timer = setInterval(() => { work.commit(work.capture('document'), () => { viewerWindows.refresh(); render(); multiStudyView?.refresh(); }); }, 2000);
       const end = () => { ++displaySequence;displayScreens=[];clearInterval(timer); viewerWindows.end(); button.disabled = true; dialog.close(); list.replaceChildren(); };
       onSessionEnd(end); window.addEventListener('pagehide', end);
       render();

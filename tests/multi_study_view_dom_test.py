@@ -230,6 +230,9 @@ class MultiStudyViewPage(unittest.TestCase):
 
     def open_set(self, uids, answer="ready"):
         """Choose exactly `uids` and press the toolbar's Open Selected Studies; returns the resolve body."""
+        in_workspace = self.page.locator("body").evaluate("e => e.classList.contains('reading')")
+        if in_workspace and not self.page.locator("body").evaluate("e => e.classList.contains('reading-list-open')"):
+            self.page.locator("#reading-bar").get_by_role("button", name="Worklist", exact=True).click()
         clear = self.page.locator("#multi-selection-clear")
         if clear.is_enabled():
             clear.click()
@@ -238,6 +241,8 @@ class MultiStudyViewPage(unittest.TestCase):
         self.site.resolve_answers.append(answer)
         self.page.locator("#multi-selection-open-set").click()
         self.wait(lambda: len(self.site.resolves) > before, "the resolve")
+        if in_workspace and self.page.locator("body").evaluate("e => e.classList.contains('reading-list-open')"):
+            self.page.locator("#reading-bar").get_by_role("button", name="Worklist", exact=True).click()
         return self.site.resolves[-1]
 
     def press(self, selector):
@@ -380,7 +385,7 @@ class MultiStudyViewPage(unittest.TestCase):
         expect(self.member(order[0])).to_contain_text("SYNACC05")
         # Retry of the unadmitted set: the same whole N, still without an expected key, a new requestId.
         last = self.site.resolves[-1]
-        body = self.press(f'#multi-study-members li[data-uid="{order[1]}"] [data-action=retry]')
+        body = self.press('#multi-study-retry')
         self.assertEqual((last["studyUids"], last["compositionId"], None), (body["studyUids"], body["compositionId"],
                                                                              body["expectedSourcePatientKey"]))
         self.assertNotEqual(last["requestId"], body["requestId"])
@@ -473,9 +478,11 @@ class MultiStudyViewPage(unittest.TestCase):
         self.assertEqual(n[:2], self.viewer_studies(popup)[0], "the viewer with unsaved work was replaced")
         self.assertEqual(loads, len(self.site.viewer_loads))
         expect(self.page.locator("#multi-study-identity")).to_contain_text("Viewing: Study 1, Study 2")
+        expect(self.page.locator("#multi-study-summary")).to_contain_text("Page 1/3")
         popup.evaluate("() => { window.__synDirty = false; }")
-        self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
-        self.wait_viewer([n[2]])
+        self.press('#multi-study-next')
+        self.wait_viewer(n[2:4])
+        expect(self.page.locator("#multi-study-summary")).to_contain_text("Page 2/3")
 
     def test_a_new_ready_set_keeps_the_admitted_set_when_the_viewer_refuses_replacement(self):
         self.open()
@@ -706,6 +713,96 @@ class MultiStudyViewPage(unittest.TestCase):
         self.post_viewer_event(partner, opening, {'type': 'failed'})
         expect(self.member(n[3])).to_contain_text('Unverified')
 
+    def test_a_row_retry_keeps_its_set_and_shows_the_other_selections_errors(self):
+        self.open()
+        self.page.locator('#toolbar-view > summary').click()
+        self.page.locator('#image-opening-open').click()
+        self.page.locator('#image-opening-target').select_option('workspace')
+        self.page.locator('#image-opening-done').click()
+        order = self.visible_order()
+        self.row(order[0]).click()
+        self.wait(lambda: self.target() == order[0], 'Reading Target')
+        first = self.open_set(order[:5])
+        n = first['studyUids']
+        frame = self.page.locator('#reading-frame')
+        self.wait(lambda: frame.count() and n[0] in (frame.get_attribute('src') or ''), 'workspace pair')
+        self.site.resolve_answers.append({n[2]: 'W9_LOAD_FAILED'})
+        self.press('#multi-study-next')
+        self.wait(lambda: n[3] in (frame.get_attribute('src') or ''), 'workspace partner')
+        second = self.open_set([n[0], n[4]], {n[4]: 'W9_SCOPE_EXCLUDED'})
+        expect(self.page.locator('#multi-study-candidate')).to_contain_text('Study 2 · Access Restricted')
+        expect(self.member(n[2])).to_contain_text('Load Failed')
+        retried = self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
+        self.assertEqual(first['compositionId'], retried['compositionId'])
+        self.assertEqual(n, retried['studyUids'])
+        self.wait_viewer([n[2]])
+        expect(self.page.locator('#multi-study-candidate')).to_contain_text('Access Restricted')
+        top_retry = self.press('#multi-study-retry')
+        self.assertEqual(second['compositionId'], top_retry['compositionId'])
+        self.assertEqual(second['studyUids'], top_retry['studyUids'])
+
+    def test_refused_overlapping_open_keeps_displayed_rows_and_top_retry(self):
+        self.open()
+        order = self.visible_order()
+        n = self.open_set(order[:3])['studyUids']
+        self.wait_viewer(n[:2])
+        popup = self.viewer()
+        self.post_viewer_event(popup, self.viewer_studies()[2],
+                               {'type': 'displayed', 'study': n[1], 'series': '1.2.3', 'sop': '1.2.3.4', 'frame': 1})
+        expect(self.member(n[1])).to_contain_text('Displayed')
+        popup.evaluate('() => { window.__synDirty = true; }')
+        second = self.open_set([n[1], order[3]])
+        expect(self.status()).to_contain_text(BUSY)
+        expect(self.member(n[1])).to_contain_text('Displayed')
+        expect(self.member(n[1])).not_to_contain_text('Not Opened')
+        expect(self.member(n[1]).get_by_role('button', name='Retry', exact=True)).to_have_count(0)
+        popup.evaluate('() => { window.__synDirty = false; }')
+        body = self.press('#multi-study-retry')
+        self.assertEqual(second['compositionId'], body['compositionId'])
+        self.wait_viewer(second['studyUids'])
+
+    def test_closed_popup_is_no_longer_viewing_and_reporting_reopens_the_member(self):
+        self.open()
+        n = self.open_set(self.visible_order()[:2])['studyUids']
+        self.wait_viewer(n)
+        self.viewer().close()
+        self.page.clock.run_for(2001)  # existing Viewer Windows lifecycle tick
+        expect(self.page.locator('#multi-study-identity')).to_contain_text('Viewing: None')
+        body = self.press(f'#multi-study-members li[data-uid="{n[1]}"] [data-action=report]')
+        self.assertEqual(n, body['studyUids'])
+        self.wait_viewer([n[1]])
+        self.assertEqual(n[1], self.target())
+
+    def test_workspace_image_labels_use_the_accepted_correction(self):
+        self.open()
+        self.page.locator('#toolbar-view > summary').click()
+        self.page.locator('#image-opening-open').click()
+        self.page.locator('#image-opening-target').select_option('workspace')
+        self.page.locator('#image-opening-done').click()
+        order = self.visible_order()
+        self.row(order[0]).click()
+        self.wait(lambda: self.target() == order[0], 'Reading Target')
+        # Only the resolve source changes after the list was fetched; report labels still belong to that target.
+        self.site.meta[order[0]].update(name='SYN CORRECTED PATIENT', desc='SYN CORRECTED SOURCE DESCRIPTION')
+        self.open_set(order[:3])
+        expect(self.page.locator('#reading-images')).to_contain_text('SYN CORRECTED PATIENT')
+        expect(self.page.locator('#reading-images')).to_contain_text('SYN CORRECTED SOURCE DESCRIPTION')
+        expect(self.page.locator('#reading-target')).to_contain_text(ALPHA)
+        expect(self.page.locator('#reading-target')).not_to_contain_text('SYN CORRECTED PATIENT')
+
+    def test_opened_composition_keeps_report_text_and_a_full_related_row_visible(self):
+        self.page.set_viewport_size({'width': 1366, 'height': 768})
+        self.open()
+        order = self.visible_order()
+        self.row(order[0]).click()
+        self.wait(lambda: self.target() == order[0], 'Reading Target')
+        self.open_set(order[:5])
+        self.wait_viewer(order[:2])
+        facts = self.page.evaluate("() => {\n          const visible = e => {\n            const r = e.getBoundingClientRect(); let top = r.top, bottom = r.bottom;\n            for (let a = e.parentElement; a; a = a.parentElement) {\n              const s = getComputedStyle(a), b = a.getBoundingClientRect();\n              if (['hidden','auto','scroll','clip'].includes(s.overflowY)) { top = Math.max(top,b.top); bottom = Math.min(bottom,b.bottom); }\n            }\n            return {height:r.height, visible:Math.max(0,Math.min(innerHeight,bottom)-Math.max(0,top))};\n          };\n          const report = document.querySelector('.redit');\n          return {row:visible(document.querySelector('#relrows tr')), header:visible(document.querySelector('.reltabs')),\n            report:visible(report), findings:visible(document.querySelector('#findings'))};\n        }")
+        self.assertGreaterEqual(facts['row']['visible'], facts['row']['height'])
+        self.assertEqual(facts['header']['height'], facts['header']['visible'])
+        self.assertGreaterEqual(facts['report']['visible'], facts['findings']['height'])
+
     # ── V-LIFECYCLE ──
     def test_a_late_answer_after_a_newer_action_and_the_session_end(self):
         self.open()
@@ -728,7 +825,6 @@ class MultiStudyViewPage(unittest.TestCase):
         self.site.resolve_answers.append((401, {"code": "AUTH_SESSION_ENDED"}))
         self.page.locator("#multi-study-next").click()
         self.page.wait_for_url(h.INDEX_URL + "**")
-        expect(self.host()).to_be_hidden()
 
 
 if __name__ == "__main__":

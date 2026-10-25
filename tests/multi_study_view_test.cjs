@@ -157,7 +157,7 @@ test('a failed new set preserves the admitted composition and retries its own fr
   f.model.finish(intent, answer(intent, { '2.2': 'W9_LOAD_FAILED' }));
   assert.deepEqual(f.model.snapshot().composition, prior);
   f.select([]);
-  const retried = f.model.beginRetry('2.2');
+  const retried = f.model.beginRetryAttempt();
   assert.deepEqual(retried.body.studyUids, ['2.1', '2.2', '2.3']);
   assert.deepEqual(retried.activeUids, ['2.1', '2.2']);
   assert.equal(retried.body.expectedSourcePatientKey, null);
@@ -285,4 +285,50 @@ test('the viewer side reads its opening only from one well-formed fragment value
   assert.deepEqual(viewerSide.studiesOf('https://syn.test/ohif/viewer?StudyInstanceUIDs=1.2.3'), ['1.2.3']);
   for (const bad of ['1.2.3,1.2.3', '1.2.3,1.2.4,1.2.5', 'x', ''])
     assert.equal(viewerSide.studiesOf('https://syn.test/ohif/viewer?StudyInstanceUIDs=' + bad), null, bad);
+});
+
+
+test('a refused navigation restores every admitted field and keeps the exact intent for Retry', () => {
+  const f = fixture(); admit(f);
+  for (const begin of [() => f.model.beginPage(1), () => f.model.beginCompare([ids[4],ids[1]]),
+    () => f.model.beginSingle(ids[3]), () => f.model.beginRetry(ids[4])]) {
+    const before = f.model.snapshot().composition, intent = begin();
+    const plan = f.model.finish(intent, answer(intent));
+    f.model.rejectLaunch(plan, {code:'W9_VIEWER_BUSY'});
+    assert.deepEqual(f.model.snapshot().composition, before);
+    const retry = f.model.beginRetryAttempt();
+    assert.deepEqual(retry.activeUids, intent.activeUids);
+    assert.equal(retry.page, intent.page);
+    assert.equal(retry.kind, intent.kind);
+    f.model.cancel();
+  }
+});
+
+test('the served OHIF extension recovers after a module timeout, including late success and a new opening', async () => {
+  const vm = require('node:vm'), fs = require('node:fs');
+  for (const late of [true, false]) {
+    const scripts = [], timers = new Map(), listeners = new Map();
+    let mounts = 0, stops = 0;
+    const window = {addEventListener: (type, fn) => listeners.set(type,fn)};
+    const document = {createElement: () => ({}), head: {append: script => scripts.push(script)}};
+    const location = {hash:'#kin-w9=opening'};
+    vm.runInNewContext(fs.readFileSync(require.resolve('../config/ohif.js'),'utf8'), {
+      window, document, location, URLSearchParams, console,
+      setTimeout: (fn, delay) => { const key = {}; timers.set(key,{fn,delay}); return key; },
+      clearTimeout: key => timers.delete(key), setInterval() {}, clearInterval() {},
+    });
+    const extension = window.config.extensions.find(e => e.id === 'kin.multi-study-strip');
+    extension.preRegistration({servicesManager:{services:{}}}); extension.onModeEnter();
+    const timeout = [...timers.values()].find(t => t.delay === 20000);
+    assert.ok(timeout); timeout.fn(); await new Promise(setImmediate);
+    assert.equal(mounts,0);
+    if (!late) { scripts[0].onerror(); listeners.get('kin-window-link-changed')(); }
+    window.KinViewerMultiStudy = {mount: () => { mounts++; return {stop: () => stops++}; }};
+    scripts.at(-1).onload(); await new Promise(setImmediate);
+    listeners.get('kin-window-link-changed')(); await new Promise(setImmediate);
+    assert.equal(mounts,1);
+    extension.onModeExit(); assert.equal(stops,1);
+    extension.onModeEnter(); await new Promise(setImmediate);
+    assert.equal(mounts,2);
+  }
 });

@@ -109,14 +109,14 @@
    */
   function create({ context, selection, uuid = () => root.crypto.randomUUID() }) {
     const owner = { ...context() };
-    let ended = false, sequence = 0, pending = null, composition = null, attempt = null, candidate = null, failed = null, resolved = null;
+    let ended = false, sequence = 0, pending = null, composition = null, attempt = null, candidate = null, candidateAttempt = null, failed = null, resolved = null;
     function live() {
       if (!ended && !contextEqual(owner, context())) end();
       return !ended;
     }
     function snapshot() {
       live();
-      return copy({ ended, pending: pending !== null, composition, attempt,
+      return copy({ ended, pending: pending !== null, composition, attempt, candidateAttempt,
         retry: !!failed || !!(candidate && composition?.compositionId !== candidate.body.compositionId) });
     }
     function current(intent) { return live() && pending === intent; }
@@ -127,7 +127,7 @@
         studyUids: Object.freeze([...studyUids]), expectedSourcePatientKey });
       pending = Object.freeze({ body, sequence: ++sequence, ...intent,
         activeUids: Object.freeze([...intent.activeUids]) });
-      if (intent.kind === 'open') candidate = pending;
+      if (intent.kind === 'open') { candidate = pending; candidateAttempt = null; }
       failed = null;
       attempt = { status: 'Loading', sequence, activeUids: [...intent.activeUids], members: null,
         message: composition ? '검사 접근 상태를 다시 확인하는 중입니다…' : '선택한 검사를 확인하는 중입니다…' };
@@ -161,17 +161,9 @@
     function beginCompare(pair) { return Array.isArray(pair) && pair.length === 2 ? navigate(pair, 'compare') : null; }
     function beginSingle(value) { return navigate([value], 'single'); }
     function backToPages() { return beginPage(composition?.page); }
-    /**
-     * Retry of one member. Before admission the failed candidate is retried as the same whole, still-unadmitted set: it
-     * must not turn into a singleton of an older admitted composition. After admission the viewer retry targets that UID
-     * alone while the resolve still names the original N.
-     */
+    // A row belongs to the admitted composition. Only the top Retry can retry a different, unadmitted selection.
     function beginRetry(value) {
       if (!live()) return null;
-      if (candidate && composition?.compositionId !== candidate.body.compositionId) {
-        const { body, activeUids, page } = candidate;
-        return begin(body.studyUids, body.compositionId, body.generation, null, { kind: 'open', activeUids, page });
-      }
       return navigate([value], 'retry');
     }
     /**
@@ -197,14 +189,15 @@
         attempt = { status: 'Not Opened', sequence: intent.sequence, activeUids: [...intent.activeUids], members: validated.members,
           message: validated.scopeStatus === 'partial' ? '선택한 검사를 모두 확인하지 못해 함께 열지 않았습니다. 오류를 확인한 뒤 Retry를 누르세요.'
             : '열 수 있는 검사를 확인하지 못했습니다. 오류를 확인한 뒤 Retry를 누르세요.' };
+        candidateAttempt = copy(attempt);
         return { status: 'not-admitted' };
       }
-      resolved = { intent, previous: composition };
+      resolved = { intent, previous: copy(composition) };
       if (first) {
         composition = { compositionId: intent.body.compositionId, generation: intent.body.generation,
           studyUids: [...intent.body.studyUids], sourcePatientKey: validated.sourcePatientKey,
           page: 0, mode: 'page', activeUids: [], members: [], blocked: false };
-        candidate = null;
+        candidate = null; candidateAttempt = null;
       }
       composition.members = validated.members;
       composition.activeUids = [...intent.activeUids];
@@ -229,7 +222,8 @@
       pending = null;
       attempt = { ...errorState(error), sequence: intent.sequence, activeUids: [...intent.activeUids] };
       failed = attempt.retry ? intent : null;
-      if (attempt.status === 'Context Changed') candidate = null;
+      if (intent.kind === 'open') candidateAttempt = copy(attempt);
+      if (attempt.status === 'Context Changed') { candidate = null; candidateAttempt = null; }
       if (attempt.status === 'Context Changed' && composition?.compositionId === intent.body.compositionId) composition.blocked = true;
       return { status: 'failed' };
     }
@@ -237,14 +231,16 @@
       if (!live() || resolved?.intent.sequence !== plan.sequence) return;
       const { intent, previous } = resolved;
       // Ready metadata alone must not replace the admitted set when the viewer keeps its old document.
-      if (intent.kind === 'open') { composition = previous; candidate = intent; }
+      composition = previous;
+      if (intent.kind === 'open') candidate = intent;
       attempt = { ...errorState(error), sequence: intent.sequence, activeUids: [...intent.activeUids] };
+      if (intent.kind === 'open') candidateAttempt = copy(attempt);
       failed = attempt.retry ? intent : null;
       resolved = null;
     }
     function cancel() { pending = null; sequence++; }
     function end() {
-      cancel(); ended = true; composition = null; candidate = null; failed = null; resolved = null;
+      cancel(); ended = true; composition = null; candidate = null; candidateAttempt = null; failed = null; resolved = null;
       attempt = { status: 'Disconnected', message: '로그인 상태가 바뀌어 여러 검사 열기를 종료했습니다. 목록에서 다시 여세요.' };
     }
     return { snapshot, beginOpen, beginPage, beginCompare, beginSingle, backToPages, beginRetry, beginRetryAttempt,
@@ -267,6 +263,7 @@
   function mount(o) {
     const work = o.work, host = o.host, $ = selector => host.querySelector(selector);
     const summary = $('#multi-study-summary'), status = $('#multi-study-status'), identity = $('#multi-study-identity');
+    const candidateStatus = $('#multi-study-candidate');
     const list = $('#multi-study-members'), title = $('#multi-study-title');
     const previous = $('#multi-study-prev'), next = $('#multi-study-next'), compare = $('#multi-study-compare');
     const pages = $('#multi-study-pages'), retry = $('#multi-study-retry'), close = $('#multi-study-close');
@@ -350,14 +347,14 @@
         const error = result?.status === 'blocked' ? { code: 'W9_POPUP_BLOCKED' }
           : { code: 'W9_VIEWER_BUSY', message: result?.message };
         model.rejectLaunch(plan, error);
-        refusal = { uids, ...errorState(error) };
+        refusal = { compositionId: plan.compositionId, uids, ...errorState(error) };
         render(); return;
       }
-      bind(id, uids, reservation.preservePartner);
+      bind(id, uids, reservation.preservePartner, result.isOpen);
       render();
     }
     // ── the opened viewer's channel ──
-    function bind(id, uids, preservePartner) {
+    function bind(id, uids, preservePartner, isOpen) {
       if (preservePartner && viewingUids().some(value => !uids.includes(value))) {
         const keep = viewers().filter(viewer => viewer.uids.some(value => !uids.includes(value)));
         for (const viewer of viewers().filter(viewer => !keep.includes(viewer))) {
@@ -368,13 +365,21 @@
         retained = keep;
       } else unbind('replaced');
       const at = work.capture('document');
-      const current = { id, uids, states: new Map(uids.map(value => [value, 'Loading'])), expired: false, channel: null, timer: null };
+      const current = { id, uids, isOpen, states: new Map(uids.map(value => [value, 'Loading'])), expired: false, channel: null, timer: null };
       try {
         current.channel = new BroadcastChannel('kin-w9:' + id);
         current.channel.onmessage = event => work.commit(at, () => message(current, event.data));
       } catch (_) { current.channel = null; }
       current.timer = setTimeout(() => work.commit(at, () => expire(current)), DISPLAY_TIMEOUT_MS);
       opening = current;
+    }
+    function pruneClosed() {
+      for (const viewer of viewers()) {
+        if (viewer.isOpen?.() !== false) continue;
+        clearTimeout(viewer.timer); viewer.channel?.close();
+        if (opening === viewer) opening = null;
+        retained = retained.filter(v => v !== viewer);
+      }
     }
     function unbind(reason) {
       for (const viewer of viewers()) {
@@ -459,6 +464,7 @@
         if (!moved) { render(); return; }
         // The new Reading Target's own image, through the same guarded launch. A workspace pane belongs to its Reading Target
         // (reading-workspace.js hides a pane of another target), so there it is requested even when already in view.
+        pruneClosed();
         const shown = !!viewerFor(value) && !o.viewer.bindsTarget?.();
         if (!shown && model?.snapshot().composition) run(model.beginSingle(value));
         else render();
@@ -495,7 +501,6 @@
     function rowState(value, c) {
       const member = c.members.find(m => m.uid === value);
       if (member?.status === 'error') return memberState(member.code);
-      if (refusal?.uids.includes(value)) return refusal;
       const viewer = viewerFor(value);
       if (viewer) {
         const state = viewer.states.get(value);
@@ -503,6 +508,7 @@
           Unverified: '영상 표시를 확인하지 못했습니다. 창 상태를 확인한 뒤 Retry로 다시 시도하세요.', 'No Images': '표시할 영상 없음' }[state];
         return { status: state, message: text };
       }
+      if (refusal?.compositionId === c.compositionId && refusal.uids.includes(value)) return refusal;
       return { status: 'Not Opened', message: '이 검사의 영상은 아직 열지 않았습니다.' };
     }
     function button(text, action, disabled, why) {
@@ -510,6 +516,7 @@
       b.disabled = !!disabled; if (why) b.title = why; b.onclick = action; return b;
     }
     function render() {
+      pruneClosed();
       const s = model?.snapshot() ?? null, c = s?.composition ?? null, attempt = s?.attempt ?? null;
       host.hidden = ended || !s || (!c && !attempt);
       if (host.hidden) { list.replaceChildren(); signature = ''; post(); return; }
@@ -517,6 +524,19 @@
       summary.textContent = summaryText(s);
       const text = attempt ? [attempt.status, attempt.message].filter(Boolean).join(' · ') : '';
       status.textContent = note ? [text, note].filter(Boolean).join(' · ') : text;
+      const candidate = c && s.candidateAttempt;
+      candidateStatus.hidden = !candidate;
+      candidateStatus.replaceChildren();
+      if (candidate) {
+        const heading = document.createElement('div');
+        heading.textContent = 'New Selection · ' + candidate.status + ' · ' + candidate.message;
+        candidateStatus.append(heading);
+        for (const member of candidate.members || []) if (member.status === 'error') {
+          const line = document.createElement('div'), state = memberState(member.code);
+          line.textContent = label(member) + ' · ' + state.status + ' · ' + state.message;
+          candidateStatus.append(line);
+        }
+      }
       previous.disabled = busy || !c || blocked || c.page <= 0;
       next.disabled = busy || !c || blocked || c.page >= pageCount(c) - 1;
       pages.disabled = busy || !c || blocked || c.mode === 'page';
@@ -524,7 +544,7 @@
       retry.hidden = !s.retry || busy; retry.disabled = busy;
       const target = o.target();
       const targetText = target ? o.targetLabel(target) || target : 'None';
-      const viewingText = opening && c ? viewingUids().map(value => 'Study ' + (c.studyUids.indexOf(value) + 1)).join(', ') : 'None';
+      const viewingText = c && viewingUids().length ? viewingUids().map(value => 'Study ' + (c.studyUids.indexOf(value) + 1)).join(', ') : 'None';
       identity.textContent = 'Viewing: ' + viewingText + ' · Reading Target: ' + targetText;
       const rows = c ? c.studyUids.map((value, ordinal) => ({ value, ordinal, member: c.members[ordinal] }))
         : (attempt?.members || []).map(member => ({ value: member.uid, ordinal: member.ordinal, member }));
@@ -558,14 +578,11 @@
             const reportButton = button('Select for Reporting', () => selectForReporting(value), busy || blocked || !ready || value === target || !!why, why || '');
             reportButton.dataset.action = 'report';
             actions.append(pick, viewButton, reportButton);
-            if (!ready || refusal?.uids.includes(value) || ['Unverified', 'No Images'].includes(state.status)) {
+            if (!ready || state === refusal || ['Unverified', 'No Images'].includes(state.status)) {
               const again = button('Retry', () => retryMember(value), busy || blocked); again.dataset.action = 'retry';
               actions.append(again);
             }
             li.append(actions);
-          } else if (member?.status === 'error') {
-            const again = button('Retry', () => retryMember(value), busy || !s.retry); again.dataset.action = 'retry';
-            li.append(again);
           }
           return li;
         }));

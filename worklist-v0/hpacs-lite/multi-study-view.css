@@ -1,7 +1,11 @@
-/* W9 Multi-Study View (multi-study-view.js): a compact band above the Related Exam / report row. Its height is bounded and
-   its member list scrolls, so the Related list header with one row, the report controls and W5's Back/Insert stay where
-   they are; nothing outside the band is restyled. */
-.multi-study { flex: none; display: flex; flex-direction: column; max-height: min(34vh, 260px); min-height: 0;
+/* W9 shares the upper space with the report-window panels. Reserve the existing 360px Related layout boundary (D390 in
+   main.html) for reporting; both upper panels scroll/shrink before they can consume that area. */
+body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .rw {
+  flex: 0 1 auto; min-height: 0; overflow: auto;
+}
+body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .workrow { flex: 1 0 360px; }
+body:not(.portrait):not(.reading) .multi-study { flex: 0 1 260px; }
+.multi-study { flex: none; display: flex; flex-direction: column; max-height: min(34vh, 260px); min-height: 0; overflow: auto;
   border-top: 1px solid var(--kin-line2); border-bottom: 1px solid var(--kin-line2); background: var(--kin-panel);
   color: var(--kin-text); font-size: 12px; }
 .multi-study[hidden] { display: none !important; }
@@ -11,6 +15,7 @@
 .multi-study-nav { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
 #multi-study-status, #multi-study-identity { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; }
 #multi-study-status:empty { display: none; }
+#multi-study-candidate { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; }
 .multi-study-members { list-style: none; margin: 0; padding: 0 8px 6px; overflow: auto; min-height: 0; }
 .multi-study-member { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 3px 4px;
   border-top: 1px solid var(--kin-line); }
