@@ -71,6 +71,7 @@ SCRIPTS = {
     "/worklist/hpacs-lite/work-context.js": lf_text(HPACS / "work-context.js"),
     "/worklist/hpacs-lite/session-transport.js": lf_text(HPACS / "session-transport.js"),
     "/worklist/hpacs-lite/study-access-admin.js": lf_text(HPACS / "study-access-admin.js"),
+    "/worklist/hpacs-lite/admin-access-review.js": lf_text(HPACS / "admin-access-review.js"),
 }
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"],

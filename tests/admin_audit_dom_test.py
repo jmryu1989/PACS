@@ -12,7 +12,7 @@ be held and released out of order) and records every request:
 
   01  opening Members reads only /api/me and the member list; the section says Not Loaded and Events Unknown with no
       table, and both fixed sentences are there (older rows without a recorded institution are not shown, with no count;
-      access history is not collected).
+      access history has not yet been observed in the displayed range).
   02  one answer in words: time, actor, action, target; a member move's other side reads "withheld: other institution"
       without a name; an absent value reads "not recorded", a recorded null or empty list reads None; Previous Value is a
       member row's before snapshot and otherwise not recorded; Reason only when the row recorded one; one GET with the
@@ -81,7 +81,7 @@ ADMIN_HTML = lf_text(HPACS / "admin.html")
 ORIGIN = "https://members.test"
 BASE = "/worklist/hpacs-lite/"
 PAGE_PATH = BASE + "admin.html"
-SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js")}
+SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "admin-access-review.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"], "institution": INSTITUTION,
@@ -118,7 +118,7 @@ WITHHELD = "withheld: other institution"
 TITLE_NOT_RECORDED = "이 행에 기록되지 않은 값입니다. 다른 값으로 짐작해 채우지 않습니다."
 TITLE_WITHHELD = "다른 기관 쪽 기록이라 내용과 기관 이름을 보이지 않습니다."
 FIXED_UNATTRIBUTED = "오래된 행 중 기록 시점 기관이 없는 행은 표시되지 않습니다."
-FIXED_ACCESS_HISTORY = "접속 이력: 수집되지 않음"
+FIXED_ACCESS_HISTORY = "접속 이력: 현재 표시 범위에서 아직 확인하지 않음"
 EMPTY_SENTENCE = "이 기관에 귀속된 감사 기록이 없습니다."
 
 

@@ -105,7 +105,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
-              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql']
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -146,10 +146,13 @@ def uid_contract(value):
     require(type(value) is str and len(value) <= 64 and re.fullmatch(r'[0-9]+(?:\.[0-9]+)+', value))
 
 
-def migration_sources():
-    names = command(['git', 'ls-tree', '-r', '--name-only', 'HEAD', 'api/prisma/migrations']).decode().splitlines()
-    require([name for name in names if name.endswith('/migration.sql')] == MIGRATIONS)
-    values = [command(['git', 'show', 'HEAD:'+path]) for path in MIGRATIONS]
+def migration_sources(root=None):
+    # The image build and migrate deploy consume this checkout, including a
+    # recorded worker overlay. A HEAD blob can silently omit its new migration.
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[1]
+    names = sorted(p.relative_to(root).as_posix() for p in (root/'api/prisma/migrations').glob('*/migration.sql'))
+    require(names == MIGRATIONS)
+    values = [(root/path).read_bytes() for path in MIGRATIONS]
     require(all(0 < len(raw) <= 128*1024 for raw in values))
     return values
 
@@ -697,6 +700,43 @@ def seed_emr(name, db):
             execute(name, db, 'INSERT INTO emr_access.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
                     sql_literal(json.dumps(row))+')')
     execute(name, db, "DO $$ BEGIN PERFORM setval('emr_access.access_entry_sequence_seq', 2, true); END $$")
+    for table, rows in expected_image_rows().items():
+        for row in rows:
+            execute(name, db, 'INSERT INTO emr_image.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_image.'+table+', '+sql_literal(json.dumps(row))+')')
+    execute(name, db, "DO $$ BEGIN PERFORM setval('emr_image.observation_sequence_seq', 2, true); END $$")
+
+
+def expected_image_rows():
+    event = '00000000-0000-4000-8000-0000000e0001'
+    at = '2026-10-25T00:00:00+00:00'
+    copy = dict(location='/synthetic/image-staging/body', kind='staging', eventId=event,
+                unit='object:2.25.701.1.1', bytes=4, sha256='1'*64, state='present')
+    return dict(preparation=[dict(event_id=event, study_uid='2.25.701',
+        source_manifest=dict(studyUid='2.25.701', patient=dict(linkId='synthetic-link', patientId='SYNTHETIC-E', assigningAuthority='synthetic')),
+        response_manifest=dict(eventId=event, sha256='2'*64, http=dict(status=206, plannedBytes=2,
+            selections=[dict(unit=copy['unit'], start=0, end=2)])), staging_copies=[copy], recorded_at=at)],
+        observation=[dict(sequence=1, event_id=event, kind='transport',
+            body=dict(wire=dict(bytesWritten=2, plannedBytes=2, terminal='transfer-ended'), observations=[]), recorded_at=at),
+            dict(sequence=2, event_id=event, kind='copies', body=[dict(copy, state='removed')], recorded_at=at)])
+
+
+def observe_image(name, db):
+    # Preserve representations/copies as well as the schema and sequence needed
+    # for the next observation after restore. B2 alone decides durable success.
+    catalog_sql = CATALOG_SQL.replace("'public'", "'emr_image'")
+    return dict(catalog=inventory.parse(psql(name, db, catalog_sql)),
+        rows={table: inventory.parse(psql(name, db,
+            'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_image.'+table+' t'))
+            for table in ('preparation', 'observation')},
+        sequence=inventory.parse(psql(name, db,
+            "SELECT jsonb_build_object('last_value',last_value,'is_called',is_called) FROM emr_image.observation_sequence_seq")))
+
+
+def image_contract(image):
+    require(type(image) is dict and set(image) == {'catalog', 'rows', 'sequence'})
+    require(image['catalog']['tables'] == ['observation', 'preparation'])
+    require(canonical(sorted_rows(image['rows'])) == canonical(sorted_rows(expected_image_rows())))
+    require(image['sequence'] == dict(last_value=2, is_called=True))
 
 
 def create_product(name, db, uid):
@@ -822,7 +862,7 @@ def observe(name, db):
     emr_rows = {table: inventory.parse(psql(name, db,
         'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_access."'+table+'" t'))
         for table in EMR_TABLES}
-    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows))
+    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows, image=observe_image(name, db)))
 
 
 def sorted_rows(rows):
@@ -883,9 +923,10 @@ def product_contract(product):
     catalog_contract(product['catalog'])
     require(canonical(sorted_rows(product['rows'])) == canonical(sorted_rows(expected_rows(product['study_uid']))))
     require(canonical(product['sequences']) == canonical(expected_sequences()))
-    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows'})
+    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows', 'image'})
     emr_catalog_contract(product['emr']['catalog'])
     require(canonical(sorted_rows(product['emr']['rows'])) == canonical(sorted_rows(expected_emr_rows())))
+    image_contract(product['emr']['image'])
 
 
 def relation(snapshot):

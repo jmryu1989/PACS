@@ -4,11 +4,11 @@
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": ["POST studies/:uid/viewer-context-events", "GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
+  "business_routes": ["GET images/dicom-web", "HEAD images/dicom-web", "POST studies/:uid/viewer-context-events", "GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
     "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack"],
-  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
+  "allowed_additions": ["GET images/dicom-web", "HEAD images/dicom-web", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
     "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack", "POST studies/:uid/viewer-context-events"],
@@ -102,7 +102,9 @@
     {"method": 0, "controller": "/", "handler": "critical-results/:id", "key": "GET critical-results/:id", "allowed": true},
     {"method": 1, "controller": "/", "handler": "critical-results/:id/ack", "key": "POST critical-results/:id/ack", "allowed": true},
     {"method": 1, "controller": "/", "handler": "critical-results/:id/cancel", "key": "POST critical-results/:id/cancel", "allowed": false},
-    {"method": 1, "controller": "/", "handler": "studies/:uid/critical-results", "key": "POST studies/:uid/critical-results", "allowed": false}
+    {"method": 1, "controller": "/", "handler": "studies/:uid/critical-results", "key": "POST studies/:uid/critical-results", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "images/dicom-web", "key": "GET images/dicom-web", "allowed": true},
+    {"method": 7, "controller": "/", "handler": "images/dicom-web", "key": "HEAD images/dicom-web", "allowed": true}
   ],
   "baseline_inventory": {
     "source_sha": "d914a9a8441819301cac28299063bdd6e721c10b",
@@ -144,7 +146,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 146, "public": 7, "session": 2, "business": 21, "denied": 116},
+    "counts": {"routes": 148, "public": 7, "session": 2, "business": 23, "denied": 116},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -259,7 +261,9 @@
       "GET studies/:uid/original-downloads/:operationId": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the owner's own download operation state and attempts (another owner, kind or study 404)"},
       "GET studies/:uid/original-downloads/:operationId/archive": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the ZIP of the stored originals of a prepared download (audited intent before the first byte); a clinician takes no originals out"},
       "POST studies/:uid/original-downloads/:operationId/archive/grant": {"decision": "denied", "unit": "S9-U4b", "commit": "1f0977c", "basis": "the one-time grant a bound cookie session asks for before the browser's own archive GET (D1489; radiologist/technician/admin, the owner's operation, owning institution and StudyAccess); a clinician takes no originals out"},
-      "POST admin/dicom-import/:operationId/files/:index/recovery": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "own-institution admin confirmation of an unknown import attempt (admin only, Gateway refused); never a clinician action"}
+      "POST admin/dicom-import/:operationId/files/:index/recovery": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "own-institution admin confirmation of an unknown import attempt (admin only, Gateway refused); never a clinician action"},
+      "GET images/dicom-web": {"decision": "business", "unit": "emr-e-online", "commit": null, "basis": "E online image delivery: the registered seam requires current server identity, patient/source and institution facts from REQUEST_FACTS #211 before activation."},
+      "HEAD images/dicom-web": {"decision": "business", "unit": "emr-e-online", "commit": null, "basis": "E online image delivery: the registered seam requires current server identity, patient/source and institution facts from REQUEST_FACTS #211 before activation."}
     }
   },
   "controller_decorators": {
@@ -267,12 +271,12 @@
     "rule": "S5-U1c D6: every @Name( in a controller is either an HTTP route decorator the inventory reads or one of these; any other name (a WebDAV route decorator of a later Nest, @RequestMapping, @Version, a custom route wrapper) fails the pure test until it is classified here or read by the inventory"
   },
   "outside_decorators": {
-    "classified": ["Injectable", "Module"],
+    "classified": ["Injectable", "Module", "Inject"],
     "rule": "S5-U1c-F03: every api/src .ts file that is not *.controller.ts is read by the controllers' lexer and decorator runs inside the inventory, so test_05 fails on it. A route decorator, @Controller(), @RequestMapping() or @Public() there is refused (both inventories open *.controller.ts only), as is a shape the runs cannot read, such call text in a comment or literal, and any decorator name not listed here (an alias or a wrapper could declare a route) until it is classified here."
   },
   "decorator_bindings": {
     "modules": {
-      "@nestjs/common": ["All", "Body", "Controller", "Delete", "Get", "Head", "Header", "HttpCode", "Injectable", "Module", "Options", "Param", "Patch", "Post", "Put", "Query", "Req", "Res", "Search", "Sse"],
+      "@nestjs/common": ["All", "Body", "Controller", "Delete", "Get", "Head", "Header", "HttpCode", "Inject", "Injectable", "Module", "Options", "Param", "Patch", "Post", "Put", "Query", "Req", "Res", "Search", "Sse"],
       "./auth.guard": ["Public"]
     },
     "public_declaration": "export const Public = () => SetMetadata('public', true);",
@@ -292,7 +296,7 @@
       "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==, or as fixed_prototype_comparison specifies; constructor only as a declaration whose own function scope holds no return (TypeScript AST excludes nested callback/class scopes); no class heading in a *.controller.ts file has extends, the heading read to the '{' of its body past type parameters and heritage clauses as class_heading lists (S5-U1c-F08)",
       "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)"
     ],
-    "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "net", "node:async_hooks", "node:crypto", "node:dns", "node:fs", "node:path", "node:http", "node:https", "node:net", "node:stream", "rxjs"],
+    "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "net", "node:async_hooks", "node:crypto", "node:dns", "node:fs", "node:fs/promises", "node:path", "node:http", "node:https", "node:net", "node:stream", "rxjs"],
     "file_packages": {
       "api/src/emr-runtime/file-lock.ts": ["node:child_process"],
       "api/src/emr-runtime/state-client.ts": ["node:worker_threads"],
@@ -716,7 +720,8 @@
         "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "CRITICAL_RESULT_ROLE_REQUIRED"},
         "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "CRITICAL_RESULT_NOT_FOUND"}
       }
-    }
+    },
+    "pending_routes": {"GET images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.", "HEAD images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam."}
   },
   "live_probe_values": {":uid": "1.2.826.0.1.3680043.8.498.0", ":id": "1", ":version": "1"},
   "read_contract": {

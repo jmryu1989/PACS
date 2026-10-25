@@ -913,6 +913,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => A.parseAccessEvent(event));
     assert.deepEqual(A.parseAccessEvent(access({ targets: [] })).targets, []);
   });
+  test('ACCESS-REVIEW: patientless audit rows retain their own identity on the admin report', () => {
+    const na = { status: 'not-applicable', reason: 'non-record-target' };
+    const target = { kind: 'access-audit', recordId: known('audit-entry-1'), patientLinkSnapshot: na, studyId: na, versionId: na };
+    const event = access({ surface: 'GET admin/audit', targets: [target] });
+    assert.deepEqual(A.parseAccessEvent(event).targets, [target]);
+    assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, recordId: na }] }));
+    assert.throws(() => A.parseAccessEvent({ ...event, surface: 'GET audit' }));
+  });
   test('TEST-EMR-07-A P09-success-with-unresolved-proxy-ip: B2 v2 records observed location or leaves it unknown', () => {
     assert(A.parseAccessEvent(access()));
     const unknown = { status: 'unresolved', reason: 'not-observed' };

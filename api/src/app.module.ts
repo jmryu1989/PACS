@@ -31,6 +31,7 @@ import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
+import { AdminAccessReview } from './admin-access-review';
 import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
 import { ViewerContextEventService } from './viewer-context-event.service';
@@ -42,6 +43,8 @@ import { ViewerJobController } from './viewer-job.controller';
 import { ViewerJobService } from './viewer-job.service';
 import { ConnectController } from './connect.controller';
 import { ConnectService } from './connect.service';
+import { OnlineImageService } from './emr-image/service';
+import { ImageContextSource, ModuleAImageContextPending, ProductionImageContext } from './emr-image/context';
 import { ManualSrController } from './manual-sr.controller';
 import { ManualSrService } from './manual-sr.service';
 import { ReportPreviewController } from './report-preview.controller';
@@ -59,8 +62,12 @@ import { DicomImportGateService } from './dicom-import-gate.service';
   controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
   providers: [
     ViewerContextEventService,
+    OnlineImageService, ModuleAImageContextPending,
+    { provide: ImageContextSource, inject: [ModuleAImageContextPending],
+      useFactory: (lookups: ModuleAImageContextPending) => new ProductionImageContext(lookups, lookups) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     StudyTransferLocalService, DicomImportGateService,
+    AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     // W9-LITE: no access-ledger owner is assembled in this build (EMR-B2 base, then the shared Module A binds the port here).
     MultiStudyViewService, { provide: ViewingSetAccess, useClass: ViewingSetAccessUnbound },

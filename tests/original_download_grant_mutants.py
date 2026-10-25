@@ -1,12 +1,12 @@
 # coding: utf-8
 """S9-U4b part (c) round 2, D1489: mutants of the original download (consult u4b-download-grant). The grant's admission
 mutants DG-M01..M07 retired with that admission (product cuts 3: the exact archive GET is a route-exact exemption from the
-binding header); DG-M08 (Sent without the server finish) now runs against the native-archive server case.
+binding header); DG-M08 (Sent without the server finish) runs against S9U4-B30's interrupted archive response.
 
 Each mutant is a one-off copy of api/src with one change in auth.guard.ts or study-transfer-local.service.ts, compiled by
 tests/service_test_loader.cjs (KIN_TEST_API_SRC selects the copy) and run against the one server case written for it in
-tests/study_transfer_local_server_test.cjs, whose Nest application puts the product's own AuthGuard in front (harness
-realGuard). A mutant is killed only when that case fails on an assertion (ERR_ASSERTION, no TypeError, no load error)
+tests/study_transfer_local_server_test.cjs. Its Nest application serves the product archive route; admission cases also
+use the product's AuthGuard (harness realGuard). A mutant is killed only when that case fails on an assertion (ERR_ASSERTION, no TypeError, no load error)
 within the bound; anything else is NOT PROVEN. The unchanged copy (baseline) must pass every named case first. The
 product tree is never written; the copies live under the --out directory and are removed after each run.
 
@@ -37,7 +37,7 @@ GUARD, SERVICE = "auth.guard.ts", "study-transfer-local.service.ts"
 MUTANTS = [
     ("DG-M08-sent-without-the-finish", SERVICE,
      "const state = t.stop === 'fenced' || !exact ? 'unconfirmed' : t.stop === 'aborted' || !finished ? 'incomplete' : 'sent';",
-     "const state = t.stop === 'fenced' ? 'unconfirmed' : 'sent';", "PC3 native archive GET refused"),
+     "const state = t.stop === 'fenced' ? 'unconfirmed' : 'sent';", "S9U4-B30"),
     # U4C-05: the rights read again inside the consume transaction, under its lock - without it a right lost after the
     # preflight still consumes the grant and opens an attempt with its intent.
     ("DG-M11-no-rights-under-the-consume-lock", SERVICE,
