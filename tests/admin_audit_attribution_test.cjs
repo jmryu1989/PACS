@@ -4473,7 +4473,9 @@ function scanAuditWrites(sources = auditSources()) {
   // EMR-D is in the B2 scope because it writes no AuditLog: a delegate key or a text naming the table there is unresolved.
   for (const file of files.filter(file => emrD(repoPath(file.fileName)))) {
     const look = node => {
-      const named = isAccess(node) ? w1(node).key : ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text
+      const named = isAccess(node) ? w1(node).key
+        : ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken ? w1(node.propertyName ?? node.name).key
+        : ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text
         : ts.isTemplateExpression(node) ? [node.head.text, ...node.templateSpans.map(span => span.literal.text)].join('') : undefined;
       if (named !== undefined && TABLE_WORDS.test(named)) {
         note(node, 'EMR-D naming AuditLog', 'unresolved', `\`${snippet(node)}\`: EMR-D is in the B2 scope (D1816) only while it writes no AuditLog`, 'D1816 EMR-D');
@@ -4694,6 +4696,8 @@ test('D1816 scope: an EMR-D file that names AuditLog leaves the scope basis and 
   const clean = scanAuditWrites([{ file, text: head + '  await tx.$executeRaw`INSERT INTO emr_clinical.syn(id) VALUES (${id})`;\n}\n' }]);
   assert.deepEqual([clean.unresolved, clean.sites], [[], []]);
   for (const body of ["  await tx.auditLog.create({ data: { action: 'syn.d' } });\n", "  await tx['auditLog'].create({ data: { action: 'syn.d' } });\n",
+    "  const { auditLog } = tx; await auditLog.create({ data: { action: 'syn.d' } });\n",
+    "  const { auditLog: audit } = tx; await audit.create({ data: { action: 'syn.d' } });\n",
     '  await tx.$executeRaw`INSERT INTO "AuditLog"(action) VALUES (${id})`;\n']) {
     const named = scanAuditWrites([{ file, text: head + body + '}\n' }]);
     assert.ok(named.unresolved.some(entry => entry.startsWith(`${file}:3 EMR-D naming AuditLog:`)), body + named.unresolved.join('\n'));
