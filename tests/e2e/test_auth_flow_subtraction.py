@@ -21,9 +21,7 @@ class AuthFlowSubtractionE2E(WorklistE2E):
     def choose_account(self, page):
         page.wait_for_url('**/auth/**')
         page.wait_for_load_state('domcontentloaded')
-        # Keycloak can offer the previous username first; its standard restart link opens account selection.
-        if not page.locator('#username').count():
-            page.get_by_role('link', name=re.compile('로그인 다시 시작|Restart login')).click()
+        # The next doctor gets a form with an editable user name, never one fixed to the previous doctor (D720).
         expect(page.locator('#username')).to_be_editable()
 
     def submit_login(self, page, actor):

@@ -639,12 +639,22 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return { ended: false, idpSid: null };
   }
 
-  /** 세션 삭제가 commit된 뒤 한 번 청한다. provider 장애는 앱의 로그아웃을 되돌리지 않는다. */
+  /**
+   * 세션 삭제가 commit된 뒤 provider 종료를 한 번 청한다(best-effort, 재시도 없음). 기다림은 IDP_END_MS까지이고 provider
+   * 장애는 앱의 종료를 되돌리지 않는다.
+   */
+  private async endIdpOnce(idpSid: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([this.keycloak.endSession(idpSid, within(IDP_END_MS)),
+        new Promise(resolve => { timer = setTimeout(resolve, IDP_END_MS); })]);
+    } catch { this.logger.warn('auth_provider_end unavailable'); }
+    finally { clearTimeout(timer); }
+  }
+
+  /** Log out·만료·수거: 답은 provider를 기다리지 않는다(U5S-REQ-05). */
   private tellIdp(idpSid: string) {
-    this.background.tryRun('auth.tellIdp', async () => {
-      try { await this.keycloak.endSession(idpSid, within(IDP_END_MS)); }
-      catch { this.logger.warn('auth_provider_end unavailable'); }
-    });
+    this.background.tryRun('auth.tellIdp', () => this.endIdpOnce(idpSid));
   }
 
   // ── 로그인 시작 ──
@@ -697,7 +707,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       if (session) {
         if (binding === 'missing') throw this.bindingMissing();
         const end = await this.endByRequest(sid, session, cause, this.requestIp(req), trigger, authRequestSurface(req));
-        if (end.ended && end.idpSid) this.tellIdp(end.idpSid);
+        // 주소를 주기 전에 그 provider 종료를 한 번 기다린다: 끝나지 않은 SSO 위의 prompt=login은 다음 사람의 폼을 앞 의사의
+        // 이름에 고정한다(D720). 확인되지 않아도 주소는 준다 — 그 폼도 자격 입력 없이는 세션을 만들지 않는다.
+        if (end.ended && end.idpSid) await this.endIdpOnce(end.idpSid);
       }
     }
     return this.startFlow(res, trigger === 'register');
