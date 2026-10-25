@@ -1,6 +1,7 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Req, Res } from '@nestjs/common';
-import { StudyTransferLocalService } from './study-transfer-local.service';
+import { Body, Controller, Get, HttpCode, HttpException, Inject, Param, Post, Req, Res, ServiceUnavailableException } from '@nestjs/common';
+import { StudyTransferLocalService, TRANSFER_MESSAGES } from './study-transfer-local.service';
 import type { Caller } from './pacs/access';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestContextUnavailable, RequestWorkContext } from './emr-runtime/request-context';
 
 /** The caller comes from the global guard's verified token and rights only (sub, actor, roles, institution, kind). */
 function caller(req: any): Caller {
@@ -13,7 +14,16 @@ function caller(req: any): Caller {
  */
 @Controller()
 export class StudyTransferLocalController {
-  constructor(private readonly transfer: StudyTransferLocalService) {}
+  constructor(private readonly transfer: StudyTransferLocalService,
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
+
+  private async withDownload<T>(req: any, task: (request: RequestWorkContext) => Promise<T>): Promise<T> {
+    try { return await this.requests.withWork(req, task); }
+    catch (failure) {
+      if (failure instanceof HttpException || failure instanceof RequestContextUnavailable) throw failure;
+      throw new ServiceUnavailableException({ code: 'IMPORT_STORAGE_UNAVAILABLE', message: TRANSFER_MESSAGES.storage });
+    }
+  }
 
   /** One application/dicom object per request; the HTTP status is the file result's own (contract 4.8). */
   @Post('dicom-import')
@@ -31,7 +41,7 @@ export class StudyTransferLocalController {
   @Post('studies/:uid/original-downloads')
   @HttpCode(200)
   prepareDownload(@Param('uid') uid: string, @Body() body: unknown, @Req() req: any) {
-    return this.transfer.prepareDownload(uid, body, caller(req));
+    return this.withDownload(req, request => this.transfer.prepareDownload(uid, body, caller(req), request));
   }
 
   @Get('studies/:uid/original-downloads/:operationId')
@@ -49,7 +59,7 @@ export class StudyTransferLocalController {
     @Res({ passthrough: true }) res: any) {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    return this.transfer.issueArchiveGrant(uid, operationId, body, req, caller(req));
+    return this.withDownload(req, request => this.transfer.issueArchiveGrant(uid, operationId, body, req, caller(req), request));
   }
 
   /** The archive writes its own response: headers before the first byte, and only the writer ends it. */
@@ -57,7 +67,12 @@ export class StudyTransferLocalController {
   archive(@Param('uid') uid: string, @Param('operationId') operationId: string, @Req() req: any, @Res() res: any) {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    return this.transfer.archive(uid, operationId, req, res, caller(req));
+    return this.withDownload(req, request => this.transfer.archive(uid, operationId, req, res, caller(req), request))
+      .catch(failure => {
+        // The writer ends the response before its retained work settles the result.
+        if (failure instanceof RequestContextUnavailable && (res.writableEnded || res.destroyed)) return;
+        throw failure;
+      });
   }
 
   @Post('admin/dicom-import/:operationId/files/:index/recovery')

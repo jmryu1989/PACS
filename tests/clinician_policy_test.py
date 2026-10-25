@@ -69,13 +69,12 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(__file__).resolve().parents[1]
 API = ROOT / "api" / "src"
 # D1816: B2 replaced these modules. Their runtime/route tests own them;
-# the retired B1 closed-source provenance grammar does not constrain their code.
+# the retired B1 closed-source provenance grammar does not constrain their code,
+# nor the new code on the B2 ledger (emr-viewing/: Module A A1, owned by tests/emr/a).
 B2_REPLACED = frozenset({"admin.controller.ts", "admin.service.ts", "auth.service.ts",
                          "pacs.service.ts", "app.module.ts", "main.ts", "member-rights-import.ts"})
 def legacy_source_contract(path):
     relative = path.relative_to(API).as_posix() if path.is_relative_to(API) else path.as_posix()
-    # The online audit/viewing bindings have real HTTP/PG consumers. The retired
-    # source-provenance grammar must not dictate their imports or class shape.
     return relative not in B2_REPLACED and not relative.startswith(("emr-runtime/", "emr-retention/", "emr-audit/", "emr-viewing/"))
 
 POLICY = API / "clinician-policy.ts"
@@ -1545,7 +1544,7 @@ def controller_inventory(sources=None):
         if path.suffix != ".ts":
             problems.append(f"{path.name}: a script neither inventory opens")
             continue
-        if not path.name.endswith("controller.ts"):
+        if not path.name.endswith(".controller.ts"):
             gathered(problems, outside_decorators, path, source, compiled.get(path, {}))
             continue
         runs = gathered(problems, decorator_runs, source)
@@ -1573,7 +1572,7 @@ def handler_statuses(sources=None):
     first and compares the keys. Two @HttpCode() on a handler, or one that is not a literal status, is refused."""
     out = {}
     for path, source in sorted((api_sources() if sources is None else sources).items()):
-        if not path.name.endswith("controller.ts"):
+        if not path.name.endswith(".controller.ts"):
             continue
         runs = decorator_runs(source)
         [prefix] = [(CONTROLLER_TEXT.fullmatch(source, start, end).group(2) or "").strip("/")
@@ -1941,7 +1940,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 controller_handlers(Path("sample.controller.ts"), source)
         # the real controllers: each public handler's own run is exactly @Public() directly above its route decorator
         found = []
-        for path in sorted(API.rglob("*controller.ts")):
+        for path in sorted(API.rglob("*.controller.ts")):
             for run in decorator_runs(path.read_text(encoding="utf-8")):
                 names = [name for name, _start, _end in run["items"]]
                 if "Public" in names:
@@ -1958,7 +1957,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         """S5-U1c D6 (RequestMethod members, unreadable decorators) and D8 (the invariants_live reader)."""
         known = set(HTTP_DECORATORS) | set(FIXTURES["controller_decorators"]["non_route"])
         seen = set()
-        for path in sorted(API.rglob("*controller.ts")):
+        for path in sorted(API.rglob("*.controller.ts")):
             for run in decorator_runs(path.read_text(encoding="utf-8")):
                 seen |= {name for name, _start, _end in run["items"]
                          if legacy_source_contract(path) or name in known}
@@ -1968,8 +1967,8 @@ class ClinicianPolicySpec(unittest.TestCase):
         sources = api_sources()
         # keyed by the path under api/src: two modules may share a basename (emr-report/contract.ts, emr-signature/contract.ts)
         outside = {path.relative_to(API).as_posix(): outside_decorators(path, source) for path, source in sources.items()
-                   if not path.name.endswith("controller.ts")}
-        self.assertEqual(len(outside) + len(list(API.rglob("*controller.ts"))), len(sources))
+                   if not path.name.endswith(".controller.ts")}
+        self.assertEqual(len(outside) + len(list(API.rglob("*.controller.ts"))), len(sources))
         self.assertLessEqual({name for names in outside.values() for name in names}, OUTSIDE_DECORATORS)
         # the model knows every method the inventory can produce; a number it does not know fails closed, and the
         # allowlist names GET, HEAD and POST, so a member the model lacks can never match a row in model or product
@@ -1990,7 +1989,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         table = re.search(r"\n    http_decorators = \{\n(.*?)\n    \}\n", text, re.S)
         self.assertIsNotNone(table)
         self.assertEqual(dict(re.findall(r'"(\w+)": "([A-Z]+)"', table.group(1))), HTTP_DECORATORS)
-        self.assertIn('CONTROLLER_GLOB = "*controller.ts"', text)
+        self.assertIn('CONTROLLER_GLOB = "*.controller.ts"', text)
         self.assertIn("for path in sorted(controller_dir.rglob(CONTROLLER_GLOB)):", text)
         rows = manifest_rows()
         self.assertEqual(len(rows), len(set(rows)), "a repeated ROUTES key is collapsed silently by the dict")
@@ -2498,7 +2497,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, r"scripts under api/src that neither inventory opens: \['routes\.tsx'\]"):
                 api_sources(Path(scratch))
         print("CLINICIAN_POLICY_OUTSIDE_FILES " + json.dumps({
-            "outside_files": sum(1 for path in sources if not path.name.endswith("controller.ts")),
+            "outside_files": sum(1 for path in sources if not path.name.endswith(".controller.ts")),
             "classified": sorted(OUTSIDE_DECORATORS), "refused": sorted(refused) + ["a .tsx script"],
             "real_routes": len(baseline),
         }, ensure_ascii=True, sort_keys=True))
@@ -2898,9 +2897,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
         for path, source in sorted(sources.items()):
+            named |= {s["module"] for s in module_statements(path, source)
+                      if s["module"] is not None and not s["module"].startswith("./")}
             if legacy_source_contract(path):
-                named |= {s["module"] for s in module_statements(path, source)
-                          if s["module"] is not None and not s["module"].startswith("./")}
                 loaded |= set(module_loads(path, source, property_names(path, source)))
         self.assertLessEqual(named | loaded, PACKAGES | frozenset().union(*FILE_PACKAGES.values()),
                              "retained sources use the legacy package contract")
@@ -3364,7 +3363,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 if heading["extends"]:
                     extending.add(path.name)
         self.assertTrue(extending)
-        self.assertEqual([name for name in extending if name.endswith("controller.ts")], [])
+        self.assertEqual([name for name in extending if name.endswith(".controller.ts")], [])
 
         def old_class_body(code, brace):
             # the class_body before this: the word class in the text since the ';', '{' or '}' before the brace

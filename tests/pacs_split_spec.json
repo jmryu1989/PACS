@@ -8471,6 +8471,16 @@
       "api/src/pacs/report-draft.ts"
     ]
   },
+  "emr_d_online": {
+    "unit": "EMR-D online (D1824, 2464002)",
+    "facade_signatures": [
+      {
+        "name": "commitReport",
+        "before": "886a2e45e6b8e57cfa8d2aff6bf7388b84336357f879c367b8c8a2d182cde8e1"
+      }
+    ],
+    "note": "D73: EMR-D added the request facts parameter to commitReport. The split's move proof keeps the signature it moved; the changed signature is not pinned. The facade still forwards every parameter to the moved concern method (validateFacade), and the commit with request facts runs through the real HTTP route in tests/emr/d/report_commit_pg_test.cjs."
+  },
   "di_additions_b2": {
     "controllers": [],
     "providers": [],
