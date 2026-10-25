@@ -46,12 +46,13 @@ async function main() {
     el(0x10, 0x10, 'PN', 'SYNTHETIC^DOWNLOAD'), el(0x10, 0x20, 'LO', 'SYN-DOWNLOAD'),
     el(0x20, 0x0d, 'UI', uid), el(0x20, 0x0e, 'UI', series), el(0x7fe0, 0x10, 'OW', Buffer.alloc(16, 0x5a))]);
   const md5 = createHash('md5').update(bytes).digest('hex');
-  let truncated = false, changed = false, fileRequests = 0;
+  let truncated = false, changed = false, fileRequests = 0, observePatient = true;
   const original = http.createServer((req, res) => {
     const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
     if (req.url === '/system') return json({ Version: '1.12.5' });
     if (req.url === '/tools/find') return json([sourceId]);
-    if (req.url.endsWith('/simplified-tags')) return json({ StudyInstanceUID: uid, SeriesInstanceUID: series, SOPInstanceUID: sop });
+    if (req.url.endsWith('/simplified-tags')) return json({ StudyInstanceUID: uid, SeriesInstanceUID: series, SOPInstanceUID: sop,
+      ...(observePatient ? { PatientID: 'SYN-DOWNLOAD' } : {}) });
     if (req.url.endsWith('/attachments/dicom/info')) return json({ UncompressedSize: bytes.length, UncompressedMD5: changed ? '0'.repeat(32) : md5 });
     if (req.url.endsWith('/file')) { fileRequests++; return res.end(truncated ? bytes.subarray(0, 140) : bytes); }
     res.statusCode = 404; res.end();
@@ -118,6 +119,8 @@ async function main() {
     const id = randomUUID();
     const prepared = await post(prefix, { operationId: id });
     assert.equal(prepared.status, 200, JSON.stringify(prepared));
+    // Later requests must use the prepared operation's durable observation, even when the source no longer supplies it.
+    observePatient = false;
     const complete = await download(id);
     assert.equal(complete.received.status, 200);
     assert.equal(complete.row.status, 'sent');
@@ -130,10 +133,10 @@ async function main() {
       assert.equal(event.rightsVersion, 1); assert.deepEqual(event.session, { method: 'session', sessionRef });
       assert.equal(event.managingInstitution.value, institution); assert.equal(event.stream, 'viewing'); assert.equal(event.act, '열람');
       assert.equal(event.targets[0].studyId.value, uid); assert.equal(event.targets[0].versionId.value, prepared.body.manifestSha256);
-      // A1's local-source shape: no formal PatientLink; the route never read the source PatientID/institution.
+      // An observed source identifier survives all stages without a formal PatientLink or invented institution.
       assert.deepEqual(event.targets, [{ kind: 'download', studyId: { status: 'known', value: uid },
         recordId: { status: 'known', value: id }, versionId: { status: 'known', value: prepared.body.manifestSha256 },
-        sourcePatientId: { status: 'unresolved', reason: 'not-observed' },
+        sourcePatientId: { status: 'known', value: 'SYN-DOWNLOAD' },
         sourceInstitution: { status: 'unresolved', reason: 'not-observed' }, projectionSha256: prepared.body.manifestSha256 }]);
     }
     assert.equal(ledger[3].relatedEventId, ledger[2].eventId);
@@ -141,7 +144,7 @@ async function main() {
     assert.deepEqual(ledger[3].targets, ledger[2].targets);
     assert.equal((await post(prefix, { operationId: id })).status, 200);
     assert.equal((await events(id)).length, 4, 'operation replay does not invent another download');
-    // The investigation consumer (emr-audit) over these stored payloads: found by study, never a formal patient.
+    // The investigation consumer (emr-audit) over stored payloads, independent of the source's current tags.
     const rows = (await witness.$queryRaw`SELECT sequence, payload, recorded_at FROM emr_access.access_entry
       WHERE payload::jsonb->'targets'->0->'recordId'->>'value'=${id} ORDER BY sequence`)
       .map(row => ({ entry: { sequence: Number(row.sequence), payload: { kind: 'access', event: JSON.parse(row.payload) } },
@@ -162,7 +165,10 @@ async function main() {
       assert.equal(row.targets[0].patient, null);
       assert.equal(row.targets[0].localSource.projectionSha256, prepared.body.manifestSha256);
     }
-    assert.equal((await investigate({ sourcePatientId: 'SYN-DOWNLOAD' })).rows.length, 0, 'an unobserved PatientID is never matched');
+    const bySourcePatient = await investigate({ sourcePatientId: 'SYN-DOWNLOAD' });
+    assert.equal(bySourcePatient.rows.length, 4);
+    assert.deepEqual(bySourcePatient.rows.map(r => r.eventId).sort(), ledger.map(e => e.eventId).sort());
+    assert.equal((await investigate({ sourcePatientId: 'ANOTHER-PATIENT' })).rows.length, 0);
     if (process.env.KIN_DOWNLOAD_REVIEW === '1') {
       // The Access Review branch's real bounded PostgreSQL query (its migration applied by the fixture), under runtime rights.
       const db = app.get(PrismaService);
@@ -172,6 +178,16 @@ async function main() {
       assert.deepEqual(review.map(r => r.event_id).sort(), ledger.map(e => e.eventId).sort());
       console.log('access-review query listed the download rows');
     }
+
+    // A genuinely absent source fact stays unresolved through a complete download.
+    const absentId = randomUUID();
+    assert.equal((await post(prefix, { operationId: absentId })).status, 200);
+    assert.equal((await download(absentId)).row.status, 'sent');
+    const absentEvents = await events(absentId);
+    assert.equal(absentEvents.length, 4);
+    for (const event of absentEvents) assert.deepEqual(event.targets[0].sourcePatientId,
+      { status: 'unresolved', reason: 'not-observed' });
+    observePatient = true;
 
     // A real PG append failure rolls back the stage, its AuditLog projection,
     // and the grant consumption. No body bytes are supplied before durable intent.
@@ -204,6 +220,7 @@ async function main() {
     assert.equal(aborted.at(-1).action, 'transfer-aborted');
     assert.equal(aborted.at(-1).relatedEventId, aborted.at(-2).eventId);
     assert.ok(!aborted.some(e => e.action === 'transfer-ended'));
+    for (const event of aborted) assert.deepEqual(event.targets[0].sourcePatientId, { status: 'known', value: 'SYN-DOWNLOAD' });
     truncated = false;
     const uncertain = randomUUID(); assert.equal((await post(prefix, { operationId: uncertain })).status, 200);
     const lastGrant = await post(prefix + '/' + uncertain + '/archive/grant', {}); assert.equal(lastGrant.status, 200);
@@ -250,7 +267,7 @@ async function main() {
     const rights = suspended => witness.memberRights.update({ where: { sub }, data: { suspended } });
     const lost = await refusal(() => rights(true), () => rights(false));
     assert.equal(lost.status, 403); assert.equal(lost.action, 'permission-refused'); assert.equal(lost.result, 'refused');
-    console.log('PASS actual download bytes; four B2 rows; investigation replay; ' +
+    console.log('PASS actual download bytes; four B2 rows found by source patient; persisted observation; absent source fact; investigation replay; ' +
       (process.env.KIN_DOWNLOAD_REVIEW === '1' ? 'access-review query; ' : 'access-review query NOT_RUN (no migration); ') +
       'replay; PG rollback of every stage; interrupted supply; refused starts (conflict, permission-refused)');
   } finally {

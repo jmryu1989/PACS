@@ -149,8 +149,13 @@ export function checkDownloadRow(op: any): StoredDownload {
       || !text(op.ownerSubject, 256) || !text(op.actor, 256)) fail();
   const d = op.download;
   const v2 = d?.schemaVersion === 2;
-  if (!exactKeys(d, v2 ? DOWNLOAD_KEYS_V2 : DOWNLOAD_KEYS) || (d.schemaVersion !== 1 && !v2) || d.targetStudyUid !== op.studyUid
+  const keys = v2 ? DOWNLOAD_KEYS_V2 : DOWNLOAD_KEYS;
+  // Older prepared operations have no retained source-subject observation.
+  const hasSourcePatients = d && Object.prototype.hasOwnProperty.call(d, 'sourcePatientIds');
+  if (!exactKeys(d, hasSourcePatients ? [...keys, 'sourcePatientIds'] : keys) || (d.schemaVersion !== 1 && !v2) || d.targetStudyUid !== op.studyUid
       || d.destination !== 'browser-download' || !storedTime(d.preparedAt) || !Array.isArray(d.attempts)) fail();
+  if (hasSourcePatients && (!Array.isArray(d.sourcePatientIds) || !d.sourcePatientIds.length
+      || d.sourcePatientIds.some((id: unknown) => id !== null && !(typeof id === 'string' && id.trim())))) fail();
   const stored = parseCanonicalManifest(d.manifestCanonical, op.manifestSha256);
   if (!stored.ok || stored.manifest.studyUid !== op.studyUid) fail();
   const manifest = (stored as Extract<typeof stored, { ok: true }>).manifest;
@@ -512,20 +517,22 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   }
 
   private async downloadAudit(tx: EmrRecordTransaction, record: RecordMutation, request: RequestWorkContext,
+    download: { sourcePatientIds?: readonly (string | null)[] },
     action: OriginalDownloadAccessEventV2['action'], audit: { actor: string; action: string; target: string; detail: string },
     eventId = randomUUID(), relatedEventId: string | null = null) {
     const detail = JSON.parse(audit.detail), facts = request.facts;
     const known = <T>(value: T) => ({ status: 'known' as const, value });
-    // These routes read the originals' UIDs, sizes and hashes, not the source PatientID or institution tags.
+    // Retain the preparation's observations even after the source is unavailable; these are not formal PatientLinks.
     const notObserved = { status: 'unresolved' as const, reason: 'not-observed' as const };
     const event: OriginalDownloadAccessEventV2 = {
       formatVersion: 2, branch: 'original-download', surface: facts.surface, eventId,
       userId: known(facts.actor), rolesAtTime: known(facts.roles), actingInstitution: known(facts.institution),
       rightsVersion: facts.rightsVersion, session: facts.binding,
       managingInstitution: known(detail.institutionId), occurredAt: detail.at, trustedProxyIp: facts.ingress,
-      cause: 'user-view', executor: 'member', targets: [{ kind: 'download', studyId: known(audit.target),
+      cause: 'user-view', executor: 'member', targets: (download.sourcePatientIds ?? [null]).map(sourcePatientId => ({ kind: 'download', studyId: known(audit.target),
         recordId: known(detail.operationId), versionId: known(detail.manifestSha256),
-        sourcePatientId: notObserved, sourceInstitution: notObserved, projectionSha256: detail.manifestSha256 }],
+        sourcePatientId: sourcePatientId === null ? notObserved : known(sourcePatientId), sourceInstitution: notObserved,
+        projectionSha256: detail.manifestSha256 })),
       action, result: action === 'provide-prepared' ? 'prepared' : action === 'transfer-aborted' ? 'aborted' :
         action === 'permission-refused' ? 'refused' : action === 'conflict' ? 'failed' : 'succeeded',
       requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId,
@@ -563,13 +570,13 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         if (found) return { replay: found };
         const now = await this.gate.clock(tx);
         const download = { schemaVersion: 1, targetStudyUid: uid, destination: 'browser-download', preparedAt: now.toISOString(),
-          manifestCanonical: built.manifestCanonical, attempts: [] as any[] };
+          manifestCanonical: built.manifestCanonical, sourcePatientIds: built.sourcePatientIds, attempts: [] as any[] };
         // claimKey and claim are left out, so both are the columns' SQL NULL that the kind check requires of a download
         // (U4BL-02): a literal null on the JSONB claim is written as the JSON null value, which is not NULL. The answer is
         // made from the row the database returned, which reads both back as null.
         const row = await tx.importOperation.create({ data: { id: operationId, ...owner, kind: 'download', studyUid: uid, status: 'prepared',
           results: [], manifestSha256: built.manifestSha256, download, createdAt: now, updatedAt: now } });
-        await this.downloadAudit(tx, record, request, 'provide-prepared', { actor: owner.actor, action: 'original.download.prepare', target: uid,
+        await this.downloadAudit(tx, record, request, download, 'provide-prepared', { actor: owner.actor, action: 'original.download.prepare', target: uid,
           detail: JSON.stringify({ institutionId: owner.institutionId, operationId, studyUid: uid, manifestSha256: built.manifestSha256,
             objects: built.manifest.objects.length, bytes: totalBytes(built.manifest), ownerIssuer: owner.ownerIssuer,
             ownerSubject: owner.ownerSubject, at: now.toISOString() }) });
@@ -605,19 +612,21 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * One complete reading of the study's originals: every instance id (Expand false) with its Study/Series/SOP UIDs and its
    * stored size/MD5. 'failed' when any read fails or answers outside its form; 'tooMany' above the ZIP32 object bound.
    */
-  private async readOriginals(uid: string): Promise<{ kind: 'read'; objects: ManifestObjectInput[] } | { kind: 'failed' } | { kind: 'tooMany' }> {
+  private async readOriginals(uid: string): Promise<{ kind: 'read'; objects: ManifestObjectInput[]; sourcePatientIds: (string | null)[] } | { kind: 'failed' } | { kind: 'tooMany' }> {
     const ids = await this.gate.studyInstanceIds(uid, ORIGINAL_ARCHIVE_LIMITS.maxDicomObjects + 1);
     if (!ids) return { kind: 'failed' };
     if (ids.length > ORIGINAL_ARCHIVE_LIMITS.maxDicomObjects) return { kind: 'tooMany' };
     const objects: ManifestObjectInput[] = [];
+    const sourcePatientIds = new Set<string | null>();
     for (const orthancId of ids) {
       const uids = await this.gate.instanceUids(orthancId);
       if (!uids || uids.studyUid !== uid) return { kind: 'failed' };
       const info = await this.gate.attachmentInfo(orthancId);
       if (!info) return { kind: 'failed' };
       objects.push({ orthancId, seriesUid: uids.seriesUid, sopUid: uids.sopUid, bytes: info.bytes, md5: info.md5 });
+      sourcePatientIds.add(uids.sourcePatientId);
     }
-    return { kind: 'read', objects };
+    return { kind: 'read', objects, sourcePatientIds: [...sourcePatientIds] };
   }
 
   /**
@@ -633,7 +642,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     const second = await this.readOriginals(uid);
     if (second.kind !== 'read' || sameSet(first.objects) !== sameSet(second.objects)) return incomplete;
     const built = canonicalManifest(uid, first.objects);
-    return built.ok ? built : incomplete;
+    // Both reads processed these subjects. Preserve every observed ID without inventing a patient match.
+    return built.ok ? { ...built, sourcePatientIds: [...new Set([...first.sourcePatientIds, ...second.sourcePatientIds])] } : incomplete;
   }
 
   /**
@@ -706,7 +716,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         download.activeArchiveGrant = grant;
         checkDownloadRow({ ...op, download });
         await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
-        await this.downloadAudit(tx, record, request, 'provide-prepared', { actor: owner.actor, action: 'original.download.grant', target: uid,
+        await this.downloadAudit(tx, record, request, download, 'provide-prepared', { actor: owner.actor, action: 'original.download.grant', target: uid,
           detail: JSON.stringify({ institutionId: op.institutionId, phase: 'issued', operationId: op.id, studyUid: uid, grantId: grant.grantId,
             grantHash: grant.hash, sessionRef: grant.sessionRef, ownerIssuer: owner.ownerIssuer, ownerSubject: owner.ownerSubject,
             manifestSha256: op.manifestSha256, issuedAt: grant.issuedAt, expiresAt: grant.expiresAt, replacedGrantId: replaced,
@@ -779,7 +789,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
       download.activeArchiveGrant.refusal = { code: code.slice(0, 64), at: now.toISOString() };
       checkDownloadRow({ ...op, download });
       await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
-      await this.downloadAudit(tx, record, request, status === 409 ? 'conflict' : 'permission-refused',
+      await this.downloadAudit(tx, record, request, download, status === 409 ? 'conflict' : 'permission-refused',
         { actor: owner.actor, action: 'original.download.grant', target: op.studyUid,
         detail: JSON.stringify({ institutionId: op.institutionId, phase: 'refused', operationId: op.id, studyUid: op.studyUid, grantId: a.grantId,
           grantHash: a.hash, sessionRef: a.sessionRef, ownerIssuer: a.ownerIssuer, ownerSubject: a.ownerSubject, manifestSha256: op.manifestSha256,
@@ -1071,7 +1081,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
           checkDownloadRow({ ...op, status: 'sending', download });
         }
         await tx.importOperation.update({ where: { id: operationId }, data: { download, status: 'sending', updatedAt: now } });
-        await this.downloadAudit(tx, record, request, 'provide-prepared', { actor: owner.actor, action: 'original.download.intent', target: op.studyUid,
+        await this.downloadAudit(tx, record, request, download, 'provide-prepared', { actor: owner.actor, action: 'original.download.intent', target: op.studyUid,
           detail: JSON.stringify({ institutionId: op.institutionId, operationId, attemptId: attempt.attemptId, number: attempt.number,
             manifestSha256: op.manifestSha256, ownerIssuer: owner.ownerIssuer, ownerSubject: owner.ownerSubject, at: now.toISOString(),
             ...(active ? { destination: 'browser-download', bindingMethod: 'archive-grant', grantId: active.grantId, grantHash: active.hash,
@@ -1158,7 +1168,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         // E has no access action for an unknown transfer. Keep the durable
         // preparation and existing operational result; never manufacture success.
         if (state === 'unconfirmed') await tx.auditLog.create({ data: audit });
-        else await this.downloadAudit(tx, record, request, state === 'sent' ? 'transfer-ended' : 'transfer-aborted',
+        else await this.downloadAudit(tx, record, request, download, state === 'sent' ? 'transfer-ended' : 'transfer-aborted',
           audit, randomUUID(), attemptId);
       }
       checkDownloadRow({ ...op, download, status: mine.state });

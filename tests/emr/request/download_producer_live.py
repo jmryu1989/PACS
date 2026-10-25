@@ -20,7 +20,8 @@ class DownloadProducerLive(PgLedgerFixture):
         if migration:
             self.sql(Path(migration).read_text(encoding='utf-8'))
         driver = ROOT / 'tests/emr/request/download_producer_pg_test.cjs'
-        review = '1' if migration else '0'
+        # Main now installs Access Review through normal migrate deploy. Retain the optional pre-merge fixture input.
+        review = '1' if migration or (ROOT / 'api/prisma/migrations/20261025120000_access_review/migration.sql').is_file() else '0'
         env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
                'KIN_B2R_SPOOL': str(ROOT / 'tmp/download-producer-b2/spool' / self.token), 'KIN_DOWNLOAD_REVIEW': review}
         if self.image:
