@@ -142,24 +142,77 @@ class AcceptancePrep(unittest.TestCase):
             shared, voi = Dataset(), Dataset()
             voi.WindowCenter, voi.WindowWidth = [512,460,570], [800,680,980]
             shared.FrameVOILUTSequence = [voi]
+            orientation = Dataset()
+            orientation.ImageOrientationPatient = [1,0,0,0,1,0]
+            shared.PlaneOrientationSequence = [orientation]
             ds.SharedFunctionalGroupsSequence = [shared]
             ds.PerFrameFunctionalGroupsSequence = []
-            for spacing in ([.064867,.086917], [.1,.2]):
-                group, measures = Dataset(), Dataset()
+            for frame, spacing in enumerate(([.064867,.086917], [.1,.2])):
+                group, measures, position = Dataset(), Dataset(), Dataset()
                 measures.PixelSpacing = spacing
                 group.PixelMeasuresSequence = [measures]
+                position.ImagePositionPatient = [0,0,-frame]
+                group.PlanePositionSequence = [position]
                 ds.PerFrameFunctionalGroupsSequence.append(group)
             ds.save_as(path, write_like_original=False)
             self.assertEqual(original_display(ds, 2)['spacing_xy'], [.2,.1])
             row = {'study':str(ds.StudyInstanceUID),'series':str(ds.SeriesInstanceUID),'sop':str(ds.SOPInstanceUID),
                    'modality':'MG','path':str(path)}
             cell = {'image':f"wadors:/studies/{row['study']}/series/{row['series']}/instances/{row['sop']}/frames/1",
-                    'spacing':[.086917,.064867,1], 'windowLevel':{'windowCenter':512,'windowWidth':800}}
+                    'spacing':[.086917,.064867,1], 'windowLevel':{'windowCenter':512,'windowWidth':800},
+                    'imagePlane':{'rowCosines':[1,0,0], 'columnCosines':[0,1,0], 'imagePositionPatient':[0,0,0]},
+                    'camera':{'viewPlaneNormal':[0,0,1], 'focalPoint':[200,300,0]}}
             self.assertEqual(display_observations([cell],[row],tmp)[0]['status'], 'PASS')
             checks = display_observations([dict(cell, spacing=[1,1,1], windowLevel={'windowCenter':512,'windowWidth':1023})],[row],tmp)
             self.assertEqual(checks[0]['status'], 'FAIL')
             self.assertEqual(checks[0]['classification'], 'PRODUCT_OBSERVATION')
             self.assertEqual(len(checks[0]['failures']), 2)
+            # Correct pixels/spacing/VOI with the last frame's geometry was the
+            # real false PASS. Check camera and metadata independently.
+            for bad in (dict(cell, camera={'viewPlaneNormal':[0,0,1], 'focalPoint':[200,300,-1]}),
+                        dict(cell, imagePlane=dict(cell['imagePlane'], imagePositionPatient=[0,0,-1])),
+                        dict(cell, imagePlane=dict(cell['imagePlane'], rowCosines=[0,1,0]))):
+                check = display_observations([bad],[row],tmp)[0]
+                self.assertEqual(check['status'], 'FAIL')
+                self.assertEqual(check['classification'], 'PRODUCT_OBSERVATION')
+            missing = display_observations([dict(cell, imagePlane=None)],[row],tmp)[0]
+            self.assertEqual(missing['status'], 'NOT_RUN')
+
+    def test_frame_geometry_uses_requested_per_frame_plane_and_nearest_position(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds, path = self.fixture(Path(tmp), modality='MG', frames=2)
+            ds.PixelSpacing, ds.WindowCenter, ds.WindowWidth = [1,1], 512, 800
+            ds.ImageOrientationPatient, ds.ImagePositionPatient = [1,0,0,0,1,0], [0,0,0]
+            ds.PerFrameFunctionalGroupsSequence = [Dataset(), Dataset()]
+            orientation, position = Dataset(), Dataset()
+            orientation.ImageOrientationPatient = [0,1,0,.6,0,-.8]
+            position.ImagePositionPatient = [-.8,0,-.6]
+            ds.PerFrameFunctionalGroupsSequence[1].PlaneOrientationSequence = [orientation]
+            ds.PerFrameFunctionalGroupsSequence[1].PlanePositionSequence = [position]
+            ds.save_as(path, write_like_original=False)
+            row = {'sop':str(ds.SOPInstanceUID),'modality':'MG','path':str(path)}
+            cell = {'image':f"wadors:/studies/1/series/2/instances/{row['sop']}/frames/2",
+                    'spacing':[1,1], 'windowLevel':{'windowCenter':512,'windowWidth':800},
+                    'imagePlane':{'rowCosines':[0,1,0], 'columnCosines':[.6,0,-.8], 'imagePositionPatient':[-.8,0,-.6]},
+                    'camera':{'viewPlaneNormal':[.8,0,.6], 'focalPoint':[-.2,20,-1.4]}}
+            check = display_observations([cell],[row],tmp)[0]
+            self.assertEqual(check['status'], 'PASS')
+            self.assertEqual(check['expected']['orientation'], [0,1,0,.6,0,-.8])
+            for observed in check['geometry']['position_checks']:
+                self.assertEqual(observed['nearest_stored_frames'], [2])
+            # A midpoint is ambiguous, not a verified frame position.
+            tied = dict(cell, camera={'focalPoint':[-.4,0,-.3]})
+            self.assertEqual(display_observations([tied],[row],tmp)[0]['status'], 'NOT_RUN')
+
+    def test_missing_original_geometry_is_not_a_display_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds, path = self.fixture(Path(tmp), modality='MG')
+            ds.PixelSpacing, ds.WindowCenter, ds.WindowWidth = [1,1], 512, 800
+            ds.save_as(path, write_like_original=False)
+            row = {'sop':str(ds.SOPInstanceUID),'modality':'MG','path':str(path)}
+            cell = {'image':f"wadors:/studies/1/series/2/instances/{row['sop']}/frames/1",
+                    'spacing':[1,1], 'windowLevel':{'windowCenter':512,'windowWidth':800}}
+            self.assertEqual(display_observations([cell],[row],tmp)[0]['status'], 'NOT_RUN')
 
     def test_zoom_fit_identity_includes_viewport_and_frame(self):
         cell = {'viewportId':'a','image':'wadors:/studies/1/series/2/instances/3/frames/1'}

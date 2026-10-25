@@ -8,6 +8,7 @@ Screenshots/renderer facts are technical evidence; doctor acceptance remains sep
 import argparse
 from functools import lru_cache
 import json
+from math import sqrt
 from pathlib import Path
 import re
 import subprocess
@@ -31,7 +32,12 @@ SNAPSHOT = """() => {
     const pixels=canvas.getContext('2d')?.getImageData(0,0,canvas.width,canvas.height).data;
     if (pixels) for(let i=0;i<pixels.length;i+=4){min=Math.min(min,pixels[i]);max=Math.max(max,pixels[i]);}
     const voi = v.getProperties?.()?.voiRange;
+    const plane = window.cornerstone?.metaData?.get('imagePlaneModule', v.getCurrentImageId());
+    const vector = value => value ? Array.from(value) : null;
     return {image:v.getCurrentImageId(), index:v.getCurrentImageIdIndex?.(),
+      imagePlane:plane ? {rowCosines:vector(plane.rowCosines), columnCosines:vector(plane.columnCosines),
+        imagePositionPatient:vector(plane.imagePositionPatient),
+        rowPixelSpacing:plane.rowPixelSpacing, columnPixelSpacing:plane.columnPixelSpacing} : null,
       spacing:Array.from(v.getImageData?.()?.spacing || []), voiRange:voi || null,
       windowLevel:voi ? window.cornerstone.utilities.windowLevel.toWindowLevel(voi.lower,voi.upper) : null,
       viewportId:cell.viewportId, x:cell.x, y:cell.y,
@@ -87,11 +93,67 @@ def original_display(ds, frame):
     spacing = attribute('PixelMeasuresSequence', 'PixelSpacing')
     center = attribute('FrameVOILUTSequence', 'WindowCenter')
     width = attribute('FrameVOILUTSequence', 'WindowWidth')
+    orientation = attribute('PlaneOrientationSequence', 'ImageOrientationPatient')
+    position = attribute('PlanePositionSequence', 'ImagePositionPatient')
     def numbers(value):
         return [float(v) for v in value] if hasattr(value, '__iter__') and not isinstance(value, str) else [float(value)]
     return {'spacing_xy': list(reversed(numbers(spacing))) if spacing is not None else None,
+            'orientation': numbers(orientation) if orientation is not None else None,
+            'position': numbers(position) if position is not None else None,
             'windows': [{'windowCenter': c, 'windowWidth': w} for c, w in zip(numbers(center), numbers(width))]
             if center is not None and width is not None else []}
+
+
+def geometry_observation(ds, frame, cell):
+    expected = original_display(ds, frame)
+    plane = cell.get('imagePlane') or {}
+    camera = cell.get('camera') or {}
+    orientation = expected['orientation']
+    rendered_orientation = (plane['rowCosines'] + plane['columnCosines']
+                            if plane.get('rowCosines') and plane.get('columnCosines') else None)
+    result = {'orientation_status': 'NOT_RUN', 'position_status': 'NOT_RUN',
+              'imagePlane': plane, 'camera_normal': camera.get('viewPlaneNormal'),
+              'camera_focal_point': camera.get('focalPoint'), 'failures': []}
+    if orientation is not None and rendered_orientation is not None:
+        result['orientation_status'] = 'PASS' if rendered_orientation == orientation else 'FAIL'
+        if result['orientation_status'] == 'FAIL':
+            result['failures'].append('Rendered plane orientation differs from requested original frame')
+    if orientation is None or len(orientation) != 6:
+        return result
+    row, col = orientation[:3], orientation[3:]
+    normal = [row[1]*col[2]-row[2]*col[1], row[2]*col[0]-row[0]*col[2], row[0]*col[1]-row[1]*col[0]]
+    if not any(normal):
+        return result
+    length = sqrt(sum(v*v for v in normal))
+    normal = [v/length for v in normal]
+    positions = [original_display(ds, n)['position'] for n in range(1, int(ds.get('NumberOfFrames', 1)) + 1)]
+    if any(p is None or len(p) != 3 for p in positions):
+        return result
+    # Project onto the original normal: in-plane pan/zoom must not change the
+    # selected slice. Nearest stored frame is the oracle, not an invented mm cutoff.
+    def depth(point):
+        return sum(a*b for a, b in zip(point, normal))
+    depths = [depth(p) for p in positions]
+    result.update(stored_normal=normal, stored_depths=depths, requested_frame=frame)
+    sources = {'camera_focal_point': camera.get('focalPoint'),
+               'image_plane_position': plane.get('imagePositionPatient')}
+    checks = []
+    for name, point in sources.items():
+        if point is None or len(point) != 3:
+            continue
+        observed_depth = depth(point)
+        distances = [abs(observed_depth - d) for d in depths]
+        nearest = [n+1 for n, distance in enumerate(distances) if distance == min(distances)]
+        status = 'FAIL' if frame not in nearest else 'PASS' if nearest == [frame] else 'NOT_RUN'
+        checks.append({'source': name, 'depth': observed_depth, 'requested_depth': depths[frame-1],
+                       'depth_error': observed_depth-depths[frame-1], 'nearest_stored_frames': nearest,
+                       'status': status})
+        if status == 'FAIL':
+            result['failures'].append(name + ' is nearest another stored frame, not the requested frame')
+    result['position_checks'] = checks
+    result['position_status'] = ('FAIL' if any(c['status'] == 'FAIL' for c in checks) else
+                                 'PASS' if checks and all(c['status'] == 'PASS' for c in checks) else 'NOT_RUN')
+    return result
 
 
 def display_observations(cells, rows, source_root):
@@ -102,16 +164,21 @@ def display_observations(cells, rows, source_root):
         if not match or match.group(3) not in by_sop:
             continue
         row = by_sop[match.group(3)]
-        expected = original_display(original_header(str(Path(source_root) / row['path'])), int(match.group(4)))
+        ds = original_header(str(Path(source_root) / row['path']))
+        frame = int(match.group(4))
+        expected = original_display(ds, frame)
+        geometry = geometry_observation(ds, frame, cell)
         observed = {'spacing_xy': cell.get('spacing', [])[:2], 'window': cell.get('windowLevel'),
                     'voiRange': cell.get('voiRange')}
-        failures = []
+        failures = list(geometry['failures'])
         if expected['spacing_xy'] is not None and observed['spacing_xy'] != expected['spacing_xy']:
             failures.append('Rendered spacing differs from original PixelSpacing')
         if expected['windows'] and observed['window'] not in expected['windows']:
             failures.append('Rendered VOI differs from every stored WindowCenter/WindowWidth pair')
-        checks.append({'image': cell['image'], 'expected': expected, 'observed': observed,
-                       'status': 'FAIL' if failures else 'PASS' if expected['spacing_xy'] and expected['windows'] else 'NOT_RUN',
+        complete = (expected['spacing_xy'] and expected['windows'] and
+                    geometry['orientation_status'] == geometry['position_status'] == 'PASS')
+        checks.append({'image': cell['image'], 'expected': expected, 'observed': observed, 'geometry': geometry,
+                       'status': 'FAIL' if failures else 'PASS' if complete else 'NOT_RUN',
                        'classification': 'PRODUCT_OBSERVATION' if failures else 'ORIGINAL_DISPLAY_CHECK',
                        'failures': failures})
     return checks
