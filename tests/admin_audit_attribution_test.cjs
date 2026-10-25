@@ -4446,14 +4446,15 @@ function scanAuditWrites(sources = auditSources()) {
       note(node, 'raw SQL fragment', 'unresolved', `\`${snippet(node)}\`: SQL whose text the program does not fix`, 'F02');
     }
   }
+  const isDestructuringAssignment = node => ts.isObjectLiteralExpression(node) && ts.isBinaryExpression(node.parent)
+    && node.parent.operatorToken.kind === K.EqualsToken && node.parent.left === node;
   function visit(node) {
     if (isAccess(node)) access(node);
     else if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
       let declaration = node.parent;
       while (ts.isBindingElement(declaration) || ts.isObjectBindingPattern(declaration) || ts.isArrayBindingPattern(declaration)) declaration = declaration.parent;
       destructuring(node, node.propertyName ?? node.name, ts.isVariableDeclaration(declaration) ? declaration.initializer : null, !!node.dotDotDotToken);
-    } else if (ts.isObjectLiteralExpression(node) && ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === K.EqualsToken
-      && node.parent.left === node) {
+    } else if (isDestructuringAssignment(node)) {
       for (const member of node.properties) {
         destructuring(member, ts.isSpreadAssignment(member) ? null : member.name, node.parent.right, ts.isSpreadAssignment(member));
       }
@@ -4475,6 +4476,7 @@ function scanAuditWrites(sources = auditSources()) {
     const look = node => {
       const named = isAccess(node) ? w1(node).key
         : ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken ? w1(node.propertyName ?? node.name).key
+        : (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && isDestructuringAssignment(node.parent) ? w1(node.name).key
         : ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text
         : ts.isTemplateExpression(node) ? [node.head.text, ...node.templateSpans.map(span => span.literal.text)].join('') : undefined;
       if (named !== undefined && TABLE_WORDS.test(named)) {
@@ -4694,13 +4696,31 @@ test('D1816 scope: an EMR-D file that names AuditLog leaves the scope basis and 
   const file = 'api/src/emr-clinical/syn-store.ts';
   const head = "import type { Prisma } from '@prisma/client';\nexport async function put(tx: Prisma.TransactionClient, id: string) {\n";
   const clean = scanAuditWrites([{ file, text: head + '  await tx.$executeRaw`INSERT INTO emr_clinical.syn(id) VALUES (${id})`;\n}\n' }]);
-  assert.deepEqual([clean.unresolved, clean.sites], [[], []]);
+  assert.deepEqual(clean.unresolved, []);
+  assert.equal(clean.sites.length, 0);
   for (const body of ["  await tx.auditLog.create({ data: { action: 'syn.d' } });\n", "  await tx['auditLog'].create({ data: { action: 'syn.d' } });\n",
     "  const { auditLog } = tx; await auditLog.create({ data: { action: 'syn.d' } });\n",
     "  const { auditLog: audit } = tx; await audit.create({ data: { action: 'syn.d' } });\n",
+    "  let auditLog; ({ auditLog } = tx); await auditLog.create({ data: { action: 'syn.d' } });\n",
+    "  let audit; ({ auditLog: audit } = tx); await audit.create({ data: { action: 'syn.d' } });\n",
+    "  class Store { audit; constructor() { ({ auditLog: this.audit } = tx); } async put() { await this.audit.create({ data: { action: 'syn.d' } }); } }\n",
+    "  let auditLog; ({ auditLog = null } = tx); await auditLog.create({ data: { action: 'syn.d' } });\n",
+    "  let audit; ({ ['auditLog']: audit } = tx); await audit.create({ data: { action: 'syn.d' } });\n",
+    "  const key = 'auditLog'; let audit; ({ [key]: audit } = tx); await audit.create({ data: { action: 'syn.d' } });\n",
+    "  async function write({ auditLog }: Prisma.TransactionClient) { await auditLog.create({ data: { action: 'syn.d' } }); }\n",
+    "  const { nested: { auditLog } } = { nested: tx }; await auditLog.create({ data: { action: 'syn.d' } });\n",
     '  await tx.$executeRaw`INSERT INTO "AuditLog"(action) VALUES (${id})`;\n']) {
     const named = scanAuditWrites([{ file, text: head + body + '}\n' }]);
     assert.ok(named.unresolved.some(entry => entry.startsWith(`${file}:3 EMR-D naming AuditLog:`)), body + named.unresolved.join('\n'));
+  }
+  for (const body of [
+    '  let studyState; ({ studyState } = tx); await studyState.findMany();\n',
+    '  let auditLog; ({ studyState: auditLog } = tx); await auditLog.findMany();\n',
+    '  class Store { study; constructor() { ({ studyState: this.study } = tx); } }\n',
+  ]) {
+    const other = scanAuditWrites([{ file, text: head + body + '}\n' }]);
+    assert.deepEqual(other.unresolved, [], body);
+    assert.equal(other.sites.length, 0, body);
   }
 });
 
