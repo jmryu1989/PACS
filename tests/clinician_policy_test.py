@@ -70,11 +70,13 @@ ROOT = Path(__file__).resolve().parents[1]
 API = ROOT / "api" / "src"
 # D1816: B2 replaced these modules. Their runtime/route tests own them;
 # the retired B1 closed-source provenance grammar does not constrain their code.
+# emr-viewing/ (Module A A1, #223) assembles a Nest DynamicModule like app.module.ts and is
+# owned by tests/emr/a; its `module:` key is Nest's DynamicModule field, not the CommonJS loader.
 B2_REPLACED = frozenset({"admin.controller.ts", "admin.service.ts", "auth.service.ts",
                          "pacs.service.ts", "app.module.ts", "main.ts", "member-rights-import.ts"})
 def legacy_source_contract(path):
     relative = path.relative_to(API).as_posix() if path.is_relative_to(API) else path.as_posix()
-    return relative not in B2_REPLACED and not relative.startswith(("emr-runtime/", "emr-retention/"))
+    return relative not in B2_REPLACED and not relative.startswith(("emr-runtime/", "emr-retention/", "emr-viewing/"))
 
 POLICY = API / "clinician-policy.ts"
 GUARD = API / "auth.guard.ts"
