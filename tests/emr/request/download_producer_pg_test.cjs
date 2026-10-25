@@ -222,7 +222,9 @@ async function main() {
     assert.equal((await operation(uncertain)).status, 'sending', 'failed result append never claims Sent');
     assert.ok(!(await events(uncertain)).some(e => e.action === 'transfer-ended'));
     assert.equal(await witness.auditLog.count({ where: { action: 'original.download.result', detail: { contains: uncertain } } }), 0);
-    console.log('PASS actual download bytes; four B2 rows; access-review query; replay; PG rollback of every stage; interrupted supply');
+    console.log('PASS actual download bytes; four B2 rows; investigation replay; ' +
+      (process.env.KIN_DOWNLOAD_REVIEW === '1' ? 'access-review query; ' : 'access-review query NOT_RUN (no migration); ') +
+      'replay; PG rollback of every stage; interrupted supply');
   } finally {
     if (app) await app.close();
     await runtime.stop(Date.now() + 15000); await witness.$disconnect();
