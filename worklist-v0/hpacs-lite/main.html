@@ -1022,8 +1022,8 @@
        안에서 스크롤해 판독문 칸을 밀어내지 않는다. 글자는 12px 이상, 상태는 색과 함께 늘 글자로 쓴다. */
     #cvr-inbox-p { flex: none; font-size: 12px; color: var(--kin-text); background: var(--kin-panel); border-top: 1px solid var(--kin-line2); }
     /* D1822 follow-up (Minhoon 2-2): a received report automatically opens the existing overlay. The report column keeps its
-       size; the list is anchored to the column's bottom, no taller than the column, scrolls inside, and keeps its bar (Hide
-       Received) on top. Read/ACK failures mark the bar (data-attention) in the existing CVR amber. */
+       size; the list scrolls inside and keeps its bar (Hide Received) on top. An arrival moves the overlay away from the
+       focused field without scrolling or resizing the editor. Read/ACK failures mark the bar (data-attention) in the existing CVR amber. */
     #cvr-inbox-p[data-attention] > .cvr-inbox-bar { box-shadow: inset 3px 0 #d29a3a; }
     #cvr-inbox-p[data-attention] #cvr-inbox-toggle { border-color: #d29a3a; color: #f0c27a; }
     .report-p { position: relative; }
@@ -1035,6 +1035,8 @@
       overflow: auto; z-index: 5; box-shadow: 0 -6px 18px #0009; }
     #cvr-inbox-p:has(> #cvr-inbox-body:not([hidden])) > .cvr-inbox-bar { position: sticky; top: 0; z-index: 1;
       background: var(--kin-panel); }
+    /* An arrival can move above the active field when the bottom of the report column would cover typing. */
+    #cvr-inbox-p.cvr-inbox-arrival:has(> #cvr-inbox-body:not([hidden])) { position: fixed; right: auto; bottom: auto; max-height: 100vh; }
     #cvr-inbox-p[hidden], #cvr-inbox-p [hidden] { display: none !important; }
     .cvr-inbox-bar { display: flex; align-items: center; gap: 6px; padding: 3px 8px; min-width: 0; white-space: nowrap; }
     #cvr-inbox-badge { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--kin-muted); }
@@ -1688,7 +1690,7 @@
           <div class="cvr-inbox-bar">
             <b id="cvr-inbox-title" tabindex="-1">Critical Results</b>
             <span id="cvr-inbox-badge" role="status" aria-live="polite"></span>
-            <button id="cvr-inbox-toggle" type="button" aria-expanded="false" aria-controls="cvr-inbox-body">Show Received</button>
+            <button id="cvr-inbox-toggle" type="button" aria-expanded="false" aria-controls="cvr-inbox-body" aria-keyshortcuts="Escape" title="Esc로 닫고 입력하던 위치로 돌아갑니다.">Show Received</button>
             <button id="cvr-inbox-refresh" type="button" title="받은 목록을 서버에서 다시 읽습니다. 읽기만 하며 어떤 전달도 바꾸지 않습니다.">Refresh</button>
           </div>
           <div id="cvr-inbox-body" role="region" aria-label="Critical Results Details" hidden>

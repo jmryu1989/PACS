@@ -1790,7 +1790,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.servers = [s]
         moved = s.add(rec(31, case="R3"))
         s.add(rec(32, case="R4"), rec(33, case="R3", full=False), rec(34, case="R4", full=False))
-        # D1822: on the reading page the body opens on Show Received only.
+        # Existing records on page load stay folded; later arrivals open the received overlay.
         self.open_panel(fold_open=True)
         for marker in ("SYN-PT-31", "SYN-PT-32"):
             seen = self.row(marker)
@@ -2230,7 +2230,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.servers = [s]
         s.add(rec(141, case="R2", source={"version": 1, "action": "save", "author": "syn-rad@kin", "at": "2026-09-28T00:30:00.000Z"}))
         self.open_panel()
-        # Minhoon 2-2: the first pending report opens the overlay automatically.
+        # Loading existing pending reports is not an arrival; the doctor can open them explicitly.
+        expect(self.region().get_by_role("button", name="Show Received", exact=True)).to_be_visible()
+        self.press("Show Received")
         expect(self.region().get_by_role("button", name="Hide Received", exact=True)).to_be_visible()
         self.assertIsNone(self.attention())
         seen = self.row("SYN-PT-141")
@@ -2670,8 +2672,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual([f"/api/critical-results/{rid(174)}"], [q["path"] for q in self.requests("read")])
         self.press("Hide Received")
         self.assertEqual({"Show Received", "Refresh"}, {b[0] for b in self.view()["buttons"]})
-        # P-02: a failed read shows a word with no number and marks the bar (D1822: the body no longer opens by itself on
-        # the reading page); Show Received shows the failure and Refresh.
+        # P-02: a failed read marks the bar without opening the body; Show Received shows the failure and Refresh.
         self.server = RecipientServer([INSTITUTION, RAD["sub"]])
         self.servers.append(self.server)
         self.fault("list", status=500, body={"message": "SYN failure"})
@@ -2682,12 +2683,14 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.press("Show Received")
         self.assertIn("SYN failure", self.status())
         self.assertIn(["Hide Received", False, None, "true"], self.view()["buttons"])
-        # The pair: pending 1 opens the overlay automatically.
+        # The pair: existing pending 1 stays folded on load and can be opened manually.
         s = self.server = RecipientServer([INSTITUTION, RAD["sub"]])
         self.servers.append(s)
         s.add(rec(175, case="R2"))
         self.open_panel()
         self.assertIsNone(self.attention())
+        self.assertIn(["Show Received", False, None, "false"], self.view()["buttons"])
+        self.press("Show Received")
         self.assertIn(["Hide Received", False, None, "true"], self.view()["buttons"])
         g = self.page.evaluate(self.GEOMETRY)
         self.assertGreater(g["shown"]["panel"], 2 * g["shown"]["button"], "the open body is measured too")

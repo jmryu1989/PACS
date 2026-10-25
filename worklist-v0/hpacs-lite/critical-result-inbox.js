@@ -369,7 +369,62 @@
     // D1822 follow-up (Minhoon 2-2): arrivals open the existing overlay without moving editor focus. Read/ACK failures
     // still mark the summary bar; they are not arrivals. Show Received clears that mark.
     let attention = false;
-    const openBody = () => { if (!bodyOpen) attention = true; };
+    const markAttention = () => { if (!bodyOpen) attention = true; };
+    let arrivalOpen = false, returnFocus = null, revealId = null;
+
+    function closeBody(restore = true) {
+      bodyOpen = false;
+      attention = false;
+      const target = arrivalOpen && returnFocus;
+      arrivalOpen = false;
+      paint();
+      // Native selection keeps following edits while the overlay is open; an opening-time snapshot would rewind it.
+      if (restore && target?.isConnected && !target.disabled && target.getClientRects().length) target.focus({ preventScroll: true });
+    }
+
+    function placeArrival() {
+      if (!fold || ended) return;
+      region.classList.toggle('cvr-inbox-arrival', bodyOpen && arrivalOpen);
+      if (!bodyOpen || !arrivalOpen) {
+        for (const name of ['left', 'top', 'width']) region.style.removeProperty(name);
+        return;
+      }
+      const column = region.parentElement.getBoundingClientRect();
+      region.style.width = `${column.width}px`;
+      let left = column.left;
+      const height = region.getBoundingClientRect().height;
+      let top = Math.max(0, Math.min(column.bottom, innerHeight) - height);
+      // Protect the visible field, including a scrolled/wrapped caret. Move only the floating list, never the editor.
+      const target = returnFocus?.isConnected && returnFocus.getClientRects().length ? returnFocus.getBoundingClientRect().toJSON() : null;
+      if (target) {
+        target.top = Math.max(0, target.top);
+        target.bottom = Math.min(innerHeight, target.bottom);
+        for (let parent = returnFocus.parentElement; parent; parent = parent.parentElement) {
+          if (!/auto|scroll|hidden|clip/.test(getComputedStyle(parent).overflowY)) continue;
+          const edge = parent.getBoundingClientRect().top + parent.clientTop;
+          target.top = Math.max(target.top, edge);
+          target.bottom = Math.min(target.bottom, edge + parent.clientHeight);
+        }
+      }
+      if (target && top < target.bottom && top + height > target.top) {
+        if (target.top >= height) top = target.top - height;
+        else if (innerHeight - target.bottom >= height) top = target.bottom;
+        else if (column.left >= column.width) left = column.left - column.width;
+        else if (innerWidth - column.right >= column.width) left = column.right;
+      }
+      region.style.left = `${left}px`;
+      region.style.top = `${top}px`;
+    }
+
+    function revealArrival() {
+      if (!fold || !revealId) return;
+      const row = rowNodes.get(revealId)?.element;
+      revealId = null;
+      if (!row) return;
+      // scrollIntoView would also move the report pane and the doctor's caret.
+      region.scrollTop = 0;
+      body.scrollTop += row.getBoundingClientRect().top - body.getBoundingClientRect().top - body.clientTop;
+    }
     // 목록 수준의 수락 기준(파일 머리의 요청 식별과 수락 기준): 지금 체인의 첫 쪽을 정한 요청 번호와, 체인이 마지막으로 받아들인 쪽의
     // 요청 번호(다음 More의 부모). 소속·쪽 범위·nextCursor·배지 수·ready·안내는 이 두 번호로만 바뀐다. 0은 이 보기에 받아들인 쪽이 없음이다.
     let chainGen = 0, tailGen = 0;
@@ -587,17 +642,22 @@
         listEnd = page.low;
         // A new report can arrive while another leaves pending, keeping the count unchanged. Remember the newest
         // received key across refreshes so that arrival opens once, while repeated reads and older pages respect Hide.
-        let arrived = false;
+        const previousNewest = latestReceived;
+        let arrived = null;
         for (const item of read.items) {
           const key = keyOf(item);
-          if (!latestReceived || order(key, latestReceived) < 0) {
-            arrived ||= item.state === 'created';
-            latestReceived = key;
-          }
+          if (lastPending !== null && (!previousNewest || order(key, previousNewest) < 0) && item.state === 'created') arrived ||= item.id;
+          if (!latestReceived || order(key, latestReceived) < 0) latestReceived = key;
         }
-        if (arrived || (lastPending === null ? read.pending > 0 : read.pending > lastPending)) {
+        // The first successful list establishes the baseline, including unacknowledgeable stubs. Loading is not arrival.
+        if (arrived || (lastPending !== null && read.pending > lastPending)) {
+          if (!bodyOpen) {
+            arrivalOpen = true;
+            returnFocus = region.contains(document.activeElement) ? null : document.activeElement;
+          }
           bodyOpen = true;
           attention = false;
+          if (!body?.contains(document.activeElement)) revealId = arrived || read.items.find(item => item.state === 'created')?.id;
         }
         lastPending = pending = read.pending;
         listPhase = 'ready';
@@ -627,7 +687,7 @@
       boundary();
       listPhase = 'failed';
       listError = detail;
-      openBody();
+      markAttention();
       paint();
     }
 
@@ -696,7 +756,7 @@
     function localRefusal(attempt, reason) {
       attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';
       attempt.detail = reason;
-      openBody();
+      markAttention();
       paint();
     }
 
@@ -781,7 +841,7 @@
 
     function unknown(attempt, retry, detail, later) {
       Object.assign(attempt, { state: 'unknown', detail, later, retried: attempt.retried || retry });
-      openBody();
+      markAttention();
       paint();
       if (retry) confirmByRead(attempt);
     }
@@ -963,7 +1023,8 @@
         actions.append(ack);
       }
       if (model.replacement) actions.append(button('Open Replacement', () => openReplacement(model.key, model.replacement)));
-      if (actions.childElementCount) row.append(actions);
+      // Keep the explicit acknowledgement beside the received heading even when the report itself is long.
+      if (actions.childElementCount) row.insertBefore(actions, head.nextSibling);
       return row;
     }
 
@@ -1079,6 +1140,8 @@
       const target = rows.moveTo || lines.moveTo || headOf(lineNodes, rows.lost) || headOf(rowNodes, lines.lost);
       if (target) target.focus();
       else if (rows.lost !== null || lines.lost !== null || moreLost) title.focus();
+      placeArrival();
+      revealArrival();
     }
 
     // ── 세션 경계 ──
@@ -1160,12 +1223,33 @@
     });
     // More는 이 보기에 나가 있는 목록 요청이 없을 때만 보낸다: 같은 부모의 More가 겹치지 않고, 나가 있는 첫 쪽이 체인을 바꾸면 그 More는 버려진다.
     moreButton.addEventListener('click', () => { if (!listing.size) loadList(true); });
-    if (fold) toggle.addEventListener('click', () => {
-      if (ended) return;
-      bodyOpen = !bodyOpen;
-      attention = false;
-      paint();
-    });
+    if (fold) {
+      toggle.addEventListener('click', () => {
+        if (ended) return;
+        if (bodyOpen) closeBody();
+        else { bodyOpen = true; attention = false; paint(); }
+      });
+      document.addEventListener('focusin', event => {
+        if (ended || !arrivalOpen || region.contains(event.target) || event.target.closest('dialog, [role="dialog"]')) return;
+        returnFocus = event.target;
+        placeArrival();
+      });
+      document.addEventListener('keydown', event => {
+        if (ended || !bodyOpen || event.defaultPrevented || event.isComposing || blocked()) return;
+        if ([...document.querySelectorAll('dialog[open], [role="dialog"][aria-modal="true"], .modal.show')]
+          .some(element => element.getClientRects().length)) return;
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeBody();
+        } else if (event.key === 'Tab' && arrivalOpen && !region.contains(event.target)) {
+          // Let native Tab reach the next control after uncovering it; no detour through covered report actions.
+          closeBody(false);
+        }
+      });
+      window.addEventListener('resize', placeArrival);
+      document.addEventListener('input', event => { if (event.target === returnFocus) placeArrival(); });
+      document.addEventListener('scroll', event => { if (!region.contains(event.target)) placeArrival(); }, true);
+    }
     // 문서가 보이고 영역이 서 있는 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다) 알림도 띄우지 않는다.
     function startTimers() {
       clearInterval(timer);
