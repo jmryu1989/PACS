@@ -530,7 +530,7 @@
       // W5 (설계 v5 §1.6): in Related Report mode the report commands wait for Back, with the reason said on each control;
       // an unsettled explicit Related insert holds the decisions that would carry its text. Prev/Next stay: they leave through
       // the move gate. Placed before the identity rule below, whose titles then stand.
-      const relatedWhy = relatedMode?.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
+      const relatedWhy = relatedMode.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
       if (relatedWhy)
         for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
           "#b-prelim"]) {
