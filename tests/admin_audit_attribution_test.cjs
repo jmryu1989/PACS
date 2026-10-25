@@ -967,6 +967,9 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    the delegate, its method, `data`, `action`, a helper and any member. Parentheses, `as`, `satisfies`, `!` and `<T>` are
 //    notation: what they hold is read, the type they state is never evidence. The last definition of a property wins; a
 //    later spread or a key W1 does not fix that may set it leaves it unresolved.
+//    R227-MAIN-01: create's data may also be held by a function-local const or a parameter of a W3 private/local helper
+//    of the writer's file, through every fixed call. Holders are used only as create data, helper arguments, const
+//    aliases or member reads (never written or called); other uses and spread arguments leave the write unresolved.
 //  W2 action values: a string literal, a template without interpolation, a const of the same file or of one direct import
 //    (not a re-export or a namespace) holding one of these; (i) `+` and templates of W2 values; (ii) both sides of ?:;
 //    (iii) a let of a function, its initializer and every plain assignment W2 values; (iv) a binding nothing changes that
@@ -1255,7 +1258,7 @@ function auditProgram(sources) {
  * The audit candidates of `sources` (default: api/src as checked out). `sites` are the resolved writes with the actions
  * and dynamic prefixes each can record, the basis of each and the W rules it took (`rules`); `candidates` is every
  * candidate with its status, reason and rule; `unresolved` the unresolved ones. A site and a candidate also carry (not
- * enumerable) their offset, and a create site its call, its action property and the literals its actions come from, for
+ * enumerable) their offset, and a create site its call, data and action properties and the literals its actions come from, for
  * the controls that rewrite them. Every positive judgement below is one of the entries W1-W6 name; anything else is
  * unresolved with where and why.
  */
@@ -4346,7 +4349,7 @@ function scanAuditWrites(sources = auditSources()) {
 
   // ── the writes ──
   const READS = new Set(['findMany', 'findFirst', 'findUnique', 'findFirstOrThrow', 'findUniqueOrThrow', 'count', 'aggregate', 'groupBy']);
-  function record(node, via, found, action, basis = [], fragments = [], rules = []) {
+  function record(node, via, found, actionProperties, basis = [], fragments = [], rules = [], data = null) {
     const unread = found.filter(value => value.text === undefined && value.prefix === undefined);
     if (!found.length || unread.length) {
       return note(node, via, 'unresolved', !found.length ? 'its action has no value in the program'
@@ -4358,7 +4361,8 @@ function scanAuditWrites(sources = auditSources()) {
       basis: [...basis, ...origins.map(origin => `${where(origin)} ${JSON.stringify(origin.text)}`),
         ...found.filter(value => value.prefix !== undefined).map(value => `${value.prefix}… then ${value.why}`)],
       rules: [...new Set([...rules, ...found.flatMap(value => value.rules)])].sort() };
-    Object.defineProperties(site, { call: { value: node }, action: { value: action }, origins: { value: origins }, start: { value: node.getStart() },
+    Object.defineProperties(site, { call: { value: node }, actionProperties: { value: actionProperties ?? [] }, data: { value: data },
+      origins: { value: origins }, start: { value: node.getStart() },
       fragments: { value: fragments } });
     sites.push(site);
     note(node, via, 'resolved', site.basis.join('; '), site.rules.join('; '));
@@ -4378,19 +4382,88 @@ function scanAuditWrites(sources = auditSources()) {
     }
     return found;
   }
+  /** R227-MAIN-01: retained AuditLog data may travel through function-local consts and W3 helper parameters.
+   * Like W5's predicate holders, every holder's uses must stay within the forms read here. Member reads also serve
+   * the download helper's B2 projection; a write, member call or opaque use leaves the legacy action unresolved. */
+  function dataSources(expression, writer, seen = new Set()) {
+    const node = bare(expression);
+    if (ts.isObjectLiteralExpression(node)) return [{ object: node }];
+    if (!ts.isIdentifier(node)) return [{ unknown: `${where(node)}: data is not an object literal or a fixed holder` }];
+    const declarations = symbolAt(node)?.declarations ?? [];
+    if (declarations.length !== 1) return [{ unknown: `${where(node)}: data holder does not have one declaration` }];
+    const [declaration] = declarations;
+    if (seen.has(declaration)) return [{ unknown: `${where(node)}: data holder is reached again through its calls` }];
+    if (declaration.getSourceFile() !== writer.getSourceFile()) return [{ unknown: `${where(node)}: data is declared in another file than the write` }];
+    const escape = dataHolder(declaration);
+    if (escape) return [{ unknown: `${where(node)}: data ${escape}` }];
+    const next = new Set(seen).add(declaration);
+    if (isConst(declaration) && ts.isIdentifier(declaration.name) && declaration.initializer
+      && ts.findAncestor(declaration, ts.isFunctionLike)) return dataSources(declaration.initializer, writer, next);
+    if (!ts.isParameter(declaration) || !ts.isIdentifier(declaration.name) || declaration.dotDotDotToken
+      || !ts.isFunctionLike(declaration.parent)) return [{ unknown: `${where(node)}: data is not a function-local const or a helper parameter` }];
+    const owner = declaration.parent, kind = helperKind(owner);
+    if (!['private method', 'function of its file', 'const function'].includes(kind.kind)) {
+      return [{ unknown: `${where(node)}: data is a parameter of ${describe(owner)}, ${kind.why ?? 'not a W3 helper'}` }];
+    }
+    const { calls: found, escapes } = callsOf(owner, 'w3');
+    if (escapes.length || !found.length) return [{ unknown: `${where(node)}: data helper has ${escapes.length ? `unfixed uses: ${escapes.join(', ')}` : 'no calls'}` }];
+    const index = owner.parameters.indexOf(declaration) - shift(owner);
+    return found.flatMap(call => {
+      if (call.arguments.some(ts.isSpreadElement)) return [{ unknown: `${where(call)}: a spread argument to the data helper` }];
+      if (call.getSourceFile() !== writer.getSourceFile()) return [{ unknown: `${where(call)}: data comes from another file than the write` }];
+      const argument = call.arguments[index] ?? declaration.initializer;
+      return argument ? dataSources(argument, writer, next) : [{ unknown: `${where(call)}: no data argument` }];
+    });
+  }
+  function dataHolder(declaration) {
+    const queue = [declaration], seen = new Set();
+    while (queue.length) {
+      const holder = queue.shift();
+      if (seen.has(holder)) continue;
+      seen.add(holder);
+      for (const reference of references(symbolAt(holder.name))) {
+        const node = lifted(reference), parent = node.parent;
+        if (isConst(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) { queue.push(parent); continue; }
+        if ((ts.isPropertyAssignment(parent) && parent.initializer === node || ts.isShorthandPropertyAssignment(parent))
+          && w1(parent.name).key === 'data' && ts.isObjectLiteralExpression(parent.parent)) {
+          const argument = outer(parent.parent), call = argument.parent, method = ts.isCallExpression(call) && bare(call.expression);
+          if (method && call.arguments.length === 1 && call.arguments[0] === argument && isAccess(method)
+            && w1(method).key === 'create' && isAccess(bare(method.expression)) && w1(bare(method.expression)).key === 'auditLog') continue;
+        }
+        if (ts.isCallExpression(parent) && parent.arguments.includes(node)) {
+          const owners = callees(parent, 'w3'), targets = owners && argumentTargets(parent, parent.arguments.indexOf(node), 'w3');
+          if (!parent.arguments.some(ts.isSpreadElement) && owners?.length && targets && owners.every(owner =>
+            owner.getSourceFile() === declaration.getSourceFile()
+            && ['private method', 'function of its file', 'const function'].includes(helperKind(owner).kind)
+            && callsOf(owner, 'w3').escapes.length === 0)) { queue.push(...targets); continue; }
+          return `is handed to an unfixed helper at ${where(parent)}`;
+        }
+        if (isAccess(parent) && parent.expression === node) {
+          let member = outer(parent);
+          while (!mutated(member) && isAccess(member.parent) && member.parent.expression === member) member = outer(member.parent);
+          if (mutated(member)) return `is written at ${where(member.parent)}`;
+          if ((ts.isCallExpression(member.parent) || ts.isNewExpression(member.parent)) && member.parent.expression === member
+            || ts.isTaggedTemplateExpression(member.parent) && member.parent.tag === member) return `has a member called at ${where(member.parent)}`;
+          continue;
+        }
+        return `is written or handed on at ${where(parent)}`;
+      }
+    }
+    return null;
+  }
   function create(call) {
     const argument = call.arguments.length === 1 ? bare(call.arguments[0]) : null;
     if (!argument || !ts.isObjectLiteralExpression(argument)) return record(call, 'auditLog.create', [unknown('its argument is not one object literal')]);
     const data = property(argument, 'data');
-    const object = data.node && bare(data.node);
-    if (!object || !ts.isObjectLiteralExpression(object)) {
-      return record(call, 'auditLog.create', [unknown(`data ${data.why ?? 'is not an object literal'}`)]);
-    }
-    const action = property(object, 'action');
-    const found = action.node ? values(action.node) : action.shorthand ? named(symbolAt(action.shorthand.name), action.shorthand.name)
-      : [unknown(`action ${action.why}`)];
-    record(call, 'auditLog.create', found, action, action.member ? [`action \`${snippet(action.member)}\``] : [], [],
-      ['W1 data and action', ...(action.rule ? [action.rule] : [])]);
+    const expression = data.node ?? data.shorthand?.name;
+    const sources = expression ? dataSources(expression, call) : [{ unknown: `data ${data.why}` }];
+    const actions = sources.filter(source => source.object).map(source => property(source.object, 'action'));
+    const found = union(sources.filter(source => source.unknown).map(source => unknown(source.unknown)), ...actions.map(action =>
+      action.node ? values(action.node) : action.shorthand ? named(symbolAt(action.shorthand.name), action.shorthand.name)
+        : [unknown(`action ${action.why}`)]));
+    record(call, 'auditLog.create', found, actions,
+      actions.filter(action => action.member).map(action => `action \`${snippet(action.member)}\``), [],
+      ['W1 data and action', ...actions.flatMap(action => action.rule ? [action.rule] : [])], data);
   }
   /** `x.auditLog` (any key W1 fixes): only the receiver of a called method; `create` is a write this check reads. */
   function delegate(access, rule) {
@@ -4446,8 +4519,9 @@ function scanAuditWrites(sources = auditSources()) {
       note(node, 'raw SQL fragment', 'unresolved', `\`${snippet(node)}\`: SQL whose text the program does not fix`, 'F02');
     }
   }
-  const isDestructuringAssignment = node => ts.isObjectLiteralExpression(node) && ts.isBinaryExpression(node.parent)
-    && node.parent.operatorToken.kind === K.EqualsToken && node.parent.left === node;
+  const isDestructuringAssignment = node => ts.isObjectLiteralExpression(node) && (destructured(node)
+    || ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === K.EqualsToken && node.parent.left === node
+    || (ts.isForOfStatement(node.parent) || ts.isForInStatement(node.parent)) && node.parent.initializer === node);
   function visit(node) {
     if (isAccess(node)) access(node);
     else if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
@@ -4456,7 +4530,8 @@ function scanAuditWrites(sources = auditSources()) {
       destructuring(node, node.propertyName ?? node.name, ts.isVariableDeclaration(declaration) ? declaration.initializer : null, !!node.dotDotDotToken);
     } else if (isDestructuringAssignment(node)) {
       for (const member of node.properties) {
-        destructuring(member, ts.isSpreadAssignment(member) ? null : member.name, node.parent.right, ts.isSpreadAssignment(member));
+        destructuring(member, ts.isSpreadAssignment(member) ? null : member.name,
+          ts.isBinaryExpression(node.parent) ? node.parent.right : null, ts.isSpreadAssignment(member));
       }
     } else if (ts.isCallExpression(node) || ts.isNewExpression(node)) fragment(node);
     if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && namesTable(node.text)) naming.push(node);
@@ -4669,6 +4744,48 @@ function verdict(scan, table = productTable(), listing = null) {
 }
 const failing = found => Object.keys(VERDICT).filter(name => found[name].length > 0);
 
+test('legacy create data: fixed holders preserve all actions; mutation and unfixed uses stay unresolved', () => {
+  const head = "import type { Prisma } from '@prisma/client';\n";
+  const row = action => `{ actor: 'a', action: '${action}', target: 't', detail: '{}' }`;
+  const helper = "async function write(tx: Prisma.TransactionClient, audit: any) { JSON.parse(audit.detail); await tx.auditLog.create({ data: audit }); }\n";
+  const run = body => `export async function run(tx: Prisma.TransactionClient) { ${body} }`;
+  const cases = [
+    [helper + run(`await write(tx, ${row('syn.a')}); await write(tx, ${row('syn.b')});`), ['syn.a', 'syn.b']],
+    [run(`const audit = ${row('syn.a')}; const data = audit; await tx.auditLog.create({ data });`), ['syn.a']],
+    [helper + run(`const audit = ${row('syn.a')}; await write(tx, audit);`), ['syn.a']],
+    [`class Store { private async write(tx: Prisma.TransactionClient, audit: any) { const target = audit.target; await tx.auditLog.create({ data: audit }); }
+      async run(tx: Prisma.TransactionClient) { await this.write(tx, ${row('syn.a')}); } }`, ['syn.a']],
+    [`const write = async (tx: Prisma.TransactionClient, audit: any) => { await tx.auditLog.create({ data: audit }); };`
+      + run(`await write(tx, ${row('syn.a')});`), ['syn.a']],
+    [helper + `function forward(tx: Prisma.TransactionClient, audit: any) { return write(tx, audit); }`
+      + run(`const audit = ${row('syn.a')}; forward(tx, audit);`), ['syn.a']],
+  ];
+  for (const [body, actions] of cases) {
+    const scan = scanAuditWrites([{ file: 'api/src/syn-data-holder.ts', text: head + body }]);
+    assert.deepEqual(scan.unresolved, [], body);
+    assert.deepEqual(scan.sites.flatMap(site => site.actions).sort(), actions, body);
+  }
+  const unfixed = [
+    run(`const audit = ${row('syn.a')}; audit.action = 'syn.b'; await tx.auditLog.create({ data: audit });`),
+    run(`const audit = ${row('syn.a')}; const alias = audit; alias.action = 'syn.b'; await tx.auditLog.create({ data: audit });`),
+    run(`const audit = ${row('syn.a')}; library(audit); await tx.auditLog.create({ data: audit });`),
+    'export ' + helper + run(`await write(tx, ${row('syn.a')});`),
+    helper + run(`await write(tx, ${row('syn.a')}); await write(tx, externalData());`),
+    helper + run(`await write(tx, ...[${row('syn.a')}]);`),
+    helper + run(`library(write); await write(tx, ${row('syn.a')});`),
+    run(`const audit = ${row('syn.a')}; await tx.auditLog.create({ data: audit }); return audit;`),
+    run(`const audit = ${row('syn.a')}; const copy = { ...audit }; await tx.auditLog.create({ data: audit });`),
+    run(`let audit = ${row('syn.a')}; await tx.auditLog.create({ data: audit });`),
+    run(`const audit = ${row('syn.a')}; audit = ${row('syn.b')}; await tx.auditLog.create({ data: audit });`),
+    run(`const audit = ${row('syn.a')}; audit.detail(); await tx.auditLog.create({ data: audit });`),
+  ];
+  for (const body of unfixed) {
+    const scan = scanAuditWrites([{ file: 'api/src/syn-data-holder.ts', text: head + body }]);
+    assert.ok(scan.candidates.some(entry => entry.kind === 'auditLog.create' && entry.status === 'unresolved'), body);
+    assert.equal(scan.sites.length, 0, body);
+  }
+});
+
 test('D1816 scope: a client handed to a B2 port enters B2; the same port declared elsewhere stays unresolved', () => {
   const port = "import type { Prisma } from '@prisma/client';\nexport interface SynPort { check(tx?: Prisma.TransactionClient): Promise<void>; }\n";
   const service = at => `import { PrismaClient } from '@prisma/client';
@@ -4707,6 +4824,11 @@ test('D1816 scope: an EMR-D file that names AuditLog leaves the scope basis and 
     "  let auditLog; ({ auditLog = null } = tx); await auditLog.create({ data: { action: 'syn.d' } });\n",
     "  let audit; ({ ['auditLog']: audit } = tx); await audit.create({ data: { action: 'syn.d' } });\n",
     "  const key = 'auditLog'; let audit; ({ [key]: audit } = tx); await audit.create({ data: { action: 'syn.d' } });\n",
+    "  let auditLog; ({ nested: { auditLog } } = { nested: tx });\n",
+    "  class Store { prisma; run() { let auditLog; ({ prisma: { auditLog } } = this); } }\n",
+    "  let auditLog; [{ auditLog }] = [tx];\n",
+    "  let auditLog; for ({ auditLog } of [tx]) {}\n",
+    "  let auditLog; for ({ auditLog } in { tx }) {}\n",
     "  async function write({ auditLog }: Prisma.TransactionClient) { await auditLog.create({ data: { action: 'syn.d' } }); }\n",
     "  const { nested: { auditLog } } = { nested: tx }; await auditLog.create({ data: { action: 'syn.d' } });\n",
     '  await tx.$executeRaw`INSERT INTO "AuditLog"(action) VALUES (${id})`;\n']) {
@@ -4717,10 +4839,22 @@ test('D1816 scope: an EMR-D file that names AuditLog leaves the scope basis and 
     '  let studyState; ({ studyState } = tx); await studyState.findMany();\n',
     '  let auditLog; ({ studyState: auditLog } = tx); await auditLog.findMany();\n',
     '  class Store { study; constructor() { ({ studyState: this.study } = tx); } }\n',
+    '  let auditLog; ({ nested: { studyState: auditLog } } = { nested: tx });\n',
+    '  let studyState; [{ studyState }] = [tx];\n',
+    '  let studyState; for ({ studyState } of [tx]) {}\n',
   ]) {
     const other = scanAuditWrites([{ file, text: head + body + '}\n' }]);
     assert.deepEqual(other.unresolved, [], body);
     assert.equal(other.sites.length, 0, body);
+  }
+  for (const body of [
+    '  let auditLog; ({ nested: { auditLog } } = { nested: tx });\n',
+    '  class Store { prisma; run() { let auditLog; ({ prisma: { auditLog } } = this); } }\n',
+    '  let auditLog; [{ auditLog }] = [tx];\n',
+    '  let auditLog; for ({ auditLog } of [tx]) {}\n',
+  ]) {
+    const legacy = scanAuditWrites([{ file: 'api/src/syn-nested-delegate.ts', text: head + body + '}\n' }]);
+    assert.ok(legacy.candidates.some(entry => entry.kind === 'auditLog delegate' && entry.status === 'unresolved'), body);
   }
 });
 
@@ -5249,6 +5383,7 @@ test('legacy provenance equivalents: each retained write keeps its site, positio
   const sources = auditSources(), base = scanAuditWrites(sources);
   const { ts, bare, symbolAt, references } = base.tools;
   const creates = base.sites.filter(site => site.via === 'auditLog.create');
+  const actionEntries = creates.flatMap(site => site.actionProperties.map(action => ({ site, action })));
   assert.ok(creates.length > 0);
   const text = node => node.getSourceFile().text.slice(node.getStart(), node.end);
   /** The `x.auditLog` and `.create` accesses of a create call, outermost first. */
@@ -5264,9 +5399,9 @@ test('legacy provenance equivalents: each retained write keeps its site, positio
   const declare = (edits, file, line) => edit(edits, file, 0, 0, line + '\n');
   const variants = {
     // `action: (x)` for every action, a shorthand `action` included.
-    'the action in parentheses': edits => creates.forEach(site => {
-      const node = site.action.node ?? site.action.shorthand;
-      edit(edits, site.file, node.getStart(), node.end, site.action.node ? `(${text(node)})` : `${text(node)}: (${text(node)})`);
+    'the action in parentheses': edits => actionEntries.forEach(({ site, action }) => {
+      const node = action.node ?? action.shorthand;
+      edit(edits, site.file, node.getStart(), node.end, action.node ? `(${text(node)})` : `${text(node)}: (${text(node)})`);
     }),
     // `x['auditLog']['create'](...)` for every `x.auditLog.create(...)`.
     'element access to the delegate and its create': edits => creates.forEach(site => {
@@ -5283,26 +5418,33 @@ test('legacy provenance equivalents: each retained write keeps its site, positio
     // `{ [AUDIT_DATA_KEY]: { [AUDIT_ACTION_KEY]: x } }` with the two constants declared in the file.
     'constant computed keys for data and action': edits => creates.forEach(site => {
       declare(edits, site.file, "const AUDIT_DATA_KEY = 'data', AUDIT_ACTION_KEY = 'action';");
-      const member = site.action.member, data = member.parent.parent;
-      edit(edits, site.file, data.name.getStart(), data.name.end, '[AUDIT_DATA_KEY]');
-      if (site.action.shorthand) edit(edits, site.file, member.getStart(), member.end, `[AUDIT_ACTION_KEY]: ${text(member)}`);
-      else edit(edits, site.file, member.name.getStart(), member.name.end, '[AUDIT_ACTION_KEY]');
+      const data = site.data.member;
+      if (site.data.shorthand) edit(edits, site.file, data.getStart(), data.end, `[AUDIT_DATA_KEY]: ${text(data)}`);
+      else edit(edits, site.file, data.name.getStart(), data.name.end, '[AUDIT_DATA_KEY]');
+      for (const action of site.actionProperties) {
+        const member = action.member;
+        if (action.shorthand) edit(edits, site.file, member.getStart(), member.end, `[AUDIT_ACTION_KEY]: ${text(member)}`);
+        else edit(edits, site.file, member.name.getStart(), member.name.end, '[AUDIT_ACTION_KEY]');
+      }
     }),
     // A comment and a line break before the action and the argument, trailing commas after the last properties.
     'comments, line breaks and trailing commas': edits => creates.forEach(site => {
-      const member = site.action.member, data = member.parent, argument = bare(site.call.arguments[0]);
-      edit(edits, site.file, member.getStart(), member.getStart(), '// the audited action\n');
+      const argument = bare(site.call.arguments[0]), objects = new Set([argument]);
+      for (const { member } of site.actionProperties) {
+        edit(edits, site.file, member.getStart(), member.getStart(), '// the audited action\n');
+        objects.add(member.parent);
+      }
       edit(edits, site.file, site.call.arguments.pos, site.call.arguments.pos, '\n  /* the row */\n');
-      for (const object of [data, argument]) if (!object.properties.hasTrailingComma) edit(edits, site.file, object.properties.end, object.properties.end, ',');
+      for (const object of objects) if (!object.properties.hasTrailingComma) edit(edits, site.file, object.properties.end, object.properties.end, ',');
     }),
     // `as const` on every const literal an action comes from; `satisfies string` on every action named by a binding.
-    'as const and satisfies': edits => creates.forEach(site => {
+    'as const and satisfies': edits => actionEntries.forEach(({ site, action }) => {
       for (const origin of site.origins) {
         const holder = origin.parent;
         if (ts.isVariableDeclaration(holder) && holder.initializer === origin) edit(edits, repoPath(origin.getSourceFile().fileName), origin.end, origin.end, ' as const');
       }
-      const node = site.action.node ? bare(site.action.node) : site.action.shorthand;
-      if (site.action.shorthand) edit(edits, site.file, node.getStart(), node.end, `${text(node)}: ${text(node)} satisfies string`);
+      const node = action.node ? bare(action.node) : action.shorthand;
+      if (action.shorthand) edit(edits, site.file, node.getStart(), node.end, `${text(node)}: ${text(node)} satisfies string`);
       else if (ts.isIdentifier(node)) edit(edits, site.file, node.end, node.end, ' satisfies string');
     }),
     // Every private or protected method of a class in a file that writes, reached by a constant key where the source has a
@@ -5327,8 +5469,8 @@ test('legacy provenance equivalents: each retained write keeps its site, positio
       new Set(base.sites.map(site => site.call.getSourceFile())).forEach(walk);
     },
     // Every const an action names directly, renamed with all its uses (the checker's references, imports included).
-    'the constants renamed': edits => creates.forEach(site => {
-      const node = site.action.node ? bare(site.action.node) : null;
+    'the constants renamed': edits => actionEntries.forEach(({ action }) => {
+      const node = action.node ? bare(action.node) : null;
       if (!node || !ts.isIdentifier(node)) return;
       const symbol = symbolAt(node), [declaration] = symbol?.declarations ?? [];
       if (!declaration || !ts.isVariableDeclaration(declaration) || !(ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const)) return;
@@ -5522,11 +5664,11 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     paths.push([site, adding(site, owner, [`${prefix}synHandedPath(${params}) { const selector = ${predicate}; synOpaque(selector); return ${call('selector')}; }`], outside, true),
       'holds an SQL fragment that is handed to `synOpaque`']);
   }
-  const helped = base.sites.filter(site => site.via === 'auditLog.create').map(site => {
-    const node = site.action.node ? bare(site.action.node) : site.action.shorthand?.name;
+  const helped = base.sites.filter(site => site.via === 'auditLog.create').flatMap(site => site.actionProperties.map(action => {
+    const node = action.node ? bare(action.node) : action.shorthand?.name;
     const declaration = node && ts.isIdentifier(node) ? symbolAt(node)?.declarations?.[0] : null;
     return declaration && ts.isParameter(declaration) && ts.isMethodDeclaration(declaration.parent) ? { site, declaration } : null;
-  }).filter(Boolean);
+  })).filter(Boolean);
   assert.ok(helped.length > 0, 'api/src has a create whose action is a parameter of a method');
   for (const { site, declaration } of helped) {
     const owner = declaration.parent, name = owner.name.getText();
