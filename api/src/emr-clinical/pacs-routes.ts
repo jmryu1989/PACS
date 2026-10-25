@@ -12,13 +12,13 @@ export class PacsClinicalRoutes {
 
   async patchState(uid: string, body: any, c: Caller, request?: object) {
     return this.clinical && request
-      ? this.clinical.workflow(request, 'PATCH studies/:uid', workflow => this.studyState.patchState(uid, body, c, workflow))
+      ? this.clinical.workflow(request, workflow => this.studyState.patchState(uid, body, c, workflow))
       : this.studyState.patchState(uid, body, c);
   }
 
   async removeState(uid: string, c: Caller, request?: object) {
     return this.clinical && request
-      ? this.clinical.workflow(request, 'DELETE studies/:uid', workflow => this.studyState.removeState(uid, c, workflow))
+      ? this.clinical.workflow(request, workflow => this.studyState.removeState(uid, c, workflow))
       : this.studyState.removeState(uid, c);
   }
 

@@ -100,15 +100,26 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal((await send('doctor', 'GET', `/studies/${uid}/tech-note`)).note, null);
     assert.equal((await readEntries()).length, 0);
     // WORKLIST-SPLIT-UID: a clinical write on a UID two patient resources share is refused with the
-    // product's identity issue; no record and no event are written, and the study state is unchanged.
+    // product's identity issue; no record and no event are written. D1860 / D-T5: the tele cancel of
+    // that UID still closes the receiving allocation - an allocation is none of 제23조④'s record acts
+    // and needs no resolved patient - ledgered on its own server surface with the patient link waived.
     await db.studyState.create({ data: { uid: splitUid, institutionId: hospital, teleInstitutionId: receiver, ts: 'wait', ss: 'Verified' } });
     const splitNote = await send('tech', 'POST', `/studies/${splitUid}/tech-note`, { attemptId: randomUUID(), baseVersion: 0, text: '분할 UID 메모', reason: '' }, 409);
     assert.equal(splitNote.code, 'STUDY_IDENTITY_UNRESOLVED');
-    const splitCancel = await send('doctor', 'PATCH', `/studies/${splitUid}`, { ts: 'cancelled' }, 409);
-    assert.equal(splitCancel.code, 'STUDY_IDENTITY_UNRESOLVED');
-    assert.equal((await db.studyState.findUnique({ where: { uid: splitUid } })).ts, 'wait');
     assert.equal(await db.techNoteRevision.count({ where: { studyUid: splitUid } }), 0);
-    assert.equal(await db.readerAssignment.count({ where: { studyUid: splitUid } }), 0);
+    await send('doctor', 'PATCH', `/studies/${splitUid}`, { ts: 'cancelled' });
+    assert.equal((await db.studyState.findUnique({ where: { uid: splitUid } })).ts, 'cancelled');
+    const splitClosed = await db.readerAssignment.findUnique({ where: { studyUid_institutionId: { studyUid: splitUid, institutionId: receiver } } });
+    assert.equal(splitClosed.readerSub, null); assert.equal(splitClosed.closedRevision, 1);
+    const closeEvents = uid => db.$queryRaw`SELECT payload::jsonb AS event FROM emr_access.access_entry
+      WHERE payload::jsonb->>'surface'='server:reader-assignment-close' AND payload::jsonb->'context'->>'studyId'=${uid}`;
+    const splitCloses = await closeEvents(splitUid);
+    assert.ok(splitCloses.length > 0);
+    for (const { event } of splitCloses) {
+      assert.equal(event.action, 'modify'); assert.equal(event.managingInstitution.value, hospital);
+      assert.deepEqual([event.targets[0].kind, event.targets[0].patientLinkSnapshot, event.targets[0].recordId.value, event.targets[0].versionId.value],
+        ['assignment', { status: 'not-applicable', reason: 'non-record-target' }, JSON.stringify([splitUid, receiver]), '1']);
+    }
     const finding = await send('doctor', 'POST', `/studies/${uid}/findings`, {
       requestId: randomUUID(), item: { schemaVersion: 1, title: '합성 소견', text: '원본 연결 대기',
         sources: [{ itemId: randomUUID(), revision: 1 }] },
@@ -188,14 +199,17 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     await send('doctor', 'PATCH', `/studies/${teleUid}`, { ts: 'cancelled' });
     const closed = await db.readerAssignment.findUnique({ where: { studyUid_institutionId: { studyUid: teleUid, institutionId: receiver } } });
     assert.equal(closed.readerSub, null); assert.equal(closed.closedRevision, 2);
-    const closes = await db.$queryRaw`SELECT payload::jsonb AS event FROM emr_access.access_entry
-      WHERE payload::jsonb->>'surface'='PATCH studies/:uid' AND payload::jsonb->>'action'='modify'`;
+    const closes = await closeEvents(teleUid);
     assert.ok(closes.length > 0);
     for (const { event } of closes) {
+      assert.equal(event.action, 'modify');
       assert.equal(event.userId.value.subject, members.doctor.sub);
-      assert.equal(event.actingInstitution.value, hospital);
+      assert.equal(event.actingInstitution.value, hospital); assert.equal(event.managingInstitution.value, hospital);
       assert.equal(event.targets[0].recordId.value, JSON.stringify([teleUid, receiver]));
+      assert.equal(event.targets[0].versionId.value, '2');
+      assert.deepEqual(event.targets[0].patientLinkSnapshot, { status: 'not-applicable', reason: 'non-record-target' });
     }
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_access.access_entry WHERE payload::jsonb->>'surface'='PATCH studies/:uid'`)[0].n, 0);
     const denied = await fetch(origin + `/api/studies/${teleUid}/reader-assignment`, { headers: { authorization: 'Bearer ' + tokens.receiving } });
     assert.ok(denied.status >= 400);
     assert.equal(await db.reportVersion.count(), 0); assert.equal(await db.reportDraft.count(), 0);

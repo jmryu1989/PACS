@@ -14,6 +14,14 @@ export interface ClinicalWorkflow {
   tx: Prisma.TransactionClient;
   closeAssignment(uid: string, owner: string, revision: number): Promise<void>;
 }
+/** S7-U3a: the receiving institution's reader allocation closes inside the study operation that
+ * takes the tele channel away (PATCH/DELETE studies/:uid). D1860 / D-T5: allocation is none of
+ * 제23조④'s record acts, so the close names no patient-bearing target and resolves the study
+ * scope without the source archive - a WORKLIST-SPLIT-UID study has no resolved patient, and
+ * its channel still closes. It is recorded on this server surface of its own: the study routes
+ * serve record kinds, and a mixed surface would require a served-record manifest that no
+ * stored reader can mint for an allocation row. */
+export const ASSIGNMENT_CLOSE_SURFACE = 'server:reader-assignment-close';
 
 /** Existing controllers keep their response shape and services keep their own
  * role/state checks. Their writes run on the same B2 connection as the exact
@@ -45,22 +53,22 @@ export class ClinicalRoutes {
       }).catch(routeError);
     } finally { work.end(); }
   }
-  async workflow<T>(request: object, surface: 'PATCH studies/:uid' | 'DELETE studies/:uid',
-    execute: (workflow: ClinicalWorkflow) => Promise<T>): Promise<T> {
+  async workflow<T>(request: object, execute: (workflow: ClinicalWorkflow) => Promise<T>): Promise<T> {
     const work = this.parts.records.begin();
     try {
       return await work.transactionWithRecords(async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
         return execute({ tx, closeAssignment: async (uid, owner, revision) => {
-          const study = await this.parts.context.study(tx, request, uid);
+          const study = await this.parts.context.scope(tx, request, uid);
           const known = <V>(value: V) => ({ status: 'known' as const, value });
+          const waived = { status: 'not-applicable' as const, reason: 'non-record-target' as const };
           const id = JSON.stringify([uid, owner]);
-          await record({ formatVersion: 1, surface, eventId: randomUUID(),
+          await record({ formatVersion: 1, surface: ASSIGNMENT_CLOSE_SURFACE, eventId: randomUUID(),
             userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
             actingInstitution: known(facts.actor.institutionId), managingInstitution: known(study.managingInstitutionId),
             occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip, cause: 'user-view',
             context: { basis: 'worklist', studyId: uid, relatedStudyId: null, reason: null }, executor: 'member',
-            targets: [{ kind: 'assignment', patientLinkSnapshot: known(study.patient), studyId: known(uid),
+            targets: [{ kind: 'assignment', patientLinkSnapshot: waived, studyId: known(uid),
               recordId: known(id), versionId: known(String(revision)) }], action: 'modify', result: 'succeeded',
             requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
           async () => ({ kind: 'ReaderAssignment', id, version: String(revision) }));

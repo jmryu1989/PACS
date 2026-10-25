@@ -336,14 +336,14 @@ function world() {
   const clinical = {
     read: (_request, _kind, _id, read) => prisma.$transaction(read),
     write: (_request, _input, write) => prisma.$transaction(write),
-    workflow: (_request, _surface, execute) => prisma.$transaction(tx => execute({ tx,
+    workflow: (_request, execute) => prisma.$transaction(tx => execute({ tx,
       closeAssignment: async () => {} })),
   };
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
     studyState, techNote, hold, clinician, evidence, draft, commit };
   /** The PacsService facade over the same providers: it builds and owns its own concern graph. */
   w.facade = () => withDraftRequestContext(new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma), nativeSigning, clinical), b2Ledger(prisma));
-  w.workflow = execute => clinical.workflow({}, 'PATCH studies/:uid', execute);
+  w.workflow = execute => clinical.workflow({}, execute);
   w.study = (fields = {}) => db.seed('studyState', { uid: uidOf(), institutionId: INST_A, ss: 'Verified', ...fields });
   w.audits = (action) => db.rows('auditLog').filter(row => !action || row.action === action);
   /** Starts the institutions concern as the facade's onModuleInit does: two synthetic institutions beside the seeds. */

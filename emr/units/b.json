@@ -153,7 +153,8 @@
     "internal_surfaces": [
       "server:doctor-key-management",
       "service:auth-session-sweep",
-      "service:member-rights-import"
+      "service:member-rights-import",
+      "server:reader-assignment-close"
     ],
     "note": "B1 adds no HTTP route; the internal sweep surface is where B2 records sessions the server ends in process"
   },
