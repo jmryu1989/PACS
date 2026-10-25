@@ -433,7 +433,8 @@ function store({ institutions } = {}) {
   s.prisma.$transaction = async (fn, options) => {
     s.transactions++;
     // What the gate relies on, not the numbers it picked (D73): READ COMMITTED (each statement sees what committed before
-    // it, so a row read after its lock is current) and a bounded wait and duration.
+    // it, so a row read after its lock is current) and a bounded wait and duration. B2's transactionWithRecords (the
+    // download stages) leaves the level unset, which is PostgreSQL's default READ COMMITTED; no other level is accepted.
     assert.equal(options?.isolationLevel ?? 'ReadCommitted', 'ReadCommitted');
     assert.ok([options?.maxWait, options?.timeout].every(v => Number.isFinite(v) && v > 0), 'a bounded transaction');
     const tx = { id: ++transactionSeq, undo: [], created: [], held: { list: [], keys: new Set() }, operationLocked: false };

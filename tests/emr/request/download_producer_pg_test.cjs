@@ -46,13 +46,13 @@ async function main() {
     el(0x10, 0x10, 'PN', 'SYNTHETIC^DOWNLOAD'), el(0x10, 0x20, 'LO', 'SYN-DOWNLOAD'),
     el(0x20, 0x0d, 'UI', uid), el(0x20, 0x0e, 'UI', series), el(0x7fe0, 0x10, 'OW', Buffer.alloc(16, 0x5a))]);
   const md5 = createHash('md5').update(bytes).digest('hex');
-  let truncated = false, fileRequests = 0;
+  let truncated = false, changed = false, fileRequests = 0;
   const original = http.createServer((req, res) => {
     const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
     if (req.url === '/system') return json({ Version: '1.12.5' });
     if (req.url === '/tools/find') return json([sourceId]);
     if (req.url.endsWith('/simplified-tags')) return json({ StudyInstanceUID: uid, SeriesInstanceUID: series, SOPInstanceUID: sop });
-    if (req.url.endsWith('/attachments/dicom/info')) return json({ UncompressedSize: bytes.length, UncompressedMD5: md5 });
+    if (req.url.endsWith('/attachments/dicom/info')) return json({ UncompressedSize: bytes.length, UncompressedMD5: changed ? '0'.repeat(32) : md5 });
     if (req.url.endsWith('/file')) { fileRequests++; return res.end(truncated ? bytes.subarray(0, 140) : bytes); }
     res.statusCode = 404; res.end();
   });
@@ -222,9 +222,37 @@ async function main() {
     assert.equal((await operation(uncertain)).status, 'sending', 'failed result append never claims Sent');
     assert.ok(!(await events(uncertain)).some(e => e.action === 'transfer-ended'));
     assert.equal(await witness.auditLog.count({ where: { action: 'original.download.result', detail: { contains: uncertain } } }), 0);
+
+    // A refused archive start closes the admitted grant and records the refusal (act none) through the real parser and
+    // ledger: no intent, no bytes. A changed original is a conflict (409); a lost right is a permission refusal (403).
+    const refusal = async (change, restore) => {
+      const op = randomUUID(); assert.equal((await post(prefix, { operationId: op })).status, 200);
+      const issued = await post(prefix + '/' + op + '/archive/grant', {}); assert.equal(issued.status, 200);
+      const files = fileRequests;
+      await change();
+      let status;
+      try { const answer = await fetch(prefix + '/' + op + '/archive?grant=' + issued.body.grant); status = answer.status; await answer.arrayBuffer(); }
+      finally { await restore(); }
+      const row = await operation(op);
+      assert.equal(row.status, 'prepared'); assert.equal(row.download.attempts.length, 0); assert.equal(fileRequests, files);
+      assert.equal(row.download.activeArchiveGrant.state, 'refused');
+      const recorded = await events(op);
+      assert.deepEqual(recorded.map(e => e.action).slice(0, 2), ['provide-prepared', 'provide-prepared']);
+      assert.equal(recorded.length, 3, 'one refusal row and no intent');
+      const refused = recorded[2];
+      assert.equal(refused.surface, 'GET studies/:uid/original-downloads/:operationId/archive');
+      assert.equal(refused.act, 'none'); assert.equal(refused.stream, 'viewing'); assert.equal(refused.relatedEventId, null);
+      assert.deepEqual(refused.targets, recorded[1].targets);
+      return { status, code: row.download.activeArchiveGrant.refusal.code, action: refused.action, result: refused.result };
+    };
+    assert.deepEqual(await refusal(async () => { changed = true; }, async () => { changed = false; }),
+      { status: 409, code: 'MANIFEST_CHANGED', action: 'conflict', result: 'failed' });
+    const rights = suspended => witness.memberRights.update({ where: { sub }, data: { suspended } });
+    const lost = await refusal(() => rights(true), () => rights(false));
+    assert.equal(lost.status, 403); assert.equal(lost.action, 'permission-refused'); assert.equal(lost.result, 'refused');
     console.log('PASS actual download bytes; four B2 rows; investigation replay; ' +
       (process.env.KIN_DOWNLOAD_REVIEW === '1' ? 'access-review query; ' : 'access-review query NOT_RUN (no migration); ') +
-      'replay; PG rollback of every stage; interrupted supply');
+      'replay; PG rollback of every stage; interrupted supply; refused starts (conflict, permission-refused)');
   } finally {
     if (app) await app.close();
     await runtime.stop(Date.now() + 15000); await witness.$disconnect();
