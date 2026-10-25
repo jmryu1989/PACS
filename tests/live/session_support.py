@@ -49,7 +49,7 @@ class Session(audit.Browser):
         test.assertEqual(status, 302, "BFF callback")
         target = urlparse(headers["Location"])
         test.assertEqual(target.path, "/worklist/hpacs-lite/main.html")
-        test.assertEqual(target.fragment, '')
+        test.assertEqual(target.fragment, 'kin-login')
         status, _, self.me = self.json("GET", "/api/me")
         test.assertEqual(status, 200)
         self.session = self.me["sessionId"]

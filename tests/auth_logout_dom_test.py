@@ -7,7 +7,7 @@ repository: index.html, main.html, admin.html, clinician.html and every local fi
 An in-test server answers as the wire contract says (s7-u5-server-evidence/wire-contract.md v1): /api/me carries a
 sessionId; every bound request names its session in X-KIN-Session and is refused 428/409/401 by code before any handler;
 logout ends the bound session and never touches the cookie; an explicit login starts by POST bound to the session it may
-replace and ends in a single-use entry proof in the URL fragment; a report draft is one row per author with a stored
+replace and ends with a non-secret explicit-login marker in the URL fragment; a report draft is one row per author with a stored
 revision - every write, discard and confirmation carries expectedOwner and expectedRevision and the full snapshot, and a
 success answers the envelope {uid, owner, revision, present, snapshot}. The server can hold, drop, cut or mangle any
 answer. No stack, network or credential is used. Cases drive the page by its controls (buttons, typing, selection, the
@@ -29,9 +29,9 @@ Session (U5S-REQ-22):
   S04  Back to Editing is a new work epoch: answers from before the preparation never apply (header, body, error);
        study A -> B -> A never shows the first A's late answer.
   S08  A new document with an end record or with storage it cannot verify stays closed (direct URLs, reload, new tab);
-       an explicit login's entry proof enters once and a replayed proof enters nothing.
+       an explicit login can enter with untrusted storage; its own session's end still closes it.
   S09  Reliable storage, no record, a valid session: normal entry by role. No session: the IdP login starts by itself
-       (amendment 1) and its entry proof is consumed without a click (amendment 2); a tab that came back without a
+       (amendment 1) and its marker is removed without a click; a tab that came back without a
        session is not sent out again.
   S10  Recover Draft stores only for the same owner and discards the capture only when the answer (or a full read after
        it) shows the same owner, revision and whole snapshot.
@@ -1013,7 +1013,7 @@ class LogoutDOMTest(unittest.TestCase):
                          if body and str(body.get("code", "")).startswith("AUTH_") else None)
 
     def sign_in_from_landing(self, page=None):
-        """The explicit login: the control, the IdP stand-in, the entry proof, the work page."""
+        """The explicit login: the control, the IdP stand-in, the marker, the work page."""
         page = page or self.page
         page.get_by_role("button", name=SIGN_IN).click()
         page.wait_for_url(MAIN_URL)
@@ -1045,7 +1045,7 @@ class LogoutDOMTest(unittest.TestCase):
                 expect(self.page.locator("#rows")).to_contain_text(PATIENT)
                 self.assertEqual((1, [], []), (self.site.logins, self.site.login_posts, self.site.entries),
                                  "one login by itself (nothing to replace), the callback document bootstraps by itself")
-                self.assertEqual("", urlparse(self.page.url).fragment, "the entry proof left the address")
+                self.assertEqual("", urlparse(self.page.url).fragment, "the explicit-login marker left the address")
                 self.assertEqual(([], "active", None), (self.dialogs, self.screen()["state"], self.screen()["end"]))
         # A login that comes back without a session is not started again by itself: the landing offers the control.
         self.fresh_context()
@@ -1332,7 +1332,7 @@ class LogoutDOMTest(unittest.TestCase):
                 self.assertEqual(0, self.site.logins, "no login starts by itself")
         self.assertEqual(2, len(self.site.logouts))
         # The login control leaves the landing. Pressing it erases nothing: the record is there until the login succeeded
-        # and its entry proof was taken.
+        # and its explicit-login marker was removed.
         self.site.account = None            # the ended session's cookie is gone: nothing to replace
         self.sign_in_from_landing()
         self.assertEqual((1, None, "active"), (self.site.logins, self.screen()["end"], self.screen()["state"]))

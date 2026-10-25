@@ -298,9 +298,9 @@ class AuthAuditLive(unittest.TestCase):
             server_window.append(self.server_time(browser))
         self.assertIsNotNone(browser.sid())
         self.secret("sid", browser.sid())
-        # S7-U5: the single-use entry proof rides in the fragment; the document then learns its session id from its
+        # The non-secret fragment marks explicit login; the document learns its session id from its
         # bootstrap (the one cookie request without a binding; a member awaiting approval gets the id with the 403).
-        self.assertEqual(urlparse(headers.get('Location', '')).fragment, '')
+        self.assertEqual(urlparse(headers.get('Location', '')).fragment, 'kin-login')
         browser.session = None
         _, _, me = browser.call("GET", "/api/me")
         browser.session = json.loads(me).get("sessionId")

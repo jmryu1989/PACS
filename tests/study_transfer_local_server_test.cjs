@@ -515,7 +515,7 @@ function fakeAuth(s) {
  * D1489 (archive grant): the product's AuthGuard itself in front of the routes, over AuthService's public checks as the
  * guard calls them - a kin_sid cookie names a session of s.sessionSubs; its binding header is 'ref:<sid>' (the guard's
  * sessionRef); a missing/other header is 428/409 with the product's codes; a session answers its stored token, whose
- * subject's durable rights are the store's; CSRF is X-KIN-CSRF: 1. Every call is counted in s.guardCalls, so a case can
+ * subject's durable rights are the store's. Every call is counted in s.guardCalls, so a case can
  * show that a refusal came before authentication, refresh or the handler.
  */
 function guardAuth(s) {

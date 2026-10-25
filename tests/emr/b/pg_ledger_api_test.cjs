@@ -688,7 +688,7 @@ async function authSuccess(endings = false) {
     assert.equal(response.status, 302);
     const cookie = response.headers.getSetCookie().find(row => row.startsWith('kin_sid='))?.split(';')[0];
     assert.equal(!!cookie, true, 'Login must publish its committed session');
-    assert.equal(new URL(response.headers.get('location')).hash, '');
+    assert.equal(new URL(response.headers.get('location')).hash, '#kin-login');
     return { cookie };
   }
   async function events(sub, action) {

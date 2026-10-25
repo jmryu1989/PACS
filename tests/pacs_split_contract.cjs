@@ -163,7 +163,7 @@ function diSnapshot() {
       declared: (meta(C.SELF_DECLARED_DEPS_METADATA, cls) ?? []).map(d => `${d.index}:${name(d.param)}`),
       optional: meta(C.OPTIONAL_DEPS_METADATA, cls) ?? [] };
   const middleware = [];
-  new AppModule().configure({ apply: (...fns) => {
+  new AppModule().configure?.({ apply: (...fns) => {
     const binding = { apply: fns.map(name), exclude: [], forRoutes: [] };
     middleware.push(binding);
     const chain = { exclude: (...routes) => { binding.exclude.push(...routes.map(name)); return chain; },

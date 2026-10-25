@@ -37,7 +37,7 @@ test fails. Three kinds of evidence and nothing more:
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
-     the gate sits between the membership check and the CSRF rule in the guard.
+     the guard applies the gate after the membership check.
 
 D1816: the legacy source-provenance grammar excludes B2 replacement modules.
 All controller routes remain in the route/role matrix; B2 behavior uses real PG/HTTP tests.

@@ -8217,30 +8217,6 @@
         "optional": []
       }
     },
-    "changed_injectables": {
-      "note": "D1489 (consult u4b-download-grant option A): the global AuthGuard gains StudyTransferLocalService, whose public grant check stands in for the session binding on the exact archive GET; di keeps the pre-split constructor and this delta is the only change",
-      "AuthGuard": {
-        "before": {
-          "params": [
-            "Reflector",
-            "AuthService"
-          ],
-          "scope": null,
-          "declared": [],
-          "optional": []
-        },
-        "after": {
-          "params": [
-            "Reflector",
-            "AuthService",
-            "StudyTransferLocalService"
-          ],
-          "scope": null,
-          "declared": [],
-          "optional": []
-        }
-      }
-    },
     "routes": [
       {
         "controller": "StudyTransferLocalController",
@@ -8748,8 +8724,7 @@
         "before": {
           "params": [
             "Reflector",
-            "AuthService",
-            "StudyTransferLocalService"
+            "AuthService"
           ],
           "scope": null,
           "declared": [],
@@ -8759,12 +8734,11 @@
           "params": [
             "Reflector",
             "AuthService",
-            "StudyTransferLocalService",
             "Object"
           ],
           "scope": null,
           "declared": [
-            "3:Symbol(RequestContextCapture)"
+            "2:Symbol(RequestContextCapture)"
           ],
           "optional": []
         }

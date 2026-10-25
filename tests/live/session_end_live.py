@@ -70,6 +70,7 @@ CASES = (
     "test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice",
     "test_04_switch_account_shows_an_editable_name",
     "test_05_the_same_doctors_other_pc_keeps_working",
+    "test_06_an_untrusted_browser_is_asked_for_credentials_and_enters",
     "test_07_a_provider_end_racing_a_refresh_still_ends_the_session",
     "test_08_what_auth_time_does_across_a_refresh",
     "test_09_an_isolated_member_cannot_come_back_until_activated",
@@ -440,14 +441,14 @@ class SessionEndLive(unittest.TestCase):
 
     def probe_at_the_landing(self, context, page) -> str:
         """The recovery Login of a browser that cannot keep an end record (SE-06): no product cookie, the landing, one
-        press - a prompt=none probe, then the fresh step. Where the press ends."""
+        press - a fresh credential step. Where the press ends."""
         context.clear_cookies(name="kin_sid")
         page.goto(self.stack.proxy + APP + "index.html")
         self.assertEqual(self.settle(page), "landing", "an untrusted browser does not enter by itself")
         del context.asked[:]
         at = self.press(page, "#signin")
         self.assertEqual(context.asked, [("start", "storage_untrusted", False), ("authorize", "login")],
-                         "the recovery Login probes with prompt=none, then asks for credentials")
+                         "the recovery Login asks for credentials")
         return at
 
     def refused_credentials(self, page, who: str) -> bool:
@@ -608,9 +609,12 @@ class SessionEndLive(unittest.TestCase):
         self.assertEqual(urlparse(page.url).path, APP + "index.html")
         del context.asked[:]
         self.assertEqual(self.press(page, "#signin"), "keycloak")
-        self.assert_editable_form(page, "the recovery Login")
+        # Retained SSO may identify A on Keycloak's password-only reauthentication form.
+        # This same-account recovery requires credentials; account-switch cases separately require an editable name.
+        self.assertTrue(page.evaluate(FORM)["password"], "the recovery Login asks for a password")
         self.assertEqual(context.asked, [("start", "storage_untrusted", False), ("authorize", "login")])
         self.assertEqual(self.credentials(page, "A"), "main")
+        self.assertEqual(self.me(context), (200, self.ids["A"]))
         self.report("SE-06", asked=len(context.asked))
 
     def test_07_a_provider_end_racing_a_refresh_still_ends_the_session(self):

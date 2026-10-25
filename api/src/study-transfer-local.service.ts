@@ -981,7 +981,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         // The rights now, in this transaction under its lock (U4C-05): what the preflight read may have changed before the
         // lock was taken, so the member rights and the study (still the institution's own, inside StudyAccess - its metadata
         // prepared by the preflight, outside the lock) are read again here, as each supply approval does. A change is
-        // refused before anything is written: no grant consumed, no attempt, no intent, byte 0.
+        // refused before anything is written: no attempt, no intent, byte 0.
         try {
           if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');
           await this.ownStudyLocked(tx, uid, c);

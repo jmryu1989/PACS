@@ -146,7 +146,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 148, "public": 7, "session": 2, "business": 23, "denied": 116},
+    "counts": {"routes": 147, "public": 6, "session": 2, "business": 23, "denied": 116},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
