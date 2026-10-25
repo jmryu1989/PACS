@@ -19,6 +19,8 @@ export interface RouteContract {
  * Connect transfer routes manage requests/bases; actual delivery belongs to EXTERNAL_SURFACES.
  */
 const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
+  { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'download', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET images/dicom-web', 'HEAD images/dicom-web'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'service-job'],
     routes: ['GET health'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],

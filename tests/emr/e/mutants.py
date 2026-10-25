@@ -212,13 +212,15 @@ MUTANTS = [
      "find": "Number.isSafeInteger(count) && count > 0 ? count : null", "replace": "Number.isSafeInteger(count) && count > 0 && count <= 2000 ? count : null",
      "kills": ["TEST-E-02 manifest_sources R21"]},
     {"id": "M-E-R4-03", "required": True, "title": "malformed source header refuses the whole study", "file": "emr-image/manifest.ts",
-     "find": "      sourceHeader = structuredClone(header);", "replace": "      refuse('MammographyHeaderInvalid');",
+     "find": "      sourceHeader = sourceReferenceHeader(header);", "replace": "      refuse('MammographyHeaderInvalid');",
      "kills": ["TEST-E-02 manifest_sources R22"]},
     {"id": "M-E-R4-03COUNT", "required": True, "title": "failed extraction reports a known zero reference count", "file": "emr-image/manifest.ts",
      "find": "declaredSourceCount: sourceHeader ? null : refs.length", "replace": "declaredSourceCount: refs.length",
      "kills": ["TEST-E-02 manifest_sources R22"]},
+    # 07abfa1 moved the source-error downgrade out of the manifest entry into classification; dropping that step lets the
+    # object keep its verified class and inferred hanging evidence.
     {"id": "M-E-R4-03FULLNESS", "required": True, "title": "unverified source error retains inferred hanging evidence", "file": "emr-image/manifest.ts",
-     "find": "        fullness: c.result.fullness === 'inferred-for-hanging' ? 'undetermined' : c.result.fullness,\n", "replace": "",
+     "find": "    extractSources(h);\n", "replace": "",
      "kills": ["TEST-E-02 manifest_sources R22"]},
     {"id": "M-E-R4-04", "required": True, "title": "non-P format errors invent a Partial View conflict", "file": "emr-image/manifest.ts",
      "find": "  const f = facts(h, sop, frames);", "replace": "  const f = facts(h, sop, frames); if (f.error) f.partial = 'conflict';",
