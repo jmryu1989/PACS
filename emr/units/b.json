@@ -153,7 +153,8 @@
     "internal_surfaces": [
       "server:doctor-key-management",
       "service:auth-session-sweep",
-      "service:member-rights-import"
+      "service:member-rights-import",
+      "server:reader-assignment-close"
     ],
     "note": "B1 adds no HTTP route; the internal sweep surface is where B2 records sessions the server ends in process"
   },
@@ -192,7 +193,8 @@
       "20261023200000_emr_server_signing",
       "20261024120000_emr_d_online",
       "20261025000000_emr_e_online",
-    "20261025120000_access_review"
+    "20261025120000_access_review",
+    "20261026120000_assignment_access_stream"
     ],
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"

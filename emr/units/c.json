@@ -18,7 +18,7 @@
     "ports_not_imported": {
       "C2": "RequestIdentityPort and native report/startup composition remain integration handoffs; the B2 PostgreSQL LedgerPort adapter is active."
     },
-    "not_wired": "C2 PostgreSQL ledger adapter, server-signing migration and ServerSigningPg suite are active. Online D composition consumes the C2 server keys. Native report routes, request identity/startup and served pages remain unwired; C1 offline code was removed (#213)."
+    "not_wired": "C2 PostgreSQL ledger, server keys and native/clinical route adapters are supplied. Authoritative request identity, study facts and startup installation remain Module A integration handoffs."
   },
   "owned_paths": [
     "api/src/emr-report/contract.ts",
@@ -40,7 +40,8 @@
     "api/src/emr-signature/pg-ledger.ts",
     "tests/emr/c/server_signing_live.py",
     "tests/emr/c/server_signing_pg_test.cjs",
-    "api/prisma/migrations/20261023200000_emr_server_signing/migration.sql"
+    "api/prisma/migrations/20261023200000_emr_server_signing/migration.sql",
+    "api/src/emr-report/native-signing.ts"
   ],
   "forbidden_single_writer": [
     "worklist-v0/hpacs-lite/main.html",

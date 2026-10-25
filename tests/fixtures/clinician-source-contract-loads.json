@@ -145,5 +145,25 @@
       "probe.ts": "export class Peer { constructor(flag: boolean) { const callback = () => { return 1; }; if (flag) { return {}; } callback(); } }\n"
     },
     "refused": "return in a constructor"
+  },
+  {
+    "name": "Prisma import type is erased, not a runtime loader",
+    "files": {
+      "probe.ts": "export type Tx = import('@prisma/client').Prisma.TransactionClient;\n"
+    }
+  },
+  {
+    "name": "Prisma runtime import still uses the loader contract",
+    "files": {
+      "probe.ts": "export const load = () => import('@prisma/client');\n"
+    },
+    "refused": "not a package the loaders may take"
+  },
+  {
+    "name": "typed service require method on a local receiver",
+    "files": {
+      "service.ts": "export class Access { require(uid: string) { return uid; } }\n",
+      "probe.ts": "import { Access } from './service'; export const check = (access: Access) => access.require('study');\n"
+    }
   }
 ]

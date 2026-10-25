@@ -2,6 +2,8 @@
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
 const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
+// Native signing is a collaborator here; this fixture is not cryptographic evidence.
+const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 function b2Ledger(prisma) {
   return { begin: () => ({
     resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
@@ -85,7 +87,7 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
   // readable set is the honest stub — reaching it at all would be the defect.
   const findings = { readableFindings: async () => { throw new Error('the stale-draft paths must not ask about findings'); } };
-  const real = withDraftRequestContext(new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma)), b2Ledger(prisma));
+  const real = withDraftRequestContext(new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma), nativeSigning), b2Ledger(prisma));
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
   const svc = {
     commitReport: (uid, body, c) => real.commitReport(uid, { ...pre(c), ...body }, c, null),

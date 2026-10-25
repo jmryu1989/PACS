@@ -311,7 +311,10 @@ window.KinTechNote = function (app) {
         const entry = document.createElement('section'), title = document.createElement('h3'), body = document.createElement('pre');
         title.textContent = `v${item.version} · ${item.author} · ${new Date(item.createdAt).toLocaleString()}`;
         body.textContent = (item.text || '(메모 비움)') + '\n수정 사유: ' + (item.reason || '(최초 작성)');
-        entry.append(title, body); $('history-items').append(entry);
+        entry.append(title, body);
+        const signed = window.KinClinicalSignature?.(result.emr, item.version);
+        if (signed) { const proof = document.createElement('p'); proof.textContent = signed; entry.append(proof); }
+        $('history-items').append(entry);
       }
       // Only the first page identifies the latest confirmed revision; older pages supply attempt evidence only.
       if (!more) advance(result.items[0]);

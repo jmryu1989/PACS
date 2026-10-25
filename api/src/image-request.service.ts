@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -109,13 +110,14 @@ export class ImageRequestService {
    * 섞인 조합을 돌려줄 수 있다(S5-U4a-F01과 같은 방식). 읽기는 행 잠금을 잡지 않는다. 스냅샷은 접근 정책 공유 잠금을
    * 기다리기 전에 정해지므로 그 사이의 정책 변경은 StudyAccessInterceptor가 응답 전에 거절한다.
    */
-  private async run<T>(c: Caller, fn: (tx: any) => Promise<T>, read = false): Promise<T> {
+  private async run<T>(c: Caller, fn: (tx: any) => Promise<T>, read = false, transaction?: Prisma.TransactionClient): Promise<T> {
     try {
-      return await this.prisma.$transaction(async tx => {
+      const execute = async (tx: Prisma.TransactionClient) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.studyAccess.snapshot(c, tx);
         return fn(tx);
-      }, read ? { isolationLevel: 'RepeatableRead', maxWait: 4000, timeout: 8000 } : { maxWait: 4000, timeout: 8000 });
+      };
+      return await (transaction ? execute(transaction) : this.prisma.$transaction(execute, read ? { isolationLevel: 'RepeatableRead', maxWait: 4000, timeout: 8000 } : { maxWait: 4000, timeout: 8000 }));
     } catch (e: any) {
       // 활성 요청 확인은 검사 행 잠금 뒤라 부분 unique가 부딪히는 일은 없어야 한다. 부딪히면 같은 뜻의 409로 답한다.
       // 그 밖의 unique 충돌은 같은 requestId가 다른 부모에서 동시에 쓰인 때뿐이다(같은 부모는 행 잠금이 줄 세운다).
@@ -206,7 +208,8 @@ export class ImageRequestService {
   }
 
   /** #7 목록. view=mine은 clinician 역할의 자기 요청, view=queue는 판독의·방사선사·관리자의 기관 대기열. 총개수는 싣지 않는다. */
-  async list(c: RequestCaller, q: ListQuery) {
+  async list(c: RequestCaller, q: ListQuery, transaction?: Prisma.TransactionClient) {
+    const db = transaction ?? this.prisma;
     this.member(c);
     const query = object(q) ? q : {};
     if (Object.keys(query).some(k => !['view', 'state', 'kind', 'cursor'].includes(k)) || Object.values(query).some(v => typeof v !== 'string')
@@ -218,9 +221,9 @@ export class ImageRequestService {
     if (query.kind !== undefined && !IMAGE_REQUEST_KINDS.includes(query.kind)) throw invalid('요청 종류를 확인하세요');
     const states = state === 'active' ? [...ACTIVE] : state === 'all' ? [...STATES] : [state[0].toUpperCase() + state.slice(1)];
     const kind = query.kind ?? 'all';
-    const accessPolicy = await this.studyAccess.snapshot(c);
+    const accessPolicy = await this.studyAccess.snapshot(c, transaction);
     const restricted = accessPolicy.policy.restricted;
-    const scope = restricted ? [...await this.studyAccess.allowed(c, (await this.prisma.studyState.findMany({
+    const scope = restricted ? [...await this.studyAccess.allowed(c, (await db.studyState.findMany({
       where: { institutionId: c.institution }, select: { uid: true } })).map(s => s.uid))] : [];
     let cursor: any = null;
     if (query.cursor !== undefined) {
@@ -234,7 +237,7 @@ export class ImageRequestService {
     // 불변인 생성 기관과 **현재** 소유 기관을 함께 JOIN한다 — 옮겨 간 검사의 요청은 어느 쪽 목록에도 나오지 않는다.
     // 한 문장이라 한 스냅샷이다. 여러 문장을 조합하는 #8·#9만 읽기 트랜잭션을 쓴다.
     const before = cursor?.at ?? '9999-12-31T00:00:00.000Z', beforeId = cursor?.id ?? 'ffffffff-ffff-ffff-ffff-ffffffffffff';
-    const rows: any[] = await this.prisma.$queryRaw`SELECT r.*
+    const rows: any[] = await db.$queryRaw`SELECT r.*
       FROM "StudyImageRequest" r JOIN "StudyState" s ON s.uid=r."studyUid" AND s."institutionId"=r."institutionId"
       WHERE r."institutionId"=${c.institution} AND (NOT ${restricted} OR r."studyUid"=ANY(${scope}::text[]))
         AND (NOT ${mine} OR r."requesterSub"=${c.sub}) AND r.state::text=ANY(${states}::text[])
@@ -248,7 +251,7 @@ export class ImageRequestService {
   }
 
   /** #8 요청 한 건. */
-  async read(id: string, c: RequestCaller) {
+  async read(id: string, c: RequestCaller, transaction?: Prisma.TransactionClient) {
     this.member(c);
     const scope = this.scope(c);
     if (!uuid(id)) throw requestMissing();
@@ -256,11 +259,11 @@ export class ImageRequestService {
     return this.run(c, async tx => {
       const row = await this.request(tx, id.toLowerCase(), c, scope, false);
       return { owner: this.owner(c), item: this.dto(row) };
-    }, true);
+    }, true, transaction);
   }
 
   /** #9 한 검사의 요청(최신 50개). 임상의는 자기 요청만. */
-  async forStudy(uid: string, c: RequestCaller) {
+  async forStudy(uid: string, c: RequestCaller, transaction?: Prisma.TransactionClient) {
     this.member(c);
     const scope = this.scope(c);
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
@@ -272,14 +275,14 @@ export class ImageRequestService {
         WHERE r."studyUid"=${uid} AND r."institutionId"=${c.institution} AND (NOT ${own} OR r."requesterSub"=${c.sub})
         ORDER BY r."createdAt" DESC,r.id DESC LIMIT 50`;
       return { owner: this.owner(c), items: rows.map(row => this.dto(row)) };
-    }, true);
+    }, true, transaction);
   }
 
   /**
    * #10 요청 등록. 요청자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 여섯 키만 받는다. 상대 기관 id는 키가
    * 반드시 있고 값은 null 또는 등록된 다른 기관이다. 같은 검사·종류·요청자의 활성 요청은 하나다(OQ-7 a).
    */
-  async create(uid: string, c: RequestCaller, b: CreateRequest) {
+  async create(uid: string, c: RequestCaller, b: CreateRequest, transaction?: Prisma.TransactionClient) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
@@ -315,14 +318,14 @@ export class ImageRequestService {
         changedBy: c.actor, createdAt: at, updatedAt: at } });
       await this.receipt(tx, c, applied, mark, b.counterpartyInstitutionId, CLINICIAN_ROLE, at);
       return { owner: this.owner(c), applied, replayed: false };
-    });
+    }, false, transaction);
   }
 
   /**
    * #11 상태 변경. accept는 빈 note, close·decline·cancel은 1~2,000자 note. 처리 동작은 technician·admin, 취소는
    * 요청한 임상의 또는 admin이다. 동작별 역할은 body의 action을 읽은 뒤 트랜잭션 전에 판정한다.
    */
-  async change(id: string, c: RequestCaller, b: any) {
+  async change(id: string, c: RequestCaller, b: any, transaction?: Prisma.TransactionClient) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !staff(c)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'action', 'note']) || !uuid(b.requestId) || !revision(b.revision)
@@ -347,6 +350,6 @@ export class ImageRequestService {
       else if (holds(c, ADMIN)) role = ADMIN;
       else throw actionForbidden();
       return this.apply(tx, c, row, requestId, mark, b.action, step.to, role, b.note);
-    });
+    }, false, transaction);
   }
 }
