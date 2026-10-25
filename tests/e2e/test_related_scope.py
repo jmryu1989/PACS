@@ -43,7 +43,12 @@ class RelatedScopeE2E(RelatedFilterE2E):
         p.locator('#related-body-part').select_option('?');self.shown(p,[])
         p.locator('#related-body-part').select_option('');self.shown(p,[current,prior,empty])
         p.screenshot(path='../tmp/related-scope/controls.png')
-        for f in (current,prior,empty):self.assertEqual(self.report_rows(f),rows[f.uid])
+        for f in (prior,empty):self.assertEqual(self.report_rows(f),rows[f.uid])
+        # W5 (design v5 §1): opening Related Report mode saves the typed Target draft first; the approved record stays as it was.
+        after=self.report_rows(current)
+        for table in ('Report','ReportVersion'):self.assertEqual(after[table],rows[current.uid][table])
+        stored=[json.loads(row) for row in after['ReportDraft'] if json.loads(row).get('present') is not False]
+        self.assertEqual([d['findings'] for d in stored],['unsaved related scope'])
         self.assertEqual(self.originals(),originals)
 
     def test_scope_02_failed_lookup_retry_cancel_and_target_change(self):

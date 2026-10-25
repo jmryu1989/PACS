@@ -11,14 +11,24 @@
       $("#prior-report-content").style.display = "none";
       for (const id of ["#prior-findings", "#prior-conclusion", "#prior-recommendation"])
         $(id).textContent = "";
+      showPriorRecommendation();
       // W5: the Source display context follows (an empty Source never keeps an older read's text).
-      relatedMode?.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
+      relatedMode.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
     }
 
     /**
      * 지금의 승인 판독문: 폐기 기록을 뺀 가장 새 판이 approve/addendum일 때만 그 판이다(W5 Source는 승인/추가기재 ReportVersion뿐).
      * 그 뒤에 취소(reset) 같은 판이 섰으면 예전 승인을 지금의 승인본으로 보이지 않는다 — 서버도 그런 Source의 삽입을 받지 않는다.
      */
+    /**
+     * W-07b: Findings and Conclusion are the report's two sections. A stored Recommendation (legacy or template value) is
+     * shown read-only only when it has text; an empty one shows no heading. The value itself is never dropped.
+     */
+    function showPriorRecommendation() {
+      const value = $("#prior-recommendation");
+      value.closest(".prior-report-section").hidden = !value.textContent;
+    }
+
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
       return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
@@ -43,7 +53,7 @@
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
-      const shown = view => relatedMode?.showSource({ seq, uid, ...view });
+      const shown = view => relatedMode.showSource({ seq, uid, ...view });
       $("#prior-report-meta").textContent = relatedReportMeta(s);
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
       $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
@@ -81,6 +91,7 @@
       $("#prior-findings").textContent = report.findings ?? "";
       $("#prior-conclusion").textContent = report.conclusion ?? "";
       $("#prior-recommendation").textContent = report.recommendation ?? "";
+      showPriorRecommendation();
       $("#prior-report-status").style.display = "none";
       $("#prior-report-content").style.display = "";
       shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
@@ -92,7 +103,7 @@
       if (!cur() || !relatedUid) return;
       // W5: in Related Report mode, Return to Current also leaves the mode — the editor comes back with its caret, selection
       // and scroll (Back to Current Draft alone keeps the Related study viewed: backToCurrentDraft).
-      const left = relatedMode?.exit() ?? null;
+      const left = relatedMode.exit();
       // 같은 판독 행 재선택은 의도적으로 무동작이다. 영상만 돌아가려다 판독문을 재로딩하거나 점유를 풀면 안 된다.
       relatedUid = null;
       ++relatedReportSeq;
@@ -109,12 +120,22 @@
      * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
      */
     function backToCurrentDraft() {
-      const left = relatedMode?.exit() ?? null;
+      const left = relatedMode.exit();
       if (!left) return false;
       renderClinical(); updateReportButtons(); renderDraftBar();
       criticalInbox?.sync();
       relatedMode.restore(left);
       return true;
+    }
+
+    /**
+     * The worklist's ways to the report editor (Enter on the current row, its keyboard activation, the row menu's
+     * 판독문 작성으로). In Related Report mode the editor is hidden, so this is the mode's Back (Report Editor): the Target,
+     * its text and its caret come back. Otherwise the Findings field takes the focus as before.
+     */
+    function focusReportEditor() {
+      if (backToCurrentDraft()) return;
+      $("#findings").focus();
     }
 
     function previewRelated(uid) {
@@ -139,7 +160,7 @@
      */
     let relatedEntrySeq = 0;
     async function enterRelatedMode(uid, { focus = true } = {}) {
-      if (!relatedMode || work.state() !== "active") return;
+      if (work.state() !== "active") return;
       if (relatedMode.active()) {
         if (uid !== relatedUid) previewRelated(uid);
         if (focus) relatedMode.focus();
@@ -191,12 +212,8 @@
       criticalInbox?.sync();
     }
 
-    /**
-     * The Related row's own action (click, Enter): the mode's entry. W5-PHASE-A-INTERIM: a page that does not serve the mode's
-     * asset keeps the row's preview; Phase B serves the asset and deletes this guard with the mount guard in page-boot.js.
-     */
+    /** The Related row's own action (click, Enter): the mode's entry. */
     function relatedActivate(uid, options) {
-      if (!relatedMode) { previewRelated(uid); return; }
       enterRelatedMode(uid, options);
     }
 
@@ -205,7 +222,6 @@
      * entry for the viewed Related study and its Back. True when the mode took the key; otherwise the caller's focus action runs.
      */
     function relatedModeCommand(which) {
-      if (!relatedMode) return false;
       if (which === "report") return backToCurrentDraft();
       if (which !== "prior" || work.state() !== "active") return false;
       if (relatedMode.active()) { relatedMode.focus(); return true; }

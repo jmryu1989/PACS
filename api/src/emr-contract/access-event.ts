@@ -229,7 +229,8 @@ const AUDIT_LINK = /^audit:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3
 const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // ── formatVersion 2 (EMR-B1, D596) ──
-// Two closed branches. `online-auth` is a U5 authentication fact; it never names clinical targets and never passes as a
+// `local-read` records observed local sources without a formal record envelope.
+// `online-auth` is a U5 authentication fact; it never names clinical targets and never passes as a
 // clinical write. `verified-offline` is a clinical act that happened on a registered device while disconnected; it is
 // admitted only through the verification capability composed at server start (none until C ships real key/signature
 // verification, so the branch is refused as unsupported). v1 parsing and results are unchanged apart from D-18's context.
@@ -308,7 +309,33 @@ export interface OfflineAccessEventV2 {
   /** The separate online reception event of this original. */
   relatedEventId: string;
 }
-export type AccessEventV2 = AuthAccessEventV2 | OfflineAccessEventV2;
+/** Local source observations do not assert a formal PatientLink or a signed/retained record. */
+export interface LocalReadTarget {
+  kind: 'study-metadata' | 'report-version' | 'report-evidence';
+  studyId: EvidenceFact<string>;
+  recordId: EvidenceFact<string>;
+  versionId: EvidenceFact<string>;
+  sourcePatientId: EvidenceFact<string>;
+  sourceInstitution: EvidenceFact<string>;
+  projectionSha256: string;
+}
+export interface LocalReadAccessEventV2 {
+  formatVersion: 2; branch: 'local-read';
+  surface: string; eventId: string;
+  userId: EvidenceFact<ImmutableIdentity>; rolesAtTime: EvidenceFact<readonly string[]>;
+  rightsVersion: number;
+  actingInstitution: EvidenceFact<string>; managingInstitution: EvidenceFact<string>;
+  occurredAt: string; trustedProxyIp: AccessEventV1['trustedProxyIp'];
+  session: Readonly<{ method: 'session'; sessionRef: string } | { method: 'bearer'; sessionRef: null }>;
+  cause: 'user-view' | 'background-fetch'; executor: 'member';
+  /** Preserve an existing source work context when observed; never infer an assignment or request a reason. */
+  context: Readonly<WorkContext> | null;
+  targets: readonly LocalReadTarget[];
+  action: 'provide-prepared' | 'transfer-ended' | 'transfer-aborted' | 'client-shown';
+  result: 'prepared' | 'succeeded' | 'aborted' | 'reported';
+  requestId: string; auditLinkId: string; relatedEventId: string | null;
+}
+export type AccessEventV2 = AuthAccessEventV2 | OfflineAccessEventV2 | LocalReadAccessEventV2;
 export type AccessEvent = AccessEventV1 | AccessEventV2;
 
 function factV2<T>(input: unknown, parse: (value: unknown) => T, unresolved: readonly UnresolvedReason[],
@@ -350,9 +377,64 @@ function surfaceCauses(surface: string): readonly CauseKind[] {
 }
 function parseAccessEventV2(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEventV2> {
   const branch = input && typeof input === 'object' ? Object.getOwnPropertyDescriptor(input, 'branch')?.value : undefined;
+  if (branch === 'local-read') return parseLocalReadEvent(input);
   if (branch === 'online-auth') return parseAuthEventV2(input);
   if (branch === 'verified-offline') return parseOfflineEventV2(input, served);
   throw new Error('Unknown access format branch');
+}
+export function parseLocalReadEvent(input: unknown): Readonly<LocalReadAccessEventV2> {
+  const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'rightsVersion',
+    'actingInstitution', 'managingInstitution', 'occurredAt', 'trustedProxyIp', 'session', 'cause', 'executor',
+    'context', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
+  if (v.formatVersion !== 2 || v.branch !== 'local-read' || v.executor !== 'member') throw new Error('Local member read required');
+  const surface = string(v.surface), kinds = surfaceKindsOf(surface);
+  const action = choice(v.action, ['provide-prepared', 'transfer-ended', 'transfer-aborted', 'client-shown']);
+  const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'reported']);
+  if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
+  const cause = choice(v.cause, ['user-view', 'background-fetch']);
+  if (!surfaceCauses(surface).includes(cause)) throw new Error('Cause does not belong to the server surface');
+  const observed = (value: unknown) => {
+    const parsed = fact(value, v => string(v));
+    if (parsed.status !== 'known' && !(parsed.status === 'unresolved' && parsed.reason === 'not-observed'))
+      throw new Error('Local observation required');
+    return parsed;
+  };
+  const required = <T>(value: unknown, parse: (v: unknown) => T): EvidenceFact<T> => {
+    const parsed = fact(value, parse);
+    if (parsed.status !== 'known') throw new Error('Resolved local fact required');
+    return parsed;
+  };
+  if (!Array.isArray(v.targets) || !v.targets.length) throw new Error('Actual local targets required');
+  const targets = v.targets.map(value => {
+    const t = object(value, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution', 'projectionSha256']);
+    const kind = choice(t.kind, ['study-metadata', 'report-version', 'report-evidence']);
+    if (!kinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
+    const versionId = kind === 'study-metadata' ? observed(t.versionId) : required(t.versionId, v => string(v));
+    if (action === 'client-shown' && kind !== 'report-version' && kind !== 'report-evidence')
+      throw new Error('Client display reporting requires a stored report target');
+    return { kind, studyId: required(t.studyId, v => string(v)), recordId: required(t.recordId, v => string(v)),
+      versionId, sourcePatientId: observed(t.sourcePatientId), sourceInstitution: observed(t.sourceInstitution),
+      projectionSha256: sha256(t.projectionSha256) };
+  });
+  const binding = object(v.session, ['method', 'sessionRef']);
+  const session: LocalReadAccessEventV2['session'] = binding.method === 'session'
+    ? { method: 'session', sessionRef: string(binding.sessionRef) }
+    : binding.method === 'bearer' && binding.sessionRef === null ? { method: 'bearer', sessionRef: null }
+    : refuse('LocalReadSessionBindingRequired');
+  const eventId = string(v.eventId), auditLinkId = string(v.auditLinkId);
+  if (!UUID4.test(eventId) || !AUDIT_LINK.test(auditLinkId)) throw new Error('Server event correlation required');
+  const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
+  if ((action === 'provide-prepared') !== (relatedEventId === null) || relatedEventId === eventId)
+    throw new Error('Prepared event reference required');
+  const trustedProxyIp = fact(v.trustedProxyIp, proxyAddress);
+  if (trustedProxyIp.status !== 'known' && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed'))
+    throw new Error('Observed ingress required');
+  return freeze({ formatVersion: 2, branch: 'local-read', surface, eventId,
+    userId: required(v.userId, identity), rolesAtTime: required(v.rolesAtTime, roleList), rightsVersion: integer(v.rightsVersion),
+    actingInstitution: required(v.actingInstitution, v => string(v)), managingInstitution: required(v.managingInstitution, v => string(v)),
+    occurredAt: utc(v.occurredAt), trustedProxyIp, session, cause, executor: 'member',
+    context: v.context === null ? null : workContext(v.context, cause, false), targets, action, result,
+    requestId: string(v.requestId), auditLinkId, relatedEventId });
 }
 function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'rightsVersion', 'actingInstitution',
@@ -563,7 +645,7 @@ const CHANGE_ACTS: readonly StatutoryAct[] = freeze(['기재', '추가기재', '
 export function statutoryAct(input: unknown, served?: readonly ResolvedRecord[]): StatutoryAct {
   const event = parseAccessEvent(input, served);
   return event.formatVersion === 2 && event.branch === 'online-auth' ? AUTH_STATUTORY_ACT[event.action] :
-    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2).action];
+    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2 | LocalReadAccessEventV2).action];
 }
 /** The streams an event is recorded in: always the viewing stream; also the history stream when it changed a record. */
 export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]): readonly AccessStream[] {
