@@ -139,7 +139,7 @@ const fs=require('fs'), assert=require('assert');
 assert.notStrictEqual(process.getuid(),0);
 for(const p of ['dist/main.js','dist/emr-runtime/store.js','prisma/migrations/0_init/migration.sql',
   'prisma/migrations/20261008120000_emr_b/migration.sql', 'prisma/migrations/20261010120000_emr_seal_attempts/migration.sql', 'prisma/migrations/20261010150000_emr_read_jit_off/migration.sql', 'prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
-  'prisma/migrations/20261015013945_import_operation/migration.sql', 'prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql', 'prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'prisma/migrations/20261024120000_emr_d_online/migration.sql', 'prisma/migrations/20261025120000_access_review/migration.sql',
+  'prisma/migrations/20261015013945_import_operation/migration.sql', 'prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql', 'prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'prisma/migrations/20261024120000_emr_d_online/migration.sql', 'prisma/migrations/20261025000000_emr_e_online/migration.sql', 'prisma/migrations/20261025120000_access_review/migration.sql',
   'node_modules/prisma/build/index.js','node_modules/.prisma/client/index.js']) assert(fs.existsSync(p),p);
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
@@ -201,7 +201,9 @@ const runtime=new EmrRuntime(process.env.DATABASE_URL, '/var/lib/kin-emr/outage'
                           '20261006000000_tech_note_attempt_id',
                           '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects',
                           '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
-                          '20261015013945_import_operation', '20261016120000_related_report_insert_receipt', '20261023180000_emr_pg_ledger', '20261023200000_emr_server_signing', '20261024120000_emr_d_online', '20261025120000_access_review'])
+                          '20261015013945_import_operation', '20261016120000_related_report_insert_receipt', '20261023180000_emr_pg_ledger', '20261023200000_emr_server_signing', '20261024120000_emr_d_online', '20261025000000_emr_e_online', '20261025120000_access_review'])
+        self.assertEqual(self.psql("SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema='emr_image';"), "observation,preparation")
+        self.assertEqual(self.psql("SELECT concat_ws(',', has_table_privilege('kin_runtime','emr_image.preparation','INSERT'), has_table_privilege('kin_runtime','emr_image.observation','INSERT'), has_sequence_privilege('kin_runtime','emr_image.observation_sequence_seq','USAGE'));"), "t,t,t")
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         # S9-U4b: the runtime role reads exactly the three history columns of the import readiness fact, and an
         # ImportOperation row written now survives the restart below with its owner and kind.
