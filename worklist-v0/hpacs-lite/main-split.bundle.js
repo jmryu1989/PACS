@@ -282,16 +282,24 @@
      * W5(설계 v5 §1.6, D1423 R2): Related Report 모드와, 저장 영수증이 확인되지 않은 Related 삽입도 쓰기를 막는다. 예외는 모드가 연
      * 일회용 허가(`admission`) 하나뿐이다 — 검토한 Insert의 그 칸, 그 한 번의 native 편집. `RELATED_BASE`는 모드가 "Target이 그
      * 삽입을 받을 수 있는가"를 물을 때 W5 사유를 빼고 기존 규칙만 묻는 표시이고, 편집을 열지 않는다(편집기의 canEdit은 모드가
-     * 직접 확인한 허가만 넘긴다). `relatedMode`는 page-boot가 올린 모드이며, 그보다 앞의 소비자가 읽으므로 여기서 선언한다(S9-U0a-PRE).
+     * 직접 확인한 허가만 넘긴다). `relatedMode`는 페이지가 언제나 싣는 Related Report 모드다(W5 Phase B). 첫 소비자(중요 결과
+     * 발신·수신의 mount가 그리는 대기 사유, 판독 버튼, 편집기 frame)보다 먼저 여기서 선언과 함께 만든다 — 넘기는 page 함수는
+     * 모두 함수 선언이라 이 시점에 이미 있고, 모드가 mount 때 부르는 것은 편집기 host 하나뿐이다.
      */
-    let relatedMode = null;
+    const relatedMode = KinRelatedReportMode({
+      editor: () => document.querySelector('.redit'), field: name => $('#' + name),
+      target: relatedTargetCard, source: relatedSourceCard,
+      insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
+      freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
+      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
+    });
     const RELATED_BASE = Object.freeze({ base: true });
     function reportWriteBlock(admission = null) {
       if (!selectedUid) return "검사를 선택하세요";
       if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
       if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
       if (admission === RELATED_BASE) return null;
-      return relatedMode?.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);
+      return relatedMode.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);
     }
 
     // ── Reading Template ──
@@ -1581,7 +1589,7 @@
       // W5 (설계 v5 §1.6): in Related Report mode the report commands wait for Back, with the reason said on each control;
       // an unsettled explicit Related insert holds the decisions that would carry its text. Prev/Next stay: they leave through
       // the move gate. Placed before the identity rule below, whose titles then stand.
-      const relatedWhy = relatedMode?.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
+      const relatedWhy = relatedMode.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
       if (relatedWhy)
         for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
           "#b-prelim"]) {
@@ -2341,7 +2349,7 @@
     function enterStudy(uid, { deferViewer = false, openSelected = false } = {}) {
       // W5: a move closes Related Report mode first (the move gate already confirmed the Target clean); its return point
       // belongs to the study being left.
-      relatedMode?.exit();
+      relatedMode.exit();
       clearReportNotice();
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);
@@ -4142,14 +4150,24 @@
       $("#prior-report-content").style.display = "none";
       for (const id of ["#prior-findings", "#prior-conclusion", "#prior-recommendation"])
         $(id).textContent = "";
+      showPriorRecommendation();
       // W5: the Source display context follows (an empty Source never keeps an older read's text).
-      relatedMode?.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
+      relatedMode.showSource({ seq: relatedReportSeq, uid: null, state: "idle" });
     }
 
     /**
      * 지금의 승인 판독문: 폐기 기록을 뺀 가장 새 판이 approve/addendum일 때만 그 판이다(W5 Source는 승인/추가기재 ReportVersion뿐).
      * 그 뒤에 취소(reset) 같은 판이 섰으면 예전 승인을 지금의 승인본으로 보이지 않는다 — 서버도 그런 Source의 삽입을 받지 않는다.
      */
+    /**
+     * W-07b: Findings and Conclusion are the report's two sections. A stored Recommendation (legacy or template value) is
+     * shown read-only only when it has text; an empty one shows no heading. The value itself is never dropped.
+     */
+    function showPriorRecommendation() {
+      const value = $("#prior-recommendation");
+      value.closest(".prior-report-section").hidden = !value.textContent;
+    }
+
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
       return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
@@ -4174,7 +4192,7 @@
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
-      const shown = view => relatedMode?.showSource({ seq, uid, ...view });
+      const shown = view => relatedMode.showSource({ seq, uid, ...view });
       $("#prior-report-meta").textContent = relatedReportMeta(s);
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
       $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
@@ -4212,6 +4230,7 @@
       $("#prior-findings").textContent = report.findings ?? "";
       $("#prior-conclusion").textContent = report.conclusion ?? "";
       $("#prior-recommendation").textContent = report.recommendation ?? "";
+      showPriorRecommendation();
       $("#prior-report-status").style.display = "none";
       $("#prior-report-content").style.display = "";
       shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
@@ -4223,7 +4242,7 @@
       if (!cur() || !relatedUid) return;
       // W5: in Related Report mode, Return to Current also leaves the mode — the editor comes back with its caret, selection
       // and scroll (Back to Current Draft alone keeps the Related study viewed: backToCurrentDraft).
-      const left = relatedMode?.exit() ?? null;
+      const left = relatedMode.exit();
       // 같은 판독 행 재선택은 의도적으로 무동작이다. 영상만 돌아가려다 판독문을 재로딩하거나 점유를 풀면 안 된다.
       relatedUid = null;
       ++relatedReportSeq;
@@ -4240,12 +4259,22 @@
      * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
      */
     function backToCurrentDraft() {
-      const left = relatedMode?.exit() ?? null;
+      const left = relatedMode.exit();
       if (!left) return false;
       renderClinical(); updateReportButtons(); renderDraftBar();
       criticalInbox?.sync();
       relatedMode.restore(left);
       return true;
+    }
+
+    /**
+     * The worklist's ways to the report editor (Enter on the current row, its keyboard activation, the row menu's
+     * 판독문 작성으로). In Related Report mode the editor is hidden, so this is the mode's Back (Report Editor): the Target,
+     * its text and its caret come back. Otherwise the Findings field takes the focus as before.
+     */
+    function focusReportEditor() {
+      if (backToCurrentDraft()) return;
+      $("#findings").focus();
     }
 
     function previewRelated(uid) {
@@ -4270,7 +4299,7 @@
      */
     let relatedEntrySeq = 0;
     async function enterRelatedMode(uid, { focus = true } = {}) {
-      if (!relatedMode || work.state() !== "active") return;
+      if (work.state() !== "active") return;
       if (relatedMode.active()) {
         if (uid !== relatedUid) previewRelated(uid);
         if (focus) relatedMode.focus();
@@ -4322,12 +4351,8 @@
       criticalInbox?.sync();
     }
 
-    /**
-     * The Related row's own action (click, Enter): the mode's entry. W5-PHASE-A-INTERIM: a page that does not serve the mode's
-     * asset keeps the row's preview; Phase B serves the asset and deletes this guard with the mount guard in page-boot.js.
-     */
+    /** The Related row's own action (click, Enter): the mode's entry. */
     function relatedActivate(uid, options) {
-      if (!relatedMode) { previewRelated(uid); return; }
       enterRelatedMode(uid, options);
     }
 
@@ -4336,7 +4361,6 @@
      * entry for the viewed Related study and its Back. True when the mode took the key; otherwise the caller's focus action runs.
      */
     function relatedModeCommand(which) {
-      if (!relatedMode) return false;
       if (which === "report") return backToCurrentDraft();
       if (which !== "prior" || work.state() !== "active") return false;
       if (relatedMode.active()) { relatedMode.focus(); return true; }
@@ -4375,7 +4399,7 @@
         // W5 (D1423 R2): every existing rule holds for every edit; Related Report mode lets through only the admission it
         // issued itself for exactly this field and request (the mode checks and consumes it here, once per edit span).
         canEdit: (field, admission = null, at = null) => work.state() === "active" && !!selectedUid
-          && !reportEditorBlock(admission && relatedMode?.admits(admission, field, at) ? admission : null),
+          && !reportEditorBlock(admission && relatedMode.admits(admission, field, at) ? admission : null),
       });
       return reportFrame;
     }
@@ -4566,7 +4590,7 @@
       renderRecommendationNotice();
       if (reportNotice || reportNoticeShown) renderReportNotice();
       // W5: the Reading Target card of Related Report mode shows this same draft state.
-      relatedMode?.refresh();
+      relatedMode.refresh();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -4715,7 +4739,7 @@
       $("#report-notice-check").style.display = ["unknown", "discard-unknown"].includes(s) || (busy && s === "checking") ? "" : "none";
       $("#report-notice-check").disabled = busy || unresolved;
       $("#report-notice-retry").disabled = busy || unresolved;
-      relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
+      relatedMode.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
         ? op : null, busy);
     }
     function renderReportNotice() {
@@ -4725,7 +4749,7 @@
       $("#report-notice").style.display = n ? "flex" : "none";
       $("#report-notice-retry").disabled = false;
       if (n?.action?.kind === "related-insert") { renderRelatedInsertNotice(n); return; }
-      relatedMode?.noticeDiscard(null);
+      relatedMode.noticeDiscard(null);
       if (!n) return;
       const unconfirmed = reportConverge.has(n.uid);
       // Check가 서버의 지금 초안을 읽고 알게 된 것(checkReportNotice). 그 뒤 이 글의 확인 여부가 바뀌었으면(늦게 닿은 저장, 새로
@@ -5049,14 +5073,14 @@
       const uid = selectedUid, at = work.capture("editor");
       if (!uid || appState[uid]?.prelimHidden) return;
       // W5: replacing the editor's text is a report command; in Related Report mode it waits for Back.
-      if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
+      if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
       try {
         await draftClient.settled(uid);
         if (!work.admits(at)) return;
         const b = await api("GET", "/bootstrap", undefined, undefined, at);
         work.commit(at, () => {
           // Related can open while the read is pending; its Target must keep the opening text.
-          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
+          if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
           appState[uid] = replaceReportState(uid, b.states?.[uid]);
           syncStudy(uid);
           loadReport({ force: true });
@@ -5487,7 +5511,7 @@
      */
     function relatedInsertFreeze({ section, parts, source, admission }) {
       const uid = selectedUid, owner = draftOwner, related = relatedStudy();
-      if (!["findings", "conclusion"].includes(section) || !relatedMode) return { refused: "넣을 칸을 확인할 수 없습니다" };
+      if (!["findings", "conclusion"].includes(section)) return { refused: "넣을 칸을 확인할 수 없습니다" };
       const why = relatedInsertBlock() || reportEditorBlock(admission);
       if (why) return { refused: why };
       if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
@@ -5620,7 +5644,7 @@
       if (exact) {
         const at = reportFrame.capture(op.field, { start: op.offset, end: op.offset + op.text.length });
         const edit = admission => editReport([{ field: op.field, at, text: "" }], { admission });
-        const removed = relatedMode ? relatedMode.admit({ field: op.field, at, text: "", op }, edit) : edit(null);
+        const removed = relatedMode.admit({ field: op.field, at, text: "", op }, edit);
         reverted = !!removed && reportFrame.read(op.field) === op.before;
       }
       if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }
@@ -5682,9 +5706,9 @@
         renderDraftBar();
         updateReportButtons();
       }
-      if (op.state === "applied") relatedMode?.announce("삽입됨 · " + relatedInsertLabel(op));
-      else if (op.state === "discarded" && op.reverted) relatedMode?.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
-      relatedMode?.refresh();
+      if (op.state === "applied") relatedMode.announce("삽입됨 · " + relatedInsertLabel(op));
+      else if (op.state === "discarded" && op.reverted) relatedMode.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
+      relatedMode.refresh();
     }
     /** Shows the pending operation's Notice again (a refused command or entry names it). */
     function relatedInsertNotice(uid) {
@@ -7296,7 +7320,7 @@
      */
     function relatedCommandBlock(command) {
       if (!selectedUid || appState[selectedUid]?.identityUnresolved || ["next", "prev"].includes(command)) return null;
-      if (relatedMode?.active()) return relatedMode.reason();
+      if (relatedMode.active()) return relatedMode.reason();
       return relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
     }
     /**
@@ -8625,6 +8649,7 @@
     // ── 공통 이벤트 ──
     // 판독 창 위치는 계정 데이터가 아니라 이 브라우저·이 장비의 작업환경 설정이다.
     const OHIF_RECT_KEY = "kin.ohif.current.rect";
+    const OHIF_SPAN_SCREENS_KEY = "kin.ohif.span.screens";
     let ohifPopupHandle = null;
     const ohifRectPolls = new Map(), ohifPopupSlots = new WeakMap(), ohifPopupSequences = new WeakMap();
     const ohifPlacementWrites = new WeakMap();
@@ -8695,9 +8720,8 @@
         if (details) {
           if (monitorQueryUnsupported) monitorSessionGranted = true;
           cacheMonitorScreens(details);
-          for (let i = 0; i < 4; i++) localStorage.removeItem(i ? OHIF_RECT_KEY + ':' + i : OHIF_RECT_KEY);
           updateMonitorButton();
-          toast("모니터 배치 허용됨 — 판독 창이 다른 모니터에 열립니다", "info");
+          toast("모니터 배치 허용됨 — Viewer Windows에서 두 화면을 선택하세요. 기존 창 위치는 유지합니다.", "info");
         } else {
           monitorSessionGranted = false;
           updateMonitorButton();
@@ -8774,8 +8798,34 @@
       };
     }
 
+    function readOhifSpanScreens() {
+      try {
+        const selected = JSON.parse(localStorage.getItem(OHIF_SPAN_SCREENS_KEY) || 'null');
+        return KinViewerDisplayLayout.span(selected) ? selected : null;
+      } catch (_) { return null; }
+    }
+
+    function ohifSpanTarget() {
+      const selected = readOhifSpanScreens();
+      if (!selected || !monitorPermissionGranted()) return null;
+      const matched = selected.map(saved => screensCache.find(s => KinViewerDisplayLayout.identity(s) === KinViewerDisplayLayout.identity(saved)));
+      return KinViewerDisplayLayout.span(matched);
+    }
+
     function ohifPlacement(stored, details = null) {
       const screens = (details?.screens || []).map(usableScreenRect).filter(Boolean);
+      const selected = readOhifSpanScreens(), span = ohifSpanTarget();
+      if (selected) {
+        // A missing display is not a successful new layout. The launch path
+        // suspends saving until the user moves/resizes the remaining window.
+        if (!span) return defaultOhifRect(currentScreenRect());
+        return stored && rectInsideScreen(stored, span) ? stored : span;
+      }
+      if (stored && monitorPermissionGranted()) {
+        const touched = screensCache.filter(target => overlapArea(stored, target) > 0);
+        // Also restore a manually spanned window without fitting it to one screen.
+        if (touched.length >= 2) return stored;
+      }
       // 권한 없이 현재 화면 하나로 clamp하면 다른 모니터의 저장 자리를 끌어온다.
       if (stored) return monitorPermissionGranted() && screensCache.length
         ? clampOhifRect(stored, screensCache) : stored;
@@ -8812,6 +8862,9 @@
           if (!suspended.baseline) { suspended.baseline = rect; return false; }
           if (Object.keys(rect).every(k => rect[k] === suspended.baseline[k])) return false;
           // After a failed placement, an actual user move resumes position saving.
+          // Restore that manual rectangle next time, including when display
+          // permission was denied or a previously selected screen disappeared.
+          localStorage.removeItem(OHIF_SPAN_SCREENS_KEY);
           ohifPlacementWrites.delete(popup);
         }
         const slot = ohifPopupSlots.get(popup) || 0;
@@ -8951,16 +9004,10 @@
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash;
       const seq = ++ohifOpenSeq;
       if (!viewerWindows) { notify('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return; }
-      const preferences = imageOpening?.snapshot(), limit = preferences?.maxWindows || 1;
-      let choice = viewerWindows.choose(url, limit, { freshDocument });
-      if (!freshDocument && choice.full && viewerWindows.available() && preferences?.reuseClean && limit > 1) {
-        const rows = viewerWindows.rows();
-        const clean = row => row.status?.kind === 'viewer' && row.status.ready && !row.status.busy && !row.status.dirty;
-        const reusable = rows.length === limit && (rows.find(row => row.index !== viewerWindowCursor && clean(row)) || rows.find(clean));
-        if (reusable) choice = { ...reusable, fresh: false };
-      }
+      // A saved multi-window preference must not allocate another viewer. Keep
+      // older live windows in the registry so their work remains reachable.
+      const choice = viewerWindows.choose(url, 1, { singleWindow: true });
       if (choice.error) { notify(choice.error, 'err', 8000); if (choice.full && !freshDocument) $('#viewer-windows-open').click(); return; }
-      if (freshDocument && (!choice.fresh || choice.pending)) { notify('기존 영상을 유지했습니다. 새 영상 창을 확보한 뒤 다시 여세요.', 'err'); return; }
       url = viewerWindows.linked(url, choice.index);
       const stored = readStoredOhifRect(choice.index);
       const initial = ohifPlacement(stored);
@@ -8978,13 +9025,6 @@
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
       );
       if (popup) {
-        if (freshDocument && ohifPopupState(popup).kind !== "blank") {
-          try { popup.opener = null; } catch (_) {}
-          viewerWindows.blocked(choice);
-          notify("새 창 이름에 기존 화면이 연결되어 열지 않았습니다. 기존 화면을 유지했습니다.", "err", 8000);
-          try { popup.focus(); } catch (_) {}
-          return;
-        }
         viewerWindows.attach(choice, popup); viewerWindowCursor = choice.index; ohifPopupSlots.set(popup, choice.index);
         // Reopening a named window can restore its opener even without navigation.
         try{popup.opener=null;}catch(_){notify('영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.','err',8000);return;}
@@ -8994,13 +9034,13 @@
           return;
         }
         const previous = ohifPopupState(popup);
-        const deferredPlacement = previous.kind === 'blank' && monitorPermissionGranted() && screen.isExtended === true;
+        const deferredPlacement = previous.kind === 'blank';
         const placementWrite = deferredPlacement ? {pending:true,baseline:null} : null;
         if (placementWrite) ohifPlacementWrites.set(popup, placementWrite);
         // 진입에서 멈춘 창은 초점만 주거나 "닫고 다시 여세요"로 돌려보내지 않는다: 아래에서 새 세션 확인과 함께 다시 읽게 한다.
         const stopped = previous.kind === "viewer" && !previous.ready && viewerEntryStopped(popup);
         if (previous.kind === "viewer" && !stopped) {
-          if (sameOhifScope(previous.href, url)) {
+          if (!freshDocument && sameOhifScope(previous.href, url)) {
             if(popup.location.hash!==new URL(url,location.origin).hash){
               try{
                 // Hash navigation can re-enter OHIF's mode and clear live job
@@ -9019,7 +9059,7 @@
             return;
           }
           if (previous.busy || previous.dirty || !previous.ready) {
-            popup.focus();
+            try { popup.focus(); } catch (_) {}
             watchOhifRect(popup);
             notify(!previous.ready
               ? "기존 영상 창의 보호 상태를 확인할 수 없습니다. 로딩을 확인하고 계속되지 않으면 그 창을 닫은 뒤 다시 여세요."
@@ -9055,7 +9095,7 @@
         ohifPopupSequences.set(popup, seq);
         // 멈춘 창을 같은 검사로 다시 열 때는 주소가 같아(달라도 # 뒤만 다르다) 대입으로는 새 문서가 읽히지 않는다 —
         // 주소만 맞춘 뒤 그 창을 다시 읽게 한다. 넘겨준 세션은 다시 읽힌 문서의 첫 스크립트가 받는다.
-        if (stopped && sameOhifScope(previous.href, url)) {
+        if ((stopped || freshDocument) && sameOhifScope(previous.href, url)) {
           try { popup.history.replaceState(popup.history.state, "", url); } catch (_) {}
           popup.location.reload();
         } else popup.location.href = url;
@@ -9064,7 +9104,7 @@
         watchOhifRect(popup);
         if (!monitorHintShown && monitorPermission?.state === "prompt" && screen.isExtended === true) {
           monitorHintShown = true;
-          notify("판독 창을 다른 화면에 열려면 툴바 [다른 모니터로]에서 허용하세요.", "info", 8000);
+          notify("Viewer Windows의 Detect Displays에서 두 화면을 선택할 수 있습니다. 지원하지 않으면 영상 창을 직접 늘리세요.", "info", 8000);
         }
         // about:blank에서 opener를 분리한 직후에는 Chrome이 다른 화면 좌표를
         // 현재 화면으로 제한한다. 실제 뷰어 문서가 준비된 뒤 한 번 배치한다.
@@ -9074,23 +9114,28 @@
           const placementAt = work.capture("document");
           const currentPlacement = () => ohifPlacementWrites.get(popup) === placementWrite;
           const validPlacement = () => {
-            try { return work.admits(placementAt) && seq === ohifPopupSequences.get(popup) && !popup.closed && monitorPermissionGranted() &&
+            try { return work.admits(placementAt) && seq === ohifPopupSequences.get(popup) && !popup.closed &&
               placementOwner && placementOwner === KinViewerOpening.key(KinAuth.session()); }
             catch (_) { return false; }
           };
           const stopPlacement = () => {
-            if (currentPlacement()) { placementWrite.pending = false; placementWrite.baseline = popupRect(popup); }
+            if (currentPlacement() && placementWrite.pending) {
+              placementWrite.pending = false; placementWrite.baseline = popupRect(popup);
+              if (validPlacement()) notify('자동 창 배치를 확인하지 못해 이전 저장 위치를 유지했습니다. 영상 창을 직접 이동하거나 늘리세요.', 'info', 8000);
+            }
           };
           // This timer also bounds a screen-details promise that never settles.
           const expiry = setTimeout(stopPlacement, 15000);
           try {
-            window.getScreenDetails().then(details => {
+            const detailsRequest = monitorPermissionGranted() ? window.getScreenDetails() : Promise.resolve(null);
+            detailsRequest.then(details => {
               if (!validPlacement()) { clearTimeout(expiry); stopPlacement(); return; }
-              cacheMonitorScreens(details);
+              if (details) cacheMonitorScreens(details);
+              if (readOhifSpanScreens() && (!monitorPermissionGranted() || !ohifSpanTarget())) { clearTimeout(expiry); stopPlacement(); return; }
               const rect = ohifPlacement(stored, details);
               const place = () => {
                 if (!currentPlacement() || !placementWrite.pending) return;
-                if (Date.now() >= deadline || !validPlacement()) { clearTimeout(expiry);stopPlacement();return; }
+                if (Date.now() >= deadline || !validPlacement() || (details && !monitorPermissionGranted()) || (readOhifSpanScreens() && !ohifSpanTarget())) { clearTimeout(expiry);stopPlacement();return; }
                 try {
                   if (popup.document === previousDocument || popup.document.readyState === 'loading' || !sameOhifScope(popup.location.href, url)) {
                     if (Date.now() < deadline) setTimeout(place, 100);
@@ -9104,7 +9149,7 @@
                   const settled = () => {
                     try {
                     if (!currentPlacement() || !placementWrite.pending) return;
-                    if (Date.now() >= deadline || !validPlacement() || !sameOhifScope(popup.location.href,url)) { clearTimeout(expiry);stopPlacement();return; }
+                    if (Date.now() >= deadline || !validPlacement() || (details && !monitorPermissionGranted()) || (readOhifSpanScreens() && !ohifSpanTarget()) || !sameOhifScope(popup.location.href,url)) { clearTimeout(expiry);stopPlacement();return; }
                     const actual = popupRect(popup);
                     if (actual && Object.keys(rect).every(k => Math.abs(actual[k]-rect[k]) <= 16)) {
                       clearTimeout(expiry);ohifPlacementWrites.delete(popup);rememberOhifRect(popup);
@@ -9137,6 +9182,32 @@
       detectDisplays.id='viewer-windows-displays';detectDisplays.textContent='Detect Displays';
       detectDisplays.title='화면 접근 권한을 확인합니다. 번호는 좌표 순의 브라우저 목록이며 OS 설정 번호와 다를 수 있습니다.';
       list.before(detectDisplays);
+      const spanChoices = document.createElement('fieldset');
+      const spanLegend = document.createElement('legend'); spanLegend.textContent = 'Viewer Displays'; spanChoices.append(spanLegend);
+      const spanSelects = [1, 2].map(number => {
+        const label = document.createElement('label'), select = document.createElement('select');
+        label.append('Viewer Display ' + number + ' ', select); spanChoices.append(label);
+        select.onchange = () => { signature = ''; render(); };
+        return select;
+      });
+      const spanHelp = document.createElement('p');
+      spanHelp.textContent = '영상 창을 걸칠 두 화면을 선택하세요. 목록·판독 창은 이동하지 않습니다. 자동 배치가 제한되면 영상 창을 직접 늘리세요.';
+      spanChoices.append(spanHelp); list.before(spanChoices);
+      let displaySignature = '';
+      function renderDisplayChoices() {
+        const next = JSON.stringify(displayScreens);
+        if (next !== displaySignature) {
+          displaySignature = next;
+          const saved = readOhifSpanScreens();
+          spanSelects.forEach((select, index) => {
+            const previous = select.value || (saved?.[index] && KinViewerDisplayLayout.identity(saved[index]));
+            select.replaceChildren(new Option('Select Display', ''));
+            displayScreens.forEach((screen, i) => select.add(new Option('Display ' + (i + 1) + ' · ' + screen.left + ', ' + screen.top + ' · ' + screen.width + ' × ' + screen.height, KinViewerDisplayLayout.identity(screen))));
+            select.value = previous || '';
+          });
+        }
+        spanChoices.hidden = displayScreens.length < 2;
+      }
       detectDisplays.onclick=async()=>{
         const request=++displaySequence,owner=KinViewerOpening.key(KinAuth.session());detectDisplays.disabled=true;
         // 화면 정보의 답은 이 확인을 시작한 문맥과 계정·요청 번호를 함께 지난다. 잠근 단추는 이 확인이 푼다(자기 것만).
@@ -9154,6 +9225,7 @@
       async function moveDisplay(index,chosen){
         const owner=KinViewerOpening.key(KinAuth.session());
         if(!viewerWindows.available()){status.textContent='현재 계정을 확인한 뒤 다시 여세요.';return;}
+        if(!monitorPermissionGranted()){status.textContent='Detect Displays에서 화면을 확인하거나 영상 창을 직접 이동하세요.';return;}
         const row=viewerWindows.rows().find(r=>r.index===index),popup=row?.popup;
         if(!popup||row.pending||!row.status?.ready||row.status.busy||movingWindows.has(popup)||ohifPlacementWrites.get(popup)?.pending){status.textContent='창을 불러오는 중이거나 작업 중입니다. 완료 후 다시 이동하세요.';return;}
         const request=++displayMoveSequence;movingWindows.set(popup,request);render();
@@ -9170,21 +9242,32 @@
         try{
           const details=await window.getScreenDetails();
           if(!valid()){if(shown())status.textContent='창 상태가 바뀌어 이동하지 않았습니다. 현재 창을 다시 확인하세요.';return;}
-          const fresh=KinViewerDisplayLayout.screens(details),target=fresh.find(s=>KinViewerDisplayLayout.identity(s)===KinViewerDisplayLayout.identity(chosen));
+          cacheMonitorScreens(details);
+          const fresh=KinViewerDisplayLayout.screens(details),spanning=Array.isArray(chosen);
+          const selected=(spanning?chosen:[chosen]).map(value=>fresh.find(s=>KinViewerDisplayLayout.identity(s)===KinViewerDisplayLayout.identity(value)));
+          const target=spanning?KinViewerDisplayLayout.span(selected):selected[0];
           if(!target||!monitorPermissionGranted()){displayScreens=fresh;render();status.textContent='화면 구성이나 권한이 바뀌었습니다. 화면을 다시 확인한 뒤 선택하세요.';return;}
-          const rect=KinViewerDisplayLayout.fit(popupRect(popup),target);
+          const rect=spanning?target:KinViewerDisplayLayout.fit(popupRect(popup),target);
           if(!rect){status.textContent='창을 복원한 뒤 다시 이동하세요.';return;}
           const gate={pending:true,baseline:null};ohifPlacementWrites.set(popup,gate);
           const moved=await new Promise(resolve=>{
             let finished=false;
             const finish=ok=>{if(finished)return;finished=true;clearTimeout(timeout);
               let saved=false;
-              if(ohifPlacementWrites.get(popup)===gate){if(ok){ohifPlacementWrites.delete(popup);saved=rememberOhifRect(popup);}else{gate.pending=false;gate.baseline=popupRect(popup);}}
+              if(ohifPlacementWrites.get(popup)===gate){
+                if(ok){
+                  try {
+                    if(spanning)localStorage.setItem(OHIF_SPAN_SCREENS_KEY,JSON.stringify(selected));
+                    else localStorage.removeItem(OHIF_SPAN_SCREENS_KEY);
+                    ohifPlacementWrites.delete(popup);saved=rememberOhifRect(popup);
+                  } catch (_) { gate.pending=false;gate.baseline=popupRect(popup); }
+                }else{gate.pending=false;gate.baseline=popupRect(popup);}
+              }
               resolve({moved:ok,saved});
             };
             const timeout=setTimeout(()=>finish(false),2500);
             const check=()=>{if(finished)return;
-              if(!valid()||!monitorPermissionGranted()||ohifPlacementWrites.get(popup)!==gate){finish(false);return;}
+              if(!valid()||!monitorPermissionGranted()||selected.some(s=>!screensCache.some(current=>KinViewerDisplayLayout.identity(s)===KinViewerDisplayLayout.identity(current)))||ohifPlacementWrites.get(popup)!==gate){finish(false);return;}
               const actual=popupRect(popup);
               if(actual&&Object.keys(rect).every(k=>Math.abs(actual[k]-rect[k])<=16))finish(true);else setTimeout(check,100);
             };
@@ -9196,11 +9279,14 @@
         finally{if(movingWindows.get(popup)===request)movingWindows.delete(popup);if(work.admits(at)&&viewerWindows.available())render();}
       }
       function render() {
-        const rows = viewerWindows?.rows() || [], limit = imageOpening?.snapshot().maxWindows || 1;
-        button.textContent = 'Viewer Windows · ' + rows.length + '/' + limit;
+        const rows = viewerWindows?.rows() || [];
+        button.textContent = 'Viewer Windows · ' + rows.length;
+        displayScreens = monitorPermissionGranted() && monitorDetails ? KinViewerDisplayLayout.screens(monitorDetails) : [];
+        renderDisplayChoices();
         $('#viewer-windows-prev').disabled = $('#viewer-windows-next').disabled = !rows.length;
-        const values = rows.map(row => ({ index: row.index, scope: row.scope, state: row.pending ? 'Loading' : !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : movingWindows.has(row.popup) ? 'Moving' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
-        const next = JSON.stringify([values,displayScreens]); if (next === signature) return; signature = next;
+        const values = rows.map(row => ({ index: row.index, scope: row.scope, state: row.pending ? 'Loading' : !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : movingWindows.has(row.popup) || ohifPlacementWrites.get(row.popup)?.pending ? 'Moving' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
+        const selectedDisplays = spanSelects.map(select => displayScreens.find(s => KinViewerDisplayLayout.identity(s) === select.value));
+        const next = JSON.stringify([values,displayScreens,selectedDisplays]); if (next === signature) return; signature = next;
         const focused = document.activeElement, focusIndex = focused?.dataset.windowIndex, focusAction = focused?.dataset.windowAction;
         list.replaceChildren();
         for (const row of values) {
@@ -9213,7 +9299,7 @@
           for (const action of ['focus', 'latest', 'close']) {
             const control = document.createElement('button'); control.type = 'button'; control.className = 'chip';
             control.textContent = action === 'focus' ? 'Focus' : action === 'latest' ? 'Latest Images' : 'Close Window';
-            if (action === 'latest') { control.disabled = !['Open', 'Unsaved'].includes(row.state); control.title = '추가된 영상을 같은 검사 범위의 새 창에서 조회합니다. 기존 화면과 미저장 작업은 유지하며 설정한 창 수 제한을 따릅니다.'; }
+            if (action === 'latest') { control.disabled = row.state !== 'Open'; control.title = '같은 창에서 이 검사의 최신 영상을 다시 읽습니다. 미저장 작업이나 처리 중인 작업이 있으면 유지합니다.'; }
             control.dataset.windowIndex = String(row.index); control.dataset.windowAction = action;
             control.onclick = () => operate(row.index, action); section.append(control);
           }
@@ -9224,6 +9310,12 @@
             control.dataset.windowIndex=String(row.index);control.dataset.windowAction='display-'+i;
             control.disabled=!['Open','Unsaved'].includes(row.state);control.onclick=()=>moveDisplay(row.index,screen);section.append(control);
           });
+          if (displayScreens.length >= 2) {
+            const control = document.createElement('button'); control.type = 'button'; control.className = 'chip';
+            control.textContent = 'Span Displays'; control.dataset.windowIndex = String(row.index); control.dataset.windowAction = 'span';
+            control.disabled = !['Open', 'Unsaved'].includes(row.state) || !KinViewerDisplayLayout.span(selectedDisplays);
+            control.onclick = () => moveDisplay(row.index, selectedDisplays); section.append(control);
+          }
           list.append(section);
         }
         if (!rows.length) list.textContent = '연결된 영상 창이 없습니다.';
@@ -9993,7 +10085,7 @@
     try {
       criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'cvr-inbox-p', prefix: 'cvr-inbox', fold: true,
         onAccountChanged: notifyAccountChanged,
-        blocked: () => relatedMode?.active() ? relatedMode.reason() : null,
+        blocked: () => relatedMode.active() ? relatedMode.reason() : null,
         eligible: () => { const s = KinAuth.session(); return !!sess && serverMode && !demoMode && !offline && s?.state === 'approved'
           && Array.isArray(s.roles) && (s.roles.includes('clinician') || s.roles.includes('radiologist')); },
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; } });
@@ -10016,7 +10108,7 @@
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
         actorName: value => displayActor(value),
         // W5 (설계 v5 §1.6): Send CVR waits for Back in Related Report mode; the reason is said on the control.
-        blocked: () => relatedMode?.active() ? relatedMode.reason() : null });
+        blocked: () => relatedMode.active() ? relatedMode.reason() : null });
       accountChangeHooks.push((reason, detail) => criticalResults.lock(detail));
     } catch (_) { toast('중요 결과 발신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
@@ -11684,7 +11776,7 @@
       const tr = e.target.closest("tr[data-uid]");
       if (!tr || tr.dataset.uid !== selectedUid) return;
       e.preventDefault();
-      $("#findings").focus();
+      focusReportEditor();
     });
     $("#rows").addEventListener("dblclick", e => {
       if (e.target.closest('[data-tech-note]')) return;
@@ -11852,7 +11944,7 @@
         const mine = !s?.tele;
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
-          { label: "판독문 작성으로", act: () => $("#findings").focus() },
+          { label: "판독문 작성으로", act: () => focusReportEditor() },
           { sep: 1 },
           { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
@@ -12370,7 +12462,7 @@
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
-        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')$('#findings').focus();})});
+        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')focusReportEditor();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
         current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
@@ -12488,16 +12580,6 @@
     // Finalize (Approve) as a command another document can run (D1371): a bound viewer frame's keydown never reaches this
     // window, so the frame forwards its Finalize key here, and the dispatcher below uses the same hook. It answers true only
     // when the command ran; only then may the caller keep the browser's own Ctrl+S (Save Page) from happening.
-    // W5 Related Report mode (design v5 section 1; D1423 R2/R3/R6). W5-PHASE-A-INTERIM: mounted only where the page serves the
-    // mode's asset and markup (the Phase A branch's pages do not yet); Phase B serves both, mounts it unconditionally and
-    // deletes this guard.
-    relatedMode = window.KinRelatedReportMode?.({
-      editor: () => document.querySelector('.redit'), field: name => $('#' + name),
-      target: relatedTargetCard, source: relatedSourceCard,
-      insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
-      freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
-      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
-    }) ?? null;
     // `related` (W5): the Related Report / Report Editor keys of another document (the viewer frame) and the workspace buttons.
     window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which) });
     window.addEventListener('keydown', event => {

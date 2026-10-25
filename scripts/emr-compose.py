@@ -112,7 +112,7 @@ def load_yaml(path):
 
 
 DECLARATION_KEYS = {"unit", "round", "base_sha", "dependencies", "owned_paths", "models", "routes", "records", "migrations",
-                    "deployment", "restore", "req_risk_test", "cases", "expected", "mutants", "candidate_cases"}
+                    "deployment", "restore", "req_risk_test", "cases", "expected", "mutants", "candidate_cases", "replacement"}
 
 
 def declared_cases(root, declaration, kind):
@@ -195,22 +195,18 @@ def check(root, declaration_path):
             problem(problems, "owned-path-missing", path)
     migrations = sorted(p.parent.name for p in (root / "api/prisma/migrations").glob("*/migration.sql"))
     spec = declaration["migrations"]
-    if len(migrations) != spec["count"]:
-        problem(problems, "migration-count", "%d != %d" % (len(migrations), spec["count"]))
     for name in spec["added"]:
         if name not in migrations:
             problem(problems, "migration-missing", name)
-    if migrations and migrations[-1] != spec["added"][-1]:
-        problem(problems, "migration-not-last", migrations[-1])
-    # Every ledger table the declared migration creates is declared and classified, and nothing declared is absent.
+    # B2 must follow the declared baseline, before the C2/D consumers. Later
+    # additive migrations belong in this sequence, not in a global count pin.
+    if spec["latest_before"] not in migrations:
+        problem(problems, "migration-baseline-missing", spec["latest_before"])
+    elif migrations[migrations.index(spec["latest_before"]) + 1:] != spec["added"]:
+        problem(problems, "migration-order", json.dumps(migrations[migrations.index(spec["latest_before"]) + 1:]))
+    # SQL migrations may replace earlier relations. PG-01 compares the installed
+    # catalog with this declaration; parsing CREATE statements cannot describe it.
     tables = sorted(declaration["deployment"]["tables"])
-    try:
-        sql = "\n".join((root / "api/prisma/migrations" / name / "migration.sql").read_text(encoding="utf-8") for name in spec["added"])
-        created = sorted(set(re.findall(r"^\s*CREATE TABLE (?:IF NOT EXISTS )?emr_access\.(\w+)", sql, re.M)))
-    except OSError:
-        created = None
-    if created != tables:
-        problem(problems, "catalog-tables-differ", json.dumps({"created": created, "declared": tables}))
     classified = sorted(name.removeprefix("emr_access.") for name in declaration["models"]["sql"])
     if classified != tables:
         problem(problems, "table-unclassified", json.dumps({"classified": classified, "declared": tables}))

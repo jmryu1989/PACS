@@ -36,6 +36,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
+const {IncomingMessage, ServerResponse} = require('node:http');
+const {Socket} = require('node:net');
+const {createRequestContext} = require('/app/dist/emr-runtime/request-context');
+const {createRequestIngress} = require('/app/dist/emr-runtime/request-ingress');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { execFileSync } = require('node:child_process');
 const { randomBytes, randomUUID } = require('node:crypto');
@@ -84,7 +88,11 @@ function database() {
   })();
   return prepared;
 }
-test.after(async () => { if (prepared) await (await prepared).$disconnect(); });
+const ledgerCleanup = [];
+test.after(async () => {
+  for (const close of ledgerCleanup) await close();
+  if (prepared) await (await prepared).$disconnect();
+});
 
 // ── the routes ──
 
@@ -116,6 +124,10 @@ function routed(method, path) {
   assert.equal(found.length, 1, `${method} ${path} must reach one handler`);
   return found[0];
 }
+// The Guard captures each request's actual route; the harness hands the handler the same admission.
+const ROUTE_KEYS = { put: ['PUT', 'studies/:uid/report'], read: ['GET', 'studies/:uid/draft'], discard: ['DELETE', 'studies/:uid/draft'],
+  force: ['DELETE', 'studies/:uid/draft/force'], commit: ['POST', 'studies/:uid/report/commit'], remove: ['DELETE', 'studies/:uid'],
+  citations: ['GET', 'studies/:uid/report/citations'], structure: ['GET', 'studies/:uid/report/structure'] };
 const ROUTE = {
   put: routed('PUT', 'studies/:uid/report'), read: routed('GET', 'studies/:uid/draft'),
   discard: routed('DELETE', 'studies/:uid/draft'), force: routed('DELETE', 'studies/:uid/draft/force'),
@@ -149,7 +161,7 @@ async function within(promise, what, ms = 8000) {
 
 async function world() {
   const base = await database();
-  const w = { base, gates: [], faults: [], points: [] };
+  const w = { base, gates: [], faults: [], points: [], open: 0 };
   for(const p of [A,B,C,ADMIN,OTHER_ADMIN,REVIEWER]) await base.memberRights.upsert({where:{sub:p.sub},update:{},create:{
     sub:p.sub,username:p.actor,email:p.actor,name:p.actor,emailVerified:true,approved:true,suspended:false,institution:p.institution,roles:p.roles}});
   /** Holds the request `label` at `point` (prepare | commit) until released; `fault` makes its next audit write throw. */
@@ -177,19 +189,35 @@ async function world() {
   } });
   const recorder = new Proxy({}, { get(_t, key) {
     if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
+      w.open++;
+      try {
       await hit('tx-start');
       const out = await fn(view(tx));
-      // the work is done and nothing is committed yet: the request holds the study row here. W5-API: a transaction that took no
-      // row lock and wrote nothing has no transaction ID and holds no row (the read-only receipt check of a relatedInsert PUT,
-      // before its write): its end is the point 'read-commit', so a case that holds or fails `commit` reaches the write.
+      // Pause the actual business transaction. Identity/admission transactions
+      // touch only the ledger schema and do not hold the study/member/session.
+      const [{ business }] = await tx.$queryRawUnsafe(`SELECT EXISTS (
+        SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE l.pid=pg_backend_pid() AND l.granted AND n.nspname='public'
+      ) AS business`);
       const [{ holds }] = await tx.$queryRawUnsafe('SELECT txid_current_if_assigned() IS NOT NULL AS holds');
-      if (!holds) { await hit('read-commit'); return out; }
-      await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
+      if (business && !holds) await hit('read-commit');
+      if (business && holds) await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
       return out;
+      } finally { w.open--; }
     }, options);
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
+  const { AccessLedgerStore } = require('/app/dist/emr-runtime/store');
+  const { FailureJournal, FailureSpool } = require('/app/dist/emr-runtime/failure-journal');
+  const { createRecordPort } = require('/app/dist/emr-runtime/record-port');
+  const { createBackgroundWorkRegistry } = require('/app/dist/emr-runtime/background-work');
+  const spool = fs.mkdtempSync(require('node:path').join(os.tmpdir(), 'kin-draft-ledger-'));
+  const journal = new FailureJournal(recorder, new FailureSpool(spool));
+  const { port: ledger, control } = createRecordPort(new AccessLedgerStore(recorder, journal));
+  const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), ledger);
+  const background = createBackgroundWorkRegistry();
   // WORKLIST-SPLIT-UID: every draft change observes the study's original resources for its own request (one resource
   // here), and the full bootstrap reads the inventory only to leave out a UID answered twice (none here); any other
   // Orthanc member is still out of bounds for this harness.
@@ -215,26 +243,43 @@ async function world() {
     const findings = { readableFindings: async (_tx, _c, _uid, ids) => ids.includes(FINDING) ? [{ id: FINDING, revision: 1, hidden: false,
       sources: [{ kind: 'item', itemId: '0f0f0f0f-0000-4000-8000-00000000000b', revision: 1 }],
       links: [{ linkState: 'current', headRevision: 1 }] }] : [] };
-    const svc = new PacsService(recorder, orthanc, keycloak, access, findings);
+    const svc = new PacsService(recorder, orthanc, keycloak, access, findings, ledger);
     const controllers = new Map();
-    return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc)); return controllers.get(cls); } };
+    return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc, w.auth, requests.source)); return controllers.get(cls); } };
   };
   w.app = build();
   /** A new process: nothing of the old one's memory, the same database. */
   w.restart = () => { w.app = build(); };
-  w.auth = new AuthService(recorder);
+  w.auth = new AuthService(recorder, undefined, ledger, background.work);
+  ledgerCleanup.push(async () => {
+    await w.auth.onModuleDestroy(); background.quiesce(); await background.drained();
+    control.close(); await control.drained(); await journal.close();
+    fs.rmSync(spool, { recursive: true });
+  });
   w.suspendReviewer = () => flow.run({label:'suspend'}, async () => {
     const {AdminService}=require('/app/dist/admin.service');
+    const {AdminController}=require('/app/dist/admin.controller');
     const provider={getUser:async()=>({id:REVIEWER.sub,username:'reviewer',email:REVIEWER.actor,
       emailVerified:true,firstName:'Synthetic',lastName:'Reviewer',groups:[INST],roles:['radiologist'],enabled:true})};
-    return new AdminService(recorder,provider,null,w.auth).patchUser(REVIEWER.sub,{enabled:false},ADMIN);
+    const req=Object.assign(new IncomingMessage(new Socket()),ADMIN),res=new ServerResponse(req);
+    requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:ADMIN.sub,roles:ADMIN.roles,
+      rightsVersion:1,institution:ADMIN.institution,binding:{method:'bearer',sessionRef:null}},
+      {method:'PATCH',route:'admin/users/:id',purpose:'clinical'},async()=>{});
+    try {return await new AdminController(new AdminService(recorder,provider,null,w.auth),null,requests.source)
+      .patch(REVIEWER.sub,{enabled:false},req);} finally {res.emit('finish');}
   });
 
   /** One request through its routed handler. The answer is what the HTTP layer would send: status, code, body. */
   w.send = (label, route, { as, sid = null, uid, body, query = {} }) => flow.run({ label }, async () => {
     const { controller, key } = ROUTE[route];
-    const req = { sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind, headers: {},
-      ...(sid ? { sid, authMethod: 'session' } : { authMethod: 'bearer' }) };
+    const req = Object.assign(new IncomingMessage(new Socket()), { sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind, headers: {},
+      ...(sid ? { sid, authMethod: 'session' } : { authMethod: 'bearer' }) });
+    const res = new ServerResponse(req);
+    // This harness begins at the handler; signed Guard/current-rights coverage is
+    // the separate registered HTTP suite. Keep its real request work/lifetime.
+    requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:as.sub,roles:as.roles,
+      institution:as.institution,rightsVersion:1,binding:sid ? {method:'session',sessionRef:w.auth.sessionRef(sid)} : {method:'bearer',sessionRef:null}},
+      {method:ROUTE_KEYS[route][0],route:ROUTE_KEYS[route][1],purpose:'clinical'},async()=>{});
     const args = [];
     for (const [slot, { index, data }] of Object.entries(Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, key) ?? {})) {
       const type = Number(slot.split(':')[0]);
@@ -251,7 +296,7 @@ async function world() {
       if (!(error instanceof HttpException)) return { ok: false, status: 0, code: 'NOT_HTTP', body: null, error };
       const answer = error.getResponse();
       return { ok: false, status: error.getStatus(), code: typeof answer === 'object' ? answer.code ?? null : null, body: answer };
-    }
+    } finally {res.emit('finish');}
   });
 
   // ── synthetic rows ──
@@ -1149,7 +1194,9 @@ test('CORE_R9_REVIEWER_FRESH: a cached colleague read cannot decide designation,
   const w=await world(),{KeycloakService}=require('/app/dist/keycloak.service');
   const provider=new KeycloakService();let current=[{id:REVIEWER.sub,email:REVIEWER.actor,username:'reviewer',enabled:true}];
   provider.adm=async route=>{
-    assert.ok(!w.points.includes('fresh:tx-start'),'roster I/O must finish before the report transaction opens');
+    // REQUEST_FACTS resolves the request identity in its own short ledger transaction before the handler runs;
+    // what must not happen is roster I/O while any transaction (and its locks) is open.
+    assert.equal(w.open,0,'roster I/O must finish before the report transaction opens');
     return route==='/groups'?[{id:'syn-group',name:INST}]:current;
   };
   assert.equal((await provider.usersInGroupWithRole(INST,'radiologist'))[0].sub,REVIEWER.sub);

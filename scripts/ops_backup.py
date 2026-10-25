@@ -31,6 +31,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -42,6 +43,7 @@ FILES = ("kin.dump", "keycloak.dump", "orthanc.tgz", ".env", "docker-compose.yml
 EMR_FILES = ("cluster-roles.sql", "emr-state.tgz", "emr-catalog.json")
 EMR_STATE = "/var/lib/kin-emr"
 EMR_TABLESPACE = "/var/lib/postgresql/emr-access/ts"
+WRAPPING_CUSTODY_CONFIG = Path("/etc/kin-deploy/emr-wrapping-custody.json")
 
 
 _resource_prefix = ContextVar("backup_resource_prefix", default="kin-rehearsal-")
@@ -69,7 +71,10 @@ def backup_components(manifest):
 
 def emr_catalog(container, user):
     """Owner, ACL, role attributes and placement are restore data, never inferred from row counts."""
+    # pg_dump may omit an explicit owner-only ACL (notably identity sequences).
+    # Compare its effective default grants with the same explicit grants.
     sql = """SELECT json_build_object(
+      'ledger', (SELECT row_to_json(m) FROM emr_access.ledger_metadata m),
       'schema', (SELECT json_build_object('owner', pg_get_userbyid(nspowner), 'acl', nspacl::text)
                  FROM pg_namespace WHERE nspname='emr_access'),
       'roles', (SELECT json_agg(r ORDER BY rolname) FROM
@@ -82,7 +87,9 @@ def emr_catalog(container, user):
       'tablespace', (SELECT json_build_object('name',spcname,'owner',pg_get_userbyid(spcowner),'acl',spcacl::text)
                     FROM pg_tablespace WHERE spcname='kin_emr_access'),
       'tables', (SELECT json_agg(r ORDER BY name) FROM
-        (SELECT c.relname AS name, pg_get_userbyid(c.relowner) AS owner, c.relacl::text AS acl, t.spcname AS tablespace
+        (SELECT c.relname AS name, pg_get_userbyid(c.relowner) AS owner,
+         COALESCE(c.relacl, acldefault(CASE WHEN c.relkind='S' THEN 's'::"char" ELSE 'r'::"char" END, c.relowner))::text AS acl,
+         t.spcname AS tablespace
          FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_tablespace t ON t.oid=c.reltablespace
          WHERE n.nspname='emr_access' AND c.relkind IN ('r','i','S')) r),
       'functions', (SELECT json_agg(r ORDER BY signature) FROM
@@ -221,11 +228,132 @@ def digest(path):
 
 def counts(container, database, user):
     command = ["docker", "exec", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
-    tables = text(command + ["SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname IN ('public','emr_access') ORDER BY schemaname,tablename;"]).splitlines()
-    if not tables or any(not re.fullmatch(r"(?:public|emr_access)\.[A-Za-z_][A-Za-z_0-9]*", name) for name in tables):
+    tables = text(command + ["SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname IN ('public','emr_access','emr_signing','emr_clinical') ORDER BY schemaname,tablename;"]).splitlines()
+    if not tables or any(not re.fullmatch(r"(?:public|emr_access|emr_signing|emr_clinical)\.[A-Za-z_][A-Za-z_0-9]*", name) for name in tables):
         raise RuntimeError("Unexpected or empty database table list")
     selects = [f'SELECT \'{name}\' AS name, count(*) AS n FROM ' + '.'.join('"'+p+'"' for p in name.split('.')) for name in tables]
     return json.loads(text(command + ["SELECT json_object_agg(name,n) FROM (" + " UNION ALL ".join(selects) + ") counts;"]))
+
+
+def signing_keys(container, user="kin"):
+    return psql_json(container, "kin", "SELECT COALESCE(json_agg(json_build_object('kid',kid,'wrapped',wrapped)), '[]'::json) FROM emr_signing.private_key", user)
+
+
+def signing_key_count(manifest):
+    tables = manifest["counts"].get("kin", {})
+    # Held snapshots keep structured catalog keys; daily snapshots use qualified table names.
+    if isinstance(tables, list):
+        return sum(row["count"] for row in tables
+                   if row["key"] == ["kin", "emr_signing", "table", "private_key", None])
+    return tables.get("emr_signing.private_key", 0)
+
+
+def capture_wrapping_custody(directory, manifest, container):
+    """Keep wrapping bytes outside the database backup, with an exact per-snapshot locator."""
+    has_keys = signing_key_count(manifest) > 0
+    config_path = os.environ.get("KIN_EMR_WRAPPING_CUSTODY")
+    # The installed release entry clears its environment before invoking held capture.
+    if not config_path and WRAPPING_CUSTODY_CONFIG.is_file():
+        config_path = WRAPPING_CUSTODY_CONFIG
+    if not config_path:
+        if has_keys:
+            raise RuntimeError("Signing keys require wrapping custody configuration before backup")
+        return
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    root = Path(config["backup_root"])
+    if not root.is_absolute():
+        raise RuntimeError("Wrapping custody backup_root must be absolute")
+    root = root.resolve()
+    backup_root = directory.parent.resolve()
+    if any(root == other or other in root.parents or root in other.parents for other in (ROOT.resolve(), backup_root)):
+        raise RuntimeError("Wrapping custody must be separate from the repository and database backup root")
+    sources = config["files"]
+    if not isinstance(sources, dict) or not sources:
+        raise RuntimeError("Wrapping custody files are required")
+    required = {row["wrapped"]["wrappingKeyId"] for row in signing_keys(container)} if has_keys else set()
+    if not required <= sources.keys():
+        raise RuntimeError("Wrapping custody is missing a stored signing key's wrappingKeyId")
+    owner = prepare_backup_parent(root)
+    target = root / directory.name
+    target.mkdir(mode=0o700)
+    give_to(target, owner)
+    custody = {"directory": str(target), "files": {}}
+    for number, (key_id, source) in enumerate(sorted(sources.items())):
+        path = Path(source)
+        if not isinstance(key_id, str) or not key_id or not path.is_absolute():
+            raise RuntimeError("Wrapping custody requires key IDs and absolute source paths")
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            raise RuntimeError("Wrapping source file is unavailable") from error
+        if len(data) != 32:
+            raise RuntimeError("Wrapping secret must contain the existing 32-byte key")
+        filename = f"wrap-{number}.key"
+        output = target / filename
+        with output.open("xb") as stream:
+            output.chmod(0o600)
+            stream.write(data)
+        give_to(output, owner)
+        custody["files"][key_id] = {"file": filename, "sha256": digest(output), "bytes": 32}
+    manifest["wrapping_custody"] = custody
+
+
+def restore_wrapping_custody(manifest, destination):
+    """Restore only to a new operator-selected directory; never overwrite live signing secrets."""
+    custody = manifest.get("wrapping_custody")
+    if not custody or not custody.get("files"):
+        raise RuntimeError("Wrapping custody locator is missing")
+    source = Path(custody["directory"])
+    if not source.is_absolute():
+        raise RuntimeError("Wrapping custody locator must be absolute")
+    destination = Path(destination)
+    destination.mkdir(mode=0o700)
+    restored = {}
+    for key_id, entry in custody["files"].items():
+        filename = entry["file"]
+        if not re.fullmatch(r"wrap-[0-9]+\.key", filename):
+            raise RuntimeError("Invalid wrapping custody filename")
+        original = source / filename
+        try:
+            data = original.read_bytes()
+        except OSError as error:
+            raise RuntimeError("Wrapping custody file is unavailable") from error
+        if len(data) != 32 or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            raise RuntimeError("Wrapping custody file differs from the snapshot")
+        output = destination / filename
+        with output.open("xb") as stream:
+            output.chmod(0o600)
+            stream.write(data)
+        restored[key_id] = str(output.resolve())
+    return restored
+
+
+def rehearse_wrapping_custody(directory, manifest, container, user="kin"):
+    # The caller has compared restored counts, so legacy manifests cannot omit a populated signing schema.
+    has_keys = signing_key_count(manifest) > 0
+    rows = signing_keys(container, user) if has_keys else []
+    if not rows and "wrapping_custody" not in manifest:
+        return {"keys": 0, "custody": "not configured; no stored signing keys"}
+    with tempfile.TemporaryDirectory(prefix="kin-wrapping-restore-") as temporary:
+        restored = restore_wrapping_custody(manifest, Path(temporary) / "secrets")
+        if any(row["wrapped"]["wrappingKeyId"] not in restored for row in rows):
+            raise RuntimeError("Restored signing key has no wrapping custody file")
+        if rows:
+            request = Path(temporary) / "request.json"
+            write_json(request, {"rows": rows, "files": {key: "/custody/secrets/" + Path(path).name for key, path in restored.items()}})
+            # Exercise the existing product unwrap implementation, including its authenticated kid/id binding.
+            script = """const fs=require('node:fs');
+const {unwrapServerPrivateKey}=require('/app/dist/emr-signature/server-crypto');
+const input=JSON.parse(fs.readFileSync('/custody/request.json','utf8'));
+for(const row of input.rows){const id=row.wrapped.wrappingKeyId, secret=fs.readFileSync(input.files[id]);
+try { unwrapServerPrivateKey(row.wrapped,row.kid,id,secret); } finally { secret.fill(0); }}
+process.stdout.write('WRAPPING_RESTORE_VERIFIED');"""
+            result = temporary_run(["--network", "none", "--read-only", "--user", "0:0",
+                "--mount", f"type=bind,source={temporary},target=/custody,readonly", "--entrypoint", "node",
+                manifest["running_images"]["kin-api"]["id"], "-e", script])
+            if result != "WRAPPING_RESTORE_VERIFIED":
+                raise RuntimeError("Restored signing keys could not be unwrapped")
+        return {"keys": len(rows), "custody": "restored and verified", "directory": manifest["wrapping_custody"]["directory"]}
 
 
 def wait_ready(origin, timeout=120):
@@ -288,6 +416,20 @@ def reload_proxy():
     # different IPs when all writers resume, so Up containers can still yield 502.
     run(["docker", "exec", "kin-proxy", "nginx", "-t"], timeout=30)
     run(["docker", "exec", "kin-proxy", "nginx", "-s", "reload"], timeout=30)
+
+
+def resumed_ledger_ready(timeout):
+    """Read the resumed API's actual PG role/storage/durability boundary."""
+    script = """
+const {EmrLedgerClient}=require('/app/dist/emr-runtime/client');
+const {verifyRuntimeConnection}=require('/app/dist/emr-runtime/manifest');
+(async()=>{
+  const db=new EmrLedgerClient(process.env.DATABASE_URL);
+  try { await db.$connect(); await verifyRuntimeConnection(db); }
+  finally { await db.$disconnect(); }
+})().catch(()=>{console.error('Resumed PostgreSQL ledger is not ready');process.exitCode=1;});
+"""
+    run(['docker', 'exec', 'kin-api', 'node', '-e', script], timeout=timeout)
 
 
 def seal_audit(directory, parent, manifest):
@@ -402,11 +544,12 @@ def backup(output, ready_timeout=120):
                  "--mount", f"type=volume,source={volume},target=/source,readonly",
                  "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."],
                 timeout=1800, output=handle)
-        stage = "archive EMR state at the same pause"
+        stage = "archive EMR failure spool at the same pause"
         with (directory / "emr-state.tgz").open("wb") as handle:
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
                            "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
         stage = "copy configuration and checksum"
+        capture_wrapping_custody(directory, manifest, "kin-db")
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)
         components = backup_components(manifest)
@@ -448,6 +591,14 @@ def backup(output, ready_timeout=120):
                 manifest["ready"] = False
                 manifest["readiness_error"] = "Application readiness deadline exceeded"
         manifest["resume_failures"] = resume_failures
+        if not resume_failures and 'kin-api' in initial_running:
+            try:
+                resumed_ledger_ready(ready_timeout)
+                manifest['emr']['resumed_pg_ready'] = True
+            except Exception:
+                manifest['emr']['resumed_pg_ready'] = False
+                manifest['ready'] = False
+                manifest['readiness_error'] = 'PostgreSQL ledger readiness failed after writer resume'
         write_json(directory / "manifest.json", manifest)
         # The seal reads only the snapshot, so it runs after the writers resumed (it never lengthens the pause) and
         # also when resume or readiness failed: a complete snapshot is sealed whenever it exists.
@@ -497,7 +648,7 @@ def validate_backup(directory):
         raise RuntimeError("Orthanc archive has no SQLite index")
     if "emr" in manifest:
         if manifest.get("emr", {}).get("same_pause") is not True:
-            raise RuntimeError("EMR database/state consistency is not attested")
+            raise RuntimeError("EMR database/failure-spool capture was not paused together")
         with tarfile.open(directory / "emr-state.tgz", "r|gz") as archive:
             for entry in archive:
                 member = PurePosixPath(entry.name)
@@ -552,13 +703,22 @@ def rehearse_audit(directory, manifest, container, user="postgres"):
     return {"verified": code == 0, **report}
 
 
-EMR_RECOVERY_SCRIPT = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
-const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
-const {AccessSeal}=require('/app/dist/emr-runtime/seal');
-const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');
-const db=new PrismaClient(); const dir='/var/lib/kin-emr';
-new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart()
-.then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
+EMR_RECOVERY_SCRIPT = """const {EmrRuntime}=require('/app/dist/emr-runtime/application');
+const runtime=new EmrRuntime(process.env.DATABASE_URL,'/var/lib/kin-emr/outage');
+(async()=>{try{await runtime.start();console.log('EMR_RESTORE_VERIFIED');}
+finally{await runtime.stop(Date.now()+15000);}})().catch(()=>{process.exitCode=1});"""
+
+
+def restored_emr_expiry(container, user):
+    """D1796: run ordinary checked expiry on the isolated restored database.
+
+    No history lifetime is inferred from access age. Unknown lifetimes are
+    retained and counted in the receipt without blocking business recovery.
+    Source backups remain untouched and retain their existing rotation policy.
+    """
+    return psql_json(container, 'kin',
+        "BEGIN; SET LOCAL ROLE kin_emr_retention; "
+        "SELECT emr_access.restore_expiry_sweep(); COMMIT;", user)
 
 
 def rehearse_held(directory, manifest, *, daily=False):
@@ -612,18 +772,22 @@ def rehearse_held(directory, manifest, *, daily=False):
                 raise RuntimeError("Restored row values differ from the snapshot")
             if value_counts(restored_values) != manifest["counts"]:
                 raise RuntimeError("Restored database row counts differ from the held manifest")
+        result["wrapping_custody"] = rehearse_wrapping_custody(directory, manifest, name)
         if shape == "post":
             if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
                 raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
                            "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
                            manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
-            checked = temporary_run(["--network", "container:" + name, "--read-only", "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
+            checked = temporary_run(["--network", "container:" + name, "--read-only", "-e", "DATABASE_URL=postgresql://kin_runtime@127.0.0.1:5432/kin",
                                      "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node",
                                      manifest["running_images"]["kin-api"]["id"], "-e", EMR_RECOVERY_SCRIPT])
             if checked != "EMR_RESTORE_VERIFIED":
-                raise RuntimeError("Restored database and external state do not agree")
-            result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}
+                raise RuntimeError("Restored PostgreSQL ledger or failure spool is not ready")
+            result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True,
+                             "expiry_sweep": restored_emr_expiry(name, "kin")}
+            if result["emr"]["expiry_sweep"].get("ran") is not True:
+                raise RuntimeError("Restored expiry sweep did not run before business use")
         result["audit"] = rehearse_audit(directory, manifest, name, user="kin")
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
@@ -707,21 +871,19 @@ def rehearse(directory):
                  "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
                  manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
             api_image = manifest["running_images"]["kin-api"]["id"]
-            recovery = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
-const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
-const {AccessSeal}=require('/app/dist/emr-runtime/seal');
-const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');
-const db=new PrismaClient(); const dir='/var/lib/kin-emr';
-new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart()
-.then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
-            # The optional reader login may correctly be disabled in the source catalog. Use the disposable restore
-            # administrator for this read-only ledger check; do not alter the preserved source role attributes.
-            checked = temporary_run(["--network", "container:"+name, "--read-only", "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
-                "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node", api_image, "-e", recovery])
+            # The private restore uses its preserved runtime role over the isolated
+            # trust-only loopback. Startup performs normal PG recovery and imports
+            # the restored failure-only spool before the copy is called verified.
+            checked = temporary_run(["--network", "container:"+name, "--read-only", "-e", "DATABASE_URL=postgresql://kin_runtime@127.0.0.1:5432/kin",
+                "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node", api_image, "-e", EMR_RECOVERY_SCRIPT])
             if checked != "EMR_RESTORE_VERIFIED":
-                raise RuntimeError("Restored database and external state do not agree")
-            result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}
+                raise RuntimeError("Restored PostgreSQL ledger or failure spool is not ready")
+            result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True,
+                             "expiry_sweep": restored_emr_expiry(name, "postgres")}
+            if result["emr"]["expiry_sweep"].get("ran") is not True:
+                raise RuntimeError("Restored expiry sweep did not run before business use")
         result["audit"] = rehearse_audit(directory, manifest, name)
+        result["wrapping_custody"] = rehearse_wrapping_custody(directory, manifest, name, "postgres")
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
         temporary_run(["--network", "none", "--read-only",
@@ -1855,11 +2017,12 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={volumes['orthanc']},target=/source,readonly",
                            "--entrypoint", "tar", db["Image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
         if shape == "post":
-            stage = "archive EMR state at the same pause"
+            stage = "archive EMR failure spool at the same pause"
             with (directory / "emr-state.tgz").open("wb") as handle:
                 temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
                                "--entrypoint", "tar", db["Image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
         stage = "copy configuration and metadata"
+        capture_wrapping_custody(directory, manifest, db_name)
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)
         for name, source in extra.items():
@@ -2300,12 +2463,25 @@ def main():
                                help="After a complete, error-free backup, keep this many daily generations (1-365, default 7)")
     backup_parser.add_argument("--no-rotate", action="store_true", help="Leave the older daily sets as they are")
     commands.add_parser("rehearse").add_argument("directory")
+    custody_parser = commands.add_parser("restore-wrapping")
+    custody_parser.add_argument("directory", help="Database backup directory containing manifest.json")
+    custody_parser.add_argument("--destination", required=True, help="New directory outside the repository and database storage")
     rotate_parser = commands.add_parser("rotate")
     rotate_parser.add_argument("--root", required=True, help="The backup root holding the daily sets")
     rotate_parser.add_argument("--keep", type=int, default=DAILY_GENERATIONS)
     rotate_parser.add_argument("--protect", action="append", default=[], help="A set name never to delete")
     rotate_parser.add_argument("--dry-run", action="store_true", help="List what would be deleted; change nothing")
     args = parser.parse_args()
+    if args.action == "restore-wrapping":
+        directory = Path(args.directory).resolve(strict=True)
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        if not manifest.get("complete"):
+            raise RuntimeError("Backup is incomplete")
+        destination = Path(args.destination).resolve()
+        if any(destination == root or root in destination.parents for root in (ROOT.resolve(), directory.parent)):
+            raise RuntimeError("Restore wrapping secrets outside the repository and database backup root")
+        print(json.dumps({"files": restore_wrapping_custody(manifest, destination)}))
+        return
     if args.action == "rotate":
         # Rotation reads and deletes host files only; it needs no Docker, but the lock keeps backup/rehearse out.
         # A dry-run performs no lock-file write either; it reports a current plan without authorizing deletion.
@@ -2329,6 +2505,109 @@ def main():
                     raise RuntimeError("백업은 보존했으나 rotation을 마치지 못했습니다. 보존된 세트를 점검하세요")
         else:
             rehearse(args.directory)
+
+
+
+# A10 purpose/copy predicate, adapted to PostgreSQL (D1770/D1794). No timer
+# deletes attempt keys while this installation or a restorable copy serves them.
+RETENTION_CLASSES = {
+    'RET-01': 'Access/auth facts: two civil years, plus actual duties/holds.',
+    'RET-02': 'Record history: the linked record lifetime and access floor.',
+    'RET-03': 'Pending attempts: resolve the real transaction; no timeout ending.',
+    'RET-06': 'Attempt keys, outcomes and minimal receipts: retire the lineage only.',
+    'RET-08': 'Native PG WAL/backup/temp: existing PostgreSQL recovery and backup rotation.',
+    'RET-09': 'Failure facts: two years; duplicate spool: verified import and no recovery need.',
+    'RET-10': 'Hold/disposal/review evidence: the actual duty or evidence purpose.',
+    'RET-11': 'Backup/private restore: actual recovery purpose and existing rotation.',
+    'RET-12': 'Synthetic test evidence: existing project evidence retention.',
+}
+COPY_MANIFEST_FIELDS = ('copy_id', 'location', 'custodian', 'installation_id', 'snapshot_sha256',
+                        'source_images', 'data_classes', 'hold', 'restorable', 'dependent_copy_ids', 'disposition')
+RETIREMENT_CONDITIONS = ('retired_from_service', 'obligations_ended_or_preserved',
+                         'no_restorable_copy_remains', 'consumers_ended', 'disposition_receipt')
+NOT_AN_ENDING = ('timeout', 'elapsed', 'no-response', 'silence')
+
+
+def _required_text(value):
+    if type(value) is not str or not value.strip():
+        raise ValueError('Nonempty evidence reference required')
+    return value
+
+
+def copy_manifest(*, copy_id, location, custodian, manifest, installation_id, data_classes,
+                  restorable, dependent_copies=(), hold=None, disposition=None):
+    for value in (copy_id, location, custodian, installation_id):
+        _required_text(value)
+    if type(restorable) is not bool or type(manifest) is not dict or type(manifest.get('sha256')) is not dict:
+        raise ValueError('Explicit copy status and native backup manifest required')
+    classes = list(data_classes)
+    if not classes or any(c not in RETENTION_CLASSES for c in classes):
+        raise ValueError('Unknown retention class')
+    if hold is not None:
+        if type(hold) is not dict or set(hold) != {'basis', 'closure_evidence'}:
+            raise ValueError('Hold basis and explicit closure status required')
+        _required_text(hold['basis'])
+        if hold['closure_evidence'] is not None:
+            _required_text(hold['closure_evidence'])
+    if disposition is not None:
+        if type(disposition) is not dict or set(disposition) != {'action', 'verification'}:
+            raise ValueError('Actual disposition and verification required')
+        _required_text(disposition['action']); _required_text(disposition['verification'])
+    dependencies = [_required_text(v) for v in dependent_copies]
+    if len(set(dependencies)) != len(dependencies) or copy_id in dependencies:
+        raise ValueError('Distinct dependent copies required')
+    return dict(copy_id=copy_id, location=location, custodian=custodian, installation_id=installation_id,
+                snapshot_sha256=dict(manifest['sha256']), source_images=manifest.get('running_images', {}),
+                data_classes={c: RETENTION_CLASSES[c] for c in classes}, hold=hold,
+                restorable=restorable, dependent_copy_ids=dependencies, disposition=disposition)
+
+
+def retirement(lineage, evidence):
+    """Report the A10 ending predicate; this does not erase a running database.
+
+    Missing copy status, missing dependencies and booleans encoded as integers
+    are incomplete evidence, never proof of retirement. Retired installations
+    and all their copies use the existing operator disposal/rotation procedure.
+    """
+    _required_text(lineage)
+    if type(evidence) is not dict or set(evidence) != set(RETIREMENT_CONDITIONS):
+        raise ValueError('Exactly the five retirement conditions are required')
+    unmet, why = [], {}
+    for name in RETIREMENT_CONDITIONS:
+        item = evidence[name]
+        if type(item) is not dict or type(item.get('met')) is not bool:
+            raise ValueError('Explicit boolean condition required: ' + name)
+        _required_text(item.get('evidence'))
+        reason = None if item['met'] else 'purpose continues'
+        if name == 'consumers_ended':
+            basis = item.get('basis')
+            if type(basis) is not str or not basis.strip() or basis.strip().lower() in NOT_AN_ENDING:
+                reason = 'actual consumer ending not established'
+        if name == 'no_restorable_copy_remains':
+            copies = item.get('copies')
+            if type(copies) is not list or item.get('inventory_complete') is not True:
+                reason = 'copy inventory incomplete'
+            else:
+                ids = set()
+                for copy in copies:
+                    if type(copy) is not dict or set(copy) != set(COPY_MANIFEST_FIELDS):
+                        reason = 'copy manifest incomplete'; continue
+                    if copy['installation_id'] != lineage or copy['copy_id'] in ids:
+                        reason = 'copy lineage or identity differs'
+                    ids.add(copy['copy_id'])
+                    if type(copy['restorable']) is not bool or copy['restorable']:
+                        reason = 'restorable or unknown copy remains'
+                    disposition = copy['disposition']
+                    if type(disposition) is not dict or not disposition.get('action') or not disposition.get('verification'):
+                        reason = 'copy disposition unverified'
+                    if copy['hold'] is not None and not copy['hold'].get('closure_evidence'):
+                        reason = 'copy hold remains'
+                for copy in copies:
+                    if type(copy) is not dict or type(copy.get('dependent_copy_ids')) is not list or not set(copy['dependent_copy_ids']) <= ids:
+                        reason = 'dependent copies missing'
+        if reason:
+            unmet.append(name); why[name] = reason
+    return dict(lineage=lineage, retire=not unmet, unmet=unmet, why=why)
 
 
 if __name__ == "__main__":

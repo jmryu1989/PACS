@@ -233,7 +233,7 @@
       </div>
       <p class="audit-hint">회원·역할 변경, 검사 접근 조건, 판독자 배정과 검사 감사 기록 가운데 이 기관에 귀속된 행만 보입니다. 귀속은 행을 기록할 때 함께 남은 기관 값으로만 정하며, 지금 소속 그룹이나 지금 검사 소유 기관으로 다시 정하지 않습니다. 기관을 옮긴 회원의 행은 이 기관 쪽 기록만 보이고 다른 쪽은 기관 이름 없이 withheld: other institution으로 보입니다. 행에 기록되지 않은 값은 not recorded로 보입니다. 감사 기록은 이 버튼을 누를 때만 읽습니다.</p>
       <p class="audit-fixed" id="audit-unattributed">오래된 행 중 기록 시점 기관이 없는 행은 표시되지 않습니다.</p>
-      <p class="audit-fixed" id="audit-access-history" title="로그인·로그아웃·세션 만료 기록은 수집하지 않습니다. 이 구역은 회원·검사·설정의 변경 이력만 보입니다.">접속 이력: 수집되지 않음</p>
+      <p class="audit-fixed" id="audit-access-history" title="이 표에 아직 표시되지 않은 접속기록이 있을 수 있습니다. 기간별 원장 조회는 Access Review에서 수행하세요.">접속 이력: 현재 표시 범위에서 아직 확인하지 않음</p>
       <p class="message" id="audit-message" role="alert"></p>
       <div class="audit-table" id="audit-wrap" hidden>
         <table id="audit-table">
@@ -245,6 +245,27 @@
       </div>
       <p class="audit-empty" id="audit-empty" hidden>이 기관에 귀속된 감사 기록이 없습니다.</p>
       <div class="audit-pager"><button type="button" id="audit-more" hidden disabled>Load More</button></div>
+    </section>
+    <section class="audit" id="access-review" aria-labelledby="access-review-title">
+      <div class="audit-head">
+        <h2 id="access-review-title">Access Review</h2>
+        <span class="astate" id="access-review-state" role="status">Not Loaded</span>
+      </div>
+      <p class="audit-hint">기록 당시 관리 기관이 이 기관으로 확인된 접속기록을 발생 시각 기준으로 조회합니다. 기관 미확인 기록은 포함되지 않습니다. UTC 기간은 시작을 포함하고 끝을 제외합니다. 같은 사건의 원장 복제와 여러 대상은 사건 한 건으로 표시합니다.</p>
+      <p class="audit-hint">다운로드·파일 제공 후보에는 준비·허가·시도·실패도 포함됩니다. prepared·reported·succeeded는 기록된 단계의 결과이며 파일 저장 완료를 뜻하지 않습니다. 업무 맥락과 결과를 함께 확인하고, 사유 확인·미확인 사항·사후조치는 기존 운영 기록에 남기세요.</p>
+      <form id="access-review-form" class="audit-head">
+        <label>From (UTC) <input id="access-review-from" type="datetime-local" required step="1"></label>
+        <label>Until (UTC, exclusive) <input id="access-review-until" type="datetime-local" required step="1"></label>
+        <label>Events <select id="access-review-filter"><option value="all">All Events</option><option value="files">Download / File Candidates</option></select></label>
+        <button id="access-review-load" type="submit" disabled>Load Review</button>
+      </form>
+      <p class="audit-fixed" id="access-review-scope"></p>
+      <p class="message" id="access-review-message" role="alert"></p>
+      <div class="audit-table" id="access-review-wrap" hidden>
+        <table><thead><tr><th scope="col">Time (UTC)</th><th scope="col">Actor / Location</th><th scope="col">Targets</th><th scope="col">Task / Result</th><th scope="col">Context / References</th></tr></thead>
+          <tbody id="access-review-rows"></tbody></table>
+      </div>
+      <div class="audit-pager"><button id="access-review-more" type="button" hidden>Load More</button></div>
     </section>
   </main>
 
@@ -1616,5 +1637,6 @@
       }).catch(() => {});
     })();
   </script>
+  <script src="admin-access-review.js"></script>
 </body>
 </html>

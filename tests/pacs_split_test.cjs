@@ -32,35 +32,13 @@ test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   assert.equal(spec.phase, 'split');
   const source = createSource();
   // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
-  assert.deepEqual(source.validate(), { members: 125, declarations: 57 });
+  assert.deepEqual(source.validate(), { members: 122, declarations: 57 });
   assert.equal(spec.facade.forwards.length, 64);
   assert.equal(spec.facade.slots.length, 15);
-  assert.equal(spec.facade.reexports.length, 13);
+  assert.equal(spec.facade.reexports.length, 14);
 });
-/**
- * W5-API (D1460): the facade's readDraft forwards the Check's optional insertRequestId, so the spec holds its current signature
- * and records the landed one beside it (spec.w5_api) - exactly that one forward, nothing else. The landed corpus (c8e4f1b) is
- * judged with the facade it was approved with: the same spec with that one signature put back.
- */
-function landedSpec() {
-  const declared = spec.w5_api;
-  assert.equal(declared.unit, 'W5-API');
-  assert.deepEqual(declared.facade_signatures.map(change => change.name), ['readDraft']);
-  const landed = structuredClone(spec);
-  for (const change of declared.facade_signatures) {
-    const forward = landed.facade.forwards.find(item => item.name === change.name);
-    assert.equal(forward.signature_sha256, change.current, change.name);
-    forward.signature_sha256 = change.landed;
-  }
-  delete landed.w5_api;
-  return landed;
-}
 test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
-  // historicalSource() builds its source through pacs_source.cjs's export with the spec file's default; give it the landed spec.
-  const sources = require('./pacs_source.cjs'), current = sources.createSource;
-  sources.createSource = options => current({ spec: landedSpec(), ...options });
-  try { assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 }); }
-  finally { sources.createSource = current; }
+  assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
 });
 test('U0B-STRUCT-SPLIT explicit moved location and re-export resolve in one Program', () => {
   const source = fixture(plain, () => {}, { [path.join(apiSrc, 'pacs.service.ts')]: "export { Worklist } from './pacs/worklist';" });
@@ -104,10 +82,16 @@ for (const [label, statement] of [
   assert.throws(() => fixture(statement('absent'), () => {}, extra).validate(), /Unresolved named export: absent/);
 });
 
+test('U0B CommonJS export-assignment members resolve through installed Node declarations', () => {
+  const source = name => `import { ${name} } from 'node:path'; ${plain}`;
+  assert.deepEqual(fixture(source('join')).validate(), { members: 1, declarations: 0 });
+  assert.throws(() => fixture(source('missingPathMember')).validate(), /Unresolved named export: missingPathMember/);
+});
+
 for (const [field, value] of [['name', 'gatewayReceiptt'], ['kind', 'PropertyDeclaration'],
   ['id', 'member:gatewayReceiptt:MethodDeclaration'], ['category', 'declaration'], ['live.kind', undefined]]) {
   test(`U0B-R02 spec ${field} must describe the resolved declaration`, () => {
-    assert.deepEqual(createSource().validate(), { members: 125, declarations: 57 });
+    assert.deepEqual(createSource().validate(), { members: 122, declarations: 57 });
     const wrong = structuredClone(spec);
     const entry = wrong.entries.find(item => item.name === 'gatewayReceipt');
     if (field === 'live.kind') delete entry.live.kind;
@@ -271,7 +255,7 @@ test('U0B-DI Nest metadata equals main before the split: tokens, constructor tok
   };
   assert.equal(full.routes.length, 138 + declared.routes.length);
   // W5-API (D1460) x S9-U4b: both declarations are taken back - the added draft argument, then the U4b additions.
-  const now = withoutDeclared(withoutW5Arguments(full), declared);
+  const now = withoutDeclared(withoutDeclared(withoutW5Arguments(full), spec.di_additions_b2), declared);
   assert.deepEqual(now, spec.di);
   assert.equal(now.routes.length, 138);
   assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
@@ -297,6 +281,7 @@ test('U0B-DI-RUNTIME Nest builds one PacsService for its consumers and starts it
   const { KeycloakService } = require('/app/dist/keycloak.service');
   const { StudyAccessService } = require('/app/dist/study-access.service');
   const { FindingService } = require('/app/dist/finding.service');
+  const { EMR_RECORD_PORT } = require('/app/dist/emr-runtime/record-port');
   const { ClinicalContextService } = require('/app/dist/clinical-context.service');
   const { ViewerContextEventService } = require('/app/dist/viewer-context-event.service');
   const calls = [];
@@ -306,10 +291,12 @@ test('U0B-DI-RUNTIME Nest builds one PacsService for its consumers and starts it
   class DiProbe {}
   Module({ providers: [PacsService, ClinicalContextService, ViewerContextEventService, { provide: PrismaService, useValue: prisma },
     { provide: OrthancService, useValue: {} }, { provide: KeycloakService, useValue: {} }, { provide: StudyAccessService, useValue: {} },
-    { provide: FindingService, useValue: {} }] })(DiProbe);
+    { provide: FindingService, useValue: {} },
+    // This cache-startup probe does not enter a clinical record operation.
+    { provide: EMR_RECORD_PORT, useValue: {} }] })(DiProbe);
   const log = console.log; console.log = () => {};
   let ctx;
-  try { ctx = await NestFactory.createApplicationContext(DiProbe, { logger: false }); await ctx.init(); }
+  try { ctx = await NestFactory.createApplicationContext(DiProbe, { logger: false, abortOnError: false }); await ctx.init(); }
   finally { console.log = log; }
   try {
     const pacs = ctx.get(PacsService);

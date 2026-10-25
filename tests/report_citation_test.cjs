@@ -1,3 +1,14 @@
+
+// B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
+// Real ledger atomicity and HTTP publication are tested against PostgreSQL.
+const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
+function b2Ledger(prisma) {
+  return { begin: () => ({
+    resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
+    transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
+    end() {},
+  }) };
+}
 // TEST-S3-U2a-CITATION-BACKEND: the compiled citation rules, insertion, carry-forward and reads.
 //
 // Runs against the built image (/app/dist) exactly like report_stale_draft_test.cjs:
@@ -11,7 +22,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const { PacsService } = require('/app/dist/pacs.service');
 const citation = require('/app/dist/report-citation');
-const vectors = require('/tests/report_citation_vectors.json');
+const vectors = require('./report_citation_vectors.json');
 
 const UID = '2.25.4242', OTHER = '2.25.9999';
 const CALLER = { kind: 'member', institution: 'synthetic', sub: 'sub-1', actor: 'doctor@synthetic', roles: ['radiologist'] };
@@ -125,7 +136,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   const keycloak = { usersInGroupWithRole: async () => [] };
   // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a
   // draft PUT the whole snapshot - a keep list the case does not name is the draft's current list (nothing dropped).
-  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings);
+  const real = withDraftRequestContext(new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma)), b2Ledger(prisma));
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
   const ids = (key, id) => (Array.isArray(row?.[key]) ? row[key].map(entry => entry[id]) : []);
   const svc = new Proxy(real, { get(target, name) {
@@ -157,7 +168,7 @@ const refusal = async (promise, status) => {
   assert.equal(e.getStatus?.(), status, e.message);
   return e.getResponse();
 };
-const put = (f, body, caller = CALLER) => f.svc.putReport(UID, { ...BODY, baseVersion: 4, ...body }, caller);
+const put = (f, body, caller = CALLER) => f.svc.putReport(UID, { ...BODY, baseVersion: 4, ...body }, caller, null);
 const commit = (f, body, caller = CALLER) => f.svc.commitReport(UID, { action: 'save', baseVersion: 4, ...BODY, ...body }, caller);
 // The citation entries the draft write stored (no entries are stored as SQL NULL, never as an empty array).
 const stored = f => { const kept = f.created.find(row => row.call === 'draft')?.data.citations; return Array.isArray(kept) ? kept : []; };
@@ -336,7 +347,7 @@ test('a draft write carries its whole keep list: a list that is not sent is refu
 test('an insertion into an emptied report is refused, not silently dropped with a 200', async () => {
   const f = fixture({ draft: { baseVersion: 4, citations: [] } });
   const body = await refusal(f.svc.putReport(UID,
-    { findings: '', conclusion: '', recommendation: '', baseVersion: 4, insert: INSERT }, CALLER), 409);
+    { findings: '', conclusion: '', recommendation: '', baseVersion: 4, insert: INSERT }, CALLER, null), 409);
   assert.equal(body.code, 'REPORT_CITATION_TEXT');
   assert.deepEqual(f.writes, [], 'the clearing delete must not happen either');
 });
@@ -438,7 +449,7 @@ test('an insertion is refused before the union can exceed the cap, and a keep li
 
 test('emptying the report deletes the draft row and the attestation of text that is gone', async () => {
   const f = fixture({ draft: { baseVersion: 4, citations: [carried('a')] } });
-  const answer = await f.svc.putReport(UID, { findings: '', conclusion: '', recommendation: '', baseVersion: 4 }, CALLER);
+  const answer = await f.svc.putReport(UID, { findings: '', conclusion: '', recommendation: '', baseVersion: 4 }, CALLER, null);
   assert.deepEqual([answer.present, answer.snapshot], [false, null]);
   assert.deepEqual(f.writes, ['reportDraft.deleteMany']);
   // No text, no attestation: the row carries both or neither.
@@ -460,7 +471,7 @@ test('the byte bound is whatever the database measured, not a shorter local gues
 test('a citation CHECK becomes the same named 409 on all three write paths, and other errors are untouched', async () => {
   const draft = { baseVersion: 4, citations: [] };
   const insertion = await refusal(fixture({ draft, fail: 'upsert', checkError: fail_error('ReportDraft_citations_check') })
-    .svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER), 409);
+    .svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER, null), 409);
   assert.equal(insertion.code, 'REPORT_CITATION_LIMIT');
   const signing = await refusal(commit(fixture({ draft, fail: 'create' }), { action: 'approve' }), 409);
   assert.equal(signing.code, 'REPORT_CITATION_LIMIT');
@@ -482,7 +493,7 @@ test('a citation CHECK becomes the same named 409 on all three write paths, and 
     const f = fixture({ draft, fail, checkError: differentCheck });
     if (fail === 'createMany') f.tx.$queryRaw = forced.tx.$queryRaw;
     const operation = fail === 'upsert'
-      ? f.svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER)
+      ? f.svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER, null)
       : fail === 'create' ? commit(f, { action: 'approve' })
         : f.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] });
     await assert.rejects(operation, error => error === differentCheck,

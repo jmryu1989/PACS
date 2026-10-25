@@ -1,4 +1,4 @@
-import { EMR_APPEND_LANES, EMR_APPEND_POOL_SIZE, EMR_VERIFY_RESERVE } from './limits';
+import { EMR_APPEND_LANES, EMR_APPEND_POOL_SIZE, EMR_VERIFY_RESERVE, EMR_PENDING_LIMIT } from './limits';
 
 /** Share an explicit capacity between the Prisma URL and admission. Datasource
  * overrides must pass their capacity to AccessLedgerStore as well. */
@@ -26,6 +26,7 @@ export async function admitAppend<T>(client: object, poolSize: number, work: () 
   let pool = pools.get(client);
   if (!pool) { pool = { capacity, active: 0, waiting: [] }; pools.set(client, pool); }
   if (pool.capacity !== capacity) throw new Error('EmrAppendPoolConfigurationMismatch');
+  if (pool.active + pool.waiting.length >= EMR_PENDING_LIMIT) throw new Error('EmrAdmissionCapacity');
   if (pool.active >= capacity) await new Promise<void>(resolve => pool.waiting.push(resolve));
   else pool.active++;
   try { return await work(); }

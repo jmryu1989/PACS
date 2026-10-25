@@ -1,0 +1,69 @@
+# Online signing keys: backup and restore
+
+The per-doctor encrypted private keys are in `kin.emr_signing.private_key`;
+`doctor_key`, `key_history` and `signed_version` retain their registration and
+verification evidence. Clinical records are in `emr_clinical`. The daily
+`scripts/ops_backup.py backup` and its `rehearse` compare every table in `public`,
+`emr_access`, `emr_signing` and `emr_clinical`, using the captured counts, not fixed totals.
+
+Wrapping bytes stay outside PostgreSQL and its backup directory. The deployed
+`FileWrappingSecrets` mapping must use the same key IDs and bytes as the custody
+configuration. The C2 handoff uses ID `c2-wrap-v1` mounted at
+`/run/secrets/emr-signing-wrap-v1`; a host source path must be supplied by the
+installation operator. This runbook does not claim that any site is configured.
+
+## Nightly job
+
+Install a private JSON configuration at `/etc/kin-deploy/emr-wrapping-custody.json`,
+using `emr/deploy/wrapping-custody.example.json` as the shape. Both the nightly
+backup and the installed release entry read this location; the release entry
+clears its environment. A direct invocation can override the configuration path
+with `KIN_EMR_WRAPPING_CUSTODY`. `files` maps **all** current and historical wrapping
+IDs still used by stored private keys to their absolute host file paths. Each is
+the existing raw 32-byte wrapping secret; do not generate replacement bytes for
+recovery. `backup_root` is a separate custody location, outside the checkout and
+outside the database backup root, writable by the existing backup account.
+
+Run the existing command:
+
+```sh
+python3 scripts/ops_backup.py backup --output /srv/kin-backups
+```
+
+While writers are paused, the tool copies the configured secrets to
+`<backup_root>/<backup-set-name>/wrap-N.key` and records the absolute directory,
+key-ID-to-file mapping and checksums in the database set's
+`manifest.json` → `wrapping_custody`. That is the exact recovery locator.
+Missing configuration when private keys exist, missing IDs, missing files or
+invalid key lengths fail the backup; writers still resume through the existing
+cleanup path. Held release captures use the same custody function.
+
+Custody directories are not deleted by daily database rotation and are not
+included in ordinary database export. Retain each alongside its dependent
+restorable snapshot under the existing custody procedure. Moving a snapshot to
+another host requires moving its separate custody directory and recording the
+new `wrapping_custody.directory` before rehearsal. This unit does not enable
+offsite transfer or change the external-backup OFF decision.
+
+## Recovery and rehearsal
+
+Restore the database with the existing release recovery procedure. Before
+enabling online approvals, restore the wrapping files into a new directory:
+
+```sh
+python3 scripts/ops_backup.py restore-wrapping /srv/kin-backups/SET --destination /srv/kin-signing-restored/SET
+python3 scripts/ops_backup.py rehearse /srv/kin-backups/SET
+```
+
+The first command checks the custody files against the snapshot and prints only
+the restored ID/path mapping. Configure the existing signing service's
+`FileWrappingSecrets` paths and secret mounts with that mapping. The command
+refuses to overwrite an existing destination. Startup wiring of that service
+belongs to the API integration unit; this ops unit does not change it.
+
+Rehearsal restores its own temporary custody copy using that same locator, checks
+all restored table counts and calls the existing product key-unwrapping function
+for every restored private key using the recorded API image. Missing or wrong
+custody fails rehearsal. Its receipt records `wrapping_custody` and `success`;
+secret bytes are never printed. Existing signatures retain public verification
+evidence, but successful DB restoration alone does not certify new approvals.

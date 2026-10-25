@@ -1,15 +1,23 @@
+import { BackgroundWork, EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
 import {
-  HttpException, Injectable, InternalServerErrorException, Logger,
+  HttpException, Inject, Injectable, InternalServerErrorException, Logger,
   OnModuleDestroy, OnModuleInit, UnauthorizedException,
 } from '@nestjs/common';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { isIP } from 'net';
 import { createRemoteJWKSet, decodeJwt, jwtVerify, JWTPayload } from 'jose';
 import { PrismaService } from './prisma.service';
+import type { Prisma } from '@prisma/client';
 import { ChangeAnswer, KeycloakService, RosterWriteFailure, within } from './keycloak.service';
 import { rightsAllow, lockMemberRights } from './member-rights';
 import { importMemberRights } from './member-rights-import';
 import { clinicianOnly } from './clinician-policy';
+import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordTransaction } from './emr-runtime/record-port';
+import { knownIdentity, verifiedIdentityClaims } from './emr-runtime/contract';
+import type { RecordMutation } from './emr-runtime/store';
+import { authRequestSurface, recordLoginFailure, sessionAccessEvent, sessionEndEvent, SessionRecordIdentity } from './emr-runtime/auth-events';
+import type { AuthEndCause, AuthFailureCause, ImmutableIdentity, ReauthenticationTrigger } from './emr-contract/access-event';
+import type { CurrentRequestAuthorization } from './emr-runtime/request-context';
 
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const SESSION_TOUCH_MS = 5 * 60 * 1000;
@@ -99,7 +107,7 @@ type PendingLogin = {
 };
 type Flow = { name: string; pending: PendingLogin; live: boolean };
 type Session = {
-  sid: string; sub: string; accessToken: string; refreshToken: string;
+  sid: string; auditRef: string; sub: string; accessToken: string; refreshToken: string;
   atExpiresAt: Date; createdAt: Date; lastSeenAt: Date;
   entryProofHash: string | null; entryProofExpiresAt: Date | null;
   idpSid: string | null; rightsVersion: number; institution: string | null;
@@ -188,10 +196,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     ? createRemoteJWKSet(new URL(process.env.KC_JWKS_URL))
     : null;
   private readonly logger = new Logger('AuthSession');
-  private cleanupTimer?: NodeJS.Timeout;
-  private idpEndTimer?: NodeJS.Timeout;
+  private stopSweep?: () => void;
+  private stopIdpEnds?: () => void;
   private resuming = false;
-  private importTimer?: NodeJS.Timeout;
+  private cancelImportRetry?: () => void;
   private stopping = false;
   /**
    * 이 프로세스가 보내 놓고 아직 답을 기다리는 변경 호출의 수(대상별: `<kind>:<target>`, 회원은 `member:<sub>`). 재시도
@@ -199,41 +207,55 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly flying = new Map<string, number>();
 
-  constructor(private prisma: PrismaService, private keycloak: KeycloakService) {}
+  constructor(private prisma: PrismaService, private keycloak: KeycloakService,
+    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
+    @Inject(EMR_BACKGROUND_WORK) private readonly background: BackgroundWork) {}
+
+  private async withAccessRecords<T>(claims: { issuer: string; subject: string; actor: string },
+    body: (tx: EmrRecordTransaction, record: RecordMutation, user: { status: 'known'; value: ImmutableIdentity }) => Promise<T>,
+    options?: { maxWait: number; timeout: number }): Promise<T> {
+    const work = this.ledger.begin();
+    try {
+      // Resolve before taking the business lane. Its immutable identity must
+      // survive a later session rollback and cannot queue behind its own lane.
+      const user = await knownIdentity(verifiedIdentityClaims(claims.issuer, claims.subject, claims.actor),
+        (issuer, subject) => work.resolveRequestIdentity(issuer, subject));
+      return await work.transactionWithRecords((tx, record) => body(tx, record, user), options);
+    }
+    finally { work.end(); }
+  }
 
   async onModuleInit() {
     // Realm startup may follow API startup. Entry checks the committed marker while this single task retries.
-    void this.importRights(1);
+    this.background.tryRun('auth.importRights', signal => this.importRights(1, signal));
     // 조회 시 idle 검사가 본체다. 타이머는 다시 오지 않는 세션 행을 치우는 수거원이고, 치운 세션도 접속기록에 남긴다.
-    this.cleanupTimer = setInterval(() => {
-      this.sweep().catch(() => this.storageWarning('sweep_cycle'));
-    }, 60 * 60 * 1000);
-    this.cleanupTimer.unref();
+    this.stopSweep = this.background.every('auth.sweep', 60 * 60 * 1000,
+      () => this.sweep().catch(() => this.storageWarning('sweep_cycle')));
     // 표식 표가 곧 provider 종료의 대기열이다: 프로세스가 죽어도 잃지 않고, 시작할 때 미확인 행을 기한과 무관하게 다시 청한다.
-    this.idpEndTimer = setInterval(() => { void this.resumeIdpEnds(false); }, IDP_END_TICK_MS);
-    this.idpEndTimer.unref();
-    void this.resumeIdpEnds(true);
+    this.stopIdpEnds = this.background.every('auth.resumeIdpEnds', IDP_END_TICK_MS, () => this.resumeIdpEnds(false));
+    this.background.tryRun('auth.resumeIdpEnds', () => this.resumeIdpEnds(true));
   }
 
   onModuleDestroy() {
     this.stopping = true;
-    if (this.importTimer) clearTimeout(this.importTimer);
-    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
-    if (this.idpEndTimer) clearInterval(this.idpEndTimer);
+    this.cancelImportRetry?.();
+    this.stopSweep?.();
+    this.stopIdpEnds?.();
   }
 
-  private async importRights(attempt: number): Promise<void> {
-    if (this.stopping) return;
+  private async importRights(attempt: number, signal: AbortSignal): Promise<void> {
+    if (this.stopping || signal.aborted) return;
     this.logger.log(`Member rights import attempt ${attempt}: checking realm-v1`);
     try {
-      await importMemberRights(this.prisma, this.keycloak, AbortSignal.timeout(30000));
+      // The held DB import completes under the quiesce signal too: once it is aborted, no roster publication starts.
+      const outcome = await importMemberRights(this.prisma, this.keycloak, this.ledger, AbortSignal.any([signal, AbortSignal.timeout(30000)]));
       this.logger.log(`Member rights import attempt ${attempt}: ready`);
+      if (outcome?.publication) await outcome.publication;
     } catch (error: any) {
       const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt - 1, 5));
       this.logger.warn(`Member rights import attempt ${attempt}: ${error?.message ?? 'storage/provider failure'}; retry in ${delay}ms`);
-      if (!this.stopping) {
-        this.importTimer = setTimeout(() => { void this.importRights(attempt + 1); }, delay);
-        this.importTimer.unref();
+      if (!this.stopping && !signal.aborted) {
+        this.cancelImportRetry = this.background.schedule('auth.importRights', delay, next => this.importRights(attempt + 1, next));
       }
     }
   }
@@ -534,20 +556,32 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 기다린다 — 그 쓰기는 종료보다 먼저 commit되거나, 종료 뒤에 실패한다. 잠금을 제때 얻지 못하면 끝내지 않고 409다.
    */
   private async endSession(
-    session: Session, cause: EndCause, ip: string | null, options: { idleCutoff?: Date; trigger?: Reason } = {},
+    session: Session, cause: EndCause, ip: string | null, options: { idleCutoff?: Date; trigger?: Reason; surface?: string | null } = {},
   ): Promise<EndResult> {
     const idpSid = this.idpSidOf(session);
     const where = options.idleCutoff
       ? { ...this.version(session), lastSeenAt: { lt: options.idleCutoff } } : this.version(session);
     try {
-      return await this.prisma.$transaction(async tx => {
+      const service = cause === 'sweep' ? await this.sweepIdentity() : undefined;
+      const end = async (tx: EmrRecordTransaction, record: RecordMutation, user: SessionRecordIdentity): Promise<EndResult> => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         if (idpSid) await this.lockIdpSession(tx, idpSid);
-        const { count } = await tx.authSession.deleteMany({ where });
-        if (count !== 1) return { ended: false, idpSid: null, change: null };
-        const change = await this.endRows(tx, idpSid, [session], cause, ip, options.trigger);
+        const surface = options.surface ?? (cause === 'sweep' ? 'service:auth-session-sweep' : null);
+        const ended = await this.endRow(tx, record, user, session, cause, ip, surface, options.trigger, service, where);
+        if (!ended) return { ended: false, idpSid: null, change: null };
+        const change = await this.endRows(tx, record, user, idpSid, cause, ip, surface, options.trigger, session.sub, service);
         return { ended: true, idpSid, change };
-      }, { maxWait: 4000, timeout: 8000 });
+      };
+      let issuer: string | undefined;
+      try { issuer = decodeJwt(session.accessToken).iss; } catch { /* Keep the missing original identity explicit. */ }
+      if (issuer) return await this.withAccessRecords({ issuer, subject: session.sub, actor: this.storedIdentity(session).actor }, end,
+        { maxWait: 4000, timeout: 8000 });
+      // An unreadable stored token must not prevent ending its existing session.
+      // Keep its auditRef and the projection's stored subject; never guess an issuer.
+      const work = this.ledger.begin();
+      try { return await work.transactionWithRecords((tx, record) => end(tx, record, { status: 'unresolved', reason: 'not-resolved' }),
+        { maxWait: 4000, timeout: 8000 }); }
+      finally { work.end(); }
     } catch (error: any) {
       if (lockWaitExceeded(error)) throw this.conflict();
       this.storageWarning('end_transaction');
@@ -563,36 +597,55 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * `sub`은 그 요청 기록의 관련 회원이다(주지 않으면 끝낸 행의 회원).
    */
   private async endRows(
-    tx: any, idpSid: string | null, ended: Session[], cause: EndCause, ip: string | null, trigger?: Reason, sub?: string,
+    tx: EmrRecordTransaction, record: RecordMutation, user: SessionRecordIdentity,
+    idpSid: string | null, cause: EndCause, ip: string | null, surface: string | null,
+    trigger?: Reason, sub?: string, service?: { status: 'known'; value: ImmutableIdentity },
   ): Promise<Change | null> {
-    let change: Change | null = null;
-    if (idpSid) {
-      const now = new Date();
-      const mark = await tx.idpSessionEnd.upsert({
-        where: { idpSid },
-        create: { idpSid, cause, decidedAt: now, nextAttemptAt: now },
-        update: { confirmedAt: null, nextAttemptAt: now },
-      });
-      const others: Session[] = await tx.authSession.findMany({ where: { idpSid } });
-      for (const other of others) {
-        const { count } = await tx.authSession.deleteMany({ where: { sid: other.sid } });
-        if (count === 1) ended.push(other);
-      }
-      change = await this.recordEnd(tx, idpSid, sub ?? ended[0]?.sub ?? null, mark.attempts);
-    }
-    for (const row of ended) {
+    if (!idpSid) return null;
+    const now = new Date();
+    const mark = await tx.idpSessionEnd.upsert({
+      where: { idpSid }, create: { idpSid, cause, decidedAt: now, nextAttemptAt: now },
+      update: { confirmedAt: null, nextAttemptAt: now },
+    });
+    const others = await tx.authSession.findMany({ where: { idpSid } });
+    for (const other of others)
+      await this.endRow(tx, record, user, other, cause, ip, surface, trigger, service, { sid: other.sid });
+    return this.recordEnd(tx, idpSid, sub ?? (user.status === 'known' ? user.value.subject : null), mark.attempts);
+  }
+
+  private async sweepIdentity() {
+    const work = this.ledger.begin();
+    try {
+      // This names the executing software task, not an invented Keycloak member.
+      const issuer = 'urn:kin:pacs:service', subject = 'auth-session-sweep';
+      return { status: 'known' as const, value: { issuer, subject,
+        id: await work.resolveRequestIdentity(issuer, subject) } };
+    } finally { work.end(); }
+  }
+
+  private async endRow(tx: EmrRecordTransaction, record: RecordMutation,
+    user: SessionRecordIdentity, row: Session, cause: EndCause, ip: string | null,
+    surface: string | null, trigger: Reason | undefined, service: { status: 'known'; value: ImmutableIdentity } | undefined,
+    where: Prisma.AuthSessionWhereInput): Promise<boolean> {
+    if (!surface || (user.status === 'known' && row.sub !== user.value.subject)) throw new Error('SessionEndObservationMissing');
+    const rights = await tx.memberRights.findUnique({ where: { sub: row.sub } });
+    const event = sessionEndEvent(user, { surface, roles: rights?.roles ?? [], rightsVersion: rights?.version ?? 0,
+      institution: row.institution, auditRef: row.auditRef, ip, occurredAt: new Date().toISOString(),
+      endCause: cause.replace(/_/g, '-') as AuthEndCause,
+      trigger: cause === 'reauthentication' ? trigger!.replace(/_/g, '-') as ReauthenticationTrigger : null, service });
+    const reference = await record(event, async () => {
+      const { count } = await tx.authSession.deleteMany({ where });
+      if (count !== 1) return null;
       const who = this.storedIdentity(row);
-      await tx.auditLog.create({ data: {
-        actor: who.actor,
-        // 만료로 세는 것은 이 셋뿐이다. 사람이나 로그인 시작이 부른 종료(새 원인 포함)는 만료로 떨어지지 않는다.
-        action: cause === 'idle' || cause === 'refresh_failed' || cause === 'sweep' ? AUTH_EXPIRED : AUTH_LOGOUT,
-        target: who.target,
+      const audit = await tx.auditLog.create({ data: {
+        at: new Date(event.occurredAt), actor: who.actor, action: event.action, target: who.target,
         detail: JSON.stringify(cause === 'reauthentication'
           ? { institution: who.institution, ip, dataSubject: null, cause, trigger: trigger ?? null }
           : { institution: who.institution, ip, dataSubject: null, cause }),
       } });
-    }
-    return change;
+      return { kind: 'AuditLog', id: String(audit.id), version: null };
+    });
+    return reference !== null;
   }
 
   /** provider 세션 하나의 종료 요청을 보내기 **전에** 기록한다(그 sid의 잠금을 쥔 트랜잭션 안에서). */
@@ -604,8 +657,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 끝내고, 끝냈으면 provider 종료를 청해 둔다(기다리지 않는다). idle·refresh 거절·수거·평소의 Log out이 쓴다. */
-  private async endAndTell(session: Session, cause: EndCause, ip: string | null, idleCutoff?: Date): Promise<boolean> {
-    const result = await this.endSession(session, cause, ip, { idleCutoff });
+  private async endAndTell(session: Session, cause: EndCause, ip: string | null, idleCutoff?: Date, surface?: string | null): Promise<boolean> {
+    const result = await this.endSession(session, cause, ip, { idleCutoff, surface });
     if (result.ended && result.change) this.tellIdp(result.change);
     return result.ended;
   }
@@ -617,12 +670,49 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return rights;
   }
 
-  async bearerRights(claims: Record<string, any>, raw: string) {
-    const rights = await this.entryRights(String(claims.sub));
+  async bearerRights(claims: Record<string, any>, raw: string, db: any = this.prisma) {
+    const rights = await this.entryRights(String(claims.sub), db);
     if (rights.newAuthAfter && !this.authenticationAfter(claims.auth_time, rights.newAuthAfter))
       throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
-    await this.refuseEndedIdpSession(claims, raw);
+    await this.refuseEndedIdpSession(claims, raw, db);
     return rights;
+  }
+
+  /** Credentials stay in this closure. Consumers can revalidate in their existing
+   * business transaction without another transaction, a refresh or provider I/O.
+   */
+  bindCurrentAuthorization(payload: Record<string, any>, raw: string, session: Session | null,
+      rights: { version: number; institution: string; roles: readonly string[] }): CurrentRequestAuthorization {
+    const claims = Object.freeze({ iss: payload.iss, sub: payload.sub, exp: payload.exp,
+      sid: payload.sid, session_state: payload.session_state, auth_time: payload.auth_time, iat: payload.iat });
+    const admitted = session ? { sid: session.sid, createdAt: session.createdAt.getTime(),
+      idpSid: session.idpSid, rightsVersion: session.rightsVersion, institution: session.institution } : null;
+    const expected = { version: rights.version, institution: rights.institution, roles: [...rights.roles].sort() };
+    return async (transaction?: EmrRecordTransaction) => {
+      const db = transaction ?? this.prisma;
+      if (claims.iss !== process.env.KC_ISSUER || typeof claims.sub !== 'string')
+        throw this.ended('인증 신원이 변경되었습니다');
+      let current: any;
+      if (admitted) {
+        const live: Session | null = await this.storage('session_read', () =>
+          db.authSession.findUnique({ where: { sid: admitted.sid } }));
+        if (!live || live.sub !== claims.sub || live.createdAt.getTime() !== admitted.createdAt
+            || live.idpSid !== admitted.idpSid || live.institution !== admitted.institution
+            || live.rightsVersion !== admitted.rightsVersion || live.lastSeenAt.getTime() < Date.now() - SESSION_IDLE_MS)
+          throw this.ended('요청을 시작한 인증 세션이 종료되었습니다');
+        // Token expiry is not a session end (S7-U5 ④): an admitted request keeps going on its stored token while a
+        // refresh is slow or fails; the session ends only when its row is gone or replaced, idle, or rights change.
+        const stored = decodeJwt(live.accessToken);
+        if (stored.iss !== claims.iss || stored.sub !== claims.sub)
+          throw this.ended('요청을 시작한 인증 세션을 확인할 수 없습니다');
+        current = await this.sessionRights(live, db);
+      } else {
+        current = await this.bearerRights(claims, raw, db);
+      }
+      if (!rightsAllow(current) || current.version !== expected.version || current.institution !== expected.institution
+          || JSON.stringify([...current.roles].sort()) !== JSON.stringify(expected.roles))
+        throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
+    };
   }
 
   private authenticationAfter(authTime: unknown, boundary: Date): boolean {
@@ -649,8 +739,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   private async sendChange(change: Change, key: string, send: () => Promise<ChangeAnswer>, waitMs: number)
     : Promise<'done' | 'void' | 'unknown' | 'pending'> {
-    this.flying.set(key, (this.flying.get(key) ?? 0) + 1);
-    const settled = (async () => {
+    // The send and its settlement are one owned background task. After the quiesce no provider request
+    // starts: the recorded intent (state unknown) stays for the next process's resumption - 'pending' here, as for an
+    // answer that did not arrive within the wait.
+    let state: 'done' | 'void' | 'unknown' = 'unknown';
+    const task = this.background.tryRun('auth.change:' + change.kind, async () => {
+      this.flying.set(key, (this.flying.get(key) ?? 0) + 1);
       let answer: ChangeAnswer;
       try { answer = await send(); }
       catch { answer = { state: 'unknown', outcome: 'transport' }; }
@@ -660,8 +754,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         if (open > 0) this.flying.set(key, open);
         else this.flying.delete(key);
       }
-      return answer.state;
-    })();
+      state = answer.state;
+    });
+    if (!task) return 'pending';
+    const settled = task.settled.then(() => state);
     let timer: NodeJS.Timeout | undefined;
     const waited = new Promise<'pending'>(resolve => { timer = setTimeout(() => resolve('pending'), Math.max(0, waitMs)); });
     try { return await Promise.race([settled, waited]); }
@@ -690,12 +786,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async endByRequest(
-    sid: string, session: Session | null, cause: EndCause, ip: string | null, trigger?: Reason,
+    sid: string, session: Session | null, cause: EndCause, ip: string | null, trigger?: Reason, surface?: string | null,
   ): Promise<EndResult> {
     for (let writes = 0; session; ) {
       if (writes === TRANSITION_LIMIT) throw this.conflict();
       writes++;
-      const result = await this.endSession(session, cause, ip, { trigger });
+      const result = await this.endSession(session, cause, ip, { trigger, surface });
       if (result.ended) return result;
       session = await this.readSession(sid);
     }
@@ -747,7 +843,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /** 방금 끝낸 세션의 provider 종료(기록해 둔 요청)를 보낸다. 답을 기다리지 않고, 확인되지 않으면 표식이 주기를 부른다. */
   private tellIdp(change: Change) {
-    void (async () => {
+    this.background.tryRun('auth.tellIdp', async () => {
       try {
         await this.prisma.idpSessionEnd.updateMany({
           where: { idpSid: change.target, confirmedAt: null },
@@ -758,7 +854,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         this.storageWarning('idp_end_write');
       }
       await this.confirmIdpEnd(change, IDP_END_MS);
-    })();
+    });
   }
 
   /**
@@ -819,15 +915,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 들였으면 받는다: 표식이 있는 sid의 제품 세션은 종료(그 sid의 행을 모두 지운다) 뒤에 콜백이 덮지 않는다고 판정한 인증으로만
    * 생기므로, 그 sid에 살아 있는 세션의 토큰과 사람·auth_time이 같으면 같은 인증이다.
    */
-  async refuseEndedIdpSession(claims: Record<string, any>, raw: string): Promise<void> {
+  async refuseEndedIdpSession(claims: Record<string, any>, raw: string, db: any = this.prisma): Promise<void> {
     const idpSid = this.idpSidOfClaims(claims);
     if (!idpSid) return;
-    const mark = await this.storage('idp_end_read', () =>
-      this.prisma.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } }));
+    const mark: { confirmedAt: Date | null } | null = await this.storage('idp_end_read', () =>
+      db.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } }));
     if (!mark || !this.markCovers(mark, claims)) return;
     const authTime = Number(claims.auth_time);
     if (mark.confirmedAt && Number.isFinite(authTime) && authTime === Math.floor(mark.confirmedAt.getTime() / 1000)) {
-      const admitted = await this.storage('idp_end_read', () => this.prisma.authSession.findMany({
+      const admitted: { accessToken: string }[] = await this.storage('idp_end_read', () => db.authSession.findMany({
         where: { idpSid, sub: String(claims.sub) }, select: { accessToken: true },
       }));
       if (admitted.some(row => row.accessToken === raw)) return;
@@ -939,7 +1035,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!sid || !session)
       return this.startFlow(req, res, reason === 'register'
         ? { phase: 'plain', reason: null, prompt } : { phase: 'probe', reason, prompt });
-    const end = await this.endByRequest(sid, session, REASON_CAUSE[reason], this.requestIp(req), reason);
+    const end = await this.endByRequest(sid, session, REASON_CAUSE[reason], this.requestIp(req), reason, authRequestSurface(req));
     // 그사이 다른 요청이 끝냈거나 provider 세션을 모르는 행이면, 남아 있을지 모르는 SSO는 probe 단계가 알아내 끝낸다.
     if (!end.ended || !end.idpSid) return this.startFlow(req, res, { phase: 'probe', reason, prompt });
     if (!end.change || !await this.confirmIdpEnd(end.change, IDP_END_WAIT_MS))
@@ -966,14 +1062,14 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   private async loginFailureRow(req: any, cause: LoginFailureCause, who: Who | null) {
     try {
-      await this.prisma.auditLog.create({ data: {
-        actor: who?.actor ?? 'unknown',
-        action: AUTH_LOGIN,
-        target: who?.target ?? '',
-        detail: JSON.stringify({
-          institution: who?.institution ?? null, ip: this.requestIp(req), dataSubject: null, outcome: 'failure', cause,
-        }),
-      } });
+      await recordLoginFailure(this.ledger, {
+        cause: cause.replace(/_/g, '-') as AuthFailureCause, legacyCause: cause,
+        occurredAt: new Date().toISOString(), ip: this.requestIp(req),
+        // Every non-null caller here follows verifyAccessToken; attempted or invalid
+        // token claims never become a member identity in either record.
+        verified: who ? { issuer: process.env.KC_ISSUER!, subject: who.target,
+          actor: who.actor, institution: who.institution } : null,
+      });
     } catch {
       this.storageWarning('login_failure_row');
     }
@@ -1105,12 +1201,13 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const reason = (flow.reason ?? intent?.reason)!;
       let change: Change | null | 'ended';
       try {
-        change = await this.prisma.$transaction(async tx => {
+        change = await this.withAccessRecords({ issuer: String(payload.iss), subject: String(payload.sub),
+          actor: this.identity(payload, String(payload.sub)).actor }, async (tx, record, user) => {
           await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
           await this.lockIdpSession(tx, idpSid!);
           const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid } });
           if (mark?.confirmedAt && this.markCovers(mark, payload, flow)) return 'ended' as const;
-          return this.endRows(tx, idpSid, [], REASON_CAUSE[reason], ip, reason, String(payload.sub));
+          return this.endRows(tx, record, user, idpSid, REASON_CAUSE[reason], ip, authRequestSurface(req), reason, String(payload.sub));
         }, { maxWait: 4000, timeout: 8000 });
       } catch {
         this.storageWarning('end_transaction');
@@ -1160,6 +1257,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const document = who.institution !== null && clinicianOnly(roles) && !roles.includes('gateway')
       && !(typeof payload.azp === 'string' && payload.azp.startsWith('gw-')) ? 'clinician.html' : 'main.html';
     const sid = randomBytes(32).toString('base64url');
+    const auditRef = 'authref:' + randomUUID();
     const proof = randomBytes(32).toString('base64url');
     const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success' });
     let outcome: 'created' | 'blocked' | 'expired' | 'isolated';
@@ -1174,7 +1272,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
        * 평소 로그인은 막히지 않고, 격리는 그 API의 답에 기대지 않는다). 사실의 쓰기와 같은 회원 잠금 안에서 읽는다.
        * 세션 생성과 성공 행은 함께 commit되거나 함께 롤백된다.
        */
-      outcome = await this.prisma.$transaction(async tx => {
+      outcome = await this.withAccessRecords({ issuer: String(payload.iss), subject: String(payload.sub), actor: who.actor }, async (tx, record, user) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.lockIdpSession(tx, idpSid!);
         const now = new Date();
@@ -1191,19 +1289,27 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           }
           return 'blocked';
         }
-        await tx.authSession.create({ data: {
-          sid,
-          sub: String(payload.sub),
-          rightsVersion: observed.version, institution: observed.institution,
-          accessToken: tokens.access_token,
-          refreshToken: tokens.refresh_token,
-          atExpiresAt: new Date(Number(payload.exp) * 1000 - REFRESH_LEAD_MS),
-          lastSeenAt: now,
-          entryProofHash: this.proofHash(proof),
-          entryProofExpiresAt: new Date(now.getTime() + ENTRY_PROOF_MS),
-          idpSid,
-        } });
-        await tx.auditLog.create({ data: { actor: who.actor, action: AUTH_LOGIN, target: who.target, detail } });
+        const event = sessionAccessEvent(user, {
+          action: AUTH_LOGIN,
+          roles: rightsAllow(rights) ? rights.roles : [], rightsVersion: rights.version,
+          institution: rights.institution, auditRef, ip, occurredAt: now.toISOString(),
+        });
+        await record(event, async () => {
+          await tx.authSession.create({ data: {
+            sid, auditRef,
+            sub: String(payload.sub),
+            rightsVersion: observed.version, institution: observed.institution,
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            atExpiresAt: new Date(Number(payload.exp) * 1000 - REFRESH_LEAD_MS),
+            lastSeenAt: now,
+            entryProofHash: this.proofHash(proof),
+            entryProofExpiresAt: new Date(now.getTime() + ENTRY_PROOF_MS),
+            idpSid,
+          } });
+          const projection = await tx.auditLog.create({ data: { at: now, actor: who.actor, action: AUTH_LOGIN, target: who.target, detail } });
+          return { kind: 'AuditLog', id: String(projection.id), version: null };
+        });
         return 'created';
       }, { maxWait: 4000, timeout: 8000 });
     } catch (error: any) {
@@ -1263,18 +1369,27 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (stored.length !== given.length || !timingSafeEqual(stored, given)) throw refused();
     const who = this.storedIdentity(session);
     const detail = JSON.stringify({ institution: who.institution, ip: this.requestIp(req), dataSubject: null });
-    const consumed = await this.storage('entry_transaction', () => this.prisma.$transaction(async tx => {
+    const consumed = await this.storage('entry_transaction', () => this.withAccessRecords(
+      { issuer: decodeJwt(session.accessToken).iss, subject: session.sub, actor: who.actor }, async (tx, record, user) => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       await this.lockMember(tx, session.sub);
-      await this.sessionRights(session, tx);
-      // 만료는 DB에 닿는 순간에 다시 본다. 0행이면 그사이 쓰였거나 만료된 것이고, 행을 쓰지 않는다.
-      const { count } = await tx.authSession.updateMany({
-        where: { sid, entryProofHash: hash, entryProofExpiresAt: { gt: new Date() } },
-        data: { entryProofHash: null, entryProofExpiresAt: null },
+      const rights = await this.sessionRights(session, tx);
+      const event = sessionAccessEvent(user, {
+        action: AUTH_ENTRY,
+        roles: rightsAllow(rights) ? rights.roles : [], rightsVersion: rights.version,
+        institution: session.institution, auditRef: session.auditRef, ip: this.requestIp(req), occurredAt: new Date().toISOString(),
       });
-      if (count !== 1) return false;
-      await tx.auditLog.create({ data: { actor: who.actor, action: AUTH_ENTRY, target: who.target, detail } });
-      return true;
+      // 만료는 DB에 닿는 순간에 다시 본다. 0행이면 그사이 쓰였거나 만료된 것이고, 행을 쓰지 않는다.
+      const recorded = await record(event, async () => {
+        const { count } = await tx.authSession.updateMany({
+          where: { sid, entryProofHash: hash, entryProofExpiresAt: { gt: new Date() } },
+          data: { entryProofHash: null, entryProofExpiresAt: null },
+        });
+        if (count !== 1) return null;
+        const projection = await tx.auditLog.create({ data: { at: new Date(event.occurredAt), actor: who.actor, action: AUTH_ENTRY, target: who.target, detail } });
+        return { kind: 'AuditLog', id: String(projection.id), version: null };
+      });
+      return recorded !== null;
     }));
     if (!consumed) throw refused();
     return { sessionId: this.sessionRef(sid) };
@@ -1332,12 +1447,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 응답은 그 요청을 시작한 관찰 S에만 적용한다: 성공은 S 조건부 저장이 count 1일 때만, 거절은 S 조건부 종료. */
-  private async doRefresh(session: Session, ip: string | null): Promise<RefreshOutcome> {
+  private async doRefresh(session: Session, ip: string | null, surface: string | null): Promise<RefreshOutcome> {
     await this.sessionRights(session);
     const answer = await this.exchangeRefresh(session.refreshToken);
     if (answer.kind === 'unavailable') return { kind: 'unavailable' };
     if (answer.kind === 'refused')
-      return await this.endAndTell(session, 'refresh_failed', ip) ? { kind: 'ended' } : { kind: 'conflict' };
+      return await this.endAndTell(session, 'refresh_failed', ip, undefined, surface) ? { kind: 'ended' } : { kind: 'conflict' };
     // 갱신은 같은 사람의 같은 provider 세션을 잇는 것이다. 다른 sub·다른 provider 세션의 토큰은 이 세션의 것이 아니다 —
     // 저장하지 않고, 세션을 끝내지도 않는다(인증 서버의 답이 이상한 것이지 이 세션이 끝난 것이 아니다).
     const idpSid = this.idpSidOfClaims(answer.payload), known = this.idpSidOf(session);
@@ -1360,12 +1475,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 같은 프로세스의 겹친 요청은 같은 관찰(sid와 두 토큰)일 때만 refresh 하나를 나눈다. 응답 쿠키는 각 요청이 정한다. */
-  private refresh(session: Session, ip: string | null): Promise<RefreshOutcome> {
+  private refresh(session: Session, ip: string | null, surface: string | null): Promise<RefreshOutcome> {
     const key = createHash('sha256').update(JSON.stringify([session.sid, session.accessToken, session.refreshToken]))
       .digest('base64url');
     const running = this.refreshes.get(key);
     if (running) return running;
-    const started: Promise<RefreshOutcome> = this.doRefresh(session, ip).finally(() => {
+    const started: Promise<RefreshOutcome> = this.doRefresh(session, ip, surface).finally(() => {
       if (this.refreshes.get(key) === started) this.refreshes.delete(key);
     });
     this.refreshes.set(key, started);
@@ -1379,7 +1494,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 끝내지 않는다. 세션이 끝나는 것은 Keycloak이 거절을 답했을 때와 idle뿐이다.
    */
   async authenticateSession(sid: string, res: any): Promise<any> {
-    const ip = this.requestIp(res?.req);
+    const ip = this.requestIp(res?.req), surface = authRequestSurface(res?.req);
     let session = await this.readSession(sid);
     if (!session) throw this.ended('인증 세션이 없습니다');
     // idle → refresh → 진행을 관찰마다 판정한다. 조건부 전이가 0행이면 그 관찰(과 늦은 성공 토큰)을 버리고 다시 읽는다.
@@ -1391,7 +1506,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       let ended: string;
       if (session.lastSeenAt.getTime() < cutoff.getTime()) {
         writes++;
-        if (await this.endAndTell(session, 'idle', ip, cutoff)) throw this.ended('인증 세션이 만료되었습니다');
+        if (await this.endAndTell(session, 'idle', ip, cutoff, surface)) throw this.ended('인증 세션이 만료되었습니다');
         ended = '인증 세션이 만료되었습니다';
       } else if (session.atExpiresAt.getTime() <= now && now < session.atExpiresAt.getTime() + REFRESH_LEAD_MS - TOKEN_MARGIN_MS) {
         // 갱신할 때가 됐고 토큰은 아직 유효하다: 이 요청은 저장된 토큰으로 가고, 갱신은 아래에서 시작만 한다.
@@ -1399,7 +1514,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         break;
       } else if (session.atExpiresAt.getTime() <= now) {
         writes++;
-        const outcome = await this.refresh(session, ip);
+        const outcome = await this.refresh(session, ip, surface);
         // 자기 저장이 채택되면 그대로 진행한다 — 저장된 atExpiresAt이 이미 지났다는 이유로 같은 요청에서 다시 refresh하지 않는다.
         if (outcome.kind === 'stored') { session = outcome.session; break; }
         if (outcome.kind === 'ended') throw this.ended('인증 세션을 갱신할 수 없습니다');
@@ -1426,7 +1541,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
      * 접속 시각이 갱신되지 않는다. 기다리지 않는다 — 그 갱신의 답(저장·거절로 인한 종료·닿지 못함)은 이미 채택한 이
      * 요청을 바꾸지 않고, 저장소 실패는 `storage`가 고정 분류로 남겼다.
      */
-    if (refreshAhead) this.refresh(session, ip).catch(() => undefined);
+    if (refreshAhead) this.background.tryRun('auth.refreshAhead', () => this.refresh(session, ip, surface).catch(() => undefined));
     return session;
   }
 
@@ -1446,7 +1561,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!sid) return;
     const session = await this.readSession(sid);
     if (!session) return;
-    const end = await this.endByRequest(sid, session, 'logout', this.requestIp(req));
+    const end = await this.endByRequest(sid, session, 'logout', this.requestIp(req), undefined, 'POST auth/logout');
     if (end.ended && end.change) this.tellIdp(end.change);
   }
 

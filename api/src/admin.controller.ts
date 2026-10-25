@@ -1,6 +1,9 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { AdminAccessReview } from './admin-access-review';
 import { Caller, PacsService } from './pacs.service';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
+import type { AdminRequestFacts } from './admin.service';
 
 const caller = (req: any): Caller => ({
   sub: req.sub,
@@ -20,7 +23,24 @@ const caller = (req: any): Caller => ({
  */
 @Controller('admin')
 export class AdminController {
-  constructor(private admin: AdminService, private pacs: PacsService) {}
+  constructor(private admin: AdminService, private pacs: PacsService,
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
+    private readonly accessReview: AdminAccessReview) {}
+
+  private withRightsFacts<T>(req: any, task: (facts: AdminRequestFacts) => Promise<T>): Promise<T> {
+    return this.requests.withWork(req, async request => {
+      await request.requireCurrent();
+      const facts = request.facts;
+      try {
+        return await task({ surface: facts.surface, actor: facts.actor,
+          roles: facts.roles, rightsVersion: facts.rightsVersion, institution: facts.institution,
+          ip: facts.ingress.status === 'known' ? facts.ingress.value.address : null,
+          ipSource: 'trusted-proxy', sessionRef: facts.binding.sessionRef, requestId: facts.requestId, request });
+      } finally {
+        await request.requireCurrent();
+      }
+    });
+  }
 
   @Get('users')
   list(@Query('page') page: string | undefined, @Req() req: any) {
@@ -28,13 +48,13 @@ export class AdminController {
   }
 
   @Post('users')
-  create(@Body() body: any, @Req() req: any) {
-    return this.admin.createUser(body, caller(req));
+  async create(@Body() body: any, @Req() req: any) {
+    return this.withRightsFacts(req, facts => this.admin.createUser(body, caller(req), facts));
   }
 
   @Patch('users/:id')
-  patch(@Param('id') id: string, @Body() body: any, @Req() req: any) {
-    return this.admin.patchUser(id, body, caller(req));
+  async patch(@Param('id') id: string, @Body() body: any, @Req() req: any) {
+    return this.withRightsFacts(req, facts => this.admin.patchUser(id, body, caller(req), facts));
   }
 
   @Post('users/:id/reset-password')
@@ -55,6 +75,7 @@ export class AdminController {
    */
   @Get('audit')
   auditEvents(@Query() query: any, @Req() req: any) {
+    if (query.report === 'access') return this.requests.withWork(req, request => this.accessReview.read(query, caller(req), request));
     return this.admin.auditEvents(query, caller(req));
   }
 }

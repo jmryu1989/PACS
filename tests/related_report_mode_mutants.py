@@ -28,8 +28,8 @@ LITE = ROOT / "worklist-v0/hpacs-lite"
 
 # (label, file, old, new, the behavior case that must catch it)
 MUTANTS = [
-    ('M9-late-reload-admission-removed', 'report-editor.js', '          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }', '', 'test_w5r3_reload_started_before_mode_cannot_replace_target_in_mode'),
-    ('M9-shared-command-admission-removed', 'report-commit.js', '      if (relatedMode?.active()) return relatedMode.reason();', '', 'test_w5r3_report_inventory_normal'),
+    ('M9-late-reload-admission-removed', 'report-editor.js', '          if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }', '', 'test_w5r3_reload_started_before_mode_cannot_replace_target_in_mode'),
+    ('M9-shared-command-admission-removed', 'report-commit.js', '      if (relatedMode.active()) return relatedMode.reason();', '', 'test_w5r3_report_inventory_normal'),
     ('M11-citationIds-proposal', 'related_report_mode_dom_test.py', '            sorted(body["citationIds"], key=lambda s: s.encode(\'utf-16-be\', errors=\'surrogatepass\'))', '            sorted(body["citationIds"])', 'test_w5r3_citation_ids_match_frozen_utf16_hashes'),
     ('M11-citationIds-binding', 'related_report_mode_dom_test.py', '"citationIds": sorted(body["citationIds"], key=lambda s: s.encode(\'utf-16-be\', errors=\'surrogatepass\'))', '"citationIds": sorted(body["citationIds"])', 'test_w5r3_citation_ids_match_frozen_utf16_hashes'),
     ('M11-structureIds-proposal', 'related_report_mode_dom_test.py', '            sorted(body["structureIds"], key=lambda s: s.encode(\'utf-16-be\', errors=\'surrogatepass\'))', '            sorted(body["structureIds"])', 'test_w5r3_structure_ids_match_frozen_utf16_hashes'),
@@ -54,7 +54,7 @@ MUTANTS = [
      '      if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }', "",
      "test_w5r2_source_identity_on_inverse_focus_after_back_keeps_operation"),
     ("W5A-04-cvr-mode-admission-removed", "critical-result-mounts.js",
-     "blocked: () => relatedMode?.active() ? relatedMode.reason() : null });", "blocked: () => null });",
+     "blocked: () => relatedMode.active() ? relatedMode.reason() : null });", "blocked: () => null });",
      "test_w5r2_cvr_unknown_retry_is_blocked_in_related_mode"),
     ("W5A-05-source-provenance-dropped", "related-report-mode.js",
      "const pair = (...values) => values.filter", "const pair = (a, b) => [a, b].filter",
@@ -66,7 +66,7 @@ MUTANTS = [
      'return sha(["related-insert-v1", r["insertRequestId"],',
      'return sha(["wrong-object-contract", r["insertRequestId"],', "test_w5r2_wire_unicode_and_canonical_digest_vectors"),
     ("W5A-07-historical-runtime-as-current", "report-draft-client.js", None,
-     "c8e4f1b485ec05ccbb97589c74a573b3f48b70ce", "test_w5r2_runtime_assets_are_current_phase_a_sources"),
+     "c8e4f1b485ec05ccbb97589c74a573b3f48b70ce", "test_w5r2_runtime_assets_are_the_current_sources"),
     # PAGE-01: only clear/saved enters; an unknown save is not an entry permission.
     ("entry-on-unknown-save", "related-report.js",
      'if (pass.status !== "clear" && pass.status !== "saved") { refuse(pass.status, pass.reason); return; }',
@@ -106,10 +106,10 @@ MUTANTS = [
      '      const related = relatedCommandBlock(action);\n      if (related) { toast(related, "err"); relatedInsertNotice(selectedUid); return; }',
      "", "test_w5_mode_blocks_every_report_command_shortcut_and_late_writer"),
     ("cvr-in-the-mode", "critical-result-mounts.js",
-     "blocked: () => relatedMode?.active() ? relatedMode.reason() : null });", "blocked: () => null });",
+     "blocked: () => relatedMode.active() ? relatedMode.reason() : null });", "blocked: () => null });",
      "test_w5_mode_blocks_every_report_command_shortcut_and_late_writer"),
     ("late-writer-in-the-mode", "order-list-store.js",
-     "return relatedMode?.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);",
+     "return relatedMode.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);",
      "return relatedInsertWriteBlock(selectedUid, admission);",
      "test_w5_mode_blocks_every_report_command_shortcut_and_late_writer"),
     # Reentrant entry: a second entry made while the first waits for the Target's save; the reader's later choice wins.
@@ -131,10 +131,10 @@ MUTANTS = [
      "test_w5_reading_workspace_panels_follow_the_mode_keys_as_they_follow_the_panes"),
     # Return to Current in the mode gives the viewing back to the Target and must also leave the mode.
     ("return-to-current-stays-in-the-mode", "related-report.js",
-     "      const left = relatedMode?.exit() ?? null;\n      // 같은 판독 행", "      const left = null;\n      // 같은 판독 행",
+     "      const left = relatedMode.exit();\n      // 같은 판독 행", "      const left = null;\n      // 같은 판독 행",
      "test_w5_return_to_current_leaves_the_mode_and_gives_the_viewing_back_to_the_target"),
     # PAGE-06 / D1244: Back keeps the Source viewed beside the editor (reading while writing); only Return to Current resets it.
-    ("back-forgets-the-viewed-study", "page-boot.js",
+    ("back-forgets-the-viewed-study", "order-list-store.js",
      "back: backToCurrentDraft,", "back: returnToReportStudy,",
      "test_w5_escape_closes_the_confirmation_first_then_leaves_and_the_keys_enter_and_back"),
     ("restriction-not-restored", "related-report-mode.js",
@@ -170,8 +170,8 @@ MUTANTS = [
      "test_w5_discard_insert_tombstone_first_then_exactly_the_inserted_span_is_removed"),
     # Discard offered for an unknown operation (unknown is never proof of no insert).
     ("discard-offered-for-unknown", "report-editor.js",
-     'relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved',
-     'relatedMode?.noticeDiscard(["refused", "discard-unknown", "unknown"].includes(s) && !unresolved',
+     'relatedMode.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved',
+     'relatedMode.noticeDiscard(["refused", "discard-unknown", "unknown"].includes(s) && !unresolved',
      "test_w5_lost_answer_is_unknown_and_check_promotes_only_with_the_receipt_and_the_whole_draft"),
     # R3/R4: the Notice of a refused move forgets the operation, so its Check is W4's text comparison.
     ("notice-forgets-the-operation", "report-editor.js",
@@ -187,6 +187,22 @@ MUTANTS = [
     ("logout-preserves-the-pending-insert", "work-exit.js",
      '          if (relatedInsertPending(report.uid)) { report.reason = "insert"; continue; }', "",
      "test_w5_logout_with_an_unknown_insert_reads_the_receipt_and_never_preserves_it_as_a_draft"),
+    # W-07b: an empty Recommendation heading in the mode / in the Related Report pane, or a stored one never shown.
+    ("recommendation-section-never-toggled", "related-report-mode.js",
+     "if (OPTIONAL_FIELDS.includes(field)) sections[field].hidden = !text;", "",
+     "test_w5b_recommendation_shows_only_with_text_and_a_whole_insert_carries_only_what_is_shown"),
+    ("empty-recommendation-heading-in-the-pane", "related-report.js",
+     'value.closest(".prior-report-section").hidden = !value.textContent;', 'value.closest(".prior-report-section").hidden = false;',
+     "test_w5b_recommendation_shows_only_with_text_and_a_whole_insert_carries_only_what_is_shown"),
+    # W5B-REVIEW-02: the worklist's editor entries focus the hidden editor instead of leaving the mode.
+    ("row-menu-focuses-the-hidden-editor", "context-menu.js",
+     '{ label: "판독문 작성으로", act: () => focusReportEditor() },', '{ label: "판독문 작성으로", act: () => $("#findings").focus() },',
+     "test_w5b_row_menu_report_editor_leaves_the_mode"),
+    # Enter on the current row reaches the row navigation's activation first (it stops the event); the worklist-row-events
+    # Enter handler is then a second layer that no page path reaches on its own (a mutant of it alone survives, recorded).
+    ("current-row-enter-focuses-the-hidden-editor", "page-boot.js",
+     "if(mode==='Radiology')focusReportEditor();", "if(mode==='Radiology')$('#findings').focus();",
+     "test_w5b_enter_on_the_current_row_leaves_the_mode"),
     # PAGE-10: a double click opens the comparison viewer again.
     ("double-click-opens-images", "related-controls.js", "    function openRelatedImages(uid) {",
      '    $("#relrows").addEventListener("dblclick", e => { const tr = e.target.closest("tr"); if (tr?.dataset.uid) openRelatedImages(tr.dataset.uid); });\n'

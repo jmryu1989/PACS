@@ -49,9 +49,10 @@ AFTER_EXIT_PATH = "/u4b/after-exit.html"
 ASSET_DIR = "/worklist/hpacs-lite/"
 # In main.html's order. W6: the report region the page script cuts in (REPORT_BLOCK) mounts the shipped report frame
 # over the report fields when it runs, so report-editor-frame.js is served and listed like the other page modules
-# (the NC-11 script-src lists exactly these; the assets-byte-exact check covers it).
+# (the NC-11 script-src lists exactly these; the assets-byte-exact check covers it). W5 Phase B: the region also calls the
+# page's always-mounted Related Report mode, so related-report-mode.js is served and listed the same way.
 PAGE_SCRIPTS = ("work-context.js", "session-transport.js", "report-draft-client.js", "report-citation.js", "report-editor-frame.js",
-                "report-structure.js", "dictation-session.js", "dictation-capture.js", "dictation.js")
+                "related-report-mode.js", "report-structure.js", "dictation-session.js", "dictation-capture.js", "dictation.js")
 WORKLET = "dictation-worklet.js"
 ASSETS = PAGE_SCRIPTS + (WORKLET,)
 BROWSER_VERSION = "148.0.7778.96"
@@ -176,6 +177,7 @@ STRUCTHTML
 <script src="report-draft-client.js"></script>
 <script src="report-citation.js"></script>
 <script src="report-editor-frame.js"></script>
+<script src="related-report-mode.js"></script>
 <script src="report-structure.js"></script>
 <script src="dictation-session.js"></script>
 <script src="dictation-capture.js"></script>
@@ -196,9 +198,10 @@ let studies = [{uid: "UIDVALUE", name: "HONG GILDONG", id: "P-1", date: "2026-09
 let calls = [], holdCalls = [], citeCalls = [], structCalls = [], dictCalls = [];
 let replies = [], toasts = [], confirms = [], logouts = 0;
 const studyPriority = { get: () => false };
-// W5 (order-list-store.js): the page's Related Report mode binding and the base-rule marker, declared as the page
-// declares them (as report_dictation_host_dom_test.py does); null = no mode asset (the sliced region holds no mode).
-let relatedMode = null;
+// W5 (order-list-store.js): the page's Related Report mode and the base-rule marker, made as the page makes them: the
+// shipped module mounted on main.html's own mode markup (BARS_HTML) over the report fields. It stays inactive here;
+// entering it is the complete page's (tests/related_report_mode_dom_test.py).
+const relatedMode = KinRelatedReportMode({ editor: () => document.querySelector('.redit'), field: name => $('#' + name) });
 const RELATED_BASE = Object.freeze({ base: true });
 const KinAuth = { authFailure: () => {}, has: () => true, logout: async () => { logouts += 1; } };
 const reportPreview = { close() {} };

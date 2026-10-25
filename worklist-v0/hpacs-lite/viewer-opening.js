@@ -49,25 +49,20 @@
       '<p>통합 판독 화면 안에서는 현재 작업공간을 계속 사용합니다. Open Viewer Window는 별도 창을 엽니다.</p>' +
       '<label><input id="image-opening-prior" type="checkbox"> Include Latest Prior</label>' +
       '<p>같은 환자·modality의 더 이른 검사 중 최근 검사를 함께 엽니다. 직접 선택한 관련 검사·시리즈와 저장 보기는 별도 선택을 따릅니다.</p>' +
-      '<label for="image-opening-limit">Viewer Windows</label> <select id="image-opening-limit"><option value="1">1 · Reuse Window</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select>' +
-      '<p>이 목록에서 관리하는 별도 창 수입니다. 2개 이상이면 다른 검사를 새 창에 유지합니다. 제한을 줄여도 열린 창을 자동으로 닫지 않습니다.</p>' +
-      '<label><input id="image-opening-reuse" type="checkbox"> Reuse Clean Window at Limit</label>' +
-      '<p>2개 이상 제한이 가득 찼을 때 저장 중도, 미저장 작업도, 열린 대화상자도 없는 창 하나를 다시 사용합니다. 제한 1에서는 적용되지 않습니다. 끄면 기존 창을 직접 닫습니다. 영상 전체를 열람했다는 뜻은 아닙니다.</p>' +
+      '<p>Viewer Window는 한 창을 다시 사용합니다. Viewer Windows의 Detect Displays에서 두 화면에 걸쳐 배치하거나 창을 직접 늘릴 수 있습니다. 이전에 열린 다른 창은 자동으로 닫지 않습니다.</p>' +
       '<label><input id="image-opening-autoload" type="checkbox"> Open on Selection</label>' +
       '<p>목록 행이나 이전/다음 검사로 새 검사를 선택할 때 영상을 엽니다. 이미 열린 창의 미저장 작업·대화상자와 창 수 제한을 유지합니다.</p>' +
       '<p id="image-opening-status" role="status"></p>' +
       '<div class="image-opening-actions"><button class="chip" type="button" id="image-opening-reset">Reset</button><button class="chip" type="button" id="image-opening-done">Done</button></div>';
     document.body.append(dialog);
-    const target = dialog.querySelector('#image-opening-target'), prior = dialog.querySelector('#image-opening-prior'), limit = dialog.querySelector('#image-opening-limit'), automatic = dialog.querySelector('#image-opening-autoload');
-    const reuse = dialog.querySelector('#image-opening-reuse');
+    const target = dialog.querySelector('#image-opening-target'), prior = dialog.querySelector('#image-opening-prior'), automatic = dialog.querySelector('#image-opening-autoload');
     const reset = dialog.querySelector('#image-opening-reset'), message = dialog.querySelector('[role=status]');
     const current = () => !ended && owner !== null && key(session()) === owner;
     function render(note) {
       if (note) feedback = note;
-      target.value = value.listTarget; prior.checked = value.includePrior; limit.value = String(value.maxWindows);
+      target.value = value.listTarget; prior.checked = value.includePrior;
       automatic.checked = value.autoLoad;
-      reuse.checked = value.reuseClean; reuse.disabled = !current() || value.maxWindows === 1;
-      button.disabled = target.disabled = prior.disabled = limit.disabled = automatic.disabled = reset.disabled = !current();
+      button.disabled = target.disabled = prior.disabled = automatic.disabled = reset.disabled = !current();
       message.textContent = feedback || ({ empty: '기본 설정 · 이 브라우저', restored: '설정 복원됨 · 이 브라우저',
         invalid: '저장된 설정 오류 · 기본 설정을 사용합니다.', unavailable: '저장소를 사용할 수 없어 기본 설정을 사용합니다.',
         disabled: '로그인을 확인한 뒤 설정을 변경하세요.' })[status];
@@ -80,7 +75,7 @@
       value = clean;
       render(write(storage, owner, value) ? '설정 저장됨 · 다음 영상 열기부터 적용' : '설정 저장 안 됨 · 이 창에서만 유지');
     }
-    target.onchange = prior.onchange = limit.onchange = automatic.onchange = reuse.onchange = () => save({ version: 3, listTarget: target.value, includePrior: prior.checked, maxWindows: Number(limit.value), autoLoad: automatic.checked, reuseClean: reuse.checked });
+    target.onchange = prior.onchange = automatic.onchange = () => save({ version: 3, listTarget: target.value, includePrior: prior.checked, maxWindows: 1, autoLoad: automatic.checked, reuseClean: false });
     reset.onclick = () => save(defaults());
     button.onclick = () => { render(); if (current()) { dialog.showModal(); target.focus(); } };
     dialog.querySelector('#image-opening-done').onclick = () => dialog.close();

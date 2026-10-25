@@ -33,6 +33,11 @@ const { RouteParamtypes } = require('/app/node_modules/@nestjs/common/enums/rout
 const { Prisma } = require('/app/node_modules/@prisma/client');
 const { PacsService } = require('/app/dist/pacs.service');
 const { PacsController } = require('/app/dist/pacs.controller');
+// REQUEST_FACTS: the draft routes read the Guard's captured admission through the shared request context.
+const { createRequestContext } = require('/app/dist/emr-runtime/request-context');
+const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
+const { IncomingMessage, ServerResponse } = require('node:http');
+const { Socket } = require('node:net');
 
 // ── the store double ──
 
@@ -278,8 +283,20 @@ function world({ source = SOURCE_LOW } = {}) {
   };
   const trap = name => new Proxy({}, { get(_t, key) { return () => { throw new Error(`harness: ${name}.${String(key)} must not be reached`); }; } });
   const w = { store, sa, source, epoch: randomUUID() };
-  w.build = () => { w.svc = new PacsService(store.client, trap('orthanc'), trap('keycloak'), sa, trap('findings'));
-    w.controller = new PacsController(w.svc, trap('auth')); };
+  const ledger = { begin: () => ({ end() {}, resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000051',
+    transactionWithRecords: (work, options) => store.client.$transaction(tx => work(tx, async (_event, effect) => effect()), options) }) };
+  w.build = () => { w.svc = new PacsService(store.client, trap('orthanc'), trap('keycloak'), sa, trap('findings'), ledger);
+    w.requests = createRequestContext(createRequestIngress({ proxyPeers: [] }), ledger);
+    w.controller = new PacsController(w.svc, trap('auth'), w.requests.source); };
+  /** The request the router hands over after the Guard admitted it (verified member, current rights, binding). */
+  w.request = (fields, method, path) => {
+    const req = Object.assign(new IncomingMessage(new Socket()), fields), res = new ServerResponse(req);
+    w.requests.capture.capture(req, res, { issuer: 'https://synthetic.invalid', subject: fields.sub, roles: fields.roles,
+      institution: fields.institution, rightsVersion: 1, binding: fields.authMethod === 'session'
+        ? { method: 'session', sessionRef: 'syn-session-ref' } : { method: 'bearer', sessionRef: null } },
+    { method, route: path, purpose: 'clinical' }, async () => {});
+    return { req, done: () => res.emit('finish') };
+  };
   w.build();
   const now = new Date('2026-10-17T00:00:00.000Z');
   store.seed('studyState', { uid: TARGET, institutionId: INST, teleInstitutionId: null, rs: 'A', ss: 'Verified', em: 'N', holder: null,
@@ -300,8 +317,9 @@ function world({ source = SOURCE_LOW } = {}) {
   store.seed('reportVersion', { uid: source, version: 2, action: 'addendum', ...PRIOR, author: B.actor, citations: null, structured: null, at: now });
   /** One request as the router hands it over; the answer is what the HTTP layer would send. */
   w.send = async (name, { as = A, uid = TARGET, body, query = {} }) => {
-    const key = ROUTES[name], req = { sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind,
-      headers: {}, authMethod: 'bearer' };
+    const key = ROUTES[name];
+    const { req, done } = w.request({ sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution, kind: as.kind,
+      headers: {}, authMethod: 'bearer' }, name === 'put' ? 'PUT' : 'GET', name === 'put' ? 'studies/:uid/report' : 'studies/:uid/draft');
     const args = [];
     for (const [slot, { index, data }] of Object.entries(Reflect.getMetadata(ROUTE_ARGS_METADATA, PacsController, key) ?? {})) {
       const type = Number(slot.split(':')[0]);
@@ -316,7 +334,7 @@ function world({ source = SOURCE_LOW } = {}) {
       if (!(error instanceof HttpException)) return { status: 0, code: 'NOT_HTTP', body: null, error };
       const answer = error.getResponse();
       return { status: error.getStatus(), code: typeof answer === 'object' ? answer.code ?? null : null, body: answer };
-    }
+    } finally { done(); }
   };
   w.draft = (who = A) => store.rows('reportDraft').find(r => r.uid === TARGET && r.author === who.actor) ?? null;
   w.receipt = id => store.rows('reportDraftInsertReceipt').find(r => r.insertRequestId === id) ?? null;
@@ -848,13 +866,14 @@ test('W5API-25 lock order: session -> policy -> Source/Target rows in one UID or
     const body = insertBody(w);
     const events = w.store.events.length;
     const key = ROUTES.put, args = [];
+    const { req, done } = w.request({ sub: A.sub, actor: A.actor, roles: A.roles, institution: A.institution, kind: 'member',
+      headers: {}, authMethod: 'session', sid: 'syn-sid' }, 'PUT', 'studies/:uid/report');
     for (const [slot, { index, data }] of Object.entries(Reflect.getMetadata(ROUTE_ARGS_METADATA, PacsController, key))) {
       const type = Number(slot.split(':')[0]);
-      args[index] = type === RouteParamtypes.PARAM ? TARGET : type === RouteParamtypes.BODY ? body
-        : { sub: A.sub, actor: A.actor, roles: A.roles, institution: A.institution, kind: 'member', headers: {}, authMethod: 'session', sid: 'syn-sid' };
+      args[index] = type === RouteParamtypes.PARAM ? TARGET : type === RouteParamtypes.BODY ? body : req;
       void data;
     }
-    await w.controller[key](...args);
+    try { await w.controller[key](...args); } finally { done(); }
     // the write transaction (the read-only replay check before it locks nothing and is W5API-28's)
     const seen = w.store.events.slice(events), from = seen.indexOf('tx lock session'), check = seen.indexOf('tx commit');
     assert.ok(check > 0 && check < from, 'a read-only replay check commits before the write transaction takes the session lock');

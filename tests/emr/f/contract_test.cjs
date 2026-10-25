@@ -117,13 +117,12 @@ function accessEvent(o = {}) {
     auditLinkId: `audit:${crypto.randomUUID()}`, relatedEventId: o.related ?? null,
   };
 }
-function chainRows(events, rows = []) {
-  let previous = rows.length ? { sequence: rows[rows.length - 1].entry.sequence, hash: rows[rows.length - 1].entry.hash } : AE.ACCESS_CHAIN_GENESIS;
+function ledgerRows(events, rows = []) {
+  let sequence = rows.length ? rows[rows.length - 1].entry.sequence : 0;
   const out = [...rows];
-  for (const e of events) {
-    const entry = AE.sealAccessEvent(previous, e);
-    out.push({ entry, durableAt: new Date(Date.parse(e.occurredAt) + 1000).toISOString(), served: null });
-    previous = { sequence: entry.sequence, hash: entry.hash };
+  for (const event of events) {
+    const entry = { sequence: ++sequence, payload: { kind: 'access', event } };
+    out.push({ entry, durableAt: new Date(Date.parse(event.occurredAt) + 1000).toISOString(), served: null });
   }
   return out;
 }
@@ -152,7 +151,7 @@ test('TEST-F-02 patient_replay: unfiltered authentication events replay with no 
   const events = ['auth.login', 'auth.entry', 'auth.logout', 'auth.session.expired'].map(authEvent);
   const plan = F.planInvestigation(authorityFor('auth-auditor'), query());
   assert.equal(plan.filters.actions, null);
-  const page = await F.readInvestigationPage(plan, ledgerOf(chainRows(events)));
+  const page = await F.readInvestigationPage(plan, ledgerOf(ledgerRows(events)));
   assert.equal(page.total, events.length);
   assert.deepEqual(page.rows.map(row => ({ eventId: row.eventId, action: row.action, occurredAt: row.occurredAt,
     actor: row.actor, statutoryAct: row.statutoryAct, targets: row.targets })), events.toReversed().map(event => ({
@@ -162,7 +161,7 @@ test('TEST-F-02 patient_replay: unfiltered authentication events replay with no 
 
 test('TEST-F-02 patient_replay: an auth.login action filter excludes other authentication and record events', async () => {
   const login = authEvent();
-  const ledger = ledgerOf(chainRows([login, authEvent('auth.entry'), authEvent('auth.logout'),
+  const ledger = ledgerOf(ledgerRows([login, authEvent('auth.entry'), authEvent('auth.logout'),
     authEvent('auth.session.expired'), accessEvent()]));
   const auditor = authorityFor('auth-filter-auditor');
   const page = await F.readInvestigationPage(F.planInvestigation(auditor, query({ actions: ['auth.login'] })), ledger);
@@ -174,7 +173,7 @@ test('TEST-F-02 patient_replay: an auth.login action filter excludes other authe
 
 test('TEST-F-02 patient_replay: patient, study, record and version filters exclude authentication events', async () => {
   const record = accessEvent();
-  const ledger = ledgerOf(chainRows([authEvent(), authEvent('auth.logout'), record]));
+  const ledger = ledgerOf(ledgerRows([authEvent(), authEvent('auth.logout'), record]));
   const auditor = authorityFor('target-filter-auditor');
   for (const filter of [{ patient: { patientId: P1.patientId, assigningAuthority: P1.assigningAuthority } },
     { studyId: 'study-1' }, { recordId: 'rep-1' }, { versionId: 'v1' }]) {
@@ -280,7 +279,7 @@ test('TEST-F-01 roster_scope: a revoked, expired, not-yet-valid or moved auditor
   // A copied authority object is not authority, and no plan means no ledger read at all.
   const real = authorityFor('aud-7', ['investigate']);
   const forged = { ...clone(real) };
-  const ledger = ledgerOf(chainRows([accessEvent()]));
+  const ledger = ledgerOf(ledgerRows([accessEvent()]));
   refused(() => F.planInvestigation(forged, query()), 'AuditAuthorityRequired', 'a structural copy of authority');
   await refusedAsync(() => F.readInvestigationPage({ ...F.planInvestigation(real, query()) }, ledger), 'InvestigationPlanRequired', 'a copied plan');
   assert.deepEqual(ledger.calls, { top: 0, rows: 0 });
@@ -314,7 +313,7 @@ test('TEST-F-01 roster_scope: only the institution events are counted, paged and
     targets: [{ kind: 'report-version', patientLinkSnapshot: unresolved, studyId: unresolved, recordId: unresolved, versionId: unresolved }] }));
   events.push(accessEvent({ inst: INST_Y, action: 'permission-refused', result: 'refused', managing: unresolved,
     targets: [{ kind: 'report-version', patientLinkSnapshot: unresolved, studyId: unresolved, recordId: unresolved, versionId: unresolved }] }));
-  const ledger = ledgerOf(chainRows(events));
+  const ledger = ledgerOf(ledgerRows(events));
   const auditor = authorityFor('aud-1');
   const first = await F.readInvestigationPage(F.planInvestigation(auditor, query({ limit: 4 })), ledger, { batch: 3 });
   assert.equal(first.total, 7, 'M-F-02: other institutions add nothing to the count or the page');
@@ -367,7 +366,7 @@ function rematchLedger() {
   const e2 = accessEvent({ patient: P1, version: 'v1', at: '2026-10-05T02:00:00.000Z' });
   // The study is re-matched to another patient; later events carry the new snapshot.
   const e3 = accessEvent({ patient: P2, version: 'v2', at: '2026-10-06T02:00:00.000Z' });
-  return { e1, e2, e3, ledger: ledgerOf(chainRows([e1, e2, e3])) };
+  return { e1, e2, e3, ledger: ledgerOf(ledgerRows([e1, e2, e3])) };
 }
 const currentLink = studyId => (studyId === 'study-1' ? P2 : null);
 
@@ -401,7 +400,7 @@ test('TEST-F-02 patient_replay: the new patient finds only its own recorded even
   assert.deepEqual(byNew.rows.map(r => r.eventId), [e3.eventId]);
   const list = accessEvent({ surface: 'GET studies', targets: [target(P1, 'study-1', 'study-1', 'meta-1', 'study-metadata'),
     target(P3, 'study-3', 'study-3', 'meta-3', 'study-metadata')] });
-  const listLedger = ledgerOf(chainRows([list]));
+  const listLedger = ledgerOf(ledgerRows([list]));
   const shown = await F.readInvestigationPage(F.planInvestigation(auditor, query({ patient: { patientId: 'SYN-P1', assigningAuthority: 'hosp-x' } }), 'export'), listLedger);
   assert.equal(shown.rows.length, 1);
   assert.deepEqual(shown.rows[0].targets.map(t => t.patient.value.patientId), ['SYN-P1']);
@@ -412,24 +411,19 @@ test('TEST-F-02 patient_replay: the new patient finds only its own recorded even
   assert.equal(otherAuthority.total, 0);
 });
 
-test('TEST-F-02 patient_replay: a stored event whose patient or version was rewritten fails its chain hash and nothing is shown', async () => {
-  const { ledger } = rematchLedger();
-  const auditor = authorityFor('aud-1');
+// DISPOSED_D557: rewritten patient/version/institution chain-hash attack scenarios are removed.
+test('TEST-F-02 patient_replay: malformed stored rows are refused without presenting a partial report', async () => {
+  const { ledger } = rematchLedger(), auditor = authorityFor('aud-1');
   const plan = () => F.planInvestigation(auditor, query(), 'export');
-  const rewritePatient = clone(ledger.data);
-  rewritePatient[0].entry.payload.event.targets[0].patientLinkSnapshot.value = P2;
-  await refusedAsync(() => F.readInvestigationPage(plan(), ledgerOf(rewritePatient)), 'LedgerRowIntegrityRefused', 'rewritten patient');
-  const rewriteVersion = clone(ledger.data);
-  rewriteVersion[1].entry.payload.event.targets[0].versionId.value = 'v9';
-  await refusedAsync(() => F.readInvestigationPage(plan(), ledgerOf(rewriteVersion)), 'LedgerRowIntegrityRefused', 'rewritten version');
-  const rewriteInstitution = clone(ledger.data);
-  rewriteInstitution[2].entry.payload.event.managingInstitution.value = INST_Y;
-  await refusedAsync(() => F.readInvestigationPage(plan(), ledgerOf(rewriteInstitution)), 'LedgerRowIntegrityRefused', 'rewritten institution');
-  const checkpoint = clone(ledger.data);
-  checkpoint[2].entry.payload = { kind: 'expiry', event: checkpoint[2].entry.payload.event };
-  await refusedAsync(() => F.readInvestigationPage(plan(), ledgerOf(checkpoint)), 'LedgerRowIntegrityRefused', 'a non-access chain entry');
-  const original = await F.readInvestigationPage(plan(), ledger);
-  assert.equal(original.total, 3);
+  for (const breakRow of [
+    rows => { rows[0].entry.payload.event.targets[0].versionId = { status: 'known', value: null }; },
+    rows => { rows[1].durableAt = 'not-a-timestamp'; },
+    rows => { rows[2].entry.payload.kind = 'not-an-access-record'; },
+  ]) {
+    const rows = clone(ledger.data); breakRow(rows);
+    await refusedAsync(() => F.readInvestigationPage(plan(), ledgerOf(rows)), 'LedgerRowIntegrityRefused');
+  }
+  assert.equal((await F.readInvestigationPage(plan(), ledger)).total, 3);
 });
 
 test('TEST-F-02 patient_replay: refused, aborted and conflict events are replayed as such and filtered by action, result and address', async () => {
@@ -438,7 +432,7 @@ test('TEST-F-02 patient_replay: refused, aborted and conflict events are replaye
   const conflict = accessEvent({ surface: 'POST studies/:uid/report/commit', action: 'conflict', result: 'failed' });
   const denied = accessEvent({ action: 'permission-refused', result: 'refused', managing: unresolved, ip: unresolved,
     targets: [{ kind: 'report-version', patientLinkSnapshot: unresolved, studyId: unresolved, recordId: unresolved, versionId: unresolved }] });
-  const ledger = ledgerOf(chainRows([prepared, aborted, conflict, denied]));
+  const ledger = ledgerOf(ledgerRows([prepared, aborted, conflict, denied]));
   const auditor = authorityFor('aud-1');
   const read = async q => (await F.readInvestigationPage(F.planInvestigation(auditor, query(q), 'export'), ledger)).rows;
   const all = await read({});
@@ -453,7 +447,7 @@ test('TEST-F-02 patient_replay: refused, aborted and conflict events are replaye
 });
 
 test('TEST-F-02 patient_replay: a source failure, misordered or out-of-snapshot row is an error and never an empty or short result', async () => {
-  const rows = chainRows([accessEvent(), accessEvent(), accessEvent()]);
+  const rows = ledgerRows([accessEvent(), accessEvent(), accessEvent()]);
   const auditor = authorityFor('aud-1');
   const plan = () => F.planInvestigation(auditor, query(), 'export');
   const base = ledgerOf(rows);
@@ -472,13 +466,13 @@ test('TEST-F-02 patient_replay: a source failure, misordered or out-of-snapshot 
 });
 
 test('TEST-F-02 patient_replay: a sealed cursor continues the same snapshot without duplicates or gaps and another plan, auditor or forged cursor is refused', async () => {
-  const rows = chainRows([1, 2, 3, 4, 5].map(() => accessEvent()));
+  const rows = ledgerRows([1, 2, 3, 4, 5].map(() => accessEvent()));
   const ledger = ledgerOf(rows);
   const auditor = authorityFor('aud-1');
   const first = await F.readInvestigationPage(F.planInvestigation(auditor, query({ limit: 2 })), ledger);
   assert.equal(first.total, 5);
   // Rows committed after the first page do not move later pages.
-  ledger.data.push(...chainRows([accessEvent(), accessEvent()], rows).slice(rows.length));
+  ledger.data.push(...ledgerRows([accessEvent(), accessEvent()], rows).slice(rows.length));
   const second = await F.readInvestigationPage(F.planInvestigation(auditor, query({ limit: 2, after: first.nextCursor })), ledger);
   const third = await F.readInvestigationPage(F.planInvestigation(auditor, query({ limit: 2, after: second.nextCursor })), ledger);
   assert.deepEqual([second.total, third.total, third.nextCursor], [5, 5, null]);
@@ -921,7 +915,7 @@ test('TEST-F-06 extended_request_hold: an untimely, backward or unbound extensio
 
 function incidentLedger() {
   const attacker = '203.0.113.9';
-  return ledgerOf(chainRows([
+  return ledgerOf(ledgerRows([
     accessEvent({ address: attacker, patient: P1, record: 'rep-1' }),
     accessEvent({ address: attacker, patient: P3, record: 'rep-3', study: 'study-3' }),
     accessEvent({ address: attacker, patient: P1, record: 'rep-5' }),
@@ -947,9 +941,9 @@ test('TEST-F-07 incident_scope: an incident query names the patients whose recor
 test('TEST-F-07 incident_scope: a ledger that cannot be read or verified is reported as subjects not identifiable and never as nobody affected', async () => {
   const auditor = authorityFor('aud-1');
   const plan = () => F.planInvestigation(auditor, query({ address: '203.0.113.9' }), 'export');
-  const tampered = clone(incidentLedger().data);
-  tampered[1].entry.payload.event.targets[0].patientLinkSnapshot.value = P2;
-  const broken = await F.incidentScope(auditor, plan(), ledgerOf(tampered));
+  const unreadable = clone(incidentLedger().data);
+  unreadable[1].entry.payload.event.targets[0].patientLinkSnapshot = { status: 'known', value: null };
+  const broken = await F.incidentScope(auditor, plan(), ledgerOf(unreadable));
   assert.equal(broken.subjectsIdentifiable, false, 'M-F-S1: an unreadable ledger never reads as nobody affected');
   assert.deepEqual(broken.reasons, [{ kind: 'ledger-unreadable', code: 'LedgerRowIntegrityRefused' }]);
   assert.deepEqual(broken.identified, []);
@@ -1009,9 +1003,9 @@ test('TEST-F-08 rights_request: a correction is a new signed version that keeps 
 test('TEST-F-02 patient_replay: change and view streams keep independent snapshots and cursors and neither stream may silently disappear', async () => {
   const auditor = authorityFor('aud-1');
   const sources = {
-    changes: ledgerOf(chainRows([1, 2, 3].map(n => accessEvent({ eventId: `change-${n}`, surface: 'POST studies/:uid/report/commit',
+    changes: ledgerOf(ledgerRows([1, 2, 3].map(n => accessEvent({ eventId: `change-${n}`, surface: 'POST studies/:uid/report/commit',
       action: 'approve-sign', result: 'succeeded' })))),
-    views: ledgerOf(chainRows([1, 2, 3].map(n => accessEvent({ eventId: `view-${n}` })))),
+    views: ledgerOf(ledgerRows([1, 2, 3].map(n => accessEvent({ eventId: `view-${n}` })))),
   };
   const plans = (changes, views) => ({
     changes: F.planInvestigation(auditor, query({ limit: 2, ...(changes ? { after: changes } : {}) })),
@@ -1024,7 +1018,7 @@ test('TEST-F-02 patient_replay: change and view streams keep independent snapsho
   assert.notEqual(first.changes.nextCursor, first.views.nextCursor);
   for (const stream of ['changes', 'views']) {
     const data = sources[stream].data;
-    data.push(...chainRows([accessEvent()], data).slice(data.length));
+    data.push(...ledgerRows([accessEvent()], data).slice(data.length));
   }
   const next = await F.readInvestigationStreams(plans(first.changes.nextCursor, first.views.nextCursor), sources);
   assert.deepEqual([next.totalEntries, next.changes.rows[0].eventId, next.views.rows[0].eventId], [6, 'change-1', 'view-1']);

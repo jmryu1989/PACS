@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import io
+import os
 from pathlib import Path
 import subprocess
 import stat
@@ -78,13 +79,20 @@ def daily_role_catalog():
             "schemas": ["emr_access", "public"]}
 
 
+def expiry_receipt():
+    return {"ran": True, "complete": True, "checkedAt": "2026-10-23T00:00:00Z",
+            "deletedEntries": 0, "deletedFailures": 0, "retainedByDutyOrHold": 0,
+            "historyRetainedUnknownLifetime": 0}
+
+
 class DailyCluster:
     """The fresh networkless rehearsal cluster of a daily EMR set restored by the catalog replay (D23): bootstrap superuser
     kin; it applies the CREATE ROLE / GRANT statements sent on stdin, the EMR tablespace and pg_restore --create; its
     databases, tablespaces and schemas are then the snapshot's (or `restored`, a restore that came out differently)."""
 
-    def __init__(self, source, restored=None):
+    def __init__(self, source, restored=None, expiry=None):
         self.source, self.restored = source, restored
+        self.expiry = expiry if expiry is not None else expiry_receipt()
         self.roles = {"kin": next(role for role in source["roles"] if role["rolname"] == "kin")}
         self.memberships, self.tablespace, self.restored_databases, self.statements = [], False, set(), []
         self.verifiers = set()
@@ -107,6 +115,8 @@ class DailyCluster:
 
     def text(self, args, **kwargs):
         joined = " ".join(args)
+        if "emr_access.restore_expiry_sweep()" in joined:
+            return json.dumps(self.expiry)
         if ops.ROLE_CATALOG_SQL in args:
             return json.dumps(self.catalog())
         if "datname='keycloak'" in joined:
@@ -160,9 +170,11 @@ class Host:
         self.catalog = {"synthetic": "catalog"}
         self.restored_catalog = None
         self.restore_answer = "EMR_RESTORE_VERIFIED"
+        self.table_counts = {"public.Report": 5}
         # D23: the cluster's role catalog the backup records, and (when set) what a rehearsal's restore comes out with.
         self.role_catalog = daily_role_catalog()
         self.restored_role_catalog = None
+        self.restored_expiry = expiry_receipt()
         self.cluster = None
         # Backups a minute apart within the monitor's 30-hour window: the monitor orders manifests by whole seconds.
         self.clock = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -201,6 +213,8 @@ class Host:
         if kwargs.get("output") is not None:
             kwargs["output"].write(orthanc_archive())
             return ""
+        if any("WRAPPING_RESTORE_VERIFIED" in arg for arg in args):
+            return "WRAPPING_RESTORE_VERIFIED"
         return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else self.restore_answer
 
     def boundary(self, answer):
@@ -222,7 +236,7 @@ class Host:
                 patch.object(ops, "run", side_effect=self.fake_run), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
                 patch.object(ops, "emr_catalog", return_value=self.catalog), \
-                patch.object(ops, "counts", return_value={"public.Report": 5}), \
+                patch.object(ops, "counts", return_value=self.table_counts), \
                 patch.object(ops, "wait_ready", side_effect=lambda *a: self.events.append(("ready",))), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -241,7 +255,7 @@ class Host:
         cleanup = Mock()
         earlier = set(folder.glob("rehearsal-*.json"))
         recorded = json.loads((folder / "manifest.json").read_text(encoding="utf-8")).get("role_catalog")
-        self.cluster = DailyCluster(recorded or self.role_catalog, self.restored_role_catalog)
+        self.cluster = DailyCluster(recorded or self.role_catalog, self.restored_role_catalog, self.restored_expiry)
 
         def rehearsal_run(args, **kwargs):
             self.events.append(("command", list(args)))
@@ -250,7 +264,7 @@ class Host:
         with patch.object(ops, "run", side_effect=rehearsal_run), patch.object(ops, "text", side_effect=self.cluster.text), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
                 patch.object(ops, "emr_catalog", return_value=self.restored_catalog or self.catalog), \
-                patch.object(ops, "counts", return_value={"public.Report": 5}), \
+                patch.object(ops, "counts", return_value=self.table_counts), \
                 patch.object(ops, "remove_owned_if_present", cleanup), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -440,6 +454,19 @@ class BackupSafetyTests(unittest.TestCase):
                 _, manifest = ops.validate_backup(directory)
             self.assertTrue(manifest["complete"])
             self.assertFalse(manifest["ready"])
+
+    def test_emr_resume_refusal_preserves_snapshot_without_claiming_ready(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            with patch.object(ops, 'resumed_ledger_ready', side_effect=RuntimeError('synthetic PG unavailable')):
+                folder, manifest, error = host.backup(rows_stream({1: 'fixture'}))
+            self.assertIsNotNone(error)
+            self.assertTrue(manifest['complete'])
+            self.assertFalse(manifest['ready'])
+            self.assertFalse(manifest['emr']['resumed_pg_ready'])
+            self.assertEqual(manifest['resume_failures'], [])
+            self.assertTrue((folder/'kin.dump').is_file())
 
     def test_14_readiness_failure_blocks_deploy_but_preserves_completed_backup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -844,6 +871,7 @@ class BackupSafetyTests(unittest.TestCase):
                     with fake.active(), patch.object(ops, "ROOT", host.repo), patch.object(ops, "require_local_docker"), \
                             patch.object(ops, "run", side_effect=rehearsal_run), \
                             patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                            patch.object(ops, "restored_emr_expiry", return_value=expiry_receipt()), \
                             patch.object(ops, "counts", return_value={"public.Report": 5}), \
                             patch.object(ops, "temporary_run", side_effect=host.fake_archive), \
                             patch.object(audit, "evaluate", side_effect=limited), \
@@ -912,9 +940,24 @@ class EmrRestoreVerification(unittest.TestCase):
         result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
         self.assertIsNone(error)
         self.assertTrue(result["success"])
-        self.assertEqual(result["emr"], {"owner_acl_preserved": True, "database_state_verified": True})
+        self.assertEqual(result["emr"], {"owner_acl_preserved": True, "database_state_verified": True,
+                                          "expiry_sweep": self.host.restored_expiry})
         self.assertTrue(result["audit"]["verified"])
         self.assertEqual(cleanup.call_count, 3)
+
+    def test_d1796_unknown_history_is_counted_without_blocking_restore(self):
+        self.host.restored_expiry = {**expiry_receipt(), "historyRetainedUnknownLifetime": 1}
+        before = self.host.files(self.folder)
+        result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
+        self.assertIsNone(error)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["emr"]["expiry_sweep"], self.host.restored_expiry)
+        self.assertEqual(self.host.files(self.folder), before)
+        self.assertEqual(cleanup.call_count, 3)
+
+    def test_d1796_sweep_must_run_before_restored_business_readiness(self):
+        self.host.restored_expiry = {**expiry_receipt(), "ran": False}
+        self.assert_restore_refused()
 
     def test_tampered_and_partial_components_refuse_before_restore(self):
         for name in ("kin.dump", *ops.EMR_FILES):
@@ -1105,6 +1148,78 @@ class EmrRestoreVerification(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'Unsafe EMR archive entry'):
                         ops.validate_backup(self.folder)
                     commands.assert_not_called()
+
+
+class WrappingCustodyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp)
+        self.host = Host(self.temp)
+        self.host.table_counts.update({"emr_signing.private_key": 1, "emr_clinical.online_version": 2})
+        self.secret = self.root / "live.key"
+        self.secret.write_bytes(bytes(range(32)))
+        self.config = self.root / "custody.json"
+        self.config.write_text(json.dumps({"backup_root": str(self.root / "custody"), "files": {"wrap-1": str(self.secret)}}))
+        self.enterContext(patch.dict(os.environ, {"KIN_EMR_WRAPPING_CUSTODY": str(self.config)}))
+        self.enterContext(patch.object(ops, "signing_keys", return_value=[{"kid": "doctor-key", "wrapped": {"wrappingKeyId": "wrap-1"}}]))
+        self.host.init_ledger()
+
+    def backup(self):
+        folder, manifest, error = self.host.backup(rows_stream({1: "original"}))
+        self.assertIsNone(error)
+        self.assertTrue(manifest["complete"])
+        return folder, manifest
+
+    def test_nightly_path_records_separate_locator_and_rehearses_after_live_secret_loss(self):
+        folder, manifest = self.backup()
+        locator = Path(manifest["wrapping_custody"]["directory"])
+        self.assertEqual(locator, self.root / "custody" / folder.name)
+        self.assertNotIn(folder, locator.parents)
+        self.secret.unlink()
+        restored = ops.restore_wrapping_custody(manifest, self.root / "restored")
+        self.assertEqual(Path(restored["wrap-1"]).read_bytes(), bytes(range(32)))
+        result, error, _, _ = self.host.rehearse(folder, rows_stream({1: "original"}))
+        self.assertIsNone(error)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["wrapping_custody"]["directory"], str(locator))
+        self.assertEqual(result["wrapping_custody"]["keys"], 1)
+        with self.assertRaises(FileExistsError):
+            ops.restore_wrapping_custody(manifest, self.root / "restored")
+
+    def test_nightly_backup_refuses_missing_custody_and_resumes_writers(self):
+        for failure in ("configuration", "file", "id", "length"):
+            with self.subTest(failure=failure):
+                self.secret.write_bytes(bytes(range(32)))
+                config = {"backup_root": str(self.root / "custody"), "files": {"wrap-1": str(self.secret)}}
+                if failure == "file": self.secret.unlink()
+                if failure == "id": config["files"] = {"other": str(self.secret)}
+                if failure == "length": self.secret.write_bytes(b"short")
+                self.config.write_text(json.dumps(config))
+                with patch.dict(os.environ, {"KIN_EMR_WRAPPING_CUSTODY": "" if failure == "configuration" else str(self.config)}):
+                    # Host records the real flow's RuntimeError; file failures are surfaced as RuntimeError too.
+                    _, manifest, error = self.host.backup(rows_stream({1: "original"}))
+                self.assertIsNotNone(error)
+                self.assertFalse(manifest["complete"])
+                self.assertEqual(manifest["resume_failures"], [])
+
+    def test_missing_changed_custody_and_restored_schema_count_drift_fail_rehearsal(self):
+        folder, manifest = self.backup()
+        entry = manifest["wrapping_custody"]["files"]["wrap-1"]
+        custody = Path(manifest["wrapping_custody"]["directory"]) / entry["file"]
+        for value in (None, b"x" * 32):
+            if value is None: custody.unlink()
+            else: custody.write_bytes(value)
+            with self.subTest(custody=value is not None):
+                result, error, _, _ = self.host.rehearse(folder, rows_stream({1: "original"}))
+                self.assertIsNotNone(error)
+                self.assertFalse(result["success"])
+        custody.write_bytes(bytes(range(32)))
+        for schema in ("emr_signing.private_key", "emr_clinical.online_version"):
+            self.host.table_counts[schema] += 1
+            result, error, _, _ = self.host.rehearse(folder, rows_stream({1: "original"}))
+            self.assertIn("row counts differ", str(error))
+            self.assertFalse(result["success"])
+            self.host.table_counts[schema] -= 1
 
 
 if __name__ == "__main__":

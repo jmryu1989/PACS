@@ -66,57 +66,6 @@
       }
     },
     {
-      "id": "member:structureCatalogValue:PropertyDeclaration",
-      "category": "member",
-      "name": "structureCatalogValue",
-      "kind": "PropertyDeclaration",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalogValue",
-        "kind": "PropertyDeclaration"
-      },
-      "baseline": {
-        "text_sha256": "26397785bcb3ea703837abb4303e0ae1847d87e1103ead9507806371571fb6ff",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:structureCatalog:GetAccessor",
-      "category": "member",
-      "name": "structureCatalog",
-      "kind": "GetAccessor",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalog",
-        "kind": "GetAccessor"
-      },
-      "baseline": {
-        "text_sha256": "01f9a81be3f22aa4fb9413ea8969392561a4e93a48258d59cf834b95b5418993",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:structureCatalog:SetAccessor",
-      "category": "member",
-      "name": "structureCatalog",
-      "kind": "SetAccessor",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalog",
-        "kind": "SetAccessor"
-      },
-      "baseline": {
-        "text_sha256": "1b34982dc61f4374cec32d7ead45e4b36c5d589b2b3d1f7b901e6488f48e15cf",
-        "sql": []
-      }
-    },
-    {
       "id": "member:onModuleInit:MethodDeclaration",
       "category": "member",
       "name": "onModuleInit",
@@ -4716,7 +4665,8 @@
       "orthanc:OrthancService",
       "keycloak:KeycloakService",
       "studyAccess:StudyAccessService",
-      "findings:FindingService"
+      "findings:FindingService",
+      "ledger:EmrRecordPort"
     ],
     "slots": [
       {
@@ -4866,7 +4816,8 @@
           "studyAccess",
           "accessConcern",
           "auditConcern",
-          "reportEvidenceConcern"
+          "reportEvidenceConcern",
+          "ledger"
         ]
       },
       {
@@ -5169,8 +5120,7 @@
       },
       {
         "name": "readDraft",
-        "slot": "reportDraftConcern",
-        "signature_sha256": "889584c7d524a17c84437ed4ceb317a5c706fa92e164f00d949ed81cb38123e2"
+        "slot": "reportDraftConcern"
       },
       {
         "name": "dictationGate",
@@ -5184,8 +5134,7 @@
       },
       {
         "name": "putReport",
-        "slot": "reportDraftConcern",
-        "signature_sha256": "802409b4896657bee0ddd048031701953fee2eb8050532ab062ceb9022db380b"
+        "slot": "reportDraftConcern"
       },
       {
         "name": "discardDraft",
@@ -5216,8 +5165,14 @@
       "adminMetricRows",
       "AdminMetricFailure",
       "AdminMetricStorage",
-      "AdminMetricStudies"
-    ]
+      "AdminMetricStudies",
+      "DraftRequestFacts"
+    ],
+    "parameter_decorators": {
+      "ledger": [
+        "Inject(EMR_RECORD_PORT)"
+      ]
+    }
   },
   "concerns": {
     "api/src/pacs/values.ts": {
@@ -5293,16 +5248,6 @@
         "access:PacsAccess"
       ]
     },
-    "api/src/pacs/report-draft.ts": {
-      "class": "PacsReportDraft",
-      "parameters": [
-        "prisma:PrismaService",
-        "studyAccess:StudyAccessService",
-        "access:PacsAccess",
-        "audit:PacsAudit",
-        "reportEvidence:PacsReportEvidence"
-      ]
-    },
     "api/src/pacs/report-evidence.ts": {
       "class": "PacsReportEvidence",
       "parameters": [
@@ -5354,6 +5299,9 @@
         "studyAccess:StudyAccessService",
         "access:PacsAccess"
       ]
+    },
+    "api/src/pacs/report-draft.ts": {
+      "class": "PacsReportDraft"
     }
   },
   "di_additions_w9": {
@@ -8476,7 +8424,7 @@
       }
     ]
   },
-  "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee",
+  "allocation_sha256": "4affecaecb385eeda40deb5efd0afe0dfa5f545746c029086815f1a28271eb81",
   "w5_api": {
     "unit": "W5-API",
     "decision": "D1460",
@@ -8496,5 +8444,144 @@
         ]
       }
     ]
+  },
+  "b2_replacement": {
+    "unit": "EMR-B2 (D1770)",
+    "facade_signatures": [
+      {
+        "name": "readDraft",
+        "before": "889584c7d524a17c84437ed4ceb317a5c706fa92e164f00d949ed81cb38123e2"
+      },
+      {
+        "name": "putReport",
+        "before": "802409b4896657bee0ddd048031701953fee2eb8050532ab062ceb9022db380b"
+      }
+    ],
+    "draft_before": {
+      "class": "PacsReportDraft",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess",
+        "audit:PacsAudit",
+        "reportEvidence:PacsReportEvidence"
+      ]
+    },
+    "note": "D73: report-draft was changed functionally by B2. Preserve its historical move proof, but do not pin new private helpers or changed signatures. Current save/view behavior is exercised through the real record port and HTTP boundary.",
+    "changed_concerns": [
+      "api/src/pacs/report-draft.ts"
+    ]
+  },
+  "di_additions_b2": {
+    "controllers": [],
+    "providers": [],
+    "routes": [],
+    "injectables": {},
+    "changed_injectables": {
+      "PacsService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "KeycloakService",
+            "StudyAccessService",
+            "FindingService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "KeycloakService",
+            "StudyAccessService",
+            "FindingService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "5:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      },
+      "AuthService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "KeycloakService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      },
+      "AdminService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "4:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      },
+      "AdminController": {
+        "before": {
+          "params": [
+            "AdminService",
+            "PacsService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "AdminService",
+            "PacsService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      }
+    }
   }
 }

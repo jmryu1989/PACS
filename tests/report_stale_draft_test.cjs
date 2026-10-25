@@ -1,3 +1,14 @@
+
+// B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
+// Real ledger atomicity and HTTP publication are tested against PostgreSQL.
+const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
+function b2Ledger(prisma) {
+  return { begin: () => ({
+    resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
+    transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
+    end() {},
+  }) };
+}
 // TEST-S3-U3-STALE-ADDENDUM: the compiled commitReport/putReport guards.
 // (S7-U5: the requests carry the draft owner and boundary; the caller's draft row is locked and kept as a tombstone.)
 //
@@ -74,7 +85,7 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
   // readable set is the honest stub — reaching it at all would be the defect.
   const findings = { readableFindings: async () => { throw new Error('the stale-draft paths must not ask about findings'); } };
-  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings);
+  const real = withDraftRequestContext(new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma)), b2Ledger(prisma));
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
   const svc = {
     commitReport: (uid, body, c) => real.commitReport(uid, { ...pre(c), ...body }, c, null),
@@ -156,19 +167,19 @@ test('role, institution and preliminary gates still answer first — the approve
 
 test('a draft cannot be based on a version that does not exist yet', async () => {
   const f = fixture({ draft: { baseVersion: 2 } });
-  const body = await refusal(f.svc.putReport(UID, { ...BODY, baseVersion: 5 }, CALLER), 400);
+  const body = await refusal(f.svc.putReport(UID, { ...BODY, baseVersion: 5 }, CALLER, null), 400);
   assert.match(String(body.message ?? body), /v5/);
   assert.deepEqual(f.writes, [], 'a refused draft write stores nothing');
   for (const baseVersion of ['3', 2.5, -1, NaN, Infinity, {}, []]) {
     const bad = fixture({ draft: null });
-    await refusal(bad.svc.putReport(UID, { ...BODY, baseVersion }, CALLER), 400);
+    await refusal(bad.svc.putReport(UID, { ...BODY, baseVersion }, CALLER, null), 400);
     assert.deepEqual(bad.writes, [], `baseVersion ${String(baseVersion)}`);
   }
 });
 
 test('an explicit rebase is audited apart from the twenty-second autosave, and never locks the report', async () => {
   const advanced = fixture({ draft: { baseVersion: 2 } });
-  await advanced.svc.putReport(UID, { ...BODY, baseVersion: 4 }, CALLER);
+  await advanced.svc.putReport(UID, { ...BODY, baseVersion: 4 }, CALLER, null);
   assert.deepEqual(advanced.writes, ['reportDraft.store:base4']);
   assert.deepEqual(advanced.audits.map(a => a.action), ['report.draft', 'report.draft.rebase']);
   assert.deepEqual(JSON.parse(advanced.audits[1].detail), { from: 2, to: 4 });
@@ -176,14 +187,14 @@ test('an explicit rebase is audited apart from the twenty-second autosave, and n
 
   for (const draft of [null, { baseVersion: 4 }, { baseVersion: 2 }]) {
     const f = fixture({ draft });
-    await f.svc.putReport(UID, { ...BODY, baseVersion: draft?.baseVersion ?? 0 }, CALLER);
+    await f.svc.putReport(UID, { ...BODY, baseVersion: draft?.baseVersion ?? 0 }, CALLER, null);
     assert.deepEqual(f.audits.map(a => a.action), ['report.draft'], `draft ${JSON.stringify(draft)} is a plain save`);
   }
 });
 
 test('clearing a draft is never refused for its base version', async () => {
   const f = fixture({ draft: { baseVersion: 2 } });
-  const result = await f.svc.putReport(UID, { findings: '', conclusion: '', recommendation: '', baseVersion: 99 }, CALLER);
+  const result = await f.svc.putReport(UID, { findings: '', conclusion: '', recommendation: '', baseVersion: 99 }, CALLER, null);
   assert.deepEqual([result.present, result.snapshot, result.revision], [false, null, EPOCH + ':2']);
   assert.deepEqual(f.audits.map(a => a.action), ['report.draft.clear']);
 });

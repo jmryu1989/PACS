@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 import time
 import unittest
@@ -115,7 +116,6 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         work.locator("#image-opening-open").click()
         work.locator("#image-opening-target").select_option("window")
         work.locator("#image-opening-prior").set_checked(False)
-        work.locator("#image-opening-limit").select_option("2")
         work.locator("#image-opening-done").click()
         with work.context.expect_page() as opened:
             work.locator("#m-filmbox").click()
@@ -145,7 +145,13 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         expect(work.locator("#observation-status")).to_contain_text("Observed ")
         expect(work.locator("#findings")).to_have_value(draft)
         self.assertEqual(holder, self.state(fixture)["holder"]); self.assertEqual(versions, self.versions(fixture)); self.assertEqual(report_rows, self.report_rows(fixture))
-        self.assertEqual(before_view, self.stable_view(viewer)); self.assertEqual(1, len(work.evaluate("arrivalNotices"))); self.assertEqual([], work.evaluate("arrivalNotices.filter(x=>x.includes('새 검사'))"))
+        self.assertEqual(before_view, self.stable_view(viewer))
+        notices = work.evaluate("arrivalNotices")
+        print("ARRIVAL NOTICES " + json.dumps(notices, ensure_ascii=False), flush=True)
+        # Window placement can also report an outcome; count the arrival event
+        # itself while retaining the assertion against a false new-study notice.
+        self.assertEqual(1, len([text for text in notices if '영상 또는 시리즈가 추가됐습니다' in text]), notices)
+        self.assertEqual([], [text for text in notices if '새 검사' in text])
         self.assertEqual(before_stack, self.stack_identity(viewer))
         expect(viewer.get_by_label("Job Title", exact=True)).to_have_value("ARRIVAL ORIGINAL UNSAVED JOB")
         self.assertTrue(viewer.evaluate("()=>kinViewerJobWorkspaceState().dirty"))
@@ -154,10 +160,21 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         work.locator("#viewer-windows-open").click()
         expect(work.locator("#viewer-windows-dialog")).to_be_visible()
         latest = work.locator('[data-window-index="0"][data-window-action="latest"]')
+        expect(latest).to_be_disabled()
+        self.assertEqual(len(work.context.pages), 2)
+        self.assertEqual(viewer.evaluate('__arrivalDocument'), marker)
+        self.assertEqual(before_stack, self.stack_identity(viewer))
+        self.assertEqual(before_view, self.stable_view(viewer))
+        expect(viewer.get_by_label('Job Title', exact=True)).to_have_value('ARRIVAL ORIGINAL UNSAVED JOB')
+        self.assertTrue(viewer.evaluate('kinViewerJobWorkspaceState().dirty'))
+        # The reader explicitly clears the draft before refreshing this document.
+        viewer.get_by_label('Job Title', exact=True).fill('')
+        viewer.wait_for_function('() => !kinViewerJobWorkspaceState().dirty')
         expect(latest).to_be_enabled()
-        with work.context.expect_page() as fresh_opened:
-            latest.click()
-        fresh = fresh_opened.value; fresh.wait_for_url("**/ohif/viewer?**"); canvas_ready(fresh, 1)
+        latest.click()
+        viewer.wait_for_function('() => !window.__arrivalDocument')
+        fresh = viewer
+        canvas_ready(fresh, 1)
         fresh.wait_for_function("""()=>typeof kinViewerWindowOwner==='function'&&kinViewerWindowOwner()&&
           typeof kinViewerJobWorkspaceState==='function'&&!kinViewerJobWorkspaceState().busy&&
           typeof kinViewerHistoryWorkspaceState==='function'&&!kinViewerHistoryWorkspaceState().busy""")
@@ -168,9 +185,8 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         self.assertEqual(5, len(fresh_stack["imageIds"])); self.assertEqual([fixture.uid] * 5, fresh_stack["studies"])
         self.assertEqual(1, fresh_stack["sops"].count(added["sop"])); self.assertNotIn(added["sop"], before_stack["sops"])
         self.assertEqual(set(before_stack["sops"]) | {added["sop"]}, set(fresh_stack["sops"]))
-        self.assertEqual(before_stack, self.stack_identity(viewer)); self.assertEqual(before_view, self.stable_view(viewer))
-        expect(viewer.get_by_label("Job Title", exact=True)).to_have_value("ARRIVAL ORIGINAL UNSAVED JOB")
-        self.assertTrue(viewer.evaluate("()=>kinViewerJobWorkspaceState().dirty"))
+        self.assertEqual(len(work.context.pages), 2)
+        self.assertFalse(viewer.evaluate("kinViewerJobWorkspaceState().dirty"))
         expect(work.locator("#findings")).to_have_value(draft)
         self.assertEqual(holder, self.state(fixture)["holder"]); self.assertEqual(versions, self.versions(fixture)); self.assertEqual(report_rows, self.report_rows(fixture))
         self.existing_originals_unchanged(originals); self.shot(work, "same-study")

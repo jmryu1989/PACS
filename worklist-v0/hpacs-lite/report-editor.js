@@ -30,7 +30,7 @@
         // W5 (D1423 R2): every existing rule holds for every edit; Related Report mode lets through only the admission it
         // issued itself for exactly this field and request (the mode checks and consumes it here, once per edit span).
         canEdit: (field, admission = null, at = null) => work.state() === "active" && !!selectedUid
-          && !reportEditorBlock(admission && relatedMode?.admits(admission, field, at) ? admission : null),
+          && !reportEditorBlock(admission && relatedMode.admits(admission, field, at) ? admission : null),
       });
       return reportFrame;
     }
@@ -221,7 +221,7 @@
       renderRecommendationNotice();
       if (reportNotice || reportNoticeShown) renderReportNotice();
       // W5: the Reading Target card of Related Report mode shows this same draft state.
-      relatedMode?.refresh();
+      relatedMode.refresh();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -370,7 +370,7 @@
       $("#report-notice-check").style.display = ["unknown", "discard-unknown"].includes(s) || (busy && s === "checking") ? "" : "none";
       $("#report-notice-check").disabled = busy || unresolved;
       $("#report-notice-retry").disabled = busy || unresolved;
-      relatedMode?.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
+      relatedMode.noticeDiscard(["refused", "discard-unknown"].includes(s) && Number.isSafeInteger(op.receiptRevision) && !unresolved
         ? op : null, busy);
     }
     function renderReportNotice() {
@@ -380,7 +380,7 @@
       $("#report-notice").style.display = n ? "flex" : "none";
       $("#report-notice-retry").disabled = false;
       if (n?.action?.kind === "related-insert") { renderRelatedInsertNotice(n); return; }
-      relatedMode?.noticeDiscard(null);
+      relatedMode.noticeDiscard(null);
       if (!n) return;
       const unconfirmed = reportConverge.has(n.uid);
       // Check가 서버의 지금 초안을 읽고 알게 된 것(checkReportNotice). 그 뒤 이 글의 확인 여부가 바뀌었으면(늦게 닿은 저장, 새로
@@ -704,14 +704,14 @@
       const uid = selectedUid, at = work.capture("editor");
       if (!uid || appState[uid]?.prelimHidden) return;
       // W5: replacing the editor's text is a report command; in Related Report mode it waits for Back.
-      if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
+      if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
       try {
         await draftClient.settled(uid);
         if (!work.admits(at)) return;
         const b = await api("GET", "/bootstrap", undefined, undefined, at);
         work.commit(at, () => {
           // Related can open while the read is pending; its Target must keep the opening text.
-          if (relatedMode?.active()) { toast(relatedMode.reason(), "err"); return; }
+          if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
           appState[uid] = replaceReportState(uid, b.states?.[uid]);
           syncStudy(uid);
           loadReport({ force: true });

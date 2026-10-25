@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-"""One-shot EMR ledger probe of the EMR-introduction release (INTERIM-RELEASE-TOOLS item 7, plan L-10 / TEST-IR-06.6).
+"""One-shot PostgreSQL ledger probe (REQ-B2R-07 / OPS-01).
 
-B1 has no HTTP route that appends to the access ledger and the Nest AppModule does not assemble the ledger, so a 200
-from the worklist proves nothing about it (emr/units/b.json:159). This probe runs the product's compiled modules inside
-the target API image, with the API's own runtime credential and state volume (EmrLedgerClient, StateCoordinator,
-FailureJournal, PrismaLedgerSql, AccessSeal, AccessLedgerStore):
-
-  process 1  recoverAtStart -> append one synthetic event -> durable receipt -> the same event again (replay)
-  process 2  recoverAtStart (a new process: restart recovery) -> the same entry and the same sealed position
-
-The event is a service job (executor "service", cause "service-job", an in-process surface with no patient target)
-whose work context names the plan's synthetic study selector, so the ledger never shows it as a person's viewing.
-There is no raw SQL write, no new route, and the ledger rows are kept (no cleanup). The verdict binds: one new row,
-zero duplicates on replay, the external seal over that row, and the same chain after restart.
+The selected API image checks its runtime role, durability and storage placement, appends one synthetic service
+event, then replays it. A second process looks up that committed operation and the same legal entry. Sequence gaps
+are valid. This probe is not HTTP/clinical acceptance, disaster recovery or a whole-ledger integrity scan.
+The caller persists the event and attempt keys before launching either process. It runs one probe at a time;
+the failure-only spool is separate from the API's writer. No pending operation belonging to the API is settled.
 
   python scripts/ops_emr_probe.py event --plan PLAN.json         the synthetic event the plan's probe fields give
   python scripts/ops_emr_probe.py verify FIRST.json SECOND.json --event-id ID
@@ -34,47 +27,53 @@ PROBE_ISSUER = "urn:kin:release-probe"
 
 PROBE_SCRIPT = r"""
 'use strict';
-const dist='/app/dist';
+const path=require('node:path');
+const dist=path.resolve('dist');
 const M=require(dist+'/emr-contract/composition');
 const CTX=require(dist+'/emr-runtime/context');
 M.composeEmrAdapters(CTX.runtimeAdapters);
 const {EmrLedgerClient}=require(dist+'/emr-runtime/client');
-const {StateCoordinator}=require(dist+'/emr-runtime/coordinator');
-const {FailureJournal}=require(dist+'/emr-runtime/failure-journal');
-const {PrismaLedgerSql,AccessLedgerStore}=require(dist+'/emr-runtime/store');
-const {AccessSeal}=require(dist+'/emr-runtime/seal');
+const {FailureJournal,FailureSpool}=require(dist+'/emr-runtime/failure-journal');
+const {AccessLedgerStore}=require(dist+'/emr-runtime/store');
+const {verifyRuntimeConnection}=require(dist+'/emr-runtime/manifest');
 const [operation, raw]=process.argv.slice(1);
 const input=JSON.parse(raw);
 const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
-const position=t=>({sequence:Number(t.sequence),hash:t.hash});
-const sealedViewing=seal=>{const s=seal.read();return s==='absent'?null:{sequence:Number(s.streams.viewing.sequence),hash:s.streams.viewing.hash};};
 (async()=>{
   const state=process.env.KIN_EMR_STATE_DIR;
+  if(!state) throw new Error('EmrFailureDirectoryRequired');
   const db=new EmrLedgerClient(process.env.DATABASE_URL);
-  await db.$connect();
+  const journal=new FailureJournal(db,new FailureSpool(path.join(state,'probe-outage')));
+  const store=new AccessLedgerStore(db,journal);
+  let result;
   try{
-    const coordinator=new StateCoordinator(state);
-    const journal=new FailureJournal(state,coordinator);
-    const sql=new PrismaLedgerSql(db);
-    const seal=new AccessSeal(state,sql,journal);
-    const store=new AccessLedgerStore(db,sql,seal,journal,db.emrAppendPoolSize);
-    const recovery=await seal.recoverAtStart();
+    await db.$connect();
+    const readiness=await verifyRuntimeConnection(db);
+    await journal.replay();
+    if(!['append','restart'].includes(operation)) throw new Error('ProbeOperationInvalid');
     const eventId=operation==='append'?input.event.eventId:input.eventId;
-    const result={operation,recovery:{recovered:recovery.recovered,notCommitted:recovery.notCommitted},
-      tail_before:position(await sql.tail('viewing')),existed_before:(await sql.entryForEvent('viewing',eventId))!==null,
-      journal_before:journal.all().length};
+    result={operation,readiness,existed_before:(await store.sql.entryForEvent('viewing',eventId))!==null};
     if(operation==='append'){
-      result.receipt=await store.append(input.event);
-      result.tail_after=position(await sql.tail('viewing'));
-      result.replay=await store.append(input.event);
-      result.tail_replay=position(await sql.tail('viewing'));
+      if(!input.keys?.operationId || !input.keys?.attemptId) throw new Error('ProbeAttemptKeysRequired');
+      const admitted=await store.admit(input.event,undefined,input.keys);
+      result.outcome=await store.transaction(admitted,async()=>null);
+      result.receipt=store.receipt(result.outcome);
+      const replay=await store.admit(input.event,undefined,input.keys);
+      result.replay_outcome=await store.transaction(replay,async()=>null);
+      result.replay=store.receipt(result.replay_outcome);
+    }else{
+      result.outcome=await store.lookup(input.operationId);
+      if(!result.outcome) throw new Error('ProbeOutcomeMissing');
+      result.receipt=store.receipt(result.outcome);
     }
-    const stored=await sql.entryForEvent('viewing',eventId);
-    result.stored=stored&&{sequence:Number(stored.sequence),hash:stored.hash,kind:stored.kind,eventId:stored.eventId};
-    result.sealed=sealedViewing(seal);
-    result.journal_after=journal.all().length;
-    out(result);
-  }finally{await db.$disconnect();}
+    const stored=await store.sql.entryForEvent('viewing',eventId);
+    result.stored=stored&&{entryId:stored.entryId,sequence:stored.sequence,stream:stored.stream,kind:stored.kind,eventId:stored.eventId};
+  }finally{
+    const cleanup=await Promise.allSettled([journal.close(),db.$disconnect()]);
+    if(cleanup.some(r=>r.status==='rejected')) throw new Error('ProbeCleanupFailed');
+  }
+  // Completion is published after cleanup, so a failed close cannot masquerade as a passed probe.
+  out(result);
 })().catch(e=>{out({operation,error:String((e&&(e.code||e.name))||'Error')});process.exitCode=1;});
 """
 
@@ -100,37 +99,47 @@ def probe_event(probe, occurred_at=None):
             "auditLinkId": "audit:" + str(uuid.uuid4()), "relatedEventId": None}
 
 
-def _position(value):
-    require(type(value) is dict and type(value.get("sequence")) is int and type(value.get("hash")) is str, "Unreadable chain position")
-    return value
+def _time(value):
+    require(type(value) is str, "Unreadable receipt time")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise Stop("Unreadable receipt time")
+    require(parsed.tzinfo is not None, "Receipt time has no timezone")
+    # The public JavaScript receipt has millisecond precision; PG keeps microseconds.
+    return parsed.replace(microsecond=parsed.microsecond // 1000 * 1000)
 
 
 def verify(first, second, event_id):
-    """The probe's verdict from the two processes' own outputs; anything short of the full chain is a refusal."""
+    """Check the selected event's immutable outcome, not a contiguous sequence or an external witness."""
     for value, operation in ((first, "append"), (second, "restart")):
         require(type(value) is dict and value.get("operation") == operation and "error" not in value, "Probe process failed: " + operation)
-    receipt = first["receipt"]
-    require(type(receipt) is dict and receipt.get("eventId") == event_id and type(receipt.get("durableAt")) is str, "No durable receipt for the event")
+        readiness = value.get("readiness")
+        require(type(readiness) is dict and readiness.get("role") == "kin_runtime"
+                and type(readiness.get("relations")) is int and readiness["relations"] > 0, "PG readiness missing")
+        receipt, outcome, stored = value.get("receipt"), value.get("outcome"), value.get("stored")
+        require(type(receipt) is dict and receipt.get("eventId") == event_id
+                and type(receipt.get("durableAt")) is str, "No durable receipt for the event")
+        require(type(outcome) is dict and outcome.get("outcome") == "committed" and outcome.get("eventId") == event_id
+                and type(outcome.get("operationId")) is str and _time(outcome.get("durableAt")) == _time(receipt["durableAt"])
+                and outcome.get("result") is None, "No matching committed outcome")
+        require(type(stored) is dict and stored.get("eventId") == event_id and stored.get("kind") == "access"
+                and stored.get("stream") == "viewing" and type(stored.get("entryId")) is str
+                and type(stored.get("sequence")) is int and stored["sequence"] > 0, "The stored entry is not the event")
+        entries = outcome.get("entries")
+        require(type(entries) is list and len(entries) == 1 and type(entries[0]) is dict
+                and entries[0].get("entryId") == stored["entryId"] and entries[0].get("stream") == "viewing"
+                and type(entries[0].get("attemptId")) is str and entries[0].get("expired") is False,
+                "Outcome does not reference the one retained entry")
+        require(type(value.get("existed_before")) is bool, "Missing pre-append observation")
+    receipt, stored = first["receipt"], first["stored"]
     require(first["replay"] == receipt, "The replay did not return the original receipt")
-    before, after, replay = (_position(first[key]) for key in ("tail_before", "tail_after", "tail_replay"))
-    added = after["sequence"] - before["sequence"]
-    require(added == (0 if first["existed_before"] else 1), "The append did not add exactly one ledger entry")
-    require(replay == after, "The replay added a ledger entry")
-    stored = first["stored"]
-    require(type(stored) is dict and stored.get("eventId") == event_id and stored.get("kind") == "access", "The stored entry is not the event")
-    if not first["existed_before"]:
-        require({"sequence": stored["sequence"], "hash": stored["hash"]} == after, "The stored entry is not the chain tail")
-    sealed = _position(first["sealed"])
-    require(sealed["sequence"] >= stored["sequence"], "The external seal does not cover the entry")
-    if not first["existed_before"]:
-        require(sealed == after, "The external seal is not at the entry")
-    require(first["recovery"]["notCommitted"] == 0 and first["journal_after"] == first["journal_before"], "The probe left a failure record")
+    require(first["replay_outcome"] == first["outcome"], "The replay changed the committed outcome")
     require(second["existed_before"] is True and second["stored"] == stored, "Restart recovery lost the entry")
-    require(_position(second["tail_before"]) == replay and _position(second["sealed"]) == sealed, "Restart recovery changed the chain")
-    require(second["recovery"]["recovered"] == 0 and second["recovery"]["notCommitted"] == 0, "Restart recovery found unsealed work")
-    require(second["journal_after"] == first["journal_after"], "Restart recovery left a failure record")
-    return {"event_id": event_id, "receipt": receipt, "entry": {"sequence": stored["sequence"], "hash": stored["hash"]},
-            "sealed": sealed, "added": added, "replay_duplicates": 0, "restart": "same chain and seal"}
+    require(second["outcome"] == first["outcome"] and second["receipt"] == receipt, "Restart changed the committed outcome")
+    return {"event_id": event_id, "receipt": receipt, "entry": {"entryId": stored["entryId"], "sequence": stored["sequence"]},
+            "operation_id": first["outcome"]["operationId"], "added": 0 if first["existed_before"] else 1,
+            "replay_duplicates": 0, "restart": "same PostgreSQL outcome and entry"}
 
 
 def run(host_ops, intro):
@@ -142,13 +151,20 @@ def run(host_ops, intro):
         event = probe_event(intro.plan["probe"])
         intro.state["probe_event"] = event
         intro.save()
-    first_run = host_ops.one_shot(intro, "api", ["-e", PROBE_SCRIPT, "append", json.dumps({"event": event})], timeout=300,
+    keys = intro.state.get("probe_keys")
+    if keys is None:
+        keys = {"operationId": str(uuid.uuid4()), "attemptId": str(uuid.uuid4())}
+        intro.state["probe_keys"] = keys
+        intro.save()
+    first_run = host_ops.one_shot(intro, "api", ["--max-old-space-size=3072", "-e", PROBE_SCRIPT, "append", json.dumps({"event": event, "keys": keys})], timeout=300,
                                   entrypoint="node", name="emr-probe")
     require(first_run["exit"] == 0 and first_run["container_exit"] == 0, "Probe append process failed")
-    second_run = host_ops.one_shot(intro, "api", ["-e", PROBE_SCRIPT, "restart", json.dumps({"eventId": event["eventId"]})],
+    first = result_line(first_run["stdout"])
+    second_run = host_ops.one_shot(intro, "api", ["--max-old-space-size=3072", "-e", PROBE_SCRIPT, "restart",
+                                   json.dumps({"eventId": event["eventId"], "operationId": first["outcome"]["operationId"]})],
                                    timeout=300, entrypoint="node", name="emr-probe-restart")
     require(second_run["exit"] == 0 and second_run["container_exit"] == 0, "Probe restart process failed")
-    first, second = result_line(first_run["stdout"]), result_line(second_run["stdout"])
+    second = result_line(second_run["stdout"])
     evidence = verify(first, second, event["eventId"])
     digest = intro.records.put("probe-evidence.json", {"evidence": evidence, "first": first, "second": second,
                                                         "logs": [first_run["logs"], second_run["logs"]],

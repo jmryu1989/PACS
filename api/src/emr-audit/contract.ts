@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
-import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, sealAccessEvent, statutoryAct } from '../emr-contract/access-event';
-import type { AccessEvent, AccessTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
+import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, statutoryAct } from '../emr-contract/access-event';
+import type { AccessEvent, AccessTarget, LocalReadTarget, DownloadTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
 import { retentionDisposition, verifiedRecord } from '../emr-contract/classification';
 import type { ResolvedRecord } from '../emr-contract/classification';
 import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
@@ -178,7 +178,7 @@ function requireScope(authority: AuditAuthority, scope: RosterScope): Readonly<A
 /** Keys a client might send to claim authority or another institution's scope. They are refused, not ignored. */
 const CLIENT_AUTHORITY_KEYS = freeze(['auditor', 'admin', 'role', 'roles', 'scope', 'scopes', 'grant', 'grantId', 'institution',
   'institutionId', 'managingInstitution', 'actingInstitution']);
-const QUERY_KEYS = freeze(['patient', 'studyId', 'recordId', 'versionId', 'actorId', 'address', 'from', 'to', 'actions', 'results', 'limit', 'after']);
+const QUERY_KEYS = freeze(['patient', 'sourcePatientId', 'studyId', 'recordId', 'versionId', 'actorId', 'address', 'from', 'to', 'actions', 'results', 'limit', 'after']);
 const ALL_ACTIONS = [...Object.values(ACCESS_ACTIONS).flat(), ...AUTH_ACTIONS] as readonly AccessEvent['action'][];
 export const EVENT_RESULTS = freeze(['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported'] as const);
 export type EventResult = typeof EVENT_RESULTS[number];
@@ -186,6 +186,8 @@ export const PAGE_LIMIT = freeze({ default: 50, max: 500 });
 
 export interface InvestigationFilters {
   patient: { patientId: string; assigningAuthority: string } | null;
+  /** Observed local PatientID, scoped by the investigation institution; not a formal patient link. */
+  sourcePatientId?: string | null;
   studyId: string | null; recordId: string | null; versionId: string | null; actorId: string | null;
   /** The trusted-proxy address the event recorded (incident scoping, 안전성 기준 제6조①2). */
   address: string | null;
@@ -226,7 +228,7 @@ function parseInvestigationQuery(input: unknown, mode: 'view' | 'export'): { fil
     }
     const address = optional('address');
     if (address !== null && isIP(address) === 0) throw new Error('Expected an IP address');
-    return { filters: { patient, studyId: optional('studyId'), recordId: optional('recordId'), versionId: optional('versionId'),
+    return { filters: { patient, ...(Object.prototype.hasOwnProperty.call(v, 'sourcePatientId') ? { sourcePatientId: optional('sourcePatientId') } : {}), studyId: optional('studyId'), recordId: optional('recordId'), versionId: optional('versionId'),
       actorId: optional('actorId'), address, from, to, actions, results }, limit, cursor };
   });
 }
@@ -249,22 +251,24 @@ function inInstitutionScope(plan: InvestigationPlan, event: Readonly<AccessEvent
   if (event.managingInstitution.status === 'known') return event.managingInstitution.value === plan.institutionId;
   return event.actingInstitution.status === 'known' && event.actingInstitution.value === plan.institutionId;
 }
-function targetMatches(f: InvestigationFilters, t: AccessTarget): boolean {
-  if (f.patient && !(t.patientLinkSnapshot.status === 'known' && samePatient(t.patientLinkSnapshot.value, f.patient))) return false;
+type InvestigationTarget = AccessTarget | LocalReadTarget | DownloadTarget;
+function targetMatches(f: InvestigationFilters, t: InvestigationTarget): boolean {
+  if (f.patient && !('patientLinkSnapshot' in t && t.patientLinkSnapshot.status === 'known' && samePatient(t.patientLinkSnapshot.value, f.patient))) return false;
+  if (f.sourcePatientId != null && !('sourcePatientId' in t && t.sourcePatientId.status === 'known' && t.sourcePatientId.value === f.sourcePatientId)) return false;
   if (f.studyId !== null && !(t.studyId.status === 'known' && t.studyId.value === f.studyId)) return false;
   if (f.recordId !== null && !(t.recordId.status === 'known' && t.recordId.value === f.recordId)) return false;
   if (f.versionId !== null && !(t.versionId.status === 'known' && t.versionId.value === f.versionId)) return false;
   return true;
 }
 /** The matched targets (only the investigated ones when a target filter is set), or null. */
-function eventMatches(plan: InvestigationPlan, event: Readonly<AccessEvent>): readonly AccessTarget[] | null {
+function eventMatches(plan: InvestigationPlan, event: Readonly<AccessEvent>): readonly InvestigationTarget[] | null {
   const f = plan.filters;
   if (event.occurredAt < f.from || event.occurredAt >= f.to) return null;
   if (f.actorId !== null && !(event.userId.status === 'known' && event.userId.value.id === f.actorId)) return null;
   if (f.address !== null && !(event.trustedProxyIp.status === 'known' && event.trustedProxyIp.value.address === f.address)) return null;
   if (f.actions && !f.actions.includes(event.action)) return null;
   if (f.results && !f.results.includes(event.result)) return null;
-  if (!f.patient && f.studyId === null && f.recordId === null && f.versionId === null) return event.targets;
+  if (!f.patient && f.sourcePatientId == null && f.studyId === null && f.recordId === null && f.versionId === null) return event.targets;
   const hit = event.targets.filter(t => targetMatches(f, t));
   return hit.length ? hit : null;
 }
@@ -286,7 +290,9 @@ export interface InvestigationLedger {
 export type CurrentPatientLink = (studyId: string) => PatientLinkSnapshot | null;
 
 export interface ReplayTarget {
-  kind: AccessTarget['kind']; patient: EvidenceFact<PatientLinkSnapshot>; studyId: EvidenceFact<string>;
+  kind: AccessTarget['kind']; patient: EvidenceFact<PatientLinkSnapshot> | null;
+  localSource?: Pick<LocalReadTarget, 'sourcePatientId' | 'sourceInstitution' | 'projectionSha256'>;
+  studyId: EvidenceFact<string>;
   recordId: EvidenceFact<string>; versionId: EvidenceFact<string>; currentLink: PatientLinkSnapshot | null; rematched: boolean;
 }
 export interface ReplayEntry {
@@ -299,22 +305,20 @@ export interface ReplayEntry {
 }
 export interface InvestigationPage { rows: readonly ReplayEntry[]; total: number; top: number; nextCursor: string | null }
 
-/** A row whose recomputed chain hash differs (a rewritten patient, version or institution) is refused, never shown. */
+/** Validate the stored event and keyset page order before presenting the operator report. */
 function verifiedRow(input: unknown, top: number, previous: number): { sequence: number; event: Readonly<AccessEvent>; durableAt: string } {
   return guarded('LedgerRowIntegrityRefused', () => {
     const row = object(input, ['entry', 'durableAt', 'served']);
-    const entry = object(row.entry, ['sequence', 'previousHash', 'payload', 'hash']);
-    integer(entry.sequence, 1); sha256(entry.previousHash); sha256(entry.hash);
+    const entry = object(row.entry, ['sequence', 'payload']);
+    integer(entry.sequence, 1);
     if (entry.sequence > top || entry.sequence >= previous) refuse('LedgerSourceOrderRefused');
     const payload = object(entry.payload, ['kind', 'event']);
     if (payload.kind !== 'access') throw new Error('Not an access event');
     const event = parseAccessEvent(payload.event, row.served === null ? undefined : row.served);
-    const sealed = sealAccessEvent({ sequence: entry.sequence - 1, hash: entry.previousHash }, event);
-    if (sealed.hash !== entry.hash) throw new Error('Chain hash mismatch');
     return { sequence: entry.sequence, event, durableAt: utc(row.durableAt) };
   });
 }
-function currentPatient(currentLink: CurrentPatientLink | undefined, target: AccessTarget): PatientLinkSnapshot | null {
+function currentPatient(currentLink: CurrentPatientLink | undefined, target: InvestigationTarget): PatientLinkSnapshot | null {
   if (!currentLink || target.studyId.status !== 'known') return null;
   const studyId = target.studyId.value;
   return guarded('CurrentLinkUnavailable', () => {
@@ -322,7 +326,12 @@ function currentPatient(currentLink: CurrentPatientLink | undefined, target: Acc
     return link === null ? null : patientLink(link);
   });
 }
-function replayTarget(target: AccessTarget, currentLink: CurrentPatientLink | undefined): ReplayTarget {
+function replayTarget(target: InvestigationTarget, currentLink: CurrentPatientLink | undefined): ReplayTarget {
+  if ('sourcePatientId' in target) return {
+    kind: target.kind, patient: null, studyId: target.studyId, recordId: target.recordId, versionId: target.versionId,
+    localSource: { sourcePatientId: target.sourcePatientId, sourceInstitution: target.sourceInstitution, projectionSha256: target.projectionSha256 },
+    currentLink: currentPatient(currentLink, target), rematched: false,
+  };
   const recorded = target.patientLinkSnapshot, current = currentPatient(currentLink, target);
   return {
     kind: target.kind,
@@ -332,7 +341,7 @@ function replayTarget(target: AccessTarget, currentLink: CurrentPatientLink | un
     rematched: current !== null && recorded.status === 'known' && !samePatient(current, recorded.value),
   };
 }
-function replayEntry(sequence: number, committedAt: string, event: Readonly<AccessEvent>, targets: readonly AccessTarget[],
+function replayEntry(sequence: number, committedAt: string, event: Readonly<AccessEvent>, targets: readonly InvestigationTarget[],
   currentLink: CurrentPatientLink | undefined): ReplayEntry {
   return {
     sequence, eventId: event.eventId, occurredAt: event.occurredAt, committedAt, surface: event.surface,
@@ -433,7 +442,7 @@ export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ ac
   if (!plan) refuse('InvestigationPageRequired');
   const targets: AccessTarget[] = [], seen = new Set<string>();
   for (const row of page.rows) for (const t of row.targets) {
-    if (t.patient.status !== 'known' || t.studyId.status !== 'known') continue;
+    if (t.patient?.status !== 'known' || t.studyId.status !== 'known') continue;
     const key = JSON.stringify([row.eventId, t.patient.value.patientId, t.patient.value.assigningAuthority, t.studyId.value]);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -484,7 +493,7 @@ export async function incidentScope(authority: AuditAuthority, plan: Investigati
   for (const row of page?.rows ?? []) {
     if (row.result === 'refused' || row.result === 'failed') continue;
     for (const t of row.targets) {
-      if (t.patient.status !== 'known') continue;
+      if (t.patient?.status !== 'known') continue;
       const p = { patientId: t.patient.value.patientId, assigningAuthority: t.patient.value.assigningAuthority };
       const key = JSON.stringify([p.patientId, p.assigningAuthority]), g = groups.get(key);
       if (!g) { groups.set(key, { patient: p, eventIds: [row.eventId], firstAt: row.occurredAt, lastAt: row.occurredAt }); continue; }

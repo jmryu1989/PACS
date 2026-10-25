@@ -24,9 +24,13 @@ const { createRequire } = require('node:module');
 const { PacsService } = require('/app/dist/pacs.service');
 const { AuthService } = require('/app/dist/auth.service');
 const { AppModule } = require('/app/dist/app.module');
+const { createRequestContext, REQUEST_CONTEXT_SOURCE } = require('/app/dist/emr-runtime/request-context');
+const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
+const { IncomingMessage, ServerResponse } = require('node:http');
+const { Socket } = require('node:net');
 // Nest's own metadata names, from the copy of @nestjs/common the compiled controllers use.
 const nest = createRequire('/app/dist/app.module.js');
-const { PATH_METADATA, METHOD_METADATA, MODULE_METADATA, ROUTE_ARGS_METADATA } = nest('@nestjs/common/constants');
+const { PATH_METADATA, METHOD_METADATA, MODULE_METADATA, ROUTE_ARGS_METADATA, SELF_DECLARED_DEPS_METADATA } = nest('@nestjs/common/constants');
 const { RequestMethod } = nest('@nestjs/common');
 const { RouteParamtypes } = nest('@nestjs/common/enums/route-paramtypes.enum');
 
@@ -102,7 +106,11 @@ function fixture() {
   const studyAccess = { prepare: async () => { touched.push('studyAccess.prepare'); }, require: async () => { touched.push('studyAccess.require'); } };
   const keycloak = { usersInGroupWithRole: async () => { touched.push('keycloak.usersInGroupWithRole'); return []; } };
   const findings = { readableFindings: async () => { touched.push('findings.readableFindings'); return []; } };
-  return { svc: new PacsService(store, {}, keycloak, studyAccess, findings), touched, controllers: new Map() };
+  const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), {begin:()=>({
+    resolveRequestIdentity:async()=> '00000000-0000-4000-8000-000000000001',
+    transactionWithRecords:async()=>{throw new Error('Refused body must not start a draft transaction');},end(){},
+  })});
+  return { svc: new PacsService(store, {}, keycloak, studyAccess, findings), touched, controllers: new Map(), requests };
 }
 
 /** The request as the router hands it over: `caller` is the session the auth guard resolved. */
@@ -110,15 +118,21 @@ function send(f, route, body, caller, uid = UID) {
   assert.equal(ROUTES[route].length, 1, `${route} must reach one handler`);
   const [{ controller, key }] = ROUTES[route];
   if (!f.controllers.has(controller)) {
-    const types = Reflect.getMetadata('design:paramtypes', controller) ?? [];
-    const providers = new Map([[PacsService, f.svc], [AuthService, { memberRightsState: async () => 'ready' }]]);
+    const types = [...(Reflect.getMetadata('design:paramtypes', controller) ?? [])];
+    for (const {index,param} of Reflect.getMetadata(SELF_DECLARED_DEPS_METADATA,controller) ?? []) types[index]=param;
+    const providers = new Map([[PacsService, f.svc], [AuthService, { memberRightsState: async () => 'ready' }],
+      [REQUEST_CONTEXT_SOURCE, f.requests.source]]);
     f.controllers.set(controller, new controller(...types.map(type => {
       assert.ok(providers.has(type), `${controller.name} needs ${type?.name}, which these cases do not provide`);
       return providers.get(type);
     })));
   }
-  const req = { sub: caller.sub, actor: caller.actor, roles: caller.roles, institution: caller.institution, kind: caller.kind,
-    authMethod: 'session', sid: 'syn-session-of-' + caller.sub, headers: {} };
+  const req = Object.assign(new IncomingMessage(new Socket()), { sub: caller.sub, actor: caller.actor, roles: caller.roles, institution: caller.institution, kind: caller.kind,
+    authMethod: 'session', sid: 'syn-session-of-' + caller.sub, headers: {} });
+  const res = new ServerResponse(req);
+  f.requests.capture.capture(req,res,{issuer:'https://synthetic.invalid',subject:caller.sub,roles:caller.roles,
+    institution:caller.institution,rightsVersion:1,binding:{method:'session',sessionRef:'synthetic-bound-reference'}},
+    {method:route === 'put' ? 'PUT' : 'DELETE',route:'studies/:uid/report',purpose:'clinical'},async()=>{});
   const args = [];
   for (const [slot, { index, data }] of Object.entries(Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, key) ?? {})) {
     const type = Number(slot.split(':')[0]);
@@ -127,7 +141,7 @@ function send(f, route, body, caller, uid = UID) {
     else if (type === RouteParamtypes.REQUEST) args[index] = req;
     else assert.fail(`the handler asks for argument ${slot} ${JSON.stringify(data)}, which these cases do not provide`);
   }
-  return (async () => f.controllers.get(controller)[key](...args))();
+  return (async () => {try {return await f.controllers.get(controller)[key](...args);} finally {res.emit('finish');}})();
 }
 
 /** The refusal of one request on a fresh fixture: [status, code, field], after checking that nothing was touched. */

@@ -7,6 +7,11 @@ require.extensions['.ts'] = (mod, filename) => mod._compile(ts.transpileModule(f
     emitDecoratorMetadata: true, esModuleInterop: true }, fileName: filename,
 }).outputText, filename);
 const { AdminService } = require('../api/src/admin.service.ts');
+const { AdminController } = require('../api/src/admin.controller.ts');
+const { createRequestContext } = require('../api/src/emr-runtime/request-context.ts');
+const { createRequestIngress } = require('../api/src/emr-runtime/request-ingress.ts');
+const { IncomingMessage, ServerResponse } = require('node:http');
+const { Socket } = require('node:net');
 const { KeycloakService } = require('../api/src/keycloak.service.ts');
 (async () => {
   const member = { sub: 'synthetic-member', username: 'synthetic', email: 'synthetic@example.test', name: 'Synthetic',
@@ -19,21 +24,38 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
     $executeRaw: async () => 0, $queryRaw: async () => [{boundary:new Date()}] };
   db.$transaction = async work => work(db);
   const kc = { institutions: async () => ['synthetic-hospital'], getUser: async () => ({id:member.sub,emailVerified:true}) };
+  process.env.KC_ISSUER = 'https://synthetic-identity.example.test/auth/realms/kin';
+  const events = [], ledger = {begin:()=>({
+    resolveRequestIdentity:async(issuer,subject)=>{assert.equal(issuer,process.env.KC_ISSUER);return '00000000-0000-4000-8000-000000000001';},
+    transactionWithRecords:async work=>work(db,async(event,mutation)=>{const result=await mutation();events.push(event);return result;}),
+    end(){},
+  })};
   const service = new AdminService(db,kc,null,{publishCredentials() {}});
+  const requests = createRequestContext(createRequestIngress({proxyPeers:[]}),ledger);
+  const controller = new AdminController(service,null,requests.source);
+  const patch = async (body, actor=caller) => {
+    const req=Object.assign(new IncomingMessage(new Socket()),actor),res=new ServerResponse(req);
+    requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:actor.sub,roles:actor.roles,
+      rightsVersion:1,institution:member.institution,binding:{method:'bearer',sessionRef:null}},
+      {method:'PATCH',route:'admin/users/:id',purpose:'clinical'},async()=>{});
+    try {return await controller.patch(member.sub,body,req);} finally {res.emit('finish');}
+  };
   const roles = ['radiologist','technician','admin','clinician'];
   for (const role of roles) {
-    await service.patchUser(member.sub,{roles:[role]},caller);
+    await patch({roles:[role]});
     assert.deepEqual(changed.roles,[role]);
   }
-  await service.patchUser(member.sub,{roles:['clinician','radiologist']},caller);
+  await patch({roles:['clinician','radiologist']});
   assert.deepEqual(changed.roles,['clinician','radiologist']);
+  assert.equal(events.length,5,'each successful rights change reaches the ledger transaction');
   for (const invalid of [[],['gateway'],['invented'],['clinician','invented']]) {
     const before=writes;
-    await assert.rejects(service.patchUser(member.sub,{roles:invalid},caller),e=>e.getStatus()===400);
+    await assert.rejects(patch({roles:invalid}),e=>e.getStatus()===400);
     assert.equal(writes,before,'invalid role never reaches a write');
   }
-  await assert.rejects(service.patchUser(member.sub,{roles:['clinician']},{...caller,sub:member.sub}),e=>e.getStatus()===400);
-  await assert.rejects(service.patchUser(member.sub,{enabled:false},{...caller,roles:['clinician']}),e=>e.getStatus()===403);
+  await assert.rejects(patch({roles:['clinician']},{...caller,sub:member.sub}),e=>e.getStatus()===400);
+  await assert.rejects(patch({enabled:false},{...caller,roles:['clinician']}),e=>e.getStatus()===403);
+  await assert.rejects(service.patchUser(member.sub,{enabled:false},caller),e=>e.getStatus()===503);
   for (const role of roles) {
     const provider = new KeycloakService(), sent=[];
     provider.adm=async (route,verb,data)=> {if(verb)sent.push({verb,data});return route.startsWith('/roles/')?{name:role}:[];};

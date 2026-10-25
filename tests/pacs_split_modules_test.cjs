@@ -1,4 +1,15 @@
 'use strict';
+
+// B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
+// Real ledger atomicity and HTTP publication are tested against PostgreSQL.
+const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
+function b2Ledger(prisma) {
+  return { begin: () => ({
+    resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
+    transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
+    end() {},
+  }) };
+}
 /* TEST-S9-U0b-MODULES — the PACS concern modules of api/src/pacs/ run directly (S9-U0b round 1, order §6 step 2, §8), and
  * since round 2 also through the PacsService facade that owns them (SPLIT-21..23).
  *
@@ -319,12 +330,12 @@ function world() {
   const hold = new PacsHold(prisma, sa, access);
   const clinician = new PacsClinician(prisma, sa, access, worklist);
   const evidence = new PacsReportEvidence(prisma, sa, findings, access);
-  const draft = new PacsReportDraft(prisma, sa, access, audit, evidence);
-  const commit = new PacsReportCommit(keycloak, sa, evidence, draft);
+  const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
+  const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft), b2Ledger(prisma));
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
     studyState, techNote, hold, clinician, evidence, draft, commit };
   /** The PacsService facade over the same providers: it builds and owns its own concern graph. */
-  w.facade = () => new PacsService(prisma, orthanc, keycloak, sa, findings);
+  w.facade = () => withDraftRequestContext(new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma)), b2Ledger(prisma));
   w.study = (fields = {}) => db.seed('studyState', { uid: uidOf(), institutionId: INST_A, ss: 'Verified', ...fields });
   w.audits = (action) => db.rows('auditLog').filter(row => !action || row.action === action);
   /** Starts the institutions concern as the facade's onModuleInit does: two synthetic institutions beside the seeds. */
@@ -365,7 +376,7 @@ test('SPLIT-01 every concern is built from references alone: constructing touche
   const audit = new PacsAudit(prisma, sa, access);
   const worklist = new PacsWorklist(prisma, orthanc, sa, access, institutions, preferences, audit);
   const evidence = new PacsReportEvidence(prisma, sa, findings, access);
-  const draft = new PacsReportDraft(prisma, sa, access, audit, evidence);
+  const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
   new PacsFilters(prisma); new PacsMetrics(prisma, orthanc, sa, access); new PacsDicomGateway(prisma, orthanc, sa, access, institutions);
   new PacsStudyState(prisma, sa, access, institutions, audit); new PacsTechNote(prisma, sa, access); new PacsHold(prisma, sa, access);
   new PacsClinician(prisma, sa, access, worklist); new PacsReportCommit(keycloak, sa, evidence, draft);
@@ -701,21 +712,21 @@ test('SPLIT-14 a citation is shown only while its finding is readable; a databas
   assert.equal(await w.evidence.reportLimitChecked(async () => 'ok'), 'ok');
 });
 
-// ── SPLIT-15 the structure catalog gate (M18) ──
+// ── SPLIT-15 the product catalog at the report boundary ──
 
-test('SPLIT-15 the structure catalog is replaced only by a list that passes the gate; a refused list leaves the previous one standing', () => {
-  const w = world();
-  // The catalog's own replacement path (P7/P12) is the protected accessor; a subclass reaches it as the product's tests do.
-  class Seam extends PacsReportEvidence { set(next) { this.structureCatalog = next; } get current() { return this.structureCatalog; } }
-  const seam = new Seam(w.db.root, w.sa, w.findings, w.access);
-  assert.equal(seam.current, STRUCTURE_CATALOG);
-  const broken = [STRUCTURE_CATALOG[0], STRUCTURE_CATALOG[0]];   // the same templateId twice
-  assert.throws(() => seam.set(broken));
-  assert.equal(seam.current, STRUCTURE_CATALOG);
-  seam.set([]);
-  assert.deepEqual(seam.current, []);
-  assert.throws(() => seam.set(broken));
-  assert.deepEqual(seam.current, []);
+test('SPLIT-15 a report draft accepts the shipped catalog and rejects an unknown item without writing', async () => {
+  const w = world(), uid = uidOf();
+  const item = STRUCTURE_CATALOG[0].items.find(i => i.code === 'TECHNIQUE');
+  const request = { op: 'apply', field: item.field, templateId: STRUCTURE_CATALOG[0].templateId,
+    templateRevision: STRUCTURE_CATALOG[0].revision, itemCode: item.code, valueType: item.valueType,
+    value: 'SYN technique', renderedText: 'Technique: SYN technique' };
+  const result = await w.evidence.draftStructure(w.db.root, uid, null, { structure: request, structureIds: [] },
+    { findings: request.renderedText }, RAD_A, 0);
+  assert.equal(result.entries[0].value, 'SYN technique');
+  assert.equal(result.entries[0].renderedText, request.renderedText);
+  await assert.rejects(() => w.evidence.draftStructure(w.db.root, uid, null,
+    { structure: { ...request, itemCode: 'UNKNOWN' }, structureIds: [] }, { findings: request.renderedText }, RAD_A, 0),
+    error => error.getStatus() === 400);
 });
 
 // ── SPLIT-16 clinician reads ──

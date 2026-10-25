@@ -1,19 +1,5 @@
 [
   {
-    "name": "removed native flock loader is refused",
-    "files": {
-      "emr-runtime/file-lock.ts": "export const lock = (fd: number) => require('../../native/flock.node').flock(fd, true);\n"
-    },
-    "refused": "relative module is missing or outside the checked api/src scope"
-  },
-  {
-    "name": "another native module is refused",
-    "files": {
-      "emr-runtime/file-lock.ts": "export const lock = () => require('../../native/other.node');\n"
-    },
-    "refused": "relative module is missing or outside the checked api/src scope"
-  },
-  {
     "name": "native module at another site is refused",
     "files": {
       "probe.ts": "export const lock = () => require('../native/flock.node');\n"

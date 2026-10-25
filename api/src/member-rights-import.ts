@@ -3,19 +3,25 @@ import { APP_ROLES } from './clinician-policy';
 import { Logger } from '@nestjs/common';
 import { KeycloakService, KeycloakUser, RosterWriteFailure } from './keycloak.service';
 import { PrismaService } from './prisma.service';
-import { lockMemberRights, rosterOverlap } from './member-rights';
+import { lockMemberRights, rosterOverlap, rightsAccessEvent } from './member-rights';
+import { randomUUID } from 'node:crypto';
+import type { EmrRecordPort } from './emr-runtime/record-port';
+import type { AccessEventV1 } from './emr-contract/access-event';
 
 /** Run once with member administration stopped, before enabling traffic for the new schema.
  * Reads every realm member, including those without an AuthSession. Never import again over DB rights.
  * Missing/disabled/uncertain legacy accounts remain refused; old provider records are retained untouched.
  * Only this transition lifts the legacy provider disable; PACS suspension is an independent DB decision.
  */
-export async function importMemberRights(prisma: PrismaService, keycloak: KeycloakService, signal?: AbortSignal) {
+export async function importMemberRights(prisma: PrismaService, keycloak: KeycloakService, ledger: EmrRecordPort, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   if (await prisma.memberRightsImport.findUnique({ where: { id: 'realm-v1' } })) return;
   const users: KeycloakUser[] = [];
   let expectedTotal: number | null = null;
   for (let page = 1; ; page++) {
+    signal?.throwIfAborted();
     const result = await keycloak.listUsers(page, signal);
+    signal?.throwIfAborted();
     if (!Number.isInteger(result.total) || result.total < 0 || (expectedTotal !== null && result.total !== expectedTotal))
       throw new Error('Unstable realm member import');
     expectedTotal = result.total;
@@ -24,9 +30,32 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
     if (!result.users.length) throw new Error('Incomplete realm member import');
   }
   if (users.length !== expectedTotal || new Set(users.map(user => user.id)).size !== users.length) throw new Error('Unstable realm member import');
-  const changes = await prisma.$transaction(async tx => {
+  signal?.throwIfAborted();
+  const work = ledger.begin();
+  let changes: { legacy: { id: number; sub: string | null; target: string; generation: number }[]; bound: number };
+  try {
+  const issuer = process.env.KC_ISSUER;
+  if (!issuer) throw new Error('Missing member identity issuer');
+  const serviceIssuer = 'urn:kin:pacs:service', serviceSubject = 'member-rights-import';
+  const actor = { issuer: serviceIssuer, subject: serviceSubject,
+    id: await work.resolveRequestIdentity(serviceIssuer, serviceSubject) };
+  const identities = new Map<string, { issuer: string; subject: string; id: string }>();
+  for (const user of users) identities.set(user.id, { issuer, subject: user.id,
+    id: await work.resolveRequestIdentity(issuer, user.id) });
+  signal?.throwIfAborted();
+  changes = await work.transactionWithRecords(async (tx, record) => {
+    signal?.throwIfAborted();
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${0x4b494e4d}::int4, ${0}::int4)`;
     if (await tx.memberRightsImport.findUnique({ where: { id: 'realm-v1' } })) return { legacy: [], bound: 0 };
+    const occurredAt = new Date().toISOString(), requestId = randomUUID();
+    const facts = { surface: 'service:member-rights-import', actor, roles: [], rightsVersion: 0,
+      institution: null, ip: null, sessionRef: null, requestId };
+    const targets: AccessEventV1['targets'][number][] = [];
+    for (const user of users) {
+      const prior = await tx.memberRights.findUnique({ where: { sub: user.id } });
+      targets.push(...rightsAccessEvent(facts, identities.get(user.id)!, prior?.version ?? 1, occurredAt).targets);
+    }
+    const apply = async () => {
     const legacy = [];
     for (const user of users) {
       const isolated = await tx.memberIsolation.findUnique({ where: { sub: user.id } });
@@ -84,9 +113,24 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
     } });
     await tx.memberRightsImport.create({ data: { id: 'realm-v1', completedAt } });
     return { legacy, bound };
+    };
+    if (!users.length) return apply();
+    // One realm decision shares one transaction and event; member count must not
+    // consume one pending operation per row before that transaction can commit.
+    const event: AccessEventV1 = { ...rightsAccessEvent(facts, actor, 1, occurredAt), targets,
+      cause: 'service-job', executor: 'service',
+      context: { basis: 'service-job', studyId: null, relatedStudyId: null, reason: null },
+      trustedProxyIp: { status: 'not-applicable', reason: 'in-process-service' } };
+    let result: Awaited<ReturnType<typeof apply>>;
+    await record(event, async () => {
+      result = await apply();
+      return { kind: 'MemberRightsImport', id: 'realm-v1', version: null };
+    });
+    return result!;
   }, { maxWait: 4000, timeout: 120000 });
+  } finally { work.end(); }
   new Logger('MemberRightsImport').log(`realm-v1 designation rows bound: ${changes.bound}`);
-  const publications = changes.legacy.map(change => {
+  const publications = (signal?.aborted ? [] : changes.legacy).map(change => {
     // Neither startup, a member command, nor login waits for this one-shot post-commit send.
     return sendMemberRoster(prisma, keycloak, change).catch(() => new Logger('MemberRightsImport').warn('명부 반영 미확인'));
   });

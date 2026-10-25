@@ -1,5 +1,5 @@
 import {
-  CanActivate, ExecutionContext, ForbiddenException, Injectable,
+  CanActivate, ExecutionContext, ForbiddenException, Inject, Injectable,
   SetMetadata,
 } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
@@ -10,6 +10,7 @@ import {
   APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,
 } from './clinician-policy';
 import { ARCHIVE_ROUTE_KEY, StudyTransferLocalService } from './study-transfer-local.service';
+import { REQUEST_CONTEXT_CAPTURE, RequestContextCapture } from './emr-runtime/request-context';
 
 /**
  * 이 가드의 토큰·결속 검사를 받지 않는 진입점에만 붙인다: health, 로그인·가입 개시(GET·POST), callback, 로그인 뒤 진입.
@@ -43,7 +44,8 @@ export function memberState(groups: string[], roles: string[]): MemberState {
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private reflector: Reflector, private auth: AuthService, private transfer: StudyTransferLocalService) {}
+  constructor(private reflector: Reflector, private auth: AuthService, private transfer: StudyTransferLocalService,
+    @Inject(REQUEST_CONTEXT_CAPTURE) private readonly requestCapture: RequestContextCapture) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest();
@@ -200,6 +202,7 @@ export class AuthGuard implements CanActivate {
       : await this.auth.sessionRights(admittedSession);
     req.roles = rightsAllow(rights) ? rights.roles : [];
     req.institution = rights.institution;
+    req.rightsVersion = rights.version;
     req.groups = rights.institution ? [rights.institution] : [];
 
     const state = memberState(req.groups, req.roles);
@@ -233,6 +236,16 @@ export class AuthGuard implements CanActivate {
 
     // Bearer 호출은 CSRF 대상이 아니다. 브라우저가 자동으로 싣는 쿠키 호출만 헤더를 요구한다.
     if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method)) this.auth.requireCsrf(req);
+    const surface = routeKey(this.reflector.get(METHOD_METADATA, ctx.getHandler()),
+      this.reflector.get(PATH_METADATA, ctx.getClass()), this.reflector.get(PATH_METADATA, ctx.getHandler()));
+    this.requestCapture.capture(req, res, {
+      issuer: payload.iss, subject: payload.sub, roles: rights.roles,
+      institution: rights.institution, rightsVersion: rights.version,
+      binding: method === 'session' ? { method: 'session', sessionRef: this.auth.sessionRef(admittedSession.sid) }
+        : { method: 'bearer', sessionRef: null },
+    }, { method: req.method, route: surface.slice(surface.indexOf(' ') + 1),
+      purpose: surface.startsWith('GET auth') || surface.startsWith('POST auth') ? 'authentication' : 'clinical' },
+    this.auth.bindCurrentAuthorization(payload, raw, admittedSession ?? null, rights));
     return true;
   }
 }

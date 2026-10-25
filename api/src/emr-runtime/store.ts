@@ -1,304 +1,223 @@
 import { randomUUID } from 'node:crypto';
-import { PrismaClient } from '@prisma/client';
-import {
-  ACCESS_STREAMS, AccessEvent, AccessStream, AppendOnlyAccessStore, DurableAccessReceipt, StatutoryAct, accessStreams, statutoryAct,
-} from '../emr-contract/access-event';
+import { PrismaClient, Prisma } from '@prisma/client';
+import { AccessEvent, AccessStream, AppendOnlyAccessStore, DurableAccessReceipt, StatutoryAct, statutoryAct } from '../emr-contract/access-event';
 import { ResolvedRecord } from '../emr-contract/classification';
-import { ContractError, choice, integer, refuse, sha256, string, utc } from '../emr-contract/validation';
-import {
-  AppendResult, ChainTail, ClauseRow, HoldRow, PlacementRow, RequestRow, RetentionRow, StoredEntry, canonicalPayload, mintDurableReceipt,
-  planExpiryPrefix, OrderFact, parseOrderFact,
-} from './contract';
+import { integer, refuse, string, utc } from '../emr-contract/validation';
+import { ClauseRow, HoldRow, RequestRow, StoredEntry, OrderFact, parseOrderFact, canonicalPayload, mintDurableReceipt } from './contract';
 import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
-import { FailureJournal, JournalUnavailable } from './failure-journal';
+import { FailureJournal } from './failure-journal';
 import { RawQuery } from './manifest';
-import { AccessSeal, SealRefused, SealState, CommitBinding } from './seal';
 import { admitAppend } from './admission';
-import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_RECOVERY_TIMEOUT_MS } from './limits';
+import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_APPEND_POOL_SIZE, boundEmrStatements } from './limits';
 
-/**
- * The protected access ledger store (EMR-B1). A ledger fact commits in the same PostgreSQL transaction as the business
- * change it describes - in every stream A assigns it (D-1: always the viewing stream; also the history stream for a change
- * of a record) - and the receipt that lets a response go out exists only after each entry was read back and its stream's
- * external seal moved over it. Every path that does not end in a receipt leaves its fact in the failure journal or as a
- * pending intent the next start resolves - never a success, never a second original event for the same attempt.
- *
- * A business change and its fact: `withAppendTransaction` does the caller's change and `appendInTransaction(tx, event)`
- * last; after it returns, `confirm(appended)`; when it throws, `settle(event, error)`. `append(event)` is the same for a
- * fact without a business change. All SQL is parameterized Prisma raw calls of the schema's own functions.
- */
-export type LedgerFailureCode = 'CommitUnknown' | 'AppendNotCommitted' | 'LedgerRefused' | 'LedgerUnreachable' | 'SealUnavailable';
+export type LedgerFailureCode = 'CommitUnknown' | 'AppendNotCommitted' | 'LedgerRefused' | 'LedgerUnreachable' | 'ResultExpired';
 export class LedgerFailure extends Error {
-  constructor(readonly code: LedgerFailureCode, readonly ledgerCode: string | null = null) {
-    super(ledgerCode ? `${code}: ${ledgerCode}` : code); this.name = 'LedgerFailure';
-  }
+  constructor(readonly code: LedgerFailureCode) { super(code); }
 }
-/** In-transaction positions of an append, one per stream. Not durable and never handed out as a receipt. */
-export interface ProvisionalEntry { readonly stream: AccessStream; readonly sequence: number; readonly hash: string; readonly contentSha256: string; readonly attemptId: string; readonly previousHash: string; readonly payload: string; readonly storedAt: string }
-export interface ProvisionalAppend { readonly provisional: true; readonly eventId: string; readonly entries: readonly ProvisionalEntry[] }
-
-/** The SQLSTATE a schema emr_access function raised, read from Prisma's raw-query error. */
-export function ledgerErrorCode(error: unknown): string | null {
-  const code = (error as any)?.meta?.code;
-  if (typeof code === 'string' && /^EB\d{3}$/.test(code)) return code;
-  const match = /\bCode: `(EB\d{3})`/.exec(String((error as any)?.message ?? ''));
-  return match ? match[1] : null;
+export interface AttemptKeys { operationId: string; attemptId: string }
+export interface AdmittedOperation extends AttemptKeys { event: Readonly<AccessEvent>; payload: string; act: StatutoryAct }
+export interface BusinessReference { kind: string; id: string; version: string | null }
+export interface OperationResult {
+  operationId: string; eventId: string; outcome: 'pending' | 'committed' | 'negative'; durableAt: string | null;
+  result: BusinessReference | null;
+  entries: readonly { entryId: string; stream: AccessStream; attemptId: string; expired: boolean }[];
 }
-function isConnectionError(error: unknown): boolean {
-  const code = (error as any)?.code;
-  return typeof code === 'string' && ['P1001', 'P1002', 'P1008', 'P1017', 'P2024'].includes(code);
-}
-
-const toNumber = (value: unknown) => integer(typeof value === 'bigint' ? Number(value) : value);
-const toIso = (value: unknown) => utc(value instanceof Date ? value.toISOString() : value);
-const toDay = (value: unknown) => (value instanceof Date ? value.toISOString() : string(value)).slice(0, 10);
+export interface ProvisionalAppend { readonly provisional: true; readonly operationId: string; readonly eventId: string }
+/** Session/rights producers decide their facts under existing business locks.
+ * Call before the effect; null means a conditional write affected no row. */
+export type RecordMutation = (event: AccessEvent, effect: () => Promise<BusinessReference | null>) => Promise<BusinessReference | null>;
+const options = { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS };
+const toIso = (v: unknown) => utc(v instanceof Date ? v.toISOString() : String(v));
+const toDay = (v: unknown) => v instanceof Date ? v.toISOString().slice(0,10) : String(v).slice(0,10);
 function entry(row: any): StoredEntry {
-  return { sequence: toNumber(row.sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.hash),
-    kind: row.kind === 'access' || row.kind === 'expiry' || row.kind === 'history' ? row.kind : refuse('StoredEntryInvalid'),
-    statutoryAct: row.statutory_act === null ? null : choice(row.statutory_act, ['기재', '추가기재', '수정', '열람', 'none'] as const),
-    eventId: row.event_id === null ? null : string(row.event_id), payload: string(row.payload),
-    contentSha256: sha256(row.content_sha256), storedAt: toIso(row.stored_at) };
+  return { entryId: row.entry_id, sequence: Number(row.sequence), stream: row.stream,
+    kind: row.stream === 'history' ? 'history' : 'access', statutoryAct: row.statutory_act,
+    eventId: row.event_id, payload: row.payload, storedAt: toIso(row.recorded_at) };
 }
-
-/** Committed-fact reads of one stream's chain (outside any business transaction): what the seal proves itself against. */
-export interface VerificationPage {
-  tail: ChainTail;
-  first: Pick<StoredEntry, 'sequence' | 'previousHash'> | null;
-  entries: { entry: StoredEntry; marker: CommitBinding | null }[];
+export function ledgerErrorCode(error: any): string | null {
+  return typeof error?.meta?.code === 'string' ? error.meta.code : null;
 }
+/** SQL bounds each page. No lifetime key map or historical recovery scan. */
 export class PrismaLedgerSql {
-  constructor(private readonly db: any, private readonly inSnapshot = false) {}
-
-  async snapshot<T>(work: (sql: PrismaLedgerSql) => Promise<T>): Promise<T> {
-    if (this.inSnapshot) return work(this);
-    return this.db.$transaction(async tx => {
-      await tx.$queryRaw`SELECT emr_access.enter_writer()::text`;
-      return work(new PrismaLedgerSql(tx, true));
-    }, { isolationLevel: 'RepeatableRead', maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS });
-  }
-  async withWriterFence<T>(work: (sql: PrismaLedgerSql) => Promise<T>): Promise<T> {
-    return this.db.$transaction(async tx => {
-      await tx.$queryRaw`SELECT emr_access.fence_writers()::text`;
-      return work(new PrismaLedgerSql(tx, true));
-    }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_RECOVERY_TIMEOUT_MS });
-  }
-  private marker(row: any): CommitBinding | null {
-    if (!row) return null;
-    return { stream: row.stream, chainId: row.chain_id, attemptId: row.attempt_id, bundleId: row.bundle_id, kind: row.kind,
-      eventId: row.event_id, sequence: toNumber(row.sequence), previousHash: row.previous_hash, hash: row.hash,
-      contentSha256: row.content_sha256, generation: toNumber(row.generation), proofDigest: row.proof_digest };
-  }
-  async markerForSlot(stream: AccessStream, sequence: number): Promise<CommitBinding | null> {
-    const rows = await this.db.$queryRaw`SELECT * FROM emr_access.commit_marker_for_slot(${stream}::text, ${sequence}::bigint)`;
-    return this.marker(rows[0]);
-  }
-  async markerForAttempt(stream: AccessStream, attemptId: string): Promise<CommitBinding | null> {
-    const rows = await this.db.$queryRaw`SELECT * FROM emr_access.commit_marker_for_attempt(${stream}::text, ${attemptId}::text)`;
-    return this.marker(rows[0]);
-  }
-
-  async tail(stream: AccessStream): Promise<ChainTail> {
-    const [row] = await this.db.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, hash FROM emr_access.chain_tail(${choice(stream, ACCESS_STREAMS)}::text)`;
-    return { chainId: string(row.chain_id), sequence: toNumber(row.sequence), hash: sha256(row.hash) };
-  }
-  async entriesAfter(stream: AccessStream, after: number, limit: number): Promise<StoredEntry[]> {
-    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entries_after(${choice(stream, ACCESS_STREAMS)}::text, ${integer(after)}::bigint, ${integer(limit, 1)}::integer)`;
+  constructor(readonly db: RawQuery) {}
+  async entriesAfter(after: number, limit: number): Promise<StoredEntry[]> {
+    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entries_after(${integer(after)}::bigint, ${integer(limit,1)}::integer)`;
     return rows.map(entry);
   }
-  /** The same snapshot proves the retained anchor and every fetched row's exact
-   * commit marker in one round trip. SECURITY DEFINER SRFs cannot inline and
-   * otherwise each estimate 1000 rows; multiplying four such estimates invokes
-   * expensive per-execution JIT. Expose the functions' actual cardinality bounds
-   * to the outer planner without changing their permissions or snapshot. */
-  async verificationPage(stream: AccessStream, after: number, limit: number): Promise<VerificationPage> {
-    const selected = choice(stream, ACCESS_STREAMS);
-    const rows = await this.db.$queryRaw<any[]>`SELECT t.chain_id::text AS tail_chain_id,
-      t.sequence AS tail_sequence, t.hash AS tail_hash, f.sequence AS first_sequence,
-      f.previous_hash AS first_previous_hash, e.*, CASE WHEN m.sequence IS NULL THEN NULL ELSE to_jsonb(m) END AS commit_marker
-      FROM (SELECT * FROM emr_access.chain_tail(${selected}::text) LIMIT 1) t
-      LEFT JOIN LATERAL (SELECT * FROM emr_access.entries_after(${selected}::text, 0, 1) LIMIT 1) f ON true
-      LEFT JOIN LATERAL (SELECT * FROM emr_access.entries_after(${selected}::text, ${integer(after)}::bigint, ${integer(limit, 1)}::integer) LIMIT ${integer(limit, 1)}) e ON true
-      LEFT JOIN LATERAL (SELECT * FROM emr_access.commit_marker_for_slot(${selected}::text, e.sequence) LIMIT 1) m ON true
-      ORDER BY e.sequence`;
-    const head = rows[0];
-    return { tail: { chainId: string(head.tail_chain_id), sequence: toNumber(head.tail_sequence), hash: sha256(head.tail_hash) },
-      first: head.first_sequence === null ? null : { sequence: toNumber(head.first_sequence), previousHash: sha256(head.first_previous_hash) },
-      entries: rows.filter(row => row.sequence !== null).map(row => ({ entry: entry(row), marker: this.marker(row.commit_marker) })) };
-  }
   async entryForEvent(stream: AccessStream, eventId: string): Promise<StoredEntry | null> {
-    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event(${choice(stream, ACCESS_STREAMS)}::text, ${eventId}::text)`;
+    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event(${stream}::text, ${eventId}::text)`;
     return rows.length ? entry(rows[0]) : null;
   }
-  async placement(): Promise<PlacementRow[]> {
-    return this.db.$queryRaw<PlacementRow[]>`SELECT relation, relkind, tablespace FROM emr_access.storage_placement()`;
+  async result(operationId: string): Promise<OperationResult | null> {
+    const [row] = await this.db.$queryRaw<{ value: OperationResult | null }[]>`SELECT emr_access.operation_result(${operationId}::uuid) AS value`;
+    return row.value;
   }
 }
-
+/** Admission commits first. Business SQL, both streams and terminal result then
+ * commit on one connection under the lock also used by settlement. */
 export class AccessLedgerStore implements AppendOnlyAccessStore {
-  private readonly attempts = new WeakMap<object, { attemptId: string; streams: readonly AccessStream[] }>();
-  constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal,
-    private readonly poolSize: number = (db as PrismaClient & { emrAppendPoolSize?: number })?.emrAppendPoolSize ?? 3) {}
-
-  /** Both standalone and business writers enter before acquiring a connection.
-   * Callers include their business change and appendInTransaction in this same
-   * callback; confirm remains outside it, after the successful COMMIT. Starting
-   * a raw Prisma transaction first would bypass admission and reintroduce the
-   * head-lock/pool priority inversion for business writes.
-   */
-  withAppendTransaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
-    return admitAppend(this.db, this.poolSize, () => this.db.$transaction(work,
-      { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }));
+  readonly sql: PrismaLedgerSql;
+  private readonly admitted = new WeakSet<object>();
+  private readonly transactions = new WeakMap<object, AdmittedOperation>();
+  constructor(private readonly db: PrismaClient, readonly journal: FailureJournal,
+    private readonly poolSize = (db as PrismaClient & { emrAppendPoolSize?: number }).emrAppendPoolSize ?? EMR_APPEND_POOL_SIZE) {
+    this.sql = new PrismaLedgerSql(db);
   }
-
-  /**
-   * Inside the caller's open business transaction, last: A parses the event and names its streams and 의료법 제23조④ act;
-   * each stream stages its row under the head lock, then durably records intent and exact reservation together.
-   * EB008 forbids COMMIT until that reservation is bound in the same transaction. No deadline is stored (contract.ts accessDeadline
-   * computes it when destruction is considered). Any failure here must abort the caller's transaction.
-   */
-  async appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
-    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];
-    const attemptId = randomUUID(), bundleId = randomUUID();
-    await this.enterWriter(tx);
-    this.attempts.set(tx, { attemptId, streams: accessStreams(input, served) });
-    let eventId = '';
-    for (const stream of accessStreams(input, served)) {
-      const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
-      eventId = event.eventId;
-      let result: AppendResult;
-      try { result = await this.appendRow(tx, stream, event.eventId, text, act, attemptId, bundleId); }
-      catch (error) { if (ledgerErrorCode(error) === 'EB002') refuse('AccessEventIdConflict'); throw error; }
-      if (!result.replay) {
-        const binding = this.seal.reserve({ stream, chainId: result.chainId, attemptId, bundleId,
-          kind: stream === 'viewing' ? 'access' : 'history', eventId, sequence: result.sequence,
-          previousHash: result.previousHash, hash: result.hash, contentSha256 });
-        await this.bindCommit(tx, binding);
-      }
-      entries.push(Object.freeze({ stream, sequence: result.sequence, hash: result.hash, contentSha256, attemptId, previousHash: result.previousHash, payload: text, storedAt: result.storedAt }));
-    }
-    return Object.freeze({ provisional: true as const, eventId, entries: Object.freeze(entries) });
+  async admit(input: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<AdmittedOperation> {
+    return admitAppend(this.db, this.poolSize, () => this.admitSql(input, served, keys));
   }
-  async enterWriter(tx: object): Promise<void> {
-    await (tx as RawQuery).$queryRaw`SELECT emr_access.enter_writer()::text`;
-  }
-  async bindCommit(tx: object, binding: CommitBinding): Promise<void> {
-    await (tx as RawQuery).$queryRaw`SELECT emr_access.bind_commit(${binding.stream}::text, ${binding.attemptId}::text,
-      ${binding.generation}::bigint, ${binding.proofDigest}::text)::text`;
-  }
-
-  /** After the caller's commit: prove every entry from storage, seal each stream, and only then mint the receipt. */
-  async confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt> {
-    let receipt: DurableAccessReceipt | null = null;
-    // Both stream rows already committed atomically. Verify them together so
-    // their adjacent protected advances can share one durable publication; the
-    // caller still receives nothing until every stream has passed.
-    const verified = await Promise.allSettled(appended.entries.map(async provisional => {
-      const candidate: StoredEntry = { sequence: provisional.sequence, hash: provisional.hash, previousHash: provisional.previousHash,
-        payload: provisional.payload, contentSha256: provisional.contentSha256, storedAt: provisional.storedAt,
-        kind: provisional.stream === 'viewing' ? 'access' : 'history', eventId: appended.eventId, statutoryAct: null };
-      // Verification already reads the new row and its DB commit marker. Its exact
-      // protected binding supplies the receipt without a duplicate event lookup.
-      // Replays (whose new attempt owns no binding) still read the original event.
-      let covered: SealState | null = null, sealError: unknown;
-      try {
-        covered = await this.seal.advanceReceipt(provisional.stream, provisional.attemptId, appended.eventId, candidate);
-      } catch (error) { sealError = error; }
-      if (covered) {
-        if (provisional.stream === 'viewing') receipt = mintDurableReceipt(candidate, covered.streams.viewing);
-        return;
-      }
-      let stored: StoredEntry | null;
-      try { stored = await this.sql.entryForEvent(provisional.stream, appended.eventId); } catch {
-        this.note(appended.eventId, 'ledger-unavailable', 'commit-unknown', provisional.attemptId, provisional.stream);
-        throw new LedgerFailure('CommitUnknown');
-      }
-      if (!stored) {
-        covered = this.seal.committedReceipt(provisional.stream, provisional.attemptId, appended.eventId, candidate);
-        if (!covered) throw new LedgerFailure('AppendNotCommitted');
-        stored = candidate;
-      }
-      if (stored.sequence !== provisional.sequence || stored.hash !== provisional.hash || stored.contentSha256 !== provisional.contentSha256) refuse('DurableReceiptRefused');
-      let sealed: SealState;
-      try {
-        if (sealError) throw sealError;
-        sealed = covered ?? await this.seal.advance(provisional.stream, { sequence: stored.sequence, hash: stored.hash }); } catch (error) {
-        // Committed but not sealed: no receipt. The same event resent, or the next start, seals it; nothing is appended twice.
-        this.note(appended.eventId, 'ledger-unavailable', 'seal-unavailable', provisional.attemptId, provisional.stream);
-        throw error instanceof SealRefused && error.code !== 'SealUnavailable' ? error : new LedgerFailure('SealUnavailable');
-      }
-      if (provisional.stream === 'viewing') receipt = mintDurableReceipt(stored, sealed.streams.viewing);
-    }));
-    for (const result of verified) if (result.status === 'rejected') throw result.reason;
-    if (!receipt) refuse('DurableReceiptRefused');
-    await Promise.all(appended.entries.map(p => this.seal.acknowledge(p.stream, p.attemptId)));
-    return receipt;
-  }
-
-  /** One standalone ledger fact (a provision before its body, a refusal, an end without a business change). */
-  async append(input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<DurableAccessReceipt> {
-    let appended: ProvisionalAppend, callbackFailed = false, transaction: object;
+  private async admitSql(input: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<AdmittedOperation> {
+    const canonical = canonicalPayload(input, served);
+    const selected = keys ?? { operationId: randomUUID(), attemptId: randomUUID() };
+    const act = statutoryAct(canonical.event, served);
     try {
-      appended = await this.withAppendTransaction(async tx => {
-        transaction = tx;
-        try { return await this.appendInTransaction(tx, input, served); }
-        catch (error) { callbackFailed = true; throw error; }
-      });
+      const [row] = await this.db.$queryRaw<{ id: string }[]>`
+        SELECT emr_access.admit_operation(${selected.operationId}::uuid, ${selected.attemptId}::uuid,
+          ${canonical.text}::text, ${act}::text)::text AS id`;
+      const operation = Object.freeze({ ...selected, operationId: row.id, event: canonical.event, payload: canonical.text, act });
+      this.admitted.add(operation);
+      return operation;
     } catch (error) {
-      await this.settleTransaction(transaction, input, error, callbackFailed, served);
-      throw error;
-    }
-    return this.confirm(appended);
-  }
-
-  /**
-   * A transaction that did not report a commit. No stored entry in any of its streams: the attempt rolled back (journal
-   * it, drop its intents). Storage unreadable, or this very content stored after all: the commit is unknown to this
-   * response (journal it, keep the intents; the resend of the same event ID or the next start settles it) - never a
-   * success, never a new event. Another content stored under this ID: this attempt was refused; the first attempt's
-   * intents stay.
-   */
-  async settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[], rolledBack = false, attempt?: {attemptId: string; streams: readonly AccessStream[]}): Promise<void> {
-    const streams = accessStreams(input, served);
-    if (rolledBack) {
-      const eventId = canonicalPayload(input, served, streams[0]).event.eventId;
-      const cause = error instanceof SealRefused ? 'seal-unavailable' : ledgerErrorCode(error) || error instanceof ContractError ? 'ledger-refused' : isConnectionError(error) ? 'ledger-unreachable' : 'business-rollback';
-      this.note(eventId, 'append-rolled-back', cause, attempt?.attemptId);
-      if (attempt) for (const stream of attempt.streams) this.seal.abort(stream, attempt.attemptId);
-      return;
-    }
-    let eventId = '', unknown = false, other = false;
-    for (const stream of streams) {
-      const { event, contentSha256 } = canonicalPayload(input, served, stream);
-      eventId = event.eventId;
-      let stored: StoredEntry | null | undefined;
-      try { stored = await this.sql.entryForEvent(stream, eventId); } catch { stored = undefined; }
-      if (stored === undefined || (stored && stored.contentSha256 === contentSha256)) unknown = true;
-      else if (stored) other = true;
-    }
-    if (unknown) { this.note(eventId, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId); return; }
-    if (other) { this.note(eventId, 'append-rolled-back', 'ledger-refused', attempt?.attemptId); return; }
-    // The caller may have lost COMMIT's response. Only startup's global writer fence decides absence.
-    this.note(eventId, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId);
-  }
-
-  /** A caller that observed its callback reject can settle exactly that transaction's own attempt.
-   * A failed/unknown COMMIT response never uses this negative path merely because a SELECT is empty.
-   */
-  async settleTransaction(tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]): Promise<void> {
-    const attempt = tx && this.attempts.get(tx);
-    await this.settle(input, error, served, callbackFailed, attempt);
-    if (tx && callbackFailed) this.attempts.delete(tx);
-  }
-
-  private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string, attemptId = `unassigned:${eventId}`, stream: AccessStream | 'transaction' = 'transaction'): void {
-    try { this.journal.record(`${kind}:${stream}:${attemptId}:${cause}`, kind, { eventId, cause }); }
-    catch (error) {
-      // Without the journal there is no surviving record of this failure: surface that, never a success.
-      if (error instanceof JournalUnavailable) throw new LedgerFailure('LedgerUnreachable', error.code);
+      await this.journal.record(ledgerErrorCode(error)?.startsWith('EB') ? 'ledger-refused' : 'ledger-unreachable', canonical.event.eventId, null);
       throw error;
     }
   }
-
+  /** One ordinary producer transaction, including multiple session endings.
+   * Admission uses a short separate connection before each effect. The outer
+   * transaction already owns an append lane: taking a second lane here could
+   * deadlock a saturated pool. Its two connection reserve services admission
+   * and settlement. No callback is retried after a lost COMMIT response. */
+  async transactionWithRecords<T>(work: (tx: Prisma.TransactionClient, record: RecordMutation) => Promise<T>,
+    transactionOptions = options): Promise<T> {
+    const operations: { operation: AdmittedOperation; expected?: 'committed' | 'negative' }[] = [];
+    let value: T, returned = false, wroteOutcome = false;
+    try {
+      return await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
+        await boundEmrStatements(tx);
+        const record: RecordMutation = async (event, effect) => {
+          const operation = await this.admitSql(event);
+          const tracked: typeof operations[number] = { operation };
+          operations.push(tracked);
+          const [locked] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
+          if (locked.value !== 'pending') {
+            const previous = await new PrismaLedgerSql(tx).result(operation.operationId);
+            if (previous?.outcome !== 'committed') throw new LedgerFailure('AppendNotCommitted');
+            if (previous.entries.some(row => row.expired)) throw new LedgerFailure('ResultExpired');
+            tracked.expected = 'committed';
+            return previous.result;
+          }
+          const reference = await effect();
+          if (reference === null) {
+            await tx.$queryRaw`SELECT emr_access.settle_operation(${operation.operationId}::uuid)`;
+            tracked.expected = 'negative';
+            return null;
+          }
+          this.transactions.set(tx, operation);
+          try {
+            await this.appendInTransaction(tx, operation, reference);
+            wroteOutcome = true;
+            if (reference.kind === 'AuditLog') await this.recordProjection(tx, event.eventId, integer(Number(reference.id), 1));
+          } finally { this.transactions.delete(tx); }
+          tracked.expected = 'committed';
+          return reference;
+        };
+        value = await work(tx, record);
+        returned = true;
+        return value;
+      }, transactionOptions));
+    } catch (error) {
+      // A confirmed negative could have been created by settlement after a
+      // rollback. Only an outcome written by this transaction proves its commit.
+      let resolved = returned && wroteOutcome;
+      for (const tracked of operations) {
+        await this.journal.record(returned ? 'commit-unknown' : 'business-rollback',
+          tracked.operation.event.eventId, tracked.operation.operationId);
+        const outcome = await this.settle(tracked.operation.operationId);
+        if (!tracked.expected || outcome?.outcome !== tracked.expected) resolved = false;
+      }
+      if (resolved) return value;
+      if (returned) throw new LedgerFailure('CommitUnknown');
+      throw error;
+    }
+  }
+  /** Recheck current authorization inside callback. Return only the stored
+   * result reference: exact retries read that version, never rerun mutation. */
+  async transaction(operation: AdmittedOperation, work: (tx: Prisma.TransactionClient) => Promise<BusinessReference | null>): Promise<OperationResult> {
+    if (!this.admitted.has(operation)) refuse('AdmittedOperationRequired');
+    let callbackFailed = false;
+    try {
+      const result = await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
+        await boundEmrStatements(tx);
+        const [state] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
+        if (state.value !== 'pending') return new PrismaLedgerSql(tx).result(operation.operationId);
+        this.transactions.set(tx, operation);
+        try {
+          const reference = await work(tx);
+          await this.appendInTransaction(tx, operation, reference);
+          if (reference?.kind === 'AuditLog')
+            await this.recordProjection(tx, operation.event.eventId, integer(Number(reference.id), 1));
+          return await new PrismaLedgerSql(tx).result(operation.operationId);
+        } catch (error) { callbackFailed = true; throw error; }
+        finally { this.transactions.delete(tx); }
+      }, options));
+      // This Promise resolves only after PostgreSQL's COMMIT acknowledgement.
+      if (!result) throw new LedgerFailure('CommitUnknown');
+      return result;
+    } catch (error) {
+      await this.journal.record(callbackFailed ? 'business-rollback' : 'commit-unknown', operation.event.eventId, operation.operationId);
+      const settled = await this.settle(operation.operationId);
+      if (settled?.outcome === 'committed') return settled;
+      if (callbackFailed) throw error;
+      if (settled?.outcome === 'negative') throw new LedgerFailure('AppendNotCommitted');
+      throw new LedgerFailure('CommitUnknown');
+    }
+  }
+  async appendInTransaction(tx: Prisma.TransactionClient, operation: AdmittedOperation,
+    reference: BusinessReference | null = null): Promise<ProvisionalAppend> {
+    if (this.transactions.get(tx) !== operation) refuse('EmrRecordTransactionRefused');
+    await tx.$queryRaw`SELECT emr_access.append_operation(${operation.operationId}::uuid, ${operation.attemptId}::uuid,
+      ${operation.payload}::text, ${operation.act}::text, ${reference?.kind ?? null}::text,
+      ${reference?.id ?? null}::text, ${reference?.version ?? null}::text)`;
+    return Object.freeze({ provisional: true, operationId: operation.operationId, eventId: operation.event.eventId });
+  }
+  async confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt> {
+    const result = await this.lookup(appended.operationId);
+    if (!result || result.eventId !== appended.eventId) throw new LedgerFailure('CommitUnknown');
+    return this.receipt(result);
+  }
+  receipt(result: OperationResult): DurableAccessReceipt {
+    if (result.outcome !== 'committed' || !result.durableAt) throw new LedgerFailure('AppendNotCommitted');
+    if (result.entries.some(e => e.expired)) throw new LedgerFailure('ResultExpired');
+    return mintDurableReceipt(result.eventId, new Date(result.durableAt).toISOString());
+  }
+  async append(input: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<DurableAccessReceipt> {
+    const operation = await this.admit(input, served, keys);
+    return this.receipt(await this.transaction(operation, async () => null));
+  }
+  async lookup(operationId: string): Promise<OperationResult | null> {
+    return this.db.$transaction(async tx => {
+      await boundEmrStatements(tx);
+      const sql = new PrismaLedgerSql(tx);
+      // A caller can persist its request before B2 admission commits. Absence
+      // is unresolved, as the public port promises; it is not a negative result.
+      if (!await sql.result(operationId)) return null;
+      await tx.$queryRaw`SELECT emr_access.lock_operation(${operationId}::uuid)`;
+      return sql.result(operationId);
+    }, options);
+  }
+  async settle(operationId: string): Promise<OperationResult | null> {
+    try {
+      return await this.db.$transaction(async tx => {
+        await boundEmrStatements(tx);
+        const [row] = await tx.$queryRaw<{ value: OperationResult }[]>`SELECT emr_access.settle_operation(${operationId}::uuid) AS value`;
+        return row.value;
+      }, options);
+    } catch { return null; } // UNKNOWN, including lock timeout; never a timed negative.
+  }
+  async recoverPending(): Promise<void> {
+    const rows = await this.db.$queryRaw<{ operation_id: string }[]>`SELECT operation_id::text FROM emr_access.pending_operations(128)`;
+    for (const row of rows) if (!(await this.settle(row.operation_id))) throw new LedgerFailure('CommitUnknown');
+  }
   /** Every fact one A decision may consult, read under the caller's transaction, as that transaction's snapshot. */
   async snapshot(tx: object, scope: object, request: SnapshotRequest): Promise<EmrSnapshot> {
     const holds = new Map<string, HoldRow[]>(), accessRequests = new Map<string, RequestRow[]>(), correctionRequests = new Map<string, RequestRow[]>();
@@ -351,6 +270,12 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     for (const row of rows) result.push(parseOrderFact(JSON.parse(row.body), result[result.length - 1]));
     return Object.freeze(result);
   }
+  /** Bootstrap the verified actor before its first event, with the same bounded
+   * admission and transaction options as the request's remaining work. */
+  async resolveRequestIdentity(issuer: string, subject: string): Promise<string> {
+    return admitAppend(this.db, this.poolSize, () => this.db.$transaction(
+      tx => this.resolveIdentity(tx, issuer, subject), options));
+  }
   /** The immutable internal member ID of a verified issuer and subject (created once; names are never a key). */
   async resolveIdentity(tx: object, issuer: string, subject: string): Promise<string> {
     const run = tx as RawQuery;
@@ -363,14 +288,6 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     await run.$queryRaw`SELECT emr_access.record_projection(${string(eventId)}::text, ${integer(auditLogId, 1)}::integer)::text AS done`;
   }
 
-  // ── the schema functions under the caller's transaction (each value bound as a parameter) ──
-  async appendRow(tx: object, stream: AccessStream, eventId: string, payload: string, act: StatutoryAct, attemptId: string, bundleId: string): Promise<AppendResult> {
-    const run = tx as RawQuery;
-    const [row] = await run.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, previous_hash, hash, stored_at, replay
-      FROM emr_access.append_reserved(${choice(stream, ACCESS_STREAMS)}::text, ${eventId}::text, ${payload}::text, ${act}::text, ${attemptId}::text, ${bundleId}::text)`;
-    return { chainId: string(row.chain_id), sequence: toNumber(row.sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.hash),
-      storedAt: toIso(row.stored_at), replay: row.replay === true };
-  }
   async holdRows(tx: object, recordId: string): Promise<HoldRow[]> {
     const run = tx as RawQuery;
     const rows = await run.$queryRaw<any[]>`SELECT hold_id, phase, body FROM emr_access.holds_for(${recordId}::text)`;
@@ -404,54 +321,4 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     const rows = await run.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event('viewing'::text, ${eventId}::text)`;
     return rows.length ? entry(rows[0]) : null;
   }
-}
-
-/**
- * The access-ledger retention job for the viewing stream (its own process and credential, kin_emr_retention; never the API
- * runtime). It reads positions, each entry's own time and holds - no payload - and computes each end now with the one rule
- * (contract.ts accessDeadline); the database re-checks the floor and the holds and appends the non-personal checkpoint in
- * the deleting transaction. The history stream is never expired here (unit H). Scheduling it is not part of this unit.
- */
-export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSeal, now = new Date().toISOString()):
-  Promise<{ deleted: number; checkpointSequence: number; checkpointHash: string } | null> {
-  // Recovery may settle absent intents only before writers start. An active append may still commit.
-  const rows: RetentionRow[] = [];
-  let after = 0;
-  for (;;) {
-    const page = await retention.$queryRaw<any[]>`SELECT sequence, hash, kind, occurred_at, held FROM emr_access.retention_view(${after}::bigint, 1000)`;
-    for (const row of page) rows.push({ sequence: toNumber(row.sequence), hash: sha256(row.hash), kind: row.kind === 'expiry' ? 'expiry' : 'access',
-      occurredAt: toIso(row.occurred_at), held: row.held === true });
-    if (page.length < 1000) break;
-    after = toNumber(page[page.length - 1].sequence);
-  }
-  const plan = planExpiryPrefix(rows, now);
-  if (!plan) return null;
-  const through = plan.through, attemptId = randomUUID(), bundleId = randomUUID();
-  // Establish the retained anchor before taking the head lock. Under that lock only
-  // commits since this frontier need verification; the deletion plan is checked again by SQL.
-  await seal.reconcileCommitted('viewing');
-  let callbackFailed = false;
-  let result: { deleted: number; checkpointSequence: number; checkpointHash: string };
-  try {
-    result = await retention.$transaction(async tx => {
-      try {
-        await tx.$queryRaw`SELECT emr_access.enter_writer()::text`;
-        await tx.$queryRaw`SELECT emr_access.lock_chain('viewing'::text)::text`;
-        const prefix = await seal.expiryPrefix(through);
-        const [row] = await tx.$queryRaw<any[]>`SELECT * FROM emr_access.expire_reserved(${through}::bigint, ${attemptId}::text, ${bundleId}::text)`;
-        const binding = seal.reserve({ stream: 'viewing', chainId: string(row.chain_id), attemptId, bundleId, kind: 'expiry', eventId: null,
-          sequence: toNumber(row.checkpoint_sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.checkpoint_hash),
-          contentSha256: sha256(row.content_sha256) }, prefix);
-        if (toNumber(row.deleted_count) !== prefix.count) refuse('ExpirySnapshotChanged');
-        await tx.$queryRaw`SELECT emr_access.bind_commit('viewing'::text, ${attemptId}::text, ${binding.generation}::bigint, ${binding.proofDigest}::text)::text`;
-        return { deleted: toNumber(row.deleted_count), checkpointSequence: toNumber(row.checkpoint_sequence), checkpointHash: sha256(row.checkpoint_hash) };
-      } catch (error) { callbackFailed = true; throw error; }
-    }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS });
-  } catch (error) {
-    seal.recordExpiryFailure(attemptId, callbackFailed);
-    if (callbackFailed) seal.abort('viewing', attemptId);
-    throw error;
-  }
-  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });
-  return result;
 }

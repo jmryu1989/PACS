@@ -42,7 +42,7 @@
       const tr = e.target.closest("tr[data-uid]");
       if (!tr || tr.dataset.uid !== selectedUid) return;
       e.preventDefault();
-      $("#findings").focus();
+      focusReportEditor();
     });
     $("#rows").addEventListener("dblclick", e => {
       if (e.target.closest('[data-tech-note]')) return;

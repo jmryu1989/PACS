@@ -32,14 +32,22 @@
      * W5(설계 v5 §1.6, D1423 R2): Related Report 모드와, 저장 영수증이 확인되지 않은 Related 삽입도 쓰기를 막는다. 예외는 모드가 연
      * 일회용 허가(`admission`) 하나뿐이다 — 검토한 Insert의 그 칸, 그 한 번의 native 편집. `RELATED_BASE`는 모드가 "Target이 그
      * 삽입을 받을 수 있는가"를 물을 때 W5 사유를 빼고 기존 규칙만 묻는 표시이고, 편집을 열지 않는다(편집기의 canEdit은 모드가
-     * 직접 확인한 허가만 넘긴다). `relatedMode`는 page-boot가 올린 모드이며, 그보다 앞의 소비자가 읽으므로 여기서 선언한다(S9-U0a-PRE).
+     * 직접 확인한 허가만 넘긴다). `relatedMode`는 페이지가 언제나 싣는 Related Report 모드다(W5 Phase B). 첫 소비자(중요 결과
+     * 발신·수신의 mount가 그리는 대기 사유, 판독 버튼, 편집기 frame)보다 먼저 여기서 선언과 함께 만든다 — 넘기는 page 함수는
+     * 모두 함수 선언이라 이 시점에 이미 있고, 모드가 mount 때 부르는 것은 편집기 host 하나뿐이다.
      */
-    let relatedMode = null;
+    const relatedMode = KinRelatedReportMode({
+      editor: () => document.querySelector('.redit'), field: name => $('#' + name),
+      target: relatedTargetCard, source: relatedSourceCard,
+      insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
+      freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
+      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
+    });
     const RELATED_BASE = Object.freeze({ base: true });
     function reportWriteBlock(admission = null) {
       if (!selectedUid) return "검사를 선택하세요";
       if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
       if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
       if (admission === RELATED_BASE) return null;
-      return relatedMode?.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);
+      return relatedMode.blocked(admission) ?? relatedInsertWriteBlock(selectedUid, admission);
     }

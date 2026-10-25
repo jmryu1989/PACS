@@ -637,7 +637,7 @@ DECLARED_CASES = [
     "TEST-F-01 roster_scope: every grant change is rights history kept three years on its own clock apart from the access ledger",
     "TEST-F-02 patient_replay: replay keeps each event recorded patient, institutions, version and times after a re-match",
     "TEST-F-02 patient_replay: the new patient finds only its own recorded events and a multi-target event shows only the investigated patient",
-    "TEST-F-02 patient_replay: a stored event whose patient or version was rewritten fails its chain hash and nothing is shown",
+    "TEST-F-02 patient_replay: malformed stored rows are refused without presenting a partial report",
     "TEST-F-02 patient_replay: refused, aborted and conflict events are replayed as such and filtered by action, result and address",
     "TEST-F-02 patient_replay: a source failure, misordered or out-of-snapshot row is an error and never an empty or short result",
     "TEST-F-02 patient_replay: a sealed cursor continues the same snapshot without duplicates or gaps and another plan, auditor or forged cursor is refused",

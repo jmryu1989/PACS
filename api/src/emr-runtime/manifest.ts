@@ -1,5 +1,4 @@
 import { Prisma } from '@prisma/client';
-import { SQL_STORAGE_CLASSIFICATION } from '../emr-contract/classification';
 import { freeze } from '../emr-contract/validation';
 
 /**
@@ -7,34 +6,13 @@ import { freeze } from '../emr-contract/validation';
  * declaration emr/units/b.json lists the same sets and the contract/live tests hold both against the actual catalog.
  * Role names are fixed; secrets never appear here (provisioning supplies them from outside the repository).
  */
-export const EMR_MIGRATION = '20261010120000_emr_seal_attempts';
+export const EMR_MIGRATION = '20261023180000_emr_pg_ledger';
 export const EMR_STORAGE = freeze({
-  schema: 'emr_access',
-  tablespace: 'kin_emr_access',
+  schema: 'emr_access', tablespace: 'kin_emr_access',
   roles: { owner: 'kin_emr_owner', runtime: 'kin_runtime', reader: 'kin_emr_reader', retention: 'kin_emr_retention' },
-  tables: ['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'commit_marker', 'duty_request_event', 'legal_hold_event', 'member_identity', 'order_fact'],
-  runtimeFunctions: [
-    'enter_writer()', 'fence_writers()', 'commit_marker_for_slot(text,bigint)', 'commit_marker_for_attempt(text,text)', 'bind_commit(text,text,bigint,text)',
-    'append_reserved(text,text,text,text,text,text)', 'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)',
-    'storage_placement()', 'civil_period_end(timestamptz,integer)', 'resolve_member_identity(text,text)',
-    'record_projection(text,integer)', 'place_hold(text,text,text)', 'release_hold(text,text)', 'holds_for(text)',
-    'record_duty_request(text,text,text,text)', 'duty_requests(text,text)', 'clause_versions(text)',
-    'order_facts_for(text)', 'record_order_fact(text,text,text,text)',
-  ],
-  readerFunctions: [
-    'enter_writer()', 'fence_writers()', 'commit_marker_for_slot(text,bigint)', 'commit_marker_for_attempt(text,text)',
-    'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)', 'storage_placement()', 'civil_period_end(timestamptz,integer)',
-    'holds_for(text)', 'duty_requests(text,text)', 'clause_versions(text)', 'order_facts_for(text)',
-  ],
-  retentionFunctions: ['enter_writer()', 'fence_writers()', 'commit_marker_for_slot(text,bigint)', 'commit_marker_for_attempt(text,text)', 'bind_commit(text,text,bigint,text)', 'lock_chain(text)', 'expire_reserved(bigint,text,text)', 'retention_view(bigint,integer)', 'chain_tail(text)', 'storage_placement()'],
-  /** Never callable by the runtime: deletion and the clause history installer. */
-  forbiddenToRuntime: ['expire_reserved(bigint,text,text)', 'record_clause_version(text,text,text,text,date,date)'],
-  stateDirectoryVariable: 'KIN_EMR_STATE_DIR',
+  tables: ['access_entry','access_target','audit_projection','clause_version','duty_request_event','legal_hold_event',
+    'member_identity','order_fact','ledger_metadata','operation','attempt','attempt_outcome','entry_receipt','failure_entry','disposal_fact'],
 });
-{
-  const declared = Object.keys(SQL_STORAGE_CLASSIFICATION).map(name => name.replace(/^emr_access\./, '')).sort();
-  if (JSON.stringify(declared) !== JSON.stringify([...EMR_STORAGE.tables].sort())) throw new Error('EMR storage manifest and classification differ');
-}
 
 /** Prisma's parameterized raw query surface, from a client or an interactive transaction. */
 export interface RawQuery { $queryRaw<T = unknown>(query: TemplateStringsArray | Prisma.Sql, ...values: any[]): Promise<T> }
@@ -67,17 +45,22 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
   const [table] = await db.$queryRaw<any[]>`SELECT pg_catalog.to_regclass('emr_access.access_entry') IS NOT NULL AS present`;
   if (!table.present) throw new EmrRuntimeRefused([...problems, 'ledger-missing']);
   const [privileges] = await db.$queryRaw<any[]>`SELECT
-      (pg_catalog.has_table_privilege('emr_access.commit_marker', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR pg_catalog.has_table_privilege('emr_access.access_entry', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-        OR pg_catalog.has_table_privilege('emr_access.access_target', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS direct_write,
-      pg_catalog.has_function_privilege('emr_access.append_reserved(text,text,text,text,text,text)', 'EXECUTE') AS append,
-      pg_catalog.has_function_privilege('emr_access.expire_reserved(bigint,text,text)', 'EXECUTE') AS expire,
-      pg_catalog.has_function_privilege('emr_access.record_clause_version(text,text,text,text,date,date)', 'EXECUTE') AS clauses,
-      pg_catalog.has_schema_privilege('emr_access', 'CREATE') AS create_ledger,
-      pg_catalog.has_schema_privilege('public', 'CREATE') AS create_public`;
+      EXISTS (SELECT FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='emr_access' AND c.relkind='r'
+          AND pg_catalog.has_table_privilege(c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS direct_write,
+      pg_catalog.has_function_privilege('emr_access.append_operation(uuid,uuid,text,text,text,text,text)','EXECUTE') AS append,
+      pg_catalog.has_function_privilege('emr_access.expire_entry(uuid)','EXECUTE') AS expire,
+      pg_catalog.has_function_privilege('emr_access.record_clause_version(text,text,text,text,date,date)','EXECUTE') AS clauses,
+      pg_catalog.has_schema_privilege('emr_access','CREATE') AS create_ledger,
+      pg_catalog.has_schema_privilege('public','CREATE') AS create_public`;
   if (privileges.direct_write !== false) problems.push('direct-ledger-write');
   if (privileges.append !== true) problems.push('append-not-granted');
   if (privileges.expire !== false || privileges.clauses !== false) problems.push('retention-or-installer-reachable');
   if (privileges.create_ledger !== false || privileges.create_public !== false) problems.push('ddl-reachable');
+  const [durability] = await db.$queryRaw<any[]>`SELECT current_setting('fsync') AS fsync,
+    current_setting('full_page_writes') AS full_page_writes, current_setting('synchronous_commit') AS synchronous_commit`;
+  for (const setting of ['fsync','full_page_writes','synchronous_commit'])
+    if (durability[setting] !== 'on') problems.push(setting + '-required');
   const placement = await db.$queryRaw<{ relation: string; relkind: string; tablespace: string }[]>`SELECT relation, relkind, tablespace FROM emr_access.storage_placement()`;
   const tables = placement.filter(p => p.relkind === 'r').map(p => p.relation).sort();
   if (JSON.stringify(tables) !== JSON.stringify([...EMR_STORAGE.tables].sort())) problems.push('ledger-relations-differ');

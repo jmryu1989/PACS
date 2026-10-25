@@ -104,7 +104,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
-              'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql']
+              'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -124,13 +125,13 @@ SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'emr'}
 # EMR-B1: schema emr_access, observed schema-qualified (the public catalog above never sees it).
-EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'commit_marker', 'duty_request_event',
-                     'legal_hold_event', 'member_identity', 'order_fact'])
+EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'clause_version', 'duty_request_event',
+    'legal_hold_event', 'member_identity', 'order_fact', 'ledger_metadata', 'operation', 'attempt', 'attempt_outcome',
+    'entry_receipt', 'failure_entry', 'disposal_fact'])
 EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtime']
 # The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
 EMR_TABLESPACE = '/tmp/emr-access/ts'
-EMR_CHAIN_ID = '00000000-0000-4000-8000-00000000e001'
-EMR_HISTORY_CHAIN_ID = '00000000-0000-4000-8000-00000000e002'
+EMR_INSTALLATION_ID = '00000000-0000-4000-8000-00000000e001'
 
 
 class ProductMismatch(ValueError):
@@ -145,10 +146,13 @@ def uid_contract(value):
     require(type(value) is str and len(value) <= 64 and re.fullmatch(r'[0-9]+(?:\.[0-9]+)+', value))
 
 
-def migration_sources():
-    names = command(['git', 'ls-tree', '-r', '--name-only', 'HEAD', 'api/prisma/migrations']).decode().splitlines()
-    require([name for name in names if name.endswith('/migration.sql')] == MIGRATIONS)
-    values = [command(['git', 'show', 'HEAD:'+path]) for path in MIGRATIONS]
+def migration_sources(root=None):
+    # The image build and migrate deploy consume this checkout, including a
+    # recorded worker overlay. A HEAD blob can silently omit its new migration.
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[1]
+    names = sorted(p.relative_to(root).as_posix() for p in (root/'api/prisma/migrations').glob('*/migration.sql'))
+    require(names == MIGRATIONS)
+    values = [(root/path).read_bytes() for path in MIGRATIONS]
     require(all(0 < len(raw) <= 128*1024 for raw in values))
     return values
 
@@ -608,37 +612,37 @@ def jsonb_time(moment):
 
 
 def expected_emr_rows():
-    """Deterministic synthetic ledger facts: a two-entry chain with its head, a placed and released hold, one reviewed
-    clause version and one identity binding. Payloads are synthetic text; hashes are A's chain bytes over them."""
-    stamp = datetime(2026, 9, 6, 0, 0, 0, 123000)
+    """Deterministic native PG keys/outcomes/payloads and B1 hold/identity facts."""
+    stamp = jsonb_time(datetime(2026, 9, 6, 0, 0, 0, 123000))
     rows = {name: [] for name in EMR_TABLES}
-    previous, entries = '0'*64, []
-    for sequence, suffix in ((1, 'e101'), (2, 'e102')):
-        event_id = '00000000-0000-4000-8000-00000000' + suffix
-        payload = json.dumps({'kind': 'access', 'event': {'eventId': event_id, 'occurredAt': '2026-09-06T00:00:00.123Z',
-                              'synthetic': True}}, separators=(',', ':'))
-        digest = hashlib.sha256(('{"sequence":%d,"previousHash":"%s","payload":%s}' % (sequence, previous, payload)).encode()).hexdigest()
-        entries.append(dict(stream='viewing', sequence=sequence, previous_hash=previous, hash=digest, kind='access', statutory_act='none', event_id=event_id, payload=payload,
-            content_sha256=hashlib.sha256(payload.encode()).hexdigest(), occurred_at=jsonb_time(stamp),
-            stored_at=jsonb_time(stamp)))
-        previous = digest
-    rows['access_entry'] = entries
-    rows['commit_marker'] = [dict(stream='viewing',chain_id=EMR_CHAIN_ID,attempt_id='SYNTHETIC-attempt-'+str(e['sequence']),
-        bundle_id='SYNTHETIC-bundle-'+str(e['sequence']),kind=e['kind'],event_id=e['event_id'],sequence=e['sequence'],
-        previous_hash=e['previous_hash'],hash=e['hash'],content_sha256=e['content_sha256'],generation=e['sequence'],
-        proof_digest=None,transaction_id=1) for e in entries]
-    # D-1: two streams, each its own chain; the seeded entries are viewing entries, the history stream is empty.
-    rows['chain_head'] = [dict(stream='viewing', chain_id=EMR_CHAIN_ID, sequence=2, hash=previous),
-                          dict(stream='history', chain_id=EMR_HISTORY_CHAIN_ID, sequence=0, hash='0'*64)]
+    rows['ledger_metadata'] = [dict(singleton=True, installation_id=EMR_INSTALLATION_ID, schema_version='pg-ledger-1')]
+    entries = rows['access_entry']
+    for sequence in (1, 2):
+        event_id = '00000000-0000-4000-8000-%012d' % (100+sequence)
+        operation = '00000000-0000-4000-8000-%012d' % (200+sequence)
+        attempt = '00000000-0000-4000-8000-%012d' % (300+sequence)
+        entry = '00000000-0000-4000-8000-%012d' % (400+sequence)
+        payload = json.dumps(dict(eventId=event_id, occurredAt='2026-09-06T00:00:00.123Z',
+            userId={'status':'unresolved','reason':'not-authenticated'}, result='refused', targets=[]), separators=(',', ':'))
+        rows['operation'].append(dict(operation_id=operation,event_id=event_id,
+            content_sha256=hashlib.sha256(('none:'+payload).encode()).hexdigest(),
+            actor_sha256=hashlib.sha256(b'{"reason": "not-authenticated", "status": "unresolved"}').hexdigest(),
+            streams=['viewing'],admitted_at=stamp,pending=False))
+        rows['attempt'].append(dict(stream='viewing',attempt_id=attempt,operation_id=operation,admitted_at=stamp))
+        rows['attempt_outcome'].append(dict(operation_id=operation,outcome='committed',recorded_at=stamp,
+            result_kind=None,result_id=None,result_version=None))
+        rows['entry_receipt'].append(dict(entry_id=entry,operation_id=operation,stream='viewing',event_id=event_id,attempt_id=attempt))
+        entries.append(dict(entry_id=entry,sequence=sequence,operation_id=operation,stream='viewing',event_id=event_id,
+            payload=payload,occurred_at=stamp,recorded_at=stamp,statutory_act='none',retention_class='viewing2y'))
     hold = dict(holdId='SYNTHETIC-hold-1', recordId=entries[0]['event_id'], basis={'synthetic': True}, actorId='SYNTHETIC-custodian',
                 at='2026-09-06T00:00:00.123Z', release=None)
     released = dict(hold, release={'holdId': 'SYNTHETIC-hold-1', 'synthetic': True})
     rows['legal_hold_event'] = [dict(hold_id='SYNTHETIC-hold-1', phase=phase, record_id=entries[0]['event_id'],
-        body=json.dumps(body, separators=(',', ':')), recorded_at=jsonb_time(stamp)) for phase, body in (('placed', hold), ('released', released))]
+        body=json.dumps(body, separators=(',', ':')), recorded_at=stamp) for phase, body in (('placed', hold), ('released', released))]
     rows['clause_version'] = [dict(clause_id='synthetic-law:article-1', publication='2026-v1', law='synthetic-law', article='article-1',
-        published_at='2026-01-01', effective_at='2026-01-01', recorded_at=jsonb_time(stamp))]
+        published_at='2026-01-01', effective_at='2026-01-01', recorded_at=stamp)]
     rows['member_identity'] = [dict(id='00000000-0000-4000-8000-00000000e201', issuer='https://identity.example.test',
-        subject='SYNTHETIC-sub', created_at=jsonb_time(stamp))]
+        subject='SYNTHETIC-sub', created_at=stamp)]
     at, record_id = '2026-09-06T00:00:00.123Z', 'SYNTHETIC-native-order'
     facts = dict(objectKind='order-indication', origin='product-authored', authorId='SYNTHETIC-physician', authorRole='physician',
         requestingClinicianId='SYNTHETIC-physician', directionSourceRef=None, examCodes=['SYNTHETIC-CT'], source=None, feed=None,
@@ -650,7 +654,7 @@ def expected_emr_rows():
         predecessor=None, components=[], processing=None)
     body = dict(recordId=record_id, eventId=event['eventId'], previousEventId=None, facts=facts, event=event)
     rows['order_fact'] = [dict(record_id=record_id, event_id=event['eventId'], sequence=1, previous_event_id=None,
-        body=json.dumps(body, separators=(',', ':')), recorded_at=jsonb_time(stamp))]
+        body=json.dumps(body, separators=(',', ':')), recorded_at=stamp)]
     return rows
 
 
@@ -695,16 +699,52 @@ def provision(name, installer='postgres'):
 
 def seed_emr(name, db):
     data = expected_emr_rows()
-    for table in ('access_entry', 'commit_marker', 'legal_hold_event', 'clause_version', 'member_identity', 'order_fact'):
+    # The clean migration has exactly one metadata row. Fix only this synthetic
+    # installation id; every dependent row is inserted with the real constraints.
+    execute(name, db, "UPDATE emr_access.ledger_metadata SET installation_id="+sql_literal(EMR_INSTALLATION_ID)+"::uuid")
+    for table in ('operation', 'attempt', 'attempt_outcome', 'entry_receipt', 'access_entry',
+                  'legal_hold_event', 'clause_version', 'member_identity', 'order_fact'):
         for row in data[table]:
-            execute(name, db, 'BEGIN; SET LOCAL session_replication_role = replica; INSERT INTO emr_access.'+table+' SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
-                    sql_literal(json.dumps(row))+'); COMMIT')
-    viewing, history = data['chain_head']
-    # Synthetic fixture only: the head rows are append-guarded for every role, so their fixed chain identities are set past
-    # the guard as the superuser, in one statement's transaction.
-    execute(name, db, "BEGIN; SET LOCAL session_replication_role = replica; "+''.join(
-        "UPDATE emr_access.chain_head SET chain_id = "+sql_literal(row['chain_id'])+"::uuid, sequence = "+str(row['sequence'])+
-        ", hash = "+sql_literal(row['hash'])+" WHERE stream = "+sql_literal(row['stream'])+"; " for row in (viewing, history))+"COMMIT")
+            execute(name, db, 'INSERT INTO emr_access.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
+                    sql_literal(json.dumps(row))+')')
+    execute(name, db, "DO $$ BEGIN PERFORM setval('emr_access.access_entry_sequence_seq', 2, true); END $$")
+    for table, rows in expected_image_rows().items():
+        for row in rows:
+            execute(name, db, 'INSERT INTO emr_image.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_image.'+table+', '+sql_literal(json.dumps(row))+')')
+    execute(name, db, "DO $$ BEGIN PERFORM setval('emr_image.observation_sequence_seq', 2, true); END $$")
+
+
+def expected_image_rows():
+    event = '00000000-0000-4000-8000-0000000e0001'
+    at = '2026-10-25T00:00:00+00:00'
+    copy = dict(location='/synthetic/image-staging/body', kind='staging', eventId=event,
+                unit='object:2.25.701.1.1', bytes=4, sha256='1'*64, state='present')
+    return dict(preparation=[dict(event_id=event, study_uid='2.25.701',
+        source_manifest=dict(studyUid='2.25.701', patient=dict(linkId='synthetic-link', patientId='SYNTHETIC-E', assigningAuthority='synthetic')),
+        response_manifest=dict(eventId=event, sha256='2'*64, http=dict(status=206, plannedBytes=2,
+            selections=[dict(unit=copy['unit'], start=0, end=2)])), staging_copies=[copy], recorded_at=at)],
+        observation=[dict(sequence=1, event_id=event, kind='transport',
+            body=dict(wire=dict(bytesWritten=2, plannedBytes=2, terminal='transfer-ended'), observations=[]), recorded_at=at),
+            dict(sequence=2, event_id=event, kind='copies', body=[dict(copy, state='removed')], recorded_at=at)])
+
+
+def observe_image(name, db):
+    # Preserve representations/copies as well as the schema and sequence needed
+    # for the next observation after restore. B2 alone decides durable success.
+    catalog_sql = CATALOG_SQL.replace("'public'", "'emr_image'")
+    return dict(catalog=inventory.parse(psql(name, db, catalog_sql)),
+        rows={table: inventory.parse(psql(name, db,
+            'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_image.'+table+' t'))
+            for table in ('preparation', 'observation')},
+        sequence=inventory.parse(psql(name, db,
+            "SELECT jsonb_build_object('last_value',last_value,'is_called',is_called) FROM emr_image.observation_sequence_seq")))
+
+
+def image_contract(image):
+    require(type(image) is dict and set(image) == {'catalog', 'rows', 'sequence'})
+    require(image['catalog']['tables'] == ['observation', 'preparation'])
+    require(canonical(sorted_rows(image['rows'])) == canonical(sorted_rows(expected_image_rows())))
+    require(image['sequence'] == dict(last_value=2, is_called=True))
 
 
 def create_product(name, db, uid):
@@ -799,7 +839,7 @@ def emr_catalog_contract(value):
     require([r['name'] for r in value['roles']] == EMR_ROLES and value['memberships'] == 0)
     require(not any(r[k] for r in value['roles'] for k in ('super', 'createrole', 'createdb', 'replication', 'bypassrls')))
     require(all(f['owner'] == 'kin_emr_owner' for f in value['functions']))
-    require(not any(g.startswith(('access_entry:', 'commit_marker:', 'chain_head:', 'legal_hold_event:', 'clause_version:')) for g in value['runtime_grants']))
+    require(not any(g.startswith(('access_entry:', 'operation:', 'attempt:', 'attempt_outcome:', 'entry_receipt:', 'legal_hold_event:', 'clause_version:')) for g in value['runtime_grants']))
 
 
 def catalog_contract(value):
@@ -827,7 +867,7 @@ def observe(name, db):
     emr_rows = {table: inventory.parse(psql(name, db,
         'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_access."'+table+'" t'))
         for table in EMR_TABLES}
-    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows))
+    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows, image=observe_image(name, db)))
 
 
 def sorted_rows(rows):
@@ -888,9 +928,10 @@ def product_contract(product):
     catalog_contract(product['catalog'])
     require(canonical(sorted_rows(product['rows'])) == canonical(sorted_rows(expected_rows(product['study_uid']))))
     require(canonical(product['sequences']) == canonical(expected_sequences()))
-    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows'})
+    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows', 'image'})
     emr_catalog_contract(product['emr']['catalog'])
     require(canonical(sorted_rows(product['emr']['rows'])) == canonical(sorted_rows(expected_emr_rows())))
+    image_contract(product['emr']['image'])
 
 
 def relation(snapshot):
@@ -1182,20 +1223,18 @@ def constraint_probes(name, product):
       BEGIN INSERT INTO "AuditLog" (id,actor,action,target) VALUES(-1,'SYNTHETIC','SYNTHETIC','SYNTHETIC');
         DELETE FROM "AuditLog" WHERE id=-1;
         RAISE EXCEPTION 'missing audit append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      -- EMR-B1 after the restore: the ledger stays placed, append-only for the owner path, closed to the runtime's direct
-      -- writes and to its expiry call, and the retention role cannot remove an unexpired prefix.
+      -- PG ledger role/placement and the real expiry floor survive the restore.
       IF EXISTS (SELECT 1 FROM emr_access.storage_placement() WHERE tablespace <> 'kin_emr_access') THEN
         RAISE EXCEPTION 'emr placement lost'; END IF;
-      BEGIN DELETE FROM emr_access.access_entry;
-        RAISE EXCEPTION 'missing emr append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN UPDATE emr_access.chain_head SET sequence = 0;
-        RAISE EXCEPTION 'missing emr head guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; INSERT INTO emr_access.access_entry SELECT * FROM emr_access.access_entry;
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; DELETE FROM emr_access.access_entry;
+        RAISE EXCEPTION 'runtime deletes legal entries'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      -- Valid identity syntax lets this probe reach the runtime grant check.
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; INSERT INTO emr_access.access_entry OVERRIDING SYSTEM VALUE SELECT * FROM emr_access.access_entry;
         RAISE EXCEPTION 'runtime writes the ledger directly'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; PERFORM emr_access.expire_reserved(1, 'SYNTHETIC-probe-attempt', 'SYNTHETIC-probe-bundle');
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; PERFORM emr_access.expire_entry('00000000-0000-4000-8000-000000000401');
         RAISE EXCEPTION 'runtime reaches expiry'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN EXECUTE 'SET LOCAL ROLE kin_emr_retention'; PERFORM emr_access.expire_reserved(1, 'SYNTHETIC-probe-attempt', 'SYNTHETIC-probe-bundle');
-        RAISE EXCEPTION 'unexpired prefix removed'; EXCEPTION WHEN SQLSTATE 'EB004' THEN NULL; END;
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_emr_retention'; PERFORM emr_access.expire_entry('00000000-0000-4000-8000-000000000401');
+        RAISE EXCEPTION 'unexpired entry removed'; EXCEPTION WHEN SQLSTATE 'EB004' THEN NULL; END;
       EXECUTE 'RESET ROLE';
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)

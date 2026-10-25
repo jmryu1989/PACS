@@ -1,4 +1,15 @@
 'use strict';
+
+// B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
+// Real ledger atomicity and HTTP publication are tested against PostgreSQL.
+const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
+function b2Ledger(prisma) {
+  return { begin: () => ({
+    resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
+    transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
+    end() {},
+  }) };
+}
 // WORKLIST-SPLIT-UID (spec-worklist-split-uid-20261016): REQ-WSU-01..06/08 -> RISK-WSU-01..06/08 ->
 // TEST-WSU-02, 03, 04, 05, 06, 08, 09, 12 (pure part). TEST-WSU-01 is tests/study_source_test.cjs.
 // Every case calls the real services: PacsService (worklist, gateway, draft, hold, evidence, institutions, clinician),
@@ -158,8 +169,8 @@ function world({ resources = [], states = [], policy = null, institutions = INST
   w.prisma = client(store, true);
   w.orthancService = new OrthancService();
   w.studyAccess = new StudyAccessService(w.prisma, w.orthancService, {});
-  w.pacs = new PacsService(w.prisma, w.orthancService, { usersInGroupWithRole: async () => [] }, w.studyAccess,
-    { readableFindings: async () => [] });
+  w.pacs = withDraftRequestContext(new PacsService(w.prisma, w.orthancService, { usersInGroupWithRole: async () => [] }, w.studyAccess,
+    { readableFindings: async () => [] }, b2Ledger(w.prisma)), b2Ledger(w.prisma));
   w.start = async () => { const log = console.log; console.log = () => {}; try { await w.pacs.onModuleInit(); } finally { console.log = log; } return w; };
   w.arrivals = () => w.audits.filter(a => a.action === 'study.arrived');
   w.sourceWrites = () => w.orthanc.filter(c => !(c.method === 'GET' || c.method === 'POST' && c.path === '/tools/find'));

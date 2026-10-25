@@ -12,7 +12,7 @@ export const ACCESS_ACTIONS = freeze({
   export: ['print-opened', 'print-done', 'pdf', 'copy', 'download', 'disclosure'],
   failure: ['auth-refused', 'permission-refused', 'conflict', 'storage-failed', 'signature-failed'],
 } as const);
-/** Closed non-patient targets. Everything else requires patient/study/record/version facts on success. */
+/** Closed non-patient targets. Patient-bearing records retain their observed identity facts. */
 export const NON_RECORD_TARGETS: readonly RecordKind[] = freeze(['preferences', 'reading-template', 'institution',
   'identity-access', 'authentication-session', 'system-operation']);
 export const STATUTORY_ACT = freeze({
@@ -48,9 +48,9 @@ export interface AccessEventV1 {
   actingInstitution: EvidenceFact<string>;
   managingInstitution: EvidenceFact<string>;
   occurredAt: string;
-  trustedProxyIp: EvidenceFact<{ address: string; source: 'trusted-proxy' }>;
+  trustedProxyIp: EvidenceFact<{ address: string; source: 'trusted-proxy' | 'request-peer' }>;
   cause: CauseKind;
-  /** D-18: the business context the server bound to this access (one-line reason only out of context). */
+  /** D-18: the business context the server bound to this access (optional reason out of context). */
   context: Readonly<WorkContext>;
   executor: 'member' | 'service' | 'unauthenticated';
   targets: readonly AccessTarget[];
@@ -110,9 +110,11 @@ function expectedResult(action: AccessAction): AccessEventV1['result'] {
     ['client-shown', 'print-done', 'pdf', 'copy'].includes(action) ? 'reported' : 'succeeded';
 }
 function surfaceKindsOf(surface: string): readonly RecordKind[] {
-  return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] : routeContract(surface).kinds;
+  return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] :
+    Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface) ? INTERNAL_SURFACES[surface].kinds : routeContract(surface).kinds;
 }
-function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean): AccessTarget[] {
+function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean,
+    surface?: string): AccessTarget[] {
   if (!Array.isArray(input)) throw new Error('Actual returned target set required');
   return input.map((target, index) => {
     const t = object(target, ['kind', 'patientLinkSnapshot', 'studyId', 'recordId', 'versionId']);
@@ -125,10 +127,21 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     if (!surfaceKinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
     const parsed = { kind, patientLinkSnapshot: fact(t.patientLinkSnapshot, patientLink), studyId: fact(t.studyId, value => string(value)),
       recordId: fact(t.recordId, value => string(value)), versionId: fact(t.versionId, value => string(value)) };
+    // This report serves immutable audit rows, including patientless login rows.
+    // Keep the clinical/disclosure meaning of access-audit on other surfaces.
+    if (surface === 'GET admin/audit' && kind === 'access-audit' && parsed.recordId.status === 'known' &&
+        [parsed.patientLinkSnapshot, parsed.studyId, parsed.versionId].every(f =>
+          f.status === 'not-applicable' && f.reason === 'non-record-target')) return parsed;
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
     if (facts.some(f => f.status === 'not-applicable' && (!NON_RECORD_TARGETS.includes(kind) || f.reason !== 'non-record-target')))
       throw new Error('Patient-bearing record facts cannot be waived');
-    if (!failure && facts.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
+    // Native drafts and the approved Source read by a W5 insertion have persisted
+    // study/record/version identities but no patient-link row. Preserve that
+    // unknown fact on these existing boundaries; never invent a patient link.
+    const nativeRecord = kind === 'private-draft' ||
+      (['PUT studies/:uid/report', 'POST studies/:uid/report/commit'].includes(surface) && kind === 'report-version');
+    const required = nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
+    if (!failure && required.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
     return parsed;
   });
 }
@@ -147,27 +160,34 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
   if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
   const userId = fact(v.userId, identity);
   const rolesAtTime = fact(v.rolesAtTime, roles => {
-    if (!Array.isArray(roles) || !roles.length || new Set(roles).size !== roles.length) throw new Error('Roles missing or duplicated');
+    const internalService = v.executor === 'service' && v.cause === 'service-job'
+      && Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface);
+    if (!Array.isArray(roles) || (!roles.length && !internalService) || new Set(roles).size !== roles.length)
+      throw new Error('Roles missing or duplicated');
     return roles.map(role => string(role));
   });
   const actingInstitution = fact(v.actingInstitution, value => string(value));
   const managingInstitution = fact(v.managingInstitution, value => string(value));
   const trustedProxyIp = fact(v.trustedProxyIp, value => {
     const ip = object(value, ['address', 'source']);
-    if (isIP(ip.address) === 0 || ip.source !== 'trusted-proxy') throw new Error('Trusted proxy IP required');
-    return { address: ip.address as string, source: 'trusted-proxy' as const };
+    if (isIP(ip.address) === 0 || !['trusted-proxy', 'request-peer'].includes(ip.source)) throw new Error('Observed IP required');
+    return { address: ip.address as string, source: ip.source as 'trusted-proxy' | 'request-peer' };
   });
   const executor = choice(v.executor, ['member', 'service', 'unauthenticated']);
   const cause = choice(v.cause, ['user-view', 'background-fetch', 'service-job']);
   const inProcess = executor === 'service' && cause === 'service-job' && trustedProxyIp.status === 'not-applicable' && trustedProxyIp.reason === 'in-process-service';
-  if ((!failure && [userId, rolesAtTime, actingInstitution, managingInstitution].some(f => f.status !== 'known')) ||
-      (!failure && trustedProxyIp.status !== 'known' && !inProcess) ||
+  // A member-rights command has no patient scope. An unobserved ingress address
+  // stays unknown for every event (B2 v2 item 2); it must never be invented.
+  const rightsOnly = Array.isArray(v.targets) && v.targets.length > 0 && v.targets.every(t => t.kind === 'identity-access');
+  if ((!failure && [userId, rolesAtTime, ...(!rightsOnly ? [actingInstitution, managingInstitution] : [])].some(f => f.status !== 'known')) ||
+      (!failure && !rightsOnly && trustedProxyIp.status !== 'known' && !inProcess
+        && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed')) ||
       (trustedProxyIp.status === 'not-applicable' && !inProcess) ||
       (executor === 'unauthenticated' && (action !== 'auth-refused' || userId.status !== 'unresolved')) ||
       (action === 'auth-refused' && executor !== 'unauthenticated') ||
       (cause === 'service-job' && executor !== 'service')) throw new Error('Unresolved or inconsistent actor context');
   const context = workContext(v.context, cause, action === 'auth-refused');
-  const targets = parseTargets(v.targets, surfaceKinds, manifest, failure);
+  const targets = parseTargets(v.targets, surfaceKinds, manifest, failure, surface);
   const auditLinkId = string(v.auditLinkId);
   if (!AUDIT_LINK.test(auditLinkId)) throw new Error('Invalid audit link ID');
   const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
@@ -182,7 +202,7 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
  * D-18 (legal register / delta map MAP-D18) [PREDICTED-CONSERVATIVE]: every access event names the business context the
  * server observed, bound from the work context - reading an assigned study, comparing a same-patient prior, a clinical
  * request, the worklist, a background fetch for the current work, an in-process job, authentication. Nothing is typed in
- * the normal flow. Only an access outside every context carries one explicit line of reason (break-glass). The context is
+ * the normal flow. An optional reason may accompany out-of-context access; it never gates ordinary viewing. The context is
  * part of the hashed event and is never a permission: authorization is decided before and apart from it.
  */
 export const WORK_CONTEXTS = freeze(['assigned-reading', 'same-patient-comparison', 'clinical-request', 'worklist',
@@ -202,8 +222,8 @@ function workContext(input: unknown, cause: CauseKind, authentication: boolean):
     authentication ? ['authentication'] : MEMBER_CONTEXTS;
   if (!expected.includes(basis)) refuse('WorkContextMismatch');
   if (basis === 'out-of-context') {
-    if (reason === null || reason !== reason.trim() || /[\r\n\u2028\u2029]/.test(reason) || reason.length > OUT_OF_CONTEXT_REASON_MAX)
-      refuse('OutOfContextReasonRequired');
+    if (reason !== null && (reason !== reason.trim() || /[\r\n\u2028\u2029]/.test(reason) || reason.length > OUT_OF_CONTEXT_REASON_MAX))
+      refuse('OutOfContextReasonInvalid');
   } else if (reason !== null) refuse('ReasonOnlyOutOfContext');
   if ((basis === 'assigned-reading' || basis === 'clinical-request') && (studyId === null || relatedStudyId !== null)) refuse('WorkContextStudyRequired');
   if (basis === 'same-patient-comparison' && (studyId === null || relatedStudyId === null || studyId === relatedStudyId)) refuse('WorkContextStudyRequired');
@@ -214,7 +234,8 @@ const AUDIT_LINK = /^audit:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3
 const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // ── formatVersion 2 (EMR-B1, D596) ──
-// Two closed branches. `online-auth` is a U5 authentication fact; it never names clinical targets and never passes as a
+// `local-read` records observed local sources without a formal record envelope.
+// `online-auth` is a U5 authentication fact; it never names clinical targets and never passes as a
 // clinical write. `verified-offline` is a clinical act that happened on a registered device while disconnected; it is
 // admitted only through the verification capability composed at server start (none until C ships real key/signature
 // verification, so the branch is refused as unsupported). v1 parsing and results are unchanged apart from D-18's context.
@@ -253,7 +274,7 @@ export interface AuthAccessEventV2 {
   actingInstitution: EvidenceFactV2<string>;
   managingInstitution: EvidenceFactV2<string>;
   occurredAt: string;
-  trustedProxyIp: EvidenceFactV2<{ address: string; source: 'trusted-proxy' }>;
+  trustedProxyIp: EvidenceFactV2<{ address: string; source: 'trusted-proxy' | 'request-peer' }>;
   cause: CauseKind;
   /** D-18: 'authentication', or 'service-job' for an in-process sweep. */
   context: Readonly<WorkContext>;
@@ -293,7 +314,33 @@ export interface OfflineAccessEventV2 {
   /** The separate online reception event of this original. */
   relatedEventId: string;
 }
-export type AccessEventV2 = AuthAccessEventV2 | OfflineAccessEventV2;
+/** Local source observations do not assert a formal PatientLink or a signed/retained record. */
+export interface LocalReadTarget {
+  kind: 'study-metadata' | 'report-version' | 'report-evidence';
+  studyId: EvidenceFact<string>;
+  recordId: EvidenceFact<string>;
+  versionId: EvidenceFact<string>;
+  sourcePatientId: EvidenceFact<string>;
+  sourceInstitution: EvidenceFact<string>;
+  projectionSha256: string;
+}
+export interface LocalReadAccessEventV2 {
+  formatVersion: 2; branch: 'local-read';
+  surface: string; eventId: string;
+  userId: EvidenceFact<ImmutableIdentity>; rolesAtTime: EvidenceFact<readonly string[]>;
+  rightsVersion: number;
+  actingInstitution: EvidenceFact<string>; managingInstitution: EvidenceFact<string>;
+  occurredAt: string; trustedProxyIp: AccessEventV1['trustedProxyIp'];
+  session: Readonly<{ method: 'session'; sessionRef: string } | { method: 'bearer'; sessionRef: null }>;
+  cause: 'user-view' | 'background-fetch'; executor: 'member';
+  /** Preserve an existing source work context when observed; never infer an assignment or request a reason. */
+  context: Readonly<WorkContext> | null;
+  targets: readonly LocalReadTarget[];
+  action: 'provide-prepared' | 'transfer-ended' | 'transfer-aborted' | 'client-shown';
+  result: 'prepared' | 'succeeded' | 'aborted' | 'reported';
+  requestId: string; auditLinkId: string; relatedEventId: string | null;
+}
+export type AccessEventV2 = AuthAccessEventV2 | OfflineAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2;
 export type AccessEvent = AccessEventV1 | AccessEventV2;
 
 function factV2<T>(input: unknown, parse: (value: unknown) => T, unresolved: readonly UnresolvedReason[],
@@ -314,15 +361,17 @@ function roleList(value: unknown): readonly string[] {
 }
 function proxyAddress(value: unknown) {
   const ip = object(value, ['address', 'source']);
-  if (isIP(ip.address) === 0 || ip.source !== 'trusted-proxy') throw new Error('Trusted proxy IP required');
-  return { address: ip.address as string, source: 'trusted-proxy' as const };
+  if (isIP(ip.address) === 0 || !['trusted-proxy', 'request-peer'].includes(ip.source)) throw new Error('Observed IP required');
+  return { address: ip.address as string, source: ip.source as 'trusted-proxy' | 'request-peer' };
 }
 const authRoutes = () => Object.keys(ROUTE_CONTRACTS).filter(r => ROUTE_CONTRACTS[r].operation === 'auth' && ROUTE_CONTRACTS[r].kinds.includes('authentication-session'));
 /** Where each authentication fact can be observed; the producer records the actual route or the closed internal surface. */
 function authSurfaces(action: AuthAction, endCause: AuthEndCause | null): readonly string[] {
   if (action === 'auth.login') return ['GET auth/callback'];
   if (action === 'auth.entry') return ['POST auth/entry'];
-  if (endCause === 'logout') return ['POST auth/logout'];
+  // The existing start flow also finishes an explicitly unfinished logout
+  // before starting the next login. Record that actual route and cause.
+  if (endCause === 'logout') return ['POST auth/logout', 'POST auth/login'];
   if (endCause === 'account-switch' || endCause === 'reauthentication') return authRoutes().filter(r => r !== 'POST auth/entry');
   if (endCause === 'isolation') return Object.keys(ROUTE_CONTRACTS).filter(r => ROUTE_CONTRACTS[r].operation === 'write' && ROUTE_CONTRACTS[r].kinds.includes('identity-access'));
   if (endCause === 'sweep') return Object.keys(INTERNAL_SURFACES).filter(s => INTERNAL_SURFACES[s].kinds.includes('authentication-session'));
@@ -333,9 +382,65 @@ function surfaceCauses(surface: string): readonly CauseKind[] {
 }
 function parseAccessEventV2(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEventV2> {
   const branch = input && typeof input === 'object' ? Object.getOwnPropertyDescriptor(input, 'branch')?.value : undefined;
+  if (branch === 'local-read') return parseLocalReadEvent(input);
   if (branch === 'online-auth') return parseAuthEventV2(input);
   if (branch === 'verified-offline') return parseOfflineEventV2(input, served);
+  if (branch === 'original-download') return parseOriginalDownloadEvent(input);
   throw new Error('Unknown access format branch');
+}
+export function parseLocalReadEvent(input: unknown): Readonly<LocalReadAccessEventV2> {
+  const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'rightsVersion',
+    'actingInstitution', 'managingInstitution', 'occurredAt', 'trustedProxyIp', 'session', 'cause', 'executor',
+    'context', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
+  if (v.formatVersion !== 2 || v.branch !== 'local-read' || v.executor !== 'member') throw new Error('Local member read required');
+  const surface = string(v.surface), kinds = surfaceKindsOf(surface);
+  const action = choice(v.action, ['provide-prepared', 'transfer-ended', 'transfer-aborted', 'client-shown']);
+  const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'reported']);
+  if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
+  const cause = choice(v.cause, ['user-view', 'background-fetch']);
+  if (!surfaceCauses(surface).includes(cause)) throw new Error('Cause does not belong to the server surface');
+  const observed = (value: unknown) => {
+    const parsed = fact(value, v => string(v));
+    if (parsed.status !== 'known' && !(parsed.status === 'unresolved' && parsed.reason === 'not-observed'))
+      throw new Error('Local observation required');
+    return parsed;
+  };
+  const required = <T>(value: unknown, parse: (v: unknown) => T): EvidenceFact<T> => {
+    const parsed = fact(value, parse);
+    if (parsed.status !== 'known') throw new Error('Resolved local fact required');
+    return parsed;
+  };
+  if (!Array.isArray(v.targets) || !v.targets.length) throw new Error('Actual local targets required');
+  const targets = v.targets.map(value => {
+    const t = object(value, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution', 'projectionSha256']);
+    const kind = choice(t.kind, ['study-metadata', 'report-version', 'report-evidence']);
+    if (!kinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
+    const versionId = kind === 'study-metadata' ? observed(t.versionId) : required(t.versionId, v => string(v));
+    if (action === 'client-shown' && kind !== 'report-version' && kind !== 'report-evidence')
+      throw new Error('Client display reporting requires a stored report target');
+    return { kind, studyId: required(t.studyId, v => string(v)), recordId: required(t.recordId, v => string(v)),
+      versionId, sourcePatientId: observed(t.sourcePatientId), sourceInstitution: observed(t.sourceInstitution),
+      projectionSha256: sha256(t.projectionSha256) };
+  });
+  const binding = object(v.session, ['method', 'sessionRef']);
+  const session: LocalReadAccessEventV2['session'] = binding.method === 'session'
+    ? { method: 'session', sessionRef: string(binding.sessionRef) }
+    : binding.method === 'bearer' && binding.sessionRef === null ? { method: 'bearer', sessionRef: null }
+    : refuse('LocalReadSessionBindingRequired');
+  const eventId = string(v.eventId), auditLinkId = string(v.auditLinkId);
+  if (!UUID4.test(eventId) || !AUDIT_LINK.test(auditLinkId)) throw new Error('Server event correlation required');
+  const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
+  if ((action === 'provide-prepared') !== (relatedEventId === null) || relatedEventId === eventId)
+    throw new Error('Prepared event reference required');
+  const trustedProxyIp = fact(v.trustedProxyIp, proxyAddress);
+  if (trustedProxyIp.status !== 'known' && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed'))
+    throw new Error('Observed ingress required');
+  return freeze({ formatVersion: 2, branch: 'local-read', surface, eventId,
+    userId: required(v.userId, identity), rolesAtTime: required(v.rolesAtTime, roleList), rightsVersion: integer(v.rightsVersion),
+    actingInstitution: required(v.actingInstitution, v => string(v)), managingInstitution: required(v.managingInstitution, v => string(v)),
+    occurredAt: utc(v.occurredAt), trustedProxyIp, session, cause, executor: 'member',
+    context: v.context === null ? null : workContext(v.context, cause, false), targets, action, result,
+    requestId: string(v.requestId), auditLinkId, relatedEventId });
 }
 function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'rightsVersion', 'actingInstitution',
@@ -365,11 +470,11 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   if (!surfaceCauses(surface).includes(cause)) throw new Error('Cause does not belong to the server surface');
   const context = workContext(v.context, cause, true);
   const executor = choice(v.executor, ['member', 'service', 'unauthenticated']);
-  const userId = factV2(v.userId, identity, ['not-authenticated'], []);
-  const affectedIdentity = factV2(v.affectedIdentity, identity, ['not-authenticated'], []);
+  const userId = factV2(v.userId, identity, ['not-authenticated', 'not-resolved'], []);
+  const affectedIdentity = factV2(v.affectedIdentity, identity, ['not-authenticated', 'not-resolved'], []);
   const rolesAtTime = factV2(v.rolesAtTime, roleList, ['not-authenticated', 'not-resolved'], []);
   const rightsVersion = factV2(v.rightsVersion, value => integer(value, 0), ['not-authenticated', 'not-resolved'], ['in-process-service']);
-  const actingInstitution = factV2(v.actingInstitution, value => string(value), ['not-authenticated', 'not-resolved', 'not-observed'], ['not-approved']);
+  const actingInstitution = factV2(v.actingInstitution, value => string(value), ['not-authenticated', 'not-resolved', 'not-observed'], ['not-approved', 'in-process-service']);
   const managingInstitution = factV2(v.managingInstitution, value => string(value), ['not-resolved'], []);
   const trustedProxyIp = factV2(v.trustedProxyIp, proxyAddress, ['not-observed'], ['in-process-service']);
   const session = factV2(v.session, value => {
@@ -378,6 +483,8 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
     return reference;
   }, ['not-resolved'], []);
   const succeeded = result === 'succeeded';
+  const unresolvedEnd = endCause !== null && session.status === 'known' &&
+    affectedIdentity.status === 'unresolved' && affectedIdentity.reason === 'not-resolved';
   // The executor's own facts, then the affected member. A sweep's service is never the member it ended; an
   // administrator's isolation ends another member; every other end and login is the executor's own.
   let consistent: boolean;
@@ -386,17 +493,23 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
       userId.status === 'unresolved' && affectedIdentity.status === 'unresolved' &&
       [rolesAtTime, rightsVersion, actingInstitution].every(f => f.status === 'unresolved' && f.reason === 'not-authenticated');
   } else if (executor === 'service') {
-    consistent = cause === 'service-job' && endCause === 'sweep' && userId.status === 'known' && affectedIdentity.status === 'known' &&
+    consistent = cause === 'service-job' && endCause === 'sweep' && userId.status === 'known' && (affectedIdentity.status === 'known' || unresolvedEnd) &&
       !sameIdentity(userId, affectedIdentity) && trustedProxyIp.status === 'not-applicable' && rightsVersion.status === 'not-applicable' &&
-      rolesAtTime.status === 'known' && actingInstitution.status === 'known';
+      rolesAtTime.status === 'known' && (actingInstitution.status === 'known' ||
+        (actingInstitution.status === 'not-applicable' && actingInstitution.reason === 'in-process-service'));
   } else {
-    consistent = cause !== 'service-job' && endCause !== 'sweep' && userId.status === 'known' && affectedIdentity.status === 'known' &&
+    consistent = cause !== 'service-job' && endCause !== 'sweep' &&
       trustedProxyIp.status !== 'not-applicable' && rightsVersion.status !== 'not-applicable' &&
-      (endCause === 'isolation' ? !sameIdentity(userId, affectedIdentity) : sameIdentity(userId, affectedIdentity));
+      !(actingInstitution.status === 'not-applicable' && actingInstitution.reason === 'in-process-service') &&
+      ((userId.status === 'known' && affectedIdentity.status === 'known' && (endCause === 'isolation' || sameIdentity(userId, affectedIdentity))) ||
+       (unresolvedEnd && userId.status === 'unresolved' && userId.reason === 'not-resolved'));
   }
   if (!consistent) throw new Error('Unresolved or inconsistent actor context');
-  if (succeeded && (trustedProxyIp.status === 'unresolved' || [rolesAtTime, rightsVersion].some(f => f.status === 'unresolved') ||
-      actingInstitution.status === 'unresolved' || managingInstitution.status !== 'known' || session.status !== 'known'))
+  // A missing observation stays missing. In particular an unapproved member
+  // can finish ordinary login; logging must not fabricate an institution/IP or
+  // turn the existing waiting-for-approval workflow into an authentication failure.
+  if (succeeded && ([rolesAtTime, rightsVersion].some(f => f.status === 'unresolved') ||
+      actingInstitution.status === 'unresolved' || session.status !== 'known'))
     throw new Error('A successful authentication fact requires its observed context');
   if (!succeeded && session.status === 'known') throw new Error('A refused or failed login has no product session');
   if (!Array.isArray(v.targets) || v.targets.length !== 0) throw new Error('Authentication events never name clinical targets');
@@ -488,9 +601,9 @@ export async function provideAfterDurableEvent<T>(store: AppendOnlyAccessStore, 
 export const ACCESS_INVARIANTS = freeze({
   mutation: 'append-only-while-retained; runtime-insert-only-not-owner-or-superuser; no-update-delete',
   store: 'separate-from-business-records; privacy-21.3-segregation-and-medical-23.4-access-store',
-  integrity: 'server-sequence-and-previous-hash-in-same-append; trusted-tail-seal-detects-omissions',
-  deletion: 'retention-job-only; viewing-stream: expired-prefix-only, atomic-chain-checkpoint-with-nonpersonal-anchor; history-stream: with-the-changed-record-destruction-set-only (H); never-runtime',
-  liveVerification: 'B: runtime-update-delete-disable-trigger-denied; tamper-gap-tail-detected; expiry-role-no-unexpired-delete; crash-checkpoint-rollback',
+  integrity: 'PostgreSQL transaction, append functions and native recovery',
+  deletion: 'retention-role-only; expired payloads independently; minimal receipt survives; H closes physical copies',
+  liveVerification: 'B: runtime cannot mutate retained entries; atomic commit, bounded pending recovery and checked expiry',
   retention: 'two-streams (D-1): viewing = each-event-floor-2-years, longer-only-under-hold-or-legal-basis; history = changes (기재·추가기재·수정) as-long-as-the-changed-record; no-stored-expiry; no-last-access-reset-or-institution-override',
   retentionBasis: '안전성 확보조치 기준 제8조① 본문(정보주체 제외)·①2; 개인정보 보호법 제3조①②·제21조①',
   expiry: 'destroy-irreversibly-when-the-two-year-security-purpose-ends; no-automatic-longer-retention',
@@ -499,7 +612,7 @@ export const ACCESS_INVARIANTS = freeze({
   failure: 'independent transaction or protected failure journal; business rollback cannot erase failure',
   correlation: 'followups retain the prepared event target/version set; ACK never migrates to a new version',
   link: 'random audit-only ID; never a session ID, cookie, bearer token, or authentication credential',
-  context: 'D-18: server-bound work context in every event (hashed); one-line reason only out of context; never a permission',
+  context: 'D-18: server-bound work context in every event (hashed); optional reason out of context; never a permission',
   emptyTargets: 'only an actually empty result or non-record operation; never omitted discovered targets',
   proxy: 'B supplies verified proxy context, never an untrusted forwarded header',
   exports: 'print-done/pdf/copy describe client reports only, not proof of physical output or OS completion',
@@ -510,7 +623,7 @@ export const ACCESS_INVARIANTS = freeze({
  *  - `viewing`: every access event, kept for its own floor (안전성 확보조치 기준 제8조①, counted from the event; longer only
  *    under a hold or another legal basis). It holds 열람 events, events about no EMR record, and the floor remainder of
  *    every change, so a change made shortly before its record is destroyed stays here for its own floor. An expired
- *    prefix is deleted with a chained checkpoint (`sealAccessExpiry`) behind B's external seal.
+ *    payload may expire independently of unrelated held events, with a minimal disposal fact.
  *  - `history`: the change history of EMR records - a succeeded 기재·추가기재·수정 act about at least one record target
  *    (의료법 제23조④, 시행규칙 제16조①2·②) - kept as long as the record it changed and destroyed with that record's
  *    destruction set (unit H). It has no prefix expiry.
@@ -538,7 +651,7 @@ const CHANGE_ACTS: readonly StatutoryAct[] = freeze(['기재', '추가기재', '
 export function statutoryAct(input: unknown, served?: readonly ResolvedRecord[]): StatutoryAct {
   const event = parseAccessEvent(input, served);
   return event.formatVersion === 2 && event.branch === 'online-auth' ? AUTH_STATUTORY_ACT[event.action] :
-    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2).action];
+    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2).action];
 }
 /** The streams an event is recorded in: always the viewing stream; also the history stream when it changed a record. */
 export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]): readonly AccessStream[] {
@@ -548,56 +661,63 @@ export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]
   return changed ? ACCESS_STREAMS : freeze(['viewing'] as const);
 }
 
-/** Hash input is the ordered parsed payload plus monotonic position, never caller-supplied chain fields. */
-export interface ChainPosition { sequence: number; hash: string }
-export interface AccessExpiryCheckpoint { kind: 'expiry'; at: string; deletedThrough: number; deletedCount: number; anchorHash: string }
-export interface AccessChainEntry extends ChainPosition {
-  previousHash: string;
-  payload: { kind: 'access'; event: Readonly<AccessEvent> } | { kind: 'history'; event: Readonly<AccessEvent> } | AccessExpiryCheckpoint;
+/** A native copy carries A1's local-source shape: its study, operation (record) and fixed manifest (version), with the
+ * source PatientID/institution only as the route observed them. No formal PatientLink, signature or retained state.
+ * The projection a copy supplies is that canonical manifest, so its hash is the manifest's. */
+export type DownloadTarget = Omit<LocalReadTarget, 'kind'> & { kind: 'download' };
+export interface OriginalDownloadAccessEventV2 extends Omit<AccessEventV1, 'formatVersion' | 'targets' | 'context' | 'action' | 'result'> {
+  formatVersion: 2; branch: 'original-download';
+  rightsVersion: number;
+  session: Readonly<{ method: 'session'; sessionRef: string } | { method: 'bearer'; sessionRef: null }>;
+  targets: readonly DownloadTarget[];
+  action: 'provide-prepared' | 'transfer-ended' | 'transfer-aborted' | 'permission-refused' | 'conflict';
+  result: 'prepared' | 'succeeded' | 'aborted' | 'refused' | 'failed';
 }
-/** Each stream is its own chain from this genesis. */
-export const ACCESS_CHAIN_GENESIS: Readonly<ChainPosition> = freeze({ sequence: 0, hash: '0'.repeat(64) });
-function chainEntry(previous: ChainPosition, payload: AccessChainEntry['payload']): Readonly<AccessChainEntry> {
-  object(previous, ['sequence', 'hash']); integer(previous.sequence); sha256(previous.hash);
-  const sequence = integer(previous.sequence + 1, 1), previousHash = previous.hash;
-  const hash = createHash('sha256').update(JSON.stringify({ sequence, previousHash, payload })).digest('hex');
-  return freeze({ sequence, previousHash, payload, hash });
-}
-/** The viewing stream's entry keeps the v1 payload kind 'access'; the history stream's is 'history', so an entry can never
- * be moved between the streams unnoticed. Only an event that changed a record may enter the history stream. */
-export function sealAccessEvent(previous: ChainPosition, input: AccessEvent, stream: AccessStream = 'viewing'): Readonly<AccessChainEntry> {
-  choice(stream, ACCESS_STREAMS);
-  const event = parseAccessEvent(input);
-  if (stream === 'history' && !accessStreams(event).includes('history')) refuse('HistoryStreamRefused');
-  return chainEntry(previous, stream === 'history' ? { kind: 'history', event } : { kind: 'access', event });
-}
-/** Viewing stream only. Through is the last deleted prefix entry; B checks every entry's end and the legal holds first. */
-export function sealAccessExpiry(previous: ChainPosition, through: ChainPosition, deletedCount: number, at: string): Readonly<AccessChainEntry> {
-  object(through, ['sequence', 'hash']); integer(through.sequence, 1); integer(deletedCount, 1); sha256(through.hash);
-  if (through.sequence > previous.sequence || deletedCount > through.sequence) throw new Error('Invalid expired prefix');
-  return chainEntry(previous, { kind: 'expiry', at: utc(at), deletedThrough: through.sequence, deletedCount, anchorHash: through.hash });
-}
-/** Verification of one stream starts at a sealed anchor and must reach an independently protected expected tail. */
-export function verifyAccessChain(anchor: ChainPosition, entries: readonly AccessChainEntry[], expectedTail: ChainPosition,
-  stream: AccessStream = 'viewing'): boolean {
-  try {
-    choice(stream, ACCESS_STREAMS);
-    let previous = anchor;
-    for (const entry of entries) {
-      object(entry, ['sequence', 'previousHash', 'payload', 'hash']);
-      let expected: Readonly<AccessChainEntry>;
-      if (entry.payload.kind === 'access' || entry.payload.kind === 'history') {
-        if ((entry.payload.kind === 'history') !== (stream === 'history')) return false;
-        object(entry.payload, ['kind', 'event']); expected = sealAccessEvent(previous, entry.payload.event, stream);
-      } else {
-        if (stream !== 'viewing') return false;
-        const p = object(entry.payload, ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']); choice(p.kind, ['expiry']);
-        expected = sealAccessExpiry(previous, { sequence: p.deletedThrough, hash: p.anchorHash }, p.deletedCount, p.at);
-      }
-      if (entry.sequence !== expected.sequence || entry.previousHash !== expected.previousHash || entry.hash !== expected.hash) return false;
-      previous = { sequence: entry.sequence, hash: entry.hash };
-    }
-    object(expectedTail, ['sequence', 'hash']); integer(expectedTail.sequence); sha256(expectedTail.hash);
-    return previous.sequence === expectedTail.sequence && previous.hash === expectedTail.hash;
-  } catch { return false; }
+function parseOriginalDownloadEvent(input: unknown): Readonly<OriginalDownloadAccessEventV2> {
+  const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'rightsVersion',
+    'actingInstitution', 'managingInstitution', 'occurredAt', 'trustedProxyIp', 'session', 'cause', 'executor',
+    'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
+  const surface = choice(v.surface, ['POST studies/:uid/original-downloads',
+    'POST studies/:uid/original-downloads/:operationId/archive/grant', 'GET studies/:uid/original-downloads/:operationId/archive']);
+  const action = choice(v.action, ['provide-prepared', 'transfer-ended', 'transfer-aborted', 'permission-refused', 'conflict']);
+  const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed']);
+  if (v.formatVersion !== 2 || v.branch !== 'original-download' || v.executor !== 'member' || v.cause !== 'user-view' ||
+      result !== expectedResult(action)) throw new Error('Observed original download stage required');
+  const known = <T>(value: unknown, parse: (value: unknown) => T): EvidenceFact<T> => {
+    const parsed = fact(value, parse);
+    if (parsed.status !== 'known') throw new Error('Observed download fact required');
+    return parsed;
+  };
+  if (!Array.isArray(v.targets) || v.targets.length !== 1) throw new Error('One original download operation required');
+  const observed = (value: unknown) => {
+    const parsed = fact(value, v => string(v));
+    if (parsed.status !== 'known' && !(parsed.status === 'unresolved' && parsed.reason === 'not-observed'))
+      throw new Error('Local observation required');
+    return parsed;
+  };
+  const targets = v.targets.map(value => {
+    const t = object(value, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution', 'projectionSha256']);
+    return { kind: choice(t.kind, ['download']), studyId: known(t.studyId, string),
+      recordId: known(t.recordId, string), versionId: known(t.versionId, sha256),
+      sourcePatientId: observed(t.sourcePatientId), sourceInstitution: observed(t.sourceInstitution),
+      projectionSha256: sha256(t.projectionSha256) };
+  });
+  const binding = object(v.session, ['method', 'sessionRef']);
+  const session: OriginalDownloadAccessEventV2['session'] = binding.method === 'session'
+    ? { method: 'session', sessionRef: string(binding.sessionRef) }
+    : binding.method === 'bearer' && binding.sessionRef === null ? { method: 'bearer', sessionRef: null }
+    : refuse('DownloadSessionBindingRequired');
+  const trustedProxyIp = fact(v.trustedProxyIp, proxyAddress);
+  if (trustedProxyIp.status !== 'known' && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed'))
+    throw new Error('Observed ingress required');
+  const eventId = string(v.eventId), auditLinkId = string(v.auditLinkId);
+  const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
+  if (!UUID4.test(eventId) || !AUDIT_LINK.test(auditLinkId) || relatedEventId === eventId ||
+      (['transfer-ended', 'transfer-aborted'].includes(action) && relatedEventId === null))
+    throw new Error('Download event correlation required');
+  return freeze({ formatVersion: 2, branch: 'original-download', surface, eventId,
+    userId: known(v.userId, identity), rolesAtTime: known(v.rolesAtTime, roleList), rightsVersion: integer(v.rightsVersion),
+    actingInstitution: known(v.actingInstitution, string), managingInstitution: known(v.managingInstitution, string),
+    occurredAt: utc(v.occurredAt), trustedProxyIp, session, cause: 'user-view', executor: 'member', targets, action, result,
+    requestId: string(v.requestId), auditLinkId, relatedEventId });
 }

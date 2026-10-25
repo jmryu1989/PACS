@@ -1,12 +1,27 @@
 # coding: utf-8
 """REQ-D-WINDOW-DISPLAY: explicit movement of the live viewer on two real displays."""
-import json,sys,unittest,uuid
+import json,os,sys,unittest,uuid
 from pathlib import Path
 from playwright.sync_api import expect
 from test_physical_monitors import PhysicalMonitorsE2E
+from test_thumbnail_series import ThumbnailSeriesE2E
 from test_prior_selection import canvas_ready
+from test_viewer_windows import retained_window
 
 class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
+    @classmethod
+    def setUpClass(cls):
+        if os.environ.get('KIN_U1_EMULATED_DISPLAYS') != '1':
+            return super().setUpClass()
+        ThumbnailSeriesE2E.setUpClass.__func__(cls)
+        probe = cls.browser.new_page()
+        cdp = probe.context.new_cdp_session(probe)
+        current = cdp.send('Emulation.getScreenInfos')['screenInfos'][0]
+        cdp.send('Emulation.addScreen', dict(left=current['left']+current['width'],top=0,
+                 width=1920,height=1080,devicePixelRatio=1))
+        probe.close()
+        print('DISPLAY_SCOPE=CDP synthetic screens; no physical-device acceptance',flush=True)
+
     def jobs(self,fixture):
         result=self.stack.request('GET',f'/studies/{fixture.uid}/viewer-jobs','doctor')
         self.assertEqual(result.status,200);return result.body['jobs']
@@ -37,7 +52,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         p.locator('#viewer-windows-displays').click()
         expect(p.locator('[data-window-action="display-1"]')).to_be_visible()
         screens=p.evaluate('async()=>KinViewerDisplayLayout.screens(await getScreenDetails())')
-        self.assertEqual(len(screens),2,'This evidence is for the user current actual two-display configuration')
+        self.assertEqual(len(screens),2,'This evidence is for the selected two-display browser configuration')
         observed=[]
         for index in [1,0]:
             control=p.locator(f'[data-window-index="0"][data-window-action="display-{index}"]')
@@ -60,7 +75,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         rect=restored.evaluate('({left:screenX,top:screenY,width:outerWidth,height:outerHeight})')
         for key in rect:self.assertLessEqual(abs(rect[key]-observed[-1][key]),16)
         self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(fixture)),1);self.assertEqual(self.jobs(fixture),[])
-        print(json.dumps({'actualScreens':screens,'moved':observed,'reopened':rect,'scope':'Two real Windows displays; same viewer document and unsaved Job/report retained; no physical disconnect/three-screen claim'}),flush=True)
+        print(json.dumps({'actualScreens':screens,'moved':observed,'reopened':rect,'scope':'Two browser displays; same viewer document and unsaved Job/report retained; no physical disconnect/three-screen claim'}),flush=True)
         restored.close()
 
     def test_display_02_permission_denied_preserves_live_viewer(self):
@@ -92,7 +107,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         p.wait_for_function('expected=>{const r=JSON.parse(localStorage.getItem(OHIF_RECT_KEY));return r&&Object.keys(expected).every(k=>Math.abs(r[k]-expected[k])<=16)&&r.left===ohifPopupHandle.screenX;}',arg=expected)
         self.assertGreaterEqual(v.evaluate('screenX'),0);self.assertEqual(v.evaluate('__displayDocument'),marker)
         expect(p.locator('#findings')).to_have_value('DISPLAY MOVE UNSAVED REPORT')
-        print(json.dumps({'scope':'Real two-display movement with synthetic permissions.query TypeError and delayed native result; Done closes controls without cancelling accepted movement'}),flush=True)
+        print(json.dumps({'scope':'Browser two-display movement with synthetic permissions.query TypeError and delayed native result; Done closes controls without cancelling accepted movement'}),flush=True)
         v.close()
 
     def test_display_04_closed_window_finishes_delayed_request_with_status(self):
@@ -118,12 +133,10 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
     def test_display_06_two_patients_move_independently_and_keep_report_target(self):
         p,first,a,first_marker=self.setup_viewer();p.locator('#viewer-windows-done').click()
         b=self.ct('DISPLAY-OTHER-'+uuid.uuid4().hex[:12],'other','20260802');self.seed_report(b,findings='DISPLAY SECOND BASE')
-        original=self.originals();self.open_toolbar_group(p,'#image-opening-open');p.locator('#image-opening-open').click()
-        p.locator('#image-opening-limit').select_option('2');p.locator('#image-opening-done').click()
+        original=self.originals()
         p.locator('#quick').fill('');p.evaluate('load()');self.select(p,b);self.thumbs(p,1)
         expect(p.locator('#findings')).to_have_value('DISPLAY SECOND BASE');p.locator('#findings').fill('SECOND PATIENT UNSAVED REPORT')
-        with p.context.expect_page() as opened:p.locator('#thumbwrap img').first.dblclick()
-        second=opened.value;second.wait_for_url('**/ohif/viewer?**');canvas_ready(second,1)
+        second=retained_window(p,b.uid)
         second.wait_for_function('typeof kinViewerJobWorkspaceState==="function"')
         second_marker=second.evaluate('window.__displayDocument=crypto.randomUUID()')
         for viewer,title in [(first,'FIRST PATIENT UNSAVED JOB'),(second,'SECOND PATIENT UNSAVED JOB')]:
@@ -150,7 +163,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         actual=[v.evaluate('({left:screenX,top:screenY,width:outerWidth,height:outerHeight})') for v in [first,second]]
         for index,rect in enumerate(actual):
             for key in rect:self.assertLessEqual(abs(rect[key]-expected[index][key]),16)
-        print(json.dumps({'twoPatientWindows':actual,'scope':'Two different actual synthetic patients on two real displays; concurrent native results, independent slot persistence, image identity and draft/job preservation'}),flush=True)
+        print(json.dumps({'twoPatientWindows':actual,'scope':'Two different synthetic patients on two browser displays; concurrent native results, independent slot persistence, image identity and draft/job preservation'}),flush=True)
         first.close();second.close()
 
 def load_tests(loader,tests,pattern):

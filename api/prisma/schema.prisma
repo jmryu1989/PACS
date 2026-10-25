@@ -19,6 +19,8 @@ datasource db {
 /// 브라우저 대신 Keycloak 토큰을 보관하는 서버측 로그인 세션.
 model AuthSession {
   sid          String   @id
+  /// Non-credential correlation retained by authentication events after session deletion.
+  auditRef     String   @unique @default(dbgenerated("('authref:'::text || (gen_random_uuid())::text)"))
   sub          String
   accessToken  String
   refreshToken String
@@ -1060,6 +1062,10 @@ model StudyAccessRevision {
   @@unique([institution,subject,requestId], map:"StudyAccessRevision_request_key")
 }
 
+// EMR B2: emr_access remains SQL-owned and EXECUTE-only for kin_runtime.
+// Migration 20261023180000_emr_pg_ledger defines operation/attempt/outcome,
+// legal entries and failure facts; Prisma business delegates share its transaction.
+
 /// S9-U4b 자기 기관 DICOM 반입·원본 다운로드 작업과 member 반입 관문의 내부 예약 한 표(계약 S9-U4p §4.4, §5.2, §7).
 /// 공개 kind는 import·download, 내부 kind는 study-claim·sop-claim이다. 공개 행의 소유는 검증된 issuer·불변 sub·기관·kind이고
 /// actor는 표시값일 뿐이다(actor에서 소유 subject를 거꾸로 만들지 않는다). import 행의 results는 파일별 UID·hash·결과와
@@ -1087,3 +1093,6 @@ model ImportOperation {
   @@index([kind, status])
   @@index([kind, studyUid])
 }
+
+// EMR E: SQL-owned emr_image.preparation/observation retain fixed manifests and
+// transport/staging facts (20261025000000_emr_e_online), on the B2 connection.
