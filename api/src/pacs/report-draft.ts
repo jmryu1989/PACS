@@ -57,7 +57,7 @@ export class PacsReportDraft {
         await facts.request.requireCurrent(tx);
         const report = !!source || observation.target === 'report-version';
         const revision = source ? String(source.version) : report ? String(value.state.version) : value.revision;
-        const resource = report ? JSON.stringify([source?.uid ?? uid, Number(revision)]) : JSON.stringify([uid, c.actor]);
+        const resource = report ? source?.uid ?? uid : JSON.stringify([uid, c.actor]);
         const event: AccessEventV1 = {
           formatVersion: 1, surface, eventId: randomUUID(),
           userId: { status: 'known', value: identity }, rolesAtTime: { status: 'known', value: facts.request.facts.roles },
@@ -65,7 +65,7 @@ export class PacsReportDraft {
           managingInstitution: { status: 'known', value: state.institutionId },
           occurredAt: new Date().toISOString(),
           trustedProxyIp: facts.ip ? { status: 'known', value: facts.ip } : { status: 'unresolved', reason: 'not-observed' },
-          cause: 'user-view', context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null },
+          cause: 'user-view', context: { basis: 'worklist', studyId: uid, relatedStudyId: null, reason: null },
           executor: 'member', targets: [{ kind: report ? 'report-version' : 'private-draft',
             patientLinkSnapshot: { status: 'unresolved', reason: 'not-resolved' },
             studyId: { status: 'known', value: source?.uid ?? uid }, recordId: { status: 'known', value: resource },

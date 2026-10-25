@@ -3,6 +3,7 @@
  * PacsService가 만들어 소유하는 평범한 객체다(Nest provider가 아니다). 생성자는 참조만 저장한다.
  */
 import type { StudyAccessService } from '../study-access.service';
+import type { Prisma } from '@prisma/client';
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../prisma.service';
 import { noteTransactionError } from './values';
@@ -47,11 +48,11 @@ export class PacsTechNote {
     return study;
   }
 
-  async techNote(uid: string, c: Caller, before?: string) {
+  async techNote(uid: string, c: Caller, before?: string, transaction?: Prisma.TransactionClient) {
     if (before !== undefined && (!/^[1-9]\d{0,9}$/.test(before) || Number(before) > 2147483647))
       throw new BadRequestException('이력 위치를 확인하세요');
     await this.studyAccess.prepare(c,[uid]);
-    return this.prisma.$transaction(async tx => {
+    const execute = async (tx: Prisma.TransactionClient) => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       const study = await this.noteScope(tx, uid, c, false);
       const writable = study.institutionId === c.institution && (c.roles.includes('technician') || c.roles.includes('admin'));
@@ -62,7 +63,9 @@ export class PacsTechNote {
       }
       const note = await tx.techNoteRevision.findFirst({ where: { studyUid: uid }, orderBy: { version: 'desc' }, select: NOTE_READ_FIELDS });
       return { uid, note: noteForCaller(note, c), writable };
-    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch(noteTransactionError);
+    };
+    return (transaction ? execute(transaction) : this.prisma.$transaction(execute,
+      { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 })).catch(noteTransactionError);
   }
 
   /**
@@ -74,7 +77,7 @@ export class PacsTechNote {
    * write behaves as before. The id lookup runs after the permission, institution and study-lock checks and before the
    * version check, in the same transaction as the revision and its audit row.
    */
-  async saveTechNote(uid: string, body: any, c: Caller) {
+  async saveTechNote(uid: string, body: any, c: Caller, transaction?: Prisma.TransactionClient) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['baseVersion', 'text', 'reason', 'attemptId'].includes(k)) ||
         !Number.isInteger(body.baseVersion) || body.baseVersion < 0 || body.baseVersion >= 2147483646 ||
         typeof body.text !== 'string' || body.text.length > 10000 || body.text.includes('\0') ||
@@ -86,7 +89,7 @@ export class PacsTechNote {
     const attemptId: string | null = body.attemptId ?? null, reason = body.reason.trim();
     const reused = () => new BadRequestException('이 저장 시도 ID는 다른 요청에 이미 사용되었습니다. 메모를 다시 확인하세요');
     await this.studyAccess.prepare(c,[uid]);
-    return this.prisma.$transaction(async tx => {
+    const execute = async (tx: Prisma.TransactionClient) => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       await this.noteScope(tx, uid, c, true);
       if (attemptId) {
@@ -109,7 +112,9 @@ export class PacsTechNote {
       await tx.auditLog.create({ data: { actor: c.actor, action: 'tech-note.revise', target: uid,
         detail: JSON.stringify({ version: note.version, institutionId: c.institution, attemptId }) } });
       return { uid, note, latestNote: note, writable: true };
-    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch(error => {
+    };
+    return (transaction ? execute(transaction) : this.prisma.$transaction(execute,
+      { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 })).catch(error => {
       // Two studies cannot both keep one id: the second insert waits for the first and then violates the unique index.
       // That is the id reused for a different request (400), never a server fault (500).
       if (attemptId && error?.code === 'P2002' && [].concat(error.meta?.target ?? []).some((t: any) => String(t).includes('attemptId'))) throw reused();

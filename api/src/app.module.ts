@@ -1,3 +1,4 @@
+import { startupClinicalProviders } from './emr-clinical/startup';
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
 import { EmrViewingModule } from './emr-viewing/emr-viewing.module';
 import { AsrService } from './asr.service';
@@ -37,7 +38,8 @@ import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
 import { ViewerContextEventService } from './viewer-context-event.service';
 import { MultiStudyViewController } from './multi-study-view.controller';
-import { MultiStudyViewService, ViewingSetAccess, ViewingSetAccessUnbound } from './multi-study-view.service';
+import { MultiStudyViewService } from './multi-study-view.service';
+import { ViewingSetAccess } from './emr-viewing/viewing-set-access';
 import { FindingController } from './finding.controller';
 import { FindingService } from './finding.service';
 import { ViewerJobController } from './viewer-job.controller';
@@ -67,6 +69,7 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 @Module({
   controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
   providers: [
+    ...startupClinicalProviders,
     ViewerContextEventService,
     OnlineImageService, ModuleAImageContextPending,
     { provide: ImageContextSource, inject: [ModuleAImageContextPending],
@@ -76,8 +79,8 @@ function adminNoStore(_req: any, res: any, next: () => void) {
     AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
-    // W9-LITE: no access-ledger owner is assembled in this build (EMR-B2 base, then the shared Module A binds the port here).
-    MultiStudyViewService, { provide: ViewingSetAccess, useClass: ViewingSetAccessUnbound },
+    // W9 source selections use the same request-bound A1 response recorder.
+    MultiStudyViewService, ViewingSetAccess,
   ],
 })
 export class AppModule implements NestModule {

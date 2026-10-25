@@ -12,9 +12,12 @@ export const ACCESS_ACTIONS = freeze({
   export: ['print-opened', 'print-done', 'pdf', 'copy', 'download', 'disclosure'],
   failure: ['auth-refused', 'permission-refused', 'conflict', 'storage-failed', 'signature-failed'],
 } as const);
-/** Closed non-patient targets. Patient-bearing records retain their observed identity facts. */
+/** Closed non-patient targets. Patient-bearing records retain their observed identity facts.
+ * `assignment` (D1860, D-T5): reader allocation is none of the four record acts 의료법 제23조④ names
+ * (기재·추가기재·수정·열람) and never changes clinical entry or read rights, so its event waives the
+ * patient link; it stays bound to its study and allocation row. */
 export const NON_RECORD_TARGETS: readonly RecordKind[] = freeze(['preferences', 'reading-template', 'institution',
-  'identity-access', 'authentication-session', 'system-operation']);
+  'identity-access', 'authentication-session', 'system-operation', 'assignment']);
 export const STATUTORY_ACT = freeze({
   write: '기재', 'additional-entry': '추가기재', modify: '수정', 'approve-sign': '기재', amend: '수정', addendum: '추가기재', cancel: '수정',
   release: 'none', 'draft-save': '기재', clear: '수정', discard: '수정', finalize: 'none', archive: 'none',
