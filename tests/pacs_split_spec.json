@@ -8592,5 +8592,234 @@
         }
       }
     }
+  },
+  "di_additions_emr_online": {
+    "unit": "EMR-E / REQUEST_FACTS / ACCESS-REVIEW / DOWNLOAD-PRODUCER-B2 (#226)",
+    "note": "Approved main additions after B2: REQUEST_FACTS (#211), ACCESS-REVIEW (#222), EMR-E (#220), and the StudyTransferLocalController constructor from DOWNLOAD-PRODUCER-B2 (#226). Remove these before B2 and the split declarations. The pre-split snapshot is unchanged.",
+    "source_commits": [
+      "8345d202533f0189bbd01eabf7058ff36e66f56c",
+      "3de568237077b6626b2bfe07f2e8be60e30d4612",
+      "1164584ef03b340aed31a2df9f5ca1a70d1a846a",
+      "c01afe22a296bdf9d62cf7826fbc363b3e01aab1"
+    ],
+    "controllers": [],
+    "providers": [
+      "OnlineImageService",
+      "ModuleAImageContextPending",
+      "ImageContextSource=factory",
+      "AdminAccessReview"
+    ],
+    "routes": [
+      {
+        "controller": "ConnectController",
+        "handler": "image",
+        "method": "GET",
+        "paths": [
+          "/|images/dicom-web"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "4:0@0:\"target\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "imageHead",
+        "method": "HEAD",
+        "paths": [
+          "/|images/dicom-web"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "4:0@0:\"target\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "OnlineImageService": {
+        "params": [
+          "Object",
+          "ImageContextSource",
+          "PrismaService",
+          "OrthancService"
+        ],
+        "scope": null,
+        "declared": [
+          "0:Symbol(EmrRecordPort)"
+        ],
+        "optional": []
+      },
+      "ModuleAImageContextPending": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AdminAccessReview": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "PacsController": {
+        "before": {
+          "params": [
+            "PacsService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PacsService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "AdminController": {
+        "before": {
+          "params": [
+            "AdminService",
+            "PacsService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "AdminService",
+            "PacsService",
+            "Object",
+            "AdminAccessReview"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "AdminService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "4:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        }
+      },
+      "ConnectController": {
+        "before": {
+          "params": [
+            "ConnectService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ConnectService",
+            "OnlineImageService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        }
+      },
+      "StudyTransferLocalController": {
+        "before": {
+          "params": [
+            "StudyTransferLocalService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "StudyTransferLocalService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "AuthGuard": {
+        "before": {
+          "params": [
+            "Reflector",
+            "AuthService",
+            "StudyTransferLocalService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "Reflector",
+            "AuthService",
+            "StudyTransferLocalService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(RequestContextCapture)"
+          ],
+          "optional": []
+        }
+      }
+    }
   }
 }

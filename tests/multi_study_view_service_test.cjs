@@ -571,7 +571,7 @@ test('W9API-22 A-03 (W9A-01): every wait from resolve entry to the answer is und
   t.diagnostic(JSON.stringify(inventory));
 });
 
-test('W9API-26 cache: a late policy source answer cannot become the next request permission', async t => {
+test('W9API-28 cache: a late policy source answer cannot become the next request permission', async t => {
     // A preparation read answering after the deadline is not cached for the same Caller: the next resolve reads again
   t.mock.timers.enable({ apis: ['setTimeout'] });
     const pair = [study(), study()], wl = world(pair, { policy: patientRule('SYN-PID-1') }), caller = reader();
@@ -997,7 +997,7 @@ test('W9API-25 R3-A01..A06 (W9A2-1): every raw source request of OrthancService 
   } finally { process.off('unhandledRejection', onUnhandled); await lb.close(); }
 });
 
-test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refused preparation provides nothing; a late answer is never cached', async t => {
+test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refused preparation provides nothing', async t => {
   const lb = await loopback();
   try {
     const found = [study(), study()];
