@@ -428,9 +428,10 @@ schemaVersion 2 요청에서만 받는다. 서버는 작업 판·검사 조합(1
 `finding_api_test.py` 11·12, `test_finding_navigation.py` 8, `test_finding_worklist.py` 5(기존 `measurements` 프로필·540초 한도 그대로 — 현재 20개 suite, 마지막은 S3-ASR-U4L `e2e/test_dictation_live.py`)와
 새 `python tests/e2e/test_finding_locations.py` (3개, `VolumeMarksE2E` 상속, `test_location_`만)이다. 새 모듈은 기존 `volume-path` 프로필의
 세 번째 suite `ci-finding-location`(360초)이며 (420+35)+(300+35)+(360+35)=1185초에 예비 150초를 더해 1335≤1500초다.
-#219(D1861) 이후 이 세 case는 Module A가 소견 원본의 고정판 조회를 연결할 때까지 임시 계약을 확인한다: 소견 쓰기 경로
-(`POST studies/:uid/findings`, `POST studies/:uid/findings/:id/revisions`)는 503 `ModuleAFixedVersionReaderPending`으로 거절하고
+#219(D1861) 이후 이 세 case는 Module A가 소견 원본의 고정판 조회를 연결할 때까지 임시 계약을 확인한다: 소견 생성
+(`POST studies/:uid/findings`, 뷰어의 Save·Retry Request와 API)은 503 `ModuleAFixedVersionReaderPending`으로 거절하고
 입력을 유지하며(화면의 미저장 행과 Retry Request, Finding·FindingRevision·finding.* 감사 행 0), 조회와 저장 작업은 그대로다.
+`POST studies/:uid/findings/:id/revisions`는 원본 조회 전에 소견을 먼저 찾으므로 없는 id는 404이며, 생성이 거절되는 동안 그 경로의 503은 닿지 않는다.
 복원할 원래 단언(연결·새 로그인 이어보기·정확한 도착·되돌림·숨김/동기화 상태·철회)은 비공개 docs-repo
 `evidence/fable-impl-emr-d-routes-20261025/handoff-module-a-finding-reader.md`에 있고 원문은 `5ac35a3`의 같은 파일이다.
 

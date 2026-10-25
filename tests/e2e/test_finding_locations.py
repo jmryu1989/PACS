@@ -10,8 +10,9 @@ the real pinned OHIF, BFF login, run-owned same-patient synthetic CTs and the re
      the Job save it links are unchanged and still proven;
   02 the API create route: a valid 3D point link and the server-matrix bodies all meet the interim refusal before any
      Job is read, the route's own shape check still answers 400, the list read answers 200 and empty;
-  03 the API revisions route (edit, hide, restore) and the page: a refused draft stays unsaved with its text and
-     survives Reload Findings.
+  03 the API revisions route: the runtime looks the finding up before it reads any source, so edit/hide/restore of an
+     id no finding has answer 404 (and no finding can exist while creation is refused); the page: a refused draft
+     stays unsaved with its text and survives Reload Findings.
 The saved-location assertions these cases held before #219 (link, continuation into a new [X, P] page, exact arrival,
 restore rollback, metadata/hidden/sync-off states, withdrawal) are listed for restoration in the Module A unit's
 hand-off (private docs-repo evidence/fable-impl-emr-d-routes-20261025/handoff-module-a-finding-reader.md); their last
@@ -198,16 +199,18 @@ class FindingLocationsE2E(VolumeMarksE2E):
         self.assertEqual(len(marks['marks']), 1)
 
     # ---- 03 -----------------------------------------------------------------------------------------
-    def test_location_03_revisions_route_meets_the_interim_refusal_and_the_page_keeps_the_refused_draft(self):
+    def test_location_03_revisions_route_of_an_unknown_finding_answers_404_and_the_page_keeps_the_refused_draft(self):
         label = 'L3 표식 '+uuid.uuid4().hex[:6]
         a, b, v, job, marks = self.prior_point(label)
         original = self.originals(); report = (self.state(a), self.versions(a)); jobs_before = self.jobs(a)
         item = dict(schemaVersion=2, title='L3 소견', text='', characteristics='보존 확인', sources=[dict(jobId=job['id'], revision=1, markId=saved_mark_id(job))])
-        # Edit, hide and restore meet the interim refusal before the finding id is looked up.
+        # The runtime looks the finding up before it reads any source (CI 40175449235): edit, hide and restore of an id
+        # no finding has answer 404, and while creation is refused no finding exists for the revisions route to reach the
+        # pending reader. Its 503 for an existing finding's edit returns with the reader (hand-off).
         for action, reason in (('edit', ''), ('hide', '숨김 확인'), ('restore', '복원 확인')):
             with self.subTest(action=action):
                 answer = self.revise(a, str(uuid.uuid4()), dict(requestId=str(uuid.uuid4()), expectedRevision=1, action=action, reason=reason, item=item))
-                self.assertEqual((answer.status, (answer.body or {}).get('code')), (503, INTERIM_CODE), answer.text)
+                self.assertEqual((answer.status, (answer.body or {}).get('code')), (404, 'NotFound'), answer.text)
         # The page: a draft linked to the 3D point is refused on Save, stays unsaved with its text and survives Reload Findings.
         title, traits = 'L3 소견', '보존 확인'
         row = self.compose_point(v, label, title, traits)
