@@ -2383,6 +2383,80 @@ class RelatedModePage(unittest.TestCase):
               });
             }"""), f"arrival {n}: {part} is clipped or covered")
 
+    def arrival_stays_over_report(self):
+        self.assertTrue(self.js("""() => {
+          const panel = document.querySelector('#cvr-inbox-p'), report = document.querySelector('.report-p');
+          const overlay = panel.getBoundingClientRect(), column = report.getBoundingClientRect();
+          // A scrolled report's bounding box may extend behind the reading bar. Check the actual surface underneath.
+          const overReport = [0.1, 0.5, 0.9].every(x => [0.1, 0.5, 0.9].every(y => {
+            const hit = document.elementsFromPoint(overlay.left + (Math.min(innerWidth, overlay.right) - overlay.left) * x,
+              overlay.top + overlay.height * y).find(e => !panel.contains(e));
+            return hit && report.contains(hit);
+          }));
+          const frame = document.querySelector('#reading-frame');
+          const viewer = frame && !frame.hidden && frame.getClientRects().length ? frame.getBoundingClientRect() : null;
+          return overReport && overlay.left >= column.left && overlay.right <= column.right &&
+            overlay.top >= Math.max(0, column.top) && overlay.bottom <= Math.min(innerHeight, column.bottom) &&
+            (!viewer || overlay.right <= viewer.left || overlay.left >= viewer.right ||
+              overlay.bottom <= viewer.top || overlay.top >= viewer.bottom);
+        }"""), "the arrival stays inside the report column and never covers the image viewer")
+
+    def test_w5b_arrival_while_reading_images_stays_over_report(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                for focus in (("body", "viewer", "splitter") if reading else ("body",)):
+                    with self.subTest(viewport=(width, height), reading=reading, focus=focus):
+                        self.page.set_viewport_size({"width": width, "height": height})
+                        recipient = self.install_arrivals()
+                        self.open()
+                        self.open_target()
+                        if reading:
+                            self.enter_reading()
+                        self.poll_arrivals()
+                        if focus == "viewer":
+                            self.page.locator('#reading-frame').content_frame.locator('body').click()
+                            expect(self.page.locator('#reading-frame')).to_be_focused()
+                        elif focus == "splitter":
+                            self.page.locator('#reading-resize-report').click()
+                            expect(self.page.locator('#reading-resize-report')).to_be_focused()
+                        else:
+                            text = self.page.locator('#reading-target' if reading else '.report-p .rbtns').first
+                            box = text.bounding_box()
+                            self.page.mouse.click(box['x'] + (10 if reading else 1), box['y'] + (box['height'] / 2 if reading else 1))
+                            self.assertEqual('BODY', self.js('document.activeElement.tagName'))
+                        active = self.js('document.activeElement.id || document.activeElement.tagName')
+                        self.arrival_server.add(recipient.rec(181, case='R2'))
+                        self.poll_arrivals()
+                        self.visible_arrival(181)
+                        self.arrival_stays_over_report()
+                        self.assertEqual(active, self.js('document.activeElement.id || document.activeElement.tagName'))
+                        self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_manual_received_escape_returns_to_toggle(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                with self.subTest(viewport=(width, height), reading=reading):
+                    self.page.set_viewport_size({"width": width, "height": height})
+                    recipient = self.install_arrivals()
+                    self.arrival_server.add(recipient.rec(181, case='R2'))
+                    self.open()
+                    self.open_target()
+                    if reading:
+                        self.enter_reading()
+                    self.poll_arrivals()
+                    toggle = self.page.get_by_role('button', name='Show Received', exact=True)
+                    toggle.click()
+                    ack = self.page.locator('#cvr-inbox-p').get_by_role('button', name='Acknowledge', exact=True)
+                    # Native Tab follows the received list controls to the ACK action without sending it.
+                    self.page.keyboard.press('Tab')  # Refresh
+                    self.page.keyboard.press('Tab')  # Show All
+                    self.page.keyboard.press('Tab')  # Acknowledge
+                    expect(ack).to_be_focused()
+                    self.page.keyboard.press('Escape')
+                    expect(self.page.locator('#cvr-inbox-body')).to_be_hidden()
+                    expect(toggle).to_be_focused()
+                    self.assertEqual([], self.arrival_posts)
+
     def arrival_preserves_the_draft(self, reading):
         for width, height in self.ARRIVAL_VIEWPORTS:
             for field in ("findings", "conclusion"):
@@ -2397,7 +2471,7 @@ class RelatedModePage(unittest.TestCase):
                     expect(body).to_be_hidden()
                     findings = self.page.locator("#findings")
                     findings.fill("\n".join(f"SYN finding line {i}" for i in range(30)))
-                    self.page.locator("#conclusion").fill("SYN impression line 1\nSYN impression line 2")
+                    self.page.locator("#conclusion").fill("SYN impression" if field == "findings" else "SYN impression line 1\nSYN impression line 2")
                     self.autosave()
                     target = self.page.locator("#" + field)
                     target.click()
@@ -2412,6 +2486,7 @@ class RelatedModePage(unittest.TestCase):
                     self.poll_arrivals()
                     expect(body).to_be_visible()
                     self.visible_arrival(181)
+                    self.arrival_stays_over_report()
                     self.assertEqual(before, self.js(snapshot), "arrival keeps draft, selection, focus and scroll")
                     self.assertEqual(box, self.js(self.BOX, ".redit"), "arrival does not move or resize the editor")
                     self.assertTrue(self.js(self.CARET_VISIBLE, field), "arrival leaves the typing line visible")
@@ -2429,12 +2504,14 @@ class RelatedModePage(unittest.TestCase):
                     close = self.page.get_by_role("button", name="Hide Received", exact=True).bounding_box()
                     self.page.mouse.click(close["x"] + close["width"] / 2, close["y"] + close["height"] / 2)
                     expect(body).to_be_hidden()
+                    expect(self.page.locator('#cvr-inbox-p')).to_have_attribute('data-attention', 'true')
                     expect(target).to_be_focused()
                     self.page.keyboard.type(" and more text")
                     self.assertEqual(value + " typed and more text", target.input_value())
                     expect(body).to_be_hidden()
                     self.poll_arrivals()
                     expect(body).to_be_hidden()
+                    expect(self.page.locator('#cvr-inbox-p')).to_have_attribute('data-attention', 'true')
                     self.arrival_server.records.pop(recipient.rid(182))
                     self.arrival_server.add(recipient.rec(183, case="R2"))
                     before_reopen = self.js(snapshot)
@@ -2444,6 +2521,7 @@ class RelatedModePage(unittest.TestCase):
                     self.assertEqual(box, self.js(self.BOX, ".redit"))
                     self.page.keyboard.press("Escape")
                     expect(body).to_be_hidden()
+                    expect(self.page.locator('#cvr-inbox-p')).to_have_attribute('data-attention', 'true')
                     expect(target).to_be_focused()
                     self.page.keyboard.type(" after escape")
                     self.assertEqual(value + " typed and more text after escape", target.input_value())
@@ -2451,7 +2529,10 @@ class RelatedModePage(unittest.TestCase):
                     self.poll_arrivals()
                     expect(body).to_be_visible()
                     self.page.keyboard.press("Tab")
-                    expect(body).to_be_hidden()
+                    expect(body).to_be_visible()
+                    if field == 'findings':
+                        expect(self.page.locator('#conclusion')).to_be_focused()
+                    self.arrival_stays_over_report()
                     self.assertTrue(self.js("""() => {
                       const e = document.activeElement, r = e.getBoundingClientRect();
                       return e.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
