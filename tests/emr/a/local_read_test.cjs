@@ -26,6 +26,8 @@ const { observeLocalReadResponse } = load('emr-viewing/response-lifecycle');
 const { parseAccessEvent, accessStreams } = load('emr-contract/access-event');
 const { recordTargets } = load('emr-runtime/contract');
 const audit = load('emr-audit/contract');
+// Paces the PG polling loops below; the run's hang timeout is their only bound.
+const pause = () => require('node:timers/promises').setTimeout(20);
 const known = value => ({ status: 'known', value });
 const unknown = { status: 'unresolved', reason: 'not-observed' };
 const actor = { id: randomUUID(), issuer: 'https://synthetic.invalid', subject: 'doctor-a' };
@@ -44,24 +46,53 @@ const source = (overrides = {}) => ({
 const body = () => [{ id: 'stored-row-a', version: 2, findings: 'synthetic report' }];
 const prepared = () => localReadEvents(facts, new LocalReadResponse(body(), [source()]))[0];
 
-function authority() {
+function authority(scopes = ['investigate'], institutionId = facts.institution) {
   const at = new Date().toISOString();
   return audit.resolveAuditAuthority({ listGrants: subject => ({ subject, complete: true, grants: [{
-    grantId: 'synthetic-grant', subject, institutionId: facts.institution, events: [{
+    grantId: 'synthetic-grant', subject, institutionId, events: [{
       kind: 'granted', eventId: 'synthetic-grant-event', at, by: actor, capacity: 'privacy-officer',
-      basisDocumentId: 'synthetic-designation', scopes: ['investigate'], validFrom: at, validUntil: null,
+      basisDocumentId: 'synthetic-designation', scopes, validFrom: at, validUntil: null,
     }],
-  }] }) }, { identity: actor, institutionId: facts.institution, roles: ['radiologist'] }, at);
+  }] }) }, { identity: actor, institutionId, roles: ['radiologist'] }, at);
 }
+const period = { from: '2020-01-01T00:00:00.000Z', to: '2100-01-01T00:00:00.000Z' };
+const ledgerOf = rows => ({
+  top: async () => rows.length ? Math.max(...rows.map(r => r.entry.sequence)) : 0,
+  rows: async (top, below, take) => rows.filter(r => r.entry.sequence <= top && (below === null || r.entry.sequence < below))
+    .sort((a, b) => b.entry.sequence - a.entry.sequence).slice(0, take),
+});
 async function replay(rows, filter) {
-  const plan = audit.planInvestigation(authority(), {
-    from: '2020-01-01T00:00:00.000Z', to: '2100-01-01T00:00:00.000Z', ...filter,
-  });
-  return audit.readInvestigationPage(plan, {
-    top: async () => rows.length ? Math.max(...rows.map(r => r.entry.sequence)) : 0,
-    rows: async (top, below, take) => rows.filter(r => r.entry.sequence <= top && (below === null || r.entry.sequence < below))
-      .sort((a, b) => b.entry.sequence - a.entry.sequence).slice(0, take),
-  });
+  return audit.readInvestigationPage(audit.planInvestigation(authority(), { ...period, ...filter }), ledgerOf(rows));
+}
+// Three local reads in one institution: patient a in two studies, and a study whose PatientID was not observed.
+function localSubjects(institution) {
+  const read = (sourcePatientId, studyId) => localReadEvents({ ...facts, institution }, new LocalReadResponse(body(), [source({
+    managingInstitution: institution, target: { ...source().target, studyId: known(studyId), sourcePatientId } })]))[0];
+  return [read(known('synthetic-patient-a'), 'study-a'), read(known('synthetic-patient-a'), 'study-c'), read(unknown, 'study-b')];
+}
+// A-AUDIT-LOCAL: the incident scope and the auditor's own access event of locally identified subjects.
+async function checkLocalIncident(ledger, events, institution) {
+  const auditor = authority(['investigate', 'export'], institution);
+  const scope = await audit.incidentScope(auditor, audit.planInvestigation(auditor, period, 'export'), ledger);
+  assert.equal(scope.subjectsIdentifiable, false, 'local-only subjects are not formally identified');
+  assert.deepEqual(scope.reasons, [{ kind: 'identified-locally', subjects: 2 }]);
+  assert.deepEqual(scope.identified, []);
+  const [a1, a2, b] = events;
+  assert.deepEqual(scope.identifiedLocally.map(g => [g.source.sourcePatientId, [...g.studyIds].sort(), [...g.eventIds].sort()]), [
+    [known('synthetic-patient-a'), ['study-a', 'study-c'], [a1.eventId, a2.eventId].sort()],
+    [unknown, ['study-b'], [b.eventId]],
+  ]);
+  assert.deepEqual(scope.identifiedLocally[0].source.sourceInstitution, unknown);
+  assert.equal(scope.auditEvent.action, 'download');
+  assert.deepEqual(scope.auditEvent.targets.map(t => [t.kind, t.recordId.value, t.studyId.value, t.sourcePatientId]).sort(),
+    [['access-audit', a1.eventId, 'study-a', known('synthetic-patient-a')], ['access-audit', a2.eventId, 'study-c', known('synthetic-patient-a')],
+      ['access-audit', b.eventId, 'study-b', unknown]].sort());
+  assert.ok(scope.auditEvent.targets.every(t => !('patientLinkSnapshot' in t)), 'no formal PatientLink placeholder');
+  // The export read the scope is built on shows the same observed identifiers.
+  const exported = await audit.readInvestigationPage(audit.planInvestigation(auditor, period, 'export'), ledger);
+  assert.deepEqual(exported.rows.map(r => r.targets[0].localSource.sourcePatientId).filter(f => f.status === 'known').map(f => f.value),
+    ['synthetic-patient-a', 'synthetic-patient-a']);
+  assert.ok(exported.rows.every(r => r.targets[0].patient === null));
 }
 
 if (!build) {
@@ -129,6 +160,11 @@ if (!build) {
     assert.equal(page.rows[0].targets[0].localSource.projectionSha256, event.targets[0].projectionSha256);
     assert.equal((await replay(rows, { sourcePatientId: 'other' })).rows.length, 0);
     assert.equal((await replay(rows, { patient: { patientId: 'synthetic-patient-a', assigningAuthority: 'invented' } })).rows.length, 0);
+  });
+  test('incident scope and the auditor event keep locally identified subjects without counting them as identified', async () => {
+    const events = localSubjects(facts.institution);
+    const rows = events.map((event, i) => ({ entry: { sequence: i + 1, payload: { kind: 'access', event } }, durableAt: event.occurredAt, served: null }));
+    await checkLocalIncident(ledgerOf(rows), events, facts.institution);
   });
   test('a deadline after selection but before adapter consumption cannot publish the selected bytes', async () => {
     const request = new IncomingMessage(new Socket()), response = new ServerResponse(request), deadline = new AbortController();
@@ -243,7 +279,7 @@ if (!build) {
         // RF owns the follow-up until it settles; the unrelated direct work
         // above is kept open, so inspect this event instead of a global drain.
         let events;
-        do { events = await readEvents(first.eventId); } while (events.length < 2);
+        while ((events = await readEvents(first.eventId)).length < 2) await pause();
         assert.deepEqual(events.map(e => e.action).sort(), ['provide-prepared', 'transfer-aborted']);
         assert.equal((await readEvents(last.eventId)).length, 0);
         assert.equal(response.headersSent, false);
@@ -268,19 +304,50 @@ if (!build) {
             const [row] = await witness.$queryRaw`SELECT count(*)::int AS n FROM pg_stat_activity
               WHERE usename='kin_runtime' AND wait_event_type='Lock' AND query LIKE '%append_operation%'`;
             if (row.n) break;
+            await pause();
           }
           if (cancellation === 'deadline') deadline.abort();
           else transport.response.emit('close');
           releaseLock(); await holding; await refused;
           transport.response.emit('finish');
           let events;
-          do { events = await readEvents(late.eventId); } while (events.length < 2);
+          while ((events = await readEvents(late.eventId)).length < 2) await pause();
           assert.deepEqual(events.map(e => e.action).sort(), ['provide-prepared', 'transfer-aborted']);
           assert.equal(transport.response.headersSent, false);
         } finally { releaseLock(); await holding; }
       }
     } finally {
       await moduleContext?.close();
+      work.end(); control.close(); await control.drained();
+      await journal.close(); await db.$disconnect(); await witness.$disconnect();
+    }
+  });
+  test('A-PG-AUDIT-LOCAL: incident scope over local reads appended and read back from PG names them as identified locally', async () => {
+    const { PrismaClient } = apiRequire('@prisma/client');
+    const { EmrLedgerClient } = load('emr-runtime/client');
+    const { AccessLedgerStore } = load('emr-runtime/store');
+    const { FailureJournal, FailureSpool } = load('emr-runtime/failure-journal');
+    const { createRecordPort } = load('emr-runtime/record-port');
+    const db = new EmrLedgerClient(process.env.DATABASE_URL);
+    const witness = new PrismaClient({ datasources: { db: { url: process.env.KIN_B2R_WITNESS_URL } } });
+    const journal = new FailureJournal(db, new FailureSpool(process.env.KIN_B2R_SPOOL));
+    const { port, control } = createRecordPort(new AccessLedgerStore(db, journal));
+    const work = port.begin();
+    try {
+      // Its own institution keeps the earlier case's rows outside this plan; every stored row is still parsed.
+      const institution = 'synthetic-incident-site', events = localSubjects(institution);
+      for (const event of events) await work.append(event);
+      const ledger = {
+        top: async () => (await witness.$queryRaw`SELECT coalesce(max(sequence), 0)::int AS top
+          FROM emr_access.access_entry WHERE stream = 'viewing'`)[0].top,
+        rows: async (top, below, take) => (await witness.$queryRawUnsafe(`SELECT sequence::int AS sequence, payload, recorded_at
+          FROM emr_access.access_entry WHERE stream = 'viewing' AND sequence <= $1::bigint AND ($2::bigint IS NULL OR sequence < $2::bigint)
+          ORDER BY sequence DESC LIMIT $3::int`, top, below, take)).map(r => ({
+          entry: { sequence: r.sequence, payload: { kind: 'access', event: JSON.parse(r.payload) } },
+          durableAt: r.recorded_at.toISOString(), served: null })),
+      };
+      await checkLocalIncident(ledger, events, institution);
+    } finally {
       work.end(); control.close(); await control.drained();
       await journal.close(); await db.$disconnect(); await witness.$disconnect();
     }

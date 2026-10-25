@@ -14,6 +14,10 @@ Pass an existing source work context when observed (including W9's comparison
 anchor); otherwise it remains null. A3 passes its existing cancellation/deadline
 signal as the third constructor argument and keeps that deadline alive through
 preparation. A1 introduces no timer, reserve or new timeout.
+A local-read route answers 200: preparation refuses any other status set before
+the interceptor runs, and only a finished 200 is `transfer-ended`. Nest gives a
+POST route 201, so a POST local-read route declares `@HttpCode(200)` (W9's
+resolve already does).
 
 Serialization runs once before recording. The hash identifies the actual
 serialized target projection; it is not a signature or an integrity chain.
@@ -35,6 +39,14 @@ formal PatientLink, signature or retained-state placeholders. Audit replay expos
 `patient: null` with `localSource` for these targets. The `sourcePatientId` filter
 is an observed identifier inside the investigation's existing institution scope;
 it is not interchangeable with the formal patient/assigning-authority filter.
+`incidentScope` lists these subjects in `identifiedLocally` by their observed
+PatientID and source institution (an unobserved PatientID stays unresolved, one
+entry per study). They are not formal identifications: their presence adds the
+reason `identified-locally`, so `subjectsIdentifiable` is false. The auditor's
+own access event (`investigationLedgerEvent`, also `incidentScope.auditEvent`)
+carries one `access-audit` target per shown local row with the same observed
+identifiers and no PatientLink. The route that records that event must accept
+these targets; no route records it yet.
 
 Run the parser/projection, failure and transport component cases:
 
@@ -51,7 +63,8 @@ KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/
 
 The PG driver proves append/readback/filter, request attribution, all receipts
 before stream selection, a last-target SQL failure and close before a delayed
-COMMIT using fixture-owned SQL locks. Its transport objects are component inputs,
+COMMIT using fixture-owned SQL locks. A second case (A-PG-AUDIT-LOCAL) builds the
+incident scope and the export from rows read back from `emr_access.access_entry`. Its transport objects are component inputs,
 not a substitute route or real HTTP wire. Pure failures use no fake durable
 receipt. UNKNOWN is queried only under the original operation ID and is never
 retried as a new event.
