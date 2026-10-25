@@ -127,6 +127,11 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     if (!surfaceKinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
     const parsed = { kind, patientLinkSnapshot: fact(t.patientLinkSnapshot, patientLink), studyId: fact(t.studyId, value => string(value)),
       recordId: fact(t.recordId, value => string(value)), versionId: fact(t.versionId, value => string(value)) };
+    // This report serves immutable audit rows, including patientless login rows.
+    // Keep the clinical/disclosure meaning of access-audit on other surfaces.
+    if (surface === 'GET admin/audit' && kind === 'access-audit' && parsed.recordId.status === 'known' &&
+        [parsed.patientLinkSnapshot, parsed.studyId, parsed.versionId].every(f =>
+          f.status === 'not-applicable' && f.reason === 'non-record-target')) return parsed;
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
     if (facts.some(f => f.status === 'not-applicable' && (!NON_RECORD_TARGETS.includes(kind) || f.reason !== 'non-record-target')))
       throw new Error('Patient-bearing record facts cannot be waived');
