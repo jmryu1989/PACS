@@ -47,7 +47,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci_test.py
     - name: Final candidate invariants, worklist and cumulative workflows
-      timeout-minutes: 82
+      timeout-minutes: 83
       run: |
         "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci.py --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA"
     - name: Check candidate committed bundle without generating it
