@@ -1,9 +1,10 @@
-import { ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { IncomingMessage } from 'node:http';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { OrthancService } from '../orthanc.service';
 import { StudyAccessService } from '../study-access.service';
+import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from '../study-source-groups';
 import { lockMemberRights } from '../member-rights';
 import { PacsAccess, Caller } from '../pacs/access';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestWorkContext } from '../emr-runtime/request-context';
@@ -84,6 +85,16 @@ export function createStartupClinicalServices(prisma: PrismaService, records: Em
   pending: ModuleAClinicalSourcesPending) {
   const identity = onlineRequestIdentity(requests);
   const access = new PacsAccess(prisma, studyAccess);
+  const scope = async (tx: Prisma.TransactionClient, request: object, uid: string) => {
+    const current = await identity.resolve(tx, request);
+    const state = await tx.studyState.findUnique({ where: { uid } });
+    if (!state || !access.visible(state, current.actor.institutionId)) throw new NotFoundException('검사가 없습니다.');
+    const c: Caller = { sub: current.actor.identity.subject, actor: current.actor.identity.subject,
+      institution: current.actor.institutionId, roles: [...current.actor.roles], kind: 'member' };
+    await studyAccess.prepare(c, [uid]);
+    await studyAccess.require(c, [uid], tx);
+    return { studyId: uid, managingInstitutionId: state.institutionId, teleInstitutionId: state.teleInstitutionId };
+  };
   const context: ClinicalContextSource = {
     async facts(tx, request) {
       const current = await identity.resolve(tx, request);
@@ -91,20 +102,20 @@ export function createStartupClinicalServices(prisma: PrismaService, records: Em
         institutionId: current.actor.institutionId, signingRegistrationId: current.actor.canSign ? current.actor.identityRegistrationId : null },
         requestId: current.ingress.requestId, ip: current.ingress.ip };
     },
+    scope,
     async study(tx, request, uid) {
-      const current = await identity.resolve(tx, request);
-      const state = await tx.studyState.findUnique({ where: { uid } });
-      if (!state || !access.visible(state, current.actor.institutionId)) throw new NotFoundException('검사가 없습니다.');
-      const c: Caller = { sub: current.actor.identity.subject, actor: current.actor.identity.subject,
-        institution: current.actor.institutionId, roles: [...current.actor.roles], kind: 'member' };
-      await studyAccess.prepare(c, [uid]);
-      await studyAccess.require(c, [uid], tx);
-      const source = await orthanc.connectStudyIdentity(uid);
+      const current = await scope(tx, request, uid);
       // This snapshot binds the currently observed original patient to the
       // managing institution. It is not an A fixed-version/retention lookup.
-      return { studyId: uid, managingInstitutionId: state.institutionId, teleInstitutionId: state.teleInstitutionId,
-        patient: { linkId: JSON.stringify([state.institutionId, source.patientId]),
-          patientId: source.patientId, assigningAuthority: state.institutionId } };
+      // WORKLIST-SPLIT-UID: a UID that two patient resources share has no
+      // resolved patient; the product's own refusal answers, never an invented link.
+      const resources = await orthanc.studyIdentityResources(uid);
+      if (!resources.length) throw new NotFoundException('검사가 없습니다.');
+      if (resources.length > 1) throw new ConflictException({ code: STUDY_IDENTITY_UNRESOLVED, message: STUDY_IDENTITY_UNRESOLVED_MESSAGE });
+      const patientId = OrthancService.tag(resources[0], '00100020');
+      if (!patientId.trim() || patientId.length > 64) throw new BadRequestException('원본 환자 식별을 확인할 수 없습니다');
+      return { ...current, patient: { linkId: JSON.stringify([current.managingInstitutionId, patientId]),
+        patientId, assigningAuthority: current.managingInstitutionId } };
     },
   };
   const sources = clinicalRouteSources(identity, records, pending.finding);

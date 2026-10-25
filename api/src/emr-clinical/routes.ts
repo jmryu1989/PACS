@@ -86,19 +86,29 @@ export class ClinicalRoutes {
       access: outcome.access, replayed: outcome.status === 'replayed' } };
   }
 
+  /** `studyId` is the study a per-study list belongs to: its event names that study and
+   * its managing institution even when the list is empty. A cross-study list records one
+   * event per managing institution it served; empty, it names the caller's own institution,
+   * the only one whose records such a list can show. */
   async collection<T extends { items?: { id: string; studyUid: string; revision: number }[] }>(request: object,
-    surface: string, recordType: ClinicalRecord, read: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    surface: string, recordType: ClinicalRecord, read: (tx: Prisma.TransactionClient) => Promise<T>, studyId?: string): Promise<T> {
     const work = this.parts.records.begin();
     try {
       return await work.transactionWithRecords(async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
+        const scope = studyId === undefined ? null : await this.parts.context.scope(tx, request, studyId);
         const response = await read(tx);
         if (!response.items) refuse('ClinicalListUnavailable');
-        const targets: AccessEventV1['targets'][number][] = [];
-        const institutions = new Set<string>(), studies = new Set<string>();
+        const served = new Map<string, { studies: Set<string>; targets: AccessEventV1['targets'][number][] }>();
+        const group = (institution: string) => {
+          let g = served.get(institution);
+          if (!g) served.set(institution, g = { studies: new Set(), targets: [] });
+          return g;
+        };
         for (const item of response.items) {
-          const study = await this.parts.context.study(tx, request, item.studyUid);
-          institutions.add(study.managingInstitutionId); studies.add(study.studyId);
+          const study = scope && item.studyUid === scope.studyId ? scope : await this.parts.context.scope(tx, request, item.studyUid);
+          const g = group(study.managingInstitutionId);
+          g.studies.add(study.studyId);
           const versions = (await this.parts.store.versions(tx, recordType, item.id))
             .filter(v => v.plan.version.sequence <= item.revision);
           // A concurrent writer may advance the head after the list's snapshot.
@@ -109,32 +119,40 @@ export class ClinicalRoutes {
               if (!version.signature) refuse('SignatureRequired');
               this.parts.signer.verify(version.signature, version.plan.signing);
             }
-            targets.push(version.plan.access.target);
+            g.targets.push(version.plan.access.target);
           }
         }
+        if (!served.size) {
+          const g = group(scope?.managingInstitutionId ?? facts.actor.institutionId);
+          if (scope) g.studies.add(scope.studyId);
+        }
         const known = <V>(value: V) => ({ status: 'known' as const, value });
-        await record({ formatVersion: 1, surface, eventId: randomUUID(),
-          userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
-          actingInstitution: known(facts.actor.institutionId), managingInstitution: institutions.size === 1 ?
-            known([...institutions][0]) : { status: 'unresolved', reason: 'not-resolved' },
-          occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip, cause: 'user-view',
-          context: { basis: 'worklist', studyId: studies.size === 1 ? [...studies][0] : null, relatedStudyId: null, reason: null },
-          executor: 'member', targets, action: 'provide-prepared', result: 'prepared',
-          requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null }, async () => null);
+        for (const [institution, g] of served) {
+          await record({ formatVersion: 1, surface, eventId: randomUUID(),
+            userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
+            actingInstitution: known(facts.actor.institutionId), managingInstitution: known(institution),
+            occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip, cause: 'user-view',
+            context: { basis: 'worklist', studyId: g.studies.size === 1 ? [...g.studies][0] : null, relatedStudyId: null, reason: null },
+            executor: 'member', targets: g.targets, action: 'provide-prepared', result: 'prepared',
+            requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null }, async () => null);
+        }
         return response;
       }).catch(routeError);
     } finally { work.end(); }
   }
 
+  /** `studyId` is the study a per-study read belongs to (the Tech Note's record ID is its
+   * study): an empty answer still names that study and its managing institution. */
   async read<T>(request: object, recordType: ClinicalRecord, recordId: string,
     read: (tx: Prisma.TransactionClient) => Promise<T>, empty?: (value: T) => boolean,
-    surface = READ_ROUTES[recordType]): Promise<T> {
+    surface = READ_ROUTES[recordType], studyId?: string): Promise<T> {
     const work = this.parts.records.begin();
     try {
       return await work.transactionWithRecords(async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
         const first = await this.parts.store.unit(tx, recordType, recordId);
-        const study = first ? await this.parts.context.study(tx, request, first.studyId) : null;
+        const scoped = first?.studyId ?? studyId;
+        const study = scoped === undefined ? null : await this.parts.context.scope(tx, request, scoped);
         if (first) await this.parts.store.lockUnit(tx, recordType, recordId);
         const response = await read(tx);
         const unit = first ? await this.parts.store.unit(tx, recordType, recordId) : null;

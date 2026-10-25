@@ -54,11 +54,14 @@ async function clinicalFixture(db, records, issuer, members) {
           institutionId: current.actor.institutionId, signingRegistrationId: current.actor.identityRegistrationId },
           requestId: current.ingress.requestId, ip: current.ingress.ip };
       },
-      async study(tx, request, uid) {
+      async scope(tx, request, uid) {
         const state = await tx.studyState.findUnique({ where: { uid } });
         if (!state || ![state.institutionId, state.teleInstitutionId].includes(request.institution ?? request.facts.institution)) product('emr-contract/validation').refuse('NotFound');
-        return { studyId: uid, managingInstitutionId: state.institutionId, teleInstitutionId: state.teleInstitutionId,
-          patient: { linkId: 'fixture:' + uid, patientId: 'synthetic:' + uid, assigningAuthority: state.institutionId } };
+        return { studyId: uid, managingInstitutionId: state.institutionId, teleInstitutionId: state.teleInstitutionId };
+      },
+      async study(tx, request, uid) {
+        const current = await this.scope(tx, request, uid);
+        return { ...current, patient: { linkId: 'fixture:' + uid, patientId: 'synthetic:' + uid, assigningAuthority: current.managingInstitutionId } };
       },
     }, async project() { throw new Error('Real route projector required'); },
   });

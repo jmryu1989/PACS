@@ -17,9 +17,14 @@ export interface ClinicalRequestFacts {
 }
 /** These are server adapters. Current session/member/study access is checked
  * under the transaction's locks; a browser's JSON cannot supply any fact. */
+/** The study's institutional scope without its patient identity. Reads and lists name the
+ * managing institution of what they serve; their targets carry the patient snapshots the
+ * stored versions already hold, so they must not depend on the source archive answering. */
+export type StudyScope = Pick<StudyFacts, 'studyId' | 'managingInstitutionId' | 'teleInstitutionId'>;
 export interface ClinicalContextSource {
   facts(tx: Prisma.TransactionClient, request: object): Promise<ClinicalRequestFacts>;
   study(tx: Prisma.TransactionClient, request: object, studyId: string): Promise<StudyFacts>;
+  scope(tx: Prisma.TransactionClient, request: object, studyId: string): Promise<StudyScope>;
 }
 export interface OnlineClinicalWrite {
   surface: WriteInput['surface']; studyId: string; recordId: string; body: unknown;

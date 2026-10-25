@@ -47,8 +47,12 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     fs.writeFileSync(secretFile, clinical.wrappingSecret);
     process.env.KIN_EMR_WRAPPING_KEY_ID = 'fixture-wrap';
     process.env.KIN_EMR_WRAPPING_KEY_FILES = JSON.stringify({ 'fixture-wrap': secretFile });
-    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [],
-      connectStudyIdentity: async uid => ({ patientId: 'synthetic:' + uid }) };
+    // One original resource per study; splitUid is a WORKLIST-SPLIT-UID source (two patient resources).
+    const splitUid = '1.2.840.9999.26';
+    const resource = (uid, patient) => ({ '0020000D': { Value: [uid] }, '00100020': { Value: [patient] } });
+    const orthanc = { studyIdentityResources: async uid => uid === splitUid
+      ? [resource(uid, 'synthetic:split-a'), resource(uid, 'synthetic:split-b')] : [resource(uid, 'synthetic:' + uid)],
+      studyIdentities: async () => [] };
     const users = Object.values(members).map(m => ({ id: m.sub, username: m.username, email: m.email, firstName: m.name,
       enabled: true, groups: [m.institution], roles: m.roles }));
     const keycloak = { getUser: async sub => users.find(u => u.id === sub),
@@ -86,6 +90,30 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const uid = '1.2.840.9999.24', teleUid = '1.2.840.9999.25';
     await db.studyState.create({ data: { uid, institutionId: hospital, ss: 'Verified' } });
     await db.studyState.create({ data: { uid: teleUid, institutionId: hospital, teleInstitutionId: receiver, ts: 'wait', ss: 'Verified' } });
+    // Empty lists and an absent note answer 200 and are recorded against the study's (or, for a
+    // cross-study list, the caller's) institution; nothing served means no targets, never a 500.
+    assert.deepEqual((await send('doctor', 'GET', `/studies/${uid}/questions`)).items, []);
+    assert.deepEqual((await send('doctor', 'GET', `/studies/${uid}/image-requests`)).items, []);
+    assert.deepEqual((await send('clinician', 'GET', '/questions?view=mine')).items, []);
+    assert.equal((await send('doctor', 'GET', `/studies/${uid}/tech-note`)).note, null);
+    const emptyReads = await db.$queryRaw`SELECT payload::jsonb AS event FROM emr_access.access_entry
+      WHERE payload::jsonb->>'surface' IN ('GET studies/:uid/questions', 'GET studies/:uid/image-requests', 'GET questions', 'GET studies/:uid/tech-note')`;
+    assert.equal(emptyReads.length, 4);
+    for (const { event } of emptyReads) {
+      assert.equal(event.action, 'provide-prepared'); assert.deepEqual(event.targets, []);
+      assert.equal(event.managingInstitution.value, hospital);
+      assert.equal(event.context.studyId, event.surface === 'GET questions' ? null : uid);
+    }
+    // WORKLIST-SPLIT-UID: a clinical write on a UID two patient resources share is refused with the
+    // product's identity issue; no record and no event are written, and the study state is unchanged.
+    await db.studyState.create({ data: { uid: splitUid, institutionId: hospital, teleInstitutionId: receiver, ts: 'wait', ss: 'Verified' } });
+    const splitNote = await send('tech', 'POST', `/studies/${splitUid}/tech-note`, { attemptId: randomUUID(), baseVersion: 0, text: '분할 UID 메모', reason: '' }, 409);
+    assert.equal(splitNote.code, 'STUDY_IDENTITY_UNRESOLVED');
+    const splitCancel = await send('doctor', 'PATCH', `/studies/${splitUid}`, { ts: 'cancelled' }, 409);
+    assert.equal(splitCancel.code, 'STUDY_IDENTITY_UNRESOLVED');
+    assert.equal((await db.studyState.findUnique({ where: { uid: splitUid } })).ts, 'wait');
+    assert.equal(await db.techNoteRevision.count({ where: { studyUid: splitUid } }), 0);
+    assert.equal(await db.readerAssignment.count({ where: { studyUid: splitUid } }), 0);
     const finding = await send('doctor', 'POST', `/studies/${uid}/findings`, {
       requestId: randomUUID(), item: { schemaVersion: 1, title: '합성 소견', text: '원본 연결 대기',
         sources: [{ itemId: randomUUID(), revision: 1 }] },

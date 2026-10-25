@@ -39,7 +39,7 @@ export class FindingController {
   list(@Param('uid') uid: string, @Query() query: any, @Req() req: any, @Res({ passthrough: true }) res: any) {
     announce(res);
     return clinicalRoutes(this.clinical).collection(req, 'GET studies/:uid/findings', 'finding',
-      tx => this.svc.list(uid, query, caller(req), undefined, requested(req), tx));
+      tx => this.svc.list(uid, query, caller(req), undefined, requested(req), tx), uid);
   }
 
   @Post('studies/:uid/findings')
