@@ -14,7 +14,7 @@ from pydicom.uid import ExplicitVRLittleEndian, XRayAngiographicImageStorage, ge
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from mgxa_acceptance import inventory, selected_files
-from mgxa_viewer_check import check_images
+from mgxa_viewer_check import check_images, comparison_pairs
 
 
 class AcceptancePrep(unittest.TestCase):
@@ -104,6 +104,15 @@ class AcceptancePrep(unittest.TestCase):
                 check_images([bad], [row], ['1'])
         with self.assertRaisesRegex(AssertionError, 'both displayed'):
             check_images([cell], [row], ['1','4'])
+
+    def test_comparison_pairs_both_breasts_without_cross_pairing(self):
+        cells = [{'image':f'wadors:/studies/{study}/series/2/instances/{x+1}/frames/1',
+                  'x':x, 'y':y} for y in (0,1) for x,study in enumerate(('1','1','4','4'))]
+        pairs = comparison_pairs(list(reversed(cells)), ['1','4'])
+        self.assertEqual([(a['x'],b['x'],a['y'],b['y']) for a,b in pairs],
+                         [(0,2,0,0),(1,3,0,0),(0,2,1,1),(1,3,1,1)])
+        with self.assertRaisesRegex(AssertionError, 'missing counterpart'):
+            comparison_pairs(cells[:-1], ['1','4'])
 
 
 if __name__ == '__main__':

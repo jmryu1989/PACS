@@ -99,6 +99,29 @@ def check_images(snapshot, rows, studies):
         raise AssertionError('Requested current/prior studies are not both displayed')
 
 
+def comparison_pairs(cells, studies):
+    """Pair corresponding positions within each study's half of the MG grid.
+
+    Both breasts occupy the same row in the served mammography layout. A
+    Cartesian product would incorrectly compare right current with left prior.
+    Original DICOM projection checks below remain the independent oracle.
+    """
+    current = [c for c in cells if IDENTITY.search(c['image']).group(1) == studies[0]]
+    prior = [c for c in cells if IDENTITY.search(c['image']).group(1) == studies[1]]
+    if not current or not prior or max(c['x'] for c in current) >= min(c['x'] for c in prior):
+        raise AssertionError('Current is not left of prior in the default comparison')
+    pairs = []
+    for y in sorted({c['y'] for c in cells}):
+        left = sorted((c for c in current if c['y'] == y), key=lambda c: c['x'])
+        right = sorted((c for c in prior if c['y'] == y), key=lambda c: c['x'])
+        if len(left) != len(right):
+            raise AssertionError('Current/prior row has a missing counterpart')
+        pairs.extend(zip(left, right))
+    if not pairs:
+        raise AssertionError('No current/prior image pairs')
+    return pairs
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--load-result', required=True)
@@ -222,21 +245,14 @@ def main():
                 for index, studies in enumerate(comparison):
                     def comparison_layout(page,case):
                         cells=case['before']
-                        current=[c for c in cells if '/studies/'+case['studies'][0]+'/' in c['image']]
-                        prior=[c for c in cells if '/studies/'+case['studies'][1]+'/' in c['image']]
-                        if max(c['x'] for c in current)>=min(c['x'] for c in prior):
-                            raise AssertionError('Current is not left of prior in the default comparison')
                         case['comparison']='Current left, actual same-subject prior right; images identified'
                         by_sop={r['sop']:r for r in rows}
                         pairs=[]
-                        for left in current:
-                            for right in prior:
-                                if left['y']!=right['y']:
-                                    continue
-                                a=mg_projection(by_sop[IDENTITY.search(left['image']).group(3)],source_root)
-                                b=mg_projection(by_sop[IDENTITY.search(right['image']).group(3)],source_root)
-                                pairs.append({'current_image':left['image'],'prior_image':right['image'],
-                                    'current_projection':a,'prior_projection':b})
+                        for left, right in comparison_pairs(cells, case['studies']):
+                            a=mg_projection(by_sop[IDENTITY.search(left['image']).group(3)],source_root)
+                            b=mg_projection(by_sop[IDENTITY.search(right['image']).group(3)],source_root)
+                            pairs.append({'current_image':left['image'],'prior_image':right['image'],
+                                'current_projection':a,'prior_projection':b})
                         case['hanging_pairs']=pairs
                         for pair in pairs:
                             a,b=pair['current_projection'],pair['prior_projection']
@@ -259,21 +275,6 @@ def main():
                             raise AssertionError('XA traversal must begin at stored frame 1')
                         canvas = page.locator('[data-cy="viewport-grid"] canvas').first
                         canvas.click()
-                        case['navigation'] = [current['image']]
-                        for frame in range(2, row['frames']+1):
-                            page.keyboard.press('ArrowDown')
-                            page.wait_for_function("wanted => ("+SNAPSHOT+")().some(c => c.image.split(/[?#]/)[0].endsWith(wanted))",
-                                arg='/instances/'+row['sop']+'/frames/'+str(frame))
-                            check_images(page.evaluate(SNAPSHOT), rows, [row['study']])
-                            case['navigation'].append(page.evaluate(SNAPSHOT)[0]['image'])
-                        page.keyboard.press('ArrowUp')
-                        page.wait_for_function('last => ('+SNAPSHOT+')()[0]?.index === last-2',arg=row['frames'])
-                        case['backward_step']=page.evaluate(SNAPSHOT)[0]['image']
-                        check_images(page.evaluate(SNAPSHOT),rows,[row['study']])
-                        page.locator('[data-cy="MoreTools-split-button-secondary"]').click()
-                        page.locator('[data-cy="Cine"]').click()
-                        page.get_by_role('button',name='First Frame',exact=True).click()
-                        page.wait_for_function('() => ('+SNAPSHOT+')()[0]?.index === 0')
                         page.evaluate('''() => {
                           window.mgxaRenders=[];
                           for(const cell of services.viewportGridService.getState().viewports.values()){
@@ -283,6 +284,25 @@ def main():
                             });
                           }
                         }''')
+                        case['navigation'] = [current['image']]
+                        for frame in range(2, row['frames']+1):
+                            page.keyboard.press('ArrowDown')
+                            page.wait_for_function("wanted => window.mgxaRenders.some(c => c.image.split(/[?#]/)[0].endsWith(wanted))",
+                                arg='/instances/'+row['sop']+'/frames/'+str(frame))
+                            check_images(page.evaluate(SNAPSHOT), rows, [row['study']])
+                            case['navigation'].append(page.evaluate(SNAPSHOT)[0]['image'])
+                        case['navigation_render_timestamps']=page.evaluate('window.mgxaRenders')
+                        page.evaluate('window.mgxaRenders=[]')
+                        page.keyboard.press('ArrowUp')
+                        page.wait_for_function('last => window.mgxaRenders.some(r=>r.index===last-2)',arg=row['frames'])
+                        case['backward_step']=page.evaluate(SNAPSHOT)[0]['image']
+                        check_images(page.evaluate(SNAPSHOT),rows,[row['study']])
+                        page.locator('[data-cy="MoreTools-split-button-secondary"]').click()
+                        page.locator('[data-cy="Cine"]').click()
+                        page.evaluate('window.mgxaRenders=[]')
+                        page.get_by_role('button',name='First Frame',exact=True).click()
+                        page.wait_for_function('() => window.mgxaRenders.some(r=>r.index===0)')
+                        page.evaluate('window.mgxaRenders=[]')
                         play = page.locator('[data-cy="cine-player-play-pause"]').first
                         case['configured_rate']=displayed_fps(page)
                         case['cine_controls']=page.locator('#kin-cine').inner_text()
