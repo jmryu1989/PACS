@@ -111,10 +111,21 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal((await db.studyState.findUnique({ where: { uid: splitUid } })).ts, 'cancelled');
     const splitClosed = await db.readerAssignment.findUnique({ where: { studyUid_institutionId: { studyUid: splitUid, institutionId: receiver } } });
     assert.equal(splitClosed.readerSub, null); assert.equal(splitClosed.closedRevision, 1);
-    const closeEvents = uid => db.$queryRaw`SELECT payload::jsonb AS event FROM emr_access.access_entry
-      WHERE payload::jsonb->>'surface'='server:reader-assignment-close' AND payload::jsonb->'context'->>'studyId'=${uid}`;
+    // R219-01 / D1860: inspect both admission and persisted rows after the real automatic close.
+    const closeEvents = uid => db.$queryRaw`SELECT e.payload::jsonb AS event, e.stream, e.statutory_act,
+      e.retention_class, o.streams AS admitted_streams
+      FROM emr_access.access_entry e JOIN emr_access.operation o ON o.operation_id=e.operation_id
+      WHERE e.payload::jsonb->>'surface'='server:reader-assignment-close' AND e.payload::jsonb->'context'->>'studyId'=${uid}`;
+    const assertViewingClose = entry => {
+      assert.equal(entry.event.result, 'succeeded');
+      assert.equal(entry.statutory_act, '수정');
+      assert.deepEqual(entry.admitted_streams, ['viewing']);
+      assert.equal(entry.stream, 'viewing');
+      assert.equal(entry.retention_class, 'viewing2y');
+    };
     const splitCloses = await closeEvents(splitUid);
-    assert.ok(splitCloses.length > 0);
+    assert.equal(splitCloses.length, 1);
+    splitCloses.forEach(assertViewingClose);
     for (const { event } of splitCloses) {
       assert.equal(event.action, 'modify'); assert.equal(event.managingInstitution.value, hospital);
       assert.deepEqual([event.targets[0].kind, event.targets[0].patientLinkSnapshot, event.targets[0].recordId.value, event.targets[0].versionId.value],
@@ -200,7 +211,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const closed = await db.readerAssignment.findUnique({ where: { studyUid_institutionId: { studyUid: teleUid, institutionId: receiver } } });
     assert.equal(closed.readerSub, null); assert.equal(closed.closedRevision, 2);
     const closes = await closeEvents(teleUid);
-    assert.ok(closes.length > 0);
+    assert.equal(closes.length, 1);
+    closes.forEach(assertViewingClose);
     for (const { event } of closes) {
       assert.equal(event.action, 'modify');
       assert.equal(event.userId.value.subject, members.doctor.sub);
