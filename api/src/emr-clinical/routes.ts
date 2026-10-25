@@ -1,7 +1,6 @@
 import { BadRequestException, ConflictException, NotFoundException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
-import type { AccessEventV1 } from '../emr-contract/access-event';
 import { ContractError, refuse } from '../emr-contract/validation';
 import { READ_ROUTES, ClinicalRecord, SurfaceKey } from './contract';
 import type { ClinicalWritePlan } from './records';
@@ -150,16 +149,18 @@ export class ClinicalRoutes {
           this.parts.signer.verify(version.signature, version.plan.signing);
         }
         const known = <V>(value: V) => ({ status: 'known' as const, value });
-        const event: AccessEventV1 = { formatVersion: 1, surface, eventId: randomUUID(),
-          userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
-          actingInstitution: known(facts.actor.institutionId), managingInstitution: study ? known(study.managingInstitutionId) :
-            { status: 'unresolved', reason: 'not-resolved' }, occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip,
-          cause: 'user-view', context: { basis: 'worklist', studyId: study?.studyId ?? null, relatedStudyId: null, reason: null },
+        if (unit && study) {
           // The real service read above owns its existing role/party/tele and
           // source-lineage checks. Recording evidence must not change them.
-          executor: 'member', targets: versions.map(v => v.plan.access.target), action: 'provide-prepared', result: 'prepared',
-          requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null };
-        await record(event, async () => unit ? ({ kind: 'emr-clinical', id: recordId, version: unit.head.versionId }) : null);
+          await record({ formatVersion: 1, surface, eventId: randomUUID(),
+            userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
+            actingInstitution: known(facts.actor.institutionId), managingInstitution: known(study.managingInstitutionId),
+            occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip,
+            cause: 'user-view', context: { basis: 'worklist', studyId: study.studyId, relatedStudyId: null, reason: null },
+            executor: 'member', targets: versions.map(v => v.plan.access.target), action: 'provide-prepared', result: 'prepared',
+            requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
+          async () => ({ kind: 'emr-clinical', id: recordId, version: unit.head.versionId }));
+        }
         return { ...response, emr: { recordId, studyId: unit?.studyId ?? null,
           signatures: versions.map(v => ({ versionId: v.plan.version.versionId, revision: v.plan.version.sequence,
             // The envelope contains clinical text. The page needs its verified
