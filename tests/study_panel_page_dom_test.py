@@ -72,6 +72,18 @@ W6_FIRST_PAINT_NODES = 1
 # (report_actions_dom_test.py, report_flow_dom_test.py).
 W4_REPORT_NODES = 10
 HIDE_W4 = "() => document.querySelector('#b-approve-next')?.style.setProperty('visibility', 'hidden')"
+# W9-UI (order 01-multi-study-view.md; the W9 prep ui-contract: "Open Selected Studies appears in Radiology's Selected
+# toolbar ... Disabled for fewer than 2"): a decided difference. The Selected toolbar gains that one button, disabled at
+# first paint (nothing is selected), and main.html adds the Multi-Study View's stylesheet link, its script tag and its
+# hidden #multi-study section (14 elements: the section, its head row, title, summary, button row with Previous, Next,
+# Compare Two, Back to Pages, Retry and Close, the status and identity lines and the empty member list). First paint:
+# + W9_VIEW_NODES. The button lengthens the toolbar line (and wraps it where the list column is narrow), so the first-paint
+# comparisons take that button, and only it, out of the layout where it stands (HIDE_W9, display none: the toolbar is the
+# baseline's again) and compare every other box and pixel with the baseline; its own place, reach and disabled reason are
+# the W9 cases (multi_study_view_dom_test.py).
+W9_VIEW_NODES = 3 + 14
+HIDE_W9 = """() => [...document.querySelectorAll('#worklist-selection button')]
+  .find(b => b.textContent === 'Open Selected Studies')?.style.setProperty('display', 'none')"""
 SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
 # Below the scroller in its column: the footer and each notice (a notice section's first row is its bar; an opened
 # notice pane scrolls inside its own height cap).
@@ -1230,6 +1242,7 @@ class StudyPanelPageDOM(unittest.TestCase):
             page.goto(auth.MAIN_URL)
             expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
             wait_startup(page, site)
+            page.evaluate(HIDE_W9)   # W9-UI decided difference, see W9_VIEW_NODES
             settle(page)
             facts = page.evaluate("""(names) => ({focus:document.activeElement.id || document.activeElement.tagName,
               panels:names.map(s=>{
@@ -1318,6 +1331,8 @@ class StudyPanelPageDOM(unittest.TestCase):
         #   are left out of the geometry and each picture covers its own W6 scroller;
         #   what lies below the scroller in its column is compared where the scroller
         #   leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable).
+        # - W9-UI (W9_VIEW_NODES above): the Selected toolbar's Open Selected Studies
+        #   button is taken out of the layout before anything is measured (HIDE_W9).
         # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'

@@ -301,6 +301,13 @@ class MultiStudyViewPage(unittest.TestCase):
         order = self.visible_order()
         button = self.page.locator("#multi-selection-open-set")
         expect(button).to_be_disabled()
+        # The Selected toolbar keeps the action whole in view at first paint, also where the list column is narrow and the
+        # toolbar line wraps (the Study Panel first-paint comparisons take this one button out: W9_VIEW_NODES there).
+        for width, height in ((1920, 1080), (1366, 768), (900, 1200), (768, 1024)):
+            with self.subTest(width=width, height=height):
+                self.page.set_viewport_size({"width": width, "height": height})
+                expect(button).to_be_in_viewport(ratio=1)
+        self.page.set_viewport_size({"width": 1400, "height": 900})
         self.choose(order[0])
         expect(button).to_be_disabled()
         self.assertIn("2개 이상", button.get_attribute("title"))

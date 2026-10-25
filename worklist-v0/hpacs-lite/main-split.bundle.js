@@ -12007,12 +12007,12 @@
     function showSelectionMenu(e, set) {
       showCtx(e, [{ label: "Open Selected Studies", dis: set.studyUids.length > KinWorklistSelection.SET_LIMITS.max,
         act: () => { ctxSelection = null; multiStudyView?.open(set); } }], null, null);
-      ctxSelection = ctxItems;
+      ctxSelection = { items: ctxItems, generation: set.generation };
     }
-    /** The selection the open selection menu was offered for changed: that menu closes before anything can act on it. */
-    function closeSelectionMenu() {
-      if (!ctxSelection) return;
-      if (ctxItems === ctxSelection && ctx.style.display === "block") {
+    /** The selection changed from the one the open selection menu was offered for: that menu closes before anything can act. */
+    function closeSelectionMenu(generation) {
+      if (!ctxSelection || ctxSelection.generation === generation) return;
+      if (ctxItems === ctxSelection.items && ctx.style.display === "block") {
         const focused = ctx.contains(document.activeElement);
         ctx.style.display = "none";
         if (focused) ctxOpener?.focus();
@@ -12559,7 +12559,7 @@
       KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior),
         // W9: Open Selected Studies (toolbar, Selection Details); a changed selection closes its row menu.
-        openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:()=>closeSelectionMenu(),
+        openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
         openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null});
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
@@ -12580,10 +12580,10 @@
         allowed: () => !!sess && serverMode && !demoMode && !offline,
         target: () => selectedUid,
         targetLabel: uid => { const s = studies.find(x => x.uid === uid); return s ? [s.name, s.id, s.date, s.modality, shownStudyDesc(s)].filter(Boolean).join(' · ') : null; },
-        relatedBlock: () => relatedMode.active() ? relatedMode.reason() : null,
+        relatedBlock: () => relatedMode.active() ? relatedMode.reason() : null, watch: [$('#related-mode')],
         select: (uid, token) => select(uid, { deferViewer: true, viewingSet: token }),
         resolve: (body, signal, at) => api('POST', '/studies/viewing-set/resolve', body, signal, at),
-        viewer: { reserve: reserveViewingSet, launch: launchViewingSet, release: releaseViewingSet },
+        viewer: { reserve: reserveViewingSet, launch: launchViewingSet, release: releaseViewingSet, bindsTarget: viewingSetToWorkspace },
         formatDate: fmtD,
       });
       restoreWorkspace();
