@@ -2593,7 +2593,9 @@ class LiveInvariantTests(unittest.TestCase):
             "GET", f"/studies/{quote(fixture.uid)}/report/versions", user,
         )
         self.assertEqual(result.status, 200, "기존 ReportVersion이 조회 불가능해졌습니다: " + result.text)
-        return sorted(result.body, key=lambda row: row["version"])
+        # MODULE_A A2: accessRef names this read's own access record, so it differs per read by contract. The stored
+        # version content these cases compare across reads is every other field.
+        return sorted(({k: v for k, v in row.items() if k != "accessRef"} for row in result.body), key=lambda row: row["version"])
 
     def report_state(self, fixture: Fixture, user: str) -> dict[str, Any]:
         result = self.stack.request("GET", "/bootstrap", user)

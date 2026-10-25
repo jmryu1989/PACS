@@ -522,7 +522,7 @@ test('the history response names its columns and the new one is not among them',
   const row = { version: 4, findings: 'SYN history', citations: [carried('history')],
     structured: [{ sid: 'syn-structure', renderedText: 'SYN structured evidence' }] };
   const f = fixture({ versions: new Map([[4, row]]) });
-  const history = await f.svc.versions(UID, CALLER);
+  const history = JSON.parse((await f.svc.versions(UID, CALLER)).json);
   assert.equal(history.length, 1, 'exercise a stored version with both evidence columns');
   assert.equal(history[0].findings, row.findings);
   assert.equal(Object.hasOwn(history[0], 'citations'), false, 'history must not expose citations');
@@ -599,7 +599,8 @@ test('no audit line carries a source pointer or clinical text', async () => {
 // REVOKED-LINEAGE / ALIASED-VERSION -> TEST-S3-U5b-VERSION-CITATIONS.
 const preserved = (citations, findings = LINE) =>
   ({ citations, findings, conclusion: '', recommendation: '' });
-const historyRead = (f, version, caller = CALLER) => f.svc.reportVersionCitations(UID, version, caller);
+// MODULE_A A2: the read returns the selected response (A1 LocalReadResponse); its serialized body is the HTTP answer.
+const historyRead = (f, version, caller = CALLER) => f.svc.reportVersionCitations(UID, version, caller).then(r => JSON.parse(r.json));
 
 test('the historical read runs the report gates and the access re-check inside one snapshot', async () => {
   const f = fixture({ versions: new Map([[2, preserved([{ ...carried('a'), findingId: FINDING, insertedText: LINE }])]]) });
@@ -651,8 +652,9 @@ test('the historical read answers one preserved row, and a version with no row i
   const answer = await historyRead(f, '2');
   const call = f.calls.find(c => c.call === 'reportVersion.findUnique');
   assert.deepEqual(call.args.where, { uid_version: { uid: UID, version: 2 } });
-  assert.deepEqual(Object.keys(call.args.select).sort(), ['citations', 'conclusion', 'findings', 'recommendation'],
+  assert.deepEqual(Object.keys(call.args.select).sort(), ['citations', 'conclusion', 'findings', 'id', 'recommendation'],
     'action/author/at/reason belong to the history response and must not leave the DB layer here');
+  assert.equal(Object.hasOwn(answer, 'id'), false, 'the row id names the access record target; it is not answered');
   assert.equal(answer.entries.length, 1);
   assert.equal(answer.entries[0].insertedBy, 'v2-author@synthetic', 'the head row is not the answer');
 
@@ -671,7 +673,7 @@ test('the historical answer is metadata only, reads no draft on any path and wri
   const f = fixture({ versions: new Map([[2, preserved([readableEntry, hiddenLineage])]]),
     draft: { baseVersion: 4, citations: [{ ...readableEntry, cid: 'draft-cid' }] } });
   const answer = await historyRead(f, '2');
-  assert.deepEqual(Object.keys(answer).sort(), ['actor', 'entries', 'version']);
+  assert.deepEqual(Object.keys(answer).sort(), ['accessRef', 'actor', 'entries', 'version']);
   assert.equal(answer.actor, CALLER.actor);
   assert.deepEqual(Object.keys(answer.entries[0]).sort(),
     ['field', 'findingRevision', 'insertedAt', 'insertedBy', 'linkStateAtInsert', 'presence', 'sourceIndex']);

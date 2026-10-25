@@ -17,6 +17,7 @@ import { applyStructureKeepList, isStructureEntry, projectStructure, structureAp
   REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA } from '../report-structure';
 import { draftToken } from './values';
 import type { Caller, PacsAccess } from './access';
+import { reportVersionCitationsRead, reportVersionsRead } from '../emr-viewing/report-read';
 
 /**
  * **서명 순간에 새로 생기는 유일한 거절이다.**
@@ -330,9 +331,12 @@ export class PacsReportEvidence {
      * 그대로 나간다 — 관문을 하나도 새로 만들지 않았는데 노출면만 넓어지는 것이다.
      * 인용은 전용 읽기 하나에서만, 소견 가독을 다시 건 뒤에 나간다.
      */
-    return this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' },
+    const rows = await this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' },
       select: { id: true, uid: true, version: true, action: true, findings: true, conclusion: true,
         recommendation: true, reason: true, author: true, at: true } });
+    // MODULE_A A2: 이 읽기가 고정한 행 전부가 열람 기록의 대상이다. 화면이 나중에 고르는 판만 기록하면 내보낸 다른 판의
+    // 열람이 기록에서 빠진다. 응답은 기록이 COMMIT된 뒤 이 행 그대로 나간다(A1 응답 경계).
+    return reportVersionsRead(uid, prev.institutionId, rows);
   }
 
   /**
@@ -471,7 +475,7 @@ export class PacsReportEvidence {
      */
     await this.studyAccess.prepare(c);
     await this.studyAccess.prepareSourceIdentity(c, [uid]);
-    return this.prisma.$transaction(async tx => {
+    const read = await this.prisma.$transaction(async tx => {
       /**
        * 관문과 판 읽기가 **한 스냅샷** 안에 있다. 밖에서 읽으면 그 사이에 예비 판독이 끼어들어
        * RS=P가 된 판을 그 관문을 거치지 않은 채 답할 수 있다.
@@ -484,9 +488,9 @@ export class PacsReportEvidence {
           `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
       const row = await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: want } },
-        // 네 칸뿐이다. `action`·`author`·`at`·`reason`은 이력 응답의 것이고, 여기서 다시 나가면
-        // 관문을 하나도 새로 만들지 않은 채 노출면만 넓어진다.
-        select: { citations: true, findings: true, conclusion: true, recommendation: true },
+        // 내보내는 것은 아래 메타데이터뿐이다. `action`·`author`·`at`·`reason`은 이력 응답의 것이고, 여기서 다시 나가면
+        // 관문을 하나도 새로 만들지 않은 채 노출면만 넓어진다. `id`는 응답에 싣지 않고 이 판의 열람 기록 대상에만 쓴다.
+        select: { id: true, citations: true, findings: true, conclusion: true, recommendation: true },
       });
       // 없는 판을 「인용 없음」으로 답하면 그 자체가 거짓말이다.
       if (!row) throw new NotFoundException('그 판을 찾을 수 없습니다');
@@ -496,7 +500,7 @@ export class PacsReportEvidence {
       const ids = [...new Set(entries.map(entry => String(entry?.findingId ?? '')).filter(Boolean))];
       const readable = new Set<string>();
       for (const found of await this.findings.readableFindings(tx, c, uid, ids)) readable.add(String(found.id));
-      return { version: want, actor: c.actor, entries: entries.map((entry, index) => {
+      const answer = { version: want, actor: c.actor, entries: entries.map((entry, index) => {
         if (!readable.has(String(entry?.findingId ?? '')))
           return { field: entry?.field ?? null, insertedAt: entry?.insertedAt ?? null,
             insertedBy: entry?.insertedBy ?? null, state: SOURCE_UNAVAILABLE };
@@ -514,6 +518,10 @@ export class PacsReportEvidence {
             ? presenceState(lineBlockOccurrences(String((row as any)[entry.field] ?? ''), entry.insertedText), counts[index])
             : null };
       }) };
+      return { institution: prev.institutionId, stored: { id: row.id, version: want }, answer };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+    // MODULE_A A2: 같은 스냅샷이 고정한 판과 걸러진 답을 그대로 기록 대상으로 쓴다. 다시 읽지 않는다 — 다시 읽으면 기록한
+    // 판과 내보낸 판이 갈릴 수 있다. 빈 증언도 그 판을 읽은 사실이다.
+    return reportVersionCitationsRead(uid, read.institution, read.stored, read.answer);
   }
 }
