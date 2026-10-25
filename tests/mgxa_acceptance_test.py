@@ -8,13 +8,16 @@ import sys
 import tempfile
 import unittest
 
-from pydicom.dataset import FileDataset, FileMetaDataset
+from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, XRayAngiographicImageStorage, generate_uid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from mgxa_acceptance import inventory, selected_files
-from mgxa_viewer_check import check_images, comparison_pairs
+from mgxa_acceptance import inventory, selected_files, provenance, digest, local_use_policy, use_limits
+from mgxa_viewer_check import (check_images, comparison_pairs, mg_projection, check_projection_pair,
+    original_display, display_observations, check_identity_preserved, check_cine_order, aggregate_status, same_origin)
+from mgxa_fixture import fixture_compose, fixture_realm
+from ci_select import select
 
 
 class AcceptancePrep(unittest.TestCase):
@@ -113,6 +116,110 @@ class AcceptancePrep(unittest.TestCase):
                          [(0,2,0,0),(1,3,0,0),(0,2,1,1),(1,3,1,1)])
         with self.assertRaisesRegex(AssertionError, 'missing counterpart'):
             comparison_pairs(cells[:-1], ['1','4'])
+
+    def test_original_representation_and_pairing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds, path = self.fixture(Path(tmp), modality='MG', frames=4)
+            ds.ImageType = ['DERIVED', 'PRIMARY', 'VOLUME', 'NONE']
+            ds.ImageLaterality, ds.ViewPosition = 'L', 'CC'
+            ds.save_as(path, write_like_original=False)
+            a = mg_projection({'path': str(path)}, tmp)
+            self.assertEqual(a['kind'], 'dbt')
+            check_projection_pair(a, dict(a))
+            for change in ({'laterality': ['R']}, {'view_position': ['MLO']}, {'kind': 'generated2d'},
+                           {'kind': 'conventional'}, {'kind': 'unverified'}):
+                with self.subTest(change=change), self.assertRaises(AssertionError):
+                    check_projection_pair(a, dict(a, **change))
+            ds.NumberOfFrames = 1
+            ds.ImageType = ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D']
+            generated = path.with_name('generated.dcm')
+            ds.save_as(generated, write_like_original=False)
+            self.assertEqual(mg_projection({'path': str(generated)}, tmp)['kind'], 'generated2d')
+
+    def test_enhanced_original_geometry_and_voi_detect_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds, path = self.fixture(Path(tmp), modality='MG', frames=2)
+            shared, voi = Dataset(), Dataset()
+            voi.WindowCenter, voi.WindowWidth = [512,460,570], [800,680,980]
+            shared.FrameVOILUTSequence = [voi]
+            ds.SharedFunctionalGroupsSequence = [shared]
+            ds.PerFrameFunctionalGroupsSequence = []
+            for spacing in ([.064867,.086917], [.1,.2]):
+                group, measures = Dataset(), Dataset()
+                measures.PixelSpacing = spacing
+                group.PixelMeasuresSequence = [measures]
+                ds.PerFrameFunctionalGroupsSequence.append(group)
+            ds.save_as(path, write_like_original=False)
+            self.assertEqual(original_display(ds, 2)['spacing_xy'], [.2,.1])
+            row = {'study':str(ds.StudyInstanceUID),'series':str(ds.SeriesInstanceUID),'sop':str(ds.SOPInstanceUID),
+                   'modality':'MG','path':str(path)}
+            cell = {'image':f"wadors:/studies/{row['study']}/series/{row['series']}/instances/{row['sop']}/frames/1",
+                    'spacing':[.086917,.064867,1], 'windowLevel':{'windowCenter':512,'windowWidth':800}}
+            self.assertEqual(display_observations([cell],[row],tmp)[0]['status'], 'PASS')
+            checks = display_observations([dict(cell, spacing=[1,1,1], windowLevel={'windowCenter':512,'windowWidth':1023})],[row],tmp)
+            self.assertEqual(checks[0]['status'], 'FAIL')
+            self.assertEqual(checks[0]['classification'], 'PRODUCT_OBSERVATION')
+            self.assertEqual(len(checks[0]['failures']), 2)
+
+    def test_zoom_fit_identity_includes_viewport_and_frame(self):
+        cell = {'viewportId':'a','image':'wadors:/studies/1/series/2/instances/3/frames/1'}
+        check_identity_preserved([cell], [dict(cell)])
+        for after in ([], [dict(cell, viewportId='b')], [dict(cell, image=cell['image'][:-1]+'2')],
+                      [dict(cell, image=cell['image'].replace('instances/3','instances/4'))]):
+            with self.assertRaises(AssertionError):
+                check_identity_preserved([cell], after)
+
+    def test_both_cine_rates_use_complete_order_with_wrap(self):
+        for rate in (30,29):
+            events = [{'image':str(i%3),'index':i%3,'t':i*1000/rate} for i in range(5)]
+            self.assertAlmostEqual(check_cine_order(events,3), rate)
+            with self.assertRaises(AssertionError):
+                check_cine_order(events[:2]+events[3:],3)
+
+    def test_subset_and_failures_never_report_complete(self):
+        passed = [{'status':'PASS_TECHNICAL_CHECK_ONLY'}]
+        self.assertEqual(aggregate_status(passed,['xa'],['mg','xa']), 'PARTIAL')
+        self.assertEqual(aggregate_status([{'status':'FAIL'}],['xa'],['mg','xa']), 'FAIL')
+        self.assertEqual(aggregate_status(passed,['xa'],['xa']), 'TECHNICAL_CHECKS_COMPLETE_DOCTOR_ACCEPTANCE_PENDING')
+
+    def test_api_errors_share_origin_without_path_filter(self):
+        self.assertTrue(same_origin('https://localhost:9443/api/studies/1/findings','https://localhost:9443'))
+        self.assertTrue(same_origin('https://localhost/api/x','https://localhost:443'))
+        self.assertFalse(same_origin('https://localhost:9444/api/x','https://localhost:9443'))
+
+    def test_manifest_local_restriction_is_consumed(self):
+        for manifest, source in (({'scope':'LOCAL TEST USE ONLY'}, {}),
+                                 ({}, {'licence':'public test sample, local evaluation only; no redistribution licence claimed'}),
+                                 ({}, {'local_only':True})):
+            policy = local_use_policy(manifest, source)
+            self.assertTrue(policy['local_only'])
+            rows = [dict(policy, sop='1')]
+            self.assertEqual(use_limits(rows, 'http://localhost:8042')['local_only_sops'], ['1'])
+            with self.assertRaises(ValueError):
+                use_limits(rows, 'https://example.invalid')
+        self.assertFalse(local_use_policy({}, {})['local_only'])
+
+    def test_provenance_identifies_executed_script_and_dirty_tree(self):
+        facts = provenance(__file__)
+        self.assertEqual(facts['scripts_sha256']['tests/mgxa_acceptance_test.py'], digest(__file__))
+        self.assertIn('git_status', facts)
+
+    def test_ci_selects_real_tool_consumers(self):
+        for path in ('scripts/mgxa_acceptance.py','scripts/mgxa_viewer_check.py','scripts/mgxa_fixture.py','tests/mgxa_acceptance_test.py'):
+            self.assertTrue(select([path])['ci-selfchecks'], path)
+
+    def test_fixture_uses_requested_tree_image_ports_and_own_volumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            compose = fixture_compose(Path(tmp), 'mgxa-test', 'mgxa-test:candidate', 19443, 18042)
+            self.assertEqual(compose['services']['api']['image'], 'mgxa-test:candidate')
+            self.assertEqual(compose['services']['proxy']['ports'], ['127.0.0.1:19443:443'])
+            self.assertEqual(compose['services']['orthanc']['ports'], ['127.0.0.1:18042:8042'])
+            self.assertTrue(all(v == {} for v in compose['volumes'].values()))
+            self.assertFalse(compose['services']['db']['ports'])
+            realm = fixture_realm('https://localhost:19443', 'generated-fixture-password')
+            bff = next(c for c in realm['clients'] if c['clientId'] == 'kin-bff')
+            self.assertEqual(bff['redirectUris'], ['https://localhost:19443/api/auth/callback'])
+            self.assertEqual([u['username'] for u in realm['users'] if not u.get('serviceAccountClientId')], ['mgxa-doctor'])
 
 
 if __name__ == '__main__':

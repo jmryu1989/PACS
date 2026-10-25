@@ -6,17 +6,18 @@ Use the isolated stack's normal doctor login to create --storage-state locally.
 Screenshots/renderer facts are technical evidence; doctor acceptance remains separate.
 """
 import argparse
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import pydicom
 from playwright.sync_api import sync_playwright
 
-from mgxa_acceptance import ROOT, digest, local_endpoint, verify_orthanc_target, values
+from mgxa_acceptance import ROOT, digest, local_endpoint, verify_orthanc_target, values, provenance, use_limits
 
 SNAPSHOT = """() => {
   const service = window.services?.cornerstoneViewportService;
@@ -29,7 +30,10 @@ SNAPSHOT = """() => {
     let min=255,max=0;
     const pixels=canvas.getContext('2d')?.getImageData(0,0,canvas.width,canvas.height).data;
     if (pixels) for(let i=0;i<pixels.length;i+=4){min=Math.min(min,pixels[i]);max=Math.max(max,pixels[i]);}
+    const voi = v.getProperties?.()?.voiRange;
     return {image:v.getCurrentImageId(), index:v.getCurrentImageIdIndex?.(),
+      spacing:Array.from(v.getImageData?.()?.spacing || []), voiRange:voi || null,
+      windowLevel:voi ? window.cornerstone.utilities.windowLevel.toWindowLevel(voi.lower,voi.upper) : null,
       viewportId:cell.viewportId, x:cell.x, y:cell.y,
       playing:!!window.services.cineService?.getState()?.cines?.[cell.viewportId]?.isPlaying,
       camera:v.getCamera?.(), width:canvas.width,height:canvas.height,min,max,
@@ -39,6 +43,109 @@ SNAPSHOT = """() => {
 IDENTITY = re.compile(r'/studies/([0-9.]+)/series/([0-9.]+)/instances/([0-9.]+)/frames/([1-9][0-9]*)(?:$|[?#])')
 
 
+@lru_cache(maxsize=None)
+def original_header(path):
+    return pydicom.dcmread(path, stop_before_pixels=True, force=True)
+
+
+def representation(ds):
+    tokens = {str(v).upper() for key in ('ImageType', 'FrameType') for group in values(ds, key)
+              for v in (group if isinstance(group, list) else [group])}
+    frames = int(ds.get('NumberOfFrames', 1))
+    if 'GENERATED_2D' in tokens and frames == 1:
+        return 'generated2d'
+    if tokens.intersection(('VOLUME', 'TOMOSYNTHESIS')) and frames > 1:
+        return 'dbt'
+    if str(ds.get('SOPClassUID', '')) in ('1.2.840.10008.5.1.4.1.1.1.2', '1.2.840.10008.5.1.4.1.1.1.2.1') and frames == 1:
+        return 'conventional'
+    return 'unverified'
+
+
+def check_projection_pair(a, b):
+    if not a['laterality'] or not b['laterality'] or not (a['view_codes'] or a['view_position']) or not (b['view_codes'] or b['view_position']):
+        raise AssertionError('Original MG projection is incomplete; hanging not verified')
+    same_view = (a['view_codes'] == b['view_codes'] if a['view_codes'] and b['view_codes']
+                 else a['view_position'] == b['view_position'])
+    if a['kind'] == 'unverified' or b['kind'] == 'unverified':
+        raise AssertionError('Original MG representation is unverified')
+    if a['laterality'] != b['laterality'] or not same_view or a['kind'] != b['kind']:
+        raise AssertionError('Automatic MG comparison pairs different lateralities, projections or representation kinds')
+
+
+def original_display(ds, frame):
+    groups = []
+    per_frame = ds.get('PerFrameFunctionalGroupsSequence', [])
+    if per_frame:
+        groups.append(per_frame[frame - 1])
+    groups.extend(ds.get('SharedFunctionalGroupsSequence', []))
+    def attribute(sequence, keyword):
+        for group in groups:
+            for item in group.get(sequence, []):
+                if keyword in item:
+                    return item.get(keyword)
+        return ds.get(keyword)
+    spacing = attribute('PixelMeasuresSequence', 'PixelSpacing')
+    center = attribute('FrameVOILUTSequence', 'WindowCenter')
+    width = attribute('FrameVOILUTSequence', 'WindowWidth')
+    def numbers(value):
+        return [float(v) for v in value] if hasattr(value, '__iter__') and not isinstance(value, str) else [float(value)]
+    return {'spacing_xy': list(reversed(numbers(spacing))) if spacing is not None else None,
+            'windows': [{'windowCenter': c, 'windowWidth': w} for c, w in zip(numbers(center), numbers(width))]
+            if center is not None and width is not None else []}
+
+
+def display_observations(cells, rows, source_root):
+    by_sop = {r['sop']: r for r in rows if r['modality'] == 'MG'}
+    checks = []
+    for cell in cells:
+        match = IDENTITY.search(cell['image'])
+        if not match or match.group(3) not in by_sop:
+            continue
+        row = by_sop[match.group(3)]
+        expected = original_display(original_header(str(Path(source_root) / row['path'])), int(match.group(4)))
+        observed = {'spacing_xy': cell.get('spacing', [])[:2], 'window': cell.get('windowLevel'),
+                    'voiRange': cell.get('voiRange')}
+        failures = []
+        if expected['spacing_xy'] is not None and observed['spacing_xy'] != expected['spacing_xy']:
+            failures.append('Rendered spacing differs from original PixelSpacing')
+        if expected['windows'] and observed['window'] not in expected['windows']:
+            failures.append('Rendered VOI differs from every stored WindowCenter/WindowWidth pair')
+        checks.append({'image': cell['image'], 'expected': expected, 'observed': observed,
+                       'status': 'FAIL' if failures else 'PASS' if expected['spacing_xy'] and expected['windows'] else 'NOT_RUN',
+                       'classification': 'PRODUCT_OBSERVATION' if failures else 'ORIGINAL_DISPLAY_CHECK',
+                       'failures': failures})
+    return checks
+
+
+def same_origin(a, b):
+    def origin(url):
+        p = urlsplit(url)
+        return p.scheme, p.hostname, p.port or (443 if p.scheme == 'https' else 80)
+    return origin(a) == origin(b)
+
+
+def check_identity_preserved(before, after):
+    def identities(cells):
+        return {c['viewportId']: IDENTITY.search(c['image']).groups() for c in cells}
+    if not after or len(after) != len(before) or identities(before) != identities(after):
+        raise AssertionError('Zoom/Fit changed a viewport, study, series, SOP or frame')
+
+
+def check_cine_order(events, frames):
+    unique = [r for i, r in enumerate(events) if i == 0 or r['image'] != events[i-1]['image']]
+    if len(unique) <= frames or not all((b['index']-a['index']) % frames == 1 for a,b in zip(unique, unique[1:])):
+        raise AssertionError('Cine skipped/reordered stored frames or did not complete a source loop')
+    return (len(unique)-1)*1000/(unique[-1]['t']-unique[0]['t'])
+
+
+def aggregate_status(cases, selected, available):
+    if any(c['status'] == 'FAIL' for c in cases):
+        return 'FAIL'
+    if set(selected) != set(available) or any(c['status'] != 'PASS_TECHNICAL_CHECK_ONLY' for c in cases):
+        return 'PARTIAL'
+    return 'TECHNICAL_CHECKS_COMPLETE_DOCTOR_ACCEPTANCE_PENDING'
+
+
 def displayed_fps(page):
     label=page.get_by_text(re.compile(r'^\d+(?:\.\d+)?\s*FPS$')).first.inner_text()
     return float(re.search(r'\d+(?:\.\d+)?',label).group())
@@ -46,13 +153,13 @@ def displayed_fps(page):
 
 def mg_projection(row, source_root):
     """Compare served SOP identities with their original standard view attributes."""
-    ds=pydicom.dcmread(Path(source_root)/row['path'],stop_before_pixels=True)
+    ds=original_header(str(Path(source_root)/row['path']))
     codes=sorted({(str(item.get('CodingSchemeDesignator','')),str(item.get('CodeValue','')))
         for element in ds.iterall() if element.keyword=='ViewCodeSequence'
         for item in element.value})
     return {'laterality':values(ds,'FrameLaterality') or values(ds,'ImageLaterality') or values(ds,'Laterality'),
             'view_codes':codes,'view_position':values(ds,'ViewPosition'),
-            'description':values(ds,'SeriesDescription')}
+            'kind':representation(ds), 'description':values(ds,'SeriesDescription')}
 
 
 def ready_snapshot(page, studies):
@@ -131,14 +238,15 @@ def main():
                         help='Navigation/action hang timeout in seconds, from host measurements')
     parser.add_argument('--output', required=True, help='New artifact directory')
     parser.add_argument('--headed', action='store_true')
-    parser.add_argument('--case', action='append', help='Rerun only the named case; keep other valid results')
+    parser.add_argument('--case', action='append', help='Run only named cases in a new directory; no previous results are merged')
     args = parser.parse_args()
     local_endpoint(args.origin)
     loaded = json.loads(Path(args.load_result).read_text(encoding='utf-8'))
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=False)
-    result = {'head_sha': subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT, text=True).strip(),
+    result = {**provenance(__file__, ROOT/'scripts/mgxa_acceptance.py'),
               'load_result_sha256': digest(args.load_result), 'origin': args.origin,
+              'available_cases': [], 'selected_cases': [], 'omitted_cases': [],
               'status': 'RUNNING', 'cases': [], 'doctor_acceptance': 'NOT_RUN',
               'limits': ['Direct viewer launch; worklist selection/report save/reopen need the plan walkthrough',
                          'Nonuniform canvas and identity are smoke evidence, not grayscale or diagnostic accuracy',
@@ -154,6 +262,7 @@ def main():
         verify_proxy(target['project'], args.origin, args.timeout)
         rows = [r['source'] for r in loaded['uploads']]
         source_root=json.loads(Path(loaded['inventory']).read_text(encoding='utf-8'))['root']
+        result['use_limits'] = use_limits(rows, args.origin)
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=not args.headed, args=['--enable-unsafe-swiftshader'])
             result['browser']={'version':browser.version,'headless':not args.headed,
@@ -164,13 +273,16 @@ def main():
             context.tracing.start(screenshots=True, snapshots=True)
             try:
                 def run_case(name, studies, action=None, prepare=None):
+                    result['available_cases'].append(name)
                     if args.case and name not in args.case:
+                        result['omitted_cases'].append(name)
                         return
+                    result['selected_cases'].append(name)
                     page = context.new_page()
                     case = {'case': name, 'studies': studies, 'status': 'RUNNING', 'responses': []}
                     result['cases'].append(case)
                     def record(response):
-                        if '/ohif/' in response.url or '/dicom-web/' in response.url:
+                        if same_origin(response.url, args.origin):
                             case['responses'].append({'url': response.url, 'status': response.status})
                     page.on('response', record)
                     page.on('pageerror',lambda error:case.setdefault('page_errors',[]).append(str(error)))
@@ -188,6 +300,7 @@ def main():
                             prepare(page, case)
                         case['before'] = ready_snapshot(page,studies) if prepare else case['default_open']
                         check_images(case['before'], rows, studies)
+                        case['display_checks'] = display_observations(case['before'], rows, source_root)
                         page.screenshot(path=str(out/(name+'-before.png')), full_page=True)
                         if action:
                             action(page, case)
@@ -209,6 +322,15 @@ def main():
                         except Exception as error:
                             case['screenshot_error'] = str(error)
                         page.close()
+                        for phase in ('zoom', 'fit', 'after', 'failure_snapshot'):
+                            if case.get(phase):
+                                case.setdefault('display_checks', []).extend(
+                                    dict(check, phase=phase) for check in display_observations(case[phase], rows, source_root))
+                        case['http_failures'] = [r for r in case['responses'] if r['status'] >= 400]
+                        if case['http_failures'] or any(c['status'] == 'FAIL' for c in case.get('display_checks', [])):
+                            case.update(status='FAIL', classification='PRODUCT_OBSERVATION')
+                        elif case['status'] == 'PASS_TECHNICAL_CHECK_ONLY' and any(c['status'] == 'NOT_RUN' for c in case.get('display_checks', [])):
+                            case['status'] = 'PARTIAL'
                         save()
 
                 # Exercise actual served OHIF controls; Part 1's standalone DOM is not
@@ -220,16 +342,25 @@ def main():
                         canvas=page.locator('[data-cy="viewport-grid"] canvas').first
                         box=canvas.bounding_box();x=box['x']+box['width']/2;y=box['y']+box['height']/2
                         page.mouse.move(x,y);page.mouse.down();page.mouse.move(x,y+50,steps=12);page.mouse.up()
-                        page.wait_for_function('before => ('+SNAPSHOT+')()[0]?.camera.parallelScale !== before',
-                                               arg=case['before'][0]['camera']['parallelScale'])
-                        case['zoom']=page.evaluate(SNAPSHOT)
+                        original = case['before'][0]
+                        def wait_scale(reference, fit=False):
+                            handle = page.wait_for_function('arg => {const cells=('+SNAPSHOT+')();const c=cells.find(c=>c.viewportId===arg.id);return cells.length===arg.count && cells.every(c=>c.max>c.min) && c && Number.isFinite(c.camera?.parallelScale) && (arg.fit ? c.camera.parallelScale===arg.scale : c.camera.parallelScale!==arg.scale) ? cells : false;}',
+                                arg={'id': original['viewportId'], 'count': len(case['before']), 'scale': reference, 'fit': fit})
+                            try:
+                                return handle.json_value()
+                            finally:
+                                handle.dispose()
+                        case['zoom']=wait_scale(original['camera']['parallelScale'])
                         check_images(case['zoom'],rows,[study])
+                        check_identity_preserved(case['before'], case['zoom'])
                         page.screenshot(path=str(out/(case['case']+'-zoom.png')))
                         page.keyboard.press('=')
-                        page.wait_for_function('before => ('+SNAPSHOT+')()[0]?.camera.parallelScale !== before',
-                                               arg=case['zoom'][0]['camera']['parallelScale'])
+                        case['fit'] = wait_scale(original['camera']['parallelScale'], fit=True)
+                        check_images(case['fit'], rows, [study])
+                        check_identity_preserved(case['before'], case['fit'])
                         page.screenshot(path=str(out/(case['case']+'-fit.png')))
-                        case['fit'] = page.evaluate(SNAPSHOT)
+                        case['zoom_fit_identity'] = 'PASS'
+                        case['fit_default_scale'] = 'PASS: exact original parallelScale restored'
                         case['one_to_one']='NOT_RUN: separate calibrated 1:1 verification required'
                         case['cad_free']='Observe screenshot and loaded SOPs; no CAD/SR/SEG was imported'
                         case['status']='OBSERVED_MANUAL_REVIEW_REQUIRED'
@@ -256,10 +387,13 @@ def main():
                         case['hanging_pairs']=pairs
                         for pair in pairs:
                             a,b=pair['current_projection'],pair['prior_projection']
-                            if not a['laterality'] or not b['laterality'] or not (a['view_codes'] or a['view_position']) or not (b['view_codes'] or b['view_position']):
-                                raise AssertionError('Original MG projection is incomplete; hanging not verified')
-                            if a['laterality']!=b['laterality'] or (a['view_codes'] and b['view_codes'] and a['view_codes']!=b['view_codes']) or (not (a['view_codes'] and b['view_codes']) and a['view_position']!=b['view_position']):
-                                raise AssertionError('Automatic MG comparison pairs different breast lateralities or projections')
+                            try:
+                                check_projection_pair(a,b)
+                                pair['status']='PASS'
+                            except AssertionError as error:
+                                pair.update(status='FAIL', error=str(error))
+                        if any(pair['status']=='FAIL' for pair in pairs):
+                            raise AssertionError('Original side/view/kind mismatch; see every hanging_pairs failure')
                     run_case('mg-real-prior-'+str(index), studies[:2], comparison_layout)
 
                 cine = [r for r in rows if r['modality'] == 'XA' and r['frames'] > 1]
@@ -311,18 +445,18 @@ def main():
                         page.wait_for_function('n => window.mgxaRenders.filter((r,i,a)=>!i||r.image!==a[i-1].image).length>n',arg=row['frames'])
                         play.click()
                         case['render_timestamps']=page.evaluate('window.mgxaRenders')
-                        unique=[r for i,r in enumerate(case['render_timestamps']) if i==0 or r['image']!=case['render_timestamps'][i-1]['image']]
-                        case['measured_fps']=(len(unique)-1)*1000/(unique[-1]['t']-unique[0]['t'])
-                        if not all((b['index']-a['index'])%row['frames']==1 for a,b in zip(unique,unique[1:])):
-                            raise AssertionError('Cine skipped or reordered stored frames')
-                        stopped=page.evaluate(SNAPSHOT)[0]
-                        # Observe a full loop at the configured rate, rather than inventing
-                        # an accuracy tolerance or calling a requested FPS a measured FPS.
-                        page.wait_for_timeout(1000*row['frames']/case['configured_rate'])
-                        later=page.evaluate(SNAPSHOT)[0]
-                        if stopped['image']!=later['image'] or later['playing']:
-                            raise AssertionError('Cine continued after Stop')
-                        case['stop_observed']=True
+                        def stopped_for_loop(rate):
+                            stopped=ready_snapshot(page,[row['study']])[0]
+                            page.evaluate('window.mgxaRenders=[]')
+                            # The observation interval is one source loop at the selected rate.
+                            page.wait_for_timeout(1000*row['frames']/rate)
+                            later=ready_snapshot(page,[row['study']])[0]
+                            renders=page.evaluate('window.mgxaRenders')
+                            if stopped['playing'] or later['playing'] or stopped['image']!=later['image'] or any(r['image']!=stopped['image'] for r in renders):
+                                raise AssertionError('Cine continued after Stop')
+                            return {'status':'PASS','before':stopped['image'],'after':later['image'],'render_timestamps':renders}
+                        case['measured_fps']=check_cine_order(case['render_timestamps'], row['frames'])
+                        case['stop_observed']=stopped_for_loop(case['configured_rate'])
                         page.locator('[data-cy="cine-player-left-arrow"]').first.click()
                         changed=displayed_fps(page)
                         if changed==case['configured_rate']:
@@ -332,9 +466,9 @@ def main():
                         page.wait_for_function('n => window.mgxaRenders.filter((r,i,a)=>!i||r.image!==a[i-1].image).length>n',arg=row['frames'])
                         play.click()
                         adjusted=page.evaluate('window.mgxaRenders')
-                        unique_adjusted=[r for i,r in enumerate(adjusted) if i==0 or r['image']!=adjusted[i-1]['image']]
-                        case['changed_rate']={'configured':changed,'render_timestamps':adjusted,
-                            'measured_fps':(len(unique_adjusted)-1)*1000/(unique_adjusted[-1]['t']-unique_adjusted[0]['t'])}
+                        case['changed_rate']={'configured':changed,'render_timestamps':adjusted}
+                        case['changed_rate']['measured_fps']=check_cine_order(adjusted, row['frames'])
+                        case['changed_rate']['stop_observed']=stopped_for_loop(changed)
                         case['source_timing']=row['attributes']
                         frame_time=row['attributes'].get('FrameTime',[])
                         case['source_fps']=1000/float(frame_time[0]) if frame_time and float(frame_time[0])>0 else None
@@ -346,9 +480,10 @@ def main():
                 browser.close()
         if not result['cases']:
             raise ValueError('No cases matched the selection')
-        result['status'] = ('FAIL' if any(c['status']=='FAIL' for c in result['cases']) else
-                            'PARTIAL' if any(c['status'] in ('NOT_RUN','OBSERVED_MANUAL_REVIEW_REQUIRED') for c in result['cases']) else
-                            'TECHNICAL_CHECKS_COMPLETE_DOCTOR_ACCEPTANCE_PENDING')
+        if args.case and set(args.case) - set(result['available_cases']):
+            raise ValueError('Unknown requested cases: '+', '.join(sorted(set(args.case)-set(result['available_cases']))))
+        result['selection_status'] = ('PARTIAL' if result['omitted_cases'] else 'ALL_AVAILABLE_CASES_RUN')
+        result['status'] = aggregate_status(result['cases'], result['selected_cases'], result['available_cases'])
     except Exception as error:
         result.update(status='BLOCKED', error=str(error))
     finally:

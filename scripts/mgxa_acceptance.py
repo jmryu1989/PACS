@@ -20,6 +20,31 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def provenance(*scripts):
+    return {'head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+            'git_status': subprocess.check_output(['git', 'status', '--porcelain=v1'], cwd=ROOT, text=True),
+            'scripts_sha256': {Path(p).resolve().relative_to(ROOT).as_posix(): digest(p) for p in scripts}}
+
+
+def local_use_policy(manifest, source):
+    # Older collector manifests express this restriction in their scope/licence.
+    basis = [str(obj.get(key, '')) for obj in (manifest, source)
+             for key in ('scope', 'purpose', 'licence', 'usage_restriction') if obj.get(key)]
+    restricted = any(obj.get('local_only') is True for obj in (manifest, source)) or any(
+        phrase in text.lower() for text in basis
+        for phrase in ('local test use only', 'local evaluation only', 'local internal testing only', 'local-internal-only'))
+    return {'local_only': restricted, 'use_policy_basis': basis}
+
+
+def use_limits(rows, endpoint):
+    restricted = [r['sop'] for r in rows if r.get('local_only')]
+    if restricted:
+        local_endpoint(endpoint)
+    return {'local_only_sops': restricted,
+            'artifacts_scope': 'LOCAL_INTERNAL_ONLY: originals, screenshots and traces must remain local'
+            if restricted else 'Retain original manifest citations and use restrictions'}
+
+
 def digest(path):
     result = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -116,7 +141,7 @@ def inventory(root, sets=None):
                                'FrameTime', 'FrameTimeVector', 'FrameIncrementPointer',
                                'CineRate', 'RecommendedDisplayFrameRate', 'SeriesDescription',
                                'PixelSpacing', 'ImagerPixelSpacing', 'ImagePositionPatient')},
-                           'local_only': folder.name == 'tcia-ea1141-dbt-20261009'}
+                           **local_use_policy(body, source)}
                     rows.append(row)
                 except Exception as error:
                     errors.append({'path': path.relative_to(root).as_posix(), 'error': str(error)})
@@ -128,8 +153,7 @@ def inventory(root, sets=None):
                        'frames': sum(r['frames'] for r in selected),
                        'multiframe_objects': sum(r['frames'] > 1 for r in selected),
                        'bytes': sum(r['bytes'] for r in selected)})
-    return {'root': str(root), 'head_sha': subprocess.check_output(
-        ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+    return {'root': str(root), **provenance(__file__),
         'scope': 'accepted studies/repositories; raw archives, source clones and quarantine excluded',
         'sources': sources, 'all_modality_counts': dict(counts), 'groups': groups,
         'files': rows, 'parse_errors': errors,
@@ -197,7 +221,7 @@ def load_samples(args):
     response.raise_for_status()
     if response.json():
         raise ValueError('Use an empty synthetic Orthanc; this loader never deletes existing studies')
-    result = {'head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+    result = {**provenance(__file__), 'use_limits': use_limits(rows, args.orthanc),
               'inventory_head_sha': body['head_sha'], 'inventory': str(Path(args.inventory).resolve()),
               'inventory_sha256': digest(args.inventory), 'target': target, 'uploads': [],
               'status': 'RUNNING', 'cleanup': 'No automatic deletion; retain this owned project for inspection'}
