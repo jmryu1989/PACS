@@ -49,7 +49,11 @@ class VolumeOrientationE2E(VolumeJobsE2E):
    points.append(chosen)
   self.band_reads=getattr(self,'band_reads',0)+1
   # One read returns the samples plus each plane's canvas size and whole-canvas red-channel statistics.
-  read=page.evaluate('''points=>[...services.viewportGridService.getState().viewports.keys()].map((id,i)=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return {values:points[i].map(([p])=>{const xy=v.worldToCanvas(p);if(!(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2))return null;return c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]}),canvas:('''+self.CANVAS_STATS+''')(id,c)}})''',points)
+  # The pinned renderer leaves isolated zero pixels inside flat bands of a 0.1 mm slab sampled every 0.5 mm (main de7a8c1
+  # census 2026-10-25: 4-9 such pixels per plane in this very flow), and the pixel grid they fall on moves with the canvas
+  # size. A sample is therefore the median of its 3x3 canvas neighbourhood (about 0.6 mm here, inside the 1.5 mm band margin
+  # above), so each point asserts its band value rather than one discarded fragment.
+  read=page.evaluate('''points=>[...services.viewportGridService.getState().viewports.keys()].map((id,i)=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return {values:points[i].map(([p])=>{const xy=v.worldToCanvas(p);if(!(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2))return null;const x=Math.floor(xy[0]*c.width/c.clientWidth),y=Math.floor(xy[1]*c.height/c.clientHeight),d=c.getContext('2d').getImageData(x-1,y-1,3,3).data,reds=[];for(let k=0;k<d.length;k+=4)reds.push(d[k]);return reds.sort((a,b)=>a-b)[4]}),canvas:('''+self.CANVAS_STATS+''')(id,c)}})''',points)
   values=[plane['values'] for plane in read];canvases=[plane['canvas'] for plane in read]
   counts=[]
   for index,(row,got) in enumerate(zip(points,values)):

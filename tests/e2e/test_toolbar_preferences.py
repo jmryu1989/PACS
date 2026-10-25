@@ -48,7 +48,11 @@ class ToolbarPreferencesE2E(NativeToolbarE2E):
   }''')
   requests=[];other.on('request',lambda request:requests.append(request.url) if request.frame==v and any(part in request.url for part in ['/api/','/dicom-web/','/instances/']) else None)
   end_document(other)
-  other.wait_for_function('() => toolbarResources.nodes.concat(toolbarResources.elements).every(node=>!node.isConnected) && toolbarResources.engines.every(engine=>!toolbarResources.core.getRenderingEngines().includes(engine))')
+  # The workspace ends its embedded viewer by dropping the whole frame document; the retained
+  # dialog, button and image elements stay connected to that discarded document, so the
+  # observable end is the frame leaving the workspace, then no render, move or request.
+  other.wait_for_function('() => !document.querySelector("#reading-frame")')
+  self.assertTrue(other.evaluate('() => toolbarResources.elements.every(node => !node.ownerDocument.defaultView || node.ownerDocument.defaultView.closed || !node.ownerDocument.defaultView.frameElement)'))
   before=other.evaluate('[toolbarResources.renders,toolbarResources.moves]');requests.clear();other.wait_for_timeout(350)
   self.assertEqual(other.evaluate('[toolbarResources.renders,toolbarResources.moves]'),before);self.assertEqual(requests,[]);self.assertEqual(self.stored(other),preference)
 

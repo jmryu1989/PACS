@@ -72,7 +72,8 @@ window.KinViewerInfoBar = (() => {
         const mode = ({ stack: '2D', orthographic: 'MPR', volume3d: '3D' })[type] || type || 'No image';
         const layout = state.layout;
         const status = mode + ' | ' + (layout.layoutType === 'grid' ? layout.numRows + '×' + layout.numCols : layout.layoutType);
-        if (bar.children[0].textContent !== label) bar.children[0].textContent = label;
+        // The bar clamps the label to two lines; the full identity stays readable on hover.
+        if (bar.children[0].textContent !== label) { bar.children[0].textContent = label; bar.children[0].title = m ? label : ''; }
         if (bar.children[1].textContent !== status) bar.children[1].textContent = status;
         bar.children[1].title = '영상 모드는 이 셀, 배치는 전체 뷰어에 적용됩니다.';
       }

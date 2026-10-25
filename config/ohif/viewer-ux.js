@@ -33,4 +33,3 @@ function kinCreateViewerUX() {
     onModeExit: stop,
   };
 }
-

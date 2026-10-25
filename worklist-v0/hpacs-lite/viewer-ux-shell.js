@@ -68,10 +68,19 @@ window.KinViewerUXShell = (() => {
     const series = window.KinViewerSeriesStrip.mount({ services });
     tabs.mount({ services, refreshChrome() { info.refresh(); series.refresh(); } });
     const subscriptions = [];
-    let frame, ended = false;
+    let frame, ended = false, fit = null;
+    // The shell changes the canvas area from inside the pane (info bar) and
+    // above the grid (strip, toolbar, late stylesheet) after the stock grid
+    // measured it; the stock observer watches the grid, not the pane's canvas
+    // container, so the backing store kept a stale size (stretched pixels,
+    // wrong pointer mapping, a saved camera that restores elsewhere).
+    const fitter = new ResizeObserver(() => { if (ended || fit) return; fit = requestAnimationFrame(() => {
+      fit = null; if (!ended) services.cornerstoneViewportService.resize(true);
+    }); });
     function refresh() { frame = null; if (!ended) {
       if (reportContext && !admits(reportContext)) closeReport();
       info.refresh(); series.refresh(); tabs.refresh();
+      for (const container of document.querySelectorAll('[data-cy="viewport-pane"] > .relative')) fitter.observe(container);
     } }
     function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
     for (const service of [services.viewportGridService, services.displaySetService, services.cornerstoneViewportService]) {
@@ -91,7 +100,7 @@ window.KinViewerUXShell = (() => {
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     schedule();
     return { dispose() {
-      ended = true; cancelAnimationFrame(frame); observer.disconnect();
+      ended = true; cancelAnimationFrame(frame); cancelAnimationFrame(fit); fitter.disconnect(); observer.disconnect();
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
       stopPatient(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;

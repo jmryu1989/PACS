@@ -80,7 +80,8 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
   patient='JOBANN-'+uuid.uuid4().hex[:12];f=self.ct(patient,'current','20260801');p=self.launch_job([f]);canvas_ready(p,1)
   ViewerHistoryE2E.open_measurement_tools(self,p)
   for index,(kind,tool,label) in enumerate([('length','Length','Length'),('angle','Angle','Angle'),('ellipse','EllipticalROI','Ellipse ROI')]):
-   p.get_by_role('button',name=label,exact=True).click();box=p.locator('.cornerstone-canvas').bounding_box()
+   # The Measurements panel's own tool buttons; the U2 image toolbar carries a second "Length".
+   p.locator('#kin-viewer-history').get_by_role('button',name=label,exact=True).click();box=p.locator('.cornerstone-canvas').bounding_box()
    x,y=box['x']+box['width']*.38,box['y']+box['height']*.3+index*95
    p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+65,y+32,steps=10);p.mouse.up()
    if kind=='angle':p.mouse.move(x+85,y-15,steps=8);p.mouse.click(x+85,y-15)
