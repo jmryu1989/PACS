@@ -1,7 +1,7 @@
 window.KinViewerUXShell = (() => {
   function mount({ services }) {
-    const css = document.createElement('link'); css.rel = 'stylesheet';
-    css.href = '/worklist/hpacs-lite/viewer-ux-theme.css'; document.head.append(css);
+    // The theme stylesheet is loaded once per document by the extension before
+    // this mount; the body class scopes its viewer-wide rules to the mounted shell.
     document.body.classList.add('kin-viewer-ux');
     const tabs = window.KinViewerPatientTabs;
     let actions = null, reportContext = null;
@@ -103,13 +103,15 @@ window.KinViewerUXShell = (() => {
     imageEvents.forEach(event => document.addEventListener(event, schedule, true));
     const observer = new MutationObserver(records => {
       if (ended || !records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) return;
-      // A pane gets its bar in this same microtask, before the stock passive
-      // effect enables the element, so the canvas is created at the size it
-      // keeps and needs no re-fit. A pane whose element already exists is
-      // re-fitted at once: left to the next frame, a Job or tab restore could
-      // apply its camera to the unfitted canvas first, and the later fit
-      // re-derives that camera from the pan in pixels, reopening the saved
-      // screen a bar's height away.
+      // The strip and the toolbar's reserved row go above the grid, and a pane
+      // gets its bar, in this same microtask, before the stock passive effect
+      // enables the element, so the canvas is created at the size it keeps and
+      // needs no re-fit. A pane whose element already exists is re-fitted at
+      // once: left to the next frame, a Job or tab restore could apply its
+      // camera to the unfitted canvas first, and the later fit re-derives that
+      // camera from the pan in pixels, reopening the saved screen a bar's
+      // height away.
+      series.place();
       if (info.adopt() && misfit()) services.cornerstoneViewportService.resize(true);
       schedule();
     });
@@ -120,7 +122,7 @@ window.KinViewerUXShell = (() => {
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
       stopPatient(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;
-      tabs.dispose(); info.dispose(); series.dispose(); css.remove(); document.body.classList.remove('kin-viewer-ux');
+      tabs.dispose(); info.dispose(); series.dispose(); document.body.classList.remove('kin-viewer-ux');
     } };
   }
   return { mount };

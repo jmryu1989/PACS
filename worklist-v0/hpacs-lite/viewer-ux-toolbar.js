@@ -165,8 +165,12 @@ window.KinViewerUXToolbar = (() => {
     window.kinViewerUXFocusTools = focusTools;
     const shortcuts = window.KinViewerUXShortcuts.mount({ getBindings: () => preferences.shortcuts, invoke, allowed: active });
     function refresh() {
-      const strip = document.querySelector('.kin-viewer-series-strip');
-      if (!toolbar.isConnected && strip) strip.before(toolbar);
+      if (toolbar.isConnected) return;
+      // The shell reserves this toolbar's row when it places the strip, so the
+      // image area does not move when the toolbar arrives after the tech-note
+      // connection; without that row the toolbar stands above the strip.
+      const slot = document.querySelector('.kin-ux-toolbar-slot'), strip = document.querySelector('.kin-viewer-series-strip');
+      if (slot) slot.replaceChildren(toolbar); else if (strip) strip.before(toolbar);
     }
     refresh(); const observer = new MutationObserver(refresh); observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     render(); load();

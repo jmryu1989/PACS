@@ -95,6 +95,9 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
 .kin-series-card .kin-series-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kin-series-scroll { flex: none; padding: .35em; }
 .kin-series-status { align-self: center; color: var(--kin-ux-secondary); }
+/* The toolbar's row is reserved by the shell before the toolbar mounts (72px = the toolbar's 6em at 12px);
+   the toolbar fills it without changing the image area. */
+.kin-ux-toolbar-slot { flex: none; box-sizing: border-box; height: 72px; min-width: 0; }
 .kin-ux-toolbar { display: flex; flex: none; min-width: 0; gap: .5em; align-items: start; background: var(--kin-panel); color: var(--kin-ux-text); padding: .3em; font: 12px/1.4 sans-serif; box-sizing: border-box; height: 6em; }
 .kin-ux-tools-bar { display: flex; flex: 1; min-width: 0; height: 5.4em; gap: .25em; overflow-x: auto; overflow-y: hidden; }
 .kin-ux-toolbar button, .kin-ux-toolbar summary, .kin-ux-settings button, .kin-ux-settings input { background: var(--kin-panel); color: var(--kin-ux-text); border: 1px solid var(--kin-ux-secondary); border-radius: 3px; padding: .3em .5em; }
