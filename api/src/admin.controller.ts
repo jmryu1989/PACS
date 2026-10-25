@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { AdminAccessReview } from './admin-access-review';
 import { Caller, PacsService } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import type { AdminRequestFacts } from './admin.service';
@@ -23,7 +24,8 @@ const caller = (req: any): Caller => ({
 @Controller('admin')
 export class AdminController {
   constructor(private admin: AdminService, private pacs: PacsService,
-    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
+    private readonly accessReview: AdminAccessReview) {}
 
   private withRightsFacts<T>(req: any, task: (facts: AdminRequestFacts) => Promise<T>): Promise<T> {
     return this.requests.withWork(req, async request => {
@@ -73,6 +75,7 @@ export class AdminController {
    */
   @Get('audit')
   auditEvents(@Query() query: any, @Req() req: any) {
+    if (query.report === 'access') return this.requests.withWork(req, request => this.accessReview.read(query, caller(req), request));
     return this.admin.auditEvents(query, caller(req));
   }
 }

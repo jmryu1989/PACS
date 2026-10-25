@@ -255,6 +255,7 @@ async function clinicalHttp() {
   const { PacsService } = require(path.join(build, 'pacs.service.js'));
   const { AdminController } = require(path.join(build, 'admin.controller.js'));
   const { AdminService } = require(path.join(build, 'admin.service.js'));
+  const { AdminAccessReview } = require(path.join(build, 'admin-access-review.js'));
   const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
   const { OrthancService } = require(path.join(build, 'orthanc.service.js'));
   const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
@@ -291,7 +292,7 @@ async function clinicalHttp() {
     class ClinicalFixture {}
     // Only external collaborators are synthetic. Both routes, the draft/CAS
     // implementation, auth/rights checks and PostgreSQL are the actual product.
-    Module({controllers:[PacsController,AdminController],providers:[...requestProviders(runtime.port),PrismaService,PacsService,AuthService,AdminService,
+    Module({controllers:[PacsController,AdminController],providers:[...requestProviders(runtime.port),PrismaService,PacsService,AuthService,AdminService,AdminAccessReview,
       {provide:OrthancService,useValue:orthanc},{provide:KeycloakService,useValue:{}},
       {provide:FindingService,useValue:{}},
       {provide:StudyAccessService,useFactory:db=>new StudyAccessService(db,orthanc,{}),inject:[PrismaService]},
