@@ -1,6 +1,6 @@
 # coding: utf-8
 """REQ-D09-JOB-ANNOTATIONS: fixed historical revisions and saved CT coordinates."""
-import copy,io,json,math,sys,unittest,uuid
+import copy,io,json,math,re,sys,unittest,uuid
 import numpy as np
 from pydicom import dcmread
 from pathlib import Path
@@ -76,15 +76,23 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
   p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click()
   p.keyboard.press('1');self.click_job(p,'Restore Job','최신 이력입니다');self.assertEqual(self.pngs(p),before)
 
+ def image_point(self,p,x,y):
+  # Page coordinates of an image position (fractions of columns/rows). A manual measurement is saved only when every
+  # handle lies inside the original image; a pixel offset from the canvas edge means a different distance in mm on
+  # each screen (the U2 shell's image area is shorter than the stock viewer's), so the drawings are placed by image position.
+  return p.evaluate('''([x,y])=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId),d=v.getImageData(),r=v.element.getBoundingClientRect();
+   return v.worldToCanvas(d.imageData.indexToWorld([x*(d.dimensions[0]-1),y*(d.dimensions[1]-1),0])).map((n,i)=>n+(i?r.y:r.x));}''',[x,y])
+
  def test_annotations_03_native_manual_values_pdf_and_forged_baseline(self):
   patient='JOBANN-'+uuid.uuid4().hex[:12];f=self.ct(patient,'current','20260801');p=self.launch_job([f]);canvas_ready(p,1)
   ViewerHistoryE2E.open_measurement_tools(self,p)
   for index,(kind,tool,label) in enumerate([('length','Length','Length'),('angle','Angle','Angle'),('ellipse','EllipticalROI','Ellipse ROI')]):
    # The Measurements panel's own tool buttons; the U2 image toolbar carries a second "Length".
-   p.locator('#kin-viewer-history').get_by_role('button',name=label,exact=True).click();box=p.locator('.cornerstone-canvas').bounding_box()
-   x,y=box['x']+box['width']*.38,box['y']+box['height']*.3+index*95
-   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+65,y+32,steps=10);p.mouse.up()
-   if kind=='angle':p.mouse.move(x+85,y-15,steps=8);p.mouse.click(x+85,y-15)
+   p.locator('#kin-viewer-history').get_by_role('button',name=label,exact=True).click()
+   # Ellipse ROI is centred on the first point with the drag as its semi-axes, so this keeps every handle inside the image.
+   start=self.image_point(p,.4,.25+index*.2);end=self.image_point(p,.6,.35+index*.2)
+   p.mouse.move(*start);p.mouse.down();p.mouse.move(*end,steps=10);p.mouse.up()
+   if kind=='angle':third=self.image_point(p,.66,.19+index*.2);p.mouse.move(*third,steps=8);p.mouse.click(*third)
    try:p.wait_for_function('''tool=>{const g=services.viewportGridService.getState();const v=services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId);
     const t=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId).getToolInstance(tool);
     return !t.isDrawing && cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName===tool && !a.invalidated && Object.keys(a.data.cachedStats||{}).length)}''',arg=tool)
@@ -109,7 +117,8 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
   for page in pdf.pages:
    self.assertIn(patient,page.extract_text());embedded += [np.array(x.image.convert('RGB')) for x in page.images]
   self.assertTrue(any(np.array_equal(images[0],image) for image in embedded))
-  text='\n'.join(page.extract_text() for page in pdf.pages)
+  # pypdf spaces words by glyph advance; with the VM's Korean fonts it widens every inter-word gap to two spaces.
+  text=re.sub(r'\s+',' ','\n'.join(page.extract_text() for page in pdf.pages))
   for token in ['저장 당시','r1','HU','mm']:self.assertIn(token,text)
   print('JOBANNOTATION PDF '+json.dumps(dict(pages=len(pdf.pages),annotations=3)),flush=True)
   p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click()

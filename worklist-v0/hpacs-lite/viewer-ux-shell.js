@@ -74,8 +74,15 @@ window.KinViewerUXShell = (() => {
     // measured it; the stock observer watches the grid, not the pane's canvas
     // container, so the backing store kept a stale size (stretched pixels,
     // wrong pointer mapping, a saved camera that restores elsewhere).
+    // Only a canvas whose backing store no longer matches its box is re-fitted:
+    // a stock resize resets and restores every camera, and a redundant one
+    // after a grid change let the MPR crosshairs move the linked planes' focal
+    // points by rounding (cell merge restore, planes the user never touched).
+    const misfit = () => [...document.querySelectorAll('[data-cy="viewport-pane"] canvas.cornerstone-canvas')].some(canvas =>
+      canvas.clientWidth > 0 && canvas.clientHeight > 0 && (canvas.width !== Math.floor(canvas.clientWidth * devicePixelRatio) ||
+        canvas.height !== Math.floor(canvas.clientHeight * devicePixelRatio)));
     const fitter = new ResizeObserver(() => { if (ended || fit) return; fit = requestAnimationFrame(() => {
-      fit = null; if (!ended) services.cornerstoneViewportService.resize(true);
+      fit = null; if (!ended && misfit()) services.cornerstoneViewportService.resize(true);
     }); });
     function refresh() { frame = null; if (!ended) {
       if (reportContext && !admits(reportContext)) closeReport();
@@ -98,11 +105,12 @@ window.KinViewerUXShell = (() => {
       if (ended || !records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) return;
       // A pane gets its bar in this same microtask, before the stock passive
       // effect enables the element, so the canvas is created at the size it
-      // keeps. A pane whose element already exists is re-fitted at once: left
-      // to the next frame, a Job or tab restore could apply its camera to the
-      // unfitted canvas first, and the later fit re-derives that camera from
-      // the pan in pixels, reopening the saved screen a bar's height away.
-      if (info.adopt()) services.cornerstoneViewportService.resize(true);
+      // keeps and needs no re-fit. A pane whose element already exists is
+      // re-fitted at once: left to the next frame, a Job or tab restore could
+      // apply its camera to the unfitted canvas first, and the later fit
+      // re-derives that camera from the pan in pixels, reopening the saved
+      // screen a bar's height away.
+      if (info.adopt() && misfit()) services.cornerstoneViewportService.resize(true);
       schedule();
     });
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
