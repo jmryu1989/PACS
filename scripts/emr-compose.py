@@ -310,11 +310,17 @@ def main(argv=None):
                 parser.error("audit-grantor needs institution, issuer, subject, capacity and basis-document")
             institution, issuer, subject, capacity, basis = [
                 "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'" for value in values]
+            delimiter = "$designation$"
+            while any(delimiter in value for value in values):
+                delimiter = delimiter[:-1] + "_$"
             sys.stdout.write("\\set ON_ERROR_STOP on\nBEGIN;\n"
+                f"DO {delimiter}\nDECLARE member_id uuid;\nBEGIN\n"
+                f"SELECT emr_access.existing_member_identity({issuer},{subject}) INTO member_id;\n"
+                "IF member_id IS NULL THEN RAISE EXCEPTION 'Unknown identity: check issuer/subject and ask the person to sign in once before designation'; END IF;\n"
                 "INSERT INTO emr_audit.grantor(institution_id,subject_id,capacity,basis_document_id)\n"
-                f"SELECT {institution},emr_access.resolve_member_identity({issuer},{subject})::text,{capacity},{basis}\n"
+                f"VALUES({institution},member_id::text,{capacity},{basis})\n"
                 "ON CONFLICT(institution_id,subject_id) DO UPDATE SET capacity=EXCLUDED.capacity,\n"
-                "basis_document_id=EXCLUDED.basis_document_id;\nCOMMIT;\n")
+                f"basis_document_id=EXCLUDED.basis_document_id;\nEND\n{delimiter};\nCOMMIT;\n")
             return 0
         sys.stdout.write(PROVISION_SQL)
         return 0

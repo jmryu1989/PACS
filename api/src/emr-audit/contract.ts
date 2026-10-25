@@ -286,6 +286,8 @@ export interface InvestigationLedger {
   /** Rows with sequence ≤ top and < below (when not null), strictly descending, at most `take`; may be broader than the
    * plan (candidate rows). Fewer than `take` means the end. */
   rows(top: number, below: number | null, take: number): Promise<readonly LedgerRow[]>;
+  /** Optional indexed count of this plan's matching events at the same snapshot. */
+  count?(top: number, filters: InvestigationFilters): Promise<number>;
 }
 /** C/B patient matching facts in round 2: the study's patient link today. Display only. */
 export type CurrentPatientLink = (studyId: string) => PatientLinkSnapshot | null;
@@ -386,33 +388,46 @@ export async function readInvestigationPage(plan: InvestigationPlan, ledger: Inv
   if (plan.cursor !== null) ({ top, after } = openCursor(plan, plan.cursor));
   else {
     let read: unknown;
-    try { read = await ledger.top(); } catch { refuse('LedgerReadFailed'); }
+    try { read = await ledger.top(); } catch (error) { ledgerReadFailure(error); }
     top = guarded('LedgerReadFailed', () => integer(read));
   }
   const limit = plan.mode === 'export' ? Infinity : plan.limit;
   const rows: ReplayEntry[] = [];
-  let below: number | null = null, previous = top + 1, total = 0, last: number | null = null, more = false;
+  const counted = plan.mode === 'view' && ledger.count !== undefined;
+  let total = 0;
+  if (counted) {
+    try { total = integer(await ledger.count(top, plan.filters)); } catch (error) { ledgerReadFailure(error); }
+  }
+  let below: number | null = counted ? after : null, previous = below ?? top + 1, last: number | null = null, more = false;
   for (;;) {
     let chunk: readonly LedgerRow[];
-    try { chunk = await ledger.rows(top, below, batch); } catch { refuse('LedgerReadFailed'); }
-    if (!Array.isArray(chunk) || chunk.length > batch) refuse('LedgerReadFailed');
+    const take = counted ? Math.min(batch, limit + 1 - rows.length) : batch;
+    try { chunk = await ledger.rows(top, below, take); } catch (error) { ledgerReadFailure(error); }
+    if (!Array.isArray(chunk) || chunk.length > take) refuse('LedgerReadFailed');
     for (const input of chunk) {
       const { sequence, event, durableAt } = verifiedRow(input, top, previous);
       previous = sequence;
       if (!inInstitutionScope(plan, event)) continue;
       const targets = eventMatches(plan, event);
       if (!targets) continue;
-      total++;
+      if (!counted) total++;
       if (after !== null && sequence >= after) continue;
       if (rows.length < limit) { rows.push(replayEntry(sequence, durableAt, event, targets, options.currentLink)); last = sequence; }
-      else more = true;
+      else { more = true; if (counted) break; }
     }
-    if (chunk.length < batch) break;
+    if ((counted && more) || chunk.length < take) break;
     below = previous;
   }
   const page = freeze({ rows, total, top, nextCursor: more ? sealCursor(plan, top, last) : null });
   pages.set(page, plan);
   return page;
+}
+
+/** Keep a transaction/statement deadline distinct from an authority or data refusal. */
+export function ledgerReadFailure(error: any): never {
+  if (error?.code === 'P2028' || error?.meta?.code === '57014' || error?.code === '57014' ||
+      error?.code === 'InvestigationTimedOut') refuse('InvestigationTimedOut');
+  refuse('LedgerReadFailed');
 }
 
 /** D-1 revised: the record-change and view streams have independent sequence spaces, snapshots and retention.

@@ -57,21 +57,22 @@ export class EmrAuditService {
       return result;
     });
   }
-  private async recorded(record: RecordMutation, ctx: RequestWorkContext, action: string,
+  private async recorded(record: RecordMutation, ctx: RequestWorkContext, action: AccessEventV1['action'],
     targets: readonly AccessTarget[], reference: string, surface = ctx.facts.surface): Promise<void> {
     const f = ctx.facts;
-    const event = parseAccessEvent({ formatVersion: 1, surface, eventId: randomUUID(),
+    const event: AccessEventV1 = { formatVersion: 1, surface, eventId: randomUUID(),
       userId: known(f.actor), rolesAtTime: known(f.roles), actingInstitution: known(f.institution), managingInstitution: known(f.institution),
       occurredAt: now(), trustedProxyIp: f.ingress, cause: 'user-view',
       context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null }, executor: 'member',
       targets, action, result: action === 'provide-prepared' ? 'prepared' : 'succeeded',
-      requestId: f.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null }) as Readonly<AccessEventV1>;
+      requestId: f.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null };
     // B1's admit_operation/storage contract caps the canonical UTF-8 payload at 65,536 bytes.
     // Partition by bytes, keeping every target and the request correlation in the same transaction.
     const cap = 65_536, overhead = Buffer.byteLength(JSON.stringify({ ...event, targets: [] }));
     let chunk: AccessTarget[] = [], bytes = overhead;
     const append = async () => {
-      await record(parseAccessEvent({ ...event, eventId: randomUUID(), auditLinkId: newAuditLinkId(), targets: chunk }),
+      // B1 validates each complete chunk at admission; avoid parsing the unbounded export first.
+      await record({ ...event, eventId: randomUUID(), auditLinkId: newAuditLinkId(), targets: chunk },
         async () => ({ kind: 'emr-audit', id: reference, version: null }));
     };
     for (const target of event.targets) {
@@ -89,7 +90,8 @@ export class EmrAuditService {
       return { issuer: string(v.issuer), subject: string(v.subject) };
     });
     const [row] = await tx.$queryRaw<{ id: string }[]>`SELECT
-      emr_access.resolve_member_identity(${subject.issuer},${subject.subject})::text AS id`;
+      emr_access.existing_member_identity(${subject.issuer},${subject.subject})::text AS id`;
+    if (!row?.id) refuse('AuditIdentityUnknown');
     return identity({ ...subject, id: row.id });
   }
 
@@ -123,7 +125,7 @@ export class EmrAuditService {
   }
 
   async investigate(request: IncomingMessage, input: unknown, mode: 'view' | 'export' = 'view') {
-    return this.run(request, async (tx, ctx, record) => {
+    try { return await this.run(request, async (tx, ctx, record) => {
       const authority = await this.authority(tx, ctx);
       const { changesAfter, viewsAfter, ...query } = requestBody(input, Object.keys(input ?? {}));
       if ('after' in query) refuse('InvestigationQueryRefused');
@@ -133,10 +135,20 @@ export class EmrAuditService {
         sequence: bigint; payload: string; recorded_at: Date; snapshot_top: bigint }[]>`
         SELECT * FROM emr_access.investigation_entries(${stream},${changes.institutionId},${changes.filters.from}::timestamptz,
           ${changes.filters.to}::timestamptz,${top}::bigint,${below}::bigint,${take}::integer)`;
+      // Changed events occur in both B1 streams. Parse their identical payload once per request.
+      const parsed = new Map<string, ReturnType<typeof parseAccessEvent>>();
+      const eventOf = (payload: string) => {
+        let event = parsed.get(payload);
+        if (!event) { event = parseAccessEvent(JSON.parse(payload)); parsed.set(payload, event); }
+        return event;
+      };
       const source = (stream: 'history' | 'viewing'): F.InvestigationLedger => ({
         top: async () => Number((await fetch(stream, null, null, 1))[0]?.snapshot_top ?? 0),
+        count: async (top, filters) => Number((await tx.$queryRaw<{ total: bigint }[]>`
+          SELECT emr_access.investigation_count(${stream},${changes.institutionId},${filters.from}::timestamptz,
+            ${filters.to}::timestamptz,${top}::bigint,${JSON.stringify(filters)}::jsonb) AS total`)[0].total),
         rows: async (top, below, take) => (await fetch(stream, top, below, take)).map(r => ({
-          entry: { sequence: Number(r.sequence), payload: { kind: 'access', event: JSON.parse(r.payload) } },
+          entry: { sequence: Number(r.sequence), payload: { kind: 'access', event: eventOf(r.payload) } },
           durableAt: r.recorded_at.toISOString(), served: null })),
       });
       const page = await F.readInvestigationStreams({ changes, views }, { changes: source('history'), views: source('viewing') });
@@ -158,7 +170,10 @@ export class EmrAuditService {
       const targets = [...new Map([...event.targets, ...viewEvent.targets].map(t => [JSON.stringify(t), t])).values()];
       await this.recorded(record, ctx, event.action, targets, changes.planId);
       return { ...page, images };
-    });
+    }); } catch (error) {
+      if (error?.code === 'P2028' || error?.meta?.code === '57014') F.ledgerReadFailure(error);
+      throw error;
+    }
   }
 
   private async issuance(tx: Tx, id: string, institution: string): Promise<F.Issuance> {

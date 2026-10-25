@@ -15,7 +15,8 @@ Use the installer connection (normal psql environment/service configuration).
 The command resolves the internal member ID and records the officer; re-running
 updates that institution/subject's capacity and document. `institution-representative`
 is the other supported capacity. The roster POST accepts
-`subject: { issuer, subject }`; callers never need an internal ID.
+`subject: { issuer, subject }`; callers never need an internal ID. The person must
+have signed in once. Both designation paths refuse an unknown issuer/subject without creating an identity.
 An ordinary admin cannot appoint an auditor.
 Roster changes append full grant history and the B1 rights event together.
 
@@ -72,7 +73,10 @@ Placement uses A's `clauseVersionAt(HOLD_CLAUSE_VERSIONS['privacy:35.3'], at)`;
 it records the publication in force at the hold time rather than the current
 publication at reopening. Extensions preserve that placement basis.
 
-Investigation uses an indexed institution/stream/sequence snapshot and keyset pages. E facts
+Investigation uses an indexed institution/stream/sequence snapshot and keyset pages.
+View totals are counted in SQL; replay stops after the page and its next matching event.
+Exports reuse identical events across streams and validate each audit chunk at B1 admission.
+A transaction/statement timeout returns `InvestigationTimedOut` with guidance to narrow the period or filters. E facts
 are fetched by UUID arrays. Every recorded target survives the split into B1's
 65,536-byte canonical payloads inside the same transaction. Roster authority reads
 share the institution lock; designation writes take it exclusively.

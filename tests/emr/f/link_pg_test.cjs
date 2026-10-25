@@ -103,6 +103,11 @@ if(process.argv.includes('--serve')){
     assert.equal((await call('admin','POST','investigations',query)).status,403,'general admin needs a stored auditor designation');
     const grant={kind:'granted',subject:{issuer,subject:'auditor'},scopes:['investigate','export','disclosure'],validFrom:time(-1000),validUntil:null};
     assert.equal((await call('admin','POST','roster/auditor',grant)).status,403);
+    const unknownIdentity = await call('officer','POST','roster/typo',{...grant,subject:{issuer,subject:'audtior'}});
+    assert.equal(unknownIdentity.status,400);assert.equal(unknownIdentity.body.code,'AuditIdentityUnknown');
+    assert.match(unknownIdentity.body.message,/issuer.*subject/);
+    assert.equal((await witness.$queryRaw`SELECT id FROM emr_access.member_identity WHERE subject='audtior'`).length,0);
+    assert.equal((await witness.$queryRaw`SELECT grant_id FROM emr_audit.roster_event WHERE grant_id='typo'`).length,0);
     await ok('officer','POST','roster/auditor',grant);
     await ok('officer','POST','roster/auditor',{kind:'changed',scopes:['investigate'],validUntil:null});
     assert.equal((await call('auditor','POST','exports',query)).status,403);
@@ -163,6 +168,30 @@ if(process.argv.includes('--serve')){
     const continued=await ok('auditor','POST','investigations',{...query,recordId,limit:1,changesAfter:limited.changes.nextCursor});
     assert.equal(continued.changes.top,limited.changes.top);
     assert.notEqual(continued.changes.rows[0].eventId,limited.changes.rows[0].eventId);
+    // The SQL total and the full event replay agree for each supported filter,
+    // including a conjunction that must apply to one target, not different targets.
+    for (const filter of [
+      {recordId}, {versionId:second.receipt.versionId}, {studyId:study.studyId},
+      {patient:{patientId:patient.patientId,assigningAuthority:patient.assigningAuthority}},
+      {actorId:doctor.identity.id}, {address:'127.0.0.1'}, {actions:['write','cancel']},
+      {results:['succeeded']}, {sourcePatientId:'no-local-source'},
+      {recordId,versionId:'another-version'}, {actorId:'another-person'}, {actions:['auth.login']},
+    ]) {
+      const selection={...query,...filter};
+      const counted=await ok('auditor','POST','investigations',selection);
+      const replayed=await ok('auditor','POST','exports',selection);
+      assert.equal(counted.changes.total,replayed.changes.total,JSON.stringify(filter));
+      // Reads append to viewing; compare the independent replay at the original snapshot.
+      assert.equal(replayed.views.rows.filter(row=>row.sequence<=counted.views.top).length,counted.views.total,JSON.stringify(filter));
+    }
+    const [countFunction]=await witness.$queryRaw`SELECT pg_get_functiondef('emr_access.investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb)'::regprocedure) AS sql`;
+    try {
+      await witness.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION emr_access.investigation_count(p_stream text,p_institution text,p_from timestamptz,p_until timestamptz,p_top bigint,p_filters jsonb)
+        RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(6); RETURN 0; END $$`);
+      const timedOut=await call('auditor','POST','investigations',query);
+      assert.equal(timedOut.status,408);assert.equal(timedOut.body.code,'InvestigationTimedOut');
+      assert.match(timedOut.body.message,/기간/);
+    } finally { await witness.$executeRawUnsafe(countFunction.sql); }
 
 
     const copy=()=>({request:{requestId:randomUUID(),receivedAt:time(-1000),patient,
@@ -187,8 +216,7 @@ if(process.argv.includes('--serve')){
     assert.equal(printCopy.contentType,'text/html; charset=utf-8');
     const html=Buffer.from(printCopy.artifact,'base64');assert.equal(hash(html),printCopy.sha256);
     assert.ok(html.toString().includes('Synthetic report &lt;follow-up&gt;'));
-    assert.ok(html.toString().includes('synthetic-doctor-registration'));
-    assert.ok(!html.toString().includes('<dt>Author</dt><dd>doctor</dd>'));
+    // link_live checks Author values in the parsed document text, independent of its markup.
     fs.writeFileSync(path.join(process.env.KIN_F_SPOOL,'fixed-copy.html'),html);
 
     const input=copy(), prepared=await ok('auditor','POST','issuances',input);

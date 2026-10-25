@@ -66,6 +66,46 @@ BEGIN
 END
 $$;
 
+-- Count matching events without replaying their contents in the API. Target predicates
+-- must all match the same target, just as the displayed event filter does.
+CREATE FUNCTION emr_access.investigation_count(p_stream text,p_institution text,p_from timestamptz,p_until timestamptz,
+  p_top bigint,p_filters jsonb) RETURNS bigint
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET jit=off AS $$
+DECLARE event_match jsonb := '{}'; target_match jsonb := '{}'; answer bigint; field text;
+BEGIN
+  IF p_filters->>'actorId' IS NOT NULL THEN
+    event_match := event_match || jsonb_build_object('userId',jsonb_build_object('status','known','value',jsonb_build_object('id',p_filters->>'actorId')));
+  END IF;
+  IF p_filters->>'address' IS NOT NULL THEN
+    event_match := event_match || jsonb_build_object('trustedProxyIp',jsonb_build_object('status','known','value',jsonb_build_object('address',p_filters->>'address')));
+  END IF;
+  IF p_filters->>'patient' IS NOT NULL THEN
+    target_match := target_match || jsonb_build_object('patientLinkSnapshot',jsonb_build_object('status','known','value',p_filters->'patient'));
+  END IF;
+  FOREACH field IN ARRAY ARRAY['studyId','recordId','versionId','sourcePatientId'] LOOP
+    IF p_filters->>field IS NOT NULL THEN
+      target_match := target_match || jsonb_build_object(field,jsonb_build_object('status','known','value',p_filters->>field));
+    END IF;
+  END LOOP;
+  IF target_match <> '{}'::jsonb THEN event_match := event_match || jsonb_build_object('targets',jsonb_build_array(target_match)); END IF;
+  SELECT count(*) INTO answer FROM emr_access.access_entry e
+  WHERE e.stream=p_stream AND e.sequence<=p_top AND e.occurred_at>=p_from AND e.occurred_at<p_until
+    AND CASE WHEN e.payload::jsonb #>> '{managingInstitution,status}'='known'
+      THEN e.payload::jsonb #>> '{managingInstitution,value}'
+      ELSE e.payload::jsonb #>> '{actingInstitution,value}' END=p_institution
+    AND e.payload::jsonb @> event_match
+    AND (p_filters->>'actions' IS NULL OR p_filters->'actions' ? (e.payload::jsonb->>'action'))
+    AND (p_filters->>'results' IS NULL OR p_filters->'results' ? (e.payload::jsonb->>'result'));
+  RETURN answer;
+END
+$$;
+
+-- Designation selects a person who has already signed in; it never enrolls a typo.
+CREATE FUNCTION emr_access.existing_member_identity(p_issuer text,p_subject text) RETURNS uuid
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET jit=off AS $$
+  SELECT id FROM emr_access.member_identity WHERE issuer=p_issuer AND subject=p_subject
+$$;
+
 -- A/H keep reading their existing B1 ports. F's latest jointly committed
 -- request/hold snapshot supplies the extended due; the original rows survive.
 CREATE OR REPLACE FUNCTION emr_access.holds_for(p_record_id text) RETURNS TABLE(hold_id text,phase text,body text)
@@ -88,4 +128,8 @@ $$;
 RESET ROLE;
 REVOKE ALL ON FUNCTION emr_access.investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION emr_access.investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer) TO kin_runtime;
+REVOKE ALL ON FUNCTION emr_access.investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb),
+  emr_access.existing_member_identity(text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION emr_access.investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb),
+  emr_access.existing_member_identity(text,text) TO kin_runtime;
 COMMIT;

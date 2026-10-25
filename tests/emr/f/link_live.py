@@ -1,5 +1,6 @@
 """F_LINK on an owned synthetic PG database and the shipped Nest HTTP consumer."""
 import json
+from html.parser import HTMLParser
 import os
 from pathlib import Path
 import sys
@@ -29,6 +30,13 @@ class AuditLinkPg(pg.PgLedgerFixture):
             '--institution', 'synthetic-hospital', '--issuer', 'https://synthetic.invalid/realms/f-link',
             '--subject', 'officer', '--capacity', 'privacy-officer',
             '--basis-document', 'synthetic-designation-authority']).stdout
+        unknown = cls.sql(bootstrap, check=False)
+        if unknown.returncode == 0 or 'Unknown identity' not in unknown.stderr:
+            raise AssertionError('installer must explain an unknown identity')
+        if cls.sql('SELECT count(*) FROM emr_access.member_identity').stdout.strip() != '0':
+            raise AssertionError('designation must not enroll an unknown identity')
+        # The sign-in identity producer precedes designation in an installed site.
+        cls.sql("SELECT emr_access.resolve_member_identity('https://synthetic.invalid/realms/f-link','officer')")
         cls.sql(bootstrap)
 
     def test_audit_copy_hold_http(self):
@@ -61,6 +69,19 @@ class AuditLinkPg(pg.PgLedgerFixture):
         (logs / 'stderr.log').write_text(result.stderr, encoding='utf-8')
         print('F_LINK PG/HTTP logs:', logs)
         self.assertEqual(result.returncode, 0, result.stdout[-2200:] + result.stderr[-1000:])
+        class DocumentText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.text = []
+            def handle_data(self, data):
+                if data.strip():
+                    self.text.append(data.strip())
+        document = DocumentText()
+        document.feed((spool / 'fixed-copy.html').read_text(encoding='utf-8'))
+        authors = [document.text[i + 1] for i, text in enumerate(document.text[:-1]) if text == 'Author']
+        self.assertEqual(authors, ['synthetic-doctor-registration'] * 2)
+        self.assertTrue(all('doctor' not in author.split() for author in authors), 'bare IdP subject is not a printed Author')
+        (logs / 'printed-authors.json').write_text(json.dumps(authors), encoding='utf-8')
         # Native restore preserves original bytes, roster history, request/hold
         # history and identity sequences. Restore consumers use the same functions.
         snapshot = """SELECT jsonb_build_object(
