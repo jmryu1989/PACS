@@ -1,6 +1,6 @@
 /* W5 Related Report mode (design v5 section 1.4/1.7). The mode takes the editor's place in the report column; the editor
    host keeps its nodes, text and Undo while it is hidden and inert. Both the Workspace and body.reading use these rules. */
-#related-mode[hidden], .redit[hidden] { display: none !important; }
+#related-mode[hidden], .redit[hidden], .related-mode-section[hidden] { display: none !important; }
 #related-mode { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 8px;
   overflow: auto; border-top: 2px solid #c98a2b; background: var(--kin-panel, #161b24); color: var(--kin-text, #dfe5ee); }
 .related-mode-head, .related-mode-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; flex: none; }

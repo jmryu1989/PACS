@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ACCESS_STREAMS, AccessEvent, AccessStream, AppendOnlyAccessStore, DurableAccessReceipt,
-  ImmutableIdentity, NON_RECORD_TARGETS, StatutoryAct, parseAccessEvent, provideAfterDurableEvent } from '../emr-contract/access-event';
+  ImmutableIdentity, AccessTarget, LocalReadTarget, NON_RECORD_TARGETS, StatutoryAct, parseAccessEvent, provideAfterDurableEvent } from '../emr-contract/access-event';
 import { RECORD_CLASSIFICATION, ResolvedRecord, OrderFacts, parseOrderFacts, RecordEvent, parseRecordEvent } from '../emr-contract/classification';
 import { civilPeriodEnd, validateOrderTransition } from '../emr-contract/lawful-defaults';
 import { choice, freeze, object, refuse, string, utc } from '../emr-contract/validation';
@@ -54,7 +54,7 @@ export interface RecordTarget { index: number; kind: string; recordId: string | 
 /** The record targets of a parsed event, in target order: what append_operation binds from the same payload. */
 export function recordTargets(input: unknown, served?: readonly ResolvedRecord[]): RecordTarget[] {
   const event = parseAccessEvent(input, served);
-  return (event.targets as readonly { kind: any; recordId: any; versionId: any }[]).flatMap((target, index) =>
+  return (event.targets as readonly (AccessTarget | LocalReadTarget)[]).flatMap((target, index) =>
     NON_RECORD_TARGETS.includes(target.kind) ? [] : [{ index, kind: target.kind,
       recordId: target.recordId.status === 'known' ? target.recordId.value : null,
       versionId: target.versionId.status === 'known' ? target.versionId.value : null }]);
