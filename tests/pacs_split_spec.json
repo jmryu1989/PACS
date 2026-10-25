@@ -5356,13 +5356,13 @@
   "di_additions_w9": {
     "unit": "W9-API",
     "decision": "D1500",
-    "note": "W9-LITE server half: the viewing-set resolve controller, its service and the unbound access-record port that the shared Module A binds on the EMR-B2 base (one route); U0B-DI compares the snapshot minus exactly these with di",
+    "note": "W9-LITE server half: the viewing-set resolve controller, its service and the metadata selector recorded by Module A under the request work on the EMR-B2 base (one route); U0B-DI compares the snapshot minus exactly these with di",
     "controllers": [
       "MultiStudyViewController"
     ],
     "providers": [
       "MultiStudyViewService",
-      "ViewingSetAccess=ViewingSetAccessUnbound"
+      "ViewingSetAccess"
     ],
     "injectables": {
       "MultiStudyViewController": {
@@ -5384,7 +5384,7 @@
         "declared": [],
         "optional": []
       },
-      "ViewingSetAccessUnbound": {
+      "ViewingSetAccess": {
         "params": [],
         "scope": null,
         "declared": [],

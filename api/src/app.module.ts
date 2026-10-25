@@ -38,7 +38,8 @@ import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
 import { ViewerContextEventService } from './viewer-context-event.service';
 import { MultiStudyViewController } from './multi-study-view.controller';
-import { MultiStudyViewService, ViewingSetAccess, ViewingSetAccessUnbound } from './multi-study-view.service';
+import { MultiStudyViewService } from './multi-study-view.service';
+import { ViewingSetAccess } from './emr-viewing/viewing-set-access';
 import { FindingController } from './finding.controller';
 import { FindingService } from './finding.service';
 import { ViewerJobController } from './viewer-job.controller';
@@ -78,8 +79,8 @@ function adminNoStore(_req: any, res: any, next: () => void) {
     AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
-    // W9-LITE: no access-ledger owner is assembled in this build (EMR-B2 base, then the shared Module A binds the port here).
-    MultiStudyViewService, { provide: ViewingSetAccess, useClass: ViewingSetAccessUnbound },
+    // W9 source selections use the same request-bound A1 response recorder.
+    MultiStudyViewService, ViewingSetAccess,
   ],
 })
 export class AppModule implements NestModule {
