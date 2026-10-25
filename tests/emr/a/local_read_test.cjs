@@ -12,6 +12,8 @@ const { IncomingMessage, ServerResponse } = require('node:http');
 const { Socket } = require('node:net');
 const root = path.resolve(__dirname, '../../..');
 const build = process.env.KIN_B2R_BUILD;
+// PG mode is the fixture's database, in image (built dist) and native (transpiled source) runs alike.
+const pg = Boolean(process.env.KIN_B2R_WITNESS_URL);
 const apiRequire = createRequire(build ? path.join(build, '../package.json') : path.join(root, 'api/package.json'));
 if (!build) {
   const ts = apiRequire('typescript');
@@ -95,7 +97,7 @@ async function checkLocalIncident(ledger, events, institution) {
   assert.ok(exported.rows.every(r => r.targets[0].patient === null));
 }
 
-if (!build) {
+if (!pg) {
   test('selection records the serialized projection and freezes attribution without formal placeholders', () => {
     let calls = 0;
     const value = { toJSON() { calls++; return body(); } }, input = source();
