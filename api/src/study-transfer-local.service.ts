@@ -22,6 +22,7 @@ import type { ImportOwner } from './dicom-import-gate.service';
 import type { RequestWorkContext } from './emr-runtime/request-context';
 import type { EmrRecordTransaction } from './emr-runtime/record-port';
 import type { RecordMutation } from './emr-runtime/store';
+import { newAuditLinkId } from './emr-contract/access-event';
 import type { OriginalDownloadAccessEventV2 } from './emr-contract/access-event';
 
 const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -515,16 +516,19 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     eventId = randomUUID(), relatedEventId: string | null = null) {
     const detail = JSON.parse(audit.detail), facts = request.facts;
     const known = <T>(value: T) => ({ status: 'known' as const, value });
+    // These routes read the originals' UIDs, sizes and hashes, not the source PatientID or institution tags.
+    const notObserved = { status: 'unresolved' as const, reason: 'not-observed' as const };
     const event: OriginalDownloadAccessEventV2 = {
       formatVersion: 2, branch: 'original-download', surface: facts.surface, eventId,
       userId: known(facts.actor), rolesAtTime: known(facts.roles), actingInstitution: known(facts.institution),
       rightsVersion: facts.rightsVersion, session: facts.binding,
       managingInstitution: known(detail.institutionId), occurredAt: detail.at, trustedProxyIp: facts.ingress,
       cause: 'user-view', executor: 'member', targets: [{ kind: 'download', studyId: known(audit.target),
-        recordId: known(detail.operationId), versionId: known(detail.manifestSha256) }],
+        recordId: known(detail.operationId), versionId: known(detail.manifestSha256),
+        sourcePatientId: notObserved, sourceInstitution: notObserved, projectionSha256: detail.manifestSha256 }],
       action, result: action === 'provide-prepared' ? 'prepared' : action === 'transfer-aborted' ? 'aborted' :
         action === 'permission-refused' ? 'refused' : action === 'conflict' ? 'failed' : 'succeeded',
-      requestId: facts.requestId, auditLinkId: `audit:${facts.requestId}`, relatedEventId,
+      requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId,
     };
     // Admin's existing audit report still reads these rows. B2 records their
     // projection in this transaction instead of creating a second success log.

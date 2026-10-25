@@ -646,7 +646,7 @@ const CHANGE_ACTS: readonly StatutoryAct[] = freeze(['기재', '추가기재', '
 export function statutoryAct(input: unknown, served?: readonly ResolvedRecord[]): StatutoryAct {
   const event = parseAccessEvent(input, served);
   return event.formatVersion === 2 && event.branch === 'online-auth' ? AUTH_STATUTORY_ACT[event.action] :
-    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2 | LocalReadAccessEventV2).action];
+    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2).action];
 }
 /** The streams an event is recorded in: always the viewing stream; also the history stream when it changed a record. */
 export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]): readonly AccessStream[] {
@@ -656,12 +656,15 @@ export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]
   return changed ? ACCESS_STREAMS : freeze(['viewing'] as const);
 }
 
-/** A native copy names its study, operation and fixed manifest, not a formal signed record or PatientLink. */
+/** A native copy carries A1's local-source shape: its study, operation (record) and fixed manifest (version), with the
+ * source PatientID/institution only as the route observed them. No formal PatientLink, signature or retained state.
+ * The projection a copy supplies is that canonical manifest, so its hash is the manifest's. */
+export type DownloadTarget = Omit<LocalReadTarget, 'kind'> & { kind: 'download' };
 export interface OriginalDownloadAccessEventV2 extends Omit<AccessEventV1, 'formatVersion' | 'targets' | 'context' | 'action' | 'result'> {
   formatVersion: 2; branch: 'original-download';
   rightsVersion: number;
   session: Readonly<{ method: 'session'; sessionRef: string } | { method: 'bearer'; sessionRef: null }>;
-  targets: readonly { kind: 'download'; studyId: EvidenceFact<string>; recordId: EvidenceFact<string>; versionId: EvidenceFact<string> }[];
+  targets: readonly DownloadTarget[];
   action: 'provide-prepared' | 'transfer-ended' | 'transfer-aborted' | 'permission-refused' | 'conflict';
   result: 'prepared' | 'succeeded' | 'aborted' | 'refused' | 'failed';
 }
@@ -681,10 +684,18 @@ function parseOriginalDownloadEvent(input: unknown): Readonly<OriginalDownloadAc
     return parsed;
   };
   if (!Array.isArray(v.targets) || v.targets.length !== 1) throw new Error('One original download operation required');
+  const observed = (value: unknown) => {
+    const parsed = fact(value, v => string(v));
+    if (parsed.status !== 'known' && !(parsed.status === 'unresolved' && parsed.reason === 'not-observed'))
+      throw new Error('Local observation required');
+    return parsed;
+  };
   const targets = v.targets.map(value => {
-    const t = object(value, ['kind', 'studyId', 'recordId', 'versionId']);
+    const t = object(value, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution', 'projectionSha256']);
     return { kind: choice(t.kind, ['download']), studyId: known(t.studyId, string),
-      recordId: known(t.recordId, string), versionId: known(t.versionId, sha256) };
+      recordId: known(t.recordId, string), versionId: known(t.versionId, sha256),
+      sourcePatientId: observed(t.sourcePatientId), sourceInstitution: observed(t.sourceInstitution),
+      projectionSha256: sha256(t.projectionSha256) };
   });
   const binding = object(v.session, ['method', 'sessionRef']);
   const session: OriginalDownloadAccessEventV2['session'] = binding.method === 'session'

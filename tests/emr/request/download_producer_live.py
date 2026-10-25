@@ -1,7 +1,8 @@
 """AR-IMPL-03: real original-download HTTP/PG and the Access Review query.
 
 Uses B2's fresh synthetic install; never reads an application .env or DB.
-The optional review migration comes from the separately owned Access Review tree.
+The optional review migration (KIN_DOWNLOAD_REVIEW_MIGRATION) comes from the separately
+owned Access Review tree; without it the review query step is not run.
 """
 import os
 from pathlib import Path
@@ -19,12 +20,13 @@ class DownloadProducerLive(PgLedgerFixture):
         if migration:
             self.sql(Path(migration).read_text(encoding='utf-8'))
         driver = ROOT / 'tests/emr/request/download_producer_pg_test.cjs'
+        review = '1' if migration else '0'
         env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
-               'KIN_B2R_SPOOL': str(ROOT / 'tmp/download-producer-b2/spool' / self.token)}
+               'KIN_B2R_SPOOL': str(ROOT / 'tmp/download-producer-b2/spool' / self.token), 'KIN_DOWNLOAD_REVIEW': review}
         if self.image:
             command = ['docker', 'run', '--rm', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
                        '--network', self.network, '--mount', 'type=bind,source=' + str(driver) + ',target=/app/download-test.cjs,readonly',
-                       '-e', 'KIN_DOWNLOAD_API=/app', '-e', 'DATABASE_URL=' + self.runtime_url,
+                       '-e', 'KIN_DOWNLOAD_API=/app', '-e', 'KIN_DOWNLOAD_REVIEW=' + review, '-e', 'DATABASE_URL=' + self.runtime_url,
                        '-e', 'KIN_B2R_WITNESS_URL=' + self.witness_url, '-e', 'KIN_B2R_SPOOL=/tmp/download-spool',
                        self.image, 'node', '/app/download-test.cjs']
         else:

@@ -23,6 +23,7 @@ const { DicomImportGateService } = product('dicom-import-gate.service');
 const { PrismaService } = product('prisma.service');
 const { StudyAccessService } = product('study-access.service');
 const { AuthService } = product('auth.service');
+const audit = product('emr-audit/contract');
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 
 async function main() {
@@ -129,20 +130,48 @@ async function main() {
       assert.equal(event.rightsVersion, 1); assert.deepEqual(event.session, { method: 'session', sessionRef });
       assert.equal(event.managingInstitution.value, institution); assert.equal(event.stream, 'viewing'); assert.equal(event.act, '열람');
       assert.equal(event.targets[0].studyId.value, uid); assert.equal(event.targets[0].versionId.value, prepared.body.manifestSha256);
+      // A1's local-source shape: no formal PatientLink; the route never read the source PatientID/institution.
       assert.deepEqual(event.targets, [{ kind: 'download', studyId: { status: 'known', value: uid },
-        recordId: { status: 'known', value: id }, versionId: { status: 'known', value: prepared.body.manifestSha256 } }]);
+        recordId: { status: 'known', value: id }, versionId: { status: 'known', value: prepared.body.manifestSha256 },
+        sourcePatientId: { status: 'unresolved', reason: 'not-observed' },
+        sourceInstitution: { status: 'unresolved', reason: 'not-observed' }, projectionSha256: prepared.body.manifestSha256 }]);
     }
     assert.equal(ledger[3].relatedEventId, ledger[2].eventId);
     assert.equal(ledger[3].requestId, ledger[2].requestId);
     assert.deepEqual(ledger[3].targets, ledger[2].targets);
     assert.equal((await post(prefix, { operationId: id })).status, 200);
     assert.equal((await events(id)).length, 4, 'operation replay does not invent another download');
-    // The Access Review branch's real bounded PostgreSQL query, under runtime rights.
-    const db = app.get(PrismaService);
-    const review = await db.$queryRaw`SELECT * FROM emr_access.review_entries(${institution}::text,
-      ${new Date(Date.now() - 60000)}::timestamptz, ${new Date(Date.now() + 60000)}::timestamptz,
-      true, NULL::bigint, NULL::bigint, 25)`;
-    assert.deepEqual(review.map(r => r.event_id).sort(), ledger.map(e => e.eventId).sort());
+    // The investigation consumer (emr-audit) over these stored payloads: found by study, never a formal patient.
+    const rows = (await witness.$queryRaw`SELECT sequence, payload, recorded_at FROM emr_access.access_entry
+      WHERE payload::jsonb->'targets'->0->'recordId'->>'value'=${id} ORDER BY sequence`)
+      .map(row => ({ entry: { sequence: Number(row.sequence), payload: { kind: 'access', event: JSON.parse(row.payload) } },
+        durableAt: row.recorded_at.toISOString(), served: null }));
+    const at = new Date().toISOString(), investigator = { id: randomUUID(), issuer, subject: 'synthetic-investigator' };
+    const authority = audit.resolveAuditAuthority({ listGrants: subject => ({ subject, complete: true, grants: [{
+      grantId: 'synthetic-grant', subject, institutionId: institution, events: [{ kind: 'granted', eventId: 'synthetic-grant-event',
+        at, by: investigator, capacity: 'privacy-officer', basisDocumentId: 'synthetic-designation', scopes: ['investigate'],
+        validFrom: at, validUntil: null }] }] }) }, { identity: investigator, institutionId: institution, roles: ['radiologist'] }, at);
+    const investigate = filter => audit.readInvestigationPage(audit.planInvestigation(authority,
+      { from: '2020-01-01T00:00:00.000Z', to: '2100-01-01T00:00:00.000Z', ...filter }), {
+      top: async () => Math.max(...rows.map(r => r.entry.sequence)),
+      rows: async (top, below, take) => rows.filter(r => r.entry.sequence <= top && (below === null || r.entry.sequence < below))
+        .sort((a, b) => b.entry.sequence - a.entry.sequence).slice(0, take) });
+    const found = await investigate({ studyId: uid });
+    assert.deepEqual(found.rows.map(r => r.eventId).sort(), ledger.map(e => e.eventId).sort());
+    for (const row of found.rows) {
+      assert.equal(row.targets[0].patient, null);
+      assert.equal(row.targets[0].localSource.projectionSha256, prepared.body.manifestSha256);
+    }
+    assert.equal((await investigate({ sourcePatientId: 'SYN-DOWNLOAD' })).rows.length, 0, 'an unobserved PatientID is never matched');
+    if (process.env.KIN_DOWNLOAD_REVIEW === '1') {
+      // The Access Review branch's real bounded PostgreSQL query (its migration applied by the fixture), under runtime rights.
+      const db = app.get(PrismaService);
+      const review = await db.$queryRaw`SELECT * FROM emr_access.review_entries(${institution}::text,
+        ${new Date(Date.now() - 60000)}::timestamptz, ${new Date(Date.now() + 60000)}::timestamptz,
+        true, NULL::bigint, NULL::bigint, 25)`;
+      assert.deepEqual(review.map(r => r.event_id).sort(), ledger.map(e => e.eventId).sort());
+      console.log('access-review query listed the download rows');
+    }
 
     // A real PG append failure rolls back the stage, its AuditLog projection,
     // and the grant consumption. No body bytes are supplied before durable intent.
