@@ -2,14 +2,20 @@
 /* The shell's rows have whole-pixel heights that never follow their text (tabs 38px, toolbar 72px,
    strip 114px, info bar 42px at the 12px font): the image area below them must not move by a
    fraction when a label, a status line or a fallback glyph changes. */
-.kin-patient-tabs { flex: none; box-sizing: border-box; height: calc(3em + 2px); overflow: hidden; background: #212121; color: #E3E3E3; font: 12px/1.4 sans-serif; }
-.kin-patient-tabs [role=tablist] { display: flex; overflow-x: auto; gap: .3em; padding: .3em; }
+/* One row holds the tabs, the lookup/guard message and Retry Patient. A message that wrapped onto a
+   second line under the tabs would be clipped by the fixed height (or, unclipped, would move the
+   image area), so it shares the row and ellipsizes; the tab list scrolls without a scrollbar track,
+   which would not fit the row either (tabs reach every entry by ArrowLeft/ArrowRight/Home/End). */
+.kin-patient-tabs { display: flex; align-items: center; gap: .5em; flex: none; box-sizing: border-box; height: calc(3em + 2px); overflow: hidden; padding-right: .5em; background: #212121; color: #E3E3E3; font: 12px/1.4 sans-serif; }
+.kin-patient-tabs [role=tablist] { display: flex; flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; gap: .3em; padding: .3em; }
+.kin-patient-tabs [role=status] { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kin-patient-tabs > button { flex: none; }
 .kin-patient-tab { display: flex; flex: none; background: #2D2D2D; border: 1px solid #B4B4B4; }
 .kin-patient-tab button { color: inherit; background: transparent; padding: .5em; }
 .kin-patient-tab [aria-selected=true] { box-shadow: inset 0 -3px #8AB4C8; }
 .kin-patient-tab button:focus-visible { outline: 2px solid #8AB4C8; outline-offset: -2px; }
 .kin-patient-tabs [role=status] { color: #B4B4B4; }
-.kin-patient-empty { display: none; padding: 1em; }
+.kin-patient-empty { display: none; flex: 1; min-width: 0; margin: 0; padding: 0 .5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kin-viewer-prior-report { position: absolute; top: 3em; right: .5em; bottom: .5em; width: min(30em, 90%); overflow: auto; padding: 1em; background: #2D2D2D; color: #E3E3E3; z-index: 10; white-space: pre-wrap; }
 .kin-viewer-prior-report[hidden] { display: none; }
 body.kin-viewer-empty .kin-patient-empty { display: block; }
