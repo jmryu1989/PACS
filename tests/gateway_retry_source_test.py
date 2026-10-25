@@ -582,41 +582,15 @@ class MigrationPins(unittest.TestCase):
         self.assertNotIn("@default", receipt)
 
     def test_migration_order_image_and_restore_bookkeeping(self):
-        names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
-        # S5-U4a: 20260926120000_study_questions (StudyQuestion/StudyQuestionEntry) is the one migration after U4; 29 -> 30.
-        # S5-U4c: 20260926130000_study_image_requests (StudyImageRequest/StudyImageRequestReceipt) follows it; 30 -> 31.
-        # S7-U1a: 20260928120000_critical_result (CriticalResult/CriticalResultEvent/CriticalResultReceipt) follows that;
-        # 31 -> 32 (the migration directory list, read in the S7-U1a fix1 evidence).
-        # S7-U3a: 20260928130000_reader_assignment_scope (ReaderAssignment keyed by study and institution) follows that;
-        # 32 -> 33.
-        # S7-AUDIT-STORE: 20260930120000_audit_log_append_only (the AuditLog guard trigger) follows that; 33 -> 34.
-        questions, image_requests = "20260926120000_study_questions", "20260926130000_study_image_requests"
-        critical, assignment_scope = "20260928120000_critical_result", "20260928130000_reader_assignment_scope"
-        audit_guard = "20260930120000_audit_log_append_only"
-        # S7-U5: 20261004120000_draft_revision_session_entry (the draft boundary and the entry proof columns) follows that; 34 -> 35.
-        draft_boundary = "20261004120000_draft_revision_session_entry"
-        # S7-U5 session end: 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid) follows that; 35 -> 36.
-        session_end = "20261005120000_idp_session_end"
-        # S7-U5 member isolation: 20261005130000_member_isolation (MemberIsolation) follows that; 36 -> 37.
-        isolation = "20261005130000_member_isolation"
-        # S7-U5 member isolation's call in flight: 20261006120000_member_isolation_call (three columns) follows that; 37 -> 38.
-        isolation_call = "20261006120000_member_isolation_call"
-        # S7-U5 D600: 20261007120000_provider_change (ProviderChange; the in-flight columns dropped) follows that; 38 -> 39.
-        provider_change = "20261007120000_provider_change"
-        attempt_ids = "20261006000000_tech_note_attempt_id"
-        self.assertEqual(names[names.index(U3_MIGRATION):], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
-                                       audit_guard, draft_boundary, session_end, isolation, attempt_ids, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects', '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
-                                       '20261015013945_import_operation', '20261016120000_related_report_insert_receipt', '20261023180000_emr_pg_ledger'],
-                         "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
-                         "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
-                         "S7-AUDIT-STORE's audit_log_append_only, S7-U5's draft_revision_session_entry and its "
-                         "idp_session_end, member_isolation, tech_note_attempt_id, member_isolation_call, provider_change, member_db_rights and designation_subjects")
-        self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
+        # Compare the restore consumer with the same SQL tree migrate deploy uses;
+        # unrelated later feature migrations must not extend a gateway-only pin.
+        migrations = sorted(p.relative_to(ROOT).as_posix()
+                            for p in (ROOT / "api" / "prisma" / "migrations").glob("*/migration.sql"))
+        names = [Path(p).parent.name for p in migrations]
+        self.assertEqual(names[names.index(U3_MIGRATION) + 1], MIGRATION_NAME,
+                         "the retry table follows its GatewayReceipt parent")
+        self.assertEqual(restore_fixture.MIGRATIONS, migrations)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
-        # the restore fixture applies exactly these migrations in this order: its list compared as data, so the order
-        # above (U3, U4, study_questions, study_image_requests, critical_result, reader_assignment_scope last) is the fixture's too
-        # (S7-U1a-B-R-001-F03: not the list's layout in the fixture's source)
-        self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
         self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'])", FIXTURE)          # TABLES
         self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'):", FIXTURE)          # seeding order, after its FK parent
         self.assertIn("rows['GatewayRetryRequest'] = [dict(studyUid=uid, epoch='00000000-0000-4000-8000-000000000c01', seq=7,\n"
