@@ -5,6 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 // Split phase (S9-U0b round 2): every original unit lives in its approved concern and is compared with its unchanged
 // RELIST baseline through the bounded correspondence its entry records (pacs_split_contract.cjs); the facade and the
 // concern files may hold nothing the spec does not name; Nest's DI and route metadata equal the snapshot taken from main
@@ -232,7 +233,7 @@ function withoutW5Arguments(now) {
     return { ...route, args: route.args.filter(arg => !change.added.includes(arg)) };
   }) };
 }
-test('U0B-DI Nest metadata equals main before the split: tokens, constructor tokens, scopes, enhancers, middleware, 138 routes', () => {
+test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions: tokens, constructor tokens, scopes, enhancers, middleware, routes', () => {
   const full = diSnapshot();
   // W9-API (D1500): the viewing-set resolve controller, its service and the unbound access-record port, one route.
   const w9 = spec.di_additions_w9;
@@ -253,15 +254,20 @@ test('U0B-DI Nest metadata equals main before the split: tokens, constructor tok
     routes: [...w9.routes, ...u4b.routes].sort((a, b) =>
       `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
   };
-  assert.equal(full.routes.length, 138 + declared.routes.length);
-  // W5-API (D1460) x S9-U4b: both declarations are taken back - the added draft argument, then the U4b additions.
-  const beforeClinical = withoutDeclared(full, spec.di_additions_d_online);
-  const now = withoutDeclared(withoutDeclared(withoutW5Arguments(beforeClinical), spec.di_additions_b2), declared);
+  const additions = [spec.di_additions_d_online, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
+  // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
+  const now = additions.reduce(withoutDeclared, withoutW5Arguments(full));
   assert.deepEqual(now, spec.di);
-  assert.equal(now.routes.length, 138);
+  // Use the approved split's route set, independent of today's editable spec, so an addition cannot be re-pinned as baseline.
+  const splitRoutes = JSON.parse(execFileSync('git', ['show',
+    'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
+  { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
+  assert.deepEqual(now.routes, splitRoutes, 'the approved pre-split route set is unchanged');
   assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {
