@@ -166,6 +166,26 @@ async function main() {
     const partial = await send(partialInput); await verify(partialInput, partial, [partialUid]);
     assert.equal(partial.body.scopeStatus, 'partial'); assert.equal(partial.body.members[1].ordinal, 1);
     assert.equal(reads.includes(missing), false);
+    // A real UID-only policy denies this member before either source preparation
+    // or serving. Ready neighbors retain their original ordinals and receipts.
+    const policyDenied = await study(), policyReady = await study(), policyReady2 = await study();
+    await witness.studyAccessPolicy.create({ data: { institution: site, subject, revision: 1,
+      reason: 'Synthetic UID scope', updatedBy: subject,
+      policy: { version: 1, restricted: true, startsAt: null, endsAt: null,
+        rules: [{ patientId: null, modalities: [], dateFrom: null, dateTo: null, studyUids: [policyReady, policyReady2] }] } } });
+    try {
+      const policyInput = selection([policyReady, policyDenied, policyReady2]);
+      const policyReply = await send(policyInput);
+      await verify(policyInput, policyReply, [policyReady, policyReady2]);
+      assert.equal(policyReply.body.scopeStatus, 'partial');
+      assert.deepEqual(policyReply.body.members[1], { uid: policyDenied, ordinal: 1,
+        status: 'error', code: 'W9_MEMBER_UNAVAILABLE' });
+      assert.equal(reads.includes(policyDenied), false, 'policy-denied source is never read');
+      assert.equal((await forUid(policyDenied)).length, 0, 'policy denial has no receipt');
+    } finally {
+      await witness.studyAccessPolicy.delete({ where: { institution_subject: { institution: site, subject } } });
+    }
+    console.log('PASS real StudyAccessPolicy denial beside ready members / no source read or receipt');
     const split = await study({ split: true }), otherSite = await study({ site: 'SYN-other-site' });
     const errorInput = selection([split, otherSite]), errorOnly = await send(errorInput);
     await verify(errorInput, errorOnly, []); assert.equal(errorOnly.body.scopeStatus, 'rejected');
@@ -218,7 +238,7 @@ async function main() {
     };
     try {
       const unknown = await send(selection([unknownUid, unknownPartner]));
-      assert.equal(unknown.status, 503); assert.equal(unknown.body.members, undefined);
+      assert.equal(unknown.status, 503); assert.equal(unknown.body.code, 'W9_AUDIT_UNAVAILABLE'); assert.equal(unknown.body.members, undefined);
       assert.equal(unknownKeys.length, 1);
       assert.deepEqual(unknownLookups, [{ id: unknownKeys[0].operationId, outcome: 'pending' }]);
       assert.equal((await forUid(unknownUid)).length + (await forUid(unknownPartner)).length, 0);
@@ -229,7 +249,7 @@ async function main() {
     await witness.$executeRawUnsafe(`ALTER TABLE emr_access.access_entry ADD CONSTRAINT a3_fixture_refusal
       CHECK (payload::jsonb->'targets'->0->'recordId'->>'value' <> '${last}')`);
     try {
-      const failed = await send(selection([first, last])); assert.equal(failed.status, 503);
+      const failed = await send(selection([first, last])); assert.equal(failed.status, 503); assert.equal(failed.body.code, 'W9_AUDIT_UNAVAILABLE');
       assert.equal(failed.text.includes('SYN metadata'), false); assert.equal(failed.body.members, undefined);
       const prior = await until(async () => { const e = await forUid(first); return e.length === 2 && e; });
       assert.deepEqual(prior.map(e => e.action).sort(), ['provide-prepared', 'transfer-aborted']);
@@ -286,12 +306,21 @@ async function main() {
       }
       await lock(); let bytes = false;
       const started = performance.now();
+      let observed;
       const pending = send(selection(cancellationUids), { signal: controller.signal, onFirstByte: () => { bytes = true; } })
-        .then(value => ({ value }), error => ({ error }));
+        .then(value => (observed = { value, at: performance.now() }), error => (observed = { error, at: performance.now() }));
       try {
         await waitAppend(); assert.equal(bytes, false);
         if (cause === 'close') { controller.abort(); await pending; }
-        else await pause(Math.max(0, VIEWING_SET_LIMITS.deadlineMs - (performance.now() - started)) + 100);
+        else {
+          await pause(Math.max(0, VIEWING_SET_LIMITS.deadlineMs - (performance.now() - started)) + 100);
+          assert.equal(observed?.value?.status, 503, 'deadline HTTP refusal arrives while the PG append is still blocked');
+          assert.equal(observed.value.body.code, 'W9_AUDIT_UNAVAILABLE');
+          assert.equal(observed.value.body.members, undefined);
+          await waitAppend();
+          assert.equal((await forUid(late)).length, 0, 'the refusal precedes the held COMMIT');
+          console.log(JSON.stringify({ deadlineReplyMs: observed.at - started, lockStillHeld: true }));
+        }
         assert.equal(bytes, false, 'no clinical body while receipt is pending');
         releaseLock(); await holding; holding = null;
         const answer = await pending;

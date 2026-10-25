@@ -1,4 +1,15 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+/** W9 same-patient metadata admission (D1500).
+ * Order: role -> institution -> input -> StudyState/visible -> local scope ->
+ * StudyAccess -> sources -> split UID -> PatientID -> patient key -> A1 receipts -> body.
+ * This read writes no clinical row or lazy StudyState. Use the existing public
+ * access/identity contracts so their decisions cannot drift between consumers.
+ * A denied member's serving source is never read. Keep the initial access decision;
+ * D1764 removes the duplicate state/policy/source-tag rechecks, not that decision
+ * or the returned UID and mixed-patient protections. The existing response
+ * interceptor still owns its policy revision check. A1 records the selected
+ * metadata under the request work and withholds it until every receipt is durable.
+ */
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { ViewingSetAccess } from './emr-viewing/viewing-set-access';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
@@ -12,8 +23,6 @@ import { STUDY_IDENTITY_UNRESOLVED, unresolvedSource } from './study-source-grou
 export const W9_SELECTION_INVALID = 'W9_SELECTION_INVALID';
 export const W9_VIEW_FORBIDDEN = 'W9_VIEW_FORBIDDEN';
 export const W9_PATIENT_MISMATCH = 'W9_PATIENT_MISMATCH';
-export const W9_CONTEXT_CHANGED = 'W9_CONTEXT_CHANGED';
-export const W9_AUDIT_UNAVAILABLE = 'W9_AUDIT_UNAVAILABLE';
 export const W9_MEMBER_UNAVAILABLE = 'W9_MEMBER_UNAVAILABLE';
 export const W9_SCOPE_EXCLUDED = 'W9_SCOPE_EXCLUDED';
 export const W9_IDENTITY_UNAVAILABLE = 'W9_IDENTITY_UNAVAILABLE';
@@ -36,8 +45,6 @@ const selectionInvalid = () => refusal(BadRequestException, W9_SELECTION_INVALID
 const viewForbidden = () => refusal(ForbiddenException, W9_VIEW_FORBIDDEN, '여러 검사 열기는 판독의 권한이 필요합니다.');
 const patientMismatch = () => refusal(ConflictException, W9_PATIENT_MISMATCH,
   '원본 환자 ID가 다른 검사는 함께 열 수 없습니다. 선택 목록을 확인하세요.');
-export const auditUnavailable = () => refusal(ServiceUnavailableException, W9_AUDIT_UNAVAILABLE,
-  '열람 기록을 저장하지 못했습니다. 잠시 후 Retry로 다시 시도하세요.');
 
 /** The minimal source display metadata of one member, exactly as the body carries it. No report, draft or version body. */
 export interface ViewingSetMetadata {

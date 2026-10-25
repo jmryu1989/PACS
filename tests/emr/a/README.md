@@ -13,7 +13,10 @@ Do not read mutable source rows again to construct this manifest.
 Pass an existing source work context when observed (including W9's comparison
 anchor); otherwise it remains null. A3 passes its existing cancellation/deadline
 signal as the third constructor argument and keeps that deadline alive through
-preparation. A1 introduces no timer, reserve or new timeout.
+preparation. A3 also supplies its existing W9_AUDIT_UNAVAILABLE failure body;
+other consumers retain EMR_VIEWING_UNAVAILABLE. A1 introduces no timer, reserve
+or new timeout. A lifecycle abort refuses HTTP immediately while the admitted
+append and its aborted follow-up drain in the original work.
 
 Serialization runs once before recording. The hash identifies the actual
 serialized target projection; it is not a signature or an integrity chain.
@@ -24,9 +27,9 @@ consumption plus a finished 200 produces `transfer-ended`; a refusal, close,
 error, or other body produces `transfer-aborted`. These are server observations,
 not proof of browser display or human reading.
 
-A3 must replace W9's `transferOf` and its old `prepare/finish` integration when
-adopting this boundary. Running both creates duplicate outcomes. A1 does not
-activate W9, change its existing source/policy checks, or call `requireCurrent`.
+A3 replaces W9's `transferOf` and its old `prepare/finish` integration with
+this boundary. Running both would create duplicate outcomes. A1 does not
+duplicate W9's source/policy checks or call `requireCurrent`.
 RF owns work release after the last follow-up; no work starts from finish/close.
 
 The event retains RF's issuer/subject identity, roles, rights version, institution,
@@ -85,7 +88,9 @@ KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/
 The 300-second hang timeout follows the existing Module A PG CI step. The
 fixture checks ready/partial/error-only, original ordinal and comparison anchor,
 source patient/UID mismatch, COMMIT before first clinical byte, final-target
-SQL refusal, close/deadline with a late receipt, and the existing source cutoff.
+SQL refusal, a real StudyAccessPolicy denial beside ready members (no source
+read or receipt), close/deadline with a late receipt, and the existing source cutoff.
+The deadline assertion observes the 503 before releasing the PG append lock.
 Native runs use the existing `KIN_B2R_NODE`, `KIN_B2R_BUILD`, and
 `KIN_B2R_PRISMA_CLI` fixture settings. No source/production stack is used.
 The real registration is `validate.yml`'s `emr-b` job (the order's `emr-b.yml`
