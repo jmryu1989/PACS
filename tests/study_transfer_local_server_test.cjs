@@ -31,7 +31,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AuthService } = require('/app/dist/auth.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
-const { createRequestContext, REQUEST_CONTEXT_CAPTURE } = require('/app/dist/emr-runtime/request-context');
+const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = require('/app/dist/emr-runtime/request-context');
 const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
 const { readDicomPart10 } = require('/app/dist/dicom-part10-reader');
 
@@ -434,7 +434,7 @@ function store({ institutions } = {}) {
     s.transactions++;
     // What the gate relies on, not the numbers it picked (D73): READ COMMITTED (each statement sees what committed before
     // it, so a row read after its lock is current) and a bounded wait and duration.
-    assert.equal(options?.isolationLevel, 'ReadCommitted');
+    assert.equal(options?.isolationLevel ?? 'ReadCommitted', 'ReadCommitted');
     assert.ok([options?.maxWait, options?.timeout].every(v => Number.isFinite(v) && v > 0), 'a bounded transaction');
     const tx = { id: ++transactionSeq, undo: [], created: [], held: { list: [], keys: new Set() }, operationLocked: false };
     s.openTransactions++;
@@ -469,6 +469,7 @@ function store({ institutions } = {}) {
 
 // ── the Nest application: the product's controller, services and parser; a test guard stands in for the global AuthGuard ──
 class TestGuard {
+  constructor(capture) { this.capture = capture; }
   canActivate(ctx) {
     const req = ctx.switchToHttp().getRequest();
     const c = JSON.parse(req.headers['x-test-caller'] || 'null');
@@ -476,10 +477,16 @@ class TestGuard {
     Object.assign(req, c, c.session ? { authMethod: 'session', sid: c.session } : { authMethod: 'bearer' });
     // The credential the real guard verified: a bearer caller carries its synthetic access token on the same request.
     if (!c.session) req.headers.authorization = 'Bearer ' + (c.token ?? 'tok:' + c.sub);
+    this.capture.capture(req, ctx.switchToHttp().getResponse(), {
+      issuer: process.env.KC_ISSUER || 'https://synthetic.test/fixture', subject: c.sub || 'fixture-missing-subject',
+      roles: c.roles, institution: c.institution, rightsVersion: 1,
+      binding: { method: 'bearer', sessionRef: null },
+    }, { method: req.method, route: req.route.path.replace(/^\/api\//, ''), purpose: 'clinical' }, async () => {});
     return true;
   }
 }
 common.Injectable()(TestGuard);
+common.Inject(REQUEST_CONTEXT_CAPTURE)(TestGuard, undefined, 0);
 
 /**
  * AuthService's public checks over the store: a cookie session lives while its row does; a synthetic bearer token
@@ -494,7 +501,7 @@ function fakeAuth(s) {
       if (s.onAuth) await s.onAuth();
       if (s.authFailure) throw s.authFailure();
       if (!raw.startsWith('tok:') || s.expiredTokens.has(raw)) throw new common.UnauthorizedException('토큰 검증 실패: synthetic');
-      return { sub: raw.slice(4), sid: 'idp:' + raw.slice(4) };
+      return { iss: process.env.KC_ISSUER, sub: raw.slice(4), sid: 'idp:' + raw.slice(4) };
     },
     bearerRights: async payload => {
       if (s.idpEnded.has(payload.sid)) throw new common.UnauthorizedException({ code: 'AUTH_SESSION_ENDED', message: '인증 세션이 없습니다' });
@@ -538,8 +545,10 @@ function guardAuth(s) {
       return { ...payload, email: payload.sub.replace(/-sub$/, '') + '@synthetic.test', realm_access: { roles: r?.roles ?? [] }, groups: r ? ['/' + r.institution] : [] };
     },
     sessionRights: async session => { count('sessionRights'); return s.rights.get(session.sub) ?? null; },
-    // Transfer authorization has its own recheck; these cases do not consume facts.
-    bindCurrentAuthorization: () => async () => { throw new Error('Unexpected request-facts consumer'); },
+    bindCurrentAuthorization: payload => async () => {
+      const row = s.rights.get(payload.sub);
+      if (!row?.approved || row.suspended) throw new common.ForbiddenException();
+    },
     credentialsMissing: () => refusal(401, 'AUTH_CREDENTIALS_MISSING', '인증 정보가 없습니다'),
     requireCsrf: req => { if (req.headers['x-kin-csrf'] !== '1') throw refusal(403, 'AUTH_CSRF_REQUIRED', 'CSRF 확인값이 없습니다'); },
   };
@@ -569,11 +578,25 @@ async function harness(options = {}) {
   };
   const access = new StudyAccessService(s.prisma, { studyIdentityResources, ...(options.accessOrthanc ?? {}) }, {});
   class TestModule {}
+  const identities = new Map();
   const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), {
-    begin() { throw new Error('Transfer route unexpectedly opened request-facts work'); },
+    begin() {
+      return {
+        resolveRequestIdentity: async (issuer, subject) => {
+          const key = JSON.stringify([issuer, subject]);
+          if (!identities.has(key)) identities.set(key, randomUUID());
+          return identities.get(key);
+        },
+        // This recording store models the port's transaction only. The live
+        // HTTP/PG test exercises B2 admission, parsing and durable appends.
+        transactionWithRecords: (task, bounds) => s.prisma.$transaction(tx => task(tx, (_event, effect) => effect()), bounds),
+        end() {},
+      };
+    },
   });
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
     { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
+    { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
     { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access },
     { provide: AuthService, useValue: options.realGuard ? guardAuth(s) : fakeAuth(s) },
     { provide: APP_GUARD, useClass: options.realGuard ? AuthGuard : TestGuard }] })(TestModule);
