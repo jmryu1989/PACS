@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import expect
 
 import test_worklist as base
-from test_prior_selection import PriorSelectionE2E, canvas_ready, synthetic_ct
+import test_prior_selection as prior
 
 RESOLVE = "/api/studies/viewing-set/resolve"
 AUDIT = "열람 기록을 저장하지 못했습니다. 잠시 후 Retry로 다시 시도하세요."
@@ -45,7 +45,7 @@ def ready_answer(body, patient):
 
 
 class MultiStudyViewE2E(base.WorklistE2E):
-    originals = PriorSelectionE2E.originals
+    originals = prior.PriorSelectionE2E.originals
 
     def ids(self, page):
         return parse_qs(urlsplit(page.url).query)["StudyInstanceUIDs"][0].split(",")
@@ -58,7 +58,7 @@ class MultiStudyViewE2E(base.WorklistE2E):
 
     def test_w9_01_unbound_refusal_then_synthetic_ready_set_displays_on_the_real_viewer(self):
         patient = "W9-" + uuid.uuid4().hex[:12]
-        fixtures = [synthetic_ct(self.stack, patient, "w9" + str(i), date, slices=2)
+        fixtures = [prior.synthetic_ct(self.stack, patient, "w9" + str(i), date, slices=2)
                     for i, date in enumerate(("20260803", "20260802", "20260801"))]
         originals, clinical = self.originals(), self.clinical(fixtures)
         page = self.login()
@@ -99,7 +99,7 @@ class MultiStudyViewE2E(base.WorklistE2E):
         viewer.wait_for_url("**/ohif/viewer?**", timeout=30000)
         self.assertEqual(self.ids(viewer), order[:2])
         self.assertEqual(parse_qs(urlsplit(viewer.url).query).get("hangingProtocolId"), ["@ohif/hpCompare"])
-        canvas_ready(viewer, 2)
+        prior.canvas_ready(viewer, 2)
         for uid in order[:2]:
             expect(self.member(page, uid)).to_contain_text("Displayed", timeout=60000)
         expect(self.member(page, order[2])).to_contain_text("Not Opened")
@@ -115,7 +115,7 @@ class MultiStudyViewE2E(base.WorklistE2E):
         self.assertIsNone(parse_qs(urlsplit(viewer.url).query).get("hangingProtocolId"))
         self.assertEqual([b["studyUids"] for b in bodies], [order, order])
         self.assertEqual(bodies[1]["expectedSourcePatientKey"], "SYN|" + patient)
-        canvas_ready(viewer, 1)
+        prior.canvas_ready(viewer, 1)
         expect(self.member(page, order[2])).to_contain_text("Displayed", timeout=60000)
         expect(page.locator("#multi-study-summary")).to_have_text("Studies 3 · Page 2/2 · Pages")
         self.assertIsNone(page.evaluate("selectedUid"))

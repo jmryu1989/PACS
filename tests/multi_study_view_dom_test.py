@@ -441,6 +441,16 @@ class MultiStudyViewPage(unittest.TestCase):
         expect(self.member(n[2])).to_contain_text("Load Failed")
         expect(self.member(n[2])).to_contain_text(MEMBER_LF)
         expect(self.member(n[2])).not_to_contain_text("SYNACC")
+        partner = self.viewer()
+        partner.evaluate("() => { document.body.dataset.kept = 'partner'; }")
+        calls = len(self.site.resolves)
+        self.member(n[2]).locator('[data-action=retry]').click()
+        expect(self.status()).to_contain_text("Not Opened")
+        self.assertEqual(calls, len(self.site.resolves), "a full window manager must refuse before resolve")
+        self.assertEqual([n[3]], self.viewer_studies(partner)[0])
+        self.assertEqual('partner', partner.locator('body').get_attribute('data-kept'))
+        # The reader frees the sole viewer slot; Retry can now open the failed UID alone.
+        partner.close()
         body = self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
         self.assertEqual((n, KEY), (body["studyUids"], body["expectedSourcePatientKey"]))
         self.wait_viewer([n[2]])
@@ -466,6 +476,24 @@ class MultiStudyViewPage(unittest.TestCase):
         popup.evaluate("() => { window.__synDirty = false; }")
         self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
         self.wait_viewer([n[2]])
+
+    def test_a_new_ready_set_keeps_the_admitted_set_when_the_viewer_refuses_replacement(self):
+        self.open()
+        order = self.visible_order()
+        original = self.open_set(order[:3])['studyUids']
+        self.wait_viewer(original[:2])
+        popup = self.viewer()
+        popup.evaluate("() => { window.__synDirty = true; document.body.dataset.kept = 'admitted'; }")
+        candidate = self.open_set(order[2:5])['studyUids']
+        expect(self.status()).to_contain_text('Not Opened')
+        self.assertEqual(original, self.page.locator('#multi-study-members li').evaluate_all('(rows) => rows.map(r => r.dataset.uid)'))
+        self.assertEqual(original[:2], self.viewer_studies(popup)[0])
+        self.assertEqual('admitted', popup.locator('body').get_attribute('data-kept'))
+        popup.evaluate('() => { window.__synDirty = false; }')
+        body = self.press('#multi-study-retry')
+        self.assertEqual(candidate, body['studyUids'])
+        self.wait_viewer(candidate[:2])
+        self.assertEqual(candidate, self.page.locator('#multi-study-members li').evaluate_all('(rows) => rows.map(r => r.dataset.uid)'))
 
     def test_a_blocked_popup_sends_no_resolve_and_retry_reserves_in_its_own_click(self):
         self.open()
@@ -517,7 +545,23 @@ class MultiStudyViewPage(unittest.TestCase):
         expect(self.member(n[3])).to_contain_text("No Images")
         self.post_viewer_event(popup, new, {"type": "failed"})
         expect(self.member(n[2])).to_contain_text("Unverified")
-        expect(self.member(n[3])).to_contain_text("No Images")
+        expect(self.member(n[3])).to_contain_text("Unverified")
+
+    def test_whole_renderer_failure_invalidates_displayed_members_even_after_the_display_bound(self):
+        self.open()
+        n = self.open_set(self.visible_order()[:2])["studyUids"]
+        self.wait_viewer(n)
+        popup = self.viewer()
+        opening = self.viewer_studies(popup)[2]
+        event = {"type": "displayed", "study": n[0], "series": "1.2.3", "sop": "1.2.3.4", "frame": 1}
+        self.post_viewer_event(popup, opening, event)
+        expect(self.member(n[0])).to_contain_text("Displayed")
+        self.page.clock.run_for(45001)
+        self.post_viewer_event(popup, opening, {"type": "failed"})
+        for value in n:
+            expect(self.member(value)).to_contain_text("Unverified")
+        self.post_viewer_event(popup, opening, event)
+        expect(self.member(n[0])).to_contain_text("Unverified")
 
     def test_the_viewer_strip_intents_page_through_the_same_bounded_commands(self):
         self.open()
@@ -615,6 +659,53 @@ class MultiStudyViewPage(unittest.TestCase):
         self.wait(lambda: parse_qs(urlparse(frame.get_attribute("src") or "").query).get("StudyInstanceUIDs") == [n[2]],
                   "the workspace frame showing the odd last member")
 
+    def test_retry_preserves_the_workspace_partner_document_and_uses_the_free_window_slot(self):
+        self.open()
+        self.page.locator('#toolbar-view > summary').click()
+        self.page.locator('#image-opening-open').click()
+        self.page.locator('#image-opening-target').select_option('workspace')
+        self.page.locator('#image-opening-done').click()
+        order = self.visible_order()
+        self.row(order[0]).click()
+        self.wait(lambda: self.target() == order[0], 'the Reading Target')
+        n = self.open_set(order[:5])["studyUids"]
+        frame = self.page.locator('#reading-frame')
+        self.wait(lambda: frame.count() and n[0] in (frame.get_attribute('src') or ''), 'the pair in the workspace')
+        self.site.resolve_answers.append({n[2]: 'W9_LOAD_FAILED'})
+        self.press('#multi-study-next')
+        self.wait(lambda: n[3] in (frame.get_attribute('src') or ''), 'the ready partner in the workspace')
+        self.wait(lambda: any(n[3] in f.url for f in self.page.frames), 'the partner document navigation')
+        partner = next(f for f in self.page.frames if '/ohif/viewer' in f.url)
+        partner.evaluate("() => { document.body.dataset.kept = 'workspace-partner'; }")
+        old_src = frame.get_attribute('src')
+        opening = parse_qs(urlparse(old_src).fragment)['kin-w9'][0]
+        self.post_viewer_event(partner, opening, {'type': 'displayed', 'study': n[3], 'series': '1.2.3', 'sop': '1.2.3.4', 'frame': 1})
+        expect(self.member(n[3])).to_contain_text('Displayed')
+        body = self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
+        self.assertEqual(n, body['studyUids'])
+        self.wait_viewer([n[2]])
+        self.assertEqual(old_src, frame.get_attribute('src'))
+        self.assertEqual('workspace-partner', partner.locator('body').get_attribute('data-kept'))
+        expect(self.member(n[3])).to_contain_text('Displayed')
+        expect(self.member(n[3])).to_contain_text('Viewing')
+        # A retained document still owns its events; failure of the retry window cannot invalidate its partner.
+        popup = self.viewer()
+        self.post_viewer_event(popup, self.viewer_studies(popup)[2], {'type': 'failed'})
+        expect(self.member(n[2])).to_contain_text('Unverified')
+        expect(self.member(n[3])).to_contain_text('Displayed')
+        old_retry = self.viewer_studies(popup)[2]
+        count = len(self.popups)
+        self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
+        self.wait(lambda: self.viewer_studies(popup)[2] != old_retry, 'a new opening in the same singleton window')
+        self.assertEqual(count, len(self.popups))
+        self.assertEqual(old_src, frame.get_attribute('src'))
+        self.assertEqual('workspace-partner', partner.locator('body').get_attribute('data-kept'))
+        expect(self.member(n[3])).to_contain_text('Displayed')
+        self.post_viewer_event(popup, old_retry, {'type': 'failed'})
+        expect(self.member(n[2])).to_contain_text('Loading')
+        self.post_viewer_event(partner, opening, {'type': 'failed'})
+        expect(self.member(n[3])).to_contain_text('Unverified')
+
     # ── V-LIFECYCLE ──
     def test_a_late_answer_after_a_newer_action_and_the_session_end(self):
         self.open()
@@ -632,9 +723,11 @@ class MultiStudyViewPage(unittest.TestCase):
         # A new Open, then the session ends: the next request's refusal closes the page and the composition with it.
         n = self.open_set(order[:5])["studyUids"]
         self.wait_viewer(n[:2])
-        self.site.ended.add(self.site.cookie)
+        # Refuse this resolve at the HTTP boundary. Revoking the whole synthetic session before clicking races the
+        # page's session polling: it can correctly leave for the landing before the button is clicked.
+        self.site.resolve_answers.append((401, {"code": "AUTH_SESSION_ENDED"}))
         self.page.locator("#multi-study-next").click()
-        self.wait(lambda: self.page.evaluate("() => KinWorkContext.state()") != "active", "the session end")
+        self.page.wait_for_url(h.INDEX_URL + "**")
         expect(self.host()).to_be_hidden()
 
 

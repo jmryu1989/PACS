@@ -109,7 +109,7 @@
    */
   function create({ context, selection, uuid = () => root.crypto.randomUUID() }) {
     const owner = { ...context() };
-    let ended = false, sequence = 0, pending = null, composition = null, attempt = null, candidate = null, failed = null;
+    let ended = false, sequence = 0, pending = null, composition = null, attempt = null, candidate = null, failed = null, resolved = null;
     function live() {
       if (!ended && !contextEqual(owner, context())) end();
       return !ended;
@@ -122,6 +122,7 @@
     function current(intent) { return live() && pending === intent; }
     function begin(studyUids, compositionId, generation, expectedSourcePatientKey, intent) {
       if (!live()) return null;
+      resolved = null;
       const body = Object.freeze({ compositionId, generation, requestId: uuid(),
         studyUids: Object.freeze([...studyUids]), expectedSourcePatientKey });
       pending = Object.freeze({ body, sequence: ++sequence, ...intent,
@@ -198,6 +199,7 @@
             : '열 수 있는 검사를 확인하지 못했습니다. 오류를 확인한 뒤 Retry를 누르세요.' };
         return { status: 'not-admitted' };
       }
+      resolved = { intent, previous: composition };
       if (first) {
         composition = { compositionId: intent.body.compositionId, generation: intent.body.generation,
           studyUids: [...intent.body.studyUids], sourcePatientKey: validated.sourcePatientKey,
@@ -231,13 +233,22 @@
       if (attempt.status === 'Context Changed' && composition?.compositionId === intent.body.compositionId) composition.blocked = true;
       return { status: 'failed' };
     }
+    function rejectLaunch(plan, error) {
+      if (!live() || resolved?.intent.sequence !== plan.sequence) return;
+      const { intent, previous } = resolved;
+      // Ready metadata alone must not replace the admitted set when the viewer keeps its old document.
+      if (intent.kind === 'open') { composition = previous; candidate = intent; }
+      attempt = { ...errorState(error), sequence: intent.sequence, activeUids: [...intent.activeUids] };
+      failed = attempt.retry ? intent : null;
+      resolved = null;
+    }
     function cancel() { pending = null; sequence++; }
     function end() {
-      cancel(); ended = true; composition = null; candidate = null; failed = null;
+      cancel(); ended = true; composition = null; candidate = null; failed = null; resolved = null;
       attempt = { status: 'Disconnected', message: '로그인 상태가 바뀌어 여러 검사 열기를 종료했습니다. 목록에서 다시 여세요.' };
     }
     return { snapshot, beginOpen, beginPage, beginCompare, beginSingle, backToPages, beginRetry, beginRetryAttempt,
-      finish, fail, cancel, end };
+      finish, fail, rejectLaunch, cancel, end };
   }
 
   /**
@@ -261,6 +272,10 @@
     const pages = $('#multi-study-pages'), retry = $('#multi-study-retry'), close = $('#multi-study-close');
     let model = null, inflight = null, opening = null, refusal = null, picks = [], note = null, ended = false;
     let reporting = null, signature = '';
+    let retained = [];
+    const viewers = () => [opening, ...retained].filter(Boolean);
+    const viewingUids = () => [...new Set(viewers().flatMap(v => v.uids))];
+    const viewerFor = value => viewers().find(v => v.uids.includes(value));
     const uuid = () => root.crypto.randomUUID();
     const pageCount = c => Math.ceil(c.studyUids.length / 2);
 
@@ -291,7 +306,10 @@
     function run(intent) {
       if (!intent) { render(); return; }
       supersede(); refusal = null;
-      const reservation = o.viewer.reserve(intent.activeUids);
+      const composition = model.snapshot().composition;
+      const preserveStudies = intent.kind === 'retry' ? (composition?.mode === 'retry' ? viewingUids() : composition?.activeUids || [])
+        .filter(value => !intent.activeUids.includes(value) && viewerFor(value)) : [];
+      const reservation = o.viewer.reserve(intent.activeUids, { preserveStudies });
       if (reservation.status === 'blocked' || reservation.status === 'refused') {
         model.fail(intent, { code: reservation.status === 'blocked' ? 'W9_POPUP_BLOCKED' : 'W9_VIEWER_BUSY', message: reservation.message });
         render(); return;
@@ -329,16 +347,26 @@
       const result = o.viewer.launch(reservation, plan, id, metadata);
       if (result?.status !== 'accepted') {
         o.viewer.release(reservation);
-        refusal = { uids, ...(result?.status === 'blocked' ? errorState({ code: 'W9_POPUP_BLOCKED' })
-          : errorState({ code: 'W9_VIEWER_BUSY', message: result?.message })) };
+        const error = result?.status === 'blocked' ? { code: 'W9_POPUP_BLOCKED' }
+          : { code: 'W9_VIEWER_BUSY', message: result?.message };
+        model.rejectLaunch(plan, error);
+        refusal = { uids, ...errorState(error) };
         render(); return;
       }
-      bind(id, uids);
+      bind(id, uids, reservation.preservePartner);
       render();
     }
     // ── the opened viewer's channel ──
-    function bind(id, uids) {
-      unbind('replaced');
+    function bind(id, uids, preservePartner) {
+      if (preservePartner && viewingUids().some(value => !uids.includes(value))) {
+        const keep = viewers().filter(viewer => viewer.uids.some(value => !uids.includes(value)));
+        for (const viewer of viewers().filter(viewer => !keep.includes(viewer))) {
+          clearTimeout(viewer.timer);
+          try { viewer.channel?.postMessage({ type: 'replaced', opening: viewer.id }); } catch (_) {}
+          viewer.channel?.close();
+        }
+        retained = keep;
+      } else unbind('replaced');
       const at = work.capture('document');
       const current = { id, uids, states: new Map(uids.map(value => [value, 'Loading'])), expired: false, channel: null, timer: null };
       try {
@@ -349,45 +377,49 @@
       opening = current;
     }
     function unbind(reason) {
-      if (!opening) return;
-      clearTimeout(opening.timer);
-      try { opening.channel?.postMessage({ type: reason, opening: opening.id }); } catch (_) {}
-      opening.channel?.close();
-      opening = null;
+      for (const viewer of viewers()) {
+        clearTimeout(viewer.timer);
+        try { viewer.channel?.postMessage({ type: reason, opening: viewer.id }); } catch (_) {}
+        viewer.channel?.close();
+      }
+      opening = null; retained = [];
     }
     function expire(current) {
-      if (current !== opening) return;
+      if (!viewers().includes(current)) return;
       current.expired = true;
       for (const [value, state] of current.states) if (state === 'Loading') current.states.set(value, 'Unverified');
       render();
     }
     function message(current, m) {
       // Late events of an older opening, even for the same UID again (A → B → A), never reach the current one.
-      if (current !== opening || !m || typeof m !== 'object' || m.opening !== current.id) return;
+      if (!viewers().includes(current) || !m || typeof m !== 'object' || m.opening !== current.id) return;
       if (m.type === 'hello') { post(); return; }
       // The strip's buttons: the same bounded page commands as the host's (the reservation reuses the held window).
       if (m.type === 'intent' && ['previous', 'next', 'pages'].includes(m.action)) { command(m.action); return; }
+      if (m.type === 'failed') {
+        // A whole renderer failure invalidates even a member shown earlier in this document. Retry starts a new opening.
+        current.expired = true;
+        clearTimeout(current.timer);
+        for (const value of current.states.keys()) current.states.set(value, 'Unverified');
+        render(); return;
+      }
       if (current.expired) return;
       const state = current.states.get(m.study);
       if (m.type === 'displayed' && state && uid(m.series) && uid(m.sop) && Number.isSafeInteger(m.frame) && m.frame >= 1) {
         if (state === 'Loading' || state === 'No Images') { current.states.set(m.study, 'Displayed'); render(); }
       } else if (m.type === 'no-images' && state === 'Loading') {
         current.states.set(m.study, 'No Images'); render();
-      } else if (m.type === 'failed') {
-        // The whole viewer failed without a member attribution: both stay unverified, never one promoted by the other.
-        for (const [value, s] of current.states) if (s === 'Loading') current.states.set(value, 'Unverified');
-        render();
       }
     }
     function post() {
-      if (!opening?.channel) return;
+      if (!viewers().length) return;
       const s = model?.snapshot(), c = s?.composition;
       try {
-        opening.channel.postMessage({ type: 'state', opening: opening.id, summary: summaryText(s),
+        for (const viewer of viewers()) viewer.channel?.postMessage({ type: 'state', opening: viewer.id, summary: summaryText(s),
           status: s?.attempt?.status ?? null, busy: !!inflight,
           canPrevious: !!c && !inflight && !c.blocked && c.page > 0, canNext: !!c && !inflight && !c.blocked && c.page < pageCount(c) - 1,
           canPages: !!c && !inflight && !c.blocked && c.mode !== 'page',
-          members: c ? c.studyUids.map((value, ordinal) => ({ ordinal, viewing: opening.uids.includes(value), state: rowState(value, c).status,
+          members: c ? c.studyUids.map((value, ordinal) => ({ ordinal, viewing: viewingUids().includes(value), state: rowState(value, c).status,
             label: label(c.members[ordinal]) })) : [] });
       } catch (_) {}
     }
@@ -427,7 +459,7 @@
         if (!moved) { render(); return; }
         // The new Reading Target's own image, through the same guarded launch. A workspace pane belongs to its Reading Target
         // (reading-workspace.js hides a pane of another target), so there it is requested even when already in view.
-        const shown = opening?.uids.includes(value) && !o.viewer.bindsTarget?.();
+        const shown = !!viewerFor(value) && !o.viewer.bindsTarget?.();
         if (!shown && model?.snapshot().composition) run(model.beginSingle(value));
         else render();
       };
@@ -464,8 +496,9 @@
       const member = c.members.find(m => m.uid === value);
       if (member?.status === 'error') return memberState(member.code);
       if (refusal?.uids.includes(value)) return refusal;
-      if (opening?.uids.includes(value)) {
-        const state = opening.states.get(value);
+      const viewer = viewerFor(value);
+      if (viewer) {
+        const state = viewer.states.get(value);
         const text = { Loading: '영상을 불러오는 중입니다…', Displayed: '이 검사의 원본 영상이 화면에 표시되었습니다.',
           Unverified: '영상 표시를 확인하지 못했습니다. 창 상태를 확인한 뒤 Retry로 다시 시도하세요.', 'No Images': '표시할 영상 없음' }[state];
         return { status: state, message: text };
@@ -491,13 +524,13 @@
       retry.hidden = !s.retry || busy; retry.disabled = busy;
       const target = o.target();
       const targetText = target ? o.targetLabel(target) || target : 'None';
-      const viewingText = opening && c ? opening.uids.map(value => 'Study ' + (c.studyUids.indexOf(value) + 1)).join(', ') : 'None';
+      const viewingText = opening && c ? viewingUids().map(value => 'Study ' + (c.studyUids.indexOf(value) + 1)).join(', ') : 'None';
       identity.textContent = 'Viewing: ' + viewingText + ' · Reading Target: ' + targetText;
       const rows = c ? c.studyUids.map((value, ordinal) => ({ value, ordinal, member: c.members[ordinal] }))
         : (attempt?.members || []).map(member => ({ value: member.uid, ordinal: member.ordinal, member }));
       const why = o.relatedBlock();
       const key = JSON.stringify([rows.map(r => [r.value, r.member, c ? rowState(r.value, c) : null]), picks, busy, blocked, target,
-        why, opening?.uids, c?.activeUids]);
+        why, viewingUids(), c?.activeUids]);
       if (key !== signature) {
         signature = key;
         const focused = document.activeElement && list.contains(document.activeElement)
@@ -510,7 +543,7 @@
           const head = document.createElement('span'); head.className = 'multi-study-label';
           head.textContent = label(member || { ordinal });
           const marks = document.createElement('span'); marks.className = 'multi-study-marks';
-          marks.textContent = [opening?.uids.includes(value) && c ? 'Viewing' : '', value === target ? 'Reading Target' : ''].filter(Boolean).join(' · ');
+          marks.textContent = [viewerFor(value) && c ? 'Viewing' : '', value === target ? 'Reading Target' : ''].filter(Boolean).join(' · ');
           const line = document.createElement('span'); line.className = 'multi-study-state';
           line.textContent = [state.status, state.message].filter(Boolean).join(' · ');
           li.append(head, marks, line);

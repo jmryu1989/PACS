@@ -136,7 +136,7 @@
       for (const name of ['DISPLAY_SETS_ADDED', 'DISPLAY_SETS_CHANGED']) if (events[name]) unsubscribe.push(ds.subscribe(events[name], checkDocuments).unsubscribe);
     } catch (_) {}
     // A lost rendering context is the whole viewer failing without a member attribution (the viewer's existing context-loss
-    // signal, which may finish loading after this mount): the worklist marks every member not yet shown Unverified at once
+    // signal, which may finish loading after this mount): the worklist marks every member Unverified at once
     // instead of at the display bound.
     let watching = false;
     const watchContext = () => {
