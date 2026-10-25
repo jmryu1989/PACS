@@ -5,6 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 // Split phase (S9-U0b round 2): every original unit lives in its approved concern and is compared with its unchanged
 // RELIST baseline through the bounded correspondence its entry records (pacs_split_contract.cjs); the facade and the
 // concern files may hold nothing the spec does not name; Nest's DI and route metadata equal the snapshot taken from main
@@ -258,10 +259,15 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   // Undo later online/identity bindings before B2 and the earlier feature declarations.
   const now = additions.reduce(withoutDeclared, withoutW5Arguments(full));
   assert.deepEqual(now, spec.di);
-  assert.equal(now.routes.length, spec.di.routes.length);
+  // Use the approved split's route set, independent of today's editable spec, so an addition cannot be re-pinned as baseline.
+  const splitRoutes = JSON.parse(execFileSync('git', ['show',
+    'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
+  { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
+  assert.deepEqual(now.routes, splitRoutes, 'the approved pre-split route set is unchanged');
   assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {
