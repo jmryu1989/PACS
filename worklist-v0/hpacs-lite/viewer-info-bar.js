@@ -26,7 +26,7 @@ window.KinViewerInfoBar = (() => {
     const bars = new Map(), labels = new Map();
     // Attach a bar to every pane that lacks one. The pane reserves the bar's
     // row by its own padding (theme) and the bar overlays it, so attaching a
-    // bar changes no size; `added` only tells the caller a pane was adopted.
+    // bar changes no size.
     function adopt() {
       const state = services.viewportGridService.getState();
       const ids = [...state.viewports.keys()];
@@ -40,7 +40,7 @@ window.KinViewerInfoBar = (() => {
       for (const [id, bar] of bars) if (!state.viewports.has(id) || !bar.isConnected) {
         bar.remove(); bars.delete(id); labels.delete(id);
       }
-      const cells = []; let added = false;
+      const cells = [];
       for (const [index, id] of ids.entries()) {
         const current = identity(services, id);
         const pane = current.viewport?.element?.closest('[data-cy="viewport-pane"]') || (ordered && panes[index]);
@@ -53,11 +53,11 @@ window.KinViewerInfoBar = (() => {
           const study = document.createElement('button'); study.type = 'button'; study.textContent = 'Study ▾';
           study.disabled = true; study.title = '이전 검사 연결은 다음 단계에서 제공됩니다.';
           study.onclick = () => studyActions?.open(id, study);
-          bar.append(label, mode, study); pane.prepend(bar); bars.set(id, bar); added = true;
+          bar.append(label, mode, study); pane.prepend(bar); bars.set(id, bar);
         }
         cells.push({ id, current, bar: bars.get(id) });
       }
-      return { layout: state.layout, cells, added };
+      return { layout: state.layout, cells };
     }
     function refresh() {
       const { layout, cells } = adopt();
@@ -89,7 +89,7 @@ window.KinViewerInfoBar = (() => {
     }
     return {
       refresh,
-      adopt: () => adopt().added,
+      adopt: () => { adopt(); },
       invalidate() { labels.clear(); for (const bar of bars.values()) bar.children[0].textContent = 'Loading / No image'; },
       dispose() { for (const bar of bars.values()) bar.remove(); bars.clear(); labels.clear(); },
     };

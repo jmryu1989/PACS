@@ -68,26 +68,20 @@ window.KinViewerUXShell = (() => {
     const series = window.KinViewerSeriesStrip.mount({ services });
     tabs.mount({ services, refreshChrome() { info.refresh(); series.refresh(); } });
     const subscriptions = [];
-    let frame, ended = false, fit = null;
-    // The shell changes the canvas area from inside the pane (info bar) and
-    // above the grid (strip, toolbar, late stylesheet) after the stock grid
-    // measured it; the stock observer watches the grid, not the pane's canvas
-    // container, so the backing store kept a stale size (stretched pixels,
-    // wrong pointer mapping, a saved camera that restores elsewhere).
-    // Only a canvas whose backing store no longer matches its box is re-fitted:
-    // a stock resize resets and restores every camera, and a redundant one
-    // after a grid change let the MPR crosshairs move the linked planes' focal
-    // points by rounding (cell merge restore, planes the user never touched).
-    const misfit = () => [...document.querySelectorAll('[data-cy="viewport-pane"] canvas.cornerstone-canvas')].some(canvas =>
-      canvas.clientWidth > 0 && canvas.clientHeight > 0 && (canvas.width !== Math.floor(canvas.clientWidth * devicePixelRatio) ||
-        canvas.height !== Math.floor(canvas.clientHeight * devicePixelRatio)));
-    const fitter = new ResizeObserver(() => { if (ended || fit) return; fit = requestAnimationFrame(() => {
-      fit = null; if (!ended && misfit()) services.cornerstoneViewportService.resize(true);
-    }); });
+    let frame, ended = false;
+    // The shell never resizes the rendering engine. The stock viewport observer
+    // queues its own resize for every pane whose element changes size and that
+    // queued pass re-fits the canvas and restores each camera from its
+    // presentation; a shell-driven resize(true) ran that pass synchronously at
+    // moments of its own, so whether a rebuilt MPR plane's focal point carried
+    // the presentation rounding depended on timing and a cell-merge restore
+    // returned planes the user never touched with a camera that differed in
+    // the last bit. The shell's rows and the bar take their space before the
+    // stock sizes a canvas (theme padding, reserved rows), so nothing of the
+    // shell's needs a re-fit of its own.
     function refresh() { frame = null; if (!ended) {
       if (reportContext && !admits(reportContext)) closeReport();
       info.refresh(); series.refresh(); tabs.refresh();
-      for (const container of document.querySelectorAll('[data-cy="viewport-pane"] > .relative')) fitter.observe(container);
     } }
     function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
     for (const service of [services.viewportGridService, services.displaySetService, services.cornerstoneViewportService]) {
@@ -104,20 +98,16 @@ window.KinViewerUXShell = (() => {
     const observer = new MutationObserver(records => {
       if (ended || !records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) return;
       // The strip and the toolbar's reserved row go above the grid in this same
-      // microtask, as soon as the grid exists; a pane gets its bar in the row
-      // its padding reserves, which changes no size. A canvas that was still
-      // sized without the shell's rows is re-fitted at once rather than on the
-      // next frame: a Job or tab restore could otherwise apply its camera to
-      // the unfitted canvas first, and the later fit re-derives that camera
-      // from the pan in pixels, reopening the saved screen a row's height away.
-      series.place();
-      if (info.adopt() && misfit()) services.cornerstoneViewportService.resize(true);
+      // microtask, as soon as the grid exists, and a pane gets its bar in the
+      // row its padding reserves: neither changes the size of a canvas the
+      // stock has already created.
+      series.place(); info.adopt();
       schedule();
     });
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     schedule();
     return { dispose() {
-      ended = true; cancelAnimationFrame(frame); cancelAnimationFrame(fit); fitter.disconnect(); observer.disconnect();
+      ended = true; cancelAnimationFrame(frame); observer.disconnect();
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
       stopPatient(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;
