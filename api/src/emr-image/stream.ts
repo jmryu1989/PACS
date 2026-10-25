@@ -135,7 +135,10 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   // The existing public judgement validates the prepared capability and ordering.
   judgeDelivery([{ prepared: p, observations: [] }]);
   const event = parseAccessEvent(input.event);
-  if (p.manifestSha256 !== manifest.sha256 || p.studyUid !== manifest.studyUid ||
+  // Only E's own v1 provide event names the formal PatientLink of every image
+  // target. A v2 branch (local-read, offline, auth) is another producer's fact.
+  if (event.formatVersion !== 1 ||
+      p.manifestSha256 !== manifest.sha256 || p.studyUid !== manifest.studyUid ||
       event.eventId !== p.eventId || event.action !== 'provide-prepared' || event.result !== 'prepared' ||
       event.managingInstitution.status !== 'known' || event.managingInstitution.value !== manifest.managingInstitution ||
       event.actingInstitution.status !== 'known' || event.actingInstitution.value !== p.receiver.institution ||

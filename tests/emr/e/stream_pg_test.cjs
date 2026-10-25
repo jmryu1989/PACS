@@ -178,6 +178,29 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
     assert.equal(E.judgeDelivery([{ prepared: current.prepared, observations: sent.result.observations }]).outcome, 'complete');
     afterPrepared = () => {}; sourceBytes = original;
 
+    // Module A's local-read branch can carry the same event ID, action, institutions
+    // and target IDs, but asserts no formal PatientLink. It never opens an image body.
+    begin();
+    const v1 = current.event, readsBefore = sourceReads;
+    current.event = parseAccessEvent({ formatVersion: 2, branch: 'local-read', surface: 'GET studies/:uid/report/versions',
+      eventId: v1.eventId, userId: v1.userId, rolesAtTime: v1.rolesAtTime, rightsVersion: 1,
+      actingInstitution: v1.actingInstitution, managingInstitution: v1.managingInstitution, occurredAt: v1.occurredAt,
+      trustedProxyIp: v1.trustedProxyIp, session: { method: 'session', sessionRef: 'authref:' + randomUUID() },
+      cause: 'user-view', executor: 'member', context: v1.context,
+      targets: [{ kind: 'report-version', studyId: known(studyUid), recordId: known(sop), versionId: known(manifest.sha256),
+        sourcePatientId: known(patient.patientId), sourceInstitution: known('synthetic-hospital'), projectionSha256: hash('synthetic-projection') }],
+      action: 'provide-prepared', result: 'prepared', requestId: v1.requestId, auditLinkId: v1.auditLinkId, relatedEventId: null });
+    sent = await request();
+    assert.equal(sent.error?.code, 'ImageEventMismatch');
+    assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
+    assert.equal(sourceReads, readsBefore);
+    assert.equal(await ledger.lookup(v1.eventId), null);
+    assert.equal((await witness.$queryRaw`SELECT event_id FROM emr_image.preparation WHERE event_id=${v1.eventId}::uuid`).length, 0);
+    // The same request with E's own v1 event still streams.
+    current.event = v1; sent = await request();
+    assert.equal(sent.answer.status, 200); assert.equal(sent.result.terminal, 'transfer-ended');
+    assert.ok(sent.answer.body.includes(original));
+
     begin(); sent = await request({ Range: 'bytes=4-19' });
     assert.equal(sent.answer.status, 206); assert.deepEqual(sent.answer.body, original.subarray(4, 20));
     assert.equal(sent.answer.headers['content-range'], `bytes 4-19/${original.length}`);
