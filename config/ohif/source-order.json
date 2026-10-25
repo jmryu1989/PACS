@@ -5,6 +5,7 @@
     "toolbar-labels.js",
     "branding.js",
     "stack-precision.js",
+    "frame-metadata.js",
     "sr-provenance.js",
     "navigation.js",
     "history.js",

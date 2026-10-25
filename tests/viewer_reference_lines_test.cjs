@@ -1,4 +1,7 @@
 // REQ-MG-03 -> RISK-MG-FALSE-ANATOMY -> TEST-MG-REFERENCE-LINES.
+// REQ-VIEWER-REFERENCE-PLANE -> RISK-MG-FALSE-ANATOMY -> TEST-VIEWER-REFERENCE-PLANE:
+// 2026-10-26 fix order F1/F3: every modality pair must share study/FoR and
+// carry stored IOP/IPP for both displayed frames; MG also retains its side gate.
 // Exercise the shipped extension's tool lifecycle/render boundary. Native geometry
 // and SVG removal are checked separately on the served viewer with public samples.
 const test = require('node:test');
@@ -20,7 +23,9 @@ function fixture(before = false) {
   }
   const manager = { getAllToolGroups: () => [...groups.values()], getToolGroup: id => groups.get(id) };
   const window = { cornerstoneTools: { ToolGroupManager: manager }, cornerstone: {
-    metaData: { get: (_, id) => images.get(id) },
+    metaData: { get: (type, id) => type === 'instance' ? images.get(id) : {
+      rowCosines: [0, 1, 0], columnCosines: [0, 0, -1], imagePositionPatient: [0, 0, 0],
+    } },
     getEnabledElementByViewportId: id => viewports.has(id) ? { viewport: viewports.get(id) } : undefined,
   } };
   if (before) group('before').addTool('ReferenceLines');
@@ -33,7 +38,8 @@ function fixture(before = false) {
   const current = before ? groups.get('before') : group('after');
   if (!before) current.addTool('ReferenceLines');
   const tool = current.getToolInstance('ReferenceLines');
-  const image = overrides => ({ Modality: 'MG', StudyInstanceUID: 'study', FrameOfReferenceUID: 'frame', ImageLaterality: 'R', ...overrides });
+  const image = overrides => ({ Modality: 'MG', StudyInstanceUID: 'study', FrameOfReferenceUID: 'frame', ImageLaterality: 'R',
+    ImageOrientationPatient: [1, 0, 0, 0, 1, 0], ImagePositionPatient: [0, 0, 0], ...overrides });
   function pane(id, value) {
     images.set(id, value);
     const viewport = { getCurrentImageId: () => id };
@@ -93,15 +99,72 @@ test('enhanced frame laterality is accepted only when the supplied sides agree',
   assert.equal(f.render(), false);
 });
 
-test('CT/MR retain native decisions, configuration and arguments even across studies/FORs', () => {
-  const f = fixture();
-  for (const modality of ['CT', 'MR']) {
-    f.images.set('source', { Modality: modality, FrameOfReferenceUID: 'source' });
-    f.images.set('target', { Modality: modality, FrameOfReferenceUID: 'target', StudyInstanceUID: 'other' });
-    assert.equal(f.render(), 'native result');
-    f.tool.editData = null; assert.equal(f.render(), 'native result');
+test('every modality requires a stored displayed-frame plane on both panes despite native defaults', () => {
+  for (const modality of ['MG', 'CT', 'MR']) {
+    for (const pane of ['source', 'target']) {
+      const f = fixture(), image = f.image({ Modality: modality });
+      f.images.set('source', image); f.images.set('target', image);
+      assert.equal(f.render(), 'native result');
+      for (const invalid of [
+        { ImageOrientationPatient: undefined }, { ImagePositionPatient: undefined },
+        { ImageOrientationPatient: [] }, { ImagePositionPatient: [0, 0] },
+        { ImageOrientationPatient: [1, 0, 0, 0, NaN, 0] }, { ImagePositionPatient: [0, Infinity, 0] },
+        { ImagePositionPatient: ['0', '', '0'] }, { ImagePositionPatient: ['0', null, '0'] },
+        // Functional groups alone must not qualify a plane that this provider has
+        // not resolved into its displayed-frame instance (the #239 boundary).
+        { ImageOrientationPatient: undefined, SharedFunctionalGroupsSequence: [{
+          PlaneOrientationSequence: [{ ImageOrientationPatient: image.ImageOrientationPatient }],
+        }] },
+      ]) {
+        f.images.set(pane, { ...image, ...invalid });
+        assert.equal(f.render(), false, `${modality} ${pane} ${JSON.stringify(invalid)}`);
+      }
+      assert.equal(f.draws.length, 1);
+      f.images.set(pane, image); assert.equal(f.render(), 'native result');
+    }
   }
-  assert.equal(f.draws.length, 4);
+});
+
+test('stored DICOM decimal strings from the served provider qualify in both panes for every modality', () => {
+  for (const Modality of ['MG', 'CT', 'MR']) {
+    const f = fixture();
+    const image = f.image({ Modality, ImageOrientationPatient: ['1', '6.123031769e-017', '0', '0', '0', '-1'],
+      ImagePositionPatient: ['-255.5', '-190', '-168'] });
+    f.images.set('source', image); f.images.set('target', image);
+    assert.equal(f.render(), 'native result');
+  }
+});
+
+test('CT/MR allow shared coordinates and refuse different or missing study/FoR in either pane', () => {
+  for (const [sourceModality, targetModality] of [['CT', 'CT'], ['MR', 'MR'], ['CT', 'MR'], ['MR', 'CT']]) {
+    for (const pane of ['source', 'target']) {
+      const f = fixture();
+      f.images.set('source', f.image({ Modality: sourceModality }));
+      f.images.set('target', f.image({ Modality: targetModality }));
+      const image = f.images.get(pane);
+      assert.equal(f.render(), 'native result');
+      for (const invalid of [{ FrameOfReferenceUID: 'other' }, { FrameOfReferenceUID: undefined },
+        { FrameOfReferenceUID: '' }, { StudyInstanceUID: 'other' }, { StudyInstanceUID: undefined }, { StudyInstanceUID: '' }]) {
+        f.images.set(pane, { ...image, ...invalid });
+        assert.equal(f.render(), false);
+      }
+      f.images.set(pane, image); assert.equal(f.render(), 'native result');
+      f.images.delete(pane); assert.equal(f.render(), false);
+      f.images.set(pane, image); f.tool.editData = null; assert.equal(f.render(), false);
+      assert.equal(f.draws.length, 2);
+    }
+  }
+});
+
+test('scrolling to an image without a plane clears eligibility and returning restores it', () => {
+  const f = fixture();
+  f.images.set('no-plane', f.image({ ImagePositionPatient: undefined }));
+  for (const viewport of [f.target.viewport, f.pane('source', f.image()).viewport]) {
+    const current = viewport.getCurrentImageId;
+    assert.equal(f.render(), 'native result');
+    viewport.getCurrentImageId = () => 'no-plane'; assert.equal(f.render(), false);
+    viewport.getCurrentImageId = current; assert.equal(f.render(), 'native result');
+  }
 });
 
 test('mode exit restores tools and subscriptions; re-entry installs one wrapper', () => {

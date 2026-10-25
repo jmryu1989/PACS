@@ -541,6 +541,31 @@ const kinStackPrecision = (() => {
   } };
 })();
 
+// OHIF 3.9.1 caches DICOMweb image UIDs without a frameNumber. A cache hit then
+// bypasses URL parsing, so _getInstance skips the functional groups. Other frames
+// can incidentally populate the shared instance first, making frame 1 order-dependent.
+function kinCreateFrameMetadata() {
+  let installed = false;
+  return { id: 'kin.frame-metadata', preRegistration() {
+    if (installed) return;
+    // The pinned Orthanc OHIF bundle exposes no MetadataProvider utility module.
+    // Its @ohif/core export is shared by the data source and Cornerstone provider.
+    // Keep this adapter at that boundary so native geometry, VOI and measurements
+    // all consume the same frame, without copying the functional-group parser.
+    window.webpackChunk.push([['kin.frame-metadata'], {}, require => {
+      const provider = require(29463).Ly.MetadataProvider;
+      const original = provider.getUIDsFromImageID;
+      provider.getUIDsFromImageID = function (imageId) {
+        const uids = original.call(this, imageId);
+        if (!uids || uids.frameNumber || !imageId.startsWith('wadors:')) return uids;
+        const frame = /\/frames\/([1-9]\d*)(?:$|[?#])/.exec(imageId);
+        return frame ? { ...uids, frameNumber: frame[1] } : uids;
+      };
+      installed = true;
+    }]);
+  } };
+}
+
 /* KIN persistence owns only explicit user commands. Cornerstone objects are
  * session bindings, never wire payloads or durable identifiers. */
 // Received SRs retain their source values and read-only SR renderer. A native
@@ -4115,8 +4140,8 @@ function kinCreateMammographyHanging() {
   }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
-// REQ-MG-03 -> RISK-MG-FALSE-ANATOMY: breast views and priors do not share a
-// patient coordinate system merely because they occupy the same tool group.
+// REQ-MG-03 / REQ-VIEWER-REFERENCE-PLANE -> RISK-MG-FALSE-ANATOMY:
+// panes do not share patient coordinates merely because they occupy one tool group.
 function kinCreateMGReferenceLines() {
   let services, stop;
   function mount() {
@@ -4126,6 +4151,15 @@ function kinCreateMGReferenceLines() {
     function instance(viewport) {
       const imageId = viewport?.getCurrentImageId?.();
       return imageId ? core.metaData.get('instance', imageId) : null;
+    }
+    function storedPlane(image) {
+      // imagePlaneModule already contains OHIF's fallback plane. The instance for
+      // the displayed frame is also the native provider's input, before defaults.
+      // DICOM DS values may remain numeric strings in the served instance.
+      const numeric = value => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '') &&
+        Number.isFinite(Number(value));
+      return [[image?.ImageOrientationPatient, 6], [image?.ImagePositionPatient, 3]]
+        .every(([values, length]) => Array.isArray(values) && values.length === length && values.every(numeric));
     }
     function side(image) {
       const values = [image?.ImageLaterality, image?.Laterality, image?.FrameLaterality];
@@ -4150,11 +4184,13 @@ function kinCreateMGReferenceLines() {
         // images here also covers pane replacement, scrolling and active-pane changes.
         const sourceViewport = core.getEnabledElementByViewportId(this.editData?.sourceViewportId)?.viewport;
         const source = instance(sourceViewport), target = instance(enabledElement.viewport);
+        if (!storedPlane(source) || !storedPlane(target) ||
+            !source.FrameOfReferenceUID || source.FrameOfReferenceUID !== target.FrameOfReferenceUID ||
+            !source.StudyInstanceUID || source.StudyInstanceUID !== target.StudyInstanceUID) return false;
         if (source?.Modality === 'MG' || target?.Modality === 'MG') {
+          const sourceSide = side(source);
           if (source?.Modality !== 'MG' || target?.Modality !== 'MG' ||
-              !source.FrameOfReferenceUID || source.FrameOfReferenceUID !== target.FrameOfReferenceUID ||
-              !source.StudyInstanceUID || source.StudyInstanceUID !== target.StudyInstanceUID ||
-              !side(source) || side(source) !== side(target)) return false;
+              !sourceSide || sourceSide !== side(target)) return false;
         }
         return render.call(this, enabledElement, svgDrawingHelper);
       };
@@ -4225,7 +4261,7 @@ function kinCreateStudyPrefetch() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },
