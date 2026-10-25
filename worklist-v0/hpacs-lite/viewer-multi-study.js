@@ -135,6 +135,19 @@
       const ds = services.displaySetService, events = ds.EVENTS || {};
       for (const name of ['DISPLAY_SETS_ADDED', 'DISPLAY_SETS_CHANGED']) if (events[name]) unsubscribe.push(ds.subscribe(events[name], checkDocuments).unsubscribe);
     } catch (_) {}
+    // A lost rendering context is the whole viewer failing without a member attribution (the viewer's existing context-loss
+    // signal, which may finish loading after this mount): the worklist marks every member not yet shown Unverified at once
+    // instead of at the display bound.
+    let watching = false;
+    const watchContext = () => {
+      if (watching || ended) return;
+      try {
+        const stop = root.kinViewerContextLoss?.onContextLoss?.(() => { if (live() && id && studies) send({ type: 'failed' }); });
+        if (typeof stop === 'function') { watching = true; unsubscribe.push(stop); }
+      } catch (_) {}
+    };
+    root.addEventListener('kin-context-recovery-ready', watchContext);
+    watchContext();
     for (const b of buttons) b.onclick = () => { if (!b.disabled) send({ type: 'intent', action: b.dataset.action }); };
     function end() { if (ended) return; ended = true; channel?.close(); channel = null; render(); }
     try { sessionChannel = root.kinViewerOnEnd(() => end()); } catch (_) {}
@@ -144,6 +157,7 @@
     return { stop() {
       end(); clearInterval(timer); sessionChannel?.close?.(); unsubscribe.forEach(u => { try { u(); } catch (_) {} });
       root.removeEventListener('hashchange', onLink); root.removeEventListener('kin-window-link-changed', onLink);
+      root.removeEventListener('kin-context-recovery-ready', watchContext);
       document.removeEventListener(core.Enums.Events.IMAGE_RENDERED, onImage, true); strip.remove();
     } };
   }
