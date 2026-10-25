@@ -1,49 +1,42 @@
 # coding: utf-8
-"""TEST-S2L-LOCATIONS (S2-L2a/S2-L2b, hosted volume-path group): saved locations of findings on the real pinned OHIF,
-BFF login, run-owned same-patient synthetic CTs and the real findings/Job APIs.
+"""TEST-S2L-LOCATIONS (S2-L2a/S2-L2b, hosted volume-path group) - the interim finding-write contract (#219, D1861).
 
-L1 proves first that the Findings section keeps the reading study through the MPR layout (U1), then saves a 3D point on the
-comparison study's volume in an [X, P] document (the bounded prior route), links it with characteristics, and reopens it after a
-new login from a one-study document: the viewer continues in a new [X, P] page with a one-use nonce and proves the restored Job,
-the point and the frame of reference there. L2 covers refusals and states (unsaved mark, an intercepted Job GET 409, a failure
-injected after the apply replaced the screen with its verified rollback, a metadata change, a hidden Job, sync off) and the
-server's markId/anchor matrix. L3 shows that a same-document restore keeps an unsaved
-finding draft and that a withdrawn comparison study withdraws the finding. Nothing here writes a report or an original."""
-import io, json, unittest, uuid
-from urllib.parse import parse_qs, urlsplit
+Every finding write runs through the composed clinical runtime, whose finding source reader Module A has not supplied
+yet (A1 #223 provides no fixed-version/patient/retention reader). Until it lands, every `finding.*` write answers
+503 `ModuleAFixedVersionReaderPending`, keeps the input and writes nothing. These three cases assert that contract on
+the real pinned OHIF, BFF login, run-owned same-patient synthetic CTs and the real findings/Job APIs:
+  01 the viewer's own Save of a finding linked to a saved 3D point (POST studies/:uid/findings) and its Retry Request;
+     U1 (the Findings section keeps the reading study through the MPR layout, a 2D Go to Image is refused there) and
+     the Job save it links are unchanged and still proven;
+  02 the API create route: a valid 3D point link and the server-matrix bodies all meet the interim refusal before any
+     Job is read, the route's own shape check still answers 400, the list read answers 200 and empty;
+  03 the API revisions route (edit, hide, restore) and the page: a refused draft stays unsaved with its text and
+     survives Reload Findings.
+The saved-location assertions these cases held before #219 (link, continuation into a new [X, P] page, exact arrival,
+restore rollback, metadata/hidden/sync-off states, withdrawal) are listed for restoration in the Module A unit's
+hand-off (private docs-repo evidence/fable-impl-emr-d-routes-20261025/handoff-module-a-finding-reader.md); their last
+full text is this file at 5ac35a3. Nothing here writes a report or an original."""
+import io, unittest, uuid
 import pydicom
 from playwright.sync_api import expect
 from test_volume_marks import VolumeMarksE2E
 from test_viewer_history import ViewerHistoryE2E, literal
 from test_worklist import psql
-from finding_api_test import BOUNDARY_COLUMNS
 
 SCHEMA = {'X-KIN-Finding-Schema': '2'}
 FINDINGS = '#kin-viewer-findings'
+INTERIM_CODE = 'ModuleAFixedVersionReaderPending'
+# The findings pane keeps a request that met no 4xx refusal for Retry Request and says so.
+PENDING_TEXT = '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.'
 ACTIVE_VOLUME = """()=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
  const m=cornerstone.metaData.get('instance',cornerstone.cache.getVolume(v.getVolumeId()).imageIds[0]);return {study:m.StudyInstanceUID,series:m.SeriesInstanceUID,frame:m.FrameOfReferenceUID}}"""
 CENTER = """()=>{window.projectionVP=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
  const volume=cornerstone.cache.getVolume(projectionVP.getVolumeId()),point=Array.from(volume.imageData.indexToWorld(volume.dimensions.map(n=>Math.floor(n/2)))),c=projectionVP.getCamera();
  projectionVP.setCamera({focalPoint:point,position:point.map((n,i)=>n+c.viewPlaneNormal[i]*100)});projectionVP.render();return point}"""
-PLANES = "()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id);return {type:v?.type,camera:v?.getCamera?.()}})"
-SHIFT = """()=>{for(const id of services.viewportGridService.getState().viewports.keys()){const view=services.cornerstoneViewportService.getCornerstoneViewport(id),c=view.getCamera(),d=c.viewPlaneNormal.map(n=>n*6);
- view.setCamera({focalPoint:c.focalPoint.map((n,i)=>n+d[i]),position:c.position.map((n,i)=>n+d[i])});view.render()}}"""
 USE_STUDY = """uid=>{const set=services.displaySetService.getActiveDisplaySets().find(s=>s.StudyInstanceUID===uid&&s.Modality==='CT');if(!set)throw Error('Missing CT of '+uid);
  services.viewportGridService.setDisplaySetsForViewports([...services.viewportGridService.getState().viewports.keys()].map(viewportId=>({viewportId,displaySetInstanceUIDs:[set.displaySetInstanceUID]})))}"""
 LOADED = """uid=>{try{return [...services.viewportGridService.getState().viewports.keys()].every(id=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id),volume=cornerstone.cache.getVolume(view.getVolumeId());
  return volume?.loadStatus.loaded&&cornerstone.metaData.get('instance',volume.imageIds[0]).StudyInstanceUID===uid})}catch(_){return false}}"""
-# The saved-screen reading test_volume_jobs.py uses for its rollback proof, read-only here.
-CAPTURE = ('()=>window.kinCreateVolumeJob({grid:services.viewportGridService,cs:services.cornerstoneViewportService,ds:services.displaySetService,'
-           'studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")}).capture(true)')
-VIEWPORT_IDS = '()=>[...services.viewportGridService.getState().viewports.keys()]'
-# N7: one synthetic failure after a v6 apply has replaced the screen. Its 3D marks step (viewer-volume-job.js) runs only after the
-# saved layout, planes and cameras were applied and verified; the wrapper puts the original back before it throws, so the rollback
-# re-applies the previous screen with the real capability. Test-only interception of an existing capability, undone in finally.
-INJECT_APPLY_FAILURE = """()=>{const marks=window.kinMprMarks,original=marks.restore,state={calls:0,restored:false};
- const undo=()=>{if(marks.restore!==original)marks.restore=original;state.restored=marks.restore===original&&window.kinMprMarks===marks;};
- marks.restore=function(){state.calls++;undo();throw Error('SYNTHETIC APPLY FAILURE AFTER LAYOUT')};
- window.__s2lApplyFailure={state,undo}}"""
-UNDO_APPLY_FAILURE = "()=>{const f=window.__s2lApplyFailure;if(!f)return null;f.undo();delete window.__s2lApplyFailure;return f.state}"
 
 
 class FindingLocationsE2E(VolumeMarksE2E):
@@ -63,8 +56,23 @@ class FindingLocationsE2E(VolumeMarksE2E):
     def link(self, f, body, user='doctor'):
         return self.stack.bearer_request('POST', '/studies/'+f.uid+'/findings', self.stack.token(user), body, headers=SCHEMA)
 
+    def revise(self, f, finding_id, body, user='doctor'):
+        return self.stack.bearer_request('POST', '/studies/'+f.uid+'/findings/'+finding_id+'/revisions', self.stack.token(user), body, headers=SCHEMA)
+
     def revision_rows(self, f):
         return psql(f'''SELECT to_jsonb(r)::text FROM "FindingRevision" r JOIN "Finding" x ON x.id=r."findingId" WHERE x."studyUid"={literal(f.uid)} ORDER BY 1''')
+
+    def written(self, f):
+        """Finding rows, revision rows and finding audit rows of the study: the interim refusal leaves all three at zero."""
+        return psql(f'''SELECT (SELECT count(*) FROM "Finding" WHERE "studyUid"={literal(f.uid)}) || '|' ||
+            (SELECT count(*) FROM "FindingRevision" r JOIN "Finding" x ON x.id=r."findingId" WHERE x."studyUid"={literal(f.uid)}) || '|' ||
+            (SELECT count(*) FROM "AuditLog" WHERE target={literal(f.uid)} AND action LIKE 'finding.%')''')
+
+    def nothing_written(self, f, report, original, jobs_before):
+        self.assertEqual(self.api_findings(f), [])
+        self.assertEqual(self.written(f), ['0|0|0']); self.assertEqual(self.revision_rows(f), [])
+        self.assertEqual(self.jobs(f), jobs_before)
+        self.assertEqual((self.state(f), self.versions(f)), report); self.assertEqual(self.originals(), original)
 
     def prior_point(self, label, sync=True):
         """[X, P] document with the MPR volume of P, one 3D point on it and one saved Job anchored on X."""
@@ -81,61 +89,50 @@ class FindingLocationsE2E(VolumeMarksE2E):
         self.assertEqual((job['snapshot']['version'], job['snapshot']['studies'], job['snapshot']['volume']['study']), (6, [a.uid, b.uid], b.uid))
         return a, b, v, job, marks
 
-    def link_point(self, v, label, title, traits, revision=1):
+    def compose_point(self, v, label, title, traits, revision=1):
+        """A new finding with its title and characteristics typed and the saved 3D point linked, not yet saved."""
         panel = self.findings_tab(v)
         panel.get_by_role('button', name='New Finding', exact=True).click()
         key = panel.locator('article[data-saved=false]').last.get_attribute('data-row-key')
         row = panel.locator('article[data-row-key="'+key+'"]')
         row.get_by_label('Finding Title').fill(title)
         row.get_by_label('Finding Characteristics', exact=True).fill(traits)
-        # The panel offers each unlinked pair once: linking removes that checkbox and shows the source line with Unlink, exactly
-        # as the 2D Link Saved Items choices do (test_finding_navigation.compose). So the click is proven by the new state, not by
-        # a checkbox that stays checked - Locator.check() waits for that element and cannot pass here (run 35258893346).
+        # The panel offers each unlinked pair once: linking removes that checkbox and shows the source line with Unlink
+        # (test_finding_navigation.compose), so the click is proven by the new state, not by a checked box.
         point = row.locator('details[data-kin-locations]').get_by_label('Link 3D Point '+label+' · 저장 작업 r'+str(revision), exact=True)
         expect(point).to_be_enabled()
         point.click()
-        expect(row.locator('[data-job-id]')).to_have_count(1)
-        expect(point).to_have_count(0)
         expect(row.locator('[data-job-id][data-source-kind="point"]')).to_have_count(1)
-        # What was typed is still in its fields after the renders this click and the saved-Jobs answer cause.
+        expect(point).to_have_count(0)
         expect(row.get_by_label('Finding Title')).to_have_value(title)
         expect(row.get_by_label('Finding Characteristics', exact=True)).to_have_value(traits)
-        row.get_by_role('button', name='Save', exact=True).click()
-        expect(row).to_contain_text('저장 완료', timeout=30000)
-        return panel, row
+        return row
 
-    def withdraw(self, uid):
-        assert uid in self.stack.active
-        columns = ', '.join("'%s', \"%s\"" % (c, c) for c in BOUNDARY_COLUMNS)
-        saved = psql(f'SELECT jsonb_build_object({columns})::text FROM "StudyState" WHERE uid={literal(uid)}')[0]
-        def restore():
-            assignments = ', '.join("\"%s\"=s.j->>'%s'" % (c, c) for c in BOUNDARY_COLUMNS)
-            psql(f'UPDATE "StudyState" t SET {assignments} FROM (SELECT {literal(saved)}::jsonb AS j) s WHERE t.uid={literal(uid)}')
-        self.addCleanup(restore)
-        psql(f'''UPDATE "StudyState" SET "institutionId"='kin-center', "teleInstitutionId"=NULL WHERE uid={literal(uid)}''')
-        return restore
+    def save_refused(self, v, row, button='Save'):
+        """The page's own request through `button` meets the interim refusal; the answer the page received is returned."""
+        with v.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/findings')) as answer:
+            row.get_by_role('button', name=button, exact=True).click()
+        self.assertEqual(answer.value.status, 503, answer.value.text())
+        self.assertEqual(answer.value.json()['code'], INTERIM_CODE)
+        return answer.value
 
-    def same_screen(self, before, after):
-        """The previous MPR screen is back: the same volume, active plane and plane set, projections and cameras (1e-6)."""
-        self.assertEqual((before['version'], before['volume'], before['active'], len(before['cells'])),
-                         (after['version'], after['volume'], after['active'], len(after['cells'])))
-        for x, y in zip(before['cells'], after['cells']):
-            self.assertEqual((x.get('orientation'), x['projection']), (y.get('orientation'), y['projection']))
-            for field in ['position', 'focalPoint', 'viewUp', 'viewPlaneNormal']:
-                for left, right in zip(x['camera'][field], y['camera'][field]): self.assertAlmostEqual(left, right, delta=1e-6)
+    def kept_unsaved(self, v, row, title, traits):
+        """The refused finding stays an unsaved draft with its typed fields, says the result is unconfirmed and offers Retry Request."""
+        expect(row).to_have_attribute('data-saved', 'false')
+        expect(row.locator('[data-kin-message]')).to_have_text(PENDING_TEXT)
+        expect(row.get_by_role('button', name='Retry Request', exact=True)).to_have_count(1)
+        expect(row.get_by_role('button', name='Save', exact=True)).to_have_count(0)
+        expect(row.get_by_label('Finding Title')).to_have_value(title)
+        expect(row.get_by_label('Finding Characteristics', exact=True)).to_have_value(traits)
+        expect(row.locator('[data-job-id][data-source-kind="point"]')).to_have_count(1)
+        self.assertTrue(v.evaluate('()=>kinViewerFindingsState().dirty'))
 
-    def at_point(self, page, point):
-        cameras = page.evaluate(PLANES)
-        self.assertEqual(len(cameras), 3)
-        for plane in cameras:
-            self.assertEqual(plane['type'], 'orthographic')
-            for got, want in zip(plane['camera']['focalPoint'], point): self.assertAlmostEqual(got, want, delta=1e-6)
-
-    # ---- L1 -----------------------------------------------------------------------------------------
-    def test_location_01_prior_point_link_new_login_continuation_and_exact_arrival(self):
+    # ---- 01 -----------------------------------------------------------------------------------------
+    def test_location_01_viewer_save_meets_the_interim_refusal_and_keeps_the_typed_finding(self):
         a, b = self.pair(); original = self.originals(); report = (self.state(a), self.versions(a))
         v = self.login(); self.launch(v, [a, b]); self.ready(v)
-        # U1 first: the Findings section keeps the reading study through the MPR layout, and a 2D Go to Image is refused there.
+        # U1 (unchanged by the interim): the Findings section keeps the reading study through the MPR layout, and a 2D
+        # Go to Image is refused there.
         panel = self.findings_tab(v)
         expect(panel).to_have_attribute('data-study-uid', a.uid)
         self.mpr(v); self.choose_volume(v, v, 0)
@@ -157,180 +154,76 @@ class FindingLocationsE2E(VolumeMarksE2E):
         [summary] = self.jobs(a)
         job = self.stack.request('GET', f'/studies/{a.uid}/viewer-jobs/{summary["id"]}', 'doctor').body
         self.assertEqual((job['snapshot']['version'], job['snapshot']['studies'], job['snapshot']['volume']['study']), (6, [a.uid, b.uid], b.uid))
-        traits = '분엽상 경계 결절 😀'
-        panel, row = self.link_point(v, label, '비교 검사 3D 표식', traits)
-        [finding] = self.api_findings(a)
-        source = finding['item']['sources'][0]
-        frame = v.evaluate(ACTIVE_VOLUME)['frame']
-        self.assertEqual((finding['item']['schemaVersion'], finding['item']['characteristics']), (2, traits))
-        self.assertEqual({k: source[k] for k in ('kind', 'jobId', 'revision', 'jobStudyUid', 'studyUid', 'studies', 'snapshotVersion')},
-                         dict(kind='job', jobId=job['id'], revision=1, jobStudyUid=a.uid, studyUid=b.uid, studies=[a.uid, b.uid], snapshotVersion=6))
-        saved_mark = job['snapshot']['marks']['marks'][0]
-        self.assertEqual({k: source['mark'][k] for k in ('id', 'label', 'point')}, saved_mark)
-        self.assertEqual(source['mark']['volume'], dict(study=b.uid, series=job['snapshot']['volume']['series'], frameOfReferenceUid=frame,
-                                                      sourceDigest=job['snapshot']['volume']['sourceDigest'], sopCount=len(job['snapshot']['volume']['sops'])))
-        # The copied point is the Job snapshot's own number text.
-        job_text = psql(f'''SELECT snapshot->'marks'->'marks'->0->'point'::text FROM "ViewerJob" WHERE id={literal(job['id'])}::uuid''')
-        copy_text = psql(f'''SELECT snapshot->'sources'->0->'mark'->'point'::text FROM "FindingRevision" WHERE "findingId"={literal(finding['id'])}::uuid''')
-        self.assertEqual(copy_text, job_text)
-        expect(row.locator('[data-job-id="'+job['id']+'"]')).to_have_attribute('data-source-study', 'comparison')
-        rows = self.revision_rows(a); jobs_before = self.jobs(a)
-        # A new login in a one-study document: the finding continues in a new [X, P] page and proves the arrival there.
-        fresh = self.login(); self.launch(fresh, [a]); self.ready(fresh)
-        panel = self.findings_tab(fresh)
-        saved_row = panel.locator('article[data-finding-id="'+finding['id']+'"]')
-        expect(saved_row.locator('[data-kin-characteristics]')).to_have_text('Characteristics (병변 특성): '+traits)
-        line = saved_row.locator('[data-job-id="'+job['id']+'"]')
-        expect(line).to_have_attribute('data-source-kind', 'point')
-        with fresh.expect_navigation(url=lambda url: 'kinFindingNonce=' in url, timeout=60000):
-            line.get_by_role('button', name='Go to 3D Point', exact=True).click()
-        params = parse_qs(urlsplit(fresh.url).query)
-        self.assertEqual(params['StudyInstanceUIDs'], [a.uid+','+b.uid]); self.assertNotIn('kinJob', params)
-        self.assertEqual((params['kinFinding'], params['kinFindingRevision'], params['kinFindingSource']), ([finding['id']], ['1'], ['0']))
-        nonce = params['kinFindingNonce'][0]
-        # No input here: a click in the new page before the restore applies is a user change that supersedes it.
-        saved_row = fresh.locator(FINDINGS+' article[data-finding-id="'+finding['id']+'"]')
-        expect(saved_row).to_contain_text('3D 표식 위치로 이동했습니다.', timeout=150000)
-        self.at_point(fresh, saved_mark['point'])
-        arrived = fresh.evaluate(ACTIVE_VOLUME)
-        self.assertEqual((arrived['study'], arrived['frame']), (b.uid, source['mark']['volume']['frameOfReferenceUid']))
-        self.same_marks(fresh.evaluate('()=>kinMprMarks.capture(true)'), marks)
-        self.assertIsNone(fresh.evaluate('k=>sessionStorage.getItem(k)', 'kin-finding-continue:'+nonce), 'the nonce is used once')
-        # The same URL again (reload): nothing restores or moves automatically.
-        fresh.reload(); self.ready(fresh)
-        panel = self.findings_tab(fresh)
-        expect(panel.locator('article[data-finding-id="'+finding['id']+'"]')).to_contain_text('요청한 소견 위치를 자동으로 열지 않았습니다', timeout=30000)
-        expect(fresh.locator('#kin-viewer-jobs-status')).not_to_contain_text('MPR 작업을 복원했습니다')
-        # Navigation wrote no finding revision, Job, report row or original.
-        self.assertEqual(self.revision_rows(a), rows); self.assertEqual(self.jobs(a), jobs_before)
-        self.assertEqual((self.state(a), self.versions(a)), report); self.assertEqual(self.originals(), original)
-        self.evidence_shot(fresh, 'S2L-prior-point-continuation')
+        jobs_before = self.jobs(a)
+        title, traits = '비교 검사 3D 표식', '분엽상 경계 결절 😀'
+        row = self.compose_point(v, label, title, traits)
+        first = self.save_refused(v, row)
+        self.kept_unsaved(v, row, title, traits)
+        self.nothing_written(a, report, original, jobs_before)
+        # Retry Request replays the kept body byte for byte and meets the same refusal; the input still stays.
+        retry = self.save_refused(v, row, 'Retry Request')
+        self.assertEqual(retry.request.post_data, first.request.post_data)
+        self.kept_unsaved(v, row, title, traits)
+        self.nothing_written(a, report, original, jobs_before)
+        self.same_marks(v.evaluate('()=>kinMprMarks.capture(true)'), marks)
+        self.evidence_shot(v, 'S2L-interim-refusal')
 
-    # ---- L2 -----------------------------------------------------------------------------------------
-    def test_location_02_refusals_metadata_hidden_sync_off_and_server_matrix(self):
+    # ---- 02 -----------------------------------------------------------------------------------------
+    def test_location_02_api_create_route_meets_the_interim_refusal_before_any_job_is_read(self):
         label = 'L2 표식 '+uuid.uuid4().hex[:6]
         a, b, v, job, marks = self.prior_point(label, sync=False)
-        panel, row = self.link_point(v, label, 'L2 소견', '')
-        [finding] = self.api_findings(a)
-        line = lambda: panel.locator('article[data-finding-id="'+finding['id']+'"] [data-job-id="'+job['id']+'"]')
-        saved_row = lambda: panel.locator('article[data-finding-id="'+finding['id']+'"]')
-        report = (self.state(a), self.versions(a)); rows = self.revision_rows(a)
-        # Same document [X, P]: a sync-off Job moves only the source plane and says so.
-        v.evaluate(SHIFT)
-        line().get_by_role('button', name='Go to 3D Point', exact=True).click()
-        expect(saved_row()).to_contain_text('3D 표식 위치로 이동했습니다. 기준 평면만 이동했습니다.', timeout=90000)
-        # An unsaved mark refuses before any request.
-        self.tools(v); self.marks(v).get_by_label('MPR annotation label', exact=True).fill('저장하지 않은 문구')
-        panel = self.findings_tab(v)
-        requests = []
-        v.on('request', lambda r: requests.append(r.url) if '/viewer-jobs' in r.url else None)
-        line().get_by_role('button', name='Go to 3D Point', exact=True).click()
-        expect(saved_row()).to_contain_text('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 복원하세요')
-        self.assertEqual(requests, [])
-        self.tools(v); self.marks(v).get_by_role('button', name='Cancel Edit', exact=True).click()
-        panel = self.findings_tab(v)
-        # The Job GET answering 409 is a refusal: the screen is unchanged, never "rolled back".
-        before = self.volume_state(v)
-        def conflict(route):
-            if route.request.method == 'GET': route.fulfill(status=409, content_type='application/json', body=json.dumps({'message': 'SYNTHETIC JOB 409'}))
-            else: route.continue_()
-        v.route('**/api/studies/*/viewer-jobs/'+job['id'], conflict)
-        line().get_by_role('button', name='Go to 3D Point', exact=True).click()
-        expect(saved_row()).to_contain_text('SYNTHETIC JOB 409')
-        expect(saved_row()).not_to_contain_text('이전 화면으로 되돌렸습니다')
-        v.unroute('**/api/studies/*/viewer-jobs/'+job['id'], conflict)
-        self.preserved_volume(before, self.volume_state(v))
-        # N7: a failure after the apply has replaced the screen is rolled back to the previous screen and said so, never restored.
-        v.evaluate(SHIFT)
-        before, ids = v.evaluate(CAPTURE), v.evaluate(VIEWPORT_IDS)
-        marks_before, jobs_before = v.evaluate('()=>kinMprMarks.capture(true)'), self.jobs(a)
-        # The previous screen is not the saved one (each plane 6 mm off), so a skipped rollback cannot pass as this screen.
-        self.assertEqual(len(before['cells']), len(job['snapshot']['cells']))
-        for shown, saved in zip(before['cells'], job['snapshot']['cells']):
-            self.assertGreater(sum((p - q) ** 2 for p, q in zip(shown['camera']['focalPoint'], saved['camera']['focalPoint'])) ** 0.5, 5)
-        injected = None
-        try:
-            v.evaluate(INJECT_APPLY_FAILURE)
-            line().get_by_role('button', name='Go to 3D Point', exact=True).click()
-            expect(saved_row().locator('[data-kin-message]')).to_have_attribute('data-kin-location-result', 'rolled-back', timeout=120000)
-        finally:
-            injected = v.evaluate(UNDO_APPLY_FAILURE)
-        self.assertEqual(injected, {'calls': 1, 'restored': True}, 'the failure happened once, inside the apply, and the capability is back')
-        expect(saved_row().locator('[data-kin-message]')).to_have_text('저장 화면을 적용하지 못해 이전 화면으로 되돌렸습니다. 영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.')
-        expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('영상 상태를 적용하지 못했습니다')
-        # The apply had replaced the viewports; the rollback rebuilt the previous screen on new ones, with its marks and without the point move.
-        self.assertNotEqual(v.evaluate(VIEWPORT_IDS), ids)
-        self.same_screen(before, v.evaluate(CAPTURE))
-        self.same_marks(v.evaluate('()=>kinMprMarks.capture(true)'), marks_before)
-        self.assertEqual(self.jobs(a), jobs_before)
-        # A retitled Job restores exactly and names its current metadata revision.
-        renamed = self.stack.request('POST', f'/studies/{a.uid}/viewer-jobs/{job["id"]}/revisions', 'doctor',
-                                     dict(expectedRevision=1, title='바뀐 위치 제목', description='', hidden=False, reason=''))
-        self.assertEqual(renamed.status, 200, renamed.text)
-        panel.get_by_role('button', name='Reload Findings', exact=True).click()
-        expect(line().locator('[data-kin-link-state]')).to_have_text('Details Changed')
-        v.evaluate(SHIFT)
-        line().get_by_role('button', name='Go to 3D Point', exact=True).click()
-        expect(saved_row()).to_contain_text('저장 작업의 제목·설명만 연결 이후 바뀌었고(현재 r2)', timeout=90000)
-        # A hidden Job is refused by the live pre-read, before its snapshot is read.
-        hidden = self.stack.request('POST', f'/studies/{a.uid}/viewer-jobs/{job["id"]}/revisions', 'doctor',
-                                    dict(expectedRevision=2, title='바뀐 위치 제목', description='', hidden=True, reason='숨김 확인'))
-        self.assertEqual(hidden.status, 200, hidden.text)
-        before = self.volume_state(v); requests.clear()
-        line().get_by_role('button', name='Go to 3D Point', exact=True).click()
-        expect(saved_row()).to_contain_text('연결한 저장 작업이 숨겨져 있어 복원하지 않았습니다')
-        self.assertFalse([u for u in requests if u.rstrip('/').endswith('/viewer-jobs/'+job['id'])], requests)
-        self.preserved_volume(before, self.volume_state(v))
-        # Server matrix: an unknown mark, a Job anchored on the comparison study and a forged point.
-        unknown = self.link(a, dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=2, title='x', text='', characteristics='',
-                            sources=[dict(jobId=job['id'], revision=3, markId=str(uuid.uuid4()))])))
-        self.assertEqual((unknown.status, unknown.body['code']), (400, 'FINDING_JOB_MARK'))
+        original = self.originals(); report = (self.state(a), self.versions(a)); jobs_before = self.jobs(a)
+        mark_id = saved_mark_id(job)
         swapped = dict(job['snapshot'], studies=[b.uid, a.uid]); swapped.pop('annotations', None)
         swapped['volume'] = {k: swapped['volume'][k] for k in ('study', 'series', 'sops')}
         other = self.stack.request('POST', f'/studies/{b.uid}/viewer-jobs', 'doctor', dict(id=str(uuid.uuid4()), title='P 판독 대상 작업', description='', snapshot=swapped))
         self.assertEqual(other.status, 200, other.text)
-        elsewhere = self.link(a, dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=2, title='x', text='', characteristics='',
-                              sources=[dict(jobId=other.body['id'], revision=1, markId=saved_mark_id(job))])))
-        missing = self.link(a, dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=2, title='x', text='', characteristics='',
-                            sources=[dict(jobId=str(uuid.uuid4()), revision=1, markId=saved_mark_id(job))])))
-        self.assertEqual((elsewhere.status, elsewhere.body), (missing.status, missing.body))
-        self.assertEqual(missing.body['message'], '연결할 저장 작업이 이 검사에 없습니다')
-        forged = self.link(a, dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=2, title='x', text='', characteristics='',
-                           sources=[dict(jobId=job['id'], revision=3, markId=saved_mark_id(job), point=[0, 0, 0])])))
-        self.assertEqual(forged.status, 400)
-        self.assertEqual(self.revision_rows(a), rows); self.assertEqual((self.state(a), self.versions(a)), report)
+        body = lambda sources: dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=2, title='L2 소견', text='', characteristics='', sources=sources))
+        # The valid 3D point link and the server matrix (an unknown mark, a Job anchored on the comparison study, a missing
+        # Job) all meet the interim refusal: it answers before the finding service reads any Job, so none is told apart yet.
+        cases = {'valid point': [dict(jobId=job['id'], revision=1, markId=mark_id)],
+                 'unknown mark': [dict(jobId=job['id'], revision=1, markId=str(uuid.uuid4()))],
+                 'job anchored on the comparison study': [dict(jobId=other.body['id'], revision=1, markId=mark_id)],
+                 'missing job': [dict(jobId=str(uuid.uuid4()), revision=1, markId=mark_id)]}
+        for name, sources in cases.items():
+            with self.subTest(body=name):
+                answer = self.link(a, body(sources))
+                self.assertEqual((answer.status, (answer.body or {}).get('code')), (503, INTERIM_CODE), answer.text)
+        # The route's own shape check is not pending: a copied point and an empty link list are refused as input.
+        forged = self.link(a, body([dict(jobId=job['id'], revision=1, markId=mark_id, point=[0, 0, 0])]))
+        self.assertEqual(forged.status, 400, forged.text)
+        empty = self.link(a, body([]))
+        self.assertEqual(empty.status, 400, empty.text)
+        self.nothing_written(a, report, original, jobs_before)
         self.assertEqual(len(marks['marks']), 1)
 
-    # ---- L3 -----------------------------------------------------------------------------------------
-    def test_location_03_same_document_restore_keeps_finding_drafts_and_withdrawal_removes_the_finding(self):
+    # ---- 03 -----------------------------------------------------------------------------------------
+    def test_location_03_revisions_route_meets_the_interim_refusal_and_the_page_keeps_the_refused_draft(self):
         label = 'L3 표식 '+uuid.uuid4().hex[:6]
         a, b, v, job, marks = self.prior_point(label)
-        panel, row = self.link_point(v, label, 'L3 소견', '보존 확인')
-        [finding] = self.api_findings(a)
-        # An unsaved finding draft stays through a same-document restore.
-        panel.get_by_role('button', name='New Finding', exact=True).click()
-        key = panel.locator('article[data-saved=false]').last.get_attribute('data-row-key')
-        draft = panel.locator('article[data-row-key="'+key+'"]')
-        draft.get_by_label('Finding Title').fill('KEEP FINDING DRAFT')
-        draft.get_by_label('Finding Characteristics', exact=True).fill('KEEP CHARACTERISTICS')
-        v.evaluate(SHIFT)
-        saved_row = panel.locator('article[data-finding-id="'+finding['id']+'"]')
-        saved_row.locator('[data-job-id="'+job['id']+'"]').get_by_role('button', name='Go to 3D Point', exact=True).click()
-        expect(saved_row).to_contain_text('3D 표식 위치로 이동했습니다.', timeout=90000)
-        self.at_point(v, marks['marks'][0]['point'])
-        expect(draft.get_by_label('Finding Title')).to_have_value('KEEP FINDING DRAFT')
-        expect(draft.get_by_label('Finding Characteristics', exact=True)).to_have_value('KEEP CHARACTERISTICS')
-        self.assertTrue(v.evaluate('()=>kinViewerFindingsState().dirty'))
-        # The comparison study leaves this institution: the finding that names it through its 3D point is withdrawn; the draft stays.
-        restore = self.withdraw(b.uid)
+        original = self.originals(); report = (self.state(a), self.versions(a)); jobs_before = self.jobs(a)
+        item = dict(schemaVersion=2, title='L3 소견', text='', characteristics='보존 확인', sources=[dict(jobId=job['id'], revision=1, markId=saved_mark_id(job))])
+        # Edit, hide and restore meet the interim refusal before the finding id is looked up.
+        for action, reason in (('edit', ''), ('hide', '숨김 확인'), ('restore', '복원 확인')):
+            with self.subTest(action=action):
+                answer = self.revise(a, str(uuid.uuid4()), dict(requestId=str(uuid.uuid4()), expectedRevision=1, action=action, reason=reason, item=item))
+                self.assertEqual((answer.status, (answer.body or {}).get('code')), (503, INTERIM_CODE), answer.text)
+        # The page: a draft linked to the 3D point is refused on Save, stays unsaved with its text and survives Reload Findings.
+        title, traits = 'L3 소견', '보존 확인'
+        row = self.compose_point(v, label, title, traits)
+        self.save_refused(v, row)
+        self.kept_unsaved(v, row, title, traits)
+        key = row.get_attribute('data-row-key')
+        panel = self.findings_tab(v)
         panel.get_by_role('button', name='Reload Findings', exact=True).click()
-        expect(panel.locator('article[data-finding-id="'+finding['id']+'"]')).to_have_count(0, timeout=30000)
-        expect(draft.get_by_label('Finding Title')).to_have_value('KEEP FINDING DRAFT')
-        # The withdrawn record's own text is gone (the open draft may still offer the shown Job's points for linking).
-        self.assertNotIn('보존 확인', panel.inner_text())
-        self.assertEqual(self.api_findings(a), [])
-        restore()
-        self.assertEqual([f['id'] for f in self.api_findings(a)], [finding['id']])
+        panel = self.findings_tab(v)
+        row = panel.locator('article[data-row-key="'+key+'"]')
+        self.kept_unsaved(v, row, title, traits)
+        self.nothing_written(a, report, original, jobs_before)
+        self.at_point_unchanged(v, marks)
+
+    def at_point_unchanged(self, v, marks):
+        self.same_marks(v.evaluate('()=>kinMprMarks.capture(true)'), marks)
 
     def evidence_shot(self, page, name):
         import os
