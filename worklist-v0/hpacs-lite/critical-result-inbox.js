@@ -348,7 +348,7 @@
       return true;
     }
 
-    let ended = false, lock = null, timer = null, watch = null, reading = false;
+    let ended = false, lock = null, timer = null, watch = null, reading = false, layoutObserver = null;
     const inflight = new Set();
     // 요청 식별(파일 머리의 최신 유효). gen은 목록·한 건 읽기·ACK를 보낸 순서다. epoch은 세션 번호로, 호스트의 계정이 바뀌거나
     // 영역이 잠기거나 끝나면 오른다. view는 투영 번호로, 투영 경계(Refresh·필터 바꿈·목록 실패)와 세션 끝에서 오른다.
@@ -368,19 +368,44 @@
     let latestReceived = null;
     // D1822 follow-up (Minhoon 2-2): arrivals open the existing overlay without moving editor focus. Read/ACK failures
     // and dismissed arrivals mark the summary bar. Show Received clears that mark.
-    let attention = false;
+    let attention = false, dismissedArrival = false;
     const markAttention = () => { if (!bodyOpen) attention = true; };
     let arrivalOpen = false, returnFocus = null, revealId = null;
 
     function closeBody() {
       const target = (arrivalOpen && returnFocus !== document.body && returnFocus) ||
         (body.contains(document.activeElement) ? toggle : null);
-      attention ||= arrivalOpen;
+      dismissedArrival ||= arrivalOpen && pending > 0;
       bodyOpen = false;
       arrivalOpen = false;
       paint();
       // Native selection keeps following edits while the overlay is open; an opening-time snapshot would rewind it.
       if (target?.isConnected && !target.disabled && target.getClientRects().length) target.focus({ preventScroll: true });
+    }
+
+    function typingLine(field) {
+      const rect = field.getBoundingClientRect().toJSON();
+      if (field.tagName !== 'TEXTAREA') return rect;
+      // Native textareas expose selection offsets, but no caret rectangle. Lay out the same text at the
+      // editable width (excluding its scrollbar) so wrapped lines and the textarea's own scroll agree.
+      const style = getComputedStyle(field), mirror = document.createElement('div');
+      for (const name of ['boxSizing', 'padding', 'borderWidth', 'font', 'letterSpacing', 'wordSpacing',
+        'textIndent', 'textTransform', 'tabSize', 'direction', 'wordBreak', 'overflowWrap']) mirror.style[name] = style[name];
+      Object.assign(mirror.style, { position: 'fixed', visibility: 'hidden', pointerEvents: 'none',
+        borderStyle: 'solid', whiteSpace: field.wrap === 'off' ? 'pre' : 'pre-wrap',
+        boxSizing: 'border-box', width: `${field.clientWidth + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth)}px`,
+        left: '0', top: '0' });
+      const offset = field.selectionDirection === 'backward' ? field.selectionStart : field.selectionEnd;
+      mirror.textContent = field.value.slice(0, offset);
+      const caret = document.createElement('span');
+      caret.textContent = field.value.slice(offset) || '\u200b';
+      mirror.append(caret);
+      document.body.append(mirror);
+      const line = caret.getClientRects()[0], height = parseFloat(style.lineHeight) || line.height;
+      const top = rect.top + line.top - mirror.getBoundingClientRect().top - field.scrollTop - (height - line.height) / 2;
+      mirror.remove();
+      return { ...rect, top: Math.max(rect.top + field.clientTop, top),
+        bottom: Math.min(rect.top + field.clientTop + field.clientHeight, top + height) };
     }
 
     function placeArrival() {
@@ -406,7 +431,7 @@
       // Only report controls can need room here. Body, the viewer and the splitters must never move the list off the report.
       const field = returnFocus?.isConnected && columnElement.contains(returnFocus) &&
         !region.contains(returnFocus) && returnFocus.matches('textarea, input, select, button, [contenteditable="true"]') ? returnFocus : null;
-      const target = field?.getClientRects().length ? field.getBoundingClientRect().toJSON() : null;
+      const target = field?.getClientRects().length ? typingLine(field) : null;
       if (target) {
         target.top = Math.max(ceiling, target.top);
         target.bottom = Math.min(floor, target.bottom);
@@ -422,11 +447,24 @@
         const above = target.top - ceiling, below = floor - target.bottom;
         const useAbove = above >= height || above >= below;
         const room = useAbove ? above : below;
-        // A short column scrolls the received list in the remaining space; it never borrows space from the images.
-        if (room > region.querySelector('.cvr-inbox-bar').getBoundingClientRect().height) {
-          region.style.maxHeight = `${room}px`;
-          height = region.getBoundingClientRect().height;
-          top = useAbove ? target.top - height : target.bottom;
+        region.style.maxHeight = `${room}px`;
+        height = region.getBoundingClientRect().height;
+        top = useAbove ? target.top - height : target.bottom;
+      }
+      // The identity and action must fit together. Measure their rendered height at this column width;
+      // a column with less room keeps the folded arrival mark instead of showing an unidentified action.
+      const row = rowNodes.get(revealId)?.element || list.firstElementChild;
+      if (row) {
+        const identity = row.querySelector('.cvr-inbox-meta');
+        const head = row.querySelector('.cvr-inbox-head');
+        const required = Math.max(head.getBoundingClientRect().bottom, identity.getBoundingClientRect().bottom) -
+          row.getBoundingClientRect().top;
+        if (body.clientHeight < required) {
+          bodyOpen = arrivalOpen = false;
+          dismissedArrival = pending > 0;
+          revealId = null;
+          paint();
+          return;
         }
       }
       region.style.left = `${column.left}px`;
@@ -673,10 +711,11 @@
             returnFocus = region.contains(document.activeElement) ? null : document.activeElement;
           }
           bodyOpen = true;
-          attention = false;
+          attention = dismissedArrival = false;
           if (!body?.contains(document.activeElement)) revealId = arrived || read.items.find(item => item.state === 'created')?.id;
         }
         lastPending = pending = read.pending;
+        if (pending === 0) dismissedArrival = false;
         listPhase = 'ready';
         listError = '';
         ready = true;
@@ -970,7 +1009,7 @@
       return {
         key: item.id, state: changed ? 'changed' : item.state, head,
         headTitle: changed ? (full ? TEXT.moved(item.source.version) : TEXT.stub) : TEXT.states[item.state],
-        notes, message: full ? item.message : null, meta: [identity(item.study), `From ${item.sender.name} · Sent ${time(item.createdAt)}`],
+        notes, message: full ? item.message : null, meta: [`From ${item.sender.name} · Sent ${time(item.createdAt)}`, identity(item.study)],
         source: full ? sourceText(item.source) : null,
         body: full ? FIELDS.map(([key, name]) => [name, item.body[key]]) : null,
         after: [reason ? TEXT.cancelReason(reason) : '', ack === 'busy' ? TEXT.sending : '', conflict ? TEXT.mismatch : '', note].filter(Boolean),
@@ -983,7 +1022,7 @@
       const label = done.label;
       return {
         key: id, state: 'acknowledged', head: `Acknowledged ${time(done.at)}`, headTitle: TEXT.states.acknowledged, notes: [],
-        message: null, meta: [identity(label.study), `From ${label.sender} · Sent ${time(label.createdAt)}`], source: null, body: null,
+        message: null, meta: [`From ${label.sender} · Sent ${time(label.createdAt)}`, identity(label.study)], source: null, body: null,
         after: [note].filter(Boolean), ack: 'off', replacement: null,
       };
     }
@@ -1021,9 +1060,10 @@
       head.title = model.headTitle;
       head.append(state);
       row.append(head);
-      for (const line of model.meta) row.append(make('p', 'cvr-inbox-meta', line));
+      if (fold) for (const line of [...model.meta].reverse()) row.append(make('p', 'cvr-inbox-meta', line));
       for (const note of model.notes) row.append(make('p', 'cvr-inbox-note', note));
       if (model.message !== null) row.append(make('p', 'cvr-inbox-message', model.message));
+      if (!fold) for (const line of model.meta) row.append(make('p', 'cvr-inbox-meta', line));
       if (model.source !== null) row.append(make('p', 'cvr-inbox-meta', model.source));
       if (model.body !== null) {
         const box = make('div', 'cvr-inbox-report');
@@ -1040,8 +1080,14 @@
         actions.push(ack);
       }
       if (model.replacement) actions.push(button('Open Replacement', () => openReplacement(model.key, model.replacement)));
-      // Keep patient identity and the explicit action visible together even in the short space beside a report field.
-      for (const action of actions) head.append(' ', action);
+      // Only the folded report panel needs compact identity/action placement; Clinician Home keeps the
+      // message and pinned report before the explicit acknowledgement.
+      if (fold) for (const action of actions) head.append(' ', action);
+      else if (actions.length) {
+        const controls = make('div', 'cvr-inbox-actions');
+        controls.append(...actions);
+        row.append(controls);
+      }
       return row;
     }
 
@@ -1140,7 +1186,7 @@
         setTitle(toggle, bodyOpen ? '받은 목록을 닫습니다. Esc로도 닫을 수 있습니다.' : '받은 중요 결과 목록을 펼칩니다.');
         toggle.setAttribute('aria-expanded', String(bodyOpen));
         body.hidden = !bodyOpen;
-        if (attention && !bodyOpen) region.dataset.attention = 'true'; else delete region.dataset.attention;
+        if ((attention || dismissedArrival) && !bodyOpen) region.dataset.attention = 'true'; else delete region.dataset.attention;
       }
       // 기록마다 한 번 계산한 값을 행과 줄이 함께 쓴다.
       const derived = lock !== null ? [] : [...new Set([...projections.keys(), ...attempts.keys(), ...outcomes.keys()])].map(derive);
@@ -1202,6 +1248,7 @@
       if (ended) return;
       drop();
       ended = true;
+      layoutObserver?.disconnect();
       clearInterval(timer);
       clearInterval(watch);
       list.replaceChildren();
@@ -1245,7 +1292,7 @@
       toggle.addEventListener('click', () => {
         if (ended) return;
         if (bodyOpen) closeBody();
-        else { bodyOpen = true; attention = false; paint(); }
+        else { bodyOpen = true; attention = dismissedArrival = false; paint(); }
       });
       document.addEventListener('focusin', event => {
         if (ended || !arrivalOpen || region.contains(event.target) || event.target.closest('dialog, [role="dialog"]')) return;
@@ -1261,7 +1308,10 @@
           closeBody();
         }
       });
+      layoutObserver = new ResizeObserver(placeArrival);
+      layoutObserver.observe(region.parentElement);
       window.addEventListener('resize', placeArrival);
+      document.addEventListener('selectionchange', () => { if (document.activeElement === returnFocus) placeArrival(); });
       document.addEventListener('input', event => { if (event.target === returnFocus) placeArrival(); });
       document.addEventListener('scroll', event => { if (!region.contains(event.target)) placeArrival(); }, true);
     }

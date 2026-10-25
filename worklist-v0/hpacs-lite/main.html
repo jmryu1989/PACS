@@ -1023,7 +1023,7 @@
     #cvr-inbox-p { flex: none; font-size: 12px; color: var(--kin-text); background: var(--kin-panel); border-top: 1px solid var(--kin-line2); }
     /* D1822 follow-up (Minhoon 2-2): a received report automatically opens the existing overlay. The report column keeps its
        size; the list scrolls inside and keeps its bar (Hide Received) on top. An arrival moves the overlay away from the
-       focused report control within the column without scrolling or resizing the editor. Dismissed arrivals and read/ACK failures
+       typing line or focused control within the column without scrolling or resizing the editor. Dismissed arrivals and read/ACK failures
        mark the bar (data-attention) in the existing CVR amber. */
     #cvr-inbox-p[data-attention] > .cvr-inbox-bar { box-shadow: inset 3px 0 #d29a3a; }
     #cvr-inbox-p[data-attention] #cvr-inbox-toggle { border-color: #d29a3a; color: #f0c27a; }
@@ -1036,7 +1036,7 @@
       overflow: auto; z-index: 5; box-shadow: 0 -6px 18px #0009; }
     #cvr-inbox-p:has(> #cvr-inbox-body:not([hidden])) > .cvr-inbox-bar { position: sticky; top: 0; z-index: 1;
       background: var(--kin-panel); }
-    /* Keep arrivals within the report column; the list scrolls above or below the focused report control. */
+    /* Keep arrivals within the report column; the list scrolls above or below the typing line or focused control. */
     #cvr-inbox-p.cvr-inbox-arrival:has(> #cvr-inbox-body:not([hidden])) { position: fixed; right: auto; bottom: auto; display: flex; flex-direction: column; }
     #cvr-inbox-p.cvr-inbox-arrival > .cvr-inbox-bar { flex: none; }
     #cvr-inbox-p.cvr-inbox-arrival > #cvr-inbox-body { min-height: 0; }

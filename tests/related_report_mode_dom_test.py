@@ -2330,7 +2330,7 @@ class RelatedModePage(unittest.TestCase):
         mirror.style[name] = s[name];
       Object.assign(mirror.style, {position: 'absolute', visibility: 'hidden', whiteSpace: 'pre-wrap',
         overflowWrap: 'break-word', width: ta.getBoundingClientRect().width + 'px', left: '0', top: '0'});
-      mirror.textContent = ta.value.slice(0, ta.selectionEnd);
+      mirror.textContent = ta.value.slice(0, ta.selectionDirection === 'backward' ? ta.selectionStart : ta.selectionEnd);
       const end = document.createElement('span'); end.textContent = '\u200b'; mirror.append(end); document.body.append(mirror);
       const r = ta.getBoundingClientRect(), line = parseFloat(s.lineHeight) || parseFloat(s.fontSize) * 1.2;
       const x = r.left + end.offsetLeft + 1 - ta.scrollLeft, y = r.top + end.offsetTop - ta.scrollTop + line / 2;
@@ -2432,6 +2432,89 @@ class RelatedModePage(unittest.TestCase):
                         self.assertEqual(active, self.js('document.activeElement.id || document.activeElement.tagName'))
                         self.assertEqual([], self.arrival_posts)
 
+    def test_w5b_arrival_tracks_caret_within_wrapped_findings(self):
+        self.page.set_viewport_size({"width": 1366, "height": 768})
+        recipient = self.install_arrivals()
+        self.open()
+        self.open_target()
+        self.enter_reading()
+        findings = self.page.locator('#findings')
+        findings.fill('\n'.join('SYN long finding ' * 12 for _ in range(45)))
+        self.page.locator('#conclusion').fill('SYN impression line 1\nSYN impression line 2')
+        self.autosave()
+        findings.click()
+        self.page.keyboard.press('Control+End')
+        self.arrival_server.add(recipient.rec(181, case='R2'))
+        self.poll_arrivals()
+        for key in ('Control+Home', 'ArrowDown', 'End', 'Shift+ArrowUp', 'Control+End'):
+            self.page.keyboard.press(key)
+            self.settle()
+            self.visible_arrival(181)
+            self.arrival_stays_over_report()
+            self.assertTrue(self.js(self.CARET_VISIBLE, 'findings'), key + ' leaves the caret visible')
+        self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_arrival_follows_reading_splitter(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            with self.subTest(viewport=(width, height)):
+                self.page.set_viewport_size({"width": width, "height": height})
+                recipient = self.install_arrivals()
+                self.open()
+                self.open_target()
+                self.enter_reading()
+                self.poll_arrivals()
+                splitter = self.page.locator('#reading-resize-report')
+                splitter.click()
+                self.page.keyboard.press('Enter')  # reset the previous subcase's saved width through the real control
+                self.settle()
+                self.arrival_server.add(recipient.rec(181, case='R2'))
+                self.poll_arrivals()
+                for key in ('Shift+ArrowRight', 'Shift+ArrowLeft'):
+                    before = splitter.bounding_box()['x']
+                    for _ in range(4):
+                        self.page.keyboard.press(key)
+                    self.settle()
+                    self.assertNotEqual(before, splitter.bounding_box()['x'], 'the keyboard moved the splitter')
+                    self.visible_arrival(181)
+                    self.arrival_stays_over_report()
+                box = splitter.bounding_box()
+                x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+                self.page.mouse.move(x, y)
+                self.page.mouse.down()
+                self.page.mouse.move(x + 160, y, steps=8)  # the review's measured drag
+                self.page.mouse.up()
+                self.settle()
+                self.assertNotEqual(box['x'], splitter.bounding_box()['x'], 'the pointer moved the splitter')
+                self.visible_arrival(181)
+                self.arrival_stays_over_report()
+                self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_dismissal_clears_when_acknowledged_elsewhere(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                with self.subTest(viewport=(width, height), reading=reading):
+                    self.page.set_viewport_size({"width": width, "height": height})
+                    recipient = self.install_arrivals()
+                    self.open()
+                    self.open_target()
+                    if reading:
+                        self.enter_reading()
+                    self.poll_arrivals()
+                    record = self.arrival_server.add(recipient.rec(181, case='R2'))
+                    self.poll_arrivals()
+                    self.visible_arrival(181)
+                    self.page.keyboard.press('Escape')
+                    panel = self.page.locator('#cvr-inbox-p')
+                    expect(panel).to_have_attribute('data-attention', 'true')
+                    self.poll_arrivals()
+                    expect(panel).to_have_attribute('data-attention', 'true')
+                    record.update(state='acknowledged', acknowledgedAt=recipient.SERVER_NOW, revision=2)
+                    self.poll_arrivals()
+                    expect(panel.get_by_text('Pending ACK 0', exact=True)).to_be_visible()
+                    self.assertIsNone(panel.get_attribute('data-attention'))
+                    expect(self.page.locator('#cvr-inbox-body')).to_be_hidden()
+                    self.assertEqual([], self.arrival_posts)
+
     def test_w5b_manual_received_escape_returns_to_toggle(self):
         for width, height in self.ARRIVAL_VIEWPORTS:
             for reading in (False, True):
@@ -2470,8 +2553,8 @@ class RelatedModePage(unittest.TestCase):
                     body = self.page.locator("#cvr-inbox-body")
                     expect(body).to_be_hidden()
                     findings = self.page.locator("#findings")
-                    findings.fill("\n".join(f"SYN finding line {i}" for i in range(30)))
-                    self.page.locator("#conclusion").fill("SYN impression" if field == "findings" else "SYN impression line 1\nSYN impression line 2")
+                    findings.fill("\n".join(f"SYN finding line {i}" for i in range(45)))
+                    self.page.locator("#conclusion").fill("SYN impression line 1\nSYN impression line 2")
                     self.autosave()
                     target = self.page.locator("#" + field)
                     target.click()

@@ -1248,6 +1248,15 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                      r["body"]["findings"], "Conclusion", r["body"]["conclusion"], "Recommendation", r["body"]["recommendation"]):
             self.assertIn(text, seen["text"])
         self.assertEqual([["Acknowledge", False]], seen["buttons"])
+        # Clinician Home reads the message, sender, identity and pinned report before its acknowledgement.
+        region = self.region()
+        parts = [region.get_by_text(r['message'], exact=True), region.get_by_text(re.compile('^From ')),
+                 region.get_by_text(re.compile('^Patient: ')), region.get_by_text(re.compile('^Source: ')),
+                 region.get_by_text(r['body']['recommendation'], exact=True),
+                 region.get_by_role('button', name='Acknowledge', exact=True)]
+        for first, second in zip(parts, parts[1:]):
+            self.assertLessEqual(first.bounding_box()['y'] + first.bounding_box()['height'], second.bounding_box()['y'])
+
         self.assertNotIn("2030", seen["text"], "the times are the server's, not the browser clock's")
         # One read, the received pending list asked for explicitly (the server's default is all).
         self.assertEqual([("GET", "/api/critical-results", {"view": ["received"], "state": ["pending"]})],
