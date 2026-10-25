@@ -787,6 +787,9 @@ class MultiStudyViewPage(unittest.TestCase):
         self.open_set(order[:3])
         expect(self.page.locator('#reading-images')).to_contain_text('SYN CORRECTED PATIENT')
         expect(self.page.locator('#reading-images')).to_contain_text('SYN CORRECTED SOURCE DESCRIPTION')
+        expect(self.page.locator('#reading-images')).to_contain_text('2026-10-05')
+        expect(self.page.locator('#reading-images')).to_contain_text('2026-10-04')
+        expect(self.page.locator('#reading-images')).not_to_contain_text('202610')
         expect(self.page.locator('#reading-target')).to_contain_text(ALPHA)
         expect(self.page.locator('#reading-target')).not_to_contain_text('SYN CORRECTED PATIENT')
 
@@ -802,6 +805,69 @@ class MultiStudyViewPage(unittest.TestCase):
         self.assertGreaterEqual(facts['row']['visible'], facts['row']['height'])
         self.assertEqual(facts['header']['height'], facts['header']['visible'])
         self.assertGreaterEqual(facts['report']['visible'], facts['findings']['height'])
+
+    def test_small_worklist_windows_keep_member_actions_and_reporting_reachable(self):
+        self.open()
+        order = self.visible_order()
+        self.row(order[0]).click()
+        self.wait(lambda: self.target() == order[0], 'Reading Target')
+        self.open_set(order[:5])
+        self.wait_viewer(order[:2])
+        # D390's smallest landscape size and the two smaller windows reported in N2.
+        for width, height in ((1024, 768), (900, 700), (900, 600)):
+            with self.subTest(width=width, height=height):
+                self.page.set_viewport_size({'width': width, 'height': height})
+                self.page.locator('#copy-patient-id').click(trial=True)
+                member = self.member(order[1])
+                member.scroll_into_view_if_needed()
+                expect(member).to_be_in_viewport(ratio=1)
+                for action in ('view', 'report', 'pick'):
+                    member.locator('[data-action=' + action + ']').click(trial=True)
+                self.page.locator('#multi-study-next').click(trial=True)
+                self.page.locator('#multi-study-close').click(trial=True)
+                self.page.locator('#findings').click(trial=True)
+                self.page.locator('#relrows tr').first.scroll_into_view_if_needed()
+                # Related's table scrolls sideways at these widths; its row must keep its whole vertical area.
+                full_height = self.page.locator('#relrows tr').first.evaluate("""e => {
+                  const r = e.getBoundingClientRect(); let top = 0, bottom = innerHeight;
+                  for (let a = e.parentElement; a; a = a.parentElement) {
+                    if (['hidden','auto','scroll','clip'].includes(getComputedStyle(a).overflowY)) {
+                      const b = a.getBoundingClientRect(); top = Math.max(top,b.top); bottom = Math.min(bottom,b.bottom);
+                    }
+                  }
+                  return r.top >= top && r.bottom <= bottom;
+                }""")
+                self.assertTrue(full_height, 'A full Related row remains vertically reachable')
+        self.press('#multi-study-next')
+        self.wait_viewer(order[2:4])
+        self.page.locator('#multi-study-close').click()
+        expect(self.host()).to_be_hidden()
+
+    def test_idle_viewer_ticks_leave_live_regions_unchanged_and_updates_still_announce(self):
+        self.open()
+        order = self.visible_order()
+        self.open_set(order[:3])
+        self.wait_viewer(order[:2])
+        self.open_set([order[0], order[4]], {order[4]: 'W9_SCOPE_EXCLUDED'})
+        candidate = self.page.locator('#multi-study-candidate')
+        expect(candidate).to_contain_text('Access Restricted')
+        self.page.evaluate("""() => {
+          window.liveChanges = [];
+          for (const id of ['multi-study-status', 'multi-study-candidate']) {
+            new MutationObserver(records => liveChanges.push({id, count:records.length})).observe(
+              document.getElementById(id), {childList:true, characterData:true, subtree:true});
+          }
+        }""")
+        before = [self.status().inner_text(), candidate.inner_text()]
+        self.page.clock.run_for(6001)  # Three existing 2 s Viewer Windows ticks.
+        self.assertEqual(before, [self.status().inner_text(), candidate.inner_text()])
+        self.assertEqual([], self.page.evaluate('liveChanges'))
+        self.site.resolve_answers.append({order[4]: 'W9_LOAD_FAILED'})
+        self.press('#multi-study-retry')
+        expect(candidate).to_contain_text('Load Failed')
+        changed = self.page.evaluate('liveChanges.map(change => change.id)')
+        self.assertIn('multi-study-status', changed)
+        self.assertIn('multi-study-candidate', changed)
 
     # ── V-LIFECYCLE ──
     def test_a_late_answer_after_a_newer_action_and_the_session_end(self):

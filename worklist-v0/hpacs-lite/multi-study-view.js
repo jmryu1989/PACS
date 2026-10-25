@@ -523,19 +523,22 @@
       const busy = !!inflight || !!reporting, blocked = !!c?.blocked;
       summary.textContent = summaryText(s);
       const text = attempt ? [attempt.status, attempt.message].filter(Boolean).join(' · ') : '';
-      status.textContent = note ? [text, note].filter(Boolean).join(' · ') : text;
+      const statusText = note ? [text, note].filter(Boolean).join(' · ') : text;
+      if (status.textContent !== statusText) status.textContent = statusText;
       const candidate = c && s.candidateAttempt;
       candidateStatus.hidden = !candidate;
-      candidateStatus.replaceChildren();
+      const candidateLines = [];
       if (candidate) {
-        const heading = document.createElement('div');
-        heading.textContent = 'New Selection · ' + candidate.status + ' · ' + candidate.message;
-        candidateStatus.append(heading);
+        candidateLines.push('New Selection · ' + candidate.status + ' · ' + candidate.message);
         for (const member of candidate.members || []) if (member.status === 'error') {
-          const line = document.createElement('div'), state = memberState(member.code);
-          line.textContent = label(member) + ' · ' + state.status + ' · ' + state.message;
-          candidateStatus.append(line);
+          const state = memberState(member.code);
+          candidateLines.push(label(member) + ' · ' + state.status + ' · ' + state.message);
         }
+      }
+      if (candidateStatus.textContent !== candidateLines.join('')) {
+        candidateStatus.replaceChildren(...candidateLines.map(text => {
+          const line = document.createElement('div'); line.textContent = text; return line;
+        }));
       }
       previous.disabled = busy || !c || blocked || c.page <= 0;
       next.disabled = busy || !c || blocked || c.page >= pageCount(c) - 1;

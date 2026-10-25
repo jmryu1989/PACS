@@ -565,7 +565,7 @@ window.KinReadingWorkspace = function (app) {
    */
   function viewingSetRow(uid) {
     const m = viewingSet?.metadata.get(uid);
-    return m ? { name: m.patientName, patientId: m.patientId, date: m.studyDate, modality: m.modalities.join(','), desc: m.description } : null;
+    return m ? { name: m.patientName, patientId: m.patientId, date: app.formatDate(m.studyDate), modality: m.modalities.join(','), desc: m.description } : null;
   }
   function openViewingSet(uid, prior, set) {
     const valid = x => typeof x === 'string' && x.length <= 64 && /^\d+(?:\.\d+)+$/.test(x);

@@ -1,10 +1,12 @@
-/* W9 shares the upper space with the report-window panels. Reserve the existing 360px Related layout boundary (D390 in
-   main.html) for reporting; both upper panels scroll/shrink before they can consume that area. */
+/* Keep the existing W9 band and D390 report floor usable in short/narrow windows. The report-window panels yield first,
+   down to main.html's existing 48px compact-panel floor; the right column then scrolls instead of hiding either area's controls. */
+body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) { min-height: 0; overflow-y: auto; }
 body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .rw {
-  flex: 0 1 auto; min-height: 0; overflow: auto;
+  flex: 0 1 auto; min-height: 48px; overflow: auto;
 }
 body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .workrow { flex: 1 0 360px; }
-body:not(.portrait):not(.reading) .multi-study { flex: 0 1 260px; }
+body:not(.portrait):not(.reading) .multi-study { flex: 0 0 260px; min-height: 260px; }
+body:not(.portrait):not(.reading) .multi-study-members { flex-shrink: 0; }
 .multi-study { flex: none; display: flex; flex-direction: column; max-height: min(34vh, 260px); min-height: 0; overflow: auto;
   border-top: 1px solid var(--kin-line2); border-bottom: 1px solid var(--kin-line2); background: var(--kin-panel);
   color: var(--kin-text); font-size: 12px; }

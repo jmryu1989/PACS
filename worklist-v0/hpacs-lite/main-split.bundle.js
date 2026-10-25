@@ -9907,6 +9907,7 @@
     }, { capture: true, passive: true });
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
+      formatDate: fmtD,
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
       onPanelsEdit: () => { workspaceGeneration++; },
       onPanelsChange: reading => {
@@ -9938,6 +9939,7 @@
         cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
+
 
     // ── 임상 정보 패널(S7-U4b) ──
     // REQ-S7-U4b-PANEL → RISK-S7-U4b-STALE-PANEL/FAIL-AS-EMPTY → TEST-S7-U4b-DOM (tests/clinical_context_dom_test.py가 이 절을
