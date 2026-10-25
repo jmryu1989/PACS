@@ -1,7 +1,7 @@
 // REQ-MG-03 -> RISK-MG-FALSE-ANATOMY -> TEST-MG-REFERENCE-LINES.
-// REQ-VIEWER-REFERENCE-PLANE -> RISK-MG-FALSE-ANATOMY -> TEST-VIEWER-REFERENCE-PLANE:
-// 2026-10-26 fix order F1/F3: every modality pair must share study/FoR and
-// carry stored IOP/IPP for both displayed frames; MG also retains its side gate.
+// REQ-VIEWER-REFERENCE-PLANE -> RISK-VIEWER-REFERENCE-PLANE -> TEST-VIEWER-REFERENCE-PLANE.
+// Registered in tests/README.md: stacks use the displayed frame's stored plane;
+// MPR uses the volume's source planes/FoR and native camera geometry.
 // Exercise the shipped extension's tool lifecycle/render boundary. Native geometry
 // and SVG removal are checked separately on the served viewer with public samples.
 const test = require('node:test');
@@ -42,12 +42,20 @@ function fixture(before = false) {
     ImageOrientationPatient: [1, 0, 0, 0, 1, 0], ImagePositionPatient: [0, 0, 0], ...overrides });
   function pane(id, value) {
     images.set(id, value);
-    const viewport = { getCurrentImageId: () => id };
+    const viewport = { type: 'stack', getCurrentImageId: () => id, getImageIds: () => [id] };
     viewports.set(id, viewport); return { viewport };
   }
   pane('source', image());
   const target = pane('target', image()), svg = {};
-  return { extension, tool, native, image, images, pane, groups, subscribers, draws,
+  function volumePane(id, values, frame = values[0]?.FrameOfReferenceUID) {
+    const ids = values.map((value, index) => {
+      const key = `${id}-volume-${index}`; images.set(key, value); return key;
+    });
+    const viewport = { type: 'orthographic', getCurrentImageId: () => undefined,
+      getImageIds: () => ids, getFrameOfReferenceUID: () => frame };
+    viewports.set(id, viewport); return { viewport };
+  }
+  return { extension, tool, native, image, images, pane, volumePane, groups, subscribers, draws,
     render: () => tool.renderAnnotation(target, svg), target, svg };
 }
 
@@ -177,4 +185,54 @@ test('mode exit restores tools and subscriptions; re-entry installs one wrapper'
   assert.equal(f.render(), false);
   assert.equal(f.subscribers.size, 1);
   f.extension.onModeExit(); assert.equal(f.tool.renderAnnotation, f.native);
+});
+
+
+test('CT/MR MPR without current image IDs preserves native drawing in all anatomical plane directions', () => {
+  for (const Modality of ['CT', 'MR']) {
+    const f = fixture(), images = [f.image({ Modality }), f.image({ Modality, ImagePositionPatient: [0, 0, 1] })];
+    const panes = ['axial', 'sagittal', 'coronal'].map(id => f.volumePane(id, images));
+    // Only the acquisition plane may have a current image; it is not the MPR identity.
+    panes[0].viewport.getCurrentImageId = () => 'axial-volume-0';
+    for (const source of ['axial', 'sagittal', 'coronal']) {
+      f.tool.editData.sourceViewportId = source;
+      for (const target of panes) {
+        assert.equal(f.tool.renderAnnotation(target, f.svg), 'native result');
+      }
+    }
+  }
+});
+
+test('volume/stack pairs share coordinates in both directions; stack never borrows another frame plane', () => {
+  const f = fixture(), image = f.image({ Modality: 'CT' });
+  const volume = f.volumePane('volume', [image]);
+  f.images.set('target', image);
+  f.tool.editData.sourceViewportId = 'volume'; assert.equal(f.render(), 'native result');
+  f.tool.editData.sourceViewportId = 'target';
+  assert.equal(f.tool.renderAnnotation(volume, f.svg), 'native result');
+  f.target.viewport.getCurrentImageId = () => undefined;
+  assert.equal(f.tool.renderAnnotation(volume, f.svg), false);
+  f.tool.editData.sourceViewportId = 'volume'; assert.equal(f.render(), false);
+});
+
+test('MPR checks the whole displayed volume and rechecks replacement on either pane', () => {
+  for (const changed of ['source', 'target']) {
+    const f = fixture(), image = f.image({ Modality: 'CT' });
+    function render(values, frame = 'frame') {
+      const source = f.volumePane('source', changed === 'source' ? values : [image], changed === 'source' ? frame : 'frame');
+      const target = f.volumePane('target', changed === 'target' ? values : [image], changed === 'target' ? frame : 'frame');
+      return f.tool.renderAnnotation(target, f.svg);
+    }
+    assert.equal(render([image, image]), 'native result');
+    for (const invalid of [{ ImagePositionPatient: undefined }, { ImageOrientationPatient: undefined },
+      { StudyInstanceUID: 'prior' }, { StudyInstanceUID: '' }, { FrameOfReferenceUID: 'other' },
+      { FrameOfReferenceUID: '' }, { Modality: 'MG' }]) {
+      assert.equal(render([image, { ...image, ...invalid }]), false, JSON.stringify(invalid));
+    }
+    assert.equal(render([]), false);
+    assert.equal(render([image], ''), false);
+    assert.equal(render([image], 'other'), false);
+    assert.equal(render([{ ...image, StudyInstanceUID: 'prior' }]), false);
+    assert.equal(render([image, image]), 'native result');
+  }
 });

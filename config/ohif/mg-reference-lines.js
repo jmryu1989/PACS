@@ -1,5 +1,5 @@
 
-// REQ-MG-03 / REQ-VIEWER-REFERENCE-PLANE -> RISK-MG-FALSE-ANATOMY:
+// REQ-VIEWER-REFERENCE-PLANE -> RISK-VIEWER-REFERENCE-PLANE; MG also REQ-MG-03:
 // panes do not share patient coordinates merely because they occupy one tool group.
 function kinCreateMGReferenceLines() {
   let services, stop;
@@ -8,8 +8,22 @@ function kinCreateMGReferenceLines() {
     const core = window.cornerstone, manager = window.cornerstoneTools.ToolGroupManager;
     const groups = new Set(), tools = new Set(), restores = [];
     function instance(viewport) {
+      if (viewport?.type === 'orthographic') {
+        // Reformatted MPR planes have no current image ID. Native geometry uses
+        // the volume camera; establish its coordinates from the volume's sources.
+        const ids = viewport.getImageIds(), frame = viewport.getFrameOfReferenceUID();
+        const first = ids?.length ? core.metaData.get('instance', ids[0]) : null;
+        if (!frame || !first?.StudyInstanceUID || first.FrameOfReferenceUID !== frame) return null;
+        return ids.every(id => {
+          const image = core.metaData.get('instance', id);
+          return storedPlane(image) && image.FrameOfReferenceUID === frame &&
+            image.StudyInstanceUID === first.StudyInstanceUID && image.Modality === first.Modality &&
+            (image.Modality !== 'MG' || side(image) === side(first));
+        }) ? first : null;
+      }
       const imageId = viewport?.getCurrentImageId?.();
-      return imageId ? core.metaData.get('instance', imageId) : null;
+      const image = imageId ? core.metaData.get('instance', imageId) : null;
+      return storedPlane(image) ? image : null;
     }
     function storedPlane(image) {
       // imagePlaneModule already contains OHIF's fallback plane. The instance for
@@ -40,10 +54,10 @@ function kinCreateMGReferenceLines() {
       const render = tool.renderAnnotation;
       const wrapped = function (enabledElement, svgDrawingHelper) {
         // editData names the plane actually used by the native renderer. Reading current
-        // images here also covers pane replacement, scrolling and active-pane changes.
+        // images/volume sources here also covers replacement, scrolling and active-pane changes.
         const sourceViewport = core.getEnabledElementByViewportId(this.editData?.sourceViewportId)?.viewport;
         const source = instance(sourceViewport), target = instance(enabledElement.viewport);
-        if (!storedPlane(source) || !storedPlane(target) ||
+        if (!source || !target ||
             !source.FrameOfReferenceUID || source.FrameOfReferenceUID !== target.FrameOfReferenceUID ||
             !source.StudyInstanceUID || source.StudyInstanceUID !== target.StudyInstanceUID) return false;
         if (source?.Modality === 'MG' || target?.Modality === 'MG') {

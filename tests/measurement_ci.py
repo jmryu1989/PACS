@@ -767,11 +767,16 @@ def main(profile_name, credential_provider=None):
         evidence_stage = Path(runner_temp)/('kin-vr-suite-evidence-'+secrets.token_hex(6))
         evidence_stage.mkdir(parents=True, exist_ok=False)
     env = profile_environment(profile_name, out, values, evidence_stage)
+    from emr.d.synthetic_stack import configure as configure_signing, compose_arguments as signing_compose_arguments
+    signing_custody = configure_signing(ROOT, env)
     project = profile['project_prefix']+secrets.token_hex(6)
     # Fixed container names mean isolation comes from the empty hosted daemon,
     # not this project name. Helpers must still address the same Compose project.
     env['COMPOSE_PROJECT_NAME'] = project
-    compose = ['docker','compose','-p',project]
+    # The signing override is this owner's -f list only (compose[3] stays the project): the suites
+    # run with COMPOSE_FILE unset, which the e2e local-target guard requires, and reach the same
+    # containers through COMPOSE_PROJECT_NAME.
+    compose = ['docker','compose','-p',project, *signing_compose_arguments(ROOT, signing_custody)]
     results = []; deadline = time.monotonic() + profile_deadline_seconds(profile_name)
     def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()
@@ -869,6 +874,7 @@ def main(profile_name, credential_provider=None):
                         f"{row['seconds']:.3f}\t{row['name']}.log\n" for row in results), encoding='utf-8')
                 if evidence_stage is not None:
                     shutil.rmtree(evidence_stage)
+                signing_custody.cleanup()
 
 
 if __name__ == '__main__':

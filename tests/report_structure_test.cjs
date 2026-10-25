@@ -2,6 +2,8 @@
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
 const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
+// Native signing is a collaborator here; this fixture is not cryptographic evidence.
+const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 function b2Ledger(prisma) {
   return { begin: () => ({
     resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
@@ -131,7 +133,7 @@ function fixture({ state = STATE,
   const access = new PacsAccess(prisma, studyAccess), audit = new PacsAudit(prisma, studyAccess, access);
   const evidence = new PacsReportEvidence(prisma, studyAccess, findings, access);
   const drafts_ = withDraftRequestContext(new PacsReportDraft(prisma, studyAccess, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
-  const commit = withDraftRequestContext(new PacsReportCommit({ usersInGroupWithRole: async () => [] }, studyAccess, evidence, drafts_), b2Ledger(prisma));
+  const commit = withDraftRequestContext(new PacsReportCommit({ usersInGroupWithRole: async () => [] }, studyAccess, evidence, drafts_, nativeSigning), b2Ledger(prisma));
   const svc = { putReport: (...a) => drafts_.putReport(...a, null, null, null), commitReport: (...a) => commit.commitReport(...a),
     forceDiscardDrafts: (...a) => drafts_.forceDiscardDrafts(...a), reportStructure: (...a) => evidence.reportStructure(...a) };
   // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a

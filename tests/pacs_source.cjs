@@ -237,8 +237,10 @@ function createSource(options = {}) {
         const params = m.parameters.map(p => (ts.isIdentifier(p.name) && !p.dotDotDotToken ? p.name.text : '?'));
         if (!holder || holder.name.text !== w.slot || callee.name.text !== name || JSON.stringify(args) !== JSON.stringify(params))
           throw new Error(`Facade forwarding differs: ${name}`);
-        // the call reaches the moved implementation of the same name on that concern, nothing else
-        if (!resolveSymbol(callee.name).declarations.includes(member(name, 'MethodDeclaration')))
+        // EMR composition can move a public forward to a new owning module;
+        // the original concern's historical move proof remains unchanged.
+        const destination = w.implementation ? locate(w.implementation) : member(name, 'MethodDeclaration');
+        if (!resolveSymbol(callee.name).declarations.includes(destination))
           throw new Error(`Facade forwarding target differs: ${name}`);
         seenForwards.add(name);
         continue;
@@ -261,7 +263,9 @@ function createSource(options = {}) {
         assign.left.expression.kind === ts.SyntaxKind.ThisKeyword ? assign.left.name.text : null;
       const created = assign && ts.isNewExpression(assign.right) ? assign.right : null;
       const args = (created?.arguments ?? []).map(a => (ts.isPropertyAccessExpression(a) &&
-        a.expression.kind === ts.SyntaxKind.ThisKeyword ? a.name.text : null));
+        a.expression.kind === ts.SyntaxKind.ThisKeyword ? a.name.text :
+        ts.isIdentifier(a) && ctor.parameters.some(p => resolveSymbol(p.name) === resolveSymbol(a))
+          ? { parameter: a.text } : null));
       if (left !== slot.name || !created || created.expression.getText() !== slot.class || JSON.stringify(args) !== JSON.stringify(slot.args) ||
           !declaredIn(resolveSymbol(created.expression), slot.file, ts.isClassDeclaration))
         throw new Error(`Facade composition differs: ${slot.name}`);
