@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Head, Param, Patch, Post, Query, Req, Res } from '@nestjs/common';
+import { OnlineImageService } from './emr-image/service';
 import { ConnectService } from './connect.service';
 import { Caller } from './pacs.service';
 
@@ -6,7 +7,11 @@ const caller = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: r
 
 @Controller()
 export class ConnectController {
-  constructor(private svc: ConnectService) {}
+  constructor(private svc: ConnectService, private images: OnlineImageService) {}
+  @Get('images/dicom-web')
+  image(@Query('target') target: string, @Req() req: any, @Res() res: any) { return this.images.send(req, res, target); }
+  @Head('images/dicom-web')
+  imageHead(@Query('target') target: string, @Req() req: any, @Res() res: any) { return this.images.send(req, res, target); }
   @Get('admin/agreements')
   agreements(@Query() q: any, @Req() r: any) { return this.svc.listAgreements(q, caller(r)); }
   @Post('admin/agreements')

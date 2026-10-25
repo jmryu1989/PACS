@@ -414,6 +414,9 @@ export function classifyMammography(headerInput: unknown): Classified {
   try {
     if (frameError) fail(frameError);
     if (f.error) fail(f.error);
+    // A malformed source container invalidates classification as well as source
+    // linkage. Otherwise an unverified object can retain a verified slab label.
+    extractSources(h);
     if (![MG_P, MG_R, BTO].includes(sop)) fail('unsupported-sop');
     for (const uid of [sop, sopInstance, studyUid, first(h, '0020000E') ?? '']) if (uid.length > 64 || !/^[0-9]+(?:\.[0-9]+)+$/.test(uid)) fail('identity-invalid');
     if (first(h, '00080060')?.toUpperCase() !== 'MG') fail('modality-not-mg');
@@ -487,6 +490,34 @@ function declared(value: unknown, h: DicomJson): MgDeclaredSource[] {
   const inventory = (refs: MgDeclaredSource[]) => refs.map(r => JSON.stringify([r.path, r.sopClass, r.sop, r.frames])).sort();
   if (JSON.stringify(inventory(fromHeader)) !== JSON.stringify(inventory(list))) refuse('MammographyHeaderMismatch');
   return fromHeader;
+}
+
+/** Keep only the source-reference subtree needed to explain an unresolved
+ * source. A malformed sequence must not duplicate the entire patient header. */
+function sourceReferenceHeader(header: DicomJson): DicomJson {
+  type Selection = { [tag: string]: Selection | null };
+  const reference: Selection = { '00081150': null, '00081155': null, '00081160': null };
+  const source: Selection = { '00082112': reference };
+  const derivation: Selection = { '00089124': source };
+  const selection: Selection = { ...source, '00189507': source, ...derivation,
+    '52009229': derivation, '52009230': derivation };
+  const project = (value: any, wanted: Selection): any => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return structuredClone(value);
+    const out: any = {};
+    for (const [tag, children] of Object.entries(wanted)) if (Object.prototype.hasOwnProperty.call(value, tag)) {
+      const element = value[tag];
+      if (children === null || !element || typeof element !== 'object' || Array.isArray(element)) out[tag] = structuredClone(element);
+      else {
+        const retained: any = {};
+        if ('vr' in element) retained.vr = structuredClone(element.vr);
+        if ('Value' in element) retained.Value = Array.isArray(element.Value)
+          ? element.Value.map(item => project(item, children)) : project(element.Value, children);
+        out[tag] = retained;
+      }
+    }
+    return out;
+  };
+  return project(header, selection);
 }
 
 export interface MgStoreEntry { header: DicomJson; patientKey: string; institutionKey: string }
@@ -625,10 +656,7 @@ function entry(value: unknown, studyUid: string, keys: { patientKey: string; ins
     let refs: MgDeclaredSource[] = [], sourceHeader: DicomJson = null;
     try { refs = declared(m.declaredSources, header); } catch (e) {
       if (!(e instanceof Unverified)) throw e;
-      sourceHeader = structuredClone(header);
-      c.result = { ...c.result, class: 'unverified', baseClass: 'unverified', status: 'unverified', basis: e.reason,
-        fullness: c.result.fullness === 'inferred-for-hanging' ? 'undetermined' : c.result.fullness,
-        fullViewAutoMatch: false, sourceClassEligible: false };
+      sourceHeader = sourceReferenceHeader(header);
     }
     pending = { c, header, refs, sourceHeader, claimedClass: m.claimedClass === null ? null : string(m.claimedClass) };
   }

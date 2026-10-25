@@ -3041,3 +3041,15 @@ uses the actual registry/session handoff and OHIF, without replacing controllers
 The validate.yml worklist-ux-measurements registration runs only the pure boundary; served-page and physical
 results remain separate from final same-SHA G3/PR CI and Opus review. Recheck before a
 larger site, increased image/tab load or changed monitor/DPI/browser (VIEWER-FIRST-SITE-REVERIFY).
+
+### EMR E online image boundary
+
+`tests/emr/e/contract_test.cjs` checks image request/manifest and observation contracts.
+`python -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600`
+uses owned synthetic PostgreSQL, the shipped E migration/store and HTTP sockets. The
+same selected case is declared in candidate CI and the dedicated E job in validate.yml.
+It checks durable preparation before body bytes, Range/multipart/HEAD, rollback,
+interruption and staging-copy facts. It does not prove native OHIF display. The
+registered `GET`/`HEAD images/dicom-web?target=...` route requires Module A's server
+context/catalog binding (REQUEST_FACTS #211); the current binding returns 503.
+Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.

@@ -19,7 +19,8 @@ SHA = re.compile(r"[0-9a-f]{40}")
 # + SERVICES final2 measured wall time rounded up + two NET suites at the existing
 # per-suite allowance (NET has no recorded live measurement yet). These are hang
 # timeouts, not performance targets; recheck after the first complete hosted run.
-CANDIDATE_DEADLINE_SECONDS = 1500 + 2100 + 180 + 2 * 540
+# E CI measurements: production build 36s + PostgreSQL/HTTP 22s.
+CANDIDATE_DEADLINE_SECONDS = 1500 + 2100 + 180 + 2 * 540 + 36 + 22
 BASE = (
     # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (and the selection 105 -> 112).
     # CN-N01-A: OrderCorrectionInvariantTests added six live cases, 89 -> 95 (and the selection 116 -> 122).
@@ -77,6 +78,7 @@ FLOWS = (
     ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),
     ("e2e/test_finding_worklist.py", "FindingWorklistE2E", "test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close", "test_worklist_02_"),
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
+    ("emr/e/online_live.py", "OnlineImagePg", "test_fixed_image_http", "test_fixed_image_"),
 )
 
 
@@ -143,8 +145,9 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 176 and len({(x["file"], x["case"]) for x in selected}) == 176,
-            "Candidate selection must contain 176 unique exact cases")
+    expected = sum(row[3] for row in BASE) + len(FLOWS)
+    require(len(selected) == expected and len({(x["file"], x["case"]) for x in selected}) == expected,
+            "Candidate selection must match the declared unique exact cases")
     return rows, selected
 
 

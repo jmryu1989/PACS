@@ -19,6 +19,11 @@ import { canonicalManifest, parseCanonicalManifest, planArchive, writeArchive, O
 import type { ArchiveObjectResult, ManifestObjectInput, OriginalManifest } from './original-archive';
 import { DicomImportGateService, IMPORT_OBJECT_LIMIT, IMPORT_FILE_SLOTS, IMPORT_STORAGE_MESSAGE, StoredFormatError, exactKeys, precheckFile, storedTime } from './dicom-import-gate.service';
 import type { ImportOwner } from './dicom-import-gate.service';
+import type { RequestWorkContext } from './emr-runtime/request-context';
+import type { EmrRecordTransaction } from './emr-runtime/record-port';
+import type { RecordMutation } from './emr-runtime/store';
+import { newAuditLinkId } from './emr-contract/access-event';
+import type { OriginalDownloadAccessEventV2 } from './emr-contract/access-event';
 
 const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -144,8 +149,13 @@ export function checkDownloadRow(op: any): StoredDownload {
       || !text(op.ownerSubject, 256) || !text(op.actor, 256)) fail();
   const d = op.download;
   const v2 = d?.schemaVersion === 2;
-  if (!exactKeys(d, v2 ? DOWNLOAD_KEYS_V2 : DOWNLOAD_KEYS) || (d.schemaVersion !== 1 && !v2) || d.targetStudyUid !== op.studyUid
+  const keys = v2 ? DOWNLOAD_KEYS_V2 : DOWNLOAD_KEYS;
+  // Older prepared operations have no retained source-subject observation.
+  const hasSourcePatients = d && Object.prototype.hasOwnProperty.call(d, 'sourcePatientIds');
+  if (!exactKeys(d, hasSourcePatients ? [...keys, 'sourcePatientIds'] : keys) || (d.schemaVersion !== 1 && !v2) || d.targetStudyUid !== op.studyUid
       || d.destination !== 'browser-download' || !storedTime(d.preparedAt) || !Array.isArray(d.attempts)) fail();
+  if (hasSourcePatients && (!Array.isArray(d.sourcePatientIds) || !d.sourcePatientIds.length
+      || d.sourcePatientIds.some((id: unknown) => id !== null && !(typeof id === 'string' && id.trim())))) fail();
   const stored = parseCanonicalManifest(d.manifestCanonical, op.manifestSha256);
   if (!stored.ok || stored.manifest.studyUid !== op.studyUid) fail();
   const manifest = (stored as Extract<typeof stored, { ok: true }>).manifest;
@@ -499,7 +509,43 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
 
   // ── POST /api/studies/:uid/original-downloads (contract 5.2 steps 1-2) ──
 
-  async prepareDownload(uid: string, body: unknown, c: Caller) {
+  private downloadWrite<T>(request: RequestWorkContext,
+    task: (tx: EmrRecordTransaction, record: RecordMutation) => Promise<T>): Promise<T> {
+    // Keep the download gate's existing transaction bounds. B2 owns the same
+    // transaction so a ledger failure rolls back the stage and its AuditLog row.
+    return request.work.transactionWithRecords(task, { maxWait: 4000, timeout: 8000 });
+  }
+
+  private async downloadAudit(tx: EmrRecordTransaction, record: RecordMutation, request: RequestWorkContext,
+    download: { sourcePatientIds?: readonly (string | null)[] },
+    action: OriginalDownloadAccessEventV2['action'], audit: { actor: string; action: string; target: string; detail: string },
+    eventId = randomUUID(), relatedEventId: string | null = null) {
+    const detail = JSON.parse(audit.detail), facts = request.facts;
+    const known = <T>(value: T) => ({ status: 'known' as const, value });
+    // Retain the preparation's observations even after the source is unavailable; these are not formal PatientLinks.
+    const notObserved = { status: 'unresolved' as const, reason: 'not-observed' as const };
+    const event: OriginalDownloadAccessEventV2 = {
+      formatVersion: 2, branch: 'original-download', surface: facts.surface, eventId,
+      userId: known(facts.actor), rolesAtTime: known(facts.roles), actingInstitution: known(facts.institution),
+      rightsVersion: facts.rightsVersion, session: facts.binding,
+      managingInstitution: known(detail.institutionId), occurredAt: detail.at, trustedProxyIp: facts.ingress,
+      cause: 'user-view', executor: 'member', targets: (download.sourcePatientIds ?? [null]).map(sourcePatientId => ({ kind: 'download', studyId: known(audit.target),
+        recordId: known(detail.operationId), versionId: known(detail.manifestSha256),
+        sourcePatientId: sourcePatientId === null ? notObserved : known(sourcePatientId), sourceInstitution: notObserved,
+        projectionSha256: detail.manifestSha256 })),
+      action, result: action === 'provide-prepared' ? 'prepared' : action === 'transfer-aborted' ? 'aborted' :
+        action === 'permission-refused' ? 'refused' : action === 'conflict' ? 'failed' : 'succeeded',
+      requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId,
+    };
+    // Admin's existing audit report still reads these rows. B2 records their
+    // projection in this transaction instead of creating a second success log.
+    await record(event, async () => {
+      const row = await tx.auditLog.create({ data: audit });
+      return { kind: 'AuditLog', id: String(row.id), version: null };
+    });
+  }
+
+  async prepareDownload(uid: string, body: unknown, c: Caller, request: RequestWorkContext) {
     const owner = this.owner(c, 'download');
     await this.gate.ready(true);
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).join() !== 'operationId'
@@ -517,22 +563,23 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     if (plan.ok === false) throw error(409, plan.code, plan.message);
     let answer: { replay: any } | { view: any };
     try {
-      answer = await this.gate.write(async tx => {
+      answer = await this.downloadWrite(request, async (tx, record) => {
+        await request.requireCurrent(tx);
         const found = await this.gate.lockOperation(tx, operationId);
         // Two POSTs of one id: the second sees the winner's committed row and replays it (contract 5.2 step 1).
         if (found) return { replay: found };
         const now = await this.gate.clock(tx);
         const download = { schemaVersion: 1, targetStudyUid: uid, destination: 'browser-download', preparedAt: now.toISOString(),
-          manifestCanonical: built.manifestCanonical, attempts: [] as any[] };
+          manifestCanonical: built.manifestCanonical, sourcePatientIds: built.sourcePatientIds, attempts: [] as any[] };
         // claimKey and claim are left out, so both are the columns' SQL NULL that the kind check requires of a download
         // (U4BL-02): a literal null on the JSONB claim is written as the JSON null value, which is not NULL. The answer is
         // made from the row the database returned, which reads both back as null.
         const row = await tx.importOperation.create({ data: { id: operationId, ...owner, kind: 'download', studyUid: uid, status: 'prepared',
           results: [], manifestSha256: built.manifestSha256, download, createdAt: now, updatedAt: now } });
-        await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.prepare', target: uid,
+        await this.downloadAudit(tx, record, request, download, 'provide-prepared', { actor: owner.actor, action: 'original.download.prepare', target: uid,
           detail: JSON.stringify({ institutionId: owner.institutionId, operationId, studyUid: uid, manifestSha256: built.manifestSha256,
             objects: built.manifest.objects.length, bytes: totalBytes(built.manifest), ownerIssuer: owner.ownerIssuer,
-            ownerSubject: owner.ownerSubject, at: now.toISOString() }) } });
+            ownerSubject: owner.ownerSubject, at: now.toISOString() }) });
         return { view: this.downloadView(row, this.storedDownload(row)) };
       });
     } catch (failure: any) {
@@ -565,19 +612,21 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * One complete reading of the study's originals: every instance id (Expand false) with its Study/Series/SOP UIDs and its
    * stored size/MD5. 'failed' when any read fails or answers outside its form; 'tooMany' above the ZIP32 object bound.
    */
-  private async readOriginals(uid: string): Promise<{ kind: 'read'; objects: ManifestObjectInput[] } | { kind: 'failed' } | { kind: 'tooMany' }> {
+  private async readOriginals(uid: string): Promise<{ kind: 'read'; objects: ManifestObjectInput[]; sourcePatientIds: (string | null)[] } | { kind: 'failed' } | { kind: 'tooMany' }> {
     const ids = await this.gate.studyInstanceIds(uid, ORIGINAL_ARCHIVE_LIMITS.maxDicomObjects + 1);
     if (!ids) return { kind: 'failed' };
     if (ids.length > ORIGINAL_ARCHIVE_LIMITS.maxDicomObjects) return { kind: 'tooMany' };
     const objects: ManifestObjectInput[] = [];
+    const sourcePatientIds = new Set<string | null>();
     for (const orthancId of ids) {
       const uids = await this.gate.instanceUids(orthancId);
       if (!uids || uids.studyUid !== uid) return { kind: 'failed' };
       const info = await this.gate.attachmentInfo(orthancId);
       if (!info) return { kind: 'failed' };
       objects.push({ orthancId, seriesUid: uids.seriesUid, sopUid: uids.sopUid, bytes: info.bytes, md5: info.md5 });
+      sourcePatientIds.add(uids.sourcePatientId);
     }
-    return { kind: 'read', objects };
+    return { kind: 'read', objects, sourcePatientIds: [...sourcePatientIds] };
   }
 
   /**
@@ -593,7 +642,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     const second = await this.readOriginals(uid);
     if (second.kind !== 'read' || sameSet(first.objects) !== sameSet(second.objects)) return incomplete;
     const built = canonicalManifest(uid, first.objects);
-    return built.ok ? built : incomplete;
+    // Both reads processed these subjects. Preserve every observed ID without inventing a patient match.
+    return built.ok ? { ...built, sourcePatientIds: [...new Set([...first.sourcePatientIds, ...second.sourcePatientIds])] } : incomplete;
   }
 
   /**
@@ -635,7 +685,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * Format 1 becomes format 2 in this transaction; an unused grant of the operation is replaced. The answer is no-store
    * (the controller) and the raw value appears nowhere else - not in the row, the audit or a log.
    */
-  async issueArchiveGrant(uid: string, operationId: string, body: unknown, req: any, c: Caller) {
+  async issueArchiveGrant(uid: string, operationId: string, body: unknown, req: any, c: Caller, request: RequestWorkContext) {
     if (req?.authMethod !== 'session' || !text(req.sessionId, 256))
       throw error(403, 'DOWNLOAD_GRANT_SESSION_REQUIRED', TRANSFER_MESSAGES.grantSession);
     const owner = this.owner(c, 'download');
@@ -649,7 +699,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     await this.storageRead(() => this.expireDownloads(found.id), downloadStorage);
     await this.storageRead(() => this.currentRights(c, 'download', uid, req), downloadStorage);
     try {
-      return await this.gate.write(async tx => {
+      return await this.downloadWrite(request, async (tx, record) => {
+        await request.requireCurrent(tx);
         const { op, now, stored } = await this.lockDownload(tx, found.id);
         if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
         if (op.status === 'sent') throw error(409, 'DOWNLOAD_ALREADY_SENT', TRANSFER_MESSAGES.alreadySent);
@@ -665,11 +716,11 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         download.activeArchiveGrant = grant;
         checkDownloadRow({ ...op, download });
         await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
-        await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.grant', target: uid,
+        await this.downloadAudit(tx, record, request, download, 'provide-prepared', { actor: owner.actor, action: 'original.download.grant', target: uid,
           detail: JSON.stringify({ institutionId: op.institutionId, phase: 'issued', operationId: op.id, studyUid: uid, grantId: grant.grantId,
             grantHash: grant.hash, sessionRef: grant.sessionRef, ownerIssuer: owner.ownerIssuer, ownerSubject: owner.ownerSubject,
             manifestSha256: op.manifestSha256, issuedAt: grant.issuedAt, expiresAt: grant.expiresAt, replacedGrantId: replaced,
-            authMethod: 'session', bindingMethod: 'session-header', at: now.toISOString() }) } });
+            authMethod: 'session', bindingMethod: 'session-header', at: now.toISOString() }) });
         return { operationId: op.id, grantId: grant.grantId, grant: raw, expiresAt: grant.expiresAt };
       });
     } catch (failure) {
@@ -727,8 +778,9 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * active grant, if it is still that admitted one, is closed as refused with the code and the database's time, and
    * the refusal is audited; no attempt is opened. Nothing else of the row changes.
    */
-  private async refuseGrant(operationId: string, owner: ImportOwner, admission: GrantAdmission, code: string) {
-    await this.gate.write(async tx => {
+  private async refuseGrant(operationId: string, owner: ImportOwner, admission: GrantAdmission, code: string,
+    status: number, request: RequestWorkContext) {
+    await this.downloadWrite(request, async (tx, record) => {
       const { op, now, stored } = await this.lockDownload(tx, operationId);
       const a = stored?.download.schemaVersion === 2 ? stored.download.activeArchiveGrant : null;
       if (!op || !a || a.grantId !== admission.grantId || a.hash !== admission.hash || a.sessionRef !== admission.sessionRef || a.state !== 'issued') return;
@@ -737,17 +789,18 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
       download.activeArchiveGrant.refusal = { code: code.slice(0, 64), at: now.toISOString() };
       checkDownloadRow({ ...op, download });
       await tx.importOperation.update({ where: { id: op.id }, data: { download, updatedAt: now } });
-      await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.grant', target: op.studyUid,
+      await this.downloadAudit(tx, record, request, download, status === 409 ? 'conflict' : 'permission-refused',
+        { actor: owner.actor, action: 'original.download.grant', target: op.studyUid,
         detail: JSON.stringify({ institutionId: op.institutionId, phase: 'refused', operationId: op.id, studyUid: op.studyUid, grantId: a.grantId,
           grantHash: a.hash, sessionRef: a.sessionRef, ownerIssuer: a.ownerIssuer, ownerSubject: a.ownerSubject, manifestSha256: op.manifestSha256,
           issuedAt: a.issuedAt, expiresAt: a.expiresAt, admittedAt: admission.admittedAt, code, authMethod: 'session', bindingMethod: 'archive-grant',
-          at: now.toISOString() }) } });
+          at: now.toISOString() }) });
     });
   }
 
   // ── GET /api/studies/:uid/original-downloads/:operationId/archive (5.2 steps 3-7) ──
 
-  async archive(uid: string, operationId: string, req: any, res: any, c: Caller): Promise<void> {
+  async archive(uid: string, operationId: string, req: any, res: any, c: Caller, request: RequestWorkContext): Promise<void> {
     // Express maps HEAD to a GET handler: a HEAD starts no supply and consumes no grant.
     if (req.method !== 'GET') throw error(405, 'DOWNLOAD_METHOD_NOT_ALLOWED', TRANSFER_MESSAGES.methodNotAllowed);
     // Set by the guard alone, after it admitted a grant of this cookie session on this exact route (D1489).
@@ -761,7 +814,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     const refused = async (failure: unknown) => {
       if (admission && op && failure instanceof HttpException && failure.getStatus() !== 503) {
         const code = String((failure.getResponse() as any)?.code ?? 'HTTP_' + failure.getStatus());
-        await this.refuseGrant(op.id, owner, admission, code).catch(() => undefined);
+        await this.refuseGrant(op.id, owner, admission, code, failure.getStatus(), request).catch(() => undefined);
       }
       return failure;
     };
@@ -782,7 +835,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     } catch (failure) { throw await refused(failure); }
     if (!op) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
     let attempt!: Awaited<ReturnType<StudyTransferLocalService['openAttempt']>>;
-    try { attempt = await this.openAttempt(op.id, owner, stored, c, uid, admission); }
+    try { attempt = await this.openAttempt(op.id, owner, stored, c, uid, admission, request); }
     catch (failure) { throw await refused(failure); }
     // Everything is decided: headers, then bytes. From here no error becomes an HTTP status (5.2 step 6).
     res.status(200);
@@ -827,7 +880,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     // its way back) decides the result as much as one that answered: the close waits until each is judged - within its
     // own stage deadlines, which run on their own timers (nothing here adds time) - and holds no lock meanwhile.
     while (target.approvals.size) await Promise.allSettled([...target.approvals]);
-    await this.closeAttempt(op.id, owner, attempt.attemptId, result, target).catch(() => undefined);
+    await this.closeAttempt(op.id, owner, attempt.attemptId, result, target, request).catch(() => undefined);
   }
 
   /**
@@ -979,9 +1032,11 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * 5.2 step 5: one sending attempt per operation, its intent row committed before the first byte or nothing is sent. A
    * previous attempt whose sending lease ran out is closed Unconfirmed with its result row in the same transaction.
    */
-  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, c: Caller, uid: string, admission: GrantAdmission | null = null) {
+  private async openAttempt(operationId: string, owner: ImportOwner, expected: StoredDownload, c: Caller, uid: string,
+    admission: GrantAdmission | null, request: RequestWorkContext) {
     try {
-      return await this.gate.write(async tx => {
+      return await this.downloadWrite(request, async (tx, record) => {
+        await request.requireCurrent(tx);
         const { op, now, stored } = await this.lockDownload(tx, operationId);
         if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);
         const download = JSON.parse(JSON.stringify(stored!.download));
@@ -1026,12 +1081,12 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
           checkDownloadRow({ ...op, status: 'sending', download });
         }
         await tx.importOperation.update({ where: { id: operationId }, data: { download, status: 'sending', updatedAt: now } });
-        await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.intent', target: op.studyUid,
+        await this.downloadAudit(tx, record, request, download, 'provide-prepared', { actor: owner.actor, action: 'original.download.intent', target: op.studyUid,
           detail: JSON.stringify({ institutionId: op.institutionId, operationId, attemptId: attempt.attemptId, number: attempt.number,
             manifestSha256: op.manifestSha256, ownerIssuer: owner.ownerIssuer, ownerSubject: owner.ownerSubject, at: now.toISOString(),
             ...(active ? { destination: 'browser-download', bindingMethod: 'archive-grant', grantId: active.grantId, grantHash: active.hash,
               sessionRef: active.sessionRef, issuedAt: active.issuedAt, expiresAt: active.expiresAt, admittedAt: admission!.admittedAt,
-              consumedAt: now.toISOString() } : {}) }) } });
+              consumedAt: now.toISOString() } : {}) }) }, attempt.attemptId);
         return attempt;
       });
     } catch (failure) {
@@ -1085,8 +1140,9 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
    * nothing here says it was taken back. An attempt already closed by someone else (it was fenced) is left as it is:
    * that close wrote its result row.
    */
-  private async closeAttempt(operationId: string, owner: ImportOwner, attemptId: string, result: any, t: SupplyTarget) {
-    await this.gate.write(async tx => {
+  private async closeAttempt(operationId: string, owner: ImportOwner, attemptId: string, result: any, t: SupplyTarget,
+    request: RequestWorkContext) {
+    await this.downloadWrite(request, async (tx, record) => {
       const { op, now, stored } = await this.lockDownload(tx, operationId);
       const download = JSON.parse(JSON.stringify(stored!.download));
       const mine = download.attempts[download.attempts.length - 1];
@@ -1104,11 +1160,16 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         mine.responseFinished = state === 'sent';
         // The reason that decided the state: the stop reason over a finished writer or a fence, else the writer's own.
         const reason = t.stop === 'fenced' || (finished && t.stop) ? t.stop : result?.reason ?? null;
-        await tx.auditLog.create({ data: { actor: owner.actor, action: 'original.download.result', target: op.studyUid,
+        const audit = { actor: owner.actor, action: 'original.download.result', target: op.studyUid,
           detail: JSON.stringify({ institutionId: op.institutionId, operationId, attemptId, state, manifestSha256: op.manifestSha256,
             archiveSha256: mine.archiveSha256, responseFinished: mine.responseFinished, reason,
             objects: mine.objects.map((o: ArchiveObjectResult) => ({ sopUid: o.sopUid, sha256: o.sha256, bytesSupplied: o.bytesSupplied, complete: o.complete })),
-            at: now.toISOString() }) } });
+            at: now.toISOString() }) };
+        // E has no access action for an unknown transfer. Keep the durable
+        // preparation and existing operational result; never manufacture success.
+        if (state === 'unconfirmed') await tx.auditLog.create({ data: audit });
+        else await this.downloadAudit(tx, record, request, download, state === 'sent' ? 'transfer-ended' : 'transfer-aborted',
+          audit, randomUUID(), attemptId);
       }
       checkDownloadRow({ ...op, download, status: mine.state });
       await tx.importOperation.update({ where: { id: op.id }, data: { download, status: mine.state, updatedAt: now } });
