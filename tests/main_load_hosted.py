@@ -323,6 +323,8 @@ def assert_script_requests(baseline, candidate, *, landing=False):
         expected[("GET", "/worklist/hpacs-lite/report-editor-frame.js", "")] += 1
         # S9-U4b part (c): the transfer panel's standalone script (Import DICOM / Download Originals).
         expected[("GET", "/worklist/hpacs-lite/study-transfer-local.js", "")] += 1
+        # W5 Phase B: the Related Report mode's standalone script (main.html tags it before the bundle).
+        expected[("GET", "/worklist/hpacs-lite/related-report-mode.js", "")] += 1
     actual = Counter(map(tuple, candidate))
     assert actual == expected, f"different script requests: expected={expected!r}, actual={actual!r}"
 
@@ -749,8 +751,9 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         static = [r for r in waterfall.rows.values() if "/worklist/" in r.get("url", "") and "status" in r]
         assert static and all(r["protocol"] == "h2" for r in static), "static protocol mismatch"
         scripts = [r for r in static if urlparse(r["url"]).path.endswith(".js")]
-        # The candidate side's scripts: the expected requests above, one each (S9-U4b part (c) added study-transfer-local.js).
-        assert len(scripts) == (61 if stack.side == "candidate" else 56), "execution request count"
+        # The candidate side's scripts: the expected requests above, one each (S9-U4b part (c) added study-transfer-local.js;
+        # W5 Phase B related-report-mode.js: main.html's script tags 61 -> 62).
+        assert len(scripts) == (62 if stack.side == "candidate" else 56), "execution request count"
         assert all(urlparse(r["url"]).netloc == urlparse(stack.origin).netloc for r in scripts), "script-src 'self' compatibility"
         document = next(r for r in wire if r["name"] == "main.html")
         result["csp"] = {"header": document["headers"].get("content-security-policy"),

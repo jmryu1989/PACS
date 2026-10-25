@@ -87,6 +87,7 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/consultations.css",
     "worklist-v0/hpacs-lite/worklist-columns.css",
     "worklist-v0/hpacs-lite/reading-workspace.css",
+    "worklist-v0/hpacs-lite/related-report-mode.css",
     "worklist-v0/hpacs-lite/reading-panel-layout.js",
     "worklist-v0/hpacs-lite/viewer-opening.js",
     "worklist-v0/hpacs-lite/worklist-startup.js",
@@ -122,6 +123,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/finding-link-model.js",
     "worklist-v0/hpacs-lite/finding-command.js",
     "worklist-v0/hpacs-lite/report-citation.js",
+    # W5 Phase B: the Related Report mode (main.html tags it after report-editor-frame.js, before the bundle).
+    "worklist-v0/hpacs-lite/related-report-mode.js",
     "worklist-v0/hpacs-lite/report-structure.js",
     "worklist-v0/hpacs-lite/dictation-session.js",
     "worklist-v0/hpacs-lite/dictation-capture.js",

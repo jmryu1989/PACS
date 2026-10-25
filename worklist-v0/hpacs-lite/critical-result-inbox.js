@@ -365,6 +365,12 @@
     // 마지막 행의 순서 키)이고, More로 읽는 쪽은 그 뒤부터 덮는다. listPhase는 이 보기에서 받아들인 결과('none'·'ready'·'failed')다.
     let filter = 'pending', listPhase = 'none', listError = '', ready = false, nextCursor = null, listEnd = null;
     let pending = null, lastPending = null, bodyOpen = false;
+    // D1822: on the reading page the folded body opens only when the reader asks (Show Received); there it is laid out over
+    // the report area. What used to open it by itself (a first or larger pending count, a read failure, an unknown or
+    // locally refused acknowledgement) now marks the summary bar instead (`data-attention`), so a list never covers the
+    // report being written. The reader's Show Received clears the mark. Without a fold (the clinician page) nothing changes.
+    let attention = false;
+    const openBody = () => { if (!bodyOpen) attention = true; };
     // 목록 수준의 수락 기준(파일 머리의 요청 식별과 수락 기준): 지금 체인의 첫 쪽을 정한 요청 번호와, 체인이 마지막으로 받아들인 쪽의
     // 요청 번호(다음 More의 부모). 소속·쪽 범위·nextCursor·배지 수·ready·안내는 이 두 번호로만 바뀐다. 0은 이 보기에 받아들인 쪽이 없음이다.
     let chainGen = 0, tailGen = 0;
@@ -582,7 +588,7 @@
         listEnd = page.low;
         // 판독 화면 패널의 본문은 확인 대기가 처음 생기거나 늘 때 스스로 열린다. 같은 수가 이어지면 사용자가 닫은 본문을 다시 열지
         // 않는다(재알림 없음, §16.3·§17 L-2). 스스로 닫지 않는다.
-        if (lastPending === null ? read.pending > 0 : read.pending > lastPending) bodyOpen = true;
+        if (lastPending === null ? read.pending > 0 : read.pending > lastPending) openBody();
         lastPending = pending = read.pending;
         listPhase = 'ready';
         listError = '';
@@ -611,7 +617,7 @@
       boundary();
       listPhase = 'failed';
       listError = detail;
-      bodyOpen = true;
+      openBody();
       paint();
     }
 
@@ -680,7 +686,7 @@
     function localRefusal(attempt, reason) {
       attempt.state = attempt.dispatches ? 'unknown' : 'not-sent';
       attempt.detail = reason;
-      bodyOpen = true;
+      openBody();
       paint();
     }
 
@@ -765,7 +771,7 @@
 
     function unknown(attempt, retry, detail, later) {
       Object.assign(attempt, { state: 'unknown', detail, later, retried: attempt.retried || retry });
-      bodyOpen = true;
+      openBody();
       paint();
       if (retry) confirmByRead(attempt);
     }
@@ -1045,6 +1051,7 @@
         setText(toggle, bodyOpen ? 'Hide Received' : 'Show Received');
         toggle.setAttribute('aria-expanded', String(bodyOpen));
         body.hidden = !bodyOpen;
+        if (attention && !bodyOpen) region.dataset.attention = 'true'; else delete region.dataset.attention;
       }
       // 기록마다 한 번 계산한 값을 행과 줄이 함께 쓴다.
       const derived = lock !== null ? [] : [...new Set([...projections.keys(), ...attempts.keys(), ...outcomes.keys()])].map(derive);
@@ -1146,6 +1153,7 @@
     if (fold) toggle.addEventListener('click', () => {
       if (ended) return;
       bodyOpen = !bodyOpen;
+      attention = false;
       paint();
     });
     // 문서가 보이고 영역이 서 있는 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다) 알림도 띄우지 않는다.

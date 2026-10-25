@@ -250,7 +250,7 @@
      */
     function relatedInsertFreeze({ section, parts, source, admission }) {
       const uid = selectedUid, owner = draftOwner, related = relatedStudy();
-      if (!["findings", "conclusion"].includes(section) || !relatedMode) return { refused: "넣을 칸을 확인할 수 없습니다" };
+      if (!["findings", "conclusion"].includes(section)) return { refused: "넣을 칸을 확인할 수 없습니다" };
       const why = relatedInsertBlock() || reportEditorBlock(admission);
       if (why) return { refused: why };
       if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
@@ -383,7 +383,7 @@
       if (exact) {
         const at = reportFrame.capture(op.field, { start: op.offset, end: op.offset + op.text.length });
         const edit = admission => editReport([{ field: op.field, at, text: "" }], { admission });
-        const removed = relatedMode ? relatedMode.admit({ field: op.field, at, text: "", op }, edit) : edit(null);
+        const removed = relatedMode.admit({ field: op.field, at, text: "", op }, edit);
         reverted = !!removed && reportFrame.read(op.field) === op.before;
       }
       if (!relatedInsertIdentityResolved(op)) { op.state = "discard-unknown"; return; }
@@ -445,9 +445,9 @@
         renderDraftBar();
         updateReportButtons();
       }
-      if (op.state === "applied") relatedMode?.announce("삽입됨 · " + relatedInsertLabel(op));
-      else if (op.state === "discarded" && op.reverted) relatedMode?.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
-      relatedMode?.refresh();
+      if (op.state === "applied") relatedMode.announce("삽입됨 · " + relatedInsertLabel(op));
+      else if (op.state === "discarded" && op.reverted) relatedMode.announce("넣었던 글을 취소했습니다 (Insert Discarded).");
+      relatedMode.refresh();
     }
     /** Shows the pending operation's Notice again (a refused command or entry names it). */
     function relatedInsertNotice(uid) {

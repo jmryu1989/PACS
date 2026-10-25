@@ -1,4 +1,5 @@
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
+import { EmrViewingModule } from './emr-viewing/emr-viewing.module';
 import { AsrService } from './asr.service';
 import { DictationController } from './dictation.controller';
 import { StudyAccessService } from './study-access.service';
@@ -68,7 +69,7 @@ import { DicomImportGateService } from './dicom-import-gate.service';
 export class AppModule {
   static withLedger(runtime: EmrRuntime, ingress: RequestIngressConfiguration = { proxyPeers: [] }): DynamicModule {
     const requests = createRequestContext(createRequestIngress(ingress), runtime.port);
-    return { module: AppModule, providers: [
+    return { module: AppModule, imports: [EmrViewingModule.withRequests(requests.source)], providers: [
       { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
       { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
       { provide: EMR_RECORD_PORT, useValue: runtime.port },

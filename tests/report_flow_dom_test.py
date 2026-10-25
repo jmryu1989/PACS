@@ -11,9 +11,10 @@ was removed once the model was merged onto this branch (D1420), so a model witho
 Workspace Ctrl+S cases serve only the viewer document as a stand-in (VIEWER_STAND_IN), so the workspace binds its real
 keyboard listener there.
 Setup-only, documented where used: the hook case marks an insertion as out (`insertInFlight`), which the citation and
-structure suites drive for real; W5_REASON stands in
-for a future W5 Related Report mode contributing a reason at the common command block (impact section 10, item 3) - the
-page's own reportCommandBlocked is put back right after.
+structure suites drive for real. The W5 reason at the common command block is no longer stood in here (W5 Phase B): the
+real Related Report mode supplies it on the complete page (tests/related_report_mode_dom_test.py
+test_w5b_the_common_command_block_carries_the_mode_reason_and_next_prev_leave_through_the_gate,
+test_w5_mode_blocks_every_report_command_shortcut_and_late_writer, test_w5r3_report_inventory_*).
 """
 import io
 import json
@@ -233,12 +234,6 @@ class FlowSite(h.Site):
         return answer[0]
 
 
-# Setup-only stand-in for W5 (not on any branch yet): the common command block gains a reason, as W5's Related Report mode
-# will add one (design v5 section 1.6). Everything that consults the block is shipped code.
-W5_REASON = "SYN related report mode: back to the current draft first"
-W5_BLOCK_ON = """reason => { window.__w4CommandBlocked = reportCommandBlocked;
-  reportCommandBlocked = command => reason; }"""
-W5_BLOCK_OFF = "() => { reportCommandBlocked = window.__w4CommandBlocked; }"
 # One Ctrl+S keydown in Findings, as the keyboard sends it; returns whether a listener prevented the browser default
 # (the page's dispatcher stops the event at the window, so nothing after it could observe the flag).
 CTRL_S = """() => { const e = new KeyboardEvent('keydown', { key: 's', code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true });
@@ -292,7 +287,8 @@ class ReportFlowPage(unittest.TestCase):
         self.errors, self.dialogs = [], []
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.on("dialog", lambda dialog: (self.dialogs.append(dialog.message), dialog.accept()))
-        # The page's timers (autosave, polling, the navigation wait bound) run only when a case advances them.
+        # Fake timers: a case can advance the page's timers (autosave, polling, the navigation wait bound) on purpose. They
+        # still run with the wall clock unless a case stands page time still (hold_page_time, R3-SUITE-01).
         self.page.clock.install()
 
     def tearDown(self):
@@ -334,11 +330,30 @@ class ReportFlowPage(unittest.TestCase):
             self.page.wait_for_timeout(20)
 
     def settle(self, ms=150):
-        """Real time for in-flight answers to reach the page (the page's own timers stay frozen)."""
+        """Real time for in-flight answers to reach the page (page time runs along unless hold_page_time() holds it)."""
         self.page.wait_for_timeout(ms)
 
     def notice(self):
         return self.page.locator("#report-notice")
+
+    def hold_page_time(self):
+        """R3-SUITE-01: the page's clock stands still from here until release_page_time(). page.clock.install() lets page
+        time run with the wall clock, so a held draft write plus the case's own barrier (a Refresh, a sort, a composition, a
+        menu) could pass the page's 3 s navigation wait bound (LEAVE_WAIT_MS) on a slow host and end the move as Result
+        Unknown: the preserved failing 44-case record was exactly that (3.4 s of page time from the press to the release,
+        reproduced deterministically). The bound itself is test_wait_bound_stops_as_unknown_..., which advances it on purpose."""
+        self.page.clock.pause_at((self.page.evaluate("Date.now()") + 100) / 1000)
+
+    def release_page_time(self):
+        self.page.clock.resume()
+
+    def held_navigation_write(self, uid, text, writes):
+        """The held write is the navigation's own save: the one new draft PUT since the press, of this study, with this text
+        (page time stands still, so no autosave can be the request the case holds)."""
+        self.wait(lambda: self.site.held_flow_puts, "the navigation's draft write")
+        self.assertEqual(writes + 1, len(self.site.flow_puts), "exactly one write since the press")
+        _, held_uid, body, _ = self.site.held_flow_puts[0]
+        self.assertEqual((uid, text), (held_uid, body["findings"]), "the held write is the navigation's save of the typed text")
 
     def compose(self):
         self.page.locator("#findings").focus()
@@ -380,12 +395,15 @@ class ReportFlowPage(unittest.TestCase):
         self.open_study(h.PATIENT)
         self.type("SYN A typed")
         self.site.put_answers = ["hold"]
+        writes = len(self.site.flow_puts)
+        self.hold_page_time()
         self.pick(h.PATIENT_B)
-        self.wait(lambda: self.site.held_flow_puts, "the draft write of A")
+        self.held_navigation_write(h.UID, "SYN A typed", writes)
         self.settle()
         self.assertEqual(h.PATIENT, self.selected(), "the switch waits for the write's answer")
         self.assertEqual("SYN A typed", self.page.locator("#findings").input_value())
         self.site.finish_flow_put()
+        self.release_page_time()
         self.wait(lambda: self.selected() == h.PATIENT_B, "the switch after the confirmed write")
         self.assertEqual(h.PATIENT_B, self.editor_of())
         self.assertEqual({"findings": "SYN A typed", "conclusion": "", "recommendation": ""}, self.stored(h.UID))
@@ -606,10 +624,13 @@ class ReportFlowPage(unittest.TestCase):
         self.open_study(h.PATIENT)
         self.type("SYN A typed")
         self.site.put_answers = ["hold"]
+        writes = len(self.site.flow_puts)
+        self.hold_page_time()
         self.pick(h.PATIENT_B)
-        self.wait(lambda: self.site.held_flow_puts, "the draft write of A")
+        self.held_navigation_write(h.UID, "SYN A typed", writes)
         cdp = self.compose()
         self.site.finish_flow_put()
+        self.release_page_time()
         expect(self.notice()).to_contain_text("Not Moved")
         self.assertEqual(h.PATIENT, self.selected(), "no move while the reader is composing")
         cdp.send("Input.insertText", {"text": "한"})
@@ -653,10 +674,14 @@ class ReportFlowPage(unittest.TestCase):
         self.open_study(h.PATIENT)
         self.type("SYN pending navigation")
         self.site.put_answers = ["hold"]
+        writes = len(self.site.flow_puts)
+        self.hold_page_time()
         self.page.locator("#b-next").click()
-        self.wait(lambda: self.site.held_flow_puts, "A's draft write")
+        self.held_navigation_write(h.UID, "SYN pending navigation", writes)
         self.drop_from_the_list(h.UID_B, h.PATIENT_B)
+        self.assertEqual((h.PATIENT, h.PATIENT), (self.selected(), self.editor_of()), "nothing moved before the answer")
         self.site.finish_flow_put()
+        self.release_page_time()
         self.wait(lambda: self.selected() != h.PATIENT, "the move after the confirmed write")
         self.assertEqual((PATIENT_C, PATIENT_C), (self.selected(), self.editor_of()))
         self.assertEqual("SYN pending navigation", self.stored(h.UID)["findings"])
@@ -666,10 +691,13 @@ class ReportFlowPage(unittest.TestCase):
         self.open_study(h.PATIENT)
         self.type("SYN A sorted")
         self.site.put_answers = ["hold"]
+        writes = len(self.site.flow_puts)
+        self.hold_page_time()
         self.page.locator("#b-next").click()   # BRAVO follows ALPHA in the order the reader sees
-        self.wait(lambda: self.site.held_flow_puts, "A's draft write")
+        self.held_navigation_write(h.UID, "SYN A sorted", writes)
         self.sort_by_name_descending()          # ALPHA is now the last row
         self.site.finish_flow_put()
+        self.release_page_time()
         self.wait(lambda: self.selected() != h.PATIENT, "the move after the confirmed write")
         self.assertEqual(h.PATIENT_B, self.selected())
 
@@ -678,10 +706,13 @@ class ReportFlowPage(unittest.TestCase):
         self.open_study(h.PATIENT_B)
         self.type("SYN B before the last row")
         self.site.put_answers = ["hold"]
+        writes = len(self.site.flow_puts)
+        self.hold_page_time()
         self.page.locator("#b-next").click()   # CHARLIE, the last row
-        self.wait(lambda: self.site.held_flow_puts, "B's draft write")
+        self.held_navigation_write(h.UID_B, "SYN B before the last row", writes)
         self.drop_from_the_list(UID_C, PATIENT_C)
         self.site.finish_flow_put()
+        self.release_page_time()
         self.settle(400)
         self.assertEqual(h.PATIENT_B, self.selected(), "no later candidate: it stays, never the first row")
         self.assertEqual("SYN B before the last row", self.stored(h.UID_B)["findings"])
@@ -691,10 +722,13 @@ class ReportFlowPage(unittest.TestCase):
         self.open_study(PATIENT_C)
         self.type("SYN C typed")
         self.site.put_answers = ["hold"]
+        writes = len(self.site.flow_puts)
+        self.hold_page_time()
         self.page.locator("#b-prev").click()   # BRAVO
-        self.wait(lambda: self.site.held_flow_puts, "C's draft write")
+        self.held_navigation_write(UID_C, "SYN C typed", writes)
         self.drop_from_the_list(h.UID_B, h.PATIENT_B)
         self.site.finish_flow_put()
+        self.release_page_time()
         self.wait(lambda: self.selected() != PATIENT_C, "the move after the confirmed write")
         self.assertEqual(h.PATIENT, self.selected())
 
@@ -909,10 +943,13 @@ class ReportFlowPage(unittest.TestCase):
         self.open_study(h.PATIENT)
         self.type("SYN A typed")
         self.site.put_answers = ["hold"]
+        writes = len(self.site.flow_puts)
+        self.hold_page_time()
         self.right_click(h.PATIENT_B)
-        self.wait(lambda: self.site.held_flow_puts, "the draft write of A")
+        self.held_navigation_write(h.UID, "SYN A typed", writes)
         self.assertFalse(self.menu_shown(), "the menu waits for the move")
         self.site.finish_flow_put()
+        self.release_page_time()
         self.wait(self.menu_shown, "the menu of B once B is selected")
         self.assertEqual(h.PATIENT_B, self.selected())
         self.page.locator("#ctx [data-i]", has_text="판독문 작성으로").click()
@@ -1107,25 +1144,15 @@ class ReportFlowPage(unittest.TestCase):
                          [(body["action"], body["findings"]) for _, body in self.site.flow_commits], "exactly one commit")
 
     # ── W5 interface: the common command block and the read-only draft snapshot (W4F-05) ──
-    def test_a_command_block_reason_stops_every_report_command_and_none_keeps_the_same_path(self):
-        """W5_COMMAND_BLOCK (W4F-05): Approve, Approve & Next, Next, Prev and Ctrl+S all consume the common block. With a
-        reason nothing moves, commits or writes, and the reason is said; without one each is the same one-click path."""
+    def test_without_a_command_block_reason_each_report_command_keeps_its_one_click_path(self):
+        """W5_COMMAND_BLOCK (W4F-05): with no reason at the common block the paths are the ones before - Approve is one
+        click, one commit; Next with nothing unconfirmed switches in the same event. The reason itself (the Related Report
+        mode) is the complete page's case (related_report_mode_dom_test.py, W5 Phase B: no stand-in here)."""
         self.open()
         self.open_study(h.PATIENT_B)
         self.type("SYN B blocked")
-        self.page.evaluate(W5_BLOCK_ON, W5_REASON)
-        writes = len(self.site.flow_puts)
-        for button in ("#b-next", "#b-prev", "#b-approve", "#b-approve-next"):
-            self.page.locator(button).click()
-            expect(self.page.locator("#toast")).to_have_text(W5_REASON)
-            self.page.evaluate("() => { $('#toast').textContent = ''; }")
-        self.page.locator("#findings").focus()
-        self.assertFalse(self.page.evaluate(CTRL_S), "Ctrl+S ran nothing: the browser default is left alone")
-        self.settle(300)
-        self.assertEqual((h.PATIENT_B, [], writes), (self.selected(), self.site.flow_commits, len(self.site.flow_puts)))
-        # No reason: the paths are the ones before - Approve is one click, one commit; Next with nothing unconfirmed
-        # switches in the same event.
-        self.page.evaluate(W5_BLOCK_OFF)
+        self.assertIsNone(self.page.evaluate("['approve', 'finalize', 'finalize-next', 'next', 'prev'].map(reportCommandBlocked)"
+                                             ".find(reason => reason !== null) ?? null"))
         self.page.locator("#b-approve").click()
         self.wait(lambda: self.site.flow_commits, "the approval")
         self.assertEqual(["approve"], [body["action"] for _, body in self.site.flow_commits])
@@ -1259,11 +1286,8 @@ MUTANTS = [
      "KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event)", "test_study_info_and_templates_keys_on_the_v2_map"),
     ("finalize-hook-always-true", "page-boot.js", "finalize: () => finalizeCommand()", "finalize: () => (finalizeCommand(), true)",
      "test_report_commands_finalize_answers_true_only_when_the_command_ran"),
-    # W4F-05: every report command consumes the common block (W5 interface).
-    ("approve-bypasses-the-common-block", "report-commit.js", 'const why = reportCommandBlocked("approve");',
-     "const why = null;", "test_a_command_block_reason_stops_every_report_command_and_none_keeps_the_same_path"),
-    ("next-prev-bypass-the-common-block", "report-toolbar.js", 'const why = reportCommandBlocked(step > 0 ? "next" : "prev");',
-     "const why = null;", "test_a_command_block_reason_stops_every_report_command_and_none_keeps_the_same_path"),
+    # W4F-05's two stand-in mutants (Approve / Next-Prev bypassing the common block) moved with the W5 reason to the
+    # complete page in W5 Phase B: related_report_mode_mutants.py M9-shared-command-admission-removed / commit-in-the-mode.
     ("finalize-hook-ran-during-insertion", "report-commit.js",
      'if (mode !== "Radiology" || commitInFlight || insertInFlight || reportCommandBlocked("finalize")) return false;',
      'if (mode !== "Radiology" || reportCommandBlocked("finalize")) return false;',
