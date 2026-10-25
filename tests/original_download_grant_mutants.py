@@ -38,8 +38,7 @@ MUTANTS = [
     ("DG-M08-sent-without-the-finish", SERVICE,
      "const state = t.stop === 'fenced' || !exact ? 'unconfirmed' : t.stop === 'aborted' || !finished ? 'incomplete' : 'sent';",
      "const state = t.stop === 'fenced' ? 'unconfirmed' : 'sent';", "S9U4-B30"),
-    # U4C-05: the rights read again inside the consume transaction, under its lock - without it a right lost after the
-    # preflight still consumes the grant and opens an attempt with its intent.
+    # U4C-05: the rights read again under the attempt lock; without it a right lost after preflight opens an attempt.
     ("DG-M11-no-rights-under-the-consume-lock", SERVICE,
      "          if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');\n"
      "          await this.ownStudyLocked(tx, uid, c);\n",
@@ -54,12 +53,12 @@ MUTANTS = [
     ("S2b-no-route-uid-check-anywhere", SERVICE,
      ["        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
       "        if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw",
-      "    if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);\n"
-      "    await this.downloadStudyNow(uid, c);\n    // After the scope check"],
+      "      if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);\n"
+      "      await this.downloadStudyNow(uid, c);\n      // After the scope check"],
      ["        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
       "        if (!op || !this.ownsDownload(op, owner)) throw",
-      "    if (!op || !this.ownsDownload(op, owner)) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);\n"
-      "    await this.downloadStudyNow(uid, c);\n    // After the scope check"], "S9U4-B85"),    # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
+      "      if (!op || !this.ownsDownload(op, owner)) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);\n"
+      "      await this.downloadStudyNow(uid, c);\n      // After the scope check"], "S9U4-B85"),    # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
     # the start of an operation prepared before its Study UID became split would go on.
     ("M-WSU-19-download-source-check-skipped", SERVICE,
      "    this.studyAccess.assertUnsplitSource(c, uid);\n", "", "S9U4-B81"),

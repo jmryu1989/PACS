@@ -58,6 +58,7 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "original.download.grant": 'detail.institutionId',
   "original.download.intent": 'detail.institutionId',
   "original.download.result": 'detail.institutionId',
+  "original.download.refused": 'detail.institutionId',
 });
 
 /** `report.<action>` 확정 행은 detail.by(행위 기관)로 귀속한다. commitReport가 받는 여섯 동작이다. */

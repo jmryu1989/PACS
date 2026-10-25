@@ -597,6 +597,22 @@ class SessionEndLive(unittest.TestCase):
         self.report("SE-05", ends=self.ends("A"))
 
 
+    def test_06_an_untrusted_browser_is_asked_for_credentials_and_enters(self):
+        """Acceptance 4: the browser cannot keep an end record, its product cookie is gone, doctor A's SSO is alive."""
+        context, page = self.profile(STORAGE_DENIED)
+        self.sign_in(page, "A")
+        context.clear_cookies(name="kin_sid")
+        page.goto(self.stack.proxy + APP + "index.html")
+        self.assertEqual(self.settle(page), "landing", "an untrusted browser does not enter by itself")
+        time.sleep(1)
+        self.assertEqual(urlparse(page.url).path, APP + "index.html")
+        del context.asked[:]
+        self.assertEqual(self.press(page, "#signin"), "keycloak")
+        self.assert_editable_form(page, "the recovery Login")
+        self.assertEqual(context.asked, [("start", "storage_untrusted", False), ("authorize", "login")])
+        self.assertEqual(self.credentials(page, "A"), "main")
+        self.report("SE-06", asked=len(context.asked))
+
     def test_07_a_provider_end_racing_a_refresh_still_ends_the_session(self):
         """F2: an end that overlaps a refresh of the same provider session. Whatever the provider does with the overlap,
         the product's mark keeps that session out and the end is asked again until the form is what a login meets."""

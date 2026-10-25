@@ -76,7 +76,8 @@ export class AuthController {
     if (result.kind === 'entered') {
       // 늦은 로그아웃 응답이 새 쿠키를 지우지 않도록 성공한 콜백만 쿠키를 쓴다.
       this.auth.setSessionCookie(res, result.sid);
-      res.redirect(302, `${pages}/${result.document}`);
+      // 저장소가 막힌 브라우저도 이 명시적 로그인에서 한 번 진입한다. 신원은 문서의 /me가 확인한다.
+      res.redirect(302, `${pages}/${result.document}#kin-login`);
     } else if (result.kind === 'work') {
       res.redirect(302, `${pages}/main.html`);
     } else {

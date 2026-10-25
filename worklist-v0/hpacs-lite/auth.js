@@ -2,6 +2,9 @@
 const KinAuth = (() => {
   const API = `${location.origin}/api`;
   const KC = `${location.origin}/auth`;
+  // 콜백이 연 문서만 저장소 오류와 앞선 기록을 넘겨받는다. 인증값이 아니며 새로고침에는 남기지 않는다.
+  const explicitLogin = location.hash === '#kin-login';
+  if (explicitLogin) history.replaceState(history.state, '', location.pathname + location.search);
   const LEGACY_KEYS = [
     'kin-at', 'kin-rt', 'kin-it', 'kin-exp', 'kin-verifier', 'kin-state', 'kin-user', 'kin-roles',
   ];
@@ -83,7 +86,7 @@ const KinAuth = (() => {
   const PREPARING_RECHECK_MS = 1000;
 
   let state = 'unknown';
-  // unknown의 사유(storage·record·entry) 또는 unconfirmed의 실패 구분.
+  // unknown의 사유(storage·record) 또는 unconfirmed의 실패 구분.
   let reason = null;
   let sessionId = null;
   let cached = null;
@@ -323,7 +326,7 @@ const KinAuth = (() => {
   }
   prune();
   // 첫 /me 응답으로 세션을 확인한 뒤 그 세션의 종료 기록만 적용한다.
-  if (!reliable || readAll().unreadable) classify();
+  if (!explicitLogin && (!reliable || readAll().unreadable)) classify();
 
   /** 서버에 물을 수 있는 시작인가: 아직 아무것도 정해지지 않은 unknown뿐이다. */
   function undecided() { return state === 'unknown' && reason === null; }
@@ -495,13 +498,13 @@ const KinAuth = (() => {
 
   /**
    * 확인한 신원을 이 문서의 것으로 삼는다 — 삼기 직전에 한 번 더 본다(Sol U5R2-F02). 답을 기다리는 사이 이 문서가 닫혔거나,
-   * 그 세션의 종료가 기록되었거나 통지되었으면 그 답은 신원을 만들지 않는다. 증명 없는 진입은 어느 세션의 것이든 사람의
-   * 로그아웃 기록 앞에 선다. 그 세션의 "떠나려는 중"은 막지 않는다 — 살아 있는 창의 것인지는 진입이 이미 가렸다.
+   * 그 세션의 종료가 기록되었거나 통지되었으면 그 답은 신원을 만들지 않는다. 명시적 로그인에서 돌아온 문서는 읽기 불가
+   * 기록을 넘겨받는다. 그 세션의 "떠나려는 중"은 막지 않는다 — 살아 있는 창의 것인지는 진입이 이미 가렸다.
    */
   function adopt(id, identity) {
     if (!undecided()) return null;
     const { records, unreadable } = readAll();
-    if (unreadable) {
+    if (unreadable && !explicitLogin) {
       reason = 'record';
       announce();
       return null;
@@ -590,7 +593,7 @@ const KinAuth = (() => {
 
   function land(session) {
     if (!/\/main\.html$/.test(location.pathname) || home(session) !== 'clinician.html') return session;
-    location.replace('clinician.html');
+    location.replace('clinician.html' + (explicitLogin ? '#kin-login' : ''));
     return new Promise(() => {});
   }
 
@@ -710,8 +713,8 @@ const KinAuth = (() => {
   /**
    * 종료 기록을 다시 읽는다(storage 알림, 창 초점·탭 표시·뒤로 가기 복원). 일하는 문서는 자기 세션의 기록에만 닫힌다 — 다른
    * 세션의 기록과 "떠나려는 중"은 그 문서들의 일이고, 읽을 수 없게 된 저장소는 종료 신호가 아니다(저장소 오류로 의사의 화면을
-   * 닫지 않는다; 그 세션이 정말 끝났으면 다음 요청의 답이 말한다). 증명으로 들어가는 중인 문서는 자기 새 세션의 종료만
-   * 따른다(A013). 아직 들어가지 않은 문서와 닫힌 문서(랜딩)는 가장 나중의 사람의 로그아웃 기록을 따르되, 기록이 지워진 것
+   * 닫지 않는다; 그 세션이 정말 끝났으면 다음 요청의 답이 말한다). 신원을 확인 중인 문서는 /me의 답을 받을 때 자기 세션의
+   * 종료를 대조한다. 닫힌 문서(랜딩)는 가장 나중의 사람의 로그아웃 기록을 따르되, 기록이 지워진 것
    * (다른 탭의 명시적 로그인)으로 다시 열리지 않는다.
    */
   function recheck() {
@@ -786,7 +789,7 @@ const KinAuth = (() => {
    *   살아 있는 세션 + 그 세션의 기록 없음(기록이 없거나 다른 세션의 것뿐)  → 그 세션으로 들어간다. 추가 클릭도 재인증도 없다.
    *   살아 있는 세션 + 그 세션의 사람의 로그아웃 기록(또는 들은 로그아웃)   → 재인증, 사유 logout_unfinished
    *   살아 있는 세션 + 믿을 수 없는 저장소 / 읽을 수 없는 기록              → 재인증, 사유 storage_untrusted / record_unreadable
-   *   세션 없음(401) + 사람의 로그아웃 기록 또는 믿을 수 없는 저장소·기록    → 재인증(끝낼 세션은 없다 — 서버가 SSO를 알아내 끝낸다)
+   *   세션 없음(401) + 사람의 로그아웃 기록 또는 믿을 수 없는 저장소·기록    → 재인증(끝낼 제품 세션 없이 자격증명 입력을 청한다)
    *   세션 없음(401) + 그 밖(서버가 끝낸 세션의 기록, 기록 없음)            → 평범한 로그인 링크
    *   계정 전환                                                            → 재인증, 사유 switch_account
    *   확인 실패(5xx·시간 초과·연결)                                         → 안내, 같은 버튼으로 다시
@@ -815,9 +818,9 @@ const KinAuth = (() => {
         let read;
         try { read = readIdentity(answer); }
         catch (error) { throw new Error(error.message + ' · "다른 계정으로 로그인"을 눌러 다시 로그인하세요.'); }
-        // 이 명시적 확인은 성공한 증명 진입처럼 앞선 세션의 기록만 넘겨받는다.
+        // 이 명시적 확인은 앞선 세션의 기록만 넘겨받는다.
         state = 'unknown'; reason = null; sessionId = null; operation = 0; pendingLeaving = null;
-        if (adopt(read.id, read.identity, true)) { moved = true; location.href = home(cached); return; }
+        if (adopt(read.id, read.identity)) { moved = true; location.href = home(cached); return; }
         throw new Error('그사이 이 로그인 세션의 종료가 기록되었습니다. 버튼을 다시 눌러 주세요.');
       }
     }
@@ -884,7 +887,7 @@ const KinAuth = (() => {
               }
               if (typeof onRetry === 'function') onRetry();
               await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-              // 기다리는 사이의 기록을 다시 본다: 증명으로 들어가는 문서는 자기 새 세션의 종료만, 그 밖의 문서는 평소대로.
+              // 기다리는 사이의 기록을 다시 본다. 신원 확인 중에는 adopt가 응답 세션의 종료를 대조한다.
               recheck();
               if (!undecided() || moved) return null;
             }
@@ -923,7 +926,7 @@ const KinAuth = (() => {
 
     /**
      * 랜딩이 먼저 보는 닫힘 상태: null(막는 것이 없다 — 일하는 중이거나 서버에 물어도 된다), ending·unconfirmed·confirmed
-     * (실패 구분과 함께), 또는 unknown(사유: storage·record·entry).
+     * (실패 구분과 함께), 또는 unknown(사유: storage·record).
      */
     endState() {
       if (state !== 'active') recheck();

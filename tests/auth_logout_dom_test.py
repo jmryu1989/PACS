@@ -72,6 +72,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # The four pages and every local file they reference (script src, link href, img src; /kin-brand/ is proxy/branding/),
 # in document order. CI-17 records exactly these with this file.
 SERVED_FILES = (
+    "worklist-v0/hpacs-lite/admin-access-review.js",
     "worklist-v0/hpacs-lite/index.html",
     "proxy/branding/kin-emblem-j1.svg",
     "proxy/branding/kin-favicon-32.png",
@@ -365,13 +366,13 @@ class Site:
 
     def complete_login(self):
         """The OIDC round trip stands in as one step: the browser has a new session for login_as and the callback's
-        redirect carries a single-use entry proof in the fragment (wire contract 3, 4)."""
+        redirect identifies the explicit login document with a non-secret fragment."""
         self.logins += 1
         if self.login_as is None:
             # The round trip came back without a session cookie (a blocked cookie, a failed callback without its error).
             return '<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'index.html")</script>'
         session = self.sign_in(self.login_as)
-        return '<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'main.html")</script>'
+        return '<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'main.html#kin-login")</script>'
 
 
     # ── the draft row of UID (wire contract 5) ──
@@ -1019,6 +1020,20 @@ class LogoutDOMTest(unittest.TestCase):
         expect(page.locator("#rows")).to_contain_text(PATIENT)
 
     # ── S09 / BR-07: entry without an end record ──
+    def test_explicit_login_opens_served_worklist_with_untrusted_storage(self):
+        for fault in (NO_STORAGE, WRITES_FAIL % json.dumps(["kin-session-probe", "kin-session-end"]),
+                      "localStorage.setItem('kin-session-end:old', '{unreadable');"):
+            with self.subTest(storage=fault):
+                self.fresh_context()
+                self.context.add_init_script(fault)
+                self.site.account = None
+                self.page.goto(INDEX_URL)
+                self.sign_in_from_landing()
+                self.assertEqual(self.screen()["state"], "active")
+                self.assertEqual(self.site.logins, 1)
+                self.assertEqual(urlparse(self.page.url).fragment, '')
+                self.assertEqual(self.site.entries, [])
+
     def test_s09_no_session_starts_the_login_by_itself_and_enters_without_a_click(self):
         # The start of a day: no session in this browser, reliable storage, no end record. Nothing is pressed.
         for first in ("index.html", "main.html"):

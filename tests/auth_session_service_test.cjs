@@ -9,7 +9,7 @@
  * and the DB failure boundary contract (section 0.B, S7-U5-SPEC-F02), as replaced by Astra spec U5S (REQ-05, 08, 09, 10)
  * and its 2026-10-04 amendments: a logout revokes and records before Keycloak is told and does not wait for it; no
  * answer expires kin_sid; a cookie request names the session its document saw (X-KIN-Session); a login is entered with
- * a single-use proof; a refresh starts ahead of the token's expiry and only Keycloak's refusal of the refresh token ends
+ * the callback document and /me; a refresh starts ahead of the token's expiry and only Keycloak's refusal of the refresh token ends
  * a session (U5S-AMD-04, U5S-TEST-S05/S07/S11, U5S-REQ-08/09 at the end of this file). The expected values are the
  * contract's literals, never read back from the implementation.
  *
@@ -385,7 +385,7 @@ test('U5S-ENTRY-01 callback delivers a session to the approved member final docu
     assert.equal(target.origin + target.pathname, ORIGIN + '/worklist/hpacs-lite/' + document, label);
     assert.equal(target.search, '', 'proof never rides in the query');
     assert.ok(done.newSid, label);
-    assert.equal(target.hash, '', 'callback redirects directly');
+    assert.equal(target.hash, '#kin-login', 'callback identifies the explicit login document without a proof');
     const entry = await w.call(w.I1, 'me', { sid: done.newSid });
     assert.equal(entry.status, status, label);
     const me = await w.call(w.I1, 'me', { sid: done.newSid, binding: entry.body.sessionId });
@@ -955,7 +955,7 @@ test('AS-01 a login writes its session and one success row in one transaction', 
   const first = await login(w, w.I1, v);
   const after = new Date();
   assert.deepEqual([first.done.status, first.done.location, !!first.done.newSid],
-    [302, ORIGIN + '/worklist/hpacs-lite/main.html', true], 'the callback is the one answer that sets kin_sid; the redirect has no entry proof');
+    [302, ORIGIN + '/worklist/hpacs-lite/main.html#kin-login', true], 'the callback is the one answer that sets kin_sid; the redirect has no entry proof');
   assert.equal(await w.sessions(), 1);
   assert.deepEqual(await w.rows(), [{ actor: 'syn-ma@synthetic.test', action: 'auth.login', target: 'syn-sub-ma',
     detail: { institution: A, ip: IP, dataSubject: null, outcome: 'success' } }]);
@@ -4033,4 +4033,52 @@ test('PC3 login uses prompt=login and PKCE; bound logout needs no CSRF header', 
   assert.equal(kc.endRequests.length, 1);
   assert.deepEqual(summary(await w.rows()), [['auth.login', 'success', A], ['auth.logout', 'logout', A]]);
   await w.finish('PC3');
+});
+
+test('U5E-02 (acceptance 2) a session a callback created first on the same provider session ends with the Log out of its sibling; a row from before the column too', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e2';
+  const s1 = await w.session(await w.issue('u5e2-v1', { sub: s, groups: [A] }));
+  // C first: the browser lost its cookie, the SSO answered without a form, S2 exists on the same provider session.
+  const c = await login(w, w.I2, await w.issue('u5e2-v2', { sub: s, groups: [B] }));
+  const s2 = c.done.newSid;
+  assert.deepEqual([await w.sessions(), !!s2], [2, true]);
+  const asked = kc.logouts;
+  const out = await w.call(w.I1, 'logout', { sid: s1 });
+  assert.deepEqual([out.status, await w.sessions(), await w.told() - asked], [204, 0, 1], 'both rows gone, the provider told once');
+  // One record per product row really ended, each with its own recorded institution; no row twice.
+  assert.deepEqual(await endsOf(w, s), [['auth.logout', 'logout', A], ['auth.logout', 'logout', A]]);
+  const after = await w.call(w.I2, 'get', { sid: s2 });
+  assert.deepEqual([...coded(after), after.cookie], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'K']);
+  // A session stored before the column existed (idpSid empty): its end reads the provider session from its stored token.
+  const old = 'syn-sub-u5e2-old';
+  const legacy = await w.session(await w.issue('u5e2-old', { sub: old, groups: [A] }), { legacy: true });
+  assert.equal((await w.call(w.I1, 'logout', { sid: legacy })).status, 204);
+  await w.told();
+  assert.equal(kc.endRequests.includes(idpOf(old)), true);
+  assert.deepEqual(await endsOf(w, old), [['auth.logout', 'logout', A]]);
+  await w.finish('U5E-02');
+});
+
+test('U5E-03 (acceptance 3) the same doctor on two PCs: the Log out of one leaves the other working, also after its refresh', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e3';
+  const pc1 = await w.issue('u5e3-pc1', { sub: s, groups: [A], idp: 'syn-idp-pc1' });
+  const pc2 = await w.issue('u5e3-pc2', { sub: s, groups: [A], idp: 'syn-idp-pc2' });
+  const pc2next = await w.issue('u5e3-pc2-next', { sub: s, groups: [A], idp: 'syn-idp-pc2' });
+  const sid1 = await w.session(pc1), sid2 = await w.session(pc2, { atExpiresAt: lapsed() });
+  assert.equal((await w.call(w.I1, 'logout', { sid: sid1 })).status, 204);
+  await w.told();
+  kc.auto = chainAnswers(new Map([[pc2.refresh, pc2next]]));
+  const other = await w.call(w.I2, 'get', { sid: sid2 });
+  kc.auto = null;
+  assert.deepEqual([other.status, await w.version(sid2), kc.endRequests], [200, 'u5e3-pc2-next', ['syn-idp-pc1']],
+    'PC2 goes on with a refreshed token of its own provider session; only PC1\'s was ended');
+  // A refresh that answers with another provider session's token is not this session's: not stored, nothing ended.
+  const sid3 = await w.session(await w.issue('u5e3-v', { sub: s, groups: [A], idp: 'syn-idp-pc3' }), { atExpiresAt: lapsed() });
+  kc.auto = () => reply.tokens(pc2next);
+  const strange = await w.call(w.I1, 'get', { sid: sid3 });
+  kc.auto = null;
+  assert.deepEqual([...coded(strange), await w.version(sid3)], [503, 'AUTH_IDP_UNAVAILABLE', 'AUTH_IDP_UNAVAILABLE', 'u5e3-v']);
+  await w.finish('U5E-03');
 });

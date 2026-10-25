@@ -31,7 +31,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AuthService } = require('/app/dist/auth.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
-const { createRequestContext, REQUEST_CONTEXT_CAPTURE } = require('/app/dist/emr-runtime/request-context');
+const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = require('/app/dist/emr-runtime/request-context');
 const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
 const { readDicomPart10 } = require('/app/dist/dicom-part10-reader');
 
@@ -433,8 +433,9 @@ function store({ institutions } = {}) {
   s.prisma.$transaction = async (fn, options) => {
     s.transactions++;
     // What the gate relies on, not the numbers it picked (D73): READ COMMITTED (each statement sees what committed before
-    // it, so a row read after its lock is current) and a bounded wait and duration.
-    assert.equal(options?.isolationLevel, 'ReadCommitted');
+    // it, so a row read after its lock is current) and a bounded wait and duration. B2's transactionWithRecords (the
+    // download stages) leaves the level unset, which is PostgreSQL's default READ COMMITTED; no other level is accepted.
+    assert.equal(options?.isolationLevel ?? 'ReadCommitted', 'ReadCommitted');
     assert.ok([options?.maxWait, options?.timeout].every(v => Number.isFinite(v) && v > 0), 'a bounded transaction');
     const tx = { id: ++transactionSeq, undo: [], created: [], held: { list: [], keys: new Set() }, operationLocked: false };
     s.openTransactions++;
@@ -469,6 +470,7 @@ function store({ institutions } = {}) {
 
 // ── the Nest application: the product's controller, services and parser; a test guard stands in for the global AuthGuard ──
 class TestGuard {
+  constructor(capture) { this.capture = capture; }
   canActivate(ctx) {
     const req = ctx.switchToHttp().getRequest();
     const c = JSON.parse(req.headers['x-test-caller'] || 'null');
@@ -476,10 +478,16 @@ class TestGuard {
     Object.assign(req, c, c.session ? { authMethod: 'session', sid: c.session } : { authMethod: 'bearer' });
     // The credential the real guard verified: a bearer caller carries its synthetic access token on the same request.
     if (!c.session) req.headers.authorization = 'Bearer ' + (c.token ?? 'tok:' + c.sub);
+    this.capture.capture(req, ctx.switchToHttp().getResponse(), {
+      issuer: process.env.KC_ISSUER || 'https://synthetic.test/fixture', subject: c.sub || 'fixture-missing-subject',
+      roles: c.roles, institution: c.institution, rightsVersion: 1,
+      binding: { method: 'bearer', sessionRef: null },
+    }, { method: req.method, route: req.route.path.replace(/^\/api\//, ''), purpose: 'clinical' }, async () => {});
     return true;
   }
 }
 common.Injectable()(TestGuard);
+common.Inject(REQUEST_CONTEXT_CAPTURE)(TestGuard, undefined, 0);
 
 /**
  * AuthService's public checks over the store: a cookie session lives while its row does; a synthetic bearer token
@@ -494,7 +502,7 @@ function fakeAuth(s) {
       if (s.onAuth) await s.onAuth();
       if (s.authFailure) throw s.authFailure();
       if (!raw.startsWith('tok:') || s.expiredTokens.has(raw)) throw new common.UnauthorizedException('토큰 검증 실패: synthetic');
-      return { sub: raw.slice(4), sid: 'idp:' + raw.slice(4) };
+      return { iss: process.env.KC_ISSUER, sub: raw.slice(4), sid: 'idp:' + raw.slice(4) };
     },
     bearerRights: async payload => {
       if (s.idpEnded.has(payload.sid)) throw new common.UnauthorizedException({ code: 'AUTH_SESSION_ENDED', message: '인증 세션이 없습니다' });
@@ -538,8 +546,10 @@ function guardAuth(s) {
       return { ...payload, email: payload.sub.replace(/-sub$/, '') + '@synthetic.test', realm_access: { roles: r?.roles ?? [] }, groups: r ? ['/' + r.institution] : [] };
     },
     sessionRights: async session => { count('sessionRights'); return s.rights.get(session.sub) ?? null; },
-    // Transfer authorization has its own recheck; these cases do not consume facts.
-    bindCurrentAuthorization: () => async () => { throw new Error('Unexpected request-facts consumer'); },
+    bindCurrentAuthorization: payload => async () => {
+      const row = s.rights.get(payload.sub);
+      if (!row?.approved || row.suspended) throw new common.ForbiddenException();
+    },
     credentialsMissing: () => refusal(401, 'AUTH_CREDENTIALS_MISSING', '인증 정보가 없습니다'),
   };
 }
@@ -568,11 +578,25 @@ async function harness(options = {}) {
   };
   const access = new StudyAccessService(s.prisma, { studyIdentityResources, ...(options.accessOrthanc ?? {}) }, {});
   class TestModule {}
+  const identities = new Map();
   const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), {
-    begin() { throw new Error('Transfer route unexpectedly opened request-facts work'); },
+    begin() {
+      return {
+        resolveRequestIdentity: async (issuer, subject) => {
+          const key = JSON.stringify([issuer, subject]);
+          if (!identities.has(key)) identities.set(key, randomUUID());
+          return identities.get(key);
+        },
+        // This recording store models the port's transaction only. The live
+        // HTTP/PG test exercises B2 admission, parsing and durable appends.
+        transactionWithRecords: (task, bounds) => s.prisma.$transaction(tx => task(tx, (_event, effect) => effect()), bounds),
+        end() {},
+      };
+    },
   });
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
     { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
+    { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
     { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access },
     { provide: AuthService, useValue: options.realGuard ? guardAuth(s) : fakeAuth(s) },
     { provide: APP_GUARD, useClass: options.realGuard ? AuthGuard : TestGuard }] })(TestModule);
@@ -1635,11 +1659,13 @@ test('S9U4-B28 download: prepare -> one fixed manifest (replayed for the same id
   assert.deepEqual(audits(h.s, 'original.download.result')[0].detail.objects.map(o => o.sha256).sort(), manifest.objects.map(o => o.sha256).sort());
   const status = await h.request('GET', `/api/studies/${study}/original-downloads/${id}`, { as: RAD });
   assert.deepEqual([status.body.state, status.body.note], ['sent', '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.']);
-  // Sent is final for its operation (5.3): 409 DOWNLOAD_ALREADY_SENT, byte 0, nothing changed; a new id prepares again.
+  // Sent is final: a repeat supplies no bytes and records the refused start; a new id prepares again.
   const before = h.s.op(id), audited = h.s.audits.length;
   const again = await h.request('GET', `/api/studies/${study}/original-downloads/${id}/archive`, { as: RAD });
   assert.deepEqual([again.status, again.body.code, again.headers['content-type'].startsWith('application/json')], [409, 'DOWNLOAD_ALREADY_SENT', true]);
-  assert.deepEqual([h.s.op(id), h.s.audits.length], [before, audited], 'state and audit unchanged');
+  assert.deepEqual(h.s.op(id), before, 'the operation and its Sent attempt are unchanged');
+  assert.equal(h.s.audits.length, audited + 1);
+  assert.deepEqual(audits(h.s, 'original.download.refused').map(a => a.detail.code), ['DOWNLOAD_ALREADY_SENT']);
   const next = randomUUID();
   assert.equal((await prepare(h, study, next)).status, 200);
   const second = await h.request('GET', `/api/studies/${study}/original-downloads/${next}/archive`, { as: RAD });
@@ -4757,8 +4783,14 @@ test('S9U4-B77 DG-T01/T04 grant issue: a bound cookie session only (Bearer 403 D
   assert.deepEqual(status.body.archiveRequest, { grantId: g2.body.grantId, state: 'issued', expiresAt: g2.body.expiresAt, attemptId: null, code: null, message: null });
   for (const secret of [g2.body.grant, grantDigest(g2.body.grant), 'ref:sid-r1']) assert.ok(!JSON.stringify(status.body).includes(secret), 'no raw value, hash or session reference in the status');
   h.s.advance(120000);
-  const expired = (await boundStatus(h, study, id, 'sid-r1')).body.archiveRequest;
-  assert.deepEqual([expired.state, expired.code, typeof expired.message], ['expired', 'DOWNLOAD_GRANT_EXPIRED', 'string']);
+  const later = (await boundStatus(h, study, id, 'sid-r1')).body.archiveRequest;
+  assert.deepEqual(later, status.body.archiveRequest, 'issuance metadata does not expire an unused download');
+  const sent = await h.request('GET', archivePath(study, id), { as: null, headers: nativeHeaders('sid-r1') });
+  assert.equal(sent.status, 200);
+  h.s.advance(120000);
+  const afterSent = (await boundStatus(h, study, id, 'sid-r1')).body;
+  assert.equal(afterSent.state, 'sent');
+  assert.deepEqual(afterSent.archiveRequest, status.body.archiveRequest, 'Sent remains Sent without a grant-expired error');
 });
 
 // ════════════ WORKLIST-SPLIT-UID hand-over (main 848b7e5; spec §5 U4b rows, TEST-WSU-11; Phase B I-01/I-02) ════════════
@@ -4766,7 +4798,7 @@ test('S9U4-B77 DG-T01/T04 grant issue: a bound cookie session only (Bearer 403 D
 // Orthanc study, as Orthanc does). The download routes observe the source per request outside any transaction and refuse
 // such a UID after their scope checks; the import path never pre-checks it: its own identity gate decides.
 
-test('S9U4-B81 WSU I-01 download replay, start and preparation of a Study UID two original resources answer: 409 STUDY_IDENTITY_UNRESOLVED, ZIP byte 0, nothing written, the operation as it was (prepared before the split included); the source read outside any transaction; an unobservable source 503 STUDY_SOURCE_UNAVAILABLE; scope refusals first and never telling the split; an ordinary download unchanged', async () => {
+test('S9U4-B81 WSU I-01 download replay, start and preparation of a Study UID two original resources answer: 409 STUDY_IDENTITY_UNRESOLVED, ZIP byte 0, refusal recorded, the operation as it was (prepared before the split included); the source read outside any transaction; an unobservable source 503 STUDY_SOURCE_UNAVAILABLE; scope refusals first and never telling the split; an ordinary download unchanged', async () => {
   const h = await harness();
   const study = await downloadStudy(h, 2);
   const id = randomUUID();
@@ -4786,7 +4818,8 @@ test('S9U4-B81 WSU I-01 download replay, start and preparation of a Study UID tw
   const fresh = randomUUID();
   const refused = await prepare(h, study, fresh);
   assert.deepEqual([refused.status, refused.body?.code, h.s.ops.has(fresh)], [409, 'STUDY_IDENTITY_UNRESOLVED', false], 'no new preparation');
-  assert.equal(h.s.writes, writes, 'no refusal wrote anything');
+  assert.equal(h.s.writes, writes + 1, 'only the archive refusal is recorded');
+  assert.deepEqual(audits(h.s, 'original.download.refused').map(a => a.detail.code), ['STUDY_IDENTITY_UNRESOLVED']);
   assert.ok(h.orthanc.sourceReads.length >= reads + 3, 'each request observed the source itself');
   assert.ok(h.orthanc.sourceReads.every(r => r.openTransactions === 0), 'every source read outside any transaction');
   // Scope first: another owner's operation, another institution's member and an absent study are the 404s they were.
@@ -4813,7 +4846,7 @@ test('S9U4-B81 WSU I-01 download replay, start and preparation of a Study UID tw
   assert.equal(h.s.op(otherId).status, 'sent');
 });
 
-test('S9U4-B82 WSU I-01 with the archive grant: a start refused for a split Study UID closes the admitted grant as refused (STUDY_IDENTITY_UNRESOLVED), opens no attempt and sends byte 0; an unobservable source leaves the grant as it was', async () => {
+test('S9U4-B82 WSU I-01 with the archive grant: a start refused for a split Study UID records the refusal (STUDY_IDENTITY_UNRESOLVED), opens no attempt and sends byte 0; an unobservable source leaves the grant as it was', async () => {
   const h = await harness({ realGuard: true });
   sessionOf(h, 'sid-r1');
   const study = await downloadStudy(h, 2);

@@ -2,8 +2,8 @@
 """U5S-REQ-06/09, amendments 1/2 -> U5S-RISK-SESSION -> U5S-ENTRY-DOM.
 
 Real auth/gate/transport and clinician document; synthetic callback and API only.
-The compiled server suite independently verifies the callback's destination, proof
-expiry, cookie binding, single consumption and atomic audit. Main uses a small
+The compiled server suite independently verifies the callback's destination, login
+marker, cookie binding and atomic audit. Main uses a small
 consumer of the public auth API: this suite does not claim full main-page coverage.
 KIN_ENTRY_PAGES optionally supplies clinician.html/js from the parallel pages job;
 KIN_ENTRY_AUTH supplies a copied auth.js for mutation testing. No source assertions.
@@ -81,7 +81,7 @@ class AuthEntryDOMTest(unittest.TestCase):
                 path = urlparse(self.path).path
                 if path == "/api/auth/callback":
                     self.send_response(302)
-                    self.send_header("Location", BASE + cls.destination)
+                    self.send_header("Location", BASE + cls.destination + "#kin-login")
                     self.end_headers()
                     return
                 name = path.removeprefix(BASE)
@@ -353,7 +353,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
         self.assertEqual(self.login_starts, [])
 
-    def login(self, destination="clinician.html", denied=False):
+    def login(self, destination="clinician.html", denied=True):
         type(self).destination = destination
         if denied and not self.storage_denied:
             self.context.add_init_script(STORAGE_DENIED)
@@ -369,7 +369,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertEqual(self.page.evaluate("window.synClicks"), 0)
 
 
-    def test_clinician_enters_final_page_once_without_click(self):
+    def test_clinician_storage_denied_enters_final_page_once_without_click(self):
         self.login()
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
         expect(self.page.locator("#actor")).to_have_text("SYN Doctor")
@@ -378,6 +378,31 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertEqual(self.documents, ["/api/auth/callback", BASE + "clinician.html"])
         self.page.evaluate("Promise.all([KinAuth.init(), KinAuth.init()])")
         self.assert_entry()
+
+    def test_explicit_login_with_full_storage_or_unreadable_record_enters_once(self):
+        for fault in (STORAGE_FULL, "localStorage.setItem('kin-session-end:old', '{unreadable');"):
+            with self.subTest(fault=fault):
+                self.renew()
+                self.context.add_init_script(fault)
+                self.login(denied=False)
+                expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
+                self.assertEqual(self.page.evaluate('KinAuth.lifecycle().state'), 'active')
+                self.assertEqual(urlparse(self.page.url).fragment, '')
+                self.assert_entry()
+
+    def test_callback_marker_is_consumed_and_does_not_bypass_its_session_end(self):
+        self.login()
+        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
+        self.assertEqual(urlparse(self.page.url).fragment, '')
+        self.page.reload()
+        self.page.wait_for_url('**/index.html')
+        self.renew()
+        self.context.add_init_script("""localStorage.setItem('kin-session-end:' + %s, JSON.stringify({
+            session: %s, operation: Date.now(), status: 'confirmed', origin: 'logout', reason: null }));"""
+            % (json.dumps(SESSION), json.dumps(SESSION)))
+        self.login(denied=False)
+        self.page.wait_for_url('**/index.html')
+        self.assertFalse(any(path == '/api/clinician/studies' for path, _ in self.requests))
 
     def test_reader_admin_and_mixed_destinations_unchanged(self):
         for roles in (["radiologist"], ["technician"], ["admin"], ["clinician", "radiologist"], ["clinician", "admin"]):

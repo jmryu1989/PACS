@@ -415,7 +415,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   /**
    * 회원 하나에 대한 줄 세우기(같은 트랜잭션 advisory lock, 다른 이름공간). 격리 사실의 쓰기와 콜백의 "사실을 보고 → 세션을
    * 만든다"가 겹치지 않는다: 콜백이 먼저면 그 세션 행은 격리가 사실 뒤에 끝내는 행에 들고, 사실이 먼저면 콜백이 그것을 본다.
-   * 잡는 순서는 늘 provider 세션 잠금 → 회원 잠금이다(사실을 쓰는 쪽은 회원 잠금 하나만 잡는다) — 교착이 없다.
    */
   private async lockMember(tx: any, sub: string): Promise<void> {
     await lockMemberRights(tx, sub);
@@ -1042,15 +1041,14 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 로그아웃(U5S-REQ-05). 순서가 계약이다: **세션 폐기·표식·접속기록을 먼저 commit하고, 그 뒤에만 Keycloak에 알린다.**
+   * 로그아웃(U5S-REQ-05). 순서가 계약이다: **세션 폐기·접속기록을 먼저 commit하고, 그 뒤에만 Keycloak에 알린다.**
    * 예전 순서(Keycloak 먼저)에서는 Keycloak이 멈춘 동안 이 앱의 세션이 살아 있었고, 그 응답이 늦으면 종료 자체가
    * 시작되지 않았다. 이제 DB 실패·경쟁(409)은 "끝났다"는 답도 Keycloak 호출도 만들지 않고, 폐기 뒤의 Keycloak 실패·
    * 시간 초과·프로세스 재시작은 세션을 되살리거나 접속기록을 하나 더 만들지 못한다.
    * 이미 없는 세션은 접속기록 없이 끝난 것으로 답한다. 결속은 가드가 토큰 갱신 없이 먼저 확인했다.
    *
    * 답은 Keycloak을 기다리지 않는다(개정 ⑨): 폐기와 접속기록이 commit되면 이 앱의 로그아웃은 끝난 것이고, 사람이
-   * "로그아웃 중"을 보고 있을 이유가 없다. provider 세션의 종료는 그 뒤에 청하고, 늦거나 실패하면 표식이 다시 청한다 —
-   * 그동안에도 표식이 그 SSO로의 재진입을 막는다.
+   * "로그아웃 중"을 보고 있을 이유가 없다. provider 세션의 종료는 그 뒤에 한 번 청한다.
    */
   async logout(req: any): Promise<void> {
     const sid: string | null = req?.sid ?? null;
@@ -1064,7 +1062,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   /**
    * 다시 오지 않는 세션의 수거. 관찰한 대상마다 이번 주기에 한 번만 조건부 종료하고 0행이면 건너뛴다.
    * 한 대상의 실패는 그 대상만 롤백하고 고정 분류만 남긴 채 다음 대상으로 간다(다음 주기가 다시 평가한다).
-   * 확인된 지 오래된 표식도 여기서 치운다 — 미확인 표식은 치우지 않는다.
    */
   private async sweep() {
     const cutoff = new Date(Date.now() - SESSION_IDLE_MS);
