@@ -232,7 +232,7 @@ function withoutW5Arguments(now) {
     return { ...route, args: route.args.filter(arg => !change.added.includes(arg)) };
   }) };
 }
-test('U0B-DI Nest metadata equals main before the split: tokens, constructor tokens, scopes, enhancers, middleware, 138 routes', () => {
+test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions: tokens, constructor tokens, scopes, enhancers, middleware, routes', () => {
   const full = diSnapshot();
   // W9-API (D1500): the viewing-set resolve controller, its service and the unbound access-record port, one route.
   const w9 = spec.di_additions_w9;
@@ -253,11 +253,12 @@ test('U0B-DI Nest metadata equals main before the split: tokens, constructor tok
     routes: [...w9.routes, ...u4b.routes].sort((a, b) =>
       `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
   };
-  assert.equal(full.routes.length, 138 + declared.routes.length);
-  // W5-API (D1460) x S9-U4b: both declarations are taken back - the added draft argument, then the U4b additions.
-  const now = withoutDeclared(withoutDeclared(withoutW5Arguments(full), spec.di_additions_b2), declared);
+  const additions = [spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
+  // Undo later online/identity bindings before B2 and the earlier feature declarations.
+  const now = additions.reduce(withoutDeclared, withoutW5Arguments(full));
   assert.deepEqual(now, spec.di);
-  assert.equal(now.routes.length, 138);
+  assert.equal(now.routes.length, spec.di.routes.length);
   assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
