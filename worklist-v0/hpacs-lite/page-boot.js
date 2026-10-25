@@ -331,7 +331,7 @@
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
-        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')$('#findings').focus();})});
+        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')focusReportEditor();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
         current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
@@ -449,16 +449,6 @@
     // Finalize (Approve) as a command another document can run (D1371): a bound viewer frame's keydown never reaches this
     // window, so the frame forwards its Finalize key here, and the dispatcher below uses the same hook. It answers true only
     // when the command ran; only then may the caller keep the browser's own Ctrl+S (Save Page) from happening.
-    // W5 Related Report mode (design v5 section 1; D1423 R2/R3/R6). W5-PHASE-A-INTERIM: mounted only where the page serves the
-    // mode's asset and markup (the Phase A branch's pages do not yet); Phase B serves both, mounts it unconditionally and
-    // deletes this guard.
-    relatedMode = window.KinRelatedReportMode?.({
-      editor: () => document.querySelector('.redit'), field: name => $('#' + name),
-      target: relatedTargetCard, source: relatedSourceCard,
-      insertBlock: relatedInsertBlock, prepare: relatedInsertPrepare, seed: relatedInsertSeed,
-      freeze: relatedInsertFreeze, edit: relatedInsertEdit, submit: relatedInsertSubmit, abandon: relatedInsertAbandon,
-      discard: relatedInsertDiscard, back: backToCurrentDraft, reloadSource: loadRelatedReport,
-    }) ?? null;
     // `related` (W5): the Related Report / Report Editor keys of another document (the viewer frame) and the workspace buttons.
     window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which) });
     window.addEventListener('keydown', event => {
