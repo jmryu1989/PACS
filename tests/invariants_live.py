@@ -5930,6 +5930,10 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual((prepared.status, prepared.body.get("state")), (200, "prepared"), prepared.text)
             archive = self.stack.bearer_request("GET", f"/studies/{study}/original-downloads/{download}/archive", self.stack.token("doctor"))
             self.assertEqual(archive.status, 200)
+            # The response finishes before the result transaction commits its audit row.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and self.s9u4_operation(download)["status"] == "sending":
+                time.sleep(0.5)
             rows = [line.split("\t") for line in psql(f"SELECT action || E'\\t' || detail FROM \"AuditLog\" WHERE detail::jsonb->>'operationId'='{download}' ORDER BY id;")]
             self.assertEqual([action for action, _ in rows], ["original.download.prepare", "original.download.intent", "original.download.result"])
             self.assertTrue(all(json.loads(detail)["institutionId"] == "hallym" for _, detail in rows))
