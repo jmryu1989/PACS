@@ -143,8 +143,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 175 and len({(x["file"], x["case"]) for x in selected}) == 175,
-            "Candidate selection must contain 175 unique exact cases")
+    require(len(selected) == 176 and len({(x["file"], x["case"]) for x in selected}) == 176,
+            "Candidate selection must contain 176 unique exact cases")
     return rows, selected
 
 
