@@ -1742,11 +1742,12 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     } catch { return null; }
   }
 
-  async instanceUids(id: string): Promise<{ studyUid: string; seriesUid: string; sopUid: string } | null> {
+  async instanceUids(id: string): Promise<{ studyUid: string; seriesUid: string; sopUid: string; sourcePatientId: string | null } | null> {
     try {
       const tags = await this.orthancJson('GET', `/instances/${id}/simplified-tags`, undefined, CONTEXT_LIMIT);
       if (!tags || typeof tags !== 'object' || [tags.StudyInstanceUID, tags.SeriesInstanceUID, tags.SOPInstanceUID].some(v => typeof v !== 'string')) return null;
-      return { studyUid: tags.StudyInstanceUID, seriesUid: tags.SeriesInstanceUID, sopUid: tags.SOPInstanceUID };
+      return { studyUid: tags.StudyInstanceUID, seriesUid: tags.SeriesInstanceUID, sopUid: tags.SOPInstanceUID,
+        sourcePatientId: typeof tags.PatientID === 'string' && tags.PatientID.trim() ? tags.PatientID : null };
     } catch { return null; }
   }
 
