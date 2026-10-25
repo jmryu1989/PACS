@@ -3054,3 +3054,15 @@ U3 consumes the viewer-local `KinViewerUX` seam: `snapshot/subscribe` for active
 D1821 adds toolbar drag/drop, editable single-key shortcuts, typing/IME exclusion and restoration in a separate authenticated browser context. `GET /api/workspace-shortcuts` now also returns `viewerSettings`; its existing `PUT` accepts either `bindings` or `viewerSettings`, with the existing `expectedOwner` and `revision`. Each write preserves the other namespace in the existing `WorkspaceShortcuts` row. No new route, table or migration is needed. The shipped OHIF toolbar definitions, evaluators and `recordInteraction` own tool behavior; the standalone Settings entry opens the server-backed editor. These checks do not establish first-site or full U2 acceptance.
 
 Unassigned CT preset number keys retain their existing native action; a viewer tool binding overrides that key. Text and editable controls suppress both kinds of image action.
+
+### EMR E online image boundary
+
+`tests/emr/e/contract_test.cjs` checks image request/manifest and observation contracts.
+`python -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600`
+uses owned synthetic PostgreSQL, the shipped E migration/store and HTTP sockets. The
+same selected case is declared in candidate CI and the dedicated E job in validate.yml.
+It checks durable preparation before body bytes, Range/multipart/HEAD, rollback,
+interruption and staging-copy facts. It does not prove native OHIF display. The
+registered `GET`/`HEAD images/dicom-web?target=...` route requires Module A's server
+context/catalog binding (REQUEST_FACTS #211); the current binding returns 503.
+Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.

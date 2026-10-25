@@ -71,6 +71,9 @@ jobs:
       - name: Module A local-read recording on the real PG record port
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pg --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/recording_boundary_test.py --class LocalReadRecordingBoundary --mode live --unit ci-module-a-pg --timeout 300
+      - name: Original-download stages through HTTP into the real PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/download-producer --tree api/src --tree tests/emr/request --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/request/download_producer_live.py --class DownloadProducerLive --mode live --unit ci-download-producer --timeout 300
       - name: EMR-B evidence (synthetic, sanitized)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -81,6 +84,7 @@ jobs:
             tmp/emr-b-ci/
             tmp/emr-b2-replace-20261023/
             tmp/module-a-01-2/
+            tmp/download-producer-b2/
             tmp/request-auth/
           if-no-files-found: error
           retention-days: 7
@@ -700,12 +704,20 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
     - name: TEST-E-01..05 declared allow/refuse cases and the shared D744-2 mammography table
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file api/package-lock.json --file tests/emr/e/contract_test.cjs --file tests/emr/e/rule-cases.json -- node --test --test-reporter=tap tests/emr/e/contract_test.cjs
+    - name: Online image preparation and HTTP transfer on the native PostgreSQL ledger
+      run: |
+        node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
+        export KIN_B2R_NODE="$(command -v node)"
+        export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
     - name: Raw run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-e-${{ env.TARGET_SHA }}
-        path: tmp/emr-e-ci/
+        path: |
+          tmp/emr-e-ci/
+          tmp/emr-e-online/
         if-no-files-found: error
         retention-days: 7
     needs: runtime
