@@ -32,6 +32,7 @@ import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
+import { AdminAccessReview } from './admin-access-review';
 import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
 import { ViewerContextEventService } from './viewer-context-event.service';
@@ -72,6 +73,7 @@ function adminNoStore(_req: any, res: any, next: () => void) {
       useFactory: (lookups: ModuleAImageContextPending) => new ProductionImageContext(lookups, lookups) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     StudyTransferLocalService, DicomImportGateService,
+    AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
     // W9-LITE: no access-ledger owner is assembled in this build (EMR-B2 base, then the shared Module A binds the port here).
