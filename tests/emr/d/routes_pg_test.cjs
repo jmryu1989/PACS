@@ -90,20 +90,15 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const uid = '1.2.840.9999.24', teleUid = '1.2.840.9999.25';
     await db.studyState.create({ data: { uid, institutionId: hospital, ss: 'Verified' } });
     await db.studyState.create({ data: { uid: teleUid, institutionId: hospital, teleInstitutionId: receiver, ts: 'wait', ss: 'Verified' } });
-    // Empty lists and an absent note answer 200 and are recorded against the study's (or, for a
-    // cross-study list, the caller's) institution; nothing served means no targets, never a 500.
+    // Empty lists and an absent note answer 200 (never 500) and, serving no record, append no 열람 entry.
+    const readEntries = async () => (await db.$queryRaw`SELECT e.payload::jsonb AS event, o.result_id, o.result_version
+      FROM emr_access.access_entry e JOIN emr_access.attempt_outcome o ON o.operation_id = e.operation_id
+      WHERE e.payload::jsonb->>'surface' IN ('GET studies/:uid/questions', 'GET studies/:uid/image-requests', 'GET questions', 'GET studies/:uid/tech-note')`);
     assert.deepEqual((await send('doctor', 'GET', `/studies/${uid}/questions`)).items, []);
     assert.deepEqual((await send('doctor', 'GET', `/studies/${uid}/image-requests`)).items, []);
     assert.deepEqual((await send('clinician', 'GET', '/questions?view=mine')).items, []);
     assert.equal((await send('doctor', 'GET', `/studies/${uid}/tech-note`)).note, null);
-    const emptyReads = await db.$queryRaw`SELECT payload::jsonb AS event FROM emr_access.access_entry
-      WHERE payload::jsonb->>'surface' IN ('GET studies/:uid/questions', 'GET studies/:uid/image-requests', 'GET questions', 'GET studies/:uid/tech-note')`;
-    assert.equal(emptyReads.length, 4);
-    for (const { event } of emptyReads) {
-      assert.equal(event.action, 'provide-prepared'); assert.deepEqual(event.targets, []);
-      assert.equal(event.managingInstitution.value, hospital);
-      assert.equal(event.context.studyId, event.surface === 'GET questions' ? null : uid);
-    }
+    assert.equal((await readEntries()).length, 0);
     // WORKLIST-SPLIT-UID: a clinical write on a UID two patient resources share is refused with the
     // product's identity issue; no record and no event are written, and the study state is unchanged.
     await db.studyState.create({ data: { uid: splitUid, institutionId: hospital, teleInstitutionId: receiver, ts: 'wait', ss: 'Verified' } });
@@ -135,6 +130,15 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(read.emr.signatures.length, 2);
     assert.ok((await send('clinician', 'GET', '/questions?view=mine')).items.some(item => item.id === id));
     assert.ok((await send('doctor', 'GET', `/studies/${uid}/questions`)).items.some(item => item.id === id));
+    // A served record is one 열람 event per list it appears in: the record's study and institution, both
+    // versions as targets, the served head as the appended reference.
+    const listed = (await readEntries()).filter(row => row.event.surface !== 'GET studies/:uid/tech-note');
+    assert.deepEqual(listed.map(row => row.event.surface).sort(), ['GET questions', 'GET studies/:uid/questions']);
+    for (const row of listed) {
+      assert.equal(row.event.action, 'provide-prepared'); assert.equal(row.event.managingInstitution.value, hospital);
+      assert.equal(row.event.context.studyId, uid); assert.equal(row.event.targets.length, 2);
+      assert.equal(row.result_id, id); assert.ok(row.result_version);
+    }
     await send('stranger', 'GET', `/questions/${id}`, undefined, 404);
     await send('doctor', 'POST', `/questions/${id}/entries`, { requestId: randomUUID(), expectedOwner: owner('other'), revision: 2, body: '다른 계정 입력' }, 409);
     const beforeFailure = await db.studyQuestion.count();

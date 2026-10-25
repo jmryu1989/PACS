@@ -86,10 +86,12 @@ export class ClinicalRoutes {
       access: outcome.access, replayed: outcome.status === 'replayed' } };
   }
 
-  /** `studyId` is the study a per-study list belongs to: its event names that study and
-   * its managing institution even when the list is empty. A cross-study list records one
-   * event per managing institution it served; empty, it names the caller's own institution,
-   * the only one whose records such a list can show. */
+  /** Every record a list serves gets its own 열람 event, as a single read does: the record's
+   * study and managing institution, the versions up to the listed revision as targets, and
+   * the served head as the appended reference. A list that serves nothing records nothing
+   * (B2's record() treats a null effect as a conditional write that affected no row, which
+   * is settled negative and appends no entry). `studyId` is the per-study list's study, so
+   * its items resolve the study scope once. */
   async collection<T extends { items?: { id: string; studyUid: string; revision: number }[] }>(request: object,
     surface: string, recordType: ClinicalRecord, read: (tx: Prisma.TransactionClient) => Promise<T>, studyId?: string): Promise<T> {
     const work = this.parts.records.begin();
@@ -99,60 +101,45 @@ export class ClinicalRoutes {
         const scope = studyId === undefined ? null : await this.parts.context.scope(tx, request, studyId);
         const response = await read(tx);
         if (!response.items) refuse('ClinicalListUnavailable');
-        const served = new Map<string, { studies: Set<string>; targets: AccessEventV1['targets'][number][] }>();
-        const group = (institution: string) => {
-          let g = served.get(institution);
-          if (!g) served.set(institution, g = { studies: new Set(), targets: [] });
-          return g;
-        };
+        const known = <V>(value: V) => ({ status: 'known' as const, value });
         for (const item of response.items) {
           const study = scope && item.studyUid === scope.studyId ? scope : await this.parts.context.scope(tx, request, item.studyUid);
-          const g = group(study.managingInstitutionId);
-          g.studies.add(study.studyId);
           const versions = (await this.parts.store.versions(tx, recordType, item.id))
             .filter(v => v.plan.version.sequence <= item.revision);
           // A concurrent writer may advance the head after the list's snapshot.
           // Only versions belonging to the returned projection are provided.
-          if (!versions.some(v => v.plan.version.sequence === item.revision)) refuse('ClinicalHistoryUnavailable');
-          for (const version of versions) {
-            if (version.plan.signing) {
-              if (!version.signature) refuse('SignatureRequired');
-              this.parts.signer.verify(version.signature, version.plan.signing);
-            }
-            g.targets.push(version.plan.access.target);
+          const head = versions.find(v => v.plan.version.sequence === item.revision);
+          if (!head) refuse('ClinicalHistoryUnavailable');
+          for (const version of versions) if (version.plan.signing) {
+            if (!version.signature) refuse('SignatureRequired');
+            this.parts.signer.verify(version.signature, version.plan.signing);
           }
-        }
-        if (!served.size) {
-          const g = group(scope?.managingInstitutionId ?? facts.actor.institutionId);
-          if (scope) g.studies.add(scope.studyId);
-        }
-        const known = <V>(value: V) => ({ status: 'known' as const, value });
-        for (const [institution, g] of served) {
           await record({ formatVersion: 1, surface, eventId: randomUUID(),
             userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
-            actingInstitution: known(facts.actor.institutionId), managingInstitution: known(institution),
+            actingInstitution: known(facts.actor.institutionId), managingInstitution: known(study.managingInstitutionId),
             occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip, cause: 'user-view',
-            context: { basis: 'worklist', studyId: g.studies.size === 1 ? [...g.studies][0] : null, relatedStudyId: null, reason: null },
-            executor: 'member', targets: g.targets, action: 'provide-prepared', result: 'prepared',
-            requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null }, async () => null);
+            context: { basis: 'worklist', studyId: study.studyId, relatedStudyId: null, reason: null },
+            executor: 'member', targets: versions.map(v => v.plan.access.target), action: 'provide-prepared', result: 'prepared',
+            requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
+          async () => ({ kind: 'emr-clinical', id: item.id, version: head.plan.version.versionId }));
         }
         return response;
       }).catch(routeError);
     } finally { work.end(); }
   }
 
-  /** `studyId` is the study a per-study read belongs to (the Tech Note's record ID is its
-   * study): an empty answer still names that study and its managing institution. */
+  /** A read that serves no record (a study without a note yet) records nothing: there is no
+   * 열람 and B2 would settle a null effect negative anyway. The record's own study scope names
+   * the managing institution; the source archive is not consulted for a read. */
   async read<T>(request: object, recordType: ClinicalRecord, recordId: string,
     read: (tx: Prisma.TransactionClient) => Promise<T>, empty?: (value: T) => boolean,
-    surface = READ_ROUTES[recordType], studyId?: string): Promise<T> {
+    surface = READ_ROUTES[recordType]): Promise<T> {
     const work = this.parts.records.begin();
     try {
       return await work.transactionWithRecords(async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
         const first = await this.parts.store.unit(tx, recordType, recordId);
-        const scoped = first?.studyId ?? studyId;
-        const study = scoped === undefined ? null : await this.parts.context.scope(tx, request, scoped);
+        const study = first ? await this.parts.context.scope(tx, request, first.studyId) : null;
         if (first) await this.parts.store.lockUnit(tx, recordType, recordId);
         const response = await read(tx);
         const unit = first ? await this.parts.store.unit(tx, recordType, recordId) : null;

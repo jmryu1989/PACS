@@ -26,7 +26,7 @@ export class PacsClinicalRoutes {
     return clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
       tx => this.notes.techNote(uid, c, before, tx),
       value => !value.note && !value.items?.length,
-      before === undefined ? 'GET studies/:uid/tech-note' : 'GET studies/:uid/tech-note/history', uid);
+      before === undefined ? 'GET studies/:uid/tech-note' : 'GET studies/:uid/tech-note/history');
   }
 
   async saveTechNote(uid: string, body: any, c: Caller, request: object) {
