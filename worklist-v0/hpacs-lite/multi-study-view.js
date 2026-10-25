@@ -306,7 +306,7 @@
       const composition = model.snapshot().composition;
       const preserveStudies = intent.kind === 'retry' ? (composition?.mode === 'retry' ? viewingUids() : composition?.activeUids || [])
         .filter(value => !intent.activeUids.includes(value) && viewerFor(value)) : [];
-      const reservation = o.viewer.reserve(intent.activeUids, { preserveStudies });
+      const reservation = o.viewer.reserve(intent.activeUids, { preserveStudies, compositionId: intent.body.compositionId });
       if (reservation.status === 'blocked' || reservation.status === 'refused') {
         model.fail(intent, { code: reservation.status === 'blocked' ? 'W9_POPUP_BLOCKED' : 'W9_VIEWER_BUSY', message: reservation.message });
         render(); return;
@@ -556,10 +556,11 @@
         why, viewingUids(), c?.activeUids]);
       if (key !== signature) {
         signature = key;
+        const scrollTop = list.scrollTop, scrollLeft = list.scrollLeft;
         const focused = document.activeElement && list.contains(document.activeElement)
           ? [document.activeElement.closest('li')?.dataset.uid, document.activeElement.dataset.action] : null;
         list.replaceChildren(...rows.map(({ value, ordinal, member }) => {
-          const li = document.createElement('li'); li.dataset.uid = value;
+          const li = document.createElement('li'); li.dataset.uid = value; li.tabIndex = -1;
           const ready = member?.status === 'ready';
           const state = c ? rowState(value, c) : member?.status === 'error' ? memberState(member.code) : { status: 'Ready', message: '' };
           li.className = 'multi-study-member' + (c?.activeUids.includes(value) ? ' active' : '');
@@ -589,7 +590,12 @@
           }
           return li;
         }));
-        if (focused) list.querySelector(`li[data-uid="${CSS.escape(focused[0] || '')}"] [data-action="${focused[1]}"]:not(:disabled)`)?.focus();
+        if (focused) {
+          const row = list.querySelector(`li[data-uid="${CSS.escape(focused[0] || '')}"]`);
+          // A busy action is disabled while its answer is pending. Keep focus on its row instead of dropping it to body.
+          (row?.querySelector(`[data-action="${focused[1]}"]:not(:disabled)`) || row)?.focus({ preventScroll: true });
+        }
+        list.scrollTop = scrollTop; list.scrollLeft = scrollLeft;
       }
       post();
     }

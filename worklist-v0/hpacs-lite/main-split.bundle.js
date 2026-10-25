@@ -9211,20 +9211,20 @@
     function viewingSetToWorkspace() {
       return !!selectedUid && (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace');
     }
-    function reserveViewingSet(uids, { preserveStudies = [] } = {}) {
+    let viewingSetRetryWindow = null;
+    function reserveViewingSet(uids, { preserveStudies = [], compositionId = null } = {}) {
       if (!Array.isArray(uids) || uids.length < 1 || uids.length > 2) return { status: 'refused', message: '열 검사를 확인하지 못했습니다.' };
       const workspace = readingWorkspace?.viewerTarget?.();
-      const preservePartner = preserveStudies.length > 0 &&
-        (workspace?.studies.some(value => preserveStudies.includes(value)) ||
-          viewerWindows?.rows().some(row => row.scope?.studies.some(value => preserveStudies.includes(value))));
-      // A singleton retry cannot replace the shared document that still displays its partner. Use a free existing
-      // manager slot instead; the delivered single-window limit still applies, even to a saved older preference.
+      // Keep the workspace partner in its pane. In window mode Minhoon's option 1 replaces the existing document
+      // through openOhifWindow's normal unsaved-work and Frame Coverage checks.
+      const preservePartner = viewingSetToWorkspace() &&
+        !!workspace?.studies.some(value => preserveStudies.includes(value));
       if (viewingSetToWorkspace() && !preservePartner) return { status: 'reserved', kind: 'workspace' };
       if (demoMode) return { status: 'refused', message: '데모 모드에서는 뷰어를 열 수 없습니다.' };
       if (!viewerWindows) return { status: 'refused', message: '영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.' };
       const url = `/ohif/viewer?StudyInstanceUIDs=${uids.map(encodeURIComponent).join(',')}` + (uids.length === 2 ? '&hangingProtocolId=@ohif/hpCompare' : '');
-      const ownRetryWindow = preservePartner && viewerWindows.rows().some(row =>
-        row.scope?.studies.length === uids.length && row.scope.studies.every((value, i) => value === uids[i]));
+      const ownRetryWindow = preservePartner && viewingSetRetryWindow?.compositionId === compositionId &&
+        viewingSetRetryWindow.isOpen() && viewerWindows.rows().some(row => row.popup === viewingSetRetryWindow.popup);
       const choice = viewerWindows.choose(url, 1, preservePartner && !ownRetryWindow ? { freshDocument: true } : { singleWindow: true });
       if (choice.error) return { status: 'refused', message: choice.full
         ? '영상 창 수 제한에 도달했습니다. Viewer Windows에서 기존 창으로 돌아가거나 저장 후 닫으세요.' : choice.error };
@@ -9238,7 +9238,7 @@
       try { popup.opener = null; } catch (_) { return { status: 'refused', message: '영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.' }; }
       let own = false;
       try { own = !known && popup.location.href === 'about:blank'; } catch (_) {}
-      return { status: 'reserved', kind: 'window', choice, popup, own, preservePartner };
+      return { status: 'reserved', kind: 'window', choice, popup, own, preservePartner, compositionId };
     }
     function launchViewingSet(reservation, plan, opening, metadata) {
       const uids = [plan.uid, plan.priorUid].filter(Boolean);
@@ -9254,6 +9254,9 @@
       if (result.status === 'accepted') {
         const sequence = ohifPopupSequences.get(reservation.popup);
         result.isOpen = () => !reservation.popup.closed && ohifPopupSequences.get(reservation.popup) === sequence;
+        if (reservation.preservePartner) viewingSetRetryWindow = {
+          compositionId: reservation.compositionId, popup: reservation.popup, isOpen: result.isOpen,
+        };
       }
       return result;
     }

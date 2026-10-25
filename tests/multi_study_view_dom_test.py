@@ -448,20 +448,45 @@ class MultiStudyViewPage(unittest.TestCase):
         expect(self.member(n[2])).not_to_contain_text("SYNACC")
         partner = self.viewer()
         partner.evaluate("() => { document.body.dataset.kept = 'partner'; }")
-        calls = len(self.site.resolves)
-        self.member(n[2]).locator('[data-action=retry]').click()
-        expect(self.status()).to_contain_text("Not Opened")
-        self.assertEqual(calls, len(self.site.resolves), "a full window manager must refuse before resolve")
-        self.assertEqual([n[3]], self.viewer_studies(partner)[0])
-        self.assertEqual('partner', partner.locator('body').get_attribute('data-kept'))
-        # The reader frees the sole viewer slot; Retry can now open the failed UID alone.
-        partner.close()
+        count = len(self.popups)
+        # Minhoon's option 1: Retry uses the existing window, and its partner can be reopened through View Study.
         body = self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
         self.assertEqual((n, KEY), (body["studyUids"], body["expectedSourcePatientKey"]))
         self.wait_viewer([n[2]])
+        self.assertIs(partner, self.viewer())
+        self.assertEqual(count, len(self.popups))
+        expect(self.member(n[3])).to_contain_text('Not Opened')
         expect(self.page.locator("#multi-study-summary")).to_contain_text("Page 2/3 · Single Study")
+        self.press(f'#multi-study-members li[data-uid="{n[3]}"] [data-action=view]')
+        self.wait_viewer([n[3]])
+        expect(self.member(n[2])).to_contain_text('Not Opened')
         self.press("#multi-study-pages")
         self.wait_viewer(n[2:4])
+
+    def test_refused_row_retry_reuses_the_window_through_unsaved_and_replace_guards(self):
+        self.open()
+        n = self.open_set(self.visible_order()[:5])['studyUids']
+        self.wait_viewer(n[:2])
+        popup = self.viewer()
+        popup.evaluate("() => { window.__synDirty = true; document.body.dataset.kept = 'original'; }")
+        self.press('#multi-study-next')
+        expect(self.member(n[2])).to_contain_text('Not Opened')
+        retry = f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]'
+        self.press(retry)
+        expect(self.status()).to_contain_text(BUSY)
+        self.assertEqual(n[:2], self.viewer_studies(popup)[0])
+        popup.evaluate("() => { window.__synDirty = false; window.kinViewerFrameCoverageConfirm = () => false; }")
+        self.press(retry)
+        expect(self.status()).to_contain_text('Not Opened')
+        self.assertEqual(n[:2], self.viewer_studies(popup)[0])
+        self.assertEqual('original', popup.locator('body').get_attribute('data-kept'))
+        popup.evaluate('() => { window.kinViewerFrameCoverageConfirm = () => true; }')
+        self.press(retry)
+        self.wait_viewer([n[2]])
+        self.assertIs(popup, self.viewer())
+        self.assertEqual(1, len(self.popups))
+        for uid in n[:2]:
+            expect(self.member(uid)).to_contain_text('Not Opened')
 
     def test_a_viewer_with_unsaved_work_is_kept_and_its_members_say_not_opened(self):
         self.open()
@@ -710,6 +735,26 @@ class MultiStudyViewPage(unittest.TestCase):
         expect(self.member(n[3])).to_contain_text('Displayed')
         self.post_viewer_event(popup, old_retry, {'type': 'failed'})
         expect(self.member(n[2])).to_contain_text('Loading')
+        # Another singleton Retry in this composition uses the earlier retry window, even for a different UID.
+        self.site.resolve_answers.append({n[4]: 'W9_LOAD_FAILED'})
+        self.post_viewer_event(popup, self.viewer_studies(popup)[2], {'type': 'failed'})
+        expect(self.member(n[2])).to_contain_text('Unverified')
+        self.press(f'#multi-study-members li[data-uid="{n[2]}"] [data-action=retry]')
+        expect(self.member(n[4])).to_contain_text('Load Failed')
+        self.press(f'#multi-study-members li[data-uid="{n[4]}"] [data-action=retry]')
+        self.wait_viewer([n[4]])
+        self.assertIs(popup, self.viewer())
+        self.assertEqual(count, len(self.popups))
+        expect(self.member(n[2])).to_contain_text('Not Opened')
+        expect(self.member(n[3])).to_contain_text('Displayed')
+        self.assertEqual(old_src, frame.get_attribute('src'))
+        self.assertEqual('workspace-partner', partner.locator('body').get_attribute('data-kept'))
+        # The side panel must show the member's whole label without the action strip squeezing it into a vertical column.
+        label = self.member(n[4]).locator('.multi-study-label')
+        label.scroll_into_view_if_needed()
+        expect(label).to_be_in_viewport(ratio=1)
+        for name in ('Previous', 'Next', 'Compare Two', 'Back to Pages', 'Close'):
+            expect(self.host().get_by_role('button', name=name, exact=True)).to_be_in_viewport(ratio=1)
         self.post_viewer_event(partner, opening, {'type': 'failed'})
         expect(self.member(n[3])).to_contain_text('Unverified')
 
@@ -842,6 +887,58 @@ class MultiStudyViewPage(unittest.TestCase):
         self.wait_viewer(order[2:4])
         self.page.locator('#multi-study-close').click()
         expect(self.host()).to_be_hidden()
+
+    def test_member_actions_keep_scroll_and_navigation_visible_at_landscape_sizes(self):
+        self.open()
+        order = self.visible_order()
+        members = self.page.locator('#multi-study-members')
+        for width in (1366, 1024):
+            with self.subTest(width=width):
+                self.page.set_viewport_size({'width': width, 'height': 768})
+                self.row(order[0]).click()
+                self.wait(lambda: self.target() == order[0], 'Reading Target')
+                n = self.open_set(order[:5])['studyUids']
+                self.wait_viewer(n[:2])
+                last = self.member(n[4])
+
+                def position(action):
+                    last.locator('[data-action=' + action + ']').focus()
+                    last.scroll_into_view_if_needed()
+                    value = members.evaluate('e => e.scrollTop')
+                    self.assertGreater(value, 0, 'the last member requires list scrolling')
+                    return value
+
+                def kept(value):
+                    # Removing Retry after success can shorten the list; the browser clamps at its new bottom.
+                    limit = members.evaluate('e => e.scrollHeight - e.clientHeight')
+                    self.assertEqual(min(value, limit), members.evaluate('e => e.scrollTop'))
+                    self.assertTrue(last.evaluate('e => e.contains(document.activeElement)'), 'focus stays in the acted row')
+                    for name in ('Previous', 'Next', 'Compare Two', 'Back to Pages', 'Close'):
+                        expect(self.host().get_by_role('button', name=name, exact=True)).to_be_in_viewport(ratio=1)
+
+                before = position('view')
+                self.site.resolve_answers.append('hold')
+                self.press(f'#multi-study-members li[data-uid="{n[4]}"] [data-action=view]')
+                kept(before)
+                self.site.finish_resolve()
+                self.wait_viewer([n[4]])
+                expect(last.locator('[data-action=view]')).to_be_enabled()
+                kept(before)
+                before = position('report')
+                last.locator('[data-action=report]').click()
+                self.wait(lambda: self.target() == n[4], 'last member selected for reporting')
+                kept(before)
+                popup = self.viewer()
+                self.post_viewer_event(popup, self.viewer_studies(popup)[2], {'type': 'failed'})
+                expect(last).to_contain_text('Unverified')
+                before = position('retry')
+                self.site.resolve_answers.append('hold')
+                self.press(f'#multi-study-members li[data-uid="{n[4]}"] [data-action=retry]')
+                kept(before)
+                self.site.finish_resolve()
+                expect(last).to_contain_text('Loading')
+                kept(before)
+                self.page.locator('#multi-study-close').click()
 
     def test_idle_viewer_ticks_leave_live_regions_unchanged_and_updates_still_announce(self):
         self.open()
