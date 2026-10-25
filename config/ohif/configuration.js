@@ -1,6 +1,31 @@
 
+// W9 multi-study view (worklist-v0/hpacs-lite/viewer-multi-study.js): load, mount and stop its strip and renderer observer
+// with the viewer mode, the way Frame Coverage is mounted. Only a viewer the worklist opened for a multi-study opening (the
+// `kin-w9` fragment, also set later on a reused window) loads it; every other viewer loads nothing more.
+function kinCreateMultiStudyStrip() {
+  let ready = null, current = null, services, epoch = 0, active = false;
+  const wanted = () => /(?:^#|&)kin-w9=/.test(location.hash);
+  const load = () => ready || (ready = new Promise((resolve, reject) => {
+    const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-multi-study.js';
+    const timeout = setTimeout(() => reject(Error('Multi-Study View loading timeout')), 20000);
+    script.onload = () => { clearTimeout(timeout); resolve(); };
+    script.onerror = () => { clearTimeout(timeout); ready = null; reject(Error('Multi-Study View loading failed')); };
+    document.head.append(script);
+  }));
+  function start() {
+    if (!active || current || !wanted()) return;
+    const ticket = epoch;
+    load().then(() => { if (active && ticket === epoch && !current) current = window.KinViewerMultiStudy.mount(services); }).catch(() => {});
+  }
+  return { id: 'kin.multi-study-strip', preRegistration({ servicesManager }) {
+    services = servicesManager.services;
+    window.addEventListener('hashchange', start); window.addEventListener('kin-window-link-changed', start);
+  }, onModeEnter() { epoch++; active = true; start(); },
+  onModeExit() { epoch++; active = false; current?.stop(); current = null; } };
+}
+
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateStudyPrefetch()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateStudyPrefetch(), kinCreateMultiStudyStrip()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

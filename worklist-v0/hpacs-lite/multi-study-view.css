@@ -1,0 +1,23 @@
+/* W9 Multi-Study View (multi-study-view.js): a compact band above the Related Exam / report row. Its height is bounded and
+   its member list scrolls, so the Related list header with one row, the report controls and W5's Back/Insert stay where
+   they are; nothing outside the band is restyled. */
+.multi-study { flex: none; display: flex; flex-direction: column; max-height: min(34vh, 260px); min-height: 0;
+  border-top: 1px solid var(--kin-line2); border-bottom: 1px solid var(--kin-line2); background: var(--kin-panel);
+  color: var(--kin-text); font-size: 12px; }
+.multi-study[hidden] { display: none !important; }
+.multi-study-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 8px; flex: none; }
+.multi-study-head h3 { margin: 0; font-size: 12px; }
+.multi-study-head h3:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: 2px; }
+.multi-study-nav { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+#multi-study-status, #multi-study-identity { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; }
+#multi-study-status:empty { display: none; }
+.multi-study-members { list-style: none; margin: 0; padding: 0 8px 6px; overflow: auto; min-height: 0; }
+.multi-study-member { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 3px 4px;
+  border-top: 1px solid var(--kin-line); }
+.multi-study-member.active { box-shadow: inset 3px 0 var(--kin-accent); }
+.multi-study-label { overflow-wrap: anywhere; }
+.multi-study-marks { color: var(--kin-accent); white-space: nowrap; }
+.multi-study-state { grid-column: 1; color: var(--kin-muted); overflow-wrap: anywhere; }
+.multi-study-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: flex-end; }
+.multi-study-actions label { display: inline-flex; gap: 3px; align-items: center; }
+.multi-study button:disabled { opacity: .55; cursor: default; }

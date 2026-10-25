@@ -86,8 +86,10 @@
      * 목적지를 받는다(누른 순간의 줄 기준, 없으면 null). 같은 이벤트에서 옮기면 누를 때 정한 그 검사이고, 저장을 기다린 뒤나
      * Notice의 Retry·Check로 나중에 옮길 때는 그 사이 바뀐 목록에 맞춘 답이다. 사람이 고른 행(클릭·메뉴·키보드 진입)은 그 행 그대로다.
      */
-    function select(uid, { deferViewer = false, openSelected = false, revalidate = null } = {}) {
-      const options = { deferViewer, openSelected };
+    function select(uid, { deferViewer = false, openSelected = false, revalidate = null, viewingSet = null } = {}) {
+      // viewingSet: the W9 Select for Reporting token. It rides with this move to enterStudy so the multi-study view can
+      // tell its own explicit move from an ordinary W4 move; it changes nothing about the move itself.
+      const options = { deferViewer, openSelected, viewingSet };
       if (uid !== selectedUid) studyRequests += 1;
       /**
        * **같은 검사를 다시 고르는 것은 이동이 아니다.**
@@ -226,10 +228,12 @@
       return null;
     }
 
-    function enterStudy(uid, { deferViewer = false, openSelected = false } = {}) {
+    function enterStudy(uid, { deferViewer = false, openSelected = false, viewingSet = null } = {}) {
       // W5: a move closes Related Report mode first (the move gate already confirmed the Target clean); its return point
       // belongs to the study being left.
       relatedMode.exit();
+      // W9: an ordinary successful move ends the multi-study composition; its own Select for Reporting keeps it.
+      multiStudyView?.entered(uid, viewingSet);
       clearReportNotice();
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);

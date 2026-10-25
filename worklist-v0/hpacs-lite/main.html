@@ -1127,6 +1127,7 @@
   </style>
   <link rel="stylesheet" href="reading-workspace.css">
   <link rel="stylesheet" href="related-report-mode.css">
+  <link rel="stylesheet" href="multi-study-view.css">
 </head>
 <body>
 
@@ -1420,6 +1421,26 @@
       </div>
       <div class="resizer resizer-h" id="resize-top" role="separator" aria-orientation="horizontal"
            title="드래그하여 상단 패널 높이 조절"></div>
+
+      <!-- W9 Multi-Study View: the frozen set opened by Open Selected Studies (multi-study-view.js). Image navigation only;
+           the Reading Target, the report and W5's Related Report mode below are not part of it. Hidden until an Open. -->
+      <section id="multi-study" class="multi-study" aria-labelledby="multi-study-title" hidden>
+        <div class="multi-study-head">
+          <h3 id="multi-study-title" tabindex="-1">Multi-Study View</h3>
+          <span id="multi-study-summary"></span>
+          <span class="multi-study-nav">
+            <button id="multi-study-prev" class="chip" type="button">Previous</button>
+            <button id="multi-study-next" class="chip" type="button">Next</button>
+            <button id="multi-study-compare" class="chip" type="button" title="두 검사를 고른 뒤 누르세요. 먼저 고른 검사가 왼쪽입니다.">Compare Two</button>
+            <button id="multi-study-pages" class="chip" type="button">Back to Pages</button>
+            <button id="multi-study-retry" class="chip" type="button" hidden>Retry</button>
+            <button id="multi-study-close" class="chip" type="button" title="여러 검사 보기를 닫습니다. 영상 창과 판독문은 그대로 둡니다.">Close</button>
+          </span>
+        </div>
+        <div id="multi-study-status" role="status" aria-live="polite"></div>
+        <div id="multi-study-identity"></div>
+        <ol id="multi-study-members" class="multi-study-members" aria-label="Selected Studies"></ol>
+      </section>
 
       <div class="workrow">
       <!-- Related Exam 목록 + 별도 이전 판독문 창 -->
@@ -2057,6 +2078,7 @@
   <script src="report-citation.js"></script>
   <script src="report-editor-frame.js"></script>
   <script src="related-report-mode.js"></script>
+  <script src="multi-study-view.js"></script>
   <script src="report-structure.js"></script>
   <script src="dictation-session.js"></script>
   <script src="dictation-capture.js"></script>

@@ -217,3 +217,72 @@ test('returned snapshots and reply objects cannot mutate frozen membership or su
   assert.equal(f.model.snapshot().composition.members[0].metadata.patientName, 'Synthetic');
   f.model.end(); assert.equal(f.model.snapshot().composition, null);
 });
+
+// ── Added by the W9-UI interim unit (Claude, D1852): request-level states, whole-request retry, viewer channel parsing ──
+const { memberState } = require('../worklist-v0/hpacs-lite/multi-study-view.js');
+const viewerSide = require('../worklist-v0/hpacs-lite/viewer-multi-study.js');
+
+test('request-level answers map by status and code only, and say whether the same request can be retried', () => {
+  const rows = [
+    [{ code: 'W9_SELECTION_INVALID', status: 400 }, 'Selection Invalid', false],
+    [{ status: 400 }, 'Selection Invalid', false], [{ status: 413 }, 'Selection Invalid', false],
+    [{ code: 'W9_VIEW_FORBIDDEN', status: 403 }, 'Access Restricted', false],
+    [{ code: 'CLINICIAN_ROUTE_DENIED', status: 403 }, 'Access Restricted', false],
+    [{ code: 'INSTITUTION_PENDING', status: 403 }, 'Access Restricted', false], [{ status: 403 }, 'Access Restricted', false],
+    [{ code: 'GATEWAY_IDENTITY_INVALID', status: 403 }, 'Access Restricted', false],
+    [{ code: 'W9_CONTEXT_CHANGED', status: 409 }, 'Context Changed', false],
+    [{ code: 'STUDY_ACCESS_CHANGED', status: 409 }, 'Context Changed', false],
+    [{ auth: true, status: 401, code: 'AUTH_SESSION_ENDED' }, 'Disconnected', false],
+    [{ auth: true, status: 409, code: 'AUTH_SESSION_MISMATCH' }, 'Context Changed', false],
+    [{ code: 'W9_AUDIT_UNAVAILABLE', status: 503 }, 'Load Failed', true], [{ status: 503 }, 'Load Failed', true],
+    [{ status: 500, code: 'UNKNOWN' }, 'Load Failed', true], [{}, 'Load Failed', true],
+    [{ code: 'W9_POPUP_BLOCKED' }, 'Popup Blocked', true], [{ code: 'W9_VIEWER_BUSY', message: 'SYN kept' }, 'Not Opened', true],
+  ];
+  for (const [error, status, retry] of rows) {
+    const state = errorState(error);
+    assert.deepEqual([state.status, state.retry], [status, retry], JSON.stringify(error));
+    assert.ok(state.message && !state.message.includes('SYN-SERVER'), 'a message of its own');
+  }
+  assert.equal(errorState({ code: 'W9_VIEWER_BUSY', message: 'SYN kept' }).message, 'SYN kept');
+  for (const code of ['W9_MEMBER_UNAVAILABLE', 'W9_SCOPE_EXCLUDED', 'W9_IDENTITY_UNAVAILABLE', 'STUDY_IDENTITY_UNRESOLVED', 'W9_LOAD_FAILED'])
+    assert.ok(['Access Restricted', 'Unverified', 'Load Failed'].includes(memberState(code).status), code);
+  assert.equal(memberState('W9_SCOPE_EXCLUDED').status, 'Access Restricted');
+  assert.equal(memberState('STUDY_IDENTITY_UNRESOLVED').status, 'Unverified');
+});
+
+test('a whole-request failure retries the same intent with a new requestId; a refused one cannot be retried', () => {
+  const f = fixture(); admit(f);
+  let intent = f.model.beginPage(1);
+  f.model.fail(intent, { status: 503, code: 'W9_AUDIT_UNAVAILABLE' });
+  assert.equal(f.model.snapshot().retry, true);
+  const again = f.model.beginRetryAttempt();
+  assert.deepEqual([again.kind, [...again.activeUids], again.page, again.body.studyUids], ['page', ids.slice(2, 4), 1, ids]);
+  assert.notEqual(again.body.requestId, intent.body.requestId);
+  assert.equal(f.model.finish(again, answer(again)).status, 'resolved');
+  assert.equal(f.model.beginRetryAttempt(), null, 'nothing failed');
+  intent = f.model.beginPage(2);
+  f.model.fail(intent, { status: 403, code: 'W9_VIEW_FORBIDDEN' });
+  assert.equal(f.model.beginRetryAttempt(), null);
+  // A first answer that was not all ready: the whole candidate again, still without an expected key.
+  const g = fixture(), first = g.open();
+  g.model.finish(first, answer(first, { [ids[1]]: 'W9_LOAD_FAILED' }));
+  const candidate = g.model.beginRetryAttempt();
+  assert.deepEqual([candidate.kind, candidate.body.compositionId, candidate.body.expectedSourcePatientKey], ['open', first.body.compositionId, null]);
+  // A blocked popup before any request is retried the same way.
+  const h = fixture(), blocked = h.open();
+  h.model.fail(blocked, { code: 'W9_POPUP_BLOCKED' });
+  assert.equal(h.model.snapshot().attempt.status, 'Popup Blocked');
+  assert.deepEqual(h.model.beginRetryAttempt().body.studyUids, blocked.body.studyUids);
+});
+
+test('the viewer side reads its opening only from one well-formed fragment value and its own 1/2 studies', () => {
+  const base = 'https://syn.test/ohif/viewer?StudyInstanceUIDs=1.2.3,1.2.4&hangingProtocolId=@ohif/hpCompare';
+  const id = '12345678-1234-4234-8234-123456789abc';
+  assert.equal(viewerSide.opening(base + '#kin-window-group=x&kin-w9=' + id), id);
+  for (const bad of ['', '#kin-w9=', '#kin-w9=not-a-uuid', `#kin-w9=${id}&kin-w9=${id}`, `?kin-w9=${id}`])
+    assert.equal(viewerSide.opening(base + bad), null, bad);
+  assert.deepEqual(viewerSide.studiesOf(base), ['1.2.3', '1.2.4']);
+  assert.deepEqual(viewerSide.studiesOf('https://syn.test/ohif/viewer?StudyInstanceUIDs=1.2.3'), ['1.2.3']);
+  for (const bad of ['1.2.3,1.2.3', '1.2.3,1.2.4,1.2.5', 'x', ''])
+    assert.equal(viewerSide.studiesOf('https://syn.test/ohif/viewer?StudyInstanceUIDs=' + bad), null, bad);
+});

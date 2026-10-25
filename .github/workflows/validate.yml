@@ -167,6 +167,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dock-strip --cwd . --file worklist-v0/hpacs-lite/viewer-workspace-dock.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/viewer_dock_strip_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_dock_strip_test.cjs
     - name: Automatic prior calendar and identity boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
+    - name: W9 multi-study composition, selection generation and viewer channel model
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/multi_study_view_test.cjs tests/worklist_selection_test.cjs
     - name: Compound search operators and malformed condition boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs tests/worklist_search_test.cjs
     - name: Worklist column visibility and account storage model
@@ -1364,6 +1366,9 @@ jobs:
     - name: W5 related report mode on the delivered split page
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/related-report-mode-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/related_report_mode_dom_test.py
+    - name: W9 multi-study view on the delivered split page
+      if: ${{ !cancelled() }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/multi-study-view-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/multi_study_view_dom_test.py
     - name: S9 worklist shortcut and accessible-name boundary
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/s9-u4a-keys --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/run-tests.py -- $RUNNER_TEMP/measurement-python/bin/python -B scripts/run-tests.py --module tests/s9_a11y_dom_test.py --class S9AccessibilityPage --mode pure --unit s9-u4a-keys
