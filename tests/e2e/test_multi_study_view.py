@@ -1,21 +1,16 @@
 # coding: utf-8
 """W9UI-V V-LIVE (order 01-multi-study-view.md, Q02/Q10) -> RISK V-RESOLVE / V-DISPLAY -> TEST W9-UI live page.
 
-Real BFF, API, database, Orthanc, OHIF and three synthetic CT studies of one patient (synthetic_ct, owned and cleaned by
-the stack's guard). Two parts, recorded apart as the order's Q10 requires:
+Real BFF, API, database, Orthanc, OHIF and synthetic CT studies owned and cleaned by the stack's guard.
 
-  UNBOUND (real server, real page): Open Selected Studies on the delivered worklist page reaches the real
-  POST /api/studies/viewing-set/resolve. This build binds ViewingSetAccess to ViewingSetAccessUnbound (app.module.ts), so
-  any set with a ready member is refused 503 W9_AUDIT_UNAVAILABLE before a member body exists. The page shows Load Failed
-  with the record message, closes only the blank window its own click reserved, navigates no viewer and writes nothing.
+The candidate flow opens a frozen set through the real Module A-bound resolve endpoint. Both pages receive actual
+200 ready metadata with ordered members and unique, nonblank recording references. Those references alone do not
+prove display: each member becomes Displayed only after its original frame renders in the real OHIF window. The
+first page shows [1, 2]; Next opens the odd last member alone. Clinical rows and original DICOM bytes stay unchanged.
 
-  SYNTHETIC RESOLVE (real page, real viewer): the same page, with only that one route answered at the browser's HTTP
-  boundary in the W9-API wire shape (all three members ready). This is NOT live success (T13 needs the Module A binding;
-  NOT_RUN). What it shows on the real stack: the frozen set opens [1, 2] in the real OHIF window, the real renderer's
-  first original frame of each member reaches the page over the opening's channel (viewer-multi-study.js on the real
-  config/ohif.js) and only then is that member Displayed; Next opens the odd last member alone (no comparison study) and
-  it is Displayed the same way; the viewer's strip shows the composition; no clinical row changes and every original
-  instance is byte-identical (originals()).
+The separate review regression labels its synthetic resolve boundary and exercises the real page, viewer, images,
+measurement/save and lifecycle. Recording-unavailable text, blank-window closure and Retry remain covered by the
+labelled UI-only failed-response scenarios in multi_study_view_dom_test.py and the client model suite.
 """
 from __future__ import annotations
 
@@ -37,7 +32,6 @@ import test_viewer_history as history
 import viewer_api_test as viewer_fixture
 
 RESOLVE = "/api/studies/viewing-set/resolve"
-AUDIT = "열람 기록을 저장하지 못했습니다. 잠시 후 Retry로 다시 시도하세요."
 CLINICAL = ("rs", "version", "holder", "draft", "findings", "conclusion", "recommendation", "confirm", "repDoc")
 
 
@@ -69,7 +63,23 @@ class MultiStudyViewE2E(base.WorklistE2E):
     def clinical(self, fixtures):
         return {f.uid: {k: self.state(f).get(k) for k in CLINICAL} for f in fixtures}
 
-    def test_w9_01_unbound_refusal_then_synthetic_ready_set_displays_on_the_real_viewer(self):
+    def assert_ready_response(self, response, order):
+        self.assertEqual(response.status, 200)
+        body, answer = response.request.post_data_json, response.json()
+        self.assertEqual(answer["scopeStatus"], "ready")
+        for field in ("compositionId", "generation", "requestId"):
+            self.assertEqual(answer[field], body[field])
+        self.assertEqual(body["studyUids"], order)
+        members = answer["members"]
+        self.assertEqual([member["uid"] for member in members], order)
+        self.assertEqual([member["ordinal"] for member in members], list(range(len(order))))
+        self.assertTrue(all(member["status"] == "ready" for member in members))
+        refs = [member["accessRef"] for member in members]
+        self.assertTrue(all(isinstance(ref, str) and ref.strip() for ref in refs))
+        self.assertEqual(len(set(refs)), len(refs))
+        return body, answer
+
+    def test_w9_01_ready_set_with_receipts_displays_on_the_real_viewer(self):
         patient = "W9-" + uuid.uuid4().hex[:12]
         fixtures = [prior.synthetic_ct(self.stack, patient, "w9" + str(i), date, slices=2)
                     for i, date in enumerate(("20260803", "20260802", "20260801"))]
@@ -84,31 +94,12 @@ class MultiStudyViewE2E(base.WorklistE2E):
         order = page.evaluate("() => [...document.querySelectorAll('#rows tr.multi-selected')].map(tr => tr.dataset.uid)")
         self.assertEqual(sorted(order), sorted(f.uid for f in fixtures))
 
-        # UNBOUND: the real server refuses before any member body; the page opens nothing and keeps nothing open.
-        with page.context.expect_page() as reserved, page.expect_response(lambda r: r.url.endswith(RESOLVE)) as reply:
+        # A3 issues the actual ready metadata and recording references; no resolve response is intercepted.
+        with page.context.expect_page() as opened, page.expect_response(lambda r: r.url.endswith(RESOLVE)) as reply:
             page.locator("#multi-selection-open-set").click()
-        blank = reserved.value
-        self.assertEqual(reply.value.status, 503)
-        self.assertEqual(reply.value.json()["code"], "W9_AUDIT_UNAVAILABLE")
-        self.assertEqual(reply.value.request.post_data_json["studyUids"], order)
-        expect(page.locator("#multi-study-status")).to_contain_text("Load Failed")
-        expect(page.locator("#multi-study-status")).to_contain_text(AUDIT)
-        if not blank.is_closed():
-            blank.wait_for_event("close", timeout=10000)
-        self.assertTrue(blank.is_closed(), "the reserved blank window stayed open")
-        self.assertIsNone(page.evaluate("selectedUid"))
-        self.assertEqual(clinical, self.clinical(fixtures))
-
-        # SYNTHETIC RESOLVE at the live HTTP boundary; the viewer, its images and its renderer are the real ones.
-        bodies = []
-
-        def synthetic(route):
-            bodies.append(route.request.post_data_json)
-            route.fulfill(json=ready_answer(bodies[-1], patient))
-        page.route("**" + RESOLVE, synthetic)
-        with page.context.expect_page() as opened:
-            page.locator("#multi-study-retry").click()
         viewer = opened.value
+        body, first = self.assert_ready_response(reply.value, order)
+        bodies = [body]
         viewer.wait_for_url("**/ohif/viewer?**", timeout=30000)
         self.assertEqual(self.ids(viewer), order[:2])
         self.assertEqual(parse_qs(urlsplit(viewer.url).query).get("hangingProtocolId"), ["@ohif/hpCompare"])
@@ -122,12 +113,15 @@ class MultiStudyViewE2E(base.WorklistE2E):
                                  "&& typeof kinViewerFrameCoverageState==='function' && !kinViewerFrameCoverageState().warn")
 
         # Next: the odd last member alone, the same frozen N resolved with the admitted key.
-        page.locator("#multi-study-next").click()
+        with page.expect_response(lambda r: r.url.endswith(RESOLVE)) as reply:
+            page.locator("#multi-study-next").click()
+        body, _ = self.assert_ready_response(reply.value, order)
+        bodies.append(body)
         viewer.wait_for_url("**StudyInstanceUIDs=" + order[2] + "**", timeout=30000)
         self.assertEqual(self.ids(viewer), [order[2]])
         self.assertIsNone(parse_qs(urlsplit(viewer.url).query).get("hangingProtocolId"))
         self.assertEqual([b["studyUids"] for b in bodies], [order, order])
-        self.assertEqual(bodies[1]["expectedSourcePatientKey"], "SYN|" + patient)
+        self.assertEqual(bodies[1]["expectedSourcePatientKey"], first["sourcePatientKey"])
         prior.canvas_ready(viewer, 1)
         expect(self.member(page, order[2])).to_contain_text("Displayed", timeout=60000)
         expect(page.locator("#multi-study-summary")).to_have_text("Studies 3 · Page 2/2 · Pages")
@@ -230,11 +224,14 @@ class MultiStudyViewE2E(base.WorklistE2E):
         open_set([order[0],order[4]])
         expect(page.locator('#multi-study-candidate')).to_contain_text('Access Restricted')
         expect(self.member(page,order[2])).to_contain_text('Load Failed')
-        # F4 remains the delivered one-window rule. Closing the partner frees that slot for this row's Retry.
-        viewer.close();errors.clear()
-        with page.context.expect_page() as reopened, page.expect_response(lambda r:r.url.endswith(RESOLVE)):
+        # F4 = 1: Retry replaces the document in the existing window; its partner can be opened again.
+        errors.clear()
+        with page.expect_response(lambda r:r.url.endswith(RESOLVE)):
             self.member(page,order[2]).get_by_role('button',name='Retry',exact=True).click()
-        viewer=reopened.value;viewer.wait_for_url('**StudyInstanceUIDs='+order[2]+'**')
+        viewer.wait_for_url('**StudyInstanceUIDs='+order[2]+'**')
+        self.assertEqual(self.ids(viewer), [order[2]])
+        expect(self.member(page,order[3])).to_contain_text('Not Opened')
+        expect(self.member(page,order[3]).get_by_role('button',name='View Study',exact=True)).to_be_enabled()
         self.assertEqual(bodies[-1]['studyUids'],order)
         expect(self.member(page,order[2])).to_contain_text('Displayed',timeout=60000)
         viewer.close()

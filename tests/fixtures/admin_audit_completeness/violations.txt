@@ -320,11 +320,11 @@ export async function run(tx: Prisma.TransactionClient) {
   await tx.auditLog.create({ select: { id: true } } as any); // expect: unresolved data is not set
 }
 
-// ==== case: f02-data-from-a-variable | verdict: unresolved ====
+// ==== case: f02-data-from-a-mutable-variable | verdict: unresolved ====
 import { Prisma } from '@prisma/client';
 export async function run(tx: Prisma.TransactionClient) {
-  const data = { actor: 'syn', action: 'syn.allowed', target: 'syn' };
-  await tx.auditLog.create({ data }); // expect: unresolved data is not an object literal
+  let data = { actor: 'syn', action: 'syn.allowed', target: 'syn' };
+  await tx.auditLog.create({ data }); // expect: unresolved data is not a function-local const or a helper parameter
 }
 
 // ==== case: f02-a-helper-with-an-unknown-call | verdict: unresolved ====

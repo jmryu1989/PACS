@@ -9,9 +9,9 @@ injects markup or adds a script tag.
 
 What is synthetic, and only that:
   - SYNTHETIC RESOLVE: POST /api/studies/viewing-set/resolve is answered at the HTTP boundary by W9Site in the W9-API wire
-    shape (ab531c5 multi-study-view.service.ts: ready / partial / rejected members, codes, 503 W9_AUDIT_UNAVAILABLE). The
-    bound product returns 503 for any ready member until Module A binds ViewingSetAccess, so every ready answer here is
-    SYNTHETIC; tests/e2e/test_multi_study_view.py meets the real server.
+    shape (ready / partial / rejected members and request errors). These are UI-only responses: the explicit 503
+    W9_AUDIT_UNAVAILABLE scenario models recording unavailable, not a normal ready set. The Module A-bound server's
+    actual ready responses and recording references are exercised by tests/e2e/test_multi_study_view.py.
   - SYNTHETIC VIEWER: /ohif/viewer is a stand-in document carrying the four workspace-state hooks the launcher reads
     (owner, annotation/job state, Frame Coverage confirm), so the launcher's own guards decide each navigation. The URL
     the page navigates to is the product's. The stand-in posts nothing by itself: the display cases post the viewer half of

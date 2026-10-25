@@ -68,11 +68,10 @@ FLOWS = (
     # with the S9/U1 registration 174 -> 175).
     ("e2e/test_related_report_mode.py", "RelatedReportModeE2E",
      "test_w5_01_prior_insert_loss_check_back_commit_reopen", "test_w5_01_"),
-    # W9-UI: the Multi-Study View on the live page - the real resolve refused while Module A is unbound, then one
-    # synthetic ready answer at the browser's HTTP boundary shown Displayed by the real viewer's renderer (the selection
-    # 175 -> 176). Live success (T13) waits for the Module A binding.
+    # W9-UI: actual A3 ready metadata with recording references; the frozen set is Displayed
+    # by the real viewer renderer across both pages.
     ("e2e/test_multi_study_view.py", "MultiStudyViewE2E",
-     "test_w9_01_unbound_refusal_then_synthetic_ready_set_displays_on_the_real_viewer", "test_w9_01_"),
+     "test_w9_01_ready_set_with_receipts_displays_on_the_real_viewer", "test_w9_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),
