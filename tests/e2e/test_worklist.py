@@ -40,6 +40,9 @@ def require_local_targets(stack):
             raise RuntimeError(f"E2E refuses non-local {name}")
     if os.environ.get("KIN_TEST_INGEST", "cstore").strip().lower() != "cstore":
         raise RuntimeError("E2E requires local cstore fixtures")
+    compose_file = os.environ.get("COMPOSE_FILE", "")
+    if compose_file and Path(compose_file).resolve() != ROOT / "docker-compose.yml":
+        raise RuntimeError("E2E requires the repository's local Compose file")
     docker_host = os.environ.get("DOCKER_HOST", "")
     if docker_host and not docker_host.startswith(("npipe:////./pipe/", "unix:///")):
         raise RuntimeError("E2E refuses remote DOCKER_HOST")
@@ -72,7 +75,7 @@ class LocalTargetGuardTests(unittest.TestCase):
         """E2E-B2-12b: fixture writes cannot use a remote Docker daemon or Gateway."""
         for overrides in ({"DOCKER_HOST": "ssh://remote"}, {"DOCKER_HOST": "tcp://127.0.0.1:2375"},
                           {"DOCKER_HOST": "npipe:////remote/pipe/docker_engine"},
-                          {"KIN_TEST_INGEST": "gateway"}):
+                          {"KIN_TEST_INGEST": "gateway"}, {"COMPOSE_FILE": "docker-compose.prod.yml"}):
             with self.subTest(env=overrides), patch.dict(os.environ, overrides, clear=True), patch.object(subprocess, "run") as command:
                 with self.assertRaises(RuntimeError):
                     require_local_targets(self.targets())
@@ -638,33 +641,13 @@ class WorklistE2E(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         return rows[0]
 
-    def provider_session_of(self, page):
-        """The provider session (AuthSession.idpSid) this page's own BFF session was born in. The row is found by the page's
-        session reference (X-KIN-Session = base64url(sha256('kin-session-id:' + sid))[:32], computed in the database), so
-        no cookie value, code or token leaves the database or reaches a log."""
-        ref, sub = page.evaluate("[KinWorkContext.session(), KinAuth.session()?.sub]")
-        if not (isinstance(ref, str) and re.fullmatch(r"[A-Za-z0-9_-]{32}", ref)
-                and isinstance(sub, str) and re.fullmatch(r"[0-9a-f-]{36}", sub)):
-            raise RuntimeError("This page holds no bound member session")
-        try:
-            rows = psql("SELECT coalesce(\"idpSid\", '') FROM \"AuthSession\" WHERE sub='" + sub + "' AND left(translate(encode("
-                        "sha256(convert_to('kin-session-id:' || sid, 'UTF8')), 'base64'), '+/', '-_'), 32) = '" + ref + "';")
-        except RuntimeError:
-            # psql echoes a failing statement; the session reference never reaches a log.
-            raise RuntimeError("The page's own session row could not be read") from None
-        if len(rows) != 1 or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", rows[0]):
-            raise RuntimeError(f"The page's own session does not name exactly one provider session (rows: {len(rows)})")
-        return rows[0]
-
-
     def sign_in_again(self, page, actor, before_login=None):
         """Log Out in this tab, then the real login form again: a new session in the same tab (its sessionStorage stays).
         After a Log Out the landing keeps its end notice and never signs in by itself (index.html boot: an end record
         stops the automatic login), so the person presses its Login button; Keycloak then shows its form - with the
-        username field, or, while its own SSO is still known, the attempted username and its restart-login link.
-        Login is pressed only after the old document has unloaded and the old session's exact provider session has
-        observably ended (OPUS-06); `before_login` runs at that point, before the new owner's page exists."""
-        provider = self.provider_session_of(page)
+        username field, or, while its own SSO is still known (the one provider end after Log Out is best-effort and not
+        awaited), the attempted username and its restart-login link. Login is pressed only after the old document has
+        unloaded; `before_login` runs at that point, before the new owner's page exists."""
         page.once("dialog", lambda dialog: dialog.accept())
         page.locator("#logout").click()
         page.wait_for_url("**/index.html**", timeout=30000)
@@ -830,8 +813,9 @@ class WorklistE2E(unittest.TestCase):
                                                                "original.download.intent", "original.download.result"])
             issued, intent, result = audit[1][1], audit[2][1], audit[3][1]
             self.assertEqual((issued["phase"], issued["grantId"], issued["grantHash"]), ("issued", use["grantId"], use["hash"]))
-            self.assertEqual((intent["attemptId"], intent["destination"]),
-                             (attempt["attemptId"], "browser-download"))
+            # The intent row names the attempt it opened; the destination is the attempt's own (M-U4B-02: no grant use).
+            self.assertEqual((intent["attemptId"], intent["number"], attempt["destination"]),
+                             (attempt["attemptId"], 1, "browser-download"))
             self.assertEqual((result["attemptId"], result["state"]), (attempt["attemptId"], "sent"))
             self.assertEqual(len({detail["institutionId"] for _, detail in audit}), 1, "one record-time institution")
             self.assertFalse(grant in stored or any(grant in json.dumps(detail) for _, detail in audit), "the raw grant is stored nowhere")
