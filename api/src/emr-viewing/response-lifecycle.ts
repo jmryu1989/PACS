@@ -30,7 +30,7 @@ export function observeLocalReadResponse(request: IncomingMessage, response: Ser
   return {
     outcome, abort,
     assertActive() { if (terminal) throw new Error('Local read response ended'); },
-    select(json: string): StreamableFile {
+    select(json: string, unavailable: Readonly<{ code: string; message: string }> = LOCAL_READ_UNAVAILABLE): StreamableFile {
       if (terminal || selected) throw new Error('Local read response is no longer selectable');
       selected = true;
       const bytes = Buffer.from(json, 'utf8');
@@ -52,7 +52,7 @@ export function observeLocalReadResponse(request: IncomingMessage, response: Ser
           response.statusCode = 503;
           response.removeHeader('Content-Length');
           response.setHeader('Content-Type', 'application/json; charset=utf-8');
-          response.end(JSON.stringify(LOCAL_READ_UNAVAILABLE));
+          response.end(JSON.stringify(unavailable));
         });
     },
   };
