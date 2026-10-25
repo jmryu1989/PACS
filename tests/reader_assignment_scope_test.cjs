@@ -207,8 +207,8 @@ async function world() {
     studies: async () => [...t.StudyState.values()].map(s => ({ '0020000D': { Value: [s.uid] }, '00080080': { Value: [s.institutionId] },
       '00100020': { Value: ['SYN-' + s.uid] }, '00100010': { Value: ['SYNTHETIC^PATIENT'] } })),
   };
-  const workflow = { workflow: (_request, surface, execute) => root.$transaction(tx => execute({ tx,
-    closeAssignment: async (uid, owner, revision) => { log.push({ client: tx.__name, model: 'Ledger', op: 'close', uid, owner, revision, surface }); } })) };
+  const workflow = { workflow: (_request, execute) => root.$transaction(tx => execute({ tx,
+    closeAssignment: async (uid, owner, revision) => { log.push({ client: tx.__name, model: 'Ledger', op: 'close', uid, owner, revision }); } })) };
   const w = {
     t, log, access, keycloak,
     ra: new ReaderAssignmentService(root, keycloak, access),
