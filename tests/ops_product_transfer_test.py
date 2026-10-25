@@ -41,7 +41,9 @@ def fixture():
                    rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
                    emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows(),
                        image=dict(catalog=dict(tables=['observation', 'preparation']), rows=transfer.expected_image_rows(),
-                           sequence=dict(last_value=2, is_called=True))))
+                           sequence=dict(last_value=2, is_called=True)),
+                       audit=dict(catalog=dict(tables=sorted(transfer.expected_audit_rows())), rows=transfer.expected_audit_rows(),
+                           sequences={table: dict(last_value=1, is_called=True) for table in ('roster_event', 'issuance_event', 'request_event')})))
     return dict(body, schema=2, profile=transfer.PROFILE, product=product,
                 relation=transfer.relation(body['snapshot'])), files, pg_config, orth_config
 
@@ -54,6 +56,14 @@ def check(body, product_sha=None):
 
 
 class Pure(unittest.TestCase):
+    def test_audit_restore_preserves_fixed_bytes_designation_and_hold_history(self):
+        expected = fixture()[0]['product']
+        transfer.audit_contract(expected['emr']['audit'])
+        for table in transfer.expected_audit_rows():
+            actual = copy.deepcopy(expected)
+            actual['emr']['audit']['rows'][table].pop()
+            with self.subTest(table=table), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
     def test_image_restore_keeps_source_response_and_copy_facts(self):
         expected = fixture()[0]['product']
         transfer.image_contract(expected['emr']['image'])

@@ -9,6 +9,7 @@ import type { LegalHold } from '../emr-contract/lawful-defaults';
 import { inspectSignatureEnvelope } from '../emr-contract/signature';
 import type { SignatureEnvelope } from '../emr-contract/signature';
 import { choice, ContractError, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
+import { onlineFixedListing } from './fixed-listing';
 
 /**
  * EMR unit F, round 1 (module-first): pure contracts for the designated-auditor roster, the patient-level replay of the
@@ -166,7 +167,7 @@ export function resolveAuditAuthority(reader: RosterReader, caller: VerifiedCall
   authorities.add(authority);
   return authority;
 }
-function requireScope(authority: AuditAuthority, scope: RosterScope): Readonly<AuditAuthority> {
+export function requireScope(authority: AuditAuthority, scope: RosterScope): Readonly<AuditAuthority> {
   if (!authorities.has(authority)) refuse('AuditAuthorityRequired');
   if (!authority.scopes.includes(scope)) refuse('AuditScopeNotGranted');
   return authority;
@@ -1624,6 +1625,8 @@ export interface DisclosureManifest {
 }
 
 function verifiedListing(input: unknown): { recordId: string; revision: string; subject: VersionListing['subject']; versions: PackageVersion[] } {
+  const online = onlineFixedListing(input);
+  if (online) return online;
   return guarded('VersionListingRefused', () => {
     const l = object(input, ['recordId', 'complete', 'revision', 'subject', 'versions', 'signatures']);
     if (l.complete !== true) refuse('VersionListingIncomplete');

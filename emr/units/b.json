@@ -192,7 +192,8 @@
       "20261023200000_emr_server_signing",
       "20261024120000_emr_d_online",
       "20261025000000_emr_e_online",
-    "20261025120000_access_review"
+    "20261025120000_access_review",
+      "20261025150000_emr_f_link"
     ],
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"
@@ -245,7 +246,8 @@
       "pending_operations(integer)",
       "record_failure(uuid,uuid,text,timestamptz,text)",
       "entries_after(bigint,integer)",
-      "entry_for_event(text,text)"
+      "entry_for_event(text,text)",
+      "investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer)"
     ],
     "reader_functions": [
       "storage_placement()",

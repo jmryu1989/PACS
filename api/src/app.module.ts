@@ -1,4 +1,6 @@
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
+import { EmrAuditController } from './emr-audit/controller';
+import { EmrAuditService } from './emr-audit/service';
 import { EmrViewingModule } from './emr-viewing/emr-viewing.module';
 import { AsrService } from './asr.service';
 import { DictationController } from './dictation.controller';
@@ -65,8 +67,9 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 }
 
 @Module({
-  controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
+  controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
   providers: [
+    EmrAuditService,
     ViewerContextEventService,
     OnlineImageService, ModuleAImageContextPending,
     { provide: ImageContextSource, inject: [ModuleAImageContextPending],
@@ -93,6 +96,6 @@ export class AppModule implements NestModule {
   }
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
-    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);
+    consumer.apply(adminNoStore).forRoutes(EmrAuditController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);
   }
 }

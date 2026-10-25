@@ -52,7 +52,7 @@ except Exception:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTROLLER_GLOB = "*.controller.ts"
+CONTROLLER_GLOB = "*controller.ts"
 
 # Read only the authentication time recorded by Keycloak's successful interactive flow, never iat or a test value.
 AUTH_TIME_MAPPER = {
@@ -101,6 +101,15 @@ class Route:
 # 이 표가 진입점의 단일 진실원천이다. 컨트롤러에 라우트를 추가하고 여기에 선언하지
 # 않으면 test_every_controller_route_is_declared가 살아 있는 스택을 건드리기도 전에 실패한다.
 ROUTES: dict[tuple[str, str], Route] = {
+    ("POST", "emr-audit/roster/:grantId"): Route(Kind.TENANT),
+    ("POST", "emr-audit/investigations"): Route(Kind.TENANT),
+    ("POST", "emr-audit/exports"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances/:id/issue"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances/:id/delivery"): Route(Kind.TENANT),
+    ("GET", "emr-audit/requests/:id"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests/:id/extend"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests/:id/resolve"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note"): Route(Kind.TENANT),
     ("POST", "studies/:uid/tech-note"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note/history"): Route(Kind.TENANT),

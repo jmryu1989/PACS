@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { AccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
@@ -91,6 +92,7 @@ export class ClinicalStore {
 
   async append(tx: Prisma.TransactionClient, command: StoredClinicalCommand, signature: ClinicalSignature | null): Promise<void> {
     const { plan } = command;
+    await lockFixedRecord(tx, plan.version.recordId);
     if ((plan.signing === null) !== (signature === null)) refuse('SignatureRequired');
     const current = await this.unit(tx, plan.record, plan.version.recordId);
     projectUnit(applyPlan(current, plan));

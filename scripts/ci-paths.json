@@ -260,7 +260,22 @@
       "proxy/**",
       "scripts/emr-compose.py",
       "scripts/record-run.py",
-      "tests/emr/f/**"
+      "tests/emr/f/**",
+      "api/src/emr-clinical/**",
+      "api/src/emr-report/**",
+      "api/src/emr-signature/**",
+      "api/src/emr-runtime/**",
+      "api/src/app.module.ts",
+      "api/src/clinician-policy.ts",
+      "tests/emr/b/pg_ledger_restore_test.py",
+      "tests/live_test_gate.py",
+      "scripts/run-tests.py",
+      "tests/ops_product_transfer_fixture.py",
+      "api/src/emr-image/**",
+      "api/src/orthanc.service.ts",
+      "api/src/auth.guard.ts",
+      "api/src/auth.service.ts",
+      "api/src/member-rights.ts"
     ],
     "contract": [
       "api/Dockerfile*",
