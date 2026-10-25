@@ -28,7 +28,7 @@ import unittest
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
-from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "live"))
@@ -40,6 +40,10 @@ import test_worklist as worklist
 
 def event(stage, **result):
     print("S9-U3-SERVICES " + json.dumps({"stage": stage, **result}), flush=True)
+
+
+class CancelledRecoveryRead(Exception):
+    pass
 
 
 class FailureServicesE2E(unittest.TestCase):
@@ -135,7 +139,33 @@ class FailureServicesE2E(unittest.TestCase):
             type(self).service_restored = True
             event("restored", service=service, running=True, health=200)
 
-    def metrics(self, page):
+    @contextmanager
+    def read_response(self, page, matches, *, recovery=False, method="GET"):
+        # Only a new matching read on this page can explain its missing response.
+        # DICOM lookup uses POST; all other reads here use GET.
+        # A click/selection failure or a completed HTTP/data/UI check stays fatal.
+        requests = []
+        action_completed = False
+
+        def requested(request):
+            if request.method == method and matches(request):
+                requests.append(request)
+
+        page.on("request", requested)
+        try:
+            try:
+                with page.expect_response(lambda r: r.request in requests) as response:
+                    yield response
+                    action_completed = True
+            except PlaywrightTimeoutError as error:
+                cancelled = [r.url for r in requests if r.failure == "net::ERR_NETWORK_CHANGED"]
+                if recovery and action_completed and cancelled:
+                    raise CancelledRecoveryRead(json.dumps(cancelled) + ": " + str(error)) from error
+                raise
+        finally:
+            page.remove_listener("request", requested)
+
+    def metrics(self, page, *, recovery=False):
         url = self.stack.proxy + "/api/admin/metrics"
         started = time.monotonic()
 
@@ -145,9 +175,9 @@ class FailureServicesE2E(unittest.TestCase):
 
         page.on("requestfailed", failed)
         try:
-            with page.expect_response(lambda r: r.url == url) as response:
+            with self.read_response(page, lambda r: r.url == url, recovery=recovery) as response:
                 page.get_by_role("button", name="Refresh Operations", exact=True).click()
-        except PlaywrightError:
+        except (PlaywrightError, CancelledRecoveryRead):
             # A browser response wait alone cannot distinguish a server stall
             # from a cancelled read on this Docker/browser host. Preserve both
             # observations while retaining the original test failure.
@@ -176,7 +206,16 @@ class FailureServicesE2E(unittest.TestCase):
         fixture = self.stack.create_fixture()
         other = self.stack.create_fixture()
         page = self.login("jmryu")
-        self.select(page, fixture)
+        self.select(page, other)
+        page.wait_for_function("""() => [...document.querySelectorAll('#thumbwrap img')]
+            .some(img => img.complete && img.naturalWidth > 0)""")
+        # Learn this fixture's preview URL from the healthy served page, so an
+        # unrelated study's cancelled preview cannot authorize recovery later.
+        with page.expect_response(lambda r: r.url.startswith(self.stack.proxy + "/instances/")
+                                  and r.url.endswith("/preview")) as preview_control:
+            self.select(page, fixture)
+        self.assertEqual(preview_control.value.status, 200)
+        preview_url = preview_control.value.url
         # Images must have decoded, not merely acquired an <img> element.
         page.wait_for_function("""() => [...document.querySelectorAll('#thumbwrap img')]
             .some(img => img.complete && img.naturalWidth > 0)""")
@@ -228,51 +267,56 @@ class FailureServicesE2E(unittest.TestCase):
 
         # Docker's restarted interface can invalidate Chromium reads on the same
         # host, even after Orthanc is healthy: Chromium cancels whatever read of
-        # either page is in flight with net::ERR_NETWORK_CHANGED, about 1.2 s after
-        # the container starts (G3 de7a8c1: the admin metrics read, nginx 499; G3
-        # 273bbeb: the same read 1.2 s after start, just clear). A cancelled read has
-        # no response, so its wait times out. Repeat the whole real recovery step
-        # once, only when the browser reported that failure for this stack during
-        # the first attempt; every HTTP/data assertion must then hold on the repeat,
-        # and any failure without such a report, or on the repeat, fails the test.
-        # Each cancel is logged when it happens, so a passing run still shows it.
-        network_changes = []
+        # either page is in flight with net::ERR_NETWORK_CHANGED (observed on G3's
+        # admin metrics read and the VM's thumbnail instance read). Keep the existing
+        # one-repeat policy; these samples do not establish a one-event upper bound.
+        # Only a missing response to the required read can trigger it. Assertions
+        # and other browser failures escape, even alongside an unrelated cancel.
 
         def network_changed(request):
             if request.failure == "net::ERR_NETWORK_CHANGED" and request.url.startswith(self.stack.proxy + "/"):
-                network_changes.append(request.url)
                 event("browser_network_changed", url=request.url)
 
         page.context.on("requestfailed", network_changed)
         try:
             for repeat in (False, True):
-                network_changes.clear()
                 try:
-                    if repeat:
-                        # Selecting the same study is a no-op, and the list reload repaints
-                        # its thumbnails only after the response: move away first so the
-                        # repeated selection reads them again, never the earlier images.
-                        self.select(page, other)
-                    with page.expect_response(lambda r: "/api/studies?" in r.url) as response:
+                    # Selecting the same study is a no-op. Move away on each attempt
+                    # so the fixture selection below owns a fresh thumbnail read.
+                    self.select(page, other)
+                    with self.read_response(page, lambda r: r.url.startswith(
+                            self.stack.proxy + "/api/studies?"), recovery=True) as response:
                         page.get_by_role("group", name="Refresh", exact=True).get_by_role("button", name="Refresh", exact=True).click()
                     self.assertEqual(response.value.status, 200)
                     returned = response.value.json()
                     observed = next(row for row in returned["studies"] if row["uid"] == fixture.uid)
                     self.assertGreater(observed["count"], 0)
-                    self.select(page, fixture)
+                    # Arm the dependent reads before selection, then consume them
+                    # in source order. A cancelled upstream read need not produce
+                    # a downstream request; a completed bad answer remains fatal.
+                    with self.read_response(page, lambda r: r.url == preview_url, recovery=True) as preview:
+                        with self.read_response(page, lambda r: r.url == self.stack.proxy + "/api/dicom/lookup"
+                                and r.post_data_json.get("studyUid") == fixture.uid,
+                                recovery=True, method="POST") as lookup:
+                            with self.read_response(page, lambda r: r.url == self.stack.proxy +
+                                    f"/dicom-web/studies/{fixture.uid}/instances", recovery=True) as thumbnails:
+                                self.select(page, fixture)
+                            self.assertEqual(thumbnails.value.status, 200)
+                        self.assertEqual(lookup.value.status, 200)
+                    self.assertEqual(preview.value.status, 200)
                     page.wait_for_function("""() => [...document.querySelectorAll('#thumbwrap img')]
                         .some(img => img.complete && img.naturalWidth > 0)""")
                     expect(page.locator("#err")).to_be_empty()
                     expect(page.locator("#observation-status")).not_to_contain_text("관측 불가")
-                    recovered = self.metrics(admin)
+                    recovered = self.metrics(admin, recovery=True)
                     self.assertEqual(recovered["state"], "observed")
                     self.assertGreater(recovered["value"], 0)
                     expect(storage_row).to_contain_text("Observed")
                     break
-                except (PlaywrightError, AssertionError) as error:
-                    if repeat or not network_changes:
+                except CancelledRecoveryRead as error:
+                    if repeat:
                         raise
-                    event("orthanc_host_network_changed", requests=network_changes.copy(),
+                    event("orthanc_host_network_changed",
                           error_type=type(error).__name__, error=str(error), retry="recovery_step")
         finally:
             page.context.remove_listener("requestfailed", network_changed)
