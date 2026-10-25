@@ -721,12 +721,15 @@ def create_product(name, db, uid):
                 ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+'); COMMIT')
 
 
+# A dropped column leaves a hole in the migrated table's column numbers that pg_dump/pg_restore closes; like
+# scripts/ops_backup.py's inventory, the position compared is the surviving column order, not the physical slot.
 CATALOG_SQL = """
 SELECT jsonb_build_object(
  'tables',(SELECT jsonb_agg(c.relname ORDER BY c.relname COLLATE "C") FROM pg_class c
    JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p')),
  'columns',(SELECT jsonb_agg(to_jsonb(x) ORDER BY x.table_name COLLATE "C",x.ordinal_position)
-   FROM (SELECT table_name,column_name,ordinal_position,data_type,udt_name,is_nullable,column_default,
+   FROM (SELECT table_name,column_name,row_number() OVER (PARTITION BY table_name ORDER BY ordinal_position) AS ordinal_position,
+     data_type,udt_name,is_nullable,column_default,
      character_maximum_length,numeric_precision,numeric_scale,datetime_precision,is_identity,is_generated
      FROM information_schema.columns WHERE table_schema='public') x),
  'constraints',(SELECT jsonb_agg(to_jsonb(x) ORDER BY x.table_name COLLATE "C",x.name COLLATE "C")
