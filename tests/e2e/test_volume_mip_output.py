@@ -229,6 +229,12 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   return self.attempt_output(page,lambda:self.print_titled(page,a,title),expected,timeout,rearm)
  def refresh_output(self,page,expected=MESSAGES['ready'],timeout=300000,rearm=None):
   return self.attempt_output(page,lambda:page.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click(),expected,timeout,rearm)
+ def settle_routes(self,page,inflight):
+  # Keep the routes registered while pumping pending handlers. 30s is route.fetch's default timeout.
+  deadline=time.monotonic()+30
+  while inflight:
+   self.assertLess(time.monotonic(),deadline,('route handler invocations did not finish',[route.request.url for route in inflight]))
+   page.wait_for_timeout(20)
  def refused(self,page,message):
   # D12/O5: a refusal leaves no printable page, Print disabled, and no private print element, image, volume or engine.
   dialog=page.locator('#kin-job-print');expect(dialog.locator('[role=status]')).to_contain_text(message,timeout=1000);self.assertNotIn(MESSAGES['ready'],dialog.locator('[role=status]').text_content())
@@ -488,37 +494,29 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   self.open_output(v,a,V12);v.evaluate(TAKE)
   # A source MD5 that changes between the reads before and after one frame body refuses in the loader.
   #
-  # The phase boundary is `unroute_all(behavior='wait')`, not the default `unroute(url,handler)`.
-  # `_unroute_internal(...,'default')` drops the pattern from `_routes` and goes straight to
-  # `_update_interception_patterns` without awaiting anything (_page.py:699-725), and the driver's
-  # interceptor removal then force-continues every route still in flight
-  # (removeRequestInterceptor -> notifyRoutesInFlightAboutRemovedHandler -> Route.removeHandler ->
-  # continue({isFallback:true})). A handler still inside its own `route.fetch()` then fulfills a route
-  # the driver has already handled. `behavior='wait'` instead runs `RouteHandler.stop('wait')`, which
-  # awaits every active invocation BEFORE the patterns are updated (_helper.py:472-484), so nothing is
-  # force-continued and no invocation survives into the next phase. These are the only page routes on
-  # `v` at both boundaries, so removing all of them removes exactly this one.
-  #
-  # The print loader runs four workers, so when one read refuses up to three are still in flight - which
-  # is why this row, and not the others, met the window. Hosted run 35581063805 is symptom evidence only:
-  # three originating `Route is already handled` from mid_read, then four `changed` invocations and
-  # `Locator.text_content` replaying that one stored error with one more apiName prefix each, so the
-  # digest phase never ran its own assertions. A `Route is already handled` here is now a genuine
-  # anomaly and fails the row.
+  # A refusal can leave the other loader workers inside route.fetch. In Playwright 1.60, unroute_all('wait') empties the route
+  # list before those handlers finish; their finalizers can then remove interception again, even after the next route is added.
+  # Hosted run 40153556585 consequently sent all 66 digest reads to the real server, bypassing `changed`. Drain while registered,
+  # then remove these page routes, so neither force-continued handlers nor a late removal can cross the phase boundary.
   #
   # Delivered is not attempted: a URL is appended only after `route.fulfill` RETURNS, so the page has
   # the bytes. The injected value is tracked separately and each phase must have delivered one.
-  seen,mid_attempted,mid_delivered,mid_faults=[],[],[],[]
+  seen,mid_attempted,mid_delivered,mid_faults,inflight=[],[],[],[],[]
   def mid_rearm():
    # A transport re-attempt discards the attempt before it, so its deliveries are not this row's evidence.
+   self.settle_routes(v,inflight)
    for record in (seen,mid_attempted,mid_delivered,mid_faults):record.clear()
   def mid_read(route):
-   response=route.fetch();value=response.json();url=route.request.url;seen.append(url);mid_attempted.append(url)
-   fault=url==seen[0] and seen.count(url)==2
-   if fault:value['UncompressedMD5']='0'*32
-   route.fulfill(response=response,json=value);mid_delivered.append(url)
-   if fault:mid_faults.append(url)
+   inflight.append(route)
+   try:
+    response=route.fetch();value=response.json();url=route.request.url;seen.append(url);mid_attempted.append(url)
+    fault=url==seen[0] and seen.count(url)==2
+    if fault:value['UncompressedMD5']='0'*32
+    route.fulfill(response=response,json=value);mid_delivered.append(url)
+    if fault:mid_faults.append(url)
+   finally:inflight.remove(route)
   v.route('**/attachments/dicom/info',mid_read);self.open_output(v,a,V12,MESSAGES['mid_read'],rearm=mid_rearm);self.refused(v,MESSAGES['mid_read'])
+  self.settle_routes(v,inflight)
   self.assertTrue(seen,'the mid-read row needs at least one intercepted source read')
   self.assertGreaterEqual(seen.count(seen[0]),2,'the first source was read twice: the read pair this row injects between existed')
   self.assertTrue(mid_faults,'the mid-read MD5 change was delivered to the page, not merely prepared')
@@ -527,13 +525,21 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   # MO9: a whole source whose instances all read consistently but differ from the saved sourceDigest is refused for version 13 too.
   digest_attempted,digest_delivered,digest_faults=[],[],[]
   def changed(route):
-   response=route.fetch();value=response.json();url=route.request.url;digest_attempted.append(url)
-   value['UncompressedMD5']='0'*32
-   # Every read this phase delivers carries the changed digest, so a delivery is a fault delivery here.
-   route.fulfill(response=response,json=value);digest_delivered.append(url);digest_faults.append(url)
-  v.route('**/attachments/dicom/info',changed);self.open_output(v,a,V13,MESSAGES['digest']);self.refused(v,MESSAGES['digest'])
+   inflight.append(route)
+   try:
+    response=route.fetch();value=response.json();url=route.request.url;digest_attempted.append(url)
+    value['UncompressedMD5']='0'*32
+    # Every read this phase delivers carries the changed digest, so a delivery is a fault delivery here.
+    route.fulfill(response=response,json=value);digest_delivered.append(url);digest_faults.append(url)
+   finally:inflight.remove(route)
+  v.route('**/attachments/dicom/info',changed);requests.clear();self.open_output(v,a,V13,None);self.settle_routes(v,inflight)
+  # The refusal below is only evidence about the product if the page read nothing but changed digests: every source info read
+  # this print sent is one the route answered. A dead route is named here as the harness's failure, never read as a missing refusal.
+  sent=[url for method,url in requests if method=='GET' and url.split('?')[0].endswith('/attachments/dicom/info')]
+  print('MIP_OUTPUT_SOURCE_INFO_READS',json.dumps({'phase':'digest','sent':len(sent),'attempted':len(digest_attempted),'delivered':len(digest_delivered),'faults':len(digest_faults)}),flush=True)
   self.assertTrue(digest_faults,'the changed source digest was delivered to the page, not merely prepared')
-  print('MIP_OUTPUT_SOURCE_INFO_READS',json.dumps({'phase':'digest','attempted':len(digest_attempted),'delivered':len(digest_delivered),'faults':len(digest_faults)}),flush=True)
+  self.assertEqual(sorted(sent),sorted(digest_delivered),'every source info read of this print was answered by the changed route')
+  self.refused(v,MESSAGES['digest'])
   v.unroute_all(behavior='wait')
   self.refresh_output(v);v.evaluate(TAKE)
   # Transport fix (hosted diagnostic run 35022850312): Chromium failed one source read with net::ERR_FAILED, before any response and
