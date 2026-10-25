@@ -153,7 +153,11 @@ class FailureServicesE2E(unittest.TestCase):
             # observations while retaining the original test failure.
             try:
                 probe_started = time.monotonic()
-                probe = page.request.get(url, timeout=30000)
+                # Send the session binding the page's own read sends: without
+                # X-KIN-Session the route answers 428 AUTH_SESSION_REQUIRED, which
+                # says nothing about the route itself.
+                probe = page.request.get(url, timeout=30000, headers={
+                    "X-KIN-CSRF": "1", "X-KIN-Session": page.evaluate("KinAuth.sessionId()") or ""})
                 event("admin_metrics_direct_probe", status=probe.status,
                       elapsed=time.monotonic() - probe_started)
             except PlaywrightError as error:
@@ -223,21 +227,32 @@ class FailureServicesE2E(unittest.TestCase):
                 event("orthanc_admin_storage", state=lost["state"], value=lost["value"])
 
         # Docker's restarted interface can invalidate Chromium reads on the same
-        # host, even after Orthanc is healthy. Retry the real Refresh only for
-        # that reported browser failure, never an HTTP/data assertion or silence.
+        # host, even after Orthanc is healthy: Chromium cancels whatever read of
+        # either page is in flight with net::ERR_NETWORK_CHANGED, about 1.2 s after
+        # the container starts (G3 de7a8c1: the admin metrics read, nginx 499; G3
+        # 273bbeb: the same read 1.2 s after start, just clear). A cancelled read has
+        # no response, so its wait times out. Repeat the whole real recovery step
+        # once, only when the browser reported that failure for this stack during
+        # the first attempt; every HTTP/data assertion must then hold on the repeat,
+        # and any failure without such a report, or on the repeat, fails the test.
+        # Each cancel is logged when it happens, so a passing run still shows it.
         network_changes = []
 
         def network_changed(request):
-            if request.failure == "net::ERR_NETWORK_CHANGED" and request.url.startswith(tuple(
-                self.stack.proxy + path for path in ("/api/studies?", "/api/dicom/", "/dicom-web/")
-            )):
+            if request.failure == "net::ERR_NETWORK_CHANGED" and request.url.startswith(self.stack.proxy + "/"):
                 network_changes.append(request.url)
+                event("browser_network_changed", url=request.url)
 
-        page.on("requestfailed", network_changed)
+        page.context.on("requestfailed", network_changed)
         try:
-            while True:
+            for repeat in (False, True):
                 network_changes.clear()
                 try:
+                    if repeat:
+                        # Selecting the same study is a no-op, and the list reload repaints
+                        # its thumbnails only after the response: move away first so the
+                        # repeated selection reads them again, never the earlier images.
+                        self.select(page, other)
                     with page.expect_response(lambda r: "/api/studies?" in r.url) as response:
                         page.get_by_role("group", name="Refresh", exact=True).get_by_role("button", name="Refresh", exact=True).click()
                     self.assertEqual(response.value.status, 200)
@@ -247,20 +262,21 @@ class FailureServicesE2E(unittest.TestCase):
                     self.select(page, fixture)
                     page.wait_for_function("""() => [...document.querySelectorAll('#thumbwrap img')]
                         .some(img => img.complete && img.naturalWidth > 0)""")
+                    expect(page.locator("#err")).to_be_empty()
+                    expect(page.locator("#observation-status")).not_to_contain_text("관측 불가")
+                    recovered = self.metrics(admin)
+                    self.assertEqual(recovered["state"], "observed")
+                    self.assertGreater(recovered["value"], 0)
+                    expect(storage_row).to_contain_text("Observed")
                     break
-                except PlaywrightError as error:
-                    if not network_changes:
+                except (PlaywrightError, AssertionError) as error:
+                    if repeat or not network_changes:
                         raise
-                    event("orthanc_host_network_changed", requests=network_changes.copy(), error=str(error), retry="Refresh")
+                    event("orthanc_host_network_changed", requests=network_changes.copy(),
+                          error_type=type(error).__name__, error=str(error), retry="recovery_step")
         finally:
-            page.remove_listener("requestfailed", network_changed)
-        expect(page.locator("#err")).to_be_empty()
-        expect(page.locator("#observation-status")).not_to_contain_text("관측 불가")
-        recovered = self.metrics(admin)
-        self.assertEqual(recovered["state"], "observed")
-        self.assertGreater(recovered["value"], 0)
-        expect(storage_row).to_contain_text("Observed")
-        event("orthanc_workflow_recovered", list_status=200, count=observed["count"], thumbnail=True)
+            page.context.remove_listener("requestfailed", network_changed)
+        event("orthanc_workflow_recovered", list_status=200, count=observed["count"], thumbnail=True, repeated=repeat)
 
     def test_keycloak_login_refresh_failure_and_recovery(self):
         session = Session(self.stack).login(self)
