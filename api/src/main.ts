@@ -27,7 +27,9 @@ async function bootstrap() {
   const runtime = new EmrRuntime(process.env.DATABASE_URL, join(process.env.KIN_EMR_STATE_DIR, 'outage'));
   await runtime.start();
   let app;
-  try { app = await NestFactory.create(AppModule.withLedger(runtime), { rawBody: true, abortOnError: false }); }
+  try { app = await NestFactory.create(AppModule.withLedger(runtime, {
+    proxyPeers: (process.env.KIN_REQUEST_PROXY_PEERS ?? '').split(',').map(peer => peer.trim()).filter(Boolean),
+  }), { rawBody: true, abortOnError: false }); }
   catch (error) { await runtime.stop(Date.now() + 5000); throw error; }
   app.use(dictationParser());
   app.use(studyTransferLocalParser());

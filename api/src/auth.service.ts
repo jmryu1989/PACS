@@ -17,6 +17,7 @@ import { knownIdentity, verifiedIdentityClaims } from './emr-runtime/contract';
 import type { RecordMutation } from './emr-runtime/store';
 import { authRequestSurface, recordLoginFailure, sessionAccessEvent, sessionEndEvent, SessionRecordIdentity } from './emr-runtime/auth-events';
 import type { AuthEndCause, AuthFailureCause, ImmutableIdentity, ReauthenticationTrigger } from './emr-contract/access-event';
+import type { CurrentRequestAuthorization } from './emr-runtime/request-context';
 
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const SESSION_TOUCH_MS = 5 * 60 * 1000;
@@ -669,12 +670,49 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return rights;
   }
 
-  async bearerRights(claims: Record<string, any>, raw: string) {
-    const rights = await this.entryRights(String(claims.sub));
+  async bearerRights(claims: Record<string, any>, raw: string, db: any = this.prisma) {
+    const rights = await this.entryRights(String(claims.sub), db);
     if (rights.newAuthAfter && !this.authenticationAfter(claims.auth_time, rights.newAuthAfter))
       throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
-    await this.refuseEndedIdpSession(claims, raw);
+    await this.refuseEndedIdpSession(claims, raw, db);
     return rights;
+  }
+
+  /** Credentials stay in this closure. Consumers can revalidate in their existing
+   * business transaction without another transaction, a refresh or provider I/O.
+   */
+  bindCurrentAuthorization(payload: Record<string, any>, raw: string, session: Session | null,
+      rights: { version: number; institution: string; roles: readonly string[] }): CurrentRequestAuthorization {
+    const claims = Object.freeze({ iss: payload.iss, sub: payload.sub, exp: payload.exp,
+      sid: payload.sid, session_state: payload.session_state, auth_time: payload.auth_time, iat: payload.iat });
+    const admitted = session ? { sid: session.sid, createdAt: session.createdAt.getTime(),
+      idpSid: session.idpSid, rightsVersion: session.rightsVersion, institution: session.institution } : null;
+    const expected = { version: rights.version, institution: rights.institution, roles: [...rights.roles].sort() };
+    return async (transaction?: EmrRecordTransaction) => {
+      const db = transaction ?? this.prisma;
+      if (claims.iss !== process.env.KC_ISSUER || typeof claims.sub !== 'string')
+        throw this.ended('인증 신원이 변경되었습니다');
+      let current: any;
+      if (admitted) {
+        const live: Session | null = await this.storage('session_read', () =>
+          db.authSession.findUnique({ where: { sid: admitted.sid } }));
+        if (!live || live.sub !== claims.sub || live.createdAt.getTime() !== admitted.createdAt
+            || live.idpSid !== admitted.idpSid || live.institution !== admitted.institution
+            || live.rightsVersion !== admitted.rightsVersion || live.lastSeenAt.getTime() < Date.now() - SESSION_IDLE_MS)
+          throw this.ended('요청을 시작한 인증 세션이 종료되었습니다');
+        // Token expiry is not a session end (S7-U5 ④): an admitted request keeps going on its stored token while a
+        // refresh is slow or fails; the session ends only when its row is gone or replaced, idle, or rights change.
+        const stored = decodeJwt(live.accessToken);
+        if (stored.iss !== claims.iss || stored.sub !== claims.sub)
+          throw this.ended('요청을 시작한 인증 세션을 확인할 수 없습니다');
+        current = await this.sessionRights(live, db);
+      } else {
+        current = await this.bearerRights(claims, raw, db);
+      }
+      if (!rightsAllow(current) || current.version !== expected.version || current.institution !== expected.institution
+          || JSON.stringify([...current.roles].sort()) !== JSON.stringify(expected.roles))
+        throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
+    };
   }
 
   private authenticationAfter(authTime: unknown, boundary: Date): boolean {
@@ -877,15 +915,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 들였으면 받는다: 표식이 있는 sid의 제품 세션은 종료(그 sid의 행을 모두 지운다) 뒤에 콜백이 덮지 않는다고 판정한 인증으로만
    * 생기므로, 그 sid에 살아 있는 세션의 토큰과 사람·auth_time이 같으면 같은 인증이다.
    */
-  async refuseEndedIdpSession(claims: Record<string, any>, raw: string): Promise<void> {
+  async refuseEndedIdpSession(claims: Record<string, any>, raw: string, db: any = this.prisma): Promise<void> {
     const idpSid = this.idpSidOfClaims(claims);
     if (!idpSid) return;
-    const mark = await this.storage('idp_end_read', () =>
-      this.prisma.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } }));
+    const mark: { confirmedAt: Date | null } | null = await this.storage('idp_end_read', () =>
+      db.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } }));
     if (!mark || !this.markCovers(mark, claims)) return;
     const authTime = Number(claims.auth_time);
     if (mark.confirmedAt && Number.isFinite(authTime) && authTime === Math.floor(mark.confirmedAt.getTime() / 1000)) {
-      const admitted = await this.storage('idp_end_read', () => this.prisma.authSession.findMany({
+      const admitted: { accessToken: string }[] = await this.storage('idp_end_read', () => db.authSession.findMany({
         where: { idpSid, sub: String(claims.sub) }, select: { accessToken: true },
       }));
       if (admitted.some(row => row.accessToken === raw)) return;

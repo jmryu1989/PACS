@@ -430,6 +430,12 @@ const kinStackPrecision = (() => {
   }
 
   function flip({ flipHorizontal, flipVertical }) {
+    // Each reflection changes the normal needed by the next one.
+    if (flipHorizontal && flipVertical) {
+      flip.call(this, { flipHorizontal: true });
+      flip.call(this, { flipVertical: true });
+      return;
+    }
     const imageData = this.getDefaultImageData();
     if (!imageData) return;
     const camera = this.getCamera();
@@ -3901,16 +3907,29 @@ function kinCreateMammographyHanging() {
   const protocolId = 'kin.mammography';
   let services, extensions, stop, institution;
   let preference = { layout: 'compare', kind: null };
+  let preferenceProvider = null;
+  let requestedLayout = null;
   let applyPreference = () => {};
   const kinds = ['conventional', 'generated2d', 'dbt'];
   const labels = { conventional: 'Conventional', generated2d: 'Synthetic 2D', dbt: 'DBT' };
   // U2 owns account storage. Restore through this hook after checking its owner; reset on logout.
   const preferences = {
     get: () => ({ ...preference }),
+    // Register before mode entry. Called synchronously at each mount with the opened study UIDs;
+    // return { layout: 'current' | 'compare', kind: null | 'conventional' | 'generated2d' | 'dbt' }.
+    // null/invalid/throw uses the study-aware default. Storage and account ownership belong to U3.
+    // 'compare' requires a usable prior; otherwise the effective layout is 'current'.
+    // Pass null to unregister. Registration does not change an already mounted viewer.
+    registerPreferenceProvider(provider) {
+      if (provider !== null && typeof provider !== 'function') return false;
+      preferenceProvider = provider;
+      return true;
+    },
     set(value) {
       if (!value || !['compare', 'current'].includes(value.layout) ||
           !(value.kind === null || kinds.includes(value.kind))) return false;
       preference = { layout: value.layout, kind: value.kind };
+      requestedLayout = value.layout;
       applyPreference();
       return true;
     },
@@ -3920,9 +3939,39 @@ function kinCreateMammographyHanging() {
     const source = extensions.getActiveDataSource()[0], series = source.retrieve.series;
     const hp = services.hangingProtocolService, raw = new Map(), search = location.search;
     const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
+    requestedLayout = null;
+    preference = { layout: opened.length > 1 ? 'compare' : 'current', kind: null };
+    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() })); } catch (_) { /* Use the study-aware default. */ }
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
     const live = () => !ended && location.search === search;
+    const orientations = new WeakMap();
+    function orient(event) {
+      if (!live() || hp.getState()?.protocolId !== protocolId) return;
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(event.detail?.viewportId);
+      const imageId = viewport?.getCurrentImageId?.();
+      if (!imageId || viewport.type !== 'stack') return;
+      const instance = window.cornerstone.metaData.get('instance', imageId);
+      const item = raw.get(instance?.SOPInstanceUID);
+      if (!item) return;
+      // setStack clears flips even if the same object is hung again in this viewport.
+      const previous = event.type === newStackEvent ? null : orientations.get(viewport);
+      if (previous?.imageId === imageId) return;
+      const frame = viewport.getCurrentImageIdIndex() + 1;
+      const orientation = window.KinMammographyModel.displaySpec(item, frame).orientation;
+      const sameObject = previous?.sop === instance.SOPInstanceUID;
+      const camera = viewport.getCamera();
+      // Preserve a reader's manual flip while scrolling; only changes in the stored frame's
+      // orientation alter the normalization. A new object starts from its own display rule.
+      const flipHorizontal = sameObject ? !!camera.flipHorizontal !== (previous.flipH !== orientation.flipH) : orientation.flipH;
+      const flipVertical = sameObject ? !!camera.flipVertical !== (previous.flipV !== orientation.flipV) : orientation.flipV;
+      orientations.set(viewport, { imageId, sop: instance.SOPInstanceUID, ...orientation });
+      if (!!camera.flipHorizontal !== flipHorizontal || !!camera.flipVertical !== flipVertical) {
+        viewport.setCamera({ flipHorizontal, flipVertical });
+        viewport.render();
+      }
+      renderLabels();
+    }
     // Keep the raw responses that the real data source already loads. Starting all MG metadata
     // before hanging prevents a late series from turning a missing/unique slot into another image.
     const metadata = async function (...args) {
@@ -3953,11 +4002,17 @@ function kinCreateMammographyHanging() {
           (!v.displaySetInstanceUIDs?.length && panes.length === views.length ? panes[i] : null);
         if (!cell || !host) return;
         let label = host.querySelector('.kin-mg-slot');
-        if (views.length !== cells.length || v.displaySetInstanceUIDs?.[0] !== cell.selected) { label?.remove(); return; }
-        if (label?.textContent === cell.label) return;
+        const viewport = services.cornerstoneViewportService.getCornerstoneViewport(v.viewportId);
+        const orientation = orientations.get(viewport);
+        const unverified = orientation?.imageId === viewport?.getCurrentImageId?.() && orientation?.status === 'unverified';
+        const matched = views.length === cells.length && v.displaySetInstanceUIDs?.[0] === cell.selected;
+        if (!matched && !unverified) { label?.remove(); return; }
+        const text = (matched ? cell.label : '') + (unverified ? (matched ? ' · ' : '') + 'Orientation Unverified' : '');
+        if (label?.textContent === text) return;
         if (!label) { label = document.createElement('div'); label.className = 'kin-mg-slot'; host.append(label); }
         label.style.cssText = 'position:absolute;bottom:24px;left:8px;z-index:5;pointer-events:none;color:#fff;background:#101e32;padding:3px 6px;font:12px sans-serif';
-        label.textContent = cell.label;
+        label.textContent = text;
+        label.title = unverified ? '영상 방향을 확인할 수 없어 저장된 방향으로 표시합니다.' : '';
       });
     }
     function protocol(data) {
@@ -3968,6 +4023,7 @@ function kinCreateMammographyHanging() {
       // The institution here is the viewing session's scope. The DICOMweb server has already
       // authorized these objects; this client classification does not grant access to a study.
       const plan = model.plan({ institution, studies });
+      preference.layout = plan.prior?.status === 'ok' ? (requestedLayout || 'compare') : 'current';
       const hasKind = (role, kind) => plan.objects.some(o => o.role === role && o.standard && o.kind === kind);
       // Prefer a representation shared by both examinations; never substitute a different kind
       // in an empty counterpart. A personal explicit selection still wins.
@@ -4050,11 +4106,17 @@ function kinCreateMammographyHanging() {
     const observer = new MutationObserver(renderLabels);
     observer.observe(document.body, { childList: true, subtree: true });
     const subscription = services.viewportGridService.subscribe(services.viewportGridService.EVENTS.GRID_STATE_CHANGED, renderLabels);
+    const imageEvent = window.cornerstone.Enums.Events.STACK_NEW_IMAGE;
+    const newStackEvent = window.cornerstone.Enums.Events.VIEWPORT_NEW_IMAGE_SET;
+    document.addEventListener(imageEvent, orient, true);
+    document.addEventListener(newStackEvent, orient, true);
     stop = () => {
       ended = true; raw.clear(); last = null; applyPreference = () => {};
       if (series.metadata === metadata) series.metadata = retrieve;
       if (hp.run === wrappedRun) hp.run = run;
       observer.disconnect(); subscription.unsubscribe(); panel?.remove();
+      document.removeEventListener(imageEvent, orient, true);
+      document.removeEventListener(newStackEvent, orient, true);
       document.querySelectorAll('.kin-mg-slot').forEach(el => el.remove());
     };
   }

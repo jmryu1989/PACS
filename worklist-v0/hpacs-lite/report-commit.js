@@ -454,7 +454,7 @@
      */
     function relatedCommandBlock(command) {
       if (!selectedUid || appState[selectedUid]?.identityUnresolved || ["next", "prev"].includes(command)) return null;
-      if (relatedMode?.active()) return relatedMode.reason();
+      if (relatedMode.active()) return relatedMode.reason();
       return relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
     }
     /**

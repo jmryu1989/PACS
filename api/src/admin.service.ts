@@ -1,5 +1,5 @@
 import {
-  BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, ServiceUnavailableException,
+  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
@@ -15,8 +15,10 @@ import { KeycloakService, KeycloakUser, within } from './keycloak.service';
 import { Caller } from './pacs.service';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
-import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import { sessionEndEvent } from './emr-runtime/auth-events';
+import type { RequestWorkContext } from './emr-runtime/request-context';
+
+export type AdminRequestFacts = RightsRequestFacts & { request: RequestWorkContext };
 
 // 감사 기록 다음 쪽 값의 봉인 키. 프로세스마다 새로 만든다 — API가 다시 시작되면 이어받기는 만료(409)되고
 // 처음부터 다시 읽는다. 키를 설정으로 두면 값이 재시작을 넘어 살아남을 이유만 생긴다.
@@ -37,7 +39,6 @@ export class AdminService {
     private keycloak: KeycloakService,
     private studyAccess: StudyAccessService,
     private auth: AuthService,
-    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
   ) {}
 
   private admin(c: Caller) {
@@ -135,8 +136,10 @@ export class AdminService {
       || rosterOverlap(ordinary);
   }
 
-  async createUser(body: any, c: Caller, facts?: RightsRequestFacts) {
+  async createUser(body: any, c: Caller, facts: AdminRequestFacts) {
     this.admin(c);
+    if (!facts?.request || facts.actor.subject !== c.sub)
+      throw new ServiceUnavailableException('회원 변경 요청의 접속 사실을 확인할 수 없습니다');
     const username = text(body?.username, 'username', 128);
     if (username.startsWith('service-account-'))
       throw new BadRequestException('Keycloak 서비스 계정 예약 이름은 사용할 수 없습니다');
@@ -162,6 +165,7 @@ export class AdminService {
     const temporaryPassword = randomBytes(18).toString('base64url') + 'aA1!';
     let created: KeycloakUser | null = null;
     try {
+      await facts.request.requireCurrent();
       created = await this.keycloak.createUser({ username, email, firstName, lastName });
       // 렐름에 default group/role이 나중에 생겨도 기본 생성은 항상 PENDING에서 시작한다.
       await this.keycloak.setGroups(created.id, []);
@@ -174,6 +178,7 @@ export class AdminService {
       } else {
         after = await this.prisma.$transaction(async tx => {
           await lockMemberRights(tx, created!.id);
+          await facts.request.requireCurrent(tx);
           return this.row(await tx.memberRights.findUnique({ where: { sub: created!.id } })
             ?? await this.register(tx, created!));
         });
@@ -194,8 +199,10 @@ export class AdminService {
     }
   }
 
-  async patchUser(id: string, body: any, c: Caller, facts?: RightsRequestFacts) {
+  async patchUser(id: string, body: any, c: Caller, facts: AdminRequestFacts) {
     this.admin(c);
+    if (!facts?.request || facts.actor.subject !== c.sub)
+      throw new ServiceUnavailableException('회원 변경 요청의 접속 사실을 확인할 수 없습니다');
     const existing = await this.prisma.memberRights.findUnique({ where: { sub: id } });
     const identityToRegister = existing ? null : await this.managed(id);
     const observed = existing ?? this.pendingMember(identityToRegister!);
@@ -258,10 +265,9 @@ export class AdminService {
       } catch (error) { preReadError = error; }
     }
 
-    if (!facts || facts.actor.subject !== c.sub) throw new ServiceUnavailableException('회원 변경 요청의 접속 사실을 확인할 수 없습니다');
-    const work = this.ledger.begin();
+    const work = facts.request.work;
     try {
-      const issuer = process.env.KC_ISSUER;
+      const issuer = facts.actor.issuer;
       if (!issuer) throw new Error('Missing member identity issuer');
       const affected = { issuer, subject: id, id: await work.resolveRequestIdentity(issuer, id) };
       const committed = await work.transactionWithRecords(async (tx, record) => {
@@ -271,6 +277,7 @@ export class AdminService {
         if (existing ? current?.version !== observed.version : !!current)
           throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
         if (preReadError) throw preReadError;
+        await facts.request.requireCurrent(tx);
         // The observed version precedes the remote pre-read. CAS rejects an older command after any
         // newer command commits, so its captured identity cannot rewind that newer identity. No I/O holds this lock.
         const version = existing ? observed.version : 1;
@@ -327,7 +334,7 @@ export class AdminService {
       if (lockWaitExceeded(error))
         throw new ConflictException({ code: 'MEMBER_BUSY', message: '다른 요청이 회원 상태를 변경하고 있습니다. 잠시 후 다시 시도하세요' });
       throw error;
-    } finally { work.end(); }
+    }
   }
 
   async resetPassword(id: string, body: any, c: Caller) {
