@@ -4,8 +4,8 @@
 // separately check durability. This is the behaviour behind the D1816 scope the
 // legacy AuditLog scan takes for EMR-D and the B2 request ports: what those flows
 // record (B2 events with the shared request's facts; the retained admin AuditLog
-// row). The context, prepare and current-session callbacks are test doubles,
-// since api/src supplies no ClinicalContextSource or OnlineClinicalWrite yet.
+// row). Context, preparation and current-session callbacks are test doubles;
+// the PostgreSQL suites cover their service adapters and durable storage.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -74,11 +74,24 @@ module.exports = async function recordedBoundaries() {
     async admit(event, _served, keys) { return { event, ...keys }; },
     async transaction(operation, work) {
       if (rejectAppend) throw new Error('SyntheticLedgerUnavailable');
-      const result = { outcome: 'positive', result: await work(db) };
+      const result = { outcome: 'committed', result: await work(db) };
       events.push(operation.event); operations.set(operation.operationId, result); return result;
     },
+    async transactionWithRecords(work) {
+      // RecordMutation runs the effect on the producer's transaction; a null
+      // reference has no event, and events become visible only on commit.
+      const pending = [];
+      const result = await db.$transaction(tx => work(tx, async (event, effect) => {
+        if (rejectAppend) throw new Error('SyntheticLedgerUnavailable');
+        const reference = await effect();
+        if (reference !== null) pending.push(event);
+        return reference;
+      }));
+      events.push(...pending);
+      return result;
+    },
     async confirm(appended) {
-      assert.equal(operations.get(appended.operationId)?.outcome, 'positive');
+      assert.equal(operations.get(appended.operationId)?.outcome, 'committed');
       const event = events.find(e => e.eventId === appended.eventId); assert.ok(event);
       return receipt(event);
     },
