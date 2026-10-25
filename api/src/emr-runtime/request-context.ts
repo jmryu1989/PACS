@@ -45,8 +45,8 @@ export interface RequestContextSource {
   ingress(request: IncomingMessage): Promise<RequestIngressFact>;
   facts(request: IncomingMessage): Promise<RequestFacts>;
   /** The callback owns all its follow-ups, including settlement after disconnect.
-   * It may retain this work to settle. Writes that re-check authorization call requireCurrent;
-   * reads do not (W9API-20 disposed, D1764).
+   * It may retain this work to settle. The draft and account-rights paths call requireCurrent before
+   * publication; a local read does not (W9API-20 disposed, D1764).
    */
   withWork<T>(request: IncomingMessage, task: (context: RequestWorkContext) => Promise<T>): Promise<T>;
 }

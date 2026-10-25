@@ -63,11 +63,11 @@ KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/
 
 The PG driver proves append/readback/filter, request attribution, all receipts
 before stream selection, a last-target SQL failure and close before a delayed
-COMMIT using fixture-owned SQL locks. A second case (A-PG-AUDIT-LOCAL) builds the
-incident scope and the export from rows read back from `emr_access.access_entry`. Its transport objects are component inputs,
-not a substitute route or real HTTP wire. Pure failures use no fake durable
-receipt. UNKNOWN is queried only under the original operation ID and is never
-retried as a new event.
+COMMIT using fixture-owned SQL locks. Its transport objects are component inputs,
+not a substitute route or real HTTP wire. A second PG case (A-PG-AUDIT-LOCAL)
+builds the incident scope and the export from rows read back from
+`emr_access.access_entry`. Pure failures use no fake durable receipt. UNKNOWN is
+queried only under the original operation ID and is never retried as a new event.
 
 REQ-A-DURABLE / A-PG-COMMIT remains partial until A2/A3's real routes prove
 COMMIT before their first clinical byte and lost-reply resolution. REQ-A-TARGET
