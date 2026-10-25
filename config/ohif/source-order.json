@@ -28,6 +28,7 @@
     "series-recovery.js",
     "context-loss.js",
     "viewer-ux.js",
+    "viewer-prior.js",
     "configuration.js"
   ]
 }

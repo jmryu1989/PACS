@@ -1106,6 +1106,27 @@
       "consumers": [
         "configuration.js"
       ]
+    },
+    {
+      "file": "viewer-prior.js",
+      "purpose": "Direct same-patient study list, native comparison assignment and read-only current approved report, bound to the U2 viewport context.",
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        },
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-prior-controller.js",
+        "/worklist/hpacs-lite/viewer-prior-panel.js"
+      ],
+      "consumers": [
+        "configuration.js"
+      ]
     }
   ],
   "registration_order": [
@@ -1218,6 +1239,11 @@
       "index": 21,
       "expression": "kinCreateViewerUX()",
       "source": "viewer-ux.js"
+    },
+    {
+      "index": 22,
+      "expression": "kinCreateViewerPrior()",
+      "source": "viewer-prior.js"
     }
   ],
   "served_consumer": {
