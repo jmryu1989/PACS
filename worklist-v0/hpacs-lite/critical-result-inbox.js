@@ -365,10 +365,9 @@
     // 마지막 행의 순서 키)이고, More로 읽는 쪽은 그 뒤부터 덮는다. listPhase는 이 보기에서 받아들인 결과('none'·'ready'·'failed')다.
     let filter = 'pending', listPhase = 'none', listError = '', ready = false, nextCursor = null, listEnd = null;
     let pending = null, lastPending = null, bodyOpen = false;
-    // D1822: on the reading page the folded body opens only when the reader asks (Show Received); there it is laid out over
-    // the report area. What used to open it by itself (a first or larger pending count, a read failure, an unknown or
-    // locally refused acknowledgement) now marks the summary bar instead (`data-attention`), so a list never covers the
-    // report being written. The reader's Show Received clears the mark. Without a fold (the clinician page) nothing changes.
+    let latestReceived = null;
+    // D1822 follow-up (Minhoon 2-2): arrivals open the existing overlay without moving editor focus. Read/ACK failures
+    // still mark the summary bar; they are not arrivals. Show Received clears that mark.
     let attention = false;
     const openBody = () => { if (!bodyOpen) attention = true; };
     // 목록 수준의 수락 기준(파일 머리의 요청 식별과 수락 기준): 지금 체인의 첫 쪽을 정한 요청 번호와, 체인이 마지막으로 받아들인 쪽의
@@ -586,9 +585,20 @@
         tailGen = ctx.gen;
         nextCursor = read.nextCursor;
         listEnd = page.low;
-        // 판독 화면 패널의 본문은 확인 대기가 처음 생기거나 늘 때 스스로 열린다. 같은 수가 이어지면 사용자가 닫은 본문을 다시 열지
-        // 않는다(재알림 없음, §16.3·§17 L-2). 스스로 닫지 않는다.
-        if (lastPending === null ? read.pending > 0 : read.pending > lastPending) openBody();
+        // A new report can arrive while another leaves pending, keeping the count unchanged. Remember the newest
+        // received key across refreshes so that arrival opens once, while repeated reads and older pages respect Hide.
+        let arrived = false;
+        for (const item of read.items) {
+          const key = keyOf(item);
+          if (!latestReceived || order(key, latestReceived) < 0) {
+            arrived ||= item.state === 'created';
+            latestReceived = key;
+          }
+        }
+        if (arrived || (lastPending === null ? read.pending > 0 : read.pending > lastPending)) {
+          bodyOpen = true;
+          attention = false;
+        }
         lastPending = pending = read.pending;
         listPhase = 'ready';
         listError = '';

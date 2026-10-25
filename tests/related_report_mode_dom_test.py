@@ -2190,7 +2190,6 @@ class RelatedModePage(unittest.TestCase):
         self.open()
         self.open_target()
         pane = self.page.locator("#cvr-inbox-p")
-        self.page.locator("#cvr-inbox-toggle").dispatch_event("click")
         ack = pane.get_by_role("button", name="Acknowledge", exact=True)
         expect(ack).to_be_visible()
         if unknown:
@@ -2319,6 +2318,93 @@ class RelatedModePage(unittest.TestCase):
 
     def test_w5b_received_list_overlays_the_mode_reading(self):
         self.received_list_overlays_the_mode(True)
+
+    # Minhoon 2-2: delivery opens the shipped overlay while native typing continues in the same Target editor.
+    def arrival_preserves_the_draft(self, reading):
+        import critical_result_recipient_dom_test as recipient
+        owner = [h.INSTITUTION, h.RAD["sub"]]
+        server = recipient.RecipientServer(owner)
+        reads, posts = [], []
+
+        def received(route, request):
+            url = urlparse(request.url)
+            query = parse_qs(url.query)
+            if request.method == "POST":
+                posts.append(request.post_data_json)
+            if query.get("view") == ["sent"]:
+                status, body = 200, {"owner": owner, "view": "sent", "items": [], "nextCursor": None, "pending": 0}
+            else:
+                status, body = server.handle(recipient.kind_of(request.method, url.path), url.path, query, request.post_data_json)
+                reads.append(body)
+            route.fulfill(status=status, json=body)
+
+        self.context.route(re.compile(r".*/api/critical-results(?:[/?].*)?$"), received)
+        self.open()
+        self.open_target()
+        if reading:
+            self.enter_reading()
+        body = self.page.locator("#cvr-inbox-body")
+        toggle = self.page.locator("#cvr-inbox-toggle")
+        expect(toggle).to_have_text("Show Received")
+        expect(body).to_be_hidden()
+        findings = self.page.locator("#findings")
+        findings.fill("SYN draft being typed\n" * 30)
+        self.page.locator("#conclusion").fill("SYN conclusion retained")
+        self.autosave()
+        findings.focus()
+        findings.evaluate("e => { e.setSelectionRange(5, 10, 'backward'); e.scrollTop = 40; }")
+        snapshot = """() => ({uid: selectedUid, fields: ['findings', 'conclusion', 'recommendation'].map(id => {
+          const e = document.getElementById(id); return [e.value, e.selectionStart, e.selectionEnd, e.selectionDirection,
+            e.scrollTop, e.scrollLeft]; }), active: document.activeElement.id,
+          scroll: [scrollX, scrollY, document.querySelector('.report-p').scrollTop]})"""
+        before, box = self.js(snapshot), self.js(self.BOX, ".redit")
+
+        def poll():
+            count = len(reads)
+            self.page.clock.fast_forward(60000)
+            self.wait(lambda: len(reads) > count, "the page polls received reports")
+            self.settle()
+
+        server.add(recipient.rec(181, case="R2"))
+        poll()
+        expect(body).to_be_visible()
+        expect(toggle).to_have_text("Hide Received")
+        expect(body).to_contain_text("SYN-PT-181")
+        self.assertEqual(before, self.js(snapshot), "arrival keeps draft, selection, focus and scroll")
+        self.assertEqual(box, self.js(self.BOX, ".redit"), "arrival does not move or resize the editor")
+        self.assertTrue(self.js(self.ON_TOP, "#cvr-inbox-body"), "the received report overlays the report pane")
+        self.page.keyboard.type("typed")
+        self.assertEqual(before["fields"][0][0][:5] + "typed" + before["fields"][0][0][10:], self.value())
+        expect(findings).to_be_focused()
+        server.add(recipient.rec(182, case="R2"))
+        after_typing = self.js(snapshot)
+        poll()
+        expect(body).to_contain_text("SYN-PT-182")
+        expect(body).to_have_count(1)
+        self.assertEqual(after_typing, self.js(snapshot), "another arrival reuses the overlay without taking focus")
+        toggle.click()
+        expect(body).to_be_hidden()
+        findings.focus()
+        poll()
+        expect(body).to_be_hidden()
+        server.records.pop(recipient.rid(182))
+        server.add(recipient.rec(183, case="R2"))
+        before_reopen = self.js(snapshot)
+        poll()
+        expect(body).to_be_visible()
+        expect(body).to_contain_text("SYN-PT-183")
+        expect(body).to_have_count(1)
+        self.assertEqual(before_reopen, self.js(snapshot), "a new arrival at the same pending count reopens without moving the draft")
+        self.assertEqual(box, self.js(self.BOX, ".redit"))
+        self.assertEqual([], posts, "displaying an arrival never acknowledges it")
+        toggle.click()
+        expect(body).to_be_hidden()
+
+    def test_w5b_arrival_preserves_the_draft_normal(self):
+        self.arrival_preserves_the_draft(False)
+
+    def test_w5b_arrival_preserves_the_draft_reading(self):
+        self.arrival_preserves_the_draft(True)
 
     # W5B-REVIEW-02: the worklist's own ways to the report editor (Enter on the current row, its keyboard activation, the
     # row menu's 판독문 작성으로) are Report Editor in the mode too: the mode closes and the editor returns with the
