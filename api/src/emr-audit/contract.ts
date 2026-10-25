@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, statutoryAct } from '../emr-contract/access-event';
-import type { AccessEvent, AccessTarget, LocalReadTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
+import type { AccessEvent, AccessTarget, LocalReadTarget, DownloadTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
 import { retentionDisposition, verifiedRecord } from '../emr-contract/classification';
 import type { ResolvedRecord } from '../emr-contract/classification';
 import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
@@ -251,7 +251,7 @@ function inInstitutionScope(plan: InvestigationPlan, event: Readonly<AccessEvent
   if (event.managingInstitution.status === 'known') return event.managingInstitution.value === plan.institutionId;
   return event.actingInstitution.status === 'known' && event.actingInstitution.value === plan.institutionId;
 }
-type InvestigationTarget = AccessTarget | LocalReadTarget;
+type InvestigationTarget = AccessTarget | LocalReadTarget | DownloadTarget;
 function targetMatches(f: InvestigationFilters, t: InvestigationTarget): boolean {
   if (f.patient && !('patientLinkSnapshot' in t && t.patientLinkSnapshot.status === 'known' && samePatient(t.patientLinkSnapshot.value, f.patient))) return false;
   if (f.sourcePatientId != null && !('sourcePatientId' in t && t.sourcePatientId.status === 'known' && t.sourcePatientId.value === f.sourcePatientId)) return false;

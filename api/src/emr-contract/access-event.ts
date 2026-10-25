@@ -340,7 +340,7 @@ export interface LocalReadAccessEventV2 {
   result: 'prepared' | 'succeeded' | 'aborted' | 'reported';
   requestId: string; auditLinkId: string; relatedEventId: string | null;
 }
-export type AccessEventV2 = AuthAccessEventV2 | OfflineAccessEventV2 | LocalReadAccessEventV2;
+export type AccessEventV2 = AuthAccessEventV2 | OfflineAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2;
 export type AccessEvent = AccessEventV1 | AccessEventV2;
 
 function factV2<T>(input: unknown, parse: (value: unknown) => T, unresolved: readonly UnresolvedReason[],
@@ -385,6 +385,7 @@ function parseAccessEventV2(input: unknown, served?: readonly ResolvedRecord[]):
   if (branch === 'local-read') return parseLocalReadEvent(input);
   if (branch === 'online-auth') return parseAuthEventV2(input);
   if (branch === 'verified-offline') return parseOfflineEventV2(input, served);
+  if (branch === 'original-download') return parseOriginalDownloadEvent(input);
   throw new Error('Unknown access format branch');
 }
 export function parseLocalReadEvent(input: unknown): Readonly<LocalReadAccessEventV2> {
@@ -650,7 +651,7 @@ const CHANGE_ACTS: readonly StatutoryAct[] = freeze(['기재', '추가기재', '
 export function statutoryAct(input: unknown, served?: readonly ResolvedRecord[]): StatutoryAct {
   const event = parseAccessEvent(input, served);
   return event.formatVersion === 2 && event.branch === 'online-auth' ? AUTH_STATUTORY_ACT[event.action] :
-    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2 | LocalReadAccessEventV2).action];
+    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2).action];
 }
 /** The streams an event is recorded in: always the viewing stream; also the history stream when it changed a record. */
 export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]): readonly AccessStream[] {
@@ -658,4 +659,65 @@ export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]
   const changed = CHANGE_ACTS.includes(statutoryAct(event, served)) && event.result === 'succeeded' &&
     (event.targets as readonly AccessTarget[]).some(target => !NON_RECORD_TARGETS.includes(target.kind));
   return changed ? ACCESS_STREAMS : freeze(['viewing'] as const);
+}
+
+/** A native copy carries A1's local-source shape: its study, operation (record) and fixed manifest (version), with the
+ * source PatientID/institution only as the route observed them. No formal PatientLink, signature or retained state.
+ * The projection a copy supplies is that canonical manifest, so its hash is the manifest's. */
+export type DownloadTarget = Omit<LocalReadTarget, 'kind'> & { kind: 'download' };
+export interface OriginalDownloadAccessEventV2 extends Omit<AccessEventV1, 'formatVersion' | 'targets' | 'context' | 'action' | 'result'> {
+  formatVersion: 2; branch: 'original-download';
+  rightsVersion: number;
+  session: Readonly<{ method: 'session'; sessionRef: string } | { method: 'bearer'; sessionRef: null }>;
+  targets: readonly DownloadTarget[];
+  action: 'provide-prepared' | 'transfer-ended' | 'transfer-aborted' | 'permission-refused' | 'conflict';
+  result: 'prepared' | 'succeeded' | 'aborted' | 'refused' | 'failed';
+}
+function parseOriginalDownloadEvent(input: unknown): Readonly<OriginalDownloadAccessEventV2> {
+  const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'rightsVersion',
+    'actingInstitution', 'managingInstitution', 'occurredAt', 'trustedProxyIp', 'session', 'cause', 'executor',
+    'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
+  const surface = choice(v.surface, ['POST studies/:uid/original-downloads',
+    'POST studies/:uid/original-downloads/:operationId/archive/grant', 'GET studies/:uid/original-downloads/:operationId/archive']);
+  const action = choice(v.action, ['provide-prepared', 'transfer-ended', 'transfer-aborted', 'permission-refused', 'conflict']);
+  const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed']);
+  if (v.formatVersion !== 2 || v.branch !== 'original-download' || v.executor !== 'member' || v.cause !== 'user-view' ||
+      result !== expectedResult(action)) throw new Error('Observed original download stage required');
+  const known = <T>(value: unknown, parse: (value: unknown) => T): EvidenceFact<T> => {
+    const parsed = fact(value, parse);
+    if (parsed.status !== 'known') throw new Error('Observed download fact required');
+    return parsed;
+  };
+  if (!Array.isArray(v.targets) || v.targets.length !== 1) throw new Error('One original download operation required');
+  const observed = (value: unknown) => {
+    const parsed = fact(value, v => string(v));
+    if (parsed.status !== 'known' && !(parsed.status === 'unresolved' && parsed.reason === 'not-observed'))
+      throw new Error('Local observation required');
+    return parsed;
+  };
+  const targets = v.targets.map(value => {
+    const t = object(value, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution', 'projectionSha256']);
+    return { kind: choice(t.kind, ['download']), studyId: known(t.studyId, string),
+      recordId: known(t.recordId, string), versionId: known(t.versionId, sha256),
+      sourcePatientId: observed(t.sourcePatientId), sourceInstitution: observed(t.sourceInstitution),
+      projectionSha256: sha256(t.projectionSha256) };
+  });
+  const binding = object(v.session, ['method', 'sessionRef']);
+  const session: OriginalDownloadAccessEventV2['session'] = binding.method === 'session'
+    ? { method: 'session', sessionRef: string(binding.sessionRef) }
+    : binding.method === 'bearer' && binding.sessionRef === null ? { method: 'bearer', sessionRef: null }
+    : refuse('DownloadSessionBindingRequired');
+  const trustedProxyIp = fact(v.trustedProxyIp, proxyAddress);
+  if (trustedProxyIp.status !== 'known' && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed'))
+    throw new Error('Observed ingress required');
+  const eventId = string(v.eventId), auditLinkId = string(v.auditLinkId);
+  const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
+  if (!UUID4.test(eventId) || !AUDIT_LINK.test(auditLinkId) || relatedEventId === eventId ||
+      (['transfer-ended', 'transfer-aborted'].includes(action) && relatedEventId === null))
+    throw new Error('Download event correlation required');
+  return freeze({ formatVersion: 2, branch: 'original-download', surface, eventId,
+    userId: known(v.userId, identity), rolesAtTime: known(v.rolesAtTime, roleList), rightsVersion: integer(v.rightsVersion),
+    actingInstitution: known(v.actingInstitution, string), managingInstitution: known(v.managingInstitution, string),
+    occurredAt: utc(v.occurredAt), trustedProxyIp, session, cause: 'user-view', executor: 'member', targets, action, result,
+    requestId: string(v.requestId), auditLinkId, relatedEventId });
 }
