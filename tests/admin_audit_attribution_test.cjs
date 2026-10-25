@@ -4778,6 +4778,11 @@ test('legacy create data: fixed holders preserve all actions; mutation and unfix
     run(`let audit = ${row('syn.a')}; await tx.auditLog.create({ data: audit });`),
     run(`const audit = ${row('syn.a')}; audit = ${row('syn.b')}; await tx.auditLog.create({ data: audit });`),
     run(`const audit = ${row('syn.a')}; audit.detail(); await tx.auditLog.create({ data: audit });`),
+    "async function write(tx: Prisma.TransactionClient, audit: any) { audit.action = 'syn.b'; await tx.auditLog.create({ data: audit }); }\n" + run(`await write(tx, ${row('syn.a')});`),
+    "function touch(audit: any) { audit.action = 'syn.b'; }\n" + run(`const audit = ${row('syn.a')}; touch(audit); await tx.auditLog.create({ data: audit });`),
+    run(`const audit = ${row('syn.a')}; library({ data: audit }); await tx.auditLog.create({ data: audit });`),
+    helper + run(`await write(...[tx, ${row('syn.b')}] as [any, any], ${row('syn.a')});`),
+    `const audit = ${row('syn.a')};\n` + run('await tx.auditLog.create({ data: audit });'),
   ];
   for (const body of unfixed) {
     const scan = scanAuditWrites([{ file: 'api/src/syn-data-holder.ts', text: head + body }]);
