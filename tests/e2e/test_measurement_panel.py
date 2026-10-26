@@ -150,7 +150,8 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
         f = self.specimen(); p = self.observed(f)
         _, panel = self.tracked(p)
         for index, (tool, label) in enumerate([('Angle','Angle'), ('EllipticalROI','Ellipse ROI')]):
-            p.get_by_role('button', name=label, exact=True).click()
+            # The Measurements panel's own tool buttons; the U2 image toolbar carries a second "Angle".
+            p.locator('#kin-viewer-history').get_by_role('button', name=label, exact=True).click()
             box=p.locator('.cornerstone-canvas').bounding_box()
             x,y=box['x']+box['width']*.4,box['y']+box['height']*(.43+index*.15)
             p.mouse.move(x,y); p.mouse.down(); p.mouse.move(x+65,y+32,steps=10); p.mouse.up()
