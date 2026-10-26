@@ -85,11 +85,13 @@ export class OnlineImageService implements BeforeApplicationShutdown {
         const result = await sendOnlineImage({ records: this.records, evidence: new PgImageEvidenceStore(this.db),
           source: this.orthanc.imageSource(), stagingDirectory }, {
           manifest, delivery: lease.delivery, requestId: facts.requestId,
-          // This response's current access check, on its own bounded ledger transaction, before any source read.
+          // This response's current access check, on its own bounded ledger transaction, before any source read:
+          // identity, institution scope, StudyAccess and provision; the archive's patient identity was compared with
+          // the manifest when the delivery opened (context.ts recheck).
           prepare: async (tx: EmrRecordTransaction) => {
             const at = new Date().toISOString();
             let current: CurrentImageFacts;
-            try { current = await this.context.current(tx, request, manifest, at); }
+            try { current = await this.context.recheck(tx, request, manifest, at); }
             catch (error) { lease.retire(); throw error; }
             if (!sameAuthority(current, lease.delivery.facts.facts, manifest)) { lease.retire(); refuse('ImageAuthorityChanged'); }
             return prepareDelivery(manifest, image, { eventId: randomUUID(), deliveryEventId: lease.delivery.event.eventId, at,

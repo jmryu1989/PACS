@@ -355,15 +355,18 @@ test('E image service: one ledger record per requester, session and manifest ver
       binding: { method: 'session', sessionRef: sessions.get(request) ?? 'authref:session-1' }, ingress: known({ address: '127.0.0.1', source: 'trusted-proxy' }),
       requestId: request.requestId ??= randomUUID() };
   } };
-  let currentChecks = 0, refuseCurrent = null;
+  let currentChecks = 0, rechecks = 0, refuseCurrent = null;
+  const facts = (request, at) => {
+    if (refuseCurrent) throw refuseCurrent;
+    return { actor: { identity: doctor, kind: 'member', roles: ['radiologist'], institutionId: 'synthetic-hospital', signingRegistrationId: null },
+      requestId: request.requestId, ip: known({ address: '127.0.0.1', source: 'trusted-proxy' }), accountGeneration: 1, provision: provision(at) };
+  };
   const context = {
     async manifest() { return manifest; },
-    async current(_tx, request, _manifest, at) {
-      currentChecks++;
-      if (refuseCurrent) throw refuseCurrent;
-      return { actor: { identity: doctor, kind: 'member', roles: ['radiologist'], institutionId: 'synthetic-hospital', signingRegistrationId: null },
-        requestId: request.requestId, ip: known({ address: '127.0.0.1', source: 'trusted-proxy' }), accountGeneration: 1, provision: provision(at) };
-    },
+    // The delivery opening reads the current study (archive patient identity included); a response re-checks the
+    // identity, scope, access and provision without the archive read.
+    async current(_tx, request, _manifest, at) { currentChecks++; return facts(request, at); },
+    async recheck(_tx, request, _manifest, at) { rechecks++; return facts(request, at); },
   };
   const service = new OnlineImageService(port, context, db, new OrthancService(), requests, registry.work);
   const server = createServer((req, res) => {
@@ -387,7 +390,7 @@ test('E image service: one ledger record per requester, session and manifest ver
     assert.ok(answers.every(a => a.headers.get('x-kin-image-event') === deliveryId), 'one record for the burst');
     const responseIds = answers.map(a => a.headers.get('x-kin-image-response'));
     assert.equal(new Set(responseIds).size, 6);
-    assert.equal(currentChecks, 2 + 6, 'two checks opening the record, one per response before its first byte');
+    assert.deepEqual([currentChecks, rechecks], [2, 6], 'two current reads opening the record, one re-check per response before its first byte');
     const provided = await entries(`event_id = '${deliveryId}'`);
     assert.equal(provided.length, 1);
     assert.deepEqual([provided[0].action, provided[0].result, provided[0].surface, provided[0].cause], ['provide-prepared', 'prepared', 'GET images/dicom-web', 'background-fetch']);
