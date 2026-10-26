@@ -1,4 +1,6 @@
 'use strict';
+// Read the selected wire body; HTTP/PG publication is covered by emr/a/report_reads_test.cjs.
+const readBody = value => JSON.parse(value.json);
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
@@ -594,14 +596,14 @@ test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliatio
 test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
   const w = await world({ resources: [A(), B(), resource(NORMAL, 'SYN-PID-N'), resource('2.25.101', 'SYN-PID-N')] }).start();
   const clinician = caller({ roles: ['clinician'], actor: 'clinician-1', sub: 'sub-clinician' });
-  const list = await w.pacs.clinicianStudies(clinician);
+  const list = readBody(await w.pacs.clinicianStudies(clinician));
   assert.deepEqual(list.studies.map(s => s.uid).sort(), [NORMAL, '2.25.101']);
   assert.deepEqual(list.identityIssues, [{ uid: SPLIT, code: 'STUDY_IDENTITY_UNRESOLVED' }]);
   assert.deepEqual(Object.keys(list).sort(), ['identityIssues', 'serverTime', 'studies']);
-  const paged = await w.pacs.clinicianStudies(clinician, { limit: '1' });
+  const paged = readBody(await w.pacs.clinicianStudies(clinician, { limit: '1' }));
   assert.equal(paged.pagination.total, 2);
   assert.equal('identityIssues' in paged, false);
-  const timeline = await w.pacs.clinicianTimeline(NORMAL, clinician, { limit: '10' });
+  const timeline = readBody(await w.pacs.clinicianTimeline(NORMAL, clinician, { limit: '10' }));
   assert.equal(timeline.pagination.total, 2);
   await rejects(w.pacs.clinicianTimeline(SPLIT, clinician, { limit: '10' }), 404);
 });

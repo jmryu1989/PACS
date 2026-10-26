@@ -1,3 +1,5 @@
+import { LocalReadResponse } from './emr-viewing/local-read';
+import { viewerSources } from './emr-viewing/consumer-read';
 import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
@@ -100,8 +102,18 @@ export class ViewerService {
     }
   }
 
-  list(uid: string, query: any, c: Caller, id?: string) {
-    return this.read(uid, query, c, id, null);
+  async list(uid: string, query: any, c: Caller, id?: string) {
+    return (await this.read(uid, query, c, id, null)).body;
+  }
+
+  async listRead(uid: string, query: any, c: Caller, id?: string) {
+    const selected = await this.read(uid, query, c, id, null);
+    return new LocalReadResponse(selected.body, selected.sources);
+  }
+
+  selectFinal(uid: string, query: any, c: Caller, final: number) {
+    if (!Number.isSafeInteger(final) || final < 1) denied();
+    return this.read(uid, query, c, undefined, final);
   }
 
   /**
@@ -115,7 +127,7 @@ export class ViewerService {
   async listFinal(uid: string, query: any, c: Caller, final: number):
       Promise<{ items: any[]; nextCursor: string | null; finalVersion: number | null }> {
     if (!Number.isSafeInteger(final) || final < 1) denied();
-    return await this.read(uid, query, c, undefined, final) as any;
+    return (await this.selectFinal(uid, query, c, final)).body as any;
   }
 
   private async read(uid: string, query: any, c: Caller, id: string | undefined, final: number | null) {
@@ -124,7 +136,7 @@ export class ViewerService {
     // The permission predicate and page share a single SQL statement, including
     // the distinction between a forbidden parent and an authorized empty page.
     const pageResult = await this.bounded(async tx => {
-      const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
+      const parent = Prisma.sql`SELECT uid, "institutionId" FROM "StudyState" WHERE uid = ${uid}
         AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
         AND (rs <> 'P' OR (CASE WHEN "preDocSub" IS NOT NULL THEN "preDocSub" = ${c.sub} ELSE "preDoc" = ${c.actor} END) OR (CASE WHEN "preReviewerSub" IS NOT NULL THEN "preReviewerSub" = ${c.sub} ELSE "preReviewer" = ${c.actor} END))`;
       // Checking "signed?" before and after a separate read cannot see a reset
@@ -139,7 +151,7 @@ export class ViewerService {
       if (id !== undefined) {
         const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent}),
           head AS (SELECT i.id FROM "ViewerItem" i JOIN parent p ON p.uid = i."studyUid" WHERE i.id = ${id}::uuid)
-          SELECT EXISTS(SELECT 1 FROM parent) AS allowed, EXISTS(SELECT 1 FROM head) AS present,
+          SELECT (SELECT "institutionId" FROM parent) AS institution, EXISTS(SELECT 1 FROM parent) AS allowed, EXISTS(SELECT 1 FROM head) AS present,
             COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.revision) FROM (
               SELECT r.* FROM "ViewerRevision" r JOIN head h ON h.id = r."itemId"
               WHERE (${page.cursor}::int IS NULL OR r.revision > ${page.cursor}::int)
@@ -148,10 +160,10 @@ export class ViewerService {
         if (!pageRow.present) throw new NotFoundException('표시 항목이 없습니다');
         const revisions = pageRow.rows.slice(0, page.limit).map(row => ({ revision: row.revision, action: row.action,
           reason: row.reason, actor: row.actor, at: timestamp(row.at), payloadBytes: row.payloadBytes, item: row.snapshot }));
-        return { revisions, nextCursor: pageRow.rows.length > page.limit ? revisions[revisions.length - 1].revision : null };
+        return { institution: pageRow.institution, body: { revisions, nextCursor: pageRow.rows.length > page.limit ? revisions[revisions.length - 1].revision : null } };
       }
       const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})${signedHead}
-        SELECT EXISTS(SELECT 1 FROM parent) AS allowed, ${signedColumn}
+        SELECT (SELECT "institutionId" FROM parent) AS institution, EXISTS(SELECT 1 FROM parent) AS allowed, ${signedColumn}
           COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.id) FROM (
             SELECT i.* FROM "ViewerItem" i JOIN parent p ON p.uid = i."studyUid"
             WHERE (${page.includeHidden} OR NOT i.hidden) ${signedItems}
@@ -160,11 +172,13 @@ export class ViewerService {
             ORDER BY i.id LIMIT ${page.limit + 1}) page), '[]'::jsonb) AS rows`;
       if (!pageRow.allowed) denied();
       const items = pageRow.rows.slice(0, page.limit).map(row => result(row));
-      return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null,
-        ...(signed ? { finalVersion: Number.isSafeInteger(pageRow.finalVersion) ? pageRow.finalVersion as number : null } : {}) };
+      return { institution: pageRow.institution, body: { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null,
+        ...(signed ? { finalVersion: Number.isSafeInteger(pageRow.finalVersion) ? pageRow.finalVersion as number : null } : {}) } };
     }, true);
-    if ('items' in pageResult) await this.verifyMeasurements(uid, pageResult.items, c);
-    return pageResult;
+    const body = pageResult.body;
+    if ('items' in body) await this.verifyMeasurements(uid, body.items, c);
+    const key = 'items' in body ? 'items' : 'revisions';
+    return { body, institution: pageResult.institution, sources: viewerSources(uid, pageResult.institution, body[key], [key], undefined, id) };
   }
 
   async write(uid: string, raw: Buffer, c: Caller, id?: string) {

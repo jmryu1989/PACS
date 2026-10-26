@@ -1,5 +1,7 @@
 import { BadRequestException, ConflictException, Controller, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
+import { LocalReadResponse } from './emr-viewing/local-read';
+import { viewerSources } from './emr-viewing/consumer-read';
 import { Caller, PacsService } from './pacs.service';
 import { ViewerService } from './viewer.service';
 import { ViewerContextEventService } from './viewer-context-event.service';
@@ -28,7 +30,7 @@ export class ViewerController {
   @Get('studies/:uid/viewer-items')
   list(@Param('uid') uid: string, @Query() query: any, @Req() req: any) {
     const c = caller(req);
-    return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);
+    return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.listRead(uid, query, c);
   }
 
   /**
@@ -51,9 +53,11 @@ export class ViewerController {
     const version = await this.pacs.clinicianViewerHead(uid, c);
     if (!clinicianViewerContinues(continued?.version ?? null, version)) throw changed();
     if (version === null) return clinicianViewerWithheld(uid);
-    const result = await this.svc.listFinal(uid, continued ? { ...rest, cursor: continued.after } : rest, c, version);
-    if (!clinicianViewerPinned(version, result.finalVersion, await this.pacs.clinicianViewerHead(uid, c))) throw changed();
-    return clinicianViewerPage(uid, version, result, VIEWER_CURSOR_KEY);
+    const selected = await this.svc.selectFinal(uid, continued ? { ...rest, cursor: continued.after } : rest, c, version);
+    const result = selected.body;
+    if (!clinicianViewerPinned(version, result['finalVersion'], await this.pacs.clinicianViewerHead(uid, c))) throw changed();
+    const body = clinicianViewerPage(uid, version, result, VIEWER_CURSOR_KEY);
+    return new LocalReadResponse(body, viewerSources(uid, selected.institution, body.items, ['items']));
   }
 
   @Post('studies/:uid/viewer-items')
@@ -64,7 +68,7 @@ export class ViewerController {
 
   @Get('studies/:uid/viewer-items/:id/revisions')
   revisions(@Param('uid') uid: string, @Param('id') id: string, @Query() query: any, @Req() req: any) {
-    return this.svc.list(uid, query, caller(req), id);
+    return this.svc.listRead(uid, query, caller(req), id);
   }
 
   @Post('studies/:uid/viewer-items/:id/revisions')

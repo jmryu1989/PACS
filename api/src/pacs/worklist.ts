@@ -21,6 +21,7 @@ import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
 import type { PacsPreferences } from './preferences';
 import type { PacsAudit } from './audit';
+import { worklistRead } from '../emr-viewing/consumer-read';
 
 export class PacsWorklist {
   constructor(
@@ -43,6 +44,16 @@ export class PacsWorklist {
    * 한 번 판정하면 변하지 않으므로, 처음 보는 순간 DB에 확정한다.
    */
   async listStudies(c: Caller, query?: any) {
+    return (await this.selectStudies(c, query)).body;
+  }
+
+  async readStudies(c: Caller, query?: any) {
+    const { body, institutions, identities } = await this.selectStudies(c, query);
+    return worklistRead(body, c.actor, inst(c), institutions, identities);
+  }
+
+  // The clinician projections reuse this selection and its observed source identity.
+  async selectStudies(c: Caller, query?: any) {
     const me = inst(c);
     const access=await this.studyAccess.snapshot(c);
     const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen)], page = studyPageQuery(query, owner);
@@ -239,10 +250,13 @@ export class PacsWorklist {
     const absentReceiptByUid = new Map(absentReceipts.map(r => [r.studyUid, r]));
     for (const row of notObserved ?? []) { const receipt = absentReceiptByUid.get(row.uid); if (receipt) Object.assign(row, { gatewayReceipt: projectGatewayReceipt(receipt) }); }
     const orderReconciliation = orderRows ? this.orderReconciliation(qido, orderRows, me, access) : undefined;
-    return { studies: out, serverTime: new Date().toISOString(), observedAt,
+    const body = { studies: out, serverTime: new Date().toISOString(), observedAt,
       ...(notObserved === undefined ? {} : { notObserved }),
       ...(orderReconciliation === undefined ? {} : { orderReconciliation }),
       ...(completes ? { identityIssues: identityIssueList(issues) } : {}), ...(page ? { pagination: window.pagination } : {}) };
+    const identities = new Map(sourceRows.map(st => [OrthancService.tag(st, '0020000D'), {
+      sourcePatientId: OrthancService.tag(st, '00100020') || null, sourceInstitution: OrthancService.tag(st, '00080080') || null }]));
+    return { body, identities, institutions: new Map([...byUid].map(([uid, state]) => [uid, state.institutionId])) };
   }
 
   /**

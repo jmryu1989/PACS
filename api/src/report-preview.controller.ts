@@ -6,6 +6,8 @@ import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 import { viewerUid } from './viewer-input';
 import { CLINICIAN_ROUTE_DENIED, clinicianOnly } from './clinician-policy';
+import { LocalReadResponse } from './emr-viewing/local-read';
+import { consumerSource, viewerSources } from './emr-viewing/consumer-read';
 
 const member = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: req.roles ?? [],
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
@@ -78,7 +80,7 @@ export class ReportPreviewController {
       let overlay: any; try { overlay = JSON.parse(state.ov || '{}'); } catch { overlay = {}; }
       for (const key of ['id', 'name', 'birth', 'sex', 'date', 'acc', 'desc', 'modality'])
         if (typeof overlay?.[key] === 'string') study[key] = overlay[key];
-      return { study, actor: caller.actor, canPreviewEditor: ['radiologist', 'admin'].some(role => caller.roles?.includes(role)),
+      const body = { study, actor: caller.actor, canPreviewEditor: ['radiologist', 'admin'].some(role => caller.roles?.includes(role)),
         // The head version's own action: output must name an addendum instead of
         // reading as an ordinary approved save. It comes from the row already
         // read above, so this adds no query, no gate and no history field.
@@ -86,6 +88,11 @@ export class ReportPreviewController {
           repDoc: state.repDoc ?? null, confirm: state.confirm ?? null,
           findings: report?.findings ?? '', conclusion: report?.conclusion ?? '', recommendation: report?.recommendation ?? '' },
         keys: heads.map(head => ({ id: head.id, revision: head.revision, author: head.authorActor, item: head.snapshot })) };
+      const identity = { sourcePatientId: tag('00100020') || null, sourceInstitution: tag('00080080') || null };
+      const sources = [consumerSource('study-metadata', uid, state.institutionId, uid, null, ['study'], identity),
+        ...viewerSources(uid, state.institutionId, body.keys, ['keys'], identity)];
+      if (report) sources.push(consumerSource('report-head', uid, state.institutionId, uid, report.version, ['report'], identity));
+      return new LocalReadResponse(body, sources);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 }

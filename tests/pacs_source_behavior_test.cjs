@@ -1,4 +1,6 @@
 'use strict';
+// Read the selected wire body; HTTP/PG publication is covered by emr/a/report_reads_test.cjs.
+const readBody = value => JSON.parse(value.json);
 // Only the contracts missing from the existing compiled suites live here.
 // Public PacsService calls use test-owned stores; no private-method forwarding seam.
 const { test } = require('node:test');
@@ -123,7 +125,7 @@ test('U0B-CLINICIAN-ROLES mixed members keep statistics; clinician-only and gate
 test('U0B-CLINICIAN-SNAPSHOT report read is final-only, tenant-gated and transaction-bound', async () => {
   const c = caller(['clinician']);
   for (const rs of ['W', 'T', 'R', 'A']) {
-    const f = fixture({ state: { rs } }), out = await f.service.clinicianReportRead(UID, c);
+    const f = fixture({ state: { rs } }), out = readBody(await f.service.clinicianReportRead(UID, c));
     assert.equal(out.report.final, rs === 'A');
     assert.equal(JSON.stringify(out).includes('FINAL'), rs === 'A');
     assert.equal(JSON.stringify(out).includes('DO NOT SEND'), false);
@@ -143,7 +145,7 @@ test('U0B-CLINICIAN-SNAPSHOT report read is final-only, tenant-gated and transac
 
 test('U0B-CLINICIAN-LIST public enumeration narrows rows and refuses a changed snapshot', async () => {
   const c = caller(['clinician']), f = fixture({ state: { rs: 'A' } });
-  const out = await f.service.clinicianStudies(c);
+  const out = readBody(await f.service.clinicianStudies(c));
   assert.equal(out.studies.length, 1);
   for (const field of ['notObserved', 'orderReconciliation', 'gatewayReceipt']) assert.equal(field in out, false);
   assert.equal(JSON.stringify(out).includes('DO NOT SEND'), false);

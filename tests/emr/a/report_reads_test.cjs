@@ -92,23 +92,45 @@ let ctx;
 before(async () => {
   const { privateKey, publicKey } = await jose.generateKeyPair('RS256');
   const jwk = { ...await jose.exportJWK(publicKey), kid: 'module-a-reports', alg: 'RS256', use: 'sig' };
-  const split = new Set(), sourceRows = new Map();
+  const split = new Set(), sourceRows = new Map(), originals = new Map(), instances = new Map();
   // Synthetic external collaborators: the OIDC key set and Orthanc's QIDO study answer (one resource per UID, two for a
   // UID two patients share). Like Orthanc 1.12.5 (measured, R229-B6-01), the answer carries the PS3.18 default study
   // attributes plus only the tags the request names in includefield; InstitutionName is not a default.
   const QIDO_STUDY_DEFAULTS = new Set(['00080005', '00080020', '00080030', '00080050', '00080056', '00080061', '00080090',
     '00080201', '00081190', '00100010', '00100020', '00100030', '00100040', '0020000D', '00200010', '00201206', '00201208']);
-  const provider = http.createServer((req, res) => {
+  const provider = http.createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.url === '/certs') return res.end(JSON.stringify({ keys: [jwk] }));
     const url = new URL(req.url, 'http://synthetic');
-    if (url.pathname === '/dicom-web/studies' && url.searchParams.get('StudyInstanceUID')) {
+    if (url.pathname === '/dicom-web/studies') {
       const uid = url.searchParams.get('StudyInstanceUID');
       const named = new Set(url.searchParams.getAll('includefield').flatMap(value => value.split(',')).map(tag => tag.trim().toUpperCase()));
       const answered = row => Object.fromEntries(Object.entries(row).filter(([tag]) => QIDO_STUDY_DEFAULTS.has(tag) || named.has(tag)));
       const row = patient => ({ '0020000D': { vr: 'UI', Value: [uid] }, '00100020': { vr: 'LO', Value: [patient] } });
-      const rows = sourceRows.get(uid) ?? (split.has(uid) ? [row('SYN-PID-1'), row('SYN-PID-2')] : [row('SYN-PID-1')]);
+      const rows = uid ? uid.split(',').flatMap(id => sourceRows.get(id) ?? (split.has(id) ? [row('SYN-PID-1'), row('SYN-PID-2')] : [row('SYN-PID-1')])) : [...sourceRows.values()].flat();
       return res.end(JSON.stringify(rows.map(answered)));
+    }
+    if (url.pathname === '/tools/lookup') {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const uid = Buffer.concat(chunks).toString('utf8');
+      const id = sha(uid).slice(0, 40).match(/.{8}/g).join('-');
+      if (instances.has(uid)) { originals.set(id, instances.get(uid)); return res.end(JSON.stringify([{ Type: 'Instance', ID: id }])); }
+      if (sourceRows.has(uid)) { originals.set(id, { MainDicomTags: { StudyInstanceUID: uid }, PatientMainDicomTags: { PatientID: 'SYN-CONSUMER-PID' } });
+        return res.end(JSON.stringify([{ Type: 'Study', ID: id }])); }
+    }
+    if (url.pathname.startsWith('/instances/') && url.pathname.endsWith('/study'))
+      return res.end(JSON.stringify({ MainDicomTags: { StudyInstanceUID: originals.get(url.pathname.split('/')[2])?.StudyInstanceUID } }));
+    if (url.pathname.startsWith('/instances/') && url.pathname.endsWith('/simplified-tags')) return res.end(JSON.stringify(originals.get(url.pathname.split('/')[2])));
+    if (url.pathname.startsWith('/instances/') && url.pathname.endsWith('/attachments/dicom/info')) return res.end(JSON.stringify({ UncompressedMD5: 'a'.repeat(32) }));
+    if (url.pathname.startsWith('/studies/') && originals.has(url.pathname.split('/')[2]))
+      return res.end(JSON.stringify(originals.get(url.pathname.split('/')[2])));
+    if (url.pathname === '/tools/find') {
+      const rows = [...sourceRows.values()].flat().map(row => ({ RequestedTags: {
+        StudyInstanceUID: row['0020000D'].Value[0], InstitutionName: row['00080080']?.Value[0] ?? '',
+        PatientID: row['00100020']?.Value[0] ?? '', StudyDate: row['00080020']?.Value[0] ?? '',
+        ModalitiesInStudy: row['00080061']?.Value?.join('\\') ?? '', AccessionNumber: row['00080050']?.Value[0] ?? '',
+      } }));
+      return res.end(JSON.stringify(rows));
     }
     res.statusCode = 404; res.end('{}');
   });
@@ -117,7 +139,7 @@ before(async () => {
   Object.assign(process.env, { KC_ISSUER: issuer, KC_AUDIENCE: 'kin-api', AUTH_REQUIRED: 'true',
     KIN_COOKIE_SECRET: randomUUID(), KC_WEB_SECRET: randomUUID(), PUBLIC_ORIGIN: 'https://synthetic.invalid',
     KC_JWKS_URL: providerUrl + '/certs', ORTHANC_URL: providerUrl, ORTHANC_USER: 'synthetic', ORTHANC_PASS: randomUUID() });
-  const token = await new jose.SignJWT({ email: actor, realm_access: { roles: ['radiologist'] }, groups: ['/' + institution] })
+  const token = await new jose.SignJWT({ sid: 'synthetic-report-session', email: actor, realm_access: { roles: ['radiologist'] }, groups: ['/' + institution] })
     .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(issuer).setSubject(sub).setAudience('kin-api')
     .setIssuedAt().setExpirationTime('30m').sign(privateKey);
   const witness = new PrismaClient({ datasources: { db: { url: process.env.KIN_B2R_WITNESS_URL } } });
@@ -134,11 +156,18 @@ before(async () => {
     approved: true, suspended: false, institution, roles: ['radiologist'] } });
   await witness.institution.create({ data: { id: foreignInstitution, name: 'Synthetic Other Site' } });
   await runtime.start();
-  const app = await NestFactory.create(AppModule.withLedger(runtime, { proxyPeers: ['127.0.0.1'] }), { logger: ['error'], abortOnError: false });
+  const app = await NestFactory.create(AppModule.withLedger(runtime, { proxyPeers: ['127.0.0.1'] }), { logger: ['error'], abortOnError: false, rawBody: true });
   app.setGlobalPrefix('api');
+  app.use('/worklist', apiRequire('express').static(path.resolve(__dirname, '../../../worklist-v0/hpacs-lite')));
   await app.listen(0, '127.0.0.1');
   const origin = await app.getUrl();
-  ctx = { witness, runtime, app, provider, relay, split, sourceRows, origin, token };
+  const clinicianSub = 'synthetic-consumer-clinician';
+  await witness.memberRights.create({ data: { sub: clinicianSub, username: clinicianSub, email: clinicianSub + '@example.test',
+    name: 'Synthetic Clinician', emailVerified: true, approved: true, suspended: false, institution, roles: ['clinician'] } });
+  const clinicianToken = await new jose.SignJWT({ email: clinicianSub + '@example.test', realm_access: { roles: ['clinician'] }, groups: ['/' + institution] })
+    .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(issuer).setSubject(clinicianSub).setAudience('kin-api')
+    .setIssuedAt().setExpirationTime('30m').sign(privateKey);
+  ctx = { witness, runtime, app, provider, relay, split, sourceRows, origin, token, clinicianToken, instances };
 });
 after(async () => {
   if (!ctx) return;
@@ -150,10 +179,10 @@ after(async () => {
 });
 
 /** One real HTTP request. `onResponse` runs when the status line and headers arrive, before any body byte is read. */
-function call(pathname, { onResponse } = {}) {
+function call(pathname, { onResponse, token, method = 'GET', body } = {}) {
   let req;
   const done = new Promise((resolve, reject) => {
-    req = http.request(ctx.origin + '/api' + pathname, { headers: { authorization: 'Bearer ' + ctx.token, 'x-real-ip': CLIENT_IP } }, res => {
+    req = http.request(ctx.origin + '/api' + pathname, { method, headers: { authorization: 'Bearer ' + (token ?? ctx.token), 'x-real-ip': CLIENT_IP, 'content-type': 'application/json' } }, res => {
       res.pause();
       Promise.resolve(onResponse?.(res)).then(() => {
         const chunks = [];
@@ -168,7 +197,7 @@ function call(pathname, { onResponse } = {}) {
       }, reject);
     });
     req.on('error', reject);
-    req.end();
+    req.end(body === undefined ? undefined : JSON.stringify(body));
   });
   return { req, done };
 }
@@ -466,7 +495,7 @@ test('A-HTTP-REPORT source identities: retain observed values, and only absent v
     ctx.sourceRows.set(uid, noResource ? [] : [row]);
     for (const suffix of ['/versions', '/versions/1/citations']) {
       const answer = await get('/studies/' + uid + '/report' + suffix);
-      assert.equal(answer.status, 200);
+      assert.equal(answer.status, 200, answer.text);
       const accessRef = Array.isArray(answer.body) ? answer.body[0].accessRef : answer.body.accessRef;
       const recorded = await events(uid);
       const prepared = recorded.find(entry => entry.event.eventId === accessRef);
@@ -475,5 +504,232 @@ test('A-HTTP-REPORT source identities: retain observed values, and only absent v
       assert.deepEqual(prepared.event.targets[0].sourceInstitution, sourceInstitution?.trim() ? { status: 'known', value: sourceInstitution } : unknown);
       assert.equal(prepared.event.managingInstitution.value, institution);
     }
+  }
+});
+
+// A-016..038 remaining read consumers: real production controllers and PG receipts, never a fixture endpoint.
+async function consumerStudy(fields = {}) {
+  const uid = await study(fields);
+  ctx.sourceRows.set(uid, [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-CONSUMER-PID'] },
+    '00100010': { Value: [{ Alphabetic: 'SYN^CONSUMER' }] }, '00080080': { Value: ['SYN-SOURCE-SITE'] },
+    '00080020': { Value: ['20261026'] }, '00080061': { Value: ['CT'] } }]);
+  return uid;
+}
+async function readRecorded(route, uid, options = {}) {
+  const before = new Set((await events(uid)).map(e => e.eventId));
+  const answer = await call(route, options).done;
+  assert.equal(answer.status, 200, answer.text);
+  const selected = (await prepared(uid)).filter(e => !before.has(e.eventId));
+  for (const row of selected) assert.deepEqual(parseAccessEvent(row.event), row.event);
+  await settled(uid, (await prepared(uid)).length);
+  return { answer: answer.body, selected: selected.map(e => e.event) };
+}
+function targetOf(events, kind) { return events.filter(e => e.targets[0].kind === kind).map(e => e.targets[0]); }
+
+test('A-REMAINDER worklist: returned page, own draft, hidden preliminary, and original source attribution', async () => {
+  const uid = await consumerStudy();
+  await version(uid, 1, { findings: 'SYN approved' });
+  await ctx.witness.report.create({ data: { uid, version: 1, findings: 'SYN approved' } });
+  await ctx.witness.reportDraft.create({ data: { uid, author: actor, findings: 'SYN private', revision: 3 } });
+  await ctx.witness.reportDraft.create({ data: { uid, author: 'other@example.test', findings: 'SYN other draft' } });
+  const hidden = await consumerStudy({ rs: 'P', preDocSub: 'other-author', preReviewerSub: 'other-reviewer' });
+  await ctx.witness.report.create({ data: { uid: hidden, version: 2, findings: 'SYN withheld' } });
+  const { answer, selected } = await readRecorded('/studies?limit=100', uid);
+  const row = answer.studies.find(r => r.uid === uid);
+  assert.equal(row.state.findings, 'SYN approved'); assert.equal(row.state.draft.findings, 'SYN private');
+  assert.equal(JSON.stringify(answer).includes('SYN other draft'), false);
+  assert.equal(JSON.stringify(answer).includes('SYN withheld'), false);
+  assert.equal(targetOf(selected, 'report-head').length, 1);
+  assert.equal(targetOf(selected, 'private-draft')[0].versionId.value, row.state.draftRevision);
+  const metadata = targetOf(selected, 'study-metadata')[0];
+  assert.equal(metadata.sourcePatientId.value, 'SYN-CONSUMER-PID');
+  assert.equal(metadata.sourceInstitution.value, 'SYN-SOURCE-SITE');
+  assert.equal(metadata.projectionSha256, sha(JSON.stringify(row)));
+  assert.equal(targetOf((await prepared(hidden)).map(e => e.event), 'report-head').length, 0);
+  const boot = await readRecorded('/bootstrap', uid);
+  assert.equal(targetOf(boot.selected, 'report-head').length, 1);
+  assert.equal(targetOf(boot.selected, 'private-draft').length, 1);
+  const lean = await readRecorded('/bootstrap?states=omit', uid);
+  assert.equal(lean.selected.length, 0, 'omitted states are not served records');
+});
+
+test('A-REMAINDER preview, report evidence, keys and revisions preserve the exact selected body', async () => {
+  const uid = await consumerStudy();
+  const stored = await version(uid, 1, { findings: 'SYN preview' });
+  await ctx.witness.report.create({ data: { uid, version: 1, findings: stored.findings } });
+  const item = { schemaVersion: 1, kind: 'key', seriesUid: uid + '.1', sopUid: uid + '.1.1', frame: 1,
+    title: 'SYN KEY', description: 'SYN key description' };
+  const id = randomUUID();
+  await ctx.witness.viewerItem.create({ data: { id, studyUid: uid, authorSub: sub, authorActor: actor,
+    revision: 1, snapshot: item, updatedAt: new Date() } });
+  const payload = JSON.stringify(item);
+  await ctx.witness.$executeRaw`INSERT INTO "ViewerRevision" ("itemId",revision,snapshot,action,reason,actor,"payloadBytes")
+    VALUES (${id}::uuid,1,${payload}::jsonb,'create','',${actor},octet_length(convert_to((${payload}::jsonb)::text,'UTF8')))`;
+  ctx.instances.set(item.sopUid, { StudyInstanceUID: uid, SeriesInstanceUID: item.seriesUid, SOPInstanceUID: item.sopUid });
+  const lookup = await readRecorded('/dicom/lookup', uid, { method: 'POST', body: { studyUid: uid, sopUid: item.sopUid } });
+  assert.equal(targetOf(lookup.selected, 'study-metadata')[0].recordId.value, lookup.answer.id);
+  assert.equal(targetOf(lookup.selected, 'study-metadata')[0].projectionSha256, sha(JSON.stringify(lookup.answer)));
+  const preview = await readRecorded('/studies/' + uid + '/report-preview', uid);
+  assert.equal(preview.answer.report.findings, stored.findings);
+  assert.equal(targetOf(preview.selected, 'report-head')[0].projectionSha256, sha(JSON.stringify(preview.answer.report)));
+  assert.equal(targetOf(preview.selected, 'key-image')[0].recordId.value, id);
+  for (const route of ['citations', 'structure']) {
+    const evidence = await readRecorded('/studies/' + uid + '/report/' + route, uid);
+    assert.equal(targetOf(evidence.selected, 'report-evidence')[0].projectionSha256, sha(JSON.stringify(evidence.answer.head)));
+  }
+  const marks = await readRecorded('/studies/' + uid + '/viewer-items?limit=20', uid);
+  assert.equal(targetOf(marks.selected, 'key-image')[0].projectionSha256, sha(JSON.stringify(marks.answer.items[0])));
+  const revisions = await readRecorded('/studies/' + uid + '/viewer-items/' + id + '/revisions?limit=20', uid);
+  assert.equal(targetOf(revisions.selected, 'key-image')[0].projectionSha256, sha(JSON.stringify(revisions.answer.revisions[0])));
+  const clinical = await readRecorded('/clinician/studies/' + uid + '/report', uid, { token: ctx.clinicianToken });
+  assert.equal(targetOf(clinical.selected, 'report-version')[0].recordId.value, String(stored.id));
+  assert.equal(targetOf(clinical.selected, 'key-image').length, 1);
+  const list = await readRecorded('/clinician/studies?limit=100', uid, { token: ctx.clinicianToken });
+  assert.equal(targetOf(list.selected, 'report-head').length, 0, 'clinician list has status, not report text');
+  const timeline = await readRecorded('/clinician/studies/' + uid + '/timeline?limit=100', uid, { token: ctx.clinicianToken });
+  assert.equal(targetOf(timeline.selected, 'study-metadata').length, 2);
+});
+
+test('A-REMAINDER: preview waits for all PG receipts before its first clinical byte', async () => {
+  const uid = await consumerStudy();
+  await version(uid, 1, { findings: 'SYN delayed preview' });
+  await ctx.witness.report.create({ data: { uid, version: 1, findings: 'SYN delayed preview' } });
+  const hold = holdLedger(); await hold.locked;
+  let first = null;
+  try {
+    const pending = call('/studies/' + uid + '/report-preview', { onResponse: async () => { first = (await prepared(uid)).length; } });
+    await runtimeWaitsOnLock(); assert.equal(first, null);
+    await hold.release(); assert.equal((await pending.done).status, 200);
+    assert.equal(first, 2);
+  } finally { await hold.release(); }
+});
+
+
+test('A-REMAINDER comparison preview/list/restore identify the saved revision', async () => {
+  const uid = await consumerStudy(), prior = await consumerStudy();
+  const id = randomUUID(), cell = { study: uid, series: uid + '.1', sop: uid + '.1.1', frame: 1,
+    camera: { focalPoint: [0,0,0], position: [0,0,1], viewUp: [0,1,0], viewPlaneNormal: [0,0,1], parallelScale: 1,
+      rotation: 0, flipHorizontal: false, flipVertical: false },
+    properties: { voiRange: { lower: 0, upper: 100 }, VOILUTFunction: 'LINEAR', invert: false, interpolationType: 1 },
+    viewport: { width: 256, height: 256 } };
+  ctx.instances.set(cell.sop, { StudyInstanceUID: uid, SeriesInstanceUID: cell.series, SOPInstanceUID: cell.sop,
+    SOPClassUID: '1.2.840.10008.5.1.4.1.1.2', Modality: 'CT', PatientID: 'SYN-CONSUMER-PID', ImageOrientationPatient: '1\\0\\0\\0\\1\\0',
+    ImagePositionPatient: '0\\0\\0' });
+  const snapshot = { version: 2, studies: [uid, prior], rows: 1, cols: 2, active: 0, cells: [cell, null] };
+  const preview = await readRecorded('/studies/' + uid + '/viewer-jobs/preview', uid, { method: 'POST', body: { snapshot } });
+  assert.equal(targetOf(preview.selected, 'comparison-layout')[0].versionId.status, 'unresolved');
+  snapshot.cells[0] = { ...cell, sourceDigest: 'a'.repeat(32) };
+  await ctx.witness.viewerJob.create({ data: { id, studyUid: uid, studies: [uid, prior], authorSub: sub, authorActor: actor,
+    fingerprint: 'synthetic', snapshot, title: 'SYN comparison', description: 'SYN description', revision: 1, updatedAt: new Date() } });
+  const list = await readRecorded('/studies/' + uid + '/viewer-jobs', uid);
+  assert.equal(targetOf(list.selected, 'comparison-description')[0].recordId.value, id);
+  const restored = await readRecorded('/studies/' + uid + '/viewer-jobs/' + id, uid);
+  const layout = targetOf(restored.selected, 'comparison-layout')[0];
+  assert.equal(layout.recordId.value, id); assert.equal(layout.versionId.value, '1');
+  assert.equal(layout.projectionSha256, sha(JSON.stringify(restored.answer.snapshot)));
+  assert.equal(targetOf(restored.selected, 'comparison-description').length, 1);
+  assert.equal((await prepared(prior)).some(e => e.event.targets[0].recordId.value === id), true);
+});
+
+
+if (process.env.KIN_A_BROWSER_PYTHON) test('A-REMAINDER real served worklist renders recorded HTTP data', async () => {
+  await consumerStudy();
+  const { spawn } = require('node:child_process');
+  const output = path.resolve(__dirname, '../../../tmp/module-a-consumers/browser');
+  const sid = randomUUID();
+  await ctx.witness.authSession.create({ data: { sid, sub, institution, accessToken: ctx.token, refreshToken: 'SYN-refresh',
+    idpSid: 'synthetic-report-session', atExpiresAt: new Date(jose.decodeJwt(ctx.token).exp * 1000), lastSeenAt: new Date() } });
+  const child = spawn(process.env.KIN_A_BROWSER_PYTHON, [path.join(__dirname, 'consumer_browser.py')], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdin.end(JSON.stringify({ origin: ctx.origin, sid, output }));
+  let log = ''; child.stdout.on('data', b => { log += b; }); child.stderr.on('data', b => { log += b; });
+  const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); });
+  assert.equal(code, 0, log);
+});
+
+
+test('A-REMAINDER critical-result full and status-only reads record only their actual projection', async () => {
+  const uid = await consumerStudy();
+  const source = await version(uid, 1, { findings: 'SYN critical pinned report' });
+  await ctx.witness.report.create({ data: { uid, version: 1, findings: source.findings } });
+  const id = randomUUID();
+  await ctx.witness.criticalResult.create({ data: { id, studyUid: uid, institutionId: institution,
+    senderInstitutionId: institution, senderSub: sub, senderActor: actor, senderName: 'Synthetic Reader',
+    recipientSub: 'synthetic-consumer-clinician', recipientActor: 'synthetic-consumer-clinician@example.test',
+    recipientName: 'Synthetic Clinician', recipientRole: 'clinician', sourceVersion: 1, sourceAction: 'approve',
+    sourceAuthor: actor, sourceAt: source.at, origName: 'SYN CONSUMER', origPatientId: 'SYN-CONSUMER-PID',
+    origBirth: '', origStudyDate: '20261026', message: 'SYN critical message', state: 'created', revision: 1, changedBy: actor,
+    updatedAt: new Date() } });
+  const full = await readRecorded('/critical-results/' + id, uid, { token: ctx.clinicianToken });
+  assert.equal(full.answer.item.body.findings, source.findings);
+  assert.equal(targetOf(full.selected, 'critical-result')[0].recordId.value, id);
+  assert.equal(targetOf(full.selected, 'report-version')[0].recordId.value, String(source.id));
+  assert.equal(targetOf(full.selected, 'report-version')[0].projectionSha256, sha(JSON.stringify(full.answer.item.body)));
+  const list = await readRecorded('/critical-results?view=received', uid, { token: ctx.clinicianToken });
+  assert.equal(targetOf(list.selected, 'report-version').length, 1);
+  const studyList = await readRecorded('/studies/' + uid + '/critical-results', uid);
+  assert.equal(targetOf(studyList.selected, 'critical-result').length, 1);
+  assert.equal(Object.hasOwn(studyList.answer.items[0], 'body'), false);
+  assert.equal(targetOf(studyList.selected, 'report-version').length, 0);
+  await ctx.witness.studyState.update({ where: { uid }, data: { rs: 'W' } });
+  const beforeRefusal = (await prepared(uid)).length;
+  assert.equal((await call('/critical-results/' + id, { token: ctx.clinicianToken }).done).status, 404);
+  assert.equal((await prepared(uid)).length, beforeRefusal);
+  await version(uid, 2, { action: 'reset' });
+  await ctx.witness.report.update({ where: { uid }, data: { version: 2 } });
+  const status = await readRecorded('/critical-results/' + id, uid, { token: ctx.clinicianToken });
+  assert.equal(Object.hasOwn(status.answer.item, 'body'), false);
+  assert.equal(targetOf(status.selected, 'critical-result').length, 1);
+  assert.equal(targetOf(status.selected, 'report-version').length, 0);
+});
+
+test('A-REMAINDER bootstrap records an unlinked order without inventing a study', async () => {
+  const oid = 'SYN-ORDER-' + randomUUID();
+  await ctx.witness.order.create({ data: { oid, institutionId: institution, patientId: 'SYN-ORDER-PATIENT', name: 'SYN ORDER',
+    sex: '', birth: '', sched: '', modality: 'CT', descr: '', ward: '', reqDoc: '' } });
+  const answer = await get('/bootstrap?states=omit');
+  assert.equal(answer.status, 200, answer.text);
+  const rows = await ctx.witness.$queryRaw`SELECT payload FROM emr_access.access_entry
+    WHERE payload::jsonb->'targets'->0->'recordId'->>'value'=${oid} AND payload::jsonb->>'action'='provide-prepared'`;
+  assert.equal(rows.length, 1);
+  const target = JSON.parse(rows[0].payload).targets[0];
+  assert.equal(target.kind, 'order'); assert.deepEqual(target.studyId, { status: 'unresolved', reason: 'not-observed' });
+  assert.equal(target.projectionSha256, sha(JSON.stringify(answer.body.orders.find(o => o.oid === oid))));
+});
+
+
+test('A-REMAINDER organization: returned folders and catalogs retain only visible UIDs and their actual revisions', async () => {
+  const uid = await consumerStudy(), hidden = await study({ institutionId: 'synthetic-other-site' });
+  const item = { id: require('node:crypto').randomUUID(), name: 'SYN organization', uids: [uid, hidden] };
+  await ctx.witness.favoriteWorkspace.upsert({ where: { institution_subject: { institution, subject: sub } },
+    create: { institution, subject: sub, revision: 3, value: JSON.stringify([item]) },
+    update: { revision: 3, value: JSON.stringify([item]) } });
+  for (const [ownerSub, revision] of [[sub, 4], ['', 5]])
+    await ctx.witness.studyTagCatalog.upsert({ where: { institution_ownerSub: { institution, ownerSub } },
+      create: { institution, ownerSub, revision, value: JSON.stringify([item]) }, update: { revision, value: JSON.stringify([item]) } });
+  const ledger = async surface => (await ctx.witness.$queryRaw`SELECT payload FROM emr_access.access_entry
+    WHERE payload::jsonb->>'surface' = ${surface} AND payload::jsonb->>'action' = 'provide-prepared' ORDER BY sequence`)
+    .map(row => JSON.parse(row.payload));
+  for (const [route, count] of [['favorite-folders', 1], ['study-tags', 2]]) {
+    const surface = 'GET ' + route, before = (await ledger(surface)).length;
+    const answer = await get('/' + route);
+    assert.equal(answer.status, 200, answer.text);
+    const records = (await ledger(surface)).slice(before);
+    assert.equal(records.length, count);
+    const projections = route === 'favorite-folders'
+      ? [{ revision: answer.body.revision, folders: answer.body.folders }] : answer.body.catalogs;
+    const returned = route === 'favorite-folders' ? answer.body.folders : answer.body.catalogs.flatMap(c => c.tags);
+    assert(returned.every(item => item.uids.includes(uid) && !item.uids.includes(hidden)));
+    records.forEach((event, index) => {
+      assertAttribution(event, surface);
+      const target = event.targets[0];
+      assert.equal(target.kind, 'study-organization');
+      assert.equal(target.versionId.value, String(projections[index].revision));
+      assert.equal(target.projectionSha256, sha(JSON.stringify(projections[index])));
+      assert.deepEqual(target.studyId, { status: 'unresolved', reason: 'not-observed' });
+      assert.deepEqual(target.sourcePatientId, { status: 'unresolved', reason: 'not-observed' });
+      const owner = route === 'favorite-folders' ? ['FavoriteWorkspace', institution, sub]
+        : ['StudyTagCatalog', institution, projections[index].scope === 'personal' ? sub : ''];
+      assert.equal(target.recordId.value, JSON.stringify(owner));
+    });
   }
 });
