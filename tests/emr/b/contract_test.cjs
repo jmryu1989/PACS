@@ -96,6 +96,7 @@ function contractSuite() {
       'trustedProxyIp', 'cause', 'context', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
     assert.deepEqual(C.canonicalPayload(v1).event, v1);
     assert.equal(C.canonicalPayload(structuredClone(v1)).contentSha256,C.canonicalPayload(v1).contentSha256);
+    assert.throws(() => A.parseAccessEvent(v1, []), 'a new served manifest must still bind every target of a previously parsed event');
     // v2 verified success and refusals.
     const login = A.parseAccessEvent(authEvent(A));
     assert.equal(login.formatVersion, 2); assert.equal(login.branch, 'online-auth'); assert.deepEqual(login.targets, []);

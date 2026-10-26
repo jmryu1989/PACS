@@ -8872,6 +8872,222 @@
       }
     }
   },
+  "di_additions_f_link": {
+    "unit": "F_LINK",
+    "middleware_routes": [
+      {
+        "apply": [
+          "adminNoStore"
+        ],
+        "forRoutes": [
+          "EmrAuditController"
+        ]
+      }
+    ],
+    "controllers": [
+      "EmrAuditController"
+    ],
+    "providers": [
+      "EmrAuditService"
+    ],
+    "routes": [
+      {
+        "controller": "EmrAuditController",
+        "handler": "delivery",
+        "method": "POST",
+        "paths": [
+          "emr-audit|issuances/:id/delivery"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "export",
+        "method": "POST",
+        "paths": [
+          "emr-audit|exports"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "extend",
+        "method": "POST",
+        "paths": [
+          "emr-audit|requests/:id/extend"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "investigate",
+        "method": "POST",
+        "paths": [
+          "emr-audit|investigations"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "issue",
+        "method": "POST",
+        "paths": [
+          "emr-audit|issuances/:id/issue"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "prepare",
+        "method": "POST",
+        "paths": [
+          "emr-audit|issuances"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "register",
+        "method": "POST",
+        "paths": [
+          "emr-audit|requests"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "resolve",
+        "method": "POST",
+        "paths": [
+          "emr-audit|requests/:id/resolve"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "roster",
+        "method": "POST",
+        "paths": [
+          "emr-audit|roster/:grantId"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"grantId\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "state",
+        "method": "GET",
+        "paths": [
+          "emr-audit|requests/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "EmrAuditController": {
+        "params": [
+          "EmrAuditService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "EmrAuditService": {
+        "params": [
+          "PrismaService",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "1:Symbol(RequestContextSource)"
+        ],
+        "optional": []
+      }
+    }
+  },
   "di_additions_d_online": {
     "unit": "EMR-D online routes",
     "controllers": [],

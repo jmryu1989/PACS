@@ -42,6 +42,10 @@ export interface AccessTarget {
   recordId: EvidenceFact<string>;
   versionId: EvidenceFact<string>;
 }
+/** An auditor's access to an event about an observed local subject does not create a PatientLink. */
+export interface LocalAuditTarget extends Pick<LocalReadTarget, 'studyId' | 'recordId' | 'versionId' | 'sourcePatientId' | 'sourceInstitution'> {
+  kind: 'access-audit';
+}
 export interface AccessEventV1 {
   formatVersion: 1;
   surface: string;
@@ -56,7 +60,7 @@ export interface AccessEventV1 {
   /** D-18: the business context the server bound to this access (optional reason out of context). */
   context: Readonly<WorkContext>;
   executor: 'member' | 'service' | 'unauthenticated';
-  targets: readonly AccessTarget[];
+  targets: readonly (AccessTarget | LocalAuditTarget)[];
   action: AccessAction;
   result: 'prepared' | 'succeeded' | 'aborted' | 'refused' | 'failed' | 'reported';
   requestId: string;
@@ -96,15 +100,21 @@ export function accessPersistence(action: AccessAction): 'business-transaction' 
 export function newAuditLinkId(): string { return `audit:${randomUUID()}`; }
 
 const servedManifests = new WeakMap<object, readonly ResolvedRecord[]>();
+const parsedEvents = new WeakSet<object>();
 /** On mixed surfaces B supplies the rows actually served, in target order, from its bound storage capability.
  * Rehydrating a persisted mixed event likewise requires its server-verified row manifest.
  * formatVersion 1 keeps its original fields and rules, plus D-18's required work context; 2 is the closed EMR-B branch set below.
  */
 export function parseAccessEvent(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEvent> {
+  // Parser outputs are deeply frozen. Reuse them during replay/classification;
+  // a new supplied manifest still requires the full target-binding check.
+  if (served === undefined && input && typeof input === 'object' && parsedEvents.has(input)) return input as Readonly<AccessEvent>;
   // Read the discriminator without running a getter; the selected parser validates the whole object.
   const version = input && typeof input === 'object' && !Array.isArray(input) ?
     Object.getOwnPropertyDescriptor(input, 'formatVersion')?.value : undefined;
-  return version === 2 ? parseAccessEventV2(input, served) : parseAccessEventV1(input, served);
+  const parsed = version === 2 ? parseAccessEventV2(input, served) : parseAccessEventV1(input, served);
+  parsedEvents.add(parsed);
+  return parsed;
 }
 function expectedResult(action: AccessAction): AccessEventV1['result'] {
   const failure = accessPersistence(action) === 'independent-failure';
@@ -116,10 +126,27 @@ function surfaceKindsOf(surface: string): readonly RecordKind[] {
   return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] :
     Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface) ? INTERNAL_SURFACES[surface].kinds : routeContract(surface).kinds;
 }
+function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined,
+    failure: boolean): AccessTarget[];
+function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined,
+    failure: boolean, surface: string): (AccessTarget | LocalAuditTarget)[];
 function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean,
-    surface?: string): AccessTarget[] {
+    surface?: string): (AccessTarget | LocalAuditTarget)[] {
   if (!Array.isArray(input)) throw new Error('Actual returned target set required');
   return input.map((target, index) => {
+    // Preserve A1's observed subject when F records access to that audit row.
+    // Clinical record reads still require their existing patient-linked target contract.
+    if (['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface) &&
+        target?.kind === 'access-audit' && 'sourcePatientId' in target) {
+      const t = object(target, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution']);
+      const parsed: LocalAuditTarget = { kind: 'access-audit', studyId: fact(t.studyId, string),
+        recordId: fact(t.recordId, string), versionId: fact(t.versionId, string),
+        sourcePatientId: fact(t.sourcePatientId, string), sourceInstitution: fact(t.sourceInstitution, string) };
+      if ([parsed.studyId, parsed.recordId, parsed.versionId, parsed.sourcePatientId, parsed.sourceInstitution]
+          .some(f => f.status === 'not-applicable') || parsed.recordId.status !== 'known' || parsed.versionId.status !== 'known')
+        throw new Error('Investigated local event identity required');
+      return parsed;
+    }
     const t = object(target, ['kind', 'patientLinkSnapshot', 'studyId', 'recordId', 'versionId']);
     const kind = choice(t.kind, Object.keys(RECORD_CLASSIFICATION) as RecordKind[]);
     if (manifest) {
@@ -143,7 +170,14 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     // unknown fact on these existing boundaries; never invent a patient link.
     const nativeRecord = kind === 'private-draft' ||
       (['PUT studies/:uid/report', 'POST studies/:uid/report/commit'].includes(surface) && kind === 'report-version');
-    const required = nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
+    // Request intake and hold administration disclose request facts even when an original
+    // cannot yet be packaged. Preserve its patient/record; do not invent a study or version.
+    const requestFacts = kind === 'disclosure' && ['POST emr-audit/requests', 'POST emr-audit/issuances',
+      'GET emr-audit/requests/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve'].includes(surface);
+    const investigatedEvent = kind === 'access-audit' && ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface);
+    const required = requestFacts ? [parsed.patientLinkSnapshot, parsed.recordId] :
+      investigatedEvent ? [parsed.patientLinkSnapshot, parsed.recordId, parsed.versionId] :
+      nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
     if (!failure && required.some(f => f.status === 'unresolved')) throw new Error('Successful provision requires resolved targets');
     return parsed;
   });
