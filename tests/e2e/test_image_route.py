@@ -12,6 +12,9 @@ TEST-E-ROUTE-02 the served OHIF viewer opens a synthetic CT series twice (the fi
   never a viewed one. Each opening prints one MEASURE line (first rendered image, every slice's frame) and one
   FRAME_REQUEST_FAILED line per failed frame request before the assertions, so the same test times the route it runs
   against (direct Orthanc before E_ROUTE, the E boundary after it).
+TEST-E-ROUTE-03 after a frame went through E (which then keeps the study's manifest for the next frames), one more
+  object arrives in the same series; a series retrieve and a study retrieve through E's image API answer with every
+  object the study holds now, the arrival included, byte for byte as stored (R244-01).
 
 Synthetic studies only (the D03A phantom pattern, larger matrix); cleaned through the local guard like the other D03A suites.
 """
@@ -28,6 +31,7 @@ from email.parser import BytesParser
 from email.policy import default as email_policy
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -45,11 +49,30 @@ MATRIX = int(os.environ.get("KIN_E_ROUTE_MATRIX", "512"))
 
 
 def ct_series(stack, label, slices, size):
-    """An owned synthetic CT series (D03A phantom drawn at `size`), registered for cleanup before the first write."""
-    uid, series, frame = generate_uid(), generate_uid(), generate_uid()
-    patient = "EROUTE-" + uuid.uuid4().hex[:12]
-    fixture = Fixture(uid, patient, "한림병원", "jmryu", "EROUTE-SYNTHETIC-" + label)
+    """An owned synthetic CT series (D03A phantom drawn at `size`), registered for cleanup before the first write.
+    Returns (fixture, series UID, SOP Instance UIDs, the study's identity for store_ct)."""
+    study = (generate_uid(), generate_uid(), generate_uid(), "EROUTE-" + uuid.uuid4().hex[:12])
+    uid = study[0]
+    fixture = Fixture(uid, study[3], "한림병원", "jmryu", "EROUTE-SYNTHETIC-" + label)
     stack.active[uid] = fixture
+    sops = store_ct(study, label, 0, slices, size)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        result = stack.request("GET", "/studies", "jmryu")
+        if result.status == 200 and any(s.get("uid") == uid for s in result.body.get("studies", [])):
+            break
+        time.sleep(.25)
+    else:
+        raise RuntimeError("Synthetic CT did not reach the real API")
+    if stack.request("PATCH", "/studies/" + uid, "jmryu", {"ss": "Verified"}).status != 200:
+        raise RuntimeError("Synthetic CT verification failed")
+    return fixture, study[1], sops, study
+
+
+def store_ct(study, label, first, slices, size):
+    """C-STORE `slices` phantom slices, numbered from `first`, into study = (study UID, series UID, frame of reference,
+    patient ID) of an owned series; their SOP Instance UIDs."""
+    uid, series, frame, patient = study
     yy, xx = np.mgrid[:size, :size]
     scale = size / 256
     body = np.where((xx - 125 * scale) ** 2 + (yy - 128 * scale) ** 2 < (95 * scale) ** 2, 300 + xx * 2 / scale, 0).astype(np.uint16)
@@ -60,7 +83,7 @@ def ct_series(stack, label, slices, size):
         raise RuntimeError("Local synthetic CT association failed")
     sops = []
     try:
-        for z in range(slices):
+        for z in range(first, first + slices):
             sop = generate_uid()
             meta = FileMetaDataset()
             meta.TransferSyntaxUID, meta.MediaStorageSOPClassUID = ExplicitVRLittleEndian, CTImageStorage
@@ -97,17 +120,7 @@ def ct_series(stack, label, slices, size):
             sops.append(sop)
     finally:
         assoc.release()
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        result = stack.request("GET", "/studies", "jmryu")
-        if result.status == 200 and any(s.get("uid") == uid for s in result.body.get("studies", [])):
-            break
-        time.sleep(.25)
-    else:
-        raise RuntimeError("Synthetic CT did not reach the real API")
-    if stack.request("PATCH", "/studies/" + uid, "jmryu", {"ss": "Verified"}).status != 200:
-        raise RuntimeError("Synthetic CT verification failed")
-    return fixture, series, sops
+    return sops
 
 
 def multipart_parts(content_type, body):
@@ -132,9 +145,9 @@ def quoted(values):
 
 
 class ImageRouteE2E(base.WorklistE2E):
-    def frame(self, path, actor, method="GET"):
+    def frame(self, path, actor, method="GET", accept=FRAME_ACCEPT):
         request = Request(self.stack.proxy + path, method=method, headers={
-            "Accept": FRAME_ACCEPT, "Authorization": "Bearer " + self.stack.token(actor)})
+            "Accept": accept, "Authorization": "Bearer " + self.stack.token(actor)})
         try:
             with urlopen(request, timeout=120, context=ssl._create_unverified_context()) as response:
                 return response.status, {k.lower(): v for k, v in response.headers.items()}, response.read()
@@ -154,7 +167,7 @@ class ImageRouteE2E(base.WorklistE2E):
             time.sleep(.25)
 
     def test_route_01_one_frame_through_https_is_one_recorded_delivery(self):
-        fixture, series, sops = ct_series(self.stack, "single", 2, 64)
+        fixture, series, sops, _ = ct_series(self.stack, "single", 2, 64)
         path = f"/dicom-web/studies/{fixture.uid}/series/{series}/instances/{sops[1]}/frames/1"
         stored = self.stack.orthanc_bytes(f"/instances/{self.orthanc_instance(sops[1])}/frames/0/raw")
         status, headers, body = self.frame(path, "doctor")
@@ -245,7 +258,7 @@ class ImageRouteE2E(base.WorklistE2E):
         return measure, received
 
     def test_route_02_served_viewer_ct_series_every_received_frame_recorded_once(self):
-        fixture, series, sops = ct_series(self.stack, "series", SLICES, MATRIX)
+        fixture, series, sops, _ = ct_series(self.stack, "series", SLICES, MATRIX)
         # The first opening after the study arrives, then a second opening by a fresh browser (no HTTP cache).
         cold, first = self.open_series(fixture, sops, "first")
         warm, second = self.open_series(fixture, sops, "again")
@@ -283,6 +296,23 @@ class ImageRouteE2E(base.WorklistE2E):
                     # Ended means E wrote the whole planned response to its connection, whatever the page did later.
                     self.assertEqual(wire[event]["plannedBytes"], wire[event]["bytesWritten"], wire.get(event))
                     self.assertEqual("transfer-ended", wire[event]["terminal"])
+
+    def test_route_03_study_and_series_retrieve_answer_with_an_object_that_arrived_after_a_frame(self):
+        fixture, series, sops, study = ct_series(self.stack, "arrival", 2, 64)
+        status, headers, body = self.frame(f"/dicom-web/studies/{fixture.uid}/series/{series}/instances/{sops[0]}/frames/1", "doctor")
+        self.assertEqual(200, status, body[:300])
+        self.assertTrue(headers.get("x-kin-image-event"), "the frame went through E, which keeps this study's manifest")
+        arrived = store_ct(study, "arrival", 2, 1, 64)
+        stored = sorted(self.stack.orthanc_bytes(f"/instances/{self.orthanc_instance(sop)}/file") for sop in sops + arrived)
+        for target in (f"/dicom-web/studies/{fixture.uid}/series/{series}", f"/dicom-web/studies/{fixture.uid}"):
+            with self.subTest(target=target):
+                status, headers, body = self.frame("/api/images/dicom-web?target=" + quote(target, safe=""), "doctor",
+                                                   accept='multipart/related; type="application/dicom"')
+                self.assertEqual(200, status, body[:300])
+                self.assertTrue(headers.get("x-kin-image-event"))
+                parts = multipart_parts(headers.get("content-type", ""), body)
+                self.assertEqual(stored, sorted(payload for _, payload in parts),
+                                 "every object the study holds now, the later arrival included, as stored")
 
 
 def load_tests(loader, tests, pattern):

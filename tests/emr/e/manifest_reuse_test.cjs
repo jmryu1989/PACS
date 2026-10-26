@@ -1,11 +1,13 @@
 'use strict';
 // E_ROUTE performance boundary: one whole-study catalog read serves that study's frame requests, without changing
 // what each request proves. A frame of a series must not re-read and rehash the whole study; an object or frame
-// the kept manifest lacks, or a source that no longer matches, must not be served from it. Compiled product code.
+// the kept manifest lacks, or a source that no longer matches, must not be served from it. A request for the study's
+// or a series' contents (retrieve, query, metadata) answers with what the study holds now, objects that arrived after
+// the kept manifest included (R244-01). Compiled product code.
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { EventEmitter } = require('node:events');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const path = require('node:path');
 const api = process.env.KIN_E_API || path.resolve(__dirname, '../../../api');
 require(path.join(api, 'node_modules/reflect-metadata'));
@@ -65,6 +67,47 @@ test('a request the kept manifest does not cover reads the catalog again; a kept
   // Still absent after the new read: prepareDelivery refuses it (ScopeOutsideManifest) against that fresh manifest.
   assert.equal(await reuse.manifest(frame(9), async () => { looked++; return versions[1]; }, live()), versions[1]);
   assert.equal(looked, 1, 'an object outside the kept manifest is looked up again, never assumed absent');
+});
+
+test('a study or series request selects what the study holds now, not what a frame request kept', async () => {
+  const { prepareDelivery, checkProvisionBasis } = load('emr-image/contract');
+  const at = new Date().toISOString();
+  const selected = (kept, request) => prepareDelivery(kept, request, { eventId: randomUUID(), at, cause: 'background-fetch',
+    opening: null, authorization: { studyUid: STUDY, institution: 'synthetic-hospital', accountGeneration: 1 },
+    provision: checkProvisionBasis({ relation: 'same-institution', at, managingInstitution: 'synthetic-hospital', studyUid: STUDY,
+      recipient: null, purpose: null, basis: null, agreement: null, auditBefore: null }) }).units.map(unit => unit.sopInstanceUid);
+  for (const target of [`/dicom-web/studies/${STUDY}`, `/dicom-web/studies/${STUDY}/series/${SERIES}`]) {
+    const reuse = fresh();
+    let source = manifest(2), reads = 0;
+    const build = async () => { reads++; return source; };
+    await reuse.manifest(frame(1), build, live());
+    source = manifest(3); // an ordinary later arrival: same patient and institution, earlier objects unchanged
+    const request = parseImageRequest('GET', target);
+    assert.deepEqual(selected(await reuse.manifest(request, build, live()), request), [sop(1), sop(2), sop(3)], target);
+    assert.equal(reads, 2, target);
+    assert.equal(await reuse.manifest(frame(3), async () => { throw new Error('read again'); }, live()), source,
+      'the fresh read then serves the arrival\'s frames');
+  }
+  for (const target of [`/dicom-web/studies?StudyInstanceUID=${STUDY}`, `/dicom-web/studies/${STUDY}/series`,
+    `/dicom-web/studies/${STUDY}/instances`, `/dicom-web/studies/${STUDY}/metadata`,
+    `/dicom-web/studies/${STUDY}/series/${SERIES}/instances`, `/dicom-web/studies/${STUDY}/series/${SERIES}/metadata`]) {
+    const reuse = fresh(), versions = [manifest(2), manifest(3)];
+    let reads = 0;
+    const build = async () => versions[reads++];
+    await reuse.manifest(frame(1), build, live());
+    assert.equal(await reuse.manifest(parseImageRequest('GET', target), build, live()), versions[1], target);
+  }
+});
+
+test('a study request does not join a catalog read that a frame request started before it', async () => {
+  const reuse = fresh(), gate = later(), versions = [manifest(2), manifest(3)];
+  const owner = reuse.manifest(frame(1), () => gate.promise, live());
+  let reads = 0;
+  const study = reuse.manifest(parseImageRequest('GET', `/dicom-web/studies/${STUDY}`), async () => versions[++reads], live());
+  gate.resolve(versions[0]);
+  assert.equal(await owner, versions[0]);
+  assert.equal(await study, versions[1], 'an object stored before the study request belongs in its answer');
+  assert.equal(reads, 1);
 });
 
 test('a joined build that fails for its own requester does not decide another request', async () => {
@@ -139,6 +182,25 @@ test('the image service rebuilds after a source/current-study change, not after 
     await assert.rejects(send(2), ForbiddenException);
     assert.equal(reads, before + 1, `rebuilt after ${change.code ?? change.constructor.name}`);
   }
+});
+
+test('the image service reads the catalog for each study or series request, between frames that reuse it', async () => {
+  process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
+  let reads = 0;
+  const context = { async manifest() { reads++; return manifest(3); },
+    async current() { throw new ForbiddenException('synthetic stop at the access check'); } };
+  const records = { begin: () => ({ transactionWithRecords: fn => fn({}), end() {} }) };
+  const service = new OnlineImageService(records, context, {}, noSourceRead, { facts: async () => ({}) });
+  const send = target => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
+    Object.assign(new EventEmitter(), { writableFinished: false }), target);
+  const seen = [];
+  for (const target of [`/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(1)}/frames/1`,
+    `/dicom-web/studies/${STUDY}/series/${SERIES}`, `/dicom-web/studies/${STUDY}`,
+    `/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(2)}/frames/1`]) {
+    await assert.rejects(send(target), ForbiddenException);
+    seen.push(reads);
+  }
+  assert.deepEqual(seen, [1, 2, 3, 3]);
 });
 
 test('simultaneous frames of a kept study do not wait on their own B2 append lanes', async () => {
