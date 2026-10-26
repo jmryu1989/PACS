@@ -26,7 +26,8 @@ synthetic prior reports.
 2. `vm-run.ps1 -CmdFile vm/demo-vm.sh`: the checkout's `docker-compose.yml` + `vm/compose.demo.yml` (production API image,
    synthetic signing key, self-signed cert for the IP, only 443 public, Orthanc on VM loopback). The run **holds the VM
    heavy lock while the demo is up**; other VM runs queue until teardown. `-HoldMinutes` is the auto-stop.
-3. Ships the originals the VM cache `/srv/kin-heavy/demo-samples` lacks (one tar stream, ~9.5 MB/s measured), then runs
+3. Ships the originals the VM cache `/srv/kin-heavy/demo-samples` lacks (`scp -r` per series folder, ~9.5 MB/s measured;
+   `deploy.ps1 -PrefillSamples` fills the cache ahead without a stack, so a deploy normally ships nothing), then runs
    the checkout's `scripts/mgxa_acceptance.py load` on the VM (empty Orthanc, SHA-256 before and after), binds the study
    UIDs to `kin-center` (as `scripts/mgxa_fixture.py` does) and provisions synthetic signing keys
    (`tests/emr/d/provision_synthetic.cjs`, which is why the usernames start with `kin-test-`).
