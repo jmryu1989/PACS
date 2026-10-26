@@ -1,7 +1,8 @@
 """Consistent KIN backup and isolated restore rehearsal; never restores over production.
 
 Usage: python scripts/ops_backup.py backup --output <outside-repository-directory> [--rotate-keep N | --no-rotate]
-       python scripts/ops_backup.py rehearse <completed-backup-directory>
+       python scripts/ops_backup.py rehearse <completed-backup-directory> [--wrapping-source <relocated-custody>]
+       python scripts/ops_backup.py restore-wrapping <backup> --destination <new-secret-directory> [--source <relocated-custody>]
        python scripts/ops_backup.py rotate --root <backup-root> [--keep N] [--protect NAME ...] [--dry-run]
 The running write services pause during backup and are resumed in finally. A complete backup's AuditLog rows are then
 sealed into audit-checkpoint.json and the backup root's ledger (scripts/ops_audit_integrity.py; the root needs a one-time
@@ -11,7 +12,8 @@ The EMR-introduction release mode (scripts/ops_emr_introduction.py) uses capture
 snapshot while the caller keeps every writer fenced and never resumes them itself (the release decides when they return).
 After a complete, error-free backup the older daily sets rotate (D1047: keep 7): rotate() deletes complete daily sets
 beyond the newest N, never a release, held, protected, latest-verified or incomplete set, and only thins (Orthanc archive
-removed) a set the audit ledger still retains.
+removed) a set the audit ledger still retains. A deleted set's separate wrapping-custody copy is removed after it; a thinned
+or retained set keeps its copy.
 """
 from __future__ import annotations
 
@@ -298,44 +300,57 @@ def capture_wrapping_custody(directory, manifest, container):
     manifest["wrapping_custody"] = custody
 
 
-def restore_wrapping_custody(manifest, destination):
-    """Restore only to a new operator-selected directory; never overwrite live signing secrets."""
+def wrapping_custody_files(manifest, source=None):
+    """Read and check the complete snapshot before creating a restore destination."""
     custody = manifest.get("wrapping_custody")
     if not custody or not custody.get("files"):
         raise RuntimeError("Wrapping custody locator is missing")
-    source = Path(custody["directory"])
+    source = Path(source if source is not None else custody["directory"])
     if not source.is_absolute():
         raise RuntimeError("Wrapping custody locator must be absolute")
-    destination = Path(destination)
-    destination.mkdir(mode=0o700)
-    restored = {}
+    files = {}
     for key_id, entry in custody["files"].items():
         filename = entry["file"]
         if not re.fullmatch(r"wrap-[0-9]+\.key", filename):
             raise RuntimeError("Invalid wrapping custody filename")
-        original = source / filename
         try:
-            data = original.read_bytes()
+            data = (source / filename).read_bytes()
         except OSError as error:
             raise RuntimeError("Wrapping custody file is unavailable") from error
         if len(data) != 32 or hashlib.sha256(data).hexdigest() != entry["sha256"]:
             raise RuntimeError("Wrapping custody file differs from the snapshot")
-        output = destination / filename
-        with output.open("xb") as stream:
-            output.chmod(0o600)
-            stream.write(data)
-        restored[key_id] = str(output.resolve())
+        files[key_id] = (filename, data)
+    return source, files
+
+
+def restore_wrapping_custody(manifest, destination, *, source=None):
+    """An operator can relocate the separate custody copy without rewriting the backup manifest."""
+    _, files = wrapping_custody_files(manifest, source)
+    destination = Path(destination)
+    destination.mkdir(mode=0o700)
+    restored = {}
+    try:
+        for key_id, (filename, data) in files.items():
+            output = destination / filename
+            with output.open("xb") as stream:
+                output.chmod(0o600)
+                stream.write(data)
+            restored[key_id] = str(output.resolve())
+    except OSError:
+        # Only this call's newly created directory is removed; an existing destination never enters here.
+        shutil.rmtree(destination)
+        raise
     return restored
 
 
-def rehearse_wrapping_custody(directory, manifest, container, user="kin"):
+def rehearse_wrapping_custody(directory, manifest, container, user="kin", *, source=None):
     # The caller has compared restored counts, so legacy manifests cannot omit a populated signing schema.
     has_keys = signing_key_count(manifest) > 0
     rows = signing_keys(container, user) if has_keys else []
     if not rows and "wrapping_custody" not in manifest:
         return {"keys": 0, "custody": "not configured; no stored signing keys"}
     with tempfile.TemporaryDirectory(prefix="kin-wrapping-restore-") as temporary:
-        restored = restore_wrapping_custody(manifest, Path(temporary) / "secrets")
+        restored = restore_wrapping_custody(manifest, Path(temporary) / "secrets", source=source)
         if any(row["wrapped"]["wrappingKeyId"] not in restored for row in rows):
             raise RuntimeError("Restored signing key has no wrapping custody file")
         if rows:
@@ -353,7 +368,7 @@ process.stdout.write('WRAPPING_RESTORE_VERIFIED');"""
                 manifest["running_images"]["kin-api"]["id"], "-e", script])
             if result != "WRAPPING_RESTORE_VERIFIED":
                 raise RuntimeError("Restored signing keys could not be unwrapped")
-        return {"keys": len(rows), "custody": "restored and verified", "directory": manifest["wrapping_custody"]["directory"]}
+        return {"keys": len(rows), "custody": "restored and verified", "directory": str(source if source is not None else manifest["wrapping_custody"]["directory"])}
 
 
 def wait_ready(origin, timeout=120):
@@ -721,7 +736,7 @@ def restored_emr_expiry(container, user):
         "SELECT emr_access.restore_expiry_sweep(); COMMIT;", user)
 
 
-def rehearse_held(directory, manifest, *, daily=False):
+def rehearse_held(directory, manifest, *, daily=False, wrapping_source=None):
     """The isolated restore check of a held capture (L-04c for B0, L-10c for B1): restored exactly as a rollback would,
     in a fresh networkless cluster of the product's shape (bootstrap superuser kin), with its roles replayed and owners
     and privileges kept; then the whole catalog, the row counts, the per-table projection and the Orthanc index with
@@ -772,7 +787,7 @@ def rehearse_held(directory, manifest, *, daily=False):
                 raise RuntimeError("Restored row values differ from the snapshot")
             if value_counts(restored_values) != manifest["counts"]:
                 raise RuntimeError("Restored database row counts differ from the held manifest")
-        result["wrapping_custody"] = rehearse_wrapping_custody(directory, manifest, name)
+        result["wrapping_custody"] = rehearse_wrapping_custody(directory, manifest, name, source=wrapping_source)
         if shape == "post":
             if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
                 raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
@@ -815,13 +830,13 @@ def rehearse_held(directory, manifest, *, daily=False):
     print(json.dumps(result))
 
 
-def rehearse(directory):
+def rehearse(directory, *, wrapping_source=None):
     directory, manifest = validate_backup(directory)
     if manifest.get("kind") == HELD_KIND:
-        return rehearse_held(directory, manifest)
+        return rehearse_held(directory, manifest, wrapping_source=wrapping_source)
     if "emr" in manifest and manifest.get("role_catalog") is not None:
         # D23: a daily EMR set made since its role catalog is captured: the catalog replay of the held path.
-        return rehearse_held(directory, manifest, daily=True)
+        return rehearse_held(directory, manifest, daily=True, wrapping_source=wrapping_source)
     # An older set (no role catalog): its pg_dumpall roles are replayed into a cluster bootstrapped as postgres, which
     # PostgreSQL 16 refuses for a membership recorded as GRANTED BY kin (a known limit of such sets; see D23).
     token = uuid.uuid4().hex
@@ -883,7 +898,7 @@ def rehearse(directory):
             if result["emr"]["expiry_sweep"].get("ran") is not True:
                 raise RuntimeError("Restored expiry sweep did not run before business use")
         result["audit"] = rehearse_audit(directory, manifest, name)
-        result["wrapping_custody"] = rehearse_wrapping_custody(directory, manifest, name, "postgres")
+        result["wrapping_custody"] = rehearse_wrapping_custody(directory, manifest, name, "postgres", source=wrapping_source)
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
         temporary_run(["--network", "none", "--read-only",
@@ -2198,6 +2213,11 @@ def _daily_whole(folder, *, completing_thin=False):
     if (type(manifest) is not dict or type(manifest.get("format")) is not int or manifest.get("format") != 1
             or manifest.get("complete") is not True or manifest.get("kind")):
         return "manifest not complete daily backup"
+    if "wrapping_custody" in manifest:
+        try:
+            wrapping_custody_files(manifest)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            return "wrapping custody unavailable or differs from snapshot"
     sums, sizes = manifest.get("sha256"), manifest.get("bytes")
     if type(sums) is not dict or type(sizes) is not dict:
         return "manifest has no checksums"
@@ -2275,6 +2295,14 @@ def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared, *, f
                 if folder.name.startswith(ROTATING) and name in generations:
                     kept_leftovers.setdefault(folder.name, "kept generation")
                 continue
+            if folder.name not in kept_leftovers and retained.get(name) is None:
+                try:
+                    rotation_custody(folder, name)
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+                    why = "wrapping custody rotation unavailable: " + type(error).__name__
+                    incomplete[folder.name] = why
+                    (kept_leftovers if folder.name.startswith(ROTATING) else retained)[folder.name] = why
+                    continue
             if folder.name.startswith(ROTATING):
                 if folder.name not in kept_leftovers:
                     resume.append(folder.name)
@@ -2284,6 +2312,27 @@ def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared, *, f
                 thin.append(name)
     return {"generations": generations, "delete": delete, "thin": thin, "resume": resume, "retained": retained,
             "incomplete": incomplete, "kept_leftovers": kept_leftovers, "identities": identities}
+
+
+def rotation_custody(folder, name):
+    """Only a snapshot's own separate key copy rotates; live keys and retained sets do not."""
+    manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    if "wrapping_custody" not in manifest:
+        return None
+    config_path = os.environ.get("KIN_EMR_WRAPPING_CUSTODY") or WRAPPING_CUSTODY_CONFIG
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    root = Path(config["backup_root"])
+    source, files = wrapping_custody_files(manifest)
+    if (not root.is_absolute() or source.name != name or source.parent.resolve() != root.resolve()
+            or source.resolve() == folder.resolve() or source.resolve() in folder.resolve().parents
+            or folder.parent.resolve() == root.resolve() or folder.parent.resolve() in root.resolve().parents):
+        raise RuntimeError("Wrapping custody is not this generation's separate configured copy")
+    _rotation_identity(source)
+    if {p.name for p in source.iterdir()} != {filename for filename, _ in files.values()}:
+        raise RuntimeError("Wrapping custody contains unlisted files")
+    for filename, _ in files.values():
+        _rotation_identity(source / filename, directory=False)
+    return source
 
 
 def rotate(root, keep, protect=(), dry_run=False, now=None):
@@ -2346,7 +2395,7 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
     if dry_run:
         result.update(would_delete=plan["delete"], would_thin=plan["thin"], would_resume=plan["resume"])
         return result
-    result.update(deleted=[], thinned=[], resumed=[])
+    result.update(deleted=[], thinned=[], resumed=[], custody_deleted=[], custody_cleanup_pending=[])
 
     def admission(name, folder, action, identity, manifest_hash):
         try:
@@ -2355,11 +2404,13 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
             why = _daily_whole(folder)
             if why:
                 return "incomplete before " + ("thinning: " if action == "thin" else "deletion: ") + why
+            if action != "thin":
+                rotation_custody(folder, name)
             current = plan_now(focus=folder.name)
             key = folder.name if action == "resume" else name
             if key not in current[action]:
                 return current["kept_leftovers"].get(folder.name) or current["retained"].get(name) or "현재 complete 세대의 keep 조건 또는 보호 조건이 바뀌었습니다"
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
             return "삭제 직전 관측 실패: " + type(error).__name__
         return None
 
@@ -2367,6 +2418,19 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
         result["status"] = "preserved-stop"
         result["stopped"][folder.name] = reason
         result["kept_leftovers" if folder.name.startswith(ROTATING) else "retained"][folder.name] = reason
+
+    def remove_generation(folder, name):
+        custody = rotation_custody(folder, name)
+        # Data goes first: a failed/interrupted archive removal must never destroy its recovery key.
+        shutil.rmtree(folder)
+        if custody is not None:
+            try:
+                shutil.rmtree(custody)
+                result["custody_deleted"].append(str(custody))
+            except OSError as error:
+                result["status"] = "preserved-stop"
+                result["custody_cleanup_pending"].append(str(custody))
+                result["stopped"][name] = "Data removed; custody cleanup pending: " + type(error).__name__
 
     for action, names in (("delete", plan["delete"]), ("thin", plan["thin"]), ("resume", plan["resume"])):
         for selected in names:
@@ -2390,11 +2454,11 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
                 if why:
                     preserve(moved, why)
                     continue
-                shutil.rmtree(moved)
+                remove_generation(moved, name)
                 result["deleted"].append(name)
             elif action == "resume":
                 # This is the same admission as the check immediately after a normal rename.
-                shutil.rmtree(folder)
+                remove_generation(folder, name)
                 result["resumed"].append(selected)
             else:
                 manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
@@ -2462,9 +2526,12 @@ def main():
     backup_parser.add_argument("--rotate-keep", type=int, default=DAILY_GENERATIONS,
                                help="After a complete, error-free backup, keep this many daily generations (1-365, default 7)")
     backup_parser.add_argument("--no-rotate", action="store_true", help="Leave the older daily sets as they are")
-    commands.add_parser("rehearse").add_argument("directory")
+    rehearse_parser = commands.add_parser("rehearse")
+    rehearse_parser.add_argument("directory")
+    rehearse_parser.add_argument("--wrapping-source", help="Relocated separate custody directory for this snapshot")
     custody_parser = commands.add_parser("restore-wrapping")
     custody_parser.add_argument("directory", help="Database backup directory containing manifest.json")
+    custody_parser.add_argument("--source", help="Relocated separate custody directory for this snapshot")
     custody_parser.add_argument("--destination", required=True, help="New directory outside the repository and database storage")
     rotate_parser = commands.add_parser("rotate")
     rotate_parser.add_argument("--root", required=True, help="The backup root holding the daily sets")
@@ -2480,7 +2547,7 @@ def main():
         destination = Path(args.destination).resolve()
         if any(destination == root or root in destination.parents for root in (ROOT.resolve(), directory.parent)):
             raise RuntimeError("Restore wrapping secrets outside the repository and database backup root")
-        print(json.dumps({"files": restore_wrapping_custody(manifest, destination)}))
+        print(json.dumps({"files": restore_wrapping_custody(manifest, destination, source=args.source)}))
         return
     if args.action == "rotate":
         # Rotation reads and deletes host files only; it needs no Docker, but the lock keeps backup/rehearse out.
@@ -2504,7 +2571,7 @@ def main():
                 if result["status"] != "complete":
                     raise RuntimeError("백업은 보존했으나 rotation을 마치지 못했습니다. 보존된 세트를 점검하세요")
         else:
-            rehearse(args.directory)
+            rehearse(args.directory, wrapping_source=args.wrapping_source)
 
 
 

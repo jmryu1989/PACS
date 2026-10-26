@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 from pypdf import PdfReader
 from pydicom import dcmread
+from viewer_tools import select_image_tool,display_transform
 from playwright.sync_api import expect
 from test_viewer_jobs import ViewerJobsE2E, literal, psql, canvas_ready
 from access_assertions import permission_denied
@@ -121,15 +122,16 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   self.seed_report(a);originals=self.originals();reports={f.uid:self.report_rows(f) for f in [a,b]}
   p=self.launch_job([a,b]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'D03A past',1);canvas_ready(p,2)
   self.choose(p,0);p.keyboard.press('ArrowDown');self.gesture(p,'Zoom',0,35);self.gesture(p,'Pan',35,20)
-  for key in ['2','r','h','v','i']:p.keyboard.press(key)
+  p.keyboard.press('2')
+  for action in ['r','h','v','i']:display_transform(p,action)
   self.choose(p,1);p.keyboard.press('ArrowDown');p.keyboard.press('1');p.wait_for_timeout(200)
-  expected=self.arrays(self.pngs(p));job=self.saved(p,a);p.close()
+  expected=self.arrays(self.settled_pngs(p));job=self.saved(p,a);p.close()
   p=self.launch_job([a]);p.set_viewport_size(dict(width=1100,height=850));canvas_ready(p,1)
   # ResizeObserver/native rendering can finish after a nonblank old canvas.
   # Complete that layout before taking the workspace-preservation baseline.
   p.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
   canvas_ready(p,1)
-  before=self.pngs(p);paper=self.output(p);actual=self.output_arrays(p,paper)
+  before=self.settled_pngs(p);paper=self.output(p);actual=self.output_arrays(p,paper)
   errors=[]
   for x,y in zip(expected,actual):
    self.assertEqual(x.shape,y.shape);error=np.abs(x.astype(int)-y.astype(int));errors.append(dict(max=int(error.max()),mean=float(error.mean())))
@@ -158,7 +160,7 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   expected=[x for x in self.arrays(self.pngs(p)) if x is not None]
   p.get_by_label('Description',exact=True).fill('긴 한국어 비교 작업 설명\n'*45);self.saved(p,f)
   self.choose(p,0)
-  p.locator('[data-cy="MeasurementTools-split-button-secondary"]').click();p.get_by_text('Annotation',exact=True).click()
+  select_image_tool(p, 'ArrowAnnotate')
   box=p.locator('.cornerstone-canvas').first.bounding_box();x,y=box['x']+box['width']*.47,box['y']+box['height']*.47
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+45,y+28,steps=8);p.mouse.up()
   p.get_by_placeholder('Enter label').fill('출력 중 보존할 미저장 표식');p.get_by_role('button',name='Save',exact=True).click()
