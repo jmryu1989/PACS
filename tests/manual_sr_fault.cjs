@@ -7,7 +7,16 @@ const { PrismaService } = require('/app/dist/prisma.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
 const { ManualSrService } = require('/app/dist/manual-sr.service');
 const prisma = new PrismaService(), orthanc = new OrthancService();
-const service = new ManualSrService(prisma, orthanc, new StudyAccessService(prisma,orthanc,{})), realFetch = global.fetch;
+const { AccessLedgerStore } = require('/app/dist/emr-runtime/store');
+const { FailureJournal, FailureSpool } = require('/app/dist/emr-runtime/failure-journal');
+const { createRecordPort } = require('/app/dist/emr-runtime/record-port');
+const { createStartupClinicalServices, ModuleAClinicalSourcesPending } = require('/app/dist/emr-clinical/startup');
+const spool = new FailureSpool(require('node:path').join(require('node:os').tmpdir(), 'manual-sr-fault-' + randomUUID()));
+const { port: records } = createRecordPort(new AccessLedgerStore(prisma, new FailureJournal(prisma, spool)));
+const studyAccess = new StudyAccessService(prisma,orthanc,{});
+const clinical = createStartupClinicalServices(prisma, records, {}, orthanc, studyAccess, new ModuleAClinicalSourcesPending());
+const service = new ManualSrService(prisma, orthanc, studyAccess, clinical.manualSrSigning), realFetch = global.fetch;
+let request;
 const { uid, caller, items } = fixture;
 const raw = x => Buffer.from(JSON.stringify(x));
 let phase = 'setup';
@@ -15,6 +24,20 @@ const watchdog = setTimeout(() => { console.error('SR timeout at '+phase); proce
 const prepare = requestId => service.prepare(uid, raw({ requestId: requestId || randomUUID(), items }), caller);
 
 async function run() {
+  // Only admission facts are synthetic in this direct fault process. C2 reads
+  // the same provisioned doctor key and B1 commits to the real fixture PG.
+  const issuer = process.env.KC_ISSUER;
+  const work = records.begin();
+  let identityId;
+  try { identityId = await work.resolveRequestIdentity(issuer, caller.sub); } finally { work.end(); }
+  assert.ok(identityId);
+  request = { facts: { actor: { id: identityId, issuer, subject: caller.sub },
+    roles: caller.roles, institution: caller.institution, rightsVersion: 1, requestId: randomUUID(),
+    ingress: { status: 'known', value: { address: '127.0.0.1', source: 'request-peer' } } },
+    async requireCurrent(tx) {
+      const member = await tx.memberRights.findUnique({ where: { sub: caller.sub } });
+      assert.ok(member?.approved && !member.suspended && member.institution === caller.institution);
+    } };
   const head = await prisma.viewerItem.findUniqueOrThrow({ where: { id: items[0].id } });
   const tags = await orthanc.viewerReference(head.snapshot.sopUid, true);
   assert.equal(tags.StudyInstanceUID, uid); assert.match(tags.PatientID, /^READBACK-/);
@@ -27,7 +50,7 @@ async function run() {
   const paused = new Promise(resolve => { release = resolve; }), entry = new Promise(resolve => { entered = resolve; });
   const realStore = orthanc.storeManualSr.bind(orthanc);
   orthanc.storeManualSr = async (...args) => { entered(); await paused; return realStore(...args); };
-  const writing = service.store(uid, report.id, raw({}), caller);
+  const writing = service.store(uid, report.id, raw({}), caller, request);
   try {
     await entry;
     assert.ok((await prisma.manualSr.findUnique({ where: { id: report.id } })).attemptedAt);
@@ -66,8 +89,8 @@ async function run() {
   assert.equal(expiredIds.length,32); assert.equal(new Set(expiredIds).size,32); assert.ok(expiredIds.includes(expiring.id));
   assert.ok(expiration.every(row=>JSON.parse(row.detail).ids.length<=8));
   await assert.rejects(prepare(requestId), e => e.getStatus() === 410);
-  await assert.rejects(service.store(uid, expiring.id, raw({}), caller), e => e.getStatus() === 410);
-  assert.equal((await service.store(uid, report.id, raw({}), caller)).stored, true);
+  await assert.rejects(service.store(uid, expiring.id, raw({}), caller, request), e => e.getStatus() === 410);
+  assert.equal((await service.store(uid, report.id, raw({}), caller, request)).stored, true);
   assert.equal((await prisma.manualSr.findUnique({ where: { id: report.id } })).sha256, report.sha256);
 
   phase = 'failed maintenance does not reject a valid prepare';
@@ -109,5 +132,5 @@ async function run() {
   console.log('MANUAL SR FAULT PASS: actual upload outside parent lock; temporary quota/expiry/tombstone; stored retry; 10s aggregate deadline/cancel');
 }
 run().catch(error => { console.error(phase,error); process.exitCode=1; }).finally(async () => {
-  global.fetch=realFetch; clearTimeout(watchdog); await prisma.$disconnect();
+  global.fetch=realFetch; clearTimeout(watchdog); await spool.close(); await prisma.$disconnect();
 });

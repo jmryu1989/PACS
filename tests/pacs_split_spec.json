@@ -9095,6 +9095,7 @@
       "ModuleAClinicalSourcesPending",
       "Symbol(OnlineClinicalServices)=factory",
       "Symbol(EMR_CLINICAL_ROUTES)=factory",
+      "Symbol(EMR_MANUAL_SR_SIGNING)=factory",
       "Symbol(EMR_NATIVE_REPORT_SIGNING)=factory"
     ],
     "routes": [],
@@ -9258,6 +9259,33 @@
           ],
           "optional": [
             1
+          ]
+        }
+      },
+      "ManualSrService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "StudyAccessService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "StudyAccessService",
+            "ManualSrSigning"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EMR_MANUAL_SR_SIGNING)"
+          ],
+          "optional": [
+            3
           ]
         }
       }

@@ -8,5 +8,5 @@ export class ManualSrController {
   @Post() @HttpCode(200)
   prepare(@Param('uid') uid: string, @Req() req: any) { return this.svc.prepare(uid, req.rawBody, caller(req)); }
   @Post(':id/store') @HttpCode(200)
-  store(@Param('uid') uid: string, @Param('id') id: string, @Req() req: any) { return this.svc.store(uid, id, req.rawBody, caller(req)); }
+  store(@Param('uid') uid: string, @Param('id') id: string, @Req() req: any) { return this.svc.store(uid, id, req.rawBody, caller(req), req); }
 }
