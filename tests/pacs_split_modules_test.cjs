@@ -335,7 +335,7 @@ function world() {
   const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft, nativeSigning), b2Ledger(prisma));
   const clinical = {
     read: (_request, _kind, _id, read) => prisma.$transaction(read),
-    write: (_request, _input, write) => prisma.$transaction(write),
+    write: async (_request, _input, write) => ({ ...await prisma.$transaction(write), emr: { replayed: false } }),
     workflow: (_request, execute) => prisma.$transaction(tx => execute({ tx,
       closeAssignment: async () => {} })),
   };
