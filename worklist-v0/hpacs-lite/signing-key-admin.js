@@ -25,7 +25,7 @@
     const dialog = document.createElement('dialog'); active = dialog; dialog.id = 'signing-key-dialog';
     dialog.style.cssText = 'width:min(760px,calc(100vw - 32px));max-height:90vh;overflow:auto';
     dialog.innerHTML = `<form class="dialog-body" id="signing-key-form"><h2>Signing Key</h2><p data-target></p>
-      <p>온라인 승인 서명키는 서버가 회원별로 보관합니다. 판독의·임상의는 지금처럼 승인하며 추가 절차가 없습니다. 키를 교체하거나 폐기해도 이미 서명된 기록은 보관된 공개키로 계속 검증됩니다. 모든 변경은 접속기록에 남습니다.</p>
+      <p>온라인 승인 서명키는 서버가 회원별로 보관합니다. 판독의·임상의·방사선사는 지금처럼 승인·저장하며 추가 절차가 없습니다. 키를 교체하거나 폐기해도 이미 서명된 기록은 보관된 공개키로 계속 검증됩니다. 모든 변경은 접속기록에 남습니다.</p>
       <p data-status role="status"></p>
       <div class="audit-table" data-wrap hidden><table><thead><tr><th scope="col">Key ID</th><th scope="col">Status</th><th scope="col">Registered (UTC)</th><th scope="col">Ended (UTC)</th></tr></thead><tbody data-rows></tbody></table></div>
       <label style="margin-top:12px">Change Reason<input name="reason" maxlength="2000" required autocomplete="off"></label>
