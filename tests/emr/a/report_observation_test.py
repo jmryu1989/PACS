@@ -376,6 +376,12 @@ test('A-HTTP-OBSERVE: wrong targets, absent or disposed provisions and malformed
   const metadataRef = resolved.body.members[0].accessRef;
   assert.equal((await prepared(metadataRef)).event.targets[0].kind, 'study-metadata');
   refusals.push(['a metadata reference', uid, report(metadataRef), 404]);
+  // The real draft read records a formatVersion 1 provision of the caller's own draft: not a report display reference.
+  const draft = await send('GET', '/studies/' + encodeURIComponent(uid) + '/draft', { member: members.reader }).done;
+  assert.equal(draft.status, 200, draft.text);
+  const [draftRead] = await entries(`e.payload::jsonb->>'surface' = 'GET studies/:uid/draft' AND e.payload::jsonb->'targets'->0->'studyId'->>'value' = '${uid}'`);
+  assert.equal(draftRead.event.formatVersion, 1);
+  refusals.push(['a formatVersion 1 draft-read reference', uid, report(draftRead.eventId), 404]);
   for (const [what, path, sent, status] of refusals) {
     const answer = await observe(path, sent).done;
     assert.equal(answer.status, status, what + ' ' + answer.text);

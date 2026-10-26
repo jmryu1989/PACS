@@ -4,7 +4,7 @@ import { ModuleRef } from '@nestjs/core';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { isDeepStrictEqual } from 'node:util';
-import { DurableAccessReceipt, LocalReadAccessEventV2, newAuditLinkId, parseAccessEvent, parseLocalReadEvent } from '../emr-contract/access-event';
+import { DurableAccessReceipt, LocalReadAccessEventV2, newAuditLinkId, parseLocalReadEvent } from '../emr-contract/access-event';
 import { ContractError, object, utc } from '../emr-contract/validation';
 import { transactionScope } from '../emr-runtime/context';
 import { isDurableReceipt } from '../emr-runtime/contract';
@@ -41,6 +41,14 @@ function observation(input: unknown): Observation {
   return report;
 }
 
+/** A stored local-read event, or null for an entry of any other branch or version (never a display reference); an
+ * unreadable local-read entry is an integrity error, not an absence. */
+function localRead(stored: unknown): Readonly<LocalReadAccessEventV2> | null {
+  const raw = stored as { formatVersion?: unknown; branch?: unknown } | null;
+  if (!raw || typeof raw !== 'object' || raw.formatVersion !== 2 || raw.branch !== 'local-read') return null;
+  return parseLocalReadEvent(stored);
+}
+
 const sameMember = (event: Readonly<LocalReadAccessEventV2>, facts: RequestFacts) =>
   event.userId.status === 'known' && event.userId.value.id === facts.actor.id &&
   event.userId.value.issuer === facts.actor.issuer && event.userId.value.subject === facts.actor.subject &&
@@ -53,8 +61,8 @@ const sameMember = (event: Readonly<LocalReadAccessEventV2>, facts: RequestFacts
  * target, surface and managing institution come from the provide-prepared entry B2 read back, never from the body.
  *
  * The event's `occurredAt` is the display time the client reported (as `displayReported` and the offline branch
- * use the device's time); B2 keeps its own reception time (`recorded_at`, the receipt's `durableAt`), answered as
- * `receivedAt`. It is a report, not proof that the person read the text.
+ * use the device's time); B2 records its own commit time, the receipt's `durableAt`, answered as `receivedAt`.
+ * It is a report, not proof that the person read the text.
  */
 @Injectable()
 export class ReportObservationService {
@@ -98,10 +106,8 @@ export class ReportObservationService {
   /** The original provide-prepared, read back from B2 and bound to this member, institution, session and study. */
   private async prepared(work: EmrRecordWork, report: Observation, uid: string, facts: RequestFacts) {
     const stored = await readBack(work, report.accessRef);
-    if (stored === null) throw unknownReference();
-    const event = parseAccessEvent(stored);
-    if (event.formatVersion !== 2 || event.branch !== 'local-read' || event.action !== 'provide-prepared' ||
-        event.targets.length !== 1 || !REPORT_KINDS.includes(event.targets[0].kind) ||
+    const event = stored === null ? null : localRead(stored);
+    if (!event || event.action !== 'provide-prepared' || event.targets.length !== 1 || !REPORT_KINDS.includes(event.targets[0].kind) ||
         event.targets[0].studyId.status !== 'known' || event.targets[0].studyId.value !== uid || !sameMember(event, facts))
       throw unknownReference();
     return event;
@@ -115,9 +121,8 @@ export class ReportObservationService {
     const replay = async () => {
       const stored = await readBack(work, report.eventId);
       if (stored === null) return null;
-      const event = parseAccessEvent(stored);
-      if (event.formatVersion !== 2 || event.branch !== 'local-read' || event.action !== 'client-shown' ||
-          event.relatedEventId !== prepared.eventId || event.occurredAt !== report.shownAt ||
+      const event = localRead(stored);
+      if (!event || event.action !== 'client-shown' || event.relatedEventId !== prepared.eventId || event.occurredAt !== report.shownAt ||
           event.surface !== prepared.surface || !isDeepStrictEqual(event.targets, prepared.targets) || !sameMember(event, facts))
         throw conflict();
       return { event, receipt: await durable(work, event) };
