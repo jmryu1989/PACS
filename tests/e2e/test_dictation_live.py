@@ -102,7 +102,7 @@ GEO_HIT_IDS = ('b-dictate', 'dictation-status', 'dictation-stop', 'dictation-can
 # ── P10 through the browser's own NetLog (Astra decision 2026-09-23, review F1-F5). The proof object is the
 # original one: the worklet response the browser itself received, status 200, COOP same-origin, COEP
 # require-corp. Playwright never reported that response (attempt 1, A-R), so it is read from the network
-# stack's log over HTTP/2; whatever cannot be bound to exactly one exchange is an INSTRUMENTATION failure.
+# stack's log over the negotiated HTTP protocol; whatever cannot be bound to exactly one exchange is an INSTRUMENTATION failure.
 NETLOG_SECONDS = 120            # --net-log-duration: the network service stops, flushes and closes the log
 NETLOG_DEADLINE_SECONDS = 140   # completion is waited for from the pre-launch clock, never longer
 NETLOG_WINDOW_SECONDS = 115     # test 01's browser traffic ends within this; the logged POST decides (review N1)
