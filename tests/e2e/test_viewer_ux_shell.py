@@ -298,7 +298,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         work = self.login(); page = work.context.new_page()
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid)
         canvas_ready(page, 8)
-        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        expect(page.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True)).to_have_value('compare')
         before = [cell['image'] for cell in self.cells(page)]
         self.assertEqual(len(set(before)), 8)
         page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
@@ -311,7 +311,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         tabs.get_by_role('tab').filter(has_text=patient).click()
         page.wait_for_function('expected => JSON.stringify([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCurrentImageId?.())) === JSON.stringify(expected)', arg=before)
         canvas_ready(page, 8)
-        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        expect(page.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True)).to_have_value('compare')
 
     def test_shell_06_study_action_seam(self):
         patient = 'U2-' + uuid.uuid4().hex[:12]

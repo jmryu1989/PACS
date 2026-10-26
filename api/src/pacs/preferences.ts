@@ -303,6 +303,13 @@ export class PacsPreferences {
   }
 
   private validViewerSettings(value: any) {
+    if (value && Object.prototype.hasOwnProperty.call(value, 'mammography')) {
+      const { mammography, ...tools } = value;
+      return !!mammography && typeof mammography === 'object' && !Array.isArray(mammography) &&
+        Object.keys(mammography).sort().join(',') === 'kind,layout' &&
+        ['compare', 'current'].includes(mammography.layout) &&
+        [null, 'conventional', 'generated2d', 'dbt'].includes(mammography.kind) && this.validViewerSettings(tools);
+    }
     if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
         Object.keys(value).sort().join(',') !== 'bar,shortcuts,version' ||
         !Array.isArray(value.bar) || new Set(value.bar).size !== value.bar.length ||

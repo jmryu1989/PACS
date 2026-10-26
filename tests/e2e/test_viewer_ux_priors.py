@@ -32,6 +32,7 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
           })})''')
         observed['served_files'] = {}
         for relative in ['config/ohif.js', 'worklist-v0/hpacs-lite/viewer-ux-shell.js',
+                         'worklist-v0/hpacs-lite/viewer-ux-toolbar.js',
                          'worklist-v0/hpacs-lite/viewer-prior-controller.js',
                          'worklist-v0/hpacs-lite/viewer-prior-panel.js']:
             url = '/ohif/app-config.js' if relative == 'config/ohif.js' else '/' + relative.replace('worklist-v0/', 'worklist/')
@@ -345,6 +346,118 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
             canvas.height===canvas.clientHeight*devicePixelRatio;
         })''')
         self.evidence(page, 'populated-grid-comparison')
+
+
+    def test_priors_06_mg_account_preferences(self):
+        # D1821 -> RISK-WRONG-STUDY/PREFERENCE-LOSS -> TEST-VIEWER-U3-MG.
+        # Real DICOM and account API; browser contexts model a fresh PC login.
+        from test_mammography_hanging import MammographyHangingE2E as MG
+        patient = 'U3MG-' + uuid.uuid4().hex[:12]
+        current = MG.phantom(self, patient)
+        prior = MG.phantom(self, patient, prior=True)
+        work = self.login()
+        self.open_toolbar_group(work, '#image-opening-open')
+        work.locator('#image-opening-open').click()
+        work.get_by_label('Include Latest Prior', exact=True).check()
+        work.get_by_role('button', name='Done', exact=True).click()
+        self.select(work, current)
+        with work.context.expect_page() as opened: work.locator('#m-filmbox').click()
+        page = opened.value
+        page.on('dialog', lambda dialog: dialog.accept())
+        url = page.url
+
+        def layout(target, compare):
+            canvas_ready(target, 8 if compare else 4)
+            target.wait_for_function('n=>window.services?.viewportGridService.getState().viewports.size===n',
+                                     arg=8 if compare else 4)
+            rows = MG.image_state(self, target)
+            self.assertEqual({row['study'] for row in rows}, {current.uid, prior.uid} if compare else {current.uid})
+            self.assertEqual([(r['side'], r['view']) for r in rows],
+                             [('R','CC'),('L','CC'),('R','CC'),('L','CC'),('R','MLO'),('L','MLO'),('R','MLO'),('L','MLO')]
+                             if compare else [('R','CC'),('L','CC'),('R','MLO'),('L','MLO')])
+            expect(target.get_by_role('button', name='Viewer Settings', exact=True)).to_be_enabled()
+
+        def editor(target):
+            target.get_by_role('button', name='Viewer Settings', exact=True).click()
+            dialog = target.get_by_role('dialog', name='Viewer Settings', exact=True)
+            expect(dialog.get_by_role('button', name='Save', exact=True)).to_be_enabled()
+            return dialog
+
+        def save(target, dialog):
+            with target.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+                dialog.get_by_role('button', name='Save', exact=True).click()
+            self.assertEqual(reply.value.status, 200)
+            expect(dialog).not_to_be_visible()
+            return reply.value.json()
+
+        layout(page, True)
+        url = page.url
+        settings = editor(page)
+        expect(settings.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        expect(settings.get_by_label('MG Image Type', exact=True)).to_have_value('')
+        self.evidence(page, 'mg-settings-default')
+        settings.get_by_label('MG Layout', exact=True).select_option('current')
+        settings.get_by_label('MG Image Type', exact=True).select_option('conventional')
+        saved = save(page, settings)
+        self.assertEqual(saved['viewerSettings']['mammography'], {'layout':'current','kind':'conventional'})
+        layout(page, False)
+        self.evidence(page, 'mg-current-account-setting')
+        fresh_work = self.login()
+        fresh = fresh_work.context.new_page()
+        fresh.goto(url)
+        layout(fresh, False)
+        settings = editor(fresh)
+        expect(settings.get_by_label('MG Image Type', exact=True)).to_have_value('conventional')
+        settings.get_by_role('button', name='Cancel', exact=True).click()
+        other_work = self.login('doctor2')
+        other = other_work.context.new_page()
+        other.goto(url)
+        layout(other, True)
+        other.close()
+        # Existing MG quick controls persist through the same owner/revision boundary.
+        self.open_layout_tools(fresh)
+        with fresh.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+            fresh.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True).select_option('compare')
+        self.assertEqual(reply.value.status, 200)
+        layout(fresh, True)
+        # An older PC must reload on CAS conflict; its attempted preference cannot overwrite the newer one.
+        settings = editor(page)
+        settings.get_by_label('MG Image Type', exact=True).select_option('dbt')
+        with page.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+            settings.get_by_role('button', name='Save', exact=True).click()
+        self.assertEqual(reply.value.status, 409)
+        expect(settings).to_be_visible()
+        settings.get_by_role('button', name='Cancel', exact=True).click()
+        page.get_by_role('button', name='Reload Settings', exact=True).click()
+        layout(page, True)
+        # A failed write leaves the saved default and exposes recovery.
+        fresh.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, json={'message':'Synthetic unavailable'})
+                    if route.request.method == 'PUT' else route.continue_(), times=1)
+        with fresh.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+            fresh.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True).select_option('current')
+        self.assertEqual(reply.value.status, 503)
+        layout(fresh, True)
+        expect(fresh.get_by_role('button', name='Reload Settings', exact=True)).to_be_visible()
+        settings = editor(fresh)
+        settings.get_by_role('button', name='Restore Defaults', exact=True).click()
+        reset = save(fresh, settings)
+        self.assertEqual(reset['viewerSettings']['mammography'], {'layout':'compare','kind':None})
+        fresh.reload()
+        layout(fresh, True)
+        self.evidence(fresh, 'mg-comparison-roamed-default')
+        # Lack of a prior changes only the effective hanging, not the persisted preference.
+        fresh.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid)
+        layout(fresh, False)
+        settings = editor(fresh)
+        expect(settings.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        settings.get_by_role('button', name='Cancel', exact=True).click()
+        self.open_layout_tools(fresh)
+        with fresh.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+            fresh.locator('#kin-mammography-hanging').get_by_label('MG Image Type', exact=True).select_option('conventional')
+        self.assertEqual(reply.value.status, 200)
+        self.assertEqual(reply.value.json()['viewerSettings']['mammography'], {'layout':'compare','kind':'conventional'})
+        fresh.goto(url)
+        layout(fresh, True)
 
 
 def load_tests(loader, tests, pattern):

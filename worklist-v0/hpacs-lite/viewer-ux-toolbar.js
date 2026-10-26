@@ -41,10 +41,55 @@ window.KinViewerUXToolbar = (() => {
     dialog.setAttribute('aria-label', 'Viewer Settings'); element('h2', 'Viewer Settings', dialog);
     element('p', '자주 쓰는 도구는 표시하고 나머지는 More에서 사용합니다. 단축키는 영문자·숫자 한 개이며, 입력 중에는 실행하지 않습니다. 설정은 계정에 저장됩니다.', dialog);
     const rows = element('div', '', dialog), inputs = new Map(), checks = new Map();
+    const mgSection = element('fieldset', '', dialog), mgInputs = new Map();
+    element('legend', 'Mammography', mgSection);
+    element('p', '유방영상 배치와 영상 종류를 계정에 저장합니다. 비교할 이전 검사가 없으면 현재 검사만 표시합니다.', mgSection);
+    for (const [key, title, options] of [
+      ['layout', 'MG Layout', [['compare', 'Current vs Prior'], ['current', 'Current']]],
+      ['kind', 'MG Image Type', [['', 'Automatic'], ['conventional', 'Conventional'], ['generated2d', 'Synthetic 2D'], ['dbt', 'DBT']]],
+    ]) {
+      const row = element('label', title, mgSection), select = element('select', '', row);
+      select.setAttribute('aria-label', title);
+      for (const [value, title] of options) { const option = element('option', title, select); option.value = value; }
+      mgInputs.set(key, select);
+    }
+    const mammography = value => value?.mammography || { layout: 'compare', kind: null };
+    let appliedMammography = null, pendingMammography = null, requestedMammography = null;
+    const mgProvider = () => active() && loaded ? mammography(preferences) : null;
+    window.kinMammographyHanging?.registerPreferenceProvider(mgProvider);
+    function applyMammography(force = false) {
+      if (!active() || !loaded || pendingMammography) return;
+      const value = mammography(preferences), signature = JSON.stringify(value);
+      if (force || appliedMammography !== signature) {
+        if (window.kinMammographyHanging?.set(value)) appliedMammography = signature;
+      }
+    }
+    function saveMammography() {
+      if (!saving && !pendingMammography) requestedMammography = null;
+      if (!pendingMammography || saving || !active() || !loaded) return;
+      const value = pendingMammography; pendingMammography = null;
+      save({ ...preferences, mammography: value });
+    }
+    // The native hook reports the effective layout (Current when no prior exists).
+    // Capture the reader's choice before that fallback, so changing image type does
+    // not replace their account's comparison default or another queued choice.
+    document.addEventListener('change', event => {
+      const select = event.target;
+      if (!active() || !loaded || !select.closest?.('#kin-mammography-hanging')) return;
+      const key = { 'MG Layout': 'layout', 'MG Image Type': 'kind' }[select.getAttribute('aria-label')];
+      if (key) requestedMammography = { ...(requestedMammography || mammography(preferences)), [key]: select.value || null };
+    }, { capture: true, signal: abort.signal });
+    window.addEventListener('kin-mammography-hanging-changed', event => {
+      if (!active() || !session.writer()) return;
+      if (!loaded) { status.textContent = '계정 설정을 불러온 뒤 변경하세요.'; return; }
+      pendingMammography = { ...(requestedMammography || event.detail) };
+      saveMammography();
+    }, { signal: abort.signal });
     const feedback = element('p', '', dialog); feedback.setAttribute('role', 'status');
     const close = () => { dialog.close(); opener?.isConnected && opener.focus(); };
     function fill(value) {
       rows.replaceChildren(); inputs.clear(); checks.clear();
+      for (const [key, input] of mgInputs) input.value = mammography(value)[key] || '';
       for (const [id, item] of catalog) {
         const row = element('label', '', rows); row.className = 'kin-ux-setting-row';
         const check = element('input', '', row); check.type = 'checkbox'; check.checked = value.bar.includes(id);
@@ -94,6 +139,7 @@ window.KinViewerUXToolbar = (() => {
       }
       const selected = [...checks].filter(([, check]) => check.checked).map(([id]) => id);
       const next = { version: 1, shortcuts, bar: [...preferences.bar.filter(id => !checks.has(id) || selected.includes(id)), ...selected.filter(id => !preferences.bar.includes(id))] };
+      next.mammography = { layout: mgInputs.get('layout').value, kind: mgInputs.get('kind').value || null };
       if (await save(next)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
@@ -128,6 +174,7 @@ window.KinViewerUXToolbar = (() => {
       node.ondrop = event => { if (!dragged) return; event.preventDefault(); event.stopPropagation(); move(dragged, parent === bar, id); };
     }
     function render() {
+      applyMammography();
       bar.replaceChildren(); menu.replaceChildren();
       preferences.bar.filter(id => catalog.has(id)).forEach(id => tool(id, bar));
       [...catalog.keys()].filter(id => !preferences.bar.includes(id)).forEach(id => tool(id, menu));
@@ -191,8 +238,12 @@ window.KinViewerUXToolbar = (() => {
         const data = await request({ method: 'PUT', body: JSON.stringify({ expectedOwner: record.owner, revision: record.revision, viewerSettings: next }) });
         if (!active()) return false;
         record = cached = data; preferences = data.viewerSettings; status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
-      } catch (error) { if (active()) { status.textContent = error.message; retry.hidden = false; } return false; }
-      finally { saving = false; if (active()) render(); }
+      } catch (error) {
+        pendingMammography = requestedMammography = null;
+        if (active()) { status.textContent = error.message; retry.hidden = false; applyMammography(true); }
+        return false;
+      }
+      finally { saving = false; if (active()) { render(); saveMammography(); } }
     }
     const nativeStyle = element('style', '', document.head);
     function rebuild() {
@@ -245,6 +296,7 @@ window.KinViewerUXToolbar = (() => {
     return { invoke, bindings: () => preferences.shortcuts, dispose() {
       if (ended) return; ended = true; abort.abort(); observer.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
+      window.kinMammographyHanging?.registerPreferenceProvider(null);
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
       if (window.kinViewerUXOpenSettings === openSettings) delete window.kinViewerUXOpenSettings;
       nativeStyle.remove();

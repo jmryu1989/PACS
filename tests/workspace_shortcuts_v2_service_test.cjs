@@ -13,6 +13,30 @@ const v1=()=>({list:'KeyQ',image:'Digit2',prior:'Digit3',report:'Digit4',context
 const v2=()=>({version:2,list:'Control+Alt+KeyQ',image:'Control+Alt+Digit2',prior:'Control+Alt+Digit3',report:'Control+Alt+Digit4',context:'Control+Alt+Digit5',note:'Control+Alt+Digit6',tools:'Control+Alt+Digit7',nativeTools:'Control+Alt+Digit9',previous:'Control+Alt+ArrowLeft',next:'Control+Alt+ArrowRight',finalize:'Control+KeyS'});
 const request=(bindings=v2(),revision=0,c=caller)=>({bindings,revision,expectedOwner:owner(c)});
 const status=code=>e=>e.getStatus?.()===code;
+
+test('MG layout and representation roam with viewer settings and preserve workspace shortcuts',async()=>{
+  const f=fixture(), tools={version:1,bar:['Zoom'],shortcuts:{Zoom:'z'}};
+  let revision=0;
+  const save=value=>f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision,viewerSettings:value},caller);
+  for(const layout of ['compare','current'])for(const kind of [null,'conventional','generated2d','dbt']){
+    const value={...tools,mammography:{layout,kind}}, saved=await save(value); revision=saved.revision;
+    assert.deepEqual(saved.viewerSettings,value);
+    assert.deepEqual((await f.service.workspaceShortcuts(caller)).viewerSettings,value);
+    const workspace=await f.service.saveWorkspaceShortcuts(request(v2(),revision),caller); revision=workspace.revision;
+    assert.deepEqual(workspace.viewerSettings,value);
+    assert.deepEqual(workspace.bindings,v2());
+  }
+  for(const c of [{...caller,sub:'other'}, {...caller,institution:'other'}])
+    assert.equal((await f.service.workspaceShortcuts(c)).viewerSettings,null);
+  const before=f.snapshot();
+  for(const mammography of [null,[],{}, {layout:'invalid',kind:null}, {layout:'compare',kind:'invalid'},
+    {layout:'current'}, {layout:'compare',kind:null,extra:true}])
+    await assert.rejects(save({...tools,mammography}),status(400));
+  assert.deepEqual(f.snapshot(),before);
+  await assert.rejects(f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision:revision-1,
+    viewerSettings:{...tools,mammography:{layout:'current',kind:'dbt'}}},caller),status(409));
+  assert.deepEqual(f.snapshot(),before);
+});
 function fixture(){
   let rows=new Map(),fault=null;
   const key=o=>JSON.stringify([o.institution,o.subject]);
