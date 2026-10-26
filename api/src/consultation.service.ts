@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
@@ -30,10 +31,10 @@ export class ConsultationService {
       .filter(u=>this.eligible(u,c)).map(u=>({sub:u.id,actor:u.email||u.username,
         name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)}))};
   }
-  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T> {
-    try { return await this.prisma.$transaction(async tx=>{
+  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>,transaction?:Prisma.TransactionClient):Promise<T> {
+    try { const execute=async (tx:Prisma.TransactionClient)=>{
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx); return fn(tx);
-    },{maxWait:4000,timeout:8000}); }
+    };return await (transaction?execute(transaction):this.prisma.$transaction(execute,{maxWait:4000,timeout:8000})); }
     catch(e:any) {
       if (e?.code==='P2002') throw conflict();
       if (['P2028','P2034'].includes(e?.code) || e?.code==='P2010' && ['55P03','57014','40P01'].includes(e?.meta?.code)) {
@@ -58,20 +59,21 @@ export class ConsultationService {
     const {creationFingerprint,lastFingerprint,lastRequest,...item}=row;
     return {owner:[c.institution,c.sub],item};
   }
-  async read(id:string,c:Caller) { await this.studyAccess.prepare(c);
+  async read(id:string,c:Caller,transaction?:Prisma.TransactionClient) { await this.studyAccess.prepare(c);
     this.member(c); if (!uuid(id)) throw new NotFoundException('자문 의뢰를 찾을 수 없습니다');
     return this.run(c,async tx=>{
       const row=await tx.studyConsultation.findUnique({where:{id:id.toLowerCase()}});
       this.access(row,c); await this.study(tx,row.studyUid,c); return this.result(row,c);
-    });
+    },transaction);
   }
-  async list(c:Caller,q:any) {
+  async list(c:Caller,q:any, transaction?: Prisma.TransactionClient) {
+    const db = transaction ?? this.prisma;
     this.member(c);
     if (!object(q) || Object.keys(q).some(k=>!['direction','cursor'].includes(k)) || !['received','sent'].includes(q.direction)) {
       throw new BadRequestException('자문 목록 구분을 확인하세요');
     }
-    const accessPolicy=await this.studyAccess.snapshot(c);
-    const scope=accessPolicy.policy.restricted?[...await this.studyAccess.allowed(c,(await this.prisma.studyState.findMany({where:{institutionId:c.institution},select:{uid:true}})).map(s=>s.uid))]:[];
+    const accessPolicy=await this.studyAccess.snapshot(c, transaction);
+    const scope=accessPolicy.policy.restricted?[...await this.studyAccess.allowed(c,(await db.studyState.findMany({where:{institutionId:c.institution},select:{uid:true}})).map(s=>s.uid))]:[];
     let cursor:any=null;
     if (q.cursor !== undefined) {
       try {
@@ -84,7 +86,7 @@ export class ConsultationService {
     // Join the current source institution as well as the immutable request institution.
     const received=q.direction==='received', before=cursor?.at??'9999-12-31T00:00:00.000Z';
     const beforeId=cursor?.id??'ffffffff-ffff-ffff-ffff-ffffffffffff';
-    const rows:any[]=await this.prisma.$queryRaw`SELECT c.* FROM "StudyConsultation" c
+    const rows:any[]=await db.$queryRaw`SELECT c.* FROM "StudyConsultation" c
       JOIN "StudyState" s ON s.uid=c."studyUid" AND s."institutionId"=c."institutionId"
       WHERE c."institutionId"=${c.institution} AND (NOT ${accessPolicy.policy.restricted} OR c."studyUid"=ANY(${scope}::text[])) AND
         ((${received} AND c."recipientSub"=${c.sub}) OR (NOT ${received} AND c."requesterSub"=${c.sub}))
@@ -94,7 +96,7 @@ export class ConsultationService {
     return {owner:[c.institution,c.sub],direction:q.direction,items:items.map(row=>this.result(row,c).item),
       nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id,r:accessPolicy.revision})).toString('base64url'):null};
   }
-  async create(uid:string,c:Caller,b:any) {
+  async create(uid:string,c:Caller,b:any,transaction?:Prisma.TransactionClient) {
     this.member(c);
     if (!object(b) || Object.keys(b).sort().join()!=='expectedOwner,reason,recipientSub,requestId'
       || !uuid(b.requestId) || !uuid(b.recipientSub) || !text(b.reason)) throw new BadRequestException('수신자와 1~2,000자의 의뢰 사유를 입력하세요');
@@ -123,9 +125,9 @@ export class ConsultationService {
       await tx.auditLog.create({data:{actor:c.actor,action:'study.consultation',target:uid,
         detail:JSON.stringify({id,institution:c.institution,from:null,to:row.state,recipient:row.recipientActor,revision:1})}});
       return this.result(row,c);
-    });
+    },transaction);
   }
-  async change(id:string,c:Caller,b:any) { await this.studyAccess.prepare(c);
+  async change(id:string,c:Caller,b:any,transaction?:Prisma.TransactionClient) { await this.studyAccess.prepare(c);
     this.member(c);
     if (!uuid(id) || !object(b) || Object.keys(b).sort().join()!=='action,expectedOwner,note,requestId,revision'
       || !uuid(b.requestId) || !Number.isInteger(b.revision) || b.revision<1 || b.revision>=2147483647
@@ -151,6 +153,6 @@ export class ConsultationService {
       await tx.auditLog.create({data:{actor:c.actor,action:'study.consultation',target:row.studyUid,
         detail:JSON.stringify({id,institution:c.institution,from:row.state,to:state,revision:updated.revision})}});
       return this.result(updated,c);
-    });
+    },transaction);
   }
 }

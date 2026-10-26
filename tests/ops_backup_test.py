@@ -1155,7 +1155,7 @@ class WrappingCustodyTests(unittest.TestCase):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
         self.host = Host(self.temp)
-        self.host.table_counts.update({"emr_signing.private_key": 1, "emr_clinical.online_version": 2})
+        self.host.table_counts.update({"emr_signing.private_key": 1, "emr_clinical.online_version": 2, "emr_audit.fixed_copy": 3, "emr_image.preparation": 4})
         self.secret = self.root / "live.key"
         self.secret.write_bytes(bytes(range(32)))
         self.config = self.root / "custody.json"
@@ -1214,7 +1214,7 @@ class WrappingCustodyTests(unittest.TestCase):
                 self.assertIsNotNone(error)
                 self.assertFalse(result["success"])
         custody.write_bytes(bytes(range(32)))
-        for schema in ("emr_signing.private_key", "emr_clinical.online_version"):
+        for schema in ("emr_signing.private_key", "emr_clinical.online_version", "emr_audit.fixed_copy", "emr_image.preparation"):
             self.host.table_counts[schema] += 1
             result, error, _, _ = self.host.rehearse(folder, rows_stream({1: "original"}))
             self.assertIn("row counts differ", str(error))

@@ -465,6 +465,38 @@ test('TEST-F-02 patient_replay: a source failure, misordered or out-of-snapshot 
   assert.deepEqual([empty.total, empty.rows.length, empty.top], [0, 0, 0]);
 });
 
+test('TEST-F-02 indexed totals keep pages bounded and continue below the last returned row', async () => {
+  const data = ledgerRows(Array.from({length: 20}, () => accessEvent()));
+  const ledger = ledgerOf(data), read = ledger.rows, requested = [];
+  let counts = 0;
+  ledger.count = async top => { counts++; return data.filter(row => row.entry.sequence <= top).length; };
+  ledger.rows = async (top, below, take) => { requested.push({below,take}); return read(top,below,take); };
+  const auditor = authorityFor('bounded-auditor');
+  const first = await F.readInvestigationPage(F.planInvestigation(auditor, query({limit:2})), ledger);
+  data.push(...ledgerRows([accessEvent()], data).slice(data.length));
+  const next = await F.readInvestigationPage(F.planInvestigation(auditor, query({limit:2,after:first.nextCursor})), ledger);
+  assert.deepEqual([first.total,next.total], [20,20]);
+  assert.deepEqual([...first.rows,...next.rows].map(row=>row.sequence), [20,19,18,17]);
+  assert.equal(counts, 1, 'the continuation carries its snapshot total');
+  assert.deepEqual(requested.map(r => r.below), [null,19]);
+  for (const [method,error] of [['top',{code:'P2028'}],['count',{meta:{code:'57014'}}],['rows',{meta:{code:'57014'}}]]) {
+    await refusedAsync(() => F.readInvestigationPage(F.planInvestigation(auditor, query()),
+      {...ledger,[method]:async()=>{throw error;}}), 'InvestigationTimedOut', method);
+  }
+});
+
+test('TEST-F-02 sparse candidates use source pages independently of the display limit', async () => {
+  const data = ledgerRows(Array.from({length: 20}, (_,i) => accessEvent({address:i===0?'10.0.0.7':'10.0.0.8'})));
+  const ledger=ledgerOf(data), read=ledger.rows; let calls=0;
+  ledger.count=async()=>1;
+  ledger.rows=async(...args)=>{calls++;return read(...args);};
+  const page=await F.readInvestigationPage(F.planInvestigation(authorityFor('sparse-auditor'),
+    query({limit:1,address:'10.0.0.7'})),ledger,{batch:10});
+  assert.deepEqual(page.rows.map(row=>row.sequence),[1]);
+  assert.equal(page.total,1);assert.equal(page.nextCursor,null);
+  assert.equal(calls,3,'two full candidate pages and an end probe, independent of limit 1');
+});
+
 test('TEST-F-02 patient_replay: a sealed cursor continues the same snapshot without duplicates or gaps and another plan, auditor or forged cursor is refused', async () => {
   const rows = ledgerRows([1, 2, 3, 4, 5].map(() => accessEvent()));
   const ledger = ledgerOf(rows);
