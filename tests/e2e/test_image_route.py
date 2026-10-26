@@ -5,13 +5,17 @@ TEST-E-ROUTE-01 one frame through the public HTTPS entry: the exact stored frame
   provide-prepared entry whose fixed response manifest names that frame, followed by its transfer-ended entry and the
   transport/copy observations; a member of another institution gets no bytes and leaves no provide entry.
 TEST-E-ROUTE-02 the served OHIF viewer opens a synthetic CT series twice (the first opening after arrival, then again
-  from a fresh browser): every frame response the browser received carries its E event and has exactly one provide
-  entry; a provide entry the browser did not receive has at most one terminal entry and is never recorded as ended
-  short of its planned bytes (E-03). E observes its own connection to nginx: a frame nginx took whole and the page
-  dropped afterwards (requestfailed, nginx 200 with every byte, run e-route-diag-opus-20261026a) is an ended transfer,
-  never a viewed one. Each opening prints one MEASURE line (first rendered image, every slice's frame) and one
-  FRAME_REQUEST_FAILED line per failed frame request before the assertions, so the same test times the route it runs
-  against (direct Orthanc before E_ROUTE, the E boundary after it).
+  from a fresh browser): every slice reaches the viewer (the browser read its frame response to the end, or the viewer
+  holds its image), every frame response carries its E event, and every one the browser read to the end has exactly
+  one provide entry; a provide entry the browser did not receive has at most one terminal entry and is never recorded
+  as ended short of its planned bytes (E-03). E observes its own connection to nginx: a frame nginx took whole and the
+  page dropped afterwards is an ended transfer, never a viewed one. The pinned viewer's streaming frame loader stops
+  reading at Content-Length without reading the end of the stream, and the browser then sometimes cancels a response it
+  received whole (net::ERR_ABORTED, every byte received, no page abort; runs e-route-diag3/diag4-opus-20261026a): such
+  a slice is in the viewer, so the viewer's own state is read as well as the network events. Each opening prints one
+  MEASURE line (first rendered image, every slice reached) and one FRAME_REQUEST_FAILED line per failed frame request
+  before the assertions, so the same test times the route it runs against (direct Orthanc before E_ROUTE, the E
+  boundary after it).
 TEST-E-ROUTE-03 after a frame went through E (which then keeps the study's manifest for the next frames), one more
   object arrives in the same series; a series retrieve and a study retrieve through E's image API answer with every
   object the study holds now, the arrival included, byte for byte as stored (R244-01).
@@ -46,6 +50,20 @@ from test_prior_selection import canvas_ready
 FRAME_ACCEPT = 'multipart/related; type="application/octet-stream"; transfer-syntax=*'
 SLICES = int(os.environ.get("KIN_E_ROUTE_SLICES", "200"))
 MATRIX = int(os.environ.get("KIN_E_ROUTE_MATRIX", "512"))
+# The SOP Instance UIDs among `sops` whose image the served viewer holds: a loaded image of a viewport's stack, or a
+# loaded frame of a viewport's volume.
+HELD_BY_VIEWER = r"""sops => {
+  const cs = window.cornerstone, held = new Set();
+  const note = id => { const sop = String(id).split('/instances/')[1]?.split('/')[0]; if (sops.includes(sop)) held.add(sop); };
+  for (const engine of cs?.getRenderingEngines?.() || []) for (const viewport of engine.getViewports()) {
+    try { for (const id of viewport.getImageIds?.() || []) if (cs.cache.getImage(id)) note(id); } catch (_) {}
+    try {
+      const volume = viewport.getVolumeId?.() && cs.cache.getVolume(viewport.getVolumeId());
+      (volume?.imageIds || []).forEach((id, k) => { if (volume.loadStatus?.cachedFrames?.[k]) note(id); });
+    } catch (_) {}
+  }
+  return [...held];
+}"""
 
 
 def ct_series(stack, label, slices, size):
@@ -215,21 +233,25 @@ class ImageRouteE2E(base.WorklistE2E):
         self.assertEqual(before, len(after))
 
     def open_series(self, fixture, sops, opening):
-        """One served-viewer opening in a fresh signed-in browser context; (MEASURE row, received frame responses)."""
+        """One served-viewer opening in a fresh signed-in browser context; (MEASURE row, answered frame responses).
+
+        A slice reached the viewer when the browser read its frame response to the end or when the viewer holds its
+        image. The pinned viewer's streaming frame loader stops reading at Content-Length and never reads the end of the
+        stream, so the browser can cancel a response it has already received whole (net::ERR_ABORTED with every byte
+        received; runs e-route-diag3/diag4-opus-20261026a); that slice is in the viewer all the same."""
         page = self.login()
         answered, finished, failed = {}, {}, []
         ours = lambda request: "/frames/" in request.url and f"/studies/{fixture.uid}/" in request.url
+        sop_of = lambda request: request.url.split("/instances/", 1)[1].split("/", 1)[0]
 
         def headers(response):
             if ours(response.request):
-                answered[id(response.request)] = {"status": response.status,
+                answered[id(response.request)] = {"sop": sop_of(response.request), "status": response.status,
                                                   "event": response.headers.get("x-kin-image-event")}
 
         def done(request):
-            # Only a body the browser read to its end counts as received.
             if ours(request):
-                sop = request.url.split("/instances/", 1)[1].split("/", 1)[0]
-                finished.setdefault(sop, []).append(answered.get(id(request), {"status": None, "event": None}))
+                finished.setdefault(sop_of(request), []).append(answered.get(id(request), {"status": None, "event": None}))
 
         def lost(request):
             if ours(request):
@@ -242,32 +264,39 @@ class ImageRouteE2E(base.WorklistE2E):
         page.goto(self.stack.proxy + "/ohif/viewer?StudyInstanceUIDs=" + fixture.uid)
         canvas_ready(page, 1)
         first = time.monotonic() - started
-        deadline = started + 300
-        while len(set(finished) & set(sops)) < len(sops) and time.monotonic() < deadline:
+        deadline, held, looked = started + 300, set(), 0.0
+        while not set(sops) <= set(finished) | held and time.monotonic() < deadline:
+            if time.monotonic() - looked >= 1:
+                held, looked = set(page.evaluate(HELD_BY_VIEWER, sops)), time.monotonic()
             page.wait_for_timeout(250)
-        every = time.monotonic() - started if len(set(finished) & set(sops)) == len(sops) else None
+        held = set(page.evaluate(HELD_BY_VIEWER, sops))
+        every = time.monotonic() - started if set(sops) <= set(finished) | held else None
         received = [row for rows in finished.values() for row in rows]
-        measure = {"route": "e-boundary" if any(r["event"] for r in received) else "direct", "opening": opening,
+        measure = {"route": "e-boundary" if any(r["event"] for r in answered.values()) else "direct", "opening": opening,
                    "slices": SLICES, "matrix": MATRIX,
                    "first_render_seconds": round(first, 3), "all_frames_seconds": None if every is None else round(every, 3),
-                   "frame_responses": len(received), "distinct_sops": len(set(finished) & set(sops)), "failed_requests": len(failed)}
+                   "frame_responses": len(received), "distinct_sops": len(set(finished) & set(sops)),
+                   "held_by_viewer": len(held & set(sops)), "failed_requests": len(failed)}
         print("MEASURE " + json.dumps(measure), flush=True)
         for row in failed:
             print("FRAME_REQUEST_FAILED " + json.dumps({"opening": opening, **row}), flush=True)
         page.context.close()
-        return measure, received
+        return measure, received, list(answered.values())
 
     def test_route_02_served_viewer_ct_series_every_received_frame_recorded_once(self):
         fixture, series, sops, _ = ct_series(self.stack, "series", SLICES, MATRIX)
         # The first opening after the study arrives, then a second opening by a fresh browser (no HTTP cache).
-        cold, first = self.open_series(fixture, sops, "first")
-        warm, second = self.open_series(fixture, sops, "again")
+        cold, first, first_answered = self.open_series(fixture, sops, "first")
+        warm, second, second_answered = self.open_series(fixture, sops, "again")
         out = Path(os.environ.get("KIN_EVIDENCE_DIR") or Path(__file__).parent / "artifacts")
         out.mkdir(parents=True, exist_ok=True)
         (out / "image-route-measure.json").write_text(json.dumps([cold, warm], indent=2), encoding="utf-8")
 
         for measure in (cold, warm):
             self.assertIsNotNone(measure["all_frames_seconds"], f"every slice's frame reached the viewer ({measure['opening']})")
+        answered = first_answered + second_answered
+        self.assertTrue(all(r["status"] == 200 and r["event"] for r in answered), "every frame response came through the E boundary")
+        self.assertEqual(len(answered), len({r["event"] for r in answered}), "one E event per delivery")
         received = first + second
         self.assertTrue(all(r["status"] == 200 for r in received), received[:5])
         events = [r["event"] for r in received]
