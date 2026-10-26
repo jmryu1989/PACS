@@ -248,6 +248,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "studies/:uid/report/citations"): Route(Kind.REPORT, "citations"),
     ("GET", "studies/:uid/report/versions/:version/citations"): Route(Kind.REPORT, "version-citations"),
     ("GET", "studies/:uid/report/structure"): Route(Kind.REPORT, "structure"),
+    # MODULE_A A4: the browser's display report of a version this member was provided. Its gates are versions()'s, and
+    # the stored provision binding/receipt is tests/emr/a/report_observation_test.py (real Guard, HTTP and PG).
+    ("POST", "studies/:uid/view-observations"): Route(Kind.REPORT, "view-observation"),
     # S7-U4a — Clinical Context(판독의 패널). 읽기 전용, 오더 값 없음(D-S7-11 b). 규칙은 clinical-context-policy.ts.
     ("GET", "studies/:uid/clinical-context"): Route(Kind.REPORT, "clinical-context"),
     ("POST", "studies/:uid/hold"): Route(Kind.REPORT, "hold"),
@@ -4346,6 +4349,15 @@ class LiveInvariantTests(unittest.TestCase):
             # first row a study ever gets, so the route is exercised on a row rather than on a 404.
             return self.stack.request(
                 "GET", f"/studies/{uid}/report/versions/{max(base_version, 1)}/citations", user)
+        if operation == "view-observation":
+            # A4 display report of what this caller was actually given: a history row's accessRef when the history read
+            # answers, otherwise a reference that names no provision. Either way the three batteries reach the route's
+            # own gates (technician no damage, preliminary third party no text, other-tenant admin 404) on a real call.
+            history = self.stack.request("GET", f"/studies/{uid}/report/versions", user)
+            rows = history.body if history.status == 200 and isinstance(history.body, list) else []
+            return self.stack.request("POST", f"/studies/{uid}/view-observations", user, {
+                "accessRef": rows[0]["accessRef"] if rows else str(uuid.uuid4()), "eventId": str(uuid.uuid4()),
+                "shownAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")})
         if operation == "structure":
             # 구조화 항목 전용 읽기. 관문은 `versions()`와 같아서(기관 + 예비 판독) 세 시험이
             # 그대로 의미를 갖는다 — 기사에게는 손상이 없어야 하고, 예비 판독의 제3자에게는
