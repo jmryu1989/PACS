@@ -269,7 +269,7 @@ test('E registered Connect GET/HEAD refuses a request without a member admission
   const { EmrRuntime } = load('emr-runtime/application');
   const previous = { ...process.env };
   // AppModule's own start-up work may reach the archive; only a read naming the requested study is the route's.
-  const studyReads = [];
+  const studyUid = '2.25.701', studyReads = [];
   const archive = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk;
     if (req.url.includes(studyUid) || body.includes(studyUid)) studyReads.push(req.method + ' ' + req.url);
