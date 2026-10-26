@@ -810,6 +810,8 @@ class Compiler:
             for name, contract in reply["contracts"].items():
                 self.answers[key].setdefault(API / name, {}).update(
                     relative_loads=dict(contract["relative_loads"]),
+                    import_types=dict(contract["import_types"]),
+                    method_calls=set(contract["method_calls"]),
                     prototype_comparisons=set(contract["prototype_comparisons"]),
                     constructors_without_return=set(contract["constructors_without_return"]))
         return self.answers[key]
@@ -1212,7 +1214,7 @@ def module_loads(path, source, code, bindings=None):
         end = call_end(code, paren) if called else paren
         text = word + ("(" + " ".join(source[paren + 1:end - 1].split()) + ")" if called else "")
         if is_property(code, at):
-            if not (word == "require" and called and this_field(code, at)):
+            if not (word == "require" and called and (this_field(code, at) or at in bindings.get("method_calls", set()))):
                 base = owner(code, at)
                 found.append((line_of(code, at), f"{base[0] if base else '<expression>'}.{text}: a member {word} other "
                                                  f"than this.require(...) or this.<field>.require(...)"))
@@ -1224,7 +1226,10 @@ def module_loads(path, source, code, bindings=None):
         if word == "require" and class_method(code, at, end):
             continue
         kind, module = loader_argument(source, paren, end)
-        if kind == "plain" and module in LOADED_PACKAGES:
+        if kind == "plain" and module in PACKAGES and bindings.get("import_types", {}).get(at) == module:
+            # Erased type references use the source package contract, not the runtime loader contract.
+            continue
+        elif kind == "plain" and module in LOADED_PACKAGES:
             loaded.append(module)
         elif kind == "plain" and module.startswith(("./", "../")):
             # The compiler resolves against exactly the source set the inventory checks, not the filesystem alone.

@@ -307,7 +307,7 @@ class MultiStudyViewPage(unittest.TestCase):
         button = self.page.locator("#multi-selection-open-set")
         expect(button).to_be_disabled()
         # The Selected toolbar keeps the action whole in view at first paint, also where the list column is narrow and the
-        # toolbar line wraps (the Study Panel first-paint comparisons take this one button out: W9_VIEW_NODES there).
+        # toolbar line wraps (the Study Panel first-paint comparisons take this one button out: w9_view_nodes there).
         for width, height in ((1920, 1080), (1366, 768), (900, 1200), (768, 1024)):
             with self.subTest(width=width, height=height):
                 self.page.set_viewport_size({"width": width, "height": height})
@@ -390,6 +390,22 @@ class MultiStudyViewPage(unittest.TestCase):
                                                                              body["expectedSourcePatientKey"]))
         self.assertNotEqual(last["requestId"], body["requestId"])
         self.wait_viewer(order[:2])
+
+    def test_audit_unavailable_retry_admits_the_same_selection(self):
+        self.open()
+        order = self.visible_order()[:3]
+        first = self.open_set(order, (503, {"code": "W9_AUDIT_UNAVAILABLE", "message": AUDIT}))
+        expect(self.status()).to_contain_text(AUDIT)
+        self.wait(lambda: self.viewer().is_closed(), "the unadmitted blank window closed")
+        self.assertEqual([], self.site.viewer_loads)
+        self.assertIsNone(self.target())
+        retry = self.press("#multi-study-retry")
+        self.assertEqual((first["studyUids"], first["compositionId"], None),
+                         (retry["studyUids"], retry["compositionId"], retry["expectedSourcePatientKey"]))
+        self.assertNotEqual(first["requestId"], retry["requestId"])
+        self.wait_viewer(order[:2])
+        expect(self.status()).to_contain_text("Ready")
+        self.assertIsNone(self.target(), "Retry must not move the Reading Target")
 
     # ── V-PAGES ──
     def test_fixed_pages_keep_the_odd_member_compare_and_back_resolve_the_frozen_n(self):

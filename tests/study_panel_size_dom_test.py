@@ -37,10 +37,11 @@ the hidden #related-mode section's 40 elements (head, the two identity cards, th
 Insert confirmation dialog). The mode's mount builds nothing until it is entered. Measured: first paint 1890 -> 1933 at
 every size (the opened panel the same 43).
 
-W9-UI decided difference (order 01-multi-study-view.md; W9_VIEW_NODES and HIDE_W9 in study_panel_page_dom_test.py): the
+W9-UI decided difference (order 01-multi-study-view.md; w9_view_nodes and HIDE_W9 in study_panel_page_dom_test.py): the
 Selected toolbar's Open Selected Studies button (disabled while nothing is selected) and the hidden Multi-Study View
-(stylesheet link, script tag, the #multi-study section's 14 elements). The button is taken out of the layout before the
-page is measured or pictured, so everything else is still round 6's. Measured: first paint 1933 -> 1950 at every size.
+(stylesheet link, script tag, the #multi-study section, including New Selection). The button is taken out of the layout before the
+page is measured or pictured, so everything else is still round 6's. The W9 delta is derived from this bounded region
+in the served DOM at first paint and with the panel open, instead of pinning its element count.
 """
 import io
 import json
@@ -53,7 +54,7 @@ from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
 from study_panel_page_dom_test import W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
-from study_panel_page_dom_test import HIDE_W4, W4_REPORT_NODES, HIDE_W9, W9_VIEW_NODES
+from study_panel_page_dom_test import HIDE_W4, W4_REPORT_NODES, HIDE_W9, w9_view_nodes
 
 # S9-U4b part (c) decided difference (D1486, same rule as W6_FIRST_PAINT_NODES / W4_REPORT_NODES): the DICOM Transfer
 # panel adds nodes that stay hidden until a person imports or downloads. main.html gives 4 elements (the Technician
@@ -104,6 +105,9 @@ SCALES = (1, 1.2, 1.4)
 W5_CVR_MODE_NODES = 2
 # W5-UI Phase B (module header): the served Related Report mode, hidden at first paint.
 W5_MODE_NODES = 3 + 40
+# EMR-D batch 2 (#219) decided difference, same rule: main.html loads clinical-signature.js, the module the question,
+# consultation and Tech Note panes read verified signing facts through. One script element; nothing of it is painted.
+D_CLINICAL_SIGNATURE_NODES = 1
 
 
 def nodes_outside_shortcuts(page):
@@ -236,14 +240,15 @@ class StudyPanelSizeDOM(unittest.TestCase):
             page.goto(auth.MAIN_URL)
             expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
             wait_startup(page, site)
-            page.evaluate(HIDE_W9)   # W9-UI decided difference (study_panel_page_dom_test.py W9_VIEW_NODES)
+            page.evaluate(HIDE_W9)   # W9-UI decided difference (study_panel_page_dom_test.py w9_view_nodes)
             settle(page)
-            facts = {'first_paint_nodes': nodes_outside_shortcuts(page)}
+            facts = {'first_paint_nodes': nodes_outside_shortcuts(page), 'w9_first_paint_nodes': w9_view_nodes(page)}
             self.click_row(page, 0, f'{width}x{height}')
             self.open_panel(page)
             page.mouse.move(width - 1, height - 1)
             settle(page)
             facts['nodes'] = nodes_outside_shortcuts(page)
+            facts['w9_nodes'] = w9_view_nodes(page)
             facts['panel'], facts['page'] = self.panel(page), page.evaluate(PAGE)
             facts['w6'] = w6_facts(page)
             del facts['panel']['edge']
@@ -293,10 +298,11 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # W5-UI: + W5_CVR_MODE_NODES (the two hidden Related-mode reason lines, module header).
                         # S9-U4b part (c): + S9U4B_TRANSFER_NODES, the hidden DICOM Transfer panel (above).
                         # W5-UI Phase B: + W5_MODE_NODES, the hidden Related Report mode (module header).
-                        # W9-UI: + W9_VIEW_NODES, the Selected toolbar's Open Selected Studies (out of the layout here,
+                        # W9-UI: the measured W9 region, the Selected toolbar's Open Selected Studies (out of the layout here,
                         # HIDE_W9) and the hidden Multi-Study View (module header).
                         self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES
-                                         + S9U4B_TRANSFER_NODES + W5_MODE_NODES + W9_VIEW_NODES,
+                                         + S9U4B_TRANSFER_NODES + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES
+                                         + mine['w9_first_paint_nodes'] - theirs['w9_first_paint_nodes'],
                                          mine['first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
                         page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
@@ -328,7 +334,8 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # controls' row and the edge (stated in the round-7 report). The whole page is counted, so the
                         # still hidden DICOM Transfer panel's nodes (and W5-UI's two hidden reason lines) are in it too.
                         self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES + S9U4B_TRANSFER_NODES
-                                         + W5_MODE_NODES + W9_VIEW_NODES, mine['nodes'] - theirs['nodes'])
+                                         + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES
+                                         + mine['w9_nodes'] - theirs['w9_nodes'], mine['nodes'] - theirs['nodes'])
                         if picture:
                             regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):

@@ -10444,7 +10444,7 @@
               || !text(entry.body) || (entry.kind !== 'close' && !entry.body.trim()) || !who(entry.author, true) || !anchor(entry.reportAnchor))
             throw new Error(TEXT.malformed);
         });
-        return item;
+        return { ...item, emr: data.emr };
       }
 
       /**
@@ -10612,7 +10612,7 @@
           threadFailure ? readDetail(threadFailure) : '');
         part('state').hidden = state === 'ready';
         part('retry').hidden = !threadFailure;
-        part('entries').replaceChildren(...(loaded ? loaded.entries.map(item => entryItem(item, loaded.current)) : []));
+        part('entries').replaceChildren(...(loaded ? loaded.entries.map(item => entryItem(item, loaded.current, loaded.emr)) : []));
         part('closed').hidden = !loaded || loaded.state !== 'Closed';
         for (const wrap of threadBox.querySelectorAll('.question-compose')) {
           paintComposer(wrap);
@@ -10621,7 +10621,7 @@
         }
       }
 
-      function entryItem(entry, current) {
+      function entryItem(entry, current, evidence) {
         const li = make('li');
         li.dataset.seq = String(entry.seq);
         li.dataset.kind = entry.kind;
@@ -10629,6 +10629,8 @@
         meta.append(make('strong', null, KINDS[entry.kind]), ` · ${person(entry.author)} (${ROLES[entry.author.role]}) · ${time(entry.at)}`);
         const body = entry.body ? make('p', 'question-body', entry.body) : make('p', 'question-muted', TEXT.closeEmpty);
         li.append(meta, body);
+        const signed = window.KinClinicalSignature?.(evidence, entry.seq);
+        if (signed) li.append(make('p', 'question-muted', signed));
         // 답변 뒤 판독이 승인·Addendum·Reset되었으면 그 답이 어느 판독 상태를 보고 쓴 것인지 알린다(서버는 스레드를 다시 열지 않는다).
         if (entry.kind === 'answer' && (entry.reportAnchor.rs !== current.rs || entry.reportAnchor.version !== current.version)) {
           const note = make('p', 'question-anchor');

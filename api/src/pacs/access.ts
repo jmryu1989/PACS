@@ -88,14 +88,15 @@ export class PacsAccess {
     return db.reportDraft.findUnique({ where: { uid_author: { uid, author: actor } } });
   }
 
-  async scopeWrite<T>(uid:string,c:Caller,work:(tx:Prisma.TransactionClient,audit:(actor:string,action:string,target:string,detail?:any)=>Promise<any>)=>Promise<T>):Promise<T> {
+  async scopeWrite<T>(uid:string,c:Caller,work:(tx:Prisma.TransactionClient,audit:(actor:string,action:string,target:string,detail?:any)=>Promise<any>)=>Promise<T>,transaction?:Prisma.TransactionClient):Promise<T> {
     await this.studyAccess.prepare(c,[uid]);
-    return this.prisma.$transaction(async tx=>{
+    const execute=async (tx:Prisma.TransactionClient)=>{
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       await this.studyAccess.require(c,[uid],tx);
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
       return work(tx,audit);
-    },{maxWait:4000,timeout:8000}).catch(noteTransactionError);
+    };
+    return (transaction?execute(transaction):this.prisma.$transaction(execute,{maxWait:4000,timeout:8000})).catch(noteTransactionError);
   }
 
   async gate(uid: string, c: Caller, db:any=this.prisma) {
