@@ -12,7 +12,8 @@ The EMR-introduction release mode (scripts/ops_emr_introduction.py) uses capture
 snapshot while the caller keeps every writer fenced and never resumes them itself (the release decides when they return).
 After a complete, error-free backup the older daily sets rotate (D1047: keep 7): rotate() deletes complete daily sets
 beyond the newest N, never a release, held, protected, latest-verified or incomplete set, and only thins (Orthanc archive
-removed) a set the audit ledger still retains.
+removed) a set the audit ledger still retains. A deleted set's separate wrapping-custody copy is removed after it; a thinned
+or retained set keeps its copy.
 """
 from __future__ import annotations
 

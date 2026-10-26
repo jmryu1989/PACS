@@ -83,7 +83,8 @@ class RotationTests(unittest.TestCase):
         root = self.root.path.parent / "custody"
         root.mkdir(exist_ok=True)
         directory = root / folder.name
-        directory.mkdir()
+        # capture_wrapping_custody creates each snapshot's copy private (0700); Linux rotation checks that mode.
+        directory.mkdir(mode=0o700)
         key = directory / "wrap-0.key"
         key.write_bytes(bytes(range(32)))
         manifest = self.root.manifest(folder.name)

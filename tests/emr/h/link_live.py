@@ -2,7 +2,8 @@
 
 Synthetic PostgreSQL and owned volumes only. Medical Rules art.15(1) periods
 remain owned by emr-contract; restore invokes the ordinary H/B expiry sweep.
-REQ-EMR-17/19 -> RISK-H-01/04/05 -> TEST-H-LINK.
+REQ-EMR-17 -> RISK-H-04 (expired restore) / RISK-H-05 (key lifetime) -> TEST-H-LINK;
+REQ-EMR-19 -> RISK-EMR-LOSS (emr_audit, emr_image counts) -> TEST-H-LINK.
 """
 import hashlib
 import json
@@ -120,11 +121,14 @@ console.log(JSON.stringify({kid,publicKey:pair.publicKey,
         self.assertTrue(held_result['success'])
         self.assertEqual(held_result['wrapping_custody']['keys'],1)
         # Exercise the daily catalog-replay consumer with the same actual captured dumps.
+        # backup() makes private daily folders; rotation refuses a group/world-readable root or set.
+        (scratch / 'daily').mkdir(mode=0o700)
         daily = scratch / 'daily' / ('20261026-000000-' + self.token[:8])
-        daily.mkdir(parents=True)
+        daily.mkdir(mode=0o700)
         daily_manifest = {k:manifest[k] for k in ('format','complete','created_utc','git_sha','postgres_image',
                           'orthanc_image','running_images','emr','wrapping_custody')}
-        daily_manifest['role_catalog'] = json.loads((held_snapshot / 'catalog.json').read_text())
+        # backup() records the cluster role catalog (not a held capture's per-object catalog.json).
+        daily_manifest['role_catalog'] = ops.role_catalog(self.container)
         daily_manifest['counts'] = {d:ops.counts(self.container,d,'kin') for d in ('kin','keycloak')}
         for table in ('emr_audit.fixed_copy','emr_image.preparation','emr_signing.private_key'):
             self.assertEqual(daily_manifest['counts']['kin'][table],1)
@@ -144,6 +148,7 @@ console.log(JSON.stringify({kid,publicKey:pair.publicKey,
         self.assertEqual(result['cleanup_failures'],[])
         self.assertEqual(result['wrapping_custody']['keys'],1)
         self.assertEqual(result['emr']['expiry_sweep']['deletedFailures'],1)
+        self.assertEqual(result['emr']['expiry_sweep']['retainedByDutyOrHold'],1)
         self.assertEqual(ops.digest(daily / 'kin.dump'),source_hash)
         self.assertEqual(self.sql('SELECT count(*) FROM emr_access.failure_entry').stdout.strip(),'2')
         ops.write_json(evidence / 'held-result.json',held_result)
