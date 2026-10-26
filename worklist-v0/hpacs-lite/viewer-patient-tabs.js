@@ -129,18 +129,15 @@ window.KinViewerPatientTabs = (() => {
     const wanted = studies(href), found = new Map();
     if (session.state() === 'unconfirmed') await session.decide();
     const endpoint = session.readOnly() ? '/api/clinician/studies' : '/api/studies';
-    // Use the existing list page contract (maximum 100), stopping once the
-    // requested studies are found. A mode re-entry reuses this resolved tab.
-    let after = null;
-    do {
-      const query = new URLSearchParams({ limit: '100' });
-      if (after) query.set('after', after);
+    // Match only the open studies through the existing scoped endpoint. The
+    // source UID lookup accepts at most 100 UIDs per request.
+    for (let offset = 0; offset < wanted.length; offset += 100) {
+      const query = new URLSearchParams({ uids: wanted.slice(offset, offset + 100).join(',') });
       const response = await fetch(endpoint + '?' + query, { credentials: 'same-origin', signal });
       if (!response.ok) throw new Error('환자 정보를 불러오지 못했습니다. 영상은 계속 볼 수 있습니다. 다시 시도하세요.');
       const result = await response.json();
       for (const row of result.studies || []) if (wanted.includes(row.uid)) found.set(row.uid, row);
-      after = result.pagination?.next;
-    } while (after && found.size < wanted.length);
+    }
     const rows = wanted.map(uid => found.get(uid));
     if (!rows.length || rows.some(row => !row?.sourcePatientKey) || rows.some(row => row.sourcePatientKey !== rows[0].sourcePatientKey))
       throw new Error('같은 환자의 검사인지 확인할 수 없어 현재 화면을 유지합니다.');

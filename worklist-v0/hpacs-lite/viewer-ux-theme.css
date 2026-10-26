@@ -113,7 +113,7 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
 .kin-ux-tool kbd { color: var(--kin-ux-secondary); }
 .kin-ux-tool[aria-pressed="true"] { border-color: var(--kin-accent); box-shadow: inset 0 0 0 1px var(--kin-accent); }
 .kin-ux-more { position: relative; flex: none; }
-.kin-ux-more > div { position: absolute; right: 0; top: 100%; display: flex; flex-wrap: wrap; width: min(34em, 80vw); max-height: 60vh; overflow: auto; gap: .3em; padding: .5em; background: var(--kin-panel); border: 1px solid var(--kin-ux-secondary); z-index: 50; }
+.kin-ux-more > div { position: absolute; right: 0; top: 100%; display: flex; flex-wrap: wrap; width: min(34em, 80vw); max-height: 60vh; overflow: auto; gap: .3em; padding: .5em; background: var(--kin-panel); border: 1px solid var(--kin-ux-secondary); z-index: 40; }
 .kin-ux-settings { background: var(--kin-panel); color: var(--kin-ux-text); max-width: 90vw; max-height: 85vh; overflow: auto; padding: 1em; border: 1px solid var(--kin-ux-secondary); }
 .kin-ux-setting-row { display: flex; gap: .7em; align-items: center; padding: .25em; }
 .kin-ux-setting-row span { flex: 1; }

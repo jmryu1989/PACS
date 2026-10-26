@@ -25,6 +25,14 @@ window.KinViewerUXToolbar = (() => {
     const more = element('details', '', toolbar); more.className = 'kin-ux-more';
     const summary = element('summary', 'More', more); summary.title = '도구를 도구 모음과 More 사이로 끌어 옮길 수 있습니다.';
     const menu = element('div', '', more); menu.setAttribute('role', 'group'); menu.setAttribute('aria-label', 'More Tools');
+    const dismissMore = event => {
+      if (event.type === 'keydown') {
+        if (event.key !== 'Escape' || !more.open) return;
+        more.open = false; summary.focus();
+      } else if (!more.contains(event.target)) more.open = false;
+    };
+    document.addEventListener('pointerdown', dismissMore, { capture: true, signal: abort.signal });
+    document.addEventListener('keydown', dismissMore, { capture: true, signal: abort.signal });
     const settings = element('section', '', toolbar); settings.className = 'kin-ux-toolbar-settings';
     const edit = button('Viewer Settings', settings, () => openSettings());
     const status = element('span', '', settings); status.setAttribute('role', 'status');
@@ -73,7 +81,7 @@ window.KinViewerUXToolbar = (() => {
       dialog.style.left = Math.max(left, Math.min(anchor.x - box.width / 2, right - box.width)) + 'px';
       dialog.style.top = Math.max(top, Math.min(anchor.y - box.height / 2, bottom - box.height)) + 'px';
     }
-    function openSettings() { if (saving || !active()) return false; opener = document.activeElement; fill(preferences); feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); positionSettings(); return true; }
+    function openSettings() { if (!session.writer() || saving || !active()) return false; more.open = false; opener = document.activeElement; fill(preferences); feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); positionSettings(); return true; }
     window.kinViewerUXOpenSettings = openSettings;
     button('Restore Defaults', dialog, () => fill(defaults()));
     const saveButton = button('Save', dialog, async () => {
@@ -108,7 +116,7 @@ window.KinViewerUXToolbar = (() => {
     }
     function tool(id, parent) {
       const item = catalog.get(id), key = preferences.shortcuts[id];
-      const node = button('', parent, () => { invoke(id); }); node.className = 'kin-ux-tool'; node.draggable = loaded && !saving;
+      const node = button('', parent, () => { more.open = false; invoke(id); }); node.className = 'kin-ux-tool'; node.draggable = loaded && !saving;
       node.dataset.tool = id; node.setAttribute('aria-label', label(item));
       node.title = label(item) + (key ? ' · ' + key.toUpperCase() : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
       if (key) node.setAttribute('aria-keyshortcuts', key.toUpperCase());
@@ -125,6 +133,7 @@ window.KinViewerUXToolbar = (() => {
       [...catalog.keys()].filter(id => !preferences.bar.includes(id)).forEach(id => tool(id, menu));
       if (!bar.children.length) element('span', '도구를 여기로 끌어 놓으세요.', bar);
       if (!menu.children.length) element('span', '도구를 여기로 끌어 놓으세요.', menu);
+      edit.hidden = !session.writer();
       edit.disabled = saving; saveButton.disabled = !loaded || saving;
       refreshState();
     }
@@ -165,7 +174,7 @@ window.KinViewerUXToolbar = (() => {
       loaded = false; render();
       if (session.state() === 'unconfirmed') await session.decide();
       if (!active() || sequence !== loadSequence) return;
-      if (!session.writer()) { status.textContent = '보기 도구를 사용할 수 있습니다. 계정 도구 설정은 판독 작업에서 저장합니다.'; render(); return; }
+      if (!session.writer()) { status.textContent = ''; retry.hidden = true; render(); return; }
       initialOwner = JSON.stringify(owner());
       status.textContent = '계정 설정을 불러오는 중…';
       try {

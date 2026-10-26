@@ -4,6 +4,7 @@ No substitute page, config, renderer or product controller is installed.
 U3 prior/report integration and first-site hardware acceptance remain separate.
 """
 import json
+from urllib.parse import parse_qs, urlsplit
 import os
 from pathlib import Path
 import unittest
@@ -195,7 +196,15 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         tabs=page.get_by_role('tablist',name='Patients')
         expect(tabs.get_by_role('tab')).to_have_count(2,timeout=45000)
         canvas_ready(page,1)
+        more = page.get_by_text('More', exact=True)
+        menu = page.get_by_role('group', name='More Tools')
+        more.click(); expect(menu).to_be_visible()
+        page.keyboard.press('Escape'); expect(menu).not_to_be_visible()
+        more.click(); expect(menu).to_be_visible()
+        page.get_by_role('toolbar', name='Frequent Tools').click(position={'x': 2, 'y': 2})
+        expect(menu).not_to_be_visible()
         ViewerImageTextE2E.annotate(self,page)
+        expect(menu).not_to_be_visible()
         before=self.cells(page)
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
         expect(tabs.get_by_role('tab').filter(has_text=b.patient_id)).to_have_attribute('aria-selected','true')
@@ -370,7 +379,9 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(folder / 'clinician-visible-second-series.png'))
         (folder / 'clinician-requests.json').write_text(json.dumps(requests, indent=2), encoding='utf-8')
-        self.assertTrue(any('/api/clinician/studies?limit=100' in url for url in requests))
+        self.assertTrue(any('/api/clinician/studies?uids=' in url for url in requests))
+        expect(page.get_by_role('button', name='Viewer Settings', exact=True)).not_to_be_visible()
+        expect(page.get_by_role('region', name='Image Tools', exact=True).get_by_role('status')).to_be_empty()
         self.assertFalse(any(url.split('?')[0].endswith('/api/studies') for url in requests))
         page.get_by_role('tablist', name='Patients').get_by_role('button', name='Close ', exact=False).click()
         expect(page.get_by_role('tablist', name='Patients').get_by_role('tab')).to_have_count(0)
@@ -460,7 +471,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         canvas_ready(page, 1)
         page.keyboard.press('j'); self.assertEqual(page.evaluate(active), 'Zoom')
         self.assertEqual(len(calls), 1, calls)
-        self.assertIn('limit=100', calls[0])
+        self.assertEqual(parse_qs(urlsplit(calls[0]).query).get('uids'), [b.uid])
         page.set_viewport_size({'width': 3200, 'height': 1050})
         page.locator('[data-cy="viewport-pane"]').first.click(position={'x':100,'y':100})
         page.get_by_role('button', name='Viewer Settings', exact=True).click()
