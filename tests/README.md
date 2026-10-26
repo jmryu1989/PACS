@@ -3062,6 +3062,8 @@ U3 consumes the viewer-local `KinViewerUX` seam: `snapshot/subscribe` for active
 
 D1821 adds toolbar drag/drop, editable single-key shortcuts, typing/IME exclusion and restoration in a separate authenticated browser context. `GET /api/workspace-shortcuts` now also returns `viewerSettings`; its existing `PUT` accepts either `bindings` or `viewerSettings`, with the existing `expectedOwner` and `revision`. Each write preserves the other namespace in the existing `WorkspaceShortcuts` row. No new route, table or migration is needed. The shipped OHIF toolbar definitions, evaluators and `recordInteraction` own tool behavior; the standalone Settings entry opens the server-backed editor. These checks do not establish first-site or full U2 acceptance.
 
+F8 (reader answer 2026-10-26): `viewerSettings` version 2 also stores Shift with one letter (`shift+h`). The defaults are Shift+H/V flip and Shift+L/R turn, while L and R stay Length and Rectangle; a version 1 record gets these four keys on load (version 1 had no key for them) and is saved as version 2. Flip Vertical and Rotate Left are registered beside the stock Flip Horizontal and Rotate Right with the stock `flipViewportVertical`/`rotateViewportCCW` commands, outside every toolbar section. `test_shell_15_flip_rotate_shift_keys` checks More labels, the keys on the served viewer, typing in the Jobs fields and the account editor; `workspace_shortcuts_v2_service_test.cjs` checks the server format. Embedded viewers keep the native toolbar and stock hotkeys.
+
 Unassigned CT preset number keys retain their existing native action; a viewer tool binding overrides that key. Text and editable controls suppress both kinds of image action.
 
 ### EMR E online image boundary
