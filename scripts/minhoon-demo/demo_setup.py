@@ -30,10 +30,11 @@ VM = 'ubuntu@210.109.80.52'
 INSTITUTION = 'kin-center'
 ACCOUNTS = {
     # role key -> (username, realm roles, display first/last). Usernames must start with kin-test-: the synthetic
-    # signing fixture tests/emr/d/provision_synthetic.cjs only provisions owned synthetic members.
-    'reader': ('kin-test-minhoon', ['radiologist'], 'Minhoon', 'Reader (demo)'),
-    'clinician': ('kin-test-clinician', ['clinician'], 'Clinician', 'Viewer (demo)'),
-    'seed': ('kin-test-prior-reader', ['radiologist'], 'Prior', 'Reader (synthetic)'),
+    # signing fixture tests/emr/d/provision_synthetic.cjs only provisions owned synthetic members. Names stay plain
+    # letters: Keycloak's person-name validator rejects e.g. parentheses and then demands VERIFY_PROFILE at login.
+    'reader': ('kin-test-minhoon', ['radiologist'], 'Minhoon', 'Demo'),
+    'clinician': ('kin-test-clinician', ['clinician'], 'Clinician', 'Demo'),
+    'seed': ('kin-test-prior-reader', ['radiologist'], 'Prior', 'Reader'),
 }
 # Public samples (manifests under tmp/dicom-samples keep the citations/licences). Current first, prior second.
 CT_STUDIES = {

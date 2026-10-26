@@ -170,6 +170,8 @@ def main():
                 box = page.locator('#findings')
                 box.wait_for()
                 box.click()
+                page.keyboard.press('Control+A')
+                page.keyboard.press('Delete')
                 cdp = ctx.new_cdp_session(page)
                 for steps in COMPOSE:
                     for text in steps:
@@ -180,7 +182,9 @@ def main():
                 case['typed'] = typed
                 if typed != KOREAN:
                     raise AssertionError('editor text differs from the composed input')
-                page.locator('#b-save').click()
+                # Not Save: Save commits a report version (RS T) in the doctor's name, which an automated check must
+                # not leave behind. The editor's own draft autosave carries the same text to the server.
+                case['save_button'] = 'not clicked (commits a report version); the 2026-10-26 dry run read Korean back from a Save commit'
                 deadline = time.monotonic() + 60
                 while True:
                     draft = api(page, 'GET', f'/studies/{typing_uid}/draft')
@@ -188,10 +192,10 @@ def main():
                     if snap.get('findings') == KOREAN or time.monotonic() > deadline:
                         break
                     time.sleep(2)
-                case['server_findings'] = snap.get('findings')
+                case['server_draft_findings'] = snap.get('findings')
                 page.screenshot(path=str(out / 'report-korean.png'))
                 if snap.get('findings') != KOREAN:
-                    raise AssertionError('saved draft on the server is not the typed Korean text')
+                    raise AssertionError('autosaved draft on the server is not the typed Korean text')
                 # Leave the account clean: discard this check's draft and release its hold. No reload: the page's
                 # one-time entry proof is spent, and the page is closed at the end of the run anyway.
                 time.sleep(3)
