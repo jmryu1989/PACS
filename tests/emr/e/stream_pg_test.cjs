@@ -268,8 +268,13 @@ test('E registered Connect GET/HEAD refuses a request without a member admission
   const { AppModule } = load('app.module');
   const { EmrRuntime } = load('emr-runtime/application');
   const previous = { ...process.env };
-  let archiveReads = 0;
-  const archive = createServer((_req, res) => { archiveReads++; res.statusCode = 404; res.end(); });
+  // AppModule's own start-up work may reach the archive; only a read naming the requested study is the route's.
+  const studyReads = [];
+  const archive = createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    if (req.url.includes(studyUid) || body.includes(studyUid)) studyReads.push(req.method + ' ' + req.url);
+    res.statusCode = 404; res.end();
+  });
   await new Promise(resolve => archive.listen(0, '127.0.0.1', resolve));
   Object.assign(process.env, { AUTH_REQUIRED: 'false', KIN_EMR_STATE_DIR: process.env.KIN_E_SPOOL,
     ORTHANC_URL: 'http://127.0.0.1:' + archive.address().port, ORTHANC_USER: 'synthetic', ORTHANC_PASS: 'synthetic',
@@ -293,7 +298,7 @@ test('E registered Connect GET/HEAD refuses a request without a member admission
     }
     const malformed = await fetch(endpoint + '/api/images/dicom-web?target=' + encodeURIComponent('/instances/anything/file'));
     assert.equal(malformed.status, 400);
-    assert.equal(archiveReads, 0, 'no archive read happens before a current member is known');
+    assert.deepEqual(studyReads, [], 'no archive read of the study happens before a current member is known');
   } finally {
     await close(archive);
     if (app) await app.close(); else await runtime.stop(Date.now() + 15000);
