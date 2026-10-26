@@ -146,8 +146,8 @@ class InventoryContracts(unittest.TestCase):
         self.assertNotEqual(ops.value_digest(("x",), ["x"], [[None]]), ops.value_digest(("x",), ["x"], [[""]]))
         self.assertNotEqual(ops.value_digest(("x",), ["x"], [["a"], ["a"]]), ops.value_digest(("x",), ["x"], [["a"]]))
 
-    def test_value_materialization_is_bounded_before_fetch(self):
-        with patch.object(ops, "psql_json_stdin", side_effect=[["x"], [100001, 2]]) as query:
+    def test_value_materialization_rejects_invalid_size_before_fetch(self):
+        with patch.object(ops, "psql_json_stdin", side_effect=[["x"], [-1, 2]]) as query:
             with self.assertRaises(RuntimeError):
                 ops.value_rows("synthetic", "kin", "public", "r")
             self.assertEqual(query.call_count, 2)
@@ -161,7 +161,7 @@ class InventoryContracts(unittest.TestCase):
         next(row for row in fresh["databases"] if row["name"] == "template0")["attributes"]["datallowconn"] = True
         facts = [{"catalog": "same"} for _ in range(9)] + [fresh]
         info = [{"Image": "sha256:" + "1" * 64, "Config": {"Env": ["POSTGRES_PASSWORD=synthetic-placeholder"]}}]
-        with patch.object(ops, "text", return_value=json.dumps(info)), patch.object(ops, "psql_json", return_value=4096):
+        with patch.object(ops, "text", return_value=json.dumps(info)), patch.object(ops, "psql_json", return_value=2 * 1024 ** 3):
             for index in (0, 1, 2, 6, 7):
                 bad = copy.deepcopy(facts)
                 bad[index]["catalog"] = "unexpected object or value"

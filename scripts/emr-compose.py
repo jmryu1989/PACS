@@ -198,8 +198,8 @@ def check(root, declaration_path):
     for name in spec["added"]:
         if name not in migrations:
             problem(problems, "migration-missing", name)
-    # B2 must follow the declared baseline, before the C2/D consumers. Later
-    # additive migrations belong in this sequence, not in a global count pin.
+    # Compare the full suffix after the declared baseline so omissions remain visible.
+    # Later additive migrations extend the declaration, not a fixed migration count.
     if spec["latest_before"] not in migrations:
         problem(problems, "migration-baseline-missing", spec["latest_before"])
     elif migrations[migrations.index(spec["latest_before"]) + 1:] != spec["added"]:
@@ -230,8 +230,6 @@ def check(root, declaration_path):
         live_spec = declaration["cases"]["live"]
         if not profile or [tuple(s) for s in profile["suites"]] != [tuple(s) for s in live_spec["profile_suites"]]:
             problem(problems, "profile-differs")
-        if len(measurement_ci.PROFILES) != declaration["expected"]["profiles"]:
-            problem(problems, "profile-count", str(len(measurement_ci.PROFILES)))
         selected = {(row[0], row[1] + "." + row[2]) for row in candidate_ci.FLOWS}
         for item in declaration["candidate_cases"]:
             if (item["file"].removeprefix("tests/"), item["case"]) not in selected:

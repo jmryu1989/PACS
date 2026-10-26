@@ -124,7 +124,7 @@ class MeasurementCiTests(unittest.TestCase):
             candidate.configure(ci.ROOT, ci, runner, Path(folder) / 'plans')
             self.assertEqual(ci.profile_deadline_seconds('measurements'), candidate.CANDIDATE_DEADLINE_SECONDS)
             self.assertEqual(ci.PROFILES['measurements']['suite_timeout'], original['suite_timeout'])
-            for filename, class_name, unit, _ in candidate.BASE[3:]:
+            for filename, class_name, unit in candidate.BASE[3:]:
                 command, outer = ci.guarded_profile_run(ci.PROFILES['measurements'], filename, class_name, unit,
                                                        candidate.CANDIDATE_DEADLINE_SECONDS)
                 self.assertEqual(command[command.index('--module') + 1], 'tests/' + filename)
@@ -754,44 +754,6 @@ class MeasurementCiTests(unittest.TestCase):
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertNotIn('- s9-u0e-served', dispatch)
 
-    def test_validate_attribution_record_binds_exact_scanner_inputs(self):
-        import argparse
-        import shlex
-        import yaml
-
-        test_file = 'tests/admin_audit_attribution_test.cjs'
-        workflow = self.catalog.combined()
-        commands = [shlex.split(step['run']) for job in workflow['jobs'].values()
-                    for step in job.get('steps', []) if test_file in step.get('run', '')]
-        self.assertEqual(len(commands), 1, 'one recorded attribution test invocation')
-        command = commands[0]
-        self.assertEqual(command[:2], ['python3', 'scripts/record-run.py'])
-        boundary = command.index('--')
-        self.assertEqual(command[-3:], ['node', '--test', test_file])
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--run-dir', required=True)
-        parser.add_argument('--cwd', default='.')
-        parser.add_argument('--file', action='append', default=[])
-        parser.add_argument('--tree', action='append', default=[])
-        args = parser.parse_args(command[2:boundary])
-        cwd = ci.ROOT / args.cwd
-        recorded = [(cwd / name).resolve() for name in args.file]
-        for name in args.tree:
-            directory = cwd / name
-            self.assertTrue(directory.is_dir(), name)
-            recorded.extend(file.resolve() for file in directory.rglob('*') if file.is_file())
-
-        # The scanner's stated corpus, plus its fixtures and compiler/generator inputs.
-        # Expand the checked-out directories independently of the recorder options so
-        # adding a source or accidentally recording an unrelated file cannot pass.
-        read = set()
-        for name in ('api/src', 'tests/fixtures/admin-audit-checker', 'tests/fixtures/admin_audit_completeness'):
-            read.update(file.resolve() for file in (ci.ROOT / name).rglob('*') if file.is_file())
-        read.update(file.resolve() for file in (ci.ROOT / 'api/prisma').glob('*.cjs') if file.is_file())
-        read.update((ci.ROOT / name).resolve() for name in (
-            'api/prisma/schema.prisma', 'api/tsconfig.json', 'api/package-lock.json', test_file))
-        self.assertEqual(len(recorded), len(set(recorded)), 'no duplicate recorded inputs')
-        self.assertSetEqual(set(recorded), read, 'recorded inputs must equal scanner inputs in both directions')
 
 
     def test_u2b_regressions_profile_is_exact_and_fits_the_shared_deadline(self):

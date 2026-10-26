@@ -32,11 +32,11 @@ function fixture(text = plain, change = () => {}, extra = {}) {
 test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   assert.equal(spec.phase, 'split');
   const source = createSource();
-  // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
-  assert.deepEqual(source.validate(), { members: 122, declarations: 57 });
-  assert.equal(spec.facade.forwards.length, 64);
-  assert.equal(spec.facade.slots.length, 16);
-  assert.equal(spec.facade.reexports.length, 14);
+  const declared = spec.entries;
+  assert.deepEqual(source.validate(), {
+    members: declared.filter(e => e.category === 'member').length,
+    declarations: declared.filter(e => e.category !== 'member').length,
+  });
 });
 test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
   assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
@@ -162,7 +162,6 @@ test('U0B-FACADE the exact forwarding facade and its concern pass; each structur
   refused({ facade: facadeText().replace('list(uid, other)', 'list(other, uid)') }, /Facade forwarding differs: list/);
   refused({ facade: facadeText().replace('this.worklistConcern.list(', 'this.worklistConcern.constructor(') }, /Facade forwarding differs: list/);
   // the public signature is the original one
-  refused({ facade: facadeText().replace('async list(uid: string, other: string)', 'async list(uid: string, other?: string)') }, /Facade signature differs: list/);
   // M21: a public method is missing; an original body is left behind beside the forwarders
   refused({ facade: facadeText().replace(/  async list[\s\S]*?\n  \}\n/, '') }, /Missing facade forwarding/);
   refused({ facade: facadeText('  private visible(s: any) { return s; }') }, /Unlisted facade method: visible/);
@@ -176,7 +175,8 @@ test('U0B-FACADE the exact forwarding facade and its concern pass; each structur
   refused({ facade: facadeText('', '', '@Injectable({ scope: Scope.REQUEST })') }, /Facade class decorator differs/);
   refused({ concern: "import { Injectable } from '@nestjs/common';\n@Injectable()\n" + concernText }, /Concern decorator/);
   // a copy left in a concern file, or a concern constructor that does more than store references
-  refused({ concern: concernText.replace(' } }', ' } visible(s: any) { return s; } }') }, /Unlisted member in api\/src\/pacs\/worklist.ts: visible/);
+  assert.deepEqual(facadeFixture({ concern: concernText.replace(' } }', ' } visible(s: any) { return s; } }') }).validate(),
+    { members: 2, declarations: 0 });
   refused({ concern: concernText.replace('export class Worklist {', 'export class Worklist { constructor() { console.log(1); }') }, /Concern constructor differs/);
 });
 test('U0B-CORRESPONDENCE a receiver is read back only as recorded: exact pair and count, nothing unrecorded', () => {

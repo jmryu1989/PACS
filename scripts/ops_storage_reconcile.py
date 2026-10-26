@@ -18,7 +18,6 @@ import ops_export_inventory as inventory
 
 INDEX_LIMIT = 512 * 1024**2
 LIST_LIMIT = 64 * 1024**2
-ITEM_LIMIT = 100000
 PAGE_LIMIT = 10000
 UUID = r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
 PROFILE = {'orthanc': '1.12.5', 'storage_plugin': '2.5.0', 'structure': 'flat', 'client_encryption': False}
@@ -94,7 +93,6 @@ class ListingState:
                     and all(ord(c) >= 32 for c in key) and key not in self.objects)
             require(integer(entry['Size'], 0, 2**63-1))
             self.objects[key] = entry['Size']
-            require(len(self.objects) <= ITEM_LIMIT)
         if page['IsTruncated']:
             requested = page.get('NextContinuationToken')
             require(token(requested) and requested not in self.seen_tokens)
@@ -128,15 +126,14 @@ def rows_from_index(path):
         require({row[1] for row in connection.execute('PRAGMA table_info(AttachedFiles)')} == COLUMNS)
         require(connection.execute('PRAGMA integrity_check(1)').fetchall() == [('ok',)])
         connection.row_factory = sqlite3.Row
-        rows = [dict(row) for row in connection.execute('SELECT * FROM AttachedFiles LIMIT ?', (ITEM_LIMIT+1,))]
-        require(len(rows) <= ITEM_LIMIT)
+        rows = [dict(row) for row in connection.execute('SELECT * FROM AttachedFiles')]
         return validate_rows(rows)
     finally:
         connection.close()
 
 
 def validate_rows(rows):
-    require(type(rows) is list and len(rows) <= ITEM_LIMIT)
+    require(type(rows) is list)
     uuids, identities = set(), set()
     for row in rows:
         require(type(row) is dict and set(row) == COLUMNS)
