@@ -3069,6 +3069,9 @@ or series request (retrieve, query, metadata) reads the catalog again so an obje
 runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
 (`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints
 one `MEASURE` line (first render and all-frames time) before its assertions, so the same case times the direct
-route and the E route. A third case retrieves a series and its study through `GET /api/images/dicom-web` after a
+route and the E route. A slice counts as reaching the viewer when the browser read its frame response to the end or
+the viewer holds its image: the pinned viewer's streaming loader stops reading at Content-Length, and the browser
+then sometimes cancels a response it already received whole (`net::ERR_ABORTED`, printed as `FRAME_REQUEST_FAILED`).
+A third case retrieves a series and its study through `GET /api/images/dicom-web` after a
 frame and one later arrival, and expects every stored object. It passes only with the Module A binding and a deployed
 viewer/decoder asset catalog.
