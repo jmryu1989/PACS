@@ -112,9 +112,16 @@ window.KinViewerUXToolbar = (() => {
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     dialog.addEventListener('keydown', event => event.stopPropagation());
     function label(item) { return item.label || item.title || item.tooltip || item.id; }
+    // A companion follows its stock sibling's evaluated availability.
+    function props(id) {
+      const item = catalog.get(id);
+      if (!item?.sibling) return service.getButtonProps(id);
+      const sibling = service.getButtonProps(item.sibling);
+      return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, disabled: !!sibling.disabled };
+    }
     function invoke(id) {
       if (!active() || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
-      const item = service.getButtonProps(id); if (!item || item.disabled) return false;
+      const item = props(id); if (!item || item.disabled) return false;
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
       if (states.some(state => state?.busy)) {
         status.textContent = '영상 작업을 불러오는 중입니다. 완료 후 도구를 다시 선택하세요.';
@@ -151,9 +158,9 @@ window.KinViewerUXToolbar = (() => {
     }
     function refreshState() {
       for (const node of toolbar.querySelectorAll('[data-tool]')) {
-        const props = service.getButtonProps(node.dataset.tool);
-        node.disabled = !props || !!props.disabled;
-        if (props?.isActive !== undefined) node.setAttribute('aria-pressed', String(!!props.isActive));
+        const state = props(node.dataset.tool);
+        node.disabled = !state || !!state.disabled;
+        if (state?.isActive !== undefined) node.setAttribute('aria-pressed', String(!!state.isActive));
         else node.removeAttribute('aria-pressed');
       }
     }
@@ -221,17 +228,11 @@ window.KinViewerUXToolbar = (() => {
           removed.add(id);
           for (const item of items) if (item.id && !next.has(item.id)) next.set(item.id, item);
         }
-        let added = false;
-        for (const [source, id, name, tooltip, commands] of companions) {
-          const item = next.get(source);
-          if (!item || next.has(id)) continue;
-          // Registered outside every section, so the stock toolbar never shows
-          // it, and refreshed by the stock evaluation the way its sibling is.
-          if (!service.getButtons()[id]) {
-            service.addButtons([{ id, uiType: 'ohif.radioGroup', props: { id, label: name, tooltip, icon: item.icon, commands, evaluate: item.evaluate } }]);
-            added = true;
-          }
-          const entries = [...next]; entries.splice(entries.findIndex(([key]) => key === source) + 1, 0, [id, service.getButtonProps(id)]);
+        // Companions stay in this toolbar only: registering buttons in the shared
+        // toolbar state during mode entry would notify every stock listener.
+        for (const [sibling, id, name, tooltip, commands] of companions) {
+          if (!next.has(sibling) || next.has(id)) continue;
+          const entries = [...next]; entries.splice(entries.findIndex(([key]) => key === sibling) + 1, 0, [id, { id, label: name, tooltip, commands, sibling }]);
           next.clear(); entries.forEach(([key, value]) => next.set(key, value));
         }
         const changed = JSON.stringify([...next].map(([id, item]) => [id, label(item)])) !== JSON.stringify([...catalog].map(([id, item]) => [id, label(item)]));
@@ -243,8 +244,6 @@ window.KinViewerUXToolbar = (() => {
           return 'body.kin-viewer-ux #root .relative.flex.justify-center > div:has([data-cy="' + key + '"], [data-cy^="' + key + '-split-button-"]) { display: none; }';
         }).join('\n');
         if (changed) render(); else refreshState();
-        // Other listeners answered that registration while this pass was syncing.
-        if (added && !queued) { queued = true; queueMicrotask(rebuild); }
       } finally { syncing = false; }
     }
     const subscription = service.subscribe(service.EVENTS.TOOL_BAR_MODIFIED, () => {
