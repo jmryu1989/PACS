@@ -1,22 +1,9 @@
 import { Controller, HttpCode, Post, Req, Res } from '@nestjs/common';
 import type { Caller } from './pacs.service';
 import { MultiStudyViewService } from './multi-study-view.service';
-import type { TransferOutcome } from './multi-study-view.service';
 
 const caller = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: req.roles ?? [],
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
-
-/**
- * What happened to this response's body, observed on the response itself and installed before the service prepares any
- * provision. A finished 200 is the resolve's own body; a finished refusal (a
- * serializer error) or a connection closed before finishing is a body that did not go out whole.
- */
-function transferOf(res: any): Promise<TransferOutcome> {
-  return new Promise(settle => {
-    res.once('finish', () => settle(res.statusCode === 200 ? 'ended' : 'aborted'));
-    res.once('close', () => settle('aborted'));
-  });
-}
 
 /**
  * W9-LITE multi-study viewing (server half). Its own controller keeps ViewerController's injectable and route metadata as
@@ -29,6 +16,17 @@ export class MultiStudyViewController {
   @Post('studies/viewing-set/resolve')
   @HttpCode(200)
   resolve(@Req() req: any, @Res({ passthrough: true }) res: any) {
-    return this.svc.resolve(req.rawBody, caller(req), transferOf(res));
+    const transport = new AbortController();
+    const end = () => {
+      req.off('aborted', end); req.off('error', end);
+      res.off('finish', end); res.off('close', end); res.off('error', end);
+      // A1 observes the selected stream's finish first. Aborting synchronously
+      // here would misclassify that successful finish as an aborted transfer.
+      queueMicrotask(() => transport.abort());
+    };
+    req.once('aborted', end); req.once('error', end);
+    res.once('finish', end); res.once('close', end); res.once('error', end);
+    if (req.aborted || res.destroyed || res.writableEnded) transport.abort();
+    return this.svc.resolve(req.rawBody, caller(req), transport.signal);
   }
 }

@@ -19,9 +19,15 @@ export class ViewingRecordService {
   async prepare(request: IncomingMessage, response: ServerResponse, selection: LocalReadResponse):
     Promise<{ body: StreamableFile; settled: Promise<void> }> {
     const lifecycle = observeLocalReadResponse(request, response, selection.signal);
+    const refuseBody = () => new ServiceUnavailableException(selection.unavailable);
     let publish: (body: StreamableFile) => void, refuse: (error: unknown) => void;
     const ready = new Promise<StreamableFile>((resolve, reject) => { publish = resolve; refuse = reject; });
     let published = false;
+    // The response deadline does not cancel an admitted append. Refuse the HTTP
+    // body immediately, but let that work retain a late COMMIT and its outcome.
+    void lifecycle.outcome.then(outcome => {
+      if (outcome === 'aborted' && !published) refuse(refuseBody());
+    });
     const settled = this.requests.withWork(request, async context => {
       const prepared: Readonly<LocalReadAccessEventV2>[] = [];
       try {
@@ -38,12 +44,12 @@ export class ViewingRecordService {
         context.assertActive();
         lifecycle.assertActive();
         if (response.statusCode !== 200) throw unavailable();
-        const body = lifecycle.select(selection.json);
+        const body = lifecycle.select(selection.json, selection.unavailable);
         published = true;
         publish(body);
       } catch (error) {
         lifecycle.abort();
-        refuse(unavailable());
+        refuse(refuseBody());
       }
       const outcome = await lifecycle.outcome;
       // Finish every committed target even if an earlier follow-up fails. B2
@@ -59,7 +65,7 @@ export class ViewingRecordService {
     // Follow-ups have already drained inside it; no second begin or session re-check.
     const completion = settled.catch(error => {
       lifecycle.abort();
-      if (!published) refuse(unavailable());
+      if (!published) refuse(refuseBody());
       if (error?.name !== 'RequestContextUnavailable') {
         if (!published) this.logger.error('Local read follow-up did not settle; consult the ledger failure record.');
         throw error;
@@ -68,8 +74,7 @@ export class ViewingRecordService {
     // The interceptor owns reporting for the returned completion. Also attach a
     // rejection handler before ready settles, so failed admission cannot leak one.
     void completion.catch(() => undefined);
-    try { return { body: await ready, settled: completion }; }
-    catch (error) { await completion.catch(() => undefined); throw error; }
+    return { body: await ready, settled: completion };
   }
 
   private async append(work: EmrRecordWork, event: LocalReadAccessEventV2): Promise<void> {

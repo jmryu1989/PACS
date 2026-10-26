@@ -541,6 +541,31 @@ const kinStackPrecision = (() => {
   } };
 })();
 
+// OHIF 3.9.1 caches DICOMweb image UIDs without a frameNumber. A cache hit then
+// bypasses URL parsing, so _getInstance skips the functional groups. Other frames
+// can incidentally populate the shared instance first, making frame 1 order-dependent.
+function kinCreateFrameMetadata() {
+  let installed = false;
+  return { id: 'kin.frame-metadata', preRegistration() {
+    if (installed) return;
+    // The pinned Orthanc OHIF bundle exposes no MetadataProvider utility module.
+    // Its @ohif/core export is shared by the data source and Cornerstone provider.
+    // Keep this adapter at that boundary so native geometry, VOI and measurements
+    // all consume the same frame, without copying the functional-group parser.
+    window.webpackChunk.push([['kin.frame-metadata'], {}, require => {
+      const provider = require(29463).Ly.MetadataProvider;
+      const original = provider.getUIDsFromImageID;
+      provider.getUIDsFromImageID = function (imageId) {
+        const uids = original.call(this, imageId);
+        if (!uids || uids.frameNumber || !imageId.startsWith('wadors:')) return uids;
+        const frame = /\/frames\/([1-9]\d*)(?:$|[?#])/.exec(imageId);
+        return frame ? { ...uids, frameNumber: frame[1] } : uids;
+      };
+      installed = true;
+    }]);
+  } };
+}
+
 /* KIN persistence owns only explicit user commands. Cornerstone objects are
  * session bindings, never wire payloads or durable identifiers. */
 // Received SRs retain their source values and read-only SR renderer. A native
@@ -4155,7 +4180,7 @@ function kinCreateStudyPrefetch() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateStudyPrefetch()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateStudyPrefetch()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

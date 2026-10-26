@@ -11,9 +11,9 @@ KIN_ENTRY_AUTH supplies a copied auth.js for mutation testing. No source asserti
 S7-U5 session end (design v2 sections 3.1, 3.2 and 5-1; REQ-S7-U5-SESSION-END R2 -> RISK-S7-U5-SILENT-REENTRY ->
 TEST-S7-U5-END-DOM): the landing table (what Login, Switch account and Register do by the origin of the end record,
 whose session it names, what storage allows and what /api/me answers - the POST body and binding asserted, entry or
-no entry asserted), A011 (Login is never gated on the identity provider's discovery), A012 (a lost entry answer is
-confirmed once by /api/me; the one-shot notice hides no real end state) and A013 (a proof entry is not aborted by
-another session's record or by window events). Records are written the way auth.js keeps them: one key per session
+no entry asserted), A011 (Login is never gated on the identity provider's discovery) and A012 (a failed bootstrap
+can recover in a fresh document; the arrival notice hides no real end state). Records are written the way auth.js
+keeps them: one key per session
 (`kin-session-end:<session>`) with an origin.
 """
 import json
@@ -638,26 +638,6 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.page.locator("#signin").click()
         self.page.wait_for_url("**/api/auth/login")
         expect(self.page.locator("body")).to_contain_text("Identity provider login")
-
-    # ── A013: a proof entry is not aborted by another session's record or by window events ──
-
-    EVENTS = {
-        "focus": "window.dispatchEvent(new Event('focus'))",
-        "visibilitychange": "document.dispatchEvent(new Event('visibilitychange'))",
-        "pageshow": "window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))",
-        "storage": "window.dispatchEvent(new StorageEvent('storage', { key: 'kin-session-end:%s' }))" % OTHER,
-        "a notice naming an unrelated session":
-            "(() => { const c = new BroadcastChannel('kin-session'); c.postMessage({ type: 'session-ended', session: 'S-unrelated', operation: 9, status: 'ending', origin: 'logout' }); c.close(); })()",
-        "a notice naming yesterday's session":
-            "(() => { const c = new BroadcastChannel('kin-session'); c.postMessage({ type: 'session-ended', session: '%s', operation: 9, status: 'ending', origin: 'logout' }); c.close(); })()" % OTHER,
-    }
-
-    def seed_yesterday(self):
-        self.context.add_init_script("localStorage.setItem(%s, %s);" % tuple(
-            json.dumps(part) for part in next(iter(self.record(OTHER).items()))))
-
-
-
 
     # ── A017: `leaving` - Log Out pressed, not ended ──
 

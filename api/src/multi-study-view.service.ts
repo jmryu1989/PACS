@@ -1,26 +1,20 @@
-/*
- * W9-LITE 서버 절반(W9-API): 같은 환자의 검사 2–20개를 한 번에 여는 열람 목록의 서버 판정 `POST studies/viewing-set/resolve`.
- *
- * 조회 전용이다. 임상 행·StudyState lazy 등록·schema 변경이 없고, 판정은 기존 공개 계약만 소비한다: 역할 need()·기관 inst()·
- * 기관 경계 PacsAccess.visible()·StudyAccess.allowed()/unchanged()·split 판정 unresolvedSource(). 판정을 여기 다시 만들면
- * 한쪽만 고쳐지는 날이 온다.
- *
- * 순서가 계약이다(spec §3): 역할 → 기관 → 입력 전체 → member마다 StudyState·visible → 자기 기관·tele 제외 → StudyAccess(그
- * 준비용 원본 읽기도 같은 resolve 신호로 취소) →
- * 허용된 member만 원본 읽기(동시 4, 전체 10초, fetch·본문 취소) → 원본 자원 수(split) → 원본 PatientID → 같은 환자 키 →
- * 기관·tele·정책 재확인 → 열람 기록의 영속 영수증 → 본문. 권한 없는 UID의 원본은 읽지 않고, 그 UID의 존재·기관·split 여부도
- * 답하지 않는다.
- *
- * 열람 기록(spec §5, D1500 D-6): 준비된 member의 metadata는 member마다의 영속 provide 영수증을 받은 뒤에만 나간다. 이 빌드에는
- * 원장 소유자가 없다(EMR-B2 base + 공용 Module A가 아직 없다) — AppModule은 ViewingSetAccess를 ViewingSetAccessUnbound에
- * 묶고, 그것은 어떤 제공도 503으로 거절한다. 기록 없는 본문도, 지어낸 사건도 없다.
+/** W9 same-patient metadata admission (D1500).
+ * Order: role -> institution -> input -> StudyState/visible -> local scope ->
+ * StudyAccess -> sources -> split UID -> PatientID -> patient key -> A1 receipts -> body.
+ * This read writes no clinical row or lazy StudyState. Use the existing public
+ * access/identity contracts so their decisions cannot drift between consumers.
+ * A denied member's serving source is never read. Keep the initial access decision;
+ * D1764 removes the duplicate state/policy/source-tag rechecks, not that decision
+ * or the returned UID and mixed-patient protections. PC3 also retires the outer
+ * policy-revision interceptor; subsequent requests apply the current policy.
+ * A1 records the selected metadata under the request work and withholds it until
+ * every receipt is durable.
  */
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { ViewingSetAccess } from './emr-viewing/viewing-set-access';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { StudyAccessService } from './study-access.service';
-import type { AccessSnapshot } from './study-access.service';
 import { PacsAccess, need, inst } from './pacs/access';
 import type { Caller } from './pacs/access';
 import type { WorkContext } from './emr-contract/access-event';
@@ -30,8 +24,6 @@ import { STUDY_IDENTITY_UNRESOLVED, unresolvedSource } from './study-source-grou
 export const W9_SELECTION_INVALID = 'W9_SELECTION_INVALID';
 export const W9_VIEW_FORBIDDEN = 'W9_VIEW_FORBIDDEN';
 export const W9_PATIENT_MISMATCH = 'W9_PATIENT_MISMATCH';
-export const W9_CONTEXT_CHANGED = 'W9_CONTEXT_CHANGED';
-export const W9_AUDIT_UNAVAILABLE = 'W9_AUDIT_UNAVAILABLE';
 export const W9_MEMBER_UNAVAILABLE = 'W9_MEMBER_UNAVAILABLE';
 export const W9_SCOPE_EXCLUDED = 'W9_SCOPE_EXCLUDED';
 export const W9_IDENTITY_UNAVAILABLE = 'W9_IDENTITY_UNAVAILABLE';
@@ -40,7 +32,7 @@ export const W9_LOAD_FAILED = 'W9_LOAD_FAILED';
 /** The route this service answers, as the EMR route classification and an access event's surface name it. */
 export const VIEWING_SET_SURFACE = 'POST studies/viewing-set/resolve';
 // deadlineMs: the one resolve deadline (spec §3). servedReadCutMs: the served reads stop there, keeping a fixed
-// 1000 ms reserve of the same 10 s for the re-check and the durable receipt (9000/1000 split, D1558).
+// 1000 ms reserve of the same 10 s for the durable receipt (9000/1000 split, D1558).
 export const VIEWING_SET_LIMITS = Object.freeze({ minMembers: 2, maxMembers: 20, concurrentReads: 4, deadlineMs: 10000,
   servedReadCutMs: 9000 });
 // A member opens with the owner's own images only: no tele channel in either direction, and a tele state that is closed.
@@ -54,10 +46,6 @@ const selectionInvalid = () => refusal(BadRequestException, W9_SELECTION_INVALID
 const viewForbidden = () => refusal(ForbiddenException, W9_VIEW_FORBIDDEN, '여러 검사 열기는 판독의 권한이 필요합니다.');
 const patientMismatch = () => refusal(ConflictException, W9_PATIENT_MISMATCH,
   '원본 환자 ID가 다른 검사는 함께 열 수 없습니다. 선택 목록을 확인하세요.');
-const contextChanged = () => refusal(ConflictException, W9_CONTEXT_CHANGED,
-  '선택·환자 정보 또는 로그인 상태가 바뀌었습니다. 목록에서 다시 여세요.');
-export const auditUnavailable = () => refusal(ServiceUnavailableException, W9_AUDIT_UNAVAILABLE,
-  '열람 기록을 저장하지 못했습니다. 잠시 후 Retry로 다시 시도하세요.');
 
 /** The minimal source display metadata of one member, exactly as the body carries it. No report, draft or version body. */
 export interface ViewingSetMetadata {
@@ -75,38 +63,6 @@ export interface ViewingSetTarget {
   /** D1500 D-5: the ordered first UID is the request's comparison anchor; never a silently chosen other one. */
   context: WorkContext;
 }
-/** The provision a resolve asks to be recorded before its body: one target per member provided, never a composition row. */
-export interface ViewingSetProvision {
-  caller: Caller; requestId: string; auditLinkId: string; surface: string; kind: 'study-metadata'; cause: 'user-view';
-  targets: ViewingSetTarget[];
-}
-/** Durable receipts, one per target: UID -> the provide-prepared event's ID (a correlation, never a permission). */
-export interface ViewingSetReceipts { readonly accessRefs: ReadonlyMap<string, string> }
-/** What happened to the one HTTP body that carried the prepared targets, as the response observed it. */
-export type TransferOutcome = 'ended' | 'aborted';
-
-/**
- * The access-record port of the resolve (spec §7 prepareMember/finishTransfer over the existing B1 store). prepare() resolves
- * only when every target's provide-prepared event is durable; finish() records the observed transfer of that body. The
- * owner and the event planner are the shared Module A on the EMR-B2 base (consult D1483, D1500 D-2); they bind here.
- *
- * Binding precondition: no real store is bound here before the resolve re-checks the caller's membership and session
- * (EMR-B2 verified request facts) between the source wait and prepare(); this build has no such seam (W9API-20, pending).
- * A prepare() that rejects owns what it already made durable: it records those events' end (aborted / storage-failed)
- * through its own journal before rejecting, because the resolve sends no body and calls no finish() after a rejection.
- */
-export abstract class ViewingSetAccess {
-  abstract prepare(provision: ViewingSetProvision): Promise<ViewingSetReceipts>;
-  abstract finish(receipts: ViewingSetReceipts, outcome: TransferOutcome): Promise<void>;
-}
-
-/** This build's binding: no access-ledger owner is assembled, so no provision can be recorded and none is made. */
-@Injectable()
-export class ViewingSetAccessUnbound extends ViewingSetAccess {
-  async prepare(): Promise<ViewingSetReceipts> { throw auditUnavailable(); }
-  async finish(): Promise<void> { throw auditUnavailable(); }
-}
-
 interface Selection { compositionId: string; generation: number; requestId: string; studyUids: string[]; expected: string | null }
 interface StateRow { uid: string; institutionId: string | null; teleInstitutionId: string | null; ts: string }
 interface Member {
@@ -145,9 +101,6 @@ function metadataOf(row: any): ViewingSetMetadata {
   };
 }
 
-const sameState = (a: StateRow | null, b: StateRow | null | undefined) => (a === null ? b == null : !!b
-  && a.institutionId === b.institutionId && a.teleInstitutionId === b.teleInstitutionId && a.ts === b.ts);
-
 /** The resolve deadline reached a wait: the typed timeout outcome, never a source or database answer. */
 class ResolveDeadline extends Error {}
 /**
@@ -181,10 +134,10 @@ export class MultiStudyViewService {
   }
 
   /**
-   * `transfer` is the observed end of this request's HTTP body; the controller starts observing before any provision.
-   * The answer is the body. A provision that is not durable answers 503 before any member metadata exists in a reply.
+   * A1 selects the metadata body only after every target receipt is durable.
+   * The transport signal cancels source reads and the same preparation deadline.
    */
-  async resolve(raw: unknown, c: Caller, transfer: Promise<TransferOutcome>) {
+  async resolve(raw: unknown, c: Caller, transport: AbortSignal) {
     // A-01: nothing about identity, institution or rights comes from the body; all of it is decided before any read.
     if (c?.kind !== 'member') throw viewForbidden();
     try { need(c.roles, 'radiologist', '여러 검사 열기'); } catch { throw viewForbidden(); }
@@ -193,14 +146,18 @@ export class MultiStudyViewService {
 
     // A-03: one deadline per resolve, and its one signal, from here to the answer. Every wait is raced against it - the
     // policy and member reads, the StudyAccess decision (whose own source read takes the signal and is cancelled with its
-    // body), the served reads (same, and cut earlier at servedReadCutMs), the re-check and the durable receipt. The
+    // body), the served reads (same, and cut earlier at servedReadCutMs), the durable receipt. The
     // deadline answers at once wherever it lands: a member without its own cause is W9_LOAD_FAILED and nothing is
     // provided (in the receipt wait: 503, and a late receipt is finished as aborted).
     const deadline = new AbortController();
     const signal = deadline.signal;
     const timer = setTimeout(() => deadline.abort(), VIEWING_SET_LIMITS.deadlineMs);
+    const end = () => { clearTimeout(timer); deadline.abort(); transport.removeEventListener('abort', end); };
+    transport.addEventListener('abort', end, { once: true });
+    if (transport.aborted) end();
+    let selected = false;
     // D1558: the served reads run under a child of the one deadline that is cut at servedReadCutMs (9000 of 10000 ms).
-    // The fixed 1000 ms reserve is for the A-05 re-check and the durable receipt of the members read in time.
+    // The fixed 1000 ms reserve is for the durable receipt of the members read in time.
     const servedCut = new AbortController();
     const cutTimer = setTimeout(() => servedCut.abort(), VIEWING_SET_LIMITS.servedReadCutMs);
     const relay = () => servedCut.abort();
@@ -221,10 +178,8 @@ export class MultiStudyViewService {
       return answer(null);
     };
     try {
-      let policy: AccessSnapshot;
       try {
         // A-02: one read of the members' rows (no transaction, no lazy registration), then each member on its own.
-        policy = await within(() => this.studyAccess.snapshot(c), signal);
         const first = await within(() => this.states(input.studyUids), signal);
         for (const m of members) {
           m.state = first.get(m.uid) ?? null;
@@ -242,16 +197,11 @@ export class MultiStudyViewService {
       // A-03: only the admitted members' sources, each failure its own; then the one-resource rule before any key.
       const admitted = members.filter(m => !m.code);
       // The served reads end at the sub-cut (9 s), so the members read in time keep 1 s of the same deadline for their
-      // re-check and receipt; a read still pending at the sub-cut is W9_LOAD_FAILED and its fetch and body are cancelled.
+      // receipt; a read still pending at the sub-cut is W9_LOAD_FAILED and its fetch and body are cancelled.
       await this.readSources(admitted, servedCut.signal);
-      // StudyAccess decided on the source rows its own preparation read. What is served is this later read, so a policy
-      // that reads source tags must hold for every row served (the same per-resource AND); a tag that changed between the
-      // two reads makes that member unavailable like any other refusal, before the split answer can name it.
-      const sourcePolicy = this.studyAccess.needsMetadata(policy);
       for (const m of admitted) {
         if (!Array.isArray(m.rows)) m.code = W9_LOAD_FAILED;
         else if (!m.rows.length) m.code = W9_MEMBER_UNAVAILABLE;
-        else if (sourcePolicy && !m.rows.every(row => this.studyAccess.matches(policy, m.uid, row))) m.code = W9_MEMBER_UNAVAILABLE;
         else if (unresolvedSource(m.rows)) m.code = STUDY_IDENTITY_UNRESOLVED;
         else {
           const patientId = m.rows[0]?.['00100020']?.Value?.[0];
@@ -268,14 +218,6 @@ export class MultiStudyViewService {
       const keys = new Set(ready.map(m => m.key!));
       if (keys.size > 1 || (input.expected !== null && ready.length && !keys.has(input.expected))) throw patientMismatch();
 
-      // A-05: the rows and the policy the decision used must still hold after the source wait.
-      try {
-        const second = await within(() => this.states(input.studyUids), signal);
-        if (members.some(m => !sameState(m.state, second.get(m.uid)))) throw contextChanged();
-        try { await within(() => this.studyAccess.unchanged(c, policy), signal); }
-        catch (error) { if (error instanceof ConflictException) throw contextChanged(); throw error; }
-      } catch (error) { if (error instanceof ResolveDeadline) return timedOut(); throw error; }
-
       // Nothing is provided when no member is ready: the answer carries the selected UIDs and their codes only.
       if (!ready.length) return answer(null);
 
@@ -285,42 +227,21 @@ export class MultiStudyViewService {
         ? { basis: 'worklist', studyId: m.uid, relatedStudyId: null, reason: null }
         : m === anchor ? { basis: 'worklist', studyId: anchor.uid, relatedStudyId: null, reason: null }
           : { basis: 'same-patient-comparison', studyId: anchor.uid, relatedStudyId: m.uid, reason: null };
-      const provision: ViewingSetProvision = {
-        caller: c, requestId: input.requestId, auditLinkId: 'audit:' + randomUUID(), surface: VIEWING_SET_SURFACE,
-        kind: 'study-metadata', cause: 'user-view',
-        targets: ready.map(m => ({ uid: m.uid, ordinal: m.ordinal, managingInstitutionId: m.state!.institutionId!,
-          patientId: m.patientId!, metadata: m.metadata!, context: context(m) })),
-      };
-      let receipts: ViewingSetReceipts;
-      const preparing = (async () => this.access.prepare(provision))();
-      try { receipts = await within(() => preparing, signal); } catch (error) {
-        // A receipt that arrives after the deadline answered 503 belongs to a body that never went out.
-        if (error instanceof ResolveDeadline) void preparing.then(late => this.settle(late, Promise.resolve('aborted')), () => undefined);
-        throw auditUnavailable();
-      }
-      const refs = receipts?.accessRefs;
-      if (!(refs instanceof Map) || refs.size !== ready.length || new Set(refs.values()).size !== ready.length
-          || ready.some(m => typeof refs.get(m.uid) !== 'string' || !refs.get(m.uid))) {
-        this.settle(receipts, Promise.resolve('aborted'));
-        throw auditUnavailable();
-      }
-      this.settle(receipts, transfer);
-      return answer(refs);
+      const targets = ready.map(m => ({ uid: m.uid, ordinal: m.ordinal,
+        managingInstitutionId: m.state!.institutionId!, patientId: m.patientId!,
+        metadata: m.metadata!, context: context(m) }));
+      const response = this.access.select(targets, answer, signal);
+      selected = true;
+      return response;
     } finally {
-      // The resolve is the owner of its source reads: whatever ends it (answer, refusal, throw, deadline), nothing it
-      // started stays active. The transfer/receipt settlement is separate and is not cancelled here.
-      deadline.abort(); servedCut.abort();
+      // A1 still needs the same deadline while awaiting durable receipts and
+      // selecting this response. The controller ends it on finish/close; late
+      // receipts drain in A1's original request work.
+      if (!selected) end();
+      servedCut.abort();
       signal.removeEventListener('abort', relay);
-      clearTimeout(timer); clearTimeout(cutTimer);
+      clearTimeout(cutTimer);
     }
-  }
-
-  /**
-   * The port records the observed end of the body after the reply. Its own failure journal owns a failed record: there is no
-   * reply left to change, and an unhandled rejection would end the process.
-   */
-  private settle(receipts: ViewingSetReceipts, outcome: Promise<TransferOutcome>) {
-    void outcome.then(result => this.access.finish(receipts, result)).catch(() => undefined);
   }
 
   private async states(uids: string[]): Promise<Map<string, StateRow>> {

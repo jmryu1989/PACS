@@ -1,25 +1,13 @@
 'use strict';
-/* W9-API (W9-LITE server half, D1500): the compiled viewing-set resolve - service, controller, Orthanc read and the real
- * StudyAccess service - over a StudyState-only Prisma double, an Orthanc double with real AbortSignal
- * semantics and a recording access-record port.
- *
- * W9L-01 (server) -> W9L-R01 -> T02;  W9L-02 -> W9L-R02 -> T03, T04, T18;  W9L-06 (server) -> W9L-R06 -> T10, T18;
- * W9L-07 (server) -> W9L-R07 -> the no-write assertions of T10/T18;  W9L-08 (server) -> W9L-R08 -> T16 (route key,
- * EMR classification and clinician denial read from the real Nest metadata). Spec mutants M01 M04 M05 M06 M15 M17 and the
- * server extras are tests/multi_study_view_mutants.py; each names the case and the assertion message that must fail.
- *
- * What the doubles are (D1444/D1447 fidelity): Prisma answers studyState.findMany from a store by its where/select and the
- * StudyAccessPolicy row by the subject the real StudyAccessService asks for; every other model and every write is recorded
- * and refused (W9L-07). The Orthanc double answers viewingSetStudy per UID, counts concurrent reads, and a pending read
- * settles on the signal it was given (a late answer that ignores the signal models a source answering after the
- * deadline); studyIdentityResources/studyIdentities answer the real StudyAccessService's preparation. The port double
- * records the provision and answers receipts, an append failure or an incomplete receipt set; it builds no AccessEvent and
- * never stands for the ledger: this unit binds no ledger (D1500 D-2/D-6), the production binding is
- * ViewingSetAccessUnbound and W9API-13/16 run it. The Orthanc read itself runs against a local HTTP server (W9API-17), and
- * so does StudyAccess's own preparation read under the resolve deadline (W9API-21, W9A-01); W9API-22 holds each wait of
- * the resolve in turn (the doubles' `stalls`) to show every one of them ends at the deadline.
- * D73: assertions are on answers, HTTP statuses/codes, recorded calls and the real Nest metadata; none reads source text.
- * Synthetic SYN-* values only; no database, no Docker, no network beyond 127.0.0.1.
+/* W9-LITE selection boundary (D1500, D1764): real service, StudyAccess and Orthanc
+ * consumers over synthetic StudyState/policy/source inputs. Selection is inspected
+ * before A1 admission; it is not a receipt or evidence of clinical HTTP delivery.
+ * W9L-01/02/06/07/08 -> W9L-R01/R02/R06/R07/R08 -> T02/03/04/10/18/16.
+ * Receipt/late COMMIT/transfer cases W9API-13/14/16/24 are also exercised through
+ * real AppModule HTTP and PG in tests/emr/a/viewing_set_test.py (A-HTTP-METADATA,
+ * A-PG-COMMIT, A-HTTP-OUTCOME). No fake durable receipts in either suite.
+ * D73: behavioral assertions, real Nest metadata; no product source-text pins.
+ * Synthetic values only; no Docker/DB here, source HTTP stays on 127.0.0.1.
  */
 require('./service_test_loader.cjs');
 const test = require('node:test');
@@ -28,7 +16,19 @@ const http = require('node:http');
 // The server's periodic header/request timeout sweep is off: these sources hold requests on purpose, and the sweep
 // (Node 22) can race a socket that the client just cancelled into an uncaught internal TypeError after a test ends.
 const HELD_SOURCE = { connectionsCheckingInterval: 2147483647, requestTimeout: 0, headersTimeout: 0 };
-const { MultiStudyViewService, ViewingSetAccess, ViewingSetAccessUnbound, VIEWING_SET_SURFACE } = require('/app/dist/multi-study-view.service');
+const { MultiStudyViewService, VIEWING_SET_SURFACE } = require('/app/dist/multi-study-view.service');
+const { ViewingSetAccess } = require('/app/dist/emr-viewing/viewing-set-access');
+const { LocalReadResponse } = require('/app/dist/emr-viewing/local-read');
+const { ViewingRecordService } = require('/app/dist/emr-viewing/viewing-record.service');
+const { EmrViewingModule } = require('/app/dist/emr-viewing/emr-viewing.module');
+const { createRequestContext } = require('/app/dist/emr-runtime/request-context');
+const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
+const { Socket } = require('node:net');
+const { createHash } = require('node:crypto');
+// An unadmitted request must fail before any record work is opened.
+const unadmitted = () => createRequestContext(createRequestIngress({ proxyPeers: [] }), {
+  begin() { assert.fail('an unadmitted request cannot begin record work'); },
+}).source;
 const { MultiStudyViewController } = require('/app/dist/multi-study-view.controller');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
@@ -72,24 +72,12 @@ const unrestricted = () => ({ version: 1, restricted: false, startsAt: null, end
 const patientRule = (...pids) => ({ version: 1, restricted: true, startsAt: null, endsAt: null,
   rules: pids.map(patientId => ({ patientId, modalities: [], dateFrom: null, dateTo: null, studyUids: [] })) });
 
-class RecordingAccess extends ViewingSetAccess {
-  constructor() { super(); this.prepared = []; this.finished = []; this.mode = 'ok'; this.during = null; this.events = 0; this.order = []; }
-  async prepare(provision) {
-    this.prepared.push(JSON.parse(JSON.stringify(provision)));
-    this.order.push('prepare');
-    // runs while the record is being made: after the resolve's own re-check, before the reply
-    if (this.during) await this.during(provision);
-    if (this.mode === 'fail') throw new Error('SYN append failed');
-    const refs = new Map(provision.targets.map(target => [target.uid, 'syn-event-' + ++this.events]));
-    if (this.mode === 'missing') refs.delete(provision.targets[0].uid);
-    if (this.mode === 'duplicate') for (const key of refs.keys()) refs.set(key, 'syn-event-same');
-    if (this.mode === 'empty') refs.set(provision.targets[0].uid, '');
-    this.order.push('receipt');
-    return { accessRefs: refs };
-  }
-  async finish(receipts, outcome) {
-    this.finished.push({ refs: [...receipts.accessRefs.values()], outcome });
-    if (this.finishMode === 'fail') throw new Error('SYN finish failed');
+class SelectingAccess extends ViewingSetAccess {
+  constructor() { super(); this.selected = []; }
+  select(targets, body, signal) {
+    const response = super.select(targets, body, signal);
+    this.selected.push({ targets: structuredClone(targets), response });
+    return response;
   }
 }
 
@@ -160,14 +148,19 @@ function world(studies, { policy = null } = {}) {
     },
   };
   w.studyAccess = new StudyAccessService(w.prisma, w.orthanc, {});
-  w.port = new RecordingAccess();
-  w.svc = new MultiStudyViewService(w.prisma, w.orthanc, w.studyAccess, w.port);
+  w.access = new SelectingAccess();
+  w.svc = new MultiStudyViewService(w.prisma, w.orthanc, w.studyAccess, w.access);
   return w;
 }
 const body = (uids, over = {}) => Buffer.from(JSON.stringify({ compositionId: COMPOSITION, generation: 1, requestId: REQUEST,
   studyUids: uids, expectedSourcePatientKey: null, ...over }));
-const never = () => new Promise(() => {});
-const resolveFor = (w, caller, raw, transfer = never()) => w.svc.resolve(raw, caller, transfer);
+const resolveFor = async (w, caller, raw) => {
+  const transport = new AbortController();
+  try {
+    const selected = await w.svc.resolve(raw, caller, transport.signal);
+    return selected instanceof LocalReadResponse ? JSON.parse(selected.json) : selected;
+  } finally { transport.abort(); }
+};
 const ids = list => list.map(s => s.uid);
 const codes = answer => answer.members.map(m => m.status === 'ready' ? 'ready' : m.code);
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -212,7 +205,7 @@ test('W9API-01 T18 A-01: every malformed selection is the one 400 with no databa
   for (const [label, raw] of Object.entries(raws)) {
     const w = world([s1, s2]);
     await refusedWith(resolveFor(w, reader(), raw), 400, 'W9_SELECTION_INVALID', label + ' must be refused as a selection');
-    assert.deepEqual([w.calls.states.length, w.calls.reads.length, w.calls.identity.length, w.port.prepared.length], [0, 0, 0, 0],
+    assert.deepEqual([w.calls.states.length, w.calls.reads.length, w.calls.identity.length, w.access.selected.length], [0, 0, 0, 0],
       label + ': refused before any read');
   }
   // the bounds themselves are accepted: 2 and 20 members, generation 2^31-1, a bounded expected key
@@ -229,7 +222,7 @@ test('W9API-02 T03 A-01: only radiologist (admin passes) resolves; the role refu
     const w = world([s1, s2]);
     await refusedWith(resolveFor(w, caller(), body(ids([s1, s2]))), 403, 'W9_VIEW_FORBIDDEN', label + ' must not resolve a viewing set');
     await refusedWith(resolveFor(w, caller(), body([s1.uid])), 403, 'W9_VIEW_FORBIDDEN', label + ': the role is decided before the input');
-    assert.deepEqual([w.calls.states.length, w.calls.reads.length, w.port.prepared.length], [0, 0, 0], label + ': refused before any read');
+    assert.deepEqual([w.calls.states.length, w.calls.reads.length, w.access.selected.length], [0, 0, 0], label + ': refused before any read');
   }
   for (const [label, caller] of [['radiologist', reader], ['admin', admin], ['clinician with radiologist', mixedReader]]) {
     const w = world([s1, s2]);
@@ -285,7 +278,7 @@ test('W9API-04 T03 A-02: a StudyAccess refusal is the same member error, for the
   const closed = { ...patientRule('SYN-PID-1'), endsAt: '2020-01-01T00:00:00.000Z' };
   const wc = world([allowed1, allowed2], { policy: closed });
   const none = await opens(resolveFor(wc, reader(), body(ids([allowed1, allowed2]))), 'a closed window');
-  assert.deepEqual([codes(none), none.scopeStatus, none.sourcePatientKey, wc.port.prepared.length], [[MU, MU], 'rejected', null, 0]);
+  assert.deepEqual([codes(none), none.scopeStatus, none.sourcePatientKey, wc.access.selected.length], [[MU, MU], 'rejected', null, 0]);
 });
 
 test('W9API-05 T03: W/T/P/A/H and Unverified studies open by image-read rights; the answer carries no report or draft field', async () => {
@@ -300,7 +293,7 @@ test('W9API-05 T03: W/T/P/A/H and Unverified studies open by image-read rights; 
   }
   assert.deepEqual(Object.keys(answer).sort(), ['compositionId', 'generation', 'members', 'requestId', 'scopeStatus', 'sourcePatientKey']);
   assert.deepEqual(w.calls.states.map(c => Object.keys(c.select).sort()),
-    [['institutionId', 'teleInstitutionId', 'ts', 'uid'], ['institutionId', 'teleInstitutionId', 'ts', 'uid']]);
+    [['institutionId', 'teleInstitutionId', 'ts', 'uid']]);
   noWrites(w);
 });
 
@@ -320,7 +313,7 @@ test('W9API-06 T02 A-04: the same patient is the owner plus the raw source Patie
   for (const [label, [o1, o2]] of Object.entries(mismatches)) {
     const pair = [study(o1), study(o2)], wm = world(pair);
     await refusedWith(resolveFor(wm, reader(), body(ids(pair))), 409, 'W9_PATIENT_MISMATCH', label + ' must not join two source patients');
-    assert.equal(wm.port.prepared.length, 0, label + ': nothing is provided');
+    assert.equal(wm.access.selected.length, 0, label + ': nothing is provided');
   }
   // the expected key of an admitted set is a stale check: equal opens, different refuses the whole set
   const we = world([p1, p2]);
@@ -347,7 +340,7 @@ test('W9API-07 T18 A-04: first Open is ready only when all are; an admitted set 
   assert.equal(reopened.scopeStatus, 'partial');
   const allBad = [study({ read: 'fail' }), study({ state: null })], wb = world(allBad);
   const rejected = await opens(resolveFor(wb, reader(), body(ids(allBad))), 'nothing ready');
-  assert.deepEqual([rejected.scopeStatus, rejected.sourcePatientKey, codes(rejected), wb.port.prepared.length],
+  assert.deepEqual([rejected.scopeStatus, rejected.sourcePatientKey, codes(rejected), wb.access.selected.length],
     ['rejected', null, [LF, MU], 0], 'nothing ready: nothing provided');
   assert.deepEqual([rejected.compositionId, rejected.generation, rejected.requestId], [COMPOSITION, 1, REQUEST]);
 });
@@ -413,14 +406,14 @@ test('W9API-10 T04 A-03: the 10 s resolve deadline cancels pending reads; no sta
   await settle();
   const cut = w.calls.reads.filter(r => [h1, h2, late, q2].some(s => s.uid === r.uid));
   assert.ok(cut.length === 4 && cut.every(r => r.sawAbort && r.signal.aborted), 'every pending read must observe the sub-cut abort');
-  // D1558: the members read in time take their re-check and receipt inside the reserve - no further time passes here
+  // D1558: the members read in time reach A1 inside the existing receipt reserve - no further time passes here
   const run = track(pending);
   await until(() => run.settled, 'the deadline answers without waiting for a late source');
   w.gates.get(late.uid)();   // the source answers after the cut: it must not be used
   await settle();
   const answer = await pending;
   assert.deepEqual(codes(answer), ['ready', LF, LF, LF, 'ready', LF, LF], 'a read answered after the deadline must not become metadata');
-  assert.deepEqual(w.port.prepared[0].targets.map(t => t.uid), [early.uid, q1.uid], 'the members read in time are recorded and provided');
+  assert.deepEqual(w.access.selected[0].targets.map(t => t.uid), [early.uid, q1.uid], 'the members read in time are selected for recording');
   assert.deepEqual(w.calls.reads.map(r => r.uid), ids(members.slice(0, 6)), 'a member still queued at the deadline is never read');
 });
 
@@ -439,34 +432,13 @@ test('W9API-24 A-03 (D1558, SRW9R2-1): the served-read sub-cut keeps each member
   await until(() => run.settled, 'the sub-cut answers inside 10 s');
   const causes = 'each member keeps its own cause; only the hung read is a load failure';
   assert.deepEqual(outcome(run), ['partial', [STUDY_IDENTITY_UNRESOLVED, IU, 'ready', LF]], causes);
-  assert.deepEqual(w.port.prepared.map(p => p.targets.map(t => t.uid)), [[members[2].uid]], 'the ready member\'s receipt is written');
+  assert.deepEqual(w.access.selected.map(p => p.targets.map(t => t.uid)), [[members[2].uid]], 'the ready metadata target is selected for A1');
   assert.ok(w.calls.reads[3].signal.aborted, 'the hung read is cancelled at the sub-cut');
-  // (2) the re-check passes the 10 s deadline: causes stay, the would-be ready member and the hung one are load failures
-  const m2 = four(), w2 = world(m2);
-  w2.stalls.states = 2;
-  const run2 = track(resolveFor(w2, reader(), body(ids(m2))));
-  await until(() => w2.calls.reads.length === 4, 'the four reads started');
-  t.mock.timers.tick(9000);
-  await until(() => !!w2.held, 'the re-check is held');
-  t.mock.timers.tick(1000);
-  await until(() => run2.settled, 'the deadline answers the held re-check');
-  assert.deepEqual(outcome(run2), ['rejected', [STUDY_IDENTITY_UNRESOLVED, IU, LF, LF]], 'a deadline keeps the causes already found');
-  assert.equal(w2.port.prepared.length, 0, 'nothing is provided after the deadline');
-  // (3) the receipt is held past 10 s: 503, and the late receipt is finished as aborted
-  const m3 = four(), w3 = world(m3);
-  let release; w3.port.during = () => new Promise(resolve => { release = resolve; });
-  const run3 = track(resolveFor(w3, reader(), body(ids(m3))));
-  await until(() => w3.calls.reads.length === 4, 'the four reads started');
-  t.mock.timers.tick(9000);
-  await until(() => !!release, 'the receipt is asked after the sub-cut');
-  t.mock.timers.tick(1000);
-  await until(() => run3.settled, 'the deadline answers the held receipt');
-  assert.deepEqual(outcome(run3), [503, 'W9_AUDIT_UNAVAILABLE'], 'a receipt held past 10 s answers 503');
-  release(); await until(() => w3.port.finished.length === 1, 'the late receipt is finished');
-  assert.deepEqual(w3.port.finished.map(f => f.outcome), ['aborted'], 'a late receipt is recorded as an aborted transfer');
+  // The receipt wait and late COMMIT run against PG in viewing_set_test.py;
+  // the initial member/source causes above remain this selection's responsibility.
 });
 
-test('W9API-11 T04 A-05: a change of a member row or of the policy during the source wait discards the whole result', async () => {
+test('W9API-11 T04 D1764: initial member decisions survive the source wait without duplicate checks', async () => {
   const changes = {
     'tele opened': s => { s.state.teleInstitutionId = B; s.state.ts = 'wait'; },
     'owner changed': s => { s.state.institutionId = B; },
@@ -477,13 +449,14 @@ test('W9API-11 T04 A-05: a change of a member row or of the policy during the so
   for (const [label, change] of Object.entries(changes)) {
     const members = [study(), study()], w = world(members, { policy: label === 'policy changed' ? patientRule('SYN-PID-1') : null });
     w.onRead = uid => { if (uid === members[1].uid) change(w.byUid.get(uid), w); };
-    await refusedWith(resolveFor(w, reader(), body(ids(members))), 409, 'W9_CONTEXT_CHANGED', label + ' must be re-checked after the source wait');
-    assert.equal(w.port.prepared.length, 0, label + ': nothing is provided');
+    const answer = await opens(resolveFor(w, reader(), body(ids(members))), label);
+    assert.deepEqual(codes(answer), ['ready', 'ready'], label + ': initial access decision retained');
+    assert.deepEqual(w.access.selected[0].targets.map(t => t.managingInstitutionId), [A, A]);
   }
-  // an unchanged world answers, and the re-check reads the same members once more
+  // The selected StudyState snapshot is read once.
   const members = [study(), study()], w = world(members);
   await opens(resolveFor(w, reader(), body(ids(members))), 'an unchanged world');
-  assert.deepEqual(w.calls.states.map(c => c.where.uid.in), [ids(members), ids(members)]);
+  assert.deepEqual(w.calls.states.map(c => c.where.uid.in), [ids(members)]);
 });
 
 test('W9API-12 T10 A-06: one provision with one target per provided member, the D-5 anchor context, no composition row', async () => {
@@ -491,14 +464,11 @@ test('W9API-12 T10 A-06: one provision with one target per provided member, the 
   const w = world(members);
   const perMember = 'every provided member must have its own target, and only those';
   const answer = await opens(resolveFor(w, reader(), body(ids(members), { expectedSourcePatientKey: A + '|SYN-PID-1' })), perMember);
-  assert.equal(w.port.prepared.length, 1, 'one provision per resolve');
-  const provision = w.port.prepared[0];
-  assert.deepEqual(Object.keys(provision).sort(), ['auditLinkId', 'caller', 'cause', 'kind', 'requestId', 'surface', 'targets'],
-    'the provision carries no composition or generation field');
-  assert.deepEqual([provision.kind, provision.cause, provision.surface, provision.requestId], ['study-metadata', 'user-view', VIEWING_SET_SURFACE, REQUEST]);
-  assert.match(provision.auditLinkId, /^audit:/);
-  assert.match(provision.auditLinkId.slice(6), UUID4);
-  assert.deepEqual([provision.caller.sub, provision.caller.institution], ['syn-reader-sub', A]);
+  assert.equal(w.access.selected.length, 1, 'one provision per resolve');
+  const provision = w.access.selected[0];
+  assert.ok(provision.response instanceof LocalReadResponse);
+  assert.equal(provision.response.sources.length, 2);
+  assert.equal(provision.response.unavailable.code, 'W9_AUDIT_UNAVAILABLE');
   assert.deepEqual(provision.targets.map(t => [t.uid, t.ordinal, t.managingInstitutionId, t.patientId]),
     [[members[0].uid, 0, A, 'SYN-PID-1'], [members[2].uid, 2, A, 'SYN-PID-1']], perMember);
   for (const target of provision.targets)
@@ -508,11 +478,20 @@ test('W9API-12 T10 A-06: one provision with one target per provided member, the 
     { basis: 'same-patient-comparison', studyId: members[0].uid, relatedStudyId: members[2].uid, reason: null }],
   'the ordered first UID anchors the comparison');
   for (const target of provision.targets) assert.ok(WORK_CONTEXTS.includes(target.context.basis));
-  assert.deepEqual(answer.members.filter(m => m.status === 'ready').map(m => m.accessRef), ['syn-event-1', 'syn-event-2']);
+  const refs = answer.members.filter(m => m.status === 'ready').map(m => m.accessRef);
+  assert.equal(new Set(refs).size, 2);
+  assert.deepEqual(provision.response.sources.map(source => source.eventId), refs);
+  for (const source of provision.response.sources) {
+    assert.match(source.eventId, UUID4);
+    const member = answer.members[source.path[1]];
+    assert.equal(source.target.studyId.value, member.uid);
+    assert.equal(source.target.projectionSha256,
+      createHash('sha256').update(JSON.stringify(member.metadata)).digest('hex'));
+  }
   // the anchor failed after admission: no silent re-anchor, each provided member is its own worklist read
   const later = [study({ read: 'fail' }), study(), study()], wl = world(later);
   await opens(resolveFor(wl, reader(), body(ids(later), { expectedSourcePatientKey: A + '|SYN-PID-1' })), 'a failed anchor');
-  assert.deepEqual(wl.port.prepared[0].targets.map(t => t.context), [
+  assert.deepEqual(wl.access.selected[0].targets.map(t => t.context), [
     { basis: 'worklist', studyId: later[1].uid, relatedStudyId: null, reason: null },
     { basis: 'worklist', studyId: later[2].uid, relatedStudyId: null, reason: null }], 'no silent re-anchor: each provided member is its own worklist read');
   // the surface is the real route's key and its classification is a study-metadata read
@@ -521,58 +500,20 @@ test('W9API-12 T10 A-06: one provision with one target per provided member, the 
   noWrites(w);
 });
 
-test('W9API-13 T18 A-06: no body before every receipt; a failed or incomplete record answers 503 with no member body', async () => {
-  const members = [study(), study()];
-  // the body waits for the receipt
-  const w = world(members);
-  let release; w.port.during = () => new Promise(resolve => { release = resolve; });
-  let answered = false;
-  const pending = opens(resolveFor(w, reader(), body(ids(members))), 'a recorded answer').then(answer => { answered = true; return answer; });
-  await until(() => w.port.prepared.length === 1, 'the provision is asked');
-  await settle(); await settle();
-  assert.equal(answered, false, 'no body before the durable receipt');
-  release();
-  assert.equal((await pending).scopeStatus, 'ready');
-  assert.deepEqual(w.port.order, ['prepare', 'receipt']);
-  for (const mode of ['fail', 'missing', 'duplicate', 'empty']) {
-    const wf = world(members); wf.port.mode = mode;
-    await refusedWith(resolveFor(wf, reader(), body(ids(members))), 503, 'W9_AUDIT_UNAVAILABLE', mode + ': a provision without every receipt must not answer');
-    await settle();
-    if (mode !== 'fail') assert.deepEqual(wf.port.finished.map(f => f.outcome), ['aborted'], mode + ': the prepared records learn the body never went out');
-  }
-  // the production binding: AppModule binds the port to ViewingSetAccessUnbound
-  const { AppModule } = require('/app/dist/app.module');
-  const binding = Reflect.getMetadata('providers', AppModule).find(p => p && p.provide === ViewingSetAccess);
-  assert.equal(binding?.useClass, ViewingSetAccessUnbound, 'this build binds the unbound port');
-  const wu = world(members);
-  const production = new MultiStudyViewService(wu.prisma, wu.orthanc, wu.studyAccess, new binding.useClass());
-  await refusedWith(production.resolve(body(ids(members)), reader(), never()), 503, 'W9_AUDIT_UNAVAILABLE',
-    'without a bound ledger no member metadata is provided');
-  const bad = [study({ state: null }), study({ read: 'fail' })], wb = world(bad);
-  const unbound = new MultiStudyViewService(wb.prisma, wb.orthanc, wb.studyAccess, new binding.useClass());
-  assert.deepEqual(codes(await opens(unbound.resolve(body(ids(bad)), reader(), never()), 'an answer that provides nothing')), [MU, LF],
-    'an answer that provides nothing needs no record');
+test('W9API-13 T18 A1 admission refuses a selected W9 body with the existing non-PHI 503', async () => {
+  const members = [study(), study()], w = world(members), transport = new AbortController();
+  const request = new http.IncomingMessage(new Socket()), response = new http.ServerResponse(request);
+  try {
+    const selected = await w.svc.resolve(body(ids(members)), reader(), transport.signal);
+    assert.ok(selected instanceof LocalReadResponse);
+    await refusedWith(new ViewingRecordService(unadmitted()).prepare(request, response, selected),
+      503, 'W9_AUDIT_UNAVAILABLE', 'A1 admission failure preserves W9 retry explanation');
+    assert.equal(response.headersSent, false);
+  } finally { transport.abort(); }
 });
 
-test('W9API-14 T10 A-06: the observed transfer is recorded once, only after it is observed', async () => {
-  const members = [study(), study()];
-  for (const outcome of ['ended', 'aborted']) {
-    const w = world(members);
-    let observe; const transfer = new Promise(resolve => { observe = resolve; });
-    await opens(resolveFor(w, reader(), body(ids(members)), transfer), 'a recorded answer');
-    await settle(); await settle();
-    assert.deepEqual(w.port.finished, [], 'no transfer outcome before the response observed one');
-    observe(outcome);
-    await until(() => w.port.finished.length === 1, 'the outcome is recorded');
-    assert.deepEqual(w.port.finished, [{ refs: ['syn-event-1', 'syn-event-2'], outcome }], 'the observed outcome, once, for the provided records');
-  }
-  // a failing record of the outcome is the port's own journal: no unhandled rejection, no second call
-  const w = world(members); w.port.finishMode = 'fail';
-  await opens(resolveFor(w, reader(), body(ids(members)), Promise.resolve('ended')), 'a recorded answer');
-  await until(() => w.port.finished.length === 1, 'the failing outcome record ran');
-  await settle();
-  assert.equal(w.port.finished.length, 1);
-});
+// W9API-14 transfer-ended/aborted and failed follow-up behavior now belongs to
+// the real A1 HTTP/PG suite, not a synthetic prepare/finish port.
 
 test('W9API-15 W9L-07: a resolve writes no clinical row and registers no StudyState, whatever it answers', async () => {
   const unregistered = study({ state: null });
@@ -587,15 +528,72 @@ test('W9API-15 W9L-07: a resolve writes no clinical row and registers no StudySt
   noWrites(wm, 'a resolve writes nothing and registers no StudyState');
 });
 
+// Run mocked-clock cases before any native fetch client exists. Undici retains
+// parser timers after cancellation; advancing its timers across a real source
+// can call a collected parser in Node 22. Keep the real HTTP cases on real time.
+test('W9API-22 A-03 (W9A-01): every wait from resolve entry to the answer is under the one deadline (executed inventory)', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const restricted = patientRule('SYN-PID-1');
+  // Each point: the wait held at its n-th call, the policy that reaches it, and what the deadline must answer.
+  const points = [
+    { at: 'member rows', stall: ['states', 1], policy: null, expect: ['rejected', [LF, LF]] },
+    { at: 'StudyAccess.allowed snapshot', stall: ['policy', 1], policy: restricted, expect: ['rejected', [LF, LF]] },
+    { at: 'StudyAccess.prepare source read (batch)', stall: ['identity', 1], policy: restricted, expect: ['rejected', [LF, LF]], signal: true },
+    { at: 'StudyAccess.prepare source read (one UID)', stall: ['identity', 1], policy: restricted, one: true, expect: ['rejected', [SX, LF]], signal: true },
+    { at: 'StudyAccess.prepare re-check', stall: ['policy', 2], policy: restricted, expect: ['rejected', [LF, LF]] },
+    { at: 'StudyAccess.allowed re-check', stall: ['policy', 3], policy: restricted, expect: ['rejected', [LF, LF]] },
+    { at: 'served source reads', read: 'hang', cutAt: 9000, policy: null, expect: ['rejected', [LF, LF]] },
+  ];
+  const inventory = [];
+  for (const p of points) {
+    const members = p.one ? [study({ state: { teleInstitutionId: B, ts: 'sent' } }), study()] : [study({ read: p.read }), study({ read: p.read })];
+    const w = world(members, { policy: p.policy });
+    if (p.stall) w.stalls[p.stall[0]] = p.stall[1];
+    const run = track(resolveFor(w, reader(), body(ids(members))));
+    await until(() => (p.read ? w.calls.reads.length === 2 : !!w.held), p.at + ': the wait is reached');
+    t.mock.timers.tick((p.cutAt ?? 10000) - 1);   // the served reads are cut at 9 s (D1558), every other wait at 10 s
+    await settle(); await settle();
+    assert.equal(run.settled, false, p.at + ': nothing is decided before ten seconds');
+    t.mock.timers.tick(1);
+    await until(() => run.settled, p.at + ': the deadline answers the resolve');
+    assert.deepEqual(outcome(run), p.expect, p.at + ': the deadline answers with the typed timeout result');
+    if (p.signal) assert.ok(w.held.signal instanceof AbortSignal && w.held.signal.aborted, p.at + ': the resolve signal reaches the read and aborts');
+    // the held wait answers late: nothing changes, nothing is provided, and a late receipt learns its body never went out
+    const before = JSON.stringify(outcome(run));
+    if (w.held) w.held.release();
+    await settle(); await settle(); await settle();
+    assert.equal(JSON.stringify(outcome(run)), before, p.at + ': a late answer is discarded');
+    assert.equal(w.access.selected.length, 0, p.at + ': nothing selected after the deadline');
+    noWrites(w);
+    inventory.push({ at: p.at, outcome: outcome(run), signal_aborted: p.signal ? w.held.signal.aborted : undefined });
+  }
+  t.diagnostic(JSON.stringify(inventory));
+});
+
+test('W9API-28 cache: a late policy source answer cannot become the next request permission', async t => {
+    // A preparation read answering after the deadline is not cached for the same Caller: the next resolve reads again
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+    const pair = [study(), study()], wl = world(pair, { policy: patientRule('SYN-PID-1') }), caller = reader();
+    wl.stalls.identity = 1;
+    const late = track(resolveFor(wl, caller, body(ids(pair))));
+    await until(() => !!wl.held, 'the preparation read is held');
+    t.mock.timers.tick(10000);
+    await until(() => late.settled, 'the deadline answers');
+    wl.held.release(); await settle(); await settle();
+    const again = await opens(resolveFor(wl, caller, body(ids(pair))), 'the next resolve');
+    assert.equal(wl.calls.identity.length, 2, 'a late preparation answer is never a cached permission fact');
+    assert.deepEqual(codes(again), ['ready', 'ready']);
+});
+
 /** A real Nest HTTP application around the real controller, service and StudyAccess (guard: synthetic caller). */
-async function serve(w, port) {
+async function serve(w) {
   const { NestFactory, APP_GUARD } = require('/app/node_modules/@nestjs/core');
   const { Module } = require('/app/node_modules/@nestjs/common');
   class SyntheticGuard { canActivate(context) { const req = context.switchToHttp().getRequest(); Object.assign(req, JSON.parse(req.headers['x-syn-caller'])); return true; } }
   class HttpProbe {}
-  Module({ controllers: [MultiStudyViewController], providers: [MultiStudyViewService,
+  Module({ imports: [EmrViewingModule.withRequests(unadmitted())], controllers: [MultiStudyViewController], providers: [MultiStudyViewService,
     { provide: PrismaService, useValue: w.prisma }, { provide: OrthancService, useValue: w.orthanc },
-    { provide: StudyAccessService, useValue: w.studyAccess }, { provide: ViewingSetAccess, useValue: port ?? w.port },
+    { provide: StudyAccessService, useValue: w.studyAccess }, { provide: ViewingSetAccess, useValue: w.access },
     { provide: APP_GUARD, useValue: new SyntheticGuard() }] })(HttpProbe);
   const app = await NestFactory.create(HttpProbe, { rawBody: true, logger: false });
   app.setGlobalPrefix('api');
@@ -605,48 +603,21 @@ async function serve(w, port) {
 const post = (url, raw, caller, signal) => fetch(url, { method: 'POST', body: raw, signal,
   headers: { 'content-type': 'application/json', 'x-syn-caller': JSON.stringify(caller) } });
 
-test('W9API-16 T10/T18 HTTP: 200 is the resolve body and ends the transfer; a completed response ends it and a closed connection aborts it', async () => {
-  const members = [study(), study()];
-  // the real route: raw body, 200, and the finished body is the observed end
-  const w = world(members), app = await serve(w);
+test('W9API-16 T18 HTTP: A1 admission failure withholds W9 metadata; error-only and input refusals keep their contracts', async () => {
+  const members = [study(), study()], w = world(members), app = await serve(w);
   try {
-    const ok = await post(app.url, body(ids(members)), reader());
-    assert.equal(ok.status, 200, 'the resolve answers 200');
-    const answer = await ok.json();
-    assert.deepEqual(codes(answer), ['ready', 'ready']);
-    await until(() => w.port.finished.length === 1, 'the transfer outcome');
-    assert.equal(w.port.finished[0].outcome, 'ended', 'a finished 200 body is an ended transfer');
+    const rejected = await post(app.url, body(ids(members)), reader());
+    const text = await rejected.text();
+    assert.deepEqual([rejected.status, JSON.parse(text).code], [503, 'W9_AUDIT_UNAVAILABLE']);
+    assert.ok(!text.includes('SYN-PID') && !text.includes('SYN PATIENT') && !text.includes(members[0].uid),
+      'no member metadata in a refused reply');
     const duplicate = await post(app.url, Buffer.from(body(ids(members)).toString().replace('{', '{"generation":2,')), reader());
-    assert.deepEqual([duplicate.status, (await duplicate.json()).code], [400, 'W9_SELECTION_INVALID'], 'a duplicate JSON key is refused from the raw body');
-    // A later policy change does not discard the already resolved response through a second global check.
-    w.policy = unrestricted();
-    w.port.during = async () => { w.revision = 7; };
-    const refused = await post(app.url, body(ids(members)), reader());
-    const refusal = await refused.json();
-    assert.deepEqual([refused.status, refusal.code, 'members' in refusal], [200, undefined, true]);
-    await until(() => w.port.finished.length === 2, 'the completed transfer outcome');
-    assert.equal(w.port.finished[1].outcome, 'ended', 'the completed response is recorded as a finished transfer');
-    // the connection closes before the body: aborted
-    w.policy = null; w.revision = 1;
-    let release; w.port.during = () => new Promise(resolve => { release = resolve; });
-    const client = new AbortController();
-    const gone = post(app.url, body(ids(members)), reader(), client.signal).catch(error => error);
-    await until(() => w.port.prepared.length === 3, 'the third provision is asked');
-    client.abort();
-    assert.equal((await gone).name, 'AbortError');
-    await new Promise(resolve => setTimeout(resolve, 50));
-    release();
-    await until(() => w.port.finished.length === 3, 'the closed transfer outcome');
-    assert.equal(w.port.finished[2].outcome, 'aborted', 'a connection closed before the body is an aborted transfer');
+    assert.deepEqual([duplicate.status, (await duplicate.json()).code], [400, 'W9_SELECTION_INVALID']);
+    for (const member of w.byUid.values()) member.state = null;
+    const errors = await post(app.url, body(ids(members)), reader());
+    assert.equal(errors.status, 200);
+    assert.deepEqual(codes(await errors.json()), [MU, MU], 'an error-only answer needs no clinical record');
   } finally { await app.close(); }
-  // the production binding over HTTP: 503 with no member metadata in the reply
-  const wu = world(members), unbound = await serve(wu, new ViewingSetAccessUnbound());
-  try {
-    const answer = await post(unbound.url, body(ids(members)), reader());
-    const text = await answer.text();
-    assert.deepEqual([answer.status, JSON.parse(text).code], [503, 'W9_AUDIT_UNAVAILABLE'], 'the unbound build answers 503');
-    assert.ok(!text.includes('SYN-PID') && !text.includes('SYN PATIENT') && !text.includes(members[0].uid), 'no member metadata in a refused reply');
-  } finally { await unbound.close(); }
 });
 
 test('W9API-17 A-03 Orthanc read: the named display tags, every resource row, and the caller\'s abort cancels the body', async () => {
@@ -702,31 +673,28 @@ test('W9API-18 T16 server part: the real route key, its EMR classification and t
   assert.equal(routeContract(key).operation, 'read');
 });
 
-test('W9API-19 T03 A-02/A-03 (SRW9-1): a source-tag policy holds for every row the resolve serves, not only for the rows StudyAccess read', async () => {
+test('W9API-19 T03 D1764: initial source-tag decision is retained; served patient mix and split identity still refuse', async () => {
   // StudyAccess prepares from its own source read; the resolve serves a later read. Between the two, the PatientID changes.
   const moved = (w, uids) => { w.onRead = uid => { if (uids.includes(uid)) w.byUid.get(uid).rows = [sourceRow(uid, { pid: 'SYN-PID-2' })]; }; };
   const both = [study({ pid: 'SYN-PID-1' }), study({ pid: 'SYN-PID-1' })];
   const w = world(both, { policy: patientRule('SYN-PID-1') });
   moved(w, ids(both));
-  const served = 'a row the policy refuses must never be served';
+  const served = 'initial policy decision is retained without a duplicate source-tag check';
   const answer = await opens(resolveFor(w, reader(), body(ids(both))), served);
-  assert.deepEqual([codes(answer), answer.scopeStatus, answer.sourcePatientKey], [[MU, MU], 'rejected', null], served);
-  assert.equal(w.port.prepared.length, 0, 'nothing refused is provided');
-  assert.ok(!JSON.stringify(answer).includes('SYN-PID-2'), 'the refused PatientID is not in the answer');
-  // one member moved: that member is unavailable at its place, the other stays ready (not a patient mismatch)
+  assert.deepEqual([codes(answer), answer.scopeStatus, answer.sourcePatientKey], [['ready', 'ready'], 'ready', A + '|SYN-PID-2'], served);
+  // One served PatientID moved: the initial decision remains, but the mixed patient set is refused.
   const one = [study({ pid: 'SYN-PID-1' }), study({ pid: 'SYN-PID-1' })];
   const w1 = world(one, { policy: patientRule('SYN-PID-1') });
   moved(w1, [one[1].uid]);
-  const partial = await opens(resolveFor(w1, reader(), body(ids(one))), served);
-  assert.deepEqual(codes(partial), ['ready', MU], 'the moved member is unavailable at its place');
-  assert.deepEqual(w1.port.prepared[0].targets.map(t => t.uid), [one[0].uid]);
-  // every resource of a UID: one served resource outside the policy refuses the member before any split answer names it
+  await refusedWith(resolveFor(w1, reader(), body(ids(one))), 409, 'W9_PATIENT_MISMATCH', 'served patient mix');
+  assert.equal(w1.access.selected.length, 0);
+  // Every returned resource counts for the split identity check.
   const splitUid = nextUid();
   const split = study({ uid: splitUid, rows: [sourceRow(splitUid, { pid: 'SYN-PID-1' }), sourceRow(splitUid, { pid: 'SYN-PID-1' })] });
   const ws = world([one[0], split], { policy: patientRule('SYN-PID-1') });
   ws.onRead = uid => { if (uid === splitUid) ws.byUid.get(uid).rows = [sourceRow(splitUid, { pid: 'SYN-PID-1' }), sourceRow(splitUid, { pid: 'SYN-PID-3' })]; };
-  assert.deepEqual(codes(await opens(resolveFor(ws, reader(), body(ids([one[0], split]))), 'a split read')), ['ready', MU],
-    'a served resource outside the policy refuses the member before the split answer');
+  assert.deepEqual(codes(await opens(resolveFor(ws, reader(), body(ids([one[0], split]))), 'a split read')), ['ready', STUDY_IDENTITY_UNRESOLVED],
+    'the served split identity is rejected without a repeated policy decision');
   // control: unchanged rows under the same policy open, and an unrestricted caller is not held to source tags
   const wc = world(one, { policy: patientRule('SYN-PID-1') });
   assert.deepEqual(codes(await opens(resolveFor(wc, reader(), body(ids(one))), 'unchanged rows')), ['ready', 'ready']);
@@ -778,7 +746,7 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
     // control: an answering source decides as before, and the policy read is /tools/find
     const wc = world(found, { policy: patientRule('SYN-PID-1') });
     wc.studyAccess = new StudyAccessService(wc.prisma, new OrthancService(), {});
-    wc.svc = new MultiStudyViewService(wc.prisma, wc.orthanc, wc.studyAccess, wc.port);
+    wc.svc = new MultiStudyViewService(wc.prisma, wc.orthanc, wc.studyAccess, wc.access);
     assert.deepEqual(codes(await opens(resolveFor(wc, reader(), body(ids(found))), 'an answering source')), ['ready', 'ready'], 'an answering source');
     assert.deepEqual(calls.map(c => c.url), ['/tools/find'], 'the preparation reads the batch identity source');
     // real time, as the source and the deadline really meet (Astra AP08): about ten seconds per stall
@@ -792,7 +760,7 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
       const w = world(found, { policy: patientRule('SYN-PID-1') });
       const real = new OrthancService();
       w.studyAccess = new StudyAccessService(w.prisma, real, {});
-      w.svc = new MultiStudyViewService(w.prisma, served ? real : w.orthanc, w.studyAccess, w.port);
+      w.svc = new MultiStudyViewService(w.prisma, served ? real : w.orthanc, w.studyAccess, w.access);
       // served-body (D1558): the held served read is cut at 9 s; the other member is re-checked and recorded inside 10 s
       const heldCalls = () => served ? calls.filter(c => c.url.startsWith('/dicom-web/') && !c.answered) : calls;
       const cutAt = served ? 9000 : 10000;
@@ -809,7 +777,7 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
       await until(() => heldCalls().every(c => c.closed), stall + ': the policy source read is cancelled by the deadline', 2000);
       const closedMs = heldCalls().map(c => c.closedAt - start);
       assert.ok(closedMs.every(ms => ms >= cutAt - 100 && ms < cutAt + 1000), stall + ': each source socket closes within a second of the cut (' + closedMs + ')');
-      assert.deepEqual(w.port.prepared.map(p => p.targets.map(t => t.uid)), served ? [[found[0].uid]] : [],
+      assert.deepEqual(w.access.selected.map(p => p.targets.map(t => t.uid)), served ? [[found[0].uid]] : [],
         stall + ': only a member read in time is provided');
       assert.deepEqual(calls.map(c => new URL(c.url, 'http://x').pathname),
         served ? ['/tools/find', '/dicom-web/studies', '/dicom-web/studies'] : ['/tools/find'], stall + ': no other source read');
@@ -818,55 +786,6 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
     }
     t.diagnostic(JSON.stringify(timings));
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
-});
-
-test('W9API-22 A-03 (W9A-01): every wait from resolve entry to the answer is under the one deadline (executed inventory)', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const restricted = patientRule('SYN-PID-1');
-  // Each point: the wait held at its n-th call, the policy that reaches it, and what the deadline must answer.
-  const points = [
-    { at: 'policy snapshot', stall: ['policy', 1], policy: null, expect: ['rejected', [LF, LF]] },
-    { at: 'member rows', stall: ['states', 1], policy: null, expect: ['rejected', [LF, LF]] },
-    { at: 'StudyAccess.allowed snapshot', stall: ['policy', 2], policy: restricted, expect: ['rejected', [LF, LF]] },
-    { at: 'StudyAccess.prepare source read (batch)', stall: ['identity', 1], policy: restricted, expect: ['rejected', [LF, LF]], signal: true },
-    { at: 'StudyAccess.prepare source read (one UID)', stall: ['identity', 1], policy: restricted, one: true, expect: ['rejected', [SX, LF]], signal: true },
-    { at: 'StudyAccess.prepare re-check', stall: ['policy', 3], policy: restricted, expect: ['rejected', [LF, LF]] },
-    { at: 'StudyAccess.allowed re-check', stall: ['policy', 4], policy: restricted, expect: ['rejected', [LF, LF]] },
-    { at: 'served source reads', read: 'hang', cutAt: 9000, policy: null, expect: ['rejected', [LF, LF]] },
-    { at: 'member rows re-check', stall: ['states', 2], policy: null, expect: ['rejected', [LF, LF]] },
-    { at: 'policy re-check', stall: ['policy', 5], policy: restricted, expect: ['rejected', [LF, LF]] },
-    { at: 'access-record receipt', receipt: true, policy: null, expect: [503, 'W9_AUDIT_UNAVAILABLE'] },
-  ];
-  const inventory = [];
-  for (const p of points) {
-    const members = p.one ? [study({ state: { teleInstitutionId: B, ts: 'sent' } }), study()] : [study({ read: p.read }), study({ read: p.read })];
-    const w = world(members, { policy: p.policy });
-    if (p.stall) w.stalls[p.stall[0]] = p.stall[1];
-    let release = null;
-    if (p.receipt) w.port.during = () => new Promise(resolve => { release = resolve; });
-    const run = track(resolveFor(w, reader(), body(ids(members))));
-    await until(() => (p.receipt ? !!release : p.read ? w.calls.reads.length === 2 : !!w.held), p.at + ': the wait is reached');
-    t.mock.timers.tick((p.cutAt ?? 10000) - 1);   // the served reads are cut at 9 s (D1558), every other wait at 10 s
-    await settle(); await settle();
-    assert.equal(run.settled, false, p.at + ': nothing is decided before ten seconds');
-    t.mock.timers.tick(1);
-    await until(() => run.settled, p.at + ': the deadline answers the resolve');
-    assert.deepEqual(outcome(run), p.expect, p.at + ': the deadline answers with the typed timeout result');
-    if (p.signal) assert.ok(w.held.signal instanceof AbortSignal && w.held.signal.aborted, p.at + ': the resolve signal reaches the read and aborts');
-    // the held wait answers late: nothing changes, nothing is provided, and a late receipt learns its body never went out
-    const before = JSON.stringify(outcome(run));
-    if (w.held) w.held.release();
-    if (release) release();
-    await settle(); await settle(); await settle();
-    assert.equal(JSON.stringify(outcome(run)), before, p.at + ': a late answer is discarded');
-    if (p.receipt) {
-      await until(() => w.port.finished.length === 1, p.at + ': the late receipt is finished');
-      assert.deepEqual(w.port.finished.map(f => f.outcome), ['aborted'], p.at + ': a late receipt is recorded as an aborted transfer');
-    } else assert.deepEqual([w.port.prepared.length, w.port.finished.length], [0, 0], p.at + ': nothing is provided after the deadline');
-    noWrites(w);
-    inventory.push({ at: p.at, outcome: outcome(run), signal_aborted: p.signal ? w.held.signal.aborted : undefined });
-  }
-  t.diagnostic(JSON.stringify(inventory));
 });
 
 test('W9API-23 A-02/A-03 (D1550): rights per resource AND, then the policy revision, then the source identity - in that order', async () => {
@@ -891,7 +810,7 @@ test('W9API-23 A-02/A-03 (D1550): rights per resource AND, then the policy revis
   wr.orthanc.studyIdentities = async (...args) => { const rows = await read(...args); wr.revision = 2; return rows; };
   await refusedWith(resolveFor(wr, reader(), body(ids(pair))), 409, 'STUDY_ACCESS_CHANGED',
     'a policy revision during the rights read refuses before any served read');
-  assert.deepEqual([wr.calls.reads.length, wr.port.prepared.length], [0, 0], 'a policy revision during the rights read refuses before any served read');
+  assert.deepEqual([wr.calls.reads.length, wr.access.selected.length], [0, 0], 'a policy revision during the rights read refuses before any served read');
 });
 
 /* W9A2-1 / D1562 R3-A00: a real 127.0.0.1 source. Every request records its start, the close of its ServerResponse and of
@@ -1077,7 +996,7 @@ test('W9API-25 R3-A01..A06 (W9A2-1): every raw source request of OrthancService 
   } finally { process.off('unhandledRejection', onUnhandled); await lb.close(); }
 });
 
-test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refused preparation provides nothing; a late answer is never cached', async t => {
+test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refused preparation provides nothing', async t => {
   const lb = await loopback();
   try {
     const found = [study(), study()];
@@ -1085,7 +1004,7 @@ test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refu
       const w = world(members, { policy });
       const real = lb.orthanc();
       w.studyAccess = new StudyAccessService(w.prisma, real, {});
-      w.svc = new MultiStudyViewService(w.prisma, served ? real : w.orthanc, w.studyAccess, w.port);
+      w.svc = new MultiStudyViewService(w.prisma, served ? real : w.orthanc, w.studyAccess, w.access);
       return w;
     };
     // (1) the W9A2-1 reproduction: tools/find answers 503 and never ends its body (U) or trickles (T)
@@ -1097,7 +1016,7 @@ test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refu
       assert.equal(error?.getStatus?.(), 503, label + ': the preparation refusal is the resolve answer');
       assert.ok(at - start < 1000, label + ': promptly');
       await closedBy(lb.calls[0], at, label);
-      assert.deepEqual([w.calls.reads.length, w.port.prepared.length, w.port.finished.length], [0, 0, 0], label + ': nothing is read for serving or provided');
+      assert.deepEqual([w.calls.reads.length, w.access.selected.length], [0, 0], label + ': nothing is read for serving or provided');
       if (mode === 'U') {   // the r2 review watched this socket stay open through 10.5 s
         await new Promise(resolve => setTimeout(resolve, Math.max(0, 10500 - (Date.now() - start))));
         assert.deepEqual([lb.calls.length, lb.calls[0].sockClosed !== null], [1, true], label + ': closed and no further request through 10.5 s');
@@ -1110,7 +1029,7 @@ test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refu
     const r1 = await rejection(resolveFor(w1, reader(), body(ids(one))));
     assert.equal(r1.error?.getStatus?.(), 503, 'A07 one-UID preparation 503');
     await closedBy(lb.calls.find(c => c.path === '/dicom-web/studies'), r1.at, 'A07 one-UID preparation 503');
-    assert.deepEqual([w1.calls.reads.length, w1.port.prepared.length], [0, 0], 'A07 one-UID: nothing served or provided');
+    assert.deepEqual([w1.calls.reads.length, w1.access.selected.length], [0, 0], 'A07 one-UID: nothing served or provided');
     // (3) a served read refuses 503 with an unfinished body: that member fails, the other is provided
     lb.calls.length = 0;
     lb.route(c => new URL(c.url, 'http://x').searchParams.get('StudyInstanceUID') === found[1].uid ? ['U', 503, '{'] : ['F', 200, JSON.stringify([sourceRow(found[0].uid)])]);
@@ -1118,12 +1037,12 @@ test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refu
     const r3 = await rejection(resolveFor(w3, reader(), body(ids(found))));
     assert.equal(r3.error, null, 'A07 a served refusal is a member failure');
     await closedBy(lb.calls.find(c => c.url.includes(found[1].uid)), r3.at, 'A07 served read 503');
-    assert.deepEqual(w3.port.prepared.map(p => p.targets.map(x => x.uid)), [[found[0].uid]], 'A07 only the member read is provided');
-    // (4) every resolve exit ends the source signals it owned: answer, mismatch, re-check refusal, receipt refusal, no ready
+    assert.deepEqual(w3.access.selected.map(p => p.targets.map(x => x.uid)), [[found[0].uid]], 'A07 only the member read is provided');
+    // (4) every resolve exit ends the source signals it owned: answer, mismatch, initial decision retained, no ready
     const exits = {
       answer: w => {}, mismatch: (w, m) => { w.byUid.get(m[1].uid).rows = [sourceRow(m[1].uid, { pid: 'SYN-PID-2' })]; },
-      'recheck refusal': (w, m) => { w.onRead = uid => { if (uid === m[1].uid) w.byUid.get(uid).state.institutionId = B; }; },
-      'receipt refusal': w => { w.port.mode = 'fail'; }, 'no ready': (w, m) => { for (const s of m) w.byUid.get(s.uid).read = 'fail'; },
+      'initial decision retained': (w, m) => { w.onRead = uid => { if (uid === m[1].uid) w.byUid.get(uid).state.institutionId = B; }; },
+      'no ready': (w, m) => { for (const s of m) w.byUid.get(s.uid).read = 'fail'; },
     };
     for (const [exit, arrange] of Object.entries(exits)) {
       const members = [study(), study()], w = world(members, { policy: patientRule('SYN-PID-1', 'SYN-PID-2') });
@@ -1132,18 +1051,6 @@ test('W9API-26 R3-A07 (W9A2-1): every resolve exit ends its source reads; a refu
       const owned = [...w.calls.reads.map(r => r.signal), ...w.calls.identitySignals];
       assert.ok(owned.length >= 3 && owned.every(s => s instanceof AbortSignal && s.aborted), `A07 ${exit}: every source signal the resolve owned is ended`);
     }
-    // (5) a preparation read answering after the deadline is not cached for the same Caller: the next resolve reads again
-    t.mock.timers.enable({ apis: ['setTimeout'] });
-    const pair = [study(), study()], wl = world(pair, { policy: patientRule('SYN-PID-1') }), caller = reader();
-    wl.stalls.identity = 1;
-    const late = track(resolveFor(wl, caller, body(ids(pair))));
-    await until(() => !!wl.held, 'the preparation read is held');
-    t.mock.timers.tick(10000);
-    await until(() => late.settled, 'the deadline answers');
-    wl.held.release(); await settle(); await settle();
-    const again = await opens(resolveFor(wl, caller, body(ids(pair))), 'the next resolve');
-    assert.equal(wl.calls.identity.length, 2, 'a late preparation answer is never a cached permission fact');
-    assert.deepEqual(codes(again), ['ready', 'ready']);
   } finally { await lb.close(); }
 });
 
@@ -1162,10 +1069,10 @@ test('W9API-27 R3-A08 (D1558): eight targets at a real source - one finite ready
       return [m.findIndex(s => s.uid === uid) % 2 ? 'T' : 'U', 200, '['];
     });
     const w = world(m), real = lb.orthanc();
-    w.svc = new MultiStudyViewService(w.prisma, real, w.studyAccess, w.port);
+    w.svc = new MultiStudyViewService(w.prisma, real, w.studyAccess, w.access);
     // a controlled 6 s before any source read, so a fresh 5 s per-read timer cannot stand in for the 9 s cut
     w.stalls.policy = 1;
-    const start = Date.now(), run = track(resolveFor(w, reader(), body(ids(m)), Promise.resolve('ended')));
+    const start = Date.now(), run = track(resolveFor(w, reader(), body(ids(m))));
     await until(() => !!w.held, 'the snapshot is held');
     setTimeout(() => w.held.release(), 6000);
     await until(() => run.settled, 'the resolve answers', 12000);
@@ -1177,12 +1084,8 @@ test('W9API-27 R3-A08 (D1558): eight targets at a real source - one finite ready
     assert.ok(maxOpen <= 4, 'A08 at most four reads in flight');
     assert.ok(heldCalls.every(c => c.start - start < 9000), 'A08 no read starts at or after the cut');
     assert.ok(!lb.calls.some(c => c.url.includes(m[7].uid)), 'A08 a member still queued at the cut is never read');
-    assert.deepEqual(w.port.prepared.map(p => p.targets.map(x => x.uid)), [[m[0].uid]], 'A08 exactly the ready target is receipted');
-    await until(() => w.port.finished.length === 1, 'A08 the transfer outcome');
-    assert.deepEqual(w.port.finished.map(f => f.outcome), ['ended'], 'A08 a normal receipt follows the actual transfer, not the source cleanup');
+    assert.deepEqual(w.access.selected.map(p => p.targets.map(x => x.uid)), [[m[0].uid]], 'A08 exactly the ready target is selected');
   } finally { await lb.close(); }
 });
 
-// SRW9-2 binding precondition: Module A binds a real store only when this case runs - EMR-B2 verified request facts let the
-// resolve re-check the caller's membership and session between the source wait and prepare() (A-05 remainder).
-test.todo('W9API-20 a membership or session change during the source wait refuses the resolve before prepare (pending: EMR-B2 request facts)');
+// W9API-20 is DISPOSED by D1764: no mid-request membership/session recheck.

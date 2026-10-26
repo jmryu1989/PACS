@@ -95,8 +95,8 @@ PROFILES = {
     'u5-session-end': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-end-ci',
         'project_prefix': 'kin-u5-session-end-ci-',
-        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline. Its own profile
-        # (its own empty runner): SE-02 pauses this stack's Keycloak, which must not reach another suite's stack.
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        # Keep the real provider-session cases on their own synthetic stack.
         'suite_timeout': 900,
         'suites': (
             ('live/session_end_live.py', 'SessionEndLive', 'ci-u5-session-end'),

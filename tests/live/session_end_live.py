@@ -75,9 +75,7 @@ CASES = (
     "test_08_what_auth_time_does_across_a_refresh",
     "test_09_an_isolated_member_cannot_come_back_until_activated",
     "test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive",
-    # S7-U5-LOGIN-RECOVERY-2 (ledger 159/159a, D720). LR2-L1b (test_12) is anomaly safety in the forced state of a provider
-    # SSO alive past its confirmed end; LR2-L1a (test_15) is cause prevention after a real confirmed Log out; LR2-L4
-    # (test_14) is a design-independent guard; test_13 is a behaviour test.
+    # Retained landing and running-provider behavior after the PC3 probe/provider-end cuts.
     "test_13_a_live_session_landing_enters_automatically",
     "test_16_the_running_provider_keeps_persistent_sessions_with_the_session_cache_off",
 )
@@ -105,12 +103,6 @@ WATCH_NOTICE = """() => { window.kinTestNoticeWritten = false;
   new MutationObserver(() => { window.kinTestNoticeWritten = true; })
     .observe(document.querySelector('#msg'), { childList: true, characterData: true, subtree: true }); }"""
 ANSWERED = """() => !/\\/index\\.html$/.test(location.pathname) || window.kinTestNoticeWritten === true"""
-# The provider answered a credentials submit: it left its form, or showed its form again with a message.
-# The form's own field ids and Keycloak's message element - not its wording.
-SUBMITTED = """() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate')
-  || (document.readyState === 'complete' && !!document.querySelector('#input-error, .kc-feedback-text'))"""
-
-
 # Keep only known routes: even a path or hostname can carry credentials. Raw query,
 # fragment, userinfo, arbitrary body/console text and screenshots are never saved.
 DIAGNOSTIC_ROUTES = frozenset({
@@ -438,27 +430,6 @@ class SessionEndLive(unittest.TestCase):
                 seen.append({"code": "code" in query, "error": query.get("error", [None])[0]})
         context.on("request", note)
         return seen
-
-    def probe_at_the_landing(self, context, page) -> str:
-        """The recovery Login of a browser that cannot keep an end record (SE-06): no product cookie, the landing, one
-        press - a fresh credential step. Where the press ends."""
-        context.clear_cookies(name="kin_sid")
-        page.goto(self.stack.proxy + APP + "index.html")
-        self.assertEqual(self.settle(page), "landing", "an untrusted browser does not enter by itself")
-        del context.asked[:]
-        at = self.press(page, "#signin")
-        self.assertEqual(context.asked, [("start", "storage_untrusted", False), ("authorize", "login")],
-                         "the recovery Login asks for credentials")
-        return at
-
-    def refused_credentials(self, page, who: str) -> bool:
-        """The account's correct credentials typed into the provider's form. True when the provider kept the person on
-        its form with a message (a disabled account is not let in); the message's wording is Keycloak's, not asserted."""
-        page.fill("#username", self.stack.username(self.logins[who]))
-        page.fill("#password", self.stack.passwords[self.logins[who]])
-        page.click("#kc-login")
-        page.wait_for_function(SUBMITTED)
-        return self.settle(page) == "keycloak" and page.evaluate("() => !!document.querySelector('#input-error, .kc-feedback-text')")
 
     # ── cases ──
     def test_01_log_out_ends_the_provider_session_and_login_meets_the_form(self):
